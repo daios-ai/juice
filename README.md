@@ -6,13 +6,17 @@ Actions can be HTTP endpoints, WebAssembly modules, or native handlers. Every ca
 
 ## Features
 
-- **Actions** — register HTTP, WASM, or native handlers with optional JSON Schema validation
-- **Processes** — budgeted execution contexts; funds are locked per-call and settled on success
-- **ACL** — per-action `read`, `call`, and `admin` permissions
-- **Tracing** — every call creates a child trace; nested WASM calls form a full trace tree
-- **Auth** — bcrypt passwords, short-lived JWT access tokens, rotating refresh tokens, PKCE flow
-- **Stats** — incremental mean tracking for latency, price, and success rate
-- **Lookup** — semantic search over actions using an Ollama embedding model
+- **Actions** — register HTTP, WASM, or native handlers with optional JSON Schema validation on inputs and outputs
+- **Processes** — budgeted execution contexts; funds are locked per-call and settled on success, refunded on failure
+- **ACL** — per-action `read`, `call`, and `admin` permissions; owners can grant and revoke per user
+- **Tracing** — every call creates a child trace; nested WASM calls form a full trace tree across the process
+- **Auth** — bcrypt passwords, short-lived JWT access tokens (15 min), rotating refresh tokens (30 days), PKCE S256 flow
+- **Events** — named event listeners that fire an action when an event is emitted by a source user; pollable queues
+- **WASM host functions** — scripts can call other actions, emit events, and read/write per-process key-value storage via `juice.call`, `juice.emit`, `juice.log`, `juice.get`, `juice.put`
+- **Stats** — incremental mean tracking per action for latency, price, success rate, and rating
+- **Feedback** — recursive cost and wall-clock latency for any subtree of the trace tree
+- **Rating propagation** — unrated child transactions automatically inherit the nearest rated ancestor's rating
+- **Lookup** — cosine similarity search over action embeddings, re-ranked by success rate
 - **HTTP API** — full REST API mirroring the CLI
 - **SQLite** — single-file database, WAL mode, pure Go (no CGO)
 
@@ -24,7 +28,7 @@ cd juice
 go build -o juice ./cmd/juice/
 ```
 
-Requires Go 1.25+.
+Requires Go 1.22+.
 
 ## Quick start
 
@@ -50,7 +54,7 @@ Requires Go 1.25+.
 # Inspect the transaction
 ./juice tx show --id <txid>
 
-# End the process (returns remaining funds)
+# End the process (returns remaining funds to owner)
 ./juice process end --id <pid>
 ```
 
@@ -64,19 +68,20 @@ Requires Go 1.25+.
 | `juice auth refresh` | Rotate the refresh token |
 | `juice action add` | Register a new action |
 | `juice action update` | Update action metadata |
-| `juice action enable/disable` | Activate or deactivate an action |
+| `juice action enable / disable` | Activate or deactivate an action |
 | `juice action list` | List actions |
 | `juice action delete` | Delete an action |
-| `juice action acl grant/revoke` | Manage per-user permissions |
+| `juice action acl grant / revoke` | Manage per-user call permissions |
 | `juice process start` | Open a funded process |
-| `juice process fund` | Add credits to a process |
-| `juice process end` | Close a process and return funds |
+| `juice process fund` | Add credits to a running process |
+| `juice process show` | Read process state |
+| `juice process end` | Close a process and return remaining funds |
 | `juice call` | Call an action within a process |
-| `juice tx list/show` | View transactions |
-| `juice stats show` | View action statistics |
-| `juice lookup` | Semantic action search |
-| `juice events listen/unlisten` | Register event listeners |
-| `juice events emit/poll` | Emit events and poll queues |
+| `juice tx list / show` | View transactions |
+| `juice stats show` | View incremental stats for an action |
+| `juice lookup` | Semantic action search (requires Ollama) |
+| `juice events listen / unlisten` | Register and remove event listeners |
+| `juice events emit / poll` | Emit events and poll listener queues |
 | `juice serve` | Start the HTTP API server |
 
 All commands accept `--output json` for machine-readable output.
@@ -87,7 +92,33 @@ All commands accept `--output json` for machine-readable output.
 ./juice serve --addr :8080
 ```
 
-Endpoints mirror the CLI. All routes except `/v1/auth/*` and `POST /v1/users` require a `Authorization: Bearer <token>` header.
+All routes except `POST /v1/auth/token`, `POST /v1/auth/authorize`, and `POST /v1/users` require `Authorization: Bearer <token>`.
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/users` | Create user |
+| `POST` | `/v1/auth/token` | Password grant or auth-code exchange |
+| `POST` | `/v1/auth/authorize` | PKCE authorization |
+| `POST` | `/v1/auth/refresh` | Rotate refresh token |
+| `GET/POST` | `/v1/actions` | List / create actions |
+| `GET/DELETE` | `/v1/actions/{id}` | Read / delete action |
+| `POST` | `/v1/actions/{id}/enable` | Activate action |
+| `POST` | `/v1/actions/{id}/disable` | Deactivate action |
+| `POST/DELETE` | `/v1/actions/{id}/acl` | Grant / revoke permission |
+| `POST` | `/v1/processes` | Start process |
+| `GET` | `/v1/processes/{id}` | Read process |
+| `POST` | `/v1/processes/{id}/fund` | Add funds |
+| `POST` | `/v1/processes/{id}/end` | Close process |
+| `GET` | `/v1/processes/{id}/feedback/{trace_id}` | Recursive cost + latency for a trace subtree |
+| `POST` | `/v1/call` | Call an action |
+| `GET` | `/v1/transactions` | List transactions |
+| `GET` | `/v1/transactions/{id}` | Read transaction |
+| `GET` | `/v1/stats/{action_id}` | Read action stats |
+| `POST` | `/v1/lookup` | Semantic search |
+| `POST` | `/v1/listeners` | Create event listener |
+| `GET` | `/v1/listeners/{id}` | Poll listener queue |
+| `DELETE` | `/v1/listeners/{id}` | Delete listener |
+| `POST` | `/v1/events/emit` | Emit a named event |
 
 ## Configuration
 
@@ -101,7 +132,7 @@ Endpoints mirror the CLI. All routes except `/v1/auth/*` and `POST /v1/users` re
 | `JUICE_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
 | `JUICE_LOG_FILE` | — | JSON log file path (stdout only if unset) |
 | `JUICE_OLLAMA_URL` | — | Ollama base URL for semantic lookup |
-| `JUICE_OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model |
+| `JUICE_OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model name |
 
 ## Architecture
 
@@ -111,9 +142,7 @@ kernel/      Core types, interfaces, auth, call semantics, accounting
 store/       SQLite implementation of kernel.Store
 script/      WebAssembly execution via wazero
 llm/         Ollama embedder for semantic lookup
-log/         Structured logger (slog-based, text + JSON)
+log/         Structured logger (slog + tint, text + JSON)
 ```
 
-`kernel/` has no dependencies on `store/`, `script/`, or `llm/` — those are injected at startup.
-
-
+`kernel/` has no dependencies on `store/`, `script/`, or `llm/` — those are injected at startup. Every source file has its own test file; `go test ./...` requires no network access.

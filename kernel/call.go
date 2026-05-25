@@ -151,7 +151,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 
 	// 11. Execute.
 	started := time.Now()
-	reply, execErr := k.execute(ctx, action, req.Args, trace)
+	reply, execErr := k.execute(ctx, action, req.Args, trace, process.OwnerUserID)
 	latency := time.Since(started).Seconds()
 	tx.EndedAt = time.Now().UTC()
 
@@ -225,12 +225,12 @@ func (k *Kernel) canCall(ctx context.Context, subjectID, actionID string) (bool,
 }
 
 // execute dispatches to the correct execution backend.
-func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace) (map[string]any, error) {
+func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (map[string]any, error) {
 	switch action.Kind {
 	case KindHTTP:
 		return k.executeHTTP(ctx, action, args)
 	case KindWasm:
-		return k.executeWasm(ctx, action, args, trace)
+		return k.executeWasm(ctx, action, args, trace, ownerUserID)
 	case KindNative:
 		return nil, ErrInvalidState.Wrap("native actions cannot be called directly")
 	default:
@@ -275,7 +275,7 @@ func (k *Kernel) executeHTTP(ctx context.Context, action *Action, args map[strin
 }
 
 // executeWasm runs a compiled WASM artifact.
-func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace) (map[string]any, error) {
+func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (map[string]any, error) {
 	if k.scripts == nil {
 		return nil, ErrInvalidState.Wrap("script executor not configured")
 	}
@@ -286,9 +286,10 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 	}
 
 	host := &kernelHostFunctions{
-		kernel:    k,
-		processID: trace.ProcessID,
-		traceID:   trace.ID,
+		kernel:      k,
+		processID:   trace.ProcessID,
+		traceID:     trace.ID,
+		ownerUserID: ownerUserID,
 	}
 
 	outputJSON, err := k.scripts.Execute(ctx, []byte(action.Source), inputJSON, host)
@@ -306,9 +307,10 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 // kernelHostFunctions implements HostFunctions using the kernel itself.
 // Scripts never receive the subject's JWT — they inherit process+trace authority.
 type kernelHostFunctions struct {
-	kernel    *Kernel
-	processID string
-	traceID   string
+	kernel      *Kernel
+	processID   string
+	traceID     string
+	ownerUserID string
 }
 
 func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJSON []byte) ([]byte, error) {
@@ -343,8 +345,14 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 }
 
 func (h *kernelHostFunctions) Emit(ctx context.Context, event string, argsJSON []byte) error {
-	// Milestone 1: events deferred.
-	return ErrInvalidState.Wrap("emit not yet implemented")
+	var args map[string]any
+	if len(argsJSON) > 0 {
+		if err := json.Unmarshal(argsJSON, &args); err != nil {
+			return ErrInvalidInput.Wrap("emit args must be a JSON object")
+		}
+	}
+	_, err := h.kernel.EmitEvent(ctx, h.ownerUserID, event, args)
+	return err
 }
 
 func (h *kernelHostFunctions) Log(ctx context.Context, level, msg string) error {

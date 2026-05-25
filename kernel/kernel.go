@@ -2,7 +2,7 @@ package kernel
 
 import (
 	"context"
-	"encoding/json"
+	"math"
 	"time"
 
 	"github.com/daios-ai/juice/log"
@@ -556,15 +556,7 @@ func cosine(a, b []float32) float32 {
 }
 
 func sqrt32(x float32) float32 {
-	if x <= 0 {
-		return 0
-	}
-	// Newton-Raphson — sufficient precision for ranking.
-	z := x
-	for i := 0; i < 10; i++ {
-		z = (z + x/z) / 2
-	}
-	return z
+	return float32(math.Sqrt(float64(x)))
 }
 
 // ---- Helpers ----
@@ -582,15 +574,6 @@ func (k *Kernel) requireAdmin(ctx context.Context, subjectID string, a *Action) 
 		return ErrUnauthorized.Wrap("admin permission required")
 	}
 	return nil
-}
-
-// jsonMarshal is a thin wrapper so call.go doesn't import encoding/json directly.
-func jsonMarshal(v any) ([]byte, error) {
-	return json.Marshal(v)
-}
-
-func jsonUnmarshal(data []byte, v any) error {
-	return json.Unmarshal(data, v)
 }
 
 // ---- Stats helpers ----
@@ -798,6 +781,65 @@ func (k *Kernel) RecursiveFeedback(ctx context.Context, processID, traceID strin
 		RecursiveCost:    totalCost,
 		RecursiveLatency: latency,
 	}, nil
+}
+
+// PropagateRatings propagates ratings from rated transactions to unrated descendants.
+// An unrated transaction inherits the rating of its nearest rated ancestor in the trace tree.
+// Call this after rating a transaction to fill in ratings for sub-calls that were never rated directly.
+func (k *Kernel) PropagateRatings(ctx context.Context, processID string) error {
+	txs, err := k.store.ListTransactions(ctx, TxFilter{ProcessID: processID, Limit: 10000})
+	if err != nil {
+		return err
+	}
+	traces, err := k.store.ListTraces(ctx, processID)
+	if err != nil {
+		return err
+	}
+
+	traceToTx := make(map[string]*Transaction, len(txs))
+	for _, tx := range txs {
+		traceToTx[tx.TraceID] = tx
+	}
+	parentOf := make(map[string]string, len(traces))
+	for _, t := range traces {
+		if t.ID != t.ParentTraceID {
+			parentOf[t.ID] = t.ParentTraceID
+		}
+	}
+
+	for _, tx := range txs {
+		if tx.Rating != nil {
+			continue
+		}
+		rating := nearestAncestorRating(tx.TraceID, parentOf, traceToTx)
+		if rating == nil {
+			continue
+		}
+		tx.Rating = rating
+		if err := k.store.UpdateTransaction(ctx, tx); err != nil {
+			continue
+		}
+		stats, _ := k.store.ReadStats(ctx, tx.ActionID)
+		if stats != nil {
+			stats.RatingMean = IncrementalMean(stats.RatingMean, stats.Uses-1, *rating)
+			_ = k.store.UpsertStats(ctx, stats)
+		}
+	}
+	return nil
+}
+
+func nearestAncestorRating(traceID string, parentOf map[string]string, traceToTx map[string]*Transaction) *float64 {
+	cur := traceID
+	for {
+		parent, ok := parentOf[cur]
+		if !ok {
+			return nil
+		}
+		if tx, ok := traceToTx[parent]; ok && tx.Rating != nil {
+			return tx.Rating
+		}
+		cur = parent
+	}
 }
 
 func collectSubtree(root string, children map[string][]string) map[string]bool {

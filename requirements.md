@@ -53,8 +53,10 @@ Rules:
 - Implementation-specific names may appear in file names or concrete types, but not in architectural package names.
 - The initial implementation should remain below six production packages, excluding tests.
 - New packages require a demonstrated dependency-cycle or cohesion reason.
+- The number of source files must be kept small. New files require a cohesion reason; splitting a file for size alone is not sufficient.
+- Every source file must have a corresponding `_test.go` file with independent tests for the logic in that file.
 
-Justification: small package count lowers coupling. Function-named packages permit implementation replacement without changing the conceptual architecture.
+Justification: small package count lowers coupling. Function-named packages permit implementation replacement without changing the conceptual architecture. Per-file tests make coverage gaps visible and keep test files co-located with the code they exercise.
 
 ## 3. Core objects
 
@@ -150,7 +152,7 @@ Requirements:
 - `read` permits metadata inspection.
 - `admin` permits ACL and lifecycle changes.
 - Owners implicitly have `admin`.
-- There must be no team-based permission in the initial kernel.
+- ACL is always direct from user to action. Group or team indirection is not part of the permission model.
 - ACL checks must be performed inside the kernel call path, not only at the HTTP or CLI boundary.
 
 Correctness condition:
@@ -900,12 +902,18 @@ Requirements:
 - Error messages must be concise and user-facing.
 - Logs may contain additional diagnostic context.
 
-## 19. Non-goals for the first implementation
+## 19. Non-goals
 
-The first implementation must not include:
+The following are not part of the Juice permission model or roadmap:
 
 ```text
 team-based permissions
+group-based permissions
+```
+
+The following are not part of the first implementation but may be added later:
+
+```text
 distributed database support
 remote script filesystem access
 ambient script network access
@@ -915,8 +923,6 @@ complex OpenAPI mounting
 risk-averse statistical estimators
 distributed workers
 ```
-
-These may be added later without changing the kernel semantics.
 
 ## 20. Acceptance criteria
 

@@ -15,6 +15,9 @@
 *.env
 .env.*
 
+# Scratch / archive
+/.old/
+
 # Editor and OS clutter
 .DS_Store
 Thumbs.db

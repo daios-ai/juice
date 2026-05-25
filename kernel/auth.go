@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"time"
 
@@ -88,7 +89,8 @@ func CodeChallenge(verifier string) string {
 
 // VerifyCodeChallenge checks that challenge == S256(verifier).
 func VerifyCodeChallenge(verifier, challenge string) bool {
-	return CodeChallenge(verifier) == challenge
+	computed := CodeChallenge(verifier)
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }
 
 // ---- Authorization code flow ----
