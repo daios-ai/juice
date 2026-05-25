@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/daios/juice/kernel"
+	"github.com/daios-ai/juice/kernel"
 	_ "modernc.org/sqlite"
 )
 

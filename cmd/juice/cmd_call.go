@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/daios/juice/kernel"
+	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
 )
 

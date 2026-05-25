@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/daios/juice/log"
+	"github.com/daios-ai/juice/log"
 	"github.com/google/uuid"
 )
 

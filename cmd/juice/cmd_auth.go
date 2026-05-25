@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daios/juice/kernel"
+	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
 )
 

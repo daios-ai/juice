@@ -9,11 +9,11 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/daios/juice/kernel"
-	"github.com/daios/juice/llm"
-	"github.com/daios/juice/log"
-	"github.com/daios/juice/script"
-	"github.com/daios/juice/store"
+	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/llm"
+	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/script"
+	"github.com/daios-ai/juice/store"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )

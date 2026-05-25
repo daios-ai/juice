@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daios/juice/kernel"
-	"github.com/daios/juice/log"
+	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/log"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"

@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/daios/juice/kernel"
+	"github.com/daios-ai/juice/kernel"
 )
 
 // OllamaEmbedder calls the Ollama /api/embeddings endpoint.

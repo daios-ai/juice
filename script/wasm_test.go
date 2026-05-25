@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daios/juice/kernel"
+	"github.com/daios-ai/juice/kernel"
 )
 
 func TestFakeExecutorEchoes(t *testing.T) {
