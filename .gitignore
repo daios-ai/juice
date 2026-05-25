@@ -1,0 +1,28 @@
+# Compiled binary (root or built inside the package dir)
+/juice
+/cmd/juice/juice
+
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+
+# Auth tokens stored by the CLI
+~/.juice/
+
+# Environment / secrets
+.env
+*.env
+.env.*
+
+# Editor and OS clutter
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test output and coverage
+*.out
+coverage.html

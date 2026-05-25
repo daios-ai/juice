@@ -1,0 +1,168 @@
+package script
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/daios/juice/kernel"
+)
+
+func TestFakeExecutorEchoes(t *testing.T) {
+	f := &FakeExecutor{}
+	ctx := context.Background()
+
+	src := []byte(`(module)`)
+	artifact, hash, err := f.Compile(ctx, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifact) == 0 || hash == "" {
+		t.Error("expected non-empty artifact and hash")
+	}
+
+	input := []byte(`{"key":"value"}`)
+	out, err := f.Execute(ctx, artifact, input, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != string(input) {
+		t.Errorf("expected echo, got %s", out)
+	}
+}
+
+func TestFakeExecutorCustomResult(t *testing.T) {
+	f := &FakeExecutor{Result: []byte(`{"answer":42}`)}
+	out, err := f.Execute(context.Background(), nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != `{"answer":42}` {
+		t.Errorf("unexpected result: %s", out)
+	}
+}
+
+func TestFakeExecutorError(t *testing.T) {
+	f := &FakeExecutor{Err: fmt.Errorf("boom")}
+	_, err := f.Execute(context.Background(), nil, nil, nil)
+	if err == nil {
+		t.Error("expected error from executor")
+	}
+}
+
+func TestMemoryPages(t *testing.T) {
+	tests := []struct {
+		bytes int64
+		pages uint32
+	}{
+		{0, 1},
+		{1, 1},
+		{65536, 1},
+		{65537, 2},
+		{64 * 1024 * 1024, 1024}, // 64 MiB
+		{-1, 1},
+	}
+	for _, tc := range tests {
+		got := MemoryPages(tc.bytes)
+		if got != tc.pages {
+			t.Errorf("MemoryPages(%d) = %d, want %d", tc.bytes, got, tc.pages)
+		}
+	}
+}
+
+// nilHost is a no-op HostFunctions for tests that don't exercise host calls.
+type nilHost struct{}
+
+func (nilHost) Call(_ context.Context, _ string, _ []byte) ([]byte, error) { return nil, nil }
+func (nilHost) Emit(_ context.Context, _ string, _ []byte) error           { return nil }
+func (nilHost) Log(_ context.Context, _, _ string) error                   { return nil }
+func (nilHost) Get(_ context.Context, _ string) ([]byte, error)            { return nil, nil }
+func (nilHost) Put(_ context.Context, _ string, _ []byte) error            { return nil }
+
+var _ kernel.HostFunctions = nilHost{}
+
+// echoWASM is a precompiled WASM module whose run() returns the input (ptr, len) unchanged.
+// alloc() is a bump allocator starting at address 0.
+var echoWASM = []byte{
+	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+	0x01, 0x0d, 0x02,
+	0x60, 0x01, 0x7f, 0x01, 0x7f,
+	0x60, 0x02, 0x7f, 0x7f, 0x02, 0x7f, 0x7f,
+	0x03, 0x03, 0x02, 0x00, 0x01,
+	0x05, 0x03, 0x01, 0x00, 0x01,
+	0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x00, 0x0b,
+	0x07, 0x18, 0x03,
+	0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00,
+	0x05, 0x61, 0x6c, 0x6c, 0x6f, 0x63, 0x00, 0x00,
+	0x03, 0x72, 0x75, 0x6e, 0x00, 0x01,
+	0x0a, 0x1a, 0x02,
+	0x11, 0x01, 0x01, 0x7f,
+	0x23, 0x00, 0x21, 0x01, 0x23, 0x00, 0x20, 0x00, 0x6a, 0x24, 0x00, 0x20, 0x01, 0x0b,
+	0x06, 0x00, 0x20, 0x00, 0x20, 0x01, 0x0b,
+}
+
+// infiniteLoopWASM is a WASM module whose run() loops forever (tests context cancellation).
+var infiniteLoopWASM = []byte{
+	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+	0x01, 0x0d, 0x02,
+	0x60, 0x01, 0x7f, 0x01, 0x7f,
+	0x60, 0x02, 0x7f, 0x7f, 0x02, 0x7f, 0x7f,
+	0x03, 0x03, 0x02, 0x00, 0x01,
+	0x05, 0x03, 0x01, 0x00, 0x01,
+	0x07, 0x18, 0x03,
+	0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00,
+	0x05, 0x61, 0x6c, 0x6c, 0x6f, 0x63, 0x00, 0x00,
+	0x03, 0x72, 0x75, 0x6e, 0x00, 0x01,
+	0x0a, 0x12, 0x02,
+	0x04, 0x00, 0x41, 0x00, 0x0b,
+	0x0b, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x20, 0x00, 0x20, 0x01, 0x0b,
+}
+
+func TestNewExecutorInitializes(t *testing.T) {
+	e := New(Config{TimeoutMS: 5000, MemoryBytes: 64 * 1024 * 1024})
+	if e == nil || e.runtime == nil {
+		t.Fatal("New() should return a non-nil executor with initialized runtime")
+	}
+}
+
+func TestExecutorCompileAndRun(t *testing.T) {
+	e := New(Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
+	ctx := context.Background()
+
+	artifact, hash, err := e.Compile(ctx, echoWASM)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(hash) == 0 {
+		t.Error("expected non-empty hash")
+	}
+
+	input := []byte(`{"msg":"hello"}`)
+	out, err := e.Execute(ctx, artifact, input, nilHost{})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !bytes.Equal(out, input) {
+		t.Errorf("echo output mismatch: got %q, want %q", out, input)
+	}
+}
+
+func TestExecutorContextTimeout(t *testing.T) {
+	e := New(Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
+	ctx := context.Background()
+
+	artifact, _, err := e.Compile(ctx, infiniteLoopWASM)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+
+	_, err = e.Execute(runCtx, artifact, []byte(`{}`), nilHost{})
+	if err == nil {
+		t.Error("expected timeout error from infinite loop, got nil")
+	}
+}
