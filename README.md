@@ -116,6 +116,4 @@ log/         Structured logger (slog-based, text + JSON)
 
 `kernel/` has no dependencies on `store/`, `script/`, or `llm/` — those are injected at startup.
 
-## License
 
-MIT
