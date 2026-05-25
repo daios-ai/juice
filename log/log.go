@@ -5,6 +5,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"time"
+
+	"github.com/lmittmann/tint"
 )
 
 type contextKey int
@@ -33,45 +36,36 @@ type Config struct {
 // New creates a Logger writing to terminal (and optionally a file).
 func New(cfg Config) (*Logger, error) {
 	level := parseLevel(cfg.Level)
+	opts := &slog.HandlerOptions{Level: level}
 
-	var writers []io.Writer
-	writers = append(writers, os.Stdout)
+	var terminal slog.Handler
+	if cfg.Format == "json" {
+		terminal = slog.NewJSONHandler(os.Stdout, opts)
+	} else {
+		terminal = tint.NewHandler(os.Stdout, &tint.Options{
+			Level:      level,
+			TimeFormat: time.TimeOnly,
+			NoColor:    false,
+		})
+	}
+
+	var handler slog.Handler = terminal
 
 	if cfg.FilePath != "" {
 		f, err := os.OpenFile(cfg.FilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return nil, err
 		}
-		writers = append(writers, f)
-	}
-
-	var out io.Writer = os.Stdout
-	var fileOut io.Writer
-	if len(writers) > 1 {
-		fileOut = writers[1]
-	}
-
-	var handler slog.Handler
-	opts := &slog.HandlerOptions{Level: level}
-
-	if cfg.Format == "json" {
-		handler = slog.NewJSONHandler(out, opts)
-	} else {
-		handler = slog.NewTextHandler(out, opts)
-	}
-
-	// When a file is configured, multiplex: text to terminal, JSON to file.
-	if fileOut != nil {
 		handler = &multiHandler{
-			terminal: slog.NewTextHandler(os.Stdout, opts),
-			file:     slog.NewJSONHandler(fileOut, opts),
+			terminal: terminal,
+			file:     slog.NewJSONHandler(f, opts),
 		}
 	}
 
 	return &Logger{inner: slog.New(handler)}, nil
 }
 
-// Default returns a logger that writes text to stdout at INFO level.
+// Default returns a logger that writes colored text to stdout at INFO level.
 func Default() *Logger {
 	l, _ := New(Config{Level: "info", Format: "text"})
 	return l
@@ -140,18 +134,10 @@ func WithTxID(ctx context.Context, id string) context.Context {
 
 // Logging methods.
 
-func (l *Logger) Debug(event string, args ...any) {
-	l.inner.Debug(event, args...)
-}
-func (l *Logger) Info(event string, args ...any) {
-	l.inner.Info(event, args...)
-}
-func (l *Logger) Warn(event string, args ...any) {
-	l.inner.Warn(event, args...)
-}
-func (l *Logger) Error(event string, args ...any) {
-	l.inner.Error(event, args...)
-}
+func (l *Logger) Debug(event string, args ...any) { l.inner.Debug(event, args...) }
+func (l *Logger) Info(event string, args ...any)  { l.inner.Info(event, args...) }
+func (l *Logger) Warn(event string, args ...any)  { l.inner.Warn(event, args...) }
+func (l *Logger) Error(event string, args ...any) { l.inner.Error(event, args...) }
 
 // multiHandler fans out to two slog.Handlers.
 type multiHandler struct {
@@ -178,4 +164,9 @@ func (h *multiHandler) WithGroup(name string) slog.Handler {
 		terminal: h.terminal.WithGroup(name),
 		file:     h.file.WithGroup(name),
 	}
+}
+
+// Discard returns a logger that drops all output (useful in tests).
+func Discard() *Logger {
+	return &Logger{inner: slog.New(slog.NewTextHandler(io.Discard, nil))}
 }

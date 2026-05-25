@@ -86,7 +86,7 @@ func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*User, 
 	if err := k.store.CreateUser(ctx, u); err != nil {
 		return nil, err
 	}
-	k.log.Info("user.created", "user_id", u.ID, "handle", u.Handle)
+	k.log.With(ctx).Info("user.created", "user_id", u.ID, "handle", u.Handle)
 	return u, nil
 }
 
@@ -113,7 +113,7 @@ func (k *Kernel) Login(ctx context.Context, handle, password string) (string, er
 	if err != nil {
 		return "", err
 	}
-	k.log.Info("user.login", "user_id", u.ID)
+	k.log.With(ctx).Info("user.login", "user_id", u.ID)
 	return tok, nil
 }
 
@@ -182,7 +182,7 @@ func (k *Kernel) CreateAction(ctx context.Context, req CreateActionRequest) (*Ac
 	if err := k.store.CreateAction(ctx, a); err != nil {
 		return nil, err
 	}
-	k.log.Info("action.created", "action_id", a.ID, "name", a.Name)
+	k.log.With(ctx).Info("action.created", "action_id", a.ID, "name", a.Name)
 	return a, nil
 }
 
@@ -372,7 +372,7 @@ func (k *Kernel) StartProcess(ctx context.Context, ownerID string, funds int64) 
 		return nil, nil, err
 	}
 
-	k.log.Info("process.started", "process_id", p.ID, "owner", ownerID, "funds", funds)
+	k.log.With(ctx).Info("process.started", "process_id", p.ID, "owner", ownerID, "funds", funds)
 	return p, t, nil
 }
 
@@ -409,7 +409,7 @@ func (k *Kernel) EndProcess(ctx context.Context, subjectID, processID string) er
 	if err := k.store.EndProcess(ctx, processID); err != nil {
 		return err
 	}
-	k.log.Info("process.ended", "process_id", processID)
+	k.log.With(ctx).Info("process.ended", "process_id", processID)
 	return nil
 }
 
@@ -681,7 +681,7 @@ func (k *Kernel) CreateListener(ctx context.Context, req CreateListenerRequest) 
 	if err := k.store.CreateListener(ctx, l); err != nil {
 		return nil, err
 	}
-	k.log.Info("listener.created", "listener_id", l.ID, "event", req.EventName)
+	k.log.With(ctx).Info("listener.created", "listener_id", l.ID, "event", req.EventName)
 	return l, nil
 }
 
@@ -723,12 +723,12 @@ func (k *Kernel) EmitEvent(ctx context.Context, sourceUserID, eventName string, 
 		}
 		action, err := k.store.ReadAction(ctx, l.TargetActionID)
 		if err != nil {
-			k.log.Warn("emit.listener_skip", "listener_id", l.ID, "error", err.Error())
+			k.log.With(ctx).Warn("emit.listener_skip", "listener_id", l.ID, "error", err.Error())
 			continue
 		}
 		owner, err := k.store.ReadUser(ctx, action.OwnerUserID)
 		if err != nil {
-			k.log.Warn("emit.listener_skip", "listener_id", l.ID, "error", err.Error())
+			k.log.With(ctx).Warn("emit.listener_skip", "listener_id", l.ID, "error", err.Error())
 			continue
 		}
 		reply, err := k.Call(ctx, CallRequest{
@@ -740,13 +740,13 @@ func (k *Kernel) EmitEvent(ctx context.Context, sourceUserID, eventName string, 
 			Args:          args,
 		})
 		if err != nil {
-			k.log.Warn("emit.call_failed", "listener_id", l.ID, "event", eventName, "error", err.Error())
+			k.log.With(ctx).Warn("emit.call_failed", "listener_id", l.ID, "event", eventName, "error", err.Error())
 			continue
 		}
 		_ = k.store.AppendEvent(ctx, l.ID, reply.TxID)
 		txIDs = append(txIDs, reply.TxID)
 	}
-	k.log.Info("event.emitted", "source", sourceUserID, "event", eventName, "fired", len(txIDs))
+	k.log.With(ctx).Info("event.emitted", "source", sourceUserID, "event", eventName, "fired", len(txIDs))
 	return txIDs, nil
 }
 

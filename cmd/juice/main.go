@@ -18,9 +18,15 @@ import (
 	"golang.org/x/term"
 )
 
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
 var rootCmd = &cobra.Command{
-	Use:   "juice",
-	Short: "Juice kernel — callable action platform",
+	Use:     "juice",
+	Short:   "Juice kernel — callable action platform",
+	Version: version + " (" + commit + ")",
 }
 
 // Global flags.

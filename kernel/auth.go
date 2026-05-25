@@ -208,6 +208,6 @@ func (k *Kernel) LoginWithRefresh(ctx context.Context, handle, password string) 
 	if err != nil {
 		return "", "", err
 	}
-	k.log.Info("user.login", "user_id", u.ID)
+	k.log.With(ctx).Info("user.login", "user_id", u.ID)
 	return accessToken, rt.Token, nil
 }
