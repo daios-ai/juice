@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/llm"
@@ -68,6 +69,21 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	if bps := os.Getenv("JUICE_FEE_BPS"); bps != "" {
 		if v, err := strconv.ParseInt(bps, 10, 64); err == nil {
 			cfg.FeeBPS = v
+		}
+	}
+	if ttl := os.Getenv("JUICE_TOKEN_TTL"); ttl != "" {
+		if d, err := time.ParseDuration(ttl); err == nil {
+			cfg.TokenTTL = d
+		}
+	}
+	if ms := os.Getenv("JUICE_SCRIPT_TIMEOUT_MS"); ms != "" {
+		if v, err := strconv.ParseInt(ms, 10, 64); err == nil {
+			cfg.ScriptTimeout = time.Duration(v) * time.Millisecond
+		}
+	}
+	if mb := os.Getenv("JUICE_SCRIPT_MEMORY_BYTES"); mb != "" {
+		if v, err := strconv.ParseInt(mb, 10, 64); err == nil {
+			cfg.ScriptMemory = v
 		}
 	}
 

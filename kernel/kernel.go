@@ -264,6 +264,7 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 	if err := k.store.UpdateAction(ctx, a); err != nil {
 		return nil, err
 	}
+	k.log.With(ctx).Info("action.updated", "action_id", a.ID)
 	return a, nil
 }
 
@@ -290,7 +291,15 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 	}
 	a.Active = active
 	a.UpdatedAt = time.Now().UTC()
-	return k.store.UpdateAction(ctx, a)
+	if err := k.store.UpdateAction(ctx, a); err != nil {
+		return err
+	}
+	event := "action.disabled"
+	if active {
+		event = "action.enabled"
+	}
+	k.log.With(ctx).Info(event, "action_id", actionID)
+	return nil
 }
 
 // DeleteAction removes an action (marks deleted; keeps transaction history).
@@ -302,7 +311,11 @@ func (k *Kernel) DeleteAction(ctx context.Context, subjectID, actionID string) e
 	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
 		return err
 	}
-	return k.store.DeleteAction(ctx, actionID)
+	if err := k.store.DeleteAction(ctx, actionID); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("action.deleted", "action_id", actionID)
+	return nil
 }
 
 // ---- ACL operations ----
@@ -316,12 +329,16 @@ func (k *Kernel) GrantACL(ctx context.Context, subjectID, actionID string, perm 
 	if err := k.requireAdmin(ctx, grantorID, a); err != nil {
 		return err
 	}
-	return k.store.GrantACL(ctx, &ACLEntry{
+	if err := k.store.GrantACL(ctx, &ACLEntry{
 		SubjectUserID: subjectID,
 		ActionID:      actionID,
 		Permission:    perm,
 		CreatedAt:     time.Now().UTC(),
-	})
+	}); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("acl.granted", "action_id", actionID, "subject", subjectID, "perm", perm)
+	return nil
 }
 
 // RevokeACL removes a permission.
@@ -333,7 +350,11 @@ func (k *Kernel) RevokeACL(ctx context.Context, subjectID, actionID string, perm
 	if err := k.requireAdmin(ctx, revokerID, a); err != nil {
 		return err
 	}
-	return k.store.RevokeACL(ctx, subjectID, actionID, perm)
+	if err := k.store.RevokeACL(ctx, subjectID, actionID, perm); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("acl.revoked", "action_id", actionID, "subject", subjectID, "perm", perm)
+	return nil
 }
 
 // ---- Process operations ----
@@ -391,7 +412,11 @@ func (k *Kernel) FundProcess(ctx context.Context, subjectID, processID string, f
 	if funds <= 0 {
 		return ErrInvalidInput.Wrap("funds must be positive")
 	}
-	return k.store.FundProcess(ctx, subjectID, processID, funds)
+	if err := k.store.FundProcess(ctx, subjectID, processID, funds); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("process.funded", "process_id", processID, "funds", funds)
+	return nil
 }
 
 // EndProcess closes a process and returns all remaining funds to the owner.

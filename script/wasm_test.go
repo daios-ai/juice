@@ -149,6 +149,23 @@ func TestExecutorCompileAndRun(t *testing.T) {
 	}
 }
 
+func TestExecutorMemoryLimit(t *testing.T) {
+	// 1 page = 64 KiB. An input larger than one page should fail to write into memory.
+	e := New(Config{TimeoutMS: 5000, MemoryBytes: 65536})
+	ctx := context.Background()
+
+	artifact, _, err := e.Compile(ctx, echoWASM)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	bigInput := make([]byte, 65537)
+	_, err = e.Execute(ctx, artifact, bigInput, nilHost{})
+	if err == nil {
+		t.Error("expected memory overflow error, got nil")
+	}
+}
+
 func TestExecutorContextTimeout(t *testing.T) {
 	e := New(Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
 	ctx := context.Background()
