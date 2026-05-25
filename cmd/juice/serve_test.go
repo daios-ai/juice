@@ -209,6 +209,23 @@ func TestServeProcessLifecycle(t *testing.T) {
 	}
 }
 
+func TestServeRateTransactionNotFound(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	k.CreateUser(context.Background(), kernel.CreateUserRequest{
+		Handle: "@rater", Email: "rater@example.com", Password: "pass",
+	})
+	tok, _ := k.Login(context.Background(), "@rater", "pass")
+
+	resp := httpDo(t, srv, "POST", "/v1/transactions/no-such-id/rate",
+		map[string]any{"rating": 1.0}, tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown tx, got %d", resp.StatusCode)
+	}
+}
+
 func TestServeRequestIDHeader(t *testing.T) {
 	srv, _ := newTestHTTPServer(t)
 	defer srv.Close()

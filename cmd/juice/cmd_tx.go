@@ -10,7 +10,7 @@ import (
 
 func init() {
 	txCmd := &cobra.Command{Use: "tx", Short: "Transaction commands"}
-	txCmd.AddCommand(txListCmd(), txShowCmd())
+	txCmd.AddCommand(txListCmd(), txShowCmd(), txRateCmd())
 	rootCmd.AddCommand(txCmd)
 }
 
@@ -91,5 +91,37 @@ func txShowCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&txID, "id", "", "Transaction ID (required)")
 	_ = cmd.MarkFlagRequired("id")
+	return cmd
+}
+
+func txRateCmd() *cobra.Command {
+	var txID string
+	var rating float64
+	cmd := &cobra.Command{
+		Use:   "rate",
+		Short: "Rate a transaction (0 or 1)",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			if err := k.RateTransaction(context.Background(), subjectID, txID, rating); err != nil {
+				return err
+			}
+			fmt.Printf("Transaction %s rated %.0f.\n", txID, rating)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&txID, "id", "", "Transaction ID (required)")
+	cmd.Flags().Float64Var(&rating, "rating", -1, "Rating: 0 (bad) or 1 (good) (required)")
+	_ = cmd.MarkFlagRequired("id")
+	_ = cmd.MarkFlagRequired("rating")
 	return cmd
 }

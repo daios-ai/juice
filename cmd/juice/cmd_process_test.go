@@ -52,6 +52,30 @@ func TestProcessStartFundEnd(t *testing.T) {
 	}
 }
 
+func TestProcessFeedback(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@fbowner", Email: "fb@example.com", Password: "p",
+	})
+	p, root, err := env.k.StartProcess(ctx, owner.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fb, err := env.k.RecursiveFeedback(ctx, p.ID, root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fb.TraceID != root.ID {
+		t.Errorf("feedback trace_id: got %q, want %q", fb.TraceID, root.ID)
+	}
+	if fb.RecursiveCost != 0 {
+		t.Errorf("expected 0 recursive cost for empty process, got %d", fb.RecursiveCost)
+	}
+}
+
 func TestProcessNegativeFundsFails(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()

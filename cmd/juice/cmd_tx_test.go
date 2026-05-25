@@ -24,6 +24,32 @@ func TestTransactionListEmpty(t *testing.T) {
 	}
 }
 
+func TestTransactionRate(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	// Create a transaction via a direct store insert so we can rate it.
+	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@rateowner", Email: "ro@example.com", Password: "p",
+	})
+	a, _ := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID, Name: "/rateable",
+		Kind: kernel.KindHTTP, Source: "http://example.com",
+	})
+	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
+
+	p, root, _ := env.k.StartProcess(ctx, owner.ID, 0)
+	_ = root
+
+	// No calls made, so no transactions to rate.
+	// Verify that rating a non-existent tx returns an error.
+	err := env.k.RateTransaction(ctx, owner.ID, "nonexistent-tx", 1.0)
+	if err == nil {
+		t.Error("expected error rating nonexistent transaction")
+	}
+	_ = p
+}
+
 func TestTransactionRating(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()

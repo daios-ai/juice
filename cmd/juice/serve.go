@@ -82,6 +82,7 @@ func runServer(addr string) error {
 		// Transactions.
 		r.Get("/v1/transactions", srv.listTransactions)
 		r.Get("/v1/transactions/{id}", srv.getTransaction)
+		r.Post("/v1/transactions/{id}/rate", srv.rateTransaction)
 
 		// Stats.
 		r.Get("/v1/stats/{action_id}", srv.getStats)
@@ -432,6 +433,22 @@ func (s *server) getTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, tx)
+}
+
+func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Rating float64 `json:"rating"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+		return
+	}
+	if err := s.kernel.RateTransaction(r.Context(), subjectFrom(r), id, req.Rating); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) getStats(w http.ResponseWriter, r *http.Request) {
