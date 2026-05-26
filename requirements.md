@@ -6,7 +6,7 @@ Codename: `juice`
 
 ## 1. Purpose
 
-Juice is a small production kernel and research platform for callable actions. It must support action registration, strict access control, budgeted execution, auditable traces, accounting, event-triggered calls, WebAssembly scripts, local language services, action discovery, and complete automated tests.
+Juice is a small production kernel and research platform for callable actions. It must support action registration, strict access control, budgeted execution, auditable traces, accounting, event-triggered calls, WebAssembly scripts, local language services, action discovery, platform supervision, and complete automated tests.
 
 The kernel must preserve one central semantic object:
 
@@ -87,6 +87,7 @@ handle
 email
 available
 locked
+suspended_at
 created_at
 updated_at
 ```
@@ -97,6 +98,7 @@ Requirements:
 - Handles must be unique.
 - Balances must be non-negative integers.
 - Balance units must be indivisible credits.
+- A suspended user must be rejected at every authenticated request with `ErrUnauthenticated`.
 
 ### 3.2 Action
 
@@ -131,6 +133,7 @@ native
 Requirements:
 
 - `id` must be globally unique.
+- `native` actions are platform-owned and may only be registered by the superuser. Regular users may not create, update, or delete `native` actions.
 - `(owner_user_id, name)` must be unique.
 - `price` must be a non-negative integer.
 - `active=false` actions must not be callable by non-owners.
@@ -214,12 +217,15 @@ Required fields:
 id
 process_id
 parent_trace_id
+cost
+latency_ms
 created_at
 ```
 
 Requirements:
 
 - Every process must have one root trace.
+- `cost` and `latency_ms` must be updated automatically as each descendant transaction completes.
 - The root trace must have `parent_trace_id = id` or `parent_trace_id = null`; this choice must be consistent across the codebase.
 - Every nested call must create exactly one child trace.
 - A child trace must inherit the parent trace’s process id.
@@ -296,20 +302,29 @@ The store interface must support:
 ```text
 CreateUser
 ReadUser
+ListUsers
+SuspendUser
+UnsuspendUser
 CreateAction
 ReadAction
 UpdateAction
 DeleteAction
+ListAllActions
 GrantACL
 RevokeACL
 CheckACL
+GrantAll
+RevokeAll
+CheckGrantAll
 CreateProcess
 ReadProcess
 EndProcess
+ListAllProcesses
 CreateTrace
 CreateTransaction
 UpdateTransaction
 ListTransactions
+ListAllTransactions
 ReadStats
 UpdateStats
 CreateListener
@@ -317,6 +332,8 @@ ReadListener
 ListListeners
 AppendEvent
 ReadEvents
+GetConfig
+SetConfig
 ```
 
 Justification: the kernel must be testable with fake stores and replaceable persistent stores.
@@ -464,6 +481,14 @@ Requirements:
 - Deletion must remove ACL entries and disable discovery.
 - Deletion may mark the action deleted rather than physically removing it.
 
+### 6.5 Native actions
+
+Requirements:
+
+- Native actions are registered programmatically at bootstrap, not through the normal creation flow.
+- Native actions must be owned by the superuser.
+- Native actions must not be creatable, updatable, or deletable by regular users.
+
 ## 7. WebAssembly scripting
 
 ### 7.1 Runtime
@@ -550,6 +575,7 @@ Requirements:
 - The ranking formula must be explicit and tested.
 - The lookup table must be replaceable without changing kernel semantics.
 - The first implementation may use brute-force cosine similarity over stored embeddings.
+- Lookup is exposed as the system native action `@sys/lookup`, callable through `Call()` by any authenticated user (grant-all applied at bootstrap).
 
 Justification: lookup is a research module. The kernel requires only a ranked list of action ids, not a specific ranking algorithm.
 
@@ -735,8 +761,11 @@ juice action enable
 juice action disable
 juice action acl grant
 juice action acl revoke
+juice action grant-all
+juice action revoke-all
 juice action list
 juice process start
+juice process show
 juice process fund
 juice process end
 juice call
@@ -746,8 +775,18 @@ juice events emit
 juice events poll
 juice tx list
 juice tx show
+juice tx rate
 juice stats show
 juice lookup
+juice health
+juice admin user list
+juice admin user show
+juice admin user suspend
+juice admin user unsuspend
+juice admin action list
+juice admin action disable
+juice admin process list
+juice admin tx list
 ```
 
 Requirements:
@@ -851,6 +890,15 @@ lookup ranking with fake embeddings
 stats update
 CLI commands
 logging smoke test
+superuser first-boot prompt and config storage
+suspended user rejected at authentication
+rating cascade to unrated descendant transactions
+trace cost and latency updated on transaction completion
+native action callable through Call()
+non-superuser rejected from admin endpoints
+grant-all allows any authenticated user to call action
+revoke-all removes open grant
+bootstrap is idempotent
 ```
 
 ### 16.4 Invariant tests
@@ -867,6 +915,10 @@ call permission is required for execution
 every call creates exactly one transaction
 every nested call creates exactly one child trace
 script calls cannot bypass ACL
+suspended users cannot authenticate
+native actions are always owned by the superuser
+rating cascade does not overwrite already-rated transactions
+trace.cost equals sum of descendant transaction gross amounts
 ```
 
 ## 17. Configuration
@@ -922,5 +974,101 @@ Requirements:
 - Error messages must be concise and user-facing.
 - Logs may contain additional diagnostic context.
 
+## 19. Superuser and platform operations
 
+### 19.1 Superuser account
 
+One designated platform operator exists per installation.
+
+Requirements:
+
+- Handle and password are set interactively on first boot if no superuser exists (prompt for both, like a standard database setup).
+- The handle is fixed once set; it cannot be changed without direct database access.
+- The superuser handle is stored in a `config` table in SQLite (key: `superuser_handle`).
+- On every startup, the server reads `config.superuser_handle` to identify the superuser.
+- Admin authority is enforced at the HTTP and CLI layers by comparing the authenticated subject handle to the stored superuser handle.
+- The kernel has no concept of superuser; it enforces normal ACL rules for all users.
+
+### 19.2 User suspension
+
+Requirements:
+
+- The superuser may suspend or unsuspend any user.
+- A suspended user is rejected at every authenticated request with `ErrUnauthenticated`.
+- Suspension does not delete the user or their data.
+
+### 19.3 Bootstrap
+
+On every `juice serve` startup, after first-boot setup, before accepting requests:
+
+1. Register and enable `@sys/lookup` (KindNative) if absent.
+2. Apply grant-all on `@sys/lookup`.
+
+Bootstrap must be idempotent.
+
+### 19.4 System native actions
+
+Requirements:
+
+- System actions are KindNative, owned by the superuser, registered at bootstrap.
+- System actions execute through the normal kernel call path (`Call()`).
+- The initial system action is `@sys/lookup` (public, grant-all at bootstrap).
+- Human supervision operations must not be registered as native actions (see §2.3).
+
+### 19.5 Public access control
+
+Requirements:
+
+- An action may be made callable by all authenticated users via grant-all.
+- grant-all and revoke-all are operations on an action, not a change to the ACL model.
+- Only the action owner or a user with admin permission on the action may call grant-all or revoke-all.
+- grant-all does not replace or remove existing per-user ACL entries.
+
+### 19.6 Admin operations
+
+The following operations are restricted to the superuser. Each has a corresponding HTTP endpoint and CLI command.
+
+User management:
+
+```text
+GET  /v1/admin/users                    juice admin user list
+GET  /v1/admin/users/{id}               juice admin user show --id
+POST /v1/admin/users/{id}/suspend       juice admin user suspend --id
+POST /v1/admin/users/{id}/unsuspend     juice admin user unsuspend --id
+```
+
+Action management:
+
+```text
+GET  /v1/admin/actions                  juice admin action list
+POST /v1/admin/actions/{id}/disable     juice admin action disable --id
+```
+
+Process management:
+
+```text
+GET  /v1/admin/processes                juice admin process list
+```
+
+Transaction management:
+
+```text
+GET  /v1/admin/transactions             juice admin tx list
+```
+
+### 19.7 Access control endpoints
+
+Require action owner or action-admin permission:
+
+```text
+POST /v1/actions/{id}/grant-all         juice action grant-all --id
+POST /v1/actions/{id}/revoke-all        juice action revoke-all --id
+```
+
+### 19.8 Health endpoint
+
+Unauthenticated. Returns server status.
+
+```text
+GET /health                             juice health
+```
