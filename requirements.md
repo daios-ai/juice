@@ -174,8 +174,10 @@ Requirements:
 Correctness condition:
 
 ```text
-CanCall(u,a) := Active(a) ∧ (Owner(u,a) ∨ ACL(u,a,call) ∨ ACL(u,a,admin)).
+CanCall(u,a) := Active(a) ∧ (Owner(u,a) ∨ Public(a) ∨ ACL(u,a,call) ∨ ACL(u,a,admin)).
 ```
+
+Where `Public(a)` is true when the action's `public` flag is set (see §19.5). This flag is stored directly on the action and checked without a separate ACL query.
 
 ### 3.4 Process
 
@@ -319,9 +321,6 @@ ListAllActions
 GrantACL
 RevokeACL
 CheckACL
-GrantAll
-RevokeAll
-CheckGrantAll
 CreateProcess
 ReadProcess
 EndProcess
@@ -747,8 +746,6 @@ id
 owner_user_id
 source_user_id
 event_name
-process_id
-trace_id
 target_action_id
 active
 created_at
@@ -756,8 +753,8 @@ created_at
 
 Requirements:
 
-- Creating a listener requires authority over the process and permission to call the target action.
-- A listener stores the process and trace under which future event calls run.
+- Creating a listener requires permission to call the target action.
+- A listener does not store a process or trace. The process is supplied by the caller at consume time (see §11.4).
 - Inactive listeners must not fire.
 - Deleting a listener must atomically deactivate it and purge all pending (unconsumed) events for that listener.
 
@@ -811,7 +808,7 @@ Requirements:
 
 - Only the listener owner may consume events. The source user may not.
 - Consuming an event must atomically lock it before calling the target action, preventing double-processing.
-- On successful lock, the kernel calls the target action through the normal kernel call path, using the listener’s `process_id`, `trace_id`, stored `args_json`, and `causing_trace_id`.
+- On successful lock, the kernel calls the target action through the normal kernel call path, using the caller-supplied `process_id`, the stored `args_json`, and the event’s `causing_trace_id` as a FOLLOWS_FROM reference.
 - On success, the event is marked consumed with the resulting `tx_id`.
 - On failure, the lock is reset and the event returns to pending. The listener owner may retry.
 - Consuming an event from an inactive listener must return `ErrInvalidState`.
