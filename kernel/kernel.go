@@ -130,20 +130,20 @@ func (k *Kernel) ListUsers(ctx context.Context, limit, offset int) ([]*User, err
 }
 
 // SuspendUser marks the user as suspended, preventing login.
-func (k *Kernel) SuspendUser(ctx context.Context, superuserID, targetID string) error {
+func (k *Kernel) SuspendUser(ctx context.Context, targetID string) error {
 	if err := k.store.SuspendUser(ctx, targetID); err != nil {
 		return err
 	}
-	k.log.With(ctx).Info("user.suspended", "target_id", targetID, "by", superuserID)
+	k.log.With(ctx).Info("user.suspended", "target_id", targetID)
 	return nil
 }
 
 // UnsuspendUser removes the suspension from a user.
-func (k *Kernel) UnsuspendUser(ctx context.Context, superuserID, targetID string) error {
+func (k *Kernel) UnsuspendUser(ctx context.Context, targetID string) error {
 	if err := k.store.UnsuspendUser(ctx, targetID); err != nil {
 		return err
 	}
-	k.log.With(ctx).Info("user.unsuspended", "target_id", targetID, "by", superuserID)
+	k.log.With(ctx).Info("user.unsuspended", "target_id", targetID)
 	return nil
 }
 
@@ -893,13 +893,29 @@ func (k *Kernel) CreateListener(ctx context.Context, req CreateListenerRequest) 
 			return nil, ErrUnauthorized.Wrap("call permission required to register listener")
 		}
 	}
+	traceID := req.TraceID
+	if traceID == "" {
+		traces, err := k.store.ListTraces(ctx, req.ProcessID)
+		if err != nil {
+			return nil, err
+		}
+		for _, t := range traces {
+			if t.ParentTraceID == t.ID {
+				traceID = t.ID
+				break
+			}
+		}
+		if traceID == "" {
+			return nil, ErrInvalidState.Wrap("process has no root trace")
+		}
+	}
 	l := &Listener{
 		ID:             uuid.New().String(),
 		OwnerUserID:    req.OwnerUserID,
 		SourceUserID:   req.SourceUserID,
 		EventName:      req.EventName,
 		ProcessID:      req.ProcessID,
-		TraceID:        req.TraceID,
+		TraceID:        traceID,
 		TargetActionID: req.TargetActionID,
 		Active:         true,
 		CreatedAt:      time.Now().UTC(),

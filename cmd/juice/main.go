@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -123,17 +124,15 @@ func loadToken() (string, error) {
 	return string(data), nil
 }
 
-func saveToken(tok string) error {
-	dir := tokenPath()[:len(tokenPath())-len("/token")]
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+func saveFile(path, content string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(tokenPath(), []byte(tok), 0o600)
+	return os.WriteFile(path, []byte(content), 0o600)
 }
 
-func removeToken() error {
-	return os.Remove(tokenPath())
-}
+func saveToken(tok string) error        { return saveFile(tokenPath(), tok) }
+func removeToken() error                { return os.Remove(tokenPath()) }
 
 func refreshTokenPath() string {
 	home, _ := os.UserHomeDir()
@@ -148,17 +147,8 @@ func loadRefreshToken() (string, error) {
 	return string(data), nil
 }
 
-func saveRefreshToken(tok string) error {
-	dir := tokenPath()[:len(tokenPath())-len("/token")]
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(refreshTokenPath(), []byte(tok), 0o600)
-}
-
-func removeRefreshToken() error {
-	return os.Remove(refreshTokenPath())
-}
+func saveRefreshToken(tok string) error { return saveFile(refreshTokenPath(), tok) }
+func removeRefreshToken() error         { return os.Remove(refreshTokenPath()) }
 
 func decodeJSON(r io.Reader, v any) error {
 	return json.NewDecoder(r).Decode(v)

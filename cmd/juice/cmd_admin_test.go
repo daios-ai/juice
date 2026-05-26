@@ -59,7 +59,7 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 	}
 
 	// Suspend.
-	if err := k.SuspendUser(ctx, "admin-id", u.ID); err != nil {
+	if err := k.SuspendUser(ctx, u.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -69,7 +69,7 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 	}
 
 	// Unsuspend.
-	if err := k.UnsuspendUser(ctx, "admin-id", u.ID); err != nil {
+	if err := k.UnsuspendUser(ctx, u.ID); err != nil {
 		t.Fatal(err)
 	}
 

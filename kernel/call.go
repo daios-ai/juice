@@ -295,7 +295,7 @@ func (k *Kernel) executeHTTP(ctx context.Context, action *Action, args map[strin
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := &http.Client{Timeout: k.cfg.ScriptTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)

@@ -1422,13 +1422,6 @@ CREATE TABLE IF NOT EXISTS listeners (
     created_at       TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS events (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    listener_id TEXT NOT NULL REFERENCES listeners(id),
-    tx_id       TEXT NOT NULL,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
 CREATE TABLE IF NOT EXISTS auth_codes (
     code           TEXT PRIMARY KEY,
     user_id        TEXT NOT NULL REFERENCES users(id),
@@ -1452,7 +1445,6 @@ CREATE INDEX IF NOT EXISTS idx_transactions_owner   ON transactions(owner_user_i
 CREATE INDEX IF NOT EXISTS idx_transactions_process ON transactions(process_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_trace   ON transactions(trace_id);
 CREATE INDEX IF NOT EXISTS idx_listeners_source     ON listeners(source_user_id, event_name);
-CREATE INDEX IF NOT EXISTS idx_events_listener      ON events(listener_id);
 CREATE INDEX IF NOT EXISTS idx_traces_process       ON traces(process_id);
 `
 

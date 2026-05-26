@@ -827,8 +827,7 @@ func (s *server) adminGetUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) adminSuspendUser(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if err := s.kernel.SuspendUser(r.Context(), subjectFrom(r), id); err != nil {
+	if err := s.kernel.SuspendUser(r.Context(), chi.URLParam(r, "id")); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -836,8 +835,7 @@ func (s *server) adminSuspendUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) adminUnsuspendUser(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if err := s.kernel.UnsuspendUser(r.Context(), subjectFrom(r), id); err != nil {
+	if err := s.kernel.UnsuspendUser(r.Context(), chi.URLParam(r, "id")); err != nil {
 		writeErr(w, err)
 		return
 	}

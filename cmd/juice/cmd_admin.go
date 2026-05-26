@@ -128,13 +128,7 @@ func adminUserSuspendCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			if err := k.SuspendUser(context.Background(), subjectID, userID); err != nil {
+			if err := k.SuspendUser(context.Background(), userID); err != nil {
 				return err
 			}
 			fmt.Printf("User %s suspended.\n", userID)
@@ -157,13 +151,7 @@ func adminUserUnsuspendCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			if err := k.UnsuspendUser(context.Background(), subjectID, userID); err != nil {
+			if err := k.UnsuspendUser(context.Background(), userID); err != nil {
 				return err
 			}
 			fmt.Printf("User %s unsuspended.\n", userID)
