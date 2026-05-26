@@ -714,6 +714,7 @@ Requirements:
 
 - A human may rate any transaction 0 (bad) or 1 (good) via RateTransaction.
 - When a transaction is rated, the rating must automatically cascade to all unrated descendant transactions in the trace tree.
+- The cascade is performed atomically by the store at rating time via a single recursive SQL operation. No separate application-level propagation step is required or permitted.
 - Rating is a human supervision operation. It must not be callable through `Call()`.
 
 **Trace metrics**
