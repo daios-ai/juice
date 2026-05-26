@@ -679,8 +679,6 @@ func (s *server) postListener(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SourceUserID   string `json:"source_user_id"`
 		EventName      string `json:"event_name"`
-		ProcessID      string `json:"process_id"`
-		TraceID        string `json:"trace_id"`
 		TargetActionID string `json:"target_action_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -691,8 +689,6 @@ func (s *server) postListener(w http.ResponseWriter, r *http.Request) {
 		OwnerUserID:    subjectFrom(r),
 		SourceUserID:   req.SourceUserID,
 		EventName:      req.EventName,
-		ProcessID:      req.ProcessID,
-		TraceID:        req.TraceID,
 		TargetActionID: req.TargetActionID,
 	})
 	if err != nil {
@@ -759,16 +755,6 @@ func (s *server) postConsumeEvent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, reply)
 }
 
-func (s *server) getProcessFeedback(w http.ResponseWriter, r *http.Request) {
-	processID := chi.URLParam(r, "id")
-	traceID := chi.URLParam(r, "trace_id")
-	fb, err := s.kernel.RecursiveFeedback(r.Context(), processID, traceID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, fb)
-}
 
 func (s *server) grantAll(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")

@@ -44,14 +44,11 @@ func TestListenerCreateAndDelete(t *testing.T) {
 	})
 
 	a := makeActiveAction(t, env, owner.ID, "/evt-handler")
-	p, root, _ := env.k.StartProcess(ctx, owner.ID, 100)
 
 	l, err := env.k.CreateListener(ctx, kernel.CreateListenerRequest{
 		OwnerUserID:    owner.ID,
 		SourceUserID:   source.ID,
 		EventName:      "ping",
-		ProcessID:      p.ID,
-		TraceID:        root.ID,
 		TargetActionID: a.ID,
 	})
 	if err != nil {
@@ -100,14 +97,11 @@ func TestListenerDeletedNotFired(t *testing.T) {
 	})
 
 	a := makeActiveAction(t, env, owner.ID, "/del-handler")
-	p, root, _ := env.k.StartProcess(ctx, owner.ID, 100)
 
 	l, _ := env.k.CreateListener(ctx, kernel.CreateListenerRequest{
 		OwnerUserID:    owner.ID,
 		SourceUserID:   source.ID,
 		EventName:      "gone",
-		ProcessID:      p.ID,
-		TraceID:        root.ID,
 		TargetActionID: a.ID,
 	})
 	_ = env.k.DeleteListener(ctx, owner.ID, l.ID)

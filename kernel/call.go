@@ -452,6 +452,25 @@ func (k *Kernel) updateStats(ctx context.Context, actionID string, tx *Transacti
 	}
 	UpdateStats(stats, tx, latency)
 	_ = k.store.UpsertStats(ctx, stats)
+	_ = k.store.UpsertStatTag(ctx, &StatTag{
+		ActionID:  actionID,
+		Key:       "latency_bucket",
+		Value:     latencyBucket(stats.LatencyMean),
+		Source:    "kernel",
+		UpdatedAt: time.Now().UTC(),
+	})
+}
+
+// latencyBucket categorises observed mean latency for lookup filtering.
+func latencyBucket(meanSeconds float64) string {
+	switch {
+	case meanSeconds < 0.1:
+		return "fast"
+	case meanSeconds < 1.0:
+		return "medium"
+	default:
+		return "slow"
+	}
 }
 
 // anyOf converts a map[string]any to any for schema validation.

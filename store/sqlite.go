@@ -58,7 +58,13 @@ func (s *DB) migrate() error {
 	if err := s.migrate004(); err != nil {
 		return err
 	}
-	return s.migrate005()
+	if err := s.migrate005(); err != nil {
+		return err
+	}
+	if err := s.migrate006(); err != nil {
+		return err
+	}
+	return s.migrate007()
 }
 
 // migrate002 applies schema002 idempotently.
@@ -130,6 +136,47 @@ func (s *DB) migrate005() error {
 		created_at       TEXT NOT NULL
 	)`)
 	return err
+}
+
+// migrate006 drops the process_id and trace_id columns from listeners.
+// These were dead data: ConsumeEvent ignores the stored process (caller supplies their own),
+// and using l.TraceID as a CHILD_OF parent violated the trace invariant
+// (child.process_id must equal parent.process_id).
+func (s *DB) migrate006() error {
+	for _, col := range []string{"process_id", "trace_id"} {
+		rows, err := s.db.Query(`PRAGMA table_info(listeners)`)
+		if err != nil {
+			return fmt.Errorf("migrate006: %w", err)
+		}
+		var found bool
+		for rows.Next() {
+			var cid, notNull, pk int
+			var name, colType string
+			var dflt any
+			_ = rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk)
+			if name == col {
+				found = true
+			}
+		}
+		rows.Close()
+		if found {
+			if _, err := s.db.Exec(`ALTER TABLE listeners DROP COLUMN ` + col); err != nil {
+				return fmt.Errorf("migrate006: drop %s: %w", col, err)
+			}
+		}
+	}
+	return nil
+}
+
+// migrate007 adds the embed_vec column to actions for storing pre-computed embeddings.
+// NULL means the action has no stored embedding yet (Lookup will skip it until re-embedded).
+func (s *DB) migrate007() error {
+	if _, err := s.db.Exec(`ALTER TABLE actions ADD COLUMN embed_vec TEXT`); err != nil {
+		if !isDuplicateColumn(err) {
+			return fmt.Errorf("migrate007: %w", err)
+		}
+	}
+	return nil
 }
 
 // migrate003 adds the caused_by_trace_id column for FOLLOWS_FROM causal tracing.
@@ -351,6 +398,37 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 			return nil, err
 		}
 		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *DB) UpdateActionEmbedding(ctx context.Context, actionID string, vec []float32) error {
+	vecJSON, err := json.Marshal(vec)
+	if err != nil {
+		return dbErr(err, "marshal embedding")
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE actions SET embed_vec=? WHERE id=?`, string(vecJSON), actionID)
+	return dbErr(err, "update action embedding")
+}
+
+func (s *DB) ListActionEmbeddings(ctx context.Context, limit int) (map[string][]float32, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, embed_vec FROM actions WHERE active=1 AND embed_vec IS NOT NULL LIMIT ?`, limit)
+	if err != nil {
+		return nil, dbErr(err, "list action embeddings")
+	}
+	defer rows.Close()
+	out := make(map[string][]float32)
+	for rows.Next() {
+		var id, vecJSON string
+		if err := rows.Scan(&id, &vecJSON); err != nil {
+			return nil, dbErr(err, "scan action embedding")
+		}
+		var vec []float32
+		if err := json.Unmarshal([]byte(vecJSON), &vec); err != nil {
+			continue
+		}
+		out[id] = vec
 	}
 	return out, rows.Err()
 }
@@ -931,9 +1009,9 @@ func (s *DB) UpsertStatTag(ctx context.Context, tag *kernel.StatTag) error {
 
 func (s *DB) CreateListener(ctx context.Context, l *kernel.Listener) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO listeners (id,owner_user_id,source_user_id,event_name,process_id,trace_id,target_action_id,active,created_at)
-		 VALUES (?,?,?,?,?,?,?,?,?)`,
-		l.ID, l.OwnerUserID, l.SourceUserID, l.EventName, l.ProcessID, l.TraceID,
+		`INSERT INTO listeners (id,owner_user_id,source_user_id,event_name,target_action_id,active,created_at)
+		 VALUES (?,?,?,?,?,?,?)`,
+		l.ID, l.OwnerUserID, l.SourceUserID, l.EventName,
 		l.TargetActionID, boolInt(l.Active), timeToStr(l.CreatedAt),
 	)
 	return dbErr(err, "create listener")
@@ -944,10 +1022,10 @@ func (s *DB) ReadListener(ctx context.Context, id string) (*kernel.Listener, err
 	var active int
 	var createdAt string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,owner_user_id,source_user_id,event_name,process_id,trace_id,target_action_id,active,created_at
+		`SELECT id,owner_user_id,source_user_id,event_name,target_action_id,active,created_at
 		 FROM listeners WHERE id=?`, id,
-	).Scan(&l.ID, &l.OwnerUserID, &l.SourceUserID, &l.EventName, &l.ProcessID,
-		&l.TraceID, &l.TargetActionID, &active, &createdAt)
+	).Scan(&l.ID, &l.OwnerUserID, &l.SourceUserID, &l.EventName,
+		&l.TargetActionID, &active, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("listener not found")
 	}
@@ -967,7 +1045,7 @@ func (s *DB) UpdateListener(ctx context.Context, l *kernel.Listener) error {
 
 func (s *DB) ListListeners(ctx context.Context, sourceUserID, eventName string) ([]*kernel.Listener, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,owner_user_id,source_user_id,event_name,process_id,trace_id,target_action_id,active,created_at
+		`SELECT id,owner_user_id,source_user_id,event_name,target_action_id,active,created_at
 		 FROM listeners WHERE source_user_id=? AND event_name=? AND active=1`,
 		sourceUserID, eventName,
 	)
@@ -982,7 +1060,7 @@ func (s *DB) ListListeners(ctx context.Context, sourceUserID, eventName string) 
 		var active int
 		var createdAt string
 		if err := rows.Scan(&l.ID, &l.OwnerUserID, &l.SourceUserID, &l.EventName,
-			&l.ProcessID, &l.TraceID, &l.TargetActionID, &active, &createdAt); err != nil {
+			&l.TargetActionID, &active, &createdAt); err != nil {
 			return nil, dbErr(err, "scan listener")
 		}
 		l.Active = active != 0

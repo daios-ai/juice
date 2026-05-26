@@ -34,14 +34,11 @@ func TestCreateListener(t *testing.T) {
 	owner := setupUser(t, st, "@alice", 500)
 	source := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, owner.ID, "/handler")
-	p, root, _ := k.StartProcess(ctx, owner.ID, 100)
 
 	l, err := k.CreateListener(ctx, CreateListenerRequest{
 		OwnerUserID:    owner.ID,
 		SourceUserID:   source.ID,
 		EventName:      "ping",
-		ProcessID:      p.ID,
-		TraceID:        root.ID,
 		TargetActionID: a.ID,
 	})
 	if err != nil {
@@ -49,30 +46,6 @@ func TestCreateListener(t *testing.T) {
 	}
 	if l.ID == "" || !l.Active {
 		t.Error("expected active listener with ID")
-	}
-}
-
-func TestCreateListenerClosedProcessFails(t *testing.T) {
-	st := newFakeStore()
-	k := newTestKernel(st)
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "@alice", 100)
-	source := setupUser(t, st, "@bob", 0)
-	a := setupActiveWasmAction(t, st, owner.ID, "/handler")
-	p, root, _ := k.StartProcess(ctx, owner.ID, 100)
-	_ = k.EndProcess(ctx, owner.ID, p.ID)
-
-	_, err := k.CreateListener(ctx, CreateListenerRequest{
-		OwnerUserID:    owner.ID,
-		SourceUserID:   source.ID,
-		EventName:      "ping",
-		ProcessID:      p.ID,
-		TraceID:        root.ID,
-		TargetActionID: a.ID,
-	})
-	if err == nil {
-		t.Error("expected error creating listener on closed process")
 	}
 }
 
@@ -84,11 +57,10 @@ func TestDeleteListener(t *testing.T) {
 	owner := setupUser(t, st, "@alice", 100)
 	source := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, owner.ID, "/handler")
-	p, root, _ := k.StartProcess(ctx, owner.ID, 100)
 
 	l, _ := k.CreateListener(ctx, CreateListenerRequest{
 		OwnerUserID: owner.ID, SourceUserID: source.ID, EventName: "ping",
-		ProcessID: p.ID, TraceID: root.ID, TargetActionID: a.ID,
+		TargetActionID: a.ID,
 	})
 
 	if err := k.DeleteListener(ctx, owner.ID, l.ID); err != nil {
@@ -109,11 +81,11 @@ func TestEmitQueuesNotFires(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 1000)
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
+	p, _, _ := k.StartProcess(ctx, alice.ID, 500)
 
 	l, err := k.CreateListener(ctx, CreateListenerRequest{
 		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "greet",
-		ProcessID: p.ID, TraceID: root.ID, TargetActionID: a.ID,
+		TargetActionID: a.ID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -144,6 +116,7 @@ func TestEmitQueuesNotFires(t *testing.T) {
 	if events[0].ID != eventIDs[0] {
 		t.Errorf("poll event ID: got %q, want %q", events[0].ID, eventIDs[0])
 	}
+	_ = p
 }
 
 func TestEmitInactiveListenerNotQueued(t *testing.T) {
@@ -154,11 +127,10 @@ func TestEmitInactiveListenerNotQueued(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 1000)
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
 
 	l, _ := k.CreateListener(ctx, CreateListenerRequest{
 		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "greet",
-		ProcessID: p.ID, TraceID: root.ID, TargetActionID: a.ID,
+		TargetActionID: a.ID,
 	})
 	_ = k.DeleteListener(ctx, alice.ID, l.ID)
 
@@ -177,11 +149,11 @@ func TestConsumeEventSuccess(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 1000)
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
+	p, _, _ := k.StartProcess(ctx, alice.ID, 500)
 
 	l, _ := k.CreateListener(ctx, CreateListenerRequest{
 		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "greet",
-		ProcessID: p.ID, TraceID: root.ID, TargetActionID: a.ID,
+		TargetActionID: a.ID,
 	})
 
 	eventIDs, _ := k.EmitEvent(ctx, bob.ID, "greet", map[string]any{"msg": "hi"}, "")
@@ -225,10 +197,10 @@ func TestConsumeEventAlreadyConsumed(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 1000)
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
+	p, _, _ := k.StartProcess(ctx, alice.ID, 500)
 	_, _ = k.CreateListener(ctx, CreateListenerRequest{
 		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "x",
-		ProcessID: p.ID, TraceID: root.ID, TargetActionID: a.ID,
+		TargetActionID: a.ID,
 	})
 
 	eventIDs, _ := k.EmitEvent(ctx, bob.ID, "x", nil, "")
@@ -251,10 +223,10 @@ func TestConsumeEventUnauthorized(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 1000)
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
+	p, _, _ := k.StartProcess(ctx, alice.ID, 500)
 	_, _ = k.CreateListener(ctx, CreateListenerRequest{
 		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "x",
-		ProcessID: p.ID, TraceID: root.ID, TargetActionID: a.ID,
+		TargetActionID: a.ID,
 	})
 
 	eventIDs, _ := k.EmitEvent(ctx, bob.ID, "x", nil, "")
@@ -273,10 +245,9 @@ func TestDeleteListenerPurgesEvents(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 500)
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
 	l, _ := k.CreateListener(ctx, CreateListenerRequest{
 		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "x",
-		ProcessID: p.ID, TraceID: root.ID, TargetActionID: a.ID,
+		TargetActionID: a.ID,
 	})
 
 	// Queue two events.
@@ -341,11 +312,11 @@ func TestEmitEventCausalTraceID(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 1000)
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
+	p, _, _ := k.StartProcess(ctx, alice.ID, 500)
 
 	_, _ = k.CreateListener(ctx, CreateListenerRequest{
 		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "ping",
-		ProcessID: p.ID, TraceID: root.ID, TargetActionID: a.ID,
+		TargetActionID: a.ID,
 	})
 
 	causingTraceID := "some-emitting-trace-id"
@@ -401,10 +372,10 @@ func TestEmitDirectCallHasNilCausalID(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 1000)
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
+	p, _, _ := k.StartProcess(ctx, alice.ID, 500)
 	_, _ = k.CreateListener(ctx, CreateListenerRequest{
 		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "ping",
-		ProcessID: p.ID, TraceID: root.ID, TargetActionID: a.ID,
+		TargetActionID: a.ID,
 	})
 
 	eventIDs, err := k.EmitEvent(ctx, bob.ID, "ping", nil, "")
@@ -440,10 +411,9 @@ func TestPollListenerUnauthorized(t *testing.T) {
 	source := setupUser(t, st, "@bob", 0)
 	stranger := setupUser(t, st, "@carol", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	p, root, _ := k.StartProcess(ctx, alice.ID, 100)
 	l, _ := k.CreateListener(ctx, CreateListenerRequest{
 		OwnerUserID: alice.ID, SourceUserID: source.ID, EventName: "x",
-		ProcessID: p.ID, TraceID: root.ID, TargetActionID: a.ID,
+		TargetActionID: a.ID,
 	})
 
 	if _, err := k.PollListener(ctx, stranger.ID, l.ID); err == nil {

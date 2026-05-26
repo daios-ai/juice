@@ -74,6 +74,12 @@ type Store interface {
 	ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*Action, error)
 	ListAllActions(ctx context.Context, limit, offset int) ([]*Action, error)
 
+	// UpdateActionEmbedding stores a pre-computed embedding vector for an action's description.
+	UpdateActionEmbedding(ctx context.Context, actionID string, vec []float32) error
+	// ListActionEmbeddings returns a map of actionID → embedding vector for all active
+	// actions that have a stored embedding. Used by Lookup to avoid re-embedding at query time.
+	ListActionEmbeddings(ctx context.Context, limit int) (map[string][]float32, error)
+
 	// ---- ACL ----
 
 	GrantACL(ctx context.Context, e *ACLEntry) error

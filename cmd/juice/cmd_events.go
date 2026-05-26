@@ -16,7 +16,7 @@ func init() {
 }
 
 func eventsListenCmd() *cobra.Command {
-	var sourceHandle, eventName, processID, traceID, actionID string
+	var sourceHandle, eventName, actionID string
 	cmd := &cobra.Command{
 		Use:   "listen",
 		Short: "Register a listener that calls an action when an event fires",
@@ -32,7 +32,6 @@ func eventsListenCmd() *cobra.Command {
 				return err
 			}
 
-			// Resolve source user.
 			sourceUser, err := k.ReadUserByHandle(context.Background(), sourceHandle)
 			if err != nil {
 				return fmt.Errorf("source user not found: %w", err)
@@ -42,8 +41,6 @@ func eventsListenCmd() *cobra.Command {
 				OwnerUserID:    subjectID,
 				SourceUserID:   sourceUser.ID,
 				EventName:      eventName,
-				ProcessID:      processID,
-				TraceID:        traceID,
 				TargetActionID: actionID,
 			})
 			if err != nil {
@@ -59,12 +56,9 @@ func eventsListenCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&sourceHandle, "source", "", "Source user handle to listen for (required)")
 	cmd.Flags().StringVar(&eventName, "event", "", "Event name to listen for (required)")
-	cmd.Flags().StringVar(&processID, "process", "", "Process ID to run under (required)")
-	cmd.Flags().StringVar(&traceID, "trace", "", "Parent trace ID (defaults to process root)")
 	cmd.Flags().StringVar(&actionID, "action", "", "Target action ID to call on event (required)")
 	_ = cmd.MarkFlagRequired("source")
 	_ = cmd.MarkFlagRequired("event")
-	_ = cmd.MarkFlagRequired("process")
 	_ = cmd.MarkFlagRequired("action")
 	return cmd
 }

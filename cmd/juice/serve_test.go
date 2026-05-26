@@ -56,7 +56,6 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		r.Post("/v1/listeners", srv.postListener)
 		r.Delete("/v1/listeners/{id}", srv.deleteListener)
 		r.Post("/v1/events/emit", srv.postEmit)
-		r.Get("/v1/processes/{id}/feedback/{trace_id}", srv.getProcessFeedback)
 	})
 
 	return httptest.NewServer(r), k

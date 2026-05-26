@@ -13,6 +13,7 @@ type fakeStore struct {
 	users           map[string]*User
 	userByHandle    map[string]*User
 	actions         map[string]*Action
+	actionEmbeds    map[string][]float32
 	acl             map[string]map[Permission]bool // key: subjectID+":"+actionID
 	grantAll        map[string]bool                // actionID -> public
 	processes       map[string]*Process
@@ -33,6 +34,7 @@ func newFakeStore() *fakeStore {
 		users:         make(map[string]*User),
 		userByHandle:  make(map[string]*User),
 		actions:       make(map[string]*Action),
+		actionEmbeds:  make(map[string][]float32),
 		acl:           make(map[string]map[Permission]bool),
 		grantAll:      make(map[string]bool),
 		processes:     make(map[string]*Process),
@@ -149,6 +151,36 @@ func (f *fakeStore) ListActions(_ context.Context, activeOnly bool, limit, offse
 		result = result[:limit]
 	}
 	return result, nil
+}
+
+func (f *fakeStore) UpdateActionEmbedding(_ context.Context, actionID string, vec []float32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := make([]float32, len(vec))
+	copy(cp, vec)
+	f.actionEmbeds[actionID] = cp
+	return nil
+}
+
+func (f *fakeStore) ListActionEmbeddings(_ context.Context, limit int) (map[string][]float32, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string][]float32, len(f.actionEmbeds))
+	count := 0
+	for id, vec := range f.actionEmbeds {
+		if limit > 0 && count >= limit {
+			break
+		}
+		a, ok := f.actions[id]
+		if !ok || !a.Active {
+			continue
+		}
+		cp := make([]float32, len(vec))
+		copy(cp, vec)
+		out[id] = cp
+		count++
+	}
+	return out, nil
 }
 
 func (f *fakeStore) GrantACL(_ context.Context, e *ACLEntry) error {

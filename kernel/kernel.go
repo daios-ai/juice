@@ -276,6 +276,7 @@ func (k *Kernel) CreateAction(ctx context.Context, req CreateActionRequest) (*Ac
 	if err := k.store.CreateAction(ctx, a); err != nil {
 		return nil, err
 	}
+	k.embedActionAsync(ctx, a)
 	k.log.With(ctx).Info("action.created", "action_id", a.ID, "name", a.Name)
 	return a, nil
 }
@@ -471,6 +472,9 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 
 	if err := k.store.UpdateAction(ctx, a); err != nil {
 		return nil, err
+	}
+	if req.Description != nil {
+		k.embedActionAsync(ctx, a)
 	}
 	k.log.With(ctx).Info("action.updated", "action_id", a.ID)
 	return a, nil
@@ -724,7 +728,25 @@ type LookupResult struct {
 	Score  float32
 }
 
+// embedActionAsync computes and stores an embedding for an action's description.
+// No-op if the embedder is nil or the description is empty. Errors are logged, not surfaced.
+func (k *Kernel) embedActionAsync(ctx context.Context, a *Action) {
+	if k.llm == nil || a.Description == "" {
+		return
+	}
+	vec, err := k.llm.Embed(ctx, a.Description)
+	if err != nil {
+		k.log.With(ctx).Warn("embed.failed", "action_id", a.ID, "error", err.Error())
+		return
+	}
+	if err := k.store.UpdateActionEmbedding(ctx, a.ID, vec); err != nil {
+		k.log.With(ctx).Warn("embed.store_failed", "action_id", a.ID, "error", err.Error())
+	}
+}
+
 // Lookup returns active actions ranked by semantic similarity to the query.
+// Uses pre-computed stored embeddings — O(1) embedding API calls regardless of catalog size.
+// Actions without a stored embedding are not returned until their description is set or updated.
 // Returns ErrInvalidState if no embedder is configured.
 func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult, error) {
 	if k.llm == nil {
@@ -739,23 +761,31 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	if limit <= 0 || limit > 50 {
 		limit = 10
 	}
+	embeddings, err := k.store.ListActionEmbeddings(ctx, 200)
+	if err != nil {
+		return nil, err
+	}
+	if len(embeddings) == 0 {
+		return nil, nil
+	}
+	// Fetch action metadata for the actions that have stored embeddings.
 	actions, err := k.store.ListActions(ctx, true, 200, 0)
 	if err != nil {
 		return nil, err
+	}
+	actionByID := make(map[string]*Action, len(actions))
+	for _, a := range actions {
+		actionByID[a.ID] = a
 	}
 
 	type scored struct {
 		a     *Action
 		score float32
 	}
-	results := make([]scored, 0, len(actions))
-	for _, a := range actions {
-		desc := a.Description
-		if desc == "" {
-			continue
-		}
-		vec, err := k.llm.Embed(ctx, desc)
-		if err != nil {
+	results := make([]scored, 0, len(embeddings))
+	for id, vec := range embeddings {
+		a, ok := actionByID[id]
+		if !ok {
 			continue
 		}
 		sim := cosine(qvec, vec)
@@ -860,8 +890,6 @@ type CreateListenerRequest struct {
 	OwnerUserID    string
 	SourceUserID   string
 	EventName      string
-	ProcessID      string
-	TraceID        string
 	TargetActionID string
 }
 
@@ -869,16 +897,6 @@ type CreateListenerRequest struct {
 func (k *Kernel) CreateListener(ctx context.Context, req CreateListenerRequest) (*Listener, error) {
 	if req.EventName == "" {
 		return nil, ErrInvalidInput.Wrap("event_name is required")
-	}
-	p, err := k.store.ReadProcess(ctx, req.ProcessID)
-	if err != nil {
-		return nil, err
-	}
-	if p.Status != ProcessOpen {
-		return nil, ErrInvalidState.Wrap("process is closed")
-	}
-	if p.OwnerUserID != req.OwnerUserID {
-		return nil, ErrUnauthorized.Wrap("only the process owner may create listeners")
 	}
 	a, err := k.store.ReadAction(ctx, req.TargetActionID)
 	if err != nil {
@@ -893,29 +911,11 @@ func (k *Kernel) CreateListener(ctx context.Context, req CreateListenerRequest) 
 			return nil, ErrUnauthorized.Wrap("call permission required to register listener")
 		}
 	}
-	traceID := req.TraceID
-	if traceID == "" {
-		traces, err := k.store.ListTraces(ctx, req.ProcessID)
-		if err != nil {
-			return nil, err
-		}
-		for _, t := range traces {
-			if t.ParentTraceID == t.ID {
-				traceID = t.ID
-				break
-			}
-		}
-		if traceID == "" {
-			return nil, ErrInvalidState.Wrap("process has no root trace")
-		}
-	}
 	l := &Listener{
 		ID:             uuid.New().String(),
 		OwnerUserID:    req.OwnerUserID,
 		SourceUserID:   req.SourceUserID,
 		EventName:      req.EventName,
-		ProcessID:      req.ProcessID,
-		TraceID:        traceID,
 		TargetActionID: req.TargetActionID,
 		Active:         true,
 		CreatedAt:      time.Now().UTC(),
@@ -1027,7 +1027,6 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID:       subjectID,
 		ProcessID:       processID,
-		ParentTraceID:   l.TraceID,
 		CausedByTraceID: e.CausingTraceID,
 		TargetUserID:    owner.ID,
 		ActionName:      action.Name,
@@ -1044,55 +1043,6 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 	return reply, nil
 }
 
-// ---- Recursive feedback ----
-
-// RecursiveFeedback computes recursive cost and latency for a trace subtree.
-func (k *Kernel) RecursiveFeedback(ctx context.Context, processID, traceID string) (*TraceFeedback, error) {
-	traces, err := k.store.ListTraces(ctx, processID)
-	if err != nil {
-		return nil, err
-	}
-	children := make(map[string][]string)
-	for _, t := range traces {
-		if t.ID == t.ParentTraceID {
-			continue
-		}
-		children[t.ParentTraceID] = append(children[t.ParentTraceID], t.ID)
-	}
-	subtree := collectSubtree(traceID, children)
-
-	txs, err := k.store.ListTransactions(ctx, TxFilter{ProcessID: processID, Limit: 10000})
-	if err != nil {
-		return nil, err
-	}
-	var rootStartedAt time.Time
-	for _, tx := range txs {
-		if tx.TraceID == traceID {
-			rootStartedAt = tx.StartedAt
-			break
-		}
-	}
-	var totalCost int64
-	var maxEndedAt time.Time
-	for _, tx := range txs {
-		if !subtree[tx.TraceID] {
-			continue
-		}
-		totalCost += tx.Gross
-		if tx.EndedAt.After(maxEndedAt) {
-			maxEndedAt = tx.EndedAt
-		}
-	}
-	var latency float64
-	if !rootStartedAt.IsZero() && !maxEndedAt.IsZero() {
-		latency = maxEndedAt.Sub(rootStartedAt).Seconds()
-	}
-	return &TraceFeedback{
-		TraceID:          traceID,
-		RecursiveCost:    totalCost,
-		RecursiveLatency: latency,
-	}, nil
-}
 
 // PropagateRatings propagates ratings from rated transactions to unrated descendants.
 // An unrated transaction inherits the rating of its nearest rated ancestor in the trace tree.
@@ -1153,17 +1103,3 @@ func nearestAncestorRating(traceID string, parentOf map[string]string, traceToTx
 	}
 }
 
-func collectSubtree(root string, children map[string][]string) map[string]bool {
-	visited := make(map[string]bool)
-	queue := []string{root}
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		if visited[cur] {
-			continue
-		}
-		visited[cur] = true
-		queue = append(queue, children[cur]...)
-	}
-	return visited
-}

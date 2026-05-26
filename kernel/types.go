@@ -149,8 +149,6 @@ type Listener struct {
 	OwnerUserID    string
 	SourceUserID   string
 	EventName      string
-	ProcessID      string
-	TraceID        string
 	TargetActionID string
 	Active         bool
 	CreatedAt      time.Time
@@ -198,11 +196,4 @@ type RefreshToken struct {
 	CreatedAt time.Time
 }
 
-// TraceFeedback holds recursive cost and latency for a trace node.
-// Deprecated: use Trace.Cost and Trace.LatencyMS instead.
-type TraceFeedback struct {
-	TraceID          string
-	RecursiveCost    int64
-	RecursiveLatency float64 // seconds
-}
 

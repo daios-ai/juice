@@ -38,7 +38,8 @@ func newTestKernelWithEmbedder(st Store, emb Embedder) *Kernel {
 
 func TestLookupRanking(t *testing.T) {
 	st := newFakeStore()
-	k := newTestKernelWithEmbedder(st, &fakeEmbedder{})
+	emb := &fakeEmbedder{}
+	k := newTestKernelWithEmbedder(st, emb)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@alice", 0)
@@ -46,11 +47,14 @@ func TestLookupRanking(t *testing.T) {
 		{"/weather", "weather forecast temperature rain"},
 		{"/news", "latest news headlines today"},
 	} {
-		_ = st.CreateAction(ctx, &Action{
+		a := &Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: desc.name,
 			Kind: KindHTTP, Active: true, Description: desc.text,
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-		})
+		}
+		_ = st.CreateAction(ctx, a)
+		vec, _ := emb.Embed(ctx, desc.text)
+		_ = st.UpdateActionEmbedding(ctx, a.ID, vec)
 	}
 
 	results, err := k.Lookup(ctx, LookupRequest{Query: "weather forecast", Limit: 10})
@@ -75,6 +79,7 @@ func TestLookupRankingWithStats(t *testing.T) {
 	k := newTestKernelWithEmbedder(st, &fakeEmbedder{})
 	ctx := context.Background()
 
+	emb := &fakeEmbedder{}
 	owner := setupUser(t, st, "@alice", 0)
 	ids := map[string]string{}
 	for _, name := range []string{"/reliable", "/unreliable"} {
@@ -84,6 +89,8 @@ func TestLookupRankingWithStats(t *testing.T) {
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)
+		vec, _ := emb.Embed(ctx, "compute data results")
+		_ = st.UpdateActionEmbedding(ctx, a.ID, vec)
 		ids[name] = a.ID
 	}
 	_ = st.UpsertStats(ctx, &Stats{ActionID: ids["/reliable"], Uses: 10, Successes: 10, LastUsedAt: time.Now()})
