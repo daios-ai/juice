@@ -58,6 +58,19 @@ Rules:
 
 Justification: small package count lowers coupling. Function-named packages permit implementation replacement without changing the conceptual architecture. Per-file tests make coverage gaps visible and keep test files co-located with the code they exercise.
 
+### 2.3 Machine layer and human supervision layer
+
+Juice must maintain a strict conceptual split between machine execution and human supervision.
+
+Requirements:
+
+- `Call()` is the machine layer. It is the sole execution path for AI agents invoking actions. All action execution, fund locking, tracing, and settlement occur through `Call()`.
+- Direct kernel operations — user and action lifecycle, process management, rating — form the human supervision layer. Humans interact with the system through these to observe, correct, and guide machine behavior.
+- No human supervision operation may be routed through `Call()`. An AI agent must never be able to rate its own outputs or trigger rating propagation.
+- This split is an architectural invariant, not an implementation detail.
+
+Justification: AI agents may produce incorrect results. Human supervision provides the correction signal. Mixing the two layers would allow machines to interfere with their own feedback, undermining the integrity of the supervision signal.
+
 ## 3. Core objects
 
 The implementation must define the following core objects in `kernel`.
@@ -614,25 +627,32 @@ Requirements:
 - Trace lookup by process must return the execution tree.
 - Trace deletion must not delete transaction history.
 
-### 10.2 Recursive feedback
+### 10.2 Ratings and trace metrics
 
-Juice must compute recursive cost and recursive latency over the trace tree.
-
-For a node \(x\) with subtree \(T_x\):
-
-```text
-recursive_cost(x) = sum(gross(y) for y in T_x)
-recursive_latency(x) = max(ended_at(y) for y in T_x) - started_at(x)
-```
+**Rating**
 
 Requirements:
 
-- Recursive cost must include descendants.
-- Recursive latency must measure wall-clock latency of the subtree.
-- Rating propagation must be explicit: an unrated child inherits the nearest rated ancestor only when the feedback job is configured to propagate ratings.
-- Feedback computation must be deterministic for a fixed transaction set.
+- A human may rate any transaction 0 (bad) or 1 (good) via RateTransaction.
+- When a transaction is rated, the rating must automatically cascade to all unrated descendant transactions in the trace tree.
+- Rating is a human supervision operation. It must not be callable through `Call()`.
 
-Justification: an action that calls other actions induces downstream cost and latency. Subtree aggregation measures the user-experienced burden of selecting that action.
+**Trace metrics**
+
+Requirements:
+
+- Every process and trace must maintain cumulative cost and wall-clock latency aggregates.
+- These aggregates must be updated automatically as each transaction completes.
+- No separate query operation is required to compute subtree cost or latency.
+
+Correctness condition:
+
+```text
+trace.cost    = sum(gross(t) for all transactions t in subtree)
+trace.latency = max(ended_at(t)) - started_at(trace)
+```
+
+Justification: an action that calls other actions induces downstream cost and latency. Automatic aggregation makes the user-experienced burden of selecting that action continuously visible without a separate query.
 
 ## 11. Events
 
