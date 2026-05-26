@@ -152,7 +152,7 @@ Requirements:
 - `read` permits metadata inspection.
 - `admin` permits ACL and lifecycle changes.
 - Owners implicitly have `admin`.
-- ACL is always direct from user to action. Group or team indirection is not part of the permission model.
+- ACL is always direct from user to action. 
 - ACL checks must be performed inside the kernel call path, not only at the HTTP or CLI boundary.
 
 Correctness condition:
@@ -902,67 +902,5 @@ Requirements:
 - Error messages must be concise and user-facing.
 - Logs may contain additional diagnostic context.
 
-## 19. Non-goals
 
-The following are not part of the Juice permission model or roadmap:
 
-```text
-team-based permissions
-group-based permissions
-```
-
-The following are not part of the first implementation but may be added later:
-
-```text
-distributed database support
-remote script filesystem access
-ambient script network access
-multi-currency accounting
-credit card purchase flow
-complex OpenAPI mounting
-risk-averse statistical estimators
-distributed workers
-```
-
-## 20. Acceptance criteria
-
-The implementation is acceptable when:
-
-```text
-go build ./... succeeds
-go test ./... succeeds
-juice serve starts with a local SQLite database
-juice can create a user
-juice can authenticate a CLI session
-juice can create, activate, and call an action
-juice can execute a wasm script action
-a wasm script can call another action through juice.call
-ACL denial is enforced for direct and script calls
-a successful call creates a transaction and transfers funds
-a failed call creates a transaction and refunds funds
-nested calls produce a trace tree
-events execute stored calls and persist transaction ids
-lookup returns ranked active actions using fake embeddings in tests and Ollama in integration
-logs are written to terminal and file
-```
-
-## 21. Minimal first milestone
-
-The first milestone must implement:
-
-```text
-SQLite store
-users
-actions
-ACL
-processes
-calls
-transactions
-traces
-wasm script execution
-CLI
-structured logging
-tests for all above
-```
-
-Lookup, events, and recursive feedback may be milestone two if the first milestone remains fully tested and semantically complete.
