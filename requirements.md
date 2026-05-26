@@ -744,7 +744,7 @@ Justification: the CLI is both an operator tool and a test surface. Duplicated s
 Requirements:
 
 - Juice must run as a production server.
-- The server must expose API operations corresponding to the CLI commands.
+- The HTTP API is primary. For every HTTP endpoint the server exposes, there must be a corresponding CLI command.
 - The server must use the same kernel service layer as the CLI.
 - The server must propagate request id, subject id, process id, trace id, action id, and transaction id into logs where available.
 - HTTP status codes must distinguish authentication failure, authorization failure, invalid input, insufficient funds, missing resource, and internal failure.
