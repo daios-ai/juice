@@ -902,5 +902,115 @@ Requirements:
 - Error messages must be concise and user-facing.
 - Logs may contain additional diagnostic context.
 
+## 19. Superuser and admin operations
 
+### 19.1 Superuser
 
+Juice must designate one platform operator account.
+
+Requirements:
+
+- The superuser handle must be configurable via `JUICE_SUPERUSER` (default: `@sys`).
+- The superuser password must be configurable via `JUICE_SUPERUSER_PASSWORD`; if unset on first boot, a random password must be generated and printed once to stdout.
+- The superuser is a regular user in the store with no special schema fields.
+- Admin authority is enforced at the HTTP and CLI layers by comparing the authenticated subject handle to the configured superuser handle.
+- The kernel must check the `suspended` field on every authenticated request and reject suspended users with `ErrUnauthenticated`.
+
+### 19.2 User suspension
+
+Users must be suspendable by the superuser.
+
+Required field added to User:
+
+```text
+suspended_at   (nullable timestamp)
+```
+
+Requirements:
+
+- A suspended user must be rejected at authentication time.
+- Suspension and unsuspension must be superuser-only operations.
+- Suspension must not delete the user or their data.
+
+### 19.3 Bootstrap
+
+On every `juice serve` startup, before accepting requests, the server must:
+
+1. Create the `@sys` user if absent.
+2. Register and enable each system native action if absent.
+3. Call grant-all on public system actions.
+
+Bootstrap must be idempotent.
+
+### 19.4 System native actions
+
+System actions are `KindNative` actions owned by `@sys` and registered at bootstrap.
+
+Requirements:
+
+- System actions must execute through the normal kernel call path.
+- Admin-only system actions must have no grant-all; only `@sys` can call them as owner.
+- Public system actions must have grant-all applied at bootstrap.
+
+### 19.5 Public access control
+
+An action may be made callable by all authenticated users via a single operation.
+
+Requirements:
+
+- `grant-all` must make an action callable by any authenticated user.
+- `revoke-all` must remove that open grant.
+- These operations must not replace explicit per-user ACL entries.
+- Only the action owner or a user with admin permission on the action may call grant-all or revoke-all.
+
+### 19.6 Admin operations
+
+The following operations are restricted to the superuser.
+
+User management:
+
+```text
+list all users
+read any user
+suspend user
+unsuspend user
+```
+
+Action management:
+
+```text
+list all actions across all owners
+force-disable any action
+```
+
+Process management:
+
+```text
+list all processes across all owners
+```
+
+Transaction management:
+
+```text
+list all transactions across all owners
+```
+
+Access control:
+
+```text
+grant-all on any action
+revoke-all on any action
+```
+
+System:
+
+```text
+GET /health  (unauthenticated, returns server status)
+```
+
+Requirements:
+
+- Every admin operation must have a corresponding HTTP endpoint and CLI command.
+- Admin HTTP endpoints must be grouped under `/v1/admin/`.
+- Admin CLI commands must be grouped under `juice admin`.
+- Non-admin requests to admin endpoints must return `ErrUnauthorized`.
