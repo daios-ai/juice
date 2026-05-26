@@ -28,10 +28,10 @@ func TestCallClosedProcess(t *testing.T) {
 	p, root, _ := env.k.StartProcess(ctx, owner.ID, 100)
 	_ = env.k.EndProcess(ctx, owner.ID, p.ID)
 
-	// Create a native action — Call will fail before exec (closed process).
+	// Create an HTTP action — Call will fail before exec (closed process).
 	a, _ := env.k.CreateAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "/echo",
-		Kind: kernel.KindNative, Source: "native",
+		Kind: kernel.KindHTTP, Source: "http://example.com/echo",
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 

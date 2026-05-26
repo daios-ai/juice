@@ -2,7 +2,11 @@ package kernel
 
 import (
 	"context"
+	"encoding/json"
 	"math"
+	"net"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/daios-ai/juice/log"
@@ -163,6 +167,38 @@ type CreateActionRequest struct {
 }
 
 // CreateAction registers a new action (inactive by default).
+// validateHTTPSource rejects URLs that could be used for SSRF attacks.
+// Allowed: http and https schemes with public hostnames or IPs.
+// Rejected: other schemes, localhost, loopback, private, and link-local addresses.
+func validateHTTPSource(source string) error {
+	u, err := url.Parse(source)
+	if err != nil {
+		return ErrInvalidInput.Wrapf("invalid URL: %v", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ErrInvalidInput.Wrap("URL scheme must be http or https")
+	}
+	// Bare (unbracketed) IPv6 in a URL is malformed and may be an SSRF probe.
+	// Go 1.25's url.splitHostPort misparses "::1" as host=":" port="1", so we
+	// must catch this before calling Hostname().
+	if strings.Count(u.Host, ":") > 1 && !strings.HasPrefix(u.Host, "[") {
+		return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return ErrInvalidInput.Wrap("URL must have a host")
+	}
+	if strings.EqualFold(host, "localhost") {
+		return ErrInvalidInput.Wrap("URL must not target localhost")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
+		}
+	}
+	return nil
+}
+
 func (k *Kernel) CreateAction(ctx context.Context, req CreateActionRequest) (*Action, error) {
 	if req.Name == "" {
 		return nil, ErrInvalidInput.Wrap("name is required")
@@ -170,8 +206,16 @@ func (k *Kernel) CreateAction(ctx context.Context, req CreateActionRequest) (*Ac
 	if req.Kind != KindHTTP && req.Kind != KindWasm && req.Kind != KindNative {
 		return nil, ErrInvalidInput.Wrapf("unknown kind %q", req.Kind)
 	}
+	if req.Kind == KindNative {
+		return nil, ErrUnauthorized.Wrap("native actions may only be registered by the kernel")
+	}
 	if req.Price < 0 {
 		return nil, ErrInvalidInput.Wrap("price must be non-negative")
+	}
+	if req.Kind == KindHTTP && req.Source != "" {
+		if err := validateHTTPSource(req.Source); err != nil {
+			return nil, err
+		}
 	}
 	if err := ValidateSchema(req.InputSchema); err != nil {
 		return nil, err
@@ -209,6 +253,36 @@ func (k *Kernel) CreateAction(ctx context.Context, req CreateActionRequest) (*Ac
 		return nil, err
 	}
 	k.log.With(ctx).Info("action.created", "action_id", a.ID, "name", a.Name)
+	return a, nil
+}
+
+// ResetInFlightEvents resets in-flight events to pending. Called at startup.
+func (k *Kernel) ResetInFlightEvents(ctx context.Context) error {
+	return k.store.ResetInFlightEvents(ctx)
+}
+
+// RegisterNativeAction creates and activates a native action for bootstrap use.
+// Unlike CreateAction, it does not reject KindNative. Call only from bootstrap.
+func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionRequest) (*Action, error) {
+	now := time.Now().UTC()
+	a := &Action{
+		ID:           uuid.New().String(),
+		OwnerUserID:  req.OwnerUserID,
+		Name:         req.Name,
+		Kind:         KindNative,
+		Active:       false,
+		Price:        req.Price,
+		Description:  req.Description,
+		InputSchema:  req.InputSchema,
+		OutputSchema: req.OutputSchema,
+		Source:       "native",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := k.store.CreateAction(ctx, a); err != nil {
+		return nil, err
+	}
+	k.log.With(ctx).Info("action.registered_native", "action_id", a.ID, "name", a.Name)
 	return a, nil
 }
 
@@ -282,6 +356,33 @@ func (k *Kernel) GetConfig(ctx context.Context, key string) (string, error) {
 // SetConfig stores a persistent config value.
 func (k *Kernel) SetConfig(ctx context.Context, key, value string) error {
 	return k.store.SetConfig(ctx, key, value)
+}
+
+// BootstrapSuperuser atomically creates the superuser account and registers the
+// superuser handle in config. If the handle already exists the user INSERT is
+// skipped and only the config key is (re-)set. Safe to call on every startup.
+func (k *Kernel) BootstrapSuperuser(ctx context.Context, req CreateUserRequest, configKey string) (*User, error) {
+	if req.Handle == "" {
+		return nil, ErrInvalidInput.Wrap("handle is required")
+	}
+	hash, err := HashPassword(req.Password)
+	if err != nil {
+		return nil, ErrInvalidInput.Wrapf("could not hash password: %v", err)
+	}
+	now := time.Now().UTC()
+	u := &User{
+		ID:           uuid.New().String(),
+		Handle:       req.Handle,
+		Email:        req.Email,
+		PasswordHash: hash,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := k.store.InitSuperuser(ctx, u, configKey, req.Handle); err != nil {
+		return nil, err
+	}
+	// Return the stored user (may differ from u if handle already existed).
+	return k.store.ReadUserByHandle(ctx, req.Handle)
 }
 
 // UpdateActionRequest holds validated input for action updates.
@@ -363,6 +464,11 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 	if active {
 		if a.Source == "" && a.Kind != KindNative {
 			return ErrInvalidState.Wrap("cannot activate action with no source")
+		}
+		if a.Kind == KindHTTP {
+			if err := validateHTTPSource(a.Source); err != nil {
+				return err
+			}
 		}
 		// Ensure stats exist.
 		stats, _ := k.store.ReadStats(ctx, actionID)
@@ -781,8 +887,8 @@ func (k *Kernel) CreateListener(ctx context.Context, req CreateListenerRequest) 
 	return l, nil
 }
 
-// PollListener returns the queued transaction IDs for a listener.
-func (k *Kernel) PollListener(ctx context.Context, subjectID, listenerID string) ([]string, error) {
+// PollListener returns the pending (unconsumed) events for a listener.
+func (k *Kernel) PollListener(ctx context.Context, subjectID, listenerID string) ([]*Event, error) {
 	l, err := k.store.ReadListener(ctx, listenerID)
 	if err != nil {
 		return nil, err
@@ -790,10 +896,10 @@ func (k *Kernel) PollListener(ctx context.Context, subjectID, listenerID string)
 	if l.OwnerUserID != subjectID && l.SourceUserID != subjectID {
 		return nil, ErrUnauthorized.Wrap("not authorized to poll this listener")
 	}
-	return k.store.ReadEvents(ctx, listenerID)
+	return k.store.ListPendingEvents(ctx, listenerID)
 }
 
-// DeleteListener deactivates a listener.
+// DeleteListener deactivates a listener and purges its pending events.
 func (k *Kernel) DeleteListener(ctx context.Context, subjectID, listenerID string) error {
 	l, err := k.store.ReadListener(ctx, listenerID)
 	if err != nil {
@@ -802,48 +908,100 @@ func (k *Kernel) DeleteListener(ctx context.Context, subjectID, listenerID strin
 	if l.OwnerUserID != subjectID {
 		return ErrUnauthorized.Wrap("only the listener owner may remove it")
 	}
+	if err := k.store.PurgeListenerEvents(ctx, listenerID); err != nil {
+		return err
+	}
 	l.Active = false
 	return k.store.UpdateListener(ctx, l)
 }
 
-// EmitEvent fires all active listeners matching (sourceUserID, eventName).
-func (k *Kernel) EmitEvent(ctx context.Context, sourceUserID, eventName string, args map[string]any) ([]string, error) {
+// EmitEvent queues an event for all active listeners matching (sourceUserID, eventName).
+// It does NOT call the target action — the listener owner must call ConsumeEvent explicitly.
+// causingTraceID is stored as a FOLLOWS_FROM reference on each event record.
+func (k *Kernel) EmitEvent(ctx context.Context, sourceUserID, eventName string, args map[string]any, causingTraceID string) ([]string, error) {
 	listeners, err := k.store.ListListeners(ctx, sourceUserID, eventName)
 	if err != nil {
 		return nil, err
 	}
-	var txIDs []string
+	argsJSON, _ := json.Marshal(args)
+	var eventIDs []string
 	for _, l := range listeners {
 		if !l.Active {
 			continue
 		}
-		action, err := k.store.ReadAction(ctx, l.TargetActionID)
-		if err != nil {
-			k.log.With(ctx).Warn("emit.listener_skip", "listener_id", l.ID, "error", err.Error())
+		e := &Event{
+			ID:             uuid.New().String(),
+			ListenerID:     l.ID,
+			ArgsJSON:       string(argsJSON),
+			CausingTraceID: causingTraceID,
+			CreatedAt:      time.Now().UTC(),
+		}
+		if err := k.store.CreateEvent(ctx, e); err != nil {
+			k.log.With(ctx).Warn("emit.event_create_failed", "listener_id", l.ID, "error", err.Error())
 			continue
 		}
-		owner, err := k.store.ReadUser(ctx, action.OwnerUserID)
-		if err != nil {
-			k.log.With(ctx).Warn("emit.listener_skip", "listener_id", l.ID, "error", err.Error())
-			continue
-		}
-		reply, err := k.Call(ctx, CallRequest{
-			SubjectID:     l.OwnerUserID,
-			ProcessID:     l.ProcessID,
-			ParentTraceID: l.TraceID,
-			TargetUserID:  owner.ID,
-			ActionName:    action.Name,
-			Args:          args,
-		})
-		if err != nil {
-			k.log.With(ctx).Warn("emit.call_failed", "listener_id", l.ID, "event", eventName, "error", err.Error())
-			continue
-		}
-		_ = k.store.AppendEvent(ctx, l.ID, reply.TxID)
-		txIDs = append(txIDs, reply.TxID)
+		eventIDs = append(eventIDs, e.ID)
 	}
-	k.log.With(ctx).Info("event.emitted", "source", sourceUserID, "event", eventName, "fired", len(txIDs))
-	return txIDs, nil
+	k.log.With(ctx).Info("event.emitted", "source", sourceUserID, "event", eventName, "queued", len(eventIDs))
+	return eventIDs, nil
+}
+
+// ConsumeEvent atomically locks an event and executes its listener's target action.
+// At-least-once delivery: if the action call fails, the event is reset to pending.
+// processID is the caller's open process, which must have sufficient funds to cover
+// the action price. Returns the call reply on success.
+func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID string) (*CallReply, error) {
+	e, err := k.store.ReadEvent(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	l, err := k.store.ReadListener(ctx, e.ListenerID)
+	if err != nil {
+		return nil, err
+	}
+	if l.OwnerUserID != subjectID {
+		return nil, ErrUnauthorized.Wrap("only the listener owner may consume events")
+	}
+	if !l.Active {
+		return nil, ErrInvalidState.Wrap("listener is inactive")
+	}
+	// Atomic lock — ErrInvalidState if already consumed or in-flight.
+	if err := k.store.LockEvent(ctx, eventID); err != nil {
+		return nil, err
+	}
+	// Resolve action target.
+	action, err := k.store.ReadAction(ctx, l.TargetActionID)
+	if err != nil {
+		_ = k.store.UnlockEvent(ctx, eventID)
+		return nil, err
+	}
+	owner, err := k.store.ReadUser(ctx, action.OwnerUserID)
+	if err != nil {
+		_ = k.store.UnlockEvent(ctx, eventID)
+		return nil, err
+	}
+	// Decode event args.
+	var args map[string]any
+	_ = json.Unmarshal([]byte(e.ArgsJSON), &args)
+	// Call the action using the supplied process.
+	reply, err := k.Call(ctx, CallRequest{
+		SubjectID:       subjectID,
+		ProcessID:       processID,
+		ParentTraceID:   l.TraceID,
+		CausedByTraceID: e.CausingTraceID,
+		TargetUserID:    owner.ID,
+		ActionName:      action.Name,
+		Args:            args,
+	})
+	if err != nil {
+		_ = k.store.UnlockEvent(ctx, eventID)
+		return nil, err
+	}
+	if err := k.store.SettleEvent(ctx, eventID, reply.TxID); err != nil {
+		k.log.With(ctx).Warn("event.settle_failed", "event_id", eventID, "tx_id", reply.TxID, "error", err.Error())
+	}
+	k.log.With(ctx).Info("event.consumed", "event_id", eventID, "tx_id", reply.TxID)
+	return reply, nil
 }
 
 // ---- Recursive feedback ----

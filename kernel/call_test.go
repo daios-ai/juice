@@ -531,6 +531,162 @@ func (h *hostCallExec) Execute(ctx context.Context, _ []byte, _ []byte, host Hos
 	return result, nil
 }
 
+// ---- Contractor execution model ----
+
+// contractorExec dispatches based on source: "outer" makes a sub-call, anything else returns {"ok":true}.
+type contractorExec struct {
+	targetUser   string
+	targetAction string
+}
+
+func (c *contractorExec) Compile(_ context.Context, src []byte) ([]byte, string, error) {
+	return src, "fakehash", nil
+}
+
+func (c *contractorExec) Execute(ctx context.Context, src []byte, _ []byte, host HostFunctions) ([]byte, error) {
+	if string(src) == "outer" {
+		result, err := host.Call(ctx, c.targetUser+"/"+c.targetAction[1:], []byte(`{}`))
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	return []byte(`{"ok":true}`), nil
+}
+
+func TestContractorSubCallChargedToActionOwner(t *testing.T) {
+	st := newFakeStore()
+	ctx := context.Background()
+
+	// alice owns the outer action (contractor); bob owns the inner action.
+	alice := setupUser(t, st, "@alice", 1000)
+	bob := setupUser(t, st, "@bob", 500)
+
+	inner := &Action{
+		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "/inner",
+		Kind: KindWasm, Source: "inner", Active: true, Price: 100,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, inner)
+	outer := &Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/outer",
+		Kind: KindWasm, Source: "outer", Active: true, Price: 50,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, outer)
+
+	exec := &contractorExec{targetUser: bob.ID, targetAction: "/inner"}
+	k := newTestKernelWithScripts(st, exec)
+
+	// Grant alice call permission on inner so contractor sub-call passes ACL.
+	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: PermCall})
+	// Grant carol call permission on outer.
+	carol := setupUser(t, st, "@carol", 50)
+	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: carol.ID, ActionID: outer.ID, Permission: PermCall})
+
+	p, root, _ := k.StartProcess(ctx, carol.ID, 50)
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID: carol.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: alice.ID, ActionName: "/outer", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call failed: %v", err)
+	}
+
+	// Carol's process should be debited only 50 (outer price), not 150.
+	proc, _ := st.ReadProcess(ctx, p.ID)
+	if proc.Available != 0 {
+		t.Errorf("caller process.available: got %d, want 0 (outer price only)", proc.Available)
+	}
+
+	// Test kernel uses 20% fee (2000 BPS).
+	// Bob received inner net = 100 - 20 = 80.
+	bobUser, _ := st.ReadUser(ctx, bob.ID)
+	if bobUser.Available != 580 { // 500 + 80
+		t.Errorf("inner action owner available: got %d, want 580", bobUser.Available)
+	}
+
+	// Alice spent 100 (inner sub-call) and received outer net = 50 - 10 = 40.
+	aliceUser, _ := st.ReadUser(ctx, alice.ID)
+	if aliceUser.Available != 940 { // 1000 - 100 + 40
+		t.Errorf("outer action owner available: got %d, want 940", aliceUser.Available)
+	}
+}
+
+func TestContractorOwnerInsufficientBalanceFails(t *testing.T) {
+	st := newFakeStore()
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 0) // Alice has no balance for sub-calls.
+	bob := setupUser(t, st, "@bob", 0)
+
+	inner := &Action{
+		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "/inner",
+		Kind: KindWasm, Source: "inner", Active: true, Price: 100,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, inner)
+	outer := &Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/outer",
+		Kind: KindWasm, Source: "outer", Active: true, Price: 50,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, outer)
+
+	exec := &contractorExec{targetUser: bob.ID, targetAction: "/inner"}
+	k := newTestKernelWithScripts(st, exec)
+	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: PermCall})
+
+	carol := setupUser(t, st, "@carol", 50)
+	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: carol.ID, ActionID: outer.ID, Permission: PermCall})
+	p, root, _ := k.StartProcess(ctx, carol.ID, 50)
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID: carol.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: alice.ID, ActionName: "/outer", Args: map[string]any{},
+	})
+	if err == nil {
+		t.Fatal("expected error when action owner has insufficient balance")
+	}
+
+	// Carol must be fully refunded.
+	proc, _ := st.ReadProcess(ctx, p.ID)
+	if proc.Available != 50 {
+		t.Errorf("caller process.available after failure: got %d, want 50 (full refund)", proc.Available)
+	}
+	if proc.Locked != 0 {
+		t.Errorf("caller process.locked after failure: got %d, want 0", proc.Locked)
+	}
+}
+
+func TestDirectCallHasNilCausedByTraceID(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 0)
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/svc",
+		Kind: KindWasm, Active: true, Price: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	p, root, _ := k.StartProcess(ctx, alice.ID, 0)
+
+	reply, err := k.Call(ctx, CallRequest{
+		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: alice.ID, ActionName: "/svc", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, _ := st.ReadTrace(ctx, reply.TraceID)
+	if tr.CausedByTraceID != nil {
+		t.Errorf("direct call trace.CausedByTraceID should be nil, got %q", *tr.CausedByTraceID)
+	}
+}
+
 // ---- Accounting (ComputeFee is defined in call.go) ----
 
 func TestComputeFee(t *testing.T) {
@@ -566,6 +722,61 @@ func TestComputeFeeInvariant(t *testing.T) {
 		}
 		if net < 0 || fee < 0 {
 			t.Fatalf("gross=%d: negative component net=%d fee=%d", gross, net, fee)
+		}
+	}
+}
+
+// failingCommitStore wraps a fakeStore and makes CommitCall always fail after
+// the first call, to verify no transaction is committed on settlement failure.
+type failingCommitStore struct {
+	*fakeStore
+	calls int
+}
+
+func (f *failingCommitStore) CommitCall(ctx context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64) error {
+	f.calls++
+	if f.calls > 0 {
+		return ErrInternal.Wrap("injected commit failure")
+	}
+	return f.fakeStore.CommitCall(ctx, tx, processID, targetUserID, feeRecipientID, net, fee)
+}
+
+func TestCommitCallAtomicOnFailure(t *testing.T) {
+	base := newFakeStore()
+	failing := &failingCommitStore{fakeStore: base}
+	k := newTestKernel(failing)
+	ctx := context.Background()
+
+	caller := setupUser(t, base, "@caller", 1000)
+	actionOwner := setupUser(t, base, "@owner", 0)
+	a := setupAction(t, base, actionOwner.ID, "/echo", 100)
+	base.GrantACL(ctx, &ACLEntry{SubjectUserID: caller.ID, ActionID: a.ID, Permission: PermCall})
+
+	p, root, _ := k.StartProcess(ctx, caller.ID, 500)
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID: caller.ID, ProcessID: p.ID,
+		ParentTraceID: root.ID, TargetUserID: actionOwner.ID,
+		ActionName: "/echo", Args: map[string]any{},
+	})
+	if err == nil {
+		t.Fatal("expected error from injected commit failure")
+	}
+
+	// Caller must be fully refunded — process.available back to 500.
+	proc, _ := base.ReadProcess(ctx, p.ID)
+	if proc.Available != 500 {
+		t.Errorf("caller process.available after commit failure: got %d, want 500", proc.Available)
+	}
+	if proc.Locked != 0 {
+		t.Errorf("caller process.locked after commit failure: got %d, want 0", proc.Locked)
+	}
+
+	// No transaction must exist in the store.
+	txs, _ := base.ListTransactions(ctx, TxFilter{ProcessID: p.ID})
+	for _, tx := range txs {
+		if tx.Status == TxSuccess {
+			t.Errorf("found committed success transaction despite commit failure: %s", tx.ID)
 		}
 	}
 }

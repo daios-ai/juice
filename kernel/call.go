@@ -22,6 +22,10 @@ type CallRequest struct {
 	// ParentTraceID is the trace from which this call originates.
 	// For top-level calls it is the process root trace ID.
 	ParentTraceID string
+	// CausedByTraceID is a FOLLOWS_FROM reference set for event-triggered calls.
+	// It references the emitting action's trace (may cross process boundaries).
+	// Leave empty for direct calls.
+	CausedByTraceID string
 	// TargetUserID is the owner of the action.
 	TargetUserID string
 	// ActionName is the action's name field.
@@ -112,10 +116,11 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// 10. Create child trace.
 	now := time.Now().UTC()
 	trace := &Trace{
-		ID:            uuid.New().String(),
-		ProcessID:     req.ProcessID,
-		ParentTraceID: req.ParentTraceID,
-		CreatedAt:     now,
+		ID:              uuid.New().String(),
+		ProcessID:       req.ProcessID,
+		ParentTraceID:   req.ParentTraceID,
+		CausedByTraceID: strPtr(req.CausedByTraceID),
+		CreatedAt:       now,
 	}
 	if err := k.store.CreateTrace(ctx, trace); err != nil {
 		_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
@@ -149,9 +154,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	argsJSON, _ := json.Marshal(req.Args)
 	tx.ArgsJSON = string(argsJSON)
 
-	// 11. Execute.
+	// 11. Execute. Pass action.OwnerUserID so host functions (juice.call, juice.emit)
+	// operate on behalf of the action author, not the caller.
 	started := time.Now()
-	reply, execErr := k.execute(ctx, action, req.Args, trace, process.OwnerUserID)
+	reply, execErr := k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
 	latency := time.Since(started).Seconds()
 	tx.EndedAt = time.Now().UTC()
 
@@ -176,24 +182,16 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, err
 	}
 
-	// 13. Record successful transaction.
+	// 13 & 14. Record transaction and settle payment atomically.
 	replyJSON, _ := json.Marshal(reply)
 	tx.ReplyJSON = string(replyJSON)
 	tx.Status = TxSuccess
 	tx.Gross = action.Price
 	tx.Net = net
 	tx.Fee = fee
-	if err := k.store.CreateTransaction(ctx, tx); err != nil {
+	if err := k.store.CommitCall(ctx, tx, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee); err != nil {
 		_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
-		return nil, ErrInternal.Wrap("could not record transaction")
-	}
-
-	// 14. Settle payment.
-	if action.Price > 0 {
-		if err := k.store.SettleCall(ctx, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee); err != nil {
-			logger.Error("call.settle_failed", "error", err)
-			// Transaction is already recorded; log and continue.
-		}
+		return nil, ErrInternal.Wrap("could not commit transaction")
 	}
 
 	// 15. Update stats.
@@ -365,23 +363,53 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	if len(parts) != 2 {
 		return nil, ErrInvalidInput.Wrap("actionName must be handle/name")
 	}
-
-	p, err := h.kernel.store.ReadProcess(ctx, h.processID)
-	if err != nil {
-		return nil, err
-	}
+	subActionName := "/" + parts[1]
 
 	var args map[string]any
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
 		return nil, ErrInvalidInput.Wrap("args must be a JSON object")
 	}
 
+	// Resolve target user and action to get the price upfront.
+	target, err := h.kernel.store.ReadUserByHandle(ctx, parts[0])
+	if err != nil {
+		target, err = h.kernel.store.ReadUser(ctx, parts[0])
+		if err != nil {
+			return nil, ErrNotFound.Wrap("target user not found")
+		}
+	}
+	action, err := h.kernel.store.ReadActionByOwnerName(ctx, target.ID, subActionName)
+	if err != nil || action == nil {
+		return nil, ErrNotFound.Wrapf("action %s not found", actionName)
+	}
+
+	// Contractor model: create an ephemeral process owned by the calling action's
+	// owner. The caller's process is not charged for sub-calls.
+	ep := &Process{
+		ID:          uuid.New().String(),
+		OwnerUserID: h.ownerUserID,
+		Status:      ProcessOpen,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := h.kernel.store.CreateProcess(ctx, ep); err != nil {
+		return nil, ErrInternal.Wrap("could not create ephemeral process")
+	}
+	// Always close the ephemeral process on return; any unused funds go back to owner.
+	// Use context.Background() so a cancelled request context does not prevent cleanup.
+	defer func() { _ = h.kernel.store.EndProcess(context.Background(), ep.ID) }()
+
+	if action.Price > 0 {
+		if err := h.kernel.store.FundProcess(ctx, h.ownerUserID, ep.ID, action.Price); err != nil {
+			return nil, ErrInsufficientFunds.Wrap("action owner has insufficient balance for sub-call")
+		}
+	}
+
 	reply, err := h.kernel.Call(ctx, CallRequest{
-		SubjectID:     p.OwnerUserID,
-		ProcessID:     h.processID,
+		SubjectID:     h.ownerUserID,
+		ProcessID:     ep.ID,
 		ParentTraceID: h.traceID,
-		TargetUserID:  parts[0],
-		ActionName:    "/" + parts[1],
+		TargetUserID:  target.ID,
+		ActionName:    subActionName,
 		Args:          args,
 	})
 	if err != nil {
@@ -397,7 +425,8 @@ func (h *kernelHostFunctions) Emit(ctx context.Context, event string, argsJSON [
 			return ErrInvalidInput.Wrap("emit args must be a JSON object")
 		}
 	}
-	_, err := h.kernel.EmitEvent(ctx, h.ownerUserID, event, args)
+	// Pass current trace ID as causal context (FOLLOWS_FROM) for listener-triggered traces.
+	_, err := h.kernel.EmitEvent(ctx, h.ownerUserID, event, args, h.traceID)
 	return err
 }
 
@@ -413,14 +442,6 @@ func (h *kernelHostFunctions) Log(ctx context.Context, level, msg string) error 
 		h.kernel.log.Info(msg, "trace_id", h.traceID)
 	}
 	return nil
-}
-
-func (h *kernelHostFunctions) Get(_ context.Context, _ string) ([]byte, error) {
-	return nil, ErrInvalidState.Wrap("get/put not yet implemented")
-}
-
-func (h *kernelHostFunctions) Put(_ context.Context, _ string, _ []byte) error {
-	return ErrInvalidState.Wrap("get/put not yet implemented")
 }
 
 // updateStats applies call outcome to action statistics.
@@ -439,6 +460,14 @@ func anyOf(m map[string]any) any {
 		return nil
 	}
 	return m
+}
+
+// strPtr returns nil for an empty string, otherwise a pointer to s.
+func strPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // ComputeFee splits a gross amount into (net, fee) using basis points.

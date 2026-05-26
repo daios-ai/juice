@@ -226,6 +226,48 @@ func TestServeRateTransactionNotFound(t *testing.T) {
 	}
 }
 
+func TestRateLimitLogin(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "rl.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "rl-test-secret"
+	logger := log.Discard()
+	k := kernel.New(db, nil, nil, cfg, logger)
+	if _, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
+		Handle: "@rlu", Email: "rlu@example.com", Password: "pass",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &server{kernel: k, log: logger}
+	r := chi.NewRouter()
+	r.Use(requestIDMiddleware)
+	// Burst of 3 with zero refill rate so tokens don't recover during the test.
+	r.With(ipRateLimiter(0, 3)).Post("/v1/auth/token", srv.postTokenMulti)
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	body := map[string]any{"handle": "@rlu", "password": "pass"}
+	for i := 0; i < 5; i++ {
+		resp := httpDo(t, ts, "POST", "/v1/auth/token", body, "")
+		resp.Body.Close()
+		if i < 3 {
+			if resp.StatusCode == http.StatusTooManyRequests {
+				t.Errorf("request %d: unexpected 429 within burst", i+1)
+			}
+		} else {
+			if resp.StatusCode != http.StatusTooManyRequests {
+				t.Errorf("request %d: expected 429 after burst, got %d", i+1, resp.StatusCode)
+			}
+		}
+	}
+}
+
 func TestServeRequestIDHeader(t *testing.T) {
 	srv, _ := newTestHTTPServer(t)
 	defer srv.Close()

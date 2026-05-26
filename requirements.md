@@ -217,6 +217,7 @@ Required fields:
 id
 process_id
 parent_trace_id
+caused_by_trace_id
 cost
 latency_ms
 created_at
@@ -230,12 +231,16 @@ Requirements:
 - Every nested call must create exactly one child trace.
 - A child trace must inherit the parent trace’s process id.
 - The trace relation must form a rooted tree for each process.
+- `caused_by_trace_id` must be null for direct calls.
+- For event-triggered calls, `caused_by_trace_id` must be set to the trace ID of the emitting action at the moment of emit. This is a FOLLOWS_FROM reference, not a parent-child link. The referenced trace may belong to a different process.
 
 Correctness condition:
 
 ```text
 ∀ child. child.process_id = parent(child).process_id.
 ```
+
+This condition applies only to CHILD_OF relationships (`parent_trace_id`). `caused_by_trace_id` crosses process boundaries and is exempt from this condition.
 
 ### 3.6 Transaction
 
@@ -290,6 +295,7 @@ Requirements:
 - WAL mode must be enabled by default.
 - Migrations must be deterministic and stored in the repository.
 - All monetary transitions must occur inside SQLite transactions.
+- Transaction creation and fund settlement must occur within a single atomic SQLite transaction. A committed transaction record must never exist without corresponding balance settlement.
 - Tests must use temporary SQLite databases.
 - No production feature may depend on an in-memory-only store.
 
@@ -330,8 +336,10 @@ UpdateStats
 CreateListener
 ReadListener
 ListListeners
-AppendEvent
-ReadEvents
+CreateEvent
+ListPendingEvents
+ConsumeEvent
+PurgeListenerEvents
 GetConfig
 SetConfig
 ```
@@ -365,6 +373,12 @@ For a valid call with price `q`, the kernel must perform:
 create child trace
 lock q credits in process
 execute action
+  sub-calls within execution (juice.call host function):
+    create ephemeral process owned by the calling action's owner,
+      funded from owner's available balance for exactly sub-action.price
+    execute sub-call against ephemeral process following §5.1–§5.5
+    on sub-call completion: close ephemeral process;
+      return unused locked funds to owner on failure
 record transaction
 on success: transfer net to target and fee to fee recipient
 on failure: apply refund rule
@@ -408,6 +422,8 @@ Requirements:
 
 Justification: this rule is conservative and testable. It separates execution failure from economic settlement.
 
+If the action owner has insufficient balance to fund the ephemeral process for a sub-call, the sub-call fails. The failure propagates to the top-level call and the original caller is fully refunded. Sub-call costs already settled from ephemeral processes before the point of failure are not reversed. Each action owner absorbs the costs of their own sub-calls.
+
 ### 5.5 Payment transition
 
 For a successful call:
@@ -445,6 +461,28 @@ Requirements:
 
 Justification: validating inputs before locking funds avoids charging invalid calls. Validating outputs before settlement prevents payment for malformed replies.
 
+### 5.7 Contractor execution model
+
+When `juice.call` is invoked inside an action's execution context, the kernel implements the contractor model:
+
+1. The kernel creates an ephemeral process owned by the calling action's owner, funded from that owner's available balance for exactly the sub-action's price.
+2. The sub-call executes against the ephemeral process following the standard §5.1–§5.5 call path.
+3. On sub-call completion, the ephemeral process is closed. On failure, unused locked funds are returned to the owner.
+4. This applies recursively: each action in the call tree bears the cost of its own sub-calls.
+
+The caller's process is debited only by the top-level `action.price`. Sub-call costs are isolated to the respective action owner's balance at each depth.
+
+The process hierarchy mirrors the trace hierarchy: each trace node corresponds to an ephemeral process owned by the action's owner at that level.
+
+Invariant:
+
+```text
+caller.process.available decreases by at most action.price per call,
+regardless of sub-call depth or cost.
+```
+
+If the action owner has insufficient balance to fund a sub-call, the sub-call fails, the top-level call fails, and the original caller is fully refunded. Action owners absorb costs already incurred by their own sub-calls.
+
 ## 6. Action lifecycle
 
 ### 6.1 Creation
@@ -455,6 +493,8 @@ Requirements:
 - Action creation must validate owner, name, kind, price, description, schemas, and source.
 - For `wasm` actions, creation must compile or validate the artifact before the action can be activated.
 - For `http` actions, creation must validate endpoint configuration without calling the endpoint unless explicitly requested.
+- For `http` actions, the `source` URL must be validated at creation and activation time. Loopback addresses, private IP ranges (RFC 1918), link-local addresses (169.254.x.x), and non-HTTP(S) schemes must be rejected.
+- Only the kernel bootstrap process may register native actions. `CreateAction` must reject `Kind=native` from all callers; bootstrap uses `RegisterNativeAction` instead.
 
 ### 6.2 Activation
 
@@ -523,17 +563,16 @@ The initial host function surface must be small:
 juice.call
 juice.emit
 juice.log
-juice.get
-juice.put
 ```
 
 Requirements:
 
 - `juice.call` must call another action through the kernel call path.
 - `juice.call` must enforce ACL, accounting, trace creation, and schema validation.
+- `juice.call` must create an ephemeral process owned by the calling action's owner and use it as the process context for the sub-call (contractor model, §5.7).
 - `juice.emit` must emit an event through the kernel event path.
+- `juice.emit` must store the current trace ID of the emitting action as `causing_trace_id` in each created event record. This ID is passed to the kernel call path at consume time and recorded as `caused_by_trace_id` on the listener-triggered trace (FOLLOWS_FROM).
 - `juice.log` must write structured logs under the current trace id.
-- `juice.get` and `juice.put` must access only process-scoped or action-scoped state according to ACL.
 - Host functions must never expose raw user tokens to guest code.
 
 Correctness condition:
@@ -575,7 +614,7 @@ Requirements:
 - The ranking formula must be explicit and tested.
 - The lookup table must be replaceable without changing kernel semantics.
 - The first implementation may use brute-force cosine similarity over stored embeddings.
-- Lookup is exposed as the system native action `@sys/lookup`, callable through `Call()` by any authenticated user (grant-all applied at bootstrap).
+- Lookup is exposed as the system native action `/lookup` (owned by the system superuser), callable through `Call()` by any authenticated user (grant-all applied at bootstrap).
 
 Justification: lookup is a research module. The kernel requires only a ranked list of action ids, not a specific ranking algorithm.
 
@@ -653,6 +692,19 @@ Requirements:
 - Trace lookup by process must return the execution tree.
 - Trace deletion must not delete transaction history.
 
+Two trace relationship types exist:
+
+```text
+CHILD_OF (parent_trace_id): synchronous sub-call within the same execution context.
+  The parent waits for the child. process_id is inherited.
+
+FOLLOWS_FROM (caused_by_trace_id): causal link across process or listener boundaries.
+  The originating trace may be closed before the triggered trace starts.
+  The referenced trace may belong to a different process.
+```
+
+Event-triggered traces use FOLLOWS_FROM. Direct sub-calls use CHILD_OF.
+
 ### 10.2 Ratings and trace metrics
 
 **Rating**
@@ -705,6 +757,7 @@ Requirements:
 - Creating a listener requires authority over the process and permission to call the target action.
 - A listener stores the process and trace under which future event calls run.
 - Inactive listeners must not fire.
+- Deleting a listener must atomically deactivate it and purge all pending (unconsumed) events for that listener.
 
 ### 11.2 Emit
 
@@ -714,21 +767,62 @@ Requirements:
 
 ```text
 listener.source_user_id = emitter_user_id
-listener.event_name = emitted_event_name
-listener.active = true
+listener.event_name     = emitted_event_name
+listener.active         = true
 ```
 
-- Each selected listener must execute through the normal kernel call path.
-- Each resulting transaction id must be appended to that listener’s event queue.
-- Event execution may be concurrent, but each call must preserve accounting and trace correctness.
+- For each selected listener, the kernel must create an event record in the listener’s queue, storing the event arguments and the emitter’s current trace ID as `causing_trace_id`.
+- Emit must not call the target action. Execution is deferred to the listener owner.
+- `EmitEvent` returns the IDs of the created event records, not transaction IDs.
+- If no listeners match, `EmitEvent` returns an empty list without error.
 
-### 11.3 Poll
+### 11.3 Event record
+
+An event record is a pending work item in a listener’s queue.
+
+Required fields:
+
+```text
+id
+listener_id
+args_json
+causing_trace_id
+consumed_at
+tx_id
+created_at
+```
 
 Requirements:
 
-- Users may poll listener state and queued transaction ids.
-- Reading a listener requires owner or source authority.
+- `args_json` stores the raw event arguments at emit time.
+- `causing_trace_id` stores the emitter’s trace ID at emit time (nullable). This is a FOLLOWS_FROM reference (§3.5).
+- An event is **pending** when `consumed_at` is null.
+- An event is **consumed** when `consumed_at` is set and `tx_id` is set.
+- An event is **in-flight** when `consumed_at` is set and `tx_id` is null. This state exists only during an active consume call and is resolved to consumed or pending on completion. On startup, all in-flight events are reset to pending (§19.3).
 - The event queue must be persistent.
+
+### 11.4 Consume
+
+The listener owner processes pending events by consuming them.
+
+Requirements:
+
+- Only the listener owner may consume events. The source user may not.
+- Consuming an event must atomically lock it before calling the target action, preventing double-processing.
+- On successful lock, the kernel calls the target action through the normal kernel call path, using the listener’s `process_id`, `trace_id`, stored `args_json`, and `causing_trace_id`.
+- On success, the event is marked consumed with the resulting `tx_id`.
+- On failure, the lock is reset and the event returns to pending. The listener owner may retry.
+- Consuming an event from an inactive listener must return `ErrInvalidState`.
+- Consuming an already-consumed event must return `ErrInvalidState`.
+- Delivery guarantee: at-least-once. An event may be retried after a failed consume. Double-processing is prevented by the atomic lock; only one consume attempt may execute the call at a time.
+
+### 11.5 Poll
+
+Requirements:
+
+- Polling a listener returns its pending (unconsumed) event records.
+- Reading a listener requires owner or source authority.
+- The result must include event ID, `args_json`, `causing_trace_id`, and `created_at` for each pending event.
 
 ## 12. Authentication
 
@@ -773,6 +867,7 @@ juice events listen
 juice events unlisten
 juice events emit
 juice events poll
+juice events consume
 juice tx list
 juice tx show
 juice tx rate
@@ -807,6 +902,7 @@ Requirements:
 - The server must use the same kernel service layer as the CLI.
 - The server must propagate request id, subject id, process id, trace id, action id, and transaction id into logs where available.
 - HTTP status codes must distinguish authentication failure, authorization failure, invalid input, insufficient funds, missing resource, and internal failure.
+- Authentication and account creation endpoints must enforce per-IP rate limiting. Excessive requests must return HTTP 429.
 
 ## 15. Logging
 
@@ -881,7 +977,7 @@ trace root and child creation
 nested call trace tree
 transaction creation
 payment split
-event listen/emit/poll/unlisten
+event listen/emit/poll/consume/unlisten
 wasm script execution
 wasm host function call
 script timeout
@@ -899,6 +995,21 @@ non-superuser rejected from admin endpoints
 grant-all allows any authenticated user to call action
 revoke-all removes open grant
 bootstrap is idempotent
+sub-calls charged to action owner's ephemeral process, not caller's process
+caller process balance debited only by action.price
+ephemeral process closed after sub-call completes
+caller fully refunded when action owner has insufficient balance for sub-call
+recursive sub-calls: each level charged to correct owner
+event-triggered trace carries caused_by_trace_id of emitting action
+direct call trace has null caused_by_trace_id
+caused_by_trace_id references a trace in a different process
+pending events absent from poll after successful consume
+emit does not alter emitter balance or process balance
+second ConsumeEvent on same event returns ErrInvalidState
+ConsumeEvent against inactive listener returns ErrInvalidState
+DeleteListener purges all pending events for that listener
+ConsumeEvent fails and resets event to pending when process has insufficient funds
+bootstrap resets in-flight events (consumed_at set, tx_id null) to pending
 ```
 
 ### 16.4 Invariant tests
@@ -919,6 +1030,15 @@ suspended users cannot authenticate
 native actions are always owned by the superuser
 rating cascade does not overwrite already-rated transactions
 trace.cost equals sum of descendant transaction gross amounts
+caller.process.available decreases by at most action.price per call
+ephemeral processes are always closed after sub-call completion
+sub-call cost reversal does not occur on top-level failure
+direct calls always have caused_by_trace_id = null
+event-triggered calls always have caused_by_trace_id set
+caused_by_trace_id never equals parent_trace_id (FOLLOWS_FROM ≠ CHILD_OF)
+emitter balance is unchanged by EmitEvent regardless of how many listeners match
+consumed events never appear in ListPendingEvents
+pending events are absent after listener deletion
 ```
 
 ## 17. Configuration
@@ -1001,10 +1121,13 @@ Requirements:
 
 On every `juice serve` startup, after first-boot setup, before accepting requests:
 
-1. Register and enable `@sys/lookup` (KindNative) if absent.
-2. Apply grant-all on `@sys/lookup`.
+1. Register and enable `/lookup` (KindNative, owned by the system superuser) if absent.
+2. Apply grant-all on `/lookup`.
+3. Reset all in-flight event consumptions: set `consumed_at = NULL` for every event where `consumed_at IS NOT NULL AND tx_id IS NULL`. These represent consume calls interrupted by a prior crash; resetting them to pending makes them retryable.
 
 Bootstrap must be idempotent.
+
+First-boot (superuser creation) must be atomic: the superuser account and its config entry must be created in a single database transaction. A partial first-boot (e.g., crash after user creation but before config write) must leave the system in a state where re-running bootstrap succeeds cleanly.
 
 ### 19.4 System native actions
 
@@ -1012,7 +1135,7 @@ Requirements:
 
 - System actions are KindNative, owned by the superuser, registered at bootstrap.
 - System actions execute through the normal kernel call path (`Call()`).
-- The initial system action is `@sys/lookup` (public, grant-all at bootstrap).
+- The initial system action is `/lookup` (owned by the system superuser, public, grant-all at bootstrap). The label `@sys/lookup` used in some contexts is a conceptual shorthand for "the `/lookup` action owned by `@sys`", not the action's Name field.
 - Human supervision operations must not be registered as native actions (see §2.3).
 
 ### 19.5 Public access control

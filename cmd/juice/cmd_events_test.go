@@ -74,7 +74,7 @@ func TestEmitNoListeners(t *testing.T) {
 		Handle: "@emitter", Email: "em@example.com", Password: "p",
 	})
 
-	txIDs, err := env.k.EmitEvent(ctx, emitter.ID, "no-listeners-event", nil)
+	txIDs, err := env.k.EmitEvent(ctx, emitter.ID, "no-listeners-event", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestListenerDeletedNotFired(t *testing.T) {
 	})
 	_ = env.k.DeleteListener(ctx, owner.ID, l.ID)
 
-	txIDs, _ := env.k.EmitEvent(ctx, source.ID, "gone", nil)
+	txIDs, _ := env.k.EmitEvent(ctx, source.ID, "gone", nil, "")
 	if len(txIDs) != 0 {
 		t.Errorf("deleted listener should not fire, got %d tx", len(txIDs))
 	}

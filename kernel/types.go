@@ -88,13 +88,16 @@ type Process struct {
 
 // Trace records causal structure for one step in a call tree.
 // Root traces have ParentTraceID == ID.
+// CausedByTraceID is a FOLLOWS_FROM reference set for event-triggered calls;
+// it references the emitting action's trace and may cross process boundaries.
 type Trace struct {
-	ID            string
-	ProcessID     string
-	ParentTraceID string
-	Cost          int64
-	LatencyMS     int64
-	CreatedAt     time.Time
+	ID              string
+	ProcessID       string
+	ParentTraceID   string
+	CausedByTraceID *string
+	Cost            int64
+	LatencyMS       int64
+	CreatedAt       time.Time
 }
 
 // Transaction records one attempted call.
@@ -151,6 +154,19 @@ type Listener struct {
 	TargetActionID string
 	Active         bool
 	CreatedAt      time.Time
+}
+
+// Event is a queued occurrence of a named event for a specific listener.
+// States: pending (ConsumedAt=nil, TxID=nil), in-flight (ConsumedAt set, TxID=nil),
+// consumed (both set). In-flight events are reset to pending on bootstrap restart.
+type Event struct {
+	ID              string
+	ListenerID      string
+	ArgsJSON        string
+	CausingTraceID  string
+	ConsumedAt      *time.Time
+	TxID            *string
+	CreatedAt       time.Time
 }
 
 // AuthCode is a short-lived PKCE authorization code.

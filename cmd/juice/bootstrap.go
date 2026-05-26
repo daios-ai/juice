@@ -18,6 +18,11 @@ const configKeySuperuser = "superuser_handle"
 func bootstrap(k *kernel.Kernel) error {
 	ctx := context.Background()
 
+	// Reset any events that were left in-flight by a prior crash.
+	if err := k.ResetInFlightEvents(ctx); err != nil {
+		return fmt.Errorf("reset in-flight events: %w", err)
+	}
+
 	handle, err := k.GetConfig(ctx, configKeySuperuser)
 	if err != nil || handle == "" {
 		// First boot: prompt for superuser credentials.
@@ -27,7 +32,7 @@ func bootstrap(k *kernel.Kernel) error {
 		}
 	}
 
-	// Register @sys/lookup native action if absent.
+	// Register /lookup native action if absent.
 	if err := ensureSysLookup(ctx, k, handle); err != nil {
 		return err
 	}
@@ -59,17 +64,13 @@ func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 		return "", fmt.Errorf("password cannot be empty")
 	}
 
-	_, err = k.CreateUser(ctx, kernel.CreateUserRequest{
+	_, err = k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
 		Handle:   handle,
 		Email:    handle + "@sys",
 		Password: password,
-	})
+	}, configKeySuperuser)
 	if err != nil {
 		return "", fmt.Errorf("create superuser: %w", err)
-	}
-
-	if err := k.SetConfig(ctx, configKeySuperuser, handle); err != nil {
-		return "", fmt.Errorf("store superuser handle: %w", err)
 	}
 
 	fmt.Printf("Superuser %q created.\n", handle)
@@ -91,7 +92,7 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 	}
 
 	// Create the native lookup action.
-	a, err = k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, err = k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID:  su.ID,
 		Name:         actionName,
 		Kind:         kernel.KindNative,

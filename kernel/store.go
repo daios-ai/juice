@@ -19,8 +19,6 @@ type HostFunctions interface {
 	Call(ctx context.Context, actionName string, args []byte) ([]byte, error)
 	Emit(ctx context.Context, event string, args []byte) error
 	Log(ctx context.Context, level, msg string) error
-	Get(ctx context.Context, key string) ([]byte, error)
-	Put(ctx context.Context, key string, value []byte) error
 }
 
 // ---- LLM interfaces ----
@@ -102,9 +100,11 @@ type Store interface {
 	// Fails atomically if user.available < amount.
 	FundProcess(ctx context.Context, userID, processID string, amount int64) error
 
-	// SettleCall debits gross from process.locked and owner.locked,
+	// CommitCall atomically records a successful transaction and settles funds:
+	// debits gross from process.locked and owner.locked,
 	// credits net to targetUser.available and fee to feeRecipient.available.
-	SettleCall(ctx context.Context, processID, targetUserID, feeRecipientID string, net, fee int64) error
+	// Either all writes succeed or none do.
+	CommitCall(ctx context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64) error
 
 	// EndProcess closes the process and returns all remaining funds to the owner.
 	EndProcess(ctx context.Context, processID string) error
@@ -136,8 +136,21 @@ type Store interface {
 	ReadListener(ctx context.Context, id string) (*Listener, error)
 	UpdateListener(ctx context.Context, l *Listener) error
 	ListListeners(ctx context.Context, sourceUserID, eventName string) ([]*Listener, error)
-	AppendEvent(ctx context.Context, listenerID, txID string) error
-	ReadEvents(ctx context.Context, listenerID string) ([]string, error)
+	CreateEvent(ctx context.Context, e *Event) error
+	ReadEvent(ctx context.Context, id string) (*Event, error)
+	ListPendingEvents(ctx context.Context, listenerID string) ([]*Event, error)
+	// LockEvent atomically marks an event as in-flight (sets consumed_at).
+	// Returns ErrInvalidState if the event is already consumed or in-flight.
+	LockEvent(ctx context.Context, eventID string) error
+	// SettleEvent records the transaction ID after a successful consume call.
+	SettleEvent(ctx context.Context, eventID, txID string) error
+	// UnlockEvent resets an in-flight event back to pending on consume failure.
+	UnlockEvent(ctx context.Context, eventID string) error
+	// PurgeListenerEvents deletes all pending (unconsumed) events for a listener.
+	PurgeListenerEvents(ctx context.Context, listenerID string) error
+	// ResetInFlightEvents resets all in-flight events (consumed_at set, tx_id null)
+	// back to pending. Called at startup to recover from crashed consume calls.
+	ResetInFlightEvents(ctx context.Context) error
 
 	// ---- Traces (by process) ----
 
@@ -157,4 +170,8 @@ type Store interface {
 
 	GetConfig(ctx context.Context, key string) (string, error)
 	SetConfig(ctx context.Context, key, value string) error
+
+	// InitSuperuser atomically creates a user and sets a config key.
+	// If the user handle already exists the user INSERT is skipped; the config is always set.
+	InitSuperuser(ctx context.Context, u *User, configKey, configValue string) error
 }

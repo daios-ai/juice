@@ -49,7 +49,13 @@ func (s *DB) migrate() error {
 	if _, err := s.db.Exec(schema001); err != nil {
 		return err
 	}
-	return s.migrate002()
+	if err := s.migrate002(); err != nil {
+		return err
+	}
+	if err := s.migrate003(); err != nil {
+		return err
+	}
+	return s.migrate004()
 }
 
 // migrate002 applies schema002 idempotently.
@@ -72,6 +78,49 @@ func (s *DB) migrate002() error {
 			if !isDuplicateColumn(err) {
 				return fmt.Errorf("migrate002: %w", err)
 			}
+		}
+	}
+	return nil
+}
+
+// migrate004 replaces the old push-based events table with a pull-based queue schema.
+// The old table stored (id INTEGER, listener_id, tx_id NOT NULL, created_at).
+// The new table stores (id TEXT UUID, listener_id, args_json, causing_trace_id,
+// consumed_at, tx_id nullable, created_at) supporting pending/in-flight/consumed states.
+func (s *DB) migrate004() error {
+	// Idempotency check: new schema has consumed_at column.
+	var n int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='consumed_at'`).Scan(&n)
+	if n > 0 {
+		return nil
+	}
+	for _, stmt := range []string{
+		`DROP INDEX IF EXISTS idx_events_listener`,
+		`DROP TABLE IF EXISTS events`,
+		`CREATE TABLE events (
+			id               TEXT PRIMARY KEY,
+			listener_id      TEXT NOT NULL REFERENCES listeners(id) ON DELETE CASCADE,
+			args_json        TEXT NOT NULL DEFAULT '{}',
+			causing_trace_id TEXT,
+			consumed_at      TEXT,
+			tx_id            TEXT,
+			created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_listener_pending
+			ON events(listener_id, created_at) WHERE consumed_at IS NULL`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("migrate004: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrate003 adds the caused_by_trace_id column for FOLLOWS_FROM causal tracing.
+func (s *DB) migrate003() error {
+	if _, err := s.db.Exec(`ALTER TABLE traces ADD COLUMN caused_by_trace_id TEXT`); err != nil {
+		if !isDuplicateColumn(err) {
+			return fmt.Errorf("migrate003: %w", err)
 		}
 	}
 	return nil
@@ -481,60 +530,65 @@ func (s *DB) FundProcess(ctx context.Context, userID, processID string, amount i
 	return dbErr(tx.Commit(), "fund process commit")
 }
 
-func (s *DB) SettleCall(ctx context.Context, processID, targetUserID, feeRecipientID string, net, fee int64) error {
+func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, processID, targetUserID, feeRecipientID string, net, fee int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return dbErr(err, "begin settle")
+		return dbErr(err, "begin commit call")
 	}
 	defer tx.Rollback()
 
-	gross := net + fee
-
-	// Debit process.locked and owner.locked.
-	p, err := tx.QueryContext(ctx, `SELECT owner_user_id FROM processes WHERE id=?`, processID)
+	// Insert transaction record.
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO transactions
+		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
+		  action_id,args_json,reply_json,status,gross,net,fee,reason,started_at,ended_at,rating)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
+		ktx.OwnerUserID, ktx.SubjectUserID, ktx.TargetUserID, ktx.ActionID,
+		ktx.ArgsJSON, ktx.ReplyJSON, string(ktx.Status),
+		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason,
+		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt), ktx.Rating,
+	)
 	if err != nil {
-		return dbErr(err, "settle: read process owner")
+		return dbErr(err, "commit call: insert transaction")
 	}
-	var ownerID string
-	if p.Next() {
-		_ = p.Scan(&ownerID)
-	}
-	p.Close()
 
+	gross := net + fee
 	if gross > 0 {
-		_, err = tx.ExecContext(ctx,
-			`UPDATE processes SET locked=locked-? WHERE id=?`, gross, processID)
-		if err != nil {
-			return dbErr(err, "settle: debit process locked")
+		// Debit process.locked and owner.locked.
+		var ownerID string
+		row := tx.QueryRowContext(ctx, `SELECT owner_user_id FROM processes WHERE id=?`, processID)
+		_ = row.Scan(&ownerID)
+
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE processes SET locked=locked-? WHERE id=?`, gross, processID); err != nil {
+			return dbErr(err, "commit call: debit process locked")
 		}
 		if ownerID != "" {
-			_, err = tx.ExecContext(ctx,
-				`UPDATE users SET locked=locked-? WHERE id=?`, gross, ownerID)
-			if err != nil {
-				return dbErr(err, "settle: debit owner locked")
+			if _, err = tx.ExecContext(ctx,
+				`UPDATE users SET locked=locked-? WHERE id=?`, gross, ownerID); err != nil {
+				return dbErr(err, "commit call: debit owner locked")
 			}
 		}
 	}
 
 	// Credit target.
 	if net > 0 {
-		_, err = tx.ExecContext(ctx,
-			`UPDATE users SET available=available+? WHERE id=?`, net, targetUserID)
-		if err != nil {
-			return dbErr(err, "settle: credit target")
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE users SET available=available+? WHERE id=?`, net, targetUserID); err != nil {
+			return dbErr(err, "commit call: credit target")
 		}
 	}
 
 	// Credit fee recipient.
 	if fee > 0 && feeRecipientID != "" {
-		_, err = tx.ExecContext(ctx,
-			`UPDATE users SET available=available+? WHERE id=?`, fee, feeRecipientID)
-		if err != nil {
-			return dbErr(err, "settle: credit fee recipient")
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE users SET available=available+? WHERE id=?`, fee, feeRecipientID); err != nil {
+			return dbErr(err, "commit call: credit fee recipient")
 		}
 	}
 
-	return dbErr(tx.Commit(), "settle commit")
+	return dbErr(tx.Commit(), "commit call: commit")
 }
 
 func (s *DB) ListAllProcesses(ctx context.Context, limit, offset int) ([]*kernel.Process, error) {
@@ -611,8 +665,8 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 
 func (s *DB) CreateTrace(ctx context.Context, t *kernel.Trace) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?)`,
-		t.ID, t.ProcessID, t.ParentTraceID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
+		`INSERT INTO traces (id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
+		t.ID, t.ProcessID, t.ParentTraceID, t.CausedByTraceID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
 	)
 	return dbErr(err, "create trace")
 }
@@ -620,9 +674,10 @@ func (s *DB) CreateTrace(ctx context.Context, t *kernel.Trace) error {
 func (s *DB) ReadTrace(ctx context.Context, id string) (*kernel.Trace, error) {
 	var t kernel.Trace
 	var createdAt string
+	var causedBy sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,process_id,parent_trace_id,cost,latency_ms,created_at FROM traces WHERE id=?`, id,
-	).Scan(&t.ID, &t.ProcessID, &t.ParentTraceID, &t.Cost, &t.LatencyMS, &createdAt)
+		`SELECT id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at FROM traces WHERE id=?`, id,
+	).Scan(&t.ID, &t.ProcessID, &t.ParentTraceID, &causedBy, &t.Cost, &t.LatencyMS, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("trace not found")
 	}
@@ -630,6 +685,9 @@ func (s *DB) ReadTrace(ctx context.Context, id string) (*kernel.Trace, error) {
 		return nil, dbErr(err, "read trace")
 	}
 	t.CreatedAt = strToTime(createdAt)
+	if causedBy.Valid {
+		t.CausedByTraceID = &causedBy.String
+	}
 	return &t, nil
 }
 
@@ -918,35 +976,113 @@ func (s *DB) ListListeners(ctx context.Context, sourceUserID, eventName string) 
 	return out, rows.Err()
 }
 
-func (s *DB) AppendEvent(ctx context.Context, listenerID, txID string) error {
+func (s *DB) CreateEvent(ctx context.Context, e *kernel.Event) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO events (listener_id,tx_id) VALUES (?,?)`, listenerID, txID)
-	return dbErr(err, "append event")
+		`INSERT INTO events (id,listener_id,args_json,causing_trace_id,created_at)
+		 VALUES (?,?,?,?,?)`,
+		e.ID, e.ListenerID, e.ArgsJSON, nullStr(e.CausingTraceID), timeToStr(e.CreatedAt),
+	)
+	return dbErr(err, "create event")
 }
 
-func (s *DB) ReadEvents(ctx context.Context, listenerID string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT tx_id FROM events WHERE listener_id=? ORDER BY id`, listenerID)
+func (s *DB) ReadEvent(ctx context.Context, id string) (*kernel.Event, error) {
+	var e kernel.Event
+	var causingTraceID, consumedAt, txID *string
+	var createdAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id,listener_id,args_json,causing_trace_id,consumed_at,tx_id,created_at
+		 FROM events WHERE id=?`, id,
+	).Scan(&e.ID, &e.ListenerID, &e.ArgsJSON, &causingTraceID, &consumedAt, &txID, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("event not found")
+	}
 	if err != nil {
-		return nil, dbErr(err, "read events")
+		return nil, dbErr(err, "read event")
+	}
+	if causingTraceID != nil {
+		e.CausingTraceID = *causingTraceID
+	}
+	e.ConsumedAt = strToNullTime(consumedAt)
+	e.TxID = txID
+	e.CreatedAt = strToTime(createdAt)
+	return &e, nil
+}
+
+func (s *DB) ListPendingEvents(ctx context.Context, listenerID string) ([]*kernel.Event, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,listener_id,args_json,causing_trace_id,created_at
+		 FROM events WHERE listener_id=? AND consumed_at IS NULL ORDER BY created_at`, listenerID)
+	if err != nil {
+		return nil, dbErr(err, "list pending events")
 	}
 	defer rows.Close()
-	var out []string
+	var out []*kernel.Event
 	for rows.Next() {
-		var txID string
-		if err := rows.Scan(&txID); err != nil {
-			return nil, err
+		var e kernel.Event
+		var causingTraceID *string
+		var createdAt string
+		if err := rows.Scan(&e.ID, &e.ListenerID, &e.ArgsJSON, &causingTraceID, &createdAt); err != nil {
+			return nil, dbErr(err, "scan event")
 		}
-		out = append(out, txID)
+		if causingTraceID != nil {
+			e.CausingTraceID = *causingTraceID
+		}
+		e.CreatedAt = strToTime(createdAt)
+		out = append(out, &e)
 	}
 	return out, rows.Err()
+}
+
+func (s *DB) LockEvent(ctx context.Context, eventID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE events SET consumed_at=datetime('now') WHERE id=? AND consumed_at IS NULL`, eventID)
+	if err != nil {
+		return dbErr(err, "lock event")
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return kernel.ErrInvalidState.Wrap("event already consumed or in-flight")
+	}
+	return nil
+}
+
+func (s *DB) SettleEvent(ctx context.Context, eventID, txID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE events SET tx_id=? WHERE id=?`, txID, eventID)
+	return dbErr(err, "settle event")
+}
+
+func (s *DB) UnlockEvent(ctx context.Context, eventID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE events SET consumed_at=NULL WHERE id=? AND tx_id IS NULL`, eventID)
+	return dbErr(err, "unlock event")
+}
+
+func (s *DB) PurgeListenerEvents(ctx context.Context, listenerID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM events WHERE listener_id=? AND consumed_at IS NULL`, listenerID)
+	return dbErr(err, "purge listener events")
+}
+
+func (s *DB) ResetInFlightEvents(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE events SET consumed_at=NULL WHERE consumed_at IS NOT NULL AND tx_id IS NULL`)
+	return dbErr(err, "reset in-flight events")
+}
+
+// nullStr converts an empty string to nil for nullable TEXT columns.
+func nullStr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // ---- Traces (by process) ----
 
 func (s *DB) ListTraces(ctx context.Context, processID string) ([]*kernel.Trace, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,process_id,parent_trace_id,cost,latency_ms,created_at FROM traces WHERE process_id=?`, processID)
+		`SELECT id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at FROM traces WHERE process_id=?`, processID)
 	if err != nil {
 		return nil, dbErr(err, "list traces")
 	}
@@ -955,10 +1091,14 @@ func (s *DB) ListTraces(ctx context.Context, processID string) ([]*kernel.Trace,
 	for rows.Next() {
 		var t kernel.Trace
 		var createdAt string
-		if err := rows.Scan(&t.ID, &t.ProcessID, &t.ParentTraceID, &t.Cost, &t.LatencyMS, &createdAt); err != nil {
+		var causedBy sql.NullString
+		if err := rows.Scan(&t.ID, &t.ProcessID, &t.ParentTraceID, &causedBy, &t.Cost, &t.LatencyMS, &createdAt); err != nil {
 			return nil, dbErr(err, "scan trace")
 		}
 		t.CreatedAt = strToTime(createdAt)
+		if causedBy.Valid {
+			t.CausedByTraceID = &causedBy.String
+		}
 		out = append(out, &t)
 	}
 	return out, rows.Err()
@@ -1084,6 +1224,32 @@ func (s *DB) SetConfig(ctx context.Context, key, value string) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO config (key,value) VALUES (?,?)`, key, value)
 	return dbErr(err, "set config")
+}
+
+func (s *DB) InitSuperuser(ctx context.Context, u *kernel.User, configKey, configValue string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin init superuser")
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO users (id,handle,email,password_hash,available,locked,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		u.ID, u.Handle, u.Email, u.PasswordHash,
+		u.Available, u.Locked, timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
+	)
+	if err != nil {
+		return dbErr(err, "init superuser: insert user")
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT OR REPLACE INTO config (key,value) VALUES (?,?)`, configKey, configValue)
+	if err != nil {
+		return dbErr(err, "init superuser: set config")
+	}
+
+	return dbErr(tx.Commit(), "init superuser: commit")
 }
 
 // ---- helpers ----

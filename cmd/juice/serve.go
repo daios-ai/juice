@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
@@ -62,13 +64,14 @@ func runServer(addr string) error {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	// Auth.
-	r.Post("/v1/auth/token", srv.postTokenMulti)
-	r.Post("/v1/auth/authorize", srv.postAuthorize)
-	r.Post("/v1/auth/refresh", srv.postRefresh)
+	// Auth — rate limited: 5 requests/minute per IP, burst of 10.
+	authLimiter := ipRateLimiter(5.0/60, 10)
+	r.With(authLimiter).Post("/v1/auth/token", srv.postTokenMulti)
+	r.With(authLimiter).Post("/v1/auth/authorize", srv.postAuthorize)
+	r.With(authLimiter).Post("/v1/auth/refresh", srv.postRefresh)
 
-	// Users.
-	r.Post("/v1/users", srv.postUser)
+	// Users — rate limited: 3 requests/minute per IP, burst of 5.
+	r.With(ipRateLimiter(3.0/60, 5)).Post("/v1/users", srv.postUser)
 
 	// Actions (public).
 	r.Group(func(r chi.Router) {
@@ -109,6 +112,7 @@ func runServer(addr string) error {
 		r.Get("/v1/listeners/{id}", srv.getListener)
 		r.Delete("/v1/listeners/{id}", srv.deleteListener)
 		r.Post("/v1/events/emit", srv.postEmit)
+		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
 
 		// Admin routes.
 		r.Group(func(r chi.Router) {
@@ -141,6 +145,71 @@ type server struct {
 type ctxKey string
 
 const ctxSubjectID ctxKey = "subject_id"
+
+// ipRateLimiter returns a middleware that limits requests from each IP address
+// using a token bucket: ratePerSec tokens refilled per second, burst maximum tokens.
+// Entries not seen for 5 minutes are evicted by a background goroutine.
+func ipRateLimiter(ratePerSec, burst float64) func(http.Handler) http.Handler {
+	type entry struct {
+		tokens   float64
+		lastFill time.Time
+		lastSeen time.Time
+	}
+	var mu sync.Mutex
+	entries := make(map[string]*entry)
+
+	// Background cleanup goroutine.
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			cutoff := time.Now().Add(-5 * time.Minute)
+			mu.Lock()
+			for ip, e := range entries {
+				if e.lastSeen.Before(cutoff) {
+					delete(entries, ip)
+				}
+			}
+			mu.Unlock()
+		}
+	}()
+
+	allow := func(ip string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		now := time.Now()
+		e, ok := entries[ip]
+		if !ok {
+			entries[ip] = &entry{tokens: burst - 1, lastFill: now, lastSeen: now}
+			return true
+		}
+		elapsed := now.Sub(e.lastFill).Seconds()
+		e.tokens = min(burst, e.tokens+elapsed*ratePerSec)
+		e.lastFill = now
+		e.lastSeen = now
+		if e.tokens < 1 {
+			return false
+		}
+		e.tokens--
+		return true
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			if ip == "" {
+				ip = r.RemoteAddr
+			}
+			if !allow(ip) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate limit exceeded"})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
 
 func maxBytesMiddleware(n int64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -634,12 +703,12 @@ func (s *server) postListener(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getListener(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	txIDs, err := s.kernel.PollListener(r.Context(), subjectFrom(r), id)
+	events, err := s.kernel.PollListener(r.Context(), subjectFrom(r), id)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"listener_id": id, "tx_ids": txIDs})
+	writeJSON(w, http.StatusOK, map[string]any{"listener_id": id, "events": events})
 }
 
 func (s *server) deleteListener(w http.ResponseWriter, r *http.Request) {
@@ -660,12 +729,33 @@ func (s *server) postEmit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	txIDs, err := s.kernel.EmitEvent(r.Context(), subjectFrom(r), req.EventName, req.Args)
+	eventIDs, err := s.kernel.EmitEvent(r.Context(), subjectFrom(r), req.EventName, req.Args, "")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tx_ids": txIDs})
+	writeJSON(w, http.StatusOK, map[string]any{"event_ids": eventIDs})
+}
+
+func (s *server) postConsumeEvent(w http.ResponseWriter, r *http.Request) {
+	eventID := chi.URLParam(r, "id")
+	var req struct {
+		ProcessID string `json:"process_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+		return
+	}
+	if req.ProcessID == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("process_id is required"))
+		return
+	}
+	reply, err := s.kernel.ConsumeEvent(r.Context(), subjectFrom(r), eventID, req.ProcessID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, reply)
 }
 
 func (s *server) getProcessFeedback(w http.ResponseWriter, r *http.Request) {

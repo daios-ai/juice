@@ -94,6 +94,22 @@ func (f *fakeScriptExec) Execute(_ context.Context, _ []byte, input []byte, _ Ho
 
 // ---- User tests ----
 
+func TestCreateNativeActionRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@owner", 0)
+	_, err := k.CreateAction(ctx, CreateActionRequest{
+		OwnerUserID: owner.ID,
+		Name:        "/native-attempt",
+		Kind:        KindNative,
+	})
+	if err == nil {
+		t.Error("expected error creating native action via CreateAction, got nil")
+	}
+}
+
 func TestCreateUser(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)
@@ -304,3 +320,51 @@ func TestUpdateStats(t *testing.T) {
 }
 
 var _ = log.Default
+
+func TestValidateHTTPSourceSSRF(t *testing.T) {
+	rejected := []string{
+		"http://localhost/api",
+		"http://127.0.0.1/secret",
+		"http://::1/secret",
+		"http://10.0.0.1/internal",
+		"http://192.168.1.1/router",
+		"http://172.16.0.1/internal",
+		"http://169.254.169.254/latest/meta-data/",
+		"ftp://example.com/file",
+		"file:///etc/passwd",
+		"://broken",
+	}
+	for _, u := range rejected {
+		if err := validateHTTPSource(u); err == nil {
+			t.Errorf("validateHTTPSource(%q): expected error, got nil", u)
+		}
+	}
+
+	accepted := []string{
+		"https://example.com/api",
+		"http://example.com/webhook",
+		"https://api.stripe.com/v1/charges",
+	}
+	for _, u := range accepted {
+		if err := validateHTTPSource(u); err != nil {
+			t.Errorf("validateHTTPSource(%q): unexpected error: %v", u, err)
+		}
+	}
+}
+
+func TestCreateHTTPActionRejectsSSRFURL(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@owner", 0)
+	_, err := k.CreateAction(ctx, CreateActionRequest{
+		OwnerUserID: owner.ID,
+		Name:        "/webhook",
+		Kind:        KindHTTP,
+		Source:      "http://169.254.169.254/latest/meta-data/",
+	})
+	if err == nil {
+		t.Error("expected error creating HTTP action with SSRF URL")
+	}
+}

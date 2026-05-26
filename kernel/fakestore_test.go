@@ -21,7 +21,7 @@ type fakeStore struct {
 	stats           map[string]*Stats
 	statTags        []*StatTag
 	listeners       map[string]*Listener
-	events          map[string][]string // listenerID -> txIDs
+	events          map[string]*Event // eventID -> Event
 	authCodes       map[string]*AuthCode
 	refreshTokens   map[string]*RefreshToken
 	config          map[string]string
@@ -39,7 +39,7 @@ func newFakeStore() *fakeStore {
 		transactions:  make(map[string]*Transaction),
 		stats:         make(map[string]*Stats),
 		listeners:     make(map[string]*Listener),
-		events:        make(map[string][]string),
+		events:        make(map[string]*Event),
 		authCodes:     make(map[string]*AuthCode),
 		refreshTokens: make(map[string]*RefreshToken),
 		config:        make(map[string]string),
@@ -247,7 +247,7 @@ func (f *fakeStore) FundProcess(_ context.Context, userID, processID string, amo
 	return nil
 }
 
-func (f *fakeStore) SettleCall(_ context.Context, processID, targetUserID, feeRecipientID string, net, fee int64) error {
+func (f *fakeStore) CommitCall(_ context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.processes[processID]
@@ -259,7 +259,6 @@ func (f *fakeStore) SettleCall(_ context.Context, processID, targetUserID, feeRe
 		return ErrInsufficientFunds.Wrap("insufficient locked funds")
 	}
 	p.Locked -= gross
-
 	if net > 0 {
 		target, ok := f.users[targetUserID]
 		if !ok {
@@ -268,12 +267,12 @@ func (f *fakeStore) SettleCall(_ context.Context, processID, targetUserID, feeRe
 		target.Available += net
 	}
 	if fee > 0 && feeRecipientID != "" {
-		recip, ok := f.users[feeRecipientID]
-		if !ok {
-			return ErrNotFound.Wrap("fee recipient not found")
+		if recip, ok := f.users[feeRecipientID]; ok {
+			recip.Available += fee
 		}
-		recip.Available += fee
 	}
+	cp := *tx
+	f.transactions[tx.ID] = &cp
 	return nil
 }
 
@@ -430,17 +429,99 @@ func (f *fakeStore) ListListeners(_ context.Context, sourceUserID, eventName str
 	return result, nil
 }
 
-func (f *fakeStore) AppendEvent(_ context.Context, listenerID, txID string) error {
+func (f *fakeStore) CreateEvent(_ context.Context, e *Event) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.events[listenerID] = append(f.events[listenerID], txID)
+	cp := *e
+	cp.CreatedAt = time.Now().UTC()
+	f.events[e.ID] = &cp
 	return nil
 }
 
-func (f *fakeStore) ReadEvents(_ context.Context, listenerID string) ([]string, error) {
+func (f *fakeStore) ReadEvent(_ context.Context, id string) (*Event, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.events[listenerID], nil
+	e, ok := f.events[id]
+	if !ok {
+		return nil, ErrNotFound.Wrap("event not found")
+	}
+	cp := *e
+	return &cp, nil
+}
+
+func (f *fakeStore) ListPendingEvents(_ context.Context, listenerID string) ([]*Event, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*Event
+	for _, e := range f.events {
+		if e.ListenerID == listenerID && e.ConsumedAt == nil {
+			cp := *e
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) LockEvent(_ context.Context, eventID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.events[eventID]
+	if !ok {
+		return ErrNotFound.Wrap("event not found")
+	}
+	if e.ConsumedAt != nil {
+		return ErrInvalidState.Wrap("event already consumed or in-flight")
+	}
+	now := time.Now().UTC()
+	e.ConsumedAt = &now
+	return nil
+}
+
+func (f *fakeStore) SettleEvent(_ context.Context, eventID, txID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.events[eventID]
+	if !ok {
+		return ErrNotFound.Wrap("event not found")
+	}
+	e.TxID = &txID
+	return nil
+}
+
+func (f *fakeStore) UnlockEvent(_ context.Context, eventID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.events[eventID]
+	if !ok {
+		return ErrNotFound.Wrap("event not found")
+	}
+	if e.TxID != nil {
+		return nil // already settled, don't unlock
+	}
+	e.ConsumedAt = nil
+	return nil
+}
+
+func (f *fakeStore) PurgeListenerEvents(_ context.Context, listenerID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for id, e := range f.events {
+		if e.ListenerID == listenerID && e.ConsumedAt == nil {
+			delete(f.events, id)
+		}
+	}
+	return nil
+}
+
+func (f *fakeStore) ResetInFlightEvents(_ context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, e := range f.events {
+		if e.ConsumedAt != nil && e.TxID == nil {
+			e.ConsumedAt = nil
+		}
+	}
+	return nil
 }
 
 func (f *fakeStore) ListTraces(_ context.Context, processID string) ([]*Trace, error) {
@@ -697,5 +778,17 @@ func (f *fakeStore) SetConfig(_ context.Context, key, value string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.config[key] = value
+	return nil
+}
+
+func (f *fakeStore) InitSuperuser(_ context.Context, u *User, configKey, configValue string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, exists := f.userByHandle[u.Handle]; !exists {
+		cp := *u
+		f.users[u.ID] = &cp
+		f.userByHandle[u.Handle] = &cp
+	}
+	f.config[configKey] = configValue
 	return nil
 }

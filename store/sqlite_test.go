@@ -265,7 +265,7 @@ func TestLockAndRefundFunds(t *testing.T) {
 	}
 }
 
-func TestSettleCall(t *testing.T) {
+func TestCommitCall(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -281,13 +281,22 @@ func TestSettleCall(t *testing.T) {
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
 	_ = db.LockFunds(ctx, p.ID, 100)
 
-	if err := db.SettleCall(ctx, p.ID, target.ID, fee.ID, 80, 20); err != nil {
+	tr := &kernel.Trace{ID: "tr1", ProcessID: p.ID, ParentTraceID: "tr1", CreatedAt: time.Now().UTC()}
+	_ = db.CreateTrace(ctx, tr)
+
+	tx := &kernel.Transaction{
+		ID: "tx1", ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: tr.ID,
+		OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: target.ID,
+		ActionID: "a1", Status: kernel.TxSuccess, Gross: 100, Net: 80, Fee: 20,
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	if err := db.CommitCall(ctx, tx, p.ID, target.ID, fee.ID, 80, 20); err != nil {
 		t.Fatal(err)
 	}
 
 	proc, _ := db.ReadProcess(ctx, p.ID)
 	if proc.Locked != 0 {
-		t.Errorf("process.locked after settle: got %d, want 0", proc.Locked)
+		t.Errorf("process.locked after commit: got %d, want 0", proc.Locked)
 	}
 
 	tgt, _ := db.ReadUser(ctx, target.ID)
@@ -298,6 +307,12 @@ func TestSettleCall(t *testing.T) {
 	feeU, _ := db.ReadUser(ctx, fee.ID)
 	if feeU.Available != 20 {
 		t.Errorf("fee.available: got %d, want 20", feeU.Available)
+	}
+
+	// Transaction must be recorded atomically.
+	stored, err := db.ReadTransaction(ctx, tx.ID)
+	if err != nil || stored.Status != kernel.TxSuccess {
+		t.Errorf("transaction not committed: %v", err)
 	}
 }
 

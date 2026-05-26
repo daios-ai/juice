@@ -122,7 +122,7 @@ func eventsEmitCmd() *cobra.Command {
 				}
 			}
 
-			txIDs, err := k.EmitEvent(context.Background(), subjectID, eventName, args)
+			txIDs, err := k.EmitEvent(context.Background(), subjectID, eventName, args, "")
 			if err != nil {
 				return err
 			}
