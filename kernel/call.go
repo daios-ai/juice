@@ -87,7 +87,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 
 	// 6. ACL check — CanCall(subject, action).
 	if action.OwnerUserID != req.SubjectID {
-		canCall, err := k.canCall(ctx, req.SubjectID, action.ID)
+		canCall, err := k.canCall(ctx, req.SubjectID, action)
 		if err != nil {
 			return nil, err
 		}
@@ -209,24 +209,19 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}, nil
 }
 
-// canCall checks grant-all (public), ACL(subject, action, call), or ACL(subject, action, admin).
-func (k *Kernel) canCall(ctx context.Context, subjectID, actionID string) (bool, error) {
-	// Check grant-all first (fast path).
-	ok, err := k.store.CheckGrantAll(ctx, actionID)
+// canCall checks public flag, ACL(subject, action, call), or ACL(subject, action, admin).
+func (k *Kernel) canCall(ctx context.Context, subjectID string, action *Action) (bool, error) {
+	if action.Public {
+		return true, nil
+	}
+	ok, err := k.store.CheckACL(ctx, subjectID, action.ID, PermCall)
 	if err != nil {
 		return false, ErrInternal.Wrapf("acl check: %v", err)
 	}
 	if ok {
 		return true, nil
 	}
-	ok, err = k.store.CheckACL(ctx, subjectID, actionID, PermCall)
-	if err != nil {
-		return false, ErrInternal.Wrapf("acl check: %v", err)
-	}
-	if ok {
-		return true, nil
-	}
-	ok, err = k.store.CheckACL(ctx, subjectID, actionID, PermAdmin)
+	ok, err = k.store.CheckACL(ctx, subjectID, action.ID, PermAdmin)
 	if err != nil {
 		return false, ErrInternal.Wrapf("acl check: %v", err)
 	}

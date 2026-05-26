@@ -508,36 +508,6 @@ func (s *DB) CheckACL(ctx context.Context, subjectID, actionID string, perm kern
 	return count > 0, nil
 }
 
-func (s *DB) GrantAll(ctx context.Context, actionID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE actions SET public=1, updated_at=? WHERE id=?`,
-		timeToStr(time.Now().UTC()), actionID,
-	)
-	return dbErr(err, "grant all")
-}
-
-func (s *DB) RevokeAll(ctx context.Context, actionID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE actions SET public=0, updated_at=? WHERE id=?`,
-		timeToStr(time.Now().UTC()), actionID,
-	)
-	return dbErr(err, "revoke all")
-}
-
-func (s *DB) CheckGrantAll(ctx context.Context, actionID string) (bool, error) {
-	var public int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT public FROM actions WHERE id=?`, actionID,
-	).Scan(&public)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, dbErr(err, "check grant all")
-	}
-	return public != 0, nil
-}
-
 // ---- Processes ----
 
 func (s *DB) CreateProcess(ctx context.Context, p *kernel.Process) error {

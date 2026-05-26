@@ -15,7 +15,6 @@ type fakeStore struct {
 	actions         map[string]*Action
 	actionEmbeds    map[string][]float32
 	acl             map[string]map[Permission]bool // key: subjectID+":"+actionID
-	grantAll        map[string]bool                // actionID -> public
 	processes       map[string]*Process
 	traces          map[string]*Trace
 	transactions    map[string]*Transaction
@@ -36,7 +35,6 @@ func newFakeStore() *fakeStore {
 		actions:       make(map[string]*Action),
 		actionEmbeds:  make(map[string][]float32),
 		acl:           make(map[string]map[Permission]bool),
-		grantAll:      make(map[string]bool),
 		processes:     make(map[string]*Process),
 		traces:        make(map[string]*Trace),
 		transactions:  make(map[string]*Transaction),
@@ -685,31 +683,6 @@ func (f *fakeStore) ListAllActions(_ context.Context, limit, offset int) ([]*Act
 	return result, nil
 }
 
-func (f *fakeStore) GrantAll(_ context.Context, actionID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.grantAll[actionID] = true
-	if a, ok := f.actions[actionID]; ok {
-		a.Public = true
-	}
-	return nil
-}
-
-func (f *fakeStore) RevokeAll(_ context.Context, actionID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.grantAll[actionID] = false
-	if a, ok := f.actions[actionID]; ok {
-		a.Public = false
-	}
-	return nil
-}
-
-func (f *fakeStore) CheckGrantAll(_ context.Context, actionID string) (bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.grantAll[actionID], nil
-}
 
 func (f *fakeStore) ListAllProcesses(_ context.Context, limit, offset int) ([]*Process, error) {
 	f.mu.Lock()

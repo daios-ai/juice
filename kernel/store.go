@@ -85,9 +85,6 @@ type Store interface {
 	GrantACL(ctx context.Context, e *ACLEntry) error
 	RevokeACL(ctx context.Context, subjectID, actionID string, perm Permission) error
 	CheckACL(ctx context.Context, subjectID, actionID string, perm Permission) (bool, error)
-	GrantAll(ctx context.Context, actionID string) error
-	RevokeAll(ctx context.Context, actionID string) error
-	CheckGrantAll(ctx context.Context, actionID string) (bool, error)
 
 	// ---- Processes ----
 

@@ -350,7 +350,9 @@ func (k *Kernel) GrantAll(ctx context.Context, subjectID, actionID string) error
 	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
 		return err
 	}
-	if err := k.store.GrantAll(ctx, actionID); err != nil {
+	a.Public = true
+	a.UpdatedAt = time.Now().UTC()
+	if err := k.store.UpdateAction(ctx, a); err != nil {
 		return err
 	}
 	k.log.With(ctx).Info("action.grant_all", "action_id", actionID, "subject", subjectID)
@@ -366,7 +368,9 @@ func (k *Kernel) RevokeAll(ctx context.Context, subjectID, actionID string) erro
 	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
 		return err
 	}
-	if err := k.store.RevokeAll(ctx, actionID); err != nil {
+	a.Public = false
+	a.UpdatedAt = time.Now().UTC()
+	if err := k.store.UpdateAction(ctx, a); err != nil {
 		return err
 	}
 	k.log.With(ctx).Info("action.revoke_all", "action_id", actionID, "subject", subjectID)
@@ -903,7 +907,7 @@ func (k *Kernel) CreateListener(ctx context.Context, req CreateListenerRequest) 
 		return nil, err
 	}
 	if a.OwnerUserID != req.OwnerUserID {
-		ok, err := k.canCall(ctx, req.OwnerUserID, req.TargetActionID)
+		ok, err := k.canCall(ctx, req.OwnerUserID, a)
 		if err != nil {
 			return nil, err
 		}
