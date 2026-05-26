@@ -199,6 +199,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// 15. Update stats.
 	k.updateStats(ctx, action.ID, tx, latency)
 
+	// 16. Update trace cost and latency for all ancestor traces.
+	_ = k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt)
+
 	logger.Info("call.success", "action", action.Name, "tx_id", txID, "latency_ms", fmt.Sprintf("%.1f", latency*1000))
 
 	return &CallReply{
@@ -208,9 +211,17 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}, nil
 }
 
-// canCall checks ACL(subject, action, call) OR ACL(subject, action, admin).
+// canCall checks grant-all (public), ACL(subject, action, call), or ACL(subject, action, admin).
 func (k *Kernel) canCall(ctx context.Context, subjectID, actionID string) (bool, error) {
-	ok, err := k.store.CheckACL(ctx, subjectID, actionID, PermCall)
+	// Check grant-all first (fast path).
+	ok, err := k.store.CheckGrantAll(ctx, actionID)
+	if err != nil {
+		return false, ErrInternal.Wrapf("acl check: %v", err)
+	}
+	if ok {
+		return true, nil
+	}
+	ok, err = k.store.CheckACL(ctx, subjectID, actionID, PermCall)
 	if err != nil {
 		return false, ErrInternal.Wrapf("acl check: %v", err)
 	}
@@ -232,10 +243,45 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 	case KindWasm:
 		return k.executeWasm(ctx, action, args, trace, ownerUserID)
 	case KindNative:
-		return nil, ErrInvalidState.Wrap("native actions cannot be called directly")
+		return k.executeNative(ctx, action, args)
 	default:
 		return nil, ErrInvalidState.Wrapf("unknown action kind %q", action.Kind)
 	}
+}
+
+// executeNative dispatches to built-in native action implementations.
+func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any) (map[string]any, error) {
+	switch action.Name {
+	case "/lookup":
+		return k.executeLookup(ctx, args)
+	default:
+		return nil, ErrInvalidState.Wrapf("unknown native action %q", action.Name)
+	}
+}
+
+// executeLookup implements the /lookup native action.
+func (k *Kernel) executeLookup(ctx context.Context, args map[string]any) (map[string]any, error) {
+	query, _ := args["query"].(string)
+	if query == "" {
+		return nil, ErrInvalidInput.Wrap("lookup requires query argument")
+	}
+	limit := 10
+	if l, ok := args["limit"].(float64); ok {
+		limit = int(l)
+	}
+	results, err := k.Lookup(ctx, LookupRequest{Query: query, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]any, len(results))
+	for i, r := range results {
+		items[i] = map[string]any{
+			"action_id": r.Action.ID,
+			"name":      r.Action.Name,
+			"score":     r.Score,
+		}
+	}
+	return map[string]any{"results": items}, nil
 }
 
 // executeHTTP calls an external HTTP endpoint.

@@ -20,6 +20,8 @@ func init() {
 		actionListCmd(),
 		actionDeleteCmd(),
 		actionACLCmd(),
+		actionGrantAllCmd(),
+		actionRevokeAllCmd(),
 	)
 	rootCmd.AddCommand(actionCmd)
 }
@@ -354,4 +356,62 @@ func modifyACL(actionID, subjectHandle string, perm kernel.Permission, grant boo
 	}
 	fmt.Printf("Permission %s %s on %s for %s.\n", perm, op, actionID, subjectHandle)
 	return nil
+}
+
+func actionGrantAllCmd() *cobra.Command {
+	var actionID string
+	cmd := &cobra.Command{
+		Use:   "grant-all",
+		Short: "Grant public (grant-all) access to an action",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			if err := k.GrantAll(context.Background(), subjectID, actionID); err != nil {
+				return err
+			}
+			fmt.Printf("Action %s is now publicly callable.\n", actionID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
+	_ = cmd.MarkFlagRequired("id")
+	return cmd
+}
+
+func actionRevokeAllCmd() *cobra.Command {
+	var actionID string
+	cmd := &cobra.Command{
+		Use:   "revoke-all",
+		Short: "Revoke public (grant-all) access from an action",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			if err := k.RevokeAll(context.Background(), subjectID, actionID); err != nil {
+				return err
+			}
+			fmt.Printf("Action %s public access revoked.\n", actionID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
+	_ = cmd.MarkFlagRequired("id")
+	return cmd
 }

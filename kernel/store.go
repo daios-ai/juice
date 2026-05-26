@@ -1,6 +1,9 @@
 package kernel
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // ---- Script execution interfaces ----
 
@@ -59,6 +62,9 @@ type Store interface {
 	CreateUser(ctx context.Context, u *User) error
 	ReadUser(ctx context.Context, id string) (*User, error)
 	ReadUserByHandle(ctx context.Context, handle string) (*User, error)
+	ListUsers(ctx context.Context, limit, offset int) ([]*User, error)
+	SuspendUser(ctx context.Context, id string) error
+	UnsuspendUser(ctx context.Context, id string) error
 
 	// ---- Actions ----
 
@@ -68,17 +74,22 @@ type Store interface {
 	UpdateAction(ctx context.Context, a *Action) error
 	DeleteAction(ctx context.Context, id string) error
 	ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*Action, error)
+	ListAllActions(ctx context.Context, limit, offset int) ([]*Action, error)
 
 	// ---- ACL ----
 
 	GrantACL(ctx context.Context, e *ACLEntry) error
 	RevokeACL(ctx context.Context, subjectID, actionID string, perm Permission) error
 	CheckACL(ctx context.Context, subjectID, actionID string, perm Permission) (bool, error)
+	GrantAll(ctx context.Context, actionID string) error
+	RevokeAll(ctx context.Context, actionID string) error
+	CheckGrantAll(ctx context.Context, actionID string) (bool, error)
 
 	// ---- Processes ----
 
 	CreateProcess(ctx context.Context, p *Process) error
 	ReadProcess(ctx context.Context, id string) (*Process, error)
+	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
 
 	// LockFunds moves `amount` from process.available to process.locked.
 	// Fails atomically if process.available < amount.
@@ -109,6 +120,9 @@ type Store interface {
 	UpdateTransaction(ctx context.Context, tx *Transaction) error
 	ReadTransaction(ctx context.Context, id string) (*Transaction, error)
 	ListTransactions(ctx context.Context, filter TxFilter) ([]*Transaction, error)
+	ListAllTransactions(ctx context.Context, limit, offset int) ([]*Transaction, error)
+	UpdateTraceCostLatency(ctx context.Context, traceID string, grossDelta int64, endedAt time.Time) error
+	CascadeRating(ctx context.Context, traceID string, rating float64) error
 
 	// ---- Stats ----
 
@@ -138,4 +152,9 @@ type Store interface {
 
 	CreateRefreshToken(ctx context.Context, t *RefreshToken) error
 	RotateRefreshToken(ctx context.Context, oldToken string) (*RefreshToken, error)
+
+	// ---- Config ----
+
+	GetConfig(ctx context.Context, key string) (string, error)
+	SetConfig(ctx context.Context, key, value string) error
 }

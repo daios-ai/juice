@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,13 +43,24 @@ func runServer(addr string) error {
 		Format:   "text",
 	})
 
+	if err := bootstrap(k); err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
+	}
+
+	superuserHandle, _ := k.GetConfig(context.Background(), configKeySuperuser)
+
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(requestIDMiddleware)
 	r.Use(loggingMiddleware(logger))
 	r.Use(maxBytesMiddleware(1 << 20)) // 1 MiB request body limit
 
-	srv := &server{kernel: k, log: logger}
+	srv := &server{kernel: k, log: logger, superuserHandle: superuserHandle}
+
+	// Health (unauthenticated).
+	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
 
 	// Auth.
 	r.Post("/v1/auth/token", srv.postTokenMulti)
@@ -69,6 +81,8 @@ func runServer(addr string) error {
 		r.Delete("/v1/actions/{id}", srv.deleteAction)
 		r.Post("/v1/actions/{id}/acl", srv.grantACL)
 		r.Delete("/v1/actions/{id}/acl", srv.revokeACL)
+		r.Post("/v1/actions/{id}/grant-all", srv.grantAll)
+		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
 
 		// Processes.
 		r.Post("/v1/processes", srv.postProcess)
@@ -96,8 +110,18 @@ func runServer(addr string) error {
 		r.Delete("/v1/listeners/{id}", srv.deleteListener)
 		r.Post("/v1/events/emit", srv.postEmit)
 
-		// Feedback (recursive cost/latency).
-		r.Get("/v1/processes/{id}/feedback/{trace_id}", srv.getProcessFeedback)
+		// Admin routes.
+		r.Group(func(r chi.Router) {
+			r.Use(srv.adminMiddleware)
+			r.Get("/v1/admin/users", srv.adminListUsers)
+			r.Get("/v1/admin/users/{id}", srv.adminGetUser)
+			r.Post("/v1/admin/users/{id}/suspend", srv.adminSuspendUser)
+			r.Post("/v1/admin/users/{id}/unsuspend", srv.adminUnsuspendUser)
+			r.Get("/v1/admin/actions", srv.adminListActions)
+			r.Post("/v1/admin/actions/{id}/disable", srv.adminDisableAction)
+			r.Get("/v1/admin/processes", srv.adminListProcesses)
+			r.Get("/v1/admin/transactions", srv.adminListTransactions)
+		})
 	})
 
 	logger.Info("server.start", "addr", addr)
@@ -107,8 +131,9 @@ func runServer(addr string) error {
 // ---- server ----
 
 type server struct {
-	kernel *kernel.Kernel
-	log    *log.Logger
+	kernel          *kernel.Kernel
+	log             *log.Logger
+	superuserHandle string
 }
 
 // ---- middleware ----
@@ -164,14 +189,36 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 			writeErr(w, err)
 			return
 		}
+		// Check suspension.
+		u, err := s.kernel.ReadUser(r.Context(), subjectID)
+		if err == nil && u.SuspendedAt != nil {
+			writeErr(w, kernel.ErrUnauthenticated.Wrap("account suspended"))
+			return
+		}
 		ctx := context.WithValue(r.Context(), ctxSubjectID, subjectID)
 		ctx = log.WithSubjectUserID(ctx, subjectID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
+func (s *server) adminMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		subjectID := subjectFromContext(r.Context())
+		u, err := s.kernel.ReadUser(r.Context(), subjectID)
+		if err != nil || u.Handle != s.superuserHandle {
+			writeErr(w, kernel.ErrUnauthorized.Wrap("admin access required"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func subjectFrom(r *http.Request) string {
-	v, _ := r.Context().Value(ctxSubjectID).(string)
+	return subjectFromContext(r.Context())
+}
+
+func subjectFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(ctxSubjectID).(string)
 	return v
 }
 
@@ -630,6 +677,119 @@ func (s *server) getProcessFeedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, fb)
+}
+
+func (s *server) grantAll(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := s.kernel.GrantAll(r.Context(), subjectFrom(r), id); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) revokeAll(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := s.kernel.RevokeAll(r.Context(), subjectFrom(r), id); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- admin handlers ----
+
+func paginate(r *http.Request) (limit, offset int) {
+	limit = 50
+	offset = 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	return
+}
+
+func (s *server) adminListUsers(w http.ResponseWriter, r *http.Request) {
+	limit, offset := paginate(r)
+	users, err := s.kernel.ListUsers(r.Context(), limit, offset)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+func (s *server) adminGetUser(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	u, err := s.kernel.ReadUser(r.Context(), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, u)
+}
+
+func (s *server) adminSuspendUser(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := s.kernel.SuspendUser(r.Context(), subjectFrom(r), id); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) adminUnsuspendUser(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := s.kernel.UnsuspendUser(r.Context(), subjectFrom(r), id); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) adminListActions(w http.ResponseWriter, r *http.Request) {
+	limit, offset := paginate(r)
+	actions, err := s.kernel.ListAllActions(r.Context(), limit, offset)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, actions)
+}
+
+func (s *server) adminDisableAction(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := s.kernel.SetActive(r.Context(), subjectFrom(r), id, false); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"active": false})
+}
+
+func (s *server) adminListProcesses(w http.ResponseWriter, r *http.Request) {
+	limit, offset := paginate(r)
+	processes, err := s.kernel.ListAllProcesses(r.Context(), limit, offset)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, processes)
+}
+
+func (s *server) adminListTransactions(w http.ResponseWriter, r *http.Request) {
+	limit, offset := paginate(r)
+	txs, err := s.kernel.ListAllTransactions(r.Context(), limit, offset)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, txs)
 }
 
 // ---- response helpers ----

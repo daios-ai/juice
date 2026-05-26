@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // fakeStore is an in-memory Store implementation for tests.
@@ -13,6 +14,7 @@ type fakeStore struct {
 	userByHandle    map[string]*User
 	actions         map[string]*Action
 	acl             map[string]map[Permission]bool // key: subjectID+":"+actionID
+	grantAll        map[string]bool                // actionID -> public
 	processes       map[string]*Process
 	traces          map[string]*Trace
 	transactions    map[string]*Transaction
@@ -22,6 +24,7 @@ type fakeStore struct {
 	events          map[string][]string // listenerID -> txIDs
 	authCodes       map[string]*AuthCode
 	refreshTokens   map[string]*RefreshToken
+	config          map[string]string
 }
 
 func newFakeStore() *fakeStore {
@@ -30,6 +33,7 @@ func newFakeStore() *fakeStore {
 		userByHandle:  make(map[string]*User),
 		actions:       make(map[string]*Action),
 		acl:           make(map[string]map[Permission]bool),
+		grantAll:      make(map[string]bool),
 		processes:     make(map[string]*Process),
 		traces:        make(map[string]*Trace),
 		transactions:  make(map[string]*Transaction),
@@ -38,6 +42,7 @@ func newFakeStore() *fakeStore {
 		events:        make(map[string][]string),
 		authCodes:     make(map[string]*AuthCode),
 		refreshTokens: make(map[string]*RefreshToken),
+		config:        make(map[string]string),
 	}
 }
 
@@ -497,4 +502,200 @@ func (f *fakeStore) RotateRefreshToken(_ context.Context, oldToken string) (*Ref
 	f.refreshTokens[newRT.Token] = newRT
 	cp := *newRT
 	return &cp, nil
+}
+
+// ---- New methods (admin / grant-all / config) ----
+
+func (f *fakeStore) ListUsers(_ context.Context, limit, offset int) ([]*User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var result []*User
+	for _, u := range f.users {
+		cp := *u
+		result = append(result, &cp)
+	}
+	if offset >= len(result) {
+		return nil, nil
+	}
+	result = result[offset:]
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func (f *fakeStore) SuspendUser(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[id]
+	if !ok {
+		return ErrNotFound.Wrap("user not found")
+	}
+	now := time.Now().UTC()
+	u.SuspendedAt = &now
+	if h, ok2 := f.userByHandle[u.Handle]; ok2 {
+		h.SuspendedAt = &now
+	}
+	return nil
+}
+
+func (f *fakeStore) UnsuspendUser(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[id]
+	if !ok {
+		return ErrNotFound.Wrap("user not found")
+	}
+	u.SuspendedAt = nil
+	if h, ok2 := f.userByHandle[u.Handle]; ok2 {
+		h.SuspendedAt = nil
+	}
+	return nil
+}
+
+func (f *fakeStore) ListAllActions(_ context.Context, limit, offset int) ([]*Action, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var result []*Action
+	for _, a := range f.actions {
+		cp := *a
+		result = append(result, &cp)
+	}
+	if offset >= len(result) {
+		return nil, nil
+	}
+	result = result[offset:]
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func (f *fakeStore) GrantAll(_ context.Context, actionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.grantAll[actionID] = true
+	if a, ok := f.actions[actionID]; ok {
+		a.Public = true
+	}
+	return nil
+}
+
+func (f *fakeStore) RevokeAll(_ context.Context, actionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.grantAll[actionID] = false
+	if a, ok := f.actions[actionID]; ok {
+		a.Public = false
+	}
+	return nil
+}
+
+func (f *fakeStore) CheckGrantAll(_ context.Context, actionID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.grantAll[actionID], nil
+}
+
+func (f *fakeStore) ListAllProcesses(_ context.Context, limit, offset int) ([]*Process, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var result []*Process
+	for _, p := range f.processes {
+		cp := *p
+		result = append(result, &cp)
+	}
+	if offset >= len(result) {
+		return nil, nil
+	}
+	result = result[offset:]
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func (f *fakeStore) ListAllTransactions(_ context.Context, limit, offset int) ([]*Transaction, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var result []*Transaction
+	for _, tx := range f.transactions {
+		cp := *tx
+		result = append(result, &cp)
+	}
+	if offset >= len(result) {
+		return nil, nil
+	}
+	result = result[offset:]
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func (f *fakeStore) UpdateTraceCostLatency(_ context.Context, traceID string, grossDelta int64, endedAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cur := traceID
+	for {
+		t, ok := f.traces[cur]
+		if !ok {
+			break
+		}
+		latencyMS := endedAt.Sub(t.CreatedAt).Milliseconds()
+		t.Cost += grossDelta
+		if latencyMS > t.LatencyMS {
+			t.LatencyMS = latencyMS
+		}
+		if t.ParentTraceID == cur {
+			break
+		}
+		cur = t.ParentTraceID
+	}
+	return nil
+}
+
+func (f *fakeStore) CascadeRating(_ context.Context, traceID string, rating float64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Collect subtree.
+	subtree := make(map[string]bool)
+	queue := []string{traceID}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if subtree[cur] {
+			continue
+		}
+		subtree[cur] = true
+		for _, t := range f.traces {
+			if t.ParentTraceID == cur && t.ID != cur {
+				queue = append(queue, t.ID)
+			}
+		}
+	}
+	for _, tx := range f.transactions {
+		if subtree[tx.TraceID] && tx.Rating == nil {
+			r := rating
+			tx.Rating = &r
+		}
+	}
+	return nil
+}
+
+func (f *fakeStore) GetConfig(_ context.Context, key string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.config[key]
+	if !ok {
+		return "", ErrNotFound.Wrapf("config key %q not found", key)
+	}
+	return v, nil
+}
+
+func (f *fakeStore) SetConfig(_ context.Context, key, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.config[key] = value
+	return nil
 }

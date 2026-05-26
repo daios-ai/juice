@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
@@ -45,8 +46,44 @@ func (s *DB) Close() error {
 
 // migrate applies the embedded DDL idempotently.
 func (s *DB) migrate() error {
-	_, err := s.db.Exec(schema001)
-	return err
+	if _, err := s.db.Exec(schema001); err != nil {
+		return err
+	}
+	return s.migrate002()
+}
+
+// migrate002 applies schema002 idempotently.
+// SQLite does not support ALTER TABLE ... ADD COLUMN IF NOT EXISTS,
+// so we attempt each statement individually and ignore "duplicate column" errors.
+func (s *DB) migrate002() error {
+	stmts := []string{
+		`ALTER TABLE users ADD COLUMN suspended_at TEXT`,
+		`ALTER TABLE actions ADD COLUMN public INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE traces ADD COLUMN cost INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE traces ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0`,
+		`CREATE TABLE IF NOT EXISTS config (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL DEFAULT ''
+		)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			// Ignore "duplicate column name" errors — column already exists from a previous migration run.
+			if !isDuplicateColumn(err) {
+				return fmt.Errorf("migrate002: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// isDuplicateColumn reports whether the SQLite error is a duplicate column error.
+func isDuplicateColumn(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "already exists")
 }
 
 // ---- time helpers ----
@@ -78,10 +115,10 @@ func strToNullTime(s *string) *time.Time {
 
 func (s *DB) CreateUser(ctx context.Context, u *kernel.User) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO users (id,handle,email,password_hash,available,locked,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?)`,
+		`INSERT INTO users (id,handle,email,password_hash,available,locked,suspended_at,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
 		u.ID, u.Handle, u.Email, u.PasswordHash, u.Available, u.Locked,
-		timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
+		nullTimeToStr(u.SuspendedAt), timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
 	)
 	if err != nil {
 		return dbErr(err, "create user")
@@ -91,30 +128,72 @@ func (s *DB) CreateUser(ctx context.Context, u *kernel.User) error {
 
 func (s *DB) ReadUser(ctx context.Context, id string) (*kernel.User, error) {
 	return s.scanUser(s.db.QueryRowContext(ctx,
-		`SELECT id,handle,email,password_hash,available,locked,created_at,updated_at
+		`SELECT id,handle,email,password_hash,available,locked,suspended_at,created_at,updated_at
 		 FROM users WHERE id=?`, id))
 }
 
 func (s *DB) ReadUserByHandle(ctx context.Context, handle string) (*kernel.User, error) {
 	return s.scanUser(s.db.QueryRowContext(ctx,
-		`SELECT id,handle,email,password_hash,available,locked,created_at,updated_at
+		`SELECT id,handle,email,password_hash,available,locked,suspended_at,created_at,updated_at
 		 FROM users WHERE handle=?`, handle))
 }
 
 func (s *DB) scanUser(row *sql.Row) (*kernel.User, error) {
 	var u kernel.User
 	var createdAt, updatedAt string
+	var suspendedAt *string
 	err := row.Scan(&u.ID, &u.Handle, &u.Email, &u.PasswordHash,
-		&u.Available, &u.Locked, &createdAt, &updatedAt)
+		&u.Available, &u.Locked, &suspendedAt, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("user not found")
 	}
 	if err != nil {
 		return nil, dbErr(err, "read user")
 	}
+	u.SuspendedAt = strToNullTime(suspendedAt)
 	u.CreatedAt = strToTime(createdAt)
 	u.UpdatedAt = strToTime(updatedAt)
 	return &u, nil
+}
+
+func (s *DB) ListUsers(ctx context.Context, limit, offset int) ([]*kernel.User, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,handle,email,password_hash,available,locked,suspended_at,created_at,updated_at
+		 FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, dbErr(err, "list users")
+	}
+	defer rows.Close()
+	var out []*kernel.User
+	for rows.Next() {
+		var u kernel.User
+		var createdAt, updatedAt string
+		var suspendedAt *string
+		if err := rows.Scan(&u.ID, &u.Handle, &u.Email, &u.PasswordHash,
+			&u.Available, &u.Locked, &suspendedAt, &createdAt, &updatedAt); err != nil {
+			return nil, dbErr(err, "scan user")
+		}
+		u.SuspendedAt = strToNullTime(suspendedAt)
+		u.CreatedAt = strToTime(createdAt)
+		u.UpdatedAt = strToTime(updatedAt)
+		out = append(out, &u)
+	}
+	return out, rows.Err()
+}
+
+func (s *DB) SuspendUser(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET suspended_at=datetime('now') WHERE id=?`, id)
+	return dbErr(err, "suspend user")
+}
+
+func (s *DB) UnsuspendUser(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET suspended_at=NULL WHERE id=?`, id)
+	return dbErr(err, "unsuspend user")
 }
 
 // ---- Actions ----
@@ -124,9 +203,9 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO actions
-		 (id,owner_user_id,name,kind,active,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.OwnerUserID, a.Name, string(a.Kind), boolInt(a.Active), a.Price,
+		 (id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		a.ID, a.OwnerUserID, a.Name, string(a.Kind), boolInt(a.Active), boolInt(a.Public), a.Price,
 		a.Description, string(inJSON), string(outJSON), a.Source, a.ArtifactHash,
 		timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
 	)
@@ -135,13 +214,13 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT id,owner_user_id,name,kind,active,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at
+		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at
 		 FROM actions WHERE id=?`, id))
 }
 
 func (s *DB) ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT id,owner_user_id,name,kind,active,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at
+		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at
 		 FROM actions WHERE owner_user_id=? AND name=?`, ownerID, name))
 }
 
@@ -149,9 +228,9 @@ func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
 	inJSON, _ := json.Marshal(a.InputSchema)
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE actions SET kind=?,active=?,price=?,description=?,input_schema=?,output_schema=?,
+		`UPDATE actions SET kind=?,active=?,public=?,price=?,description=?,input_schema=?,output_schema=?,
 		 source=?,artifact_hash=?,updated_at=? WHERE id=?`,
-		string(a.Kind), boolInt(a.Active), a.Price, a.Description,
+		string(a.Kind), boolInt(a.Active), boolInt(a.Public), a.Price, a.Description,
 		string(inJSON), string(outJSON), a.Source, a.ArtifactHash,
 		timeToStr(a.UpdatedAt), a.ID,
 	)
@@ -164,7 +243,7 @@ func (s *DB) DeleteAction(ctx context.Context, id string) error {
 }
 
 func (s *DB) ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*kernel.Action, error) {
-	q := `SELECT id,owner_user_id,name,kind,active,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at FROM actions`
+	q := `SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at FROM actions`
 	args := []any{}
 	if activeOnly {
 		q += ` WHERE active=1`
@@ -189,11 +268,33 @@ func (s *DB) ListActions(ctx context.Context, activeOnly bool, limit, offset int
 	return out, rows.Err()
 }
 
+func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.Action, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at
+		 FROM actions ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, dbErr(err, "list all actions")
+	}
+	defer rows.Close()
+	var out []*kernel.Action
+	for rows.Next() {
+		a, err := s.scanActionRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
 	var a kernel.Action
 	var kind, inJSON, outJSON, createdAt, updatedAt string
-	var active int
-	err := row.Scan(&a.ID, &a.OwnerUserID, &a.Name, &kind, &active, &a.Price,
+	var active, public int
+	err := row.Scan(&a.ID, &a.OwnerUserID, &a.Name, &kind, &active, &public, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash,
 		&createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -202,25 +303,26 @@ func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
 	if err != nil {
 		return nil, dbErr(err, "read action")
 	}
-	return finishAction(&a, kind, active, inJSON, outJSON, createdAt, updatedAt)
+	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt)
 }
 
 func (s *DB) scanActionRow(rows *sql.Rows) (*kernel.Action, error) {
 	var a kernel.Action
 	var kind, inJSON, outJSON, createdAt, updatedAt string
-	var active int
-	err := rows.Scan(&a.ID, &a.OwnerUserID, &a.Name, &kind, &active, &a.Price,
+	var active, public int
+	err := rows.Scan(&a.ID, &a.OwnerUserID, &a.Name, &kind, &active, &public, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash,
 		&createdAt, &updatedAt)
 	if err != nil {
 		return nil, dbErr(err, "scan action")
 	}
-	return finishAction(&a, kind, active, inJSON, outJSON, createdAt, updatedAt)
+	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt)
 }
 
-func finishAction(a *kernel.Action, kind string, active int, inJSON, outJSON, createdAt, updatedAt string) (*kernel.Action, error) {
+func finishAction(a *kernel.Action, kind string, active, public int, inJSON, outJSON, createdAt, updatedAt string) (*kernel.Action, error) {
 	a.Kind = kernel.ActionKind(kind)
 	a.Active = active != 0
+	a.Public = public != 0
 	a.CreatedAt = strToTime(createdAt)
 	a.UpdatedAt = strToTime(updatedAt)
 	if err := json.Unmarshal([]byte(inJSON), &a.InputSchema); err != nil {
@@ -261,6 +363,36 @@ func (s *DB) CheckACL(ctx context.Context, subjectID, actionID string, perm kern
 		return false, dbErr(err, "check acl")
 	}
 	return count > 0, nil
+}
+
+func (s *DB) GrantAll(ctx context.Context, actionID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE actions SET public=1, updated_at=? WHERE id=?`,
+		timeToStr(time.Now().UTC()), actionID,
+	)
+	return dbErr(err, "grant all")
+}
+
+func (s *DB) RevokeAll(ctx context.Context, actionID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE actions SET public=0, updated_at=? WHERE id=?`,
+		timeToStr(time.Now().UTC()), actionID,
+	)
+	return dbErr(err, "revoke all")
+}
+
+func (s *DB) CheckGrantAll(ctx context.Context, actionID string) (bool, error) {
+	var public int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT public FROM actions WHERE id=?`, actionID,
+	).Scan(&public)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, dbErr(err, "check grant all")
+	}
+	return public != 0, nil
 }
 
 // ---- Processes ----
@@ -405,6 +537,33 @@ func (s *DB) SettleCall(ctx context.Context, processID, targetUserID, feeRecipie
 	return dbErr(tx.Commit(), "settle commit")
 }
 
+func (s *DB) ListAllProcesses(ctx context.Context, limit, offset int) ([]*kernel.Process, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,owner_user_id,available,locked,status,created_at,ended_at
+		 FROM processes ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, dbErr(err, "list all processes")
+	}
+	defer rows.Close()
+	var out []*kernel.Process
+	for rows.Next() {
+		var p kernel.Process
+		var status, createdAt string
+		var endedAt *string
+		if err := rows.Scan(&p.ID, &p.OwnerUserID, &p.Available, &p.Locked, &status, &createdAt, &endedAt); err != nil {
+			return nil, dbErr(err, "scan process")
+		}
+		p.Status = kernel.ProcessStatus(status)
+		p.CreatedAt = strToTime(createdAt)
+		p.EndedAt = strToNullTime(endedAt)
+		out = append(out, &p)
+	}
+	return out, rows.Err()
+}
+
 func (s *DB) EndProcess(ctx context.Context, processID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -452,8 +611,8 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 
 func (s *DB) CreateTrace(ctx context.Context, t *kernel.Trace) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,created_at) VALUES (?,?,?,?)`,
-		t.ID, t.ProcessID, t.ParentTraceID, timeToStr(t.CreatedAt),
+		`INSERT INTO traces (id,process_id,parent_trace_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?)`,
+		t.ID, t.ProcessID, t.ParentTraceID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
 	)
 	return dbErr(err, "create trace")
 }
@@ -462,8 +621,8 @@ func (s *DB) ReadTrace(ctx context.Context, id string) (*kernel.Trace, error) {
 	var t kernel.Trace
 	var createdAt string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,process_id,parent_trace_id,created_at FROM traces WHERE id=?`, id,
-	).Scan(&t.ID, &t.ProcessID, &t.ParentTraceID, &createdAt)
+		`SELECT id,process_id,parent_trace_id,cost,latency_ms,created_at FROM traces WHERE id=?`, id,
+	).Scan(&t.ID, &t.ProcessID, &t.ParentTraceID, &t.Cost, &t.LatencyMS, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("trace not found")
 	}
@@ -577,6 +736,78 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 		out = append(out, &tx)
 	}
 	return out, rows.Err()
+}
+
+func (s *DB) ListAllTransactions(ctx context.Context, limit, offset int) ([]*kernel.Transaction, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
+		        action_id,args_json,reply_json,status,gross,net,fee,reason,started_at,ended_at,rating
+		 FROM transactions ORDER BY started_at DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, dbErr(err, "list all transactions")
+	}
+	defer rows.Close()
+	var out []*kernel.Transaction
+	for rows.Next() {
+		var tx kernel.Transaction
+		var status, startedAt, endedAt string
+		if err := rows.Scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
+			&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
+			&tx.ArgsJSON, &tx.ReplyJSON, &status,
+			&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason,
+			&startedAt, &endedAt, &tx.Rating); err != nil {
+			return nil, dbErr(err, "scan transaction")
+		}
+		tx.Status = kernel.TxStatus(status)
+		tx.StartedAt = strToTime(startedAt)
+		tx.EndedAt = strToTime(endedAt)
+		out = append(out, &tx)
+	}
+	return out, rows.Err()
+}
+
+func (s *DB) UpdateTraceCostLatency(ctx context.Context, traceID string, grossDelta int64, endedAt time.Time) error {
+	// Walk up the trace tree from traceID to the root, updating cost and latency_ms.
+	cur := traceID
+	for {
+		t, err := s.ReadTrace(ctx, cur)
+		if err != nil {
+			return err
+		}
+		// Compute latency as ms from trace creation to endedAt.
+		latencyMS := endedAt.Sub(t.CreatedAt).Milliseconds()
+
+		_, err = s.db.ExecContext(ctx,
+			`UPDATE traces SET cost=cost+?, latency_ms=MAX(latency_ms,?) WHERE id=?`,
+			grossDelta, latencyMS, cur,
+		)
+		if err != nil {
+			return dbErr(err, "update trace cost latency")
+		}
+
+		// Stop at root (parent_trace_id == id).
+		if t.ParentTraceID == cur {
+			break
+		}
+		cur = t.ParentTraceID
+	}
+	return nil
+}
+
+func (s *DB) CascadeRating(ctx context.Context, traceID string, rating float64) error {
+	_, err := s.db.ExecContext(ctx, `
+WITH RECURSIVE subtree(id) AS (
+    SELECT id FROM traces WHERE id=?
+    UNION ALL
+    SELECT t.id FROM traces t JOIN subtree s ON t.parent_trace_id=s.id AND t.id != t.parent_trace_id
+)
+UPDATE transactions SET rating=? WHERE trace_id IN (SELECT id FROM subtree) AND rating IS NULL`,
+		traceID, rating,
+	)
+	return dbErr(err, "cascade rating")
 }
 
 // ---- Stats ----
@@ -715,7 +946,7 @@ func (s *DB) ReadEvents(ctx context.Context, listenerID string) ([]string, error
 
 func (s *DB) ListTraces(ctx context.Context, processID string) ([]*kernel.Trace, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,process_id,parent_trace_id,created_at FROM traces WHERE process_id=?`, processID)
+		`SELECT id,process_id,parent_trace_id,cost,latency_ms,created_at FROM traces WHERE process_id=?`, processID)
 	if err != nil {
 		return nil, dbErr(err, "list traces")
 	}
@@ -724,7 +955,7 @@ func (s *DB) ListTraces(ctx context.Context, processID string) ([]*kernel.Trace,
 	for rows.Next() {
 		var t kernel.Trace
 		var createdAt string
-		if err := rows.Scan(&t.ID, &t.ProcessID, &t.ParentTraceID, &createdAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.ProcessID, &t.ParentTraceID, &t.Cost, &t.LatencyMS, &createdAt); err != nil {
 			return nil, dbErr(err, "scan trace")
 		}
 		t.CreatedAt = strToTime(createdAt)
@@ -833,6 +1064,26 @@ func (s *DB) RotateRefreshToken(ctx context.Context, oldToken string) (*kernel.R
 		return nil, dbErr(err, "insert new refresh token")
 	}
 	return newTok, dbErr(tx.Commit(), "rotate refresh token commit")
+}
+
+// ---- Config ----
+
+func (s *DB) GetConfig(ctx context.Context, key string) (string, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM config WHERE key=?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", kernel.ErrNotFound.Wrapf("config key %q not found", key)
+	}
+	if err != nil {
+		return "", dbErr(err, "get config")
+	}
+	return value, nil
+}
+
+func (s *DB) SetConfig(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO config (key,value) VALUES (?,?)`, key, value)
+	return dbErr(err, "set config")
 }
 
 // ---- helpers ----
@@ -995,3 +1246,4 @@ CREATE INDEX IF NOT EXISTS idx_listeners_source     ON listeners(source_user_id,
 CREATE INDEX IF NOT EXISTS idx_events_listener      ON events(listener_id);
 CREATE INDEX IF NOT EXISTS idx_traces_process       ON traces(process_id);
 `
+

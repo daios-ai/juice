@@ -109,12 +109,38 @@ func (k *Kernel) Login(ctx context.Context, handle, password string) (string, er
 	if !CheckPassword(password, u.PasswordHash) {
 		return "", ErrUnauthenticated.Wrap("invalid credentials")
 	}
+	if u.SuspendedAt != nil {
+		return "", ErrUnauthenticated.Wrap("account suspended")
+	}
 	tok, err := IssueToken(u.ID, k.cfg.TokenSecret, k.cfg.TokenTTL)
 	if err != nil {
 		return "", err
 	}
 	k.log.With(ctx).Info("user.login", "user_id", u.ID)
 	return tok, nil
+}
+
+// ListUsers returns all users ordered by creation time.
+func (k *Kernel) ListUsers(ctx context.Context, limit, offset int) ([]*User, error) {
+	return k.store.ListUsers(ctx, limit, offset)
+}
+
+// SuspendUser marks the user as suspended, preventing login.
+func (k *Kernel) SuspendUser(ctx context.Context, superuserID, targetID string) error {
+	if err := k.store.SuspendUser(ctx, targetID); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("user.suspended", "target_id", targetID, "by", superuserID)
+	return nil
+}
+
+// UnsuspendUser removes the suspension from a user.
+func (k *Kernel) UnsuspendUser(ctx context.Context, superuserID, targetID string) error {
+	if err := k.store.UnsuspendUser(ctx, targetID); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("user.unsuspended", "target_id", targetID, "by", superuserID)
+	return nil
 }
 
 // VerifyToken validates a bearer token and returns the subject user ID.
@@ -199,6 +225,63 @@ func (k *Kernel) ReadActionByOwnerName(ctx context.Context, ownerID, name string
 // ListActions returns public active actions (or all actions for owners).
 func (k *Kernel) ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*Action, error) {
 	return k.store.ListActions(ctx, activeOnly, limit, offset)
+}
+
+// ListAllActions returns all actions regardless of active state.
+func (k *Kernel) ListAllActions(ctx context.Context, limit, offset int) ([]*Action, error) {
+	return k.store.ListAllActions(ctx, limit, offset)
+}
+
+// ListAllProcesses returns all processes ordered by creation time.
+func (k *Kernel) ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error) {
+	return k.store.ListAllProcesses(ctx, limit, offset)
+}
+
+// ListAllTransactions returns all transactions ordered by started_at.
+func (k *Kernel) ListAllTransactions(ctx context.Context, limit, offset int) ([]*Transaction, error) {
+	return k.store.ListAllTransactions(ctx, limit, offset)
+}
+
+// GrantAll sets the public flag on an action, allowing anyone to call it.
+func (k *Kernel) GrantAll(ctx context.Context, subjectID, actionID string) error {
+	a, err := k.store.ReadAction(ctx, actionID)
+	if err != nil {
+		return err
+	}
+	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
+		return err
+	}
+	if err := k.store.GrantAll(ctx, actionID); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("action.grant_all", "action_id", actionID, "subject", subjectID)
+	return nil
+}
+
+// RevokeAll clears the public flag on an action.
+func (k *Kernel) RevokeAll(ctx context.Context, subjectID, actionID string) error {
+	a, err := k.store.ReadAction(ctx, actionID)
+	if err != nil {
+		return err
+	}
+	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
+		return err
+	}
+	if err := k.store.RevokeAll(ctx, actionID); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("action.revoke_all", "action_id", actionID, "subject", subjectID)
+	return nil
+}
+
+// GetConfig returns a persistent config value by key.
+func (k *Kernel) GetConfig(ctx context.Context, key string) (string, error) {
+	return k.store.GetConfig(ctx, key)
+}
+
+// SetConfig stores a persistent config value.
+func (k *Kernel) SetConfig(ctx context.Context, key, value string) error {
+	return k.store.SetConfig(ctx, key, value)
 }
 
 // UpdateActionRequest holds validated input for action updates.
@@ -465,7 +548,7 @@ func (k *Kernel) ListTransactions(ctx context.Context, filter TxFilter) ([]*Tran
 	return k.store.ListTransactions(ctx, filter)
 }
 
-// RateTransaction sets a rating on a completed transaction.
+// RateTransaction sets a rating on a completed transaction and cascades to unrated descendants.
 func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, rating float64) error {
 	if rating != 0 && rating != 1 {
 		return ErrInvalidInput.Wrap("rating must be 0 or 1")
@@ -481,7 +564,12 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 		return ErrUnauthorized.Wrap("only the process owner may rate a transaction")
 	}
 	tx.Rating = &rating
-	return k.store.UpdateTransaction(ctx, tx)
+	if err := k.store.UpdateTransaction(ctx, tx); err != nil {
+		return err
+	}
+	// Cascade to unrated descendants.
+	_ = k.store.CascadeRating(ctx, tx.TraceID, rating)
+	return nil
 }
 
 // ---- Stats ----

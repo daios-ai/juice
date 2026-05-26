@@ -9,7 +9,7 @@ import (
 
 func init() {
 	processCmd := &cobra.Command{Use: "process", Short: "Process lifecycle commands"}
-	processCmd.AddCommand(processStartCmd(), processFundCmd(), processEndCmd(), processShowCmd(), processFeedbackCmd())
+	processCmd.AddCommand(processStartCmd(), processFundCmd(), processEndCmd(), processShowCmd())
 	rootCmd.AddCommand(processCmd)
 }
 
@@ -142,34 +142,3 @@ func processShowCmd() *cobra.Command {
 	return cmd
 }
 
-func processFeedbackCmd() *cobra.Command {
-	var processID, traceID string
-	cmd := &cobra.Command{
-		Use:   "feedback",
-		Short: "Show recursive cost and latency for a trace subtree",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			fb, err := k.RecursiveFeedback(context.Background(), processID, traceID)
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(fb)
-			}
-			fmt.Printf("Trace:    %s\n  recursive_cost:    %d\n  recursive_latency: %.3fs\n",
-				fb.TraceID, fb.RecursiveCost, fb.RecursiveLatency)
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&processID, "process", "", "Process ID (required)")
-	cmd.Flags().StringVar(&traceID, "trace", "", "Trace ID to root the subtree at (required)")
-	_ = cmd.MarkFlagRequired("process")
-	_ = cmd.MarkFlagRequired("trace")
-	return cmd
-}

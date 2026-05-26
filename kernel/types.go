@@ -44,6 +44,7 @@ type User struct {
 	PasswordHash string
 	Available    int64
 	Locked       int64
+	SuspendedAt  *time.Time
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
@@ -55,6 +56,7 @@ type Action struct {
 	Name         string
 	Kind         ActionKind
 	Active       bool
+	Public       bool
 	Price        int64
 	Description  string
 	InputSchema  map[string]any
@@ -90,6 +92,8 @@ type Trace struct {
 	ID            string
 	ProcessID     string
 	ParentTraceID string
+	Cost          int64
+	LatencyMS     int64
 	CreatedAt     time.Time
 }
 
@@ -169,8 +173,10 @@ type RefreshToken struct {
 }
 
 // TraceFeedback holds recursive cost and latency for a trace node.
+// Deprecated: use Trace.Cost and Trace.LatencyMS instead.
 type TraceFeedback struct {
-	TraceID           string
-	RecursiveCost     int64
-	RecursiveLatency  float64 // seconds
+	TraceID          string
+	RecursiveCost    int64
+	RecursiveLatency float64 // seconds
 }
+
