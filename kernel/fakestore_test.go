@@ -25,6 +25,7 @@ type fakeStore struct {
 	authCodes       map[string]*AuthCode
 	refreshTokens   map[string]*RefreshToken
 	config          map[string]string
+	deposits        []*Deposit
 }
 
 func newFakeStore() *fakeStore {
@@ -790,5 +791,18 @@ func (f *fakeStore) InitSuperuser(_ context.Context, u *User, configKey, configV
 		f.userByHandle[u.Handle] = &cp
 	}
 	f.config[configKey] = configValue
+	return nil
+}
+
+func (f *fakeStore) CreateDeposit(_ context.Context, d *Deposit) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[d.TargetUserID]
+	if !ok {
+		return ErrNotFound.Wrap("user not found")
+	}
+	u.Available += d.Amount
+	cp := *d
+	f.deposits = append(f.deposits, &cp)
 	return nil
 }

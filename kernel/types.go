@@ -169,6 +169,16 @@ type Event struct {
 	CreatedAt       time.Time
 }
 
+// Deposit is an admin credit grant to a user's available balance.
+type Deposit struct {
+	ID             string
+	OperatorUserID string
+	TargetUserID   string
+	Amount         int64
+	Reason         string
+	CreatedAt      time.Time
+}
+
 // AuthCode is a short-lived PKCE authorization code.
 type AuthCode struct {
 	Code          string

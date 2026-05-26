@@ -79,6 +79,68 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 	}
 }
 
+func TestAdminDeposit(t *testing.T) {
+	ctx := context.Background()
+	k := newAdminTestKernel(t)
+
+	admin, err := k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@admin", Email: "admin@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@recipient", Email: "r@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Deposit succeeds and balance increases.
+	d, err := k.Deposit(ctx, admin.ID, u.ID, 500, "initial grant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Amount != 500 {
+		t.Errorf("deposit amount: got %d, want 500", d.Amount)
+	}
+	if d.OperatorUserID != admin.ID {
+		t.Errorf("operator: got %q, want %q", d.OperatorUserID, admin.ID)
+	}
+
+	u2, err := k.ReadUser(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u2.Available != 500 {
+		t.Errorf("available after deposit: got %d, want 500", u2.Available)
+	}
+
+	// Second deposit accumulates.
+	if _, err := k.Deposit(ctx, admin.ID, u.ID, 200, "top-up"); err != nil {
+		t.Fatal(err)
+	}
+	u3, _ := k.ReadUser(ctx, u.ID)
+	if u3.Available != 700 {
+		t.Errorf("available after second deposit: got %d, want 700", u3.Available)
+	}
+
+	// Zero amount rejected.
+	if _, err := k.Deposit(ctx, admin.ID, u.ID, 0, ""); err == nil {
+		t.Error("expected error for zero amount")
+	}
+
+	// Negative amount rejected.
+	if _, err := k.Deposit(ctx, admin.ID, u.ID, -1, ""); err == nil {
+		t.Error("expected error for negative amount")
+	}
+
+	// Unknown user rejected.
+	if _, err := k.Deposit(ctx, admin.ID, "nonexistent", 100, ""); err == nil {
+		t.Error("expected error for unknown target user")
+	}
+}
+
 func TestAdminListAllActions(t *testing.T) {
 	ctx := context.Background()
 	k := newAdminTestKernel(t)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
 )
 
@@ -17,6 +18,7 @@ func init() {
 		adminUserShowCmd(),
 		adminUserSuspendCmd(),
 		adminUserUnsuspendCmd(),
+		adminUserDepositCmd(),
 	)
 
 	// admin action
@@ -74,18 +76,26 @@ func adminUserListCmd() *cobra.Command {
 }
 
 func adminUserShowCmd() *cobra.Command {
-	var userID string
+	var userID, handle string
 	cmd := &cobra.Command{
 		Use:   "show",
 		Short: "Show user details",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(c *cobra.Command, _ []string) error {
 			k, db, err := openKernel()
 			if err != nil {
 				return err
 			}
 			defer db.Close()
 
-			u, err := k.ReadUser(context.Background(), userID)
+			ctx := context.Background()
+			var u *kernel.User
+			if c.Flags().Changed("handle") {
+				u, err = k.ReadUserByHandle(ctx, handle)
+			} else if c.Flags().Changed("id") {
+				u, err = k.ReadUser(ctx, userID)
+			} else {
+				return fmt.Errorf("either --id or --handle is required")
+			}
 			if err != nil {
 				return err
 			}
@@ -102,8 +112,8 @@ func adminUserShowCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&userID, "id", "", "User ID (required)")
-	_ = cmd.MarkFlagRequired("id")
+	cmd.Flags().StringVar(&userID, "id", "", "User ID")
+	cmd.Flags().StringVar(&handle, "handle", "", "User handle (e.g. @sys)")
 	return cmd
 }
 
@@ -162,6 +172,58 @@ func adminUserUnsuspendCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&userID, "id", "", "User ID to unsuspend (required)")
 	_ = cmd.MarkFlagRequired("id")
+	return cmd
+}
+
+func adminUserDepositCmd() *cobra.Command {
+	var userID, handle, reason string
+	var amount int64
+	cmd := &cobra.Command{
+		Use:   "deposit",
+		Short: "Add credits to a user account",
+		RunE: func(c *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			ctx := context.Background()
+			var targetID string
+			if c.Flags().Changed("handle") {
+				u, err := k.ReadUserByHandle(ctx, handle)
+				if err != nil {
+					return err
+				}
+				targetID = u.ID
+			} else if c.Flags().Changed("id") {
+				targetID = userID
+			} else {
+				return fmt.Errorf("either --id or --handle is required")
+			}
+
+			d, err := k.Deposit(ctx, subjectID, targetID, amount, reason)
+			if err != nil {
+				return err
+			}
+
+			if flagOutput == "json" {
+				return printJSON(d)
+			}
+			fmt.Printf("Deposited %d credits to %s (deposit id: %s)\n", d.Amount, targetID, d.ID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&userID, "id", "", "Target user ID")
+	cmd.Flags().StringVar(&handle, "handle", "", "Target user handle (e.g. @alice)")
+	cmd.Flags().Int64Var(&amount, "amount", 0, "Credits to deposit (required, > 0)")
+	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
+	_ = cmd.MarkFlagRequired("amount")
 	return cmd
 }
 

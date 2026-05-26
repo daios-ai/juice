@@ -55,7 +55,10 @@ func (s *DB) migrate() error {
 	if err := s.migrate003(); err != nil {
 		return err
 	}
-	return s.migrate004()
+	if err := s.migrate004(); err != nil {
+		return err
+	}
+	return s.migrate005()
 }
 
 // migrate002 applies schema002 idempotently.
@@ -114,6 +117,19 @@ func (s *DB) migrate004() error {
 		}
 	}
 	return nil
+}
+
+// migrate005 creates the deposits audit table.
+func (s *DB) migrate005() error {
+	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS deposits (
+		id               TEXT PRIMARY KEY,
+		operator_user_id TEXT NOT NULL REFERENCES users(id),
+		target_user_id   TEXT NOT NULL REFERENCES users(id),
+		amount           INTEGER NOT NULL CHECK (amount > 0),
+		reason           TEXT NOT NULL DEFAULT '',
+		created_at       TEXT NOT NULL
+	)`)
+	return err
 }
 
 // migrate003 adds the caused_by_trace_id column for FOLLOWS_FROM causal tracing.
@@ -1250,6 +1266,33 @@ func (s *DB) InitSuperuser(ctx context.Context, u *kernel.User, configKey, confi
 	}
 
 	return dbErr(tx.Commit(), "init superuser: commit")
+}
+
+// ---- Deposits ----
+
+func (s *DB) CreateDeposit(ctx context.Context, d *kernel.Deposit) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin deposit")
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO deposits (id,operator_user_id,target_user_id,amount,reason,created_at)
+		 VALUES (?,?,?,?,?,?)`,
+		d.ID, d.OperatorUserID, d.TargetUserID, d.Amount, d.Reason, timeToStr(d.CreatedAt),
+	)
+	if err != nil {
+		return dbErr(err, "insert deposit")
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`UPDATE users SET available=available+? WHERE id=?`, d.Amount, d.TargetUserID)
+	if err != nil {
+		return dbErr(err, "deposit: update user balance")
+	}
+
+	return dbErr(tx.Commit(), "deposit: commit")
 }
 
 // ---- helpers ----

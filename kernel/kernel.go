@@ -147,6 +147,30 @@ func (k *Kernel) UnsuspendUser(ctx context.Context, superuserID, targetID string
 	return nil
 }
 
+// Deposit adds credits directly to a user's available balance and records an audit entry.
+// The operatorID is stored for audit; superuser enforcement is the caller's responsibility.
+func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, amount int64, reason string) (*Deposit, error) {
+	if amount <= 0 {
+		return nil, ErrInvalidInput.Wrap("amount must be positive")
+	}
+	if _, err := k.store.ReadUser(ctx, targetUserID); err != nil {
+		return nil, err
+	}
+	d := &Deposit{
+		ID:             uuid.New().String(),
+		OperatorUserID: operatorID,
+		TargetUserID:   targetUserID,
+		Amount:         amount,
+		Reason:         reason,
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := k.store.CreateDeposit(ctx, d); err != nil {
+		return nil, err
+	}
+	k.log.With(ctx).Info("deposit.created", "deposit_id", d.ID, "target_user_id", targetUserID, "amount", amount)
+	return d, nil
+}
+
 // VerifyToken validates a bearer token and returns the subject user ID.
 func (k *Kernel) VerifyToken(token string) (string, error) {
 	return VerifyToken(token, k.cfg.TokenSecret)

@@ -18,6 +18,7 @@ func init() {
 		actionEnableCmd(),
 		actionDisableCmd(),
 		actionListCmd(),
+		actionShowCmd(),
 		actionDeleteCmd(),
 		actionACLCmd(),
 		actionGrantAllCmd(),
@@ -253,6 +254,44 @@ func actionListCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&all, "all", false, "Include inactive actions")
 	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
 	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	return cmd
+}
+
+func actionShowCmd() *cobra.Command {
+	var actionID string
+	cmd := &cobra.Command{
+		Use:   "show",
+		Short: "Show action details",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			a, err := k.ReadAction(context.Background(), actionID)
+			if err != nil {
+				return err
+			}
+
+			if flagOutput == "json" {
+				return printJSON(a)
+			}
+			active := "inactive"
+			if a.Active {
+				active = "active"
+			}
+			public := "private"
+			if a.Public {
+				public = "public"
+			}
+			fmt.Printf("Action: %s\n  name:        %s\n  kind:        %s\n  status:      %s  (%s)\n  price:       %d credits\n  owner:       %s\n  description: %s\n",
+				a.ID, a.Name, a.Kind, active, public, a.Price, a.OwnerUserID, a.Description)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
+	_ = cmd.MarkFlagRequired("id")
 	return cmd
 }
 

@@ -174,4 +174,8 @@ type Store interface {
 	// InitSuperuser atomically creates a user and sets a config key.
 	// If the user handle already exists the user INSERT is skipped; the config is always set.
 	InitSuperuser(ctx context.Context, u *User, configKey, configValue string) error
+
+	// ---- Deposits ----
+
+	CreateDeposit(ctx context.Context, d *Deposit) error
 }

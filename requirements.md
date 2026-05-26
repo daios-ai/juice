@@ -342,6 +342,7 @@ ConsumeEvent
 PurgeListenerEvents
 GetConfig
 SetConfig
+CreateDeposit
 ```
 
 Justification: the kernel must be testable with fake stores and replaceable persistent stores.
@@ -878,6 +879,7 @@ juice admin user list
 juice admin user show
 juice admin user suspend
 juice admin user unsuspend
+juice admin user deposit
 juice admin action list
 juice admin action disable
 juice admin process list
@@ -1158,6 +1160,7 @@ GET  /v1/admin/users                    juice admin user list
 GET  /v1/admin/users/{id}               juice admin user show --id
 POST /v1/admin/users/{id}/suspend       juice admin user suspend --id
 POST /v1/admin/users/{id}/unsuspend     juice admin user unsuspend --id
+POST /v1/admin/users/{id}/deposit       juice admin user deposit --handle / --id
 ```
 
 Action management:
@@ -1195,3 +1198,34 @@ Unauthenticated. Returns server status.
 ```text
 GET /health                             juice health
 ```
+
+### 19.9 Deposits
+
+The superuser may add credits directly to any user's available balance as an out-of-band platform operation.
+
+Required deposit fields:
+
+```text
+id
+operator_user_id
+target_user_id
+amount
+reason
+created_at
+```
+
+Requirements:
+
+- Only the superuser may issue a deposit.
+- Amount must be a positive integer.
+- A deposit must atomically increase `user.available` by the specified amount inside a single SQLite transaction.
+- Each deposit must be persisted as an audit record.
+- `reason` is optional but stored when provided.
+- Deposits must not route through `Call()`. They are a human supervision operation (§2.3).
+
+Required tests:
+
+- Deposit increases target user's available balance by the exact amount.
+- Non-superuser deposit attempt is rejected with `ErrUnauthorized`.
+- Zero or negative amount is rejected with `ErrInvalidInput`.
+- Deposit record is retrievable after creation.

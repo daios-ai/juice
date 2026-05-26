@@ -121,6 +121,7 @@ func runServer(addr string) error {
 			r.Get("/v1/admin/users/{id}", srv.adminGetUser)
 			r.Post("/v1/admin/users/{id}/suspend", srv.adminSuspendUser)
 			r.Post("/v1/admin/users/{id}/unsuspend", srv.adminUnsuspendUser)
+			r.Post("/v1/admin/users/{id}/deposit", srv.adminDepositUser)
 			r.Get("/v1/admin/actions", srv.adminListActions)
 			r.Post("/v1/admin/actions/{id}/disable", srv.adminDisableAction)
 			r.Get("/v1/admin/processes", srv.adminListProcesses)
@@ -841,6 +842,24 @@ func (s *server) adminUnsuspendUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) adminDepositUser(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Amount int64  `json:"amount"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid request body"))
+		return
+	}
+	d, err := s.kernel.Deposit(r.Context(), subjectFrom(r), id, req.Amount, req.Reason)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, d)
 }
 
 func (s *server) adminListActions(w http.ResponseWriter, r *http.Request) {

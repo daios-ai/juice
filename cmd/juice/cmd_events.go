@@ -11,7 +11,7 @@ import (
 
 func init() {
 	eventsCmd := &cobra.Command{Use: "events", Short: "Event listener commands"}
-	eventsCmd.AddCommand(eventsListenCmd(), eventsUnlistenCmd(), eventsEmitCmd(), eventsPollCmd())
+	eventsCmd.AddCommand(eventsListenCmd(), eventsUnlistenCmd(), eventsEmitCmd(), eventsPollCmd(), eventsConsumeCmd())
 	rootCmd.AddCommand(eventsCmd)
 }
 
@@ -128,11 +128,11 @@ func eventsEmitCmd() *cobra.Command {
 			}
 
 			if flagOutput == "json" {
-				return printJSON(map[string]any{"tx_ids": txIDs})
+				return printJSON(map[string]any{"event_ids": txIDs})
 			}
-			fmt.Printf("Event emitted: %d listener(s) fired\n", len(txIDs))
+			fmt.Printf("Event queued for %d listener(s)\n", len(txIDs))
 			for _, id := range txIDs {
-				fmt.Printf("  tx: %s\n", id)
+				fmt.Printf("  event: %s\n", id)
 			}
 			return nil
 		},
@@ -160,22 +160,58 @@ func eventsPollCmd() *cobra.Command {
 				return err
 			}
 
-			txIDs, err := k.PollListener(context.Background(), subjectID, listenerID)
+			events, err := k.PollListener(context.Background(), subjectID, listenerID)
 			if err != nil {
 				return err
 			}
 
 			if flagOutput == "json" {
-				return printJSON(map[string]any{"tx_ids": txIDs})
+				return printJSON(map[string]any{"events": events})
 			}
-			fmt.Printf("Queued transactions: %d\n", len(txIDs))
-			for _, id := range txIDs {
-				fmt.Println(" ", id)
+			fmt.Printf("Pending events: %d\n", len(events))
+			for _, e := range events {
+				fmt.Printf("  %s  args: %s\n", e.ID, e.ArgsJSON)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&listenerID, "id", "", "Listener ID (required)")
 	_ = cmd.MarkFlagRequired("id")
+	return cmd
+}
+
+func eventsConsumeCmd() *cobra.Command {
+	var eventID, processID string
+	cmd := &cobra.Command{
+		Use:   "consume",
+		Short: "Consume a pending event, calling its listener's target action",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			reply, err := k.ConsumeEvent(context.Background(), subjectID, eventID, processID)
+			if err != nil {
+				return err
+			}
+
+			if flagOutput == "json" {
+				return printJSON(reply)
+			}
+			fmt.Printf("Event consumed: tx=%s\n", reply.TxID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&eventID, "id", "", "Event ID (required)")
+	cmd.Flags().StringVar(&processID, "process", "", "Process ID to fund the action call (required)")
+	_ = cmd.MarkFlagRequired("id")
+	_ = cmd.MarkFlagRequired("process")
 	return cmd
 }
