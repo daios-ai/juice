@@ -5,10 +5,14 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +21,13 @@ import (
 )
 
 const driverName = "sqlite"
+
+// Migration policy: store/migrations/*.sql is the canonical schema history.
+// Keep future schema changes in numbered SQL files and let this runner apply
+// them; do not add ad hoc migration SQL to Go.
+//
+//go:embed migrations/*.sql
+var migrationFS embed.FS
 
 // DB implements kernel.Store using SQLite.
 type DB struct {
@@ -44,163 +55,125 @@ func (s *DB) Close() error {
 	return s.db.Close()
 }
 
-// migrate applies the embedded DDL idempotently.
+// migrate applies file-backed SQL migrations in order.
 func (s *DB) migrate() error {
-	if _, err := s.db.Exec(schema001); err != nil {
+	if _, err := s.db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
 		return err
 	}
-	if err := s.migrate002(); err != nil {
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+		version    TEXT PRIMARY KEY,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
 		return err
 	}
-	if err := s.migrate003(); err != nil {
+	files, err := migrationFileNames()
+	if err != nil {
 		return err
 	}
-	if err := s.migrate004(); err != nil {
-		return err
-	}
-	if err := s.migrate005(); err != nil {
-		return err
-	}
-	if err := s.migrate006(); err != nil {
-		return err
-	}
-	if err := s.migrate007(); err != nil {
-		return err
-	}
-	return s.migrate008()
-}
-
-// migrate002 applies schema002 idempotently.
-// SQLite does not support ALTER TABLE ... ADD COLUMN IF NOT EXISTS,
-// so we attempt each statement individually and ignore "duplicate column" errors.
-func (s *DB) migrate002() error {
-	stmts := []string{
-		`ALTER TABLE users ADD COLUMN suspended_at TEXT`,
-		`ALTER TABLE actions ADD COLUMN public INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE traces ADD COLUMN cost INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE traces ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0`,
-		`CREATE TABLE IF NOT EXISTS config (
-			key   TEXT PRIMARY KEY,
-			value TEXT NOT NULL DEFAULT ''
-		)`,
-	}
-	for _, stmt := range stmts {
-		if _, err := s.db.Exec(stmt); err != nil {
-			// Ignore "duplicate column name" errors — column already exists from a previous migration run.
-			if !isDuplicateColumn(err) {
-				return fmt.Errorf("migrate002: %w", err)
+	for _, file := range files {
+		version := strings.TrimSuffix(path.Base(file), ".sql")
+		applied, err := s.migrationApplied(version)
+		if err != nil {
+			return err
+		}
+		if applied {
+			continue
+		}
+		if version == "004_events_queue" && s.columnExists("events", "consumed_at") {
+			if err := s.markMigrationApplied(version); err != nil {
+				return err
 			}
+			continue
+		}
+		sqlBytes, err := migrationFS.ReadFile(file)
+		if err != nil {
+			return err
+		}
+		if err := s.applyMigration(version, string(sqlBytes)); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// migrate004 replaces the old push-based events table with a pull-based queue schema.
-// The old table stored (id INTEGER, listener_id, tx_id NOT NULL, created_at).
-// The new table stores (id TEXT UUID, listener_id, args_json, causing_trace_id,
-// consumed_at, tx_id nullable, created_at) supporting pending/in-flight/consumed states.
-func (s *DB) migrate004() error {
-	// Idempotency check: new schema has consumed_at column.
+func migrationFileNames() ([]string, error) {
+	entries, err := fs.ReadDir(migrationFS, "migrations")
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		files = append(files, path.Join("migrations", e.Name()))
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func (s *DB) migrationApplied(version string) (bool, error) {
 	var n int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='consumed_at'`).Scan(&n)
-	if n > 0 {
-		return nil
-	}
-	for _, stmt := range []string{
-		`DROP INDEX IF EXISTS idx_events_listener`,
-		`DROP TABLE IF EXISTS events`,
-		`CREATE TABLE events (
-			id               TEXT PRIMARY KEY,
-			listener_id      TEXT NOT NULL REFERENCES listeners(id) ON DELETE CASCADE,
-			args_json        TEXT NOT NULL DEFAULT '{}',
-			causing_trace_id TEXT,
-			consumed_at      TEXT,
-			tx_id            TEXT,
-			created_at       TEXT NOT NULL DEFAULT (datetime('now'))
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_events_listener_pending
-			ON events(listener_id, created_at) WHERE consumed_at IS NULL`,
-	} {
-		if _, err := s.db.Exec(stmt); err != nil {
-			return fmt.Errorf("migrate004: %w", err)
-		}
-	}
-	return nil
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=?`, version).Scan(&n)
+	return n > 0, err
 }
 
-// migrate005 creates the deposits audit table.
-func (s *DB) migrate005() error {
-	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS deposits (
-		id               TEXT PRIMARY KEY,
-		operator_user_id TEXT NOT NULL REFERENCES users(id),
-		target_user_id   TEXT NOT NULL REFERENCES users(id),
-		amount           INTEGER NOT NULL CHECK (amount > 0),
-		reason           TEXT NOT NULL DEFAULT '',
-		created_at       TEXT NOT NULL
-	)`)
+func (s *DB) applyMigration(version, sqlText string) error {
+	var txStmts []string
+	for _, stmt := range splitSQLStatements(sqlText) {
+		if strings.HasPrefix(strings.ToUpper(stmt), "PRAGMA ") {
+			if _, err := s.db.Exec(stmt); err != nil {
+				return fmt.Errorf("%s: %w", version, err)
+			}
+			continue
+		}
+		txStmts = append(txStmts, stmt)
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, stmt := range txStmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			if ignorableMigrationError(err) {
+				continue
+			}
+			return fmt.Errorf("%s: %w", version, err)
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`, version, timeToStr(time.Now().UTC())); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *DB) markMigrationApplied(version string) error {
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)`, version, timeToStr(time.Now().UTC()))
 	return err
 }
 
-// migrate006 drops the process_id and trace_id columns from listeners.
-// These were dead data: ConsumeEvent ignores the stored process (caller supplies their own),
-// and using l.TraceID as a CHILD_OF parent violated the trace invariant
-// (child.process_id must equal parent.process_id).
-func (s *DB) migrate006() error {
-	for _, col := range []string{"process_id", "trace_id"} {
-		rows, err := s.db.Query(`PRAGMA table_info(listeners)`)
-		if err != nil {
-			return fmt.Errorf("migrate006: %w", err)
+func splitSQLStatements(sqlText string) []string {
+	var lines []string
+	for _, line := range strings.Split(sqlText, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "--") {
+			continue
 		}
-		var found bool
-		for rows.Next() {
-			var cid, notNull, pk int
-			var name, colType string
-			var dflt any
-			_ = rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk)
-			if name == col {
-				found = true
-			}
-		}
-		rows.Close()
-		if found {
-			if _, err := s.db.Exec(`ALTER TABLE listeners DROP COLUMN ` + col); err != nil {
-				return fmt.Errorf("migrate006: drop %s: %w", col, err)
-			}
-		}
+		lines = append(lines, line)
 	}
-	return nil
-}
-
-// migrate007 adds the embed_vec column to actions for storing pre-computed embeddings.
-// NULL means the action has no stored embedding yet (Lookup will skip it until re-embedded).
-func (s *DB) migrate007() error {
-	if _, err := s.db.Exec(`ALTER TABLE actions ADD COLUMN embed_vec TEXT`); err != nil {
-		if !isDuplicateColumn(err) {
-			return fmt.Errorf("migrate007: %w", err)
+	parts := strings.Split(strings.Join(lines, "\n"), ";")
+	stmts := make([]string, 0, len(parts))
+	for _, p := range parts {
+		stmt := strings.TrimSpace(p)
+		if stmt == "" || strings.HasPrefix(stmt, "--") {
+			continue
 		}
+		stmts = append(stmts, stmt)
 	}
-	return nil
-}
-
-// migrate008 adds the rating_count column to action_stats.
-// The denominator for RatingMean is the number of rated observations, not total uses.
-func (s *DB) migrate008() error {
-	if _, err := s.db.Exec(`ALTER TABLE action_stats ADD COLUMN rating_count INTEGER NOT NULL DEFAULT 0`); err != nil {
-		if !isDuplicateColumn(err) {
-			return fmt.Errorf("migrate008: %w", err)
-		}
-	}
-	return nil
-}
-
-// migrate003 adds the caused_by_trace_id column for FOLLOWS_FROM causal tracing.
-func (s *DB) migrate003() error {
-	if _, err := s.db.Exec(`ALTER TABLE traces ADD COLUMN caused_by_trace_id TEXT`); err != nil {
-		if !isDuplicateColumn(err) {
-			return fmt.Errorf("migrate003: %w", err)
-		}
-	}
-	return nil
+	return stmts
 }
 
 // isDuplicateColumn reports whether the SQLite error is a duplicate column error.
@@ -212,11 +185,37 @@ func isDuplicateColumn(err error) bool {
 	return strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "already exists")
 }
 
+func ignorableMigrationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return isDuplicateColumn(err) || strings.Contains(msg, "no such column")
+}
+
+func (s *DB) columnExists(table, column string) bool {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, colType string
+		var dflt any
+		_ = rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk)
+		if name == column {
+			return true
+		}
+	}
+	return false
+}
+
 // ---- time helpers ----
 
 const timeLayout = time.RFC3339Nano
 
-func timeToStr(t time.Time) string  { return t.UTC().Format(timeLayout) }
+func timeToStr(t time.Time) string { return t.UTC().Format(timeLayout) }
 func strToTime(s string) time.Time {
 	t, _ := time.Parse(timeLayout, s)
 	return t
@@ -1484,141 +1483,3 @@ func dbErr(err error, op string) error {
 	}
 	return kernel.ErrInternal.Wrapf("%s: %v", op, err)
 }
-
-// schema001 is the initial migration DDL.
-const schema001 = `
-PRAGMA journal_mode=WAL;
-PRAGMA foreign_keys=ON;
-
-CREATE TABLE IF NOT EXISTS users (
-    id            TEXT PRIMARY KEY,
-    handle        TEXT NOT NULL UNIQUE,
-    email         TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    available     INTEGER NOT NULL DEFAULT 0 CHECK (available >= 0),
-    locked        INTEGER NOT NULL DEFAULT 0 CHECK (locked >= 0),
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS actions (
-    id            TEXT PRIMARY KEY,
-    owner_user_id TEXT NOT NULL REFERENCES users(id),
-    name          TEXT NOT NULL,
-    kind          TEXT NOT NULL CHECK (kind IN ('http','wasm','native')),
-    active        INTEGER NOT NULL DEFAULT 0,
-    price         INTEGER NOT NULL DEFAULT 0 CHECK (price >= 0),
-    description   TEXT NOT NULL DEFAULT '',
-    input_schema  TEXT NOT NULL DEFAULT '{}',
-    output_schema TEXT NOT NULL DEFAULT '{}',
-    source        TEXT NOT NULL DEFAULT '',
-    artifact_hash TEXT NOT NULL DEFAULT '',
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL,
-    UNIQUE (owner_user_id, name)
-);
-
-CREATE TABLE IF NOT EXISTS acl_entries (
-    subject_user_id TEXT NOT NULL REFERENCES users(id),
-    action_id       TEXT NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
-    permission      TEXT NOT NULL CHECK (permission IN ('read','call','admin')),
-    created_at      TEXT NOT NULL,
-    PRIMARY KEY (subject_user_id, action_id, permission)
-);
-
-CREATE TABLE IF NOT EXISTS processes (
-    id            TEXT PRIMARY KEY,
-    owner_user_id TEXT NOT NULL REFERENCES users(id),
-    available     INTEGER NOT NULL DEFAULT 0 CHECK (available >= 0),
-    locked        INTEGER NOT NULL DEFAULT 0 CHECK (locked >= 0),
-    status        TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','closed')),
-    created_at    TEXT NOT NULL,
-    ended_at      TEXT
-);
-
-CREATE TABLE IF NOT EXISTS traces (
-    id              TEXT PRIMARY KEY,
-    process_id      TEXT NOT NULL REFERENCES processes(id),
-    parent_trace_id TEXT NOT NULL,
-    created_at      TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS transactions (
-    id              TEXT PRIMARY KEY,
-    process_id      TEXT NOT NULL,
-    trace_id        TEXT NOT NULL,
-    parent_trace_id TEXT NOT NULL,
-    owner_user_id   TEXT NOT NULL,
-    subject_user_id TEXT NOT NULL,
-    target_user_id  TEXT NOT NULL,
-    action_id       TEXT NOT NULL,
-    args_json       TEXT NOT NULL DEFAULT '',
-    reply_json      TEXT NOT NULL DEFAULT '',
-    status          TEXT NOT NULL CHECK (status IN ('success','failure')),
-    gross           INTEGER NOT NULL DEFAULT 0 CHECK (gross >= 0),
-    net             INTEGER NOT NULL DEFAULT 0 CHECK (net >= 0),
-    fee             INTEGER NOT NULL DEFAULT 0 CHECK (fee >= 0),
-    reason          TEXT NOT NULL DEFAULT '',
-    started_at      TEXT NOT NULL,
-    ended_at        TEXT NOT NULL,
-    rating          REAL
-);
-
-CREATE TABLE IF NOT EXISTS action_stats (
-    action_id    TEXT PRIMARY KEY REFERENCES actions(id) ON DELETE CASCADE,
-    uses         INTEGER NOT NULL DEFAULT 0,
-    successes    INTEGER NOT NULL DEFAULT 0,
-    failures     INTEGER NOT NULL DEFAULT 0,
-    price_mean   REAL NOT NULL DEFAULT 0,
-    latency_mean REAL NOT NULL DEFAULT 0,
-    rating_mean  REAL NOT NULL DEFAULT 0,
-    last_used_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS stat_tags (
-    action_id  TEXT NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
-    key        TEXT NOT NULL,
-    value      TEXT NOT NULL DEFAULT '',
-    source     TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (action_id, key, source)
-);
-
-CREATE TABLE IF NOT EXISTS listeners (
-    id               TEXT PRIMARY KEY,
-    owner_user_id    TEXT NOT NULL REFERENCES users(id),
-    source_user_id   TEXT NOT NULL REFERENCES users(id),
-    event_name       TEXT NOT NULL,
-    process_id       TEXT NOT NULL REFERENCES processes(id),
-    trace_id         TEXT NOT NULL,
-    target_action_id TEXT NOT NULL REFERENCES actions(id),
-    active           INTEGER NOT NULL DEFAULT 1,
-    created_at       TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS auth_codes (
-    code           TEXT PRIMARY KEY,
-    user_id        TEXT NOT NULL REFERENCES users(id),
-    code_challenge TEXT NOT NULL,
-    redirect_uri   TEXT NOT NULL DEFAULT '',
-    expires_at     TEXT NOT NULL,
-    used           INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS refresh_tokens (
-    token      TEXT PRIMARY KEY,
-    user_id    TEXT NOT NULL REFERENCES users(id),
-    expires_at TEXT NOT NULL,
-    revoked    INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_actions_owner        ON actions(owner_user_id);
-CREATE INDEX IF NOT EXISTS idx_acl_action           ON acl_entries(action_id);
-CREATE INDEX IF NOT EXISTS idx_transactions_owner   ON transactions(owner_user_id);
-CREATE INDEX IF NOT EXISTS idx_transactions_process ON transactions(process_id);
-CREATE INDEX IF NOT EXISTS idx_transactions_trace   ON transactions(trace_id);
-CREATE INDEX IF NOT EXISTS idx_listeners_source     ON listeners(source_user_id, event_name);
-CREATE INDEX IF NOT EXISTS idx_traces_process       ON traces(process_id);
-`
-

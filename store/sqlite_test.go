@@ -20,6 +20,43 @@ func openTestDB(t *testing.T) *DB {
 	return db
 }
 
+func TestMigrationsAreFileBackedAndRecorded(t *testing.T) {
+	db := openTestDB(t)
+
+	files, err := migrationFileNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) < 8 {
+		t.Fatalf("expected at least 8 migration files, got %d", len(files))
+	}
+	for _, file := range files {
+		version := filepath.Base(file[:len(file)-len(filepath.Ext(file))])
+		applied, err := db.migrationApplied(version)
+		if err != nil {
+			t.Fatalf("migrationApplied(%s): %v", version, err)
+		}
+		if !applied {
+			t.Fatalf("migration %s was not recorded", version)
+		}
+	}
+
+	for _, tc := range []struct {
+		table  string
+		column string
+	}{
+		{"events", "consumed_at"},
+		{"events", "causing_trace_id"},
+		{"actions", "embed_vec"},
+		{"action_stats", "rating_count"},
+		{"traces", "caused_by_trace_id"},
+	} {
+		if !db.columnExists(tc.table, tc.column) {
+			t.Fatalf("expected %s.%s to exist after migrations", tc.table, tc.column)
+		}
+	}
+}
+
 func newUser(handle string, balance int64) *kernel.User {
 	return &kernel.User{
 		ID:           uuid.New().String(),

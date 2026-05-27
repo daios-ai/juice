@@ -114,9 +114,28 @@ CREATE TABLE IF NOT EXISTS events (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS auth_codes (
+    code           TEXT PRIMARY KEY,
+    user_id        TEXT NOT NULL REFERENCES users(id),
+    code_challenge TEXT NOT NULL,
+    redirect_uri   TEXT NOT NULL DEFAULT '',
+    expires_at     TEXT NOT NULL,
+    used           INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    token      TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id),
+    expires_at TEXT NOT NULL,
+    revoked    INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_actions_owner   ON actions(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_acl_action      ON acl_entries(action_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_owner  ON transactions(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_process ON transactions(process_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_trace ON transactions(trace_id);
 CREATE INDEX IF NOT EXISTS idx_listeners_source_event ON listeners(source_user_id, event_name);
 CREATE INDEX IF NOT EXISTS idx_events_listener ON events(listener_id);
+CREATE INDEX IF NOT EXISTS idx_traces_process ON traces(process_id);
