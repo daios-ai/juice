@@ -230,10 +230,11 @@ Requirements:
 - Every process must have one root trace.
 - `cost` and `latency_ms` must be updated automatically as each descendant transaction completes.
 - The root trace must have `parent_trace_id = id` or `parent_trace_id = null`; this choice must be consistent across the codebase.
-- Every nested call must create exactly one child trace.
+- Every direct `Call()` invocation creates exactly one child trace within the calling process.
 - A child trace must inherit the parent trace’s process id.
 - The trace relation must form a rooted tree for each process.
-- `caused_by_trace_id` must be null for direct calls.
+- `caused_by_trace_id` must be null for direct calls that are not contractor sub-calls or event-triggered.
+- For contractor sub-calls via `juice.call` (§5.7), the ephemeral process root trace must set `caused_by_trace_id` to the calling action’s trace ID. This is a FOLLOWS_FROM reference. The caller’s trace tree is not extended; the link is causal, not structural. The caller’s process is not the ephemeral process’s process.
 - For event-triggered calls, `caused_by_trace_id` must be set to the trace ID of the emitting action at the moment of emit. This is a FOLLOWS_FROM reference, not a parent-child link. The referenced trace may belong to a different process.
 - The kernel must validate that a supplied `parent_trace_id` exists and belongs to the same process before creating a child trace. An invalid or cross-process `parent_trace_id` must be rejected with `ErrInvalidInput`.
 
@@ -476,7 +477,7 @@ When `juice.call` is invoked inside an action's execution context, the kernel im
 
 The caller's process is debited only by the top-level `action.price`. Sub-call costs are isolated to the respective action owner's balance at each depth.
 
-The process hierarchy mirrors the trace hierarchy: each trace node corresponds to an ephemeral process owned by the action's owner at that level.
+Each contractor sub-call creates a new ephemeral process with its own root trace. The root trace of the ephemeral process sets `caused_by_trace_id` to the calling action's trace ID (FOLLOWS_FROM). It does not set `parent_trace_id` to the caller's trace — contractor sub-calls cross process boundaries and are not CHILD_OF the calling trace. The caller's trace tree is structurally complete at its own process boundary; the causal link is for observability only.
 
 Invariant:
 
@@ -573,7 +574,7 @@ Requirements:
 
 - `juice.call` must call another action through the kernel call path.
 - `juice.call` must enforce ACL, accounting, trace creation, and schema validation.
-- `juice.call` must create an ephemeral process owned by the calling action's owner and use it as the process context for the sub-call (contractor model, §5.7).
+- `juice.call` must create an ephemeral process owned by the calling action's owner and use it as the process context for the sub-call (contractor model, §5.7). The ephemeral process root trace must set `caused_by_trace_id` to the calling action's current trace ID (FOLLOWS_FROM). The calling trace's `parent_trace_id` is not modified; the caller's process trace tree is not extended.
 - `juice.emit` must emit an event through the kernel event path.
 - `juice.emit` must store the current trace ID of the emitting action as `causing_trace_id` in each created event record. This ID is passed to the kernel call path at consume time and recorded as `caused_by_trace_id` on the listener-triggered trace (FOLLOWS_FROM).
 - `juice.log` must write structured logs under the current trace id.
@@ -706,22 +707,22 @@ Justification: this rule is deterministic, unbiased for stationary observations,
 Requirements:
 
 - Every transaction must reference a trace.
-- Nested calls must create child traces.
+- Direct `Call()` invocations within a process create child traces (CHILD_OF).
+- Contractor sub-calls via `juice.call` and event-triggered calls create traces in separate processes linked via FOLLOWS_FROM.
 - Trace lookup by process must return the execution tree.
 - Trace deletion must not delete transaction history.
 
 Two trace relationship types exist:
 
 ```text
-CHILD_OF (parent_trace_id): synchronous sub-call within the same execution context.
+CHILD_OF (parent_trace_id): direct Call() invocation within the same process.
   The parent waits for the child. process_id is inherited.
 
-FOLLOWS_FROM (caused_by_trace_id): causal link across process or listener boundaries.
+FOLLOWS_FROM (caused_by_trace_id): causal link across process boundaries.
+  Used for contractor sub-calls (juice.call) and event-triggered calls.
   The originating trace may be closed before the triggered trace starts.
-  The referenced trace may belong to a different process.
+  The referenced trace always belongs to a different process.
 ```
-
-Event-triggered traces use FOLLOWS_FROM. Direct sub-calls use CHILD_OF.
 
 ### 10.2 Ratings and trace metrics
 
