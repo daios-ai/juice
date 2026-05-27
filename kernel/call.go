@@ -105,31 +105,28 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInsufficientFunds.Wrapf("process has %d credits, action costs %d", process.Available, action.Price)
 	}
 
-	// 9. Lock funds atomically.
-	if action.Price > 0 {
-		if err := k.store.LockFunds(ctx, req.ProcessID, action.Price); err != nil {
-			return nil, ErrInsufficientFunds.Wrap("could not lock funds")
-		}
-	}
-
-	// 10. Validate or resolve parent trace.
+	// 9. Validate or resolve parent trace — precondition check, no state change yet.
 	if req.ParentTraceID != "" {
 		parent, err := k.store.ReadTrace(ctx, req.ParentTraceID)
 		if err != nil {
-			_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
 			return nil, ErrInvalidInput.Wrap("parent trace not found")
 		}
 		if parent.ProcessID != req.ProcessID {
-			_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
 			return nil, ErrInvalidInput.Wrap("parent trace belongs to a different process")
 		}
 	} else {
 		root, err := k.store.ReadRootTrace(ctx, req.ProcessID)
 		if err != nil {
-			_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
 			return nil, ErrInternal.Wrap("could not resolve root trace for process")
 		}
 		req.ParentTraceID = root.ID
+	}
+
+	// 10. Lock funds atomically — first state change.
+	if action.Price > 0 {
+		if err := k.store.LockFunds(ctx, req.ProcessID, action.Price); err != nil {
+			return nil, ErrInsufficientFunds.Wrap("could not lock funds")
+		}
 	}
 
 	// 11. Create child trace.
@@ -142,7 +139,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		CreatedAt:       now,
 	}
 	if err := k.store.CreateTrace(ctx, trace); err != nil {
-		_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
+		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
+			logger.Error("call.refund_failed_on_trace_error", "refund_error", refundErr)
+			return nil, ErrInternal.Wrap("could not refund funds after trace creation failure")
+		}
 		return nil, ErrInternal.Wrap("could not create trace")
 	}
 

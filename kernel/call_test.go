@@ -867,6 +867,75 @@ func TestCommitCallAtomicOnFailure(t *testing.T) {
 	}
 }
 
+// ---- Trace validation precondition tests ----
+
+func TestCallInvalidParentTraceDoesNotLockFunds(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 1000)
+	a := setupAction(t, st, alice.ID, "/svc", 100)
+	st.GrantACL(ctx, &ACLEntry{SubjectUserID: alice.ID, ActionID: a.ID, Permission: PermCall})
+
+	p, _, _ := k.StartProcess(ctx, alice.ID, 500)
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID:     alice.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: "nonexistent-trace-id",
+		TargetUserID:  alice.ID,
+		ActionName:    "/svc",
+		Args:          map[string]any{},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for bad parent trace, got %v", err)
+	}
+
+	// Funds must be untouched — no locking should have occurred.
+	proc, _ := st.ReadProcess(ctx, p.ID)
+	if proc.Available != 500 {
+		t.Errorf("process.available: got %d, want 500 (funds locked before trace validated)", proc.Available)
+	}
+	if proc.Locked != 0 {
+		t.Errorf("process.locked: got %d, want 0 (funds locked before trace validated)", proc.Locked)
+	}
+}
+
+func TestCallCrossProcessParentTraceDoesNotLockFunds(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 1000)
+	a := setupAction(t, st, alice.ID, "/svc", 100)
+	st.GrantACL(ctx, &ACLEntry{SubjectUserID: alice.ID, ActionID: a.ID, Permission: PermCall})
+
+	p, _, _ := k.StartProcess(ctx, alice.ID, 500)
+	other, otherRoot, _ := k.StartProcess(ctx, alice.ID, 0)
+	_ = other
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID:     alice.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: otherRoot.ID, // belongs to a different process
+		TargetUserID:  alice.ID,
+		ActionName:    "/svc",
+		Args:          map[string]any{},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for cross-process trace, got %v", err)
+	}
+
+	proc, _ := st.ReadProcess(ctx, p.ID)
+	if proc.Available != 500 {
+		t.Errorf("process.available: got %d, want 500", proc.Available)
+	}
+	if proc.Locked != 0 {
+		t.Errorf("process.locked: got %d, want 0", proc.Locked)
+	}
+}
+
 // ---- CommitFailedCall settlement error tests ----
 
 type failingCommitFailedCallStore struct {
