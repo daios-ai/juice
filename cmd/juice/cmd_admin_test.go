@@ -147,7 +147,7 @@ func TestRequireSuperuser(t *testing.T) {
 	env := newTestEnv(t)
 
 	admin, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@admin", Email: "admin@example.com", Password: "pass",
+		Handle: "@sys", Email: "sys@sys", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -158,11 +158,8 @@ func TestRequireSuperuser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.k.SetConfig(ctx, configKeySuperuser, "@admin"); err != nil {
-		t.Fatal(err)
-	}
 
-	adminToken, err := env.k.Login(ctx, "@admin", "pass")
+	adminToken, err := env.k.Login(ctx, "@sys", "pass")
 	if err != nil {
 		t.Fatal(err)
 	}

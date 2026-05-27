@@ -618,7 +618,9 @@ Requirements:
 - The ranking formula must be explicit and tested.
 - The lookup table must be replaceable without changing kernel semantics.
 - The first implementation may use brute-force cosine similarity over stored embeddings.
-- Lookup is exposed as the system native action `/lookup` (owned by the system superuser), callable through `Call()` by any authenticated user (grant-all applied at bootstrap).
+- Lookup is exposed as the system native action `@sys/lookup`, callable through `Call()` by any authenticated user (grant-all applied at bootstrap).
+- The input schema must declare `query` (string, required) and `limit` (integer, optional, default 10).
+- The output schema must declare a `results` array where each element has `action_id` (string), `name` (string), `owner_handle` (string), `description` (string), and `score` (number).
 
 Justification: lookup is a research module. The kernel requires only a ranked list of action ids, not a specific ranking algorithm.
 
@@ -1114,13 +1116,15 @@ One designated platform operator exists per installation.
 
 Requirements:
 
-- Handle and password are set interactively on first boot if no superuser exists (prompt for both, like a standard database setup).
-- The handle is fixed once set; it cannot be changed without direct database access.
-- The superuser handle is stored in a `config` table in SQLite (key: `superuser_handle`).
-- On every startup, the server reads `config.superuser_handle` to identify the superuser.
-- Admin authority is enforced in the CLI by comparing the authenticated subject handle to the stored superuser handle.
+- The superuser handle is always `@sys`. It is a platform constant, not configurable.
+- On first boot, the operator is prompted only for a password. The handle `@sys` is set automatically.
+- The `config` table records the sentinel key `superuser_handle = @sys` to indicate first boot has completed.
+- On every startup, the server reads `config.superuser_handle` to confirm first boot and identify the superuser.
+- Admin authority is enforced in the CLI by comparing the authenticated subject handle to `@sys`.
 - Admin and superuser operations must not be exposed through HTTP endpoints.
 - The kernel has no concept of superuser; it enforces normal ACL rules for all users.
+
+Justification: a fixed handle makes system actions stably addressable across every deployment. An agent or script can always call `@sys/lookup` without out-of-band knowledge of the installation's superuser handle.
 
 ### 19.2 User suspension
 
@@ -1148,7 +1152,7 @@ Requirements:
 
 - System actions are KindNative, owned by the superuser, registered at bootstrap.
 - System actions execute through the normal kernel call path (`Call()`).
-- The initial system action is `/lookup` (owned by the system superuser, public, grant-all at bootstrap). The label `@sys/lookup` used in some contexts is a conceptual shorthand for "the `/lookup` action owned by `@sys`", not the action's Name field.
+- The initial system action is `/lookup`, owned by `@sys`, public, grant-all at bootstrap. Its stable address is `@sys/lookup` (target handle `@sys`, action name `/lookup`).
 - Human supervision operations must not be registered as native actions (see §2.3).
 
 ### 19.5 Public access control

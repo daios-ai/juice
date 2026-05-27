@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -11,7 +10,10 @@ import (
 	"golang.org/x/term"
 )
 
-const configKeySuperuser = "superuser_handle"
+const (
+	configKeySuperuser = "superuser_handle"
+	superuserHandle    = "@sys"
+)
 
 // bootstrap runs idempotent startup tasks before the server accepts requests.
 // On first boot (no superuser configured), it prompts for credentials interactively.
@@ -42,17 +44,6 @@ func bootstrap(k *kernel.Kernel) error {
 func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 	fmt.Println("First boot: no superuser configured.")
 
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Superuser handle: ")
-	handle, err := reader.ReadString('\n')
-	if err != nil {
-		return "", fmt.Errorf("reading handle: %w", err)
-	}
-	handle = strings.TrimSpace(handle)
-	if handle == "" {
-		return "", fmt.Errorf("handle cannot be empty")
-	}
-
 	fmt.Print("Superuser password: ")
 	passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
@@ -65,16 +56,16 @@ func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 	}
 
 	_, err = k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
-		Handle:   handle,
-		Email:    handle + "@sys",
+		Handle:   superuserHandle,
+		Email:    "sys@sys",
 		Password: password,
 	}, configKeySuperuser)
 	if err != nil {
 		return "", fmt.Errorf("create superuser: %w", err)
 	}
 
-	fmt.Printf("Superuser %q created.\n", handle)
-	return handle, nil
+	fmt.Printf("Superuser %q created.\n", superuserHandle)
+	return superuserHandle, nil
 }
 
 func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle string) error {
@@ -101,8 +92,32 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 		Kind:         kernel.KindNative,
 		Price:        0,
 		Description:  "Semantic search over active actions",
-		InputSchema:  map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}, "limit": map[string]any{"type": "number"}}},
-		OutputSchema: map[string]any{"type": "object"},
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{"type": "string", "description": "Semantic search query"},
+				"limit": map[string]any{"type": "integer", "description": "Maximum number of results"},
+			},
+			"required": []string{"query"},
+		},
+		OutputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"results": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"action_id":    map[string]any{"type": "string"},
+							"name":         map[string]any{"type": "string"},
+							"owner_handle": map[string]any{"type": "string"},
+							"description":  map[string]any{"type": "string"},
+							"score":        map[string]any{"type": "number"},
+						},
+					},
+				},
+			},
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("create @sys/lookup: %w", err)

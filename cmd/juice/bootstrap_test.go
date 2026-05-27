@@ -29,7 +29,7 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 
 	// Create a superuser manually.
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@su", Email: "su@sys", Password: "pass",
+		Handle: "@sys", Email: "sys@sys", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestBootstrapSuperuserAtomic(t *testing.T) {
 
 	// BootstrapSuperuser must atomically create user + config.
 	_, err := k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
-		Handle: "@admin", Email: "admin@sys", Password: "secret",
+		Handle: "@sys", Email: "sys@sys", Password: "secret",
 	}, configKeySuperuser)
 	if err != nil {
 		t.Fatalf("BootstrapSuperuser: %v", err)
@@ -70,19 +70,19 @@ func TestBootstrapSuperuserAtomic(t *testing.T) {
 
 	// Config must be set.
 	handle, err := k.GetConfig(ctx, configKeySuperuser)
-	if err != nil || handle != "@admin" {
-		t.Errorf("superuser config: got %q %v, want @admin nil", handle, err)
+	if err != nil || handle != "@sys" {
+		t.Errorf("superuser config: got %q %v, want @sys nil", handle, err)
 	}
 
 	// User must be readable.
-	u, err := k.ReadUserByHandle(ctx, "@admin")
+	u, err := k.ReadUserByHandle(ctx, "@sys")
 	if err != nil || u == nil {
 		t.Fatalf("superuser user not found: %v", err)
 	}
 
 	// Second call must be idempotent (handle already exists).
 	_, err = k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
-		Handle: "@admin", Email: "admin@sys", Password: "secret",
+		Handle: "@sys", Email: "sys@sys", Password: "secret",
 	}, configKeySuperuser)
 	if err != nil {
 		t.Errorf("second BootstrapSuperuser: expected idempotent, got %v", err)
