@@ -760,8 +760,9 @@ type LookupRequest struct {
 
 // LookupResult is a ranked action for a lookup query.
 type LookupResult struct {
-	Action *Action
-	Score  float32
+	Action      *Action
+	OwnerHandle string
+	Score       float32
 }
 
 // embedActionAsync computes and stores an embedding for an action's description.
@@ -848,6 +849,18 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		}
 		out = append(out, &LookupResult{Action: r.a, Score: r.score})
 	}
+
+	// Resolve owner handles; cache to avoid redundant store reads.
+	ownerHandles := make(map[string]string)
+	for _, r := range out {
+		if _, cached := ownerHandles[r.Action.OwnerUserID]; !cached {
+			if u, err := k.store.ReadUser(ctx, r.Action.OwnerUserID); err == nil {
+				ownerHandles[r.Action.OwnerUserID] = u.Handle
+			}
+		}
+		r.OwnerHandle = ownerHandles[r.Action.OwnerUserID]
+	}
+
 	return out, nil
 }
 

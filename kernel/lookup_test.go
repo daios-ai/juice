@@ -71,6 +71,12 @@ func TestLookupRanking(t *testing.T) {
 		if r.Score < 0 {
 			t.Errorf("score should be non-negative: %f", r.Score)
 		}
+		if r.OwnerHandle != "@alice" {
+			t.Errorf("expected owner handle @alice, got %q", r.OwnerHandle)
+		}
+		if r.Action.Description == "" {
+			t.Errorf("expected non-empty description for %s", r.Action.Name)
+		}
 	}
 }
 
