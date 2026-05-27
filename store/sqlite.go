@@ -743,6 +743,34 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, proc
 	return dbErr(tx.Commit(), "commit failed call: commit")
 }
 
+func (s *DB) ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Process, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,owner_user_id,available,locked,status,created_at,ended_at
+		 FROM processes WHERE owner_user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		ownerID, limit, offset)
+	if err != nil {
+		return nil, dbErr(err, "list processes")
+	}
+	defer rows.Close()
+	var out []*kernel.Process
+	for rows.Next() {
+		var p kernel.Process
+		var status, createdAt string
+		var endedAt *string
+		if err := rows.Scan(&p.ID, &p.OwnerUserID, &p.Available, &p.Locked, &status, &createdAt, &endedAt); err != nil {
+			return nil, dbErr(err, "scan process")
+		}
+		p.Status = kernel.ProcessStatus(status)
+		p.CreatedAt = strToTime(createdAt)
+		p.EndedAt = strToNullTime(endedAt)
+		out = append(out, &p)
+	}
+	return out, rows.Err()
+}
+
 func (s *DB) ListAllProcesses(ctx context.Context, limit, offset int) ([]*kernel.Process, error) {
 	if limit <= 0 {
 		limit = 100
@@ -1165,6 +1193,35 @@ func (s *DB) ListListeners(ctx context.Context, sourceUserID, eventName string) 
 	return out, rows.Err()
 }
 
+func (s *DB) ListListenersByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Listener, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,owner_user_id,source_user_id,event_name,target_action_id,active,created_at
+		 FROM listeners WHERE owner_user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		ownerID, limit, offset,
+	)
+	if err != nil {
+		return nil, dbErr(err, "list listeners by owner")
+	}
+	defer rows.Close()
+	var out []*kernel.Listener
+	for rows.Next() {
+		var l kernel.Listener
+		var active int
+		var createdAt string
+		if err := rows.Scan(&l.ID, &l.OwnerUserID, &l.SourceUserID, &l.EventName,
+			&l.TargetActionID, &active, &createdAt); err != nil {
+			return nil, dbErr(err, "scan listener")
+		}
+		l.Active = active != 0
+		l.CreatedAt = strToTime(createdAt)
+		out = append(out, &l)
+	}
+	return out, rows.Err()
+}
+
 func (s *DB) CreateEvent(ctx context.Context, e *kernel.Event) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO events (id,listener_id,args_json,causing_trace_id,created_at)
@@ -1393,6 +1450,19 @@ func (s *DB) RotateRefreshToken(ctx context.Context, oldToken string) (*kernel.R
 		return nil, dbErr(err, "insert new refresh token")
 	}
 	return newTok, dbErr(tx.Commit(), "rotate refresh token commit")
+}
+
+func (s *DB) RevokeRefreshToken(ctx context.Context, token string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE refresh_tokens SET revoked=1 WHERE token=? AND revoked=0`, token)
+	if err != nil {
+		return dbErr(err, "revoke refresh token")
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return kernel.ErrUnauthenticated.Wrap("invalid or already revoked refresh token")
+	}
+	return nil
 }
 
 // ---- Config ----

@@ -838,6 +838,7 @@ Requirements:
 - CLI login must support device authorization or loopback login.
 - API calls must use short-lived bearer access tokens.
 - Refresh tokens, if used, must be rotatable.
+- Logout must revoke the associated refresh token server-side.
 - Scripts must never receive access tokens or refresh tokens.
 - Internal script calls must use trace-scoped kernel authority.
 
@@ -856,6 +857,7 @@ juice auth login
 juice auth logout
 juice action add
 juice action update
+juice action delete
 juice action enable
 juice action disable
 juice action acl grant
@@ -864,11 +866,13 @@ juice action grant-all
 juice action revoke-all
 juice action list
 juice process start
+juice process list
 juice process show
 juice process fund
 juice process end
 juice call
 juice events listen
+juice events list
 juice events unlisten
 juice events emit
 juice events poll
@@ -1228,7 +1232,7 @@ Requirements:
 - Returns the authenticated user's id, handle, email, available balance, and locked balance.
 - A suspended user must be rejected with `ErrUnauthenticated` before reaching this handler.
 
-### 19.9 Deposits
+### 19.10 Deposits
 
 The superuser may add credits directly to any user's available balance as an out-of-band platform operation.
 
@@ -1259,3 +1263,58 @@ Required tests:
 - Non-superuser deposit attempt is rejected with `ErrUnauthorized`.
 - Zero or negative amount is rejected with `ErrInvalidInput`.
 - Deposit record is retrievable after creation.
+
+### 19.11 Action management endpoints
+
+Require action owner or action-admin permission:
+
+```text
+PUT /v1/actions/{id}                    juice action update --id
+DELETE /v1/actions/{id}                 juice action delete --id
+```
+
+Requirements:
+
+- `PUT /v1/actions/{id}` applies §6.3 update semantics: updating source, schema, kind, price, or endpoint deactivates the action unless explicitly marked safe.
+- `DELETE /v1/actions/{id}` applies §6.4 deletion semantics: historical transactions are preserved.
+
+### 19.12 Owner list endpoints
+
+Return resources owned by the authenticated user:
+
+```text
+GET /v1/processes                       juice process list
+GET /v1/listeners                       juice events list
+```
+
+Requirements:
+
+- `GET /v1/processes` returns all processes owned by the authenticated subject, ordered by `created_at` descending.
+- `GET /v1/listeners` returns all listeners owned by the authenticated subject.
+
+### 19.13 Events poll endpoint
+
+Returns pending events for a listener:
+
+```text
+GET /v1/listeners/{id}/events           juice events poll --id
+```
+
+Requirements:
+
+- Requires the authenticated subject to be the listener owner or the source user (§11.5).
+- Returns pending (unconsumed) events with `id`, `args_json`, `causing_trace_id`, and `created_at`.
+
+### 19.14 Auth logout endpoint
+
+Revokes the caller's refresh token:
+
+```text
+POST /v1/auth/logout                    juice auth logout
+```
+
+Requirements:
+
+- Accepts the refresh token in the request body.
+- Marks the token revoked; subsequent refresh attempts with that token must return `ErrUnauthenticated`.
+- A missing or already-revoked token must return `ErrUnauthenticated`.

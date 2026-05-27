@@ -11,7 +11,7 @@ import (
 
 func init() {
 	eventsCmd := &cobra.Command{Use: "events", Short: "Event listener commands"}
-	eventsCmd.AddCommand(eventsListenCmd(), eventsUnlistenCmd(), eventsEmitCmd(), eventsPollCmd(), eventsConsumeCmd())
+	eventsCmd.AddCommand(eventsListenCmd(), eventsListCmd(), eventsUnlistenCmd(), eventsEmitCmd(), eventsPollCmd(), eventsConsumeCmd())
 	rootCmd.AddCommand(eventsCmd)
 }
 
@@ -60,6 +60,44 @@ func eventsListenCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("source")
 	_ = cmd.MarkFlagRequired("event")
 	_ = cmd.MarkFlagRequired("action")
+	return cmd
+}
+
+func eventsListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List listeners owned by the current user",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			listeners, err := k.ListListeners(context.Background(), subjectID, 100, 0)
+			if err != nil {
+				return err
+			}
+
+			if flagOutput == "json" {
+				return printJSON(listeners)
+			}
+			for _, l := range listeners {
+				active := "active"
+				if !l.Active {
+					active = "inactive"
+				}
+				fmt.Printf("%s  %-8s  event:%-20s  action:%s\n",
+					l.ID[:8], active, l.EventName, l.TargetActionID[:8])
+			}
+			return nil
+		},
+	}
 	return cmd
 }
 

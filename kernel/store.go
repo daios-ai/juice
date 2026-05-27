@@ -94,6 +94,7 @@ type Store interface {
 
 	CreateProcess(ctx context.Context, p *Process) error
 	ReadProcess(ctx context.Context, id string) (*Process, error)
+	ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error)
 	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
 
 	// LockFunds moves `amount` from process.available to process.locked.
@@ -152,6 +153,7 @@ type Store interface {
 	ReadListener(ctx context.Context, id string) (*Listener, error)
 	UpdateListener(ctx context.Context, l *Listener) error
 	ListListeners(ctx context.Context, sourceUserID, eventName string) ([]*Listener, error)
+	ListListenersByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Listener, error)
 	CreateEvent(ctx context.Context, e *Event) error
 	ReadEvent(ctx context.Context, id string) (*Event, error)
 	ListPendingEvents(ctx context.Context, listenerID string) ([]*Event, error)
@@ -181,6 +183,7 @@ type Store interface {
 
 	CreateRefreshToken(ctx context.Context, t *RefreshToken) error
 	RotateRefreshToken(ctx context.Context, oldToken string) (*RefreshToken, error)
+	RevokeRefreshToken(ctx context.Context, token string) error
 
 	// ---- Config ----
 

@@ -615,3 +615,139 @@ func TestTransactionCRUD(t *testing.T) {
 		t.Errorf("list: got %d, want 1", len(txs))
 	}
 }
+
+func TestListProcesses(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	u := newUser("@lp-owner", 1000)
+	other := newUser("@lp-other", 0)
+	if err := db.CreateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateUser(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create two processes for u and one for other.
+	for i, ownerID := range []string{u.ID, u.ID, other.ID} {
+		p := &kernel.Process{
+			ID:          uuid.New().String(),
+			OwnerUserID: ownerID,
+			Status:      kernel.ProcessOpen,
+			CreatedAt:   time.Now().UTC(),
+		}
+		tr := &kernel.Trace{
+			ID:            uuid.New().String(),
+			ProcessID:     p.ID,
+			ParentTraceID: p.ID,
+			CreatedAt:     time.Now().UTC(),
+		}
+		_ = i
+		if err := db.StartProcess(ctx, p, tr, ownerID, 0); err != nil {
+			t.Fatalf("StartProcess %d: %v", i, err)
+		}
+	}
+
+	got, err := db.ListProcesses(ctx, u.ID, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Errorf("ListProcesses: got %d, want 2", len(got))
+	}
+	for _, p := range got {
+		if p.OwnerUserID != u.ID {
+			t.Errorf("ListProcesses: unexpected owner %s", p.OwnerUserID)
+		}
+	}
+}
+
+func TestListListenersByOwner(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@ll-owner", 0)
+	other := newUser("@ll-other", 0)
+	if err := db.CreateUser(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateUser(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+
+	act := newAction(owner.ID, "/ll-action", 0, false)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+
+	makeListener := func(ownerID, sourceID string) *kernel.Listener {
+		return &kernel.Listener{
+			ID:             uuid.New().String(),
+			OwnerUserID:    ownerID,
+			SourceUserID:   sourceID,
+			EventName:      "test.event",
+			TargetActionID: act.ID,
+			Active:         true,
+			CreatedAt:      time.Now().UTC(),
+		}
+	}
+
+	if err := db.CreateListener(ctx, makeListener(owner.ID, other.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateListener(ctx, makeListener(owner.ID, other.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateListener(ctx, makeListener(other.ID, owner.ID)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.ListListenersByOwner(ctx, owner.ID, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Errorf("ListListenersByOwner: got %d, want 2", len(got))
+	}
+	for _, l := range got {
+		if l.OwnerUserID != owner.ID {
+			t.Errorf("unexpected owner %s", l.OwnerUserID)
+		}
+	}
+}
+
+func TestRevokeRefreshToken(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	u := newUser("@rt-user", 0)
+	if err := db.CreateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+
+	tok := &kernel.RefreshToken{
+		Token:     "test-token-abc",
+		UserID:    u.ID,
+		ExpiresAt: time.Now().UTC().Add(24 * time.Hour),
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := db.CreateRefreshToken(ctx, tok); err != nil {
+		t.Fatal(err)
+	}
+
+	// Revoking a valid token succeeds.
+	if err := db.RevokeRefreshToken(ctx, tok.Token); err != nil {
+		t.Fatalf("RevokeRefreshToken: %v", err)
+	}
+
+	// Revoking again returns an error.
+	if err := db.RevokeRefreshToken(ctx, tok.Token); err == nil {
+		t.Error("expected error revoking already-revoked token")
+	}
+
+	// Rotating a revoked token fails.
+	if _, err := db.RotateRefreshToken(ctx, tok.Token); err == nil {
+		t.Error("expected error rotating revoked token")
+	}
+}

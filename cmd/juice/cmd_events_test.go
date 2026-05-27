@@ -111,3 +111,43 @@ func TestListenerDeletedNotFired(t *testing.T) {
 		t.Errorf("deleted listener should not fire, got %d tx", len(txIDs))
 	}
 }
+
+func TestListListeners(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@list-lst-owner", Email: "llo@example.com", Password: "p",
+	})
+	other, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@list-lst-other", Email: "llot@example.com", Password: "p",
+	})
+
+	a := makeActiveAction(t, env, owner.ID, "/list-lst-action")
+
+	env.k.CreateListener(ctx, kernel.CreateListenerRequest{
+		OwnerUserID: owner.ID, SourceUserID: other.ID,
+		EventName: "ev1", TargetActionID: a.ID,
+	})
+	env.k.CreateListener(ctx, kernel.CreateListenerRequest{
+		OwnerUserID: owner.ID, SourceUserID: other.ID,
+		EventName: "ev2", TargetActionID: a.ID,
+	})
+	env.k.CreateListener(ctx, kernel.CreateListenerRequest{
+		OwnerUserID: other.ID, SourceUserID: owner.ID,
+		EventName: "ev3", TargetActionID: a.ID,
+	})
+
+	listeners, err := env.k.ListListeners(ctx, owner.ID, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listeners) != 2 {
+		t.Errorf("ListListeners: got %d, want 2", len(listeners))
+	}
+	for _, l := range listeners {
+		if l.OwnerUserID != owner.ID {
+			t.Errorf("unexpected owner %s", l.OwnerUserID)
+		}
+	}
+}

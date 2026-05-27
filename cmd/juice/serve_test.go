@@ -46,12 +46,14 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	r.Post("/v1/auth/token", srv.postTokenMulti)
 	r.Post("/v1/auth/authorize", srv.postAuthorize)
 	r.Post("/v1/auth/refresh", srv.postRefresh)
+	r.Post("/v1/auth/logout", srv.postLogout)
 	r.Post("/v1/users", srv.postUser)
 	r.Group(func(r chi.Router) {
 		r.Use(srv.authMiddleware)
 		r.Get("/v1/actions", srv.getActions)
 		r.Post("/v1/actions", srv.postAction)
 		r.Get("/v1/actions/{id}", srv.getAction)
+		r.Put("/v1/actions/{id}", srv.updateAction)
 		r.Post("/v1/actions/{id}/enable", srv.enableAction)
 		r.Post("/v1/actions/{id}/disable", srv.disableAction)
 		r.Delete("/v1/actions/{id}", srv.deleteAction)
@@ -59,6 +61,7 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		r.Delete("/v1/actions/{id}/acl", srv.revokeACL)
 		r.Post("/v1/actions/{id}/grant-all", srv.grantAll)
 		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
+		r.Get("/v1/processes", srv.listProcesses)
 		r.Post("/v1/processes", srv.postProcess)
 		r.Get("/v1/processes/{id}", srv.getProcess)
 		r.Post("/v1/processes/{id}/fund", srv.fundProcess)
@@ -69,8 +72,10 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		r.Post("/v1/transactions/{id}/rate", srv.rateTransaction)
 		r.Get("/v1/stats/{action_id}", srv.getStats)
 		r.Post("/v1/lookup", srv.postLookup)
+		r.Get("/v1/listeners", srv.listListeners)
 		r.Post("/v1/listeners", srv.postListener)
 		r.Get("/v1/listeners/{id}", srv.getListener)
+		r.Get("/v1/listeners/{id}/events", srv.getListener)
 		r.Delete("/v1/listeners/{id}", srv.deleteListener)
 		r.Post("/v1/events/emit", srv.postEmit)
 		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
@@ -931,6 +936,187 @@ func TestServeListenerFlow(t *testing.T) {
 	defer del.Body.Close()
 	if del.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete listener: expected 204, got %d", del.StatusCode)
+	}
+}
+
+func TestServeUpdateAction(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@upd-owner")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/upd-action", "kind": "http", "price": 0, "source": "http://x.example",
+	}, tok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok).Body.Close()
+
+	newDesc := "updated description"
+	resp := httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{
+		"description": newDesc,
+	}, tok)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("update action: expected 200, got %d", resp.StatusCode)
+	}
+	var updated kernel.Action
+	decodeResponse(t, resp, &updated)
+	if updated.Description != newDesc {
+		t.Errorf("description: got %q, want %q", updated.Description, newDesc)
+	}
+	// Update must deactivate the action (source/schema change wasn't made here but description is safe;
+	// price/source changes deactivate — just verify the response has the action).
+	if updated.ID != action.ID {
+		t.Errorf("ID mismatch after update")
+	}
+}
+
+func TestServeListProcesses(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@lp-user")
+
+	// Create two processes.
+	httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, tok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, tok).Body.Close()
+
+	resp := httpDo(t, srv, "GET", "/v1/processes", nil, tok)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("list processes: expected 200, got %d", resp.StatusCode)
+	}
+	var processes []kernel.Process
+	decodeResponse(t, resp, &processes)
+	if len(processes) != 2 {
+		t.Errorf("list processes: got %d, want 2", len(processes))
+	}
+}
+
+func TestServeListListeners(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	ownerID, ownerTok := makeUser(t, k, "@ll-owner")
+	sourceID, _ := makeUser(t, k, "@ll-source")
+
+	act := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/ll-action", "kind": "http", "price": 0, "source": "http://ll.example",
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, act, &action)
+	_ = ownerID
+	_ = sourceID
+
+	// Create two listeners.
+	httpDo(t, srv, "POST", "/v1/listeners", map[string]any{
+		"source_user_id": sourceID, "event_name": "a", "target_action_id": action.ID,
+	}, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/listeners", map[string]any{
+		"source_user_id": sourceID, "event_name": "b", "target_action_id": action.ID,
+	}, ownerTok).Body.Close()
+
+	resp := httpDo(t, srv, "GET", "/v1/listeners", nil, ownerTok)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("list listeners: expected 200, got %d", resp.StatusCode)
+	}
+	var listeners []kernel.Listener
+	decodeResponse(t, resp, &listeners)
+	if len(listeners) != 2 {
+		t.Errorf("list listeners: got %d, want 2", len(listeners))
+	}
+}
+
+func TestServePollListenerEvents(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@poll-owner")
+	sourceID, sourceTok := makeUser(t, k, "@poll-source")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/poll-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+
+	lr := httpDo(t, srv, "POST", "/v1/listeners", map[string]any{
+		"source_user_id": sourceID, "event_name": "ping", "target_action_id": action.ID,
+	}, ownerTok)
+	var listener kernel.Listener
+	decodeResponse(t, lr, &listener)
+
+	httpDo(t, srv, "POST", "/v1/events/emit", map[string]any{
+		"event_name": "ping", "args": map[string]any{},
+	}, sourceTok).Body.Close()
+
+	// Poll via the new /events sub-path.
+	resp := httpDo(t, srv, "GET", "/v1/listeners/"+listener.ID+"/events", nil, ownerTok)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("poll events: expected 200, got %d", resp.StatusCode)
+	}
+	var result map[string]any
+	decodeResponse(t, resp, &result)
+	events, _ := result["events"].([]any)
+	if len(events) == 0 {
+		t.Error("expected at least one pending event")
+	}
+}
+
+func TestServeLogout(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, _ = makeUser(t, k, "@logout-user")
+
+	// Obtain a refresh token via PKCE.
+	verifier := strings.Repeat("y", 43)
+	h := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(h[:])
+
+	authResp := httpDoForm(t, srv, "/v1/auth/authorize", url.Values{
+		"handle": {"@logout-user"}, "password": {"pass"}, "code_challenge": {challenge},
+	})
+	var authResult map[string]string
+	decodeResponse(t, authResp, &authResult)
+	code := strings.TrimPrefix(authResult["redirect"], "?code=")
+
+	tokenResp := httpDoForm(t, srv, "/v1/auth/token", url.Values{
+		"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {verifier},
+	})
+	var tokenResult map[string]string
+	decodeResponse(t, tokenResp, &tokenResult)
+	refreshToken := tokenResult["refresh_token"]
+	if refreshToken == "" {
+		t.Fatal("expected refresh token from PKCE flow")
+	}
+
+	// Logout — revoke the refresh token.
+	out := httpDo(t, srv, "POST", "/v1/auth/logout", map[string]any{
+		"refresh_token": refreshToken,
+	}, "")
+	out.Body.Close()
+	if out.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout: expected 204, got %d", out.StatusCode)
+	}
+
+	// Refresh with the revoked token must fail.
+	ref := httpDo(t, srv, "POST", "/v1/auth/refresh", map[string]any{
+		"refresh_token": refreshToken,
+	}, "")
+	ref.Body.Close()
+	if ref.StatusCode != http.StatusUnauthorized {
+		t.Errorf("refresh after logout: expected 401, got %d", ref.StatusCode)
 	}
 }
 

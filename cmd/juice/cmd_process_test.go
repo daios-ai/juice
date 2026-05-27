@@ -53,6 +53,35 @@ func TestProcessStartFundEnd(t *testing.T) {
 }
 
 
+func TestProcessList(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@list-proc", Email: "lp@example.com", Password: "p",
+	})
+	other, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@list-proc-other", Email: "lpo@example.com", Password: "p",
+	})
+
+	env.k.StartProcess(ctx, owner.ID, 0)
+	env.k.StartProcess(ctx, owner.ID, 0)
+	env.k.StartProcess(ctx, other.ID, 0)
+
+	processes, err := env.k.ListProcesses(ctx, owner.ID, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(processes) != 2 {
+		t.Errorf("ListProcesses: got %d, want 2", len(processes))
+	}
+	for _, p := range processes {
+		if p.OwnerUserID != owner.ID {
+			t.Errorf("unexpected owner %s", p.OwnerUserID)
+		}
+	}
+}
+
 func TestProcessNegativeFundsFails(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()

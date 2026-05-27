@@ -165,8 +165,17 @@ func loginPKCE(handle, password, server string) error {
 func logoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
-		Short: "Remove the stored bearer token",
+		Short: "Revoke the stored refresh token and remove local credentials",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			// Revoke refresh token server-side if one is stored.
+			if rt, err := loadRefreshToken(); err == nil {
+				k, db, err := openKernel()
+				if err != nil {
+					return err
+				}
+				_ = k.RevokeRefreshToken(context.Background(), rt)
+				db.Close()
+			}
 			if err := removeToken(); err != nil && !os.IsNotExist(err) {
 				return err
 			}

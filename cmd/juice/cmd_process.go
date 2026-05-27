@@ -9,7 +9,7 @@ import (
 
 func init() {
 	processCmd := &cobra.Command{Use: "process", Short: "Process lifecycle commands"}
-	processCmd.AddCommand(processStartCmd(), processFundCmd(), processEndCmd(), processShowCmd())
+	processCmd.AddCommand(processStartCmd(), processListCmd(), processFundCmd(), processEndCmd(), processShowCmd())
 	rootCmd.AddCommand(processCmd)
 }
 
@@ -48,6 +48,40 @@ func processStartCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Int64Var(&funds, "funds", 0, "Initial credit allocation")
+	return cmd
+}
+
+func processListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List processes owned by the current user",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			processes, err := k.ListProcesses(context.Background(), subjectID, 100, 0)
+			if err != nil {
+				return err
+			}
+
+			if flagOutput == "json" {
+				return printJSON(processes)
+			}
+			for _, p := range processes {
+				fmt.Printf("%s  %-6s  available:%-6d  locked:%-6d\n",
+					p.ID[:8], p.Status, p.Available, p.Locked)
+			}
+			return nil
+		},
+	}
 	return cmd
 }
 

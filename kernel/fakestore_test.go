@@ -666,6 +666,17 @@ func (f *fakeStore) RotateRefreshToken(_ context.Context, oldToken string) (*Ref
 	return &cp, nil
 }
 
+func (f *fakeStore) RevokeRefreshToken(_ context.Context, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rt, ok := f.refreshTokens[token]
+	if !ok || rt.Revoked {
+		return ErrUnauthenticated.Wrap("invalid or already revoked refresh token")
+	}
+	rt.Revoked = true
+	return nil
+}
+
 // ---- New methods (admin / grant-all / config) ----
 
 func (f *fakeStore) ListUsers(_ context.Context, limit, offset int) ([]*User, error) {
@@ -733,6 +744,46 @@ func (f *fakeStore) ListAllActions(_ context.Context, limit, offset int) ([]*Act
 	return result, nil
 }
 
+
+func (f *fakeStore) ListProcesses(_ context.Context, ownerID string, limit, offset int) ([]*Process, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var result []*Process
+	for _, p := range f.processes {
+		if p.OwnerUserID == ownerID {
+			cp := *p
+			result = append(result, &cp)
+		}
+	}
+	if offset >= len(result) {
+		return nil, nil
+	}
+	result = result[offset:]
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func (f *fakeStore) ListListenersByOwner(_ context.Context, ownerID string, limit, offset int) ([]*Listener, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var result []*Listener
+	for _, l := range f.listeners {
+		if l.OwnerUserID == ownerID {
+			cp := *l
+			result = append(result, &cp)
+		}
+	}
+	if offset >= len(result) {
+		return nil, nil
+	}
+	result = result[offset:]
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
 
 func (f *fakeStore) ListAllProcesses(_ context.Context, limit, offset int) ([]*Process, error) {
 	f.mu.Lock()

@@ -360,6 +360,10 @@ func (k *Kernel) ListAllActions(ctx context.Context, limit, offset int) ([]*Acti
 }
 
 // ListAllProcesses returns all processes ordered by creation time.
+func (k *Kernel) ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error) {
+	return k.store.ListProcesses(ctx, ownerID, limit, offset)
+}
+
 func (k *Kernel) ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error) {
 	return k.store.ListAllProcesses(ctx, limit, offset)
 }
@@ -983,6 +987,11 @@ func (k *Kernel) DeleteListener(ctx context.Context, subjectID, listenerID strin
 	}
 	l.Active = false
 	return k.store.UpdateListener(ctx, l)
+}
+
+// ListListeners returns all listeners owned by ownerID.
+func (k *Kernel) ListListeners(ctx context.Context, ownerID string, limit, offset int) ([]*Listener, error) {
+	return k.store.ListListenersByOwner(ctx, ownerID, limit, offset)
 }
 
 // EmitEvent queues an event for all active listeners matching (sourceUserID, eventName).

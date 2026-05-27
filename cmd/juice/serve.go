@@ -66,6 +66,7 @@ func runServer(addr string) error {
 	r.With(authLimiter).Post("/v1/auth/token", srv.postTokenMulti)
 	r.With(authLimiter).Post("/v1/auth/authorize", srv.postAuthorize)
 	r.With(authLimiter).Post("/v1/auth/refresh", srv.postRefresh)
+	r.With(authLimiter).Post("/v1/auth/logout", srv.postLogout)
 
 	// Users — rate limited: 3 requests/minute per IP, burst of 5.
 	r.With(ipRateLimiter(3.0/60, 5)).Post("/v1/users", srv.postUser)
@@ -76,6 +77,7 @@ func runServer(addr string) error {
 		r.Get("/v1/actions", srv.getActions)
 		r.Post("/v1/actions", srv.postAction)
 		r.Get("/v1/actions/{id}", srv.getAction)
+		r.Put("/v1/actions/{id}", srv.updateAction)
 		r.Post("/v1/actions/{id}/enable", srv.enableAction)
 		r.Post("/v1/actions/{id}/disable", srv.disableAction)
 		r.Delete("/v1/actions/{id}", srv.deleteAction)
@@ -85,6 +87,7 @@ func runServer(addr string) error {
 		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
 
 		// Processes.
+		r.Get("/v1/processes", srv.listProcesses)
 		r.Post("/v1/processes", srv.postProcess)
 		r.Get("/v1/processes/{id}", srv.getProcess)
 		r.Post("/v1/processes/{id}/fund", srv.fundProcess)
@@ -105,8 +108,10 @@ func runServer(addr string) error {
 		r.Post("/v1/lookup", srv.postLookup)
 
 		// Listeners & Events.
+		r.Get("/v1/listeners", srv.listListeners)
 		r.Post("/v1/listeners", srv.postListener)
 		r.Get("/v1/listeners/{id}", srv.getListener)
+		r.Get("/v1/listeners/{id}/events", srv.getListener)
 		r.Delete("/v1/listeners/{id}", srv.deleteListener)
 		r.Post("/v1/events/emit", srv.postEmit)
 		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
@@ -356,6 +361,34 @@ func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a)
 }
 
+func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Price        *int64         `json:"price"`
+		Description  *string        `json:"description"`
+		Source       *string        `json:"source"`
+		InputSchema  map[string]any `json:"input_schema"`
+		OutputSchema map[string]any `json:"output_schema"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+		return
+	}
+	a, err := s.kernel.UpdateAction(r.Context(), subjectFrom(r), kernel.UpdateActionRequest{
+		ID:           id,
+		Price:        body.Price,
+		Description:  body.Description,
+		Source:       body.Source,
+		InputSchema:  body.InputSchema,
+		OutputSchema: body.OutputSchema,
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, a)
+}
+
 func (s *server) enableAction(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := s.kernel.SetActive(r.Context(), subjectFrom(r), id, true); err != nil {
@@ -417,6 +450,15 @@ func (s *server) revokeACL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) listProcesses(w http.ResponseWriter, r *http.Request) {
+	processes, err := s.kernel.ListProcesses(r.Context(), subjectFrom(r), 100, 0)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, processes)
 }
 
 func (s *server) postProcess(w http.ResponseWriter, r *http.Request) {
@@ -613,6 +655,21 @@ func (s *server) postRefresh(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *server) postLogout(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+		return
+	}
+	if err := s.kernel.RevokeRefreshToken(r.Context(), req.RefreshToken); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Override postToken to support both password grant and authorization_code grant.
 // The existing postToken handles password grant; this adds code exchange.
 func (s *server) postTokenMulti(w http.ResponseWriter, r *http.Request) {
@@ -647,6 +704,15 @@ func (s *server) postTokenMulti(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- Listener / Event handlers ----
+
+func (s *server) listListeners(w http.ResponseWriter, r *http.Request) {
+	listeners, err := s.kernel.ListListeners(r.Context(), subjectFrom(r), 100, 0)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, listeners)
+}
 
 func (s *server) postListener(w http.ResponseWriter, r *http.Request) {
 	var req struct {

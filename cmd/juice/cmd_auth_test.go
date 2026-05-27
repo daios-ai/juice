@@ -62,6 +62,37 @@ func TestAuthWrongPassword(t *testing.T) {
 	}
 }
 
+func TestRevokeRefreshToken(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	_, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@revoke-user", Email: "rv@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, rt, err := env.k.LoginWithRefresh(ctx, "@revoke-user", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.k.RevokeRefreshToken(ctx, rt); err != nil {
+		t.Fatalf("RevokeRefreshToken: %v", err)
+	}
+
+	// Rotating a revoked token must fail.
+	if _, _, err := env.k.RefreshAccessToken(ctx, rt); err == nil {
+		t.Error("expected error refreshing with revoked token")
+	}
+
+	// Revoking again must fail.
+	if err := env.k.RevokeRefreshToken(ctx, rt); err == nil {
+		t.Error("expected error revoking already-revoked token")
+	}
+}
+
 func TestRequireSubjectIDExpired(t *testing.T) {
 	dir := t.TempDir()
 	origHome := os.Getenv("HOME")
