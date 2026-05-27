@@ -74,6 +74,7 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		r.Delete("/v1/listeners/{id}", srv.deleteListener)
 		r.Post("/v1/events/emit", srv.postEmit)
 		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
+		r.Get("/v1/me", srv.getMe)
 	})
 
 	return httptest.NewServer(r), k
@@ -985,5 +986,37 @@ func TestServeRequestIDHeader(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.Header.Get("X-Request-ID") == "" {
 		t.Error("expected X-Request-ID header in response")
+	}
+}
+
+func TestServeGetMe(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	uid, tok := makeUser(t, k, "@metest")
+	giveCredits(t, k, uid, 500)
+
+	resp := httpDo(t, srv, "GET", "/v1/me", nil, tok)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/me: expected 200, got %d", resp.StatusCode)
+	}
+	var got map[string]any
+	decodeResponse(t, resp, &got)
+
+	if got["handle"] != "@metest" {
+		t.Errorf("handle: got %v, want @metest", got["handle"])
+	}
+	if got["email"] != "@metest@test.com" {
+		t.Errorf("email: got %v, want @metest@test.com", got["email"])
+	}
+	if got["available"].(float64) != 500 {
+		t.Errorf("available: got %v, want 500", got["available"])
+	}
+
+	// Unauthenticated request must be rejected.
+	resp2 := httpDo(t, srv, "GET", "/v1/me", nil, "")
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unauthenticated: expected 401, got %d", resp2.StatusCode)
 	}
 }

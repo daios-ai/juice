@@ -888,6 +888,7 @@ juice admin action list
 juice admin action disable
 juice admin process list
 juice admin tx list
+juice user me
 ```
 
 Requirements:
@@ -1202,6 +1203,20 @@ Unauthenticated. Returns server status.
 ```text
 GET /health                             juice health
 ```
+
+### 19.9 User self-view endpoint
+
+Returns the authenticated user's own profile.
+
+```text
+GET /v1/me                              juice user me
+```
+
+Requirements:
+
+- Requires authentication (Bearer token).
+- Returns the authenticated user's id, handle, email, available balance, and locked balance.
+- A suspended user must be rejected with `ErrUnauthenticated` before reaching this handler.
 
 ### 19.9 Deposits
 

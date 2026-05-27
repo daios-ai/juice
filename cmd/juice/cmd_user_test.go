@@ -62,3 +62,26 @@ func TestUserDuplicateHandleFails(t *testing.T) {
 		t.Error("expected error for duplicate handle")
 	}
 }
+
+func TestUserMe(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@meuser", Email: "me@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := env.k.ReadUser(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Handle != "@meuser" {
+		t.Errorf("handle: got %q, want @meuser", got.Handle)
+	}
+	if got.Email != "me@example.com" {
+		t.Errorf("email: got %q, want me@example.com", got.Email)
+	}
+}

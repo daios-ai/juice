@@ -12,6 +12,7 @@ import (
 func init() {
 	userCmd := &cobra.Command{Use: "user", Short: "User account commands"}
 	userCmd.AddCommand(userCreateCmd())
+	userCmd.AddCommand(userMeCmd())
 	rootCmd.AddCommand(userCmd)
 }
 
@@ -57,6 +58,43 @@ func userCreateCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("handle")
 	_ = cmd.MarkFlagRequired("email")
 	return cmd
+}
+
+func userMeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "me",
+		Short: "Show the authenticated user's profile",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			u, err := k.ReadUser(context.Background(), subjectID)
+			if err != nil {
+				return err
+			}
+
+			if flagOutput == "json" {
+				return printJSON(map[string]any{
+					"id":        u.ID,
+					"handle":    u.Handle,
+					"email":     u.Email,
+					"available": u.Available,
+					"locked":    u.Locked,
+				})
+			}
+			fmt.Printf("id:        %s\nhandle:    %s\nemail:     %s\navailable: %d\nlocked:    %d\n",
+				u.ID, u.Handle, u.Email, u.Available, u.Locked)
+			return nil
+		},
+	}
 }
 
 func printJSON(v any) error {

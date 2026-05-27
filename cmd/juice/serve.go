@@ -111,6 +111,8 @@ func runServer(addr string) error {
 		r.Post("/v1/events/emit", srv.postEmit)
 		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
 
+		// Current user.
+		r.Get("/v1/me", srv.getMe)
 	})
 
 	logger.Info("server.start", "addr", addr)
@@ -743,6 +745,23 @@ func (s *server) revokeAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- me ----
+
+func (s *server) getMe(w http.ResponseWriter, r *http.Request) {
+	u, err := s.kernel.ReadUser(r.Context(), subjectFrom(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":        u.ID,
+		"handle":    u.Handle,
+		"email":     u.Email,
+		"available": u.Available,
+		"locked":    u.Locked,
+	})
 }
 
 // ---- response helpers ----
