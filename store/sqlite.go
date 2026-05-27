@@ -798,7 +798,7 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 	if total > 0 {
 		_, err = tx.ExecContext(ctx,
 			`UPDATE users SET available=available+?, locked=locked-? WHERE id=?`,
-			total, locked, ownerID)
+			total, total, ownerID)
 		if err != nil {
 			return dbErr(err, "end process: return funds")
 		}

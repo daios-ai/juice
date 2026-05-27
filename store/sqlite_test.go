@@ -330,10 +330,13 @@ func TestEndProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Funds returned to owner.
+	// Funds returned to owner; locked must be zero.
 	u, _ := db.ReadUser(ctx, user.ID)
 	if u.Available != 1000 {
-		t.Errorf("user balance after end: got %d, want 1000", u.Available)
+		t.Errorf("user available after end: got %d, want 1000", u.Available)
+	}
+	if u.Locked != 0 {
+		t.Errorf("user locked after end: got %d, want 0", u.Locked)
 	}
 
 	proc, _ := db.ReadProcess(ctx, p.ID)
