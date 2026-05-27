@@ -235,6 +235,7 @@ Requirements:
 - The trace relation must form a rooted tree for each process.
 - `caused_by_trace_id` must be null for direct calls.
 - For event-triggered calls, `caused_by_trace_id` must be set to the trace ID of the emitting action at the moment of emit. This is a FOLLOWS_FROM reference, not a parent-child link. The referenced trace may belong to a different process.
+- The kernel must validate that a supplied `parent_trace_id` exists and belongs to the same process before creating a child trace. An invalid or cross-process `parent_trace_id` must be rejected with `ErrInvalidInput`.
 
 Correctness condition:
 
@@ -298,6 +299,8 @@ Requirements:
 - Migrations must be deterministic and stored in the repository.
 - All monetary transitions must occur inside SQLite transactions.
 - Transaction creation and fund settlement must occur within a single atomic SQLite transaction. A committed transaction record must never exist without corresponding balance settlement.
+- Failed-call fund refund and failure transaction record must occur within a single atomic SQLite transaction. A refunded process must never exist without a corresponding failure transaction.
+- Process creation, the associated user debit, and root trace creation must occur within a single atomic SQLite transaction. A funded process must never exist without a root trace.
 - Tests must use temporary SQLite databases.
 - No production feature may depend on an in-memory-only store.
 
@@ -418,6 +421,7 @@ Requirements:
 - The first implementation must charge only successful calls.
 - A failed call must not leak locked funds.
 - A failed call must still create a transaction.
+- The fund refund and the failure transaction record must be committed atomically in a single store operation. It must not be possible for funds to be refunded without a transaction record, or for a failure transaction to be recorded without the corresponding refund.
 - Transaction status and reason must make the failure class observable.
 
 Justification: this rule is conservative and testable. It separates execution failure from economic settlement.
@@ -639,7 +643,7 @@ Requirements:
 - `uses = successes + failures`.
 - `price_mean` must be computed from successful calls.
 - `latency_mean` must be computed from completed calls.
-- `rating_mean` must be computed from rated calls.
+- `rating_mean` must be computed from rated calls only. The denominator for the incremental mean is the number of previous ratings, not `uses`. A separate `rating_count` field must track this.
 - Missing statistics must have defined defaults.
 
 ### 9.2 Extension tags
@@ -679,6 +683,8 @@ Online update:
 mean_{n+1} = mean_n + (x_{n+1} - mean_n)/(n+1)
 ```
 
+For `price_mean`, n is `successes`. For `latency_mean`, n is `uses`. For `rating_mean`, n is `rating_count` — the number of rated observations, which may be less than `uses`. Using `uses` as the denominator for `rating_mean` is incorrect and must not be done.
+
 Justification: this rule is deterministic, unbiased for stationary observations, and easy to test. Risk-averse updates may be added later as an experimental tag or lookup feature.
 
 ## 10. Trace and feedback model
@@ -713,7 +719,7 @@ Requirements:
 
 - A human may rate any transaction 0 (bad) or 1 (good) via RateTransaction.
 - When a transaction is rated, the rating must automatically cascade to all unrated descendant transactions in the trace tree.
-- The cascade is performed atomically by the store at rating time via a single recursive SQL operation. No separate application-level propagation step is required or permitted.
+- The initial rating update and the descendant cascade must be performed in a single atomic SQLite transaction using one recursive SQL operation. The two writes must not be separate operations; the cascade error must not be silently ignored. No separate application-level propagation step is required or permitted.
 - Rating is a human supervision operation. It must not be callable through `Call()`.
 
 **Trace metrics**
