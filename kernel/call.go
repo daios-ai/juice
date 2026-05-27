@@ -187,6 +187,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		tx.Status = TxFailure
 		tx.Reason = execErr.Error()
 		_ = k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price)
+		_ = k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt)
 		k.updateStats(ctx, action.ID, tx, latency)
 		logger.Warn("call.failed", "action", action.Name, "error", execErr)
 		return nil, execErr
@@ -197,6 +198,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		tx.Status = TxFailure
 		tx.Reason = "output schema violation: " + err.Error()
 		_ = k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price)
+		_ = k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt)
 		k.updateStats(ctx, action.ID, tx, latency)
 		return nil, err
 	}

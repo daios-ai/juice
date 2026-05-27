@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"errors"
 	"math"
 	"testing"
 	"time"
@@ -107,6 +108,65 @@ func TestCreateNativeActionRejected(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error creating native action via CreateAction, got nil")
+	}
+}
+
+func TestNativeActionNormalLifecycleRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@sys", 0)
+	a, err := k.RegisterNativeAction(ctx, CreateActionRequest{
+		OwnerUserID: owner.ID,
+		Name:        "/native",
+		Kind:        KindNative,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	price := int64(1)
+	if _, err := k.UpdateAction(ctx, owner.ID, UpdateActionRequest{ID: a.ID, Price: &price}); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("UpdateAction native error: got %v, want ErrUnauthorized", err)
+	}
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("SetActive native error: got %v, want ErrUnauthorized", err)
+	}
+	if err := k.DeleteAction(ctx, owner.ID, a.ID); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("DeleteAction native error: got %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestActivateNativeActionBootstrapPath(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@sys", 0)
+	a, err := k.RegisterNativeAction(ctx, CreateActionRequest{
+		OwnerUserID: owner.ID,
+		Name:        "/native",
+		Kind:        KindNative,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Active {
+		t.Fatal("registered native action should start inactive")
+	}
+	if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	active, err := k.ReadAction(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !active.Active {
+		t.Fatal("ActivateNativeAction should activate native action")
+	}
+	if stats, err := k.ReadStats(ctx, a.ID); err != nil || stats == nil {
+		t.Fatalf("ActivateNativeAction should initialize stats, stats=%v err=%v", stats, err)
 	}
 }
 

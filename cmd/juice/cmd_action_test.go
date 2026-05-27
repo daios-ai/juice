@@ -72,6 +72,46 @@ func TestActionACLGrantRevoke(t *testing.T) {
 	}
 }
 
+func TestActionPriceUpdateDeactivates(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@priceowner", Email: "price@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID,
+		Name:        "/priced",
+		Kind:        kernel.KindHTTP,
+		Price:       10,
+		Source:      "http://example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	price := int64(20)
+	updated, err := env.k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{
+		ID:    a.ID,
+		Price: &price,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Active {
+		t.Fatal("price update should deactivate action")
+	}
+	if updated.Price != price {
+		t.Fatalf("price: got %d, want %d", updated.Price, price)
+	}
+}
+
 func TestActionDelete(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()

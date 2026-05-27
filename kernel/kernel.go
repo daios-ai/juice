@@ -15,20 +15,20 @@ import (
 
 // Config holds kernel-level configuration.
 type Config struct {
-	FeeBPS             int64         // basis points, e.g. 2000 = 20%
-	FeeRecipientID     string        // user ID that receives fees
-	TokenSecret        string        // HMAC secret for JWT signing
-	TokenTTL           time.Duration // token validity window
-	ScriptTimeout      time.Duration
-	ScriptMemory       int64 // bytes
-	AllowLocalSources  bool  // permit loopback/private URLs as action sources (tests only)
+	FeeBPS            int64         // basis points, e.g. 2000 = 20%
+	FeeRecipientID    string        // user ID that receives fees
+	TokenSecret       string        // HMAC secret for JWT signing
+	TokenTTL          time.Duration // token validity window
+	ScriptTimeout     time.Duration
+	ScriptMemory      int64 // bytes
+	AllowLocalSources bool  // permit loopback/private URLs as action sources (tests only)
 }
 
 // DefaultConfig returns safe local defaults.
 func DefaultConfig() Config {
 	return Config{
-		FeeBPS:       2000,
-		TokenTTL:     15 * time.Minute,
+		FeeBPS:        2000,
+		TokenTTL:      15 * time.Minute,
 		ScriptTimeout: 10 * time.Second,
 		ScriptMemory:  64 * 1024 * 1024, // 64 MiB
 	}
@@ -289,7 +289,7 @@ func (k *Kernel) ResetInFlightEvents(ctx context.Context) error {
 	return k.store.ResetInFlightEvents(ctx)
 }
 
-// RegisterNativeAction creates and activates a native action for bootstrap use.
+// RegisterNativeAction creates a native action for bootstrap use.
 // Unlike CreateAction, it does not reject KindNative. Call only from bootstrap.
 func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionRequest) (*Action, error) {
 	now := time.Now().UTC()
@@ -312,6 +312,31 @@ func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionReque
 	}
 	k.log.With(ctx).Info("action.registered_native", "action_id", a.ID, "name", a.Name)
 	return a, nil
+}
+
+// ActivateNativeAction activates a native action for bootstrap use.
+// Native actions are not managed by the normal user-facing action lifecycle.
+func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID string) error {
+	a, err := k.store.ReadAction(ctx, actionID)
+	if err != nil {
+		return err
+	}
+	if a.Kind != KindNative {
+		return ErrInvalidInput.Wrap("action is not native")
+	}
+	stats, _ := k.store.ReadStats(ctx, actionID)
+	if stats == nil {
+		if err := k.store.UpsertStats(ctx, DefaultStats(actionID)); err != nil {
+			return err
+		}
+	}
+	a.Active = true
+	a.UpdatedAt = time.Now().UTC()
+	if err := k.store.UpdateAction(ctx, a); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("action.native_enabled", "action_id", actionID)
+	return nil
 }
 
 // ReadAction returns the action with the given ID.
@@ -436,6 +461,9 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 	if a == nil {
 		return nil, ErrNotFound.Wrap("action not found")
 	}
+	if a.Kind == KindNative {
+		return nil, ErrUnauthorized.Wrap("native actions are managed by bootstrap")
+	}
 	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
 		return nil, err
 	}
@@ -445,6 +473,7 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 			return nil, ErrInvalidInput.Wrap("price must be non-negative")
 		}
 		a.Price = *req.Price
+		a.Active = false
 	}
 	if req.Description != nil {
 		a.Description = *req.Description
@@ -493,6 +522,9 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 	if err != nil {
 		return err
 	}
+	if a.Kind == KindNative {
+		return ErrUnauthorized.Wrap("native actions are managed by bootstrap")
+	}
 	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
 		return err
 	}
@@ -531,6 +563,9 @@ func (k *Kernel) DeleteAction(ctx context.Context, subjectID, actionID string) e
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return err
+	}
+	if a.Kind == KindNative {
+		return ErrUnauthorized.Wrap("native actions are managed by bootstrap")
 	}
 	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
 		return err
@@ -1037,6 +1072,3 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 	k.log.With(ctx).Info("event.consumed", "event_id", eventID, "tx_id", reply.TxID)
 	return reply, nil
 }
-
-
-

@@ -42,6 +42,13 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 	if err := ensureSysLookup(ctx, k, u.Handle); err != nil {
 		t.Fatalf("first ensureSysLookup: %v", err)
 	}
+	a, err := k.ReadActionByOwnerName(ctx, u.ID, "/lookup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Active {
+		t.Fatal("/lookup should be active after ensureSysLookup")
+	}
 
 	// Second call: idempotent.
 	if err := ensureSysLookup(ctx, k, u.Handle); err != nil {

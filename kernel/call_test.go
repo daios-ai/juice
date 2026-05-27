@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -481,6 +482,88 @@ func TestCallOutputSchemaRejection(t *testing.T) {
 	if proc.Available != 500 {
 		t.Errorf("process available should be restored: got %d, want 500", proc.Available)
 	}
+}
+
+func TestFailedExecutionUpdatesTraceLatencyNotCost(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &sleepingFailExec{
+		delay: 20 * time.Millisecond,
+		err:   fmt.Errorf("boom"),
+	})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 1000)
+	a := &Action{
+		ID:          uuid.New().String(),
+		OwnerUserID: alice.ID,
+		Name:        "/fails",
+		Kind:        KindWasm,
+		Active:      true,
+		Price:       50,
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: alice.ID, ActionName: "/fails", Args: map[string]any{},
+	})
+	if err == nil {
+		t.Fatal("expected execution failure")
+	}
+
+	txs, err := st.ListTransactions(ctx, TxFilter{ProcessID: p.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(txs) != 1 {
+		t.Fatalf("transactions: got %d, want 1", len(txs))
+	}
+	tx := txs[0]
+	if tx.Status != TxFailure {
+		t.Fatalf("tx status: got %s, want failure", tx.Status)
+	}
+	if tx.Gross != 0 {
+		t.Fatalf("failed tx gross: got %d, want 0", tx.Gross)
+	}
+
+	child, err := st.ReadTrace(ctx, tx.TraceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.Cost != 0 {
+		t.Fatalf("child trace cost: got %d, want 0", child.Cost)
+	}
+	if child.LatencyMS <= 0 {
+		t.Fatalf("child trace latency should be updated on failure, got %d", child.LatencyMS)
+	}
+
+	rootTrace, err := st.ReadTrace(ctx, root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootTrace.Cost != 0 {
+		t.Fatalf("root trace cost: got %d, want 0", rootTrace.Cost)
+	}
+	if rootTrace.LatencyMS <= 0 {
+		t.Fatalf("root trace latency should be updated on failure, got %d", rootTrace.LatencyMS)
+	}
+}
+
+type sleepingFailExec struct {
+	delay time.Duration
+	err   error
+}
+
+func (s *sleepingFailExec) Compile(_ context.Context, source []byte) ([]byte, string, error) {
+	return source, "fakehash", nil
+}
+
+func (s *sleepingFailExec) Execute(_ context.Context, _ []byte, _ []byte, _ HostFunctions) ([]byte, error) {
+	time.Sleep(s.delay)
+	return nil, s.err
 }
 
 func TestWasmHostCallRespectsACL(t *testing.T) {

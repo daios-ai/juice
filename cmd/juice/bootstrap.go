@@ -86,7 +86,10 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 	actionName := "/lookup"
 	a, err := k.ReadActionByOwnerName(ctx, su.ID, actionName)
 	if err == nil && a != nil {
-		// Already registered — ensure grant-all is set.
+		// Already registered — ensure active and grant-all is set.
+		if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
+			return fmt.Errorf("activate @sys/lookup: %w", err)
+		}
 		_ = k.GrantAll(ctx, su.ID, a.ID)
 		return nil
 	}
@@ -105,7 +108,7 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 		return fmt.Errorf("create @sys/lookup: %w", err)
 	}
 
-	if err := k.SetActive(ctx, su.ID, a.ID, true); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
 		return fmt.Errorf("activate @sys/lookup: %w", err)
 	}
 
