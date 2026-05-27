@@ -37,9 +37,9 @@ type CallRequest struct {
 
 // CallReply is the response from a successful Call().
 type CallReply struct {
-	Result  map[string]any
-	TxID    string
-	TraceID string
+	Result  map[string]any `json:"result"`
+	TxID    string         `json:"tx_id"`
+	TraceID string         `json:"trace_id"`
 }
 
 // Call executes the central kernel transition.

@@ -15,12 +15,13 @@ import (
 
 // Config holds kernel-level configuration.
 type Config struct {
-	FeeBPS         int64         // basis points, e.g. 2000 = 20%
-	FeeRecipientID string        // user ID that receives fees
-	TokenSecret    string        // HMAC secret for JWT signing
-	TokenTTL       time.Duration // token validity window
-	ScriptTimeout  time.Duration
-	ScriptMemory   int64 // bytes
+	FeeBPS             int64         // basis points, e.g. 2000 = 20%
+	FeeRecipientID     string        // user ID that receives fees
+	TokenSecret        string        // HMAC secret for JWT signing
+	TokenTTL           time.Duration // token validity window
+	ScriptTimeout      time.Duration
+	ScriptMemory       int64 // bytes
+	AllowLocalSources  bool  // permit loopback/private URLs as action sources (tests only)
 }
 
 // DefaultConfig returns safe local defaults.
@@ -194,7 +195,7 @@ type CreateActionRequest struct {
 // validateHTTPSource rejects URLs that could be used for SSRF attacks.
 // Allowed: http and https schemes with public hostnames or IPs.
 // Rejected: other schemes, localhost, loopback, private, and link-local addresses.
-func validateHTTPSource(source string) error {
+func validateHTTPSource(source string, allowLocal bool) error {
 	u, err := url.Parse(source)
 	if err != nil {
 		return ErrInvalidInput.Wrapf("invalid URL: %v", err)
@@ -212,12 +213,14 @@ func validateHTTPSource(source string) error {
 	if host == "" {
 		return ErrInvalidInput.Wrap("URL must have a host")
 	}
-	if strings.EqualFold(host, "localhost") {
-		return ErrInvalidInput.Wrap("URL must not target localhost")
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-			return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
+	if !allowLocal {
+		if strings.EqualFold(host, "localhost") {
+			return ErrInvalidInput.Wrap("URL must not target localhost")
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+				return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
+			}
 		}
 	}
 	return nil
@@ -237,7 +240,7 @@ func (k *Kernel) CreateAction(ctx context.Context, req CreateActionRequest) (*Ac
 		return nil, ErrInvalidInput.Wrap("price must be non-negative")
 	}
 	if req.Kind == KindHTTP && req.Source != "" {
-		if err := validateHTTPSource(req.Source); err != nil {
+		if err := validateHTTPSource(req.Source, k.cfg.AllowLocalSources); err != nil {
 			return nil, err
 		}
 	}
@@ -498,7 +501,7 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 			return ErrInvalidState.Wrap("cannot activate action with no source")
 		}
 		if a.Kind == KindHTTP {
-			if err := validateHTTPSource(a.Source); err != nil {
+			if err := validateHTTPSource(a.Source, k.cfg.AllowLocalSources); err != nil {
 				return err
 			}
 		}

@@ -1,3 +1,3 @@
 - Never implement anything that violates requirements.md
-- Keep the number of files small
+- Keep the number of files small because this codebase is critical and must be correct!
 - Every GO file must have a corresponding test file

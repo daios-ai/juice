@@ -335,7 +335,7 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 		"://broken",
 	}
 	for _, u := range rejected {
-		if err := validateHTTPSource(u); err == nil {
+		if err := validateHTTPSource(u, false); err == nil {
 			t.Errorf("validateHTTPSource(%q): expected error, got nil", u)
 		}
 	}
@@ -346,7 +346,7 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 		"https://api.stripe.com/v1/charges",
 	}
 	for _, u := range accepted {
-		if err := validateHTTPSource(u); err != nil {
+		if err := validateHTTPSource(u, false); err != nil {
 			t.Errorf("validateHTTPSource(%q): unexpected error: %v", u, err)
 		}
 	}

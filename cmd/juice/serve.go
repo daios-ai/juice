@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -49,15 +48,13 @@ func runServer(addr string) error {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
-	superuserHandle, _ := k.GetConfig(context.Background(), configKeySuperuser)
-
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(requestIDMiddleware)
 	r.Use(loggingMiddleware(logger))
 	r.Use(maxBytesMiddleware(1 << 20)) // 1 MiB request body limit
 
-	srv := &server{kernel: k, log: logger, superuserHandle: superuserHandle}
+	srv := &server{kernel: k, log: logger}
 
 	// Health (unauthenticated).
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -114,19 +111,6 @@ func runServer(addr string) error {
 		r.Post("/v1/events/emit", srv.postEmit)
 		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
 
-		// Admin routes.
-		r.Group(func(r chi.Router) {
-			r.Use(srv.adminMiddleware)
-			r.Get("/v1/admin/users", srv.adminListUsers)
-			r.Get("/v1/admin/users/{id}", srv.adminGetUser)
-			r.Post("/v1/admin/users/{id}/suspend", srv.adminSuspendUser)
-			r.Post("/v1/admin/users/{id}/unsuspend", srv.adminUnsuspendUser)
-			r.Post("/v1/admin/users/{id}/deposit", srv.adminDepositUser)
-			r.Get("/v1/admin/actions", srv.adminListActions)
-			r.Post("/v1/admin/actions/{id}/disable", srv.adminDisableAction)
-			r.Get("/v1/admin/processes", srv.adminListProcesses)
-			r.Get("/v1/admin/transactions", srv.adminListTransactions)
-		})
 	})
 
 	logger.Info("server.start", "addr", addr)
@@ -138,7 +122,6 @@ func runServer(addr string) error {
 type server struct {
 	kernel          *kernel.Kernel
 	log             *log.Logger
-	superuserHandle string
 }
 
 // ---- middleware ----
@@ -268,18 +251,6 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), ctxSubjectID, subjectID)
 		ctx = log.WithSubjectUserID(ctx, subjectID)
 		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-func (s *server) adminMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		subjectID := subjectFromContext(r.Context())
-		u, err := s.kernel.ReadUser(r.Context(), subjectID)
-		if err != nil || u.Handle != s.superuserHandle {
-			writeErr(w, kernel.ErrUnauthorized.Wrap("admin access required"))
-			return
-		}
-		next.ServeHTTP(w, r)
 	})
 }
 
@@ -772,117 +743,6 @@ func (s *server) revokeAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// ---- admin handlers ----
-
-func paginate(r *http.Request) (limit, offset int) {
-	limit = 50
-	offset = 0
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = n
-		}
-	}
-	if v := r.URL.Query().Get("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			offset = n
-		}
-	}
-	return
-}
-
-func (s *server) adminListUsers(w http.ResponseWriter, r *http.Request) {
-	limit, offset := paginate(r)
-	users, err := s.kernel.ListUsers(r.Context(), limit, offset)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, users)
-}
-
-func (s *server) adminGetUser(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	u, err := s.kernel.ReadUser(r.Context(), id)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, u)
-}
-
-func (s *server) adminSuspendUser(w http.ResponseWriter, r *http.Request) {
-	if err := s.kernel.SuspendUser(r.Context(), chi.URLParam(r, "id")); err != nil {
-		writeErr(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *server) adminUnsuspendUser(w http.ResponseWriter, r *http.Request) {
-	if err := s.kernel.UnsuspendUser(r.Context(), chi.URLParam(r, "id")); err != nil {
-		writeErr(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *server) adminDepositUser(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	var req struct {
-		Amount int64  `json:"amount"`
-		Reason string `json:"reason"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid request body"))
-		return
-	}
-	d, err := s.kernel.Deposit(r.Context(), subjectFrom(r), id, req.Amount, req.Reason)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, d)
-}
-
-func (s *server) adminListActions(w http.ResponseWriter, r *http.Request) {
-	limit, offset := paginate(r)
-	actions, err := s.kernel.ListAllActions(r.Context(), limit, offset)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, actions)
-}
-
-func (s *server) adminDisableAction(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if err := s.kernel.SetActive(r.Context(), subjectFrom(r), id, false); err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"active": false})
-}
-
-func (s *server) adminListProcesses(w http.ResponseWriter, r *http.Request) {
-	limit, offset := paginate(r)
-	processes, err := s.kernel.ListAllProcesses(r.Context(), limit, offset)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, processes)
-}
-
-func (s *server) adminListTransactions(w http.ResponseWriter, r *http.Request) {
-	limit, offset := paginate(r)
-	txs, err := s.kernel.ListAllTransactions(r.Context(), limit, offset)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, txs)
 }
 
 // ---- response helpers ----

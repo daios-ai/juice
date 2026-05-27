@@ -3,10 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
@@ -27,6 +31,7 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "serve-test-secret"
+	cfg.AllowLocalSources = true
 	logger := log.Discard()
 	k := kernel.New(db, nil, nil, cfg, logger)
 
@@ -35,7 +40,12 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	r.Use(middleware.Recoverer)
 	r.Use(requestIDMiddleware)
 
+	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
 	r.Post("/v1/auth/token", srv.postTokenMulti)
+	r.Post("/v1/auth/authorize", srv.postAuthorize)
+	r.Post("/v1/auth/refresh", srv.postRefresh)
 	r.Post("/v1/users", srv.postUser)
 	r.Group(func(r chi.Router) {
 		r.Use(srv.authMiddleware)
@@ -45,6 +55,10 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		r.Post("/v1/actions/{id}/enable", srv.enableAction)
 		r.Post("/v1/actions/{id}/disable", srv.disableAction)
 		r.Delete("/v1/actions/{id}", srv.deleteAction)
+		r.Post("/v1/actions/{id}/acl", srv.grantACL)
+		r.Delete("/v1/actions/{id}/acl", srv.revokeACL)
+		r.Post("/v1/actions/{id}/grant-all", srv.grantAll)
+		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
 		r.Post("/v1/processes", srv.postProcess)
 		r.Get("/v1/processes/{id}", srv.getProcess)
 		r.Post("/v1/processes/{id}/fund", srv.fundProcess)
@@ -52,13 +66,41 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		r.Post("/v1/call", srv.postCall)
 		r.Get("/v1/transactions", srv.listTransactions)
 		r.Get("/v1/transactions/{id}", srv.getTransaction)
+		r.Post("/v1/transactions/{id}/rate", srv.rateTransaction)
 		r.Get("/v1/stats/{action_id}", srv.getStats)
+		r.Post("/v1/lookup", srv.postLookup)
 		r.Post("/v1/listeners", srv.postListener)
+		r.Get("/v1/listeners/{id}", srv.getListener)
 		r.Delete("/v1/listeners/{id}", srv.deleteListener)
 		r.Post("/v1/events/emit", srv.postEmit)
+		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
 	})
 
 	return httptest.NewServer(r), k
+}
+
+// makeUser creates a user and returns (userID, accessToken).
+func makeUser(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
+	t.Helper()
+	u, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
+		Handle: handle, Email: handle + "@test.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := k.Login(context.Background(), handle, "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.ID, tok
+}
+
+// giveCredits deposits funds into a user's account via the kernel directly.
+func giveCredits(t *testing.T, k *kernel.Kernel, userID string, amount int64) {
+	t.Helper()
+	if _, err := k.Deposit(context.Background(), userID, userID, amount, "test"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func httpDo(t *testing.T, srv *httptest.Server, method, path string, body any, tok string) *http.Response {
@@ -84,11 +126,38 @@ func httpDo(t *testing.T, srv *httptest.Server, method, path string, body any, t
 	return resp
 }
 
+func httpDoForm(t *testing.T, srv *httptest.Server, path string, values url.Values) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest("POST", srv.URL+path, strings.NewReader(values.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
 func decodeResponse(t *testing.T, resp *http.Response, v any) {
 	t.Helper()
 	defer resp.Body.Close()
 	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
 		t.Fatalf("decode response: %v", err)
+	}
+}
+
+// ---- tests ----
+
+func TestServeHealth(t *testing.T) {
+	srv, _ := newTestHTTPServer(t)
+	defer srv.Close()
+
+	resp := httpDo(t, srv, "GET", "/health", nil, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 }
 
@@ -130,6 +199,67 @@ func TestServeAuthToken(t *testing.T) {
 	}
 }
 
+func TestServePKCEFlow(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, _ = makeUser(t, k, "@pkce-user")
+
+	verifier := strings.Repeat("x", 43)
+	h := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(h[:])
+
+	// Step 1: authorize.
+	resp := httpDoForm(t, srv, "/v1/auth/authorize", url.Values{
+		"handle":         {"@pkce-user"},
+		"password":       {"pass"},
+		"code_challenge": {challenge},
+	})
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("authorize: expected 200, got %d", resp.StatusCode)
+	}
+	var authResp map[string]string
+	decodeResponse(t, resp, &authResp)
+	code := strings.TrimPrefix(authResp["redirect"], "?code=")
+	if code == "" {
+		t.Fatal("expected code in redirect")
+	}
+
+	// Step 2: exchange code for tokens.
+	resp2 := httpDoForm(t, srv, "/v1/auth/token", url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"code_verifier": {verifier},
+	})
+	if resp2.StatusCode != http.StatusOK {
+		resp2.Body.Close()
+		t.Fatalf("token exchange: expected 200, got %d", resp2.StatusCode)
+	}
+	var tokenResp map[string]string
+	decodeResponse(t, resp2, &tokenResp)
+	if tokenResp["access_token"] == "" {
+		t.Error("expected access_token")
+	}
+	if tokenResp["refresh_token"] == "" {
+		t.Error("expected refresh_token")
+	}
+
+	// Step 3: refresh.
+	resp3 := httpDo(t, srv, "POST", "/v1/auth/refresh", map[string]any{
+		"refresh_token": tokenResp["refresh_token"],
+	}, "")
+	if resp3.StatusCode != http.StatusOK {
+		resp3.Body.Close()
+		t.Fatalf("refresh: expected 200, got %d", resp3.StatusCode)
+	}
+	var refreshResp map[string]string
+	decodeResponse(t, resp3, &refreshResp)
+	if refreshResp["access_token"] == "" {
+		t.Error("refresh: expected new access_token")
+	}
+}
+
 func TestServeAuthRequired(t *testing.T) {
 	srv, _ := newTestHTTPServer(t)
 	defer srv.Close()
@@ -145,10 +275,7 @@ func TestServeCreateAndGetAction(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	user, _ := k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@srv-actowner", Email: "sa@example.com", Password: "pass",
-	})
-	tok, _ := k.Login(context.Background(), "@srv-actowner", "pass")
+	userID, tok := makeUser(t, k, "@srv-actowner")
 
 	resp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/http-action", "kind": "http",
@@ -163,8 +290,8 @@ func TestServeCreateAndGetAction(t *testing.T) {
 	if action.ID == "" {
 		t.Error("expected action with ID")
 	}
-	if action.OwnerUserID != user.ID {
-		t.Errorf("action owner: got %q, want %q", action.OwnerUserID, user.ID)
+	if action.OwnerUserID != userID {
+		t.Errorf("action owner: got %q, want %q", action.OwnerUserID, userID)
 	}
 
 	resp2 := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, tok)
@@ -179,14 +306,246 @@ func TestServeCreateAndGetAction(t *testing.T) {
 	}
 }
 
+func TestServeListActions(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@list-owner")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/list-me", "kind": "http", "price": 0, "source": "http://x.example",
+	}, tok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok).Body.Close()
+
+	resp := httpDo(t, srv, "GET", "/v1/actions", nil, tok)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("list actions: expected 200, got %d", resp.StatusCode)
+	}
+	var actions []kernel.Action
+	decodeResponse(t, resp, &actions)
+	if len(actions) == 0 {
+		t.Error("expected at least one action in list")
+	}
+}
+
+func TestServeEnableDisableAction(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@toggle-owner")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/toggle-me", "kind": "http", "price": 0, "source": "http://x.example",
+	}, tok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+
+	// Disable.
+	r1 := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/disable", nil, tok)
+	defer r1.Body.Close()
+	if r1.StatusCode != http.StatusOK {
+		t.Fatalf("disable: expected 200, got %d", r1.StatusCode)
+	}
+
+	fetched := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, tok)
+	var a1 kernel.Action
+	decodeResponse(t, fetched, &a1)
+	if a1.Active {
+		t.Error("action should be inactive after disable")
+	}
+
+	// Enable.
+	r2 := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok)
+	defer r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("enable: expected 200, got %d", r2.StatusCode)
+	}
+
+	fetched2 := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, tok)
+	var a2 kernel.Action
+	decodeResponse(t, fetched2, &a2)
+	if !a2.Active {
+		t.Error("action should be active after enable")
+	}
+}
+
+func TestServeDeleteAction(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@del-owner")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/delete-me", "kind": "http", "price": 0, "source": "http://x.example",
+	}, tok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+
+	del := httpDo(t, srv, "DELETE", "/v1/actions/"+action.ID, nil, tok)
+	defer del.Body.Close()
+	if del.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete: expected 204, got %d", del.StatusCode)
+	}
+
+	get := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, tok)
+	defer get.Body.Close()
+	if get.StatusCode != http.StatusNotFound {
+		t.Errorf("after delete: expected 404, got %d", get.StatusCode)
+	}
+}
+
+func TestServeACL(t *testing.T) {
+	// Set up a backend so the HTTP action can actually execute.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@acl-owner")
+	_, user2Tok := makeUser(t, k, "@acl-user2")
+
+	// Create a private (non-public) action.
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/acl-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	// Activate.
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+
+	// user2 opens a process.
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, user2Tok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	// user2 tries to call — should be denied (403).
+	r1 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@acl-owner", "action_name": "/acl-action",
+	}, user2Tok)
+	r1.Body.Close()
+	if r1.StatusCode != http.StatusForbidden {
+		t.Fatalf("before grant: expected 403, got %d", r1.StatusCode)
+	}
+
+	// Owner grants call permission to user2.
+	user2, _ := k.ReadUserByHandle(context.Background(), "@acl-user2")
+	gr := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/acl", map[string]any{
+		"subject_user_id": user2.ID, "permission": "call",
+	}, ownerTok)
+	gr.Body.Close()
+	if gr.StatusCode != http.StatusNoContent {
+		t.Fatalf("grant acl: expected 204, got %d", gr.StatusCode)
+	}
+
+	// user2 calls — should succeed.
+	r2 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@acl-owner", "action_name": "/acl-action",
+	}, user2Tok)
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("after grant: expected 200, got %d", r2.StatusCode)
+	}
+
+	// Owner revokes permission.
+	rv := httpDo(t, srv, "DELETE", "/v1/actions/"+action.ID+"/acl", map[string]any{
+		"subject_user_id": user2.ID, "permission": "call",
+	}, ownerTok)
+	rv.Body.Close()
+	if rv.StatusCode != http.StatusNoContent {
+		t.Fatalf("revoke acl: expected 204, got %d", rv.StatusCode)
+	}
+
+	// user2 calls again — should be denied.
+	r3 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@acl-owner", "action_name": "/acl-action",
+	}, user2Tok)
+	r3.Body.Close()
+	if r3.StatusCode != http.StatusForbidden {
+		t.Fatalf("after revoke: expected 403, got %d", r3.StatusCode)
+	}
+}
+
+func TestServeGrantRevokeAll(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@ga-owner")
+	_, user3Tok := makeUser(t, k, "@ga-user3")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/public-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+
+	// user3 opens a process.
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, user3Tok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	// Before grant-all: user3 cannot call.
+	r1 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@ga-owner", "action_name": "/public-action",
+	}, user3Tok)
+	r1.Body.Close()
+	if r1.StatusCode != http.StatusForbidden {
+		t.Fatalf("before grant-all: expected 403, got %d", r1.StatusCode)
+	}
+
+	// Grant-all.
+	ga := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok)
+	ga.Body.Close()
+	if ga.StatusCode != http.StatusNoContent {
+		t.Fatalf("grant-all: expected 204, got %d", ga.StatusCode)
+	}
+
+	// user3 can now call.
+	r2 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@ga-owner", "action_name": "/public-action",
+	}, user3Tok)
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("after grant-all: expected 200, got %d", r2.StatusCode)
+	}
+
+	// Revoke-all.
+	ra := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/revoke-all", nil, ownerTok)
+	ra.Body.Close()
+	if ra.StatusCode != http.StatusNoContent {
+		t.Fatalf("revoke-all: expected 204, got %d", ra.StatusCode)
+	}
+
+	// user3 can no longer call.
+	r3 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@ga-owner", "action_name": "/public-action",
+	}, user3Tok)
+	r3.Body.Close()
+	if r3.StatusCode != http.StatusForbidden {
+		t.Fatalf("after revoke-all: expected 403, got %d", r3.StatusCode)
+	}
+}
+
 func TestServeProcessLifecycle(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@srv-proc", Email: "sp@example.com", Password: "pass",
-	})
-	tok, _ := k.Login(context.Background(), "@srv-proc", "pass")
+	_, tok := makeUser(t, k, "@srv-proc")
 
 	resp := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, tok)
 	if resp.StatusCode != http.StatusCreated {
@@ -195,16 +554,221 @@ func TestServeProcessLifecycle(t *testing.T) {
 	}
 	var proc map[string]any
 	decodeResponse(t, resp, &proc)
-
-	pid, ok := proc["process_id"].(string)
-	if !ok || pid == "" {
-		t.Fatal("expected process_id in response")
+	pid := proc["process_id"].(string)
+	if pid == "" {
+		t.Fatal("expected process_id")
 	}
 
-	resp2 := httpDo(t, srv, "POST", "/v1/processes/"+pid+"/end", nil, tok)
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusNoContent {
-		t.Errorf("end process: expected 204, got %d", resp2.StatusCode)
+	// Get process.
+	get := httpDo(t, srv, "GET", "/v1/processes/"+pid, nil, tok)
+	if get.StatusCode != http.StatusOK {
+		get.Body.Close()
+		t.Fatalf("get process: expected 200, got %d", get.StatusCode)
+	}
+	var p kernel.Process
+	decodeResponse(t, get, &p)
+	if p.ID != pid {
+		t.Errorf("get process: ID mismatch")
+	}
+
+	// End process.
+	end := httpDo(t, srv, "POST", "/v1/processes/"+pid+"/end", nil, tok)
+	defer end.Body.Close()
+	if end.StatusCode != http.StatusNoContent {
+		t.Errorf("end process: expected 204, got %d", end.StatusCode)
+	}
+}
+
+func TestServeFundProcess(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	userID, tok := makeUser(t, k, "@fund-user")
+	giveCredits(t, k, userID, 200)
+
+	// Start process with 0 initial funds.
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, tok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	// Fund the process via HTTP.
+	fr := httpDo(t, srv, "POST", "/v1/processes/"+pid+"/fund", map[string]any{"funds": 100}, tok)
+	defer fr.Body.Close()
+	if fr.StatusCode != http.StatusNoContent {
+		t.Fatalf("fund process: expected 204, got %d", fr.StatusCode)
+	}
+
+	// Verify available funds increased.
+	get := httpDo(t, srv, "GET", "/v1/processes/"+pid, nil, tok)
+	var p kernel.Process
+	decodeResponse(t, get, &p)
+	if p.Available != 100 {
+		t.Errorf("funded process: expected 100 available, got %d", p.Available)
+	}
+}
+
+func TestServeCall(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"answer": 42})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@call-owner")
+	_, callerTok := makeUser(t, k, "@call-caller")
+
+	// Create and activate a free public HTTP action.
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/answer", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok).Body.Close()
+
+	// Caller opens a process.
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, callerTok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	// Make the call.
+	callResp := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id":  pid,
+		"target":      "@call-owner",
+		"action_name": "/answer",
+		"args":        map[string]any{},
+	}, callerTok)
+	if callResp.StatusCode != http.StatusOK {
+		callResp.Body.Close()
+		t.Fatalf("call: expected 200, got %d", callResp.StatusCode)
+	}
+	var reply kernel.CallReply
+	decodeResponse(t, callResp, &reply)
+	if reply.TxID == "" {
+		t.Error("expected tx_id in call reply")
+	}
+	if reply.Result["answer"] != float64(42) {
+		t.Errorf("call result: expected answer=42, got %v", reply.Result)
+	}
+}
+
+func TestServeListAndGetTransaction(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"done": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@tx-owner")
+	_, callerTok := makeUser(t, k, "@tx-caller")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/tx-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok).Body.Close()
+
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, callerTok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	call := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@tx-owner", "action_name": "/tx-action",
+	}, callerTok)
+	var callReply kernel.CallReply
+	decodeResponse(t, call, &callReply)
+	txID := callReply.TxID
+	if txID == "" {
+		t.Fatal("expected tx_id from call")
+	}
+
+	// List transactions.
+	list := httpDo(t, srv, "GET", "/v1/transactions", nil, callerTok)
+	if list.StatusCode != http.StatusOK {
+		list.Body.Close()
+		t.Fatalf("list transactions: expected 200, got %d", list.StatusCode)
+	}
+	var txs []kernel.Transaction
+	decodeResponse(t, list, &txs)
+	if len(txs) == 0 {
+		t.Error("expected at least one transaction")
+	}
+
+	// Get transaction by ID.
+	get := httpDo(t, srv, "GET", "/v1/transactions/"+txID, nil, callerTok)
+	if get.StatusCode != http.StatusOK {
+		get.Body.Close()
+		t.Fatalf("get transaction: expected 200, got %d", get.StatusCode)
+	}
+	var tx kernel.Transaction
+	decodeResponse(t, get, &tx)
+	if tx.ID != txID {
+		t.Errorf("get transaction: ID mismatch, got %v", tx.ID)
+	}
+}
+
+func TestServeRateTransaction(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@rate-owner")
+	_, callerTok := makeUser(t, k, "@rate-caller")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/rate-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok).Body.Close()
+
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, callerTok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	call := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@rate-owner", "action_name": "/rate-action",
+	}, callerTok)
+	var callReply kernel.CallReply
+	decodeResponse(t, call, &callReply)
+	txID := callReply.TxID
+	if txID == "" {
+		t.Fatal("expected tx_id from call")
+	}
+
+	// Rate it (caller is the process owner); rating must be 0 or 1.
+	rate := httpDo(t, srv, "POST", "/v1/transactions/"+txID+"/rate", map[string]any{
+		"rating": 1,
+	}, callerTok)
+	defer rate.Body.Close()
+	if rate.StatusCode != http.StatusNoContent {
+		t.Fatalf("rate transaction: expected 204, got %d", rate.StatusCode)
+	}
+
+	// Verify rating is persisted.
+	get := httpDo(t, srv, "GET", "/v1/transactions/"+txID, nil, callerTok)
+	var tx kernel.Transaction
+	decodeResponse(t, get, &tx)
+	if tx.Rating == nil {
+		t.Error("expected rating to be set on transaction")
 	}
 }
 
@@ -212,16 +776,160 @@ func TestServeRateTransactionNotFound(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@rater", Email: "rater@example.com", Password: "pass",
-	})
-	tok, _ := k.Login(context.Background(), "@rater", "pass")
+	_, tok := makeUser(t, k, "@rater")
 
 	resp := httpDo(t, srv, "POST", "/v1/transactions/no-such-id/rate",
 		map[string]any{"rating": 1.0}, tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for unknown tx, got %d", resp.StatusCode)
+	}
+}
+
+func TestServeGetStats(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@stats-owner")
+	_, callerTok := makeUser(t, k, "@stats-caller")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/stats-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok).Body.Close()
+
+	// Make one call to generate stats.
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, callerTok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": proc["process_id"], "target": "@stats-owner", "action_name": "/stats-action",
+	}, callerTok).Body.Close()
+
+	get := httpDo(t, srv, "GET", "/v1/stats/"+action.ID, nil, ownerTok)
+	if get.StatusCode != http.StatusOK {
+		get.Body.Close()
+		t.Fatalf("get stats: expected 200, got %d", get.StatusCode)
+	}
+	var stats kernel.Stats
+	decodeResponse(t, get, &stats)
+	if stats.Uses == 0 {
+		t.Error("expected uses > 0 in stats after a call")
+	}
+}
+
+func TestServeLookupRequiresEmbedder(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@lookup-user")
+
+	resp := httpDo(t, srv, "POST", "/v1/lookup", map[string]any{"query": "something"}, tok)
+	defer resp.Body.Close()
+	// Lookup requires an embedder; without one it returns 409 (invalid_state).
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("lookup without embedder: expected 409, got %d", resp.StatusCode)
+	}
+}
+
+func TestServeListenerFlow(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"consumed": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@lst-owner")
+	sourceID, sourceTok := makeUser(t, k, "@lst-source")
+
+	// Owner creates a free public action.
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/lst-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok).Body.Close()
+
+	// Owner creates a listener watching the source user.
+	lr := httpDo(t, srv, "POST", "/v1/listeners", map[string]any{
+		"source_user_id":   sourceID,
+		"event_name":       "test.ping",
+		"target_action_id": action.ID,
+	}, ownerTok)
+	if lr.StatusCode != http.StatusCreated {
+		lr.Body.Close()
+		t.Fatalf("create listener: expected 201, got %d", lr.StatusCode)
+	}
+	var listener kernel.Listener
+	decodeResponse(t, lr, &listener)
+	lid := listener.ID
+	if lid == "" {
+		t.Fatal("expected listener ID")
+	}
+
+	// Source user emits event.
+	emit := httpDo(t, srv, "POST", "/v1/events/emit", map[string]any{
+		"event_name": "test.ping", "args": map[string]any{},
+	}, sourceTok)
+	if emit.StatusCode != http.StatusOK {
+		emit.Body.Close()
+		t.Fatalf("emit: expected 200, got %d", emit.StatusCode)
+	}
+	var emitResp map[string]any
+	decodeResponse(t, emit, &emitResp)
+	eventIDs, _ := emitResp["event_ids"].([]any)
+	if len(eventIDs) == 0 {
+		t.Fatal("expected at least one event_id from emit")
+	}
+	eventID := eventIDs[0].(string)
+
+	// Poll listener — should have one pending event.
+	poll := httpDo(t, srv, "GET", "/v1/listeners/"+lid, nil, ownerTok)
+	if poll.StatusCode != http.StatusOK {
+		poll.Body.Close()
+		t.Fatalf("poll listener: expected 200, got %d", poll.StatusCode)
+	}
+	var pollResp map[string]any
+	decodeResponse(t, poll, &pollResp)
+	events, _ := pollResp["events"].([]any)
+	if len(events) == 0 {
+		t.Error("expected pending event in listener poll")
+	}
+
+	// Owner opens a process to consume the event.
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	// Consume the event.
+	consume := httpDo(t, srv, "POST", "/v1/events/"+eventID+"/consume", map[string]any{
+		"process_id": pid,
+	}, ownerTok)
+	if consume.StatusCode != http.StatusOK {
+		consume.Body.Close()
+		t.Fatalf("consume event: expected 200, got %d", consume.StatusCode)
+	}
+	consume.Body.Close()
+
+	// Delete listener.
+	del := httpDo(t, srv, "DELETE", "/v1/listeners/"+lid, nil, ownerTok)
+	defer del.Body.Close()
+	if del.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete listener: expected 204, got %d", del.StatusCode)
 	}
 }
 
