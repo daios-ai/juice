@@ -112,7 +112,7 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 		}
 	}
 
-	k := kernel.New(db, exec, embedder, chatter, cfg, logger)
+	k := kernel.New(db, exec, &httpActionExecutor{timeout: cfg.ScriptTimeout}, embedder, chatter, cfg, logger)
 	return k, db, nil
 }
 

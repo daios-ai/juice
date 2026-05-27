@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 
@@ -253,7 +251,10 @@ func (k *Kernel) canCall(ctx context.Context, subjectID string, action *Action) 
 func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (map[string]any, error) {
 	switch action.Kind {
 	case KindHTTP:
-		return k.executeHTTP(ctx, action, args)
+		if k.http == nil {
+			return nil, ErrInvalidState.Wrap("HTTP executor not configured")
+		}
+		return k.http.Execute(ctx, action.Source, args)
 	case KindWasm:
 		return k.executeWasm(ctx, action, args, trace, ownerUserID)
 	case KindNative:
@@ -342,42 +343,6 @@ func (k *Kernel) executeChat(ctx context.Context, args map[string]any) (map[stri
 			"content": reply.Content,
 		},
 	}, nil
-}
-
-// executeHTTP calls an external HTTP endpoint.
-func (k *Kernel) executeHTTP(ctx context.Context, action *Action, args map[string]any) (map[string]any, error) {
-	body, err := json.Marshal(args)
-	if err != nil {
-		return nil, ErrInvalidInput.Wrap("could not serialize args")
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, action.Source, strings.NewReader(string(body)))
-	if err != nil {
-		return nil, ErrInvalidInput.Wrapf("invalid action URL: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: k.cfg.ScriptTimeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
-	if err != nil {
-		return nil, ErrExecutionFailed.Wrap("could not read response body")
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, ErrExecutionFailed.Wrapf("action returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result map[string]any
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, ErrExecutionFailed.Wrap("action response is not valid JSON")
-	}
-	return result, nil
 }
 
 // executeWasm runs a compiled WASM artifact.

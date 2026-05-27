@@ -39,18 +39,19 @@ func DefaultConfig() Config {
 type Kernel struct {
 	store   Store
 	scripts ScriptExecutor
+	http    HTTPExecutor
 	llm     Embedder
 	chatter Chatter
 	cfg     Config
 	log     *log.Logger
 }
 
-// New constructs a Kernel. scripts, llm, and chatter may be nil if those features are unused.
-func New(store Store, scripts ScriptExecutor, llm Embedder, chatter Chatter, cfg Config, logger *log.Logger) *Kernel {
+// New constructs a Kernel. scripts, http, llm, and chatter may be nil if those features are unused.
+func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, chatter Chatter, cfg Config, logger *log.Logger) *Kernel {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Kernel{store: store, scripts: scripts, llm: llm, chatter: chatter, cfg: cfg, log: logger}
+	return &Kernel{store: store, scripts: scripts, http: http, llm: llm, chatter: chatter, cfg: cfg, log: logger}
 }
 
 // ---- User operations ----

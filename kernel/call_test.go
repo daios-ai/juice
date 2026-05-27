@@ -881,7 +881,7 @@ func newTestKernelWithChatter(st Store, c Chatter) *Kernel {
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
-	return New(st, nil, nil, c, cfg, nil)
+	return New(st, nil, nil, nil, c, cfg, nil)
 }
 
 func TestCallLLMChat(t *testing.T) {

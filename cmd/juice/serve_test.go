@@ -33,7 +33,7 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	cfg.TokenSecret = "serve-test-secret"
 	cfg.AllowLocalSources = true
 	logger := log.Discard()
-	k := kernel.New(db, nil, nil, nil, cfg, logger)
+	k := kernel.New(db, nil, &httpActionExecutor{timeout: cfg.ScriptTimeout}, nil, nil, cfg, logger)
 
 	srv := &server{kernel: k, log: logger}
 	r := chi.NewRouter()
@@ -1131,7 +1131,7 @@ func TestRateLimitLogin(t *testing.T) {
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "rl-test-secret"
 	logger := log.Discard()
-	k := kernel.New(db, nil, nil, nil, cfg, logger)
+	k := kernel.New(db, nil, nil, nil, nil, cfg, logger)
 	if _, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
 		Handle: "@rlu", Email: "rlu@example.com", Password: "pass",
 	}); err != nil {

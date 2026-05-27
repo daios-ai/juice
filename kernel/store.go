@@ -14,6 +14,12 @@ type ScriptExecutor interface {
 	Execute(ctx context.Context, artifact []byte, input []byte, host HostFunctions) ([]byte, error)
 }
 
+// HTTPExecutor calls an external HTTP action endpoint.
+// kernel/ defines this interface; cmd/juice provides the concrete implementation.
+type HTTPExecutor interface {
+	Execute(ctx context.Context, source string, args map[string]any) (map[string]any, error)
+}
+
 // HostFunctions are the callbacks available to a running script.
 type HostFunctions interface {
 	Call(ctx context.Context, actionName string, args []byte) ([]byte, error)

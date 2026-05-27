@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -13,7 +12,10 @@ import (
 	"golang.org/x/term"
 )
 
-const configKeySuperuser = "superuser_handle"
+const (
+	configKeySuperuser = "superuser_handle"
+	superuserHandle    = "@sys"
+)
 
 // bootstrap runs idempotent startup tasks before the server accepts requests.
 // On first boot (no superuser configured), it prompts for credentials interactively.
@@ -38,22 +40,17 @@ func bootstrap(k *kernel.Kernel) error {
 	if err := ensureSysLookup(ctx, k, handle); err != nil {
 		return err
 	}
+
+	// Register /llm/chat native action if absent.
+	if err := ensureSysLLMChat(ctx, k, handle); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 	fmt.Println("First boot: no superuser configured.")
-
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Superuser handle: ")
-	handle, err := reader.ReadString('\n')
-	if err != nil {
-		return "", fmt.Errorf("reading handle: %w", err)
-	}
-	handle = strings.TrimSpace(handle)
-	if handle == "" {
-		return "", fmt.Errorf("handle cannot be empty")
-	}
 
 	fmt.Print("Superuser password: ")
 	passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -67,16 +64,16 @@ func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 	}
 
 	_, err = k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
-		Handle:   handle,
-		Email:    handle + "@sys",
+		Handle:   superuserHandle,
+		Email:    "sys@sys",
 		Password: password,
 	}, configKeySuperuser)
 	if err != nil {
 		return "", fmt.Errorf("create superuser: %w", err)
 	}
 
-	fmt.Printf("Superuser %q created.\n", handle)
-	return handle, nil
+	fmt.Printf("Superuser %q created.\n", superuserHandle)
+	return superuserHandle, nil
 }
 
 func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle string) error {
@@ -88,7 +85,10 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 	actionName := "/lookup"
 	a, err := k.ReadActionByOwnerName(ctx, su.ID, actionName)
 	if err == nil && a != nil {
-		// Already registered — ensure grant-all is set.
+		// Already registered — ensure active and grant-all is set.
+		if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
+			return fmt.Errorf("activate @sys/lookup: %w", err)
+		}
 		_ = k.GrantAll(ctx, su.ID, a.ID)
 		return nil
 	}
@@ -100,19 +100,109 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 		Kind:         kernel.KindNative,
 		Price:        0,
 		Description:  "Semantic search over active actions",
-		InputSchema:  map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}, "limit": map[string]any{"type": "number"}}},
-		OutputSchema: map[string]any{"type": "object"},
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{"type": "string", "description": "Semantic search query"},
+				"limit": map[string]any{"type": "integer", "description": "Maximum number of results"},
+			},
+			"required": []string{"query"},
+		},
+		OutputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"results": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"action_id":    map[string]any{"type": "string"},
+							"name":         map[string]any{"type": "string"},
+							"owner_handle": map[string]any{"type": "string"},
+							"description":  map[string]any{"type": "string"},
+							"score":        map[string]any{"type": "number"},
+						},
+					},
+				},
+			},
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("create @sys/lookup: %w", err)
 	}
 
-	if err := k.SetActive(ctx, su.ID, a.ID, true); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
 		return fmt.Errorf("activate @sys/lookup: %w", err)
 	}
 
 	if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
 		return fmt.Errorf("grant-all @sys/lookup: %w", err)
+	}
+
+	return nil
+}
+
+func ensureSysLLMChat(ctx context.Context, k *kernel.Kernel, superuserHandle string) error {
+	su, err := k.ReadUserByHandle(ctx, superuserHandle)
+	if err != nil {
+		return fmt.Errorf("read superuser: %w", err)
+	}
+
+	actionName := "/llm/chat"
+	a, err := k.ReadActionByOwnerName(ctx, su.ID, actionName)
+	if err == nil && a != nil {
+		if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
+			return fmt.Errorf("activate @sys/llm/chat: %w", err)
+		}
+		_ = k.GrantAll(ctx, su.ID, a.ID)
+		return nil
+	}
+
+	msgItemSchema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"role":    map[string]any{"type": "string"},
+			"content": map[string]any{"type": "string"},
+		},
+		"required": []string{"role", "content"},
+	}
+	a, err = k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID: su.ID,
+		Name:        actionName,
+		Kind:        kernel.KindNative,
+		Price:       0,
+		Description: "Chat completion via the configured language model",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"messages": map[string]any{"type": "array", "items": msgItemSchema, "description": "Conversation history"},
+				"system":   map[string]any{"type": "string", "description": "Optional system prompt"},
+			},
+			"required": []string{"messages"},
+		},
+		OutputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"message": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"role":    map[string]any{"type": "string"},
+						"content": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create @sys/llm/chat: %w", err)
+	}
+
+	if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
+		return fmt.Errorf("activate @sys/llm/chat: %w", err)
+	}
+
+	if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
+		return fmt.Errorf("grant-all @sys/llm/chat: %w", err)
 	}
 
 	return nil
@@ -143,7 +233,7 @@ func newTestKernel(t *testing.T) *kernel.Kernel {
 	t.Cleanup(func() { db.Close() })
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "bootstrap-test-secret"
-	return kernel.New(db, nil, nil, cfg, log.Discard())
+	return kernel.New(db, nil, nil, nil, cfg, log.Discard())
 }
 
 func TestEnsureSysLookupIdempotent(t *testing.T) {
@@ -152,7 +242,7 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 
 	// Create a superuser manually.
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@su", Email: "su@sys", Password: "pass",
+		Handle: "@sys", Email: "sys@sys", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -165,10 +255,46 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 	if err := ensureSysLookup(ctx, k, u.Handle); err != nil {
 		t.Fatalf("first ensureSysLookup: %v", err)
 	}
+	a, err := k.ReadActionByOwnerName(ctx, u.ID, "/lookup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Active {
+		t.Fatal("/lookup should be active after ensureSysLookup")
+	}
 
 	// Second call: idempotent.
 	if err := ensureSysLookup(ctx, k, u.Handle); err != nil {
 		t.Fatalf("second ensureSysLookup: %v", err)
+	}
+}
+
+func TestEnsureSysLLMChatIdempotent(t *testing.T) {
+	ctx := context.Background()
+	k := newTestKernel(t)
+
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@sys", Email: "sys@sys", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First call: creates the action.
+	if err := ensureSysLLMChat(ctx, k, u.Handle); err != nil {
+		t.Fatalf("first ensureSysLLMChat: %v", err)
+	}
+	a, err := k.ReadActionByOwnerName(ctx, u.ID, "/llm/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Active {
+		t.Fatal("/llm/chat should be active after ensureSysLLMChat")
+	}
+
+	// Second call: idempotent.
+	if err := ensureSysLLMChat(ctx, k, u.Handle); err != nil {
+		t.Fatalf("second ensureSysLLMChat: %v", err)
 	}
 }
 
@@ -178,7 +304,7 @@ func TestBootstrapSuperuserAtomic(t *testing.T) {
 
 	// BootstrapSuperuser must atomically create user + config.
 	_, err := k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
-		Handle: "@admin", Email: "admin@sys", Password: "secret",
+		Handle: "@sys", Email: "sys@sys", Password: "secret",
 	}, configKeySuperuser)
 	if err != nil {
 		t.Fatalf("BootstrapSuperuser: %v", err)
@@ -186,19 +312,19 @@ func TestBootstrapSuperuserAtomic(t *testing.T) {
 
 	// Config must be set.
 	handle, err := k.GetConfig(ctx, configKeySuperuser)
-	if err != nil || handle != "@admin" {
-		t.Errorf("superuser config: got %q %v, want @admin nil", handle, err)
+	if err != nil || handle != "@sys" {
+		t.Errorf("superuser config: got %q %v, want @sys nil", handle, err)
 	}
 
 	// User must be readable.
-	u, err := k.ReadUserByHandle(ctx, "@admin")
+	u, err := k.ReadUserByHandle(ctx, "@sys")
 	if err != nil || u == nil {
 		t.Fatalf("superuser user not found: %v", err)
 	}
 
 	// Second call must be idempotent (handle already exists).
 	_, err = k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
-		Handle: "@admin", Email: "admin@sys", Password: "secret",
+		Handle: "@sys", Email: "sys@sys", Password: "secret",
 	}, configKeySuperuser)
 	if err != nil {
 		t.Errorf("second BootstrapSuperuser: expected idempotent, got %v", err)
@@ -241,7 +367,7 @@ func newTestEnv(t *testing.T) *testEnv {
 
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "cli-test-secret"
-	k := kernel.New(db, nil, nil, cfg, log.Discard())
+	k := kernel.New(db, nil, nil, nil, cfg, log.Discard())
 
 	t.Cleanup(func() { db.Close() })
 
@@ -803,6 +929,46 @@ func TestActionACLGrantRevoke(t *testing.T) {
 	}
 }
 
+func TestActionPriceUpdateDeactivates(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@priceowner", Email: "price@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID,
+		Name:        "/priced",
+		Kind:        kernel.KindHTTP,
+		Price:       10,
+		Source:      "http://example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	price := int64(20)
+	updated, err := env.k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{
+		ID:    a.ID,
+		Price: &price,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Active {
+		t.Fatal("price update should deactivate action")
+	}
+	if updated.Price != price {
+		t.Fatalf("price: got %d, want %d", updated.Price, price)
+	}
+}
+
 func TestActionDelete(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
@@ -895,6 +1061,21 @@ func init() {
 	rootCmd.AddCommand(adminCmd)
 }
 
+func requireSuperuser(k *kernel.Kernel) (string, error) {
+	subjectID, err := requireSubjectID(k)
+	if err != nil {
+		return "", err
+	}
+	subject, err := k.ReadUser(context.Background(), subjectID)
+	if err != nil {
+		return "", err
+	}
+	if subject.Handle != superuserHandle {
+		return "", kernel.ErrUnauthorized.Wrap("superuser required")
+	}
+	return subjectID, nil
+}
+
 func adminUserListCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{
@@ -906,6 +1087,10 @@ func adminUserListCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
 
 			users, err := k.ListUsers(context.Background(), limit, offset)
 			if err != nil {
@@ -941,6 +1126,10 @@ func adminUserShowCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
 
 			ctx := context.Background()
 			var u *kernel.User
@@ -983,6 +1172,9 @@ func adminUserSuspendCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
 			if err := k.SuspendUser(context.Background(), userID); err != nil {
 				return err
 			}
@@ -1006,6 +1198,9 @@ func adminUserUnsuspendCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
 			if err := k.UnsuspendUser(context.Background(), userID); err != nil {
 				return err
 			}
@@ -1031,7 +1226,7 @@ func adminUserDepositCmd() *cobra.Command {
 			}
 			defer db.Close()
 
-			subjectID, err := requireSubjectID(k)
+			subjectID, err := requireSuperuser(k)
 			if err != nil {
 				return err
 			}
@@ -1082,6 +1277,10 @@ func adminActionListCmd() *cobra.Command {
 			}
 			defer db.Close()
 
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
+
 			actions, err := k.ListAllActions(context.Background(), limit, offset)
 			if err != nil {
 				return err
@@ -1121,7 +1320,7 @@ func adminActionDisableCmd() *cobra.Command {
 			}
 			defer db.Close()
 
-			subjectID, err := requireSubjectID(k)
+			subjectID, err := requireSuperuser(k)
 			if err != nil {
 				return err
 			}
@@ -1149,6 +1348,10 @@ func adminProcessListCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
 
 			processes, err := k.ListAllProcesses(context.Background(), limit, offset)
 			if err != nil {
@@ -1182,6 +1385,10 @@ func adminTxListCmd() *cobra.Command {
 			}
 			defer db.Close()
 
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
+
 			txs, err := k.ListAllTransactions(context.Background(), limit, offset)
 			if err != nil {
 				return err
@@ -1209,6 +1416,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -1227,7 +1435,7 @@ func newAdminTestKernel(t *testing.T) *kernel.Kernel {
 	t.Cleanup(func() { db.Close() })
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "admin-test-secret"
-	return kernel.New(db, nil, nil, cfg, log.Discard())
+	return kernel.New(db, nil, nil, nil, cfg, log.Discard())
 }
 
 func TestAdminListUsers(t *testing.T) {
@@ -1345,6 +1553,54 @@ func TestAdminDeposit(t *testing.T) {
 	// Unknown user rejected.
 	if _, err := k.Deposit(ctx, admin.ID, "nonexistent", 100, ""); err == nil {
 		t.Error("expected error for unknown target user")
+	}
+}
+
+func TestRequireSuperuser(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnv(t)
+
+	admin, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@sys", Email: "sys@sys", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regular, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@regular", Email: "regular@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	adminToken, err := env.k.Login(ctx, "@sys", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveToken(adminToken); err != nil {
+		t.Fatal(err)
+	}
+	got, err := requireSuperuser(env.k)
+	if err != nil {
+		t.Fatalf("admin should pass superuser check: %v", err)
+	}
+	if got != admin.ID {
+		t.Fatalf("subject id: got %q, want %q", got, admin.ID)
+	}
+
+	regularToken, err := env.k.Login(ctx, "@regular", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveToken(regularToken); err != nil {
+		t.Fatal(err)
+	}
+	_, err = requireSuperuser(env.k)
+	if !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("regular user should be unauthorized, got %v", err)
+	}
+	if regular.ID == "" {
+		t.Fatal("regular user setup failed")
 	}
 }
 
@@ -1550,8 +1806,17 @@ func loginPKCE(handle, password, server string) error {
 func logoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
-		Short: "Remove the stored bearer token",
+		Short: "Revoke the stored refresh token and remove local credentials",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			// Revoke refresh token server-side if one is stored.
+			if rt, err := loadRefreshToken(); err == nil {
+				k, db, err := openKernel()
+				if err != nil {
+					return err
+				}
+				_ = k.RevokeRefreshToken(context.Background(), rt)
+				db.Close()
+			}
 			if err := removeToken(); err != nil && !os.IsNotExist(err) {
 				return err
 			}
@@ -1657,6 +1922,37 @@ func TestAuthWrongPassword(t *testing.T) {
 	}
 	if _, err := env.k.Login(ctx, "@wrongpass", "wrong"); err == nil {
 		t.Error("expected error for wrong password")
+	}
+}
+
+func TestRevokeRefreshToken(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	_, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@revoke-user", Email: "rv@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, rt, err := env.k.LoginWithRefresh(ctx, "@revoke-user", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.k.RevokeRefreshToken(ctx, rt); err != nil {
+		t.Fatalf("RevokeRefreshToken: %v", err)
+	}
+
+	// Rotating a revoked token must fail.
+	if _, _, err := env.k.RefreshAccessToken(ctx, rt); err == nil {
+		t.Error("expected error refreshing with revoked token")
+	}
+
+	// Revoking again must fail.
+	if err := env.k.RevokeRefreshToken(ctx, rt); err == nil {
+		t.Error("expected error revoking already-revoked token")
 	}
 }
 
@@ -1859,7 +2155,7 @@ import (
 
 func init() {
 	eventsCmd := &cobra.Command{Use: "events", Short: "Event listener commands"}
-	eventsCmd.AddCommand(eventsListenCmd(), eventsUnlistenCmd(), eventsEmitCmd(), eventsPollCmd(), eventsConsumeCmd())
+	eventsCmd.AddCommand(eventsListenCmd(), eventsListCmd(), eventsUnlistenCmd(), eventsEmitCmd(), eventsPollCmd(), eventsConsumeCmd())
 	rootCmd.AddCommand(eventsCmd)
 }
 
@@ -1908,6 +2204,44 @@ func eventsListenCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("source")
 	_ = cmd.MarkFlagRequired("event")
 	_ = cmd.MarkFlagRequired("action")
+	return cmd
+}
+
+func eventsListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List listeners owned by the current user",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			listeners, err := k.ListListeners(context.Background(), subjectID, 100, 0)
+			if err != nil {
+				return err
+			}
+
+			if flagOutput == "json" {
+				return printJSON(listeners)
+			}
+			for _, l := range listeners {
+				active := "active"
+				if !l.Active {
+					active = "inactive"
+				}
+				fmt.Printf("%s  %-8s  event:%-20s  action:%s\n",
+					l.ID[:8], active, l.EventName, l.TargetActionID[:8])
+			}
+			return nil
+		},
+	}
 	return cmd
 }
 
@@ -2175,6 +2509,46 @@ func TestListenerDeletedNotFired(t *testing.T) {
 	}
 }
 
+func TestListListeners(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@list-lst-owner", Email: "llo@example.com", Password: "p",
+	})
+	other, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@list-lst-other", Email: "llot@example.com", Password: "p",
+	})
+
+	a := makeActiveAction(t, env, owner.ID, "/list-lst-action")
+
+	env.k.CreateListener(ctx, kernel.CreateListenerRequest{
+		OwnerUserID: owner.ID, SourceUserID: other.ID,
+		EventName: "ev1", TargetActionID: a.ID,
+	})
+	env.k.CreateListener(ctx, kernel.CreateListenerRequest{
+		OwnerUserID: owner.ID, SourceUserID: other.ID,
+		EventName: "ev2", TargetActionID: a.ID,
+	})
+	env.k.CreateListener(ctx, kernel.CreateListenerRequest{
+		OwnerUserID: other.ID, SourceUserID: owner.ID,
+		EventName: "ev3", TargetActionID: a.ID,
+	})
+
+	listeners, err := env.k.ListListeners(ctx, owner.ID, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listeners) != 2 {
+		t.Errorf("ListListeners: got %d, want 2", len(listeners))
+	}
+	for _, l := range listeners {
+		if l.OwnerUserID != owner.ID {
+			t.Errorf("unexpected owner %s", l.OwnerUserID)
+		}
+	}
+}
+
 
 // ===== cmd/juice/cmd_process.go =====
 
@@ -2189,7 +2563,7 @@ import (
 
 func init() {
 	processCmd := &cobra.Command{Use: "process", Short: "Process lifecycle commands"}
-	processCmd.AddCommand(processStartCmd(), processFundCmd(), processEndCmd(), processShowCmd())
+	processCmd.AddCommand(processStartCmd(), processListCmd(), processFundCmd(), processEndCmd(), processShowCmd())
 	rootCmd.AddCommand(processCmd)
 }
 
@@ -2228,6 +2602,40 @@ func processStartCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Int64Var(&funds, "funds", 0, "Initial credit allocation")
+	return cmd
+}
+
+func processListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List processes owned by the current user",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			processes, err := k.ListProcesses(context.Background(), subjectID, 100, 0)
+			if err != nil {
+				return err
+			}
+
+			if flagOutput == "json" {
+				return printJSON(processes)
+			}
+			for _, p := range processes {
+				fmt.Printf("%s  %-6s  available:%-6d  locked:%-6d\n",
+					p.ID[:8], p.Status, p.Available, p.Locked)
+			}
+			return nil
+		},
+	}
 	return cmd
 }
 
@@ -2380,6 +2788,35 @@ func TestProcessStartFundEnd(t *testing.T) {
 	}
 }
 
+
+func TestProcessList(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@list-proc", Email: "lp@example.com", Password: "p",
+	})
+	other, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@list-proc-other", Email: "lpo@example.com", Password: "p",
+	})
+
+	env.k.StartProcess(ctx, owner.ID, 0)
+	env.k.StartProcess(ctx, owner.ID, 0)
+	env.k.StartProcess(ctx, other.ID, 0)
+
+	processes, err := env.k.ListProcesses(ctx, owner.ID, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(processes) != 2 {
+		t.Errorf("ListProcesses: got %d, want 2", len(processes))
+	}
+	for _, p := range processes {
+		if p.OwnerUserID != owner.ID {
+			t.Errorf("unexpected owner %s", p.OwnerUserID)
+		}
+	}
+}
 
 func TestProcessNegativeFundsFails(t *testing.T) {
 	env := newTestEnv(t)
@@ -2805,6 +3242,7 @@ import (
 func init() {
 	userCmd := &cobra.Command{Use: "user", Short: "User account commands"}
 	userCmd.AddCommand(userCreateCmd())
+	userCmd.AddCommand(userMeCmd())
 	rootCmd.AddCommand(userCmd)
 }
 
@@ -2850,6 +3288,43 @@ func userCreateCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("handle")
 	_ = cmd.MarkFlagRequired("email")
 	return cmd
+}
+
+func userMeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "me",
+		Short: "Show the authenticated user's profile",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			u, err := k.ReadUser(context.Background(), subjectID)
+			if err != nil {
+				return err
+			}
+
+			if flagOutput == "json" {
+				return printJSON(map[string]any{
+					"id":        u.ID,
+					"handle":    u.Handle,
+					"email":     u.Email,
+					"available": u.Available,
+					"locked":    u.Locked,
+				})
+			}
+			fmt.Printf("id:        %s\nhandle:    %s\nemail:     %s\navailable: %d\nlocked:    %d\n",
+				u.ID, u.Handle, u.Email, u.Available, u.Locked)
+			return nil
+		},
+	}
 }
 
 func printJSON(v any) error {
@@ -2926,6 +3401,29 @@ func TestUserDuplicateHandleFails(t *testing.T) {
 	req.Email = "c@d.com"
 	if _, err := env.k.CreateUser(ctx, req); err == nil {
 		t.Error("expected error for duplicate handle")
+	}
+}
+
+func TestUserMe(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@meuser", Email: "me@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := env.k.ReadUser(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Handle != "@meuser" {
+		t.Errorf("handle: got %q, want @meuser", got.Handle)
+	}
+	if got.Email != "me@example.com" {
+		t.Errorf("email: got %q, want me@example.com", got.Email)
 	}
 }
 
@@ -3034,14 +3532,19 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	})
 
 	var embedder kernel.Embedder
+	var chatter kernel.Chatter
 	if ollamaURL := os.Getenv("JUICE_OLLAMA_URL"); ollamaURL != "" {
 		embedder = &llm.OllamaEmbedder{
 			URL:   ollamaURL,
 			Model: envOr("JUICE_OLLAMA_EMBED_MODEL", "nomic-embed-text"),
 		}
+		chatter = &llm.OllamaChatter{
+			URL:   ollamaURL,
+			Model: envOr("JUICE_OLLAMA_CHAT_MODEL", "gemma4:26b"),
+		}
 	}
 
-	k := kernel.New(db, exec, embedder, cfg, logger)
+	k := kernel.New(db, exec, embedder, chatter, cfg, logger)
 	return k, db, nil
 }
 
@@ -3265,6 +3768,7 @@ func runServer(addr string) error {
 	r.With(authLimiter).Post("/v1/auth/token", srv.postTokenMulti)
 	r.With(authLimiter).Post("/v1/auth/authorize", srv.postAuthorize)
 	r.With(authLimiter).Post("/v1/auth/refresh", srv.postRefresh)
+	r.With(authLimiter).Post("/v1/auth/logout", srv.postLogout)
 
 	// Users — rate limited: 3 requests/minute per IP, burst of 5.
 	r.With(ipRateLimiter(3.0/60, 5)).Post("/v1/users", srv.postUser)
@@ -3275,6 +3779,7 @@ func runServer(addr string) error {
 		r.Get("/v1/actions", srv.getActions)
 		r.Post("/v1/actions", srv.postAction)
 		r.Get("/v1/actions/{id}", srv.getAction)
+		r.Put("/v1/actions/{id}", srv.updateAction)
 		r.Post("/v1/actions/{id}/enable", srv.enableAction)
 		r.Post("/v1/actions/{id}/disable", srv.disableAction)
 		r.Delete("/v1/actions/{id}", srv.deleteAction)
@@ -3284,6 +3789,7 @@ func runServer(addr string) error {
 		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
 
 		// Processes.
+		r.Get("/v1/processes", srv.listProcesses)
 		r.Post("/v1/processes", srv.postProcess)
 		r.Get("/v1/processes/{id}", srv.getProcess)
 		r.Post("/v1/processes/{id}/fund", srv.fundProcess)
@@ -3304,12 +3810,16 @@ func runServer(addr string) error {
 		r.Post("/v1/lookup", srv.postLookup)
 
 		// Listeners & Events.
+		r.Get("/v1/listeners", srv.listListeners)
 		r.Post("/v1/listeners", srv.postListener)
 		r.Get("/v1/listeners/{id}", srv.getListener)
+		r.Get("/v1/listeners/{id}/events", srv.getListener)
 		r.Delete("/v1/listeners/{id}", srv.deleteListener)
 		r.Post("/v1/events/emit", srv.postEmit)
 		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
 
+		// Current user.
+		r.Get("/v1/me", srv.getMe)
 	})
 
 	logger.Info("server.start", "addr", addr)
@@ -3553,6 +4063,34 @@ func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a)
 }
 
+func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Price        *int64         `json:"price"`
+		Description  *string        `json:"description"`
+		Source       *string        `json:"source"`
+		InputSchema  map[string]any `json:"input_schema"`
+		OutputSchema map[string]any `json:"output_schema"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+		return
+	}
+	a, err := s.kernel.UpdateAction(r.Context(), subjectFrom(r), kernel.UpdateActionRequest{
+		ID:           id,
+		Price:        body.Price,
+		Description:  body.Description,
+		Source:       body.Source,
+		InputSchema:  body.InputSchema,
+		OutputSchema: body.OutputSchema,
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, a)
+}
+
 func (s *server) enableAction(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := s.kernel.SetActive(r.Context(), subjectFrom(r), id, true); err != nil {
@@ -3614,6 +4152,15 @@ func (s *server) revokeACL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) listProcesses(w http.ResponseWriter, r *http.Request) {
+	processes, err := s.kernel.ListProcesses(r.Context(), subjectFrom(r), 100, 0)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, processes)
 }
 
 func (s *server) postProcess(w http.ResponseWriter, r *http.Request) {
@@ -3810,6 +4357,21 @@ func (s *server) postRefresh(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *server) postLogout(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+		return
+	}
+	if err := s.kernel.RevokeRefreshToken(r.Context(), req.RefreshToken); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Override postToken to support both password grant and authorization_code grant.
 // The existing postToken handles password grant; this adds code exchange.
 func (s *server) postTokenMulti(w http.ResponseWriter, r *http.Request) {
@@ -3844,6 +4406,15 @@ func (s *server) postTokenMulti(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- Listener / Event handlers ----
+
+func (s *server) listListeners(w http.ResponseWriter, r *http.Request) {
+	listeners, err := s.kernel.ListListeners(r.Context(), subjectFrom(r), 100, 0)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, listeners)
+}
 
 func (s *server) postListener(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -3944,6 +4515,23 @@ func (s *server) revokeAll(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ---- me ----
+
+func (s *server) getMe(w http.ResponseWriter, r *http.Request) {
+	u, err := s.kernel.ReadUser(r.Context(), subjectFrom(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":        u.ID,
+		"handle":    u.Handle,
+		"email":     u.Email,
+		"available": u.Available,
+		"locked":    u.Locked,
+	})
+}
+
 // ---- response helpers ----
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -3999,7 +4587,7 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	cfg.TokenSecret = "serve-test-secret"
 	cfg.AllowLocalSources = true
 	logger := log.Discard()
-	k := kernel.New(db, nil, nil, cfg, logger)
+	k := kernel.New(db, nil, nil, nil, cfg, logger)
 
 	srv := &server{kernel: k, log: logger}
 	r := chi.NewRouter()
@@ -4012,12 +4600,14 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	r.Post("/v1/auth/token", srv.postTokenMulti)
 	r.Post("/v1/auth/authorize", srv.postAuthorize)
 	r.Post("/v1/auth/refresh", srv.postRefresh)
+	r.Post("/v1/auth/logout", srv.postLogout)
 	r.Post("/v1/users", srv.postUser)
 	r.Group(func(r chi.Router) {
 		r.Use(srv.authMiddleware)
 		r.Get("/v1/actions", srv.getActions)
 		r.Post("/v1/actions", srv.postAction)
 		r.Get("/v1/actions/{id}", srv.getAction)
+		r.Put("/v1/actions/{id}", srv.updateAction)
 		r.Post("/v1/actions/{id}/enable", srv.enableAction)
 		r.Post("/v1/actions/{id}/disable", srv.disableAction)
 		r.Delete("/v1/actions/{id}", srv.deleteAction)
@@ -4025,6 +4615,7 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		r.Delete("/v1/actions/{id}/acl", srv.revokeACL)
 		r.Post("/v1/actions/{id}/grant-all", srv.grantAll)
 		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
+		r.Get("/v1/processes", srv.listProcesses)
 		r.Post("/v1/processes", srv.postProcess)
 		r.Get("/v1/processes/{id}", srv.getProcess)
 		r.Post("/v1/processes/{id}/fund", srv.fundProcess)
@@ -4035,11 +4626,14 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		r.Post("/v1/transactions/{id}/rate", srv.rateTransaction)
 		r.Get("/v1/stats/{action_id}", srv.getStats)
 		r.Post("/v1/lookup", srv.postLookup)
+		r.Get("/v1/listeners", srv.listListeners)
 		r.Post("/v1/listeners", srv.postListener)
 		r.Get("/v1/listeners/{id}", srv.getListener)
+		r.Get("/v1/listeners/{id}/events", srv.getListener)
 		r.Delete("/v1/listeners/{id}", srv.deleteListener)
 		r.Post("/v1/events/emit", srv.postEmit)
 		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
+		r.Get("/v1/me", srv.getMe)
 	})
 
 	return httptest.NewServer(r), k
@@ -4899,6 +5493,187 @@ func TestServeListenerFlow(t *testing.T) {
 	}
 }
 
+func TestServeUpdateAction(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@upd-owner")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/upd-action", "kind": "http", "price": 0, "source": "http://x.example",
+	}, tok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok).Body.Close()
+
+	newDesc := "updated description"
+	resp := httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{
+		"description": newDesc,
+	}, tok)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("update action: expected 200, got %d", resp.StatusCode)
+	}
+	var updated kernel.Action
+	decodeResponse(t, resp, &updated)
+	if updated.Description != newDesc {
+		t.Errorf("description: got %q, want %q", updated.Description, newDesc)
+	}
+	// Update must deactivate the action (source/schema change wasn't made here but description is safe;
+	// price/source changes deactivate — just verify the response has the action).
+	if updated.ID != action.ID {
+		t.Errorf("ID mismatch after update")
+	}
+}
+
+func TestServeListProcesses(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@lp-user")
+
+	// Create two processes.
+	httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, tok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, tok).Body.Close()
+
+	resp := httpDo(t, srv, "GET", "/v1/processes", nil, tok)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("list processes: expected 200, got %d", resp.StatusCode)
+	}
+	var processes []kernel.Process
+	decodeResponse(t, resp, &processes)
+	if len(processes) != 2 {
+		t.Errorf("list processes: got %d, want 2", len(processes))
+	}
+}
+
+func TestServeListListeners(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	ownerID, ownerTok := makeUser(t, k, "@ll-owner")
+	sourceID, _ := makeUser(t, k, "@ll-source")
+
+	act := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/ll-action", "kind": "http", "price": 0, "source": "http://ll.example",
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, act, &action)
+	_ = ownerID
+	_ = sourceID
+
+	// Create two listeners.
+	httpDo(t, srv, "POST", "/v1/listeners", map[string]any{
+		"source_user_id": sourceID, "event_name": "a", "target_action_id": action.ID,
+	}, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/listeners", map[string]any{
+		"source_user_id": sourceID, "event_name": "b", "target_action_id": action.ID,
+	}, ownerTok).Body.Close()
+
+	resp := httpDo(t, srv, "GET", "/v1/listeners", nil, ownerTok)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("list listeners: expected 200, got %d", resp.StatusCode)
+	}
+	var listeners []kernel.Listener
+	decodeResponse(t, resp, &listeners)
+	if len(listeners) != 2 {
+		t.Errorf("list listeners: got %d, want 2", len(listeners))
+	}
+}
+
+func TestServePollListenerEvents(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@poll-owner")
+	sourceID, sourceTok := makeUser(t, k, "@poll-source")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/poll-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+
+	lr := httpDo(t, srv, "POST", "/v1/listeners", map[string]any{
+		"source_user_id": sourceID, "event_name": "ping", "target_action_id": action.ID,
+	}, ownerTok)
+	var listener kernel.Listener
+	decodeResponse(t, lr, &listener)
+
+	httpDo(t, srv, "POST", "/v1/events/emit", map[string]any{
+		"event_name": "ping", "args": map[string]any{},
+	}, sourceTok).Body.Close()
+
+	// Poll via the new /events sub-path.
+	resp := httpDo(t, srv, "GET", "/v1/listeners/"+listener.ID+"/events", nil, ownerTok)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("poll events: expected 200, got %d", resp.StatusCode)
+	}
+	var result map[string]any
+	decodeResponse(t, resp, &result)
+	events, _ := result["events"].([]any)
+	if len(events) == 0 {
+		t.Error("expected at least one pending event")
+	}
+}
+
+func TestServeLogout(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, _ = makeUser(t, k, "@logout-user")
+
+	// Obtain a refresh token via PKCE.
+	verifier := strings.Repeat("y", 43)
+	h := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(h[:])
+
+	authResp := httpDoForm(t, srv, "/v1/auth/authorize", url.Values{
+		"handle": {"@logout-user"}, "password": {"pass"}, "code_challenge": {challenge},
+	})
+	var authResult map[string]string
+	decodeResponse(t, authResp, &authResult)
+	code := strings.TrimPrefix(authResult["redirect"], "?code=")
+
+	tokenResp := httpDoForm(t, srv, "/v1/auth/token", url.Values{
+		"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {verifier},
+	})
+	var tokenResult map[string]string
+	decodeResponse(t, tokenResp, &tokenResult)
+	refreshToken := tokenResult["refresh_token"]
+	if refreshToken == "" {
+		t.Fatal("expected refresh token from PKCE flow")
+	}
+
+	// Logout — revoke the refresh token.
+	out := httpDo(t, srv, "POST", "/v1/auth/logout", map[string]any{
+		"refresh_token": refreshToken,
+	}, "")
+	out.Body.Close()
+	if out.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout: expected 204, got %d", out.StatusCode)
+	}
+
+	// Refresh with the revoked token must fail.
+	ref := httpDo(t, srv, "POST", "/v1/auth/refresh", map[string]any{
+		"refresh_token": refreshToken,
+	}, "")
+	ref.Body.Close()
+	if ref.StatusCode != http.StatusUnauthorized {
+		t.Errorf("refresh after logout: expected 401, got %d", ref.StatusCode)
+	}
+}
+
 func TestRateLimitLogin(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "rl.db"))
@@ -4910,7 +5685,7 @@ func TestRateLimitLogin(t *testing.T) {
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "rl-test-secret"
 	logger := log.Discard()
-	k := kernel.New(db, nil, nil, cfg, logger)
+	k := kernel.New(db, nil, nil, nil, cfg, logger)
 	if _, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
 		Handle: "@rlu", Email: "rlu@example.com", Password: "pass",
 	}); err != nil {
@@ -4951,6 +5726,38 @@ func TestServeRequestIDHeader(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.Header.Get("X-Request-ID") == "" {
 		t.Error("expected X-Request-ID header in response")
+	}
+}
+
+func TestServeGetMe(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	uid, tok := makeUser(t, k, "@metest")
+	giveCredits(t, k, uid, 500)
+
+	resp := httpDo(t, srv, "GET", "/v1/me", nil, tok)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/me: expected 200, got %d", resp.StatusCode)
+	}
+	var got map[string]any
+	decodeResponse(t, resp, &got)
+
+	if got["handle"] != "@metest" {
+		t.Errorf("handle: got %v, want @metest", got["handle"])
+	}
+	if got["email"] != "@metest@test.com" {
+		t.Errorf("email: got %v, want @metest@test.com", got["email"])
+	}
+	if got["available"].(float64) != 500 {
+		t.Errorf("available: got %v, want 500", got["available"])
+	}
+
+	// Unauthenticated request must be rejected.
+	resp2 := httpDo(t, srv, "GET", "/v1/me", nil, "")
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unauthenticated: expected 401, got %d", resp2.StatusCode)
 	}
 }
 
@@ -5153,6 +5960,11 @@ func (k *Kernel) issueRefreshToken(ctx context.Context, userID string) (*Refresh
 }
 
 // LoginWithRefresh authenticates handle+password and returns both access and refresh tokens.
+// RevokeRefreshToken revokes a refresh token, preventing further use.
+func (k *Kernel) RevokeRefreshToken(ctx context.Context, token string) error {
+	return k.store.RevokeRefreshToken(ctx, token)
+}
+
 func (k *Kernel) LoginWithRefresh(ctx context.Context, handle, password string) (accessToken, refreshToken string, err error) {
 	u, err := k.store.ReadUserByHandle(ctx, handle)
 	if err != nil {
@@ -5488,9 +6300,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrNotFound.Wrapf("action %s/%s not found", req.TargetUserID, req.ActionName)
 	}
 
-	// 5. Action must be active (non-owners only).
-	if !action.Active && action.OwnerUserID != req.SubjectID {
-		return nil, ErrNotFound.Wrapf("action %s/%s not found", req.TargetUserID, req.ActionName)
+	// 5. Action must be active.
+	if !action.Active {
+		return nil, ErrInvalidState.Wrap("action is inactive")
 	}
 
 	// 6. ACL check — CanCall(subject, action).
@@ -5594,6 +6406,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		tx.Status = TxFailure
 		tx.Reason = execErr.Error()
 		_ = k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price)
+		_ = k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt)
 		k.updateStats(ctx, action.ID, tx, latency)
 		logger.Warn("call.failed", "action", action.Name, "error", execErr)
 		return nil, execErr
@@ -5604,6 +6417,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		tx.Status = TxFailure
 		tx.Reason = "output schema violation: " + err.Error()
 		_ = k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price)
+		_ = k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt)
 		k.updateStats(ctx, action.ID, tx, latency)
 		return nil, err
 	}
@@ -5673,6 +6487,8 @@ func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[str
 	switch action.Name {
 	case "/lookup":
 		return k.executeLookup(ctx, args)
+	case "/llm/chat":
+		return k.executeChat(ctx, args)
 	default:
 		return nil, ErrInvalidState.Wrapf("unknown native action %q", action.Name)
 	}
@@ -5701,6 +6517,50 @@ func (k *Kernel) executeLookup(ctx context.Context, args map[string]any) (map[st
 		}
 	}
 	return map[string]any{"results": items}, nil
+}
+
+// executeChat implements the /llm/chat native action.
+func (k *Kernel) executeChat(ctx context.Context, args map[string]any) (map[string]any, error) {
+	if k.chatter == nil {
+		return nil, ErrInvalidState.Wrap("chat service not configured")
+	}
+
+	rawMsgs, ok := args["messages"]
+	if !ok {
+		return nil, ErrInvalidInput.Wrap("chat requires messages argument")
+	}
+	msgList, ok := rawMsgs.([]any)
+	if !ok {
+		return nil, ErrInvalidInput.Wrap("messages must be an array")
+	}
+
+	var messages []ChatMessage
+	if sys, ok := args["system"].(string); ok && sys != "" {
+		messages = append(messages, ChatMessage{Role: "system", Content: sys})
+	}
+	for _, item := range msgList {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return nil, ErrInvalidInput.Wrap("each message must be an object")
+		}
+		role, _ := m["role"].(string)
+		content, _ := m["content"].(string)
+		if role == "" || content == "" {
+			return nil, ErrInvalidInput.Wrap("each message must have role and content")
+		}
+		messages = append(messages, ChatMessage{Role: role, Content: content})
+	}
+
+	reply, err := k.chatter.Chat(ctx, messages)
+	if err != nil {
+		return nil, ErrExecutionFailed.Wrapf("chat failed: %v", err)
+	}
+	return map[string]any{
+		"message": map[string]any{
+			"role":    reply.Role,
+			"content": reply.Content,
+		},
+	}, nil
 }
 
 // executeHTTP calls an external HTTP endpoint.
@@ -5940,6 +6800,7 @@ package kernel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -5977,17 +6838,16 @@ func TestCallClosedProcessFails(t *testing.T) {
 	}
 }
 
-func TestCallInactiveActionDeniedForNonOwner(t *testing.T) {
+func TestCallInactiveActionDenied(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@alice", 1000)
-	target := setupUser(t, st, "@bob", 0)
 
 	a := &Action{
 		ID:          uuid.New().String(),
-		OwnerUserID: target.ID,
+		OwnerUserID: owner.ID,
 		Name:        "/svc",
 		Kind:        KindNative,
 		Active:      false,
@@ -6003,12 +6863,16 @@ func TestCallInactiveActionDeniedForNonOwner(t *testing.T) {
 		SubjectID:     owner.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
-		TargetUserID:  target.ID,
+		TargetUserID:  owner.ID,
 		ActionName:    "/svc",
 		Args:          map[string]any{},
 	})
 	if err == nil {
-		t.Error("expected error calling inactive action as non-owner")
+		t.Error("expected error calling inactive action")
+	}
+	var ke *KernelError
+	if !errors.As(err, &ke) || ke.Code != "invalid_state" {
+		t.Errorf("expected invalid_state error, got %v", err)
 	}
 }
 
@@ -6417,6 +7281,88 @@ func TestCallOutputSchemaRejection(t *testing.T) {
 	}
 }
 
+func TestFailedExecutionUpdatesTraceLatencyNotCost(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &sleepingFailExec{
+		delay: 20 * time.Millisecond,
+		err:   fmt.Errorf("boom"),
+	})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 1000)
+	a := &Action{
+		ID:          uuid.New().String(),
+		OwnerUserID: alice.ID,
+		Name:        "/fails",
+		Kind:        KindWasm,
+		Active:      true,
+		Price:       50,
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: alice.ID, ActionName: "/fails", Args: map[string]any{},
+	})
+	if err == nil {
+		t.Fatal("expected execution failure")
+	}
+
+	txs, err := st.ListTransactions(ctx, TxFilter{ProcessID: p.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(txs) != 1 {
+		t.Fatalf("transactions: got %d, want 1", len(txs))
+	}
+	tx := txs[0]
+	if tx.Status != TxFailure {
+		t.Fatalf("tx status: got %s, want failure", tx.Status)
+	}
+	if tx.Gross != 0 {
+		t.Fatalf("failed tx gross: got %d, want 0", tx.Gross)
+	}
+
+	child, err := st.ReadTrace(ctx, tx.TraceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.Cost != 0 {
+		t.Fatalf("child trace cost: got %d, want 0", child.Cost)
+	}
+	if child.LatencyMS <= 0 {
+		t.Fatalf("child trace latency should be updated on failure, got %d", child.LatencyMS)
+	}
+
+	rootTrace, err := st.ReadTrace(ctx, root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootTrace.Cost != 0 {
+		t.Fatalf("root trace cost: got %d, want 0", rootTrace.Cost)
+	}
+	if rootTrace.LatencyMS <= 0 {
+		t.Fatalf("root trace latency should be updated on failure, got %d", rootTrace.LatencyMS)
+	}
+}
+
+type sleepingFailExec struct {
+	delay time.Duration
+	err   error
+}
+
+func (s *sleepingFailExec) Compile(_ context.Context, source []byte) ([]byte, string, error) {
+	return source, "fakehash", nil
+}
+
+func (s *sleepingFailExec) Execute(_ context.Context, _ []byte, _ []byte, _ HostFunctions) ([]byte, error) {
+	time.Sleep(s.delay)
+	return nil, s.err
+}
+
 func TestWasmHostCallRespectsACL(t *testing.T) {
 	st := newFakeStore()
 	ctx := context.Background()
@@ -6715,6 +7661,103 @@ func TestCommitCallAtomicOnFailure(t *testing.T) {
 		if tx.Status == TxSuccess {
 			t.Errorf("found committed success transaction despite commit failure: %s", tx.ID)
 		}
+	}
+}
+
+// ---- /llm/chat native action tests ----
+
+type fakeChatter struct {
+	reply ChatMessage
+}
+
+func (f *fakeChatter) Chat(_ context.Context, _ []ChatMessage) (ChatMessage, error) {
+	return f.reply, nil
+}
+
+func newTestKernelWithChatter(st Store, c Chatter) *Kernel {
+	cfg := DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.FeeBPS = 2000
+	return New(st, nil, nil, c, cfg, nil)
+}
+
+func TestCallLLMChat(t *testing.T) {
+	ctx := context.Background()
+	st := newFakeStore()
+	fc := &fakeChatter{reply: ChatMessage{Role: "assistant", Content: "hello there"}}
+	k := newTestKernelWithChatter(st, fc)
+
+	owner := setupUser(t, st, "@sys", 1000)
+	chatAction := &Action{
+		ID:           uuid.New().String(),
+		OwnerUserID:  owner.ID,
+		Name:         "/llm/chat",
+		Kind:         KindNative,
+		Active:       true,
+		Price:        0,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, chatAction)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, 0)
+	reply, err := k.Call(ctx, CallRequest{
+		SubjectID:     owner.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: root.ID,
+		TargetUserID:  owner.ID,
+		ActionName:    "/llm/chat",
+		Args: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hi"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Call /llm/chat: %v", err)
+	}
+	msg, ok := reply.Result["message"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected message in result, got %v", reply.Result)
+	}
+	if msg["content"] != "hello there" {
+		t.Errorf("content: got %q, want %q", msg["content"], "hello there")
+	}
+}
+
+func TestCallLLMChatNoChatter(t *testing.T) {
+	ctx := context.Background()
+	st := newFakeStore()
+	k := newTestKernel(st) // no chatter
+
+	owner := setupUser(t, st, "@sys", 1000)
+	chatAction := &Action{
+		ID:           uuid.New().String(),
+		OwnerUserID:  owner.ID,
+		Name:         "/llm/chat",
+		Kind:         KindNative,
+		Active:       true,
+		Price:        0,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, chatAction)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, 0)
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID:     owner.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: root.ID,
+		TargetUserID:  owner.ID,
+		ActionName:    "/llm/chat",
+		Args:          map[string]any{"messages": []any{}},
+	})
+	if err == nil {
+		t.Fatal("expected error when no chatter configured")
 	}
 }
 
@@ -7960,6 +9003,17 @@ func (f *fakeStore) RotateRefreshToken(_ context.Context, oldToken string) (*Ref
 	return &cp, nil
 }
 
+func (f *fakeStore) RevokeRefreshToken(_ context.Context, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rt, ok := f.refreshTokens[token]
+	if !ok || rt.Revoked {
+		return ErrUnauthenticated.Wrap("invalid or already revoked refresh token")
+	}
+	rt.Revoked = true
+	return nil
+}
+
 // ---- New methods (admin / grant-all / config) ----
 
 func (f *fakeStore) ListUsers(_ context.Context, limit, offset int) ([]*User, error) {
@@ -8027,6 +9081,46 @@ func (f *fakeStore) ListAllActions(_ context.Context, limit, offset int) ([]*Act
 	return result, nil
 }
 
+
+func (f *fakeStore) ListProcesses(_ context.Context, ownerID string, limit, offset int) ([]*Process, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var result []*Process
+	for _, p := range f.processes {
+		if p.OwnerUserID == ownerID {
+			cp := *p
+			result = append(result, &cp)
+		}
+	}
+	if offset >= len(result) {
+		return nil, nil
+	}
+	result = result[offset:]
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func (f *fakeStore) ListListenersByOwner(_ context.Context, ownerID string, limit, offset int) ([]*Listener, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var result []*Listener
+	for _, l := range f.listeners {
+		if l.OwnerUserID == ownerID {
+			cp := *l
+			result = append(result, &cp)
+		}
+	}
+	if offset >= len(result) {
+		return nil, nil
+	}
+	result = result[offset:]
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
 
 func (f *fakeStore) ListAllProcesses(_ context.Context, limit, offset int) ([]*Process, error) {
 	f.mu.Lock()
@@ -8182,20 +9276,20 @@ import (
 
 // Config holds kernel-level configuration.
 type Config struct {
-	FeeBPS             int64         // basis points, e.g. 2000 = 20%
-	FeeRecipientID     string        // user ID that receives fees
-	TokenSecret        string        // HMAC secret for JWT signing
-	TokenTTL           time.Duration // token validity window
-	ScriptTimeout      time.Duration
-	ScriptMemory       int64 // bytes
-	AllowLocalSources  bool  // permit loopback/private URLs as action sources (tests only)
+	FeeBPS            int64         // basis points, e.g. 2000 = 20%
+	FeeRecipientID    string        // user ID that receives fees
+	TokenSecret       string        // HMAC secret for JWT signing
+	TokenTTL          time.Duration // token validity window
+	ScriptTimeout     time.Duration
+	ScriptMemory      int64 // bytes
+	AllowLocalSources bool  // permit loopback/private URLs as action sources (tests only)
 }
 
 // DefaultConfig returns safe local defaults.
 func DefaultConfig() Config {
 	return Config{
-		FeeBPS:       2000,
-		TokenTTL:     15 * time.Minute,
+		FeeBPS:        2000,
+		TokenTTL:      15 * time.Minute,
 		ScriptTimeout: 10 * time.Second,
 		ScriptMemory:  64 * 1024 * 1024, // 64 MiB
 	}
@@ -8207,16 +9301,17 @@ type Kernel struct {
 	store   Store
 	scripts ScriptExecutor
 	llm     Embedder
+	chatter Chatter
 	cfg     Config
 	log     *log.Logger
 }
 
-// New constructs a Kernel. scripts and llm may be nil if those features are unused.
-func New(store Store, scripts ScriptExecutor, llm Embedder, cfg Config, logger *log.Logger) *Kernel {
+// New constructs a Kernel. scripts, llm, and chatter may be nil if those features are unused.
+func New(store Store, scripts ScriptExecutor, llm Embedder, chatter Chatter, cfg Config, logger *log.Logger) *Kernel {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Kernel{store: store, scripts: scripts, llm: llm, cfg: cfg, log: logger}
+	return &Kernel{store: store, scripts: scripts, llm: llm, chatter: chatter, cfg: cfg, log: logger}
 }
 
 // ---- User operations ----
@@ -8456,7 +9551,7 @@ func (k *Kernel) ResetInFlightEvents(ctx context.Context) error {
 	return k.store.ResetInFlightEvents(ctx)
 }
 
-// RegisterNativeAction creates and activates a native action for bootstrap use.
+// RegisterNativeAction creates a native action for bootstrap use.
 // Unlike CreateAction, it does not reject KindNative. Call only from bootstrap.
 func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionRequest) (*Action, error) {
 	now := time.Now().UTC()
@@ -8481,6 +9576,31 @@ func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionReque
 	return a, nil
 }
 
+// ActivateNativeAction activates a native action for bootstrap use.
+// Native actions are not managed by the normal user-facing action lifecycle.
+func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID string) error {
+	a, err := k.store.ReadAction(ctx, actionID)
+	if err != nil {
+		return err
+	}
+	if a.Kind != KindNative {
+		return ErrInvalidInput.Wrap("action is not native")
+	}
+	stats, _ := k.store.ReadStats(ctx, actionID)
+	if stats == nil {
+		if err := k.store.UpsertStats(ctx, DefaultStats(actionID)); err != nil {
+			return err
+		}
+	}
+	a.Active = true
+	a.UpdatedAt = time.Now().UTC()
+	if err := k.store.UpdateAction(ctx, a); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("action.native_enabled", "action_id", actionID)
+	return nil
+}
+
 // ReadAction returns the action with the given ID.
 func (k *Kernel) ReadAction(ctx context.Context, id string) (*Action, error) {
 	return k.store.ReadAction(ctx, id)
@@ -8502,6 +9622,10 @@ func (k *Kernel) ListAllActions(ctx context.Context, limit, offset int) ([]*Acti
 }
 
 // ListAllProcesses returns all processes ordered by creation time.
+func (k *Kernel) ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error) {
+	return k.store.ListProcesses(ctx, ownerID, limit, offset)
+}
+
 func (k *Kernel) ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error) {
 	return k.store.ListAllProcesses(ctx, limit, offset)
 }
@@ -8603,6 +9727,9 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 	if a == nil {
 		return nil, ErrNotFound.Wrap("action not found")
 	}
+	if a.Kind == KindNative {
+		return nil, ErrUnauthorized.Wrap("native actions are managed by bootstrap")
+	}
 	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
 		return nil, err
 	}
@@ -8612,6 +9739,7 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 			return nil, ErrInvalidInput.Wrap("price must be non-negative")
 		}
 		a.Price = *req.Price
+		a.Active = false
 	}
 	if req.Description != nil {
 		a.Description = *req.Description
@@ -8660,6 +9788,9 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 	if err != nil {
 		return err
 	}
+	if a.Kind == KindNative {
+		return ErrUnauthorized.Wrap("native actions are managed by bootstrap")
+	}
 	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
 		return err
 	}
@@ -8698,6 +9829,9 @@ func (k *Kernel) DeleteAction(ctx context.Context, subjectID, actionID string) e
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return err
+	}
+	if a.Kind == KindNative {
+		return ErrUnauthorized.Wrap("native actions are managed by bootstrap")
 	}
 	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
 		return err
@@ -9117,6 +10251,11 @@ func (k *Kernel) DeleteListener(ctx context.Context, subjectID, listenerID strin
 	return k.store.UpdateListener(ctx, l)
 }
 
+// ListListeners returns all listeners owned by ownerID.
+func (k *Kernel) ListListeners(ctx context.Context, ownerID string, limit, offset int) ([]*Listener, error) {
+	return k.store.ListListenersByOwner(ctx, ownerID, limit, offset)
+}
+
 // EmitEvent queues an event for all active listeners matching (sourceUserID, eventName).
 // It does NOT call the target action — the listener owner must call ConsumeEvent explicitly.
 // causingTraceID is stored as a FOLLOWS_FROM reference on each event record.
@@ -9206,15 +10345,13 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 }
 
 
-
-
-
 // ===== kernel/kernel_test.go =====
 
 package kernel
 
 import (
 	"context"
+	"errors"
 	"math"
 	"testing"
 	"time"
@@ -9227,14 +10364,14 @@ func newTestKernel(st Store) *Kernel {
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
-	return New(st, nil, nil, cfg, log.Default())
+	return New(st, nil, nil, nil, cfg, log.Default())
 }
 
 func newTestKernelWithScripts(st Store, exec ScriptExecutor) *Kernel {
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
-	return New(st, exec, nil, cfg, log.Default())
+	return New(st, exec, nil, nil, cfg, log.Default())
 }
 
 func setupUser(t *testing.T, st *fakeStore, handle string, balance int64) *User {
@@ -9320,6 +10457,65 @@ func TestCreateNativeActionRejected(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error creating native action via CreateAction, got nil")
+	}
+}
+
+func TestNativeActionNormalLifecycleRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@sys", 0)
+	a, err := k.RegisterNativeAction(ctx, CreateActionRequest{
+		OwnerUserID: owner.ID,
+		Name:        "/native",
+		Kind:        KindNative,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	price := int64(1)
+	if _, err := k.UpdateAction(ctx, owner.ID, UpdateActionRequest{ID: a.ID, Price: &price}); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("UpdateAction native error: got %v, want ErrUnauthorized", err)
+	}
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("SetActive native error: got %v, want ErrUnauthorized", err)
+	}
+	if err := k.DeleteAction(ctx, owner.ID, a.ID); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("DeleteAction native error: got %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestActivateNativeActionBootstrapPath(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@sys", 0)
+	a, err := k.RegisterNativeAction(ctx, CreateActionRequest{
+		OwnerUserID: owner.ID,
+		Name:        "/native",
+		Kind:        KindNative,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Active {
+		t.Fatal("registered native action should start inactive")
+	}
+	if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	active, err := k.ReadAction(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !active.Active {
+		t.Fatal("ActivateNativeAction should activate native action")
+	}
+	if stats, err := k.ReadStats(ctx, a.ID); err != nil || stats == nil {
+		t.Fatalf("ActivateNativeAction should initialize stats, stats=%v err=%v", stats, err)
 	}
 }
 
@@ -9620,7 +10816,7 @@ func newTestKernelWithEmbedder(st Store, emb Embedder) *Kernel {
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
-	return New(st, nil, emb, cfg, nil)
+	return New(st, nil, emb, nil, cfg, nil)
 }
 
 func TestLookupRanking(t *testing.T) {
@@ -10083,6 +11279,7 @@ type Store interface {
 
 	CreateProcess(ctx context.Context, p *Process) error
 	ReadProcess(ctx context.Context, id string) (*Process, error)
+	ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error)
 	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
 
 	// LockFunds moves `amount` from process.available to process.locked.
@@ -10141,6 +11338,7 @@ type Store interface {
 	ReadListener(ctx context.Context, id string) (*Listener, error)
 	UpdateListener(ctx context.Context, l *Listener) error
 	ListListeners(ctx context.Context, sourceUserID, eventName string) ([]*Listener, error)
+	ListListenersByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Listener, error)
 	CreateEvent(ctx context.Context, e *Event) error
 	ReadEvent(ctx context.Context, id string) (*Event, error)
 	ListPendingEvents(ctx context.Context, listenerID string) ([]*Event, error)
@@ -10170,6 +11368,7 @@ type Store interface {
 
 	CreateRefreshToken(ctx context.Context, t *RefreshToken) error
 	RotateRefreshToken(ctx context.Context, oldToken string) (*RefreshToken, error)
+	RevokeRefreshToken(ctx context.Context, token string) error
 
 	// ---- Config ----
 
@@ -10540,6 +11739,18 @@ func (o *OllamaChatter) Chat(ctx context.Context, messages []kernel.ChatMessage)
 		return kernel.ChatMessage{}, kernel.ErrInternal.Wrapf("decode chat response: %v", err)
 	}
 	return kernel.ChatMessage{Role: result.Message.Role, Content: result.Message.Content}, nil
+}
+
+// FakeChatter returns a fixed response for tests.
+type FakeChatter struct {
+	Reply kernel.ChatMessage
+}
+
+func (f *FakeChatter) Chat(_ context.Context, _ []kernel.ChatMessage) (kernel.ChatMessage, error) {
+	if f.Reply.Role == "" {
+		return kernel.ChatMessage{Role: "assistant", Content: "ok"}, nil
+	}
+	return f.Reply, nil
 }
 
 // FakeEmbedder returns a deterministic fixed-length vector for tests.
@@ -10940,6 +12151,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/tetratelabs/wazero"
@@ -10999,6 +12211,12 @@ func (e *Executor) Compile(ctx context.Context, source []byte) ([]byte, string, 
 // The module must export a function `run(inputPtr, inputLen) (outputPtr, outputLen)`.
 // Input/output are JSON bytes exchanged through linear memory.
 func (e *Executor) Execute(ctx context.Context, artifact []byte, input []byte, host kernel.HostFunctions) ([]byte, error) {
+	if e.cfg.TimeoutMS > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(e.cfg.TimeoutMS)*time.Millisecond)
+		defer cancel()
+	}
+
 	h := sha256.Sum256(artifact)
 	hash := hex.EncodeToString(h[:])
 
@@ -11116,6 +12334,21 @@ func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions
 			[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32},
 			[]api.ValueType{},
 		).Export("log")
+
+	// juice.emit(eventPtr, eventLen, argsPtr, argsLen)
+	b.NewFunctionBuilder().
+		WithGoModuleFunction(
+			api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+				eventPtr, eventLen := uint32(stack[0]), uint32(stack[1])
+				argsPtr, argsLen := uint32(stack[2]), uint32(stack[3])
+				mem := mod.Memory()
+				event, _ := mem.Read(eventPtr, eventLen)
+				args, _ := mem.Read(argsPtr, argsLen)
+				_ = host.Emit(ctx, string(event), args)
+			}),
+			[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32},
+			[]api.ValueType{},
+		).Export("emit")
 }
 
 // writeToMem writes data into the module's memory via `alloc` and returns (ptr, len).
@@ -11360,6 +12593,36 @@ func TestExecutorContextTimeout(t *testing.T) {
 	}
 }
 
+func TestExecutorConfiguredTimeout(t *testing.T) {
+	e := New(Config{TimeoutMS: 100, MemoryBytes: 4 * 1024 * 1024})
+	ctx := context.Background()
+
+	artifact, _, err := e.Compile(ctx, infiniteLoopWASM)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	_, err = e.Execute(ctx, artifact, []byte(`{}`), nilHost{})
+	if err == nil {
+		t.Error("expected configured timeout error from infinite loop, got nil")
+	}
+}
+
+func TestHostModuleExportsEmit(t *testing.T) {
+	e := New(Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
+	builder := e.runtime.NewHostModuleBuilder("juice-test")
+	registerHostFunctions(builder, nilHost{})
+	mod, err := builder.Instantiate(context.Background())
+	if err != nil {
+		t.Fatalf("Instantiate host module: %v", err)
+	}
+	defer mod.Close(context.Background())
+
+	if mod.ExportedFunctionDefinitions()["emit"] == nil {
+		t.Fatal("expected host module to export emit")
+	}
+}
+
 
 // ===== store/sqlite.go =====
 
@@ -11370,10 +12633,14 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -11382,6 +12649,13 @@ import (
 )
 
 const driverName = "sqlite"
+
+// Migration policy: store/migrations/*.sql is the canonical schema history.
+// Keep future schema changes in numbered SQL files and let this runner apply
+// them; do not add ad hoc migration SQL to Go.
+//
+//go:embed migrations/*.sql
+var migrationFS embed.FS
 
 // DB implements kernel.Store using SQLite.
 type DB struct {
@@ -11409,163 +12683,125 @@ func (s *DB) Close() error {
 	return s.db.Close()
 }
 
-// migrate applies the embedded DDL idempotently.
+// migrate applies file-backed SQL migrations in order.
 func (s *DB) migrate() error {
-	if _, err := s.db.Exec(schema001); err != nil {
+	if _, err := s.db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
 		return err
 	}
-	if err := s.migrate002(); err != nil {
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+		version    TEXT PRIMARY KEY,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
 		return err
 	}
-	if err := s.migrate003(); err != nil {
+	files, err := migrationFileNames()
+	if err != nil {
 		return err
 	}
-	if err := s.migrate004(); err != nil {
-		return err
-	}
-	if err := s.migrate005(); err != nil {
-		return err
-	}
-	if err := s.migrate006(); err != nil {
-		return err
-	}
-	if err := s.migrate007(); err != nil {
-		return err
-	}
-	return s.migrate008()
-}
-
-// migrate002 applies schema002 idempotently.
-// SQLite does not support ALTER TABLE ... ADD COLUMN IF NOT EXISTS,
-// so we attempt each statement individually and ignore "duplicate column" errors.
-func (s *DB) migrate002() error {
-	stmts := []string{
-		`ALTER TABLE users ADD COLUMN suspended_at TEXT`,
-		`ALTER TABLE actions ADD COLUMN public INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE traces ADD COLUMN cost INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE traces ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0`,
-		`CREATE TABLE IF NOT EXISTS config (
-			key   TEXT PRIMARY KEY,
-			value TEXT NOT NULL DEFAULT ''
-		)`,
-	}
-	for _, stmt := range stmts {
-		if _, err := s.db.Exec(stmt); err != nil {
-			// Ignore "duplicate column name" errors — column already exists from a previous migration run.
-			if !isDuplicateColumn(err) {
-				return fmt.Errorf("migrate002: %w", err)
+	for _, file := range files {
+		version := strings.TrimSuffix(path.Base(file), ".sql")
+		applied, err := s.migrationApplied(version)
+		if err != nil {
+			return err
+		}
+		if applied {
+			continue
+		}
+		if version == "004_events_queue" && s.columnExists("events", "consumed_at") {
+			if err := s.markMigrationApplied(version); err != nil {
+				return err
 			}
+			continue
+		}
+		sqlBytes, err := migrationFS.ReadFile(file)
+		if err != nil {
+			return err
+		}
+		if err := s.applyMigration(version, string(sqlBytes)); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// migrate004 replaces the old push-based events table with a pull-based queue schema.
-// The old table stored (id INTEGER, listener_id, tx_id NOT NULL, created_at).
-// The new table stores (id TEXT UUID, listener_id, args_json, causing_trace_id,
-// consumed_at, tx_id nullable, created_at) supporting pending/in-flight/consumed states.
-func (s *DB) migrate004() error {
-	// Idempotency check: new schema has consumed_at column.
+func migrationFileNames() ([]string, error) {
+	entries, err := fs.ReadDir(migrationFS, "migrations")
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		files = append(files, path.Join("migrations", e.Name()))
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func (s *DB) migrationApplied(version string) (bool, error) {
 	var n int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='consumed_at'`).Scan(&n)
-	if n > 0 {
-		return nil
-	}
-	for _, stmt := range []string{
-		`DROP INDEX IF EXISTS idx_events_listener`,
-		`DROP TABLE IF EXISTS events`,
-		`CREATE TABLE events (
-			id               TEXT PRIMARY KEY,
-			listener_id      TEXT NOT NULL REFERENCES listeners(id) ON DELETE CASCADE,
-			args_json        TEXT NOT NULL DEFAULT '{}',
-			causing_trace_id TEXT,
-			consumed_at      TEXT,
-			tx_id            TEXT,
-			created_at       TEXT NOT NULL DEFAULT (datetime('now'))
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_events_listener_pending
-			ON events(listener_id, created_at) WHERE consumed_at IS NULL`,
-	} {
-		if _, err := s.db.Exec(stmt); err != nil {
-			return fmt.Errorf("migrate004: %w", err)
-		}
-	}
-	return nil
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=?`, version).Scan(&n)
+	return n > 0, err
 }
 
-// migrate005 creates the deposits audit table.
-func (s *DB) migrate005() error {
-	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS deposits (
-		id               TEXT PRIMARY KEY,
-		operator_user_id TEXT NOT NULL REFERENCES users(id),
-		target_user_id   TEXT NOT NULL REFERENCES users(id),
-		amount           INTEGER NOT NULL CHECK (amount > 0),
-		reason           TEXT NOT NULL DEFAULT '',
-		created_at       TEXT NOT NULL
-	)`)
+func (s *DB) applyMigration(version, sqlText string) error {
+	var txStmts []string
+	for _, stmt := range splitSQLStatements(sqlText) {
+		if strings.HasPrefix(strings.ToUpper(stmt), "PRAGMA ") {
+			if _, err := s.db.Exec(stmt); err != nil {
+				return fmt.Errorf("%s: %w", version, err)
+			}
+			continue
+		}
+		txStmts = append(txStmts, stmt)
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, stmt := range txStmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			if ignorableMigrationError(err) {
+				continue
+			}
+			return fmt.Errorf("%s: %w", version, err)
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`, version, timeToStr(time.Now().UTC())); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *DB) markMigrationApplied(version string) error {
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)`, version, timeToStr(time.Now().UTC()))
 	return err
 }
 
-// migrate006 drops the process_id and trace_id columns from listeners.
-// These were dead data: ConsumeEvent ignores the stored process (caller supplies their own),
-// and using l.TraceID as a CHILD_OF parent violated the trace invariant
-// (child.process_id must equal parent.process_id).
-func (s *DB) migrate006() error {
-	for _, col := range []string{"process_id", "trace_id"} {
-		rows, err := s.db.Query(`PRAGMA table_info(listeners)`)
-		if err != nil {
-			return fmt.Errorf("migrate006: %w", err)
+func splitSQLStatements(sqlText string) []string {
+	var lines []string
+	for _, line := range strings.Split(sqlText, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "--") {
+			continue
 		}
-		var found bool
-		for rows.Next() {
-			var cid, notNull, pk int
-			var name, colType string
-			var dflt any
-			_ = rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk)
-			if name == col {
-				found = true
-			}
-		}
-		rows.Close()
-		if found {
-			if _, err := s.db.Exec(`ALTER TABLE listeners DROP COLUMN ` + col); err != nil {
-				return fmt.Errorf("migrate006: drop %s: %w", col, err)
-			}
-		}
+		lines = append(lines, line)
 	}
-	return nil
-}
-
-// migrate007 adds the embed_vec column to actions for storing pre-computed embeddings.
-// NULL means the action has no stored embedding yet (Lookup will skip it until re-embedded).
-func (s *DB) migrate007() error {
-	if _, err := s.db.Exec(`ALTER TABLE actions ADD COLUMN embed_vec TEXT`); err != nil {
-		if !isDuplicateColumn(err) {
-			return fmt.Errorf("migrate007: %w", err)
+	parts := strings.Split(strings.Join(lines, "\n"), ";")
+	stmts := make([]string, 0, len(parts))
+	for _, p := range parts {
+		stmt := strings.TrimSpace(p)
+		if stmt == "" || strings.HasPrefix(stmt, "--") {
+			continue
 		}
+		stmts = append(stmts, stmt)
 	}
-	return nil
-}
-
-// migrate008 adds the rating_count column to action_stats.
-// The denominator for RatingMean is the number of rated observations, not total uses.
-func (s *DB) migrate008() error {
-	if _, err := s.db.Exec(`ALTER TABLE action_stats ADD COLUMN rating_count INTEGER NOT NULL DEFAULT 0`); err != nil {
-		if !isDuplicateColumn(err) {
-			return fmt.Errorf("migrate008: %w", err)
-		}
-	}
-	return nil
-}
-
-// migrate003 adds the caused_by_trace_id column for FOLLOWS_FROM causal tracing.
-func (s *DB) migrate003() error {
-	if _, err := s.db.Exec(`ALTER TABLE traces ADD COLUMN caused_by_trace_id TEXT`); err != nil {
-		if !isDuplicateColumn(err) {
-			return fmt.Errorf("migrate003: %w", err)
-		}
-	}
-	return nil
+	return stmts
 }
 
 // isDuplicateColumn reports whether the SQLite error is a duplicate column error.
@@ -11577,11 +12813,37 @@ func isDuplicateColumn(err error) bool {
 	return strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "already exists")
 }
 
+func ignorableMigrationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return isDuplicateColumn(err) || strings.Contains(msg, "no such column")
+}
+
+func (s *DB) columnExists(table, column string) bool {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, colType string
+		var dflt any
+		_ = rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk)
+		if name == column {
+			return true
+		}
+	}
+	return false
+}
+
 // ---- time helpers ----
 
 const timeLayout = time.RFC3339Nano
 
-func timeToStr(t time.Time) string  { return t.UTC().Format(timeLayout) }
+func timeToStr(t time.Time) string { return t.UTC().Format(timeLayout) }
 func strToTime(s string) time.Time {
 	t, _ := time.Parse(timeLayout, s)
 	return t
@@ -12109,6 +13371,34 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, proc
 	return dbErr(tx.Commit(), "commit failed call: commit")
 }
 
+func (s *DB) ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Process, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,owner_user_id,available,locked,status,created_at,ended_at
+		 FROM processes WHERE owner_user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		ownerID, limit, offset)
+	if err != nil {
+		return nil, dbErr(err, "list processes")
+	}
+	defer rows.Close()
+	var out []*kernel.Process
+	for rows.Next() {
+		var p kernel.Process
+		var status, createdAt string
+		var endedAt *string
+		if err := rows.Scan(&p.ID, &p.OwnerUserID, &p.Available, &p.Locked, &status, &createdAt, &endedAt); err != nil {
+			return nil, dbErr(err, "scan process")
+		}
+		p.Status = kernel.ProcessStatus(status)
+		p.CreatedAt = strToTime(createdAt)
+		p.EndedAt = strToNullTime(endedAt)
+		out = append(out, &p)
+	}
+	return out, rows.Err()
+}
+
 func (s *DB) ListAllProcesses(ctx context.Context, limit, offset int) ([]*kernel.Process, error) {
 	if limit <= 0 {
 		limit = 100
@@ -12163,7 +13453,7 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 	if total > 0 {
 		_, err = tx.ExecContext(ctx,
 			`UPDATE users SET available=available+?, locked=locked-? WHERE id=?`,
-			total, locked, ownerID)
+			total, total, ownerID)
 		if err != nil {
 			return dbErr(err, "end process: return funds")
 		}
@@ -12531,6 +13821,35 @@ func (s *DB) ListListeners(ctx context.Context, sourceUserID, eventName string) 
 	return out, rows.Err()
 }
 
+func (s *DB) ListListenersByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Listener, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,owner_user_id,source_user_id,event_name,target_action_id,active,created_at
+		 FROM listeners WHERE owner_user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		ownerID, limit, offset,
+	)
+	if err != nil {
+		return nil, dbErr(err, "list listeners by owner")
+	}
+	defer rows.Close()
+	var out []*kernel.Listener
+	for rows.Next() {
+		var l kernel.Listener
+		var active int
+		var createdAt string
+		if err := rows.Scan(&l.ID, &l.OwnerUserID, &l.SourceUserID, &l.EventName,
+			&l.TargetActionID, &active, &createdAt); err != nil {
+			return nil, dbErr(err, "scan listener")
+		}
+		l.Active = active != 0
+		l.CreatedAt = strToTime(createdAt)
+		out = append(out, &l)
+	}
+	return out, rows.Err()
+}
+
 func (s *DB) CreateEvent(ctx context.Context, e *kernel.Event) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO events (id,listener_id,args_json,causing_trace_id,created_at)
@@ -12761,6 +14080,19 @@ func (s *DB) RotateRefreshToken(ctx context.Context, oldToken string) (*kernel.R
 	return newTok, dbErr(tx.Commit(), "rotate refresh token commit")
 }
 
+func (s *DB) RevokeRefreshToken(ctx context.Context, token string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE refresh_tokens SET revoked=1 WHERE token=? AND revoked=0`, token)
+	if err != nil {
+		return dbErr(err, "revoke refresh token")
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return kernel.ErrUnauthenticated.Wrap("invalid or already revoked refresh token")
+	}
+	return nil
+}
+
 // ---- Config ----
 
 func (s *DB) GetConfig(ctx context.Context, key string) (string, error) {
@@ -12850,144 +14182,6 @@ func dbErr(err error, op string) error {
 	return kernel.ErrInternal.Wrapf("%s: %v", op, err)
 }
 
-// schema001 is the initial migration DDL.
-const schema001 = `
-PRAGMA journal_mode=WAL;
-PRAGMA foreign_keys=ON;
-
-CREATE TABLE IF NOT EXISTS users (
-    id            TEXT PRIMARY KEY,
-    handle        TEXT NOT NULL UNIQUE,
-    email         TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    available     INTEGER NOT NULL DEFAULT 0 CHECK (available >= 0),
-    locked        INTEGER NOT NULL DEFAULT 0 CHECK (locked >= 0),
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS actions (
-    id            TEXT PRIMARY KEY,
-    owner_user_id TEXT NOT NULL REFERENCES users(id),
-    name          TEXT NOT NULL,
-    kind          TEXT NOT NULL CHECK (kind IN ('http','wasm','native')),
-    active        INTEGER NOT NULL DEFAULT 0,
-    price         INTEGER NOT NULL DEFAULT 0 CHECK (price >= 0),
-    description   TEXT NOT NULL DEFAULT '',
-    input_schema  TEXT NOT NULL DEFAULT '{}',
-    output_schema TEXT NOT NULL DEFAULT '{}',
-    source        TEXT NOT NULL DEFAULT '',
-    artifact_hash TEXT NOT NULL DEFAULT '',
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL,
-    UNIQUE (owner_user_id, name)
-);
-
-CREATE TABLE IF NOT EXISTS acl_entries (
-    subject_user_id TEXT NOT NULL REFERENCES users(id),
-    action_id       TEXT NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
-    permission      TEXT NOT NULL CHECK (permission IN ('read','call','admin')),
-    created_at      TEXT NOT NULL,
-    PRIMARY KEY (subject_user_id, action_id, permission)
-);
-
-CREATE TABLE IF NOT EXISTS processes (
-    id            TEXT PRIMARY KEY,
-    owner_user_id TEXT NOT NULL REFERENCES users(id),
-    available     INTEGER NOT NULL DEFAULT 0 CHECK (available >= 0),
-    locked        INTEGER NOT NULL DEFAULT 0 CHECK (locked >= 0),
-    status        TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','closed')),
-    created_at    TEXT NOT NULL,
-    ended_at      TEXT
-);
-
-CREATE TABLE IF NOT EXISTS traces (
-    id              TEXT PRIMARY KEY,
-    process_id      TEXT NOT NULL REFERENCES processes(id),
-    parent_trace_id TEXT NOT NULL,
-    created_at      TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS transactions (
-    id              TEXT PRIMARY KEY,
-    process_id      TEXT NOT NULL,
-    trace_id        TEXT NOT NULL,
-    parent_trace_id TEXT NOT NULL,
-    owner_user_id   TEXT NOT NULL,
-    subject_user_id TEXT NOT NULL,
-    target_user_id  TEXT NOT NULL,
-    action_id       TEXT NOT NULL,
-    args_json       TEXT NOT NULL DEFAULT '',
-    reply_json      TEXT NOT NULL DEFAULT '',
-    status          TEXT NOT NULL CHECK (status IN ('success','failure')),
-    gross           INTEGER NOT NULL DEFAULT 0 CHECK (gross >= 0),
-    net             INTEGER NOT NULL DEFAULT 0 CHECK (net >= 0),
-    fee             INTEGER NOT NULL DEFAULT 0 CHECK (fee >= 0),
-    reason          TEXT NOT NULL DEFAULT '',
-    started_at      TEXT NOT NULL,
-    ended_at        TEXT NOT NULL,
-    rating          REAL
-);
-
-CREATE TABLE IF NOT EXISTS action_stats (
-    action_id    TEXT PRIMARY KEY REFERENCES actions(id) ON DELETE CASCADE,
-    uses         INTEGER NOT NULL DEFAULT 0,
-    successes    INTEGER NOT NULL DEFAULT 0,
-    failures     INTEGER NOT NULL DEFAULT 0,
-    price_mean   REAL NOT NULL DEFAULT 0,
-    latency_mean REAL NOT NULL DEFAULT 0,
-    rating_mean  REAL NOT NULL DEFAULT 0,
-    last_used_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS stat_tags (
-    action_id  TEXT NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
-    key        TEXT NOT NULL,
-    value      TEXT NOT NULL DEFAULT '',
-    source     TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (action_id, key, source)
-);
-
-CREATE TABLE IF NOT EXISTS listeners (
-    id               TEXT PRIMARY KEY,
-    owner_user_id    TEXT NOT NULL REFERENCES users(id),
-    source_user_id   TEXT NOT NULL REFERENCES users(id),
-    event_name       TEXT NOT NULL,
-    process_id       TEXT NOT NULL REFERENCES processes(id),
-    trace_id         TEXT NOT NULL,
-    target_action_id TEXT NOT NULL REFERENCES actions(id),
-    active           INTEGER NOT NULL DEFAULT 1,
-    created_at       TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS auth_codes (
-    code           TEXT PRIMARY KEY,
-    user_id        TEXT NOT NULL REFERENCES users(id),
-    code_challenge TEXT NOT NULL,
-    redirect_uri   TEXT NOT NULL DEFAULT '',
-    expires_at     TEXT NOT NULL,
-    used           INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS refresh_tokens (
-    token      TEXT PRIMARY KEY,
-    user_id    TEXT NOT NULL REFERENCES users(id),
-    expires_at TEXT NOT NULL,
-    revoked    INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_actions_owner        ON actions(owner_user_id);
-CREATE INDEX IF NOT EXISTS idx_acl_action           ON acl_entries(action_id);
-CREATE INDEX IF NOT EXISTS idx_transactions_owner   ON transactions(owner_user_id);
-CREATE INDEX IF NOT EXISTS idx_transactions_process ON transactions(process_id);
-CREATE INDEX IF NOT EXISTS idx_transactions_trace   ON transactions(trace_id);
-CREATE INDEX IF NOT EXISTS idx_listeners_source     ON listeners(source_user_id, event_name);
-CREATE INDEX IF NOT EXISTS idx_traces_process       ON traces(process_id);
-`
-
-
 
 // ===== store/sqlite_test.go =====
 
@@ -13011,6 +14205,43 @@ func openTestDB(t *testing.T) *DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+func TestMigrationsAreFileBackedAndRecorded(t *testing.T) {
+	db := openTestDB(t)
+
+	files, err := migrationFileNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) < 8 {
+		t.Fatalf("expected at least 8 migration files, got %d", len(files))
+	}
+	for _, file := range files {
+		version := filepath.Base(file[:len(file)-len(filepath.Ext(file))])
+		applied, err := db.migrationApplied(version)
+		if err != nil {
+			t.Fatalf("migrationApplied(%s): %v", version, err)
+		}
+		if !applied {
+			t.Fatalf("migration %s was not recorded", version)
+		}
+	}
+
+	for _, tc := range []struct {
+		table  string
+		column string
+	}{
+		{"events", "consumed_at"},
+		{"events", "causing_trace_id"},
+		{"actions", "embed_vec"},
+		{"action_stats", "rating_count"},
+		{"traces", "caused_by_trace_id"},
+	} {
+		if !db.columnExists(tc.table, tc.column) {
+			t.Fatalf("expected %s.%s to exist after migrations", tc.table, tc.column)
+		}
+	}
 }
 
 func newUser(handle string, balance int64) *kernel.User {
@@ -13323,10 +14554,13 @@ func TestEndProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Funds returned to owner.
+	// Funds returned to owner; locked must be zero.
 	u, _ := db.ReadUser(ctx, user.ID)
 	if u.Available != 1000 {
-		t.Errorf("user balance after end: got %d, want 1000", u.Available)
+		t.Errorf("user available after end: got %d, want 1000", u.Available)
+	}
+	if u.Locked != 0 {
+		t.Errorf("user locked after end: got %d, want 0", u.Locked)
 	}
 
 	proc, _ := db.ReadProcess(ctx, p.ID)
@@ -13566,6 +14800,142 @@ func TestTransactionCRUD(t *testing.T) {
 	}
 	if len(txs) != 1 {
 		t.Errorf("list: got %d, want 1", len(txs))
+	}
+}
+
+func TestListProcesses(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	u := newUser("@lp-owner", 1000)
+	other := newUser("@lp-other", 0)
+	if err := db.CreateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateUser(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create two processes for u and one for other.
+	for i, ownerID := range []string{u.ID, u.ID, other.ID} {
+		p := &kernel.Process{
+			ID:          uuid.New().String(),
+			OwnerUserID: ownerID,
+			Status:      kernel.ProcessOpen,
+			CreatedAt:   time.Now().UTC(),
+		}
+		tr := &kernel.Trace{
+			ID:            uuid.New().String(),
+			ProcessID:     p.ID,
+			ParentTraceID: p.ID,
+			CreatedAt:     time.Now().UTC(),
+		}
+		_ = i
+		if err := db.StartProcess(ctx, p, tr, ownerID, 0); err != nil {
+			t.Fatalf("StartProcess %d: %v", i, err)
+		}
+	}
+
+	got, err := db.ListProcesses(ctx, u.ID, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Errorf("ListProcesses: got %d, want 2", len(got))
+	}
+	for _, p := range got {
+		if p.OwnerUserID != u.ID {
+			t.Errorf("ListProcesses: unexpected owner %s", p.OwnerUserID)
+		}
+	}
+}
+
+func TestListListenersByOwner(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@ll-owner", 0)
+	other := newUser("@ll-other", 0)
+	if err := db.CreateUser(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateUser(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+
+	act := newAction(owner.ID, "/ll-action", 0, false)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+
+	makeListener := func(ownerID, sourceID string) *kernel.Listener {
+		return &kernel.Listener{
+			ID:             uuid.New().String(),
+			OwnerUserID:    ownerID,
+			SourceUserID:   sourceID,
+			EventName:      "test.event",
+			TargetActionID: act.ID,
+			Active:         true,
+			CreatedAt:      time.Now().UTC(),
+		}
+	}
+
+	if err := db.CreateListener(ctx, makeListener(owner.ID, other.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateListener(ctx, makeListener(owner.ID, other.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateListener(ctx, makeListener(other.ID, owner.ID)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.ListListenersByOwner(ctx, owner.ID, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Errorf("ListListenersByOwner: got %d, want 2", len(got))
+	}
+	for _, l := range got {
+		if l.OwnerUserID != owner.ID {
+			t.Errorf("unexpected owner %s", l.OwnerUserID)
+		}
+	}
+}
+
+func TestRevokeRefreshToken(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	u := newUser("@rt-user", 0)
+	if err := db.CreateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+
+	tok := &kernel.RefreshToken{
+		Token:     "test-token-abc",
+		UserID:    u.ID,
+		ExpiresAt: time.Now().UTC().Add(24 * time.Hour),
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := db.CreateRefreshToken(ctx, tok); err != nil {
+		t.Fatal(err)
+	}
+
+	// Revoking a valid token succeeds.
+	if err := db.RevokeRefreshToken(ctx, tok.Token); err != nil {
+		t.Fatalf("RevokeRefreshToken: %v", err)
+	}
+
+	// Revoking again returns an error.
+	if err := db.RevokeRefreshToken(ctx, tok.Token); err == nil {
+		t.Error("expected error revoking already-revoked token")
+	}
+
+	// Rotating a revoked token fails.
+	if _, err := db.RotateRefreshToken(ctx, tok.Token); err == nil {
+		t.Error("expected error rotating revoked token")
 	}
 }
 

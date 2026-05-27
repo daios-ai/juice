@@ -15,14 +15,14 @@ func newTestKernel(st Store) *Kernel {
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
-	return New(st, nil, nil, nil, cfg, log.Default())
+	return New(st, nil, nil, nil, nil, cfg, log.Default())
 }
 
 func newTestKernelWithScripts(st Store, exec ScriptExecutor) *Kernel {
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
-	return New(st, exec, nil, nil, cfg, log.Default())
+	return New(st, exec, nil, nil, nil, cfg, log.Default())
 }
 
 func setupUser(t *testing.T, st *fakeStore, handle string, balance int64) *User {
