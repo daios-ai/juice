@@ -40,17 +40,16 @@ func TestCallClosedProcessFails(t *testing.T) {
 	}
 }
 
-func TestCallInactiveActionDeniedForNonOwner(t *testing.T) {
+func TestCallInactiveActionDenied(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@alice", 1000)
-	target := setupUser(t, st, "@bob", 0)
 
 	a := &Action{
 		ID:          uuid.New().String(),
-		OwnerUserID: target.ID,
+		OwnerUserID: owner.ID,
 		Name:        "/svc",
 		Kind:        KindNative,
 		Active:      false,
@@ -66,12 +65,16 @@ func TestCallInactiveActionDeniedForNonOwner(t *testing.T) {
 		SubjectID:     owner.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
-		TargetUserID:  target.ID,
+		TargetUserID:  owner.ID,
 		ActionName:    "/svc",
 		Args:          map[string]any{},
 	})
 	if err == nil {
-		t.Error("expected error calling inactive action as non-owner")
+		t.Error("expected error calling inactive action")
+	}
+	var ke *KernelError
+	if !errors.As(err, &ke) || ke.Code != "invalid_state" {
+		t.Errorf("expected invalid_state error, got %v", err)
 	}
 }
 

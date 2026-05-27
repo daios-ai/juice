@@ -81,9 +81,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrNotFound.Wrapf("action %s/%s not found", req.TargetUserID, req.ActionName)
 	}
 
-	// 5. Action must be active (non-owners only).
-	if !action.Active && action.OwnerUserID != req.SubjectID {
-		return nil, ErrNotFound.Wrapf("action %s/%s not found", req.TargetUserID, req.ActionName)
+	// 5. Action must be active.
+	if !action.Active {
+		return nil, ErrInvalidState.Wrap("action is inactive")
 	}
 
 	// 6. ACL check — CanCall(subject, action).

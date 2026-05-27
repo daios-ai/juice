@@ -906,6 +906,7 @@ Requirements:
 
 - Juice must run as a production server.
 - The HTTP API is primary. For every HTTP endpoint the server exposes, there must be a corresponding CLI command.
+- Superuser/admin operations are intentionally excluded from the HTTP API. They must exist only in the CLI and must not be exposed as HTTP endpoints.
 - The server must use the same kernel service layer as the CLI.
 - The server must propagate request id, subject id, process id, trace id, action id, and transaction id into logs where available.
 - HTTP status codes must distinguish authentication failure, authorization failure, invalid input, insufficient funds, missing resource, and internal failure.
@@ -998,7 +999,7 @@ suspended user rejected at authentication
 rating cascade to unrated descendant transactions
 trace cost and latency updated on transaction completion
 native action callable through Call()
-non-superuser rejected from admin endpoints
+non-superuser rejected from admin CLI commands
 grant-all allows any authenticated user to call action
 revoke-all removes open grant
 bootstrap is idempotent
@@ -1113,7 +1114,8 @@ Requirements:
 - The handle is fixed once set; it cannot be changed without direct database access.
 - The superuser handle is stored in a `config` table in SQLite (key: `superuser_handle`).
 - On every startup, the server reads `config.superuser_handle` to identify the superuser.
-- Admin authority is enforced at the HTTP and CLI layers by comparing the authenticated subject handle to the stored superuser handle.
+- Admin authority is enforced in the CLI by comparing the authenticated subject handle to the stored superuser handle.
+- Admin and superuser operations must not be exposed through HTTP endpoints.
 - The kernel has no concept of superuser; it enforces normal ACL rules for all users.
 
 ### 19.2 User suspension
@@ -1156,35 +1158,43 @@ Requirements:
 
 ### 19.6 Admin operations
 
-The following operations are restricted to the superuser. Each has a corresponding HTTP endpoint and CLI command.
+The following operations are restricted to the superuser and must exist only as CLI commands.
+
+Requirements:
+
+- Admin operations must not have HTTP endpoints.
+- The HTTP server must not register `/v1/admin/*` routes.
+- CLI admin commands must authenticate the caller and compare the authenticated subject's handle to `config.superuser_handle`.
+- A non-superuser attempting any admin CLI command must be rejected with `ErrUnauthorized`.
+- Admin operations must not route through `Call()`.
 
 User management:
 
 ```text
-GET  /v1/admin/users                    juice admin user list
-GET  /v1/admin/users/{id}               juice admin user show --id
-POST /v1/admin/users/{id}/suspend       juice admin user suspend --id
-POST /v1/admin/users/{id}/unsuspend     juice admin user unsuspend --id
-POST /v1/admin/users/{id}/deposit       juice admin user deposit --handle / --id
+juice admin user list
+juice admin user show --id
+juice admin user suspend --id
+juice admin user unsuspend --id
+juice admin user deposit --handle / --id
 ```
 
 Action management:
 
 ```text
-GET  /v1/admin/actions                  juice admin action list
-POST /v1/admin/actions/{id}/disable     juice admin action disable --id
+juice admin action list
+juice admin action disable --id
 ```
 
 Process management:
 
 ```text
-GET  /v1/admin/processes                juice admin process list
+juice admin process list
 ```
 
 Transaction management:
 
 ```text
-GET  /v1/admin/transactions             juice admin tx list
+juice admin tx list
 ```
 
 ### 19.7 Access control endpoints
@@ -1241,6 +1251,7 @@ Requirements:
 - Each deposit must be persisted as an audit record.
 - `reason` is optional but stored when provided.
 - Deposits must not route through `Call()`. They are a human supervision operation (§2.3).
+- Deposits must only be available through the admin CLI; they must not have an HTTP endpoint.
 
 Required tests:
 

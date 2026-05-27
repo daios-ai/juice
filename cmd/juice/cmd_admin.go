@@ -40,6 +40,25 @@ func init() {
 	rootCmd.AddCommand(adminCmd)
 }
 
+func requireSuperuser(k *kernel.Kernel) (string, error) {
+	subjectID, err := requireSubjectID(k)
+	if err != nil {
+		return "", err
+	}
+	subject, err := k.ReadUser(context.Background(), subjectID)
+	if err != nil {
+		return "", err
+	}
+	superuserHandle, err := k.GetConfig(context.Background(), configKeySuperuser)
+	if err != nil {
+		return "", err
+	}
+	if subject.Handle != superuserHandle {
+		return "", kernel.ErrUnauthorized.Wrap("superuser required")
+	}
+	return subjectID, nil
+}
+
 func adminUserListCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{
@@ -51,6 +70,10 @@ func adminUserListCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
 
 			users, err := k.ListUsers(context.Background(), limit, offset)
 			if err != nil {
@@ -86,6 +109,10 @@ func adminUserShowCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
 
 			ctx := context.Background()
 			var u *kernel.User
@@ -128,6 +155,9 @@ func adminUserSuspendCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
 			if err := k.SuspendUser(context.Background(), userID); err != nil {
 				return err
 			}
@@ -151,6 +181,9 @@ func adminUserUnsuspendCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
 			if err := k.UnsuspendUser(context.Background(), userID); err != nil {
 				return err
 			}
@@ -176,7 +209,7 @@ func adminUserDepositCmd() *cobra.Command {
 			}
 			defer db.Close()
 
-			subjectID, err := requireSubjectID(k)
+			subjectID, err := requireSuperuser(k)
 			if err != nil {
 				return err
 			}
@@ -227,6 +260,10 @@ func adminActionListCmd() *cobra.Command {
 			}
 			defer db.Close()
 
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
+
 			actions, err := k.ListAllActions(context.Background(), limit, offset)
 			if err != nil {
 				return err
@@ -266,7 +303,7 @@ func adminActionDisableCmd() *cobra.Command {
 			}
 			defer db.Close()
 
-			subjectID, err := requireSubjectID(k)
+			subjectID, err := requireSuperuser(k)
 			if err != nil {
 				return err
 			}
@@ -294,6 +331,10 @@ func adminProcessListCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
 
 			processes, err := k.ListAllProcesses(context.Background(), limit, offset)
 			if err != nil {
@@ -326,6 +367,10 @@ func adminTxListCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+
+			if _, err := requireSuperuser(k); err != nil {
+				return err
+			}
 
 			txs, err := k.ListAllTransactions(context.Background(), limit, offset)
 			if err != nil {

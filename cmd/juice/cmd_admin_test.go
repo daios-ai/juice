@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -138,6 +139,57 @@ func TestAdminDeposit(t *testing.T) {
 	// Unknown user rejected.
 	if _, err := k.Deposit(ctx, admin.ID, "nonexistent", 100, ""); err == nil {
 		t.Error("expected error for unknown target user")
+	}
+}
+
+func TestRequireSuperuser(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnv(t)
+
+	admin, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@admin", Email: "admin@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regular, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@regular", Email: "regular@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.k.SetConfig(ctx, configKeySuperuser, "@admin"); err != nil {
+		t.Fatal(err)
+	}
+
+	adminToken, err := env.k.Login(ctx, "@admin", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveToken(adminToken); err != nil {
+		t.Fatal(err)
+	}
+	got, err := requireSuperuser(env.k)
+	if err != nil {
+		t.Fatalf("admin should pass superuser check: %v", err)
+	}
+	if got != admin.ID {
+		t.Fatalf("subject id: got %q, want %q", got, admin.ID)
+	}
+
+	regularToken, err := env.k.Login(ctx, "@regular", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveToken(regularToken); err != nil {
+		t.Fatal(err)
+	}
+	_, err = requireSuperuser(env.k)
+	if !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("regular user should be unauthorized, got %v", err)
+	}
+	if regular.ID == "" {
+		t.Fatal("regular user setup failed")
 	}
 }
 

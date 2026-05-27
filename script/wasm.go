@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/tetratelabs/wazero"
@@ -66,6 +67,12 @@ func (e *Executor) Compile(ctx context.Context, source []byte) ([]byte, string, 
 // The module must export a function `run(inputPtr, inputLen) (outputPtr, outputLen)`.
 // Input/output are JSON bytes exchanged through linear memory.
 func (e *Executor) Execute(ctx context.Context, artifact []byte, input []byte, host kernel.HostFunctions) ([]byte, error) {
+	if e.cfg.TimeoutMS > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(e.cfg.TimeoutMS)*time.Millisecond)
+		defer cancel()
+	}
+
 	h := sha256.Sum256(artifact)
 	hash := hex.EncodeToString(h[:])
 
@@ -183,6 +190,21 @@ func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions
 			[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32},
 			[]api.ValueType{},
 		).Export("log")
+
+	// juice.emit(eventPtr, eventLen, argsPtr, argsLen)
+	b.NewFunctionBuilder().
+		WithGoModuleFunction(
+			api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+				eventPtr, eventLen := uint32(stack[0]), uint32(stack[1])
+				argsPtr, argsLen := uint32(stack[2]), uint32(stack[3])
+				mem := mod.Memory()
+				event, _ := mem.Read(eventPtr, eventLen)
+				args, _ := mem.Read(argsPtr, argsLen)
+				_ = host.Emit(ctx, string(event), args)
+			}),
+			[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32},
+			[]api.ValueType{},
+		).Export("emit")
 }
 
 // writeToMem writes data into the module's memory via `alloc` and returns (ptr, len).

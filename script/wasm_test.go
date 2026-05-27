@@ -183,3 +183,33 @@ func TestExecutorContextTimeout(t *testing.T) {
 		t.Error("expected timeout error from infinite loop, got nil")
 	}
 }
+
+func TestExecutorConfiguredTimeout(t *testing.T) {
+	e := New(Config{TimeoutMS: 100, MemoryBytes: 4 * 1024 * 1024})
+	ctx := context.Background()
+
+	artifact, _, err := e.Compile(ctx, infiniteLoopWASM)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	_, err = e.Execute(ctx, artifact, []byte(`{}`), nilHost{})
+	if err == nil {
+		t.Error("expected configured timeout error from infinite loop, got nil")
+	}
+}
+
+func TestHostModuleExportsEmit(t *testing.T) {
+	e := New(Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
+	builder := e.runtime.NewHostModuleBuilder("juice-test")
+	registerHostFunctions(builder, nilHost{})
+	mod, err := builder.Instantiate(context.Background())
+	if err != nil {
+		t.Fatalf("Instantiate host module: %v", err)
+	}
+	defer mod.Close(context.Background())
+
+	if mod.ExportedFunctionDefinitions()["emit"] == nil {
+		t.Fatal("expected host module to export emit")
+	}
+}

@@ -3205,7 +3205,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -3248,15 +3247,13 @@ func runServer(addr string) error {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
-	superuserHandle, _ := k.GetConfig(context.Background(), configKeySuperuser)
-
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(requestIDMiddleware)
 	r.Use(loggingMiddleware(logger))
 	r.Use(maxBytesMiddleware(1 << 20)) // 1 MiB request body limit
 
-	srv := &server{kernel: k, log: logger, superuserHandle: superuserHandle}
+	srv := &server{kernel: k, log: logger}
 
 	// Health (unauthenticated).
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -3313,19 +3310,6 @@ func runServer(addr string) error {
 		r.Post("/v1/events/emit", srv.postEmit)
 		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
 
-		// Admin routes.
-		r.Group(func(r chi.Router) {
-			r.Use(srv.adminMiddleware)
-			r.Get("/v1/admin/users", srv.adminListUsers)
-			r.Get("/v1/admin/users/{id}", srv.adminGetUser)
-			r.Post("/v1/admin/users/{id}/suspend", srv.adminSuspendUser)
-			r.Post("/v1/admin/users/{id}/unsuspend", srv.adminUnsuspendUser)
-			r.Post("/v1/admin/users/{id}/deposit", srv.adminDepositUser)
-			r.Get("/v1/admin/actions", srv.adminListActions)
-			r.Post("/v1/admin/actions/{id}/disable", srv.adminDisableAction)
-			r.Get("/v1/admin/processes", srv.adminListProcesses)
-			r.Get("/v1/admin/transactions", srv.adminListTransactions)
-		})
 	})
 
 	logger.Info("server.start", "addr", addr)
@@ -3337,7 +3321,6 @@ func runServer(addr string) error {
 type server struct {
 	kernel          *kernel.Kernel
 	log             *log.Logger
-	superuserHandle string
 }
 
 // ---- middleware ----
@@ -3467,18 +3450,6 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), ctxSubjectID, subjectID)
 		ctx = log.WithSubjectUserID(ctx, subjectID)
 		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-func (s *server) adminMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		subjectID := subjectFromContext(r.Context())
-		u, err := s.kernel.ReadUser(r.Context(), subjectID)
-		if err != nil || u.Handle != s.superuserHandle {
-			writeErr(w, kernel.ErrUnauthorized.Wrap("admin access required"))
-			return
-		}
-		next.ServeHTTP(w, r)
 	})
 }
 
@@ -3973,117 +3944,6 @@ func (s *server) revokeAll(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ---- admin handlers ----
-
-func paginate(r *http.Request) (limit, offset int) {
-	limit = 50
-	offset = 0
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = n
-		}
-	}
-	if v := r.URL.Query().Get("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			offset = n
-		}
-	}
-	return
-}
-
-func (s *server) adminListUsers(w http.ResponseWriter, r *http.Request) {
-	limit, offset := paginate(r)
-	users, err := s.kernel.ListUsers(r.Context(), limit, offset)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, users)
-}
-
-func (s *server) adminGetUser(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	u, err := s.kernel.ReadUser(r.Context(), id)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, u)
-}
-
-func (s *server) adminSuspendUser(w http.ResponseWriter, r *http.Request) {
-	if err := s.kernel.SuspendUser(r.Context(), chi.URLParam(r, "id")); err != nil {
-		writeErr(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *server) adminUnsuspendUser(w http.ResponseWriter, r *http.Request) {
-	if err := s.kernel.UnsuspendUser(r.Context(), chi.URLParam(r, "id")); err != nil {
-		writeErr(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *server) adminDepositUser(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	var req struct {
-		Amount int64  `json:"amount"`
-		Reason string `json:"reason"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid request body"))
-		return
-	}
-	d, err := s.kernel.Deposit(r.Context(), subjectFrom(r), id, req.Amount, req.Reason)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, d)
-}
-
-func (s *server) adminListActions(w http.ResponseWriter, r *http.Request) {
-	limit, offset := paginate(r)
-	actions, err := s.kernel.ListAllActions(r.Context(), limit, offset)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, actions)
-}
-
-func (s *server) adminDisableAction(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if err := s.kernel.SetActive(r.Context(), subjectFrom(r), id, false); err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"active": false})
-}
-
-func (s *server) adminListProcesses(w http.ResponseWriter, r *http.Request) {
-	limit, offset := paginate(r)
-	processes, err := s.kernel.ListAllProcesses(r.Context(), limit, offset)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, processes)
-}
-
-func (s *server) adminListTransactions(w http.ResponseWriter, r *http.Request) {
-	limit, offset := paginate(r)
-	txs, err := s.kernel.ListAllTransactions(r.Context(), limit, offset)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, txs)
-}
-
 // ---- response helpers ----
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -4109,10 +3969,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
@@ -4133,6 +3997,7 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "serve-test-secret"
+	cfg.AllowLocalSources = true
 	logger := log.Discard()
 	k := kernel.New(db, nil, nil, cfg, logger)
 
@@ -4141,7 +4006,12 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	r.Use(middleware.Recoverer)
 	r.Use(requestIDMiddleware)
 
+	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
 	r.Post("/v1/auth/token", srv.postTokenMulti)
+	r.Post("/v1/auth/authorize", srv.postAuthorize)
+	r.Post("/v1/auth/refresh", srv.postRefresh)
 	r.Post("/v1/users", srv.postUser)
 	r.Group(func(r chi.Router) {
 		r.Use(srv.authMiddleware)
@@ -4151,6 +4021,10 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		r.Post("/v1/actions/{id}/enable", srv.enableAction)
 		r.Post("/v1/actions/{id}/disable", srv.disableAction)
 		r.Delete("/v1/actions/{id}", srv.deleteAction)
+		r.Post("/v1/actions/{id}/acl", srv.grantACL)
+		r.Delete("/v1/actions/{id}/acl", srv.revokeACL)
+		r.Post("/v1/actions/{id}/grant-all", srv.grantAll)
+		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
 		r.Post("/v1/processes", srv.postProcess)
 		r.Get("/v1/processes/{id}", srv.getProcess)
 		r.Post("/v1/processes/{id}/fund", srv.fundProcess)
@@ -4158,13 +4032,41 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		r.Post("/v1/call", srv.postCall)
 		r.Get("/v1/transactions", srv.listTransactions)
 		r.Get("/v1/transactions/{id}", srv.getTransaction)
+		r.Post("/v1/transactions/{id}/rate", srv.rateTransaction)
 		r.Get("/v1/stats/{action_id}", srv.getStats)
+		r.Post("/v1/lookup", srv.postLookup)
 		r.Post("/v1/listeners", srv.postListener)
+		r.Get("/v1/listeners/{id}", srv.getListener)
 		r.Delete("/v1/listeners/{id}", srv.deleteListener)
 		r.Post("/v1/events/emit", srv.postEmit)
+		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
 	})
 
 	return httptest.NewServer(r), k
+}
+
+// makeUser creates a user and returns (userID, accessToken).
+func makeUser(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
+	t.Helper()
+	u, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
+		Handle: handle, Email: handle + "@test.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := k.Login(context.Background(), handle, "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.ID, tok
+}
+
+// giveCredits deposits funds into a user's account via the kernel directly.
+func giveCredits(t *testing.T, k *kernel.Kernel, userID string, amount int64) {
+	t.Helper()
+	if _, err := k.Deposit(context.Background(), userID, userID, amount, "test"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func httpDo(t *testing.T, srv *httptest.Server, method, path string, body any, tok string) *http.Response {
@@ -4190,11 +4092,38 @@ func httpDo(t *testing.T, srv *httptest.Server, method, path string, body any, t
 	return resp
 }
 
+func httpDoForm(t *testing.T, srv *httptest.Server, path string, values url.Values) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest("POST", srv.URL+path, strings.NewReader(values.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
 func decodeResponse(t *testing.T, resp *http.Response, v any) {
 	t.Helper()
 	defer resp.Body.Close()
 	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
 		t.Fatalf("decode response: %v", err)
+	}
+}
+
+// ---- tests ----
+
+func TestServeHealth(t *testing.T) {
+	srv, _ := newTestHTTPServer(t)
+	defer srv.Close()
+
+	resp := httpDo(t, srv, "GET", "/health", nil, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 }
 
@@ -4236,6 +4165,67 @@ func TestServeAuthToken(t *testing.T) {
 	}
 }
 
+func TestServePKCEFlow(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, _ = makeUser(t, k, "@pkce-user")
+
+	verifier := strings.Repeat("x", 43)
+	h := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(h[:])
+
+	// Step 1: authorize.
+	resp := httpDoForm(t, srv, "/v1/auth/authorize", url.Values{
+		"handle":         {"@pkce-user"},
+		"password":       {"pass"},
+		"code_challenge": {challenge},
+	})
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("authorize: expected 200, got %d", resp.StatusCode)
+	}
+	var authResp map[string]string
+	decodeResponse(t, resp, &authResp)
+	code := strings.TrimPrefix(authResp["redirect"], "?code=")
+	if code == "" {
+		t.Fatal("expected code in redirect")
+	}
+
+	// Step 2: exchange code for tokens.
+	resp2 := httpDoForm(t, srv, "/v1/auth/token", url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"code_verifier": {verifier},
+	})
+	if resp2.StatusCode != http.StatusOK {
+		resp2.Body.Close()
+		t.Fatalf("token exchange: expected 200, got %d", resp2.StatusCode)
+	}
+	var tokenResp map[string]string
+	decodeResponse(t, resp2, &tokenResp)
+	if tokenResp["access_token"] == "" {
+		t.Error("expected access_token")
+	}
+	if tokenResp["refresh_token"] == "" {
+		t.Error("expected refresh_token")
+	}
+
+	// Step 3: refresh.
+	resp3 := httpDo(t, srv, "POST", "/v1/auth/refresh", map[string]any{
+		"refresh_token": tokenResp["refresh_token"],
+	}, "")
+	if resp3.StatusCode != http.StatusOK {
+		resp3.Body.Close()
+		t.Fatalf("refresh: expected 200, got %d", resp3.StatusCode)
+	}
+	var refreshResp map[string]string
+	decodeResponse(t, resp3, &refreshResp)
+	if refreshResp["access_token"] == "" {
+		t.Error("refresh: expected new access_token")
+	}
+}
+
 func TestServeAuthRequired(t *testing.T) {
 	srv, _ := newTestHTTPServer(t)
 	defer srv.Close()
@@ -4251,10 +4241,7 @@ func TestServeCreateAndGetAction(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	user, _ := k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@srv-actowner", Email: "sa@example.com", Password: "pass",
-	})
-	tok, _ := k.Login(context.Background(), "@srv-actowner", "pass")
+	userID, tok := makeUser(t, k, "@srv-actowner")
 
 	resp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/http-action", "kind": "http",
@@ -4269,8 +4256,8 @@ func TestServeCreateAndGetAction(t *testing.T) {
 	if action.ID == "" {
 		t.Error("expected action with ID")
 	}
-	if action.OwnerUserID != user.ID {
-		t.Errorf("action owner: got %q, want %q", action.OwnerUserID, user.ID)
+	if action.OwnerUserID != userID {
+		t.Errorf("action owner: got %q, want %q", action.OwnerUserID, userID)
 	}
 
 	resp2 := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, tok)
@@ -4285,14 +4272,246 @@ func TestServeCreateAndGetAction(t *testing.T) {
 	}
 }
 
+func TestServeListActions(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@list-owner")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/list-me", "kind": "http", "price": 0, "source": "http://x.example",
+	}, tok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok).Body.Close()
+
+	resp := httpDo(t, srv, "GET", "/v1/actions", nil, tok)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("list actions: expected 200, got %d", resp.StatusCode)
+	}
+	var actions []kernel.Action
+	decodeResponse(t, resp, &actions)
+	if len(actions) == 0 {
+		t.Error("expected at least one action in list")
+	}
+}
+
+func TestServeEnableDisableAction(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@toggle-owner")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/toggle-me", "kind": "http", "price": 0, "source": "http://x.example",
+	}, tok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+
+	// Disable.
+	r1 := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/disable", nil, tok)
+	defer r1.Body.Close()
+	if r1.StatusCode != http.StatusOK {
+		t.Fatalf("disable: expected 200, got %d", r1.StatusCode)
+	}
+
+	fetched := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, tok)
+	var a1 kernel.Action
+	decodeResponse(t, fetched, &a1)
+	if a1.Active {
+		t.Error("action should be inactive after disable")
+	}
+
+	// Enable.
+	r2 := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok)
+	defer r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("enable: expected 200, got %d", r2.StatusCode)
+	}
+
+	fetched2 := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, tok)
+	var a2 kernel.Action
+	decodeResponse(t, fetched2, &a2)
+	if !a2.Active {
+		t.Error("action should be active after enable")
+	}
+}
+
+func TestServeDeleteAction(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@del-owner")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/delete-me", "kind": "http", "price": 0, "source": "http://x.example",
+	}, tok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+
+	del := httpDo(t, srv, "DELETE", "/v1/actions/"+action.ID, nil, tok)
+	defer del.Body.Close()
+	if del.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete: expected 204, got %d", del.StatusCode)
+	}
+
+	get := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, tok)
+	defer get.Body.Close()
+	if get.StatusCode != http.StatusNotFound {
+		t.Errorf("after delete: expected 404, got %d", get.StatusCode)
+	}
+}
+
+func TestServeACL(t *testing.T) {
+	// Set up a backend so the HTTP action can actually execute.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@acl-owner")
+	_, user2Tok := makeUser(t, k, "@acl-user2")
+
+	// Create a private (non-public) action.
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/acl-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	// Activate.
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+
+	// user2 opens a process.
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, user2Tok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	// user2 tries to call — should be denied (403).
+	r1 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@acl-owner", "action_name": "/acl-action",
+	}, user2Tok)
+	r1.Body.Close()
+	if r1.StatusCode != http.StatusForbidden {
+		t.Fatalf("before grant: expected 403, got %d", r1.StatusCode)
+	}
+
+	// Owner grants call permission to user2.
+	user2, _ := k.ReadUserByHandle(context.Background(), "@acl-user2")
+	gr := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/acl", map[string]any{
+		"subject_user_id": user2.ID, "permission": "call",
+	}, ownerTok)
+	gr.Body.Close()
+	if gr.StatusCode != http.StatusNoContent {
+		t.Fatalf("grant acl: expected 204, got %d", gr.StatusCode)
+	}
+
+	// user2 calls — should succeed.
+	r2 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@acl-owner", "action_name": "/acl-action",
+	}, user2Tok)
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("after grant: expected 200, got %d", r2.StatusCode)
+	}
+
+	// Owner revokes permission.
+	rv := httpDo(t, srv, "DELETE", "/v1/actions/"+action.ID+"/acl", map[string]any{
+		"subject_user_id": user2.ID, "permission": "call",
+	}, ownerTok)
+	rv.Body.Close()
+	if rv.StatusCode != http.StatusNoContent {
+		t.Fatalf("revoke acl: expected 204, got %d", rv.StatusCode)
+	}
+
+	// user2 calls again — should be denied.
+	r3 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@acl-owner", "action_name": "/acl-action",
+	}, user2Tok)
+	r3.Body.Close()
+	if r3.StatusCode != http.StatusForbidden {
+		t.Fatalf("after revoke: expected 403, got %d", r3.StatusCode)
+	}
+}
+
+func TestServeGrantRevokeAll(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@ga-owner")
+	_, user3Tok := makeUser(t, k, "@ga-user3")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/public-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+
+	// user3 opens a process.
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, user3Tok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	// Before grant-all: user3 cannot call.
+	r1 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@ga-owner", "action_name": "/public-action",
+	}, user3Tok)
+	r1.Body.Close()
+	if r1.StatusCode != http.StatusForbidden {
+		t.Fatalf("before grant-all: expected 403, got %d", r1.StatusCode)
+	}
+
+	// Grant-all.
+	ga := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok)
+	ga.Body.Close()
+	if ga.StatusCode != http.StatusNoContent {
+		t.Fatalf("grant-all: expected 204, got %d", ga.StatusCode)
+	}
+
+	// user3 can now call.
+	r2 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@ga-owner", "action_name": "/public-action",
+	}, user3Tok)
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("after grant-all: expected 200, got %d", r2.StatusCode)
+	}
+
+	// Revoke-all.
+	ra := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/revoke-all", nil, ownerTok)
+	ra.Body.Close()
+	if ra.StatusCode != http.StatusNoContent {
+		t.Fatalf("revoke-all: expected 204, got %d", ra.StatusCode)
+	}
+
+	// user3 can no longer call.
+	r3 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@ga-owner", "action_name": "/public-action",
+	}, user3Tok)
+	r3.Body.Close()
+	if r3.StatusCode != http.StatusForbidden {
+		t.Fatalf("after revoke-all: expected 403, got %d", r3.StatusCode)
+	}
+}
+
 func TestServeProcessLifecycle(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@srv-proc", Email: "sp@example.com", Password: "pass",
-	})
-	tok, _ := k.Login(context.Background(), "@srv-proc", "pass")
+	_, tok := makeUser(t, k, "@srv-proc")
 
 	resp := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, tok)
 	if resp.StatusCode != http.StatusCreated {
@@ -4301,16 +4520,221 @@ func TestServeProcessLifecycle(t *testing.T) {
 	}
 	var proc map[string]any
 	decodeResponse(t, resp, &proc)
-
-	pid, ok := proc["process_id"].(string)
-	if !ok || pid == "" {
-		t.Fatal("expected process_id in response")
+	pid := proc["process_id"].(string)
+	if pid == "" {
+		t.Fatal("expected process_id")
 	}
 
-	resp2 := httpDo(t, srv, "POST", "/v1/processes/"+pid+"/end", nil, tok)
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusNoContent {
-		t.Errorf("end process: expected 204, got %d", resp2.StatusCode)
+	// Get process.
+	get := httpDo(t, srv, "GET", "/v1/processes/"+pid, nil, tok)
+	if get.StatusCode != http.StatusOK {
+		get.Body.Close()
+		t.Fatalf("get process: expected 200, got %d", get.StatusCode)
+	}
+	var p kernel.Process
+	decodeResponse(t, get, &p)
+	if p.ID != pid {
+		t.Errorf("get process: ID mismatch")
+	}
+
+	// End process.
+	end := httpDo(t, srv, "POST", "/v1/processes/"+pid+"/end", nil, tok)
+	defer end.Body.Close()
+	if end.StatusCode != http.StatusNoContent {
+		t.Errorf("end process: expected 204, got %d", end.StatusCode)
+	}
+}
+
+func TestServeFundProcess(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	userID, tok := makeUser(t, k, "@fund-user")
+	giveCredits(t, k, userID, 200)
+
+	// Start process with 0 initial funds.
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, tok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	// Fund the process via HTTP.
+	fr := httpDo(t, srv, "POST", "/v1/processes/"+pid+"/fund", map[string]any{"funds": 100}, tok)
+	defer fr.Body.Close()
+	if fr.StatusCode != http.StatusNoContent {
+		t.Fatalf("fund process: expected 204, got %d", fr.StatusCode)
+	}
+
+	// Verify available funds increased.
+	get := httpDo(t, srv, "GET", "/v1/processes/"+pid, nil, tok)
+	var p kernel.Process
+	decodeResponse(t, get, &p)
+	if p.Available != 100 {
+		t.Errorf("funded process: expected 100 available, got %d", p.Available)
+	}
+}
+
+func TestServeCall(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"answer": 42})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@call-owner")
+	_, callerTok := makeUser(t, k, "@call-caller")
+
+	// Create and activate a free public HTTP action.
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/answer", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok).Body.Close()
+
+	// Caller opens a process.
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, callerTok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	// Make the call.
+	callResp := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id":  pid,
+		"target":      "@call-owner",
+		"action_name": "/answer",
+		"args":        map[string]any{},
+	}, callerTok)
+	if callResp.StatusCode != http.StatusOK {
+		callResp.Body.Close()
+		t.Fatalf("call: expected 200, got %d", callResp.StatusCode)
+	}
+	var reply kernel.CallReply
+	decodeResponse(t, callResp, &reply)
+	if reply.TxID == "" {
+		t.Error("expected tx_id in call reply")
+	}
+	if reply.Result["answer"] != float64(42) {
+		t.Errorf("call result: expected answer=42, got %v", reply.Result)
+	}
+}
+
+func TestServeListAndGetTransaction(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"done": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@tx-owner")
+	_, callerTok := makeUser(t, k, "@tx-caller")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/tx-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok).Body.Close()
+
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, callerTok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	call := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@tx-owner", "action_name": "/tx-action",
+	}, callerTok)
+	var callReply kernel.CallReply
+	decodeResponse(t, call, &callReply)
+	txID := callReply.TxID
+	if txID == "" {
+		t.Fatal("expected tx_id from call")
+	}
+
+	// List transactions.
+	list := httpDo(t, srv, "GET", "/v1/transactions", nil, callerTok)
+	if list.StatusCode != http.StatusOK {
+		list.Body.Close()
+		t.Fatalf("list transactions: expected 200, got %d", list.StatusCode)
+	}
+	var txs []kernel.Transaction
+	decodeResponse(t, list, &txs)
+	if len(txs) == 0 {
+		t.Error("expected at least one transaction")
+	}
+
+	// Get transaction by ID.
+	get := httpDo(t, srv, "GET", "/v1/transactions/"+txID, nil, callerTok)
+	if get.StatusCode != http.StatusOK {
+		get.Body.Close()
+		t.Fatalf("get transaction: expected 200, got %d", get.StatusCode)
+	}
+	var tx kernel.Transaction
+	decodeResponse(t, get, &tx)
+	if tx.ID != txID {
+		t.Errorf("get transaction: ID mismatch, got %v", tx.ID)
+	}
+}
+
+func TestServeRateTransaction(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@rate-owner")
+	_, callerTok := makeUser(t, k, "@rate-caller")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/rate-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok).Body.Close()
+
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, callerTok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	call := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": pid, "target": "@rate-owner", "action_name": "/rate-action",
+	}, callerTok)
+	var callReply kernel.CallReply
+	decodeResponse(t, call, &callReply)
+	txID := callReply.TxID
+	if txID == "" {
+		t.Fatal("expected tx_id from call")
+	}
+
+	// Rate it (caller is the process owner); rating must be 0 or 1.
+	rate := httpDo(t, srv, "POST", "/v1/transactions/"+txID+"/rate", map[string]any{
+		"rating": 1,
+	}, callerTok)
+	defer rate.Body.Close()
+	if rate.StatusCode != http.StatusNoContent {
+		t.Fatalf("rate transaction: expected 204, got %d", rate.StatusCode)
+	}
+
+	// Verify rating is persisted.
+	get := httpDo(t, srv, "GET", "/v1/transactions/"+txID, nil, callerTok)
+	var tx kernel.Transaction
+	decodeResponse(t, get, &tx)
+	if tx.Rating == nil {
+		t.Error("expected rating to be set on transaction")
 	}
 }
 
@@ -4318,16 +4742,160 @@ func TestServeRateTransactionNotFound(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@rater", Email: "rater@example.com", Password: "pass",
-	})
-	tok, _ := k.Login(context.Background(), "@rater", "pass")
+	_, tok := makeUser(t, k, "@rater")
 
 	resp := httpDo(t, srv, "POST", "/v1/transactions/no-such-id/rate",
 		map[string]any{"rating": 1.0}, tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for unknown tx, got %d", resp.StatusCode)
+	}
+}
+
+func TestServeGetStats(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@stats-owner")
+	_, callerTok := makeUser(t, k, "@stats-caller")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/stats-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok).Body.Close()
+
+	// Make one call to generate stats.
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, callerTok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": proc["process_id"], "target": "@stats-owner", "action_name": "/stats-action",
+	}, callerTok).Body.Close()
+
+	get := httpDo(t, srv, "GET", "/v1/stats/"+action.ID, nil, ownerTok)
+	if get.StatusCode != http.StatusOK {
+		get.Body.Close()
+		t.Fatalf("get stats: expected 200, got %d", get.StatusCode)
+	}
+	var stats kernel.Stats
+	decodeResponse(t, get, &stats)
+	if stats.Uses == 0 {
+		t.Error("expected uses > 0 in stats after a call")
+	}
+}
+
+func TestServeLookupRequiresEmbedder(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@lookup-user")
+
+	resp := httpDo(t, srv, "POST", "/v1/lookup", map[string]any{"query": "something"}, tok)
+	defer resp.Body.Close()
+	// Lookup requires an embedder; without one it returns 409 (invalid_state).
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("lookup without embedder: expected 409, got %d", resp.StatusCode)
+	}
+}
+
+func TestServeListenerFlow(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"consumed": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@lst-owner")
+	sourceID, sourceTok := makeUser(t, k, "@lst-source")
+
+	// Owner creates a free public action.
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/lst-action", "kind": "http", "price": 0, "source": backend.URL,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, ownerTok).Body.Close()
+
+	// Owner creates a listener watching the source user.
+	lr := httpDo(t, srv, "POST", "/v1/listeners", map[string]any{
+		"source_user_id":   sourceID,
+		"event_name":       "test.ping",
+		"target_action_id": action.ID,
+	}, ownerTok)
+	if lr.StatusCode != http.StatusCreated {
+		lr.Body.Close()
+		t.Fatalf("create listener: expected 201, got %d", lr.StatusCode)
+	}
+	var listener kernel.Listener
+	decodeResponse(t, lr, &listener)
+	lid := listener.ID
+	if lid == "" {
+		t.Fatal("expected listener ID")
+	}
+
+	// Source user emits event.
+	emit := httpDo(t, srv, "POST", "/v1/events/emit", map[string]any{
+		"event_name": "test.ping", "args": map[string]any{},
+	}, sourceTok)
+	if emit.StatusCode != http.StatusOK {
+		emit.Body.Close()
+		t.Fatalf("emit: expected 200, got %d", emit.StatusCode)
+	}
+	var emitResp map[string]any
+	decodeResponse(t, emit, &emitResp)
+	eventIDs, _ := emitResp["event_ids"].([]any)
+	if len(eventIDs) == 0 {
+		t.Fatal("expected at least one event_id from emit")
+	}
+	eventID := eventIDs[0].(string)
+
+	// Poll listener — should have one pending event.
+	poll := httpDo(t, srv, "GET", "/v1/listeners/"+lid, nil, ownerTok)
+	if poll.StatusCode != http.StatusOK {
+		poll.Body.Close()
+		t.Fatalf("poll listener: expected 200, got %d", poll.StatusCode)
+	}
+	var pollResp map[string]any
+	decodeResponse(t, poll, &pollResp)
+	events, _ := pollResp["events"].([]any)
+	if len(events) == 0 {
+		t.Error("expected pending event in listener poll")
+	}
+
+	// Owner opens a process to consume the event.
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	// Consume the event.
+	consume := httpDo(t, srv, "POST", "/v1/events/"+eventID+"/consume", map[string]any{
+		"process_id": pid,
+	}, ownerTok)
+	if consume.StatusCode != http.StatusOK {
+		consume.Body.Close()
+		t.Fatalf("consume event: expected 200, got %d", consume.StatusCode)
+	}
+	consume.Body.Close()
+
+	// Delete listener.
+	del := httpDo(t, srv, "DELETE", "/v1/listeners/"+lid, nil, ownerTok)
+	defer del.Body.Close()
+	if del.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete listener: expected 204, got %d", del.StatusCode)
 	}
 }
 
@@ -4842,6 +5410,7 @@ package kernel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -4875,9 +5444,9 @@ type CallRequest struct {
 
 // CallReply is the response from a successful Call().
 type CallReply struct {
-	Result  map[string]any
-	TxID    string
-	TraceID string
+	Result  map[string]any `json:"result"`
+	TxID    string         `json:"tx_id"`
+	TraceID string         `json:"trace_id"`
 }
 
 // Call executes the central kernel transition.
@@ -4952,7 +5521,27 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 	}
 
-	// 10. Create child trace.
+	// 10. Validate or resolve parent trace.
+	if req.ParentTraceID != "" {
+		parent, err := k.store.ReadTrace(ctx, req.ParentTraceID)
+		if err != nil {
+			_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
+			return nil, ErrInvalidInput.Wrap("parent trace not found")
+		}
+		if parent.ProcessID != req.ProcessID {
+			_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
+			return nil, ErrInvalidInput.Wrap("parent trace belongs to a different process")
+		}
+	} else {
+		root, err := k.store.ReadRootTrace(ctx, req.ProcessID)
+		if err != nil {
+			_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
+			return nil, ErrInternal.Wrap("could not resolve root trace for process")
+		}
+		req.ParentTraceID = root.ID
+	}
+
+	// 11. Create child trace.
 	now := time.Now().UTC()
 	trace := &Trace{
 		ID:              uuid.New().String(),
@@ -4993,35 +5582,33 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	argsJSON, _ := json.Marshal(req.Args)
 	tx.ArgsJSON = string(argsJSON)
 
-	// 11. Execute. Pass action.OwnerUserID so host functions (juice.call, juice.emit)
+	// 12. Execute. Pass action.OwnerUserID so host functions (juice.call, juice.emit)
 	// operate on behalf of the action author, not the caller.
 	started := time.Now()
 	reply, execErr := k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
 	latency := time.Since(started).Seconds()
 	tx.EndedAt = time.Now().UTC()
 
-	// Handle execution failure.
+	// Handle execution failure: refund and record atomically.
 	if execErr != nil {
-		_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
 		tx.Status = TxFailure
 		tx.Reason = execErr.Error()
-		_ = k.store.CreateTransaction(ctx, tx)
+		_ = k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price)
 		k.updateStats(ctx, action.ID, tx, latency)
 		logger.Warn("call.failed", "action", action.Name, "error", execErr)
 		return nil, execErr
 	}
 
-	// 12. Validate output schema.
+	// 13. Validate output schema.
 	if err := ValidateInput(action.OutputSchema, anyOf(reply)); err != nil {
-		_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
 		tx.Status = TxFailure
 		tx.Reason = "output schema violation: " + err.Error()
-		_ = k.store.CreateTransaction(ctx, tx)
+		_ = k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price)
 		k.updateStats(ctx, action.ID, tx, latency)
 		return nil, err
 	}
 
-	// 13 & 14. Record transaction and settle payment atomically.
+	// 14 & 15. Record transaction and settle payment atomically.
 	replyJSON, _ := json.Marshal(reply)
 	tx.ReplyJSON = string(replyJSON)
 	tx.Status = TxSuccess
@@ -5033,10 +5620,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInternal.Wrap("could not commit transaction")
 	}
 
-	// 15. Update stats.
+	// 16. Update stats.
 	k.updateStats(ctx, action.ID, tx, latency)
 
-	// 16. Update trace cost and latency for all ancestor traces.
+	// 17. Update trace cost and latency for all ancestor traces.
 	_ = k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt)
 
 	logger.Info("call.success", "action", action.Name, "tx_id", txID, "latency_ms", fmt.Sprintf("%.1f", latency*1000))
@@ -5219,32 +5806,37 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 
 	// Contractor model: create an ephemeral process owned by the calling action's
 	// owner. The caller's process is not charged for sub-calls.
+	now := time.Now().UTC()
 	ep := &Process{
 		ID:          uuid.New().String(),
 		OwnerUserID: h.ownerUserID,
 		Status:      ProcessOpen,
-		CreatedAt:   time.Now().UTC(),
+		CreatedAt:   now,
 	}
-	if err := h.kernel.store.CreateProcess(ctx, ep); err != nil {
+	epRoot := &Trace{
+		ID:        uuid.New().String(),
+		ProcessID: ep.ID,
+		CreatedAt: now,
+	}
+	epRoot.ParentTraceID = epRoot.ID
+	if err := h.kernel.store.StartProcess(ctx, ep, epRoot, h.ownerUserID, action.Price); err != nil {
+		if isInsufficientFunds(err) {
+			return nil, ErrInsufficientFunds.Wrap("action owner has insufficient balance for sub-call")
+		}
 		return nil, ErrInternal.Wrap("could not create ephemeral process")
 	}
+	ep.Available = action.Price
 	// Always close the ephemeral process on return; any unused funds go back to owner.
 	// Use context.Background() so a cancelled request context does not prevent cleanup.
 	defer func() { _ = h.kernel.store.EndProcess(context.Background(), ep.ID) }()
 
-	if action.Price > 0 {
-		if err := h.kernel.store.FundProcess(ctx, h.ownerUserID, ep.ID, action.Price); err != nil {
-			return nil, ErrInsufficientFunds.Wrap("action owner has insufficient balance for sub-call")
-		}
-	}
-
 	reply, err := h.kernel.Call(ctx, CallRequest{
-		SubjectID:     h.ownerUserID,
-		ProcessID:     ep.ID,
-		ParentTraceID: h.traceID,
-		TargetUserID:  target.ID,
-		ActionName:    subActionName,
-		Args:          args,
+		SubjectID:       h.ownerUserID,
+		ProcessID:       ep.ID,
+		CausedByTraceID: h.traceID, // FOLLOWS_FROM: ephemeral process crosses boundary
+		TargetUserID:    target.ID,
+		ActionName:      subActionName,
+		Args:            args,
 	})
 	if err != nil {
 		return nil, err
@@ -5313,6 +5905,11 @@ func anyOf(m map[string]any) any {
 		return nil
 	}
 	return m
+}
+
+// isInsufficientFunds reports whether err wraps ErrInsufficientFunds.
+func isInsufficientFunds(err error) bool {
+	return errors.Is(err, ErrInsufficientFunds)
 }
 
 // strPtr returns nil for an empty string, otherwise a pointer to s.
@@ -6910,6 +7507,28 @@ func (f *fakeStore) CheckACL(_ context.Context, subjectID, actionID string, perm
 	return m[perm], nil
 }
 
+func (f *fakeStore) StartProcess(_ context.Context, p *Process, t *Trace, ownerID string, funds int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if funds > 0 {
+		u, ok := f.users[ownerID]
+		if !ok {
+			return ErrNotFound.Wrap("owner not found")
+		}
+		if u.Available < funds {
+			return ErrInsufficientFunds.Wrap("insufficient user balance")
+		}
+		u.Available -= funds
+		u.Locked += funds
+	}
+	cp := *p
+	cp.Available = funds
+	f.processes[p.ID] = &cp
+	tc := *t
+	f.traces[t.ID] = &tc
+	return nil
+}
+
 func (f *fakeStore) CreateProcess(_ context.Context, p *Process) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -6972,6 +7591,22 @@ func (f *fakeStore) FundProcess(_ context.Context, userID, processID string, amo
 	}
 	u.Available -= amount
 	p.Available += amount
+	return nil
+}
+
+func (f *fakeStore) CommitFailedCall(_ context.Context, tx *Transaction, processID string, gross int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.processes[processID]
+	if !ok {
+		return ErrNotFound.Wrap("process not found")
+	}
+	if gross > 0 {
+		p.Locked -= gross
+		p.Available += gross
+	}
+	cp := *tx
+	f.transactions[tx.ID] = &cp
 	return nil
 }
 
@@ -7042,6 +7677,18 @@ func (f *fakeStore) ReadTrace(_ context.Context, id string) (*Trace, error) {
 	}
 	cp := *t
 	return &cp, nil
+}
+
+func (f *fakeStore) ReadRootTrace(_ context.Context, processID string) (*Trace, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, t := range f.traces {
+		if t.ProcessID == processID && t.ParentTraceID == t.ID {
+			cp := *t
+			return &cp, nil
+		}
+	}
+	return nil, ErrNotFound.Wrap("root trace not found for process")
 }
 
 func (f *fakeStore) CreateTransaction(_ context.Context, tx *Transaction) error {
@@ -7439,10 +8086,16 @@ func (f *fakeStore) UpdateTraceCostLatency(_ context.Context, traceID string, gr
 	return nil
 }
 
-func (f *fakeStore) CascadeRating(_ context.Context, traceID string, rating float64) error {
+func (f *fakeStore) RateTransactionCascade(_ context.Context, txID string, traceID string, rating float64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	// Collect subtree.
+	tx, ok := f.transactions[txID]
+	if !ok {
+		return ErrNotFound.Wrap("transaction not found")
+	}
+	r := rating
+	tx.Rating = &r
+	// Cascade to unrated descendants.
 	subtree := make(map[string]bool)
 	queue := []string{traceID}
 	for len(queue) > 0 {
@@ -7460,8 +8113,8 @@ func (f *fakeStore) CascadeRating(_ context.Context, traceID string, rating floa
 	}
 	for _, tx := range f.transactions {
 		if subtree[tx.TraceID] && tx.Rating == nil {
-			r := rating
-			tx.Rating = &r
+			r2 := rating
+			tx.Rating = &r2
 		}
 	}
 	return nil
@@ -7529,12 +8182,13 @@ import (
 
 // Config holds kernel-level configuration.
 type Config struct {
-	FeeBPS         int64         // basis points, e.g. 2000 = 20%
-	FeeRecipientID string        // user ID that receives fees
-	TokenSecret    string        // HMAC secret for JWT signing
-	TokenTTL       time.Duration // token validity window
-	ScriptTimeout  time.Duration
-	ScriptMemory   int64 // bytes
+	FeeBPS             int64         // basis points, e.g. 2000 = 20%
+	FeeRecipientID     string        // user ID that receives fees
+	TokenSecret        string        // HMAC secret for JWT signing
+	TokenTTL           time.Duration // token validity window
+	ScriptTimeout      time.Duration
+	ScriptMemory       int64 // bytes
+	AllowLocalSources  bool  // permit loopback/private URLs as action sources (tests only)
 }
 
 // DefaultConfig returns safe local defaults.
@@ -7708,7 +8362,7 @@ type CreateActionRequest struct {
 // validateHTTPSource rejects URLs that could be used for SSRF attacks.
 // Allowed: http and https schemes with public hostnames or IPs.
 // Rejected: other schemes, localhost, loopback, private, and link-local addresses.
-func validateHTTPSource(source string) error {
+func validateHTTPSource(source string, allowLocal bool) error {
 	u, err := url.Parse(source)
 	if err != nil {
 		return ErrInvalidInput.Wrapf("invalid URL: %v", err)
@@ -7726,12 +8380,14 @@ func validateHTTPSource(source string) error {
 	if host == "" {
 		return ErrInvalidInput.Wrap("URL must have a host")
 	}
-	if strings.EqualFold(host, "localhost") {
-		return ErrInvalidInput.Wrap("URL must not target localhost")
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-			return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
+	if !allowLocal {
+		if strings.EqualFold(host, "localhost") {
+			return ErrInvalidInput.Wrap("URL must not target localhost")
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+				return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
+			}
 		}
 	}
 	return nil
@@ -7751,7 +8407,7 @@ func (k *Kernel) CreateAction(ctx context.Context, req CreateActionRequest) (*Ac
 		return nil, ErrInvalidInput.Wrap("price must be non-negative")
 	}
 	if req.Kind == KindHTTP && req.Source != "" {
-		if err := validateHTTPSource(req.Source); err != nil {
+		if err := validateHTTPSource(req.Source, k.cfg.AllowLocalSources); err != nil {
 			return nil, err
 		}
 	}
@@ -8012,7 +8668,7 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 			return ErrInvalidState.Wrap("cannot activate action with no source")
 		}
 		if a.Kind == KindHTTP {
-			if err := validateHTTPSource(a.Source); err != nil {
+			if err := validateHTTPSource(a.Source, k.cfg.AllowLocalSources); err != nil {
 				return err
 			}
 		}
@@ -8095,6 +8751,7 @@ func (k *Kernel) RevokeACL(ctx context.Context, subjectID, actionID string, perm
 // ---- Process operations ----
 
 // StartProcess creates a new process and locks funds from the owner's account.
+// Process creation, user debit, and root trace creation are atomic.
 func (k *Kernel) StartProcess(ctx context.Context, ownerID string, funds int64) (*Process, *Trace, error) {
 	if funds < 0 {
 		return nil, nil, ErrInvalidInput.Wrap("funds must be non-negative")
@@ -8107,26 +8764,18 @@ func (k *Kernel) StartProcess(ctx context.Context, ownerID string, funds int64) 
 		Status:      ProcessOpen,
 		CreatedAt:   now,
 	}
-	if err := k.store.CreateProcess(ctx, p); err != nil {
-		return nil, nil, err
-	}
-	if funds > 0 {
-		if err := k.store.FundProcess(ctx, ownerID, p.ID, funds); err != nil {
-			return nil, nil, err
-		}
-		p.Available = funds
-	}
-
-	// Create root trace (ParentTraceID == ID).
+	// Root trace: ParentTraceID == ID.
 	t := &Trace{
 		ID:        uuid.New().String(),
 		ProcessID: p.ID,
 		CreatedAt: now,
 	}
 	t.ParentTraceID = t.ID
-	if err := k.store.CreateTrace(ctx, t); err != nil {
+
+	if err := k.store.StartProcess(ctx, p, t, ownerID, funds); err != nil {
 		return nil, nil, err
 	}
+	p.Available = funds
 
 	k.log.With(ctx).Info("process.started", "process_id", p.ID, "owner", ownerID, "funds", funds)
 	return p, t, nil
@@ -8201,6 +8850,7 @@ func (k *Kernel) ListTransactions(ctx context.Context, filter TxFilter) ([]*Tran
 }
 
 // RateTransaction sets a rating on a completed transaction and cascades to unrated descendants.
+// Both the rating update and the cascade are performed atomically in a single store operation.
 func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, rating float64) error {
 	if rating != 0 && rating != 1 {
 		return ErrInvalidInput.Wrap("rating must be 0 or 1")
@@ -8215,13 +8865,7 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	if tx.OwnerUserID != subjectID {
 		return ErrUnauthorized.Wrap("only the process owner may rate a transaction")
 	}
-	tx.Rating = &rating
-	if err := k.store.UpdateTransaction(ctx, tx); err != nil {
-		return err
-	}
-	// Cascade to unrated descendants.
-	_ = k.store.CascadeRating(ctx, tx.TraceID, rating)
-	return nil
+	return k.store.RateTransactionCascade(ctx, txID, tx.TraceID, rating)
 }
 
 // ---- Stats ----
@@ -8391,8 +9035,8 @@ func UpdateStats(s *Stats, tx *Transaction, latencySeconds float64) {
 	s.LatencyMean = IncrementalMean(s.LatencyMean, s.Uses-1, latencySeconds)
 
 	if tx.Rating != nil {
-		ratingCount := s.Uses
-		s.RatingMean = IncrementalMean(s.RatingMean, ratingCount-1, *tx.Rating)
+		s.RatingCount++
+		s.RatingMean = IncrementalMean(s.RatingMean, s.RatingCount-1, *tx.Rating)
 	}
 }
 
@@ -8904,7 +9548,7 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 		"://broken",
 	}
 	for _, u := range rejected {
-		if err := validateHTTPSource(u); err == nil {
+		if err := validateHTTPSource(u, false); err == nil {
 			t.Errorf("validateHTTPSource(%q): expected error, got nil", u)
 		}
 	}
@@ -8915,7 +9559,7 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 		"https://api.stripe.com/v1/charges",
 	}
 	for _, u := range accepted {
-		if err := validateHTTPSource(u); err != nil {
+		if err := validateHTTPSource(u, false); err != nil {
 			t.Errorf("validateHTTPSource(%q): unexpected error: %v", u, err)
 		}
 	}
@@ -9433,6 +10077,10 @@ type Store interface {
 
 	// ---- Processes ----
 
+	// StartProcess atomically creates the process, debits owner funds, and creates the root trace.
+	// All three writes occur in a single SQLite transaction. Either all succeed or none do.
+	StartProcess(ctx context.Context, p *Process, t *Trace, ownerID string, funds int64) error
+
 	CreateProcess(ctx context.Context, p *Process) error
 	ReadProcess(ctx context.Context, id string) (*Process, error)
 	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
@@ -9454,6 +10102,10 @@ type Store interface {
 	// Either all writes succeed or none do.
 	CommitCall(ctx context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64) error
 
+	// CommitFailedCall atomically refunds locked funds and records a failure transaction.
+	// Either both writes succeed or neither does.
+	CommitFailedCall(ctx context.Context, tx *Transaction, processID string, gross int64) error
+
 	// EndProcess closes the process and returns all remaining funds to the owner.
 	EndProcess(ctx context.Context, processID string) error
 
@@ -9461,6 +10113,8 @@ type Store interface {
 
 	CreateTrace(ctx context.Context, t *Trace) error
 	ReadTrace(ctx context.Context, id string) (*Trace, error)
+	// ReadRootTrace returns the root trace (ParentTraceID == ID) for the given process.
+	ReadRootTrace(ctx context.Context, processID string) (*Trace, error)
 
 	// ---- Transactions ----
 
@@ -9470,7 +10124,10 @@ type Store interface {
 	ListTransactions(ctx context.Context, filter TxFilter) ([]*Transaction, error)
 	ListAllTransactions(ctx context.Context, limit, offset int) ([]*Transaction, error)
 	UpdateTraceCostLatency(ctx context.Context, traceID string, grossDelta int64, endedAt time.Time) error
-	CascadeRating(ctx context.Context, traceID string, rating float64) error
+	// RateTransactionCascade atomically rates txID and cascades the rating to all
+	// unrated descendant transactions in the trace subtree rooted at traceID.
+	// All writes occur in a single SQLite transaction.
+	RateTransactionCascade(ctx context.Context, txID string, traceID string, rating float64) error
 
 	// ---- Stats ----
 
@@ -9670,6 +10327,7 @@ type Stats struct {
 	Uses        int64
 	Successes   int64
 	Failures    int64
+	RatingCount int64 // number of rated observations (may be less than Uses)
 	PriceMean   float64
 	LatencyMean float64
 	RatingMean  float64
@@ -10771,7 +11429,10 @@ func (s *DB) migrate() error {
 	if err := s.migrate006(); err != nil {
 		return err
 	}
-	return s.migrate007()
+	if err := s.migrate007(); err != nil {
+		return err
+	}
+	return s.migrate008()
 }
 
 // migrate002 applies schema002 idempotently.
@@ -10881,6 +11542,17 @@ func (s *DB) migrate007() error {
 	if _, err := s.db.Exec(`ALTER TABLE actions ADD COLUMN embed_vec TEXT`); err != nil {
 		if !isDuplicateColumn(err) {
 			return fmt.Errorf("migrate007: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrate008 adds the rating_count column to action_stats.
+// The denominator for RatingMean is the number of rated observations, not total uses.
+func (s *DB) migrate008() error {
+	if _, err := s.db.Exec(`ALTER TABLE action_stats ADD COLUMN rating_count INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if !isDuplicateColumn(err) {
+			return fmt.Errorf("migrate008: %w", err)
 		}
 	}
 	return nil
@@ -11217,6 +11889,48 @@ func (s *DB) CheckACL(ctx context.Context, subjectID, actionID string, perm kern
 
 // ---- Processes ----
 
+func (s *DB) StartProcess(ctx context.Context, p *kernel.Process, t *kernel.Trace, ownerID string, funds int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin start process")
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at) VALUES (?,?,?,?,?,?,?)`,
+		p.ID, p.OwnerUserID, 0, 0, string(p.Status), timeToStr(p.CreatedAt), nullTimeToStr(p.EndedAt),
+	); err != nil {
+		return dbErr(err, "start process: insert process")
+	}
+
+	if funds > 0 {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE users SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
+			funds, funds, ownerID, funds,
+		)
+		if err != nil {
+			return dbErr(err, "start process: deduct user")
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return kernel.ErrInsufficientFunds.Wrap("insufficient user balance")
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE processes SET available=? WHERE id=?`, funds, p.ID,
+		); err != nil {
+			return dbErr(err, "start process: credit process")
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO traces (id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
+		t.ID, t.ProcessID, t.ParentTraceID, t.CausedByTraceID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
+	); err != nil {
+		return dbErr(err, "start process: insert trace")
+	}
+
+	return dbErr(tx.Commit(), "start process: commit")
+}
+
 func (s *DB) CreateProcess(ctx context.Context, p *kernel.Process) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at)
@@ -11362,6 +12076,39 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, processID,
 	return dbErr(tx.Commit(), "commit call: commit")
 }
 
+func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, processID string, gross int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin commit failed call")
+	}
+	defer tx.Rollback()
+
+	if gross > 0 {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE processes SET available=available+?, locked=locked-? WHERE id=?`,
+			gross, gross, processID,
+		); err != nil {
+			return dbErr(err, "commit failed call: refund process")
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO transactions
+		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
+		  action_id,args_json,reply_json,status,gross,net,fee,reason,started_at,ended_at,rating)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
+		ktx.OwnerUserID, ktx.SubjectUserID, ktx.TargetUserID, ktx.ActionID,
+		ktx.ArgsJSON, ktx.ReplyJSON, string(ktx.Status),
+		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason,
+		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt), ktx.Rating,
+	); err != nil {
+		return dbErr(err, "commit failed call: insert transaction")
+	}
+
+	return dbErr(tx.Commit(), "commit failed call: commit")
+}
+
 func (s *DB) ListAllProcesses(ctx context.Context, limit, offset int) ([]*kernel.Process, error) {
 	if limit <= 0 {
 		limit = 100
@@ -11454,6 +12201,27 @@ func (s *DB) ReadTrace(ctx context.Context, id string) (*kernel.Trace, error) {
 	}
 	if err != nil {
 		return nil, dbErr(err, "read trace")
+	}
+	t.CreatedAt = strToTime(createdAt)
+	if causedBy.Valid {
+		t.CausedByTraceID = &causedBy.String
+	}
+	return &t, nil
+}
+
+func (s *DB) ReadRootTrace(ctx context.Context, processID string) (*kernel.Trace, error) {
+	var t kernel.Trace
+	var createdAt string
+	var causedBy sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at
+		 FROM traces WHERE process_id=? AND parent_trace_id=id LIMIT 1`, processID,
+	).Scan(&t.ID, &t.ProcessID, &t.ParentTraceID, &causedBy, &t.Cost, &t.LatencyMS, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("root trace not found for process")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read root trace")
 	}
 	t.CreatedAt = strToTime(createdAt)
 	if causedBy.Valid {
@@ -11626,8 +12394,20 @@ func (s *DB) UpdateTraceCostLatency(ctx context.Context, traceID string, grossDe
 	return nil
 }
 
-func (s *DB) CascadeRating(ctx context.Context, traceID string, rating float64) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *DB) RateTransactionCascade(ctx context.Context, txID string, traceID string, rating float64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin rate cascade")
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE transactions SET rating=? WHERE id=?`, rating, txID,
+	); err != nil {
+		return dbErr(err, "rate cascade: update transaction")
+	}
+
+	if _, err := tx.ExecContext(ctx, `
 WITH RECURSIVE subtree(id) AS (
     SELECT id FROM traces WHERE id=?
     UNION ALL
@@ -11635,8 +12415,11 @@ WITH RECURSIVE subtree(id) AS (
 )
 UPDATE transactions SET rating=? WHERE trace_id IN (SELECT id FROM subtree) AND rating IS NULL`,
 		traceID, rating,
-	)
-	return dbErr(err, "cascade rating")
+	); err != nil {
+		return dbErr(err, "rate cascade: cascade descendants")
+	}
+
+	return dbErr(tx.Commit(), "rate cascade: commit")
 }
 
 // ---- Stats ----
@@ -11645,9 +12428,9 @@ func (s *DB) ReadStats(ctx context.Context, actionID string) (*kernel.Stats, err
 	var st kernel.Stats
 	var lastUsed string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT action_id,uses,successes,failures,price_mean,latency_mean,rating_mean,last_used_at
+		`SELECT action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at
 		 FROM action_stats WHERE action_id=?`, actionID,
-	).Scan(&st.ActionID, &st.Uses, &st.Successes, &st.Failures,
+	).Scan(&st.ActionID, &st.Uses, &st.Successes, &st.Failures, &st.RatingCount,
 		&st.PriceMean, &st.LatencyMean, &st.RatingMean, &lastUsed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil // no stats yet is not an error
@@ -11661,13 +12444,14 @@ func (s *DB) ReadStats(ctx context.Context, actionID string) (*kernel.Stats, err
 
 func (s *DB) UpsertStats(ctx context.Context, st *kernel.Stats) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO action_stats (action_id,uses,successes,failures,price_mean,latency_mean,rating_mean,last_used_at)
-		 VALUES (?,?,?,?,?,?,?,?)
+		`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
+		 VALUES (?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(action_id) DO UPDATE SET
 		   uses=excluded.uses, successes=excluded.successes, failures=excluded.failures,
-		   price_mean=excluded.price_mean, latency_mean=excluded.latency_mean,
-		   rating_mean=excluded.rating_mean, last_used_at=excluded.last_used_at`,
-		st.ActionID, st.Uses, st.Successes, st.Failures,
+		   rating_count=excluded.rating_count, price_mean=excluded.price_mean,
+		   latency_mean=excluded.latency_mean, rating_mean=excluded.rating_mean,
+		   last_used_at=excluded.last_used_at`,
+		st.ActionID, st.Uses, st.Successes, st.Failures, st.RatingCount,
 		st.PriceMean, st.LatencyMean, st.RatingMean, timeToStr(st.LastUsedAt),
 	)
 	return dbErr(err, "upsert stats")
