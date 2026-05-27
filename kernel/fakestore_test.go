@@ -213,6 +213,28 @@ func (f *fakeStore) CheckACL(_ context.Context, subjectID, actionID string, perm
 	return m[perm], nil
 }
 
+func (f *fakeStore) StartProcess(_ context.Context, p *Process, t *Trace, ownerID string, funds int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if funds > 0 {
+		u, ok := f.users[ownerID]
+		if !ok {
+			return ErrNotFound.Wrap("owner not found")
+		}
+		if u.Available < funds {
+			return ErrInsufficientFunds.Wrap("insufficient user balance")
+		}
+		u.Available -= funds
+		u.Locked += funds
+	}
+	cp := *p
+	cp.Available = funds
+	f.processes[p.ID] = &cp
+	tc := *t
+	f.traces[t.ID] = &tc
+	return nil
+}
+
 func (f *fakeStore) CreateProcess(_ context.Context, p *Process) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -275,6 +297,22 @@ func (f *fakeStore) FundProcess(_ context.Context, userID, processID string, amo
 	}
 	u.Available -= amount
 	p.Available += amount
+	return nil
+}
+
+func (f *fakeStore) CommitFailedCall(_ context.Context, tx *Transaction, processID string, gross int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.processes[processID]
+	if !ok {
+		return ErrNotFound.Wrap("process not found")
+	}
+	if gross > 0 {
+		p.Locked -= gross
+		p.Available += gross
+	}
+	cp := *tx
+	f.transactions[tx.ID] = &cp
 	return nil
 }
 
@@ -345,6 +383,18 @@ func (f *fakeStore) ReadTrace(_ context.Context, id string) (*Trace, error) {
 	}
 	cp := *t
 	return &cp, nil
+}
+
+func (f *fakeStore) ReadRootTrace(_ context.Context, processID string) (*Trace, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, t := range f.traces {
+		if t.ProcessID == processID && t.ParentTraceID == t.ID {
+			cp := *t
+			return &cp, nil
+		}
+	}
+	return nil, ErrNotFound.Wrap("root trace not found for process")
 }
 
 func (f *fakeStore) CreateTransaction(_ context.Context, tx *Transaction) error {
@@ -742,10 +792,16 @@ func (f *fakeStore) UpdateTraceCostLatency(_ context.Context, traceID string, gr
 	return nil
 }
 
-func (f *fakeStore) CascadeRating(_ context.Context, traceID string, rating float64) error {
+func (f *fakeStore) RateTransactionCascade(_ context.Context, txID string, traceID string, rating float64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	// Collect subtree.
+	tx, ok := f.transactions[txID]
+	if !ok {
+		return ErrNotFound.Wrap("transaction not found")
+	}
+	r := rating
+	tx.Rating = &r
+	// Cascade to unrated descendants.
 	subtree := make(map[string]bool)
 	queue := []string{traceID}
 	for len(queue) > 0 {
@@ -763,8 +819,8 @@ func (f *fakeStore) CascadeRating(_ context.Context, traceID string, rating floa
 	}
 	for _, tx := range f.transactions {
 		if subtree[tx.TraceID] && tx.Rating == nil {
-			r := rating
-			tx.Rating = &r
+			r2 := rating
+			tx.Rating = &r2
 		}
 	}
 	return nil

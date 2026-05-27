@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -113,7 +114,27 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 	}
 
-	// 10. Create child trace.
+	// 10. Validate or resolve parent trace.
+	if req.ParentTraceID != "" {
+		parent, err := k.store.ReadTrace(ctx, req.ParentTraceID)
+		if err != nil {
+			_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
+			return nil, ErrInvalidInput.Wrap("parent trace not found")
+		}
+		if parent.ProcessID != req.ProcessID {
+			_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
+			return nil, ErrInvalidInput.Wrap("parent trace belongs to a different process")
+		}
+	} else {
+		root, err := k.store.ReadRootTrace(ctx, req.ProcessID)
+		if err != nil {
+			_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
+			return nil, ErrInternal.Wrap("could not resolve root trace for process")
+		}
+		req.ParentTraceID = root.ID
+	}
+
+	// 11. Create child trace.
 	now := time.Now().UTC()
 	trace := &Trace{
 		ID:              uuid.New().String(),
@@ -154,35 +175,33 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	argsJSON, _ := json.Marshal(req.Args)
 	tx.ArgsJSON = string(argsJSON)
 
-	// 11. Execute. Pass action.OwnerUserID so host functions (juice.call, juice.emit)
+	// 12. Execute. Pass action.OwnerUserID so host functions (juice.call, juice.emit)
 	// operate on behalf of the action author, not the caller.
 	started := time.Now()
 	reply, execErr := k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
 	latency := time.Since(started).Seconds()
 	tx.EndedAt = time.Now().UTC()
 
-	// Handle execution failure.
+	// Handle execution failure: refund and record atomically.
 	if execErr != nil {
-		_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
 		tx.Status = TxFailure
 		tx.Reason = execErr.Error()
-		_ = k.store.CreateTransaction(ctx, tx)
+		_ = k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price)
 		k.updateStats(ctx, action.ID, tx, latency)
 		logger.Warn("call.failed", "action", action.Name, "error", execErr)
 		return nil, execErr
 	}
 
-	// 12. Validate output schema.
+	// 13. Validate output schema.
 	if err := ValidateInput(action.OutputSchema, anyOf(reply)); err != nil {
-		_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
 		tx.Status = TxFailure
 		tx.Reason = "output schema violation: " + err.Error()
-		_ = k.store.CreateTransaction(ctx, tx)
+		_ = k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price)
 		k.updateStats(ctx, action.ID, tx, latency)
 		return nil, err
 	}
 
-	// 13 & 14. Record transaction and settle payment atomically.
+	// 14 & 15. Record transaction and settle payment atomically.
 	replyJSON, _ := json.Marshal(reply)
 	tx.ReplyJSON = string(replyJSON)
 	tx.Status = TxSuccess
@@ -194,10 +213,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInternal.Wrap("could not commit transaction")
 	}
 
-	// 15. Update stats.
+	// 16. Update stats.
 	k.updateStats(ctx, action.ID, tx, latency)
 
-	// 16. Update trace cost and latency for all ancestor traces.
+	// 17. Update trace cost and latency for all ancestor traces.
 	_ = k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt)
 
 	logger.Info("call.success", "action", action.Name, "tx_id", txID, "latency_ms", fmt.Sprintf("%.1f", latency*1000))
@@ -380,32 +399,37 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 
 	// Contractor model: create an ephemeral process owned by the calling action's
 	// owner. The caller's process is not charged for sub-calls.
+	now := time.Now().UTC()
 	ep := &Process{
 		ID:          uuid.New().String(),
 		OwnerUserID: h.ownerUserID,
 		Status:      ProcessOpen,
-		CreatedAt:   time.Now().UTC(),
+		CreatedAt:   now,
 	}
-	if err := h.kernel.store.CreateProcess(ctx, ep); err != nil {
+	epRoot := &Trace{
+		ID:        uuid.New().String(),
+		ProcessID: ep.ID,
+		CreatedAt: now,
+	}
+	epRoot.ParentTraceID = epRoot.ID
+	if err := h.kernel.store.StartProcess(ctx, ep, epRoot, h.ownerUserID, action.Price); err != nil {
+		if isInsufficientFunds(err) {
+			return nil, ErrInsufficientFunds.Wrap("action owner has insufficient balance for sub-call")
+		}
 		return nil, ErrInternal.Wrap("could not create ephemeral process")
 	}
+	ep.Available = action.Price
 	// Always close the ephemeral process on return; any unused funds go back to owner.
 	// Use context.Background() so a cancelled request context does not prevent cleanup.
 	defer func() { _ = h.kernel.store.EndProcess(context.Background(), ep.ID) }()
 
-	if action.Price > 0 {
-		if err := h.kernel.store.FundProcess(ctx, h.ownerUserID, ep.ID, action.Price); err != nil {
-			return nil, ErrInsufficientFunds.Wrap("action owner has insufficient balance for sub-call")
-		}
-	}
-
 	reply, err := h.kernel.Call(ctx, CallRequest{
-		SubjectID:     h.ownerUserID,
-		ProcessID:     ep.ID,
-		ParentTraceID: h.traceID,
-		TargetUserID:  target.ID,
-		ActionName:    subActionName,
-		Args:          args,
+		SubjectID:       h.ownerUserID,
+		ProcessID:       ep.ID,
+		CausedByTraceID: h.traceID, // FOLLOWS_FROM: ephemeral process crosses boundary
+		TargetUserID:    target.ID,
+		ActionName:      subActionName,
+		Args:            args,
 	})
 	if err != nil {
 		return nil, err
@@ -474,6 +498,11 @@ func anyOf(m map[string]any) any {
 		return nil
 	}
 	return m
+}
+
+// isInsufficientFunds reports whether err wraps ErrInsufficientFunds.
+func isInsufficientFunds(err error) bool {
+	return errors.Is(err, ErrInsufficientFunds)
 }
 
 // strPtr returns nil for an empty string, otherwise a pointer to s.

@@ -128,6 +128,7 @@ type Stats struct {
 	Uses        int64
 	Successes   int64
 	Failures    int64
+	RatingCount int64 // number of rated observations (may be less than Uses)
 	PriceMean   float64
 	LatencyMean float64
 	RatingMean  float64

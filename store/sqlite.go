@@ -64,7 +64,10 @@ func (s *DB) migrate() error {
 	if err := s.migrate006(); err != nil {
 		return err
 	}
-	return s.migrate007()
+	if err := s.migrate007(); err != nil {
+		return err
+	}
+	return s.migrate008()
 }
 
 // migrate002 applies schema002 idempotently.
@@ -174,6 +177,17 @@ func (s *DB) migrate007() error {
 	if _, err := s.db.Exec(`ALTER TABLE actions ADD COLUMN embed_vec TEXT`); err != nil {
 		if !isDuplicateColumn(err) {
 			return fmt.Errorf("migrate007: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrate008 adds the rating_count column to action_stats.
+// The denominator for RatingMean is the number of rated observations, not total uses.
+func (s *DB) migrate008() error {
+	if _, err := s.db.Exec(`ALTER TABLE action_stats ADD COLUMN rating_count INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if !isDuplicateColumn(err) {
+			return fmt.Errorf("migrate008: %w", err)
 		}
 	}
 	return nil
@@ -510,6 +524,48 @@ func (s *DB) CheckACL(ctx context.Context, subjectID, actionID string, perm kern
 
 // ---- Processes ----
 
+func (s *DB) StartProcess(ctx context.Context, p *kernel.Process, t *kernel.Trace, ownerID string, funds int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin start process")
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at) VALUES (?,?,?,?,?,?,?)`,
+		p.ID, p.OwnerUserID, 0, 0, string(p.Status), timeToStr(p.CreatedAt), nullTimeToStr(p.EndedAt),
+	); err != nil {
+		return dbErr(err, "start process: insert process")
+	}
+
+	if funds > 0 {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE users SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
+			funds, funds, ownerID, funds,
+		)
+		if err != nil {
+			return dbErr(err, "start process: deduct user")
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return kernel.ErrInsufficientFunds.Wrap("insufficient user balance")
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE processes SET available=? WHERE id=?`, funds, p.ID,
+		); err != nil {
+			return dbErr(err, "start process: credit process")
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO traces (id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
+		t.ID, t.ProcessID, t.ParentTraceID, t.CausedByTraceID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
+	); err != nil {
+		return dbErr(err, "start process: insert trace")
+	}
+
+	return dbErr(tx.Commit(), "start process: commit")
+}
+
 func (s *DB) CreateProcess(ctx context.Context, p *kernel.Process) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at)
@@ -655,6 +711,39 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, processID,
 	return dbErr(tx.Commit(), "commit call: commit")
 }
 
+func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, processID string, gross int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin commit failed call")
+	}
+	defer tx.Rollback()
+
+	if gross > 0 {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE processes SET available=available+?, locked=locked-? WHERE id=?`,
+			gross, gross, processID,
+		); err != nil {
+			return dbErr(err, "commit failed call: refund process")
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO transactions
+		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
+		  action_id,args_json,reply_json,status,gross,net,fee,reason,started_at,ended_at,rating)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
+		ktx.OwnerUserID, ktx.SubjectUserID, ktx.TargetUserID, ktx.ActionID,
+		ktx.ArgsJSON, ktx.ReplyJSON, string(ktx.Status),
+		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason,
+		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt), ktx.Rating,
+	); err != nil {
+		return dbErr(err, "commit failed call: insert transaction")
+	}
+
+	return dbErr(tx.Commit(), "commit failed call: commit")
+}
+
 func (s *DB) ListAllProcesses(ctx context.Context, limit, offset int) ([]*kernel.Process, error) {
 	if limit <= 0 {
 		limit = 100
@@ -747,6 +836,27 @@ func (s *DB) ReadTrace(ctx context.Context, id string) (*kernel.Trace, error) {
 	}
 	if err != nil {
 		return nil, dbErr(err, "read trace")
+	}
+	t.CreatedAt = strToTime(createdAt)
+	if causedBy.Valid {
+		t.CausedByTraceID = &causedBy.String
+	}
+	return &t, nil
+}
+
+func (s *DB) ReadRootTrace(ctx context.Context, processID string) (*kernel.Trace, error) {
+	var t kernel.Trace
+	var createdAt string
+	var causedBy sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at
+		 FROM traces WHERE process_id=? AND parent_trace_id=id LIMIT 1`, processID,
+	).Scan(&t.ID, &t.ProcessID, &t.ParentTraceID, &causedBy, &t.Cost, &t.LatencyMS, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("root trace not found for process")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read root trace")
 	}
 	t.CreatedAt = strToTime(createdAt)
 	if causedBy.Valid {
@@ -919,8 +1029,20 @@ func (s *DB) UpdateTraceCostLatency(ctx context.Context, traceID string, grossDe
 	return nil
 }
 
-func (s *DB) CascadeRating(ctx context.Context, traceID string, rating float64) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *DB) RateTransactionCascade(ctx context.Context, txID string, traceID string, rating float64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin rate cascade")
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE transactions SET rating=? WHERE id=?`, rating, txID,
+	); err != nil {
+		return dbErr(err, "rate cascade: update transaction")
+	}
+
+	if _, err := tx.ExecContext(ctx, `
 WITH RECURSIVE subtree(id) AS (
     SELECT id FROM traces WHERE id=?
     UNION ALL
@@ -928,8 +1050,11 @@ WITH RECURSIVE subtree(id) AS (
 )
 UPDATE transactions SET rating=? WHERE trace_id IN (SELECT id FROM subtree) AND rating IS NULL`,
 		traceID, rating,
-	)
-	return dbErr(err, "cascade rating")
+	); err != nil {
+		return dbErr(err, "rate cascade: cascade descendants")
+	}
+
+	return dbErr(tx.Commit(), "rate cascade: commit")
 }
 
 // ---- Stats ----
@@ -938,9 +1063,9 @@ func (s *DB) ReadStats(ctx context.Context, actionID string) (*kernel.Stats, err
 	var st kernel.Stats
 	var lastUsed string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT action_id,uses,successes,failures,price_mean,latency_mean,rating_mean,last_used_at
+		`SELECT action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at
 		 FROM action_stats WHERE action_id=?`, actionID,
-	).Scan(&st.ActionID, &st.Uses, &st.Successes, &st.Failures,
+	).Scan(&st.ActionID, &st.Uses, &st.Successes, &st.Failures, &st.RatingCount,
 		&st.PriceMean, &st.LatencyMean, &st.RatingMean, &lastUsed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil // no stats yet is not an error
@@ -954,13 +1079,14 @@ func (s *DB) ReadStats(ctx context.Context, actionID string) (*kernel.Stats, err
 
 func (s *DB) UpsertStats(ctx context.Context, st *kernel.Stats) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO action_stats (action_id,uses,successes,failures,price_mean,latency_mean,rating_mean,last_used_at)
-		 VALUES (?,?,?,?,?,?,?,?)
+		`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
+		 VALUES (?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(action_id) DO UPDATE SET
 		   uses=excluded.uses, successes=excluded.successes, failures=excluded.failures,
-		   price_mean=excluded.price_mean, latency_mean=excluded.latency_mean,
-		   rating_mean=excluded.rating_mean, last_used_at=excluded.last_used_at`,
-		st.ActionID, st.Uses, st.Successes, st.Failures,
+		   rating_count=excluded.rating_count, price_mean=excluded.price_mean,
+		   latency_mean=excluded.latency_mean, rating_mean=excluded.rating_mean,
+		   last_used_at=excluded.last_used_at`,
+		st.ActionID, st.Uses, st.Successes, st.Failures, st.RatingCount,
 		st.PriceMean, st.LatencyMean, st.RatingMean, timeToStr(st.LastUsedAt),
 	)
 	return dbErr(err, "upsert stats")

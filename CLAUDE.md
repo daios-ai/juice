@@ -1,0 +1,3 @@
+- Never implement anything that violates requirements.md
+- Keep the number of files small
+- Every GO file must have a corresponding test file

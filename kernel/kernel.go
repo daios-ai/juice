@@ -581,6 +581,7 @@ func (k *Kernel) RevokeACL(ctx context.Context, subjectID, actionID string, perm
 // ---- Process operations ----
 
 // StartProcess creates a new process and locks funds from the owner's account.
+// Process creation, user debit, and root trace creation are atomic.
 func (k *Kernel) StartProcess(ctx context.Context, ownerID string, funds int64) (*Process, *Trace, error) {
 	if funds < 0 {
 		return nil, nil, ErrInvalidInput.Wrap("funds must be non-negative")
@@ -593,26 +594,18 @@ func (k *Kernel) StartProcess(ctx context.Context, ownerID string, funds int64) 
 		Status:      ProcessOpen,
 		CreatedAt:   now,
 	}
-	if err := k.store.CreateProcess(ctx, p); err != nil {
-		return nil, nil, err
-	}
-	if funds > 0 {
-		if err := k.store.FundProcess(ctx, ownerID, p.ID, funds); err != nil {
-			return nil, nil, err
-		}
-		p.Available = funds
-	}
-
-	// Create root trace (ParentTraceID == ID).
+	// Root trace: ParentTraceID == ID.
 	t := &Trace{
 		ID:        uuid.New().String(),
 		ProcessID: p.ID,
 		CreatedAt: now,
 	}
 	t.ParentTraceID = t.ID
-	if err := k.store.CreateTrace(ctx, t); err != nil {
+
+	if err := k.store.StartProcess(ctx, p, t, ownerID, funds); err != nil {
 		return nil, nil, err
 	}
+	p.Available = funds
 
 	k.log.With(ctx).Info("process.started", "process_id", p.ID, "owner", ownerID, "funds", funds)
 	return p, t, nil
@@ -687,6 +680,7 @@ func (k *Kernel) ListTransactions(ctx context.Context, filter TxFilter) ([]*Tran
 }
 
 // RateTransaction sets a rating on a completed transaction and cascades to unrated descendants.
+// Both the rating update and the cascade are performed atomically in a single store operation.
 func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, rating float64) error {
 	if rating != 0 && rating != 1 {
 		return ErrInvalidInput.Wrap("rating must be 0 or 1")
@@ -701,13 +695,7 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	if tx.OwnerUserID != subjectID {
 		return ErrUnauthorized.Wrap("only the process owner may rate a transaction")
 	}
-	tx.Rating = &rating
-	if err := k.store.UpdateTransaction(ctx, tx); err != nil {
-		return err
-	}
-	// Cascade to unrated descendants.
-	_ = k.store.CascadeRating(ctx, tx.TraceID, rating)
-	return nil
+	return k.store.RateTransactionCascade(ctx, txID, tx.TraceID, rating)
 }
 
 // ---- Stats ----
@@ -877,8 +865,8 @@ func UpdateStats(s *Stats, tx *Transaction, latencySeconds float64) {
 	s.LatencyMean = IncrementalMean(s.LatencyMean, s.Uses-1, latencySeconds)
 
 	if tx.Rating != nil {
-		ratingCount := s.Uses
-		s.RatingMean = IncrementalMean(s.RatingMean, ratingCount-1, *tx.Rating)
+		s.RatingCount++
+		s.RatingMean = IncrementalMean(s.RatingMean, s.RatingCount-1, *tx.Rating)
 	}
 }
 

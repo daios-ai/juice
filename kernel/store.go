@@ -88,6 +88,10 @@ type Store interface {
 
 	// ---- Processes ----
 
+	// StartProcess atomically creates the process, debits owner funds, and creates the root trace.
+	// All three writes occur in a single SQLite transaction. Either all succeed or none do.
+	StartProcess(ctx context.Context, p *Process, t *Trace, ownerID string, funds int64) error
+
 	CreateProcess(ctx context.Context, p *Process) error
 	ReadProcess(ctx context.Context, id string) (*Process, error)
 	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
@@ -109,6 +113,10 @@ type Store interface {
 	// Either all writes succeed or none do.
 	CommitCall(ctx context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64) error
 
+	// CommitFailedCall atomically refunds locked funds and records a failure transaction.
+	// Either both writes succeed or neither does.
+	CommitFailedCall(ctx context.Context, tx *Transaction, processID string, gross int64) error
+
 	// EndProcess closes the process and returns all remaining funds to the owner.
 	EndProcess(ctx context.Context, processID string) error
 
@@ -116,6 +124,8 @@ type Store interface {
 
 	CreateTrace(ctx context.Context, t *Trace) error
 	ReadTrace(ctx context.Context, id string) (*Trace, error)
+	// ReadRootTrace returns the root trace (ParentTraceID == ID) for the given process.
+	ReadRootTrace(ctx context.Context, processID string) (*Trace, error)
 
 	// ---- Transactions ----
 
@@ -125,7 +135,10 @@ type Store interface {
 	ListTransactions(ctx context.Context, filter TxFilter) ([]*Transaction, error)
 	ListAllTransactions(ctx context.Context, limit, offset int) ([]*Transaction, error)
 	UpdateTraceCostLatency(ctx context.Context, traceID string, grossDelta int64, endedAt time.Time) error
-	CascadeRating(ctx context.Context, traceID string, rating float64) error
+	// RateTransactionCascade atomically rates txID and cascades the rating to all
+	// unrated descendant transactions in the trace subtree rooted at traceID.
+	// All writes occur in a single SQLite transaction.
+	RateTransactionCascade(ctx context.Context, txID string, traceID string, rating float64) error
 
 	// ---- Stats ----
 
