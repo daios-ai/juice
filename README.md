@@ -28,7 +28,7 @@ cd juice
 go build -o juice ./cmd/juice/
 ```
 
-Requires Go 1.22+.
+Requires Go 1.25+.
 
 ## Quick start
 
@@ -96,29 +96,36 @@ All routes except `POST /v1/auth/token`, `POST /v1/auth/authorize`, and `POST /v
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/health` | Health check (unauthenticated) |
 | `POST` | `/v1/users` | Create user |
 | `POST` | `/v1/auth/token` | Password grant or auth-code exchange |
 | `POST` | `/v1/auth/authorize` | PKCE authorization |
 | `POST` | `/v1/auth/refresh` | Rotate refresh token |
-| `GET/POST` | `/v1/actions` | List / create actions |
-| `GET/DELETE` | `/v1/actions/{id}` | Read / delete action |
+| `GET` | `/v1/actions` | List active actions |
+| `POST` | `/v1/actions` | Create action |
+| `GET` | `/v1/actions/{id}` | Read action |
+| `DELETE` | `/v1/actions/{id}` | Delete action |
 | `POST` | `/v1/actions/{id}/enable` | Activate action |
 | `POST` | `/v1/actions/{id}/disable` | Deactivate action |
-| `POST/DELETE` | `/v1/actions/{id}/acl` | Grant / revoke permission |
+| `POST` | `/v1/actions/{id}/acl` | Grant permission to a user |
+| `DELETE` | `/v1/actions/{id}/acl` | Revoke permission from a user |
+| `POST` | `/v1/actions/{id}/grant-all` | Make action publicly callable |
+| `POST` | `/v1/actions/{id}/revoke-all` | Revoke public access |
 | `POST` | `/v1/processes` | Start process |
 | `GET` | `/v1/processes/{id}` | Read process |
 | `POST` | `/v1/processes/{id}/fund` | Add funds |
 | `POST` | `/v1/processes/{id}/end` | Close process |
-| `GET` | `/v1/processes/{id}/feedback/{trace_id}` | Recursive cost + latency for a trace subtree |
 | `POST` | `/v1/call` | Call an action |
 | `GET` | `/v1/transactions` | List transactions |
 | `GET` | `/v1/transactions/{id}` | Read transaction |
+| `POST` | `/v1/transactions/{id}/rate` | Rate a transaction (0 or 1) |
 | `GET` | `/v1/stats/{action_id}` | Read action stats |
 | `POST` | `/v1/lookup` | Semantic search |
 | `POST` | `/v1/listeners` | Create event listener |
 | `GET` | `/v1/listeners/{id}` | Poll listener queue |
 | `DELETE` | `/v1/listeners/{id}` | Delete listener |
 | `POST` | `/v1/events/emit` | Emit a named event |
+| `POST` | `/v1/events/{id}/consume` | Consume a pending event |
 
 ## Configuration
 
