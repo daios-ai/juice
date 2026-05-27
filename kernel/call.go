@@ -184,7 +184,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if execErr != nil {
 		tx.Status = TxFailure
 		tx.Reason = execErr.Error()
-		_ = k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price)
+		if settlErr := k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price); settlErr != nil {
+			logger.Error("call.settlement_failed", "action", action.Name, "exec_error", execErr, "settlement_error", settlErr)
+			return nil, ErrInternal.Wrap("could not record failure transaction")
+		}
 		_ = k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt)
 		k.updateStats(ctx, action.ID, tx, latency)
 		logger.Warn("call.failed", "action", action.Name, "error", execErr)
@@ -192,13 +195,16 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	// 13. Validate output schema.
-	if err := ValidateInput(action.OutputSchema, anyOf(reply)); err != nil {
+	if schemaErr := ValidateInput(action.OutputSchema, anyOf(reply)); schemaErr != nil {
 		tx.Status = TxFailure
-		tx.Reason = "output schema violation: " + err.Error()
-		_ = k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price)
+		tx.Reason = "output schema violation: " + schemaErr.Error()
+		if settlErr := k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price); settlErr != nil {
+			logger.Error("call.settlement_failed", "action", action.Name, "schema_error", schemaErr, "settlement_error", settlErr)
+			return nil, ErrInternal.Wrap("could not record failure transaction")
+		}
 		_ = k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt)
 		k.updateStats(ctx, action.ID, tx, latency)
-		return nil, err
+		return nil, schemaErr
 	}
 
 	// 14 & 15. Record transaction and settle payment atomically.
@@ -209,7 +215,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	tx.Net = net
 	tx.Fee = fee
 	if err := k.store.CommitCall(ctx, tx, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee); err != nil {
-		_ = k.store.RefundFunds(ctx, req.ProcessID, action.Price)
+		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
+			logger.Error("call.refund_failed", "action", action.Name, "commit_error", err, "refund_error", refundErr)
+			return nil, ErrInternal.Wrap("could not refund funds after failed commit")
+		}
 		return nil, ErrInternal.Wrap("could not commit transaction")
 	}
 

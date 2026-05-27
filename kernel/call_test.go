@@ -867,6 +867,45 @@ func TestCommitCallAtomicOnFailure(t *testing.T) {
 	}
 }
 
+// ---- CommitFailedCall settlement error tests ----
+
+type failingCommitFailedCallStore struct {
+	*fakeStore
+}
+
+func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *Transaction, _ string, _ int64) error {
+	return ErrInternal.Wrap("injected CommitFailedCall failure")
+}
+
+func TestCommitFailedCallSettlementError(t *testing.T) {
+	base := newFakeStore()
+	failing := &failingCommitFailedCallStore{fakeStore: base}
+	k := newTestKernelWithScripts(failing, &fakeScriptExec{err: ErrExecutionFailed.Wrap("boom")})
+	ctx := context.Background()
+
+	alice := setupUser(t, base, "@alice", 1000)
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/risky",
+		Kind: KindWasm, Active: true, Price: 100,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = base.CreateAction(ctx, a)
+
+	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID: alice.ID, ProcessID: p.ID,
+		ParentTraceID: root.ID, TargetUserID: alice.ID,
+		ActionName: "/risky", Args: map[string]any{},
+	})
+
+	// When CommitFailedCall fails, Call must return ErrInternal (not the original exec error).
+	if !errors.Is(err, ErrInternal) {
+		t.Errorf("expected ErrInternal when CommitFailedCall fails, got %v", err)
+	}
+}
+
 // ---- /llm/chat native action tests ----
 
 type fakeChatter struct {
