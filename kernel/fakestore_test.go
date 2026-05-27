@@ -296,6 +296,7 @@ func (f *fakeStore) FundProcess(_ context.Context, userID, processID string, amo
 		return ErrNotFound.Wrap("process not found")
 	}
 	u.Available -= amount
+	u.Locked += amount
 	p.Available += amount
 	return nil
 }
@@ -328,6 +329,11 @@ func (f *fakeStore) CommitCall(_ context.Context, tx *Transaction, processID, ta
 		return ErrInsufficientFunds.Wrap("insufficient locked funds")
 	}
 	p.Locked -= gross
+	owner, ok := f.users[p.OwnerUserID]
+	if !ok {
+		return ErrNotFound.Wrap("process owner not found")
+	}
+	owner.Locked -= gross
 	if net > 0 {
 		target, ok := f.users[targetUserID]
 		if !ok {
@@ -359,6 +365,7 @@ func (f *fakeStore) EndProcess(_ context.Context, processID string) error {
 			return ErrNotFound.Wrap("owner not found")
 		}
 		u.Available += refund
+		u.Locked -= refund
 	}
 	p.Available = 0
 	p.Locked = 0

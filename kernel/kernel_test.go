@@ -333,6 +333,74 @@ func TestProcessAvailablePlusLockedInvariant(t *testing.T) {
 	checkInvariant("after end", 0)
 }
 
+func TestUserLockedBalanceInvariant(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 1000)
+
+	checkUser := func(tag string, wantAvail, wantLocked int64) {
+		t.Helper()
+		u, err := st.ReadUser(ctx, alice.ID)
+		if err != nil {
+			t.Fatalf("%s: ReadUser: %v", tag, err)
+		}
+		if u.Available != wantAvail {
+			t.Errorf("%s: user.available got %d, want %d", tag, u.Available, wantAvail)
+		}
+		if u.Locked != wantLocked {
+			t.Errorf("%s: user.locked got %d, want %d", tag, u.Locked, wantLocked)
+		}
+	}
+
+	checkUser("initial", 1000, 0)
+
+	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
+	checkUser("after StartProcess(500)", 500, 500)
+
+	if err := k.FundProcess(ctx, alice.ID, p.ID, 200); err != nil {
+		t.Fatal(err)
+	}
+	checkUser("after FundProcess(200)", 300, 700)
+
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/svc",
+		Kind: KindWasm, Active: true, Price: 100,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	if _, err := k.Call(ctx, CallRequest{
+		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: alice.ID, ActionName: "/svc", Args: map[string]any{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Call settles: user.locked decreases by gross (100); alice also receives net as target.
+	u, _ := st.ReadUser(ctx, alice.ID)
+	if u.Locked != 600 {
+		t.Errorf("after Call: user.locked got %d, want 600", u.Locked)
+	}
+	if u.Locked < 0 {
+		t.Errorf("after Call: user.locked is negative: %d", u.Locked)
+	}
+
+	if err := k.EndProcess(ctx, alice.ID, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	// EndProcess returns process.available (600) to user; user.locked must reach 0.
+	u, _ = st.ReadUser(ctx, alice.ID)
+	if u.Locked != 0 {
+		t.Errorf("after EndProcess: user.locked got %d, want 0", u.Locked)
+	}
+	if u.Available < 0 {
+		t.Errorf("after EndProcess: user.available is negative: %d", u.Available)
+	}
+}
+
 // ---- Stats tests ----
 
 func TestIncrementalMean(t *testing.T) {
