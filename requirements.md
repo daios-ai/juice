@@ -599,7 +599,7 @@ Requirements:
 - The concrete implementation must call Ollama.
 - The kernel must not import the Ollama adapter.
 - Embedding model name must be configurable.
-- Chat model name must be configurable.
+- Chat model name must be configurable. The default chat model is `gemma4:26b`.
 - Lookup tests must use a fake embedding implementation.
 
 Required interface shape:
@@ -623,6 +623,16 @@ Requirements:
 - The output schema must declare a `results` array where each element has `action_id` (string), `name` (string), `owner_handle` (string), `description` (string), and `score` (number).
 
 Justification: lookup is a research module. The kernel requires only a ranked list of action ids, not a specific ranking algorithm.
+
+### 8.3 Chat module
+
+Requirements:
+
+- Chat is exposed as the system native action `@sys/llm/chat`, callable through `Call()` by any authenticated user (grant-all applied at bootstrap).
+- The input schema must declare `messages` (array, required), where each element has `role` (string) and `content` (string), plus an optional `system` (string) prompt prepended before the messages array.
+- The output schema must declare a `message` object with `role` (string) and `content` (string).
+- If no chat service is configured, calls to `@sys/llm/chat` must return `ErrInvalidState`.
+- Chat tests must use a fake chatter implementation.
 
 ## 9. Action statistics
 
@@ -1152,7 +1162,9 @@ Requirements:
 
 - System actions are KindNative, owned by the superuser, registered at bootstrap.
 - System actions execute through the normal kernel call path (`Call()`).
-- The initial system action is `/lookup`, owned by `@sys`, public, grant-all at bootstrap. Its stable address is `@sys/lookup` (target handle `@sys`, action name `/lookup`).
+- The initial system actions are `/lookup` and `/llm/chat`, both owned by `@sys`, public, grant-all at bootstrap.
+  - `@sys/lookup` (target handle `@sys`, action name `/lookup`): semantic action search.
+  - `@sys/llm/chat` (target handle `@sys`, action name `/llm/chat`): chat completion via the configured language model.
 - Human supervision operations must not be registered as native actions (see §2.3).
 
 ### 19.5 Public access control

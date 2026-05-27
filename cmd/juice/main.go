@@ -100,14 +100,19 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	})
 
 	var embedder kernel.Embedder
+	var chatter kernel.Chatter
 	if ollamaURL := os.Getenv("JUICE_OLLAMA_URL"); ollamaURL != "" {
 		embedder = &llm.OllamaEmbedder{
 			URL:   ollamaURL,
 			Model: envOr("JUICE_OLLAMA_EMBED_MODEL", "nomic-embed-text"),
 		}
+		chatter = &llm.OllamaChatter{
+			URL:   ollamaURL,
+			Model: envOr("JUICE_OLLAMA_CHAT_MODEL", "gemma4:26b"),
+		}
 	}
 
-	k := kernel.New(db, exec, embedder, cfg, logger)
+	k := kernel.New(db, exec, embedder, chatter, cfg, logger)
 	return k, db, nil
 }
 

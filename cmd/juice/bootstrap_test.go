@@ -20,7 +20,7 @@ func newTestKernel(t *testing.T) *kernel.Kernel {
 	t.Cleanup(func() { db.Close() })
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "bootstrap-test-secret"
-	return kernel.New(db, nil, nil, cfg, log.Discard())
+	return kernel.New(db, nil, nil, nil, cfg, log.Discard())
 }
 
 func TestEnsureSysLookupIdempotent(t *testing.T) {
@@ -53,6 +53,35 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 	// Second call: idempotent.
 	if err := ensureSysLookup(ctx, k, u.Handle); err != nil {
 		t.Fatalf("second ensureSysLookup: %v", err)
+	}
+}
+
+func TestEnsureSysLLMChatIdempotent(t *testing.T) {
+	ctx := context.Background()
+	k := newTestKernel(t)
+
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@sys", Email: "sys@sys", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First call: creates the action.
+	if err := ensureSysLLMChat(ctx, k, u.Handle); err != nil {
+		t.Fatalf("first ensureSysLLMChat: %v", err)
+	}
+	a, err := k.ReadActionByOwnerName(ctx, u.ID, "/llm/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Active {
+		t.Fatal("/llm/chat should be active after ensureSysLLMChat")
+	}
+
+	// Second call: idempotent.
+	if err := ensureSysLLMChat(ctx, k, u.Handle); err != nil {
+		t.Fatalf("second ensureSysLLMChat: %v", err)
 	}
 }
 

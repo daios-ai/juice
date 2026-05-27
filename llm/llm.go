@@ -90,6 +90,18 @@ func (o *OllamaChatter) Chat(ctx context.Context, messages []kernel.ChatMessage)
 	return kernel.ChatMessage{Role: result.Message.Role, Content: result.Message.Content}, nil
 }
 
+// FakeChatter returns a fixed response for tests.
+type FakeChatter struct {
+	Reply kernel.ChatMessage
+}
+
+func (f *FakeChatter) Chat(_ context.Context, _ []kernel.ChatMessage) (kernel.ChatMessage, error) {
+	if f.Reply.Role == "" {
+		return kernel.ChatMessage{Role: "assistant", Content: "ok"}, nil
+	}
+	return f.Reply, nil
+}
+
 // FakeEmbedder returns a deterministic fixed-length vector for tests.
 // The vector is derived from the byte sum of the text so similarity is meaningful.
 type FakeEmbedder struct {

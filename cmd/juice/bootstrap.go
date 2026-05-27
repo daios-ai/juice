@@ -38,6 +38,12 @@ func bootstrap(k *kernel.Kernel) error {
 	if err := ensureSysLookup(ctx, k, handle); err != nil {
 		return err
 	}
+
+	// Register /llm/chat native action if absent.
+	if err := ensureSysLLMChat(ctx, k, handle); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -129,6 +135,72 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 
 	if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
 		return fmt.Errorf("grant-all @sys/lookup: %w", err)
+	}
+
+	return nil
+}
+
+func ensureSysLLMChat(ctx context.Context, k *kernel.Kernel, superuserHandle string) error {
+	su, err := k.ReadUserByHandle(ctx, superuserHandle)
+	if err != nil {
+		return fmt.Errorf("read superuser: %w", err)
+	}
+
+	actionName := "/llm/chat"
+	a, err := k.ReadActionByOwnerName(ctx, su.ID, actionName)
+	if err == nil && a != nil {
+		if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
+			return fmt.Errorf("activate @sys/llm/chat: %w", err)
+		}
+		_ = k.GrantAll(ctx, su.ID, a.ID)
+		return nil
+	}
+
+	msgItemSchema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"role":    map[string]any{"type": "string"},
+			"content": map[string]any{"type": "string"},
+		},
+		"required": []string{"role", "content"},
+	}
+	a, err = k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID: su.ID,
+		Name:        actionName,
+		Kind:        kernel.KindNative,
+		Price:       0,
+		Description: "Chat completion via the configured language model",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"messages": map[string]any{"type": "array", "items": msgItemSchema, "description": "Conversation history"},
+				"system":   map[string]any{"type": "string", "description": "Optional system prompt"},
+			},
+			"required": []string{"messages"},
+		},
+		OutputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"message": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"role":    map[string]any{"type": "string"},
+						"content": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create @sys/llm/chat: %w", err)
+	}
+
+	if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
+		return fmt.Errorf("activate @sys/llm/chat: %w", err)
+	}
+
+	if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
+		return fmt.Errorf("grant-all @sys/llm/chat: %w", err)
 	}
 
 	return nil

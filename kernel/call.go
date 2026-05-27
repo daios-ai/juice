@@ -268,6 +268,8 @@ func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[str
 	switch action.Name {
 	case "/lookup":
 		return k.executeLookup(ctx, args)
+	case "/llm/chat":
+		return k.executeChat(ctx, args)
 	default:
 		return nil, ErrInvalidState.Wrapf("unknown native action %q", action.Name)
 	}
@@ -296,6 +298,50 @@ func (k *Kernel) executeLookup(ctx context.Context, args map[string]any) (map[st
 		}
 	}
 	return map[string]any{"results": items}, nil
+}
+
+// executeChat implements the /llm/chat native action.
+func (k *Kernel) executeChat(ctx context.Context, args map[string]any) (map[string]any, error) {
+	if k.chatter == nil {
+		return nil, ErrInvalidState.Wrap("chat service not configured")
+	}
+
+	rawMsgs, ok := args["messages"]
+	if !ok {
+		return nil, ErrInvalidInput.Wrap("chat requires messages argument")
+	}
+	msgList, ok := rawMsgs.([]any)
+	if !ok {
+		return nil, ErrInvalidInput.Wrap("messages must be an array")
+	}
+
+	var messages []ChatMessage
+	if sys, ok := args["system"].(string); ok && sys != "" {
+		messages = append(messages, ChatMessage{Role: "system", Content: sys})
+	}
+	for _, item := range msgList {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return nil, ErrInvalidInput.Wrap("each message must be an object")
+		}
+		role, _ := m["role"].(string)
+		content, _ := m["content"].(string)
+		if role == "" || content == "" {
+			return nil, ErrInvalidInput.Wrap("each message must have role and content")
+		}
+		messages = append(messages, ChatMessage{Role: role, Content: content})
+	}
+
+	reply, err := k.chatter.Chat(ctx, messages)
+	if err != nil {
+		return nil, ErrExecutionFailed.Wrapf("chat failed: %v", err)
+	}
+	return map[string]any{
+		"message": map[string]any{
+			"role":    reply.Role,
+			"content": reply.Content,
+		},
+	}, nil
 }
 
 // executeHTTP calls an external HTTP endpoint.

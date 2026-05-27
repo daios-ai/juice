@@ -866,3 +866,100 @@ func TestCommitCallAtomicOnFailure(t *testing.T) {
 		}
 	}
 }
+
+// ---- /llm/chat native action tests ----
+
+type fakeChatter struct {
+	reply ChatMessage
+}
+
+func (f *fakeChatter) Chat(_ context.Context, _ []ChatMessage) (ChatMessage, error) {
+	return f.reply, nil
+}
+
+func newTestKernelWithChatter(st Store, c Chatter) *Kernel {
+	cfg := DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.FeeBPS = 2000
+	return New(st, nil, nil, c, cfg, nil)
+}
+
+func TestCallLLMChat(t *testing.T) {
+	ctx := context.Background()
+	st := newFakeStore()
+	fc := &fakeChatter{reply: ChatMessage{Role: "assistant", Content: "hello there"}}
+	k := newTestKernelWithChatter(st, fc)
+
+	owner := setupUser(t, st, "@sys", 1000)
+	chatAction := &Action{
+		ID:           uuid.New().String(),
+		OwnerUserID:  owner.ID,
+		Name:         "/llm/chat",
+		Kind:         KindNative,
+		Active:       true,
+		Price:        0,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, chatAction)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, 0)
+	reply, err := k.Call(ctx, CallRequest{
+		SubjectID:     owner.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: root.ID,
+		TargetUserID:  owner.ID,
+		ActionName:    "/llm/chat",
+		Args: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hi"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Call /llm/chat: %v", err)
+	}
+	msg, ok := reply.Result["message"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected message in result, got %v", reply.Result)
+	}
+	if msg["content"] != "hello there" {
+		t.Errorf("content: got %q, want %q", msg["content"], "hello there")
+	}
+}
+
+func TestCallLLMChatNoChatter(t *testing.T) {
+	ctx := context.Background()
+	st := newFakeStore()
+	k := newTestKernel(st) // no chatter
+
+	owner := setupUser(t, st, "@sys", 1000)
+	chatAction := &Action{
+		ID:           uuid.New().String(),
+		OwnerUserID:  owner.ID,
+		Name:         "/llm/chat",
+		Kind:         KindNative,
+		Active:       true,
+		Price:        0,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, chatAction)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, 0)
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID:     owner.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: root.ID,
+		TargetUserID:  owner.ID,
+		ActionName:    "/llm/chat",
+		Args:          map[string]any{"messages": []any{}},
+	})
+	if err == nil {
+		t.Fatal("expected error when no chatter configured")
+	}
+}
