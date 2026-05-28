@@ -190,6 +190,69 @@ func TestRequireSuperuser(t *testing.T) {
 	}
 }
 
+// TestAdminDepositEnforcesSuperuser exercises the exact code path that
+// adminUserDepositCmd uses: requireSuperuser guard followed by k.Deposit.
+func TestAdminDepositEnforcesSuperuser(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnv(t)
+
+	su, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@sys", Email: "sys@sys", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regular, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@regular", Email: "regular@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@recipient", Email: "rec@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-superuser token: requireSuperuser must reject before Deposit is reached.
+	regularToken, err := env.k.Login(ctx, "@regular", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveToken(regularToken); err != nil {
+		t.Fatal(err)
+	}
+	_, err = requireSuperuser(env.k)
+	if !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("non-superuser should be rejected by requireSuperuser, got %v", err)
+	}
+	_ = regular.ID // referenced above
+
+	// Superuser token: requireSuperuser succeeds, Deposit goes through.
+	suToken, err := env.k.Login(ctx, "@sys", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveToken(suToken); err != nil {
+		t.Fatal(err)
+	}
+	subjectID, err := requireSuperuser(env.k)
+	if err != nil {
+		t.Fatalf("superuser should pass requireSuperuser: %v", err)
+	}
+	if subjectID != su.ID {
+		t.Fatalf("subjectID: got %q, want %q", subjectID, su.ID)
+	}
+	d, err := env.k.Deposit(ctx, subjectID, recipient.ID, 500, "test grant")
+	if err != nil {
+		t.Fatalf("deposit by superuser: %v", err)
+	}
+	if d.Amount != 500 {
+		t.Errorf("deposit amount: got %d, want 500", d.Amount)
+	}
+}
+
 func TestAdminListAllActions(t *testing.T) {
 	ctx := context.Background()
 	k := newAdminTestKernel(t)
