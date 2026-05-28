@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
@@ -124,49 +123,6 @@ func makeUser(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 		t.Fatal(err)
 	}
 	return u.ID, tok
-}
-
-func signedHTTPRating(t *testing.T, k *kernel.Kernel, raterID, txID string, rating float64) map[string]any {
-	t.Helper()
-	receipt, err := k.GetReceiptByTxID(context.Background(), txID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	privB64, err := k.GetConfig(context.Background(), configKeySigningPrivate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	privBytes, err := base64.RawURLEncoding.DecodeString(privB64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	createdAt := time.Now().UTC()
-	ratingID := "rating-" + txID
-	payload, err := kernel.CanonicalJSON(struct {
-		CreatedAt      string  `json:"created_at"`
-		ID             string  `json:"id"`
-		RatedReceiptID string  `json:"rated_receipt_id"`
-		RatedTxID      string  `json:"rated_tx_id"`
-		RaterUserID    string  `json:"rater_user_id"`
-		Rating         float64 `json:"rating"`
-	}{
-		CreatedAt:      createdAt.Format(time.RFC3339),
-		ID:             ratingID,
-		RatedReceiptID: receipt.ID,
-		RatedTxID:      txID,
-		RaterUserID:    raterID,
-		Rating:         rating,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sig := ed25519.Sign(ed25519.PrivateKey(privBytes), payload)
-	return map[string]any{
-		"rating":     rating,
-		"rating_id":  ratingID,
-		"created_at": createdAt.Format(time.RFC3339),
-		"signature":  base64.RawURLEncoding.EncodeToString(sig),
-	}
 }
 
 // giveCredits deposits funds into a user's account via the kernel directly.
@@ -811,14 +767,6 @@ func TestServeRateTransaction(t *testing.T) {
 
 	_, ownerTok := makeUser(t, k, "@rate-owner")
 	_, callerTok := makeUser(t, k, "@rate-caller")
-	sys, err := k.ReadUserByHandle(context.Background(), "@sys")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sysTok, err := k.Login(context.Background(), "@sys", "sys-pass")
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/rate-action", "kind": "http", "price": 0, "source": backend.URL,
@@ -843,9 +791,9 @@ func TestServeRateTransaction(t *testing.T) {
 		t.Fatal("expected tx_id from call")
 	}
 
-	// Rate it as @sys with the platform signing key.
-	rate := httpDo(t, srv, "POST", "/v1/transactions/"+txID+"/rate",
-		signedHTTPRating(t, k, sys.ID, txID, 1), sysTok)
+	rate := httpDo(t, srv, "POST", "/v1/transactions/"+txID+"/rate", map[string]any{
+		"rating": 1,
+	}, callerTok)
 	defer rate.Body.Close()
 	if rate.StatusCode != http.StatusNoContent {
 		t.Fatalf("rate transaction: expected 204, got %d", rate.StatusCode)
@@ -864,12 +812,7 @@ func TestServeRateTransactionNotFound(t *testing.T) {
 	}
 
 	resp := httpDo(t, srv, "POST", "/v1/transactions/no-such-id/rate",
-		map[string]any{
-			"rating":     1.0,
-			"rating_id":  "missing-rating",
-			"created_at": time.Now().UTC().Format(time.RFC3339),
-			"signature":  "missing-signature",
-		}, tok)
+		map[string]any{"rating": 1.0}, tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for unknown tx, got %d", resp.StatusCode)

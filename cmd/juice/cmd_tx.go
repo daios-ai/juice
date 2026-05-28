@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
@@ -98,9 +97,6 @@ func txShowCmd() *cobra.Command {
 func txRateCmd() *cobra.Command {
 	var txID string
 	var rating float64
-	var ratingID string
-	var createdAt string
-	var signature string
 	cmd := &cobra.Command{
 		Use:   "rate",
 		Short: "Rate a transaction (0 or 1)",
@@ -116,21 +112,7 @@ func txRateCmd() *cobra.Command {
 				return err
 			}
 
-			var ts time.Time
-			if createdAt != "" {
-				ts, err = time.Parse(time.RFC3339, createdAt)
-				if err != nil {
-					return fmt.Errorf("invalid --created-at: %w", err)
-				}
-			}
-			if err := k.RateTransaction(context.Background(), kernel.RateTransactionRequest{
-				ID:        ratingID,
-				SubjectID: subjectID,
-				TxID:      txID,
-				Rating:    rating,
-				CreatedAt: ts,
-				Signature: signature,
-			}); err != nil {
+			if err := k.RateTransaction(context.Background(), subjectID, txID, rating); err != nil {
 				return err
 			}
 			fmt.Printf("Transaction %s rated %.0f.\n", txID, rating)
@@ -139,9 +121,6 @@ func txRateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&txID, "id", "", "Transaction ID (required)")
 	cmd.Flags().Float64Var(&rating, "rating", -1, "Rating: 0 (bad) or 1 (good) (required)")
-	cmd.Flags().StringVar(&ratingID, "rating-id", "", "Rating ID included in the signed payload")
-	cmd.Flags().StringVar(&createdAt, "created-at", "", "RFC3339 timestamp included in the signed payload")
-	cmd.Flags().StringVar(&signature, "signature", "", "base64url Ed25519 signature over the canonical rating payload")
 	_ = cmd.MarkFlagRequired("id")
 	_ = cmd.MarkFlagRequired("rating")
 	return cmd

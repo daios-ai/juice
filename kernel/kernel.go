@@ -843,32 +843,22 @@ func (k *Kernel) ListTransactions(ctx context.Context, filter TxFilter) ([]*Tran
 	return k.store.ListTransactions(ctx, filter)
 }
 
-// RateTransactionRequest is a signed immutable rating submission.
-type RateTransactionRequest struct {
-	ID        string
-	SubjectID string
-	TxID      string
-	Rating    float64
-	CreatedAt time.Time
-	Signature string
-}
-
 // RateTransaction submits a rating for a completed transaction and cascades to unrated descendants.
 // Ratings are stored in a separate ratings table; the transaction row is never modified.
 // Both the root rating insertion and the cascade are performed atomically in a single store operation.
 // After cascade, action stats are updated to reflect the new rating.
-func (k *Kernel) RateTransaction(ctx context.Context, req RateTransactionRequest) error {
-	if req.Rating != 0 && req.Rating != 1 {
+func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, rating float64) error {
+	if rating != 0 && rating != 1 {
 		return ErrInvalidInput.Wrap("rating must be 0 or 1")
 	}
-	rater, err := k.store.ReadUser(ctx, req.SubjectID)
+	rater, err := k.store.ReadUser(ctx, subjectID)
 	if err != nil {
 		return err
 	}
 	if rater.SuspendedAt != nil {
 		return ErrUnauthenticated.Wrap("account suspended")
 	}
-	tx, err := k.store.ReadTransaction(ctx, req.TxID)
+	tx, err := k.store.ReadTransaction(ctx, txID)
 	if err != nil {
 		return err
 	}
@@ -876,39 +866,27 @@ func (k *Kernel) RateTransaction(ctx context.Context, req RateTransactionRequest
 		return ErrNotFound.Wrap("transaction not found")
 	}
 	// Check for duplicate rating (transaction already has a rating record).
-	if existing, _ := k.store.ReadRatingByTxID(ctx, req.TxID); existing != nil {
+	if existing, _ := k.store.ReadRatingByTxID(ctx, txID); existing != nil {
 		return ErrInvalidInput.Wrap("transaction already rated")
 	}
 	// Look up receipt for this transaction (may be nil for old transactions).
-	receipt, _ := k.store.ReadReceiptByTxID(ctx, req.TxID)
+	receipt, _ := k.store.ReadReceiptByTxID(ctx, txID)
 	r := &Rating{
-		ID:          req.ID,
-		RatedTxID:   req.TxID,
-		RaterUserID: req.SubjectID,
-		Rating:      req.Rating,
-		CreatedAt:   req.CreatedAt.UTC(),
-		Signature:   req.Signature,
+		ID:          uuid.New().String(),
+		RatedTxID:   txID,
+		RaterUserID: subjectID,
+		Rating:      rating,
+		CreatedAt:   time.Now().UTC(),
 	}
 	if receipt != nil {
 		r.RatedReceiptID = &receipt.ID
 	}
-	if rater.Handle == k.cfg.SuperuserHandle && r.Signature == "" {
-		if r.ID == "" {
-			r.ID = uuid.New().String()
-		}
-		if r.CreatedAt.IsZero() {
-			r.CreatedAt = time.Now().UTC()
-		}
-		sig, err := signRating(k.cfg.SigningKey, r)
-		if err != nil {
-			return err
-		}
-		r.Signature = sig
-	}
-	if err := k.verifyRatingSignature(rater, r); err != nil {
+	sig, err := signRating(k.cfg.SigningKey, r)
+	if err != nil {
 		return err
 	}
-	if err := k.store.CreateRatingCascade(ctx, req.TxID, tx.TraceID, r); err != nil {
+	r.Signature = sig
+	if err := k.store.CreateRatingCascade(ctx, txID, tx.TraceID, r); err != nil {
 		return err
 	}
 	// Update action stats to keep rating_mean and rating_count current.
@@ -917,53 +895,11 @@ func (k *Kernel) RateTransaction(ctx context.Context, req RateTransactionRequest
 		stats = DefaultStats(tx.ActionID)
 	}
 	stats.RatingCount++
-	stats.RatingMean = IncrementalMean(stats.RatingMean, stats.RatingCount-1, req.Rating)
+	stats.RatingMean = IncrementalMean(stats.RatingMean, stats.RatingCount-1, rating)
 	if updateErr := k.store.UpsertStats(ctx, stats); updateErr != nil {
 		k.log.With(ctx).Warn("rate.stats_update_failed", "action_id", tx.ActionID, "error", updateErr)
 	}
 	return nil
-}
-
-func (k *Kernel) verifyRatingSignature(rater *User, r *Rating) error {
-	if r.ID == "" {
-		return ErrInvalidInput.Wrap("rating id is required")
-	}
-	if r.CreatedAt.IsZero() {
-		return ErrInvalidInput.Wrap("rating created_at is required")
-	}
-	if r.Signature == "" {
-		return ErrInvalidInput.Wrap("rating signature is required")
-	}
-	sig, err := base64.RawURLEncoding.DecodeString(r.Signature)
-	if err != nil || len(sig) != ed25519.SignatureSize {
-		return ErrInvalidInput.Wrap("rating signature must be base64url Ed25519")
-	}
-	pub, err := k.ratingPublicKey(rater)
-	if err != nil {
-		return err
-	}
-	payload, err := canonicalRatingPayload(r)
-	if err != nil {
-		return err
-	}
-	if !ed25519.Verify(pub, payload, sig) {
-		return ErrUnauthorized.Wrap("rating signature verification failed")
-	}
-	return nil
-}
-
-func (k *Kernel) ratingPublicKey(rater *User) (ed25519.PublicKey, error) {
-	if rater.Handle == k.cfg.SuperuserHandle && len(k.cfg.SigningKey) == ed25519.PrivateKeySize {
-		pub, ok := k.cfg.SigningKey.Public().(ed25519.PublicKey)
-		if !ok {
-			return nil, ErrInvalidState.Wrap("platform signing key is invalid")
-		}
-		return pub, nil
-	}
-	if rater.PublicKey == "" {
-		return nil, ErrInvalidState.Wrap("rater public key is not configured")
-	}
-	return decodeRemotePublicKey(rater.PublicKey)
 }
 
 // ---- Stats ----
