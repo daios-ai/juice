@@ -900,12 +900,12 @@ type failingCommitStore struct {
 	calls int
 }
 
-func (f *failingCommitStore) CommitCall(ctx context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats) error {
+func (f *failingCommitStore) CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats) error {
 	f.calls++
 	if f.calls > 0 {
 		return ErrInternal.Wrap("injected commit failure")
 	}
-	return f.fakeStore.CommitCall(ctx, tx, processID, targetUserID, feeRecipientID, net, fee, stats)
+	return f.fakeStore.CommitCall(ctx, tx, receipt, processID, targetUserID, feeRecipientID, net, fee, stats)
 }
 
 func TestCommitCallAtomicOnFailure(t *testing.T) {
@@ -1023,7 +1023,7 @@ type failingCommitFailedCallStore struct {
 	*fakeStore
 }
 
-func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *Transaction, _ string, _ int64, _ *Stats) error {
+func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *Transaction, _ *Receipt, _ string, _ int64, _ *Stats) error {
 	return ErrInternal.Wrap("injected CommitFailedCall failure")
 }
 

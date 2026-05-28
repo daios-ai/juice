@@ -63,6 +63,8 @@ type Store interface {
 	CreateUser(ctx context.Context, u *User) error
 	ReadUser(ctx context.Context, id string) (*User, error)
 	ReadUserByHandle(ctx context.Context, handle string) (*User, error)
+	ReadUserByPublicKey(ctx context.Context, publicKey string) (*User, error)
+	UpdateUser(ctx context.Context, u *User) error
 	ListUsers(ctx context.Context, limit, offset int) ([]*User, error)
 	SuspendUser(ctx context.Context, id string) error
 	UnsuspendUser(ctx context.Context, id string) error
@@ -111,13 +113,13 @@ type Store interface {
 	// Fails atomically if user.available < amount.
 	FundProcess(ctx context.Context, userID, processID string, amount int64) error
 
-	// CommitCall atomically records a successful transaction, settles funds, updates trace
-	// cost/latency for all ancestor traces, and upserts action stats — all in one SQLite transaction.
-	CommitCall(ctx context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats) error
+	// CommitCall atomically records a successful transaction, creates its receipt, settles funds,
+	// updates trace cost/latency for all ancestor traces, and upserts action stats — all in one SQLite transaction.
+	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats) error
 
-	// CommitFailedCall atomically refunds locked funds, records a failure transaction,
+	// CommitFailedCall atomically refunds locked funds, records a failure transaction, creates its receipt,
 	// updates trace latency, and upserts action stats — all in one SQLite transaction.
-	CommitFailedCall(ctx context.Context, tx *Transaction, processID string, gross int64, stats *Stats) error
+	CommitFailedCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID string, gross int64, stats *Stats) error
 
 	// EndProcess closes the process and returns all remaining funds to the owner.
 	EndProcess(ctx context.Context, processID string) error
@@ -131,15 +133,31 @@ type Store interface {
 
 	// ---- Transactions ----
 
+	// CreateTransaction inserts a transaction record. Transactions are immutable after creation;
+	// there is no UpdateTransaction.
 	CreateTransaction(ctx context.Context, tx *Transaction) error
-	UpdateTransaction(ctx context.Context, tx *Transaction) error
 	ReadTransaction(ctx context.Context, id string) (*Transaction, error)
 	ListTransactions(ctx context.Context, filter TxFilter) ([]*Transaction, error)
 	ListAllTransactions(ctx context.Context, limit, offset int) ([]*Transaction, error)
-	// RateTransactionCascade atomically rates txID and cascades the rating to all
+
+	// ---- Receipts ----
+
+	CreateReceipt(ctx context.Context, r *Receipt) error
+	ReadReceiptByTxID(ctx context.Context, txID string) (*Receipt, error)
+
+	// ---- Ratings ----
+
+	// CreateRatingCascade atomically inserts a rating record for txID and cascades to all
 	// unrated descendant transactions in the trace subtree rooted at traceID.
 	// All writes occur in a single SQLite transaction.
-	RateTransactionCascade(ctx context.Context, txID string, traceID string, rating float64) error
+	CreateRatingCascade(ctx context.Context, txID, traceID string, r *Rating) error
+	ReadRatingByTxID(ctx context.Context, txID string) (*Rating, error)
+
+	// ---- Idempotency ----
+
+	CreateIdempotencyRecord(ctx context.Context, r *IdempotencyRecord) error
+	// ReadIdempotencyRecord returns an unexpired record matching key + counterparty, or ErrNotFound.
+	ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*IdempotencyRecord, error)
 
 	// ---- Stats ----
 

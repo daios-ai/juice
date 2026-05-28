@@ -697,6 +697,228 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	}
 }
 
+// ---- Deposit enforcement tests ----
+
+func TestDepositNonSuperuserRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	su := setupUser(t, st, "@sys", 0)
+	st.config["superuser_handle"] = "@sys"
+	regular := setupUser(t, st, "@regular", 0)
+	recipient := setupUser(t, st, "@recipient", 0)
+
+	// Superuser can deposit.
+	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 100, "ok"); err != nil {
+		t.Fatalf("superuser deposit: %v", err)
+	}
+	// Regular user cannot deposit.
+	if _, err := k.Deposit(ctx, regular.ID, recipient.ID, 100, "bad"); !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized for non-superuser deposit, got %v", err)
+	}
+}
+
+// ---- Receipt tests ----
+
+func TestReceiptCreatedWithCall(t *testing.T) {
+	st := newFakeStore()
+	su := setupUser(t, st, "@sys", 0)
+	st.config["superuser_handle"] = "@sys"
+
+	exec := &fakeScriptExec{result: `{"ok":true}`}
+	k := newTestKernelWithScripts(st, exec)
+	k.SetSigningKey(nil, su.ID, "@sys") // nil key: signature will be empty but IssuerUserID is set
+	ctx := context.Background()
+
+	caller := setupUser(t, st, "@rcpt-caller", 500)
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: caller.ID, Name: "/rcpt-svc",
+		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: caller.ID, ActionID: a.ID, Permission: PermCall, CreatedAt: time.Now().UTC()})
+
+	p, root, _ := k.StartProcess(ctx, caller.ID, 200)
+	reply, err := k.Call(ctx, CallRequest{
+		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: caller.ID, ActionName: "/rcpt-svc", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+
+	r, err := st.ReadReceiptByTxID(ctx, reply.TxID)
+	if err != nil {
+		t.Fatalf("ReadReceiptByTxID: %v", err)
+	}
+	if r.TxID != reply.TxID {
+		t.Errorf("receipt.TxID: got %q, want %q", r.TxID, reply.TxID)
+	}
+	if r.IssuerUserID != su.ID {
+		t.Errorf("receipt.IssuerUserID: got %q, want %q", r.IssuerUserID, su.ID)
+	}
+}
+
+func TestReceiptCreatedWithFailedCall(t *testing.T) {
+	st := newFakeStore()
+	su := setupUser(t, st, "@sys", 0)
+	st.config["superuser_handle"] = "@sys"
+
+	exec := &fakeScriptExec{err: ErrExecutionFailed.Wrap("boom")}
+	k := newTestKernelWithScripts(st, exec)
+	k.SetSigningKey(nil, su.ID, "@sys")
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@fail-owner", 500)
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/fail-svc",
+		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, 200)
+	reply, _ := k.Call(ctx, CallRequest{
+		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: owner.ID, ActionName: "/fail-svc", Args: map[string]any{},
+	})
+
+	// Find the failed transaction.
+	txs, _ := st.ListTransactions(ctx, TxFilter{ProcessID: p.ID})
+	if len(txs) == 0 {
+		t.Fatal("expected a transaction for failed call")
+	}
+	_ = reply
+
+	var failTxID string
+	for _, tx := range txs {
+		if tx.Status == TxFailure {
+			failTxID = tx.ID
+			break
+		}
+	}
+	if failTxID == "" {
+		t.Fatal("expected a failed transaction")
+	}
+
+	r, err := st.ReadReceiptByTxID(ctx, failTxID)
+	if err != nil {
+		t.Fatalf("ReadReceiptByTxID for failed call: %v", err)
+	}
+	if r.Status != TxFailure {
+		t.Errorf("receipt.Status: got %q, want %q", r.Status, TxFailure)
+	}
+}
+
+// ---- Rating record tests ----
+
+func TestRatingRecordCreated(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@rr-owner", 500)
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/rr-svc",
+		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, 100)
+	reply, err := k.Call(ctx, CallRequest{
+		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: owner.ID, ActionName: "/rr-svc", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+
+	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
+		t.Fatalf("RateTransaction: %v", err)
+	}
+
+	// Rating is in the ratings table, not on the transaction row.
+	tx, _ := st.ReadTransaction(ctx, reply.TxID)
+	if tx == nil {
+		t.Fatal("expected transaction")
+	}
+
+	rating, err := st.ReadRatingByTxID(ctx, reply.TxID)
+	if err != nil {
+		t.Fatalf("ReadRatingByTxID: %v", err)
+	}
+	if rating.Rating != 1.0 {
+		t.Errorf("rating.Rating: got %f, want 1.0", rating.Rating)
+	}
+	if rating.RaterUserID != owner.ID {
+		t.Errorf("rating.RaterUserID: got %q, want %q", rating.RaterUserID, owner.ID)
+	}
+}
+
+func TestRatingDuplicateRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@dup-owner", 500)
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/dup-svc",
+		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, 100)
+	reply, err := k.Call(ctx, CallRequest{
+		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: owner.ID, ActionName: "/dup-svc", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+
+	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
+		t.Fatalf("first RateTransaction: %v", err)
+	}
+	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, 0.0); !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("expected ErrInvalidInput for duplicate rating, got %v", err)
+	}
+}
+
+// ---- Zero-credit process tests ----
+
+func TestZeroCreditProcess(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@zero-owner", 100)
+
+	p, _, err := k.StartProcess(ctx, owner.ID, 0)
+	if err != nil {
+		t.Fatalf("StartProcess with 0 funds: %v", err)
+	}
+
+	u, _ := st.ReadUser(ctx, owner.ID)
+	if u.Available != 100 {
+		t.Errorf("user.available after 0-fund process: got %d, want 100", u.Available)
+	}
+	if p.Available != 0 {
+		t.Errorf("process.available: got %d, want 0", p.Available)
+	}
+}
+
 // ---- Action soft-delete tests ----
 
 func TestDeleteActionSoftDelete(t *testing.T) {

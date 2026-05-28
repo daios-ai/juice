@@ -61,6 +61,9 @@ func runServer(addr string) error {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
+	// Well-known kernel metadata (unauthenticated).
+	r.Get("/.well-known/juice-kernel.json", srv.getWellKnown)
+
 	// Auth — rate limited: 5 requests/minute per IP, burst of 10.
 	authLimiter := ipRateLimiter(5.0/60, 10)
 	r.With(authLimiter).Post("/v1/auth/token", srv.postTokenMulti)
@@ -85,6 +88,7 @@ func runServer(addr string) error {
 		r.Delete("/v1/actions/{id}/acl", srv.revokeACL)
 		r.Post("/v1/actions/{id}/grant-all", srv.grantAll)
 		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
+		r.Get("/v1/actions/{id}/manifest", srv.getActionManifest)
 
 		// Processes.
 		r.Get("/v1/processes", srv.listProcesses)
@@ -811,6 +815,29 @@ func (s *server) revokeAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- well-known / federation ----
+
+func (s *server) getWellKnown(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	pubKey, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	baseURL := envOr("JUICE_BASE_URL", "")
+	writeJSON(w, http.StatusOK, map[string]string{
+		"handle":     "@sys",
+		"public_key": pubKey,
+		"base_url":   baseURL,
+	})
+}
+
+func (s *server) getActionManifest(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	m, err := s.kernel.GetActionManifest(r.Context(), subjectFrom(r), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
 }
 
 // ---- me ----

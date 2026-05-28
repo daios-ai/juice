@@ -1,6 +1,9 @@
 package kernel
 
-import "time"
+import (
+	"crypto/ed25519"
+	"time"
+)
 
 // ActionKind describes how an action is executed.
 type ActionKind string
@@ -37,16 +40,19 @@ const (
 )
 
 // User is an authenticated subject with balances.
+// A user with PublicKey and RemoteBaseURL set represents a remote kernel peer.
 type User struct {
-	ID           string
-	Handle       string
-	Email        string
-	PasswordHash string
-	Available    int64
-	Locked       int64
-	SuspendedAt  *time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID            string
+	Handle        string
+	Email         string
+	PasswordHash  string
+	Available     int64
+	Locked        int64
+	SuspendedAt   *time.Time
+	PublicKey     string // Ed25519 public key, base64url; empty for local users
+	RemoteBaseURL string // HTTP API base URL of the remote kernel; empty for local users
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // Action is a callable capability.
@@ -101,26 +107,26 @@ type Trace struct {
 	CreatedAt       time.Time
 }
 
-// Transaction records one attempted call.
+// Transaction records one attempted call. Immutable after creation.
 type Transaction struct {
-	ID            string
-	ProcessID     string
-	TraceID       string
-	ParentTraceID string
-	OwnerUserID   string
-	SubjectUserID string
-	TargetUserID  string
-	ActionID      string
-	ArgsJSON      string
-	ReplyJSON     string
-	Status        TxStatus
-	Gross         int64
-	Net           int64
-	Fee           int64
-	Reason        string
-	StartedAt     time.Time
-	EndedAt       time.Time
-	Rating        *float64
+	ID                 string
+	ProcessID          string
+	TraceID            string
+	ParentTraceID      string
+	OwnerUserID        string
+	SubjectUserID      string
+	TargetUserID       string
+	ActionID           string
+	ArgsJSON           string
+	ReplyJSON          string
+	Status             TxStatus
+	Gross              int64
+	Net                int64
+	Fee                int64
+	Reason             string
+	RemoteReceiptHash  string // SHA-256 of the remote receipt JSON for cross-kernel calls; empty for local
+	StartedAt          time.Time
+	EndedAt            time.Time
 }
 
 // Stats tracks fixed performance and usage statistics for an action.
@@ -198,4 +204,64 @@ type RefreshToken struct {
 	CreatedAt time.Time
 }
 
+// Receipt is an immutable signed record of a committed call.
+// Created atomically with the transaction in CommitCall or CommitFailedCall.
+type Receipt struct {
+	ID           string
+	IssuerUserID string   // @sys user of this kernel
+	TxID         string
+	TraceID      string
+	ActionID     string
+	ArgsHash     string   // hex SHA-256 of args JSON
+	ReplyHash    string   // hex SHA-256 of reply JSON
+	Status       TxStatus
+	Gross        int64
+	Net          int64
+	Fee          int64
+	Reason       string
+	CreatedAt    time.Time
+	Signature    string   // base64url Ed25519 signature over canonical payload
+}
+
+// Rating is an immutable human-submitted rating for a transaction.
+// Stored in a separate ratings table; the transaction row is never modified after creation.
+type Rating struct {
+	ID             string
+	RatedTxID      string
+	RatedReceiptID *string  // nil for transactions predating the receipt requirement
+	RaterUserID    string
+	Rating         float64  // 0 or 1
+	CreatedAt      time.Time
+	Signature      string   // base64url Ed25519 signature
+}
+
+// IdempotencyRecord prevents duplicate cross-kernel calls.
+type IdempotencyRecord struct {
+	ID                 string
+	IdempotencyKey     string
+	CounterpartyUserID string
+	ReceiptID          *string
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
+}
+
+// ActionManifest is a signed, exportable description of a public active action.
+type ActionManifest struct {
+	OwnerHandle  string         `json:"owner_handle"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description"`
+	InputSchema  map[string]any `json:"input_schema"`
+	OutputSchema map[string]any `json:"output_schema"`
+	Price        int64          `json:"price"`
+	Kind         ActionKind     `json:"kind"`
+	ArtifactHash string         `json:"artifact_hash"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	Signature    string         `json:"signature"` // base64url Ed25519 signature
+}
+
+// Ed25519 key type aliases for clarity at call sites.
+type (
+	Ed25519PrivateKey = ed25519.PrivateKey
+	Ed25519PublicKey  = ed25519.PublicKey
+)
 

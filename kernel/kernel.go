@@ -2,7 +2,11 @@ package kernel
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net"
 	"net/url"
@@ -15,13 +19,16 @@ import (
 
 // Config holds kernel-level configuration.
 type Config struct {
-	FeeBPS            int64         // basis points, e.g. 2000 = 20%
-	FeeRecipientID    string        // user ID that receives fees
-	TokenSecret       string        // HMAC secret for JWT signing
-	TokenTTL          time.Duration // token validity window
+	FeeBPS            int64              // basis points, e.g. 2000 = 20%
+	FeeRecipientID    string             // user ID that receives fees
+	TokenSecret       string             // HMAC secret for JWT signing
+	TokenTTL          time.Duration      // token validity window
 	ScriptTimeout     time.Duration
-	ScriptMemory      int64 // bytes
-	AllowLocalSources bool  // permit loopback/private URLs as action sources (tests only)
+	ScriptMemory      int64              // bytes
+	AllowLocalSources bool               // permit loopback/private URLs as action sources (tests only)
+	SigningKey        ed25519.PrivateKey  // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
+	IssuerUserID      string             // @sys user ID, set during bootstrap
+	SuperuserHandle   string             // cached superuser handle for deposit checks
 }
 
 // DefaultConfig returns safe local defaults.
@@ -52,6 +59,13 @@ func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, c
 		logger = log.Default()
 	}
 	return &Kernel{store: store, scripts: scripts, http: http, llm: llm, chatter: chatter, cfg: cfg, log: logger}
+}
+
+// SetSigningKey stores the Ed25519 signing key and issuer user ID after bootstrap completes.
+func (k *Kernel) SetSigningKey(priv ed25519.PrivateKey, issuerUserID, superuserHandle string) {
+	k.cfg.SigningKey = priv
+	k.cfg.IssuerUserID = issuerUserID
+	k.cfg.SuperuserHandle = superuserHandle
 }
 
 // ---- User operations ----
@@ -151,8 +165,19 @@ func (k *Kernel) UnsuspendUser(ctx context.Context, targetID string) error {
 }
 
 // Deposit adds credits directly to a user's available balance and records an audit entry.
-// The operatorID is stored for audit; superuser enforcement is the caller's responsibility.
+// Only the superuser may call this; the check is enforced here, not only at the CLI boundary.
 func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, amount int64, reason string) (*Deposit, error) {
+	operator, err := k.store.ReadUser(ctx, operatorID)
+	if err != nil {
+		return nil, err
+	}
+	suHandle := k.cfg.SuperuserHandle
+	if suHandle == "" {
+		suHandle, _ = k.store.GetConfig(ctx, "superuser_handle")
+	}
+	if operator.Handle != suHandle {
+		return nil, ErrUnauthorized.Wrap("only the superuser may issue deposits")
+	}
 	if amount <= 0 {
 		return nil, ErrInvalidInput.Wrap("amount must be positive")
 	}
@@ -770,8 +795,9 @@ func (k *Kernel) ListTransactions(ctx context.Context, filter TxFilter) ([]*Tran
 	return k.store.ListTransactions(ctx, filter)
 }
 
-// RateTransaction sets a rating on a completed transaction and cascades to unrated descendants.
-// Both the rating update and the cascade are performed atomically in a single store operation.
+// RateTransaction submits a rating for a completed transaction and cascades to unrated descendants.
+// Ratings are stored in a separate ratings table; the transaction row is never modified.
+// Both the root rating insertion and the cascade are performed atomically in a single store operation.
 // After cascade, action stats are updated to reflect the new rating.
 func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, rating float64) error {
 	if rating != 0 && rating != 1 {
@@ -787,10 +813,24 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	if tx.OwnerUserID != subjectID {
 		return ErrUnauthorized.Wrap("only the process owner may rate a transaction")
 	}
-	if tx.Rating != nil {
+	// Check for duplicate rating (transaction already has a rating record).
+	if existing, _ := k.store.ReadRatingByTxID(ctx, txID); existing != nil {
 		return ErrInvalidInput.Wrap("transaction already rated")
 	}
-	if err := k.store.RateTransactionCascade(ctx, txID, tx.TraceID, rating); err != nil {
+	// Look up receipt for this transaction (may be nil for old transactions).
+	receipt, _ := k.store.ReadReceiptByTxID(ctx, txID)
+	r := &Rating{
+		ID:          uuid.New().String(),
+		RatedTxID:   txID,
+		RaterUserID: subjectID,
+		Rating:      rating,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if receipt != nil {
+		r.RatedReceiptID = &receipt.ID
+	}
+	r.Signature = signRating(k.cfg.SigningKey, r)
+	if err := k.store.CreateRatingCascade(ctx, txID, tx.TraceID, r); err != nil {
 		return err
 	}
 	// Update action stats to keep rating_mean and rating_count current.
@@ -997,11 +1037,6 @@ func UpdateStats(s *Stats, tx *Transaction, latencySeconds float64) {
 	}
 
 	s.LatencyMean = IncrementalMean(s.LatencyMean, s.Uses-1, latencySeconds)
-
-	if tx.Rating != nil {
-		s.RatingCount++
-		s.RatingMean = IncrementalMean(s.RatingMean, s.RatingCount-1, *tx.Rating)
-	}
 }
 
 // DefaultStats returns a zeroed Stats struct for a newly activated action.
@@ -1169,4 +1204,263 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 	}
 	k.log.With(ctx).Info("event.consumed", "event_id", eventID, "tx_id", reply.TxID)
 	return reply, nil
+}
+
+// ---- Receipt helpers ----
+
+// buildReceipt constructs a Receipt from a committed transaction and signs it.
+// Returns nil if no signing key / issuer is configured (unbootstrapped kernel).
+func (k *Kernel) buildReceipt(tx *Transaction) *Receipt {
+	if k.cfg.IssuerUserID == "" {
+		return nil
+	}
+	argsHash := sha256Hex(tx.ArgsJSON)
+	replyHash := sha256Hex(tx.ReplyJSON)
+	r := &Receipt{
+		ID:           uuid.New().String(),
+		IssuerUserID: k.cfg.IssuerUserID,
+		TxID:         tx.ID,
+		TraceID:      tx.TraceID,
+		ActionID:     tx.ActionID,
+		ArgsHash:     argsHash,
+		ReplyHash:    replyHash,
+		Status:       tx.Status,
+		Gross:        tx.Gross,
+		Net:          tx.Net,
+		Fee:          tx.Fee,
+		Reason:       tx.Reason,
+		CreatedAt:    time.Now().UTC(),
+	}
+	r.Signature = signReceipt(k.cfg.SigningKey, r)
+	return r
+}
+
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("%x", h)
+}
+
+// signReceipt signs the canonical receipt payload (excluding Signature) with key.
+// Returns empty string if key is nil.
+func signReceipt(key ed25519.PrivateKey, r *Receipt) string {
+	if len(key) == 0 {
+		return ""
+	}
+	payload, err := json.Marshal(receiptPayload{
+		ActionID:     r.ActionID,
+		ArgsHash:     r.ArgsHash,
+		CreatedAt:    r.CreatedAt.UTC().Format(time.RFC3339),
+		Fee:          r.Fee,
+		Gross:        r.Gross,
+		ID:           r.ID,
+		IssuerUserID: r.IssuerUserID,
+		Net:          r.Net,
+		Reason:       r.Reason,
+		ReplyHash:    r.ReplyHash,
+		Status:       string(r.Status),
+		TraceID:      r.TraceID,
+		TxID:         r.TxID,
+	})
+	if err != nil {
+		return ""
+	}
+	sig := ed25519.Sign(key, payload)
+	return base64.RawURLEncoding.EncodeToString(sig)
+}
+
+// receiptPayload is the canonical signed form of a receipt (fields alphabetically ordered).
+type receiptPayload struct {
+	ActionID     string `json:"action_id"`
+	ArgsHash     string `json:"args_hash"`
+	CreatedAt    string `json:"created_at"`
+	Fee          int64  `json:"fee"`
+	Gross        int64  `json:"gross"`
+	ID           string `json:"id"`
+	IssuerUserID string `json:"issuer_user_id"`
+	Net          int64  `json:"net"`
+	Reason       string `json:"reason"`
+	ReplyHash    string `json:"reply_hash"`
+	Status       string `json:"status"`
+	TraceID      string `json:"trace_id"`
+	TxID         string `json:"tx_id"`
+}
+
+// signRating signs the canonical rating payload (excluding Signature) with key.
+// Returns empty string if key is nil.
+func signRating(key ed25519.PrivateKey, r *Rating) string {
+	if len(key) == 0 {
+		return ""
+	}
+	receiptID := ""
+	if r.RatedReceiptID != nil {
+		receiptID = *r.RatedReceiptID
+	}
+	payload, err := json.Marshal(ratingPayload{
+		CreatedAt:      r.CreatedAt.UTC().Format(time.RFC3339),
+		ID:             r.ID,
+		RatedReceiptID: receiptID,
+		RatedTxID:      r.RatedTxID,
+		RaterUserID:    r.RaterUserID,
+		Rating:         r.Rating,
+	})
+	if err != nil {
+		return ""
+	}
+	sig := ed25519.Sign(key, payload)
+	return base64.RawURLEncoding.EncodeToString(sig)
+}
+
+// ratingPayload is the canonical signed form of a rating (fields alphabetically ordered).
+type ratingPayload struct {
+	CreatedAt      string  `json:"created_at"`
+	ID             string  `json:"id"`
+	RatedReceiptID string  `json:"rated_receipt_id"`
+	RatedTxID      string  `json:"rated_tx_id"`
+	RaterUserID    string  `json:"rater_user_id"`
+	Rating         float64 `json:"rating"`
+}
+
+// ---- Federation operations ----
+
+// RegisterRemoteKernel creates or updates a local user record representing a remote kernel peer.
+func (k *Kernel) RegisterRemoteKernel(ctx context.Context, handle, publicKey, baseURL string) (*User, error) {
+	if handle == "" || publicKey == "" || baseURL == "" {
+		return nil, ErrInvalidInput.Wrap("handle, public_key, and base_url are required")
+	}
+	// Check if a user with this public key already exists.
+	existing, err := k.store.ReadUserByPublicKey(ctx, publicKey)
+	if err == nil && existing != nil {
+		// Update the existing record's base URL.
+		existing.RemoteBaseURL = baseURL
+		existing.UpdatedAt = time.Now().UTC()
+		if err := k.store.UpdateUser(ctx, existing); err != nil {
+			return nil, err
+		}
+		return existing, nil
+	}
+	now := time.Now().UTC()
+	u := &User{
+		ID:            uuid.New().String(),
+		Handle:        handle,
+		Email:         handle + "@remote",
+		PasswordHash:  "remote",
+		PublicKey:     publicKey,
+		RemoteBaseURL: baseURL,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	if err := k.store.CreateUser(ctx, u); err != nil {
+		return nil, err
+	}
+	k.log.With(ctx).Info("remote_kernel.registered", "handle", handle, "base_url", baseURL)
+	return u, nil
+}
+
+// ListRemoteKernels returns all local user records that represent remote kernel peers.
+func (k *Kernel) ListRemoteKernels(ctx context.Context) ([]*User, error) {
+	all, err := k.store.ListUsers(ctx, 1000, 0)
+	if err != nil {
+		return nil, err
+	}
+	var remote []*User
+	for _, u := range all {
+		if u.RemoteBaseURL != "" {
+			remote = append(remote, u)
+		}
+	}
+	return remote, nil
+}
+
+// ImportRemoteAction creates a local HTTP action from a remote kernel's action manifest.
+// The action is owned by the remote kernel user identified by remoteUserID.
+func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m ActionManifest) (*Action, error) {
+	remoteUser, err := k.store.ReadUser(ctx, remoteUserID)
+	if err != nil {
+		return nil, err
+	}
+	if remoteUser.RemoteBaseURL == "" {
+		return nil, ErrInvalidInput.Wrap("user is not a remote kernel")
+	}
+	source := strings.TrimRight(remoteUser.RemoteBaseURL, "/") + "/v1/call"
+	req := CreateActionRequest{
+		OwnerUserID:  remoteUserID,
+		Name:         m.Name,
+		Kind:         KindHTTP,
+		Price:        m.Price,
+		Description:  m.Description,
+		InputSchema:  m.InputSchema,
+		OutputSchema: m.OutputSchema,
+		Source:       source,
+	}
+	return k.RegisterNativeAction(ctx, req)
+}
+
+// GetActionManifest returns a signed manifest for a public active action.
+func (k *Kernel) GetActionManifest(ctx context.Context, subjectID, actionID string) (*ActionManifest, error) {
+	a, err := k.store.ReadAction(ctx, actionID)
+	if err != nil {
+		return nil, err
+	}
+	if a.DeletedAt != nil {
+		return nil, ErrNotFound.Wrap("action not found")
+	}
+	if !a.Active || !a.Public {
+		if a.OwnerUserID != subjectID && !k.isSuperuser(ctx, subjectID) {
+			return nil, ErrUnauthorized.Wrap("manifest only available for public active actions")
+		}
+	}
+	owner, err := k.store.ReadUser(ctx, a.OwnerUserID)
+	if err != nil {
+		return nil, err
+	}
+	m := &ActionManifest{
+		OwnerHandle:  owner.Handle,
+		Name:         a.Name,
+		Description:  a.Description,
+		InputSchema:  a.InputSchema,
+		OutputSchema: a.OutputSchema,
+		Price:        a.Price,
+		Kind:         a.Kind,
+		ArtifactHash: a.ArtifactHash,
+		UpdatedAt:    a.UpdatedAt,
+	}
+	m.Signature = signManifest(k.cfg.SigningKey, m)
+	return m, nil
+}
+
+// signManifest signs the canonical manifest payload (excluding Signature).
+func signManifest(key ed25519.PrivateKey, m *ActionManifest) string {
+	if len(key) == 0 {
+		return ""
+	}
+	inputJSON, _ := json.Marshal(m.InputSchema)
+	outputJSON, _ := json.Marshal(m.OutputSchema)
+	payload, err := json.Marshal(manifestPayload{
+		ArtifactHash: m.ArtifactHash,
+		Description:  m.Description,
+		InputSchema:  string(inputJSON),
+		Kind:         string(m.Kind),
+		Name:         m.Name,
+		OutputSchema: string(outputJSON),
+		OwnerHandle:  m.OwnerHandle,
+		Price:        m.Price,
+		UpdatedAt:    m.UpdatedAt.UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return ""
+	}
+	sig := ed25519.Sign(key, payload)
+	return base64.RawURLEncoding.EncodeToString(sig)
+}
+
+type manifestPayload struct {
+	ArtifactHash string `json:"artifact_hash"`
+	Description  string `json:"description"`
+	InputSchema  string `json:"input_schema"`
+	Kind         string `json:"kind"`
+	Name         string `json:"name"`
+	OutputSchema string `json:"output_schema"`
+	OwnerHandle  string `json:"owner_handle"`
+	Price        int64  `json:"price"`
+	UpdatedAt    string `json:"updated_at"`
 }

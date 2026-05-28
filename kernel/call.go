@@ -192,7 +192,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		tx.Status = TxFailure
 		tx.Reason = execErr.Error()
 		stats := k.computeStats(ctx, action.ID, tx, latency)
-		if settlErr := k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price, stats); settlErr != nil {
+		receipt := k.buildReceipt(tx)
+		if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats); settlErr != nil {
 			logger.Error("call.settlement_failed", "action", action.Name, "exec_error", execErr, "settlement_error", settlErr)
 			return nil, ErrInternal.Wrap("could not record failure transaction")
 		}
@@ -206,7 +207,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		tx.Status = TxFailure
 		tx.Reason = "output schema violation: " + schemaErr.Error()
 		stats := k.computeStats(ctx, action.ID, tx, latency)
-		if settlErr := k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price, stats); settlErr != nil {
+		receipt := k.buildReceipt(tx)
+		if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats); settlErr != nil {
 			logger.Error("call.settlement_failed", "action", action.Name, "schema_error", schemaErr, "settlement_error", settlErr)
 			return nil, ErrInternal.Wrap("could not record failure transaction")
 		}
@@ -222,7 +224,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	tx.Net = net
 	tx.Fee = fee
 	stats := k.computeStats(ctx, action.ID, tx, latency)
-	if err := k.store.CommitCall(ctx, tx, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats); err != nil {
+	receipt := k.buildReceipt(tx)
+	if err := k.store.CommitCall(ctx, tx, receipt, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats); err != nil {
 		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
 			logger.Error("call.refund_failed", "action", action.Name, "commit_error", err, "refund_error", refundErr)
 			return nil, ErrInternal.Wrap("could not refund funds after failed commit")

@@ -9,41 +9,47 @@ import (
 
 // fakeStore is an in-memory Store implementation for tests.
 type fakeStore struct {
-	mu              sync.Mutex
-	users           map[string]*User
-	userByHandle    map[string]*User
-	actions         map[string]*Action
-	actionEmbeds    map[string][]float32
-	acl             map[string]map[Permission]bool // key: subjectID+":"+actionID
-	processes       map[string]*Process
-	traces          map[string]*Trace
-	transactions    map[string]*Transaction
-	stats           map[string]*Stats
-	statTags        []*StatTag
-	listeners       map[string]*Listener
-	events          map[string]*Event // eventID -> Event
-	authCodes       map[string]*AuthCode
-	refreshTokens   map[string]*RefreshToken
-	config          map[string]string
-	deposits        []*Deposit
+	mu                 sync.Mutex
+	users              map[string]*User
+	userByHandle       map[string]*User
+	actions            map[string]*Action
+	actionEmbeds       map[string][]float32
+	acl                map[string]map[Permission]bool // key: subjectID+":"+actionID
+	processes          map[string]*Process
+	traces             map[string]*Trace
+	transactions       map[string]*Transaction
+	stats              map[string]*Stats
+	statTags           []*StatTag
+	listeners          map[string]*Listener
+	events             map[string]*Event // eventID -> Event
+	authCodes          map[string]*AuthCode
+	refreshTokens      map[string]*RefreshToken
+	config             map[string]string
+	deposits           []*Deposit
+	receipts           map[string]*Receipt          // txID -> Receipt
+	ratings            map[string]*Rating           // txID -> Rating
+	idempotencyRecords map[string]*IdempotencyRecord // key+counterparty -> record
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		users:         make(map[string]*User),
-		userByHandle:  make(map[string]*User),
-		actions:       make(map[string]*Action),
-		actionEmbeds:  make(map[string][]float32),
-		acl:           make(map[string]map[Permission]bool),
-		processes:     make(map[string]*Process),
-		traces:        make(map[string]*Trace),
-		transactions:  make(map[string]*Transaction),
-		stats:         make(map[string]*Stats),
-		listeners:     make(map[string]*Listener),
-		events:        make(map[string]*Event),
-		authCodes:     make(map[string]*AuthCode),
-		refreshTokens: make(map[string]*RefreshToken),
-		config:        make(map[string]string),
+		users:              make(map[string]*User),
+		userByHandle:       make(map[string]*User),
+		actions:            make(map[string]*Action),
+		actionEmbeds:       make(map[string][]float32),
+		acl:                make(map[string]map[Permission]bool),
+		processes:          make(map[string]*Process),
+		traces:             make(map[string]*Trace),
+		transactions:       make(map[string]*Transaction),
+		stats:              make(map[string]*Stats),
+		listeners:          make(map[string]*Listener),
+		events:             make(map[string]*Event),
+		authCodes:          make(map[string]*AuthCode),
+		refreshTokens:      make(map[string]*RefreshToken),
+		config:             make(map[string]string),
+		receipts:           make(map[string]*Receipt),
+		ratings:            make(map[string]*Rating),
+		idempotencyRecords: make(map[string]*IdempotencyRecord),
 	}
 }
 
@@ -307,7 +313,7 @@ func (f *fakeStore) FundProcess(_ context.Context, userID, processID string, amo
 	return nil
 }
 
-func (f *fakeStore) CommitFailedCall(_ context.Context, tx *Transaction, processID string, gross int64, stats *Stats) error {
+func (f *fakeStore) CommitFailedCall(_ context.Context, tx *Transaction, receipt *Receipt, processID string, gross int64, stats *Stats) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.processes[processID]
@@ -320,6 +326,10 @@ func (f *fakeStore) CommitFailedCall(_ context.Context, tx *Transaction, process
 	}
 	cp := *tx
 	f.transactions[tx.ID] = &cp
+	if receipt != nil {
+		rcp := *receipt
+		f.receipts[receipt.TxID] = &rcp
+	}
 	f.applyTraceLatency(tx.TraceID, 0, tx.EndedAt)
 	if stats != nil {
 		f.stats[stats.ActionID] = stats
@@ -327,7 +337,7 @@ func (f *fakeStore) CommitFailedCall(_ context.Context, tx *Transaction, process
 	return nil
 }
 
-func (f *fakeStore) CommitCall(_ context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats) error {
+func (f *fakeStore) CommitCall(_ context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.processes[processID]
@@ -358,6 +368,10 @@ func (f *fakeStore) CommitCall(_ context.Context, tx *Transaction, processID, ta
 	}
 	cp := *tx
 	f.transactions[tx.ID] = &cp
+	if receipt != nil {
+		rcp := *receipt
+		f.receipts[receipt.TxID] = &rcp
+	}
 	f.applyTraceLatency(tx.TraceID, tx.Gross, tx.EndedAt)
 	if stats != nil {
 		f.stats[stats.ActionID] = stats
@@ -877,39 +891,6 @@ func (f *fakeStore) applyTraceLatency(traceID string, grossDelta int64, endedAt 
 	}
 }
 
-func (f *fakeStore) RateTransactionCascade(_ context.Context, txID string, traceID string, rating float64) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	tx, ok := f.transactions[txID]
-	if !ok {
-		return ErrNotFound.Wrap("transaction not found")
-	}
-	r := rating
-	tx.Rating = &r
-	// Cascade to unrated descendants.
-	subtree := make(map[string]bool)
-	queue := []string{traceID}
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		if subtree[cur] {
-			continue
-		}
-		subtree[cur] = true
-		for _, t := range f.traces {
-			if t.ParentTraceID == cur && t.ID != cur {
-				queue = append(queue, t.ID)
-			}
-		}
-	}
-	for _, tx := range f.transactions {
-		if subtree[tx.TraceID] && tx.Rating == nil {
-			r2 := rating
-			tx.Rating = &r2
-		}
-	}
-	return nil
-}
 
 func (f *fakeStore) GetConfig(_ context.Context, key string) (string, error) {
 	f.mu.Lock()
@@ -951,4 +932,96 @@ func (f *fakeStore) CreateDeposit(_ context.Context, d *Deposit) error {
 	cp := *d
 	f.deposits = append(f.deposits, &cp)
 	return nil
+}
+
+func (f *fakeStore) ReadUserByPublicKey(_ context.Context, publicKey string) (*User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, u := range f.users {
+		if u.PublicKey == publicKey {
+			cp := *u
+			return &cp, nil
+		}
+	}
+	return nil, ErrNotFound.Wrap("user not found")
+}
+
+func (f *fakeStore) UpdateUser(_ context.Context, u *User) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.users[u.ID]; !ok {
+		return ErrNotFound.Wrap("user not found")
+	}
+	cp := *u
+	f.users[u.ID] = &cp
+	f.userByHandle[u.Handle] = &cp
+	return nil
+}
+
+func (f *fakeStore) CreateReceipt(_ context.Context, r *Receipt) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := *r
+	f.receipts[r.TxID] = &cp
+	return nil
+}
+
+func (f *fakeStore) ReadReceiptByTxID(_ context.Context, txID string) (*Receipt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.receipts[txID]
+	if !ok {
+		return nil, ErrNotFound.Wrap("receipt not found")
+	}
+	cp := *r
+	return &cp, nil
+}
+
+func (f *fakeStore) CreateRatingCascade(_ context.Context, txID, _ string, r *Rating) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, exists := f.ratings[txID]; exists {
+		return ErrInvalidState.Wrap("already rated")
+	}
+	cp := *r
+	f.ratings[txID] = &cp
+	return nil
+}
+
+func (f *fakeStore) ReadRatingByTxID(_ context.Context, txID string) (*Rating, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.ratings[txID]
+	if !ok {
+		return nil, ErrNotFound.Wrap("rating not found")
+	}
+	cp := *r
+	return &cp, nil
+}
+
+func (f *fakeStore) CreateIdempotencyRecord(_ context.Context, r *IdempotencyRecord) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := r.IdempotencyKey + ":" + r.CounterpartyUserID
+	if _, exists := f.idempotencyRecords[key]; exists {
+		return nil // INSERT OR IGNORE semantics
+	}
+	cp := *r
+	f.idempotencyRecords[key] = &cp
+	return nil
+}
+
+func (f *fakeStore) ReadIdempotencyRecord(_ context.Context, key, counterpartyUserID string) (*IdempotencyRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := key + ":" + counterpartyUserID
+	r, ok := f.idempotencyRecords[k]
+	if !ok {
+		return nil, ErrNotFound.Wrap("idempotency record not found")
+	}
+	if time.Now().UTC().After(r.ExpiresAt) {
+		return nil, ErrNotFound.Wrap("idempotency record expired")
+	}
+	cp := *r
+	return &cp, nil
 }

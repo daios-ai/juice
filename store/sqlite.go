@@ -236,14 +236,23 @@ func strToNullTime(s *string) *time.Time {
 	return &t
 }
 
+// strVal dereferences a nullable string pointer, returning "" for nil.
+func strVal(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 // ---- Users ----
 
 func (s *DB) CreateUser(ctx context.Context, u *kernel.User) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO users (id,handle,email,password_hash,available,locked,suspended_at,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO users (id,handle,email,password_hash,available,locked,suspended_at,public_key,remote_base_url,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		u.ID, u.Handle, u.Email, u.PasswordHash, u.Available, u.Locked,
-		nullTimeToStr(u.SuspendedAt), timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
+		nullTimeToStr(u.SuspendedAt), nullStr(u.PublicKey), nullStr(u.RemoteBaseURL),
+		timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
 	)
 	if err != nil {
 		return dbErr(err, "create user")
@@ -253,22 +262,37 @@ func (s *DB) CreateUser(ctx context.Context, u *kernel.User) error {
 
 func (s *DB) ReadUser(ctx context.Context, id string) (*kernel.User, error) {
 	return s.scanUser(s.db.QueryRowContext(ctx,
-		`SELECT id,handle,email,password_hash,available,locked,suspended_at,created_at,updated_at
+		`SELECT id,handle,email,password_hash,available,locked,suspended_at,public_key,remote_base_url,created_at,updated_at
 		 FROM users WHERE id=?`, id))
 }
 
 func (s *DB) ReadUserByHandle(ctx context.Context, handle string) (*kernel.User, error) {
 	return s.scanUser(s.db.QueryRowContext(ctx,
-		`SELECT id,handle,email,password_hash,available,locked,suspended_at,created_at,updated_at
+		`SELECT id,handle,email,password_hash,available,locked,suspended_at,public_key,remote_base_url,created_at,updated_at
 		 FROM users WHERE handle=?`, handle))
+}
+
+func (s *DB) ReadUserByPublicKey(ctx context.Context, publicKey string) (*kernel.User, error) {
+	return s.scanUser(s.db.QueryRowContext(ctx,
+		`SELECT id,handle,email,password_hash,available,locked,suspended_at,public_key,remote_base_url,created_at,updated_at
+		 FROM users WHERE public_key=?`, publicKey))
+}
+
+func (s *DB) UpdateUser(ctx context.Context, u *kernel.User) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET handle=?,email=?,public_key=?,remote_base_url=?,updated_at=? WHERE id=?`,
+		u.Handle, u.Email, nullStr(u.PublicKey), nullStr(u.RemoteBaseURL),
+		timeToStr(u.UpdatedAt), u.ID,
+	)
+	return dbErr(err, "update user")
 }
 
 func (s *DB) scanUser(row *sql.Row) (*kernel.User, error) {
 	var u kernel.User
 	var createdAt, updatedAt string
-	var suspendedAt *string
+	var suspendedAt, publicKey, remoteBaseURL *string
 	err := row.Scan(&u.ID, &u.Handle, &u.Email, &u.PasswordHash,
-		&u.Available, &u.Locked, &suspendedAt, &createdAt, &updatedAt)
+		&u.Available, &u.Locked, &suspendedAt, &publicKey, &remoteBaseURL, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("user not found")
 	}
@@ -276,6 +300,8 @@ func (s *DB) scanUser(row *sql.Row) (*kernel.User, error) {
 		return nil, dbErr(err, "read user")
 	}
 	u.SuspendedAt = strToNullTime(suspendedAt)
+	u.PublicKey = strVal(publicKey)
+	u.RemoteBaseURL = strVal(remoteBaseURL)
 	u.CreatedAt = strToTime(createdAt)
 	u.UpdatedAt = strToTime(updatedAt)
 	return &u, nil
@@ -286,7 +312,7 @@ func (s *DB) ListUsers(ctx context.Context, limit, offset int) ([]*kernel.User, 
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,handle,email,password_hash,available,locked,suspended_at,created_at,updated_at
+		`SELECT id,handle,email,password_hash,available,locked,suspended_at,public_key,remote_base_url,created_at,updated_at
 		 FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list users")
@@ -296,12 +322,14 @@ func (s *DB) ListUsers(ctx context.Context, limit, offset int) ([]*kernel.User, 
 	for rows.Next() {
 		var u kernel.User
 		var createdAt, updatedAt string
-		var suspendedAt *string
+		var suspendedAt, publicKey, remoteBaseURL *string
 		if err := rows.Scan(&u.ID, &u.Handle, &u.Email, &u.PasswordHash,
-			&u.Available, &u.Locked, &suspendedAt, &createdAt, &updatedAt); err != nil {
+			&u.Available, &u.Locked, &suspendedAt, &publicKey, &remoteBaseURL, &createdAt, &updatedAt); err != nil {
 			return nil, dbErr(err, "scan user")
 		}
 		u.SuspendedAt = strToNullTime(suspendedAt)
+		u.PublicKey = strVal(publicKey)
+		u.RemoteBaseURL = strVal(remoteBaseURL)
 		u.CreatedAt = strToTime(createdAt)
 		u.UpdatedAt = strToTime(updatedAt)
 		out = append(out, &u)
@@ -668,27 +696,41 @@ func (s *DB) FundProcess(ctx context.Context, userID, processID string, amount i
 	return dbErr(tx.Commit(), "fund process commit")
 }
 
-func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats) error {
+func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return dbErr(err, "begin commit call")
 	}
 	defer tx.Rollback()
 
-	// Insert transaction record.
+	// Insert transaction record (immutable — no rating column written).
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		  action_id,args_json,reply_json,status,gross,net,fee,reason,started_at,ended_at,rating)
+		  action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
 		ktx.OwnerUserID, ktx.SubjectUserID, ktx.TargetUserID, ktx.ActionID,
 		ktx.ArgsJSON, ktx.ReplyJSON, string(ktx.Status),
-		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason,
-		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt), ktx.Rating,
+		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason, nullStr(ktx.RemoteReceiptHash),
+		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
 	)
 	if err != nil {
 		return dbErr(err, "commit call: insert transaction")
+	}
+
+	// Insert receipt atomically with the transaction.
+	if receipt != nil {
+		if _, err = tx.ExecContext(ctx,
+			`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			receipt.ID, receipt.IssuerUserID, receipt.TxID, receipt.TraceID, receipt.ActionID,
+			receipt.ArgsHash, receipt.ReplyHash, string(receipt.Status),
+			receipt.Gross, receipt.Net, receipt.Fee, receipt.Reason,
+			timeToStr(receipt.CreatedAt), receipt.Signature,
+		); err != nil {
+			return dbErr(err, "commit call: insert receipt")
+		}
 	}
 
 	gross := net + fee
@@ -763,7 +805,7 @@ WHERE id IN (SELECT id FROM ancestors)`,
 	return dbErr(tx.Commit(), "commit call: commit")
 }
 
-func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, processID string, gross int64, stats *kernel.Stats) error {
+func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID string, gross int64, stats *kernel.Stats) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return dbErr(err, "begin commit failed call")
@@ -782,15 +824,29 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, proc
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		  action_id,args_json,reply_json,status,gross,net,fee,reason,started_at,ended_at,rating)
+		  action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
 		ktx.OwnerUserID, ktx.SubjectUserID, ktx.TargetUserID, ktx.ActionID,
 		ktx.ArgsJSON, ktx.ReplyJSON, string(ktx.Status),
-		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason,
-		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt), ktx.Rating,
+		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason, nullStr(ktx.RemoteReceiptHash),
+		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
 	); err != nil {
 		return dbErr(err, "commit failed call: insert transaction")
+	}
+
+	// Insert receipt atomically with the transaction.
+	if receipt != nil {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			receipt.ID, receipt.IssuerUserID, receipt.TxID, receipt.TraceID, receipt.ActionID,
+			receipt.ArgsHash, receipt.ReplyHash, string(receipt.Status),
+			receipt.Gross, receipt.Net, receipt.Fee, receipt.Reason,
+			timeToStr(receipt.CreatedAt), receipt.Signature,
+		); err != nil {
+			return dbErr(err, "commit failed call: insert receipt")
+		}
 	}
 
 	// Update trace latency (cost delta is 0 for failures).
@@ -984,39 +1040,30 @@ func (s *DB) CreateTransaction(ctx context.Context, tx *kernel.Transaction) erro
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		  action_id,args_json,reply_json,status,gross,net,fee,reason,started_at,ended_at,rating)
+		  action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		tx.ID, tx.ProcessID, tx.TraceID, tx.ParentTraceID,
 		tx.OwnerUserID, tx.SubjectUserID, tx.TargetUserID, tx.ActionID,
 		tx.ArgsJSON, tx.ReplyJSON, string(tx.Status),
-		tx.Gross, tx.Net, tx.Fee, tx.Reason,
-		timeToStr(tx.StartedAt), timeToStr(tx.EndedAt), tx.Rating,
+		tx.Gross, tx.Net, tx.Fee, tx.Reason, nullStr(tx.RemoteReceiptHash),
+		timeToStr(tx.StartedAt), timeToStr(tx.EndedAt),
 	)
 	return dbErr(err, "create transaction")
-}
-
-func (s *DB) UpdateTransaction(ctx context.Context, tx *kernel.Transaction) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE transactions SET reply_json=?,status=?,gross=?,net=?,fee=?,reason=?,ended_at=?,rating=?
-		 WHERE id=?`,
-		tx.ReplyJSON, string(tx.Status), tx.Gross, tx.Net, tx.Fee,
-		tx.Reason, timeToStr(tx.EndedAt), tx.Rating, tx.ID,
-	)
-	return dbErr(err, "update transaction")
 }
 
 func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transaction, error) {
 	var tx kernel.Transaction
 	var status, startedAt, endedAt string
+	var remoteReceiptHash *string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		        action_id,args_json,reply_json,status,gross,net,fee,reason,started_at,ended_at,rating
+		        action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at
 		 FROM transactions WHERE id=?`, id,
 	).Scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
 		&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
 		&tx.ArgsJSON, &tx.ReplyJSON, &status,
-		&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason,
-		&startedAt, &endedAt, &tx.Rating)
+		&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash,
+		&startedAt, &endedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("transaction not found")
 	}
@@ -1024,6 +1071,7 @@ func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transactio
 		return nil, dbErr(err, "read transaction")
 	}
 	tx.Status = kernel.TxStatus(status)
+	tx.RemoteReceiptHash = strVal(remoteReceiptHash)
 	tx.StartedAt = strToTime(startedAt)
 	tx.EndedAt = strToTime(endedAt)
 	return &tx, nil
@@ -1031,7 +1079,7 @@ func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transactio
 
 func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel.Transaction, error) {
 	q := `SELECT id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-	             action_id,args_json,reply_json,status,gross,net,fee,reason,started_at,ended_at,rating
+	             action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at
 	      FROM transactions WHERE 1=1`
 	args := []any{}
 	if f.OwnerUserID != "" {
@@ -1068,14 +1116,16 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 	for rows.Next() {
 		var tx kernel.Transaction
 		var status, startedAt, endedAt string
+		var remoteReceiptHash *string
 		if err := rows.Scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
 			&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
 			&tx.ArgsJSON, &tx.ReplyJSON, &status,
-			&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason,
-			&startedAt, &endedAt, &tx.Rating); err != nil {
+			&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash,
+			&startedAt, &endedAt); err != nil {
 			return nil, dbErr(err, "scan transaction")
 		}
 		tx.Status = kernel.TxStatus(status)
+		tx.RemoteReceiptHash = strVal(remoteReceiptHash)
 		tx.StartedAt = strToTime(startedAt)
 		tx.EndedAt = strToTime(endedAt)
 		out = append(out, &tx)
@@ -1089,7 +1139,7 @@ func (s *DB) ListAllTransactions(ctx context.Context, limit, offset int) ([]*ker
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		        action_id,args_json,reply_json,status,gross,net,fee,reason,started_at,ended_at,rating
+		        action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at
 		 FROM transactions ORDER BY started_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list all transactions")
@@ -1099,14 +1149,16 @@ func (s *DB) ListAllTransactions(ctx context.Context, limit, offset int) ([]*ker
 	for rows.Next() {
 		var tx kernel.Transaction
 		var status, startedAt, endedAt string
+		var remoteReceiptHash *string
 		if err := rows.Scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
 			&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
 			&tx.ArgsJSON, &tx.ReplyJSON, &status,
-			&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason,
-			&startedAt, &endedAt, &tx.Rating); err != nil {
+			&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash,
+			&startedAt, &endedAt); err != nil {
 			return nil, dbErr(err, "scan transaction")
 		}
 		tx.Status = kernel.TxStatus(status)
+		tx.RemoteReceiptHash = strVal(remoteReceiptHash)
 		tx.StartedAt = strToTime(startedAt)
 		tx.EndedAt = strToTime(endedAt)
 		out = append(out, &tx)
@@ -1142,33 +1194,6 @@ func (s *DB) UpdateTraceCostLatency(ctx context.Context, traceID string, grossDe
 	return nil
 }
 
-func (s *DB) RateTransactionCascade(ctx context.Context, txID string, traceID string, rating float64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin rate cascade")
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE transactions SET rating=? WHERE id=?`, rating, txID,
-	); err != nil {
-		return dbErr(err, "rate cascade: update transaction")
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-WITH RECURSIVE subtree(id) AS (
-    SELECT id FROM traces WHERE id=?
-    UNION ALL
-    SELECT t.id FROM traces t JOIN subtree s ON t.parent_trace_id=s.id AND t.id != t.parent_trace_id
-)
-UPDATE transactions SET rating=? WHERE trace_id IN (SELECT id FROM subtree) AND rating IS NULL`,
-		traceID, rating,
-	); err != nil {
-		return dbErr(err, "rate cascade: cascade descendants")
-	}
-
-	return dbErr(tx.Commit(), "rate cascade: commit")
-}
 
 // ---- Stats ----
 
@@ -1655,4 +1680,131 @@ func dbErr(err error, op string) error {
 		return nil
 	}
 	return kernel.ErrInternal.Wrapf("%s: %v", op, err)
+}
+
+// ---- Receipts ----
+
+func (s *DB) CreateReceipt(ctx context.Context, r *kernel.Receipt) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		r.ID, r.IssuerUserID, r.TxID, r.TraceID, r.ActionID,
+		r.ArgsHash, r.ReplyHash, string(r.Status),
+		r.Gross, r.Net, r.Fee, r.Reason,
+		timeToStr(r.CreatedAt), r.Signature,
+	)
+	return dbErr(err, "create receipt")
+}
+
+func (s *DB) ReadReceiptByTxID(ctx context.Context, txID string) (*kernel.Receipt, error) {
+	var r kernel.Receipt
+	var status, createdAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature
+		 FROM receipts WHERE tx_id=?`, txID,
+	).Scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
+		&r.ArgsHash, &r.ReplyHash, &status,
+		&r.Gross, &r.Net, &r.Fee, &r.Reason, &createdAt, &r.Signature)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("receipt not found")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read receipt by tx_id")
+	}
+	r.Status = kernel.TxStatus(status)
+	r.CreatedAt = strToTime(createdAt)
+	return &r, nil
+}
+
+// ---- Ratings ----
+
+func (s *DB) CreateRatingCascade(ctx context.Context, txID, traceID string, r *kernel.Rating) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin rating cascade")
+	}
+	defer tx.Rollback()
+
+	// Insert the root rating record.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature)
+		 VALUES (?,?,?,?,?,?,?)`,
+		r.ID, r.RatedTxID, r.RatedReceiptID, r.RaterUserID, r.Rating,
+		timeToStr(r.CreatedAt), r.Signature,
+	); err != nil {
+		return dbErr(err, "rating cascade: insert root rating")
+	}
+
+	// Cascade: insert rating records for all unrated descendant transactions.
+	if _, err := tx.ExecContext(ctx, `
+WITH RECURSIVE subtree(id) AS (
+    SELECT id FROM traces WHERE id=?
+    UNION ALL
+    SELECT t.id FROM traces t JOIN subtree s ON t.parent_trace_id=s.id AND t.id != t.parent_trace_id
+)
+INSERT OR IGNORE INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature)
+SELECT lower(hex(randomblob(16))), tx.id, NULL, ?, ?, ?, ''
+FROM transactions tx
+WHERE tx.trace_id IN (SELECT id FROM subtree)
+  AND tx.id != ?
+  AND NOT EXISTS (SELECT 1 FROM ratings WHERE rated_tx_id=tx.id)`,
+		traceID, r.RaterUserID, r.Rating, timeToStr(r.CreatedAt), txID,
+	); err != nil {
+		return dbErr(err, "rating cascade: cascade descendants")
+	}
+
+	return dbErr(tx.Commit(), "rating cascade: commit")
+}
+
+func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating, error) {
+	var r kernel.Rating
+	var ratedReceiptID *string
+	var createdAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature
+		 FROM ratings WHERE rated_tx_id=?`, txID,
+	).Scan(&r.ID, &r.RatedTxID, &ratedReceiptID, &r.RaterUserID, &r.Rating, &createdAt, &r.Signature)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("rating not found")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read rating by tx_id")
+	}
+	r.RatedReceiptID = ratedReceiptID
+	r.CreatedAt = strToTime(createdAt)
+	return &r, nil
+}
+
+// ---- Idempotency ----
+
+func (s *DB) CreateIdempotencyRecord(ctx context.Context, r *kernel.IdempotencyRecord) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO idempotency_records (id,idempotency_key,counterparty_user_id,receipt_id,created_at,expires_at)
+		 VALUES (?,?,?,?,?,?)`,
+		r.ID, r.IdempotencyKey, r.CounterpartyUserID, r.ReceiptID,
+		timeToStr(r.CreatedAt), timeToStr(r.ExpiresAt),
+	)
+	return dbErr(err, "create idempotency record")
+}
+
+func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*kernel.IdempotencyRecord, error) {
+	var r kernel.IdempotencyRecord
+	var receiptID *string
+	var createdAt, expiresAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id,idempotency_key,counterparty_user_id,receipt_id,created_at,expires_at
+		 FROM idempotency_records
+		 WHERE idempotency_key=? AND counterparty_user_id=? AND expires_at > datetime('now')`,
+		key, counterpartyUserID,
+	).Scan(&r.ID, &r.IdempotencyKey, &r.CounterpartyUserID, &receiptID, &createdAt, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("idempotency record not found or expired")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read idempotency record")
+	}
+	r.ReceiptID = receiptID
+	r.CreatedAt = strToTime(createdAt)
+	r.ExpiresAt = strToTime(expiresAt)
+	return &r, nil
 }

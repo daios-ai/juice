@@ -383,7 +383,7 @@ func TestCommitCall(t *testing.T) {
 		ActionID: "a1", Status: kernel.TxSuccess, Gross: 100, Net: 80, Fee: 20,
 		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
 	}
-	if err := db.CommitCall(ctx, tx, p.ID, target.ID, fee.ID, 80, 20, nil); err != nil {
+	if err := db.CommitCall(ctx, tx, nil, p.ID, target.ID, fee.ID, 80, 20, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -805,5 +805,202 @@ func TestRevokeRefreshToken(t *testing.T) {
 	// Rotating a revoked token fails.
 	if _, err := db.RotateRefreshToken(ctx, tok.Token); err == nil {
 		t.Error("expected error rotating revoked token")
+	}
+}
+
+// ---- Receipt tests ----
+
+func TestCreateReadReceipt(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	issuer := newUser("@issuer", 0)
+	_ = db.CreateUser(ctx, issuer)
+
+	tx := &kernel.Transaction{
+		ID:            uuid.New().String(),
+		OwnerUserID:   issuer.ID,
+		SubjectUserID: issuer.ID,
+		TargetUserID:  issuer.ID,
+		ActionID:      uuid.New().String(),
+		Status:        kernel.TxSuccess,
+		StartedAt:     time.Now().UTC(),
+		EndedAt:       time.Now().UTC(),
+	}
+	_ = db.CreateTransaction(ctx, tx)
+
+	r := &kernel.Receipt{
+		ID:           uuid.New().String(),
+		IssuerUserID: issuer.ID,
+		TxID:         tx.ID,
+		TraceID:      uuid.New().String(),
+		ActionID:     tx.ActionID,
+		ArgsHash:     "abc123",
+		ReplyHash:    "def456",
+		Status:       kernel.TxSuccess,
+		Gross:        0,
+		Net:          0,
+		Fee:          0,
+		Reason:       "",
+		CreatedAt:    time.Now().UTC(),
+		Signature:    "sig",
+	}
+	if err := db.CreateReceipt(ctx, r); err != nil {
+		t.Fatalf("CreateReceipt: %v", err)
+	}
+
+	got, err := db.ReadReceiptByTxID(ctx, tx.ID)
+	if err != nil {
+		t.Fatalf("ReadReceiptByTxID: %v", err)
+	}
+	if got.ID != r.ID {
+		t.Errorf("receipt.ID: got %q, want %q", got.ID, r.ID)
+	}
+	if got.IssuerUserID != issuer.ID {
+		t.Errorf("receipt.IssuerUserID: got %q, want %q", got.IssuerUserID, issuer.ID)
+	}
+	if got.ArgsHash != "abc123" {
+		t.Errorf("receipt.ArgsHash: got %q, want %q", got.ArgsHash, "abc123")
+	}
+}
+
+// ---- Rating cascade tests ----
+
+func TestCreateRatingCascade(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	rater := newUser("@rater", 0)
+	_ = db.CreateUser(ctx, rater)
+
+	tx := &kernel.Transaction{
+		ID:            uuid.New().String(),
+		OwnerUserID:   rater.ID,
+		SubjectUserID: rater.ID,
+		TargetUserID:  rater.ID,
+		ActionID:      uuid.New().String(),
+		Status:        kernel.TxSuccess,
+		StartedAt:     time.Now().UTC(),
+		EndedAt:       time.Now().UTC(),
+	}
+	traceID := uuid.New().String()
+	tx.TraceID = traceID
+	_ = db.CreateTransaction(ctx, tx)
+
+	rating := &kernel.Rating{
+		ID:          uuid.New().String(),
+		RatedTxID:   tx.ID,
+		RaterUserID: rater.ID,
+		Rating:      1.0,
+		CreatedAt:   time.Now().UTC(),
+		Signature:   "",
+	}
+	if err := db.CreateRatingCascade(ctx, tx.ID, traceID, rating); err != nil {
+		t.Fatalf("CreateRatingCascade: %v", err)
+	}
+
+	got, err := db.ReadRatingByTxID(ctx, tx.ID)
+	if err != nil {
+		t.Fatalf("ReadRatingByTxID: %v", err)
+	}
+	if got.Rating != 1.0 {
+		t.Errorf("rating.Rating: got %f, want 1.0", got.Rating)
+	}
+	if got.RaterUserID != rater.ID {
+		t.Errorf("rating.RaterUserID: got %q, want %q", got.RaterUserID, rater.ID)
+	}
+
+	// Duplicate rating must fail.
+	dup := &kernel.Rating{
+		ID:          uuid.New().String(),
+		RatedTxID:   tx.ID,
+		RaterUserID: rater.ID,
+		Rating:      0.0,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := db.CreateRatingCascade(ctx, tx.ID, traceID, dup); err == nil {
+		t.Error("expected error for duplicate rating")
+	}
+}
+
+// ---- ReadUserByPublicKey tests ----
+
+func TestReadUserByPublicKey(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	u := newUser("@remote", 0)
+	u.PublicKey = "ed25519pubkeyABC"
+	u.RemoteBaseURL = "https://remote.example.com"
+	if err := db.CreateUser(ctx, u); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	got, err := db.ReadUserByPublicKey(ctx, "ed25519pubkeyABC")
+	if err != nil {
+		t.Fatalf("ReadUserByPublicKey: %v", err)
+	}
+	if got.Handle != "@remote" {
+		t.Errorf("handle: got %q, want @remote", got.Handle)
+	}
+	if got.RemoteBaseURL != "https://remote.example.com" {
+		t.Errorf("RemoteBaseURL: got %q", got.RemoteBaseURL)
+	}
+
+	// Unknown key returns ErrNotFound.
+	if _, err := db.ReadUserByPublicKey(ctx, "unknown-key"); err == nil {
+		t.Error("expected error for unknown public key")
+	}
+}
+
+// ---- Idempotency record tests ----
+
+func TestCreateReadIdempotencyRecord(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	counterparty := newUser("@cp", 0)
+	_ = db.CreateUser(ctx, counterparty)
+
+	now := time.Now().UTC()
+	r := &kernel.IdempotencyRecord{
+		ID:                 uuid.New().String(),
+		IdempotencyKey:     "key-abc-123",
+		CounterpartyUserID: counterparty.ID,
+		CreatedAt:          now,
+		ExpiresAt:          now.Add(24 * time.Hour),
+	}
+	if err := db.CreateIdempotencyRecord(ctx, r); err != nil {
+		t.Fatalf("CreateIdempotencyRecord: %v", err)
+	}
+
+	got, err := db.ReadIdempotencyRecord(ctx, "key-abc-123", counterparty.ID)
+	if err != nil {
+		t.Fatalf("ReadIdempotencyRecord: %v", err)
+	}
+	if got.ID != r.ID {
+		t.Errorf("record.ID: got %q, want %q", got.ID, r.ID)
+	}
+
+	// Unknown key returns ErrNotFound.
+	if _, err := db.ReadIdempotencyRecord(ctx, "no-such-key", counterparty.ID); err == nil {
+		t.Error("expected error for unknown idempotency key")
+	}
+
+	// Second INSERT with same key+counterparty is silently ignored (INSERT OR IGNORE).
+	dup := &kernel.IdempotencyRecord{
+		ID:                 uuid.New().String(),
+		IdempotencyKey:     "key-abc-123",
+		CounterpartyUserID: counterparty.ID,
+		CreatedAt:          now,
+		ExpiresAt:          now.Add(24 * time.Hour),
+	}
+	if err := db.CreateIdempotencyRecord(ctx, dup); err != nil {
+		t.Fatalf("duplicate idempotency insert should not error: %v", err)
+	}
+	// Confirm original record is still returned (not the duplicate ID).
+	got2, _ := db.ReadIdempotencyRecord(ctx, "key-abc-123", counterparty.ID)
+	if got2.ID != r.ID {
+		t.Errorf("expected original ID after duplicate insert, got %q", got2.ID)
 	}
 }

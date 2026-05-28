@@ -1,6 +1,6 @@
 # Juice Kernel Requirements
 
-Version: 0.1  
+Version: 0.2  
 Status: implementation requirements  
 Codename: `juice`
 
@@ -88,6 +88,8 @@ email
 available
 locked
 suspended_at
+public_key
+remote_base_url
 created_at
 updated_at
 ```
@@ -99,6 +101,9 @@ Requirements:
 - Balances must be non-negative integers.
 - Balance units must be indivisible credits.
 - A suspended user must be rejected at every authenticated request with `ErrUnauthenticated`.
+- `public_key` is a nullable Ed25519 public key, stored as base64url. When set, it must be a valid 32-byte Ed25519 public key. `public_key` must be unique across all users when non-null.
+- `remote_base_url` is a nullable URL of the remote kernel's HTTP API base. A user with both `public_key` and `remote_base_url` set represents a remote kernel peer (see §21).
+- Local (human) users have both fields null.
 
 ### 3.2 Action
 
@@ -205,6 +210,8 @@ closed
 Requirements:
 
 - A process starts with user-provided funds.
+- A process may be created with zero initial funds. `available = 0` is a valid initial state.
+- Zero-credit processes may execute actions with `price = 0`. The fund locking invariant `available >= price` is satisfied by `0 >= 0`.
 - A closed process cannot execute calls.
 - Ending a process returns all process funds to the owner.
 - Process balances must be non-negative integers.
@@ -268,9 +275,9 @@ gross
 net
 fee
 reason
+remote_receipt_hash
 started_at
 ended_at
-rating
 ```
 
 Allowed status values:
@@ -285,7 +292,8 @@ Requirements:
 - Every attempted call must create one transaction.
 - Successful paid calls must have `gross = net + fee`.
 - Failed calls must use the explicit refund rule in Section 5.4.
-- Ratings must be nullable and, when present, must be in `{0,1}` in the first implementation.
+- A transaction record is immutable after its `status`, `gross`, `net`, `fee`, `reason`, and `reply_json` are set at commit time. No field may be updated after the transaction is committed.
+- `remote_receipt_hash` is nullable. For cross-kernel calls, it stores the SHA-256 hash of the remote kernel's receipt (see §21.4). For local calls it is null.
 
 ## 4. Persistence
 
@@ -314,6 +322,7 @@ The store interface must support:
 ```text
 CreateUser
 ReadUser
+ReadUserByPublicKey
 ListUsers
 SuspendUser
 UnsuspendUser
@@ -331,7 +340,6 @@ EndProcess
 ListAllProcesses
 CreateTrace
 CreateTransaction
-UpdateTransaction
 ListTransactions
 ListAllTransactions
 ReadStats
@@ -346,7 +354,16 @@ PurgeListenerEvents
 GetConfig
 SetConfig
 CreateDeposit
+CreateReceipt
+ReadReceipt
+CreateRating
+ReadRating
+ListRatings
+CreateIdempotencyRecord
+ReadIdempotencyRecord
 ```
+
+Note: `UpdateTransaction` is removed. Transaction records are immutable after creation (§3.6). All fields must be set at `CreateTransaction` time.
 
 Justification: the kernel must be testable with fake stores and replaceable persistent stores.
 
@@ -404,6 +421,8 @@ This transition is valid only when:
 ```text
 q >= 0 ∧ available >= q
 ```
+
+A call with `price = 0` satisfies this condition for any non-negative `available` value, including `available = 0`. Zero-credit processes may execute zero-price actions.
 
 Justification: this is the budget safety invariant. No action can execute unless the process has already reserved the required funds.
 
@@ -622,6 +641,7 @@ Requirements:
 - Lookup is exposed as the system native action `@sys/lookup`, callable through `Call()` by any authenticated user (grant-all applied at bootstrap).
 - The input schema must declare `query` (string, required) and `limit` (integer, optional, default 10).
 - The output schema must declare a `results` array where each element has `action_id` (string), `name` (string), `owner_handle` (string), `description` (string), and `score` (number).
+- Agents and scripts must invoke lookup exclusively through `Call()` on `@sys/lookup`. Direct kernel lookup methods bypass accounting and tracing and must not be exposed through any user-facing API or script host function. Direct lookup is restricted to platform diagnostics.
 
 Justification: lookup is a research module. The kernel requires only a ranked list of action ids, not a specific ranking algorithm.
 
@@ -728,11 +748,29 @@ FOLLOWS_FROM (caused_by_trace_id): causal link across process boundaries.
 
 **Rating**
 
+A rating is a first-class immutable record submitted by a human for a transaction.
+
+Required fields:
+
+```text
+id
+rated_tx_id
+rated_receipt_id
+rater_user_id
+rating
+created_at
+signature
+```
+
 Requirements:
 
-- A human may rate any transaction 0 (bad) or 1 (good) via RateTransaction.
-- When a transaction is rated, the rating must automatically cascade to all unrated descendant transactions in the trace tree.
-- The initial rating update and the descendant cascade must be performed in a single atomic SQLite transaction using one recursive SQL operation. The two writes must not be separate operations; the cascade error must not be silently ignored. No separate application-level propagation step is required or permitted.
+- A human may rate any transaction 0 (bad) or 1 (good) via `RateTransaction`.
+- Each rating is stored as a new record in the `ratings` table. The transaction row is not modified (§3.6 immutability).
+- A transaction may have at most one rating record. Submitting a second rating for the same transaction must be rejected with `ErrInvalidInput`.
+- `rated_receipt_id` references the receipt issued for that transaction (see §20). It is null for transactions predating the receipt requirement.
+- `signature` is the Ed25519 signature of the canonical rating payload signed by the rater's private key, or by the platform signing key when the rater is the superuser. Signature verification is enforced at rating submission time.
+- When a transaction is rated, the rating must automatically cascade to all unrated descendant transactions in the trace tree by creating rating records for each unrated descendant.
+- The initial rating insertion and all cascade insertions must be performed in a single atomic SQLite transaction. Partial cascade is not permitted.
 - Rating is a human supervision operation. It must not be callable through `Call()`.
 
 **Trace metrics**
@@ -906,6 +944,9 @@ juice admin action disable
 juice admin process list
 juice admin tx list
 juice user me
+juice remote add
+juice remote list
+juice remote import
 ```
 
 Requirements:
@@ -1035,6 +1076,14 @@ ConsumeEvent against inactive listener returns ErrInvalidState
 DeleteListener purges all pending events for that listener
 ConsumeEvent fails and resets event to pending when process has insufficient funds
 bootstrap resets in-flight events (consumed_at set, tx_id null) to pending
+second rating on same transaction rejected with ErrInvalidInput
+rating record created in ratings table, transaction row unchanged
+rating cascade creates rating records for unrated descendants
+Ed25519 signing keypair present after first boot
+zero-credit process satisfies fund locking for zero-price actions
+Kernel.Deposit rejected with ErrUnauthorized for non-superuser caller
+receipt created atomically with successful transaction commit
+receipt created atomically with failed transaction commit
 ```
 
 ### 16.4 Invariant tests
@@ -1064,6 +1113,8 @@ caused_by_trace_id never equals parent_trace_id (FOLLOWS_FROM ≠ CHILD_OF)
 emitter balance is unchanged by EmitEvent regardless of how many listeners match
 consumed events never appear in ListPendingEvents
 pending events are absent after listener deletion
+transaction row is immutable after commit (no field updated post-creation)
+rating records reference valid tx_id and receipt_id
 ```
 
 ## 17. Configuration
@@ -1130,12 +1181,13 @@ Requirements:
 - The superuser handle is always `@sys`. It is a platform constant, not configurable.
 - On first boot, the operator is prompted only for a password. The handle `@sys` is set automatically.
 - The `config` table records the sentinel key `superuser_handle = @sys` to indicate first boot has completed.
+- On first boot, an Ed25519 signing keypair must be generated atomically with the superuser account and config entry, in the same database transaction. `config.signing_public_key` stores the public key (base64url). `config.signing_private_key` stores the private key (base64url, sensitive — never logged or returned by any API). It is an invalid state for `@sys` to exist without a signing keypair; a partial first-boot must leave the system re-runnable.
 - On every startup, the server reads `config.superuser_handle` to confirm first boot and identify the superuser.
 - Admin authority is enforced in the CLI by comparing the authenticated subject handle to `@sys`.
 - Admin and superuser operations must not be exposed through HTTP endpoints.
 - The kernel has no concept of superuser; it enforces normal ACL rules for all users.
 
-Justification: a fixed handle makes system actions stably addressable across every deployment. An agent or script can always call `@sys/lookup` without out-of-band knowledge of the installation's superuser handle.
+Justification: a fixed handle makes system actions stably addressable across every deployment. An agent or script can always call `@sys/lookup` without out-of-band knowledge of the installation's superuser handle. The signing keypair allows this installation to issue verifiable receipts and action manifests.
 
 ### 19.2 User suspension
 
@@ -1149,9 +1201,10 @@ Requirements:
 
 On every `juice serve` startup, after first-boot setup, before accepting requests:
 
-1. Register and enable `/lookup` (KindNative, owned by the system superuser) if absent.
-2. Apply grant-all on `/lookup`.
-3. Reset all in-flight event consumptions: set `consumed_at = NULL` for every event where `consumed_at IS NOT NULL AND tx_id IS NULL`. These represent consume calls interrupted by a prior crash; resetting them to pending makes them retryable.
+1. Verify that `config.signing_public_key` and `config.signing_private_key` are present. Abort startup if either is missing.
+2. Register and enable `/lookup` (KindNative, owned by the system superuser) if absent.
+3. Apply grant-all on `/lookup`.
+4. Reset all in-flight event consumptions: set `consumed_at = NULL` for every event where `consumed_at IS NOT NULL AND tx_id IS NULL`. These represent consume calls interrupted by a prior crash; resetting them to pending makes them retryable.
 
 Bootstrap must be idempotent.
 
@@ -1267,6 +1320,7 @@ created_at
 Requirements:
 
 - Only the superuser may issue a deposit.
+- Deposit authorization must be enforced inside `Kernel.Deposit`, not only at the CLI boundary. `Kernel.Deposit` must verify that `operator_user_id` matches the configured superuser and return `ErrUnauthorized` for any other caller.
 - Amount must be a positive integer.
 - A deposit must atomically increase `user.available` by the specified amount inside a single SQLite transaction.
 - Each deposit must be persisted as an audit record.
@@ -1335,3 +1389,167 @@ Requirements:
 - Accepts the refresh token in the request body.
 - Marks the token revoked; subsequent refresh attempts with that token must return `ErrUnauthenticated`.
 - A missing or already-revoked token must return `ErrUnauthenticated`.
+
+## 20. Receipts
+
+### 20.1 Receipt object
+
+A receipt is an immutable, cryptographically signed record of a committed call. Every call — successful or failed — produces exactly one receipt.
+
+Required fields:
+
+```text
+id
+issuer_user_id
+tx_id
+trace_id
+action_id
+args_hash
+reply_hash
+status
+gross
+net
+fee
+reason
+created_at
+signature
+```
+
+Requirements:
+
+- `issuer_user_id` is the `@sys` user of the kernel that executed the call.
+- `args_hash` and `reply_hash` are SHA-256 hashes of the canonical (RFC 8785 JCS) JSON serialisation of `args_json` and `reply_json` respectively.
+- `status`, `gross`, `net`, `fee`, and `reason` must match the corresponding transaction fields exactly.
+- `signature` is the Ed25519 signature of the canonical JSON serialisation of all other receipt fields (excluding `signature` itself), signed with `config.signing_private_key`.
+- A receipt is immutable. No field may change after creation.
+- Receipt creation must be atomic with transaction commit: `CommitCall` and `CommitFailedCall` must create the transaction record and the receipt record in the same SQLite transaction. A committed transaction without a receipt is an invalid state.
+
+### 20.2 Receipt invariant
+
+```text
+∀ committed call. ∃ exactly one receipt r. r.tx_id = call.tx_id.
+```
+
+The kernel must enforce this invariant. It is not acceptable to create a transaction without a receipt or a receipt without a transaction.
+
+### 20.3 Ratings (separate table)
+
+A rating record references both a transaction and its receipt.
+
+Required fields:
+
+```text
+id
+rated_tx_id
+rated_receipt_id
+rater_user_id
+rating
+created_at
+signature
+```
+
+Requirements:
+
+- `rating` must be in `{0, 1}`.
+- `rated_receipt_id` is nullable for transactions that predate the receipt requirement.
+- `signature` is the Ed25519 signature of the canonical JSON serialisation of all other rating fields (excluding `signature`), signed with the rater's private key. For the superuser rater, the platform signing key is used.
+- A transaction may have at most one rating record. A duplicate must be rejected with `ErrInvalidInput`.
+- Rating cascade (§10.2) creates one rating record per unrated descendant; all insertions are in one atomic SQLite transaction.
+
+### 20.4 Canonical serialisation
+
+All signed objects (receipts, ratings, action manifests — see §21.3) must use RFC 8785 JSON Canonicalization Scheme (JCS) as the serialisation standard for signature generation and verification.
+
+Requirements:
+
+- The `script` package or a shared utility must provide a `CanonicalJSON(v any) ([]byte, error)` function.
+- Signature generation must call `CanonicalJSON` before signing.
+- Signature verification must call `CanonicalJSON` before verifying.
+
+## 21. Federation
+
+### 21.1 Remote kernels as ordinary users
+
+A remote kernel is represented as an ordinary user record with `public_key` and `remote_base_url` set (§3.1). No new kernel object type is introduced.
+
+Requirements:
+
+- `public_key` is the Ed25519 public key of the remote kernel (its `config.signing_public_key`).
+- `remote_base_url` is the base URL of the remote kernel's HTTP API (e.g. `https://remote.example.com`).
+- A remote kernel user may own actions. Those actions have `kind = http` and are created locally by the `juice remote import` command.
+- A remote kernel user may not authenticate with a password. It has no refresh token and no access token.
+- The remote kernel user's `handle` must be unique and must not collide with local user handles. Convention: `@<hostname>`.
+
+### 21.2 Peer discovery
+
+In v1, peer discovery is manual only.
+
+Requirements:
+
+- `juice remote add <url>` fetches the well-known metadata endpoint at `<url>/.well-known/juice-kernel.json`, validates the response, and creates or updates the local user record for that remote kernel.
+- `juice remote list` lists all remote kernel users registered locally.
+- `juice remote import <remote-handle> <action-name>` fetches the remote kernel's action manifest for the named action and creates a local `http` action that proxies calls to the remote endpoint.
+- There is no automatic peer discovery in v1. Kernels do not gossip or crawl for peers.
+
+### 21.3 Action manifests
+
+An action manifest is a signed, exportable description of a public active action.
+
+Required fields:
+
+```text
+owner_handle
+name
+description
+input_schema
+output_schema
+price
+kind
+artifact_hash
+stats
+updated_at
+signature
+```
+
+Requirements:
+
+- Only active public actions may be included in a manifest.
+- `artifact_hash` is the content hash of the compiled artifact (same as `action.artifact_hash`).
+- `stats` is a snapshot of the action's fixed statistics fields (§9.1) at manifest generation time.
+- `signature` is the Ed25519 signature of the canonical JSON of all other manifest fields, signed with `config.signing_private_key`.
+- The kernel must expose a manifest endpoint: `GET /v1/actions/{id}/manifest`.
+- The well-known metadata endpoint `GET /.well-known/juice-kernel.json` must return at minimum: `public_key` (base64url), `handle` (`@sys`), and `base_url`.
+
+### 21.4 Cross-kernel calls
+
+When a local action with `kind = http` represents a remote kernel action, calls to it follow the normal §5.1–§5.5 call path locally. The remote execution is initiated by the HTTP action handler.
+
+Requirements:
+
+- The HTTP action handler for a remote action must include the local kernel's `idempotency_key` in the remote call request.
+- On a successful remote call, the remote kernel returns its receipt. The local kernel stores `SHA-256(receipt_json)` as `transaction.remote_receipt_hash`.
+- The local kernel does not re-verify the remote receipt signature in v1. Verification is deferred to a future audit step.
+
+### 21.5 Idempotency
+
+Cross-kernel calls must be idempotent. A repeated request with the same idempotency key from the same counterparty must return the original receipt without re-executing.
+
+Required fields:
+
+```text
+id
+idempotency_key
+counterparty_user_id
+receipt_id
+created_at
+expires_at
+```
+
+Requirements:
+
+- `idempotency_key` is a UUID v4 generated by the local kernel at call time.
+- `counterparty_user_id` is the remote kernel's local user id.
+- `expires_at` is `created_at + 24 hours`.
+- If a request arrives with an `idempotency_key` that matches an unexpired record for the same `counterparty_user_id`, the kernel must return the original receipt without executing again.
+- Expired idempotency records may be purged.
+- Idempotency applies to cross-kernel calls only. Local calls do not use idempotency keys.

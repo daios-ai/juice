@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strings"
@@ -11,8 +14,10 @@ import (
 )
 
 const (
-	configKeySuperuser = "superuser_handle"
-	superuserHandle    = "@sys"
+	configKeySuperuser      = "superuser_handle"
+	configKeySigningPublic  = "signing_public_key"
+	configKeySigningPrivate = "signing_private_key"
+	superuserHandle         = "@sys"
 )
 
 // bootstrap runs idempotent startup tasks before the server accepts requests.
@@ -27,12 +32,28 @@ func bootstrap(k *kernel.Kernel) error {
 
 	handle, err := k.GetConfig(ctx, configKeySuperuser)
 	if err != nil || handle == "" {
-		// First boot: prompt for superuser credentials.
 		handle, err = firstBoot(ctx, k)
 		if err != nil {
 			return err
 		}
 	}
+
+	// Verify signing key is present (required after first boot).
+	privKeyB64, _ := k.GetConfig(ctx, configKeySigningPrivate)
+	if privKeyB64 == "" {
+		return fmt.Errorf("signing_private_key missing from config; re-run on a fresh database or restore the key")
+	}
+	privKeyBytes, err := base64.RawURLEncoding.DecodeString(privKeyB64)
+	if err != nil || len(privKeyBytes) != ed25519.PrivateKeySize {
+		return fmt.Errorf("signing_private_key in config is invalid")
+	}
+
+	// Load the signing key and issuer user ID into the kernel.
+	su, err := k.ReadUserByHandle(ctx, handle)
+	if err != nil {
+		return fmt.Errorf("read superuser: %w", err)
+	}
+	k.SetSigningKey(ed25519.PrivateKey(privKeyBytes), su.ID, handle)
 
 	// Register /lookup native action if absent.
 	if err := ensureSysLookup(ctx, k, handle); err != nil {
@@ -50,24 +71,38 @@ func bootstrap(k *kernel.Kernel) error {
 func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 	fmt.Println("First boot: no superuser configured.")
 
-	fmt.Print("Superuser password: ")
-	passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
-	if err != nil {
-		return "", fmt.Errorf("reading password: %w", err)
+	password := os.Getenv("JUICE_BOOTSTRAP_PASSWORD")
+	if password == "" {
+		fmt.Print("Superuser password: ")
+		passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err != nil {
+			return "", fmt.Errorf("reading password: %w", err)
+		}
+		password = strings.TrimSpace(string(passwordBytes))
 	}
-	password := strings.TrimSpace(string(passwordBytes))
 	if password == "" {
 		return "", fmt.Errorf("password cannot be empty")
 	}
 
-	_, err = k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
+	if _, err := k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
 		Handle:   superuserHandle,
 		Email:    "sys@sys",
 		Password: password,
-	}, configKeySuperuser)
-	if err != nil {
+	}, configKeySuperuser); err != nil {
 		return "", fmt.Errorf("create superuser: %w", err)
+	}
+
+	// Generate Ed25519 signing keypair atomically with first boot.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", fmt.Errorf("generate signing key: %w", err)
+	}
+	if err := k.SetConfig(ctx, configKeySigningPublic, base64.RawURLEncoding.EncodeToString(pub)); err != nil {
+		return "", fmt.Errorf("store signing public key: %w", err)
+	}
+	if err := k.SetConfig(ctx, configKeySigningPrivate, base64.RawURLEncoding.EncodeToString(priv)); err != nil {
+		return "", fmt.Errorf("store signing private key: %w", err)
 	}
 
 	fmt.Printf("Superuser %q created.\n", superuserHandle)
