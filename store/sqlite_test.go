@@ -167,6 +167,62 @@ func TestActionCRUD(t *testing.T) {
 	}
 }
 
+func TestDeleteActionSoftDelete(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@sd-owner", 0)
+	caller := newUser("@sd-caller", 0)
+	_ = db.CreateUser(ctx, owner)
+	_ = db.CreateUser(ctx, caller)
+
+	a := newAction(owner.ID, "/sd-svc", 0, true)
+	if err := db.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.GrantACL(ctx, &kernel.ACLEntry{
+		SubjectUserID: caller.ID,
+		ActionID:      a.ID,
+		Permission:    kernel.PermCall,
+		CreatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.DeleteAction(ctx, a.ID); err != nil {
+		t.Fatalf("DeleteAction: %v", err)
+	}
+
+	// Row still exists in the database (soft delete preserves it).
+	var count int
+	if err := db.db.QueryRow("SELECT COUNT(*) FROM actions WHERE id=?", a.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("action row count after soft delete: got %d, want 1", count)
+	}
+
+	// ReadAction returns not found (filtered by deleted_at IS NULL).
+	_, err := db.ReadAction(ctx, a.ID)
+	if err == nil {
+		t.Error("expected error reading soft-deleted action, got nil")
+	}
+
+	// ListActions excludes the deleted action.
+	all, _ := db.ListActions(ctx, false, 100, 0)
+	for _, listed := range all {
+		if listed.ID == a.ID {
+			t.Error("soft-deleted action should not appear in ListActions")
+		}
+	}
+
+	// ACL entries are purged.
+	ok, _ := db.CheckACL(ctx, caller.ID, a.ID, kernel.PermCall)
+	if ok {
+		t.Error("ACL entry should be removed after soft delete")
+	}
+}
+
 func TestListActions(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -327,7 +383,7 @@ func TestCommitCall(t *testing.T) {
 		ActionID: "a1", Status: kernel.TxSuccess, Gross: 100, Net: 80, Fee: 20,
 		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
 	}
-	if err := db.CommitCall(ctx, tx, p.ID, target.ID, fee.ID, 80, 20); err != nil {
+	if err := db.CommitCall(ctx, tx, p.ID, target.ID, fee.ID, 80, 20, nil); err != nil {
 		t.Fatal(err)
 	}
 

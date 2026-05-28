@@ -65,6 +65,7 @@ type Action struct {
 	ArtifactHash string // content-addressed compiled WASM artifact
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	DeletedAt    *time.Time // nil unless soft-deleted
 }
 
 // ACLEntry grants a permission to a subject over an action.

@@ -1206,3 +1206,49 @@ func TestServeGetMe(t *testing.T) {
 		t.Errorf("unauthenticated: expected 401, got %d", resp2.StatusCode)
 	}
 }
+
+func TestGetActionRequiresReadPermission(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@ra-owner")
+	_, strangerTok := makeUser(t, k, "@ra-stranger")
+	_, readerTok := makeUser(t, k, "@ra-reader")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "/ra-action", "kind": "http", "price": 0, "source": "http://example.com",
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+
+	// Owner can read their own action.
+	r1 := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, ownerTok)
+	r1.Body.Close()
+	if r1.StatusCode != http.StatusOK {
+		t.Errorf("owner: expected 200, got %d", r1.StatusCode)
+	}
+
+	// Stranger has no read permission — expect 403.
+	r2 := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, strangerTok)
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusForbidden {
+		t.Errorf("stranger: expected 403, got %d", r2.StatusCode)
+	}
+
+	// Grant read permission to reader via kernel.
+	reader, _ := k.ReadUserByHandle(context.Background(), "@ra-reader")
+	gr := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/acl", map[string]any{
+		"subject_user_id": reader.ID, "permission": "read",
+	}, ownerTok)
+	gr.Body.Close()
+	if gr.StatusCode != http.StatusNoContent {
+		t.Fatalf("grant read: expected 204, got %d", gr.StatusCode)
+	}
+
+	// Reader can now access the action.
+	r3 := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, readerTok)
+	r3.Body.Close()
+	if r3.StatusCode != http.StatusOK {
+		t.Errorf("reader with ACL: expected 200, got %d", r3.StatusCode)
+	}
+}

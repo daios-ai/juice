@@ -339,14 +339,14 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at
-		 FROM actions WHERE id=?`, id))
+		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at,deleted_at
+		 FROM actions WHERE id=? AND deleted_at IS NULL`, id))
 }
 
 func (s *DB) ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at
-		 FROM actions WHERE owner_user_id=? AND name=?`, ownerID, name))
+		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at,deleted_at
+		 FROM actions WHERE owner_user_id=? AND name=? AND deleted_at IS NULL`, ownerID, name))
 }
 
 func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
@@ -363,15 +363,28 @@ func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
 }
 
 func (s *DB) DeleteAction(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM actions WHERE id=?`, id)
-	return dbErr(err, "delete action")
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin delete action")
+	}
+	defer tx.Rollback()
+	now := timeToStr(time.Now().UTC())
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE actions SET active=0, deleted_at=? WHERE id=?`, now, id); err != nil {
+		return dbErr(err, "delete action: soft delete")
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM acl_entries WHERE action_id=?`, id); err != nil {
+		return dbErr(err, "delete action: purge acl")
+	}
+	return dbErr(tx.Commit(), "delete action: commit")
 }
 
 func (s *DB) ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*kernel.Action, error) {
-	q := `SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at FROM actions`
+	q := `SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at,deleted_at FROM actions WHERE deleted_at IS NULL`
 	args := []any{}
 	if activeOnly {
-		q += ` WHERE active=1`
+		q += ` AND active=1`
 	}
 	q += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
@@ -398,8 +411,8 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at
-		 FROM actions ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at,deleted_at
+		 FROM actions WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list all actions")
 	}
@@ -450,37 +463,43 @@ func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
 	var a kernel.Action
 	var kind, inJSON, outJSON, createdAt, updatedAt string
 	var active, public int
+	var deletedAt *string
 	err := row.Scan(&a.ID, &a.OwnerUserID, &a.Name, &kind, &active, &public, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash,
-		&createdAt, &updatedAt)
+		&createdAt, &updatedAt, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("action not found")
 	}
 	if err != nil {
 		return nil, dbErr(err, "read action")
 	}
-	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt)
+	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt, deletedAt)
 }
 
 func (s *DB) scanActionRow(rows *sql.Rows) (*kernel.Action, error) {
 	var a kernel.Action
 	var kind, inJSON, outJSON, createdAt, updatedAt string
 	var active, public int
+	var deletedAt *string
 	err := rows.Scan(&a.ID, &a.OwnerUserID, &a.Name, &kind, &active, &public, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash,
-		&createdAt, &updatedAt)
+		&createdAt, &updatedAt, &deletedAt)
 	if err != nil {
 		return nil, dbErr(err, "scan action")
 	}
-	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt)
+	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt, deletedAt)
 }
 
-func finishAction(a *kernel.Action, kind string, active, public int, inJSON, outJSON, createdAt, updatedAt string) (*kernel.Action, error) {
+func finishAction(a *kernel.Action, kind string, active, public int, inJSON, outJSON, createdAt, updatedAt string, deletedAt *string) (*kernel.Action, error) {
 	a.Kind = kernel.ActionKind(kind)
 	a.Active = active != 0
 	a.Public = public != 0
 	a.CreatedAt = strToTime(createdAt)
 	a.UpdatedAt = strToTime(updatedAt)
+	if deletedAt != nil {
+		t := strToTime(*deletedAt)
+		a.DeletedAt = &t
+	}
 	if err := json.Unmarshal([]byte(inJSON), &a.InputSchema); err != nil {
 		a.InputSchema = map[string]any{}
 	}
@@ -649,7 +668,7 @@ func (s *DB) FundProcess(ctx context.Context, userID, processID string, amount i
 	return dbErr(tx.Commit(), "fund process commit")
 }
 
-func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, processID, targetUserID, feeRecipientID string, net, fee int64) error {
+func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return dbErr(err, "begin commit call")
@@ -707,10 +726,44 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, processID,
 		}
 	}
 
+	// Update trace cost and latency for all ancestor traces atomically.
+	if _, err = tx.ExecContext(ctx, `
+WITH RECURSIVE ancestors(id, parent_id) AS (
+    SELECT id, parent_trace_id FROM traces WHERE id=?
+    UNION ALL
+    SELECT t.id, t.parent_trace_id FROM traces t
+    JOIN ancestors a ON t.id=a.parent_id AND a.id!=a.parent_id
+)
+UPDATE traces SET
+    cost=cost+?,
+    latency_ms=MAX(latency_ms, CAST((julianday(?)-julianday(created_at))*86400000 AS INTEGER))
+WHERE id IN (SELECT id FROM ancestors)`,
+		ktx.TraceID, ktx.Gross, timeToStr(ktx.EndedAt),
+	); err != nil {
+		return dbErr(err, "commit call: update trace cost")
+	}
+
+	// Upsert action stats.
+	if stats != nil {
+		if _, err = tx.ExecContext(ctx,
+			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
+			 VALUES (?,?,?,?,?,?,?,?,?)
+			 ON CONFLICT(action_id) DO UPDATE SET
+			   uses=excluded.uses, successes=excluded.successes, failures=excluded.failures,
+			   rating_count=excluded.rating_count, price_mean=excluded.price_mean,
+			   latency_mean=excluded.latency_mean, rating_mean=excluded.rating_mean,
+			   last_used_at=excluded.last_used_at`,
+			stats.ActionID, stats.Uses, stats.Successes, stats.Failures, stats.RatingCount,
+			stats.PriceMean, stats.LatencyMean, stats.RatingMean, timeToStr(stats.LastUsedAt),
+		); err != nil {
+			return dbErr(err, "commit call: upsert stats")
+		}
+	}
+
 	return dbErr(tx.Commit(), "commit call: commit")
 }
 
-func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, processID string, gross int64) error {
+func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, processID string, gross int64, stats *kernel.Stats) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return dbErr(err, "begin commit failed call")
@@ -738,6 +791,39 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, proc
 		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt), ktx.Rating,
 	); err != nil {
 		return dbErr(err, "commit failed call: insert transaction")
+	}
+
+	// Update trace latency (cost delta is 0 for failures).
+	if _, err := tx.ExecContext(ctx, `
+WITH RECURSIVE ancestors(id, parent_id) AS (
+    SELECT id, parent_trace_id FROM traces WHERE id=?
+    UNION ALL
+    SELECT t.id, t.parent_trace_id FROM traces t
+    JOIN ancestors a ON t.id=a.parent_id AND a.id!=a.parent_id
+)
+UPDATE traces SET
+    latency_ms=MAX(latency_ms, CAST((julianday(?)-julianday(created_at))*86400000 AS INTEGER))
+WHERE id IN (SELECT id FROM ancestors)`,
+		ktx.TraceID, timeToStr(ktx.EndedAt),
+	); err != nil {
+		return dbErr(err, "commit failed call: update trace latency")
+	}
+
+	// Upsert action stats.
+	if stats != nil {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
+			 VALUES (?,?,?,?,?,?,?,?,?)
+			 ON CONFLICT(action_id) DO UPDATE SET
+			   uses=excluded.uses, successes=excluded.successes, failures=excluded.failures,
+			   rating_count=excluded.rating_count, price_mean=excluded.price_mean,
+			   latency_mean=excluded.latency_mean, rating_mean=excluded.rating_mean,
+			   last_used_at=excluded.last_used_at`,
+			stats.ActionID, stats.Uses, stats.Successes, stats.Failures, stats.RatingCount,
+			stats.PriceMean, stats.LatencyMean, stats.RatingMean, timeToStr(stats.LastUsedAt),
+		); err != nil {
+			return dbErr(err, "commit failed call: upsert stats")
+		}
 	}
 
 	return dbErr(tx.Commit(), "commit failed call: commit")
@@ -1308,6 +1394,23 @@ func (s *DB) PurgeListenerEvents(ctx context.Context, listenerID string) error {
 	_, err := s.db.ExecContext(ctx,
 		`DELETE FROM events WHERE listener_id=? AND consumed_at IS NULL`, listenerID)
 	return dbErr(err, "purge listener events")
+}
+
+func (s *DB) DeleteListenerWithEvents(ctx context.Context, listenerID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin delete listener")
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE listeners SET active=0 WHERE id=?`, listenerID); err != nil {
+		return dbErr(err, "delete listener: deactivate")
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM events WHERE listener_id=? AND consumed_at IS NULL`, listenerID); err != nil {
+		return dbErr(err, "delete listener: purge events")
+	}
+	return dbErr(tx.Commit(), "delete listener: commit")
 }
 
 func (s *DB) ResetInFlightEvents(ctx context.Context) error {

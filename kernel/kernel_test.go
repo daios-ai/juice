@@ -496,3 +496,212 @@ func TestCreateHTTPActionRejectsSSRFURL(t *testing.T) {
 		t.Error("expected error creating HTTP action with SSRF URL")
 	}
 }
+
+// ---- Event / Listener tests ----
+
+type failingSettleStore struct {
+	*fakeStore
+}
+
+func (f *failingSettleStore) SettleEvent(_ context.Context, _, _ string) error {
+	return ErrInternal.Wrap("injected settle failure")
+}
+
+func TestConsumeEventSettleFailureReturnsError(t *testing.T) {
+	base := newFakeStore()
+	failing := &failingSettleStore{fakeStore: base}
+	k := newTestKernelWithScripts(failing, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, base, "@settle-owner", 1000)
+
+	a := &Action{
+		ID:          uuid.New().String(),
+		OwnerUserID: owner.ID,
+		Name:        "/settle-svc",
+		Kind:        KindWasm,
+		Active:      true,
+		Price:       10,
+		Source:      "wat",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	_ = base.CreateAction(ctx, a)
+
+	l := &Listener{
+		ID:             uuid.New().String(),
+		OwnerUserID:    owner.ID,
+		SourceUserID:   owner.ID,
+		EventName:      "settle.test",
+		TargetActionID: a.ID,
+		Active:         true,
+		CreatedAt:      time.Now().UTC(),
+	}
+	_ = base.CreateListener(ctx, l)
+
+	e := &Event{
+		ID:             uuid.New().String(),
+		ListenerID:     l.ID,
+		ArgsJSON:       `{}`,
+		CausingTraceID: "",
+		CreatedAt:      time.Now().UTC(),
+	}
+	_ = base.CreateEvent(ctx, e)
+
+	p, _, _ := k.StartProcess(ctx, owner.ID, 500)
+
+	_, err := k.ConsumeEvent(ctx, owner.ID, e.ID, p.ID)
+	if err == nil {
+		t.Fatal("expected error from failing SettleEvent, got nil")
+	}
+	var ke *KernelError
+	if !errors.As(err, &ke) || ke.Code != "internal" {
+		t.Errorf("want ErrInternal, got: %v", err)
+	}
+}
+
+func TestDeleteListenerPurgesEventsAtomically(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@dl-owner", 100)
+	a := setupAction(t, st, owner.ID, "/lookup", 0)
+
+	l := &Listener{
+		ID:             uuid.New().String(),
+		OwnerUserID:    owner.ID,
+		SourceUserID:   owner.ID,
+		EventName:      "dl.test",
+		TargetActionID: a.ID,
+		Active:         true,
+		CreatedAt:      time.Now().UTC(),
+	}
+	_ = st.CreateListener(ctx, l)
+
+	pending1 := &Event{ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: `{}`, CreatedAt: time.Now().UTC()}
+	pending2 := &Event{ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: `{}`, CreatedAt: time.Now().UTC()}
+	inFlight := &Event{ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: `{}`, CreatedAt: time.Now().UTC()}
+	_ = st.CreateEvent(ctx, pending1)
+	_ = st.CreateEvent(ctx, pending2)
+	_ = st.CreateEvent(ctx, inFlight)
+	// Mark inFlight as consumed (in-flight — ConsumedAt set, TxID nil).
+	_ = st.LockEvent(ctx, inFlight.ID)
+
+	if err := k.DeleteListener(ctx, owner.ID, l.ID); err != nil {
+		t.Fatalf("DeleteListener: %v", err)
+	}
+
+	got, _ := st.ReadListener(ctx, l.ID)
+	if got.Active {
+		t.Error("listener should be inactive after delete")
+	}
+
+	pending, _ := st.ListPendingEvents(ctx, l.ID)
+	if len(pending) != 0 {
+		t.Errorf("pending events after delete: got %d, want 0", len(pending))
+	}
+
+	// In-flight event is consumed (ConsumedAt set), so it is preserved.
+	_, err := st.ReadEvent(ctx, inFlight.ID)
+	if err != nil {
+		t.Errorf("in-flight event should be preserved after delete: %v", err)
+	}
+}
+
+func TestRateTransactionUpdatesActionStats(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@rate-owner", 1000)
+	a := &Action{
+		ID:          uuid.New().String(),
+		OwnerUserID: owner.ID,
+		Name:        "/rate-svc",
+		Kind:        KindWasm,
+		Active:      true,
+		Price:       0,
+		Source:      "wat",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, 100)
+	reply, err := k.Call(ctx, CallRequest{
+		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: owner.ID, ActionName: "/rate-svc", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+
+	const rating = 1.0
+	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, rating); err != nil {
+		t.Fatalf("RateTransaction: %v", err)
+	}
+
+	stats, err := k.ReadStats(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("ReadStats: %v", err)
+	}
+	if stats == nil {
+		t.Fatal("expected stats after rating, got nil")
+	}
+	if stats.RatingCount != 1 {
+		t.Errorf("RatingCount: got %d, want 1", stats.RatingCount)
+	}
+	if stats.RatingMean != rating {
+		t.Errorf("RatingMean: got %f, want %f", stats.RatingMean, rating)
+	}
+}
+
+// ---- Action soft-delete tests ----
+
+func TestDeleteActionSoftDelete(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@sd-owner", 0)
+	caller := setupUser(t, st, "@sd-caller", 0)
+
+	a := &Action{
+		ID:          uuid.New().String(),
+		OwnerUserID: owner.ID,
+		Name:        "/sd-svc",
+		Kind:        KindHTTP,
+		Active:      true,
+		Price:       0,
+		Source:      "http://example.com",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: caller.ID, ActionID: a.ID, Permission: PermCall, CreatedAt: time.Now().UTC()})
+
+	if err := k.DeleteAction(ctx, owner.ID, a.ID); err != nil {
+		t.Fatalf("DeleteAction: %v", err)
+	}
+
+	// Action should no longer be readable.
+	_, err := k.ReadAction(ctx, a.ID)
+	if err == nil {
+		t.Error("expected error reading deleted action, got nil")
+	}
+
+	// Action should not appear in listings.
+	list, _ := st.ListActions(ctx, false, 100, 0)
+	for _, listed := range list {
+		if listed.ID == a.ID {
+			t.Error("deleted action should not appear in ListActions")
+		}
+	}
+
+	// ACL entries should be purged.
+	ok, _ := st.CheckACL(ctx, caller.ID, a.ID, PermCall)
+	if ok {
+		t.Error("ACL entry should be removed after action delete")
+	}
+}

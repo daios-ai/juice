@@ -353,7 +353,7 @@ func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	a, err := s.kernel.ReadAction(r.Context(), id)
+	a, err := s.kernel.ReadActionForSubject(r.Context(), subjectFrom(r), id)
 	if err != nil {
 		writeErr(w, err)
 		return

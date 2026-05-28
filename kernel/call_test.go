@@ -773,6 +773,87 @@ func TestDirectCallHasNilCausedByTraceID(t *testing.T) {
 	}
 }
 
+func TestContractorEphemeralRootHasCausedByTraceID(t *testing.T) {
+	st := newFakeStore()
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 500)
+	bob := setupUser(t, st, "@bob", 0)
+
+	inner := &Action{
+		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "/inner",
+		Kind: KindWasm, Source: "inner", Active: true, Price: 0,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, inner)
+	outer := &Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/outer",
+		Kind: KindWasm, Source: "outer", Active: true, Price: 0,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, outer)
+	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: PermCall})
+
+	exec := &contractorExec{targetUser: bob.ID, targetAction: "/inner"}
+	k := newTestKernelWithScripts(st, exec)
+
+	p, root, _ := k.StartProcess(ctx, alice.ID, 0)
+	reply, err := k.Call(ctx, CallRequest{
+		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: alice.ID, ActionName: "/outer", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call failed: %v", err)
+	}
+
+	outerCallTraceID := reply.TraceID
+
+	// Find all traces — locate the ephemeral process root (parent == self, not in alice's original process).
+	allProcs, _ := st.ListAllProcesses(ctx, 10, 0)
+	var epID string
+	for _, proc := range allProcs {
+		if proc.ID != p.ID {
+			epID = proc.ID
+			break
+		}
+	}
+	if epID == "" {
+		t.Fatal("ephemeral process not found")
+	}
+
+	traces, _ := st.ListTraces(ctx, epID)
+	var epRoot *Trace
+	for _, tr := range traces {
+		if tr.ParentTraceID == tr.ID { // self-referential root
+			epRoot = tr
+			break
+		}
+	}
+	if epRoot == nil {
+		t.Fatal("ephemeral root trace not found")
+	}
+
+	// Ephemeral root must carry FOLLOWS_FROM to the outer call trace.
+	if epRoot.CausedByTraceID == nil {
+		t.Fatal("ephemeral root trace.CausedByTraceID should not be nil")
+	}
+	if *epRoot.CausedByTraceID != outerCallTraceID {
+		t.Errorf("ephemeral root caused_by: got %q, want %q", *epRoot.CausedByTraceID, outerCallTraceID)
+	}
+
+	// The child call trace within the ephemeral process must NOT have CausedByTraceID.
+	for _, tr := range traces {
+		if tr.ID == epRoot.ID {
+			continue
+		}
+		if tr.CausedByTraceID != nil {
+			t.Errorf("child call trace.CausedByTraceID should be nil, got %q", *tr.CausedByTraceID)
+		}
+	}
+}
+
 // ---- Accounting (ComputeFee is defined in call.go) ----
 
 func TestComputeFee(t *testing.T) {
@@ -819,12 +900,12 @@ type failingCommitStore struct {
 	calls int
 }
 
-func (f *failingCommitStore) CommitCall(ctx context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64) error {
+func (f *failingCommitStore) CommitCall(ctx context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats) error {
 	f.calls++
 	if f.calls > 0 {
 		return ErrInternal.Wrap("injected commit failure")
 	}
-	return f.fakeStore.CommitCall(ctx, tx, processID, targetUserID, feeRecipientID, net, fee)
+	return f.fakeStore.CommitCall(ctx, tx, processID, targetUserID, feeRecipientID, net, fee, stats)
 }
 
 func TestCommitCallAtomicOnFailure(t *testing.T) {
@@ -942,7 +1023,7 @@ type failingCommitFailedCallStore struct {
 	*fakeStore
 }
 
-func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *Transaction, _ string, _ int64) error {
+func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *Transaction, _ string, _ int64, _ *Stats) error {
 	return ErrInternal.Wrap("injected CommitFailedCall failure")
 }
 
@@ -1099,7 +1180,7 @@ func TestCallSuspendedSubjectRejected(t *testing.T) {
 		t.Fatal("expected error for suspended subject")
 	}
 	var ke *KernelError
-	if !errors.As(err, &ke) || ke.Code != "unauthorized" {
-		t.Errorf("expected unauthorized error, got %v", err)
+	if !errors.As(err, &ke) || ke.Code != "unauthenticated" {
+		t.Errorf("expected unauthenticated error, got %v", err)
 	}
 }

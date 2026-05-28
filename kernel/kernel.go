@@ -341,9 +341,56 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID string) erro
 	return nil
 }
 
-// ReadAction returns the action with the given ID.
+// ReadAction returns the action with the given ID (no ACL check).
+// Returns ErrNotFound for soft-deleted actions.
+// Used internally; external callers should use ReadActionForSubject.
 func (k *Kernel) ReadAction(ctx context.Context, id string) (*Action, error) {
-	return k.store.ReadAction(ctx, id)
+	a, err := k.store.ReadAction(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if a.DeletedAt != nil {
+		return nil, ErrNotFound.Wrap("action not found")
+	}
+	return a, nil
+}
+
+// ReadActionForSubject returns an action only if the subject has read access.
+// Public actions are readable by anyone. Otherwise Owner ∨ ACL(read) ∨ ACL(admin) is required.
+func (k *Kernel) ReadActionForSubject(ctx context.Context, subjectID, actionID string) (*Action, error) {
+	a, err := k.store.ReadAction(ctx, actionID)
+	if err != nil {
+		return nil, err
+	}
+	if a.Public || a.OwnerUserID == subjectID {
+		return a, nil
+	}
+	ok, err := k.canRead(ctx, subjectID, a)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrUnauthorized.Wrap("read permission denied")
+	}
+	return a, nil
+}
+
+// canRead returns true if subjectID may read action a.
+// CanRead(u,a) := Owner(u,a) ∨ Public(a) ∨ ACL(u,a,read) ∨ ACL(u,a,admin)
+func (k *Kernel) canRead(ctx context.Context, subjectID string, a *Action) (bool, error) {
+	if a.OwnerUserID == subjectID || a.Public {
+		return true, nil
+	}
+	if ok, err := k.store.CheckACL(ctx, subjectID, a.ID, PermRead); err != nil {
+		return false, ErrInternal.Wrapf("acl check: %v", err)
+	} else if ok {
+		return true, nil
+	}
+	ok, err := k.store.CheckACL(ctx, subjectID, a.ID, PermAdmin)
+	if err != nil {
+		return false, ErrInternal.Wrapf("acl check: %v", err)
+	}
+	return ok, nil
 }
 
 // ReadActionByOwnerName returns an action by (ownerID, name).
@@ -725,6 +772,7 @@ func (k *Kernel) ListTransactions(ctx context.Context, filter TxFilter) ([]*Tran
 
 // RateTransaction sets a rating on a completed transaction and cascades to unrated descendants.
 // Both the rating update and the cascade are performed atomically in a single store operation.
+// After cascade, action stats are updated to reflect the new rating.
 func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, rating float64) error {
 	if rating != 0 && rating != 1 {
 		return ErrInvalidInput.Wrap("rating must be 0 or 1")
@@ -739,7 +787,20 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	if tx.OwnerUserID != subjectID {
 		return ErrUnauthorized.Wrap("only the process owner may rate a transaction")
 	}
-	return k.store.RateTransactionCascade(ctx, txID, tx.TraceID, rating)
+	if err := k.store.RateTransactionCascade(ctx, txID, tx.TraceID, rating); err != nil {
+		return err
+	}
+	// Update action stats to keep rating_mean and rating_count current.
+	stats, err := k.store.ReadStats(ctx, tx.ActionID)
+	if err != nil || stats == nil {
+		stats = DefaultStats(tx.ActionID)
+	}
+	stats.RatingCount++
+	stats.RatingMean = IncrementalMean(stats.RatingMean, stats.RatingCount-1, rating)
+	if updateErr := k.store.UpsertStats(ctx, stats); updateErr != nil {
+		k.log.With(ctx).Warn("rate.stats_update_failed", "action_id", tx.ActionID, "error", updateErr)
+	}
+	return nil
 }
 
 // ---- Stats ----
@@ -988,7 +1049,7 @@ func (k *Kernel) PollListener(ctx context.Context, subjectID, listenerID string)
 	return k.store.ListPendingEvents(ctx, listenerID)
 }
 
-// DeleteListener deactivates a listener and purges its pending events.
+// DeleteListener atomically deactivates a listener and purges its pending events.
 func (k *Kernel) DeleteListener(ctx context.Context, subjectID, listenerID string) error {
 	l, err := k.store.ReadListener(ctx, listenerID)
 	if err != nil {
@@ -997,11 +1058,7 @@ func (k *Kernel) DeleteListener(ctx context.Context, subjectID, listenerID strin
 	if l.OwnerUserID != subjectID {
 		return ErrUnauthorized.Wrap("only the listener owner may remove it")
 	}
-	if err := k.store.PurgeListenerEvents(ctx, listenerID); err != nil {
-		return err
-	}
-	l.Active = false
-	return k.store.UpdateListener(ctx, l)
+	return k.store.DeleteListenerWithEvents(ctx, listenerID)
 }
 
 // ListListeners returns all listeners owned by ownerID.
@@ -1091,7 +1148,8 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 		return nil, err
 	}
 	if err := k.store.SettleEvent(ctx, eventID, reply.TxID); err != nil {
-		k.log.With(ctx).Warn("event.settle_failed", "event_id", eventID, "tx_id", reply.TxID, "error", err.Error())
+		k.log.With(ctx).Error("event.settle_failed", "event_id", eventID, "tx_id", reply.TxID, "error", err.Error())
+		return nil, ErrInternal.Wrap("could not settle event after successful call")
 	}
 	k.log.With(ctx).Info("event.consumed", "event_id", eventID, "tx_id", reply.TxID)
 	return reply, nil

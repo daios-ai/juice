@@ -1,9 +1,6 @@
 package kernel
 
-import (
-	"context"
-	"time"
-)
+import "context"
 
 // ---- Script execution interfaces ----
 
@@ -114,15 +111,13 @@ type Store interface {
 	// Fails atomically if user.available < amount.
 	FundProcess(ctx context.Context, userID, processID string, amount int64) error
 
-	// CommitCall atomically records a successful transaction and settles funds:
-	// debits gross from process.locked and owner.locked,
-	// credits net to targetUser.available and fee to feeRecipient.available.
-	// Either all writes succeed or none do.
-	CommitCall(ctx context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64) error
+	// CommitCall atomically records a successful transaction, settles funds, updates trace
+	// cost/latency for all ancestor traces, and upserts action stats — all in one SQLite transaction.
+	CommitCall(ctx context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats) error
 
-	// CommitFailedCall atomically refunds locked funds and records a failure transaction.
-	// Either both writes succeed or neither does.
-	CommitFailedCall(ctx context.Context, tx *Transaction, processID string, gross int64) error
+	// CommitFailedCall atomically refunds locked funds, records a failure transaction,
+	// updates trace latency, and upserts action stats — all in one SQLite transaction.
+	CommitFailedCall(ctx context.Context, tx *Transaction, processID string, gross int64, stats *Stats) error
 
 	// EndProcess closes the process and returns all remaining funds to the owner.
 	EndProcess(ctx context.Context, processID string) error
@@ -141,7 +136,6 @@ type Store interface {
 	ReadTransaction(ctx context.Context, id string) (*Transaction, error)
 	ListTransactions(ctx context.Context, filter TxFilter) ([]*Transaction, error)
 	ListAllTransactions(ctx context.Context, limit, offset int) ([]*Transaction, error)
-	UpdateTraceCostLatency(ctx context.Context, traceID string, grossDelta int64, endedAt time.Time) error
 	// RateTransactionCascade atomically rates txID and cascades the rating to all
 	// unrated descendant transactions in the trace subtree rooted at traceID.
 	// All writes occur in a single SQLite transaction.
@@ -172,6 +166,8 @@ type Store interface {
 	UnlockEvent(ctx context.Context, eventID string) error
 	// PurgeListenerEvents deletes all pending (unconsumed) events for a listener.
 	PurgeListenerEvents(ctx context.Context, listenerID string) error
+	// DeleteListenerWithEvents atomically deactivates a listener and purges its pending events.
+	DeleteListenerWithEvents(ctx context.Context, listenerID string) error
 	// ResetInFlightEvents resets all in-flight events (consumed_at set, tx_id null)
 	// back to pending. Called at startup to recover from crashed consume calls.
 	ResetInFlightEvents(ctx context.Context) error

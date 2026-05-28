@@ -54,7 +54,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrUnauthorized.Wrap("subject user not found")
 	}
 	if subject.SuspendedAt != nil {
-		return nil, ErrUnauthorized.Wrap("subject user is suspended")
+		return nil, ErrUnauthenticated.Wrap("account suspended")
 	}
 
 	// 2. Process must exist and be open.
@@ -191,14 +191,12 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if execErr != nil {
 		tx.Status = TxFailure
 		tx.Reason = execErr.Error()
-		if settlErr := k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price); settlErr != nil {
+		stats := k.computeStats(ctx, action.ID, tx, latency)
+		if settlErr := k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price, stats); settlErr != nil {
 			logger.Error("call.settlement_failed", "action", action.Name, "exec_error", execErr, "settlement_error", settlErr)
 			return nil, ErrInternal.Wrap("could not record failure transaction")
 		}
-		if updateErr := k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt); updateErr != nil {
-			logger.Warn("call.trace_update_failed", "trace_id", trace.ID, "error", updateErr)
-		}
-		k.updateStats(ctx, action.ID, tx, latency)
+		k.upsertStatTag(ctx, action.ID, stats)
 		logger.Warn("call.failed", "action", action.Name, "error", execErr)
 		return nil, execErr
 	}
@@ -207,39 +205,31 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if schemaErr := ValidateInput(action.OutputSchema, anyOf(reply)); schemaErr != nil {
 		tx.Status = TxFailure
 		tx.Reason = "output schema violation: " + schemaErr.Error()
-		if settlErr := k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price); settlErr != nil {
+		stats := k.computeStats(ctx, action.ID, tx, latency)
+		if settlErr := k.store.CommitFailedCall(ctx, tx, req.ProcessID, action.Price, stats); settlErr != nil {
 			logger.Error("call.settlement_failed", "action", action.Name, "schema_error", schemaErr, "settlement_error", settlErr)
 			return nil, ErrInternal.Wrap("could not record failure transaction")
 		}
-		if updateErr := k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt); updateErr != nil {
-			logger.Warn("call.trace_update_failed", "trace_id", trace.ID, "error", updateErr)
-		}
-		k.updateStats(ctx, action.ID, tx, latency)
+		k.upsertStatTag(ctx, action.ID, stats)
 		return nil, schemaErr
 	}
 
-	// 14 & 15. Record transaction and settle payment atomically.
+	// 14 & 15. Record transaction, settle payment, update trace cost/latency, and upsert stats — all atomic.
 	replyJSON, _ := json.Marshal(reply)
 	tx.ReplyJSON = string(replyJSON)
 	tx.Status = TxSuccess
 	tx.Gross = action.Price
 	tx.Net = net
 	tx.Fee = fee
-	if err := k.store.CommitCall(ctx, tx, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee); err != nil {
+	stats := k.computeStats(ctx, action.ID, tx, latency)
+	if err := k.store.CommitCall(ctx, tx, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats); err != nil {
 		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
 			logger.Error("call.refund_failed", "action", action.Name, "commit_error", err, "refund_error", refundErr)
 			return nil, ErrInternal.Wrap("could not refund funds after failed commit")
 		}
 		return nil, ErrInternal.Wrap("could not commit transaction")
 	}
-
-	// 16. Update stats.
-	k.updateStats(ctx, action.ID, tx, latency)
-
-	// 17. Update trace cost and latency for all ancestor traces.
-	if updateErr := k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt); updateErr != nil {
-		logger.Warn("call.trace_update_failed", "trace_id", trace.ID, "error", updateErr)
-	}
+	k.upsertStatTag(ctx, action.ID, stats)
 
 	logger.Info("call.success", "action", action.Name, "tx_id", txID, "latency_ms", fmt.Sprintf("%.1f", latency*1000))
 
@@ -449,6 +439,7 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 		CreatedAt: now,
 	}
 	epRoot.ParentTraceID = epRoot.ID
+	epRoot.CausedByTraceID = strPtr(h.traceID) // FOLLOWS_FROM: ephemeral process root explains why this process was created
 	if err := h.kernel.store.StartProcess(ctx, ep, epRoot, h.ownerUserID, action.Price); err != nil {
 		if isInsufficientFunds(err) {
 			return nil, ErrInsufficientFunds.Wrap("action owner has insufficient balance for sub-call")
@@ -461,12 +452,11 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	defer func() { _ = h.kernel.store.EndProcess(context.Background(), ep.ID) }()
 
 	reply, err := h.kernel.Call(ctx, CallRequest{
-		SubjectID:       h.ownerUserID,
-		ProcessID:       ep.ID,
-		CausedByTraceID: h.traceID, // FOLLOWS_FROM: ephemeral process crosses boundary
-		TargetUserID:    target.ID,
-		ActionName:      subActionName,
-		Args:            args,
+		SubjectID:    h.ownerUserID,
+		ProcessID:    ep.ID,
+		TargetUserID: target.ID,
+		ActionName:   subActionName,
+		Args:         args,
 	})
 	if err != nil {
 		return nil, err
@@ -500,14 +490,19 @@ func (h *kernelHostFunctions) Log(ctx context.Context, level, msg string) error 
 	return nil
 }
 
-// updateStats applies call outcome to action statistics.
-func (k *Kernel) updateStats(ctx context.Context, actionID string, tx *Transaction, latency float64) {
+// computeStats reads current stats, applies the call outcome, and returns the updated Stats.
+// The returned value is passed to CommitCall/CommitFailedCall so the upsert is atomic with settlement.
+func (k *Kernel) computeStats(ctx context.Context, actionID string, tx *Transaction, latency float64) *Stats {
 	stats, err := k.store.ReadStats(ctx, actionID)
 	if err != nil || stats == nil {
 		stats = DefaultStats(actionID)
 	}
 	UpdateStats(stats, tx, latency)
-	_ = k.store.UpsertStats(ctx, stats)
+	return stats
+}
+
+// upsertStatTag writes the latency bucket tag. Best-effort: errors are logged, not fatal.
+func (k *Kernel) upsertStatTag(ctx context.Context, actionID string, stats *Stats) {
 	_ = k.store.UpsertStatTag(ctx, &StatTag{
 		ActionID:  actionID,
 		Key:       "latency_bucket",

@@ -127,6 +127,12 @@ func (f *fakeStore) DeleteAction(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.actions, id)
+	suffix := ":" + id
+	for key := range f.acl {
+		if len(key) >= len(suffix) && key[len(key)-len(suffix):] == suffix {
+			delete(f.acl, key)
+		}
+	}
 	return nil
 }
 
@@ -301,7 +307,7 @@ func (f *fakeStore) FundProcess(_ context.Context, userID, processID string, amo
 	return nil
 }
 
-func (f *fakeStore) CommitFailedCall(_ context.Context, tx *Transaction, processID string, gross int64) error {
+func (f *fakeStore) CommitFailedCall(_ context.Context, tx *Transaction, processID string, gross int64, stats *Stats) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.processes[processID]
@@ -314,10 +320,14 @@ func (f *fakeStore) CommitFailedCall(_ context.Context, tx *Transaction, process
 	}
 	cp := *tx
 	f.transactions[tx.ID] = &cp
+	f.applyTraceLatency(tx.TraceID, 0, tx.EndedAt)
+	if stats != nil {
+		f.stats[stats.ActionID] = stats
+	}
 	return nil
 }
 
-func (f *fakeStore) CommitCall(_ context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64) error {
+func (f *fakeStore) CommitCall(_ context.Context, tx *Transaction, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.processes[processID]
@@ -348,6 +358,10 @@ func (f *fakeStore) CommitCall(_ context.Context, tx *Transaction, processID, ta
 	}
 	cp := *tx
 	f.transactions[tx.ID] = &cp
+	f.applyTraceLatency(tx.TraceID, tx.Gross, tx.EndedAt)
+	if stats != nil {
+		f.stats[stats.ActionID] = stats
+	}
 	return nil
 }
 
@@ -601,6 +615,20 @@ func (f *fakeStore) PurgeListenerEvents(_ context.Context, listenerID string) er
 	return nil
 }
 
+func (f *fakeStore) DeleteListenerWithEvents(_ context.Context, listenerID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if l, ok := f.listeners[listenerID]; ok {
+		l.Active = false
+	}
+	for id, e := range f.events {
+		if e.ListenerID == listenerID && e.ConsumedAt == nil {
+			delete(f.events, id)
+		}
+	}
+	return nil
+}
+
 func (f *fakeStore) ResetInFlightEvents(_ context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -828,9 +856,9 @@ func (f *fakeStore) ListAllTransactions(_ context.Context, limit, offset int) ([
 	return result, nil
 }
 
-func (f *fakeStore) UpdateTraceCostLatency(_ context.Context, traceID string, grossDelta int64, endedAt time.Time) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+// applyTraceLatency walks up the trace ancestor chain and updates cost and latency.
+// Must be called with f.mu held.
+func (f *fakeStore) applyTraceLatency(traceID string, grossDelta int64, endedAt time.Time) {
 	cur := traceID
 	for {
 		t, ok := f.traces[cur]
@@ -847,7 +875,6 @@ func (f *fakeStore) UpdateTraceCostLatency(_ context.Context, traceID string, gr
 		}
 		cur = t.ParentTraceID
 	}
-	return nil
 }
 
 func (f *fakeStore) RateTransactionCascade(_ context.Context, txID string, traceID string, rating float64) error {
