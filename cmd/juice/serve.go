@@ -133,8 +133,8 @@ func runServer(addr string) error {
 // ---- server ----
 
 type server struct {
-	kernel          *kernel.Kernel
-	log             *log.Logger
+	kernel *kernel.Kernel
+	log    *log.Logger
 }
 
 // ---- middleware ----
@@ -576,13 +576,32 @@ func (s *server) getTransaction(w http.ResponseWriter, r *http.Request) {
 func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var req struct {
-		Rating float64 `json:"rating"`
+		Rating    float64 `json:"rating"`
+		RatingID  string  `json:"rating_id"`
+		CreatedAt string  `json:"created_at"`
+		Signature string  `json:"signature"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	if err := s.kernel.RateTransaction(r.Context(), subjectFrom(r), id, req.Rating); err != nil {
+	var createdAt time.Time
+	if req.CreatedAt != "" {
+		var err error
+		createdAt, err = time.Parse(time.RFC3339, req.CreatedAt)
+		if err != nil {
+			writeErr(w, kernel.ErrInvalidInput.Wrap("created_at must be RFC3339"))
+			return
+		}
+	}
+	if err := s.kernel.RateTransaction(r.Context(), kernel.RateTransactionRequest{
+		ID:        req.RatingID,
+		SubjectID: subjectFrom(r),
+		TxID:      id,
+		Rating:    req.Rating,
+		CreatedAt: createdAt,
+		Signature: req.Signature,
+	}); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -789,7 +808,6 @@ func (s *server) postConsumeEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, reply)
 }
-
 
 func (s *server) grantAll(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")

@@ -40,6 +40,46 @@ func testSigningKey() ed25519.PrivateKey {
 	return priv
 }
 
+func setUserSigningKey(t *testing.T, st *fakeStore, u *User) ed25519.PrivateKey {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.PublicKey = base64.RawURLEncoding.EncodeToString(pub)
+	if err := st.UpdateUser(context.Background(), u); err != nil {
+		t.Fatal(err)
+	}
+	return priv
+}
+
+func signedRatingRequest(t *testing.T, st *fakeStore, subject *User, priv ed25519.PrivateKey, txID string, rating float64) RateTransactionRequest {
+	t.Helper()
+	rr := RateTransactionRequest{
+		ID:        uuid.New().String(),
+		SubjectID: subject.ID,
+		TxID:      txID,
+		Rating:    rating,
+		CreatedAt: time.Now().UTC(),
+	}
+	r := &Rating{
+		ID:          rr.ID,
+		RatedTxID:   rr.TxID,
+		RaterUserID: rr.SubjectID,
+		Rating:      rr.Rating,
+		CreatedAt:   rr.CreatedAt,
+	}
+	if receipt, _ := st.ReadReceiptByTxID(context.Background(), txID); receipt != nil {
+		r.RatedReceiptID = &receipt.ID
+	}
+	sig, err := signRating(priv, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr.Signature = sig
+	return rr
+}
+
 func setupUser(t *testing.T, st *fakeStore, handle string, balance int64) *User {
 	t.Helper()
 	hash, err := HashPassword("password")
@@ -630,6 +670,7 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@rate-owner", 1000)
+	ownerKey := setUserSigningKey(t, st, owner)
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: owner.ID,
@@ -653,7 +694,7 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	}
 
 	const rating = 1.0
-	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, rating); err != nil {
+	if err := k.RateTransaction(ctx, signedRatingRequest(t, st, owner, ownerKey, reply.TxID, rating)); err != nil {
 		t.Fatalf("RateTransaction: %v", err)
 	}
 
@@ -678,6 +719,7 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@rerate-owner", 500)
+	ownerKey := setUserSigningKey(t, st, owner)
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: owner.ID,
@@ -699,10 +741,10 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
+	if err := k.RateTransaction(ctx, signedRatingRequest(t, st, owner, ownerKey, reply.TxID, 1.0)); err != nil {
 		t.Fatalf("first RateTransaction: %v", err)
 	}
-	err = k.RateTransaction(ctx, owner.ID, reply.TxID, 0.0)
+	err = k.RateTransaction(ctx, signedRatingRequest(t, st, owner, ownerKey, reply.TxID, 0.0))
 	if err == nil {
 		t.Fatal("expected error on second rating, got nil")
 	}
@@ -927,6 +969,7 @@ func TestRatingRecordCreated(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@rr-owner", 500)
+	ownerKey := setUserSigningKey(t, st, owner)
 	a := &Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/rr-svc",
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
@@ -945,7 +988,7 @@ func TestRatingRecordCreated(t *testing.T) {
 		t.Fatalf("Call: %v", err)
 	}
 
-	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
+	if err := k.RateTransaction(ctx, signedRatingRequest(t, st, owner, ownerKey, reply.TxID, 1.0)); err != nil {
 		t.Fatalf("RateTransaction: %v", err)
 	}
 
@@ -973,6 +1016,7 @@ func TestRatingDuplicateRejected(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@dup-owner", 500)
+	ownerKey := setUserSigningKey(t, st, owner)
 	a := &Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/dup-svc",
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
@@ -991,10 +1035,10 @@ func TestRatingDuplicateRejected(t *testing.T) {
 		t.Fatalf("Call: %v", err)
 	}
 
-	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
+	if err := k.RateTransaction(ctx, signedRatingRequest(t, st, owner, ownerKey, reply.TxID, 1.0)); err != nil {
 		t.Fatalf("first RateTransaction: %v", err)
 	}
-	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, 0.0); !errors.Is(err, ErrInvalidInput) {
+	if err := k.RateTransaction(ctx, signedRatingRequest(t, st, owner, ownerKey, reply.TxID, 0.0)); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for duplicate rating, got %v", err)
 	}
 }

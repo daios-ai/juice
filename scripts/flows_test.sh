@@ -792,7 +792,7 @@ echo "=== FLOW 16: Human rating and cascade ==="
 RATE_TX_ID="$TX_ID"
 
 if [ -n "$RATE_TX_ID" ]; then
-    RATE=$(j "$H_ALICE" tx rate --id "$RATE_TX_ID" --rating 1 2>&1)
+    RATE=$(j "$H_SYS" tx rate --id "$RATE_TX_ID" --rating 1 2>&1)
     if echo "$RATE" | grep -qi "rated\|ok\|success"; then
         ok "16.1 transaction rated 1"
     else
@@ -800,7 +800,7 @@ if [ -n "$RATE_TX_ID" ]; then
     fi
 
     # Already-rated transaction cannot be re-rated
-    RATE2=$(j "$H_ALICE" tx rate --id "$RATE_TX_ID" --rating 0 2>&1)
+    RATE2=$(j "$H_SYS" tx rate --id "$RATE_TX_ID" --rating 0 2>&1)
     if echo "$RATE2" | grep -qi "already rated\|error\|invalid"; then
         ok "16.2 already-rated transaction cannot be re-rated"
     else

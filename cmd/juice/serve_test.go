@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -14,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
@@ -38,21 +38,23 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	k := kernel.New(db, nil, &httpActionExecutor{timeout: cfg.ScriptTimeout}, nil, nil, cfg, logger)
 
 	ctx := context.Background()
-	if _, err := k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
-		Handle: "@sys", Email: "sys@sys", Password: "sys-pass",
-	}, "superuser_handle"); err != nil {
+	if err := k.FirstBoot(ctx, "sys-pass"); err != nil {
 		t.Fatal(err)
 	}
 
-	// Set up a signing key so buildReceipt works in all call tests.
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
 	sys, err := k.ReadUserByHandle(ctx, "@sys")
 	if err != nil {
 		t.Fatal(err)
 	}
+	privB64, err := k.GetConfig(ctx, configKeySigningPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privBytes, err := base64.RawURLEncoding.DecodeString(privB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv := ed25519.PrivateKey(privBytes)
 	k.SetSigningKey(priv, sys.ID, "@sys")
 	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
 		t.Fatal(err)
@@ -122,6 +124,49 @@ func makeUser(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 		t.Fatal(err)
 	}
 	return u.ID, tok
+}
+
+func signedHTTPRating(t *testing.T, k *kernel.Kernel, raterID, txID string, rating float64) map[string]any {
+	t.Helper()
+	receipt, err := k.GetReceiptByTxID(context.Background(), txID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privB64, err := k.GetConfig(context.Background(), configKeySigningPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privBytes, err := base64.RawURLEncoding.DecodeString(privB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdAt := time.Now().UTC()
+	ratingID := "rating-" + txID
+	payload, err := kernel.CanonicalJSON(struct {
+		CreatedAt      string  `json:"created_at"`
+		ID             string  `json:"id"`
+		RatedReceiptID string  `json:"rated_receipt_id"`
+		RatedTxID      string  `json:"rated_tx_id"`
+		RaterUserID    string  `json:"rater_user_id"`
+		Rating         float64 `json:"rating"`
+	}{
+		CreatedAt:      createdAt.Format(time.RFC3339),
+		ID:             ratingID,
+		RatedReceiptID: receipt.ID,
+		RatedTxID:      txID,
+		RaterUserID:    raterID,
+		Rating:         rating,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := ed25519.Sign(ed25519.PrivateKey(privBytes), payload)
+	return map[string]any{
+		"rating":     rating,
+		"rating_id":  ratingID,
+		"created_at": createdAt.Format(time.RFC3339),
+		"signature":  base64.RawURLEncoding.EncodeToString(sig),
+	}
 }
 
 // giveCredits deposits funds into a user's account via the kernel directly.
@@ -766,6 +811,14 @@ func TestServeRateTransaction(t *testing.T) {
 
 	_, ownerTok := makeUser(t, k, "@rate-owner")
 	_, callerTok := makeUser(t, k, "@rate-caller")
+	sys, err := k.ReadUserByHandle(context.Background(), "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sysTok, err := k.Login(context.Background(), "@sys", "sys-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/rate-action", "kind": "http", "price": 0, "source": backend.URL,
@@ -790,10 +843,9 @@ func TestServeRateTransaction(t *testing.T) {
 		t.Fatal("expected tx_id from call")
 	}
 
-	// Rate it (caller is the process owner); rating must be 0 or 1.
-	rate := httpDo(t, srv, "POST", "/v1/transactions/"+txID+"/rate", map[string]any{
-		"rating": 1,
-	}, callerTok)
+	// Rate it as @sys with the platform signing key.
+	rate := httpDo(t, srv, "POST", "/v1/transactions/"+txID+"/rate",
+		signedHTTPRating(t, k, sys.ID, txID, 1), sysTok)
 	defer rate.Body.Close()
 	if rate.StatusCode != http.StatusNoContent {
 		t.Fatalf("rate transaction: expected 204, got %d", rate.StatusCode)
@@ -806,10 +858,18 @@ func TestServeRateTransactionNotFound(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@rater")
+	tok, err := k.Login(context.Background(), "@sys", "sys-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	resp := httpDo(t, srv, "POST", "/v1/transactions/no-such-id/rate",
-		map[string]any{"rating": 1.0}, tok)
+		map[string]any{
+			"rating":     1.0,
+			"rating_id":  "missing-rating",
+			"created_at": time.Now().UTC().Format(time.RFC3339),
+			"signature":  "missing-signature",
+		}, tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for unknown tx, got %d", resp.StatusCode)
@@ -1296,12 +1356,12 @@ func TestFederationCall(t *testing.T) {
 
 	// Register a public /ping action on @sys pointing to the backend.
 	a, err := k.CreateAction(ctx, kernel.CreateActionRequest{
-		OwnerUserID: sys.ID,
-		Name:        "/ping",
-		Kind:        kernel.KindHTTP,
-		Source:      backend.URL,
-		Price:       0,
-		Description: "ping",
+		OwnerUserID:  sys.ID,
+		Name:         "/ping",
+		Kind:         kernel.KindHTTP,
+		Source:       backend.URL,
+		Price:        0,
+		Description:  "ping",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 	})
