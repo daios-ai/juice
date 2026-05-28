@@ -58,18 +58,18 @@ Rules:
 
 Justification: small package count lowers coupling. Function-named packages permit implementation replacement without changing the conceptual architecture. Per-file tests make coverage gaps visible and keep test files co-located with the code they exercise.
 
-### 2.3 Machine layer and human supervision layer
+### 2.3 Execution layer and supervision layer
 
-Juice must maintain a strict conceptual split between machine execution and human supervision.
+Juice must maintain a strict conceptual split between action execution and supervision.
 
 Requirements:
 
-- `Call()` is the machine layer. It is the sole execution path for AI agents invoking actions. All action execution, fund locking, tracing, and settlement occur through `Call()`.
-- Direct kernel operations — user and action lifecycle, process management, rating — form the human supervision layer. Humans interact with the system through these to observe, correct, and guide machine behavior.
-- No human supervision operation may be routed through `Call()`. An AI agent must never be able to rate its own outputs or trigger rating propagation.
+- `Call()` is the execution layer. It is the sole path for invoking actions. All action execution, fund locking, tracing, and settlement occur through `Call()`.
+- Direct kernel operations — user and action lifecycle, process management, rating — form the supervision layer. Authenticated subjects (human operators or agents) use these to observe, correct, and guide execution.
+- No supervision operation may be routed through `Call()`. A subject must never rate its own outputs or trigger rating propagation from within the execution layer.
 - This split is an architectural invariant, not an implementation detail.
 
-Justification: AI agents may produce incorrect results. Human supervision provides the correction signal. Mixing the two layers would allow machines to interfere with their own feedback, undermining the integrity of the supervision signal.
+Justification: Execution may produce incorrect results. Supervision provides the correction signal. Mixing the two layers would allow a subject to interfere with its own feedback loop, undermining the integrity of the supervision signal.
 
 ## 3. Core objects
 
@@ -103,7 +103,7 @@ Requirements:
 - A suspended user must be rejected at every authenticated request with `ErrUnauthenticated`.
 - `public_key` is a nullable Ed25519 public key, stored as base64url. When set, it must be a valid 32-byte Ed25519 public key. `public_key` must be unique across all users when non-null.
 - `remote_base_url` is a nullable URL of the remote kernel's HTTP API base. A user with both `public_key` and `remote_base_url` set represents a remote kernel peer (see §21).
-- Local (human) users have both fields null.
+- Local users have both fields null.
 
 ### 3.2 Action
 
@@ -748,7 +748,7 @@ FOLLOWS_FROM (caused_by_trace_id): causal link across process boundaries.
 
 **Rating**
 
-A rating is a first-class immutable record submitted by a human for a transaction.
+A rating is a first-class immutable record submitted by an authenticated subject for a transaction.
 
 Required fields:
 
@@ -764,14 +764,14 @@ signature
 
 Requirements:
 
-- A human may rate any transaction 0 (bad) or 1 (good) via `RateTransaction`.
+- Any authenticated subject may rate any transaction 0 (bad) or 1 (good) via `RateTransaction`.
 - Each rating is stored as a new record in the `ratings` table. The transaction row is not modified (§3.6 immutability).
 - A transaction may have at most one rating record. Submitting a second rating for the same transaction must be rejected with `ErrInvalidInput`.
 - `rated_receipt_id` references the receipt issued for that transaction (see §20). It is null for transactions predating the receipt requirement.
 - `signature` is the Ed25519 signature of the canonical rating payload signed by the rater's private key, or by the platform signing key when the rater is the superuser. Signature verification is enforced at rating submission time.
 - When a transaction is rated, the rating must automatically cascade to all unrated descendant transactions in the trace tree by creating rating records for each unrated descendant.
 - The initial rating insertion and all cascade insertions must be performed in a single atomic SQLite transaction. Partial cascade is not permitted.
-- Rating is a human supervision operation. It must not be callable through `Call()`.
+- Rating is a supervision operation. It must not be callable through `Call()`.
 
 **Trace metrics**
 
@@ -1219,7 +1219,7 @@ Requirements:
 - The initial system actions are `/lookup` and `/llm/chat`, both owned by `@sys`, public, grant-all at bootstrap.
   - `@sys/lookup` (target handle `@sys`, action name `/lookup`): semantic action search.
   - `@sys/llm/chat` (target handle `@sys`, action name `/llm/chat`): chat completion via the configured language model.
-- Human supervision operations must not be registered as native actions (see §2.3).
+- Supervision operations must not be registered as native actions (see §2.3).
 
 ### 19.5 Public access control
 
@@ -1325,7 +1325,7 @@ Requirements:
 - A deposit must atomically increase `user.available` by the specified amount inside a single SQLite transaction.
 - Each deposit must be persisted as an audit record.
 - `reason` is optional but stored when provided.
-- Deposits must not route through `Call()`. They are a human supervision operation (§2.3).
+- Deposits must not route through `Call()`. They are a supervision operation (§2.3).
 - Deposits must only be available through the admin CLI; they must not have an HTTP endpoint.
 
 Required tests:
