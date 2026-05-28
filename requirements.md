@@ -142,7 +142,7 @@ Requirements:
 - `(owner_user_id, name)` must be unique.
 - `price` must be a non-negative integer.
 - `active=false` actions must not be callable by non-owners.
-- Public discovery must return only active actions unless an owner explicitly requests private state.
+- Public discovery must return only active public actions.
 - Script source must be visible to authorized users.
 - Compiled artifacts must be content-addressed by `artifact_hash`.
 
@@ -381,6 +381,7 @@ existing action
 active action
 ACL permits call
 valid input schema
+signed receipts can be issued
 process.available >= action.price
 ```
 
@@ -748,7 +749,7 @@ FOLLOWS_FROM (caused_by_trace_id): causal link across process boundaries.
 
 **Rating**
 
-A rating is a first-class immutable record submitted by an authenticated subject for a transaction.
+A rating is a platform-signed immutable record submitted by an authenticated subject for a transaction.
 
 Required fields:
 
@@ -764,12 +765,12 @@ signature
 
 Requirements:
 
-- Any authenticated subject may rate any transaction 0 (bad) or 1 (good) via `RateTransaction`.
+- Any authenticated subject may rate any transaction 0 (bad) or 1 (good) via `RateTransaction(subject, tx_id, rating)`.
 - Each rating is stored as a new record in the `ratings` table. The transaction row is not modified (§3.6 immutability).
 - A transaction may have at most one rating record. Submitting a second rating for the same transaction must be rejected with `ErrInvalidInput`.
 - `rated_receipt_id` references the receipt issued for that transaction (see §20). It is null for transactions predating the receipt requirement.
-- `signature` is the Ed25519 signature of the canonical rating payload signed by the rater's private key, or by the platform signing key when the rater is the superuser. Signature verification is enforced at rating submission time.
-- When a transaction is rated, the rating must automatically cascade to all unrated descendant transactions in the trace tree by creating rating records for each unrated descendant.
+- `signature` is the platform Ed25519 signature of the canonical rating record.
+- When a transaction is rated, the rating must automatically cascade to all unrated descendant transactions in the trace tree by creating platform-signed rating records for each unrated descendant.
 - The initial rating insertion and all cascade insertions must be performed in a single atomic SQLite transaction. Partial cascade is not permitted.
 - Rating is a supervision operation. It must not be callable through `Call()`.
 
@@ -1142,6 +1143,7 @@ JUICE_SCRIPT_MEMORY_BYTES
 Requirements:
 
 - Configuration must have safe local defaults where possible.
+- `JUICE_FEE_BPS` must be between 0 and 10000; if nonzero, `JUICE_FEE_RECIPIENT` must resolve to a user before startup succeeds.
 - Production secrets must not be committed.
 - Invalid configuration must fail at startup with a clear error.
 
@@ -1452,9 +1454,9 @@ Requirements:
 
 - `rating` must be in `{0, 1}`.
 - `rated_receipt_id` is nullable for transactions that predate the receipt requirement.
-- `signature` is the Ed25519 signature of the canonical JSON serialisation of all other rating fields (excluding `signature`), signed with the rater's private key. For the superuser rater, the platform signing key is used.
+- `signature` is the platform Ed25519 signature of the canonical JSON serialisation of all other rating fields (excluding `signature`).
 - A transaction may have at most one rating record. A duplicate must be rejected with `ErrInvalidInput`.
-- Rating cascade (§10.2) creates one rating record per unrated descendant; all insertions are in one atomic SQLite transaction.
+- Rating cascade (§10.2) creates one platform-signed rating record per unrated descendant; all insertions are in one atomic SQLite transaction.
 
 ### 20.4 Canonical serialisation
 
