@@ -787,6 +787,9 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	if tx.OwnerUserID != subjectID {
 		return ErrUnauthorized.Wrap("only the process owner may rate a transaction")
 	}
+	if tx.Rating != nil {
+		return ErrInvalidInput.Wrap("transaction already rated")
+	}
 	if err := k.store.RateTransactionCascade(ctx, txID, tx.TraceID, rating); err != nil {
 		return err
 	}
@@ -944,9 +947,12 @@ func sqrt32(x float32) float32 {
 
 // ---- Helpers ----
 
-// requireAdmin returns nil if subjectID is the owner of a OR has admin ACL.
+// requireAdmin returns nil if subjectID is the owner of a, the platform superuser, or has admin ACL.
 func (k *Kernel) requireAdmin(ctx context.Context, subjectID string, a *Action) error {
 	if a.OwnerUserID == subjectID {
+		return nil
+	}
+	if k.isSuperuser(ctx, subjectID) {
 		return nil
 	}
 	ok, err := k.store.CheckACL(ctx, subjectID, a.ID, PermAdmin)
@@ -957,6 +963,16 @@ func (k *Kernel) requireAdmin(ctx context.Context, subjectID string, a *Action) 
 		return ErrUnauthorized.Wrap("admin permission required")
 	}
 	return nil
+}
+
+// isSuperuser returns true if subjectID is the platform superuser registered during bootstrap.
+func (k *Kernel) isSuperuser(ctx context.Context, subjectID string) bool {
+	handle, _ := k.store.GetConfig(ctx, "superuser_handle")
+	if handle == "" {
+		return false
+	}
+	u, err := k.store.ReadUserByHandle(ctx, handle)
+	return err == nil && u.ID == subjectID
 }
 
 // ---- Stats helpers ----

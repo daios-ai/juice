@@ -87,6 +87,9 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 			cfg.ScriptMemory = v
 		}
 	}
+	if os.Getenv("JUICE_ALLOW_LOCAL_SOURCES") == "true" {
+		cfg.AllowLocalSources = true
+	}
 
 	logger, _ := log.New(log.Config{
 		Level:    envOr("JUICE_LOG_LEVEL", "info"),
@@ -162,29 +165,38 @@ func decodeJSON(r io.Reader, v any) error {
 // requireSubjectID loads the stored access token and verifies it.
 // If the access token is expired, it silently uses the refresh token to obtain
 // a new one, saves both new tokens, and returns the subject ID.
+// Returns ErrUnauthenticated if the account is suspended.
 func requireSubjectID(k *kernel.Kernel) (string, error) {
 	tok, err := loadToken()
 	if err != nil {
 		return "", err
 	}
 	subjectID, err := k.VerifyToken(tok)
-	if err == nil {
-		return subjectID, nil
+	if err != nil {
+		// Access token invalid — attempt silent refresh.
+		rt, rtErr := loadRefreshToken()
+		if rtErr != nil {
+			return "", fmt.Errorf("session expired; run: juice auth login")
+		}
+		access, newRT, rtErr := k.RefreshAccessToken(context.Background(), rt)
+		if rtErr != nil {
+			return "", fmt.Errorf("session expired; run: juice auth login")
+		}
+		if err := saveToken(access); err != nil {
+			return "", err
+		}
+		_ = saveRefreshToken(newRT)
+		subjectID, err = k.VerifyToken(access)
+		if err != nil {
+			return "", err
+		}
 	}
-	// Access token invalid — attempt silent refresh.
-	rt, rtErr := loadRefreshToken()
-	if rtErr != nil {
-		return "", fmt.Errorf("session expired; run: juice auth login")
+	// Mirror authMiddleware: reject suspended accounts at every authenticated CLI call.
+	u, uErr := k.ReadUser(context.Background(), subjectID)
+	if uErr == nil && u.SuspendedAt != nil {
+		return "", kernel.ErrUnauthenticated.Wrap("account suspended")
 	}
-	access, newRT, rtErr := k.RefreshAccessToken(context.Background(), rt)
-	if rtErr != nil {
-		return "", fmt.Errorf("session expired; run: juice auth login")
-	}
-	if err := saveToken(access); err != nil {
-		return "", err
-	}
-	_ = saveRefreshToken(newRT)
-	return k.VerifyToken(access)
+	return subjectID, nil
 }
 
 func promptPassword(prompt string) (string, error) {

@@ -657,6 +657,46 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	}
 }
 
+func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@rerate-owner", 500)
+	a := &Action{
+		ID:          uuid.New().String(),
+		OwnerUserID: owner.ID,
+		Name:        "/rerate-svc",
+		Kind:        KindWasm,
+		Active:      true,
+		Price:       0,
+		Source:      "wat",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, 100)
+	reply, err := k.Call(ctx, CallRequest{
+		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: owner.ID, ActionName: "/rerate-svc", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
+		t.Fatalf("first RateTransaction: %v", err)
+	}
+	err = k.RateTransaction(ctx, owner.ID, reply.TxID, 0.0)
+	if err == nil {
+		t.Fatal("expected error on second rating, got nil")
+	}
+	ke, ok := err.(*KernelError)
+	if !ok || ke.Code != "invalid_input" {
+		t.Errorf("expected invalid_input error, got %v", err)
+	}
+}
+
 // ---- Action soft-delete tests ----
 
 func TestDeleteActionSoftDelete(t *testing.T) {
