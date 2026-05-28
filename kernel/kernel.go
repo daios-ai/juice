@@ -1381,18 +1381,28 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 	if remoteUser.RemoteBaseURL == "" {
 		return nil, ErrInvalidInput.Wrap("user is not a remote kernel")
 	}
-	source := strings.TrimRight(remoteUser.RemoteBaseURL, "/") + "/v1/call"
-	req := CreateActionRequest{
+	source := strings.TrimRight(remoteUser.RemoteBaseURL, "/") +
+		"/v1/federation/call?action=" + url.QueryEscape(m.Name)
+	now := time.Now().UTC()
+	a := &Action{
+		ID:           uuid.New().String(),
 		OwnerUserID:  remoteUserID,
 		Name:         m.Name,
 		Kind:         KindHTTP,
+		Active:       false,
 		Price:        m.Price,
 		Description:  m.Description,
 		InputSchema:  m.InputSchema,
 		OutputSchema: m.OutputSchema,
 		Source:       source,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
-	return k.RegisterNativeAction(ctx, req)
+	if err := k.store.CreateAction(ctx, a); err != nil {
+		return nil, err
+	}
+	k.log.With(ctx).Info("action.imported_remote", "action_id", a.ID, "name", a.Name)
+	return a, nil
 }
 
 // GetActionManifest returns a signed manifest for a public active action.

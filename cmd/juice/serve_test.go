@@ -54,9 +54,10 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	r.Post("/v1/auth/refresh", srv.postRefresh)
 	r.Post("/v1/auth/logout", srv.postLogout)
 	r.Post("/v1/users", srv.postUser)
+	r.Post("/v1/federation/call", srv.postFederationCall)
+	r.Get("/v1/actions", srv.getActions)
 	r.Group(func(r chi.Router) {
 		r.Use(srv.authMiddleware)
-		r.Get("/v1/actions", srv.getActions)
 		r.Post("/v1/actions", srv.postAction)
 		r.Get("/v1/actions/{id}", srv.getAction)
 		r.Put("/v1/actions/{id}", srv.updateAction)
@@ -282,7 +283,8 @@ func TestServeAuthRequired(t *testing.T) {
 	srv, _ := newTestHTTPServer(t)
 	defer srv.Close()
 
-	resp := httpDo(t, srv, "GET", "/v1/actions", nil, "")
+	// POST /v1/actions requires authentication; GET is public (returns active public actions).
+	resp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{"name": "/x"}, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("expected 401 without token, got %d", resp.StatusCode)
@@ -1256,5 +1258,68 @@ func TestGetActionRequiresReadPermission(t *testing.T) {
 	r3.Body.Close()
 	if r3.StatusCode != http.StatusOK {
 		t.Errorf("reader with ACL: expected 200, got %d", r3.StatusCode)
+	}
+}
+
+func TestFederationCall(t *testing.T) {
+	// Stand up a backend that returns {"pong": true}.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"pong":true}`))
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Register a public /ping action on @sys pointing to the backend.
+	a, err := k.CreateAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID: sys.ID,
+		Name:        "/ping",
+		Kind:        kernel.KindHTTP,
+		Source:      backend.URL,
+		Price:       0,
+		Description: "ping",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.GrantAll(ctx, sys.ID, a.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Store the superuser handle in config (required by postFederationCall).
+	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
+		t.Fatal(err)
+	}
+
+	// POST to federation endpoint — no auth required.
+	resp := httpDo(t, srv, "POST", "/v1/federation/call?action=/ping", map[string]any{}, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["pong"] != true {
+		t.Errorf("expected pong:true in result, got %v", result)
+	}
+
+	// Unknown action returns not found.
+	resp2 := httpDo(t, srv, "POST", "/v1/federation/call?action=/nope", map[string]any{}, "")
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown action: expected 404, got %d", resp2.StatusCode)
 	}
 }

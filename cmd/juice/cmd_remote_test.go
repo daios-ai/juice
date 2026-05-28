@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"testing"
 
@@ -77,10 +78,12 @@ func TestRemoteAdd(t *testing.T) {
 		t.Fatalf("runRemoteAdd: %v", err)
 	}
 
-	// The remote kernel should be registered as a user with RemoteBaseURL set.
-	u, err := k.ReadUserByHandle(t.Context(), "@remote-node")
+	// Handle is derived from the URL host, not the remote's self-reported handle.
+	parsed, _ := url.Parse(remote.URL)
+	expectedHandle := "@" + parsed.Host
+	u, err := k.ReadUserByHandle(t.Context(), expectedHandle)
 	if err != nil {
-		t.Fatalf("ReadUserByHandle @remote-node: %v", err)
+		t.Fatalf("ReadUserByHandle %s: %v", expectedHandle, err)
 	}
 	if u.RemoteBaseURL == "" {
 		t.Error("expected RemoteBaseURL to be set")

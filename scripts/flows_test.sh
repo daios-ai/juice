@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end flow tests for the juice CLI.
-# Covers all 18 user-story flows.
+# Covers all 20 user-story flows.
 #
 # Usage (manual):
 #   go build -o /tmp/juice ./cmd/juice/
@@ -9,7 +9,7 @@
 # Usage (via Go test suite):
 #   go test ./cmd/juice/ -run TestFlowsIntegration -v -timeout 120s
 #
-# Requires: python3 (inline HTTP backends and JSON parsing)
+# Requires: python3 (inline HTTP backends), curl (federation setup)
 set -uo pipefail
 
 JUICE="${JUICE:-$(command -v juice 2>/dev/null || true)}"
@@ -27,6 +27,12 @@ H_SYS="$TMPDIR/home_sys"
 H_ALICE="$TMPDIR/home_alice"
 H_BOB="$TMPDIR/home_bob"
 mkdir -p "$H_SYS/.juice" "$H_ALICE/.juice" "$H_BOB/.juice"
+
+# Remote kernel (second juice serve instance on port 19875).
+REMOTE_DB="$TMPDIR/remote.db"
+H_REMOTE_SYS="$TMPDIR/home_remote_sys"
+REMOTE_SYS_PASS="remotesyspass"
+mkdir -p "$H_REMOTE_SYS/.juice"
 
 PASS=0
 FAIL=0
@@ -50,6 +56,15 @@ jj() {
     JUICE_BOOTSTRAP_PASSWORD="$SYS_PASS" \
     JUICE_ALLOW_LOCAL_SOURCES="true" \
     "$JUICE" --db "$DB" --output json "$@" 2>&1
+}
+
+# Run juice against the remote kernel DB.
+rj() {
+    local home_dir="$1"; shift
+    HOME="$home_dir" \
+    JUICE_BOOTSTRAP_PASSWORD="$REMOTE_SYS_PASS" \
+    JUICE_ALLOW_LOCAL_SOURCES="true" \
+    "$JUICE" --db "$REMOTE_DB" "$@" 2>&1
 }
 
 # Extract a JSON string field: strfield "json" "fieldname"
@@ -93,12 +108,20 @@ http.server.HTTPServer(('127.0.0.1',19872),H).serve_forever()
 " &
 BACKEND_FAIL_PID=$!
 
+# ── Real remote juice kernel (second instance on port 19875) ─────────────────
+HOME="$H_REMOTE_SYS" \
+JUICE_ADDR="127.0.0.1:19875" \
+JUICE_BOOTSTRAP_PASSWORD="$REMOTE_SYS_PASS" \
+JUICE_ALLOW_LOCAL_SOURCES="true" \
+"$JUICE" --db "$REMOTE_DB" serve &
+REMOTE_KERNEL_PID=$!
+
 cleanup() {
-    kill "$BACKEND_OK_PID" "$BACKEND_FAIL_PID" 2>/dev/null || true
+    kill "$BACKEND_OK_PID" "$BACKEND_FAIL_PID" "$REMOTE_KERNEL_PID" 2>/dev/null || true
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
-sleep 0.5   # let backends start
+sleep 1   # let backends start (remote kernel needs a moment to bootstrap)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 echo "=== FLOW 1: First boot and platform bootstrap ==="
@@ -900,6 +923,105 @@ txs = json.load(sys.stdin)
 print(sum(1 for t in txs if t.get('Status','') == 'success'))
 " 2>/dev/null || echo "?")
 ok "18.6 each successful call created a transaction record (successes=$SUCC)"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== FLOW 19: Zero-credit process ==="
+
+# Alice starts a process with 0 funds — no credits should be deducted.
+ALICE_BAL_BEFORE=$(numfield "$(jj "$H_ALICE" user me 2>&1)" "available")
+ZERO_PROC_DATA=$(jj "$H_ALICE" process start --funds 0 2>&1)
+ZERO_PROC_ID=$(strfield "$ZERO_PROC_DATA" "process_id")
+
+if [ -n "$ZERO_PROC_ID" ]; then
+    ok "19.1 zero-credit process started"
+else
+    fail "19.1 zero-credit process started" "$ZERO_PROC_DATA"
+fi
+
+ALICE_BAL_AFTER=$(numfield "$(jj "$H_ALICE" user me 2>&1)" "available")
+if [ "${ALICE_BAL_BEFORE:-0}" = "${ALICE_BAL_AFTER:-0}" ]; then
+    ok "19.2 user balance unchanged after 0-fund process start"
+else
+    fail "19.2 user balance unchanged" "before=$ALICE_BAL_BEFORE after=$ALICE_BAL_AFTER"
+fi
+
+# Call a free action (wasm-echo, price=0) from the zero-credit process.
+ZERO_CALL=$(jj "$H_ALICE" call --process "$ZERO_PROC_ID" --target @alice --action /wasm-echo --args '{}' 2>&1)
+if echo "$ZERO_CALL" | grep -q "tx_id"; then
+    ok "19.3 free action callable from zero-credit process"
+else
+    fail "19.3 free action callable from zero-credit process" "$ZERO_CALL"
+fi
+
+j "$H_ALICE" process end --id "$ZERO_PROC_ID" >/dev/null 2>&1
+
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== FLOW 20: Federation — register remote kernel and call imported action ==="
+
+# Set up the remote kernel via its HTTP API: login, create /greet, enable, grant-all.
+REMOTE_TOKEN_JSON=$(curl -s -X POST "http://127.0.0.1:19875/v1/auth/token" \
+    -H "Content-Type: application/json" \
+    -d "{\"handle\":\"@sys\",\"password\":\"$REMOTE_SYS_PASS\"}")
+REMOTE_TOKEN=$(strfield "$REMOTE_TOKEN_JSON" "token")
+
+REMOTE_GREET=$(curl -s -X POST "http://127.0.0.1:19875/v1/actions" \
+    -H "Authorization: Bearer $REMOTE_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"name":"/greet","kind":"http","source":"http://127.0.0.1:19871","price":0,"description":"says hello","input_schema":{"type":"object"},"output_schema":{"type":"object"}}')
+REMOTE_GREET_ID=$(strfield "$REMOTE_GREET" "ID")
+
+curl -s -X POST "http://127.0.0.1:19875/v1/actions/$REMOTE_GREET_ID/enable" \
+    -H "Authorization: Bearer $REMOTE_TOKEN" >/dev/null
+curl -s -X POST "http://127.0.0.1:19875/v1/actions/$REMOTE_GREET_ID/grant-all" \
+    -H "Authorization: Bearer $REMOTE_TOKEN" >/dev/null
+
+# @sys on the local kernel registers the remote kernel.
+REMOTE_ADD=$(j "$H_SYS" remote add "http://127.0.0.1:19875" 2>&1)
+if echo "$REMOTE_ADD" | grep -qi "registered\|127.0.0.1:19875"; then
+    ok "20.1 remote kernel registered"
+else
+    fail "20.1 remote kernel registered" "$REMOTE_ADD"
+fi
+
+# @sys lists remote kernels — @127.0.0.1:19875 should appear.
+REMOTE_LIST=$(j "$H_SYS" remote list 2>&1)
+if echo "$REMOTE_LIST" | grep -q "127.0.0.1:19875"; then
+    ok "20.2 remote kernel visible in list"
+else
+    fail "20.2 remote kernel visible in list" "$REMOTE_LIST"
+fi
+
+# @sys imports /greet from the remote kernel.
+REMOTE_IMPORT=$(j "$H_SYS" remote import @127.0.0.1:19875 /greet 2>&1)
+if echo "$REMOTE_IMPORT" | grep -qi "imported"; then
+    ok "20.3 action imported from remote kernel"
+else
+    fail "20.3 action imported from remote kernel" "$REMOTE_IMPORT"
+fi
+
+# Extract the imported action ID: "Imported action @127.0.0.1:19875//greet (id=UUID)"
+GREET_ID=$(echo "$REMOTE_IMPORT" | grep -oE 'id=[a-f0-9-]+' | sed 's/id=//')
+
+if [ -n "$GREET_ID" ]; then
+    # @sys activates and grants the imported action so any user can call it.
+    j "$H_SYS" action enable --id "$GREET_ID" >/dev/null 2>&1
+    j "$H_SYS" action grant-all --id "$GREET_ID" >/dev/null 2>&1
+
+    # Alice calls the imported action — the call crosses the network to the real remote kernel.
+    FED_PROC_DATA=$(jj "$H_ALICE" process start --funds 0 2>&1)
+    FED_PROC_ID=$(strfield "$FED_PROC_DATA" "process_id")
+    FED_CALL=$(jj "$H_ALICE" call --process "$FED_PROC_ID" --target @127.0.0.1:19875 --action /greet --args '{}' 2>&1)
+    if echo "$FED_CALL" | grep -q "tx_id"; then
+        ok "20.4 imported remote action callable by local user (real network call)"
+    else
+        fail "20.4 imported remote action callable by local user (real network call)" "$FED_CALL"
+    fi
+    j "$H_ALICE" process end --id "$FED_PROC_ID" >/dev/null 2>&1
+else
+    fail "20.4 imported remote action callable by local user (real network call)" "could not extract action id from: $REMOTE_IMPORT"
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""

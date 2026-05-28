@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/daios-ai/juice/kernel"
@@ -80,7 +81,14 @@ func runRemoteAdd(_ *cobra.Command, args []string) error {
 		meta.BaseURL = baseURL
 	}
 
-	u, err := k.RegisterRemoteKernel(ctx, meta.Handle, meta.PublicKey, meta.BaseURL)
+	// Derive a canonical local handle from the URL host (@<hostname> convention).
+	parsed, err := url.Parse(meta.BaseURL)
+	if err != nil || parsed.Host == "" {
+		return fmt.Errorf("invalid base URL %q", meta.BaseURL)
+	}
+	localHandle := "@" + parsed.Host
+
+	u, err := k.RegisterRemoteKernel(ctx, localHandle, meta.PublicKey, meta.BaseURL)
 	if err != nil {
 		return fmt.Errorf("register remote kernel: %w", err)
 	}
@@ -148,24 +156,31 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("remote kernel returned %d: %s", resp.StatusCode, body)
 	}
 
-	// Parse the action list — remote kernel returns an array of actions.
+	// Parse the action list — remote kernel returns *kernel.Action objects (PascalCase JSON).
 	var actions []struct {
-		ID           string         `json:"id"`
-		Name         string         `json:"name"`
-		Description  string         `json:"description"`
-		Price        int64          `json:"price"`
-		Kind         string         `json:"kind"`
-		InputSchema  map[string]any `json:"input_schema"`
-		OutputSchema map[string]any `json:"output_schema"`
-		ArtifactHash string         `json:"artifact_hash"`
+		ID           string
+		Name         string
+		Description  string
+		Price        int64
+		Kind         string
+		InputSchema  map[string]any
+		OutputSchema map[string]any
+		ArtifactHash string
 	}
 	if err := json.Unmarshal(body, &actions); err != nil {
 		return fmt.Errorf("parse action list: %w", err)
 	}
-	if len(actions) == 0 {
+	idx := -1
+	for i := range actions {
+		if actions[i].Name == actionName {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
 		return fmt.Errorf("action %q not found on remote kernel %q", actionName, remoteHandle)
 	}
-	a := actions[0]
+	a := actions[idx]
 
 	m := kernel.ActionManifest{
 		OwnerHandle:  remoteHandle,

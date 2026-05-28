@@ -64,6 +64,9 @@ func runServer(addr string) error {
 	// Well-known kernel metadata (unauthenticated).
 	r.Get("/.well-known/juice-kernel.json", srv.getWellKnown)
 
+	// Federation call endpoint (unauthenticated; action must be public).
+	r.Post("/v1/federation/call", srv.postFederationCall)
+
 	// Auth — rate limited: 5 requests/minute per IP, burst of 10.
 	authLimiter := ipRateLimiter(5.0/60, 10)
 	r.With(authLimiter).Post("/v1/auth/token", srv.postTokenMulti)
@@ -74,10 +77,12 @@ func runServer(addr string) error {
 	// Users — rate limited: 3 requests/minute per IP, burst of 5.
 	r.With(ipRateLimiter(3.0/60, 5)).Post("/v1/users", srv.postUser)
 
-	// Actions (public).
+	// Public action listing — no auth required (only returns grant-all active actions).
+	r.Get("/v1/actions", srv.getActions)
+
+	// Actions (authenticated).
 	r.Group(func(r chi.Router) {
 		r.Use(srv.authMiddleware)
-		r.Get("/v1/actions", srv.getActions)
 		r.Post("/v1/actions", srv.postAction)
 		r.Get("/v1/actions/{id}", srv.getAction)
 		r.Put("/v1/actions/{id}", srv.updateAction)
@@ -822,12 +827,54 @@ func (s *server) revokeAll(w http.ResponseWriter, r *http.Request) {
 func (s *server) getWellKnown(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	pubKey, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	handle, _ := s.kernel.GetConfig(ctx, configKeySuperuser)
+	if handle == "" {
+		handle = "@sys"
+	}
 	baseURL := envOr("JUICE_BASE_URL", "")
 	writeJSON(w, http.StatusOK, map[string]string{
-		"handle":     "@sys",
+		"handle":     handle,
 		"public_key": pubKey,
 		"base_url":   baseURL,
 	})
+}
+
+func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
+	actionName := r.URL.Query().Get("action")
+	if actionName == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("action query param required"))
+		return
+	}
+	var args map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+		return
+	}
+	ctx := r.Context()
+	suHandle, _ := s.kernel.GetConfig(ctx, configKeySuperuser)
+	su, err := s.kernel.ReadUserByHandle(ctx, suHandle)
+	if err != nil {
+		writeErr(w, kernel.ErrInvalidState.Wrap("kernel not bootstrapped"))
+		return
+	}
+	proc, _, err := s.kernel.StartProcess(ctx, su.ID, 0)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	defer s.kernel.EndProcess(ctx, su.ID, proc.ID)
+	reply, err := s.kernel.Call(ctx, kernel.CallRequest{
+		SubjectID:    su.ID,
+		ProcessID:    proc.ID,
+		TargetUserID: su.ID,
+		ActionName:   actionName,
+		Args:         args,
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, reply.Result)
 }
 
 func (s *server) getActionManifest(w http.ResponseWriter, r *http.Request) {
