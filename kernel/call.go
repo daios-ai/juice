@@ -45,9 +45,16 @@ type CallReply struct {
 func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) {
 	logger := k.log.With(ctx)
 
-	// 1. Subject must be authenticated (already resolved by caller; just validate non-empty).
+	// 1. Subject must be authenticated: non-empty, exists, and not suspended.
 	if req.SubjectID == "" {
 		return nil, ErrUnauthenticated.Wrap("subject is required")
+	}
+	subject, err := k.store.ReadUser(ctx, req.SubjectID)
+	if err != nil || subject == nil {
+		return nil, ErrUnauthorized.Wrap("subject user not found")
+	}
+	if subject.SuspendedAt != nil {
+		return nil, ErrUnauthorized.Wrap("subject user is suspended")
 	}
 
 	// 2. Process must exist and be open.
@@ -188,7 +195,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			logger.Error("call.settlement_failed", "action", action.Name, "exec_error", execErr, "settlement_error", settlErr)
 			return nil, ErrInternal.Wrap("could not record failure transaction")
 		}
-		_ = k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt)
+		if updateErr := k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt); updateErr != nil {
+			logger.Warn("call.trace_update_failed", "trace_id", trace.ID, "error", updateErr)
+		}
 		k.updateStats(ctx, action.ID, tx, latency)
 		logger.Warn("call.failed", "action", action.Name, "error", execErr)
 		return nil, execErr
@@ -202,7 +211,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			logger.Error("call.settlement_failed", "action", action.Name, "schema_error", schemaErr, "settlement_error", settlErr)
 			return nil, ErrInternal.Wrap("could not record failure transaction")
 		}
-		_ = k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt)
+		if updateErr := k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt); updateErr != nil {
+			logger.Warn("call.trace_update_failed", "trace_id", trace.ID, "error", updateErr)
+		}
 		k.updateStats(ctx, action.ID, tx, latency)
 		return nil, schemaErr
 	}
@@ -226,7 +237,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	k.updateStats(ctx, action.ID, tx, latency)
 
 	// 17. Update trace cost and latency for all ancestor traces.
-	_ = k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt)
+	if updateErr := k.store.UpdateTraceCostLatency(ctx, trace.ID, tx.Gross, tx.EndedAt); updateErr != nil {
+		logger.Warn("call.trace_update_failed", "trace_id", trace.ID, "error", updateErr)
+	}
 
 	logger.Info("call.success", "action", action.Name, "tx_id", txID, "latency_ms", fmt.Sprintf("%.1f", latency*1000))
 

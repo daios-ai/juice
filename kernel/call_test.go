@@ -1071,3 +1071,35 @@ func TestCallLLMChatNoChatter(t *testing.T) {
 		t.Fatal("expected error when no chatter configured")
 	}
 }
+
+func TestCallSuspendedSubjectRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@alice", 1000)
+	target := setupUser(t, st, "@bob", 0)
+	_ = setupAction(t, st, target.ID, "/echo", 0)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, 100)
+
+	if err := st.SuspendUser(ctx, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID:     owner.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: root.ID,
+		TargetUserID:  target.ID,
+		ActionName:    "/echo",
+		Args:          map[string]any{},
+	})
+	if err == nil {
+		t.Fatal("expected error for suspended subject")
+	}
+	var ke *KernelError
+	if !errors.As(err, &ke) || ke.Code != "unauthorized" {
+		t.Errorf("expected unauthorized error, got %v", err)
+	}
+}
