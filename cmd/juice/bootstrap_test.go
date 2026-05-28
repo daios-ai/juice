@@ -50,9 +50,16 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 		t.Fatal("/lookup should be active after ensureSysLookup")
 	}
 
-	// Second call: idempotent.
+	// Second call: idempotent — must also enforce grant-all.
 	if err := ensureSysLookup(ctx, k, u.Handle); err != nil {
 		t.Fatalf("second ensureSysLookup: %v", err)
+	}
+	a, err = k.ReadActionByOwnerName(ctx, u.ID, "/lookup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Public {
+		t.Error("/lookup should be public after idempotent ensureSysLookup")
 	}
 }
 
@@ -79,9 +86,16 @@ func TestEnsureSysLLMChatIdempotent(t *testing.T) {
 		t.Fatal("/llm/chat should be active after ensureSysLLMChat")
 	}
 
-	// Second call: idempotent.
+	// Second call: idempotent — must also enforce grant-all.
 	if err := ensureSysLLMChat(ctx, k, u.Handle); err != nil {
 		t.Fatalf("second ensureSysLLMChat: %v", err)
+	}
+	a, err = k.ReadActionByOwnerName(ctx, u.ID, "/llm/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Public {
+		t.Error("/llm/chat should be public after idempotent ensureSysLLMChat")
 	}
 }
 

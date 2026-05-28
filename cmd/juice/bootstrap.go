@@ -87,7 +87,9 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 		if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
 			return fmt.Errorf("activate @sys/lookup: %w", err)
 		}
-		_ = k.GrantAll(ctx, su.ID, a.ID)
+		if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
+			return fmt.Errorf("grant-all @sys/lookup: %w", err)
+		}
 		return nil
 	}
 
@@ -152,7 +154,9 @@ func ensureSysLLMChat(ctx context.Context, k *kernel.Kernel, superuserHandle str
 		if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
 			return fmt.Errorf("activate @sys/llm/chat: %w", err)
 		}
-		_ = k.GrantAll(ctx, su.ID, a.ID)
+		if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
+			return fmt.Errorf("grant-all @sys/llm/chat: %w", err)
+		}
 		return nil
 	}
 
