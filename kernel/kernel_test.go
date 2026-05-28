@@ -2,6 +2,9 @@ package kernel
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"math"
 	"testing"
@@ -16,6 +19,7 @@ func newTestKernel(st Store) *Kernel {
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
 	cfg.IssuerUserID = "test-issuer-id"
+	cfg.SigningKey = testSigningKey()
 	return New(st, nil, nil, nil, nil, cfg, log.Default())
 }
 
@@ -24,7 +28,16 @@ func newTestKernelWithScripts(st Store, exec ScriptExecutor) *Kernel {
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
 	cfg.IssuerUserID = "test-issuer-id"
+	cfg.SigningKey = testSigningKey()
 	return New(st, exec, nil, nil, nil, cfg, log.Default())
+}
+
+func testSigningKey() ed25519.PrivateKey {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return priv
 }
 
 func setupUser(t *testing.T, st *fakeStore, handle string, balance int64) *User {
@@ -371,7 +384,7 @@ func TestUserLockedBalanceInvariant(t *testing.T) {
 		Kind: KindWasm, Active: true, Price: 100,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 
@@ -730,7 +743,7 @@ func TestReceiptCreatedWithCall(t *testing.T) {
 
 	exec := &fakeScriptExec{result: `{"ok":true}`}
 	k := newTestKernelWithScripts(st, exec)
-	k.SetSigningKey(nil, su.ID, "@sys") // nil key: signature will be empty but IssuerUserID is set
+	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
 	ctx := context.Background()
 
 	caller := setupUser(t, st, "@rcpt-caller", 500)
@@ -739,7 +752,7 @@ func TestReceiptCreatedWithCall(t *testing.T) {
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: caller.ID, ActionID: a.ID, Permission: PermCall, CreatedAt: time.Now().UTC()})
@@ -772,7 +785,7 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 
 	exec := &fakeScriptExec{err: ErrExecutionFailed.Wrap("boom")}
 	k := newTestKernelWithScripts(st, exec)
-	k.SetSigningKey(nil, su.ID, "@sys")
+	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@fail-owner", 500)
@@ -781,7 +794,7 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 
@@ -818,6 +831,94 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 	}
 }
 
+func TestReceiptSigningRequiresConfiguredKey(t *testing.T) {
+	k := newTestKernel(newFakeStore())
+	k.SetSigningKey(nil, "issuer-id", "@sys")
+
+	_, err := k.buildReceipt(&Transaction{
+		ID:        "tx-id",
+		TraceID:   "trace-id",
+		ActionID:  "action-id",
+		ArgsJSON:  `{}`,
+		ReplyJSON: `{}`,
+		Status:    TxSuccess,
+		EndedAt:   time.Now().UTC(),
+	})
+	if !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
+	}
+}
+
+func TestManifestSigningRequiresConfiguredKey(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	k.SetSigningKey(nil, "issuer-id", "@sys")
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@manifest-owner", 0)
+	a := &Action{
+		ID:           uuid.New().String(),
+		OwnerUserID:  owner.ID,
+		Name:         "/manifest",
+		Kind:         KindHTTP,
+		Active:       true,
+		Public:       true,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		Source:       "https://example.com/call",
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := k.GetActionManifest(ctx, owner.ID, a.ID)
+	if !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
+	}
+}
+
+func TestRatingSigningRequiresConfiguredKey(t *testing.T) {
+	_, err := signRating(nil, &Rating{
+		ID:          "rating-id",
+		RatedTxID:   "tx-id",
+		RaterUserID: "user-id",
+		Rating:      1,
+		CreatedAt:   time.Now().UTC(),
+	})
+	if !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
+	}
+}
+
+func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	if _, err := k.RegisterRemoteKernel(ctx, "@bad-key", "not-base64url", "https://remote.example.com"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for malformed public key, got %v", err)
+	}
+
+	shortKey := base64.RawURLEncoding.EncodeToString([]byte("short"))
+	if _, err := k.RegisterRemoteKernel(ctx, "@short-key", shortKey, "https://remote.example.com"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for short public key, got %v", err)
+	}
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validKey := base64.RawURLEncoding.EncodeToString(pub)
+	if _, err := k.RegisterRemoteKernel(ctx, "@bad-url", validKey, "ftp://remote.example.com"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for unsupported URL scheme, got %v", err)
+	}
+	if _, err := k.RegisterRemoteKernel(ctx, "@remote", validKey, "https://remote.example.com"); err != nil {
+		t.Fatalf("valid remote kernel should register: %v", err)
+	}
+}
+
 // ---- Rating record tests ----
 
 func TestRatingRecordCreated(t *testing.T) {
@@ -831,7 +932,7 @@ func TestRatingRecordCreated(t *testing.T) {
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 
@@ -877,7 +978,7 @@ func TestRatingDuplicateRejected(t *testing.T) {
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 

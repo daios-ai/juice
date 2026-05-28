@@ -55,6 +55,7 @@ func statsShowCmd() *cobra.Command {
 func lookupCmd() *cobra.Command {
 	var query string
 	var limit int
+	var processID string
 	cmd := &cobra.Command{
 		Use:   "lookup",
 		Short: "Search for actions using a natural-language query",
@@ -65,25 +66,48 @@ func lookupCmd() *cobra.Command {
 			}
 			defer db.Close()
 
-			results, err := k.Lookup(context.Background(), kernel.LookupRequest{
-				Query: query,
-				Limit: limit,
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			reply, err := k.Call(context.Background(), kernel.CallRequest{
+				SubjectID:    subjectID,
+				ProcessID:    processID,
+				TargetUserID: "@sys",
+				ActionName:   "/lookup",
+				Args: map[string]any{
+					"query": query,
+					"limit": float64(limit),
+				},
 			})
 			if err != nil {
 				return err
 			}
 
 			if flagOutput == "json" {
-				return printJSON(results)
+				return printJSON(reply.Result)
 			}
-			for _, r := range results {
-				fmt.Printf("%.4f  %s  %s\n", r.Score, r.Action.ID[:8], r.Action.Name)
+			results, _ := reply.Result["results"].([]any)
+			for _, item := range results {
+				r, _ := item.(map[string]any)
+				score, _ := r["score"].(float64)
+				actionID, _ := r["action_id"].(string)
+				name, _ := r["name"].(string)
+				owner, _ := r["owner_handle"].(string)
+				shortID := actionID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				fmt.Printf("%.4f  %s  %s%s\n", score, shortID, owner, name)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&query, "query", "", "Natural-language query (required)")
 	cmd.Flags().IntVar(&limit, "limit", 10, "Maximum results")
+	cmd.Flags().StringVar(&processID, "process", "", "Process ID (required)")
 	_ = cmd.MarkFlagRequired("query")
+	_ = cmd.MarkFlagRequired("process")
 	return cmd
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
@@ -41,5 +42,60 @@ func TestLookupRequiresEmbedder(t *testing.T) {
 	_, err := env.k.Lookup(ctx, kernel.LookupRequest{Query: "test", Limit: 5})
 	if err == nil {
 		t.Error("expected error when no embedder configured")
+	}
+}
+
+func TestLookupCommandUsesCall(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	if err := env.k.FirstBoot(ctx, "sys-pass"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSysLookup(ctx, env.k, "@sys"); err != nil {
+		t.Fatal(err)
+	}
+	sys, err := env.k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@lookup-cli", Email: "lookup-cli@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.k.Deposit(ctx, sys.ID, user.ID, 10, "test"); err != nil {
+		t.Fatal(err)
+	}
+	proc, _, err := env.k.StartProcess(ctx, user.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := env.k.Login(ctx, "@lookup-cli", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = runCmd(t, lookupCmd(), "--query", "weather", "--process", proc.ID)
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("expected lookup native action to fail without embedder, got %v", err)
+	}
+
+	txs, err := env.k.ListTransactions(ctx, kernel.TxFilter{ProcessID: proc.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(txs) != 1 {
+		t.Fatalf("lookup command should route through Call and create one transaction, got %d", len(txs))
+	}
+	if txs[0].Status != kernel.TxFailure {
+		t.Fatalf("lookup without embedder should create a failed transaction, got %s", txs[0].Status)
+	}
+	if _, err := env.k.GetReceiptByTxID(ctx, txs[0].ID); err != nil {
+		t.Fatalf("lookup transaction should have a receipt: %v", err)
 	}
 }

@@ -20,14 +20,14 @@ import (
 
 // Config holds kernel-level configuration.
 type Config struct {
-	FeeBPS            int64              // basis points, e.g. 2000 = 20%
-	FeeRecipientID    string             // user ID that receives fees
-	TokenSecret       string             // HMAC secret for JWT signing
-	TokenTTL          time.Duration      // token validity window
+	FeeBPS            int64         // basis points, e.g. 2000 = 20%
+	FeeRecipientID    string        // user ID that receives fees
+	TokenSecret       string        // HMAC secret for JWT signing
+	TokenTTL          time.Duration // token validity window
 	ScriptTimeout     time.Duration
 	ScriptMemory      int64              // bytes
 	AllowLocalSources bool               // permit loopback/private URLs as action sources (tests only)
-	SigningKey        ed25519.PrivateKey  // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
+	SigningKey        ed25519.PrivateKey // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
 	IssuerUserID      string             // @sys user ID, set during bootstrap
 	SuperuserHandle   string             // cached superuser handle for deposit checks
 }
@@ -874,7 +874,11 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	if receipt != nil {
 		r.RatedReceiptID = &receipt.ID
 	}
-	r.Signature = signRating(k.cfg.SigningKey, r)
+	sig, err := signRating(k.cfg.SigningKey, r)
+	if err != nil {
+		return err
+	}
+	r.Signature = sig
 	if err := k.store.CreateRatingCascade(ctx, txID, tx.TraceID, r); err != nil {
 		return err
 	}
@@ -1314,7 +1318,11 @@ func (k *Kernel) buildReceipt(tx *Transaction) (*Receipt, error) {
 		Reason:       tx.Reason,
 		CreatedAt:    time.Now().UTC(),
 	}
-	r.Signature = signReceipt(k.cfg.SigningKey, r)
+	sig, err := signReceipt(k.cfg.SigningKey, r)
+	if err != nil {
+		return nil, err
+	}
+	r.Signature = sig
 	return r, nil
 }
 
@@ -1324,10 +1332,9 @@ func sha256Hex(s string) string {
 }
 
 // signReceipt signs the canonical receipt payload (excluding Signature) with JCS.
-// Returns empty string if key is nil.
-func signReceipt(key ed25519.PrivateKey, r *Receipt) string {
-	if len(key) == 0 {
-		return ""
+func signReceipt(key ed25519.PrivateKey, r *Receipt) (string, error) {
+	if len(key) != ed25519.PrivateKeySize {
+		return "", ErrInvalidState.Wrap("signing key is not configured")
 	}
 	payload, err := CanonicalJSON(receiptPayload{
 		ActionID:     r.ActionID,
@@ -1345,10 +1352,10 @@ func signReceipt(key ed25519.PrivateKey, r *Receipt) string {
 		TxID:         r.TxID,
 	})
 	if err != nil {
-		return ""
+		return "", ErrInternal.Wrapf("canonicalize receipt: %v", err)
 	}
 	sig := ed25519.Sign(key, payload)
-	return base64.RawURLEncoding.EncodeToString(sig)
+	return base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
 // receiptPayload is the canonical signed form of a receipt (fields alphabetically ordered).
@@ -1369,10 +1376,9 @@ type receiptPayload struct {
 }
 
 // signRating signs the canonical rating payload (excluding Signature) with JCS.
-// Returns empty string if key is nil.
-func signRating(key ed25519.PrivateKey, r *Rating) string {
-	if len(key) == 0 {
-		return ""
+func signRating(key ed25519.PrivateKey, r *Rating) (string, error) {
+	if len(key) != ed25519.PrivateKeySize {
+		return "", ErrInvalidState.Wrap("signing key is not configured")
 	}
 	receiptID := ""
 	if r.RatedReceiptID != nil {
@@ -1387,10 +1393,10 @@ func signRating(key ed25519.PrivateKey, r *Rating) string {
 		Rating:         r.Rating,
 	})
 	if err != nil {
-		return ""
+		return "", ErrInternal.Wrapf("canonicalize rating: %v", err)
 	}
 	sig := ed25519.Sign(key, payload)
-	return base64.RawURLEncoding.EncodeToString(sig)
+	return base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
 // ratingPayload is the canonical signed form of a rating (fields alphabetically ordered).
@@ -1409,6 +1415,12 @@ type ratingPayload struct {
 func (k *Kernel) RegisterRemoteKernel(ctx context.Context, handle, publicKey, baseURL string) (*User, error) {
 	if handle == "" || publicKey == "" || baseURL == "" {
 		return nil, ErrInvalidInput.Wrap("handle, public_key, and base_url are required")
+	}
+	if _, err := decodeRemotePublicKey(publicKey); err != nil {
+		return nil, err
+	}
+	if err := validateRemoteBaseURL(baseURL); err != nil {
+		return nil, err
 	}
 	// Check if a user with this public key already exists.
 	existing, err := k.store.ReadUserByPublicKey(ctx, publicKey)
@@ -1437,6 +1449,31 @@ func (k *Kernel) RegisterRemoteKernel(ctx context.Context, handle, publicKey, ba
 	}
 	k.log.With(ctx).Info("remote_kernel.registered", "handle", handle, "base_url", baseURL)
 	return u, nil
+}
+
+func decodeRemotePublicKey(publicKey string) (ed25519.PublicKey, error) {
+	key, err := base64.RawURLEncoding.DecodeString(publicKey)
+	if err != nil {
+		return nil, ErrInvalidInput.Wrap("public_key must be base64url")
+	}
+	if len(key) != ed25519.PublicKeySize {
+		return nil, ErrInvalidInput.Wrap("public_key must be a 32-byte Ed25519 public key")
+	}
+	return ed25519.PublicKey(key), nil
+}
+
+func validateRemoteBaseURL(baseURL string) error {
+	u, err := url.Parse(baseURL)
+	if err != nil || u == nil || u.Scheme == "" || u.Host == "" {
+		return ErrInvalidInput.Wrap("remote_base_url must be an absolute URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ErrInvalidInput.Wrap("remote_base_url must use http or https")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return ErrInvalidInput.Wrap("remote_base_url must not include userinfo, query, or fragment")
+	}
+	return nil
 }
 
 // ListRemoteKernels returns all local user records that represent remote kernel peers.
@@ -1518,14 +1555,18 @@ func (k *Kernel) GetActionManifest(ctx context.Context, subjectID, actionID stri
 		UpdatedAt:    a.UpdatedAt,
 		Stats:        stats,
 	}
-	m.Signature = signManifest(k.cfg.SigningKey, m)
+	sig, err := signManifest(k.cfg.SigningKey, m)
+	if err != nil {
+		return nil, err
+	}
+	m.Signature = sig
 	return m, nil
 }
 
 // signManifest signs the canonical manifest payload (excluding Signature) with JCS.
-func signManifest(key ed25519.PrivateKey, m *ActionManifest) string {
-	if len(key) == 0 {
-		return ""
+func signManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
+	if len(key) != ed25519.PrivateKeySize {
+		return "", ErrInvalidState.Wrap("signing key is not configured")
 	}
 	inputJSON, _ := CanonicalJSON(m.InputSchema)
 	outputJSON, _ := CanonicalJSON(m.OutputSchema)
@@ -1548,10 +1589,10 @@ func signManifest(key ed25519.PrivateKey, m *ActionManifest) string {
 		UpdatedAt:    m.UpdatedAt.UTC().Format(time.RFC3339),
 	})
 	if err != nil {
-		return ""
+		return "", ErrInternal.Wrapf("canonicalize manifest: %v", err)
 	}
 	sig := ed25519.Sign(key, payload)
-	return base64.RawURLEncoding.EncodeToString(sig)
+	return base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
 type manifestPayload struct {

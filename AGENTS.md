@@ -1,0 +1,13 @@
+- Never implement anything that violates requirements.md
+- Never implement code if I don't ask you directly
+- Keep the number of files small because this codebase is critical and must be correct!
+- Every GO file must have a corresponding test file
+
+- Code size and simplicity are hard requirements.
+- Always look for simplification opportunities before adding code.
+- Prefer deleting, reusing, or routing through existing kernel paths over adding new abstractions.
+- Do not add new packages without explicit approval.
+- Do not add new files unless there is a strong cohesion reason.
+- Keep public APIs minimal.
+- Treat requirements.md as the product contract.
+- Before broadening scope, stop and explain the tradeoff.

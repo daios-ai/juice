@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +15,15 @@ import (
 	"github.com/daios-ai/juice/log"
 	"github.com/daios-ai/juice/store"
 )
+
+func remoteTestPublicKey(t *testing.T) string {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(pub)
+}
 
 // newRemoteTestKernel opens a fresh DB, bootstraps @sys, and returns the kernel.
 func newRemoteTestKernel(t *testing.T) (*kernel.Kernel, *store.DB) {
@@ -56,7 +68,7 @@ func TestRemoteAdd(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
 			"handle":     "@remote-node",
-			"public_key": "pubkey-abc",
+			"public_key": remoteTestPublicKey(t),
 			"base_url":   "",
 		})
 	}))
@@ -88,8 +100,8 @@ func TestRemoteAdd(t *testing.T) {
 	if u.RemoteBaseURL == "" {
 		t.Error("expected RemoteBaseURL to be set")
 	}
-	if u.PublicKey != "pubkey-abc" {
-		t.Errorf("PublicKey: got %q, want %q", u.PublicKey, "pubkey-abc")
+	if _, err := base64.RawURLEncoding.DecodeString(u.PublicKey); err != nil {
+		t.Errorf("PublicKey should be base64url: %v", err)
 	}
 }
 
@@ -97,7 +109,7 @@ func TestRemoteList(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 
 	// Register a remote kernel directly via kernel API.
-	if _, err := k.RegisterRemoteKernel(t.Context(), "@list-remote", "pk-xyz", "https://list.example.com"); err != nil {
+	if _, err := k.RegisterRemoteKernel(t.Context(), "@list-remote", remoteTestPublicKey(t), "https://list.example.com"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -118,11 +130,11 @@ func TestRemoteImport(t *testing.T) {
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode([]map[string]any{{
-			"id":          "action-remote-id",
-			"name":        "/greet",
-			"description": "says hello",
-			"price":       0,
-			"kind":        "http",
+			"id":            "action-remote-id",
+			"name":          "/greet",
+			"description":   "says hello",
+			"price":         0,
+			"kind":          "http",
 			"input_schema":  map[string]any{"type": "object"},
 			"output_schema": map[string]any{"type": "object"},
 		}})
@@ -130,7 +142,7 @@ func TestRemoteImport(t *testing.T) {
 	defer remote.Close()
 
 	// Register the remote kernel.
-	if _, err := k.RegisterRemoteKernel(t.Context(), "@import-remote", "pk-import", remote.URL); err != nil {
+	if _, err := k.RegisterRemoteKernel(t.Context(), "@import-remote", remoteTestPublicKey(t), remote.URL); err != nil {
 		t.Fatal(err)
 	}
 

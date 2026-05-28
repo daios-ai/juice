@@ -1071,6 +1071,7 @@ func newTestKernelWithChatter(st Store, c Chatter) *Kernel {
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
 	cfg.IssuerUserID = "test-issuer-id"
+	cfg.SigningKey = testSigningKey()
 	return New(st, nil, nil, nil, c, cfg, nil)
 }
 
