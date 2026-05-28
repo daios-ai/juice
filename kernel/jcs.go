@@ -1,0 +1,87 @@
+package kernel
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"sort"
+)
+
+// CanonicalJSON serializes v per RFC 8785: objects with Unicode-sorted keys, recursively.
+func CanonicalJSON(v any) ([]byte, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return nil, err
+	}
+	return canonicalValue(decoded)
+}
+
+func canonicalValue(v any) ([]byte, error) {
+	switch val := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var buf bytes.Buffer
+		buf.WriteByte('{')
+		for i, k := range keys {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			keyJSON, _ := json.Marshal(k)
+			buf.Write(keyJSON)
+			buf.WriteByte(':')
+			valJSON, err := canonicalValue(val[k])
+			if err != nil {
+				return nil, err
+			}
+			buf.Write(valJSON)
+		}
+		buf.WriteByte('}')
+		return buf.Bytes(), nil
+	case []any:
+		var buf bytes.Buffer
+		buf.WriteByte('[')
+		for i, item := range val {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			itemJSON, err := canonicalValue(item)
+			if err != nil {
+				return nil, err
+			}
+			buf.Write(itemJSON)
+		}
+		buf.WriteByte(']')
+		return buf.Bytes(), nil
+	default:
+		return json.Marshal(v)
+	}
+}
+
+// jcsHashStr parses a JSON string, canonicalizes it, and returns hex SHA-256.
+// If s is empty, returns sha256 of empty bytes.
+func jcsHashStr(jsonStr string) (string, error) {
+	if jsonStr == "" {
+		h := sha256.Sum256(nil)
+		return fmt.Sprintf("%x", h), nil
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(jsonStr), &decoded); err != nil {
+		h := sha256.Sum256([]byte(jsonStr))
+		return fmt.Sprintf("%x", h), nil
+	}
+	canonical, err := canonicalValue(decoded)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(canonical)
+	return fmt.Sprintf("%x", h), nil
+}

@@ -256,6 +256,7 @@ type ActionManifest struct {
 	Kind         ActionKind     `json:"kind"`
 	ArtifactHash string         `json:"artifact_hash"`
 	UpdatedAt    time.Time      `json:"updated_at"`
+	Stats        *Stats         `json:"stats"`
 	Signature    string         `json:"signature"` // base64url Ed25519 signature
 }
 

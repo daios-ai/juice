@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -35,9 +37,24 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	logger := log.Discard()
 	k := kernel.New(db, nil, &httpActionExecutor{timeout: cfg.ScriptTimeout}, nil, nil, cfg, logger)
 
-	if _, err := k.BootstrapSuperuser(context.Background(), kernel.CreateUserRequest{
+	ctx := context.Background()
+	if _, err := k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
 		Handle: "@sys", Email: "sys@sys", Password: "sys-pass",
 	}, "superuser_handle"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up a signing key so buildReceipt works in all call tests.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	k.SetSigningKey(priv, sys.ID, "@sys")
+	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -78,11 +95,10 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		r.Get("/v1/transactions/{id}", srv.getTransaction)
 		r.Post("/v1/transactions/{id}/rate", srv.rateTransaction)
 		r.Get("/v1/stats/{action_id}", srv.getStats)
-		r.Post("/v1/lookup", srv.postLookup)
 		r.Get("/v1/listeners", srv.listListeners)
 		r.Post("/v1/listeners", srv.postListener)
-		r.Get("/v1/listeners/{id}", srv.getListener)
-		r.Get("/v1/listeners/{id}/events", srv.getListener)
+		r.Get("/v1/listeners/{id}", srv.getListenerMeta)
+		r.Get("/v1/listeners/{id}/events", srv.pollListenerEvents)
 		r.Delete("/v1/listeners/{id}", srv.deleteListener)
 		r.Post("/v1/events/emit", srv.postEmit)
 		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
@@ -841,17 +857,17 @@ func TestServeGetStats(t *testing.T) {
 	}
 }
 
-func TestServeLookupRequiresEmbedder(t *testing.T) {
+func TestServeLookupEndpointRemoved(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
 	_, tok := makeUser(t, k, "@lookup-user")
 
+	// POST /v1/lookup was removed; the route no longer exists.
 	resp := httpDo(t, srv, "POST", "/v1/lookup", map[string]any{"query": "something"}, tok)
 	defer resp.Body.Close()
-	// Lookup requires an embedder; without one it returns 409 (invalid_state).
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("lookup without embedder: expected 409, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for removed /v1/lookup, got %d", resp.StatusCode)
 	}
 }
 
@@ -910,11 +926,11 @@ func TestServeListenerFlow(t *testing.T) {
 	}
 	eventID := eventIDs[0].(string)
 
-	// Poll listener — should have one pending event.
-	poll := httpDo(t, srv, "GET", "/v1/listeners/"+lid, nil, ownerTok)
+	// Poll listener events — should have one pending event.
+	poll := httpDo(t, srv, "GET", "/v1/listeners/"+lid+"/events", nil, ownerTok)
 	if poll.StatusCode != http.StatusOK {
 		poll.Body.Close()
-		t.Fatalf("poll listener: expected 200, got %d", poll.StatusCode)
+		t.Fatalf("poll listener events: expected 200, got %d", poll.StatusCode)
 	}
 	var pollResp map[string]any
 	decodeResponse(t, poll, &pollResp)
@@ -1310,10 +1326,11 @@ func TestFederationCall(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var result map[string]any
-	json.NewDecoder(resp.Body).Decode(&result)
-	if result["pong"] != true {
-		t.Errorf("expected pong:true in result, got %v", result)
+	var envelope map[string]any
+	json.NewDecoder(resp.Body).Decode(&envelope)
+	resultMap, _ := envelope["result"].(map[string]any)
+	if resultMap["pong"] != true {
+		t.Errorf("expected pong:true in result, got %v", envelope)
 	}
 
 	// Unknown action returns not found.

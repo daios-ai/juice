@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -85,24 +84,8 @@ func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 		return "", fmt.Errorf("password cannot be empty")
 	}
 
-	if _, err := k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
-		Handle:   superuserHandle,
-		Email:    "sys@sys",
-		Password: password,
-	}, configKeySuperuser); err != nil {
-		return "", fmt.Errorf("create superuser: %w", err)
-	}
-
-	// Generate Ed25519 signing keypair atomically with first boot.
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return "", fmt.Errorf("generate signing key: %w", err)
-	}
-	if err := k.SetConfig(ctx, configKeySigningPublic, base64.RawURLEncoding.EncodeToString(pub)); err != nil {
-		return "", fmt.Errorf("store signing public key: %w", err)
-	}
-	if err := k.SetConfig(ctx, configKeySigningPrivate, base64.RawURLEncoding.EncodeToString(priv)); err != nil {
-		return "", fmt.Errorf("store signing private key: %w", err)
+	if err := k.FirstBoot(ctx, password); err != nil {
+		return "", fmt.Errorf("first boot: %w", err)
 	}
 
 	fmt.Printf("Superuser %q created.\n", superuserHandle)

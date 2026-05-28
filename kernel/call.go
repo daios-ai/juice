@@ -180,10 +180,26 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	argsJSON, _ := json.Marshal(req.Args)
 	tx.ArgsJSON = string(argsJSON)
 
-	// 12. Execute. Pass action.OwnerUserID so host functions (juice.call, juice.emit)
-	// operate on behalf of the action author, not the caller.
+	// 12. Execute. If the target is a remote kernel and the HTTP executor supports federation,
+	// use ExecuteFederation to carry an idempotency key and capture the remote receipt hash.
 	started := time.Now()
-	reply, execErr := k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
+	var reply map[string]any
+	var execErr error
+	if target.RemoteBaseURL != "" {
+		if fe, ok := k.http.(federationExecutor); ok {
+			idempotencyKey := uuid.New().String()
+			var receiptJSON string
+			reply, receiptJSON, execErr = fe.ExecuteFederation(ctx, action.Source, idempotencyKey, req.Args)
+			if execErr == nil && receiptJSON != "" {
+				tx.RemoteReceiptHash = sha256Hex(receiptJSON)
+			}
+		} else {
+			reply, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
+		}
+	} else {
+		// Pass action.OwnerUserID so host functions operate on behalf of the action author.
+		reply, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
+	}
 	latency := time.Since(started).Seconds()
 	tx.EndedAt = time.Now().UTC()
 
@@ -192,7 +208,13 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		tx.Status = TxFailure
 		tx.Reason = execErr.Error()
 		stats := k.computeStats(ctx, action.ID, tx, latency)
-		receipt := k.buildReceipt(tx)
+		receipt, receiptErr := k.buildReceipt(tx)
+		if receiptErr != nil {
+			if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
+				logger.Error("call.refund_failed_on_receipt_error", "action", action.Name, "refund_error", refundErr)
+			}
+			return nil, ErrInternal.Wrap("could not build receipt")
+		}
 		if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats); settlErr != nil {
 			logger.Error("call.settlement_failed", "action", action.Name, "exec_error", execErr, "settlement_error", settlErr)
 			return nil, ErrInternal.Wrap("could not record failure transaction")
@@ -207,7 +229,13 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		tx.Status = TxFailure
 		tx.Reason = "output schema violation: " + schemaErr.Error()
 		stats := k.computeStats(ctx, action.ID, tx, latency)
-		receipt := k.buildReceipt(tx)
+		receipt, receiptErr := k.buildReceipt(tx)
+		if receiptErr != nil {
+			if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
+				logger.Error("call.refund_failed_on_receipt_error", "action", action.Name, "refund_error", refundErr)
+			}
+			return nil, ErrInternal.Wrap("could not build receipt")
+		}
 		if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats); settlErr != nil {
 			logger.Error("call.settlement_failed", "action", action.Name, "schema_error", schemaErr, "settlement_error", settlErr)
 			return nil, ErrInternal.Wrap("could not record failure transaction")
@@ -224,7 +252,13 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	tx.Net = net
 	tx.Fee = fee
 	stats := k.computeStats(ctx, action.ID, tx, latency)
-	receipt := k.buildReceipt(tx)
+	receipt, receiptErr := k.buildReceipt(tx)
+	if receiptErr != nil {
+		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
+			logger.Error("call.refund_failed_on_receipt_error", "action", action.Name, "refund_error", refundErr)
+		}
+		return nil, ErrInternal.Wrap("could not build receipt")
+	}
 	if err := k.store.CommitCall(ctx, tx, receipt, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats); err != nil {
 		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
 			logger.Error("call.refund_failed", "action", action.Name, "commit_error", err, "refund_error", refundErr)

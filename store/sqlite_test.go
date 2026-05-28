@@ -383,7 +383,12 @@ func TestCommitCall(t *testing.T) {
 		ActionID: "a1", Status: kernel.TxSuccess, Gross: 100, Net: 80, Fee: 20,
 		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
 	}
-	if err := db.CommitCall(ctx, tx, nil, p.ID, target.ID, fee.ID, 80, 20, nil); err != nil {
+	receipt := &kernel.Receipt{
+		ID: "rc1", IssuerUserID: payer.ID, TxID: tx.ID, TraceID: tr.ID, ActionID: "a1",
+		ArgsHash: "ah1", ReplyHash: "rh1", Status: kernel.TxSuccess,
+		Gross: 100, Net: 80, Fee: 20, CreatedAt: time.Now().UTC(),
+	}
+	if err := db.CommitCall(ctx, tx, receipt, p.ID, target.ID, fee.ID, 80, 20, nil); err != nil {
 		t.Fatal(err)
 	}
 

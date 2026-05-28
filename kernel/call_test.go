@@ -1070,6 +1070,7 @@ func newTestKernelWithChatter(st Store, c Chatter) *Kernel {
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
+	cfg.IssuerUserID = "test-issuer-id"
 	return New(st, nil, nil, nil, c, cfg, nil)
 }
 

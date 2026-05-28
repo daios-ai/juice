@@ -719,18 +719,19 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		return dbErr(err, "commit call: insert transaction")
 	}
 
-	// Insert receipt atomically with the transaction.
-	if receipt != nil {
-		if _, err = tx.ExecContext(ctx,
-			`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			receipt.ID, receipt.IssuerUserID, receipt.TxID, receipt.TraceID, receipt.ActionID,
-			receipt.ArgsHash, receipt.ReplyHash, string(receipt.Status),
-			receipt.Gross, receipt.Net, receipt.Fee, receipt.Reason,
-			timeToStr(receipt.CreatedAt), receipt.Signature,
-		); err != nil {
-			return dbErr(err, "commit call: insert receipt")
-		}
+	// Receipt is mandatory.
+	if receipt == nil {
+		return dbErr(fmt.Errorf("receipt is required"), "commit call")
+	}
+	if _, err = tx.ExecContext(ctx,
+		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		receipt.ID, receipt.IssuerUserID, receipt.TxID, receipt.TraceID, receipt.ActionID,
+		receipt.ArgsHash, receipt.ReplyHash, string(receipt.Status),
+		receipt.Gross, receipt.Net, receipt.Fee, receipt.Reason,
+		timeToStr(receipt.CreatedAt), receipt.Signature,
+	); err != nil {
+		return dbErr(err, "commit call: insert receipt")
 	}
 
 	gross := net + fee
@@ -835,18 +836,19 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, rece
 		return dbErr(err, "commit failed call: insert transaction")
 	}
 
-	// Insert receipt atomically with the transaction.
-	if receipt != nil {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			receipt.ID, receipt.IssuerUserID, receipt.TxID, receipt.TraceID, receipt.ActionID,
-			receipt.ArgsHash, receipt.ReplyHash, string(receipt.Status),
-			receipt.Gross, receipt.Net, receipt.Fee, receipt.Reason,
-			timeToStr(receipt.CreatedAt), receipt.Signature,
-		); err != nil {
-			return dbErr(err, "commit failed call: insert receipt")
-		}
+	// Receipt is mandatory.
+	if receipt == nil {
+		return dbErr(fmt.Errorf("receipt is required"), "commit failed call")
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		receipt.ID, receipt.IssuerUserID, receipt.TxID, receipt.TraceID, receipt.ActionID,
+		receipt.ArgsHash, receipt.ReplyHash, string(receipt.Status),
+		receipt.Gross, receipt.Net, receipt.Fee, receipt.Reason,
+		timeToStr(receipt.CreatedAt), receipt.Signature,
+	); err != nil {
+		return dbErr(err, "commit failed call: insert receipt")
 	}
 
 	// Update trace latency (cost delta is 0 for failures).
@@ -1639,6 +1641,33 @@ func (s *DB) InitSuperuser(ctx context.Context, u *kernel.User, configKey, confi
 	return dbErr(tx.Commit(), "init superuser: commit")
 }
 
+func (s *DB) InitFirstBoot(ctx context.Context, u *kernel.User, configs map[string]string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin init first boot")
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO users (id,handle,email,password_hash,available,locked,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		u.ID, u.Handle, u.Email, u.PasswordHash,
+		u.Available, u.Locked, timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
+	)
+	if err != nil {
+		return dbErr(err, "init first boot: insert user")
+	}
+
+	for k, v := range configs {
+		if _, err = tx.ExecContext(ctx,
+			`INSERT OR REPLACE INTO config (key,value) VALUES (?,?)`, k, v); err != nil {
+			return dbErr(err, "init first boot: set config "+k)
+		}
+	}
+
+	return dbErr(tx.Commit(), "init first boot: commit")
+}
+
 // ---- Deposits ----
 
 func (s *DB) CreateDeposit(ctx context.Context, d *kernel.Deposit) error {
@@ -1710,6 +1739,26 @@ func (s *DB) ReadReceiptByTxID(ctx context.Context, txID string) (*kernel.Receip
 	}
 	if err != nil {
 		return nil, dbErr(err, "read receipt by tx_id")
+	}
+	r.Status = kernel.TxStatus(status)
+	r.CreatedAt = strToTime(createdAt)
+	return &r, nil
+}
+
+func (s *DB) ReadReceipt(ctx context.Context, id string) (*kernel.Receipt, error) {
+	var r kernel.Receipt
+	var status, createdAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature
+		 FROM receipts WHERE id=?`, id,
+	).Scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
+		&r.ArgsHash, &r.ReplyHash, &status,
+		&r.Gross, &r.Net, &r.Fee, &r.Reason, &createdAt, &r.Signature)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("receipt not found")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read receipt")
 	}
 	r.Status = kernel.TxStatus(status)
 	r.CreatedAt = strToTime(createdAt)

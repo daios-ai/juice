@@ -113,14 +113,11 @@ func runServer(addr string) error {
 		// Stats.
 		r.Get("/v1/stats/{action_id}", srv.getStats)
 
-		// Lookup.
-		r.Post("/v1/lookup", srv.postLookup)
-
 		// Listeners & Events.
 		r.Get("/v1/listeners", srv.listListeners)
 		r.Post("/v1/listeners", srv.postListener)
-		r.Get("/v1/listeners/{id}", srv.getListener)
-		r.Get("/v1/listeners/{id}/events", srv.getListener)
+		r.Get("/v1/listeners/{id}", srv.getListenerMeta)
+		r.Get("/v1/listeners/{id}/events", srv.pollListenerEvents)
 		r.Delete("/v1/listeners/{id}", srv.deleteListener)
 		r.Post("/v1/events/emit", srv.postEmit)
 		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
@@ -602,26 +599,6 @@ func (s *server) getStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
-func (s *server) postLookup(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Query string `json:"query"`
-		Limit int    `json:"limit"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
-		return
-	}
-	results, err := s.kernel.Lookup(r.Context(), kernel.LookupRequest{
-		Query: req.Query,
-		Limit: req.Limit,
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, results)
-}
-
 // ---- PKCE / auth handlers ----
 
 func (s *server) postAuthorize(w http.ResponseWriter, r *http.Request) {
@@ -746,7 +723,17 @@ func (s *server) postListener(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, l)
 }
 
-func (s *server) getListener(w http.ResponseWriter, r *http.Request) {
+func (s *server) getListenerMeta(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	l, err := s.kernel.GetListener(r.Context(), subjectFrom(r), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, l)
+}
+
+func (s *server) pollListenerEvents(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	events, err := s.kernel.PollListener(r.Context(), subjectFrom(r), id)
 	if err != nil {
@@ -851,6 +838,20 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+
+	// Idempotency: replay a prior response if the same key is presented.
+	idempotencyKey := r.Header.Get("X-Idempotency-Key")
+	if idempotencyKey != "" {
+		if rec, err := s.kernel.GetIdempotencyRecord(ctx, idempotencyKey, ""); err == nil {
+			var receipt *kernel.Receipt
+			if rec.ReceiptID != nil {
+				receipt, _ = s.kernel.GetReceiptByID(ctx, *rec.ReceiptID)
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"result": nil, "receipt": receipt})
+			return
+		}
+	}
+
 	suHandle, _ := s.kernel.GetConfig(ctx, configKeySuperuser)
 	su, err := s.kernel.ReadUserByHandle(ctx, suHandle)
 	if err != nil {
@@ -874,7 +875,24 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, reply.Result)
+
+	// Fetch receipt and record idempotency entry.
+	var receipt *kernel.Receipt
+	if reply.TxID != "" {
+		receipt, _ = s.kernel.GetReceiptByTxID(ctx, reply.TxID)
+	}
+	if idempotencyKey != "" && receipt != nil {
+		_ = s.kernel.CreateIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
+			ID:                 uuid.New().String(),
+			IdempotencyKey:     idempotencyKey,
+			CounterpartyUserID: "",
+			ReceiptID:          &receipt.ID,
+			CreatedAt:          time.Now().UTC(),
+			ExpiresAt:          time.Now().UTC().Add(24 * time.Hour),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"result": reply.Result, "receipt": receipt})
 }
 
 func (s *server) getActionManifest(w http.ResponseWriter, r *http.Request) {

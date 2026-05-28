@@ -921,6 +921,32 @@ func (f *fakeStore) InitSuperuser(_ context.Context, u *User, configKey, configV
 	return nil
 }
 
+func (f *fakeStore) InitFirstBoot(_ context.Context, u *User, configs map[string]string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, exists := f.userByHandle[u.Handle]; !exists {
+		cp := *u
+		f.users[u.ID] = &cp
+		f.userByHandle[u.Handle] = &cp
+	}
+	for k, v := range configs {
+		f.config[k] = v
+	}
+	return nil
+}
+
+func (f *fakeStore) ReadReceipt(_ context.Context, id string) (*Receipt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.receipts {
+		if r.ID == id {
+			cp := *r
+			return &cp, nil
+		}
+	}
+	return nil, ErrNotFound.Wrap("receipt not found")
+}
+
 func (f *fakeStore) CreateDeposit(_ context.Context, d *Deposit) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

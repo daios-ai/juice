@@ -8,6 +8,45 @@ import (
 	"testing"
 )
 
+func TestExecuteFederationSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Idempotency-Key") == "" {
+			http.Error(w, "missing idempotency key", http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"result":  map[string]any{"ok": true},
+			"receipt": map[string]any{"id": "r1", "status": "success"},
+		})
+	}))
+	defer srv.Close()
+
+	exec := &httpActionExecutor{}
+	result, receiptJSON, err := exec.ExecuteFederation(context.Background(), srv.URL, "key-123", map[string]any{})
+	if err != nil {
+		t.Fatalf("ExecuteFederation: %v", err)
+	}
+	if result["ok"] != true {
+		t.Errorf("result: got %v, want ok:true", result)
+	}
+	if receiptJSON == "" {
+		t.Error("expected non-empty receiptJSON")
+	}
+}
+
+func TestExecuteFederationNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	exec := &httpActionExecutor{}
+	_, _, err := exec.ExecuteFederation(context.Background(), srv.URL, "key-x", map[string]any{})
+	if err == nil {
+		t.Fatal("expected error for non-200 response")
+	}
+}
+
 func TestHTTPActionExecutorSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var in map[string]any

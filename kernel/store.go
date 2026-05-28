@@ -214,6 +214,15 @@ type Store interface {
 	// If the user handle already exists the user INSERT is skipped; the config is always set.
 	InitSuperuser(ctx context.Context, u *User, configKey, configValue string) error
 
+	// InitFirstBoot atomically creates a user and sets all given config entries.
+	// If the user handle already exists the user INSERT is skipped; config entries are always set.
+	InitFirstBoot(ctx context.Context, u *User, configs map[string]string) error
+
+	// ---- Receipts (by ID) ----
+
+	// ReadReceipt returns the receipt with the given ID.
+	ReadReceipt(ctx context.Context, id string) (*Receipt, error)
+
 	// ---- Deposits ----
 
 	CreateDeposit(ctx context.Context, d *Deposit) error

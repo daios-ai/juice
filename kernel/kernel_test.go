@@ -15,6 +15,7 @@ func newTestKernel(st Store) *Kernel {
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
+	cfg.IssuerUserID = "test-issuer-id"
 	return New(st, nil, nil, nil, nil, cfg, log.Default())
 }
 
@@ -22,6 +23,7 @@ func newTestKernelWithScripts(st Store, exec ScriptExecutor) *Kernel {
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
+	cfg.IssuerUserID = "test-issuer-id"
 	return New(st, exec, nil, nil, nil, cfg, log.Default())
 }
 

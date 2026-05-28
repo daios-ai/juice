@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -51,6 +52,13 @@ type Kernel struct {
 	chatter Chatter
 	cfg     Config
 	log     *log.Logger
+}
+
+// federationExecutor is an optional extension of HTTPExecutor for cross-kernel calls.
+// When the HTTP executor also implements this interface, Call() uses it for remote-kernel targets
+// to send an idempotency key and receive the remote receipt for audit purposes.
+type federationExecutor interface {
+	ExecuteFederation(ctx context.Context, source, idempotencyKey string, args map[string]any) (result map[string]any, receiptJSON string, err error)
 }
 
 // New constructs a Kernel. scripts, http, llm, and chatter may be nil if those features are unused.
@@ -493,6 +501,46 @@ func (k *Kernel) SetConfig(ctx context.Context, key, value string) error {
 	return k.store.SetConfig(ctx, key, value)
 }
 
+// FirstBoot atomically creates the @sys superuser account, generates an Ed25519 signing
+// keypair, and stores all three config entries in a single SQLite transaction.
+// Safe to call on a database that was already initialized — user INSERT is skipped.
+func (k *Kernel) FirstBoot(ctx context.Context, password string) error {
+	if password == "" {
+		return ErrInvalidInput.Wrap("password cannot be empty")
+	}
+	hash, err := HashPassword(password)
+	if err != nil {
+		return ErrInvalidInput.Wrapf("could not hash password: %v", err)
+	}
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return ErrInternal.Wrapf("generate signing key: %v", err)
+	}
+	now := time.Now().UTC()
+	u := &User{
+		ID:           uuid.New().String(),
+		Handle:       "@sys",
+		Email:        "sys@sys",
+		PasswordHash: hash,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	configs := map[string]string{
+		"superuser_handle":    "@sys",
+		"signing_public_key":  base64.RawURLEncoding.EncodeToString(pub),
+		"signing_private_key": base64.RawURLEncoding.EncodeToString(priv),
+	}
+	if err := k.store.InitFirstBoot(ctx, u, configs); err != nil {
+		return err
+	}
+	su, err := k.store.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		return err
+	}
+	k.SetSigningKey(ed25519.PrivateKey(priv), su.ID, "@sys")
+	return nil
+}
+
 // BootstrapSuperuser atomically creates the superuser account and registers the
 // superuser handle in config. If the handle already exists the user INSERT is
 // skipped and only the config key is (re-)set. Safe to call on every startup.
@@ -810,9 +858,6 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	if tx == nil {
 		return ErrNotFound.Wrap("transaction not found")
 	}
-	if tx.OwnerUserID != subjectID {
-		return ErrUnauthorized.Wrap("only the process owner may rate a transaction")
-	}
 	// Check for duplicate rating (transaction already has a rating record).
 	if existing, _ := k.store.ReadRatingByTxID(ctx, txID); existing != nil {
 		return ErrInvalidInput.Wrap("transaction already rated")
@@ -1117,6 +1162,38 @@ func (k *Kernel) ListListeners(ctx context.Context, ownerID string, limit, offse
 	return k.store.ListListenersByOwner(ctx, ownerID, limit, offset)
 }
 
+// GetListener returns listener metadata. Subject must be the owner or source user.
+func (k *Kernel) GetListener(ctx context.Context, subjectID, listenerID string) (*Listener, error) {
+	l, err := k.store.ReadListener(ctx, listenerID)
+	if err != nil {
+		return nil, err
+	}
+	if l.OwnerUserID != subjectID && l.SourceUserID != subjectID {
+		return nil, ErrUnauthorized.Wrap("not authorized to view this listener")
+	}
+	return l, nil
+}
+
+// GetReceiptByTxID returns the receipt for a transaction.
+func (k *Kernel) GetReceiptByTxID(ctx context.Context, txID string) (*Receipt, error) {
+	return k.store.ReadReceiptByTxID(ctx, txID)
+}
+
+// GetReceiptByID returns the receipt with the given ID.
+func (k *Kernel) GetReceiptByID(ctx context.Context, id string) (*Receipt, error) {
+	return k.store.ReadReceipt(ctx, id)
+}
+
+// GetIdempotencyRecord returns an unexpired idempotency record matching key + counterparty.
+func (k *Kernel) GetIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*IdempotencyRecord, error) {
+	return k.store.ReadIdempotencyRecord(ctx, key, counterpartyUserID)
+}
+
+// CreateIdempotencyRecord stores a new idempotency record.
+func (k *Kernel) CreateIdempotencyRecord(ctx context.Context, r *IdempotencyRecord) error {
+	return k.store.CreateIdempotencyRecord(ctx, r)
+}
+
 // EmitEvent queues an event for all active listeners matching (sourceUserID, eventName).
 // It does NOT call the target action — the listener owner must call ConsumeEvent explicitly.
 // causingTraceID is stored as a FOLLOWS_FROM reference on each event record.
@@ -1209,13 +1286,19 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 // ---- Receipt helpers ----
 
 // buildReceipt constructs a Receipt from a committed transaction and signs it.
-// Returns nil if no signing key / issuer is configured (unbootstrapped kernel).
-func (k *Kernel) buildReceipt(tx *Transaction) *Receipt {
+// Returns ErrInvalidState if the kernel has not been bootstrapped (no issuer configured).
+func (k *Kernel) buildReceipt(tx *Transaction) (*Receipt, error) {
 	if k.cfg.IssuerUserID == "" {
-		return nil
+		return nil, ErrInvalidState.Wrap("kernel not bootstrapped: no issuer")
 	}
-	argsHash := sha256Hex(tx.ArgsJSON)
-	replyHash := sha256Hex(tx.ReplyJSON)
+	argsHash, err := jcsHashStr(tx.ArgsJSON)
+	if err != nil {
+		return nil, ErrInternal.Wrapf("hash args: %v", err)
+	}
+	replyHash, err := jcsHashStr(tx.ReplyJSON)
+	if err != nil {
+		return nil, ErrInternal.Wrapf("hash reply: %v", err)
+	}
 	r := &Receipt{
 		ID:           uuid.New().String(),
 		IssuerUserID: k.cfg.IssuerUserID,
@@ -1232,7 +1315,7 @@ func (k *Kernel) buildReceipt(tx *Transaction) *Receipt {
 		CreatedAt:    time.Now().UTC(),
 	}
 	r.Signature = signReceipt(k.cfg.SigningKey, r)
-	return r
+	return r, nil
 }
 
 func sha256Hex(s string) string {
@@ -1240,13 +1323,13 @@ func sha256Hex(s string) string {
 	return fmt.Sprintf("%x", h)
 }
 
-// signReceipt signs the canonical receipt payload (excluding Signature) with key.
+// signReceipt signs the canonical receipt payload (excluding Signature) with JCS.
 // Returns empty string if key is nil.
 func signReceipt(key ed25519.PrivateKey, r *Receipt) string {
 	if len(key) == 0 {
 		return ""
 	}
-	payload, err := json.Marshal(receiptPayload{
+	payload, err := CanonicalJSON(receiptPayload{
 		ActionID:     r.ActionID,
 		ArgsHash:     r.ArgsHash,
 		CreatedAt:    r.CreatedAt.UTC().Format(time.RFC3339),
@@ -1285,7 +1368,7 @@ type receiptPayload struct {
 	TxID         string `json:"tx_id"`
 }
 
-// signRating signs the canonical rating payload (excluding Signature) with key.
+// signRating signs the canonical rating payload (excluding Signature) with JCS.
 // Returns empty string if key is nil.
 func signRating(key ed25519.PrivateKey, r *Rating) string {
 	if len(key) == 0 {
@@ -1295,7 +1378,7 @@ func signRating(key ed25519.PrivateKey, r *Rating) string {
 	if r.RatedReceiptID != nil {
 		receiptID = *r.RatedReceiptID
 	}
-	payload, err := json.Marshal(ratingPayload{
+	payload, err := CanonicalJSON(ratingPayload{
 		CreatedAt:      r.CreatedAt.UTC().Format(time.RFC3339),
 		ID:             r.ID,
 		RatedReceiptID: receiptID,
@@ -1406,6 +1489,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 }
 
 // GetActionManifest returns a signed manifest for a public active action.
+// Manifests are only available for actions that are both active and public.
 func (k *Kernel) GetActionManifest(ctx context.Context, subjectID, actionID string) (*ActionManifest, error) {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
@@ -1415,14 +1499,13 @@ func (k *Kernel) GetActionManifest(ctx context.Context, subjectID, actionID stri
 		return nil, ErrNotFound.Wrap("action not found")
 	}
 	if !a.Active || !a.Public {
-		if a.OwnerUserID != subjectID && !k.isSuperuser(ctx, subjectID) {
-			return nil, ErrUnauthorized.Wrap("manifest only available for public active actions")
-		}
+		return nil, ErrUnauthorized.Wrap("manifest only available for public active actions")
 	}
 	owner, err := k.store.ReadUser(ctx, a.OwnerUserID)
 	if err != nil {
 		return nil, err
 	}
+	stats, _ := k.store.ReadStats(ctx, a.ID)
 	m := &ActionManifest{
 		OwnerHandle:  owner.Handle,
 		Name:         a.Name,
@@ -1433,19 +1516,26 @@ func (k *Kernel) GetActionManifest(ctx context.Context, subjectID, actionID stri
 		Kind:         a.Kind,
 		ArtifactHash: a.ArtifactHash,
 		UpdatedAt:    a.UpdatedAt,
+		Stats:        stats,
 	}
 	m.Signature = signManifest(k.cfg.SigningKey, m)
 	return m, nil
 }
 
-// signManifest signs the canonical manifest payload (excluding Signature).
+// signManifest signs the canonical manifest payload (excluding Signature) with JCS.
 func signManifest(key ed25519.PrivateKey, m *ActionManifest) string {
 	if len(key) == 0 {
 		return ""
 	}
-	inputJSON, _ := json.Marshal(m.InputSchema)
-	outputJSON, _ := json.Marshal(m.OutputSchema)
-	payload, err := json.Marshal(manifestPayload{
+	inputJSON, _ := CanonicalJSON(m.InputSchema)
+	outputJSON, _ := CanonicalJSON(m.OutputSchema)
+	statsJSON := ""
+	if m.Stats != nil {
+		if b, err := CanonicalJSON(m.Stats); err == nil {
+			statsJSON = string(b)
+		}
+	}
+	payload, err := CanonicalJSON(manifestPayload{
 		ArtifactHash: m.ArtifactHash,
 		Description:  m.Description,
 		InputSchema:  string(inputJSON),
@@ -1454,6 +1544,7 @@ func signManifest(key ed25519.PrivateKey, m *ActionManifest) string {
 		OutputSchema: string(outputJSON),
 		OwnerHandle:  m.OwnerHandle,
 		Price:        m.Price,
+		Stats:        statsJSON,
 		UpdatedAt:    m.UpdatedAt.UTC().Format(time.RFC3339),
 	})
 	if err != nil {
@@ -1472,5 +1563,6 @@ type manifestPayload struct {
 	OutputSchema string `json:"output_schema"`
 	OwnerHandle  string `json:"owner_handle"`
 	Price        int64  `json:"price"`
+	Stats        string `json:"stats"`
 	UpdatedAt    string `json:"updated_at"`
 }

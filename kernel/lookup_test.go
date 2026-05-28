@@ -33,6 +33,7 @@ func newTestKernelWithEmbedder(st Store, emb Embedder) *Kernel {
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
+	cfg.IssuerUserID = "test-issuer-id"
 	return New(st, nil, nil, emb, nil, cfg, nil)
 }
 

@@ -10,6 +10,34 @@ import (
 	"github.com/daios-ai/juice/store"
 )
 
+func TestFirstBootAtomic(t *testing.T) {
+	ctx := context.Background()
+	k := newTestKernel(t)
+
+	if err := k.FirstBoot(ctx, "secret"); err != nil {
+		t.Fatalf("FirstBoot: %v", err)
+	}
+
+	// All three config entries must be present.
+	for _, key := range []string{"superuser_handle", "signing_public_key", "signing_private_key"} {
+		v, err := k.GetConfig(ctx, key)
+		if err != nil || v == "" {
+			t.Errorf("config %q missing after FirstBoot: %v", key, err)
+		}
+	}
+
+	// @sys user must exist.
+	u, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil || u == nil {
+		t.Fatalf("@sys not found after FirstBoot: %v", err)
+	}
+
+	// Second call must be a no-op (idempotent).
+	if err := k.FirstBoot(ctx, "secret"); err != nil {
+		t.Errorf("second FirstBoot should be idempotent, got: %v", err)
+	}
+}
+
 func newTestKernel(t *testing.T) *kernel.Kernel {
 	t.Helper()
 	dir := t.TempDir()

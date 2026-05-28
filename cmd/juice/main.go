@@ -70,24 +70,36 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	cfg.TokenSecret = envOr("JUICE_SECRET_KEY", "dev-secret-change-me")
 	cfg.FeeRecipientID = os.Getenv("JUICE_FEE_RECIPIENT")
 	if bps := os.Getenv("JUICE_FEE_BPS"); bps != "" {
-		if v, err := strconv.ParseInt(bps, 10, 64); err == nil {
-			cfg.FeeBPS = v
+		v, err := strconv.ParseInt(bps, 10, 64)
+		if err != nil {
+			db.Close()
+			return nil, nil, fmt.Errorf("JUICE_FEE_BPS invalid: %w", err)
 		}
+		cfg.FeeBPS = v
 	}
 	if ttl := os.Getenv("JUICE_TOKEN_TTL"); ttl != "" {
-		if d, err := time.ParseDuration(ttl); err == nil {
-			cfg.TokenTTL = d
+		d, err := time.ParseDuration(ttl)
+		if err != nil {
+			db.Close()
+			return nil, nil, fmt.Errorf("JUICE_TOKEN_TTL invalid: %w", err)
 		}
+		cfg.TokenTTL = d
 	}
 	if ms := os.Getenv("JUICE_SCRIPT_TIMEOUT_MS"); ms != "" {
-		if v, err := strconv.ParseInt(ms, 10, 64); err == nil {
-			cfg.ScriptTimeout = time.Duration(v) * time.Millisecond
+		v, err := strconv.ParseInt(ms, 10, 64)
+		if err != nil {
+			db.Close()
+			return nil, nil, fmt.Errorf("JUICE_SCRIPT_TIMEOUT_MS invalid: %w", err)
 		}
+		cfg.ScriptTimeout = time.Duration(v) * time.Millisecond
 	}
 	if mb := os.Getenv("JUICE_SCRIPT_MEMORY_BYTES"); mb != "" {
-		if v, err := strconv.ParseInt(mb, 10, 64); err == nil {
-			cfg.ScriptMemory = v
+		v, err := strconv.ParseInt(mb, 10, 64)
+		if err != nil {
+			db.Close()
+			return nil, nil, fmt.Errorf("JUICE_SCRIPT_MEMORY_BYTES invalid: %w", err)
 		}
+		cfg.ScriptMemory = v
 	}
 	if os.Getenv("JUICE_ALLOW_LOCAL_SOURCES") == "true" {
 		cfg.AllowLocalSources = true
