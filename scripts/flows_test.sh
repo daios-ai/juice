@@ -786,7 +786,7 @@ fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "=== FLOW 16: Human rating and cascade ==="
+echo "=== FLOW 16: Human rating ==="
 
 # Use the known tx from flow 8 (direct call to ACTION_ID), so stats checks are consistent.
 RATE_TX_ID="$TX_ID"
@@ -815,6 +815,14 @@ if [ -n "$RATE_TX_ID" ]; then
         ok "16.3 action stats: rating_count updated after rating"
     else
         fail "16.3 action stats rating_count updated" "rating_count=$RATING_COUNT stats=$STATS"
+    fi
+
+    # Non-buyer (@bob) cannot rate a transaction they did not pay for
+    RATE_BOB=$(j "$H_BOB" tx rate --id "$RATE_TX_ID" --rating 1 2>&1)
+    if echo "$RATE_BOB" | grep -qi "unauthorized\|forbidden\|error\|invalid"; then
+        ok "16.4 non-buyer cannot rate transaction"
+    else
+        fail "16.4 non-buyer cannot rate transaction" "$RATE_BOB"
     fi
 else
     fail "16.1 transaction rated 1" "no successful tx found"
