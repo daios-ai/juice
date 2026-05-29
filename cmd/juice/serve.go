@@ -77,8 +77,9 @@ func runServer(addr string) error {
 	// Users — rate limited: 3 requests/minute per IP, burst of 5.
 	r.With(ipRateLimiter(3.0/60, 5)).Post("/v1/users", srv.postUser)
 
-	// Public action listing — no auth required (only returns grant-all active actions).
+	// Public action routes — no auth required.
 	r.Get("/v1/actions", srv.getActions)
+	r.Get("/v1/actions/{id}/manifest", srv.getActionManifest)
 
 	// Actions (authenticated).
 	r.Group(func(r chi.Router) {
@@ -93,7 +94,6 @@ func runServer(addr string) error {
 		r.Delete("/v1/actions/{id}/acl", srv.revokeACL)
 		r.Post("/v1/actions/{id}/grant-all", srv.grantAll)
 		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
-		r.Get("/v1/actions/{id}/manifest", srv.getActionManifest)
 
 		// Processes.
 		r.Get("/v1/processes", srv.listProcesses)
@@ -896,7 +896,7 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getActionManifest(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	m, err := s.kernel.GetActionManifest(r.Context(), subjectFrom(r), id)
+	m, err := s.kernel.GetActionManifest(r.Context(), id)
 	if err != nil {
 		writeErr(w, err)
 		return

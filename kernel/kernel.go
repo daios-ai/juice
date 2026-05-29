@@ -1554,7 +1554,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 
 // GetActionManifest returns a signed manifest for a public active action.
 // Manifests are only available for actions that are both active and public.
-func (k *Kernel) GetActionManifest(ctx context.Context, subjectID, actionID string) (*ActionManifest, error) {
+func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*ActionManifest, error) {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return nil, err
@@ -1582,7 +1582,7 @@ func (k *Kernel) GetActionManifest(ctx context.Context, subjectID, actionID stri
 		UpdatedAt:    a.UpdatedAt,
 		Stats:        stats,
 	}
-	sig, err := signManifest(k.cfg.SigningKey, m)
+	sig, err := SignManifest(k.cfg.SigningKey, m)
 	if err != nil {
 		return nil, err
 	}
@@ -1590,11 +1590,7 @@ func (k *Kernel) GetActionManifest(ctx context.Context, subjectID, actionID stri
 	return m, nil
 }
 
-// signManifest signs the canonical manifest payload (excluding Signature) with JCS.
-func signManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
-	if len(key) != ed25519.PrivateKeySize {
-		return "", ErrInvalidState.Wrap("signing key is not configured")
-	}
+func manifestCanonicalPayload(m *ActionManifest) ([]byte, error) {
 	inputJSON, _ := CanonicalJSON(m.InputSchema)
 	outputJSON, _ := CanonicalJSON(m.OutputSchema)
 	statsJSON := ""
@@ -1603,7 +1599,7 @@ func signManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
 			statsJSON = string(b)
 		}
 	}
-	payload, err := CanonicalJSON(manifestPayload{
+	return CanonicalJSON(manifestPayload{
 		ArtifactHash: m.ArtifactHash,
 		Description:  m.Description,
 		InputSchema:  string(inputJSON),
@@ -1615,11 +1611,36 @@ func signManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
 		Stats:        statsJSON,
 		UpdatedAt:    m.UpdatedAt.UTC().Format(time.RFC3339),
 	})
+}
+
+// SignManifest creates a base64url Ed25519 signature over the canonical manifest payload.
+func SignManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
+	if len(key) != ed25519.PrivateKeySize {
+		return "", ErrInvalidState.Wrap("signing key is not configured")
+	}
+	payload, err := manifestCanonicalPayload(m)
 	if err != nil {
 		return "", ErrInternal.Wrapf("canonicalize manifest: %v", err)
 	}
-	sig := ed25519.Sign(key, payload)
-	return base64.RawURLEncoding.EncodeToString(sig), nil
+	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
+}
+
+// VerifyManifestSignature checks that m.Signature was produced by the private key
+// corresponding to pubKeyB64 (base64url Ed25519 public key).
+func VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
+	pub, err := decodeRemotePublicKey(pubKeyB64)
+	if err != nil {
+		return err
+	}
+	payload, err := manifestCanonicalPayload(m)
+	if err != nil {
+		return ErrInternal.Wrapf("canonicalize manifest: %v", err)
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(m.Signature)
+	if err != nil || !ed25519.Verify(pub, payload, sig) {
+		return ErrUnauthorized.Wrap("manifest signature is invalid")
+	}
+	return nil
 }
 
 type manifestPayload struct {

@@ -143,10 +143,10 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("%q is not a remote kernel", remoteHandle)
 	}
 
-	// Fetch the action list to find the action by name.
-	manifestURL := fmt.Sprintf("%s/v1/actions?owner=%s&name=%s",
-		strings.TrimRight(remoteUser.RemoteBaseURL, "/"), remoteHandle, actionName)
-	resp, err := http.Get(manifestURL)
+	base := strings.TrimRight(remoteUser.RemoteBaseURL, "/")
+
+	// Discover the action ID by listing.
+	resp, err := http.Get(fmt.Sprintf("%s/v1/actions?owner=%s&name=%s", base, remoteHandle, actionName))
 	if err != nil {
 		return fmt.Errorf("fetch action list: %w", err)
 	}
@@ -155,43 +155,39 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("remote kernel returned %d: %s", resp.StatusCode, body)
 	}
-
-	// Parse the action list — remote kernel returns *kernel.Action objects (PascalCase JSON).
-	var actions []struct {
-		ID           string
-		Name         string
-		Description  string
-		Price        int64
-		Kind         string
-		InputSchema  map[string]any
-		OutputSchema map[string]any
-		ArtifactHash string
-	}
+	var actions []struct{ ID, Name string }
 	if err := json.Unmarshal(body, &actions); err != nil {
 		return fmt.Errorf("parse action list: %w", err)
 	}
-	idx := -1
-	for i := range actions {
-		if actions[i].Name == actionName {
-			idx = i
+	actionID := ""
+	for _, a := range actions {
+		if a.Name == actionName {
+			actionID = a.ID
 			break
 		}
 	}
-	if idx == -1 {
+	if actionID == "" {
 		return fmt.Errorf("action %q not found on remote kernel %q", actionName, remoteHandle)
 	}
-	a := actions[idx]
 
-	m := kernel.ActionManifest{
-		OwnerHandle:  remoteHandle,
-		Name:         a.Name,
-		Description:  a.Description,
-		InputSchema:  a.InputSchema,
-		OutputSchema: a.OutputSchema,
-		Price:        a.Price,
-		Kind:         kernel.ActionKind(a.Kind),
-		ArtifactHash: a.ArtifactHash,
+	// Fetch and verify the signed manifest.
+	resp2, err := http.Get(fmt.Sprintf("%s/v1/actions/%s/manifest", base, actionID))
+	if err != nil {
+		return fmt.Errorf("fetch manifest: %w", err)
 	}
+	defer resp2.Body.Close()
+	body2, _ := io.ReadAll(resp2.Body)
+	if resp2.StatusCode != http.StatusOK {
+		return fmt.Errorf("remote kernel returned %d: %s", resp2.StatusCode, body2)
+	}
+	var m kernel.ActionManifest
+	if err := json.Unmarshal(body2, &m); err != nil {
+		return fmt.Errorf("parse manifest: %w", err)
+	}
+	if err := kernel.VerifyManifestSignature(remoteUser.PublicKey, &m); err != nil {
+		return fmt.Errorf("manifest signature invalid: %w", err)
+	}
+
 	imported, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		return fmt.Errorf("import action: %w", err)

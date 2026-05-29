@@ -921,7 +921,7 @@ func TestManifestSigningRequiresConfiguredKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.GetActionManifest(ctx, owner.ID, a.ID)
+	_, err := k.GetActionManifest(ctx, a.ID)
 	if !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
 	}

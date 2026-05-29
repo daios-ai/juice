@@ -474,6 +474,19 @@ Correctness condition:
 gross = net + fee
 ```
 
+Fee policy for v1:
+
+```text
+root local call           → fee = Fee(gross, JUICE_FEE_BPS)
+contractor sub-call       → fee = 0, net = gross
+remote proxy call         → fee = 0
+remote destination call   → destination kernel policy
+```
+
+The `call_context` is determined by the kernel. Action providers do not control it.
+
+Justification: contractor calls are production inputs. Charging a percentage fee on every internal edge taxes implementation depth and discourages composition.
+
 ### 5.6 Schema validation
 
 Requirements:
@@ -491,7 +504,7 @@ Justification: validating inputs before locking funds avoids charging invalid ca
 When `juice.call` is invoked inside an action's execution context, the kernel implements the contractor model:
 
 1. The kernel creates an ephemeral process owned by the calling action's owner, funded from that owner's available balance for exactly the sub-action's price.
-2. The sub-call executes against the ephemeral process following the standard §5.1–§5.5 call path.
+2. The sub-call executes against the ephemeral process following the standard §5.1–§5.5 call path, with fee = 0. The contractor receives the full `action.price`.
 3. On sub-call completion, the ephemeral process is closed. On failure, unused locked funds are returned to the owner.
 4. This applies recursively: each action in the call tree bears the cost of its own sub-calls.
 
@@ -765,13 +778,21 @@ signature
 
 Requirements:
 
-- Any authenticated subject may rate any transaction 0 (bad) or 1 (good) via `RateTransaction(subject, tx_id, rating)`.
+- Only the direct buyer may rate a transaction via `RateTransaction(subject, tx_id, rating)`.
+
+```text
+direct_buyer(tx) := owner_user_id of the process that paid for tx
+
+CanRate(subject, tx) := subject.id = direct_buyer(tx)
+```
+
+For contractor sub-calls, the direct buyer is the owner of the ephemeral process. For event-triggered calls, the direct buyer is the owner of the consuming process.
+
 - Each rating is stored as a new record in the `ratings` table. The transaction row is not modified (§3.6 immutability).
 - A transaction may have at most one rating record. Submitting a second rating for the same transaction must be rejected with `ErrInvalidInput`.
 - `rated_receipt_id` references the receipt issued for that transaction (see §20). It is null for transactions predating the receipt requirement.
 - `signature` is the platform Ed25519 signature of the canonical rating record.
-- When a transaction is rated, the rating must automatically cascade to all unrated descendant transactions in the trace tree by creating platform-signed rating records for each unrated descendant.
-- The initial rating insertion and all cascade insertions must be performed in a single atomic SQLite transaction. Partial cascade is not permitted.
+- Ratings do not cascade. A rating applies only to the rated transaction. Derived propagated scores may be computed as experimental statistics or tags, but they are not rating records.
 - Rating is a supervision operation. It must not be callable through `Call()`.
 
 **Trace metrics**
@@ -1055,7 +1076,11 @@ CLI commands
 logging smoke test
 superuser first-boot prompt and config storage
 suspended user rejected at authentication
-rating cascade to unrated descendant transactions
+root local call charges fee
+contractor sub-call has fee = 0, contractor receives full price
+direct buyer can rate transaction
+non-buyer cannot rate transaction
+ratings do not cascade
 trace cost and latency updated on transaction completion
 native action callable through Call()
 non-superuser rejected from admin CLI commands
@@ -1079,7 +1104,6 @@ ConsumeEvent fails and resets event to pending when process has insufficient fun
 bootstrap resets in-flight events (consumed_at set, tx_id null) to pending
 second rating on same transaction rejected with ErrInvalidInput
 rating record created in ratings table, transaction row unchanged
-rating cascade creates rating records for unrated descendants
 Ed25519 signing keypair present after first boot
 zero-credit process satisfies fund locking for zero-price actions
 Kernel.Deposit rejected with ErrUnauthorized for non-superuser caller
@@ -1103,7 +1127,8 @@ every nested call creates exactly one child trace
 script calls cannot bypass ACL
 suspended users cannot authenticate
 native actions are always owned by the superuser
-rating cascade does not overwrite already-rated transactions
+contractor sub-calls do not incur platform fee
+direct buyer identified as process owner
 trace.cost equals sum of descendant transaction gross amounts
 caller.process.available decreases by at most action.price per call
 ephemeral processes are always closed after sub-call completion
@@ -1115,7 +1140,7 @@ emitter balance is unchanged by EmitEvent regardless of how many listeners match
 consumed events never appear in ListPendingEvents
 pending events are absent after listener deletion
 transaction row is immutable after commit (no field updated post-creation)
-rating records reference valid tx_id and receipt_id
+rating record references valid tx_id
 ```
 
 ## 17. Configuration
@@ -1456,7 +1481,7 @@ Requirements:
 - `rated_receipt_id` is nullable for transactions that predate the receipt requirement.
 - `signature` is the platform Ed25519 signature of the canonical JSON serialisation of all other rating fields (excluding `signature`).
 - A transaction may have at most one rating record. A duplicate must be rejected with `ErrInvalidInput`.
-- Rating cascade (§10.2) creates one platform-signed rating record per unrated descendant; all insertions are in one atomic SQLite transaction.
+- Ratings do not cascade (§10.2). Only the rated transaction receives a rating record.
 
 ### 20.4 Canonical serialisation
 

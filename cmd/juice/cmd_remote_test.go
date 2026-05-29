@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
@@ -126,23 +127,41 @@ func TestRemoteList(t *testing.T) {
 func TestRemoteImport(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 
-	// Stand up a fake remote kernel that serves an action list.
+	// Generate a real signing keypair for the "remote" kernel.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+
+	const actionID = "action-remote-id"
+	m := kernel.ActionManifest{
+		OwnerHandle:  "@import-remote",
+		Name:         "/greet",
+		Description:  "says hello",
+		Kind:         kernel.KindHTTP,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	}
+	sig, err := kernel.SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+
+	// Stand up a fake remote kernel that serves action list and signed manifest.
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]map[string]any{{
-			"id":            "action-remote-id",
-			"name":          "/greet",
-			"description":   "says hello",
-			"price":         0,
-			"kind":          "http",
-			"input_schema":  map[string]any{"type": "object"},
-			"output_schema": map[string]any{"type": "object"},
-		}})
+		if strings.Contains(r.URL.Path, "/manifest") {
+			json.NewEncoder(w).Encode(m)
+		} else {
+			json.NewEncoder(w).Encode([]map[string]string{{"ID": actionID, "Name": "/greet"}})
+		}
 	}))
 	defer remote.Close()
 
-	// Register the remote kernel.
-	if _, err := k.RegisterRemoteKernel(t.Context(), "@import-remote", remoteTestPublicKey(t), remote.URL); err != nil {
+	// Register the remote kernel with the real public key.
+	if _, err := k.RegisterRemoteKernel(t.Context(), "@import-remote", pubB64, remote.URL); err != nil {
 		t.Fatal(err)
 	}
 

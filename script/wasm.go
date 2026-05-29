@@ -166,8 +166,7 @@ func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions
 				args, _ := mem.Read(argsPtr, argsLen)
 				result, err := host.Call(ctx, string(name), args)
 				if err != nil {
-					stack[0], stack[1] = 0, 0
-					return
+					panic(err.Error())
 				}
 				ptrs := writeToMem(ctx, mod, result)
 				stack[0], stack[1] = ptrs[0], ptrs[1]
