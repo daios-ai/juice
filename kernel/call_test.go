@@ -686,14 +686,13 @@ func TestContractorSubCallChargedToActionOwner(t *testing.T) {
 		t.Errorf("caller process.available: got %d, want 0 (outer price only)", proc.Available)
 	}
 
-	// Test kernel uses 20% fee (2000 BPS).
-	// Bob received inner net = 100 - 20 = 80.
+	// Contractor sub-call has fee=0; Bob received full inner price = 100.
 	bobUser, _ := st.ReadUser(ctx, bob.ID)
-	if bobUser.Available != 580 { // 500 + 80
-		t.Errorf("inner action owner available: got %d, want 580", bobUser.Available)
+	if bobUser.Available != 600 { // 500 + 100
+		t.Errorf("inner action owner available: got %d, want 600", bobUser.Available)
 	}
 
-	// Alice spent 100 (inner sub-call) and received outer net = 50 - 10 = 40.
+	// Alice spent 100 (inner sub-call, no fee) and received outer net = 50 - 10 = 40 (20% fee).
 	aliceUser, _ := st.ReadUser(ctx, alice.ID)
 	if aliceUser.Available != 940 { // 1000 - 100 + 40
 		t.Errorf("outer action owner available: got %d, want 940", aliceUser.Available)

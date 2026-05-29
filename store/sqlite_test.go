@@ -873,9 +873,9 @@ func TestCreateReadReceipt(t *testing.T) {
 	}
 }
 
-// ---- Rating cascade tests ----
+// ---- Rating tests ----
 
-func TestCreateRatingCascade(t *testing.T) {
+func TestCreateRating(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -892,8 +892,6 @@ func TestCreateRatingCascade(t *testing.T) {
 		StartedAt:     time.Now().UTC(),
 		EndedAt:       time.Now().UTC(),
 	}
-	traceID := uuid.New().String()
-	tx.TraceID = traceID
 	_ = db.CreateTransaction(ctx, tx)
 
 	rating := &kernel.Rating{
@@ -904,8 +902,8 @@ func TestCreateRatingCascade(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 		Signature:   "",
 	}
-	if err := db.CreateRatingCascade(ctx, tx.ID, traceID, rating); err != nil {
-		t.Fatalf("CreateRatingCascade: %v", err)
+	if err := db.CreateRating(ctx, rating); err != nil {
+		t.Fatalf("CreateRating: %v", err)
 	}
 
 	got, err := db.ReadRatingByTxID(ctx, tx.ID)
@@ -927,7 +925,7 @@ func TestCreateRatingCascade(t *testing.T) {
 		Rating:      0.0,
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := db.CreateRatingCascade(ctx, tx.ID, traceID, dup); err == nil {
+	if err := db.CreateRating(ctx, dup); err == nil {
 		t.Error("expected error for duplicate rating")
 	}
 }

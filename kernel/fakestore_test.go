@@ -1001,14 +1001,14 @@ func (f *fakeStore) ReadReceiptByTxID(_ context.Context, txID string) (*Receipt,
 	return &cp, nil
 }
 
-func (f *fakeStore) CreateRatingCascade(_ context.Context, txID, _ string, r *Rating) error {
+func (f *fakeStore) CreateRating(_ context.Context, r *Rating) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, exists := f.ratings[txID]; exists {
+	if _, exists := f.ratings[r.RatedTxID]; exists {
 		return ErrInvalidState.Wrap("already rated")
 	}
 	cp := *r
-	f.ratings[txID] = &cp
+	f.ratings[r.RatedTxID] = &cp
 	return nil
 }
 

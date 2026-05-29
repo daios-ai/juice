@@ -848,10 +848,9 @@ func (k *Kernel) ListTransactions(ctx context.Context, filter TxFilter) ([]*Tran
 	return k.store.ListTransactions(ctx, filter)
 }
 
-// RateTransaction submits a rating for a completed transaction and cascades to unrated descendants.
+// RateTransaction submits a rating for a completed transaction.
+// Only the direct buyer (the process owner who paid) may rate.
 // Ratings are stored in a separate ratings table; the transaction row is never modified.
-// Both the root rating insertion and the cascade are performed atomically in a single store operation.
-// After cascade, action stats are updated to reflect the new rating.
 func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, rating float64) error {
 	if rating != 0 && rating != 1 {
 		return ErrInvalidInput.Wrap("rating must be 0 or 1")
@@ -869,6 +868,10 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	}
 	if tx == nil {
 		return ErrNotFound.Wrap("transaction not found")
+	}
+	// Only the direct buyer (process owner) may rate.
+	if subjectID != tx.OwnerUserID {
+		return ErrUnauthorized.Wrap("only the direct buyer may rate a transaction")
 	}
 	// Check for duplicate rating (transaction already has a rating record).
 	if existing, _ := k.store.ReadRatingByTxID(ctx, txID); existing != nil {
@@ -891,7 +894,7 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 		return err
 	}
 	r.Signature = sig
-	if err := k.store.CreateRatingCascade(ctx, txID, tx.TraceID, r); err != nil {
+	if err := k.store.CreateRating(ctx, r); err != nil {
 		return err
 	}
 	// Update action stats to keep rating_mean and rating_count current.

@@ -1766,42 +1766,14 @@ func (s *DB) ReadReceipt(ctx context.Context, id string) (*kernel.Receipt, error
 
 // ---- Ratings ----
 
-func (s *DB) CreateRatingCascade(ctx context.Context, txID, traceID string, r *kernel.Rating) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin rating cascade")
-	}
-	defer tx.Rollback()
-
-	// Insert the root rating record.
-	if _, err := tx.ExecContext(ctx,
+func (s *DB) CreateRating(ctx context.Context, r *kernel.Rating) error {
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature)
 		 VALUES (?,?,?,?,?,?,?)`,
 		r.ID, r.RatedTxID, r.RatedReceiptID, r.RaterUserID, r.Rating,
 		timeToStr(r.CreatedAt), r.Signature,
-	); err != nil {
-		return dbErr(err, "rating cascade: insert root rating")
-	}
-
-	// Cascade: insert rating records for all unrated descendant transactions.
-	if _, err := tx.ExecContext(ctx, `
-WITH RECURSIVE subtree(id) AS (
-    SELECT id FROM traces WHERE id=?
-    UNION ALL
-    SELECT t.id FROM traces t JOIN subtree s ON t.parent_trace_id=s.id AND t.id != t.parent_trace_id
-)
-INSERT OR IGNORE INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature)
-SELECT lower(hex(randomblob(16))), tx.id, NULL, ?, ?, ?, ''
-FROM transactions tx
-WHERE tx.trace_id IN (SELECT id FROM subtree)
-  AND tx.id != ?
-  AND NOT EXISTS (SELECT 1 FROM ratings WHERE rated_tx_id=tx.id)`,
-		traceID, r.RaterUserID, r.Rating, timeToStr(r.CreatedAt), txID,
-	); err != nil {
-		return dbErr(err, "rating cascade: cascade descendants")
-	}
-
-	return dbErr(tx.Commit(), "rating cascade: commit")
+	)
+	return dbErr(err, "create rating")
 }
 
 func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating, error) {

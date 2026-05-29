@@ -147,10 +147,8 @@ type Store interface {
 
 	// ---- Ratings ----
 
-	// CreateRatingCascade atomically inserts a rating record for txID and cascades to all
-	// unrated descendant transactions in the trace subtree rooted at traceID.
-	// All writes occur in a single SQLite transaction.
-	CreateRatingCascade(ctx context.Context, txID, traceID string, r *Rating) error
+	// CreateRating inserts a rating record. Ratings do not cascade (§10.2).
+	CreateRating(ctx context.Context, r *Rating) error
 	ReadRatingByTxID(ctx context.Context, txID string) (*Rating, error)
 
 	// ---- Idempotency ----

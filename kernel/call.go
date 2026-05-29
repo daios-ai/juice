@@ -31,6 +31,9 @@ type CallRequest struct {
 	ActionName string
 	// Args is the JSON-decoded input arguments.
 	Args map[string]any
+	// ContractorCall is true for sub-calls made via juice.call inside an action.
+	// Fee is set to 0 so the contractor receives its full action.price (§5.7).
+	ContractorCall bool
 }
 
 // CallReply is the response from a successful Call().
@@ -162,7 +165,11 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	logger.Info("call.start", "action", action.Name, "price", action.Price)
 
 	// Prepare transaction skeleton.
-	net, fee := ComputeFee(action.Price, k.cfg.FeeBPS)
+	feeBPS := k.cfg.FeeBPS
+	if req.ContractorCall {
+		feeBPS = 0
+	}
+	net, fee := ComputeFee(action.Price, feeBPS)
 	txID := uuid.New().String()
 	tx := &Transaction{
 		ID:            txID,
@@ -497,11 +504,12 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	defer func() { _ = h.kernel.store.EndProcess(context.Background(), ep.ID) }()
 
 	reply, err := h.kernel.Call(ctx, CallRequest{
-		SubjectID:    h.ownerUserID,
-		ProcessID:    ep.ID,
-		TargetUserID: target.ID,
-		ActionName:   subActionName,
-		Args:         args,
+		SubjectID:      h.ownerUserID,
+		ProcessID:      ep.ID,
+		TargetUserID:   target.ID,
+		ActionName:     subActionName,
+		Args:           args,
+		ContractorCall: true,
 	})
 	if err != nil {
 		return nil, err
