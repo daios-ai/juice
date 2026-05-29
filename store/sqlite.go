@@ -412,7 +412,7 @@ func (s *DB) ListActions(ctx context.Context, activeOnly bool, limit, offset int
 	q := `SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at,deleted_at FROM actions WHERE deleted_at IS NULL`
 	args := []any{}
 	if activeOnly {
-		q += ` AND active=1`
+		q += ` AND active=1 AND public=1`
 	}
 	q += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
@@ -1195,7 +1195,6 @@ func (s *DB) UpdateTraceCostLatency(ctx context.Context, traceID string, grossDe
 	}
 	return nil
 }
-
 
 // ---- Stats ----
 

@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -221,5 +222,44 @@ func TestRefreshAccessToken(t *testing.T) {
 	_, _, err = k.RefreshAccessToken(ctx, refresh1)
 	if err == nil {
 		t.Error("old refresh token should be revoked after rotation")
+	}
+}
+
+func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	u, err := k.CreateUser(ctx, CreateUserRequest{
+		Handle: "@suspended-auth", Email: "suspended@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, _ := GenerateCodeVerifier()
+	challenge := CodeChallenge(verifier)
+	redirect, err := k.StartAuthCode(ctx, u.Handle, "pass", challenge, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, refresh, err := k.LoginWithRefresh(ctx, u.Handle, "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SuspendUser(ctx, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.StartAuthCode(ctx, u.Handle, "pass", challenge, ""); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("StartAuthCode: got %v, want ErrUnauthenticated", err)
+	}
+	code := redirect[len("?code="):]
+	if _, _, err := k.ExchangeAuthCode(ctx, code, verifier); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("ExchangeAuthCode: got %v, want ErrUnauthenticated", err)
+	}
+	if _, _, err := k.RefreshAccessToken(ctx, refresh); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("RefreshAccessToken: got %v, want ErrUnauthenticated", err)
+	}
+	if _, _, err := k.LoginWithRefresh(ctx, u.Handle, "pass"); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("LoginWithRefresh: got %v, want ErrUnauthenticated", err)
 	}
 }

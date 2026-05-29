@@ -113,12 +113,20 @@ func validateValue(schema map[string]any, data any, path string) error {
 			return ErrSchemaViolation.Wrapf("field %s: expected object, got %T", path, data)
 		}
 		props, _ := schema["properties"].(map[string]any)
-		required, _ := schema["required"].([]any)
-		reqSet := make(map[string]bool, len(required))
-		for _, r := range required {
-			if s, ok := r.(string); ok {
-				reqSet[s] = true
+		var required []string
+		switch v := schema["required"].(type) {
+		case []string:
+			required = v
+		case []any:
+			for _, r := range v {
+				if s, ok := r.(string); ok {
+					required = append(required, s)
+				}
 			}
+		}
+		reqSet := make(map[string]bool, len(required))
+		for _, s := range required {
+			reqSet[s] = true
 		}
 		for name, raw := range props {
 			childSchema, _ := raw.(map[string]any)

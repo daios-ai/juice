@@ -92,6 +92,7 @@ func setupProcess(t *testing.T, k *Kernel, ownerID string, funds int64) (*Proces
 type fakeScriptExec struct {
 	result string
 	err    error
+	calls  int
 }
 
 func (f *fakeScriptExec) Compile(_ context.Context, source []byte) ([]byte, string, error) {
@@ -99,6 +100,7 @@ func (f *fakeScriptExec) Compile(_ context.Context, source []byte) ([]byte, stri
 }
 
 func (f *fakeScriptExec) Execute(_ context.Context, _ []byte, input []byte, _ HostFunctions) ([]byte, error) {
+	f.calls++
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -846,6 +848,52 @@ func TestReceiptSigningRequiresConfiguredKey(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
+	}
+}
+
+func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
+	st := newFakeStore()
+	exec := &fakeScriptExec{result: `{"ok":true}`}
+	k := newTestKernelWithScripts(st, exec)
+	k.SetSigningKey(nil, "issuer-id", "@sys")
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@no-receipt-owner", 100)
+	a := &Action{
+		ID:           uuid.New().String(),
+		OwnerUserID:  owner.ID,
+		Name:         "/no-receipt",
+		Kind:         KindWasm,
+		Active:       true,
+		Price:        10,
+		Source:       "wat",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	p, root, _ := k.StartProcess(ctx, owner.ID, 50)
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: owner.ID, ActionName: "/no-receipt", Args: map[string]any{},
+	})
+	if !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("expected ErrInvalidState, got %v", err)
+	}
+	if exec.calls != 0 {
+		t.Fatalf("action executed despite missing receipt signing: %d calls", exec.calls)
+	}
+	got, _ := st.ReadProcess(ctx, p.ID)
+	if got.Available != 50 || got.Locked != 0 {
+		t.Fatalf("funds changed before receipt precondition: available=%d locked=%d", got.Available, got.Locked)
+	}
+	txs, _ := st.ListTransactions(ctx, TxFilter{ProcessID: p.ID})
+	if len(txs) != 0 {
+		t.Fatalf("transaction created despite missing receipt signing: %d", len(txs))
 	}
 }
 

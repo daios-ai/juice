@@ -26,8 +26,8 @@ type fakeStore struct {
 	refreshTokens      map[string]*RefreshToken
 	config             map[string]string
 	deposits           []*Deposit
-	receipts           map[string]*Receipt          // txID -> Receipt
-	ratings            map[string]*Rating           // txID -> Rating
+	receipts           map[string]*Receipt           // txID -> Receipt
+	ratings            map[string]*Rating            // txID -> Rating
 	idempotencyRecords map[string]*IdempotencyRecord // key+counterparty -> record
 }
 
@@ -147,7 +147,7 @@ func (f *fakeStore) ListActions(_ context.Context, activeOnly bool, limit, offse
 	defer f.mu.Unlock()
 	var result []*Action
 	for _, a := range f.actions {
-		if activeOnly && !a.Active {
+		if activeOnly && (!a.Active || !a.Public) {
 			continue
 		}
 		cp := *a
@@ -793,7 +793,6 @@ func (f *fakeStore) ListAllActions(_ context.Context, limit, offset int) ([]*Act
 	return result, nil
 }
 
-
 func (f *fakeStore) ListProcesses(_ context.Context, ownerID string, limit, offset int) ([]*Process, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -890,7 +889,6 @@ func (f *fakeStore) applyTraceLatency(traceID string, grossDelta int64, endedAt 
 		cur = t.ParentTraceID
 	}
 }
-
 
 func (f *fakeStore) GetConfig(_ context.Context, key string) (string, error) {
 	f.mu.Lock()

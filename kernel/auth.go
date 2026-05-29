@@ -110,6 +110,9 @@ func (k *Kernel) StartAuthCode(ctx context.Context, handle, password, codeChalle
 	if !CheckPassword(password, u.PasswordHash) {
 		return "", ErrUnauthenticated.Wrap("invalid credentials")
 	}
+	if err := rejectSuspended(u); err != nil {
+		return "", err
+	}
 
 	rawCode := make([]byte, 24)
 	if _, err := rand.Read(rawCode); err != nil {
@@ -149,6 +152,11 @@ func (k *Kernel) ExchangeAuthCode(ctx context.Context, code, codeVerifier string
 	if !VerifyCodeChallenge(codeVerifier, ac.CodeChallenge) {
 		return "", "", ErrUnauthenticated.Wrap("code_verifier does not match challenge")
 	}
+	if u, err := k.store.ReadUser(ctx, ac.UserID); err != nil {
+		return "", "", err
+	} else if err := rejectSuspended(u); err != nil {
+		return "", "", err
+	}
 
 	accessToken, err = IssueToken(ac.UserID, k.cfg.TokenSecret, k.cfg.TokenTTL)
 	if err != nil {
@@ -166,6 +174,11 @@ func (k *Kernel) RefreshAccessToken(ctx context.Context, oldRefreshToken string)
 	rt, err := k.store.RotateRefreshToken(ctx, oldRefreshToken)
 	if err != nil {
 		return "", "", ErrUnauthenticated.Wrap("invalid or expired refresh token")
+	}
+	if u, err := k.store.ReadUser(ctx, rt.UserID); err != nil {
+		return "", "", err
+	} else if err := rejectSuspended(u); err != nil {
+		return "", "", err
 	}
 	accessToken, err = IssueToken(rt.UserID, k.cfg.TokenSecret, k.cfg.TokenTTL)
 	if err != nil {
@@ -206,6 +219,9 @@ func (k *Kernel) LoginWithRefresh(ctx context.Context, handle, password string) 
 	}
 	if !CheckPassword(password, u.PasswordHash) {
 		return "", "", ErrUnauthenticated.Wrap("invalid credentials")
+	}
+	if err := rejectSuspended(u); err != nil {
+		return "", "", err
 	}
 	accessToken, err = IssueToken(u.ID, k.cfg.TokenSecret, k.cfg.TokenTTL)
 	if err != nil {

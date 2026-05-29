@@ -363,8 +363,18 @@ func TestServeListActions(t *testing.T) {
 	}
 	var actions []kernel.Action
 	decodeResponse(t, resp, &actions)
+	if len(actions) != 0 {
+		t.Fatal("private action should not appear in public list")
+	}
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, tok).Body.Close()
+	resp = httpDo(t, srv, "GET", "/v1/actions", nil, tok)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("list actions after grant-all: expected 200, got %d", resp.StatusCode)
+	}
+	decodeResponse(t, resp, &actions)
 	if len(actions) == 0 {
-		t.Error("expected at least one action in list")
+		t.Error("expected public action in list")
 	}
 }
 

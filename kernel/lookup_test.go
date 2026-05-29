@@ -50,7 +50,7 @@ func TestLookupRanking(t *testing.T) {
 	} {
 		a := &Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: desc.name,
-			Kind: KindHTTP, Active: true, Description: desc.text,
+			Kind: KindHTTP, Active: true, Public: true, Description: desc.text,
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)
@@ -92,7 +92,7 @@ func TestLookupRankingWithStats(t *testing.T) {
 	for _, name := range []string{"/reliable", "/unreliable"} {
 		a := &Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: name,
-			Kind: KindHTTP, Active: true, Description: "compute data results",
+			Kind: KindHTTP, Active: true, Public: true, Description: "compute data results",
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)

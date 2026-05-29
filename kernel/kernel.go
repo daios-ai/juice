@@ -35,7 +35,7 @@ type Config struct {
 // DefaultConfig returns safe local defaults.
 func DefaultConfig() Config {
 	return Config{
-		FeeBPS:        2000,
+		FeeBPS:        0,
 		TokenTTL:      15 * time.Minute,
 		ScriptTimeout: 10 * time.Second,
 		ScriptMemory:  64 * 1024 * 1024, // 64 MiB
@@ -138,8 +138,8 @@ func (k *Kernel) Login(ctx context.Context, handle, password string) (string, er
 	if !CheckPassword(password, u.PasswordHash) {
 		return "", ErrUnauthenticated.Wrap("invalid credentials")
 	}
-	if u.SuspendedAt != nil {
-		return "", ErrUnauthenticated.Wrap("account suspended")
+	if err := rejectSuspended(u); err != nil {
+		return "", err
 	}
 	tok, err := IssueToken(u.ID, k.cfg.TokenSecret, k.cfg.TokenTTL)
 	if err != nil {
@@ -147,6 +147,13 @@ func (k *Kernel) Login(ctx context.Context, handle, password string) (string, er
 	}
 	k.log.With(ctx).Info("user.login", "user_id", u.ID)
 	return tok, nil
+}
+
+func rejectSuspended(u *User) error {
+	if u.SuspendedAt != nil {
+		return ErrUnauthenticated.Wrap("account suspended")
+	}
+	return nil
 }
 
 // ListUsers returns all users ordered by creation time.
@@ -303,11 +310,10 @@ func (k *Kernel) CreateAction(ctx context.Context, req CreateActionRequest) (*Ac
 	}
 
 	if req.Kind == KindWasm && len(req.Source) > 0 && k.scripts != nil {
-		artifact, hash, err := k.scripts.Compile(ctx, []byte(req.Source))
+		_, hash, err := k.scripts.Compile(ctx, []byte(req.Source))
 		if err != nil {
 			return nil, ErrInvalidInput.Wrapf("wasm compilation failed: %v", err)
 		}
-		a.Source = string(artifact)
 		a.ArtifactHash = hash
 	}
 
@@ -431,7 +437,7 @@ func (k *Kernel) ReadActionByOwnerName(ctx context.Context, ownerID, name string
 	return k.store.ReadActionByOwnerName(ctx, ownerID, name)
 }
 
-// ListActions returns public active actions (or all actions for owners).
+// ListActions returns public actions. With activeOnly set it returns public active actions.
 func (k *Kernel) ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*Action, error) {
 	return k.store.ListActions(ctx, activeOnly, limit, offset)
 }
@@ -622,11 +628,10 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 		a.Source = *req.Source
 		a.Active = false
 		if a.Kind == KindWasm && k.scripts != nil {
-			artifact, hash, err := k.scripts.Compile(ctx, []byte(*req.Source))
+			_, hash, err := k.scripts.Compile(ctx, []byte(*req.Source))
 			if err != nil {
 				return nil, ErrInvalidInput.Wrapf("wasm compilation failed: %v", err)
 			}
-			a.Source = string(artifact)
 			a.ArtifactHash = hash
 		}
 	}
@@ -1299,8 +1304,8 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 // buildReceipt constructs a Receipt from a committed transaction and signs it.
 // Returns ErrInvalidState if the kernel has not been bootstrapped (no issuer configured).
 func (k *Kernel) buildReceipt(tx *Transaction) (*Receipt, error) {
-	if k.cfg.IssuerUserID == "" {
-		return nil, ErrInvalidState.Wrap("kernel not bootstrapped: no issuer")
+	if err := k.requireReceiptSigningReady(); err != nil {
+		return nil, err
 	}
 	argsHash, err := jcsHashStr(tx.ArgsJSON)
 	if err != nil {
@@ -1331,6 +1336,13 @@ func (k *Kernel) buildReceipt(tx *Transaction) (*Receipt, error) {
 	}
 	r.Signature = sig
 	return r, nil
+}
+
+func (k *Kernel) requireReceiptSigningReady() error {
+	if k.cfg.IssuerUserID == "" || len(k.cfg.SigningKey) != ed25519.PrivateKeySize {
+		return ErrInvalidState.Wrap("kernel cannot issue signed receipts")
+	}
+	return nil
 }
 
 func sha256Hex(s string) string {

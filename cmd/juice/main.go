@@ -75,7 +75,15 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 			db.Close()
 			return nil, nil, fmt.Errorf("JUICE_FEE_BPS invalid: %w", err)
 		}
+		if v < 0 || v > 10000 {
+			db.Close()
+			return nil, nil, fmt.Errorf("JUICE_FEE_BPS must be 0-10000")
+		}
 		cfg.FeeBPS = v
+	}
+	if cfg.FeeBPS > 0 && cfg.FeeRecipientID == "" {
+		db.Close()
+		return nil, nil, fmt.Errorf("JUICE_FEE_RECIPIENT required when JUICE_FEE_BPS > 0")
 	}
 	if ttl := os.Getenv("JUICE_TOKEN_TTL"); ttl != "" {
 		d, err := time.ParseDuration(ttl)

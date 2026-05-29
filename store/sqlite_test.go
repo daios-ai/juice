@@ -231,16 +231,20 @@ func TestListActions(t *testing.T) {
 	_ = db.CreateUser(ctx, owner)
 
 	active := newAction(owner.ID, "/active", 0, true)
+	active.Public = true
 	inactive := newAction(owner.ID, "/inactive", 0, false)
+	inactive.Public = true
+	private := newAction(owner.ID, "/private", 0, true)
 	_ = db.CreateAction(ctx, active)
 	_ = db.CreateAction(ctx, inactive)
+	_ = db.CreateAction(ctx, private)
 
 	all, err := db.ListActions(ctx, false, 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 2 {
-		t.Errorf("ListActions(all): got %d, want 2", len(all))
+	if len(all) != 3 {
+		t.Errorf("ListActions(all): got %d, want 3", len(all))
 	}
 
 	activeOnly, err := db.ListActions(ctx, true, 100, 0)

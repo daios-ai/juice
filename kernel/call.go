@@ -106,6 +106,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if err := ValidateInput(action.InputSchema, req.Args); err != nil {
 		return nil, err
 	}
+	if err := k.requireReceiptSigningReady(); err != nil {
+		return nil, err
+	}
 
 	// 8. Check process has sufficient available funds.
 	if process.Available < action.Price {
@@ -407,6 +410,11 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 		return nil, ErrInvalidInput.Wrap("could not serialize args")
 	}
 
+	artifact, _, err := k.scripts.Compile(ctx, []byte(action.Source))
+	if err != nil {
+		return nil, ErrExecutionFailed.Wrapf("wasm compile failed: %v", err)
+	}
+
 	host := &kernelHostFunctions{
 		kernel:      k,
 		processID:   trace.ProcessID,
@@ -414,7 +422,7 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 		ownerUserID: ownerUserID,
 	}
 
-	outputJSON, err := k.scripts.Execute(ctx, []byte(action.Source), inputJSON, host)
+	outputJSON, err := k.scripts.Execute(ctx, artifact, inputJSON, host)
 	if err != nil {
 		return nil, ErrExecutionFailed.Wrapf("wasm execution failed: %v", err)
 	}

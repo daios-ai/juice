@@ -143,6 +143,7 @@ func TestActionListActive(t *testing.T) {
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
+	_ = env.k.GrantAll(ctx, owner.ID, a.ID)
 
 	actions, err := env.k.ListActions(ctx, true, 10, 0)
 	if err != nil {
@@ -155,6 +156,6 @@ func TestActionListActive(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("active action should appear in ListActions")
+		t.Error("active public action should appear in ListActions")
 	}
 }
