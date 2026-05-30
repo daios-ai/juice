@@ -124,7 +124,7 @@ All monetary transitions occur inside SQLite transactions. Each operation must a
 | Failed call | transaction, receipt, full refund, trace metrics, stats |
 | End process | process closure, return of remaining owner funds |
 | Deposit | user credit, deposit record |
-| Rating cascade | all new rating records |
+| Rating | rating record insert |
 
 A committed monetary transition must never exist without its audit record, or vice versa.
 
@@ -174,16 +174,16 @@ Zero-credit processes may execute actions with `price = 0` because `available >=
 
 ### 5.3 Settlement
 
-Only successful calls are charged in v1:
+Only successful calls are charged in v1. Fee applies to value added only (VAT model):
 
 ```text
-gross = action.price
-fee   = Fee(gross)
-net   = gross - fee
-gross = net + fee
+gross       = action.price
+sub_cost    = sum of gross paid to direct sub-calls during execution
+fee         = Fee(gross - sub_cost)
+net         = gross - fee
 ```
 
-Success decreases the process and owner locked balances by `gross`, credits the target by `net`, and credits the fee recipient by `fee`.
+Success decreases the process and owner locked balances by `gross`, credits the target by `net`, and credits the fee recipient by `fee`. Each kernel taxes only its own layer; remote sub-calls are subject to the remote kernel's fee policy independently.
 
 Any failure before or after target execution starts charges zero, refunds the full locked gross amount, records a failure transaction, and exposes the failure class through `status` and `reason`. A later partial-failure policy must be represented explicitly in the transaction.
 
@@ -306,7 +306,7 @@ Every transaction references a trace. Trace lookup by process returns its execut
 - `trace.cost` is the sum of descendant transaction gross amounts.
 - `trace.latency_ms` is wall-clock elapsed time from trace creation until the latest descendant completion.
 
-Any authenticated subject may call `RateTransaction(tx_id, rating)` with `rating ∈ {0, 1}`. Rating is a supervision operation and must not route through `Call()`. Verify the rating signature at submission. Ratings are immutable rows; transaction rows never change. A duplicate rating returns `ErrInvalidInput`. Rating `0` or `1` propagates recursively to unrated descendant transactions in the same trace tree without overwriting existing ratings; all inserts commit atomically. Update stats accordingly.
+Only the direct buyer (`tx.owner_user_id`'s process owner) may call `RateTransaction(tx_id, rating)` with `rating ∈ {0, 1}`; any other subject returns `ErrUnauthorized`. Rating is a supervision operation and must not route through `Call()`. Ratings are immutable rows; transaction rows never change. A duplicate rating returns `ErrInvalidInput`. Ratings do not cascade; each rating applies only to the rated transaction. Update stats accordingly.
 
 ### 9.2 Receipts
 
@@ -532,7 +532,9 @@ CLI commands
 logging smoke test
 superuser first-boot prompt and config storage
 suspended user rejected at authentication
-rating cascade to unrated descendant transactions
+direct buyer can rate transaction
+non-buyer cannot rate transaction
+contractor sub-call has fee = 0, contractor receives full price
 trace cost and latency updated on transaction completion
 native action callable through Call()
 non-superuser rejected from admin CLI commands
@@ -556,7 +558,7 @@ ConsumeEvent fails and resets event to pending when process has insufficient fun
 bootstrap resets in-flight events (consumed_at set, tx_id null) to pending
 second rating on same transaction rejected with ErrInvalidInput
 rating record created in ratings table, transaction row unchanged
-rating cascade creates rating records for unrated descendants
+ratings do not cascade
 Ed25519 signing keypair present after first boot
 zero-credit process satisfies fund locking for zero-price actions
 Kernel.Deposit rejected with ErrUnauthorized for non-superuser caller
@@ -578,7 +580,7 @@ every nested call creates exactly one child trace
 script calls cannot bypass ACL
 suspended users cannot authenticate
 native actions are always owned by the superuser
-rating cascade does not overwrite already-rated transactions
+ratings do not cascade; each rating applies only to the rated transaction
 trace.cost equals sum of descendant transaction gross amounts
 caller.process.available decreases by at most action.price per call
 ephemeral processes are always closed after sub-call completion
