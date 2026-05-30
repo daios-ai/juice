@@ -179,9 +179,12 @@ Only successful calls are charged in v1. Fee applies to value added only (VAT mo
 ```text
 gross       = action.price
 sub_cost    = sum of gross paid to direct sub-calls during execution
-fee         = Fee(gross - sub_cost)
+taxable     = max(gross - sub_cost, 0)
+fee         = (taxable * fee_bps + 9_999) / 10_000
 net         = gross - fee
 ```
+
+Negative value added does not create a fee credit or a kernel payout.
 
 Success decreases the process and owner locked balances by `gross`, credits the target by `net`, and credits the fee recipient by `fee`. Each kernel taxes only its own layer; remote sub-calls are subject to the remote kernel's fee policy independently.
 
