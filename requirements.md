@@ -1,142 +1,154 @@
 # Juice Kernel Requirements
 
-Version: 0.2  
-Status: implementation requirements  
+Version: 0.2
+Status: implementation requirements
 Codename: `juice`
 
-## 1. Purpose
+## 1. Purpose and architecture
 
-Juice is a small production kernel and research platform for callable actions. It must support action registration, strict access control, budgeted execution, auditable traces, accounting, event-triggered calls, WebAssembly scripts, local language services, action discovery, platform supervision, and complete automated tests.
-
-The kernel must preserve one central semantic object:
+Juice is a small Go production kernel and research platform for callable actions. Its central semantic object is:
 
 ```text
 Call(subject, process, action, args)
 ```
 
-A call is valid exactly when the subject is authenticated, the action exists, the action is active, the subject has permission to call the action, the process has sufficient available funds, and the arguments validate against the action schema.
+`Call()` is the sole action-execution path. A call is valid exactly when the subject is authenticated, the process exists and is open, the subject owns or has explicit authority over the process, the action exists and is active, `CanCall(subject, action)` is true, the arguments satisfy the input schema, and the process has enough available credits.
 
-## 2. Design constraints
+Execution and supervision are separate layers:
 
-### 2.1 Implementation language
+- **Execution:** `Call()` performs action invocation, fund locking, tracing, settlement, statistics, and receipts. Native actions, WASM `juice.call`, event consumption, and remote proxies must use it.
+- **Supervision:** direct authenticated kernel operations manage users, actions, processes, ACLs, ratings, and deposits. They must not route through `Call()`.
+- A subject must not rate its own output or trigger rating propagation from execution code.
 
-Juice must be implemented in Go.
+## 2. Implementation constraints
 
-Requirements:
-
-- The implementation must build with `go build ./...`.
-- The implementation must test with `go test ./...`.
-- The kernel must use ordinary Go interfaces for replaceable modules.
-- The kernel package must not import CLI, HTTP, SQLite, wazero, or Ollama packages directly.
-
-Justification: the kernel is a transition system. Its correctness depends on stable interfaces and explicit state transitions, not on a particular transport or adapter.
-
-### 2.2 Codebase size and layout
-
-The codebase must use a small number of function-named packages.
-
-Required package layout:
+- Use Go. `go build ./...` and `go test ./...` must pass.
+- Use ordinary Go interfaces for replaceable modules.
+- `kernel` must not import CLI, HTTP, SQLite, wazero, or Ollama implementations.
+- Use only these function-named production packages unless a dependency-cycle or cohesion reason requires otherwise:
 
 ```text
-cmd/juice/      command line entrypoint
-kernel/         core objects and operational semantics
-store/          persistence interface and SQLite implementation
-script/         WebAssembly script execution
-llm/            local language and embedding interface
-log/            structured logging
+cmd/juice/   CLI and server entrypoint
+kernel/      core objects and operational semantics
+store/       persistence interface and SQLite implementation
+script/      WebAssembly execution
+llm/         local language and embedding interface
+log/         structured logging
 ```
+
+- Architectural package names such as `sqlite`, `wazero`, or `ollama` are forbidden; implementation-specific names may appear in concrete types or file names.
+- Keep the package and source-file counts small. Do not split files for size alone. Every production source file must have a corresponding `_test.go` file with independent tests for its logic.
+
+## 3. Data model
+
+All IDs are stable opaque identifiers; action IDs are globally unique. Credit balances and prices are non-negative integers; credits are indivisible.
+
+| Object | Required fields | Rules |
+|---|---|---|
+| `User` | `id`, `handle`, `email`, `available`, `locked`, `suspended_at`, `public_key`, `remote_base_url`, `created_at`, `updated_at` | `handle` is unique. A suspended user is rejected at every authenticated request with `ErrUnauthenticated`. `public_key`, when set, is a unique base64url Ed25519 32-byte public key. Local users have null `public_key` and `remote_base_url`; remote peers set both. |
+| `Action` | `id`, `owner_user_id`, `name`, `kind`, `active`, `public`, `price`, `description`, `input_schema`, `output_schema`, `source`, `artifact_hash`, `created_at`, `updated_at` | `kind ∈ {http, wasm, native}`. `(owner_user_id, name)` is unique. An `active=false` action is not callable by non-owners. Public discovery returns active actions only unless an owner requests private state. Authorized users may inspect script source. Compiled artifacts are content-addressed by `artifact_hash`. |
+| `ACLEntry` | `subject_user_id`, `action_id`, `permission`, `created_at` | `permission ∈ {read, call, admin}`. ACLs are direct user-to-action grants. `read` permits inspection; `call` permits execution; `admin` permits ACL and lifecycle changes. Owners implicitly have `admin`. |
+| `Process` | `id`, `owner_user_id`, `available`, `locked`, `status`, `created_at`, `ended_at` | `status ∈ {open, closed}`. A process starts with user-provided funds and may start with zero credits (`available = 0`). Closing it returns all remaining funds to its owner. Closed processes cannot execute calls. |
+| `Trace` | `id`, `process_id`, `parent_trace_id`, `caused_by_trace_id`, `cost`, `latency_ms`, `created_at` | Every process has one root trace. Choose one root convention consistently: `parent_trace_id = id` or `parent_trace_id = null`. Every direct `Call()` creates exactly one child trace. |
+| `Transaction` | `id`, `process_id`, `trace_id`, `parent_trace_id`, `owner_user_id`, `subject_user_id`, `target_user_id`, `action_id`, `args_json`, `reply_json`, `status`, `gross`, `net`, `fee`, `reason`, `remote_receipt_hash`, `started_at`, `ended_at` | `status ∈ {success, failure}`. Every attempted call creates one immutable transaction. `remote_receipt_hash` is null locally and stores `SHA-256(remote_receipt_json)` for cross-kernel calls. |
+| `Stats` | `uses`, `successes`, `failures`, `rating_count`, `price_mean`, `latency_mean`, `rating_mean`, `last_used_at` | Missing stats have defined defaults. `uses = successes + failures`. |
+| `StatTag` | `action_id`, `key`, `value`, `source`, `updated_at` | Optional, queryable for lookup experiments, and never required for kernel execution. Experimental tags are namespaced by source and never alter fixed-stat semantics. |
+| `Listener` | `id`, `owner_user_id`, `source_user_id`, `event_name`, `target_action_id`, `active`, `created_at` | A listener subscribes its owner to an exact `(source_user_id, event_name)` pair. |
+| `Event` | `id`, `listener_id`, `args_json`, `causing_trace_id`, `consumed_at`, `tx_id`, `created_at` | Persistent queued work item. `causing_trace_id` is nullable. |
+| `Deposit` | `id`, `operator_user_id`, `target_user_id`, `amount`, `reason`, `created_at` | Immutable audit record for a positive out-of-band superuser credit grant. |
+| `Receipt` | `id`, `issuer_user_id`, `tx_id`, `trace_id`, `action_id`, `args_hash`, `reply_hash`, `status`, `gross`, `net`, `fee`, `reason`, `created_at`, `signature` | Immutable signed record for exactly one committed call. |
+| `Rating` | `id`, `rated_tx_id`, `rated_receipt_id`, `rater_user_id`, `rating`, `created_at`, `signature` | Immutable signed feedback record. `rating ∈ {0, 1}`. At most one rating exists per transaction. `rated_receipt_id` may be null only for pre-receipt transactions. |
+| `IdempotencyRecord` | `id`, `idempotency_key`, `counterparty_user_id`, `receipt_id`, `created_at`, `expires_at` | Used only for cross-kernel calls. |
+
+### 3.1 ACL rule
+
+ACL checks must occur inside the kernel path, not only at CLI or HTTP boundaries:
+
+```text
+CanCall(u, a) := Active(a) ∧ (Owner(u, a) ∨ Public(a) ∨ ACL(u, a, call) ∨ ACL(u, a, admin))
+```
+
+`public` is stored directly on the action. Grant-all and revoke-all toggle this flag without replacing direct ACL entries; only the owner or an action admin may invoke them.
+
+### 3.2 Trace relationships
+
+| Field | Relation | Scope | Use |
+|---|---|---|---|
+| `parent_trace_id` | `CHILD_OF` | Same process only | Direct calls within a process |
+| `caused_by_trace_id` | `FOLLOWS_FROM` | Cross-process | Contractor sub-calls and event-triggered calls |
 
 Rules:
 
-- Package names must describe function, not implementation.
-- Top-level package names such as `sqlite`, `wazero`, and `ollama` are forbidden.
-- Implementation-specific names may appear in file names or concrete types, but not in architectural package names.
-- The initial implementation should remain below six production packages, excluding tests.
-- New packages require a demonstrated dependency-cycle or cohesion reason.
-- The number of source files must be kept small. New files require a cohesion reason; splitting a file for size alone is not sufficient.
-- Every source file must have a corresponding `_test.go` file with independent tests for the logic in that file.
-
-Justification: small package count lowers coupling. Function-named packages permit implementation replacement without changing the conceptual architecture. Per-file tests make coverage gaps visible and keep test files co-located with the code they exercise.
-
-### 2.3 Execution layer and supervision layer
-
-Juice must maintain a strict conceptual split between action execution and supervision.
-
-Requirements:
-
-- `Call()` is the execution layer. It is the sole path for invoking actions. All action execution, fund locking, tracing, and settlement occur through `Call()`.
-- Direct kernel operations — user and action lifecycle, process management, rating — form the supervision layer. Authenticated subjects (human operators or agents) use these to observe, correct, and guide execution.
-- No supervision operation may be routed through `Call()`. A subject must never rate its own outputs or trigger rating propagation from within the execution layer.
-- This split is an architectural invariant, not an implementation detail.
-
-Justification: Execution may produce incorrect results. Supervision provides the correction signal. Mixing the two layers would allow a subject to interfere with its own feedback loop, undermining the integrity of the supervision signal.
-
-## 3. Core objects
-
-The implementation must define the following core objects in `kernel`.
-
-### 3.1 User
-
-A user is an authenticated subject with balances.
-
-Required fields:
+- A child inherits its parent's `process_id`; trace trees are rooted per process. Every transaction references a trace. Trace lookup by process returns the execution tree; trace deletion never deletes transaction history.
+- The kernel must reject a missing or cross-process supplied `parent_trace_id` with `ErrInvalidInput`.
+- Direct calls have null `caused_by_trace_id`.
+- Contractor ephemeral-process roots set `caused_by_trace_id` to the calling action trace.
+- Event-triggered calls set `caused_by_trace_id` to the emitter trace stored at emit time.
+- `caused_by_trace_id` must never be treated as `parent_trace_id`.
+- Each completed descendant transaction updates ancestor `cost` and `latency_ms` automatically. The originating trace of a `FOLLOWS_FROM` relationship may already be closed; the referenced trace belongs to a different process.
 
 ```text
-id
-handle
-email
-available
-locked
-suspended_at
-public_key
-remote_base_url
-created_at
-updated_at
+∀ child. child.process_id = parent(child).process_id
 ```
 
-Requirements:
+## 4. Persistence and atomicity
 
-- User ids must be stable opaque identifiers.
-- Handles must be unique.
-- Balances must be non-negative integers.
-- Balance units must be indivisible credits.
-- A suspended user must be rejected at every authenticated request with `ErrUnauthenticated`.
-- `public_key` is a nullable Ed25519 public key, stored as base64url. When set, it must be a valid 32-byte Ed25519 public key. `public_key` must be unique across all users when non-null.
-- `remote_base_url` is a nullable URL of the remote kernel's HTTP API base. A user with both `public_key` and `remote_base_url` set represents a remote kernel peer (see §21).
-- Local users have both fields null.
+Use file-backed SQLite with WAL enabled by default. Migrations must be deterministic and stored in the repository. Tests use temporary SQLite databases. No production feature may depend on an in-memory-only store.
 
-### 3.2 Action
-
-An action is a callable capability.
-
-Required fields:
+`kernel` depends on a store interface, never directly on SQLite. The interface must support:
 
 ```text
-id
-owner_user_id
-name
-kind
-active
-price
-description
-input_schema
-output_schema
-source
-artifact_hash
-created_at
-updated_at
+CreateUser ReadUser ReadUserByPublicKey ListUsers SuspendUser UnsuspendUser
+CreateAction ReadAction UpdateAction DeleteAction ListAllActions
+GrantACL RevokeACL CheckACL
+CreateProcess ReadProcess EndProcess ListAllProcesses
+CreateTrace CreateTransaction ListTransactions ListAllTransactions
+ReadStats UpdateStats
+CreateListener ReadListener ListListeners
+CreateEvent ListPendingEvents ConsumeEvent PurgeListenerEvents
+GetConfig SetConfig CreateDeposit
+CreateReceipt ReadReceipt
+CreateRating ReadRating ListRatings
+CreateIdempotencyRecord ReadIdempotencyRecord
 ```
 
-Allowed kinds:
+`UpdateTransaction` is forbidden: transactions are immutable after creation, and all fields are set at `CreateTransaction` time.
+
+All monetary transitions occur inside SQLite transactions. Each operation must atomically include:
+
+| Operation | Atomic writes |
+|---|---|
+| Start process | user debit, process creation, root trace creation |
+| Fund process | user debit, process credit |
+| Successful call | transaction, receipt, locked-fund settlement, target payment, platform fee, trace metrics, stats |
+| Failed call | transaction, receipt, full refund, trace metrics, stats |
+| End process | process closure, return of remaining owner funds |
+| Deposit | user credit, deposit record |
+| Rating cascade | all new rating records |
+
+A committed monetary transition must never exist without its audit record, or vice versa.
+
+## 5. Call state machine
+
+### 5.1 Ordered preconditions
+
+Check, in order:
 
 ```text
-http
-wasm
-native
+1. authenticated, non-suspended subject
+2. existing open process
+3. subject owns the process or has explicit process authority
+4. existing action
+5. active action
+6. CanCall(subject, action)
+7. valid input schema
+8. process.available >= action.price
+9. valid same-process parent trace, if supplied
 ```
 
-Requirements:
+Return the matching typed error for the first failed precondition.
 
+<<<<<<< HEAD
 - `id` must be globally unique.
 - `native` actions are platform-owned and may only be registered by the superuser. Regular users may not create, update, or delete `native` actions.
 - `(owner_user_id, name)` must be unique.
@@ -390,90 +402,44 @@ The kernel must return a typed error for each failed precondition.
 ### 5.2 Call transition
 
 For a valid call with price `q`, the kernel must perform:
+=======
+### 5.2 Transition
+
+For price `q`:
+>>>>>>> 73da227669bd9782246edf035fed5dc44acfd77f
 
 ```text
 create child trace
 lock q credits in process
 execute action
-  sub-calls within execution (juice.call host function):
-    create ephemeral process owned by the calling action's owner,
-      funded from owner's available balance for exactly sub-action.price
-    execute sub-call against ephemeral process following §5.1–§5.5
-    on sub-call completion: close ephemeral process;
-      return unused locked funds to owner on failure
-record transaction
-on success: transfer net to target and fee to fee recipient
-on failure: apply refund rule
-update action statistics
-return reply with tx_id and trace_id
+validate output schema
+on success: atomically record transaction + receipt, settle payment, update trace metrics + stats
+on failure: atomically record transaction + receipt, refund full q, update trace metrics + stats
+return result, tx_id, trace_id
 ```
 
-### 5.3 Fund locking
-
-Before execution, the process transition must be:
+Locking occurs before execution:
 
 ```text
 available := available - q
 locked    := locked + q
+valid iff q >= 0 ∧ available >= q
 ```
 
-This transition is valid only when:
+Zero-credit processes may execute actions with `price = 0` because `available >= price` is satisfied by `0 >= 0`.
 
-```text
-q >= 0 ∧ available >= q
-```
+### 5.3 Settlement
 
-A call with `price = 0` satisfies this condition for any non-negative `available` value, including `available = 0`. Zero-credit processes may execute zero-price actions.
-
-Justification: this is the budget safety invariant. No action can execute unless the process has already reserved the required funds.
-
-### 5.4 Failure accounting
-
-Juice must implement the following explicit refund rule:
-
-```text
-If execution fails before the target action starts, refund the full gross amount.
-If execution starts and returns failure, charge zero in the first implementation and refund the full gross amount.
-If a later policy charges partial failure cost, that policy must be represented explicitly in the transaction.
-```
-
-Requirements:
-
-- The first implementation must charge only successful calls.
-- A failed call must not leak locked funds.
-- A failed call must still create a transaction.
-- The fund refund and the failure transaction record must be committed atomically in a single store operation. It must not be possible for funds to be refunded without a transaction record, or for a failure transaction to be recorded without the corresponding refund.
-- Transaction status and reason must make the failure class observable.
-
-Justification: this rule is conservative and testable. It separates execution failure from economic settlement.
-
-If the action owner has insufficient balance to fund the ephemeral process for a sub-call, the sub-call fails. The failure propagates to the top-level call and the original caller is fully refunded. Sub-call costs already settled from ephemeral processes before the point of failure are not reversed. Each action owner absorbs the costs of their own sub-calls.
-
-### 5.5 Payment transition
-
-For a successful call:
+Only successful calls are charged in v1:
 
 ```text
 gross = action.price
 fee   = Fee(gross)
 net   = gross - fee
-```
-
-The settlement transition must satisfy:
-
-```text
-owner.locked decreases by gross
-process.locked decreases by gross
-target.available increases by net
-fee_recipient.available increases by fee
-```
-
-Correctness condition:
-
-```text
 gross = net + fee
 ```
 
+<<<<<<< HEAD
 Fee policy for v1:
 
 ```text
@@ -488,19 +454,19 @@ The `call_context` is determined by the kernel. Action providers do not control 
 Justification: contractor calls are production inputs. Charging a percentage fee on every internal edge taxes implementation depth and discourages composition.
 
 ### 5.6 Schema validation
+=======
+Success decreases the process and owner locked balances by `gross`, credits the target by `net`, and credits the fee recipient by `fee`.
+>>>>>>> 73da227669bd9782246edf035fed5dc44acfd77f
 
-Requirements:
+Any failure before or after target execution starts charges zero, refunds the full locked gross amount, records a failure transaction, and exposes the failure class through `status` and `reason`. A later partial-failure policy must be represented explicitly in the transaction.
 
-- Every action must have input and output schemas.
-- The first implementation may support a strict JSON Schema subset.
-- Unsupported schema forms must fail at action creation or update time.
-- Calls must validate inputs before funds are locked.
-- Replies must validate outputs before successful settlement.
+### 5.4 Schemas
 
-Justification: validating inputs before locking funds avoids charging invalid calls. Validating outputs before settlement prevents payment for malformed replies.
+Every action has input and output schemas. The first implementation may support a strict JSON Schema subset, but unsupported forms must fail action creation or update. Validate input before locking funds and output before successful settlement.
 
-### 5.7 Contractor execution model
+### 5.5 Contractor sub-calls
 
+<<<<<<< HEAD
 When `juice.call` is invoked inside an action's execution context, the kernel implements the contractor model:
 
 1. The kernel creates an ephemeral process owned by the calling action's owner, funded from that owner's available balance for exactly the sub-action's price.
@@ -513,271 +479,195 @@ The caller's process is debited only by the top-level `action.price`. Sub-call c
 Each contractor sub-call creates a new ephemeral process with its own root trace. The root trace of the ephemeral process sets `caused_by_trace_id` to the calling action's trace ID (FOLLOWS_FROM). It does not set `parent_trace_id` to the caller's trace — contractor sub-calls cross process boundaries and are not CHILD_OF the calling trace. The caller's trace tree is structurally complete at its own process boundary; the causal link is for observability only.
 
 Invariant:
+=======
+When a running action invokes WASM host function `juice.call(target, args)`:
+>>>>>>> 73da227669bd9782246edf035fed5dc44acfd77f
 
 ```text
-caller.process.available decreases by at most action.price per call,
-regardless of sub-call depth or cost.
+owner := calling action owner
+create ephemeral process owned by owner
+fund it from owner.available with exactly target.price
+create ephemeral root trace with caused_by_trace_id = calling trace id
+invoke normal Call(owner, ephemeral process, target, args)
+close ephemeral process and return unused funds
 ```
 
-If the action owner has insufficient balance to fund a sub-call, the sub-call fails, the top-level call fails, and the original caller is fully refunded. Action owners absorb costs already incurred by their own sub-calls.
+Rules:
+
+- The caller's process pays only the top-level action price.
+- Each recursive action owner pays for its own direct sub-calls.
+- The ephemeral root's causal link is `FOLLOWS_FROM`, not `CHILD_OF`.
+- Insufficient owner funds fail the sub-call and propagate failure to the top-level call; the original caller is fully refunded.
+- Previously settled descendant costs are not reversed.
+- Ephemeral processes are always closed after completion.
+
+```text
+caller.process.available decreases by at most action.price per call, regardless of sub-call depth or cost
+```
 
 ## 6. Action lifecycle
 
-### 6.1 Creation
+| Operation | Rules |
+|---|---|
+| Create | Create inactive by default. Validate owner, name, kind, non-negative price, description, schemas, and source. WASM creation validates or compiles its artifact. HTTP creation validates endpoint configuration without calling the endpoint unless explicitly requested. Reject non-HTTP(S), loopback, private IP ranges (RFC 1918), and link-local (`169.254.x.x`) source URLs at creation and activation. Normal `CreateAction` always rejects `Kind=native`; bootstrap uses `RegisterNativeAction` instead. |
+| Activate | Require owner or admin. Initialize stats if absent. Reject invalid schema, missing source, invalid artifact, invalid HTTP URL, or invalid runtime configuration. |
+| Update | Require owner or admin. Updating source, schema, kind, price, or endpoint deactivates unless explicitly marked safe. Recompute WASM `artifact_hash`; retain prior source and hash in transaction history. |
+| Delete | Require owner or admin. Disable discovery, remove ACL entries, and preserve historical transactions; soft deletion is permitted. |
+| Native | Register programmatically during bootstrap only, owned by `@sys`. Regular users cannot create, update, or delete native actions. |
 
-Requirements:
+## 7. Adapters
 
-- Actions must be created inactive by default.
-- Action creation must validate owner, name, kind, price, description, schemas, and source.
-- For `wasm` actions, creation must compile or validate the artifact before the action can be activated.
-- For `http` actions, creation must validate endpoint configuration without calling the endpoint unless explicitly requested.
-- For `http` actions, the `source` URL must be validated at creation and activation time. Loopback addresses, private IP ranges (RFC 1918), link-local addresses (169.254.x.x), and non-HTTP(S) schemes must be rejected.
-- Only the kernel bootstrap process may register native actions. `CreateAction` must reject `Kind=native` from all callers; bootstrap uses `RegisterNativeAction` instead.
+### 7.1 WebAssembly
 
-### 6.2 Activation
+Use wazero. Scripts receive no ambient filesystem, network, environment, or process access; they receive only explicitly exported host functions. Each execution has a memory limit, timeout, deterministic `context.Context` cancellation, and an artifact-hash compiled-module cache. Store source and artifact; authorized users may inspect source; activation should precompile where possible; lifecycle compilation failures are typed errors.
 
-Requirements:
-
-- Activation must require owner or admin permission.
-- Activation must initialize action statistics if absent.
-- Activation must fail if the action has invalid schema, missing source, invalid artifact, or invalid runtime configuration.
-
-### 6.3 Update
-
-Requirements:
-
-- Updating source, schema, kind, price, or endpoint must deactivate the action unless the update is explicitly marked safe.
-- Updating a `wasm` action must recompute `artifact_hash`.
-- Previous script source and artifact hash must remain available in transaction history.
-
-### 6.4 Deletion
-
-Requirements:
-
-- Deletion must require owner or admin permission.
-- Deletion must not remove historical transactions.
-- Deletion must remove ACL entries and disable discovery.
-- Deletion may mark the action deleted rather than physically removing it.
-
-### 6.5 Native actions
-
-Requirements:
-
-- Native actions are registered programmatically at bootstrap, not through the normal creation flow.
-- Native actions must be owned by the superuser.
-- Native actions must not be creatable, updatable, or deletable by regular users.
-
-## 7. WebAssembly scripting
-
-### 7.1 Runtime
-
-Juice must use wazero for WebAssembly execution.
-
-Requirements:
-
-- Scripts must execute in a sandboxed wazero runtime.
-- Scripts must not receive ambient filesystem, network, environment, or process access.
-- Scripts must receive only the host functions explicitly exported by Juice.
-- Each script execution must have a timeout.
-- Each script execution must have a memory limit.
-- Each script execution must have deterministic cancellation through `context.Context`.
-- Compiled modules must be cached by `artifact_hash`.
-
-### 7.2 Source and compilation
-
-Requirements:
-
-- The user must be able to inspect script source.
-- The system must store script source.
-- The system must store or cache the compiled artifact.
-- The activation path must precompile scripts when possible.
-- Compilation errors must be surfaced as typed action lifecycle errors.
-
-### 7.3 Host functions
-
-The initial host function surface must be small:
+Initial host surface:
 
 ```text
-juice.call
-juice.emit
-juice.log
+juice.call   normal contractor sub-call (§5.5)
+juice.emit   emit through the kernel event path with the current trace id
+juice.log    structured log associated with the current trace id
 ```
 
-Requirements:
-
-- `juice.call` must call another action through the kernel call path.
-- `juice.call` must enforce ACL, accounting, trace creation, and schema validation.
-- `juice.call` must create an ephemeral process owned by the calling action's owner and use it as the process context for the sub-call (contractor model, §5.7). The ephemeral process root trace must set `caused_by_trace_id` to the calling action's current trace ID (FOLLOWS_FROM). The calling trace's `parent_trace_id` is not modified; the caller's process trace tree is not extended.
-- `juice.emit` must emit an event through the kernel event path.
-- `juice.emit` must store the current trace ID of the emitting action as `causing_trace_id` in each created event record. This ID is passed to the kernel call path at consume time and recorded as `caused_by_trace_id` on the listener-triggered trace (FOLLOWS_FROM).
-- `juice.log` must write structured logs under the current trace id.
-- Host functions must never expose raw user tokens to guest code.
-
-Correctness condition:
+Scripts never receive raw user tokens. Script authority is mediated by the kernel:
 
 ```text
-ScriptAuthority ⊆ KernelAuthority(trace, process, subject).
+ScriptAuthority ⊆ KernelAuthority(trace, process, subject)
 ```
 
-Justification: scripts may compose kernel operations, but cannot bypass kernel authorization.
+### 7.2 Local language services
 
-## 8. Lookup and local language services
-
-### 8.1 Ollama adapter
-
-Juice must use Ollama for local language models and sentence embeddings.
-
-Requirements:
-
-- `llm` must expose an interface for chat and embeddings.
-- The concrete implementation must call Ollama.
-- The kernel must not import the Ollama adapter.
-- Embedding model name must be configurable.
-- Chat model name must be configurable. The default chat model is `gemma4:26b`.
-- Lookup tests must use a fake embedding implementation.
-
-Required interface shape:
+`llm` exposes replaceable interfaces; concrete adapters call Ollama. The kernel must not import Ollama adapters. Model names are configurable; default chat model: `gemma4:26b`.
 
 ```text
 Embed(ctx, text) -> vector
 Chat(ctx, messages) -> message
 ```
 
-### 8.2 Lookup module
+Tests use fake embedding and chat implementations.
 
-Requirements:
+### 7.3 Native lookup and chat
 
-- Lookup must rank active actions for a natural-language query.
-- Lookup must combine semantic similarity with action statistics.
-- The ranking formula must be explicit and tested.
-- The lookup table must be replaceable without changing kernel semantics.
-- The first implementation may use brute-force cosine similarity over stored embeddings.
-- Lookup is exposed as the system native action `@sys/lookup`, callable through `Call()` by any authenticated user (grant-all applied at bootstrap).
-- The input schema must declare `query` (string, required) and `limit` (integer, optional, default 10).
-- The output schema must declare a `results` array where each element has `action_id` (string), `name` (string), `owner_handle` (string), `description` (string), and `score` (number).
-- Agents and scripts must invoke lookup exclusively through `Call()` on `@sys/lookup`. Direct kernel lookup methods bypass accounting and tracing and must not be exposed through any user-facing API or script host function. Direct lookup is restricted to platform diagnostics.
+| Native action | Rules |
+|---|---|
+| `@sys/lookup` | Public, grant-all, and callable only through `Call()`. Rank active actions for a natural-language query using an explicit tested formula combining semantic similarity and action statistics. Ranking storage is replaceable; brute-force cosine similarity over stored embeddings is acceptable. Input: required string `query`, optional integer `limit` defaulting to `10`. Output: `results[]` with `action_id`, `name`, `owner_handle`, `description`, and numeric `score`. Direct lookup exists only for platform diagnostics and is not exposed through user-facing APIs or WASM hosts. |
+| `@sys/llm/chat` | Public, grant-all, and callable through `Call()`. Input: required `messages[]` of `{role, content}` plus optional prepended string `system`. Output: `message` object with `role` and `content`. Return `ErrInvalidState` if chat is unconfigured. |
 
-Justification: lookup is a research module. The kernel requires only a ranked list of action ids, not a specific ranking algorithm.
+### 7.4 Statistics
 
-### 8.3 Chat module
-
-Requirements:
-
-- Chat is exposed as the system native action `@sys/llm/chat`, callable through `Call()` by any authenticated user (grant-all applied at bootstrap).
-- The input schema must declare `messages` (array, required), where each element has `role` (string) and `content` (string), plus an optional `system` (string) prompt prepended before the messages array.
-- The output schema must declare a `message` object with `role` (string) and `content` (string).
-- If no chat service is configured, calls to `@sys/llm/chat` must return `ErrInvalidState`.
-- Chat tests must use a fake chatter implementation.
-
-## 9. Action statistics
-
-### 9.1 Fixed fields
-
-Each action must track these fixed statistics:
+Use incremental means:
 
 ```text
-uses
-successes
-failures
-price_mean
-latency_mean
-rating_mean
-last_used_at
+mean_(n+1) = mean_n + (x_(n+1) - mean_n) / (n + 1)
 ```
 
-Requirements:
+- `price_mean`: successful calls only; denominator `successes`.
+- `latency_mean`: completed calls; denominator `uses`.
+- `rating_mean`: rated calls only; denominator `rating_count`, never `uses`.
 
-- `uses = successes + failures`.
-- `price_mean` must be computed from successful calls.
-- `latency_mean` must be computed from completed calls.
-- `rating_mean` must be computed from rated calls only. The denominator for the incremental mean is the number of previous ratings, not `uses`. A separate `rating_count` field must track this.
-- Missing statistics must have defined defaults.
+## 8. Events
 
-### 9.2 Extension tags
+### 8.1 Listener and emit
 
-Action statistics must support extension tags.
+Creating a listener requires authenticated owner authority, an existing source user, exact event-name match, an existing target action, and owner permission to call that target. A listener stores neither process nor trace; the consumer supplies the process at consume time. Inactive listeners never fire. Deleting a listener requires its owner, atomically deactivates it, and purges all pending events.
 
-Required tag fields:
+`EmitEvent(source, event_name, args, causing_trace_id)` creates one queued event per active exact-match listener where `listener.source_user_id = emitter_user_id` and `listener.event_name = emitted_event_name`. Each event stores the raw arguments at emit time. Emit does not call targets, change balances, require an emitter process, or create transactions. It returns created event IDs, or an empty list when no listeners match. WASM `juice.emit` passes the current action trace ID.
+
+### 8.2 Queue states and consume
+
+| State | Condition |
+|---|---|
+| Pending | `consumed_at = null` |
+| In-flight | `consumed_at != null ∧ tx_id = null` |
+| Consumed | `consumed_at != null ∧ tx_id != null` |
+
+Only the listener owner may consume; the source user may not consume unless also the owner. Consumption atomically locks a pending event, then invokes the normal call path using the supplied `process_id`, stored `args_json`, and stored `causing_trace_id` as `FOLLOWS_FROM`. Success stores the resulting `tx_id`; failure resets the event to pending. Reject inactive listeners and already-consumed events with `ErrInvalidState`. Delivery is at-least-once; the lock prevents concurrent double-processing. Startup resets in-flight events to pending.
+
+Polling returns pending events with `id`, `args_json`, `causing_trace_id`, and `created_at`. The listener owner or source user may poll.
+
+## 9. Feedback, receipts, and signatures
+
+### 9.1 Trace metrics and ratings
+
+Every transaction references a trace. Trace lookup by process returns its execution tree; trace deletion must not remove transaction history. Every process and trace maintains cumulative cost and wall-clock latency aggregates automatically as transactions complete; no separate subtree-metric query is required. On descendant completion:
+
+- `trace.cost` is the sum of descendant transaction gross amounts.
+- `trace.latency_ms` is wall-clock elapsed time from trace creation until the latest descendant completion.
+
+Any authenticated subject may call `RateTransaction(tx_id, rating)` with `rating ∈ {0, 1}`. Rating is a supervision operation and must not route through `Call()`. Verify the rating signature at submission. Ratings are immutable rows; transaction rows never change. A duplicate rating returns `ErrInvalidInput`. Rating `0` or `1` propagates recursively to unrated descendant transactions in the same trace tree without overwriting existing ratings; all inserts commit atomically. Update stats accordingly.
+
+### 9.2 Receipts
+
+Every committed success or failure has exactly one immutable receipt:
 
 ```text
-action_id
-key
-value
-source
-updated_at
+∀ committed call. ∃ exactly one receipt r. r.tx_id = call.tx_id
 ```
 
-Requirements:
+- `issuer_user_id` is the local `@sys` user.
+- `args_hash` and `reply_hash` are SHA-256 hashes of RFC 8785 JCS canonical `args_json` and `reply_json`.
+- Receipt economic fields exactly match the transaction.
+- `signature` is the platform Ed25519 signature over canonical receipt JSON excluding `signature`.
+- Transaction and receipt creation are atomic in both `CommitCall` and `CommitFailedCall`.
 
-- Tags must not be required for kernel execution.
-- Tags must be queryable for lookup experiments.
-- Tags must be namespaced by source when generated by experimental modules.
-- Tags must not alter fixed-field semantics.
+### 9.3 Signed JSON
 
-### 9.3 Update rule
-
-The first implementation must use a simple incremental mean for fixed statistics.
-
-For a sequence of observations \(x_1,\ldots,x_n\):
+Receipts, ratings, and action manifests use RFC 8785 JSON Canonicalization Scheme (JCS) for signing and verification. The `script` package or a shared utility provides:
 
 ```text
-mean_n = (x_1 + ... + x_n) / n
+CanonicalJSON(v any) ([]byte, error)
 ```
 
-Online update:
+Generate and verify signatures only over `CanonicalJSON` output. A rating signature covers all fields except `signature`; ordinary raters use their private key and `@sys` uses the platform key.
+
+## 10. Authentication and errors
+
+Human authentication uses an OAuth/OIDC-style flow. Browser login supports authorization code with PKCE; CLI login supports device authorization or loopback login. API calls use short-lived bearer access tokens. Refresh tokens, if used, are rotatable; logout revokes them server-side. Scripts never receive access or refresh tokens; internal script calls use trace-scoped authority.
+
+Kernel errors are typed and mapped to stable CLI exit codes and HTTP statuses:
 
 ```text
-mean_{n+1} = mean_n + (x_{n+1} - mean_n)/(n+1)
+ErrUnauthenticated ErrUnauthorized ErrNotFound ErrInvalidInput ErrInvalidState
+ErrInsufficientFunds ErrExecutionFailed ErrSchemaViolation ErrTimeout ErrInternal
 ```
 
-For `price_mean`, n is `successes`. For `latency_mean`, n is `uses`. For `rating_mean`, n is `rating_count` — the number of rated observations, which may be less than `uses`. Using `uses` as the denominator for `rating_mean` is incorrect and must not be done.
+Messages are concise and user-facing; logs may include diagnostics.
 
-Justification: this rule is deterministic, unbiased for stationary observations, and easy to test. Risk-averse updates may be added later as an experimental tag or lookup feature.
+## 11. Superuser, bootstrap, and deposits
 
-## 10. Trace and feedback model
+The fixed platform superuser handle is `@sys`; it is not configurable. The kernel itself has no privileged subject concept and enforces normal ACL rules. CLI admin authority compares the authenticated handle to `config.superuser_handle`.
 
-### 10.1 Trace tree
-
-Requirements:
-
-- Every transaction must reference a trace.
-- Direct `Call()` invocations within a process create child traces (CHILD_OF).
-- Contractor sub-calls via `juice.call` and event-triggered calls create traces in separate processes linked via FOLLOWS_FROM.
-- Trace lookup by process must return the execution tree.
-- Trace deletion must not delete transaction history.
-
-Two trace relationship types exist:
+First boot prompts only for a password and atomically creates:
 
 ```text
-CHILD_OF (parent_trace_id): direct Call() invocation within the same process.
-  The parent waits for the child. process_id is inherited.
-
-FOLLOWS_FROM (caused_by_trace_id): causal link across process boundaries.
-  Used for contractor sub-calls (juice.call) and event-triggered calls.
-  The originating trace may be closed before the triggered trace starts.
-  The referenced trace always belongs to a different process.
+@sys user
+config.superuser_handle = @sys
+config.signing_public_key  = base64url Ed25519 public key
+config.signing_private_key = base64url Ed25519 private key
 ```
 
-### 10.2 Ratings and trace metrics
+The private key is sensitive: never log or return it. Partial first boot must remain safely rerunnable.
 
+<<<<<<< HEAD
 **Rating**
 
 A rating is a platform-signed immutable record submitted by an authenticated subject for a transaction.
 
 Required fields:
+=======
+Every server startup reads `config.superuser_handle` to confirm first boot and identify `@sys`. Before accepting requests:
+>>>>>>> 73da227669bd9782246edf035fed5dc44acfd77f
 
 ```text
-id
-rated_tx_id
-rated_receipt_id
-rater_user_id
-rating
-created_at
-signature
+verify both signing keys exist; abort if either is missing
+register and enable @sys/lookup and @sys/llm/chat if absent
+apply grant-all to both native actions
+reset in-flight events to pending (`consumed_at = NULL` where `consumed_at IS NOT NULL AND tx_id IS NULL`)
 ```
 
-Requirements:
+Bootstrap is idempotent. Native actions are owned by `@sys`, registered programmatically, and execute through `Call()`. Supervision operations must not be registered as native actions.
 
+<<<<<<< HEAD
 - Only the direct buyer may rate a transaction via `RateTransaction(subject, tx_id, rating)`.
 
 ```text
@@ -794,260 +684,141 @@ For contractor sub-calls, the direct buyer is the owner of the ephemeral process
 - `signature` is the platform Ed25519 signature of the canonical rating record.
 - Ratings do not cascade. A rating applies only to the rated transaction. Derived propagated scores may be computed as experimental statistics or tags, but they are not rating records.
 - Rating is a supervision operation. It must not be callable through `Call()`.
+=======
+The superuser may suspend or unsuspend users. Suspension preserves data and causes every authenticated request to return `ErrUnauthenticated`.
+>>>>>>> 73da227669bd9782246edf035fed5dc44acfd77f
 
-**Trace metrics**
+`Kernel.Deposit(operator_user_id, target_user_id, amount, reason)` is a supervision operation available only through the admin CLI. It verifies that the operator is the configured superuser, requires a positive amount, and atomically credits `user.available` while creating a retrievable audit record. `reason` is optional but stored when provided. No HTTP endpoint exists.
 
-Requirements:
+## 12. Federation
 
-- Every process and trace must maintain cumulative cost and wall-clock latency aggregates.
-- These aggregates must be updated automatically as each transaction completes.
-- No separate query operation is required to compute subtree cost or latency.
+### 12.1 Remote peers and discovery
 
-Correctness condition:
+A remote kernel is an ordinary user with `public_key` and `remote_base_url` set. Its public key is the remote platform signing key; its URL is the remote HTTP API base. Remote users cannot authenticate with passwords or receive tokens. Convention: unique handle `@<hostname>`; for example, `remote_base_url = https://remote.example.com`.
 
-```text
-trace.cost    = sum(gross(t) for all transactions t in subtree)
-trace.latency = max(ended_at(t)) - started_at(trace)
-```
-
-Justification: an action that calls other actions induces downstream cost and latency. Automatic aggregation makes the user-experienced burden of selecting that action continuously visible without a separate query.
-
-## 11. Events
-
-### 11.1 Listener
-
-A listener binds an event to a call.
-
-Required fields:
+Discovery is manual only:
 
 ```text
-id
-owner_user_id
-source_user_id
-event_name
-target_action_id
-active
-created_at
+juice remote add <url>                       fetch and validate <url>/.well-known/juice-kernel.json
+juice remote list                            list registered peers
+juice remote import <remote-handle> <action-name>   fetch signed manifest and create local http proxy action (kind = http)
 ```
 
-Requirements:
+No gossip or crawling exists in v1. Imported actions are local `http` actions owned by the remote-user record.
 
-- Creating a listener requires permission to call the target action.
-- A listener does not store a process or trace. The process is supplied by the caller at consume time (see §11.4).
-- Inactive listeners must not fire.
-- Deleting a listener must atomically deactivate it and purge all pending (unconsumed) events for that listener.
+### 12.2 Action manifests
 
-### 11.2 Emit
-
-Requirements:
-
-- Emitting an event must select active listeners where:
+Only active public actions have signed manifests. Required fields:
 
 ```text
-listener.source_user_id = emitter_user_id
-listener.event_name     = emitted_event_name
-listener.active         = true
+owner_handle name description input_schema output_schema price kind
+artifact_hash stats updated_at signature
 ```
 
-- For each selected listener, the kernel must create an event record in the listener’s queue, storing the event arguments and the emitter’s current trace ID as `causing_trace_id`.
-- Emit must not call the target action. Execution is deferred to the listener owner.
-- `EmitEvent` returns the IDs of the created event records, not transaction IDs.
-- If no listeners match, `EmitEvent` returns an empty list without error.
+`artifact_hash` matches `action.artifact_hash`; `stats` is a fixed-stat snapshot; `signature` is the platform Ed25519 signature over canonical JSON excluding `signature`.
 
-### 11.3 Event record
-
-An event record is a pending work item in a listener’s queue.
-
-Required fields:
+Expose:
 
 ```text
-id
-listener_id
-args_json
-causing_trace_id
-consumed_at
-tx_id
-created_at
+GET /.well-known/juice-kernel.json   -> public_key, handle (@sys), base_url
+GET /v1/actions/{id}/manifest        -> signed public-action manifest
 ```
 
-Requirements:
+### 12.3 Cross-kernel calls and idempotency
 
-- `args_json` stores the raw event arguments at emit time.
-- `causing_trace_id` stores the emitter’s trace ID at emit time (nullable). This is a FOLLOWS_FROM reference (§3.5).
-- An event is **pending** when `consumed_at` is null.
-- An event is **consumed** when `consumed_at` is set and `tx_id` is set.
-- An event is **in-flight** when `consumed_at` is set and `tx_id` is null. This state exists only during an active consume call and is resolved to consumed or pending on completion. On startup, all in-flight events are reset to pending (§19.3).
-- The event queue must be persistent.
+A local remote-proxy action follows the normal local call path. Its HTTP handler sends a UUID v4 `idempotency_key`. On remote success, store `SHA-256(receipt_json)` (the remote receipt JSON) in `transaction.remote_receipt_hash`; v1 defers remote receipt-signature verification to later audit.
 
-### 11.4 Consume
+Idempotency applies only to cross-kernel calls. A repeated unexpired `(idempotency_key, counterparty_user_id)` returns the original receipt without re-execution. `expires_at = created_at + 24 hours`; expired records may be purged.
 
-The listener owner processes pending events by consuming them.
+## 13. CLI and HTTP server
 
-Requirements:
-
-- Only the listener owner may consume events. The source user may not.
-- Consuming an event must atomically lock it before calling the target action, preventing double-processing.
-- On successful lock, the kernel calls the target action through the normal kernel call path, using the caller-supplied `process_id`, the stored `args_json`, and the event’s `causing_trace_id` as a FOLLOWS_FROM reference.
-- On success, the event is marked consumed with the resulting `tx_id`.
-- On failure, the lock is reset and the event returns to pending. The listener owner may retry.
-- Consuming an event from an inactive listener must return `ErrInvalidState`.
-- Consuming an already-consumed event must return `ErrInvalidState`.
-- Delivery guarantee: at-least-once. An event may be retried after a failed consume. Double-processing is prevented by the atomic lock; only one consume attempt may execute the call at a time.
-
-### 11.5 Poll
-
-Requirements:
-
-- Polling a listener returns its pending (unconsumed) event records.
-- Reading a listener requires owner or source authority.
-- The result must include event ID, `args_json`, `causing_trace_id`, and `created_at` for each pending event.
-
-## 12. Authentication
-
-Requirements:
-
-- Human authentication must use a modern OAuth/OIDC-style flow.
-- Browser login must support authorization code with PKCE.
-- CLI login must support device authorization or loopback login.
-- API calls must use short-lived bearer access tokens.
-- Refresh tokens, if used, must be rotatable.
-- Logout must revoke the associated refresh token server-side.
-- Scripts must never receive access tokens or refresh tokens.
-- Internal script calls must use trace-scoped kernel authority.
-
-Justification: users authenticate to the kernel; scripts receive only mediated authority. This prevents scripts from exfiltrating reusable credentials.
-
-## 13. CLI
-
-Juice must provide a CLI named `juice`.
+Provide CLI `juice`. CLI commands use the same service layer as the server, support human-readable and JSON output, work directly against local SQLite where feasible, and each have at least one test.
 
 Required commands:
 
 ```text
 juice serve
-juice user create
-juice auth login
-juice auth logout
-juice action add
-juice action update
-juice action delete
-juice action enable
-juice action disable
-juice action acl grant
-juice action acl revoke
-juice action grant-all
-juice action revoke-all
-juice action list
-juice process start
-juice process list
-juice process show
-juice process fund
-juice process end
-juice call
-juice events listen
-juice events list
-juice events unlisten
-juice events emit
-juice events poll
-juice events consume
-juice tx list
-juice tx show
-juice tx rate
-juice stats show
-juice lookup
-juice health
-juice admin user list
-juice admin user show
-juice admin user suspend
-juice admin user unsuspend
-juice admin user deposit
-juice admin action list
-juice admin action disable
-juice admin process list
+juice user create                         juice user me
+juice auth login                          juice auth logout
+juice action add                          juice action update
+juice action delete                       juice action enable
+juice action disable                      juice action list
+juice action acl grant                    juice action acl revoke
+juice action grant-all                    juice action revoke-all
+juice process start                       juice process list
+juice process show                        juice process fund
+juice process end                         juice call
+juice events listen                       juice events list
+juice events unlisten                     juice events emit
+juice events poll                         juice events consume
+juice tx list                             juice tx show
+juice tx rate                             juice stats show
+juice lookup                              juice health
+juice admin user list                     juice admin user show
+juice admin user suspend                  juice admin user unsuspend
+juice admin user deposit                  juice admin action list
+juice admin action disable                juice admin process list
 juice admin tx list
-juice user me
-juice remote add
-juice remote list
+juice remote add                          juice remote list
 juice remote import
 ```
 
-Requirements:
+The HTTP API is primary. Every exposed endpoint has a corresponding CLI command. The server uses the shared kernel layer, propagates request, subject, process, trace, action, and transaction IDs into logs where available, maps authentication failure, authorization failure, invalid input, insufficient funds, missing resource, and internal failure to distinct HTTP statuses, and rate-limits authentication and account-creation endpoints per IP with HTTP `429` on excess.
 
-- CLI commands must call the same service layer as the server.
-- CLI output must support human-readable text and JSON.
-- Every CLI command must have at least one test.
-- The CLI must be usable against a local SQLite database without running the HTTP server where feasible.
+Admin operations are CLI-only: do not register `/v1/admin/*` routes. They authenticate the caller, reject a non-superuser with `ErrUnauthorized`, require `@sys`, stay outside `Call()`, and include user list/show/suspend/unsuspend/deposit, action list/disable, process list, and transaction list.
 
-Justification: the CLI is both an operator tool and a test surface. Duplicated semantics would create inconsistencies.
+```text
+juice admin user list
+juice admin user show --id
+juice admin user suspend --id
+juice admin user unsuspend --id
+juice admin user deposit --handle / --id
+juice admin action list
+juice admin action disable --id
+juice admin process list
+juice admin tx list
+```
 
-## 14. Server interface
+Required endpoint behavior:
 
-Requirements:
+| Endpoint | Rule |
+|---|---|
+| `GET /health` | Unauthenticated server status; CLI: `juice health`. |
+| `GET /v1/me` | Authenticated subject profile: `id`, `handle`, `email`, `available`, `locked`; reject suspended users before handler. |
+| `PUT /v1/actions/{id}` | Owner or action admin; apply update/deactivation rules. |
+| `DELETE /v1/actions/{id}` | Owner or action admin; preserve transaction history. |
+| `POST /v1/actions/{id}/grant-all` | Owner or action admin; CLI: `juice action grant-all --id`. |
+| `POST /v1/actions/{id}/revoke-all` | Owner or action admin; CLI: `juice action revoke-all --id`. |
+| `GET /v1/processes` | Authenticated owner's processes ordered by descending `created_at`. |
+| `GET /v1/listeners` | Authenticated owner's listeners. |
+| `GET /v1/listeners/{id}/events` | Listener owner or source; return pending event fields. |
+| `POST /v1/auth/logout` | Accept refresh token in body, revoke it, and return `ErrUnauthenticated` for missing or already-revoked tokens. |
 
-- Juice must run as a production server.
-- The HTTP API is primary. For every HTTP endpoint the server exposes, there must be a corresponding CLI command.
-- Superuser/admin operations are intentionally excluded from the HTTP API. They must exist only in the CLI and must not be exposed as HTTP endpoints.
-- The server must use the same kernel service layer as the CLI.
-- The server must propagate request id, subject id, process id, trace id, action id, and transaction id into logs where available.
-- HTTP status codes must distinguish authentication failure, authorization failure, invalid input, insufficient funds, missing resource, and internal failure.
-- Authentication and account creation endpoints must enforce per-IP rate limiting. Excessive requests must return HTTP 429.
+## 14. Logging and configuration
 
-## 15. Logging
-
-Juice must provide rich structured logging to terminal and file.
+Log structured records to terminal and file simultaneously. Format (`text` or `JSON`), file path, and level are configurable. Every kernel transition logs start and end; errors include stable codes; script logs include trace ID.
 
 Required fields:
 
 ```text
-time
-level
-event
-request_id
-subject_user_id
-process_id
-trace_id
-action_id
-tx_id
-status
-duration_ms
-error
+time level event request_id subject_user_id process_id trace_id action_id tx_id
+status duration_ms error
 ```
 
-Requirements:
-
-- Logs must be emitted to terminal and file simultaneously.
-- Log format must be configurable as text or JSON.
-- File path and log level must be configurable.
-- Every kernel transition must log start and end events.
-- Errors must be logged with stable error codes.
-- Script logs must be associated with the current trace id.
-
-Justification: production operation and research reproducibility both require reconstructable execution records.
-
-## 16. Testing
-
-### 16.1 Test command
-
-The entire system must be testable by:
+Load configuration from environment variables and an optional config file. Use safe local defaults where possible; commit no production secrets; reject invalid startup configuration clearly.
 
 ```text
-go test ./...
+JUICE_DB_PATH JUICE_LOG_LEVEL JUICE_LOG_FILE JUICE_FEE_BPS JUICE_FEE_RECIPIENT
+JUICE_AUTH_ISSUER JUICE_AUTH_AUDIENCE JUICE_TOKEN_TTL
+JUICE_OLLAMA_URL JUICE_OLLAMA_CHAT_MODEL JUICE_OLLAMA_EMBED_MODEL
+JUICE_SCRIPT_TIMEOUT_MS JUICE_SCRIPT_MEMORY_BYTES
 ```
 
-This command must pass without external network access.
+## 15. Required automated tests
 
-### 16.2 Test isolation
+`go test ./...` must pass without external network access. Tests use temporary SQLite databases, fake Ollama and script adapters unless explicitly integration tests, no global state, and no order dependence.
 
-Requirements:
-
-- Tests must use temporary SQLite databases.
-- Tests must use fake Ollama and fake script adapters unless the test explicitly targets integration.
-- Tests must not depend on global state.
-- Tests must not depend on test order.
-
-### 16.3 Required test suites
-
-The implementation must include tests for:
+Required suites:
 
 ```text
 user creation
@@ -1111,9 +882,7 @@ receipt created atomically with successful transaction commit
 receipt created atomically with failed transaction commit
 ```
 
-### 16.4 Invariant tests
-
-The following invariants must be tested directly:
+Direct invariant tests:
 
 ```text
 balances are never negative
@@ -1143,6 +912,7 @@ transaction row is immutable after commit (no field updated post-creation)
 rating record references valid tx_id
 ```
 
+<<<<<<< HEAD
 ## 17. Configuration
 
 Juice must load configuration from environment variables and optional config file.
@@ -1580,3 +1350,23 @@ Requirements:
 - If a request arrives with an `idempotency_key` that matches an unexpired record for the same `counterparty_user_id`, the kernel must return the original receipt without executing again.
 - Expired idempotency records may be purged.
 - Idempotency applies to cross-kernel calls only. Local calls do not use idempotency keys.
+=======
+## 16. Design rationale
+
+These constraints preserve the original design intent:
+
+| Decision | Rationale |
+|---|---|
+| Stable kernel interfaces and explicit transitions | Kernel correctness must not depend on a transport or adapter. |
+| Small function-named package and file set with per-file tests | Lower coupling, replaceable implementations, and visible coverage gaps. |
+| Separate execution and supervision layers | Execution can be wrong; supervision supplies a correction signal that execution must not manipulate. |
+| Lock credits before execution | No action runs without reserving its budget. |
+| Full refund on v1 failures | Conservative, observable, and testable accounting separates execution failure from settlement. |
+| Validate input before lock and output before settlement | Invalid requests are not charged and malformed replies are not paid. |
+| Mediated WASM authority | Scripts compose kernel operations without bypassing authorization or exfiltrating reusable credentials. |
+| Replaceable lookup ranking | Research experiments can change ranking without changing kernel semantics. |
+| Incremental fixed statistics plus optional tags | Deterministic baseline metrics remain stable while experiments stay isolated; later risk-averse updates belong in experimental tags or lookup features. |
+| Automatic trace aggregates | Downstream cost and latency remain continuously visible without separate subtree queries. |
+| Fixed `@sys` handle and signing keypair | System actions are stably addressable and the installation can issue verifiable receipts and manifests. |
+| Structured terminal and file logs | Production operation and research reproduction require reconstructable execution records. |
+>>>>>>> 73da227669bd9782246edf035fed5dc44acfd77f

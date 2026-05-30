@@ -432,6 +432,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "cli-test-secret"
 	k := kernel.New(db, nil, nil, nil, nil, cfg, log.Discard())
+	t.Setenv("JUICE_SECRET_KEY", "cli-test-secret")
 
 	t.Cleanup(func() { db.Close() })
 
@@ -1064,6 +1065,7 @@ func TestActionListActive(t *testing.T) {
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
+	_ = env.k.GrantAll(ctx, owner.ID, a.ID)
 
 	actions, err := env.k.ListActions(ctx, true, 10, 0)
 	if err != nil {
@@ -1076,7 +1078,7 @@ func TestActionListActive(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("active action should appear in ListActions")
+		t.Error("active public action should appear in ListActions")
 	}
 }
 
@@ -3053,6 +3055,7 @@ func statsShowCmd() *cobra.Command {
 func lookupCmd() *cobra.Command {
 	var query string
 	var limit int
+	var processID string
 	cmd := &cobra.Command{
 		Use:   "lookup",
 		Short: "Search for actions using a natural-language query",
@@ -3063,26 +3066,49 @@ func lookupCmd() *cobra.Command {
 			}
 			defer db.Close()
 
-			results, err := k.Lookup(context.Background(), kernel.LookupRequest{
-				Query: query,
-				Limit: limit,
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			reply, err := k.Call(context.Background(), kernel.CallRequest{
+				SubjectID:    subjectID,
+				ProcessID:    processID,
+				TargetUserID: "@sys",
+				ActionName:   "/lookup",
+				Args: map[string]any{
+					"query": query,
+					"limit": float64(limit),
+				},
 			})
 			if err != nil {
 				return err
 			}
 
 			if flagOutput == "json" {
-				return printJSON(results)
+				return printJSON(reply.Result)
 			}
-			for _, r := range results {
-				fmt.Printf("%.4f  %s  %s\n", r.Score, r.Action.ID[:8], r.Action.Name)
+			results, _ := reply.Result["results"].([]any)
+			for _, item := range results {
+				r, _ := item.(map[string]any)
+				score, _ := r["score"].(float64)
+				actionID, _ := r["action_id"].(string)
+				name, _ := r["name"].(string)
+				owner, _ := r["owner_handle"].(string)
+				shortID := actionID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				fmt.Printf("%.4f  %s  %s%s\n", score, shortID, owner, name)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&query, "query", "", "Natural-language query (required)")
 	cmd.Flags().IntVar(&limit, "limit", 10, "Maximum results")
+	cmd.Flags().StringVar(&processID, "process", "", "Process ID (required)")
 	_ = cmd.MarkFlagRequired("query")
+	_ = cmd.MarkFlagRequired("process")
 	return cmd
 }
 
@@ -3093,6 +3119,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
@@ -3132,6 +3159,61 @@ func TestLookupRequiresEmbedder(t *testing.T) {
 	_, err := env.k.Lookup(ctx, kernel.LookupRequest{Query: "test", Limit: 5})
 	if err == nil {
 		t.Error("expected error when no embedder configured")
+	}
+}
+
+func TestLookupCommandUsesCall(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	if err := env.k.FirstBoot(ctx, "sys-pass"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSysLookup(ctx, env.k, "@sys"); err != nil {
+		t.Fatal(err)
+	}
+	sys, err := env.k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@lookup-cli", Email: "lookup-cli@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.k.Deposit(ctx, sys.ID, user.ID, 10, "test"); err != nil {
+		t.Fatal(err)
+	}
+	proc, _, err := env.k.StartProcess(ctx, user.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := env.k.Login(ctx, "@lookup-cli", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = runCmd(t, lookupCmd(), "--query", "weather", "--process", proc.ID)
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("expected lookup native action to fail without embedder, got %v", err)
+	}
+
+	txs, err := env.k.ListTransactions(ctx, kernel.TxFilter{ProcessID: proc.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(txs) != 1 {
+		t.Fatalf("lookup command should route through Call and create one transaction, got %d", len(txs))
+	}
+	if txs[0].Status != kernel.TxFailure {
+		t.Fatalf("lookup without embedder should create a failed transaction, got %s", txs[0].Status)
+	}
+	if _, err := env.k.GetReceiptByTxID(ctx, txs[0].ID); err != nil {
+		t.Fatalf("lookup transaction should have a receipt: %v", err)
 	}
 }
 
@@ -3283,10 +3365,10 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("%q is not a remote kernel", remoteHandle)
 	}
 
-	// Fetch the action list to find the action by name.
-	manifestURL := fmt.Sprintf("%s/v1/actions?owner=%s&name=%s",
-		strings.TrimRight(remoteUser.RemoteBaseURL, "/"), remoteHandle, actionName)
-	resp, err := http.Get(manifestURL)
+	base := strings.TrimRight(remoteUser.RemoteBaseURL, "/")
+
+	// Discover the action ID by listing.
+	resp, err := http.Get(fmt.Sprintf("%s/v1/actions?owner=%s&name=%s", base, remoteHandle, actionName))
 	if err != nil {
 		return fmt.Errorf("fetch action list: %w", err)
 	}
@@ -3295,43 +3377,39 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("remote kernel returned %d: %s", resp.StatusCode, body)
 	}
-
-	// Parse the action list — remote kernel returns *kernel.Action objects (PascalCase JSON).
-	var actions []struct {
-		ID           string
-		Name         string
-		Description  string
-		Price        int64
-		Kind         string
-		InputSchema  map[string]any
-		OutputSchema map[string]any
-		ArtifactHash string
-	}
+	var actions []struct{ ID, Name string }
 	if err := json.Unmarshal(body, &actions); err != nil {
 		return fmt.Errorf("parse action list: %w", err)
 	}
-	idx := -1
-	for i := range actions {
-		if actions[i].Name == actionName {
-			idx = i
+	actionID := ""
+	for _, a := range actions {
+		if a.Name == actionName {
+			actionID = a.ID
 			break
 		}
 	}
-	if idx == -1 {
+	if actionID == "" {
 		return fmt.Errorf("action %q not found on remote kernel %q", actionName, remoteHandle)
 	}
-	a := actions[idx]
 
-	m := kernel.ActionManifest{
-		OwnerHandle:  remoteHandle,
-		Name:         a.Name,
-		Description:  a.Description,
-		InputSchema:  a.InputSchema,
-		OutputSchema: a.OutputSchema,
-		Price:        a.Price,
-		Kind:         kernel.ActionKind(a.Kind),
-		ArtifactHash: a.ArtifactHash,
+	// Fetch and verify the signed manifest.
+	resp2, err := http.Get(fmt.Sprintf("%s/v1/actions/%s/manifest", base, actionID))
+	if err != nil {
+		return fmt.Errorf("fetch manifest: %w", err)
 	}
+	defer resp2.Body.Close()
+	body2, _ := io.ReadAll(resp2.Body)
+	if resp2.StatusCode != http.StatusOK {
+		return fmt.Errorf("remote kernel returned %d: %s", resp2.StatusCode, body2)
+	}
+	var m kernel.ActionManifest
+	if err := json.Unmarshal(body2, &m); err != nil {
+		return fmt.Errorf("parse manifest: %w", err)
+	}
+	if err := kernel.VerifyManifestSignature(remoteUser.PublicKey, &m); err != nil {
+		return fmt.Errorf("manifest signature invalid: %w", err)
+	}
+
 	imported, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		return fmt.Errorf("import action: %w", err)
@@ -3346,17 +3424,30 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
 	"github.com/daios-ai/juice/store"
 )
+
+func remoteTestPublicKey(t *testing.T) string {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(pub)
+}
 
 // newRemoteTestKernel opens a fresh DB, bootstraps @sys, and returns the kernel.
 func newRemoteTestKernel(t *testing.T) (*kernel.Kernel, *store.DB) {
@@ -3401,7 +3492,7 @@ func TestRemoteAdd(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
 			"handle":     "@remote-node",
-			"public_key": "pubkey-abc",
+			"public_key": remoteTestPublicKey(t),
 			"base_url":   "",
 		})
 	}))
@@ -3433,8 +3524,8 @@ func TestRemoteAdd(t *testing.T) {
 	if u.RemoteBaseURL == "" {
 		t.Error("expected RemoteBaseURL to be set")
 	}
-	if u.PublicKey != "pubkey-abc" {
-		t.Errorf("PublicKey: got %q, want %q", u.PublicKey, "pubkey-abc")
+	if _, err := base64.RawURLEncoding.DecodeString(u.PublicKey); err != nil {
+		t.Errorf("PublicKey should be base64url: %v", err)
 	}
 }
 
@@ -3442,7 +3533,7 @@ func TestRemoteList(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 
 	// Register a remote kernel directly via kernel API.
-	if _, err := k.RegisterRemoteKernel(t.Context(), "@list-remote", "pk-xyz", "https://list.example.com"); err != nil {
+	if _, err := k.RegisterRemoteKernel(t.Context(), "@list-remote", remoteTestPublicKey(t), "https://list.example.com"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3459,23 +3550,41 @@ func TestRemoteList(t *testing.T) {
 func TestRemoteImport(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 
-	// Stand up a fake remote kernel that serves an action list.
+	// Generate a real signing keypair for the "remote" kernel.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+
+	const actionID = "action-remote-id"
+	m := kernel.ActionManifest{
+		OwnerHandle:  "@import-remote",
+		Name:         "/greet",
+		Description:  "says hello",
+		Kind:         kernel.KindHTTP,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	}
+	sig, err := kernel.SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+
+	// Stand up a fake remote kernel that serves action list and signed manifest.
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]map[string]any{{
-			"id":          "action-remote-id",
-			"name":        "/greet",
-			"description": "says hello",
-			"price":       0,
-			"kind":        "http",
-			"input_schema":  map[string]any{"type": "object"},
-			"output_schema": map[string]any{"type": "object"},
-		}})
+		if strings.Contains(r.URL.Path, "/manifest") {
+			json.NewEncoder(w).Encode(m)
+		} else {
+			json.NewEncoder(w).Encode([]map[string]string{{"ID": actionID, "Name": "/greet"}})
+		}
 	}))
 	defer remote.Close()
 
-	// Register the remote kernel.
-	if _, err := k.RegisterRemoteKernel(t.Context(), "@import-remote", "pk-import", remote.URL); err != nil {
+	// Register the remote kernel with the real public key.
+	if _, err := k.RegisterRemoteKernel(t.Context(), "@import-remote", pubB64, remote.URL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3683,7 +3792,7 @@ func TestTransactionRate(t *testing.T) {
 
 	// No calls made, so no transactions to rate.
 	// Verify that rating a non-existent tx returns an error.
-	err := env.k.RateTransaction(ctx, owner.ID, "nonexistent-tx", 1.0)
+	err := env.k.RateTransaction(ctx, owner.ID, "nonexistent-tx", 1)
 	if err == nil {
 		t.Error("expected error rating nonexistent transaction")
 	}
@@ -4262,7 +4371,15 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 			db.Close()
 			return nil, nil, fmt.Errorf("JUICE_FEE_BPS invalid: %w", err)
 		}
+		if v < 0 || v > 10000 {
+			db.Close()
+			return nil, nil, fmt.Errorf("JUICE_FEE_BPS must be 0-10000")
+		}
 		cfg.FeeBPS = v
+	}
+	if cfg.FeeBPS > 0 && cfg.FeeRecipientID == "" {
+		db.Close()
+		return nil, nil, fmt.Errorf("JUICE_FEE_RECIPIENT required when JUICE_FEE_BPS > 0")
 	}
 	if ttl := os.Getenv("JUICE_TOKEN_TTL"); ttl != "" {
 		d, err := time.ParseDuration(ttl)
@@ -4571,8 +4688,9 @@ func runServer(addr string) error {
 	// Users — rate limited: 3 requests/minute per IP, burst of 5.
 	r.With(ipRateLimiter(3.0/60, 5)).Post("/v1/users", srv.postUser)
 
-	// Public action listing — no auth required (only returns grant-all active actions).
+	// Public action routes — no auth required.
 	r.Get("/v1/actions", srv.getActions)
+	r.Get("/v1/actions/{id}/manifest", srv.getActionManifest)
 
 	// Actions (authenticated).
 	r.Group(func(r chi.Router) {
@@ -4587,7 +4705,6 @@ func runServer(addr string) error {
 		r.Delete("/v1/actions/{id}/acl", srv.revokeACL)
 		r.Post("/v1/actions/{id}/grant-all", srv.grantAll)
 		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
-		r.Get("/v1/actions/{id}/manifest", srv.getActionManifest)
 
 		// Processes.
 		r.Get("/v1/processes", srv.listProcesses)
@@ -4627,8 +4744,8 @@ func runServer(addr string) error {
 // ---- server ----
 
 type server struct {
-	kernel          *kernel.Kernel
-	log             *log.Logger
+	kernel *kernel.Kernel
+	log    *log.Logger
 }
 
 // ---- middleware ----
@@ -5284,7 +5401,6 @@ func (s *server) postConsumeEvent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, reply)
 }
 
-
 func (s *server) grantAll(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := s.kernel.GrantAll(r.Context(), subjectFrom(r), id); err != nil {
@@ -5391,7 +5507,7 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getActionManifest(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	m, err := s.kernel.GetActionManifest(r.Context(), subjectFrom(r), id)
+	m, err := s.kernel.GetActionManifest(r.Context(), id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -5442,7 +5558,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -5476,21 +5591,23 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	k := kernel.New(db, nil, &httpActionExecutor{timeout: cfg.ScriptTimeout}, nil, nil, cfg, logger)
 
 	ctx := context.Background()
-	if _, err := k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
-		Handle: "@sys", Email: "sys@sys", Password: "sys-pass",
-	}, "superuser_handle"); err != nil {
+	if err := k.FirstBoot(ctx, "sys-pass"); err != nil {
 		t.Fatal(err)
 	}
 
-	// Set up a signing key so buildReceipt works in all call tests.
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
 	sys, err := k.ReadUserByHandle(ctx, "@sys")
 	if err != nil {
 		t.Fatal(err)
 	}
+	privB64, err := k.GetConfig(ctx, configKeySigningPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privBytes, err := base64.RawURLEncoding.DecodeString(privB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv := ed25519.PrivateKey(privBytes)
 	k.SetSigningKey(priv, sys.ID, "@sys")
 	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
 		t.Fatal(err)
@@ -5800,8 +5917,18 @@ func TestServeListActions(t *testing.T) {
 	}
 	var actions []kernel.Action
 	decodeResponse(t, resp, &actions)
+	if len(actions) != 0 {
+		t.Fatal("private action should not appear in public list")
+	}
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, tok).Body.Close()
+	resp = httpDo(t, srv, "GET", "/v1/actions", nil, tok)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("list actions after grant-all: expected 200, got %d", resp.StatusCode)
+	}
+	decodeResponse(t, resp, &actions)
 	if len(actions) == 0 {
-		t.Error("expected at least one action in list")
+		t.Error("expected public action in list")
 	}
 }
 
@@ -6228,7 +6355,6 @@ func TestServeRateTransaction(t *testing.T) {
 		t.Fatal("expected tx_id from call")
 	}
 
-	// Rate it (caller is the process owner); rating must be 0 or 1.
 	rate := httpDo(t, srv, "POST", "/v1/transactions/"+txID+"/rate", map[string]any{
 		"rating": 1,
 	}, callerTok)
@@ -6244,7 +6370,10 @@ func TestServeRateTransactionNotFound(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@rater")
+	tok, err := k.Login(context.Background(), "@sys", "sys-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	resp := httpDo(t, srv, "POST", "/v1/transactions/no-such-id/rate",
 		map[string]any{"rating": 1.0}, tok)
@@ -6734,12 +6863,12 @@ func TestFederationCall(t *testing.T) {
 
 	// Register a public /ping action on @sys pointing to the backend.
 	a, err := k.CreateAction(ctx, kernel.CreateActionRequest{
-		OwnerUserID: sys.ID,
-		Name:        "/ping",
-		Kind:        kernel.KindHTTP,
-		Source:      backend.URL,
-		Price:       0,
-		Description: "ping",
+		OwnerUserID:  sys.ID,
+		Name:         "/ping",
+		Kind:         kernel.KindHTTP,
+		Source:       backend.URL,
+		Price:        0,
+		Description:  "ping",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 	})
@@ -6894,6 +7023,9 @@ func (k *Kernel) StartAuthCode(ctx context.Context, handle, password, codeChalle
 	if !CheckPassword(password, u.PasswordHash) {
 		return "", ErrUnauthenticated.Wrap("invalid credentials")
 	}
+	if err := rejectSuspended(u); err != nil {
+		return "", err
+	}
 
 	rawCode := make([]byte, 24)
 	if _, err := rand.Read(rawCode); err != nil {
@@ -6933,6 +7065,11 @@ func (k *Kernel) ExchangeAuthCode(ctx context.Context, code, codeVerifier string
 	if !VerifyCodeChallenge(codeVerifier, ac.CodeChallenge) {
 		return "", "", ErrUnauthenticated.Wrap("code_verifier does not match challenge")
 	}
+	if u, err := k.store.ReadUser(ctx, ac.UserID); err != nil {
+		return "", "", err
+	} else if err := rejectSuspended(u); err != nil {
+		return "", "", err
+	}
 
 	accessToken, err = IssueToken(ac.UserID, k.cfg.TokenSecret, k.cfg.TokenTTL)
 	if err != nil {
@@ -6950,6 +7087,11 @@ func (k *Kernel) RefreshAccessToken(ctx context.Context, oldRefreshToken string)
 	rt, err := k.store.RotateRefreshToken(ctx, oldRefreshToken)
 	if err != nil {
 		return "", "", ErrUnauthenticated.Wrap("invalid or expired refresh token")
+	}
+	if u, err := k.store.ReadUser(ctx, rt.UserID); err != nil {
+		return "", "", err
+	} else if err := rejectSuspended(u); err != nil {
+		return "", "", err
 	}
 	accessToken, err = IssueToken(rt.UserID, k.cfg.TokenSecret, k.cfg.TokenTTL)
 	if err != nil {
@@ -6991,6 +7133,9 @@ func (k *Kernel) LoginWithRefresh(ctx context.Context, handle, password string) 
 	if !CheckPassword(password, u.PasswordHash) {
 		return "", "", ErrUnauthenticated.Wrap("invalid credentials")
 	}
+	if err := rejectSuspended(u); err != nil {
+		return "", "", err
+	}
 	accessToken, err = IssueToken(u.ID, k.cfg.TokenSecret, k.cfg.TokenTTL)
 	if err != nil {
 		return "", "", err
@@ -7010,6 +7155,7 @@ package kernel
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -7232,6 +7378,45 @@ func TestRefreshAccessToken(t *testing.T) {
 	}
 }
 
+func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	u, err := k.CreateUser(ctx, CreateUserRequest{
+		Handle: "@suspended-auth", Email: "suspended@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, _ := GenerateCodeVerifier()
+	challenge := CodeChallenge(verifier)
+	redirect, err := k.StartAuthCode(ctx, u.Handle, "pass", challenge, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, refresh, err := k.LoginWithRefresh(ctx, u.Handle, "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SuspendUser(ctx, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.StartAuthCode(ctx, u.Handle, "pass", challenge, ""); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("StartAuthCode: got %v, want ErrUnauthenticated", err)
+	}
+	code := redirect[len("?code="):]
+	if _, _, err := k.ExchangeAuthCode(ctx, code, verifier); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("ExchangeAuthCode: got %v, want ErrUnauthenticated", err)
+	}
+	if _, _, err := k.RefreshAccessToken(ctx, refresh); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("RefreshAccessToken: got %v, want ErrUnauthenticated", err)
+	}
+	if _, _, err := k.LoginWithRefresh(ctx, u.Handle, "pass"); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("LoginWithRefresh: got %v, want ErrUnauthenticated", err)
+	}
+}
+
 
 // ===== kernel/call.go =====
 
@@ -7268,6 +7453,9 @@ type CallRequest struct {
 	ActionName string
 	// Args is the JSON-decoded input arguments.
 	Args map[string]any
+	// ContractorCall is true for sub-calls made via juice.call inside an action.
+	// Fee is set to 0 so the contractor receives its full action.price (§5.7).
+	ContractorCall bool
 }
 
 // CallReply is the response from a successful Call().
@@ -7343,6 +7531,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if err := ValidateInput(action.InputSchema, req.Args); err != nil {
 		return nil, err
 	}
+	if err := k.requireReceiptSigningReady(); err != nil {
+		return nil, err
+	}
 
 	// 8. Check process has sufficient available funds.
 	if process.Available < action.Price {
@@ -7396,7 +7587,11 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	logger.Info("call.start", "action", action.Name, "price", action.Price)
 
 	// Prepare transaction skeleton.
-	net, fee := ComputeFee(action.Price, k.cfg.FeeBPS)
+	feeBPS := k.cfg.FeeBPS
+	if req.ContractorCall {
+		feeBPS = 0
+	}
+	net, fee := ComputeFee(action.Price, feeBPS)
 	txID := uuid.New().String()
 	tx := &Transaction{
 		ID:            txID,
@@ -7644,6 +7839,11 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 		return nil, ErrInvalidInput.Wrap("could not serialize args")
 	}
 
+	artifact, _, err := k.scripts.Compile(ctx, []byte(action.Source))
+	if err != nil {
+		return nil, ErrExecutionFailed.Wrapf("wasm compile failed: %v", err)
+	}
+
 	host := &kernelHostFunctions{
 		kernel:      k,
 		processID:   trace.ProcessID,
@@ -7651,7 +7851,7 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 		ownerUserID: ownerUserID,
 	}
 
-	outputJSON, err := k.scripts.Execute(ctx, []byte(action.Source), inputJSON, host)
+	outputJSON, err := k.scripts.Execute(ctx, artifact, inputJSON, host)
 	if err != nil {
 		return nil, ErrExecutionFailed.Wrapf("wasm execution failed: %v", err)
 	}
@@ -7726,11 +7926,12 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	defer func() { _ = h.kernel.store.EndProcess(context.Background(), ep.ID) }()
 
 	reply, err := h.kernel.Call(ctx, CallRequest{
-		SubjectID:    h.ownerUserID,
-		ProcessID:    ep.ID,
-		TargetUserID: target.ID,
-		ActionName:   subActionName,
-		Args:         args,
+		SubjectID:      h.ownerUserID,
+		ProcessID:      ep.ID,
+		TargetUserID:   target.ID,
+		ActionName:     subActionName,
+		Args:           args,
+		ContractorCall: true,
 	})
 	if err != nil {
 		return nil, err
@@ -8522,14 +8723,13 @@ func TestContractorSubCallChargedToActionOwner(t *testing.T) {
 		t.Errorf("caller process.available: got %d, want 0 (outer price only)", proc.Available)
 	}
 
-	// Test kernel uses 20% fee (2000 BPS).
-	// Bob received inner net = 100 - 20 = 80.
+	// Contractor sub-call has fee=0; Bob received full inner price = 100.
 	bobUser, _ := st.ReadUser(ctx, bob.ID)
-	if bobUser.Available != 580 { // 500 + 80
-		t.Errorf("inner action owner available: got %d, want 580", bobUser.Available)
+	if bobUser.Available != 600 { // 500 + 100
+		t.Errorf("inner action owner available: got %d, want 600", bobUser.Available)
 	}
 
-	// Alice spent 100 (inner sub-call) and received outer net = 50 - 10 = 40.
+	// Alice spent 100 (inner sub-call, no fee) and received outer net = 50 - 10 = 40 (20% fee).
 	aliceUser, _ := st.ReadUser(ctx, alice.ID)
 	if aliceUser.Available != 940 { // 1000 - 100 + 40
 		t.Errorf("outer action owner available: got %d, want 940", aliceUser.Available)
@@ -8907,6 +9107,7 @@ func newTestKernelWithChatter(st Store, c Chatter) *Kernel {
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
 	cfg.IssuerUserID = "test-issuer-id"
+	cfg.SigningKey = testSigningKey()
 	return New(st, nil, nil, nil, c, cfg, nil)
 }
 
@@ -9624,8 +9825,8 @@ type fakeStore struct {
 	refreshTokens      map[string]*RefreshToken
 	config             map[string]string
 	deposits           []*Deposit
-	receipts           map[string]*Receipt          // txID -> Receipt
-	ratings            map[string]*Rating           // txID -> Rating
+	receipts           map[string]*Receipt           // txID -> Receipt
+	ratings            map[string]*Rating            // txID -> Rating
 	idempotencyRecords map[string]*IdempotencyRecord // key+counterparty -> record
 }
 
@@ -9745,7 +9946,7 @@ func (f *fakeStore) ListActions(_ context.Context, activeOnly bool, limit, offse
 	defer f.mu.Unlock()
 	var result []*Action
 	for _, a := range f.actions {
-		if activeOnly && !a.Active {
+		if activeOnly && (!a.Active || !a.Public) {
 			continue
 		}
 		cp := *a
@@ -10391,7 +10592,6 @@ func (f *fakeStore) ListAllActions(_ context.Context, limit, offset int) ([]*Act
 	return result, nil
 }
 
-
 func (f *fakeStore) ListProcesses(_ context.Context, ownerID string, limit, offset int) ([]*Process, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -10488,7 +10688,6 @@ func (f *fakeStore) applyTraceLatency(traceID string, grossDelta int64, endedAt 
 		cur = t.ParentTraceID
 	}
 }
-
 
 func (f *fakeStore) GetConfig(_ context.Context, key string) (string, error) {
 	f.mu.Lock()
@@ -10601,14 +10800,14 @@ func (f *fakeStore) ReadReceiptByTxID(_ context.Context, txID string) (*Receipt,
 	return &cp, nil
 }
 
-func (f *fakeStore) CreateRatingCascade(_ context.Context, txID, _ string, r *Rating) error {
+func (f *fakeStore) CreateRating(_ context.Context, r *Rating) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, exists := f.ratings[txID]; exists {
+	if _, exists := f.ratings[r.RatedTxID]; exists {
 		return ErrInvalidState.Wrap("already rated")
 	}
 	cp := *r
-	f.ratings[txID] = &cp
+	f.ratings[r.RatedTxID] = &cp
 	return nil
 }
 
@@ -10848,14 +11047,14 @@ import (
 
 // Config holds kernel-level configuration.
 type Config struct {
-	FeeBPS            int64              // basis points, e.g. 2000 = 20%
-	FeeRecipientID    string             // user ID that receives fees
-	TokenSecret       string             // HMAC secret for JWT signing
-	TokenTTL          time.Duration      // token validity window
+	FeeBPS            int64         // basis points, e.g. 2000 = 20%
+	FeeRecipientID    string        // user ID that receives fees
+	TokenSecret       string        // HMAC secret for JWT signing
+	TokenTTL          time.Duration // token validity window
 	ScriptTimeout     time.Duration
 	ScriptMemory      int64              // bytes
 	AllowLocalSources bool               // permit loopback/private URLs as action sources (tests only)
-	SigningKey        ed25519.PrivateKey  // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
+	SigningKey        ed25519.PrivateKey // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
 	IssuerUserID      string             // @sys user ID, set during bootstrap
 	SuperuserHandle   string             // cached superuser handle for deposit checks
 }
@@ -10863,7 +11062,7 @@ type Config struct {
 // DefaultConfig returns safe local defaults.
 func DefaultConfig() Config {
 	return Config{
-		FeeBPS:        2000,
+		FeeBPS:        0,
 		TokenTTL:      15 * time.Minute,
 		ScriptTimeout: 10 * time.Second,
 		ScriptMemory:  64 * 1024 * 1024, // 64 MiB
@@ -10966,8 +11165,8 @@ func (k *Kernel) Login(ctx context.Context, handle, password string) (string, er
 	if !CheckPassword(password, u.PasswordHash) {
 		return "", ErrUnauthenticated.Wrap("invalid credentials")
 	}
-	if u.SuspendedAt != nil {
-		return "", ErrUnauthenticated.Wrap("account suspended")
+	if err := rejectSuspended(u); err != nil {
+		return "", err
 	}
 	tok, err := IssueToken(u.ID, k.cfg.TokenSecret, k.cfg.TokenTTL)
 	if err != nil {
@@ -10975,6 +11174,13 @@ func (k *Kernel) Login(ctx context.Context, handle, password string) (string, er
 	}
 	k.log.With(ctx).Info("user.login", "user_id", u.ID)
 	return tok, nil
+}
+
+func rejectSuspended(u *User) error {
+	if u.SuspendedAt != nil {
+		return ErrUnauthenticated.Wrap("account suspended")
+	}
+	return nil
 }
 
 // ListUsers returns all users ordered by creation time.
@@ -11131,11 +11337,10 @@ func (k *Kernel) CreateAction(ctx context.Context, req CreateActionRequest) (*Ac
 	}
 
 	if req.Kind == KindWasm && len(req.Source) > 0 && k.scripts != nil {
-		artifact, hash, err := k.scripts.Compile(ctx, []byte(req.Source))
+		_, hash, err := k.scripts.Compile(ctx, []byte(req.Source))
 		if err != nil {
 			return nil, ErrInvalidInput.Wrapf("wasm compilation failed: %v", err)
 		}
-		a.Source = string(artifact)
 		a.ArtifactHash = hash
 	}
 
@@ -11259,7 +11464,7 @@ func (k *Kernel) ReadActionByOwnerName(ctx context.Context, ownerID, name string
 	return k.store.ReadActionByOwnerName(ctx, ownerID, name)
 }
 
-// ListActions returns public active actions (or all actions for owners).
+// ListActions returns public actions. With activeOnly set it returns public active actions.
 func (k *Kernel) ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*Action, error) {
 	return k.store.ListActions(ctx, activeOnly, limit, offset)
 }
@@ -11450,11 +11655,10 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 		a.Source = *req.Source
 		a.Active = false
 		if a.Kind == KindWasm && k.scripts != nil {
-			artifact, hash, err := k.scripts.Compile(ctx, []byte(*req.Source))
+			_, hash, err := k.scripts.Compile(ctx, []byte(*req.Source))
 			if err != nil {
 				return nil, ErrInvalidInput.Wrapf("wasm compilation failed: %v", err)
 			}
-			a.Source = string(artifact)
 			a.ArtifactHash = hash
 		}
 	}
@@ -11671,13 +11875,19 @@ func (k *Kernel) ListTransactions(ctx context.Context, filter TxFilter) ([]*Tran
 	return k.store.ListTransactions(ctx, filter)
 }
 
-// RateTransaction submits a rating for a completed transaction and cascades to unrated descendants.
+// RateTransaction submits a rating for a completed transaction.
+// Only the direct buyer (the process owner who paid) may rate.
 // Ratings are stored in a separate ratings table; the transaction row is never modified.
-// Both the root rating insertion and the cascade are performed atomically in a single store operation.
-// After cascade, action stats are updated to reflect the new rating.
 func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, rating float64) error {
 	if rating != 0 && rating != 1 {
 		return ErrInvalidInput.Wrap("rating must be 0 or 1")
+	}
+	rater, err := k.store.ReadUser(ctx, subjectID)
+	if err != nil {
+		return err
+	}
+	if rater.SuspendedAt != nil {
+		return ErrUnauthenticated.Wrap("account suspended")
 	}
 	tx, err := k.store.ReadTransaction(ctx, txID)
 	if err != nil {
@@ -11685,6 +11895,10 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	}
 	if tx == nil {
 		return ErrNotFound.Wrap("transaction not found")
+	}
+	// Only the direct buyer (process owner) may rate.
+	if subjectID != tx.OwnerUserID {
+		return ErrUnauthorized.Wrap("only the direct buyer may rate a transaction")
 	}
 	// Check for duplicate rating (transaction already has a rating record).
 	if existing, _ := k.store.ReadRatingByTxID(ctx, txID); existing != nil {
@@ -11702,8 +11916,12 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	if receipt != nil {
 		r.RatedReceiptID = &receipt.ID
 	}
-	r.Signature = signRating(k.cfg.SigningKey, r)
-	if err := k.store.CreateRatingCascade(ctx, txID, tx.TraceID, r); err != nil {
+	sig, err := signRating(k.cfg.SigningKey, r)
+	if err != nil {
+		return err
+	}
+	r.Signature = sig
+	if err := k.store.CreateRating(ctx, r); err != nil {
 		return err
 	}
 	// Update action stats to keep rating_mean and rating_count current.
@@ -12116,8 +12334,8 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 // buildReceipt constructs a Receipt from a committed transaction and signs it.
 // Returns ErrInvalidState if the kernel has not been bootstrapped (no issuer configured).
 func (k *Kernel) buildReceipt(tx *Transaction) (*Receipt, error) {
-	if k.cfg.IssuerUserID == "" {
-		return nil, ErrInvalidState.Wrap("kernel not bootstrapped: no issuer")
+	if err := k.requireReceiptSigningReady(); err != nil {
+		return nil, err
 	}
 	argsHash, err := jcsHashStr(tx.ArgsJSON)
 	if err != nil {
@@ -12142,8 +12360,19 @@ func (k *Kernel) buildReceipt(tx *Transaction) (*Receipt, error) {
 		Reason:       tx.Reason,
 		CreatedAt:    time.Now().UTC(),
 	}
-	r.Signature = signReceipt(k.cfg.SigningKey, r)
+	sig, err := signReceipt(k.cfg.SigningKey, r)
+	if err != nil {
+		return nil, err
+	}
+	r.Signature = sig
 	return r, nil
+}
+
+func (k *Kernel) requireReceiptSigningReady() error {
+	if k.cfg.IssuerUserID == "" || len(k.cfg.SigningKey) != ed25519.PrivateKeySize {
+		return ErrInvalidState.Wrap("kernel cannot issue signed receipts")
+	}
+	return nil
 }
 
 func sha256Hex(s string) string {
@@ -12152,10 +12381,9 @@ func sha256Hex(s string) string {
 }
 
 // signReceipt signs the canonical receipt payload (excluding Signature) with JCS.
-// Returns empty string if key is nil.
-func signReceipt(key ed25519.PrivateKey, r *Receipt) string {
-	if len(key) == 0 {
-		return ""
+func signReceipt(key ed25519.PrivateKey, r *Receipt) (string, error) {
+	if len(key) != ed25519.PrivateKeySize {
+		return "", ErrInvalidState.Wrap("signing key is not configured")
 	}
 	payload, err := CanonicalJSON(receiptPayload{
 		ActionID:     r.ActionID,
@@ -12173,10 +12401,10 @@ func signReceipt(key ed25519.PrivateKey, r *Receipt) string {
 		TxID:         r.TxID,
 	})
 	if err != nil {
-		return ""
+		return "", ErrInternal.Wrapf("canonicalize receipt: %v", err)
 	}
 	sig := ed25519.Sign(key, payload)
-	return base64.RawURLEncoding.EncodeToString(sig)
+	return base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
 // receiptPayload is the canonical signed form of a receipt (fields alphabetically ordered).
@@ -12197,11 +12425,19 @@ type receiptPayload struct {
 }
 
 // signRating signs the canonical rating payload (excluding Signature) with JCS.
-// Returns empty string if key is nil.
-func signRating(key ed25519.PrivateKey, r *Rating) string {
-	if len(key) == 0 {
-		return ""
+func signRating(key ed25519.PrivateKey, r *Rating) (string, error) {
+	if len(key) != ed25519.PrivateKeySize {
+		return "", ErrInvalidState.Wrap("signing key is not configured")
 	}
+	payload, err := canonicalRatingPayload(r)
+	if err != nil {
+		return "", err
+	}
+	sig := ed25519.Sign(key, payload)
+	return base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+func canonicalRatingPayload(r *Rating) ([]byte, error) {
 	receiptID := ""
 	if r.RatedReceiptID != nil {
 		receiptID = *r.RatedReceiptID
@@ -12215,10 +12451,9 @@ func signRating(key ed25519.PrivateKey, r *Rating) string {
 		Rating:         r.Rating,
 	})
 	if err != nil {
-		return ""
+		return nil, ErrInternal.Wrapf("canonicalize rating: %v", err)
 	}
-	sig := ed25519.Sign(key, payload)
-	return base64.RawURLEncoding.EncodeToString(sig)
+	return payload, nil
 }
 
 // ratingPayload is the canonical signed form of a rating (fields alphabetically ordered).
@@ -12237,6 +12472,12 @@ type ratingPayload struct {
 func (k *Kernel) RegisterRemoteKernel(ctx context.Context, handle, publicKey, baseURL string) (*User, error) {
 	if handle == "" || publicKey == "" || baseURL == "" {
 		return nil, ErrInvalidInput.Wrap("handle, public_key, and base_url are required")
+	}
+	if _, err := decodeRemotePublicKey(publicKey); err != nil {
+		return nil, err
+	}
+	if err := validateRemoteBaseURL(baseURL); err != nil {
+		return nil, err
 	}
 	// Check if a user with this public key already exists.
 	existing, err := k.store.ReadUserByPublicKey(ctx, publicKey)
@@ -12265,6 +12506,31 @@ func (k *Kernel) RegisterRemoteKernel(ctx context.Context, handle, publicKey, ba
 	}
 	k.log.With(ctx).Info("remote_kernel.registered", "handle", handle, "base_url", baseURL)
 	return u, nil
+}
+
+func decodeRemotePublicKey(publicKey string) (ed25519.PublicKey, error) {
+	key, err := base64.RawURLEncoding.DecodeString(publicKey)
+	if err != nil {
+		return nil, ErrInvalidInput.Wrap("public_key must be base64url")
+	}
+	if len(key) != ed25519.PublicKeySize {
+		return nil, ErrInvalidInput.Wrap("public_key must be a 32-byte Ed25519 public key")
+	}
+	return ed25519.PublicKey(key), nil
+}
+
+func validateRemoteBaseURL(baseURL string) error {
+	u, err := url.Parse(baseURL)
+	if err != nil || u == nil || u.Scheme == "" || u.Host == "" {
+		return ErrInvalidInput.Wrap("remote_base_url must be an absolute URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ErrInvalidInput.Wrap("remote_base_url must use http or https")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return ErrInvalidInput.Wrap("remote_base_url must not include userinfo, query, or fragment")
+	}
+	return nil
 }
 
 // ListRemoteKernels returns all local user records that represent remote kernel peers.
@@ -12318,7 +12584,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 
 // GetActionManifest returns a signed manifest for a public active action.
 // Manifests are only available for actions that are both active and public.
-func (k *Kernel) GetActionManifest(ctx context.Context, subjectID, actionID string) (*ActionManifest, error) {
+func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*ActionManifest, error) {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return nil, err
@@ -12346,15 +12612,15 @@ func (k *Kernel) GetActionManifest(ctx context.Context, subjectID, actionID stri
 		UpdatedAt:    a.UpdatedAt,
 		Stats:        stats,
 	}
-	m.Signature = signManifest(k.cfg.SigningKey, m)
+	sig, err := SignManifest(k.cfg.SigningKey, m)
+	if err != nil {
+		return nil, err
+	}
+	m.Signature = sig
 	return m, nil
 }
 
-// signManifest signs the canonical manifest payload (excluding Signature) with JCS.
-func signManifest(key ed25519.PrivateKey, m *ActionManifest) string {
-	if len(key) == 0 {
-		return ""
-	}
+func manifestCanonicalPayload(m *ActionManifest) ([]byte, error) {
 	inputJSON, _ := CanonicalJSON(m.InputSchema)
 	outputJSON, _ := CanonicalJSON(m.OutputSchema)
 	statsJSON := ""
@@ -12363,7 +12629,7 @@ func signManifest(key ed25519.PrivateKey, m *ActionManifest) string {
 			statsJSON = string(b)
 		}
 	}
-	payload, err := CanonicalJSON(manifestPayload{
+	return CanonicalJSON(manifestPayload{
 		ArtifactHash: m.ArtifactHash,
 		Description:  m.Description,
 		InputSchema:  string(inputJSON),
@@ -12375,11 +12641,36 @@ func signManifest(key ed25519.PrivateKey, m *ActionManifest) string {
 		Stats:        statsJSON,
 		UpdatedAt:    m.UpdatedAt.UTC().Format(time.RFC3339),
 	})
-	if err != nil {
-		return ""
+}
+
+// SignManifest creates a base64url Ed25519 signature over the canonical manifest payload.
+func SignManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
+	if len(key) != ed25519.PrivateKeySize {
+		return "", ErrInvalidState.Wrap("signing key is not configured")
 	}
-	sig := ed25519.Sign(key, payload)
-	return base64.RawURLEncoding.EncodeToString(sig)
+	payload, err := manifestCanonicalPayload(m)
+	if err != nil {
+		return "", ErrInternal.Wrapf("canonicalize manifest: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
+}
+
+// VerifyManifestSignature checks that m.Signature was produced by the private key
+// corresponding to pubKeyB64 (base64url Ed25519 public key).
+func VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
+	pub, err := decodeRemotePublicKey(pubKeyB64)
+	if err != nil {
+		return err
+	}
+	payload, err := manifestCanonicalPayload(m)
+	if err != nil {
+		return ErrInternal.Wrapf("canonicalize manifest: %v", err)
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(m.Signature)
+	if err != nil || !ed25519.Verify(pub, payload, sig) {
+		return ErrUnauthorized.Wrap("manifest signature is invalid")
+	}
+	return nil
 }
 
 type manifestPayload struct {
@@ -12402,6 +12693,9 @@ package kernel
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"math"
 	"testing"
@@ -12416,6 +12710,7 @@ func newTestKernel(st Store) *Kernel {
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
 	cfg.IssuerUserID = "test-issuer-id"
+	cfg.SigningKey = testSigningKey()
 	return New(st, nil, nil, nil, nil, cfg, log.Default())
 }
 
@@ -12424,7 +12719,16 @@ func newTestKernelWithScripts(st Store, exec ScriptExecutor) *Kernel {
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
 	cfg.IssuerUserID = "test-issuer-id"
+	cfg.SigningKey = testSigningKey()
 	return New(st, exec, nil, nil, nil, cfg, log.Default())
+}
+
+func testSigningKey() ed25519.PrivateKey {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return priv
 }
 
 func setupUser(t *testing.T, st *fakeStore, handle string, balance int64) *User {
@@ -12479,6 +12783,7 @@ func setupProcess(t *testing.T, k *Kernel, ownerID string, funds int64) (*Proces
 type fakeScriptExec struct {
 	result string
 	err    error
+	calls  int
 }
 
 func (f *fakeScriptExec) Compile(_ context.Context, source []byte) ([]byte, string, error) {
@@ -12486,6 +12791,7 @@ func (f *fakeScriptExec) Compile(_ context.Context, source []byte) ([]byte, stri
 }
 
 func (f *fakeScriptExec) Execute(_ context.Context, _ []byte, input []byte, _ HostFunctions) ([]byte, error) {
+	f.calls++
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -12771,7 +13077,7 @@ func TestUserLockedBalanceInvariant(t *testing.T) {
 		Kind: KindWasm, Active: true, Price: 100,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 
@@ -13130,7 +13436,7 @@ func TestReceiptCreatedWithCall(t *testing.T) {
 
 	exec := &fakeScriptExec{result: `{"ok":true}`}
 	k := newTestKernelWithScripts(st, exec)
-	k.SetSigningKey(nil, su.ID, "@sys") // nil key: signature will be empty but IssuerUserID is set
+	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
 	ctx := context.Background()
 
 	caller := setupUser(t, st, "@rcpt-caller", 500)
@@ -13139,7 +13445,7 @@ func TestReceiptCreatedWithCall(t *testing.T) {
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: caller.ID, ActionID: a.ID, Permission: PermCall, CreatedAt: time.Now().UTC()})
@@ -13172,7 +13478,7 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 
 	exec := &fakeScriptExec{err: ErrExecutionFailed.Wrap("boom")}
 	k := newTestKernelWithScripts(st, exec)
-	k.SetSigningKey(nil, su.ID, "@sys")
+	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@fail-owner", 500)
@@ -13181,7 +13487,7 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 
@@ -13218,6 +13524,140 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 	}
 }
 
+func TestReceiptSigningRequiresConfiguredKey(t *testing.T) {
+	k := newTestKernel(newFakeStore())
+	k.SetSigningKey(nil, "issuer-id", "@sys")
+
+	_, err := k.buildReceipt(&Transaction{
+		ID:        "tx-id",
+		TraceID:   "trace-id",
+		ActionID:  "action-id",
+		ArgsJSON:  `{}`,
+		ReplyJSON: `{}`,
+		Status:    TxSuccess,
+		EndedAt:   time.Now().UTC(),
+	})
+	if !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
+	}
+}
+
+func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
+	st := newFakeStore()
+	exec := &fakeScriptExec{result: `{"ok":true}`}
+	k := newTestKernelWithScripts(st, exec)
+	k.SetSigningKey(nil, "issuer-id", "@sys")
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@no-receipt-owner", 100)
+	a := &Action{
+		ID:           uuid.New().String(),
+		OwnerUserID:  owner.ID,
+		Name:         "/no-receipt",
+		Kind:         KindWasm,
+		Active:       true,
+		Price:        10,
+		Source:       "wat",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	p, root, _ := k.StartProcess(ctx, owner.ID, 50)
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: owner.ID, ActionName: "/no-receipt", Args: map[string]any{},
+	})
+	if !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("expected ErrInvalidState, got %v", err)
+	}
+	if exec.calls != 0 {
+		t.Fatalf("action executed despite missing receipt signing: %d calls", exec.calls)
+	}
+	got, _ := st.ReadProcess(ctx, p.ID)
+	if got.Available != 50 || got.Locked != 0 {
+		t.Fatalf("funds changed before receipt precondition: available=%d locked=%d", got.Available, got.Locked)
+	}
+	txs, _ := st.ListTransactions(ctx, TxFilter{ProcessID: p.ID})
+	if len(txs) != 0 {
+		t.Fatalf("transaction created despite missing receipt signing: %d", len(txs))
+	}
+}
+
+func TestManifestSigningRequiresConfiguredKey(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	k.SetSigningKey(nil, "issuer-id", "@sys")
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@manifest-owner", 0)
+	a := &Action{
+		ID:           uuid.New().String(),
+		OwnerUserID:  owner.ID,
+		Name:         "/manifest",
+		Kind:         KindHTTP,
+		Active:       true,
+		Public:       true,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		Source:       "https://example.com/call",
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := k.GetActionManifest(ctx, a.ID)
+	if !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
+	}
+}
+
+func TestRatingSigningRequiresConfiguredKey(t *testing.T) {
+	_, err := signRating(nil, &Rating{
+		ID:          "rating-id",
+		RatedTxID:   "tx-id",
+		RaterUserID: "user-id",
+		Rating:      1,
+		CreatedAt:   time.Now().UTC(),
+	})
+	if !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
+	}
+}
+
+func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	if _, err := k.RegisterRemoteKernel(ctx, "@bad-key", "not-base64url", "https://remote.example.com"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for malformed public key, got %v", err)
+	}
+
+	shortKey := base64.RawURLEncoding.EncodeToString([]byte("short"))
+	if _, err := k.RegisterRemoteKernel(ctx, "@short-key", shortKey, "https://remote.example.com"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for short public key, got %v", err)
+	}
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validKey := base64.RawURLEncoding.EncodeToString(pub)
+	if _, err := k.RegisterRemoteKernel(ctx, "@bad-url", validKey, "ftp://remote.example.com"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for unsupported URL scheme, got %v", err)
+	}
+	if _, err := k.RegisterRemoteKernel(ctx, "@remote", validKey, "https://remote.example.com"); err != nil {
+		t.Fatalf("valid remote kernel should register: %v", err)
+	}
+}
+
 // ---- Rating record tests ----
 
 func TestRatingRecordCreated(t *testing.T) {
@@ -13231,7 +13671,7 @@ func TestRatingRecordCreated(t *testing.T) {
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 
@@ -13277,7 +13717,7 @@ func TestRatingDuplicateRejected(t *testing.T) {
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 
@@ -13425,7 +13865,7 @@ func TestLookupRanking(t *testing.T) {
 	} {
 		a := &Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: desc.name,
-			Kind: KindHTTP, Active: true, Description: desc.text,
+			Kind: KindHTTP, Active: true, Public: true, Description: desc.text,
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)
@@ -13467,7 +13907,7 @@ func TestLookupRankingWithStats(t *testing.T) {
 	for _, name := range []string{"/reliable", "/unreliable"} {
 		a := &Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: name,
-			Kind: KindHTTP, Active: true, Description: "compute data results",
+			Kind: KindHTTP, Active: true, Public: true, Description: "compute data results",
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)
@@ -13637,12 +14077,20 @@ func validateValue(schema map[string]any, data any, path string) error {
 			return ErrSchemaViolation.Wrapf("field %s: expected object, got %T", path, data)
 		}
 		props, _ := schema["properties"].(map[string]any)
-		required, _ := schema["required"].([]any)
-		reqSet := make(map[string]bool, len(required))
-		for _, r := range required {
-			if s, ok := r.(string); ok {
-				reqSet[s] = true
+		var required []string
+		switch v := schema["required"].(type) {
+		case []string:
+			required = v
+		case []any:
+			for _, r := range v {
+				if s, ok := r.(string); ok {
+					required = append(required, s)
+				}
 			}
+		}
+		reqSet := make(map[string]bool, len(required))
+		for _, s := range required {
+			reqSet[s] = true
 		}
 		for name, raw := range props {
 			childSchema, _ := raw.(map[string]any)
@@ -13931,10 +14379,8 @@ type Store interface {
 
 	// ---- Ratings ----
 
-	// CreateRatingCascade atomically inserts a rating record for txID and cascades to all
-	// unrated descendant transactions in the trace subtree rooted at traceID.
-	// All writes occur in a single SQLite transaction.
-	CreateRatingCascade(ctx context.Context, txID, traceID string, r *Rating) error
+	// CreateRating inserts a rating record. Ratings do not cascade (§10.2).
+	CreateRating(ctx context.Context, r *Rating) error
 	ReadRatingByTxID(ctx context.Context, txID string) (*Rating, error)
 
 	// ---- Idempotency ----
@@ -15006,8 +15452,7 @@ func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions
 				args, _ := mem.Read(argsPtr, argsLen)
 				result, err := host.Call(ctx, string(name), args)
 				if err != nil {
-					stack[0], stack[1] = 0, 0
-					return
+					panic(err.Error())
 				}
 				ptrs := writeToMem(ctx, mod, result)
 				stack[0], stack[1] = ptrs[0], ptrs[1]
@@ -15736,7 +16181,7 @@ func (s *DB) ListActions(ctx context.Context, activeOnly bool, limit, offset int
 	q := `SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at,deleted_at FROM actions WHERE deleted_at IS NULL`
 	args := []any{}
 	if activeOnly {
-		q += ` AND active=1`
+		q += ` AND active=1 AND public=1`
 	}
 	q += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
@@ -16520,7 +16965,6 @@ func (s *DB) UpdateTraceCostLatency(ctx context.Context, traceID string, grossDe
 	return nil
 }
 
-
 // ---- Stats ----
 
 func (s *DB) ReadStats(ctx context.Context, actionID string) (*kernel.Stats, error) {
@@ -17091,42 +17535,14 @@ func (s *DB) ReadReceipt(ctx context.Context, id string) (*kernel.Receipt, error
 
 // ---- Ratings ----
 
-func (s *DB) CreateRatingCascade(ctx context.Context, txID, traceID string, r *kernel.Rating) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin rating cascade")
-	}
-	defer tx.Rollback()
-
-	// Insert the root rating record.
-	if _, err := tx.ExecContext(ctx,
+func (s *DB) CreateRating(ctx context.Context, r *kernel.Rating) error {
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature)
 		 VALUES (?,?,?,?,?,?,?)`,
 		r.ID, r.RatedTxID, r.RatedReceiptID, r.RaterUserID, r.Rating,
 		timeToStr(r.CreatedAt), r.Signature,
-	); err != nil {
-		return dbErr(err, "rating cascade: insert root rating")
-	}
-
-	// Cascade: insert rating records for all unrated descendant transactions.
-	if _, err := tx.ExecContext(ctx, `
-WITH RECURSIVE subtree(id) AS (
-    SELECT id FROM traces WHERE id=?
-    UNION ALL
-    SELECT t.id FROM traces t JOIN subtree s ON t.parent_trace_id=s.id AND t.id != t.parent_trace_id
-)
-INSERT OR IGNORE INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature)
-SELECT lower(hex(randomblob(16))), tx.id, NULL, ?, ?, ?, ''
-FROM transactions tx
-WHERE tx.trace_id IN (SELECT id FROM subtree)
-  AND tx.id != ?
-  AND NOT EXISTS (SELECT 1 FROM ratings WHERE rated_tx_id=tx.id)`,
-		traceID, r.RaterUserID, r.Rating, timeToStr(r.CreatedAt), txID,
-	); err != nil {
-		return dbErr(err, "rating cascade: cascade descendants")
-	}
-
-	return dbErr(tx.Commit(), "rating cascade: commit")
+	)
+	return dbErr(err, "create rating")
 }
 
 func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating, error) {
@@ -17418,16 +17834,20 @@ func TestListActions(t *testing.T) {
 	_ = db.CreateUser(ctx, owner)
 
 	active := newAction(owner.ID, "/active", 0, true)
+	active.Public = true
 	inactive := newAction(owner.ID, "/inactive", 0, false)
+	inactive.Public = true
+	private := newAction(owner.ID, "/private", 0, true)
 	_ = db.CreateAction(ctx, active)
 	_ = db.CreateAction(ctx, inactive)
+	_ = db.CreateAction(ctx, private)
 
 	all, err := db.ListActions(ctx, false, 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 2 {
-		t.Errorf("ListActions(all): got %d, want 2", len(all))
+	if len(all) != 3 {
+		t.Errorf("ListActions(all): got %d, want 3", len(all))
 	}
 
 	activeOnly, err := db.ListActions(ctx, true, 100, 0)
@@ -18056,9 +18476,9 @@ func TestCreateReadReceipt(t *testing.T) {
 	}
 }
 
-// ---- Rating cascade tests ----
+// ---- Rating tests ----
 
-func TestCreateRatingCascade(t *testing.T) {
+func TestCreateRating(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -18075,8 +18495,6 @@ func TestCreateRatingCascade(t *testing.T) {
 		StartedAt:     time.Now().UTC(),
 		EndedAt:       time.Now().UTC(),
 	}
-	traceID := uuid.New().String()
-	tx.TraceID = traceID
 	_ = db.CreateTransaction(ctx, tx)
 
 	rating := &kernel.Rating{
@@ -18087,8 +18505,8 @@ func TestCreateRatingCascade(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 		Signature:   "",
 	}
-	if err := db.CreateRatingCascade(ctx, tx.ID, traceID, rating); err != nil {
-		t.Fatalf("CreateRatingCascade: %v", err)
+	if err := db.CreateRating(ctx, rating); err != nil {
+		t.Fatalf("CreateRating: %v", err)
 	}
 
 	got, err := db.ReadRatingByTxID(ctx, tx.ID)
@@ -18110,7 +18528,7 @@ func TestCreateRatingCascade(t *testing.T) {
 		Rating:      0.0,
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := db.CreateRatingCascade(ctx, tx.ID, traceID, dup); err == nil {
+	if err := db.CreateRating(ctx, dup); err == nil {
 		t.Error("expected error for duplicate rating")
 	}
 }
