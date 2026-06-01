@@ -7,6 +7,9 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
+// minSchema is a minimal valid schema for tests that need to activate actions.
+var minSchema = map[string]any{"type": "object", "properties": map[string]any{}}
+
 func TestActionCreateAndToggle(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
@@ -19,10 +22,12 @@ func TestActionCreateAndToggle(t *testing.T) {
 	}
 
 	a, err := env.k.CreateAction(ctx, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID,
-		Name:        "/cli-action",
-		Kind:        kernel.KindHTTP,
-		Source:      "http://example.com",
+		OwnerUserID:  owner.ID,
+		Name:         "/cli-action",
+		Kind:         kernel.KindHTTP,
+		Source:       "http://example.com",
+		InputSchema:  minSchema,
+		OutputSchema: minSchema,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -83,11 +88,13 @@ func TestActionPriceUpdateDeactivates(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, err := env.k.CreateAction(ctx, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID,
-		Name:        "/priced",
-		Kind:        kernel.KindHTTP,
-		Price:       10,
-		Source:      "http://example.com",
+		OwnerUserID:  owner.ID,
+		Name:         "/priced",
+		Kind:         kernel.KindHTTP,
+		Price:        10,
+		Source:       "http://example.com",
+		InputSchema:  minSchema,
+		OutputSchema: minSchema,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -139,8 +146,12 @@ func TestActionListActive(t *testing.T) {
 		Handle: "@listowner", Email: "list@example.com", Password: "pass",
 	})
 	a, _ := env.k.CreateAction(ctx, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "/listed",
-		Kind: kernel.KindHTTP, Source: "http://example.com",
+		OwnerUserID:  owner.ID,
+		Name:         "/listed",
+		Kind:         kernel.KindHTTP,
+		Source:       "http://example.com",
+		InputSchema:  minSchema,
+		OutputSchema: minSchema,
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 	_ = env.k.GrantAll(ctx, owner.ID, a.ID)

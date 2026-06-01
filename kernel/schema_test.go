@@ -3,9 +3,9 @@ package kernel
 import "testing"
 
 func TestValidateSchema(t *testing.T) {
-	t.Run("nil schema is valid", func(t *testing.T) {
-		if err := ValidateSchema(nil); err != nil {
-			t.Error(err)
+	t.Run("nil schema is rejected", func(t *testing.T) {
+		if err := ValidateSchema(nil); err == nil {
+			t.Error("expected error for nil schema")
 		}
 	})
 

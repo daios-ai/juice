@@ -12,7 +12,6 @@ import (
 	"github.com/daios-ai/juice/kernel"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
 // Executor implements kernel.ScriptExecutor using wazero.
@@ -37,8 +36,6 @@ func New(cfg Config) *Executor {
 		rCfg = rCfg.WithMemoryLimitPages(MemoryPages(cfg.MemoryBytes))
 	}
 	rt := wazero.NewRuntimeWithConfig(context.Background(), rCfg)
-	// Instantiate WASI once per runtime; re-instantiating per Execute call would panic.
-	wasi_snapshot_preview1.MustInstantiate(context.Background(), rt)
 	return &Executor{
 		runtime: rt,
 		cfg:     cfg,

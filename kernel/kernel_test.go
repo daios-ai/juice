@@ -1118,3 +1118,48 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 		t.Error("ACL entry should be removed after action delete")
 	}
 }
+
+func TestSetActiveValidatesWasm(t *testing.T) {
+	st := newFakeStore()
+	ctx := context.Background()
+	owner := setupUser(t, st, "@alice", 0)
+
+	// WASM action with placeholder source.
+	a, err := newTestKernel(st).CreateAction(ctx, CreateActionRequest{
+		OwnerUserID:  owner.ID,
+		Name:         "/wasm-act",
+		Kind:         KindWasm,
+		Source:       "invalid-wasm",
+		Price:        0,
+		Description:  "test",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Kernel with no script executor: activation must be rejected.
+	kNoScripts := newTestKernel(st)
+	if err := kNoScripts.SetActive(ctx, owner.ID, a.ID, true); err == nil {
+		t.Error("expected error activating wasm action without script executor")
+	}
+}
+
+func TestSetActiveValidatesSchemas(t *testing.T) {
+	st := newFakeStore()
+	ctx := context.Background()
+	owner := setupUser(t, st, "@alice", 0)
+
+	// Create action via store directly with a nil schema to bypass CreateAction validation.
+	a := &Action{
+		ID: "schema-test", OwnerUserID: owner.ID, Name: "/no-schema",
+		Kind: KindHTTP, Source: "http://example.com", Active: false, Price: 0,
+	}
+	_ = st.CreateAction(ctx, a)
+
+	k := newTestKernel(st)
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err == nil {
+		t.Error("expected error activating action with nil input schema")
+	}
+}

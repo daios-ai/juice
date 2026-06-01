@@ -60,6 +60,19 @@ func TestJCSHashStrEmpty(t *testing.T) {
 	}
 }
 
+func TestCanonicalJSONIntegerFloats(t *testing.T) {
+	// Integer-valued floats must serialize without decimal point (RFC 8785).
+	input := map[string]any{"n": float64(42), "big": float64(1e14)}
+	out, err := CanonicalJSON(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := `{"big":100000000000000,"n":42}`
+	if string(out) != expected {
+		t.Errorf("got %s, want %s", out, expected)
+	}
+}
+
 func TestJCSHashStrDeterministic(t *testing.T) {
 	// Same JSON with different key order must produce the same hash.
 	a := `{"z":1,"a":2}`

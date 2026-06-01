@@ -5437,11 +5437,22 @@ func (s *server) getWellKnown(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
-	actionName := r.URL.Query().Get("action")
-	if actionName == "" {
+	// action must be "@owner/name" format.
+	actionParam := r.URL.Query().Get("action")
+	if actionParam == "" {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("action query param required"))
 		return
 	}
+
+	// Parse "@owner/name" → ownerHandle, actionName.
+	slash := strings.Index(actionParam[1:], "/")
+	if slash < 0 || !strings.HasPrefix(actionParam, "@") {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("action must be @owner/name"))
+		return
+	}
+	ownerHandle := actionParam[:slash+1]
+	actionName := actionParam[slash+1:]
+
 	var args map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
@@ -5449,10 +5460,35 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	// Idempotency: replay a prior response if the same key is presented.
+	// Resolve the action owner and the action itself — must be active and public.
+	owner, err := s.kernel.ReadUserByHandle(ctx, ownerHandle)
+	if err != nil || owner == nil {
+		writeErr(w, kernel.ErrNotFound.Wrap("action owner not found"))
+		return
+	}
+	action, err := s.kernel.ReadActionByOwnerName(ctx, owner.ID, actionName)
+	if err != nil || action == nil {
+		writeErr(w, kernel.ErrNotFound.Wrapf("action %s not found", actionParam))
+		return
+	}
+	if !action.Active || !action.Public {
+		writeErr(w, kernel.ErrUnauthorized.Wrap("action is not active and public"))
+		return
+	}
+
+	// Optionally resolve the calling remote kernel for idempotency.
+	// If unregistered, execution proceeds but idempotency is not persisted.
+	var counterparty *kernel.User
+	if h := r.URL.Query().Get("counterparty"); h != "" {
+		if u, err := s.kernel.ReadUserByHandle(ctx, h); err == nil && u != nil && u.RemoteBaseURL != "" {
+			counterparty = u
+		}
+	}
+
+	// Idempotency: replay a prior response if counterparty is known and key is presented.
 	idempotencyKey := r.Header.Get("X-Idempotency-Key")
-	if idempotencyKey != "" {
-		if rec, err := s.kernel.GetIdempotencyRecord(ctx, idempotencyKey, ""); err == nil {
+	if idempotencyKey != "" && counterparty != nil {
+		if rec, err := s.kernel.GetIdempotencyRecord(ctx, idempotencyKey, counterparty.ID); err == nil {
 			var receipt *kernel.Receipt
 			if rec.ReceiptID != nil {
 				receipt, _ = s.kernel.GetReceiptByID(ctx, *rec.ReceiptID)
@@ -5462,22 +5498,29 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Determine the subject: use the registered counterparty or fall back to @sys.
 	suHandle, _ := s.kernel.GetConfig(ctx, configKeySuperuser)
-	su, err := s.kernel.ReadUserByHandle(ctx, suHandle)
-	if err != nil {
-		writeErr(w, kernel.ErrInvalidState.Wrap("kernel not bootstrapped"))
-		return
+	subject := counterparty
+	if subject == nil {
+		su, err := s.kernel.ReadUserByHandle(ctx, suHandle)
+		if err != nil {
+			writeErr(w, kernel.ErrInvalidState.Wrap("kernel not bootstrapped"))
+			return
+		}
+		subject = su
 	}
-	proc, _, err := s.kernel.StartProcess(ctx, su.ID, 0)
+
+	proc, _, err := s.kernel.StartProcess(ctx, subject.ID, action.Price)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	defer s.kernel.EndProcess(ctx, su.ID, proc.ID)
+	defer s.kernel.EndProcess(ctx, subject.ID, proc.ID)
+
 	reply, err := s.kernel.Call(ctx, kernel.CallRequest{
-		SubjectID:    su.ID,
+		SubjectID:    subject.ID,
 		ProcessID:    proc.ID,
-		TargetUserID: su.ID,
+		TargetUserID: owner.ID,
 		ActionName:   actionName,
 		Args:         args,
 	})
@@ -5486,20 +5529,22 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch receipt and record idempotency entry.
+	// Fetch receipt and record idempotency entry (only when counterparty is registered).
 	var receipt *kernel.Receipt
 	if reply.TxID != "" {
 		receipt, _ = s.kernel.GetReceiptByTxID(ctx, reply.TxID)
 	}
-	if idempotencyKey != "" && receipt != nil {
-		_ = s.kernel.CreateIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
+	if idempotencyKey != "" && counterparty != nil && receipt != nil {
+		if idemErr := s.kernel.CreateIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
 			ID:                 uuid.New().String(),
 			IdempotencyKey:     idempotencyKey,
-			CounterpartyUserID: "",
+			CounterpartyUserID: counterparty.ID,
 			ReceiptID:          &receipt.ID,
 			CreatedAt:          time.Now().UTC(),
 			ExpiresAt:          time.Now().UTC().Add(24 * time.Hour),
-		})
+		}); idemErr != nil {
+			log.Default().Warn("federation.idempotency_record_failed", "error", idemErr)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"result": reply.Result, "receipt": receipt})
@@ -6861,6 +6906,12 @@ func TestFederationCall(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Register a remote peer to act as the calling counterparty (32 zero bytes as ed25519 public key).
+	_, err = k.RegisterRemoteKernel(ctx, "@remote.example.com", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "http://remote.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Register a public /ping action on @sys pointing to the backend.
 	a, err := k.CreateAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
@@ -6882,13 +6933,9 @@ func TestFederationCall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Store the superuser handle in config (required by postFederationCall).
-	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
-		t.Fatal(err)
-	}
-
 	// POST to federation endpoint — no auth required.
-	resp := httpDo(t, srv, "POST", "/v1/federation/call?action=/ping", map[string]any{}, "")
+	// action uses "@owner/name" format; counterparty identifies the calling remote kernel.
+	resp := httpDo(t, srv, "POST", "/v1/federation/call?action=@sys/ping&counterparty=@remote.example.com", map[string]any{}, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -6901,10 +6948,68 @@ func TestFederationCall(t *testing.T) {
 	}
 
 	// Unknown action returns not found.
-	resp2 := httpDo(t, srv, "POST", "/v1/federation/call?action=/nope", map[string]any{}, "")
+	resp2 := httpDo(t, srv, "POST", "/v1/federation/call?action=@sys/nope&counterparty=@remote.example.com", map[string]any{}, "")
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown action: expected 404, got %d", resp2.StatusCode)
+	}
+
+	// Unregistered counterparty is silently treated as anonymous (no idempotency).
+	resp3 := httpDo(t, srv, "POST", "/v1/federation/call?action=@sys/ping&counterparty=@unknown", map[string]any{}, "")
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Errorf("unregistered counterparty should still work for public action: expected 200, got %d", resp3.StatusCode)
+	}
+
+	// Missing action param returns 422.
+	resp4 := httpDo(t, srv, "POST", "/v1/federation/call", map[string]any{}, "")
+	resp4.Body.Close()
+	if resp4.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("missing action param: expected 422, got %d", resp4.StatusCode)
+	}
+}
+
+func TestFederationCallRejectsNonPublicAction(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a private inactive action owned by @sys.
+	a, err := k.CreateAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID:  sys.ID,
+		Name:         "/secret",
+		Kind:         kernel.KindHTTP,
+		Source:       "http://127.0.0.1:19871",
+		Price:        0,
+		Description:  "private",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Not activated, not public.
+
+	// Private inactive action is rejected.
+	resp := httpDo(t, srv, "POST", "/v1/federation/call?action=@sys/secret", map[string]any{}, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("private action: expected 403, got %d", resp.StatusCode)
+	}
+
+	// Activate but keep private — still rejected.
+	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	resp2 := httpDo(t, srv, "POST", "/v1/federation/call?action=@sys/secret", map[string]any{}, "")
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Errorf("active but private action: expected 403, got %d", resp2.StatusCode)
 	}
 }
 
@@ -7453,9 +7558,6 @@ type CallRequest struct {
 	ActionName string
 	// Args is the JSON-decoded input arguments.
 	Args map[string]any
-	// ContractorCall is true for sub-calls made via juice.call inside an action.
-	// Fee is set to 0 so the contractor receives its full action.price (§5.7).
-	ContractorCall bool
 }
 
 // CallReply is the response from a successful Call().
@@ -7586,12 +7688,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	logger = k.log.With(ctx)
 	logger.Info("call.start", "action", action.Name, "price", action.Price)
 
-	// Prepare transaction skeleton.
-	feeBPS := k.cfg.FeeBPS
-	if req.ContractorCall {
-		feeBPS = 0
-	}
-	net, fee := ComputeFee(action.Price, feeBPS)
+	// Prepare transaction skeleton (fee computed post-execution once subCost is known).
 	txID := uuid.New().String()
 	tx := &Transaction{
 		ID:            txID,
@@ -7616,6 +7713,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// use ExecuteFederation to carry an idempotency key and capture the remote receipt hash.
 	started := time.Now()
 	var reply map[string]any
+	var subCost int64
 	var execErr error
 	if target.RemoteBaseURL != "" {
 		if fe, ok := k.http.(federationExecutor); ok {
@@ -7626,11 +7724,11 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 				tx.RemoteReceiptHash = sha256Hex(receiptJSON)
 			}
 		} else {
-			reply, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
+			reply, subCost, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
 		}
 	} else {
 		// Pass action.OwnerUserID so host functions operate on behalf of the action author.
-		reply, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
+		reply, subCost, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
 	}
 	latency := time.Since(started).Seconds()
 	tx.EndedAt = time.Now().UTC()
@@ -7677,6 +7775,12 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	// 14 & 15. Record transaction, settle payment, update trace cost/latency, and upsert stats — all atomic.
+	// VAT fee: each kernel taxes only the value it adds (gross minus direct sub-call cost).
+	taxable := action.Price - subCost
+	if taxable < 0 {
+		taxable = 0
+	}
+	net, fee := ComputeFee(taxable, action.Price, k.cfg.FeeBPS)
 	replyJSON, _ := json.Marshal(reply)
 	tx.ReplyJSON = string(replyJSON)
 	tx.Status = TxSuccess
@@ -7729,19 +7833,22 @@ func (k *Kernel) canCall(ctx context.Context, subjectID string, action *Action) 
 }
 
 // execute dispatches to the correct execution backend.
-func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (map[string]any, error) {
+// Returns (result, subCost, error) where subCost is the total gross paid to direct WASM sub-calls.
+func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (map[string]any, int64, error) {
 	switch action.Kind {
 	case KindHTTP:
 		if k.http == nil {
-			return nil, ErrInvalidState.Wrap("HTTP executor not configured")
+			return nil, 0, ErrInvalidState.Wrap("HTTP executor not configured")
 		}
-		return k.http.Execute(ctx, action.Source, args)
+		result, err := k.http.Execute(ctx, action.Source, args)
+		return result, 0, err
 	case KindWasm:
 		return k.executeWasm(ctx, action, args, trace, ownerUserID)
 	case KindNative:
-		return k.executeNative(ctx, action, args)
+		result, err := k.executeNative(ctx, action, args)
+		return result, 0, err
 	default:
-		return nil, ErrInvalidState.Wrapf("unknown action kind %q", action.Kind)
+		return nil, 0, ErrInvalidState.Wrapf("unknown action kind %q", action.Kind)
 	}
 }
 
@@ -7829,19 +7936,20 @@ func (k *Kernel) executeChat(ctx context.Context, args map[string]any) (map[stri
 }
 
 // executeWasm runs a compiled WASM artifact.
-func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (map[string]any, error) {
+// Returns (result, subCost, error) where subCost is the gross paid to direct sub-calls during execution.
+func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (map[string]any, int64, error) {
 	if k.scripts == nil {
-		return nil, ErrInvalidState.Wrap("script executor not configured")
+		return nil, 0, ErrInvalidState.Wrap("script executor not configured")
 	}
 
 	inputJSON, err := json.Marshal(args)
 	if err != nil {
-		return nil, ErrInvalidInput.Wrap("could not serialize args")
+		return nil, 0, ErrInvalidInput.Wrap("could not serialize args")
 	}
 
 	artifact, _, err := k.scripts.Compile(ctx, []byte(action.Source))
 	if err != nil {
-		return nil, ErrExecutionFailed.Wrapf("wasm compile failed: %v", err)
+		return nil, 0, ErrExecutionFailed.Wrapf("wasm compile failed: %v", err)
 	}
 
 	host := &kernelHostFunctions{
@@ -7853,14 +7961,14 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 
 	outputJSON, err := k.scripts.Execute(ctx, artifact, inputJSON, host)
 	if err != nil {
-		return nil, ErrExecutionFailed.Wrapf("wasm execution failed: %v", err)
+		return nil, 0, ErrExecutionFailed.Wrapf("wasm execution failed: %v", err)
 	}
 
 	var result map[string]any
 	if err := json.Unmarshal(outputJSON, &result); err != nil {
-		return nil, ErrExecutionFailed.Wrap("wasm output is not valid JSON")
+		return nil, 0, ErrExecutionFailed.Wrap("wasm output is not valid JSON")
 	}
-	return result, nil
+	return result, host.subCost, nil
 }
 
 // kernelHostFunctions implements HostFunctions using the kernel itself.
@@ -7870,6 +7978,7 @@ type kernelHostFunctions struct {
 	processID   string
 	traceID     string
 	ownerUserID string
+	subCost     int64 // gross paid to direct sub-calls; used for VAT fee computation
 }
 
 func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJSON []byte) ([]byte, error) {
@@ -7920,18 +8029,18 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 		}
 		return nil, ErrInternal.Wrap("could not create ephemeral process")
 	}
+	h.subCost += action.Price
 	ep.Available = action.Price
 	// Always close the ephemeral process on return; any unused funds go back to owner.
 	// Use context.Background() so a cancelled request context does not prevent cleanup.
 	defer func() { _ = h.kernel.store.EndProcess(context.Background(), ep.ID) }()
 
 	reply, err := h.kernel.Call(ctx, CallRequest{
-		SubjectID:      h.ownerUserID,
-		ProcessID:      ep.ID,
-		TargetUserID:   target.ID,
-		ActionName:     subActionName,
-		Args:           args,
-		ContractorCall: true,
+		SubjectID:    h.ownerUserID,
+		ProcessID:    ep.ID,
+		TargetUserID: target.ID,
+		ActionName:   subActionName,
+		Args:         args,
 	})
 	if err != nil {
 		return nil, err
@@ -8020,14 +8129,14 @@ func strPtr(s string) *string {
 	return &s
 }
 
-// ComputeFee splits a gross amount into (net, fee) using basis points.
-// fee is rounded up to the nearest credit (ceiling division).
-// Invariant: net + fee == gross.
-func ComputeFee(gross, feeBPS int64) (net, fee int64) {
-	if gross == 0 || feeBPS == 0 {
+// ComputeFee computes (net, fee) for a gross amount using VAT-style basis points.
+// Only the taxable portion (gross minus direct sub-call cost) is subject to the fee.
+// fee is rounded up (ceiling division). Invariant: net + fee == gross.
+func ComputeFee(taxable, gross, feeBPS int64) (net, fee int64) {
+	if gross == 0 || feeBPS == 0 || taxable == 0 {
 		return gross, 0
 	}
-	fee = (gross*feeBPS + 9999) / 10000
+	fee = (taxable*feeBPS + 9999) / 10000
 	net = gross - fee
 	return
 }
@@ -8723,16 +8832,16 @@ func TestContractorSubCallChargedToActionOwner(t *testing.T) {
 		t.Errorf("caller process.available: got %d, want 0 (outer price only)", proc.Available)
 	}
 
-	// Contractor sub-call has fee=0; Bob received full inner price = 100.
+	// VAT model: inner taxable=100, fee=20, net=80. Bob: 500+80=580.
 	bobUser, _ := st.ReadUser(ctx, bob.ID)
-	if bobUser.Available != 600 { // 500 + 100
-		t.Errorf("inner action owner available: got %d, want 600", bobUser.Available)
+	if bobUser.Available != 580 {
+		t.Errorf("inner action owner available: got %d, want 580", bobUser.Available)
 	}
 
-	// Alice spent 100 (inner sub-call, no fee) and received outer net = 50 - 10 = 40 (20% fee).
+	// VAT model: outer gross=50, sub_cost=100 → taxable=0, fee=0, net=50. Alice: 1000-100+50=950.
 	aliceUser, _ := st.ReadUser(ctx, alice.ID)
-	if aliceUser.Available != 940 { // 1000 - 100 + 40
-		t.Errorf("outer action owner available: got %d, want 940", aliceUser.Available)
+	if aliceUser.Available != 950 {
+		t.Errorf("outer action owner available: got %d, want 950", aliceUser.Available)
 	}
 }
 
@@ -8894,22 +9003,26 @@ func TestContractorEphemeralRootHasCausedByTraceID(t *testing.T) {
 
 func TestComputeFee(t *testing.T) {
 	tests := []struct {
-		gross, feeBPS, wantNet, wantFee int64
+		taxable, gross, feeBPS, wantNet, wantFee int64
 	}{
-		{0, 2000, 0, 0},
-		{100, 2000, 80, 20},
-		{1, 2000, 0, 1},
-		{5, 2000, 4, 1},
-		{1000, 2000, 800, 200},
-		{1, 0, 1, 0},
-		{100, 0, 100, 0},
-		{100, 10000, 0, 100},
+		// taxable == gross (no sub-calls): full fee applies
+		{0, 0, 2000, 0, 0},
+		{100, 100, 2000, 80, 20},
+		{1, 1, 2000, 0, 1},
+		{5, 5, 2000, 4, 1},
+		{1000, 1000, 2000, 800, 200},
+		{1, 1, 0, 1, 0},
+		{100, 100, 0, 100, 0},
+		{100, 100, 10000, 0, 100},
+		// VAT: taxable < gross (sub-calls consumed some gross)
+		{0, 50, 2000, 50, 0},   // outer action in contractor test: taxable=0, no fee
+		{30, 100, 2000, 94, 6}, // partial sub-cost: taxable=30, fee=ceil(30*0.2)=6, net=94
 	}
 	for _, tc := range tests {
-		net, fee := ComputeFee(tc.gross, tc.feeBPS)
+		net, fee := ComputeFee(tc.taxable, tc.gross, tc.feeBPS)
 		if net != tc.wantNet || fee != tc.wantFee {
-			t.Errorf("ComputeFee(%d, %d) = (%d, %d), want (%d, %d)",
-				tc.gross, tc.feeBPS, net, fee, tc.wantNet, tc.wantFee)
+			t.Errorf("ComputeFee(%d, %d, %d) = (%d, %d), want (%d, %d)",
+				tc.taxable, tc.gross, tc.feeBPS, net, fee, tc.wantNet, tc.wantFee)
 		}
 		if tc.gross > 0 && net+fee != tc.gross {
 			t.Errorf("invariant broken: gross=%d net=%d fee=%d", tc.gross, net, fee)
@@ -8919,7 +9032,7 @@ func TestComputeFee(t *testing.T) {
 
 func TestComputeFeeInvariant(t *testing.T) {
 	for gross := int64(0); gross <= 10000; gross++ {
-		net, fee := ComputeFee(gross, 2000)
+		net, fee := ComputeFee(gross, gross, 2000)
 		if net+fee != gross {
 			t.Fatalf("gross=%d: net(%d)+fee(%d) != gross", gross, net, fee)
 		}
@@ -12558,8 +12671,11 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 	if remoteUser.RemoteBaseURL == "" {
 		return nil, ErrInvalidInput.Wrap("user is not a remote kernel")
 	}
+	// action param uses "@owner/name" format; counterparty identifies this kernel to the remote.
+	localHandle, _ := k.store.GetConfig(ctx, "superuser_handle")
 	source := strings.TrimRight(remoteUser.RemoteBaseURL, "/") +
-		"/v1/federation/call?action=" + url.QueryEscape(m.Name)
+		"/v1/federation/call?action=" + url.QueryEscape(m.OwnerHandle+m.Name) +
+		"&counterparty=" + url.QueryEscape(localHandle)
 	now := time.Now().UTC()
 	a := &Action{
 		ID:           uuid.New().String(),

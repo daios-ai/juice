@@ -9,6 +9,9 @@ import (
 // Supported: type, properties, required, items, enum, nullable.
 // Returns ErrSchemaViolation if the schema form is unsupported.
 func ValidateSchema(schema map[string]any) error {
+	if schema == nil {
+		return ErrSchemaViolation.Wrap("schema is required")
+	}
 	return validateSchemaNode(schema, "#", 0)
 }
 

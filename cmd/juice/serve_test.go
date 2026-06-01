@@ -351,6 +351,7 @@ func TestServeListActions(t *testing.T) {
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/list-me", "kind": "http", "price": 0, "source": "http://x.example",
+		"input_schema": minSchema, "output_schema": minSchema,
 	}, tok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
@@ -386,6 +387,7 @@ func TestServeEnableDisableAction(t *testing.T) {
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/toggle-me", "kind": "http", "price": 0, "source": "http://x.example",
+		"input_schema": minSchema, "output_schema": minSchema,
 	}, tok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
@@ -461,6 +463,7 @@ func TestServeACL(t *testing.T) {
 	// Create a private (non-public) action.
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/acl-action", "kind": "http", "price": 0, "source": backend.URL,
+		"input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
@@ -535,6 +538,7 @@ func TestServeGrantRevokeAll(t *testing.T) {
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/public-action", "kind": "http", "price": 0, "source": backend.URL,
+		"input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
@@ -671,6 +675,7 @@ func TestServeCall(t *testing.T) {
 	// Create and activate a free public HTTP action.
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/answer", "kind": "http", "price": 0, "source": backend.URL,
+		"input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
@@ -719,6 +724,7 @@ func TestServeListAndGetTransaction(t *testing.T) {
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/tx-action", "kind": "http", "price": 0, "source": backend.URL,
+		"input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
@@ -780,6 +786,7 @@ func TestServeRateTransaction(t *testing.T) {
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/rate-action", "kind": "http", "price": 0, "source": backend.URL,
+		"input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
@@ -844,6 +851,7 @@ func TestServeGetStats(t *testing.T) {
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/stats-action", "kind": "http", "price": 0, "source": backend.URL,
+		"input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
@@ -900,6 +908,7 @@ func TestServeListenerFlow(t *testing.T) {
 	// Owner creates a free public action.
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/lst-action", "kind": "http", "price": 0, "source": backend.URL,
+		"input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
@@ -984,6 +993,7 @@ func TestServeUpdateAction(t *testing.T) {
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/upd-action", "kind": "http", "price": 0, "source": "http://x.example",
+		"input_schema": minSchema, "output_schema": minSchema,
 	}, tok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
@@ -1080,6 +1090,7 @@ func TestServePollListenerEvents(t *testing.T) {
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "/poll-action", "kind": "http", "price": 0, "source": backend.URL,
+		"input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)

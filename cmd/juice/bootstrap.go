@@ -37,7 +37,7 @@ func bootstrap(k *kernel.Kernel) error {
 		}
 	}
 
-	// Verify signing key is present (required after first boot).
+	// Verify both signing keys are present, valid, and consistent.
 	privKeyB64, _ := k.GetConfig(ctx, configKeySigningPrivate)
 	if privKeyB64 == "" {
 		return fmt.Errorf("signing_private_key missing from config; re-run on a fresh database or restore the key")
@@ -45,6 +45,18 @@ func bootstrap(k *kernel.Kernel) error {
 	privKeyBytes, err := base64.RawURLEncoding.DecodeString(privKeyB64)
 	if err != nil || len(privKeyBytes) != ed25519.PrivateKeySize {
 		return fmt.Errorf("signing_private_key in config is invalid")
+	}
+	pubKeyB64, _ := k.GetConfig(ctx, configKeySigningPublic)
+	if pubKeyB64 == "" {
+		return fmt.Errorf("signing_public_key missing from config")
+	}
+	pubKeyBytes, err := base64.RawURLEncoding.DecodeString(pubKeyB64)
+	if err != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("signing_public_key in config is invalid")
+	}
+	derivedPub := ed25519.PrivateKey(privKeyBytes).Public().(ed25519.PublicKey)
+	if !derivedPub.Equal(ed25519.PublicKey(pubKeyBytes)) {
+		return fmt.Errorf("signing_public_key does not match signing_private_key")
 	}
 
 	// Load the signing key and issuer user ID into the kernel.

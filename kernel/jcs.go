@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 )
 
 // CanonicalJSON serializes v per RFC 8785: objects with Unicode-sorted keys, recursively.
@@ -61,6 +63,12 @@ func canonicalValue(v any) ([]byte, error) {
 		}
 		buf.WriteByte(']')
 		return buf.Bytes(), nil
+	case float64:
+		// RFC 8785: integer-valued floats are serialized without decimal point.
+		if !math.IsInf(val, 0) && !math.IsNaN(val) && val == math.Trunc(val) && math.Abs(val) < 1e15 {
+			return []byte(strconv.FormatInt(int64(val), 10)), nil
+		}
+		return json.Marshal(val)
 	default:
 		return json.Marshal(v)
 	}

@@ -13,10 +13,12 @@ func makeActiveAction(t *testing.T, env *testEnv, ownerID, name string) *kernel.
 	t.Helper()
 	ctx := context.Background()
 	a, err := env.k.CreateAction(ctx, kernel.CreateActionRequest{
-		OwnerUserID: ownerID,
-		Name:        name,
-		Kind:        kernel.KindHTTP,
-		Source:      "http://example.com",
+		OwnerUserID:  ownerID,
+		Name:         name,
+		Kind:         kernel.KindHTTP,
+		Source:       "http://example.com",
+		InputSchema:  minSchema,
+		OutputSchema: minSchema,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -770,12 +770,16 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 	}
 
 	// Update trace cost and latency for all ancestor traces atomically.
+	// Follows parent_trace_id within a process, then caused_by_trace_id across process boundaries.
 	if _, err = tx.ExecContext(ctx, `
-WITH RECURSIVE ancestors(id, parent_id) AS (
-    SELECT id, parent_trace_id FROM traces WHERE id=?
+WITH RECURSIVE ancestors(id, parent_id, caused_by_id) AS (
+    SELECT id, parent_trace_id, caused_by_trace_id FROM traces WHERE id=?
     UNION ALL
-    SELECT t.id, t.parent_trace_id FROM traces t
+    SELECT t.id, t.parent_trace_id, t.caused_by_trace_id FROM traces t
     JOIN ancestors a ON t.id=a.parent_id AND a.id!=a.parent_id
+    UNION ALL
+    SELECT t.id, t.parent_trace_id, t.caused_by_trace_id FROM traces t
+    JOIN ancestors a ON t.id=a.caused_by_id AND a.id=a.parent_id AND a.caused_by_id IS NOT NULL
 )
 UPDATE traces SET
     cost=cost+?,
@@ -851,13 +855,17 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, rece
 		return dbErr(err, "commit failed call: insert receipt")
 	}
 
-	// Update trace latency (cost delta is 0 for failures).
+	// Update trace latency for all ancestor traces (cost delta is 0 for failures).
+	// Follows parent_trace_id within a process, then caused_by_trace_id across process boundaries.
 	if _, err := tx.ExecContext(ctx, `
-WITH RECURSIVE ancestors(id, parent_id) AS (
-    SELECT id, parent_trace_id FROM traces WHERE id=?
+WITH RECURSIVE ancestors(id, parent_id, caused_by_id) AS (
+    SELECT id, parent_trace_id, caused_by_trace_id FROM traces WHERE id=?
     UNION ALL
-    SELECT t.id, t.parent_trace_id FROM traces t
+    SELECT t.id, t.parent_trace_id, t.caused_by_trace_id FROM traces t
     JOIN ancestors a ON t.id=a.parent_id AND a.id!=a.parent_id
+    UNION ALL
+    SELECT t.id, t.parent_trace_id, t.caused_by_trace_id FROM traces t
+    JOIN ancestors a ON t.id=a.caused_by_id AND a.id=a.parent_id AND a.caused_by_id IS NOT NULL
 )
 UPDATE traces SET
     latency_ms=MAX(latency_ms, CAST((julianday(?)-julianday(created_at))*86400000 AS INTEGER))

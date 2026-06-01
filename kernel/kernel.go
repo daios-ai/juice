@@ -286,11 +286,15 @@ func (k *Kernel) CreateAction(ctx context.Context, req CreateActionRequest) (*Ac
 			return nil, err
 		}
 	}
-	if err := ValidateSchema(req.InputSchema); err != nil {
-		return nil, err
+	if req.InputSchema != nil {
+		if err := ValidateSchema(req.InputSchema); err != nil {
+			return nil, err
+		}
 	}
-	if err := ValidateSchema(req.OutputSchema); err != nil {
-		return nil, err
+	if req.OutputSchema != nil {
+		if err := ValidateSchema(req.OutputSchema); err != nil {
+			return nil, err
+		}
 	}
 
 	now := time.Now().UTC()
@@ -663,10 +667,26 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 		if a.Source == "" && a.Kind != KindNative {
 			return ErrInvalidState.Wrap("cannot activate action with no source")
 		}
+		if err := ValidateSchema(a.InputSchema); err != nil {
+			return ErrInvalidState.Wrapf("invalid input schema: %v", err)
+		}
+		if err := ValidateSchema(a.OutputSchema); err != nil {
+			return ErrInvalidState.Wrapf("invalid output schema: %v", err)
+		}
 		if a.Kind == KindHTTP {
 			if err := validateHTTPSource(a.Source, k.cfg.AllowLocalSources); err != nil {
 				return err
 			}
+		}
+		if a.Kind == KindWasm {
+			if k.scripts == nil {
+				return ErrInvalidState.Wrap("cannot activate wasm action: script executor not configured")
+			}
+			_, hash, err := k.scripts.Compile(ctx, []byte(a.Source))
+			if err != nil {
+				return ErrInvalidState.Wrapf("wasm compile failed: %v", err)
+			}
+			a.ArtifactHash = hash
 		}
 		// Ensure stats exist.
 		stats, _ := k.store.ReadStats(ctx, actionID)

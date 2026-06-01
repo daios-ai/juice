@@ -16,10 +16,12 @@ func TestStatsInitializedOnActivation(t *testing.T) {
 		Handle: "@statsowner", Email: "s@e.com", Password: "p",
 	})
 	a, _ := env.k.CreateAction(ctx, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID,
-		Name:        "/svc",
-		Kind:        kernel.KindHTTP,
-		Source:      "http://x.com",
+		OwnerUserID:  owner.ID,
+		Name:         "/svc",
+		Kind:         kernel.KindHTTP,
+		Source:       "http://x.com",
+		InputSchema:  minSchema,
+		OutputSchema: minSchema,
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 

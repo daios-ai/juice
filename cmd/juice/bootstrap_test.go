@@ -159,3 +159,24 @@ func TestBootstrapSuperuserAtomic(t *testing.T) {
 		t.Errorf("second BootstrapSuperuser: expected idempotent, got %v", err)
 	}
 }
+
+func TestBootstrapRejectsKeyMismatch(t *testing.T) {
+	ctx := context.Background()
+	k := newTestKernel(t)
+
+	// Run first boot to generate a valid key pair.
+	if err := k.FirstBoot(ctx, "pass"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tamper: store a different public key (32 zero bytes, base64url).
+	badPub := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	if err := k.SetConfig(ctx, configKeySigningPublic, badPub); err != nil {
+		t.Fatal(err)
+	}
+
+	// bootstrap must reject the mismatch.
+	if err := bootstrap(k); err == nil {
+		t.Error("expected error for mismatched signing keys, got nil")
+	}
+}
