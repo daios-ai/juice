@@ -213,7 +213,7 @@ func eventsPollCmd() *cobra.Command {
 }
 
 func eventsConsumeCmd() *cobra.Command {
-	var eventID, processID string
+	var eventID, processID, parentTraceID string
 	cmd := &cobra.Command{
 		Use:   "consume",
 		Short: "Consume a pending event, calling its listener's target action",
@@ -229,7 +229,7 @@ func eventsConsumeCmd() *cobra.Command {
 				return err
 			}
 
-			reply, err := k.ConsumeEvent(context.Background(), subjectID, eventID, processID)
+			reply, err := k.ConsumeEvent(context.Background(), subjectID, eventID, processID, parentTraceID)
 			if err != nil {
 				return err
 			}
@@ -243,6 +243,7 @@ func eventsConsumeCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&eventID, "id", "", "Event ID (required)")
 	cmd.Flags().StringVar(&processID, "process", "", "Process ID to fund the action call (required)")
+	cmd.Flags().StringVar(&parentTraceID, "trace", "", "Parent trace ID (defaults to process root)")
 	_ = cmd.MarkFlagRequired("id")
 	_ = cmd.MarkFlagRequired("process")
 	return cmd

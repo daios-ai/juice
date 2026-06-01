@@ -161,7 +161,7 @@ func TestConsumeEventSuccess(t *testing.T) {
 		t.Fatal("emit failed")
 	}
 
-	reply, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID)
+	reply, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID, "")
 	if err != nil {
 		t.Fatalf("ConsumeEvent: %v", err)
 	}
@@ -204,11 +204,11 @@ func TestConsumeEventAlreadyConsumed(t *testing.T) {
 	})
 
 	eventIDs, _ := k.EmitEvent(ctx, bob.ID, "x", nil, "")
-	_, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID)
+	_, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID, "")
 	if err != nil {
 		t.Fatalf("first consume: %v", err)
 	}
-	_, err = k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID)
+	_, err = k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID, "")
 	if err == nil {
 		t.Error("expected ErrInvalidState on second consume, got nil")
 	}
@@ -230,7 +230,7 @@ func TestConsumeEventUnauthorized(t *testing.T) {
 	})
 
 	eventIDs, _ := k.EmitEvent(ctx, bob.ID, "x", nil, "")
-	_, err := k.ConsumeEvent(ctx, bob.ID, eventIDs[0], p.ID)
+	_, err := k.ConsumeEvent(ctx, bob.ID, eventIDs[0], p.ID, "")
 	if err == nil {
 		t.Error("expected unauthorized error, got nil")
 	}
@@ -338,7 +338,7 @@ func TestEmitEventCausalTraceID(t *testing.T) {
 	}
 
 	// After ConsumeEvent, the resulting trace must carry the FOLLOWS_FROM link.
-	reply, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID)
+	reply, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID, "")
 	if err != nil {
 		t.Fatalf("ConsumeEvent: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestEmitDirectCallHasNilCausalID(t *testing.T) {
 		t.Errorf("direct emit event.causing_trace_id should be empty, got %q", e.CausingTraceID)
 	}
 
-	reply, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID)
+	reply, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID, "")
 	if err != nil {
 		t.Fatalf("ConsumeEvent: %v", err)
 	}

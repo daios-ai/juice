@@ -1310,9 +1310,9 @@ func (k *Kernel) EmitEvent(ctx context.Context, sourceUserID, eventName string, 
 
 // ConsumeEvent atomically locks an event and executes its listener's target action.
 // At-least-once delivery: if the action call fails, the event is reset to pending.
-// processID is the caller's open process, which must have sufficient funds to cover
-// the action price. Returns the call reply on success.
-func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID string) (*CallReply, error) {
+// processID is the caller's open process; parentTraceID optionally sets the CHILD_OF
+// parent within that process (defaults to the process root when empty).
+func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID, parentTraceID string) (*CallReply, error) {
 	e, err := k.store.ReadEvent(ctx, eventID)
 	if err != nil {
 		return nil, err
@@ -1350,6 +1350,7 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID:       subjectID,
 		ProcessID:       processID,
+		ParentTraceID:   parentTraceID,
 		CausedByTraceID: e.CausingTraceID,
 		TargetUserID:    owner.ID,
 		ActionName:      action.Name,

@@ -1437,3 +1437,32 @@ func TestListActionsByOwnerOpenAPISpec(t *testing.T) {
 	_ = a3
 	_ = a4
 }
+
+func TestInitFirstBootConfigPreservesExisting(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	u := newUser("@sys", 0)
+	configs := map[string]string{"signing_key": "original-value"}
+	if err := db.InitFirstBoot(ctx, u, configs); err != nil {
+		t.Fatalf("InitFirstBoot: %v", err)
+	}
+
+	// Simulate a manual config update after first boot.
+	if err := db.SetConfig(ctx, "signing_key", "updated-value"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+
+	// Calling InitFirstBoot again must not clobber the updated value.
+	if err := db.InitFirstBoot(ctx, u, configs); err != nil {
+		t.Fatalf("InitFirstBoot second call: %v", err)
+	}
+
+	got, err := db.GetConfig(ctx, "signing_key")
+	if err != nil {
+		t.Fatalf("GetConfig: %v", err)
+	}
+	if got != "updated-value" {
+		t.Errorf("signing_key: got %q, want %q", got, "updated-value")
+	}
+}

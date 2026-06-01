@@ -626,7 +626,7 @@ func TestConsumeEventSettlesAtomically(t *testing.T) {
 
 	p, _, _ := k.StartProcess(ctx, owner.ID, 500)
 
-	reply, err := k.ConsumeEvent(ctx, owner.ID, e.ID, p.ID)
+	reply, err := k.ConsumeEvent(ctx, owner.ID, e.ID, p.ID, "")
 	if err != nil {
 		t.Fatalf("ConsumeEvent: %v", err)
 	}
@@ -638,6 +638,42 @@ func TestConsumeEventSettlesAtomically(t *testing.T) {
 	}
 	if *got.TxID != reply.TxID {
 		t.Errorf("event.TxID = %q, want %q", *got.TxID, reply.TxID)
+	}
+}
+
+func TestConsumeEventRespectsParentTraceID(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@parent-trace-owner", 1000)
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/pt-svc",
+		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	l := &Listener{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, SourceUserID: owner.ID,
+		EventName: "pt-ev", TargetActionID: a.ID, Active: true,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateListener(ctx, l)
+	e := &Event{
+		ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: "{}",
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateEvent(ctx, e)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, 500)
+
+	reply, err := k.ConsumeEvent(ctx, owner.ID, e.ID, p.ID, root.ID)
+	if err != nil {
+		t.Fatalf("ConsumeEvent with parentTraceID: %v", err)
+	}
+	if reply.TxID == "" {
+		t.Error("expected tx_id in reply")
 	}
 }
 

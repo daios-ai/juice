@@ -1716,7 +1716,7 @@ func (s *DB) InitFirstBoot(ctx context.Context, u *kernel.User, configs map[stri
 
 	for k, v := range configs {
 		if _, err = tx.ExecContext(ctx,
-			`INSERT OR REPLACE INTO config (key,value) VALUES (?,?)`, k, v); err != nil {
+			`INSERT OR IGNORE INTO config (key,value) VALUES (?,?)`, k, v); err != nil {
 			return dbErr(err, "init first boot: set config "+k)
 		}
 	}
