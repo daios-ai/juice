@@ -932,7 +932,7 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			// status == "pending": duplicate in-flight
-			http.Error(w, `{"error":"duplicate in flight"}`, http.StatusConflict)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "duplicate in flight"})
 			return
 		}
 		writeErr(w, kernel.ErrInvalidState.Wrap("idempotency check failed"))
