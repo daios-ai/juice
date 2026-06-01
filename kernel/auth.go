@@ -107,6 +107,9 @@ func (k *Kernel) StartAuthCode(ctx context.Context, handle, password, codeChalle
 	if err != nil {
 		return "", ErrUnauthenticated.Wrap("invalid credentials")
 	}
+	if u.RemoteBaseURL != "" {
+		return "", ErrUnauthenticated.Wrap("invalid credentials")
+	}
 	if !CheckPassword(password, u.PasswordHash) {
 		return "", ErrUnauthenticated.Wrap("invalid credentials")
 	}
@@ -215,6 +218,9 @@ func (k *Kernel) RevokeRefreshToken(ctx context.Context, token string) error {
 func (k *Kernel) LoginWithRefresh(ctx context.Context, handle, password string) (accessToken, refreshToken string, err error) {
 	u, err := k.store.ReadUserByHandle(ctx, handle)
 	if err != nil {
+		return "", "", ErrUnauthenticated.Wrap("invalid credentials")
+	}
+	if u.RemoteBaseURL != "" {
 		return "", "", ErrUnauthenticated.Wrap("invalid credentials")
 	}
 	if !CheckPassword(password, u.PasswordHash) {

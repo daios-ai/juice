@@ -254,6 +254,17 @@ func TestServeCreateUser(t *testing.T) {
 	if resp.StatusCode != http.StatusCreated {
 		t.Errorf("expected 201, got %d", resp.StatusCode)
 	}
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := body["password_hash"]; ok {
+		t.Error("response must not contain password_hash")
+	}
+	if body["handle"] != "@http-alice" {
+		t.Errorf("response handle: got %v", body["handle"])
+	}
 }
 
 func TestServeAuthToken(t *testing.T) {
@@ -673,6 +684,26 @@ func TestServeProcessLifecycle(t *testing.T) {
 	defer end.Body.Close()
 	if end.StatusCode != http.StatusNoContent {
 		t.Errorf("end process: expected 204, got %d", end.StatusCode)
+	}
+}
+
+func TestServeGetProcessUnauthorized(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@proc-owner")
+	_, otherTok := makeUser(t, k, "@proc-other")
+
+	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
+	var proc map[string]any
+	decodeResponse(t, pr, &proc)
+	pid := proc["process_id"].(string)
+
+	// Non-owner must get 403.
+	get := httpDo(t, srv, "GET", "/v1/processes/"+pid, nil, otherTok)
+	defer get.Body.Close()
+	if get.StatusCode != http.StatusForbidden {
+		t.Errorf("non-owner get process: expected 403, got %d", get.StatusCode)
 	}
 }
 

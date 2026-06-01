@@ -158,7 +158,12 @@ func processShowCmd() *cobra.Command {
 			}
 			defer db.Close()
 
-			p, err := k.ReadProcess(context.Background(), processID)
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+
+			p, err := k.ReadProcess(context.Background(), subjectID, processID)
 			if err != nil {
 				return err
 			}

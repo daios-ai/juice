@@ -37,15 +37,6 @@ func callCmd() *cobra.Command {
 				}
 			}
 
-			// Resolve parent trace ID if not supplied.
-			if parentTraceID == "" {
-				p, err := k.ReadProcess(context.Background(), processID)
-				if err != nil {
-					return err
-				}
-				_ = p // root trace resolves inside kernel
-			}
-
 			reply, err := k.Call(context.Background(), kernel.CallRequest{
 				SubjectID:     subjectID,
 				ProcessID:     processID,

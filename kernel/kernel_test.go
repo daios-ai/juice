@@ -246,6 +246,22 @@ func TestLogin(t *testing.T) {
 	}
 }
 
+func TestLoginRejectsRemotePeer(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	_, err := k.RegisterRemoteKernel(ctx, "@peer", base64.RawURLEncoding.EncodeToString(pub), "https://peer.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := k.Login(ctx, "@peer", "remote"); err == nil {
+		t.Error("Login must reject remote kernel peers")
+	}
+}
+
 // ---- Process tests ----
 
 func TestStartAndEndProcess(t *testing.T) {
@@ -281,6 +297,29 @@ func TestStartAndEndProcess(t *testing.T) {
 
 	if err := k.EndProcess(ctx, owner.ID, p.ID); err == nil {
 		t.Error("expected error ending closed process")
+	}
+}
+
+func TestReadProcessUnauthorized(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice-proc", 500)
+	bob := setupUser(t, st, "@bob-proc", 0)
+
+	p, _, err := k.StartProcess(ctx, alice.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Owner can read.
+	if _, err := k.ReadProcess(ctx, alice.ID, p.ID); err != nil {
+		t.Errorf("owner ReadProcess: %v", err)
+	}
+	// Non-owner must be rejected.
+	if _, err := k.ReadProcess(ctx, bob.ID, p.ID); err == nil {
+		t.Error("ReadProcess must reject non-owner")
 	}
 }
 

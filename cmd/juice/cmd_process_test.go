@@ -38,7 +38,7 @@ func TestProcessStartFundEnd(t *testing.T) {
 	if err := env.k.FundProcess(ctx, owner.ID, p.ID, 200); err != nil {
 		t.Fatal(err)
 	}
-	p2, _ := env.k.ReadProcess(ctx, p.ID)
+	p2, _ := env.k.ReadProcess(ctx, owner.ID, p.ID)
 	if p2.Available != 700 {
 		t.Errorf("process.available after fund: got %d, want 700", p2.Available)
 	}
@@ -46,7 +46,7 @@ func TestProcessStartFundEnd(t *testing.T) {
 	if err := env.k.EndProcess(ctx, owner.ID, p.ID); err != nil {
 		t.Fatal(err)
 	}
-	p3, _ := env.k.ReadProcess(ctx, p.ID)
+	p3, _ := env.k.ReadProcess(ctx, owner.ID, p.ID)
 	if p3.Status != kernel.ProcessClosed {
 		t.Error("process should be closed after end")
 	}

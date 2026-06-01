@@ -318,7 +318,13 @@ func (s *server) postUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, u)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":        u.ID,
+		"handle":    u.Handle,
+		"email":     u.Email,
+		"available": u.Available,
+		"locked":    u.Locked,
+	})
 }
 
 func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
@@ -539,7 +545,7 @@ func (s *server) postProcess(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getProcess(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	p, err := s.kernel.ReadProcess(r.Context(), id)
+	p, err := s.kernel.ReadProcess(r.Context(), subjectFrom(r), id)
 	if err != nil {
 		writeErr(w, err)
 		return

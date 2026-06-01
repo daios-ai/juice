@@ -144,6 +144,9 @@ func (k *Kernel) Login(ctx context.Context, handle, password string) (string, er
 	if err != nil {
 		return "", ErrUnauthenticated.Wrap("invalid credentials")
 	}
+	if u.RemoteBaseURL != "" {
+		return "", ErrUnauthenticated.Wrap("invalid credentials")
+	}
 	if !CheckPassword(password, u.PasswordHash) {
 		return "", ErrUnauthenticated.Wrap("invalid credentials")
 	}
@@ -858,9 +861,16 @@ func (k *Kernel) EndProcess(ctx context.Context, subjectID, processID string) er
 	return nil
 }
 
-// ReadProcess returns a process by ID.
-func (k *Kernel) ReadProcess(ctx context.Context, id string) (*Process, error) {
-	return k.store.ReadProcess(ctx, id)
+// ReadProcess returns a process by ID, requiring the caller to be its owner.
+func (k *Kernel) ReadProcess(ctx context.Context, subjectID, id string) (*Process, error) {
+	p, err := k.store.ReadProcess(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if p.OwnerUserID != subjectID {
+		return nil, ErrUnauthorized.Wrap("not authorized to view this process")
+	}
+	return p, nil
 }
 
 // ---- Transaction operations ----
