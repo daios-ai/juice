@@ -269,7 +269,11 @@ func actionShowCmd() *cobra.Command {
 			}
 			defer db.Close()
 
-			a, err := k.ReadAction(context.Background(), actionID)
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+			a, err := k.ReadActionForSubject(context.Background(), subjectID, actionID)
 			if err != nil {
 				return err
 			}

@@ -138,6 +138,57 @@ func TestActionDelete(t *testing.T) {
 	}
 }
 
+func TestActionShowACL(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@show-owner", Email: "show-owner@example.com", Password: "pass",
+	})
+	reader, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@show-reader", Email: "show-reader@example.com", Password: "pass",
+	})
+	stranger, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@show-stranger", Email: "show-stranger@example.com", Password: "pass",
+	})
+
+	a, _ := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID, Name: "/show-svc",
+		Kind: kernel.KindHTTP, Source: "http://example.com",
+	})
+
+	// Owner can read their own action.
+	ownerTok, _ := env.k.Login(ctx, "@show-owner", "pass")
+	if err := saveToken(ownerTok); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCmd(t, actionShowCmd(), "--id", a.ID); err != nil {
+		t.Errorf("owner: unexpected error: %v", err)
+	}
+
+	// Stranger gets ErrUnauthorized.
+	strangerTok, _ := env.k.Login(ctx, "@show-stranger", "pass")
+	if err := saveToken(strangerTok); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCmd(t, actionShowCmd(), "--id", a.ID); err == nil {
+		t.Error("stranger: expected error, got nil")
+	}
+
+	// Grant read to reader — they can now read.
+	if err := env.k.GrantACL(ctx, reader.ID, a.ID, kernel.PermRead, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	readerTok, _ := env.k.Login(ctx, "@show-reader", "pass")
+	if err := saveToken(readerTok); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCmd(t, actionShowCmd(), "--id", a.ID); err != nil {
+		t.Errorf("reader with ACL: unexpected error: %v", err)
+	}
+	_ = stranger
+}
+
 func TestActionListActive(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()

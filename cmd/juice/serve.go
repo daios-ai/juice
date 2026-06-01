@@ -29,6 +29,8 @@ func init() {
 	}
 	serveCmd.Flags().StringVar(&addr, "addr", envOr("JUICE_ADDR", ":8080"), "Listen address")
 	rootCmd.AddCommand(serveCmd)
+
+	rootCmd.AddCommand(healthCmd())
 }
 
 func runServer(addr string) error {
@@ -965,6 +967,35 @@ func (s *server) getMe(w http.ResponseWriter, r *http.Request) {
 		"available": u.Available,
 		"locked":    u.Locked,
 	})
+}
+
+// ---- health command ----
+
+func healthCmd() *cobra.Command {
+	var healthURL string
+	cmd := &cobra.Command{
+		Use:   "health",
+		Short: "Check server health",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			resp, err := http.Get(healthURL + "/health") //nolint:noctx
+			if err != nil {
+				return fmt.Errorf("server unreachable: %w", err)
+			}
+			defer resp.Body.Close()
+			var body map[string]any
+			_ = json.NewDecoder(resp.Body).Decode(&body)
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("server returned %d", resp.StatusCode)
+			}
+			if flagOutput == "json" {
+				return printJSON(body)
+			}
+			fmt.Println("ok")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&healthURL, "url", envOr("JUICE_URL", "http://localhost:8080"), "Server base URL")
+	return cmd
 }
 
 // ---- response helpers ----

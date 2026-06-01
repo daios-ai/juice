@@ -1435,3 +1435,14 @@ func TestFederationCallRejectsNonPublicAction(t *testing.T) {
 		t.Errorf("active but private action: expected 403, got %d", resp2.StatusCode)
 	}
 }
+
+func TestHealthCmd(t *testing.T) {
+	srv, _ := newTestHTTPServer(t)
+	defer srv.Close()
+
+	t.Setenv("JUICE_URL", srv.URL)
+	_, err := runCmd(t, healthCmd(), "--url", srv.URL)
+	if err != nil {
+		t.Fatalf("health: unexpected error: %v", err)
+	}
+}
