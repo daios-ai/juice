@@ -985,6 +985,120 @@ func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
 	}
 }
 
+// ---- Remote proxy / manifest tests ----
+
+func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	remoteUser, err := k.RegisterRemoteKernel(ctx, "@remote-peer", base64.RawURLEncoding.EncodeToString(pub), "https://remote.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := ActionManifest{
+		ActionID:    "remote-action-id-1",
+		OwnerHandle: "@remote-peer",
+		Name:        "/sum",
+		Kind:        KindHTTP,
+		Price:       50,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	}
+	a, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("ImportRemoteAction: %v", err)
+	}
+	if a.Kind != KindRemoteProxy {
+		t.Errorf("kind: got %q, want %q", a.Kind, KindRemoteProxy)
+	}
+	if a.RemoteActionID != m.ActionID {
+		t.Errorf("remote_action_id: got %q, want %q", a.RemoteActionID, m.ActionID)
+	}
+	if a.Price != 50 {
+		t.Errorf("price: got %d, want 50", a.Price)
+	}
+}
+
+func TestImportRemoteActionReimp(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	remoteUser, err := k.RegisterRemoteKernel(ctx, "@reimp-peer", base64.RawURLEncoding.EncodeToString(pub), "https://reimp.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := ActionManifest{
+		ActionID:    "reimp-action-id",
+		OwnerHandle: "@reimp-peer",
+		Name:        "/calc",
+		Kind:        KindHTTP,
+		Price:       10,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	}
+	first, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+
+	// Reimport with updated price.
+	m.Price = 99
+	second, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("reimport: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Error("reimport must return the same action ID")
+	}
+	if second.Price != 99 {
+		t.Errorf("reimport price: got %d, want 99", second.Price)
+	}
+}
+
+func TestGetActionManifestIncludesActionID(t *testing.T) {
+	st := newFakeStore()
+	su := setupUser(t, st, "@sys", 0)
+	st.config["superuser_handle"] = "@sys"
+	k := newTestKernel(st)
+	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@manifest-owner2", 0)
+	a := &Action{
+		ID:           uuid.New().String(),
+		OwnerUserID:  owner.ID,
+		Name:         "/manifest2",
+		Kind:         KindHTTP,
+		Active:       true,
+		Public:       true,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		Source:       "https://example.com/call",
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := k.GetActionManifest(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("GetActionManifest: %v", err)
+	}
+	if m.ActionID != a.ID {
+		t.Errorf("manifest.action_id: got %q, want %q", m.ActionID, a.ID)
+	}
+	if m.Signature == "" {
+		t.Error("manifest signature must be set")
+	}
+}
+
 // ---- Rating record tests ----
 
 func TestRatingRecordCreated(t *testing.T) {

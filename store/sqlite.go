@@ -119,6 +119,11 @@ func (s *DB) migrationApplied(version string) (bool, error) {
 }
 
 func (s *DB) applyMigration(version, sqlText string) error {
+	// Disable FK enforcement for the duration of this migration so that table
+	// reconstruction (DROP + CREATE) works even when child rows exist.
+	s.db.Exec(`PRAGMA foreign_keys=OFF`)
+	defer s.db.Exec(`PRAGMA foreign_keys=ON`)
+
 	var txStmts []string
 	for _, stmt := range splitSQLStatements(sqlText) {
 		if strings.HasPrefix(strings.ToUpper(stmt), "PRAGMA ") {
@@ -356,10 +361,10 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO actions
-		 (id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 (id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.OwnerUserID, a.Name, string(a.Kind), boolInt(a.Active), boolInt(a.Public), a.Price,
-		a.Description, string(inJSON), string(outJSON), a.Source, a.ArtifactHash,
+		a.Description, string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.RemoteActionID,
 		timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
 	)
 	return dbErr(err, "create action")
@@ -367,13 +372,13 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at,deleted_at
+		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at,deleted_at
 		 FROM actions WHERE id=? AND deleted_at IS NULL`, id))
 }
 
 func (s *DB) ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at,deleted_at
+		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at,deleted_at
 		 FROM actions WHERE owner_user_id=? AND name=? AND deleted_at IS NULL`, ownerID, name))
 }
 
@@ -409,7 +414,7 @@ func (s *DB) DeleteAction(ctx context.Context, id string) error {
 }
 
 func (s *DB) ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*kernel.Action, error) {
-	q := `SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at,deleted_at FROM actions WHERE deleted_at IS NULL`
+	q := `SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at,deleted_at FROM actions WHERE deleted_at IS NULL`
 	args := []any{}
 	if activeOnly {
 		q += ` AND active=1 AND public=1`
@@ -439,7 +444,7 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,created_at,updated_at,deleted_at
+		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at,deleted_at
 		 FROM actions WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list all actions")
@@ -493,7 +498,7 @@ func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
 	var active, public int
 	var deletedAt *string
 	err := row.Scan(&a.ID, &a.OwnerUserID, &a.Name, &kind, &active, &public, &a.Price,
-		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash,
+		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.RemoteActionID,
 		&createdAt, &updatedAt, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("action not found")
@@ -510,12 +515,19 @@ func (s *DB) scanActionRow(rows *sql.Rows) (*kernel.Action, error) {
 	var active, public int
 	var deletedAt *string
 	err := rows.Scan(&a.ID, &a.OwnerUserID, &a.Name, &kind, &active, &public, &a.Price,
-		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash,
+		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.RemoteActionID,
 		&createdAt, &updatedAt, &deletedAt)
 	if err != nil {
 		return nil, dbErr(err, "scan action")
 	}
 	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt, deletedAt)
+}
+
+func (s *DB) ReadActionByOwnerRemoteID(ctx context.Context, ownerID, remoteActionID string) (*kernel.Action, error) {
+	return s.scanAction(s.db.QueryRowContext(ctx,
+		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at,deleted_at
+		 FROM actions WHERE owner_user_id=? AND remote_action_id=? AND remote_action_id!='' AND deleted_at IS NULL`,
+		ownerID, remoteActionID))
 }
 
 func finishAction(a *kernel.Action, kind string, active, public int, inJSON, outJSON, createdAt, updatedAt string, deletedAt *string) (*kernel.Action, error) {

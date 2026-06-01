@@ -1539,8 +1539,9 @@ func (k *Kernel) ListRemoteKernels(ctx context.Context) ([]*User, error) {
 	return remote, nil
 }
 
-// ImportRemoteAction creates a local HTTP action from a remote kernel's action manifest.
+// ImportRemoteAction creates or updates a local remote_proxy action from a remote kernel's manifest.
 // The action is owned by the remote kernel user identified by remoteUserID.
+// Reimport (same owner + remote_action_id) updates metadata and source URL in place.
 func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m ActionManifest) (*Action, error) {
 	remoteUser, err := k.store.ReadUser(ctx, remoteUserID)
 	if err != nil {
@@ -1549,25 +1550,46 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 	if remoteUser.RemoteBaseURL == "" {
 		return nil, ErrInvalidInput.Wrap("user is not a remote kernel")
 	}
+	if m.ActionID == "" {
+		return nil, ErrInvalidInput.Wrap("manifest missing action_id")
+	}
 	// action param uses "@owner/name" format; counterparty identifies this kernel to the remote.
 	localHandle, _ := k.store.GetConfig(ctx, "superuser_handle")
 	source := strings.TrimRight(remoteUser.RemoteBaseURL, "/") +
 		"/v1/federation/call?action=" + url.QueryEscape(m.OwnerHandle+m.Name) +
 		"&counterparty=" + url.QueryEscape(localHandle)
+
+	// Reimport: if we already have an action for this remote action, update it.
+	if existing, err := k.store.ReadActionByOwnerRemoteID(ctx, remoteUserID, m.ActionID); err == nil {
+		existing.Source = source
+		existing.Price = m.Price
+		existing.Description = m.Description
+		existing.InputSchema = m.InputSchema
+		existing.OutputSchema = m.OutputSchema
+		existing.Active = false // deactivate on reimport so owner must review
+		existing.UpdatedAt = time.Now().UTC()
+		if err := k.store.UpdateAction(ctx, existing); err != nil {
+			return nil, err
+		}
+		k.log.With(ctx).Info("action.reimported_remote", "action_id", existing.ID, "name", existing.Name)
+		return existing, nil
+	}
+
 	now := time.Now().UTC()
 	a := &Action{
-		ID:           uuid.New().String(),
-		OwnerUserID:  remoteUserID,
-		Name:         m.Name,
-		Kind:         KindHTTP,
-		Active:       false,
-		Price:        m.Price,
-		Description:  m.Description,
-		InputSchema:  m.InputSchema,
-		OutputSchema: m.OutputSchema,
-		Source:       source,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:             uuid.New().String(),
+		OwnerUserID:    remoteUserID,
+		Name:           m.Name,
+		Kind:           KindRemoteProxy,
+		Active:         false,
+		Price:          m.Price,
+		Description:    m.Description,
+		InputSchema:    m.InputSchema,
+		OutputSchema:   m.OutputSchema,
+		Source:         source,
+		RemoteActionID: m.ActionID,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	if err := k.store.CreateAction(ctx, a); err != nil {
 		return nil, err
@@ -1595,6 +1617,7 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 	}
 	stats, _ := k.store.ReadStats(ctx, a.ID)
 	m := &ActionManifest{
+		ActionID:     a.ID,
 		OwnerHandle:  owner.Handle,
 		Name:         a.Name,
 		Description:  a.Description,
@@ -1624,6 +1647,7 @@ func manifestCanonicalPayload(m *ActionManifest) ([]byte, error) {
 		}
 	}
 	return CanonicalJSON(manifestPayload{
+		ActionID:     m.ActionID,
 		ArtifactHash: m.ArtifactHash,
 		Description:  m.Description,
 		InputSchema:  string(inputJSON),
@@ -1668,6 +1692,7 @@ func VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
 }
 
 type manifestPayload struct {
+	ActionID     string `json:"action_id"`
 	ArtifactHash string `json:"artifact_hash"`
 	Description  string `json:"description"`
 	InputSchema  string `json:"input_schema"`

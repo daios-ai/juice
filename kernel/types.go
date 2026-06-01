@@ -9,9 +9,10 @@ import (
 type ActionKind string
 
 const (
-	KindHTTP   ActionKind = "http"
-	KindWasm   ActionKind = "wasm"
-	KindNative ActionKind = "native"
+	KindHTTP        ActionKind = "http"
+	KindWasm        ActionKind = "wasm"
+	KindNative      ActionKind = "native"
+	KindRemoteProxy ActionKind = "remote_proxy"
 )
 
 // Permission names an ACL right.
@@ -67,9 +68,10 @@ type Action struct {
 	Description  string
 	InputSchema  map[string]any
 	OutputSchema map[string]any
-	Source       string // URL for http; WAT/WASM source for wasm
-	ArtifactHash string // content-addressed compiled WASM artifact
-	CreatedAt    time.Time
+	Source          string // URL for http; WAT/WASM source for wasm; federation URL for remote_proxy
+	ArtifactHash    string // content-addressed compiled WASM artifact
+	RemoteActionID  string // ID of the action on the remote kernel (remote_proxy only)
+	CreatedAt       time.Time
 	UpdatedAt    time.Time
 	DeletedAt    *time.Time // nil unless soft-deleted
 }
@@ -247,6 +249,7 @@ type IdempotencyRecord struct {
 
 // ActionManifest is a signed, exportable description of a public active action.
 type ActionManifest struct {
+	ActionID     string         `json:"action_id"`
 	OwnerHandle  string         `json:"owner_handle"`
 	Name         string         `json:"name"`
 	Description  string         `json:"description"`

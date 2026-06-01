@@ -118,6 +118,18 @@ func (f *fakeStore) ReadActionByOwnerName(_ context.Context, ownerID, name strin
 	return nil, ErrNotFound.Wrap("action not found")
 }
 
+func (f *fakeStore) ReadActionByOwnerRemoteID(_ context.Context, ownerID, remoteActionID string) (*Action, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, a := range f.actions {
+		if a.OwnerUserID == ownerID && a.RemoteActionID == remoteActionID && remoteActionID != "" {
+			cp := *a
+			return &cp, nil
+		}
+	}
+	return nil, ErrNotFound.Wrap("action not found")
+}
+
 func (f *fakeStore) UpdateAction(_ context.Context, a *Action) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

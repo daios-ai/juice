@@ -188,7 +188,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	var reply map[string]any
 	var subCost int64
 	var execErr error
-	if target.RemoteBaseURL != "" {
+	if action.Kind == KindRemoteProxy {
 		if fe, ok := k.http.(federationExecutor); ok {
 			idempotencyKey := uuid.New().String()
 			var receiptJSON string

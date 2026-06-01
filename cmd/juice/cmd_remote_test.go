@@ -136,6 +136,7 @@ func TestRemoteImport(t *testing.T) {
 
 	const actionID = "action-remote-id"
 	m := kernel.ActionManifest{
+		ActionID:     actionID,
 		OwnerHandle:  "@import-remote",
 		Name:         "/greet",
 		Description:  "says hello",
