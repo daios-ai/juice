@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -1732,7 +1733,7 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 
 			params := openAPIParams(op, pathItem)
 			inputSchema := openAPIInputSchema(op, pathItem)
-			hash := openAPIOperationHash(baseURL, desc, method, path, inputSchema, outputSchema, price)
+			hash := openAPIOperationHash(baseURL, desc, method, path, inputSchema, outputSchema, price, params)
 
 			src := OpenAPISource{
 				Type:          "openapi",
@@ -1921,13 +1922,21 @@ func openAPIParams(op, pathItem map[string]any) []OpenAPIParam {
 	return params
 }
 
-func openAPIOperationHash(baseURL, description, method, path string, inputSchema, outputSchema map[string]any, price int64) string {
+func openAPIOperationHash(baseURL, description, method, path string, inputSchema, outputSchema map[string]any, price int64, params []OpenAPIParam) string {
+	sorted := make([]OpenAPIParam, len(params))
+	copy(sorted, params)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	paramsSlice := make([]any, len(sorted))
+	for i, p := range sorted {
+		paramsSlice[i] = map[string]any{"in": p.In, "name": p.Name}
+	}
 	payload := map[string]any{
 		"base_url":      baseURL,
 		"description":   description,
 		"input_schema":  inputSchema,
 		"method":        method,
 		"output_schema": outputSchema,
+		"params":        paramsSlice,
 		"path":          path,
 		"price":         price,
 	}
@@ -2068,8 +2077,10 @@ func remoteActionContentHash(m ActionManifest) string {
 	inputJSON, _ := CanonicalJSON(m.InputSchema)
 	outputJSON, _ := CanonicalJSON(m.OutputSchema)
 	payload, _ := CanonicalJSON(map[string]any{
+		"artifact_hash": m.ArtifactHash,
 		"description":   m.Description,
 		"input_schema":  string(inputJSON),
+		"kind":          string(m.Kind),
 		"name":          m.Name,
 		"output_schema": string(outputJSON),
 		"price":         m.Price,

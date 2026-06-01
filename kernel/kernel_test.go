@@ -1161,6 +1161,65 @@ func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
 	}
 }
 
+func TestRemoteActionContentHashIncludesKindAndArtifact(t *testing.T) {
+	base := ActionManifest{
+		ActionID:     "act-1",
+		OwnerHandle:  "@peer",
+		Name:         "/svc",
+		Description:  "test",
+		Kind:         KindHTTP,
+		ArtifactHash: "abc123",
+		Price:        10,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	}
+
+	// Different kind must produce a different hash.
+	wasmVariant := base
+	wasmVariant.Kind = KindWasm
+	if remoteActionContentHash(base) == remoteActionContentHash(wasmVariant) {
+		t.Error("kind change should produce different hash")
+	}
+
+	// Different artifact_hash must produce a different hash.
+	newArtifact := base
+	newArtifact.ArtifactHash = "def456"
+	if remoteActionContentHash(base) == remoteActionContentHash(newArtifact) {
+		t.Error("artifact_hash change should produce different hash")
+	}
+
+	// Identical manifests must produce the same hash.
+	if remoteActionContentHash(base) != remoteActionContentHash(base) {
+		t.Error("identical manifests should produce the same hash")
+	}
+}
+
+func TestOpenAPIOperationHashIncludesParams(t *testing.T) {
+	schema := map[string]any{"type": "object"}
+	paramsBody := []OpenAPIParam{{Name: "data", In: "body"}}
+	paramsQuery := []OpenAPIParam{{Name: "data", In: "query"}}
+
+	hashBody := openAPIOperationHash("http://api.example.com", "do thing", "POST", "/do",
+		schema, schema, 0, paramsBody)
+	hashQuery := openAPIOperationHash("http://api.example.com", "do thing", "POST", "/do",
+		schema, schema, 0, paramsQuery)
+
+	if hashBody == hashQuery {
+		t.Error("params with different 'in' values should produce different hashes")
+	}
+
+	// Order of params must not affect the hash.
+	p1 := []OpenAPIParam{{Name: "a", In: "query"}, {Name: "b", In: "body"}}
+	p2 := []OpenAPIParam{{Name: "b", In: "body"}, {Name: "a", In: "query"}}
+	h1 := openAPIOperationHash("http://api.example.com", "do thing", "POST", "/do",
+		schema, schema, 0, p1)
+	h2 := openAPIOperationHash("http://api.example.com", "do thing", "POST", "/do",
+		schema, schema, 0, p2)
+	if h1 != h2 {
+		t.Error("param order should not affect hash")
+	}
+}
+
 func TestGetActionManifestIncludesActionID(t *testing.T) {
 	st := newFakeStore()
 	su := setupUser(t, st, "@sys", 0)
