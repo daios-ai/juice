@@ -655,7 +655,7 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	}
 
 	const rating = 1.0
-	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, rating); err != nil {
+	if _, err := k.RateTransaction(ctx, owner.ID, reply.TxID, rating); err != nil {
 		t.Fatalf("RateTransaction: %v", err)
 	}
 
@@ -701,10 +701,10 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
+	if _, err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
 		t.Fatalf("first RateTransaction: %v", err)
 	}
-	err = k.RateTransaction(ctx, owner.ID, reply.TxID, 0.0)
+	_, err = k.RateTransaction(ctx, owner.ID, reply.TxID, 0.0)
 	if err == nil {
 		t.Fatal("expected error on second rating, got nil")
 	}
@@ -993,7 +993,7 @@ func TestRatingRecordCreated(t *testing.T) {
 		t.Fatalf("Call: %v", err)
 	}
 
-	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
+	if _, err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
 		t.Fatalf("RateTransaction: %v", err)
 	}
 
@@ -1039,10 +1039,10 @@ func TestRatingDuplicateRejected(t *testing.T) {
 		t.Fatalf("Call: %v", err)
 	}
 
-	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
+	if _, err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
 		t.Fatalf("first RateTransaction: %v", err)
 	}
-	if err := k.RateTransaction(ctx, owner.ID, reply.TxID, 0.0); !errors.Is(err, ErrInvalidInput) {
+	if _, err := k.RateTransaction(ctx, owner.ID, reply.TxID, 0.0); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for duplicate rating, got %v", err)
 	}
 }

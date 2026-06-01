@@ -582,11 +582,12 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	if err := s.kernel.RateTransaction(r.Context(), subjectFrom(r), id, req.Rating); err != nil {
+	rating, err := s.kernel.RateTransaction(r.Context(), subjectFrom(r), id, req.Rating)
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, rating)
 }
 
 func (s *server) getStats(w http.ResponseWriter, r *http.Request) {

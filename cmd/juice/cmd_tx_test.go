@@ -43,7 +43,7 @@ func TestTransactionRate(t *testing.T) {
 
 	// No calls made, so no transactions to rate.
 	// Verify that rating a non-existent tx returns an error.
-	err := env.k.RateTransaction(ctx, owner.ID, "nonexistent-tx", 1)
+	_, err := env.k.RateTransaction(ctx, owner.ID, "nonexistent-tx", 1)
 	if err == nil {
 		t.Error("expected error rating nonexistent transaction")
 	}

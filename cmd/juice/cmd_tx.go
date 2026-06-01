@@ -112,7 +112,7 @@ func txRateCmd() *cobra.Command {
 				return err
 			}
 
-			if err := k.RateTransaction(context.Background(), subjectID, txID, rating); err != nil {
+			if _, err := k.RateTransaction(context.Background(), subjectID, txID, rating); err != nil {
 				return err
 			}
 			fmt.Printf("Transaction %s rated %.0f.\n", txID, rating)

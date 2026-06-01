@@ -871,31 +871,31 @@ func (k *Kernel) ListTransactions(ctx context.Context, filter TxFilter) ([]*Tran
 // RateTransaction submits a rating for a completed transaction.
 // Only the direct buyer (the process owner who paid) may rate.
 // Ratings are stored in a separate ratings table; the transaction row is never modified.
-func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, rating float64) error {
+func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, rating float64) (*Rating, error) {
 	if rating != 0 && rating != 1 {
-		return ErrInvalidInput.Wrap("rating must be 0 or 1")
+		return nil, ErrInvalidInput.Wrap("rating must be 0 or 1")
 	}
 	rater, err := k.store.ReadUser(ctx, subjectID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if rater.SuspendedAt != nil {
-		return ErrUnauthenticated.Wrap("account suspended")
+		return nil, ErrUnauthenticated.Wrap("account suspended")
 	}
 	tx, err := k.store.ReadTransaction(ctx, txID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if tx == nil {
-		return ErrNotFound.Wrap("transaction not found")
+		return nil, ErrNotFound.Wrap("transaction not found")
 	}
 	// Only the direct buyer (process owner) may rate.
 	if subjectID != tx.OwnerUserID {
-		return ErrUnauthorized.Wrap("only the direct buyer may rate a transaction")
+		return nil, ErrUnauthorized.Wrap("only the direct buyer may rate a transaction")
 	}
 	// Check for duplicate rating (transaction already has a rating record).
 	if existing, _ := k.store.ReadRatingByTxID(ctx, txID); existing != nil {
-		return ErrInvalidInput.Wrap("transaction already rated")
+		return nil, ErrInvalidInput.Wrap("transaction already rated")
 	}
 	// Look up receipt for this transaction (may be nil for old transactions).
 	receipt, _ := k.store.ReadReceiptByTxID(ctx, txID)
@@ -911,11 +911,11 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	}
 	sig, err := signRating(k.cfg.SigningKey, r)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	r.Signature = sig
 	if err := k.store.CreateRating(ctx, r); err != nil {
-		return err
+		return nil, err
 	}
 	// Update action stats to keep rating_mean and rating_count current.
 	stats, err := k.store.ReadStats(ctx, tx.ActionID)
@@ -927,7 +927,7 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	if updateErr := k.store.UpsertStats(ctx, stats); updateErr != nil {
 		k.log.With(ctx).Warn("rate.stats_update_failed", "action_id", tx.ActionID, "error", updateErr)
 	}
-	return nil
+	return r, nil
 }
 
 // ---- Stats ----

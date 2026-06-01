@@ -423,7 +423,7 @@ Receipts, ratings, and action manifests use RFC 8785 JSON Canonicalization Schem
 CanonicalJSON(v any) ([]byte, error)
 ```
 
-Generate and verify signatures only over `CanonicalJSON` output. A rating signature covers all fields except `signature`; ordinary raters use their private key and `@sys` uses the platform key.
+Generate and verify signatures only over `CanonicalJSON` output. A rating signature covers all fields except `signature` and is signed with the platform key.
 
 ## 10. Authentication and errors
 

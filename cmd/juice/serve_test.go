@@ -811,9 +811,20 @@ func TestServeRateTransaction(t *testing.T) {
 	rate := httpDo(t, srv, "POST", "/v1/transactions/"+txID+"/rate", map[string]any{
 		"rating": 1,
 	}, callerTok)
-	defer rate.Body.Close()
-	if rate.StatusCode != http.StatusNoContent {
-		t.Fatalf("rate transaction: expected 204, got %d", rate.StatusCode)
+	if rate.StatusCode != http.StatusOK {
+		rate.Body.Close()
+		t.Fatalf("rate transaction: expected 200, got %d", rate.StatusCode)
+	}
+	var ratingResp kernel.Rating
+	decodeResponse(t, rate, &ratingResp)
+	if ratingResp.ID == "" {
+		t.Error("expected rating ID in response")
+	}
+	if ratingResp.Signature == "" {
+		t.Error("expected signature in rating response")
+	}
+	if ratingResp.RatedTxID != txID {
+		t.Errorf("rated_tx_id: got %q, want %q", ratingResp.RatedTxID, txID)
 	}
 
 	// Rating is stored in the ratings table (not on the transaction row).
