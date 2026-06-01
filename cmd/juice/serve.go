@@ -342,7 +342,12 @@ func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("spec_url is required"))
 		return
 	}
-	result, err := s.kernel.ImportOpenAPI(r.Context(), subjectFrom(r), req.SpecURL)
+	specBytes, err := fetchOpenAPISpec(r.Context(), req.SpecURL, s.kernel.AllowsLocalSources())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	result, err := s.kernel.ImportOpenAPI(r.Context(), subjectFrom(r), req.SpecURL, specBytes)
 	if err != nil {
 		writeErr(w, err)
 		return

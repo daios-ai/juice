@@ -447,7 +447,12 @@ func actionImportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			result, err := k.ImportOpenAPI(context.Background(), subjectID, specURL)
+			allowLocal := os.Getenv("JUICE_ALLOW_LOCAL_SOURCES") == "true"
+			specBytes, err := fetchOpenAPISpec(context.Background(), specURL, allowLocal)
+			if err != nil {
+				return err
+			}
+			result, err := k.ImportOpenAPI(context.Background(), subjectID, specURL, specBytes)
 			if err != nil {
 				return err
 			}

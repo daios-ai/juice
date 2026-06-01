@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -35,13 +33,6 @@ func newTestKernelWithScripts(st Store, exec ScriptExecutor) *Kernel {
 	return New(st, exec, nil, nil, nil, cfg, log.Default())
 }
 
-func newTestKernelWithOpenAPI(st Store, client *http.Client) *Kernel {
-	cfg := DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.AllowLocalSources = true
-	cfg.OpenAPIClient = client
-	return New(st, nil, nil, nil, nil, cfg, log.Default())
-}
 
 func testSigningKey() ed25519.PrivateKey {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -1321,23 +1312,18 @@ func TestSetActiveValidatesSchemas(t *testing.T) {
 }
 
 // minOpenAPISpec is a valid minimal OpenAPI 3.x spec with one GET /hello operation.
+// servers[0].url is a public hostname so activation SSRF checks pass without AllowLocalSources.
 const minOpenAPISpec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
 func TestImportOpenAPI(t *testing.T) {
-	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(minOpenAPISpec))
-	}))
-	defer specSrv.Close()
-
 	st := newFakeStore()
-	k := newTestKernelWithOpenAPI(st, specSrv.Client())
+	k := newTestKernel(st)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@oapi-import-owner", 0)
-	specURL := specSrv.URL + "/spec.json"
+	specURL := "https://spec.example.com/api.json"
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, specURL)
+	result, err := k.ImportOpenAPI(ctx, owner.ID, specURL, []byte(minOpenAPISpec))
 	if err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
@@ -1361,7 +1347,7 @@ func TestImportOpenAPI(t *testing.T) {
 	}
 
 	// Re-import with identical spec → Unchanged.
-	result2, err := k.ImportOpenAPI(ctx, owner.ID, specURL)
+	result2, err := k.ImportOpenAPI(ctx, owner.ID, specURL, []byte(minOpenAPISpec))
 	if err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
@@ -1372,20 +1358,14 @@ func TestImportOpenAPI(t *testing.T) {
 }
 
 func TestUnimportOpenAPI(t *testing.T) {
-	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(minOpenAPISpec))
-	}))
-	defer specSrv.Close()
-
 	st := newFakeStore()
-	k := newTestKernelWithOpenAPI(st, specSrv.Client())
+	k := newTestKernel(st)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@oapi-unimport-owner", 0)
-	specURL := specSrv.URL + "/spec.json"
+	specURL := "https://spec.example.com/api.json"
 
-	if _, err := k.ImportOpenAPI(ctx, owner.ID, specURL); err != nil {
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, specURL, []byte(minOpenAPISpec)); err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
 
@@ -1398,7 +1378,7 @@ func TestUnimportOpenAPI(t *testing.T) {
 	}
 
 	// UnimportOpenAPI with name filter deactivates only the matching action.
-	if _, err := k.ImportOpenAPI(ctx, owner.ID, specURL); err != nil {
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, specURL, []byte(minOpenAPISpec)); err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
 	actions2, err := k.UnimportOpenAPI(ctx, owner.ID, specURL, "sayHello")
@@ -1407,5 +1387,70 @@ func TestUnimportOpenAPI(t *testing.T) {
 	}
 	if len(actions2) != 1 {
 		t.Fatalf("expected 1 action for name filter, got %d", len(actions2))
+	}
+}
+
+func TestOpenAPIActivation(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@oapi-activate-owner", 0)
+	specURL := "https://spec.example.com/api.json"
+
+	result, err := k.ImportOpenAPI(ctx, owner.ID, specURL, []byte(minOpenAPISpec))
+	if err != nil {
+		t.Fatalf("ImportOpenAPI: %v", err)
+	}
+	a := result.Created[0]
+
+	// Activation must succeed: base_url is api.example.com (public), schemas are valid.
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+	updated, err := k.ReadAction(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.Active {
+		t.Error("action should be active after SetActive(true)")
+	}
+}
+
+func TestOpenAPIActivationRejectsPrivateBaseURL(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st) // AllowLocalSources = false
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@oapi-private-owner", 0)
+
+	// Craft an OpenAPISource with a private execution base URL.
+	src := OpenAPISource{
+		Type:          "openapi",
+		SpecURL:       "https://spec.example.com/api.json",
+		BaseURL:       "http://10.0.0.1",
+		Method:        "GET",
+		Path:          "/secret",
+		OperationKey:  "getSecret",
+		OperationHash: "hash",
+	}
+	srcBytes, _ := json.Marshal(src)
+	a := &Action{
+		ID:           uuid.New().String(),
+		OwnerUserID:  owner.ID,
+		Name:         "@oapi-private-owner/getSecret",
+		Kind:         KindHTTP,
+		Source:       string(srcBytes),
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err == nil {
+		t.Error("expected error activating action with private base URL, got nil")
 	}
 }

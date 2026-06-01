@@ -163,10 +163,10 @@ func TestExecuteOpenAPIPathParam(t *testing.T) {
 	defer srv.Close()
 
 	src := map[string]any{
-		"type":    "openapi",
+		"type":     "openapi",
 		"base_url": srv.URL,
-		"method":  "GET",
-		"path":    "/items/{id}",
+		"method":   "GET",
+		"path":     "/items/{id}",
 	}
 	srcJSON, _ := json.Marshal(src)
 
@@ -180,5 +180,51 @@ func TestExecuteOpenAPIPathParam(t *testing.T) {
 	}
 	if result["filter"] != "active" {
 		t.Errorf("filter: got %v, want active", result["filter"])
+	}
+}
+
+// TestExecuteOpenAPIPostQueryParam verifies that a POST operation with a declared query
+// parameter sends it in the URL query string, not the request body (issue 8 regression).
+func TestExecuteOpenAPIPostQueryParam(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "want POST", http.StatusMethodNotAllowed)
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		json.NewEncoder(w).Encode(map[string]any{
+			"query_param": r.URL.Query().Get("format"),
+			"body_param":  body["data"],
+		})
+	}))
+	defer srv.Close()
+
+	// Source with explicit Params: "format" is a query param, "data" is a body param.
+	src := map[string]any{
+		"type":     "openapi",
+		"base_url": srv.URL,
+		"method":   "POST",
+		"path":     "/upload",
+		"params": []map[string]any{
+			{"name": "format", "in": "query"},
+			{"name": "data", "in": "body"},
+		},
+	}
+	srcJSON, _ := json.Marshal(src)
+
+	exec := &httpActionExecutor{}
+	result, err := exec.Execute(context.Background(), string(srcJSON), map[string]any{
+		"format": "json",
+		"data":   "hello",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result["query_param"] != "json" {
+		t.Errorf("query_param: got %v, want %q", result["query_param"], "json")
+	}
+	if result["body_param"] != "hello" {
+		t.Errorf("body_param: got %v, want %q", result["body_param"], "hello")
 	}
 }

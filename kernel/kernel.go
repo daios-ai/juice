@@ -9,10 +9,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
 	"net"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -30,7 +28,6 @@ type Config struct {
 	ScriptTimeout     time.Duration
 	ScriptMemory      int64              // bytes
 	AllowLocalSources bool               // permit loopback/private URLs as action sources (tests only)
-	OpenAPIClient    *http.Client       // HTTP client for fetching OpenAPI specs; nil → http.DefaultClient
 	SigningKey        ed25519.PrivateKey // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
 	IssuerUserID      string             // @sys user ID, set during bootstrap
 	SuperuserHandle   string             // cached superuser handle for deposit checks
@@ -45,6 +42,9 @@ func DefaultConfig() Config {
 		ScriptMemory:  64 * 1024 * 1024, // 64 MiB
 	}
 }
+
+// AllowsLocalSources reports whether the kernel is configured to permit loopback/private source URLs.
+func (k *Kernel) AllowsLocalSources() bool { return k.cfg.AllowLocalSources }
 
 // Kernel is the central service object.
 // It holds all dependencies and exposes operations to both the CLI and HTTP server.
@@ -683,7 +683,15 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 			return ErrInvalidState.Wrapf("invalid output schema: %v", err)
 		}
 		if a.Kind == KindHTTP {
-			if err := validateHTTPSource(a.Source, k.cfg.AllowLocalSources); err != nil {
+			src := a.Source
+			if strings.HasPrefix(strings.TrimSpace(src), "{") {
+				var osrc OpenAPISource
+				if err := json.Unmarshal([]byte(src), &osrc); err != nil {
+					return ErrInvalidInput.Wrap("invalid OpenAPI source JSON")
+				}
+				src = osrc.BaseURL
+			}
+			if err := validateHTTPSource(src, k.cfg.AllowLocalSources); err != nil {
 				return err
 			}
 		}
@@ -1656,6 +1664,7 @@ type rawOp struct {
 	method       string
 	path         string
 	baseURL      string
+	params       []OpenAPIParam
 	inputSchema  map[string]any
 	outputSchema map[string]any
 	price        int64
@@ -1663,44 +1672,11 @@ type rawOp struct {
 	sourceJSON   string
 }
 
-// parseOpenAPIOperations fetches specURL and returns one rawOp per supported operation
-// (GET/POST/PUT/PATCH/DELETE). Operations that cannot be imported are returned as rejections.
-func (k *Kernel) parseOpenAPIOperations(ctx context.Context, specURL string) ([]rawOp, []ImportRejection, error) {
-	if !k.cfg.AllowLocalSources {
-		u, err := url.Parse(specURL)
-		if err != nil {
-			return nil, nil, ErrInvalidInput.Wrapf("invalid spec URL: %v", err)
-		}
-		host := u.Hostname()
-		if ip := net.ParseIP(host); ip != nil {
-			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-				return nil, nil, ErrInvalidInput.Wrap("unsafe spec URL: private/loopback host")
-			}
-		} else if host == "localhost" || host == "" {
-			return nil, nil, ErrInvalidInput.Wrap("unsafe spec URL: localhost")
-		}
-	}
-
-	client := k.cfg.OpenAPIClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, specURL, nil)
-	if err != nil {
-		return nil, nil, ErrInvalidInput.Wrapf("invalid spec URL: %v", err)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, nil, ErrExecutionFailed.Wrapf("fetch spec: %v", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-	if err != nil {
-		return nil, nil, ErrExecutionFailed.Wrap("read spec body")
-	}
-
+// parseOpenAPISpec parses specBytes (already-fetched JSON) and returns one rawOp per supported
+// operation (GET/POST/PUT/PATCH/DELETE). specURL is stored in provenance only; no HTTP is performed.
+func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportRejection, error) {
 	var spec map[string]any
-	if err := json.Unmarshal(body, &spec); err != nil {
+	if err := json.Unmarshal(specBytes, &spec); err != nil {
 		return nil, nil, ErrInvalidInput.Wrap("spec is not valid JSON")
 	}
 
@@ -1756,6 +1732,7 @@ func (k *Kernel) parseOpenAPIOperations(ctx context.Context, specURL string) ([]
 				}
 			}
 
+			params := openAPIParams(op, pathItem)
 			inputSchema := openAPIInputSchema(op, pathItem)
 			hash := openAPIOperationHash(baseURL, desc, method, path, inputSchema, outputSchema, price)
 
@@ -1767,6 +1744,7 @@ func (k *Kernel) parseOpenAPIOperations(ctx context.Context, specURL string) ([]
 				Path:          path,
 				OperationKey:  key,
 				OperationHash: hash,
+				Params:        params,
 			}
 			srcBytes, _ := json.Marshal(src)
 
@@ -1776,6 +1754,7 @@ func (k *Kernel) parseOpenAPIOperations(ctx context.Context, specURL string) ([]
 				method:       strings.ToUpper(method),
 				path:         path,
 				baseURL:      baseURL,
+				params:       params,
 				inputSchema:  inputSchema,
 				outputSchema: outputSchema,
 				price:        price,
@@ -1900,6 +1879,50 @@ func openAPIInputSchema(op, pathItem map[string]any) map[string]any {
 	return result
 }
 
+// openAPIParams records the binding location for each input field so the executor
+// can route path params, query params, and body fields correctly regardless of HTTP method.
+func openAPIParams(op, pathItem map[string]any) []OpenAPIParam {
+	var params []OpenAPIParam
+	seen := map[string]struct{}{}
+	for _, source := range []map[string]any{pathItem, op} {
+		ps, _ := source["parameters"].([]any)
+		for _, pRaw := range ps {
+			p, ok := pRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			in, _ := p["in"].(string)
+			if in != "path" && in != "query" {
+				continue
+			}
+			name, _ := p["name"].(string)
+			if name == "" {
+				continue
+			}
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			params = append(params, OpenAPIParam{Name: name, In: in})
+		}
+	}
+	if rb, ok := op["requestBody"].(map[string]any); ok {
+		content, _ := rb["content"].(map[string]any)
+		jc, _ := content["application/json"].(map[string]any)
+		if bodySchema, ok := jc["schema"].(map[string]any); ok {
+			if props, ok := bodySchema["properties"].(map[string]any); ok {
+				for name := range props {
+					if _, dup := seen[name]; !dup {
+						seen[name] = struct{}{}
+						params = append(params, OpenAPIParam{Name: name, In: "body"})
+					}
+				}
+			}
+		}
+	}
+	return params
+}
+
 func openAPIOperationHash(baseURL, description, method, path string, inputSchema, outputSchema map[string]any, price int64) string {
 	payload := map[string]any{
 		"base_url":      baseURL,
@@ -1931,16 +1954,15 @@ func openAPISlug(s string) string {
 	return strings.Trim(b.String(), "-")
 }
 
-// ImportOpenAPI fetches specURL, parses supported operations, and reconciles them with
-// existing OpenAPI-imported actions for the owner. It is idempotent: re-running against
-// a changed spec updates changed operations, deactivates removed ones, and creates new ones.
-func (k *Kernel) ImportOpenAPI(ctx context.Context, ownerID, specURL string) (*ImportResult, error) {
+// ImportOpenAPI parses specBytes (caller-fetched OpenAPI JSON), reconciles operations with
+// existing OpenAPI-imported actions for the owner, and returns the diff. It is idempotent.
+func (k *Kernel) ImportOpenAPI(ctx context.Context, ownerID, specURL string, specBytes []byte) (*ImportResult, error) {
 	owner, err := k.store.ReadUser(ctx, ownerID)
 	if err != nil {
 		return nil, err
 	}
 
-	rawOps, rejected, err := k.parseOpenAPIOperations(ctx, specURL)
+	rawOps, rejected, err := parseOpenAPISpec(specBytes, specURL)
 	if err != nil {
 		return nil, err
 	}

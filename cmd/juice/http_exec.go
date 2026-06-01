@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -133,32 +134,56 @@ func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, source string, 
 		return nil, kernel.ErrInvalidInput.Wrap("invalid OpenAPI source")
 	}
 
-	// Substitute {param} placeholders in path from args.
 	path := src.Path
-	pathParams := map[string]struct{}{}
-	for {
-		start := strings.Index(path, "{")
-		if start < 0 {
-			break
-		}
-		end := strings.Index(path[start:], "}")
-		if end < 0 {
-			break
-		}
-		param := path[start+1 : start+end]
-		pathParams[param] = struct{}{}
-		val := ""
-		if v, ok := args[param]; ok {
-			val = fmt.Sprintf("%v", v)
-		}
-		path = path[:start] + val + path[start+end+1:]
-	}
+	queryVals := url.Values{}
+	bodyArgs := map[string]any{}
 
-	// Remaining args not consumed as path params.
-	remaining := make(map[string]any, len(args))
-	for k, v := range args {
-		if _, isPath := pathParams[k]; !isPath {
-			remaining[k] = v
+	if len(src.Params) > 0 {
+		// Use stored param bindings to route each arg correctly.
+		for _, p := range src.Params {
+			v, ok := args[p.Name]
+			if !ok {
+				continue
+			}
+			switch p.In {
+			case "path":
+				path = strings.ReplaceAll(path, "{"+p.Name+"}", url.PathEscape(fmt.Sprintf("%v", v)))
+			case "query":
+				queryVals.Set(p.Name, fmt.Sprintf("%v", v))
+			case "body":
+				bodyArgs[p.Name] = v
+			}
+		}
+	} else {
+		// Fallback for actions imported before param binding was added.
+		pathParams := map[string]struct{}{}
+		for {
+			start := strings.Index(path, "{")
+			if start < 0 {
+				break
+			}
+			end := strings.Index(path[start:], "}")
+			if end < 0 {
+				break
+			}
+			param := path[start+1 : start+end]
+			pathParams[param] = struct{}{}
+			val := ""
+			if v, ok := args[param]; ok {
+				val = fmt.Sprintf("%v", v)
+			}
+			path = path[:start] + val + path[start+end+1:]
+		}
+		method := strings.ToUpper(src.Method)
+		for k, v := range args {
+			if _, isPath := pathParams[k]; isPath {
+				continue
+			}
+			if method == http.MethodGet {
+				queryVals.Set(k, fmt.Sprintf("%v", v))
+			} else {
+				bodyArgs[k] = v
+			}
 		}
 	}
 
@@ -166,19 +191,22 @@ func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, source string, 
 	method := strings.ToUpper(src.Method)
 
 	var reqBody io.Reader
-	if method == http.MethodGet {
+	if len(queryVals) > 0 {
 		u, err := url.Parse(rawURL)
 		if err != nil {
 			return nil, kernel.ErrInvalidInput.Wrapf("invalid URL: %v", err)
 		}
-		q := u.Query()
-		for k, v := range remaining {
-			q.Set(k, fmt.Sprintf("%v", v))
+		existing := u.Query()
+		for k, vs := range queryVals {
+			for _, v := range vs {
+				existing.Set(k, v)
+			}
 		}
-		u.RawQuery = q.Encode()
+		u.RawQuery = existing.Encode()
 		rawURL = u.String()
-	} else {
-		b, err := json.Marshal(remaining)
+	}
+	if len(bodyArgs) > 0 || (method != http.MethodGet && len(src.Params) > 0) {
+		b, err := json.Marshal(bodyArgs)
 		if err != nil {
 			return nil, kernel.ErrInvalidInput.Wrap("could not serialize args")
 		}
@@ -189,7 +217,7 @@ func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, source string, 
 	if err != nil {
 		return nil, kernel.ErrInvalidInput.Wrapf("invalid action URL: %v", err)
 	}
-	if method != http.MethodGet {
+	if reqBody != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
@@ -218,4 +246,45 @@ func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, source string, 
 		return nil, kernel.ErrExecutionFailed.Wrap("action response is not valid JSON")
 	}
 	return result, nil
+}
+
+// fetchOpenAPISpec fetches and returns the raw bytes of an OpenAPI spec at specURL.
+// It rejects loopback, private, and link-local addresses unless allowLocal is true.
+func fetchOpenAPISpec(ctx context.Context, specURL string, allowLocal bool) ([]byte, error) {
+	u, err := url.Parse(specURL)
+	if err != nil {
+		return nil, kernel.ErrInvalidInput.Wrapf("invalid spec URL: %v", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, kernel.ErrInvalidInput.Wrap("spec URL scheme must be http or https")
+	}
+	if !allowLocal {
+		host := u.Hostname()
+		if strings.EqualFold(host, "localhost") || host == "" {
+			return nil, kernel.ErrInvalidInput.Wrap("unsafe spec URL")
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+				return nil, kernel.ErrInvalidInput.Wrap("unsafe spec URL: private/loopback host")
+			}
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, specURL, nil)
+	if err != nil {
+		return nil, kernel.ErrInvalidInput.Wrapf("invalid spec URL: %v", err)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, kernel.ErrExecutionFailed.Wrapf("fetch spec: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return nil, kernel.ErrExecutionFailed.Wrap("read spec body")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, kernel.ErrExecutionFailed.Wrapf("spec server returned %d", resp.StatusCode)
+	}
+	return body, nil
 }

@@ -267,15 +267,22 @@ type ImportRejection struct {
 	Reason string
 }
 
+// OpenAPIParam records where one input field is sent in the HTTP request.
+type OpenAPIParam struct {
+	Name string `json:"name"`
+	In   string `json:"in"` // "path", "query", or "body"
+}
+
 // OpenAPISource is the provenance stored in Action.Source for OpenAPI-imported actions.
 type OpenAPISource struct {
-	Type          string `json:"type"`
-	SpecURL       string `json:"spec_url"`
-	BaseURL       string `json:"base_url"`
-	Method        string `json:"method"`
-	Path          string `json:"path"`
-	OperationKey  string `json:"operation_key"`
-	OperationHash string `json:"operation_hash"`
+	Type          string         `json:"type"`
+	SpecURL       string         `json:"spec_url"`
+	BaseURL       string         `json:"base_url"`
+	Method        string         `json:"method"`
+	Path          string         `json:"path"`
+	OperationKey  string         `json:"operation_key"`
+	OperationHash string         `json:"operation_hash"`
+	Params        []OpenAPIParam `json:"params,omitempty"`
 }
 
 // ActionManifest is a signed, exportable description of a public active action.
