@@ -156,6 +156,8 @@ type Store interface {
 	ReadRatingByTxID(ctx context.Context, txID string) (*Rating, error)
 	// CreateRatingAndUpdateStats atomically inserts a rating and updates rating_count/rating_mean.
 	CreateRatingAndUpdateStats(ctx context.Context, r *Rating, actionID string, rating float64) error
+	// ListRatings returns ratings for a given action ordered by created_at DESC.
+	ListRatings(ctx context.Context, actionID string, limit, offset int) ([]*Rating, error)
 
 	// ---- Idempotency ----
 

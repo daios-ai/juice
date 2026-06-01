@@ -90,6 +90,7 @@ func runServer(addr string) error {
 		r.Post("/v1/actions/unimport", srv.unimportOpenAPI)
 		r.Post("/v1/actions", srv.postAction)
 		r.Get("/v1/actions/{id}", srv.getAction)
+		r.Get("/v1/actions/{id}/ratings", srv.listActionRatings)
 		r.Put("/v1/actions/{id}", srv.updateAction)
 		r.Post("/v1/actions/{id}/enable", srv.enableAction)
 		r.Post("/v1/actions/{id}/disable", srv.disableAction)
@@ -421,6 +422,16 @@ func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, a)
+}
+
+func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
+	actionID := chi.URLParam(r, "id")
+	ratings, err := s.kernel.ListRatings(r.Context(), actionID, 50, 0)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ratings)
 }
 
 func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {

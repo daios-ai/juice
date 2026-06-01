@@ -28,6 +28,7 @@ func TestActionCreateAndToggle(t *testing.T) {
 		Name:         "/cli-action",
 		Kind:         kernel.KindHTTP,
 		Source:       "http://example.com",
+		Description:  "test action",
 		InputSchema:  minSchema,
 		OutputSchema: minSchema,
 	})
@@ -95,6 +96,7 @@ func TestActionPriceUpdateDeactivates(t *testing.T) {
 		Kind:         kernel.KindHTTP,
 		Price:        10,
 		Source:       "http://example.com",
+		Description:  "test action",
 		InputSchema:  minSchema,
 		OutputSchema: minSchema,
 	})
@@ -275,6 +277,7 @@ func TestActionListActive(t *testing.T) {
 		Name:         "/listed",
 		Kind:         kernel.KindHTTP,
 		Source:       "http://example.com",
+		Description:  "test action",
 		InputSchema:  minSchema,
 		OutputSchema: minSchema,
 	})

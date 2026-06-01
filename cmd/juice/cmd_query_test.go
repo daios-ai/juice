@@ -20,6 +20,7 @@ func TestStatsInitializedOnActivation(t *testing.T) {
 		Name:         "/svc",
 		Kind:         kernel.KindHTTP,
 		Source:       "http://x.com",
+		Description:  "test action",
 		InputSchema:  minSchema,
 		OutputSchema: minSchema,
 	})

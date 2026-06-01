@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -1076,6 +1077,30 @@ func (f *fakeStore) ReadRatingByTxID(_ context.Context, txID string) (*Rating, e
 	}
 	cp := *r
 	return &cp, nil
+}
+
+func (f *fakeStore) ListRatings(_ context.Context, actionID string, limit, offset int) ([]*Rating, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var result []*Rating
+	for _, r := range f.ratings {
+		tx, ok := f.transactions[r.RatedTxID]
+		if ok && tx.ActionID == actionID {
+			cp := *r
+			result = append(result, &cp)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
+	if offset >= len(result) {
+		return nil, nil
+	}
+	result = result[offset:]
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
 }
 
 func (f *fakeStore) CreateIdempotencyRecord(_ context.Context, r *IdempotencyRecord) error {

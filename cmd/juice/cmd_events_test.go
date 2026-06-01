@@ -17,6 +17,7 @@ func makeActiveAction(t *testing.T, env *testEnv, ownerID, name string) *kernel.
 		Name:         name,
 		Kind:         kernel.KindHTTP,
 		Source:       "http://example.com",
+		Description:  "test action",
 		InputSchema:  minSchema,
 		OutputSchema: minSchema,
 	})

@@ -1410,6 +1410,36 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 	}
 }
 
+func TestSetActiveRequiresDescription(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "@desc-owner", 0)
+
+	a, err := k.CreateAction(ctx, CreateActionRequest{
+		OwnerUserID:  owner.ID,
+		Name:         "/nodesc",
+		Kind:         KindHTTP,
+		Source:       "http://example.com",
+		Price:        0,
+		Description:  "",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = k.SetActive(ctx, owner.ID, a.ID, true)
+	if err == nil {
+		t.Fatal("expected error activating action with empty description")
+	}
+	var ke *KernelError
+	if !errors.As(err, &ke) || ke.Code != "invalid_state" {
+		t.Errorf("want ErrInvalidState, got: %v", err)
+	}
+}
+
 func TestSetActiveValidatesWasm(t *testing.T) {
 	st := newFakeStore()
 	ctx := context.Background()

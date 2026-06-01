@@ -1862,6 +1862,35 @@ func (s *DB) CreateRatingAndUpdateStats(ctx context.Context, r *kernel.Rating, a
 	return dbErr(tx.Commit(), "create rating and update stats: commit")
 }
 
+func (s *DB) ListRatings(ctx context.Context, actionID string, limit, offset int) ([]*kernel.Rating, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT r.id, r.rated_tx_id, r.rated_receipt_id, r.rater_user_id, r.rating, r.created_at, r.signature
+		 FROM ratings r
+		 JOIN transactions t ON t.id = r.rated_tx_id
+		 WHERE t.action_id = ?
+		 ORDER BY r.created_at DESC
+		 LIMIT ? OFFSET ?`,
+		actionID, limit, offset,
+	)
+	if err != nil {
+		return nil, dbErr(err, "list ratings")
+	}
+	defer rows.Close()
+	var result []*kernel.Rating
+	for rows.Next() {
+		var r kernel.Rating
+		var ratedReceiptID *string
+		var createdAt string
+		if err := rows.Scan(&r.ID, &r.RatedTxID, &ratedReceiptID, &r.RaterUserID, &r.Rating, &createdAt, &r.Signature); err != nil {
+			return nil, dbErr(err, "list ratings: scan")
+		}
+		r.RatedReceiptID = ratedReceiptID
+		r.CreatedAt = strToTime(createdAt)
+		result = append(result, &r)
+	}
+	return result, dbErr(rows.Err(), "list ratings: rows")
+}
+
 func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating, error) {
 	var r kernel.Rating
 	var ratedReceiptID *string

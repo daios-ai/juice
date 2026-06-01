@@ -581,7 +581,8 @@ FAIL_ACTION=$(jj "$H_ALICE" action add \
     --name /fail \
     --kind http \
     --price 50 \
-    --source "http://127.0.0.1:19872" 2>&1)
+    --source "http://127.0.0.1:19872" \
+    --description "Failing action" 2>&1)
 FAIL_ID=$(strfield "$FAIL_ACTION" "ID")
 j "$H_ALICE" action enable --id "$FAIL_ID" >/dev/null 2>&1
 
@@ -638,7 +639,7 @@ wasm = bytes([
 sys.stdout.buffer.write(wasm)
 " > "$TMPDIR/echo.wasm"
 
-WASM_ADD=$(jj "$H_ALICE" action add --name /wasm-echo --kind wasm --source "$TMPDIR/echo.wasm" 2>&1)
+WASM_ADD=$(jj "$H_ALICE" action add --name /wasm-echo --kind wasm --source "$TMPDIR/echo.wasm" --description "Wasm echo action" 2>&1)
 WASM_ID=$(strfield "$WASM_ADD" "ID")
 
 if [ -n "$WASM_ID" ]; then

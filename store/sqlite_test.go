@@ -1156,6 +1156,67 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 	}
 }
 
+func TestListRatings(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@list-owner", 0)
+	_ = db.CreateUser(ctx, owner)
+	action := newAction(owner.ID, "/list-a", 0, true)
+	_ = db.CreateAction(ctx, action)
+
+	rater := newUser("@list-rater", 0)
+	_ = db.CreateUser(ctx, rater)
+
+	makeTxAndRating := func(id string, rating float64, offset time.Duration) {
+		tx := &kernel.Transaction{
+			ID:            id,
+			OwnerUserID:   rater.ID,
+			SubjectUserID: rater.ID,
+			TargetUserID:  owner.ID,
+			ActionID:      action.ID,
+			Status:        kernel.TxSuccess,
+			StartedAt:     time.Now().UTC(),
+			EndedAt:       time.Now().UTC(),
+		}
+		_ = db.CreateTransaction(ctx, tx)
+		r := &kernel.Rating{
+			ID:          "r-" + id,
+			RatedTxID:   id,
+			RaterUserID: rater.ID,
+			Rating:      rating,
+			CreatedAt:   time.Now().UTC().Add(offset),
+		}
+		_ = db.CreateRating(ctx, r)
+	}
+	makeTxAndRating("tx-list-1", 1.0, 0)
+	makeTxAndRating("tx-list-2", 0.0, time.Second)
+
+	// List all: should return 2 in DESC order.
+	all, err := db.ListRatings(ctx, action.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("ListRatings: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("want 2 ratings, got %d", len(all))
+	}
+	if all[0].RatedTxID != "tx-list-2" {
+		t.Errorf("first result should be newest (tx-list-2), got %s", all[0].RatedTxID)
+	}
+
+	// Offset skips the first.
+	page2, _ := db.ListRatings(ctx, action.ID, 10, 1)
+	if len(page2) != 1 || page2[0].RatedTxID != "tx-list-1" {
+		t.Errorf("offset=1 should return tx-list-1, got %v", page2)
+	}
+
+	// Wrong action ID returns empty.
+	none, _ := db.ListRatings(ctx, "no-such-action", 10, 0)
+	if len(none) != 0 {
+		t.Errorf("expected no ratings for unknown action, got %d", len(none))
+	}
+}
+
 // ---- ReadUserByPublicKey tests ----
 
 func TestReadUserByPublicKey(t *testing.T) {

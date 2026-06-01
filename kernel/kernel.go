@@ -677,6 +677,9 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 		return err
 	}
 	if active {
+		if strings.TrimSpace(a.Description) == "" {
+			return ErrInvalidState.Wrap("description is required before activation")
+		}
 		if a.Source == "" && a.Kind != KindNative {
 			return ErrInvalidState.Wrap("cannot activate action with no source")
 		}
@@ -946,6 +949,11 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 		return nil, err
 	}
 	return r, nil
+}
+
+// ListRatings returns ratings for an action ordered by creation time descending.
+func (k *Kernel) ListRatings(ctx context.Context, actionID string, limit, offset int) ([]*Rating, error) {
+	return k.store.ListRatings(ctx, actionID, limit, offset)
 }
 
 // ---- Stats ----
