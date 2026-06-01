@@ -276,14 +276,15 @@ type OpenAPIParam struct {
 
 // OpenAPISource is the provenance stored in Action.Source for OpenAPI-imported actions.
 type OpenAPISource struct {
-	Type          string         `json:"type"`
-	SpecURL       string         `json:"spec_url"`
-	BaseURL       string         `json:"base_url"`
-	Method        string         `json:"method"`
-	Path          string         `json:"path"`
-	OperationKey  string         `json:"operation_key"`
-	OperationHash string         `json:"operation_hash"`
-	Params        []OpenAPIParam `json:"params,omitempty"`
+	Type              string         `json:"type"`
+	SpecURL           string         `json:"spec_url"`
+	BaseURL           string         `json:"base_url"`
+	Method            string         `json:"method"`
+	Path              string         `json:"path"`
+	OperationKey      string         `json:"operation_key"`
+	OperationHash     string         `json:"operation_hash"`
+	Params            []OpenAPIParam `json:"params,omitempty"`
+	OwnershipVerified bool           `json:"ownership_verified,omitempty"`
 }
 
 // ActionManifest is a signed, exportable description of a public active action.

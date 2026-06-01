@@ -487,6 +487,14 @@ func (k *Kernel) GrantAll(ctx context.Context, subjectID, actionID string) error
 	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
 		return err
 	}
+	if strings.HasPrefix(strings.TrimSpace(a.Source), "{") {
+		var osrc OpenAPISource
+		if jsonErr := json.Unmarshal([]byte(a.Source), &osrc); jsonErr == nil && osrc.Type == "openapi" {
+			if !osrc.OwnershipVerified {
+				return ErrUnauthorized.Wrap("ownership not verified: add x-juice-owner to spec")
+			}
+		}
+	}
 	a.Public = true
 	a.UpdatedAt = time.Now().UTC()
 	if err := k.store.UpdateAction(ctx, a); err != nil {
@@ -696,6 +704,14 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 				return ErrInvalidState.Wrapf("wasm compile failed: %v", err)
 			}
 			a.ArtifactHash = hash
+		}
+		if a.Public && strings.HasPrefix(strings.TrimSpace(a.Source), "{") {
+			var osrc OpenAPISource
+			if jsonErr := json.Unmarshal([]byte(a.Source), &osrc); jsonErr == nil && osrc.Type == "openapi" {
+				if !osrc.OwnershipVerified {
+					return ErrUnauthorized.Wrap("ownership not verified: add x-juice-owner to spec")
+				}
+			}
 		}
 		// Ensure stats exist.
 		stats, _ := k.store.ReadStats(ctx, actionID)
@@ -1670,6 +1686,27 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 				continue
 			}
 
+			if secRaw, ok := op["security"]; ok {
+				if secs, ok := secRaw.([]any); ok && len(secs) > 0 {
+					rejected = append(rejected, ImportRejection{Key: key, Reason: "operation has security requirements"})
+					continue
+				}
+			}
+
+			if rb, ok := op["requestBody"].(map[string]any); ok {
+				if content, ok := rb["content"].(map[string]any); ok && len(content) > 0 {
+					if _, hasJSON := content["application/json"]; !hasJSON {
+						rejected = append(rejected, ImportRejection{Key: key, Reason: "requestBody has no application/json content"})
+						continue
+					}
+				}
+			}
+
+			if ambig, reason := openAPIAmbiguous2xxSchema(op); ambig {
+				rejected = append(rejected, ImportRejection{Key: key, Reason: reason})
+				continue
+			}
+
 			var price int64
 			if v, ok := op["x-juice-price"]; ok {
 				if f, ok := v.(float64); ok {
@@ -1763,6 +1800,32 @@ func openAPIJSONSchema(respRaw any) map[string]any {
 		return schema
 	}
 	return nil
+}
+
+func openAPIAmbiguous2xxSchema(op map[string]any) (bool, string) {
+	responses, _ := op["responses"].(map[string]any)
+	var seen []string
+	for code, resp := range responses {
+		if len(code) != 3 || code[0] != '2' {
+			continue
+		}
+		s := openAPIJSONSchema(resp)
+		if s == nil {
+			continue
+		}
+		b, _ := json.Marshal(s)
+		seen = append(seen, string(b))
+	}
+	if len(seen) < 2 {
+		return false, ""
+	}
+	first := seen[0]
+	for _, s := range seen[1:] {
+		if s != first {
+			return true, "ambiguous 2xx response schemas"
+		}
+	}
+	return false, ""
 }
 
 func openAPIInputSchema(op, pathItem map[string]any) map[string]any {
@@ -1920,6 +1983,10 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, ownerID, specURL string, spe
 		return nil, err
 	}
 
+	var specMap map[string]any
+	_ = json.Unmarshal(specBytes, &specMap)
+	ownershipVerified := specMap["x-juice-owner"] == owner.Handle
+
 	existing, err := k.store.ListActionsByOwnerOpenAPISpec(ctx, ownerID, specURL)
 	if err != nil {
 		return nil, err
@@ -1952,6 +2019,15 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, ownerID, specURL string, spe
 				continue
 			}
 		}
+		sourceJSON := raw.sourceJSON
+		if ownershipVerified {
+			var osrc OpenAPISource
+			_ = json.Unmarshal([]byte(raw.sourceJSON), &osrc)
+			osrc.OwnershipVerified = true
+			if b, marshalErr := json.Marshal(osrc); marshalErr == nil {
+				sourceJSON = string(b)
+			}
+		}
 		incoming = append(incoming, incomingOp{
 			key:  raw.key,
 			hash: raw.hash,
@@ -1960,7 +2036,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, ownerID, specURL string, spe
 				a.Price        = raw.price
 				a.InputSchema  = raw.inputSchema
 				a.OutputSchema = raw.outputSchema
-				a.Source       = raw.sourceJSON
+				a.Source       = sourceJSON
 			},
 			new: func() *Action {
 				now := time.Now().UTC()
@@ -1974,7 +2050,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, ownerID, specURL string, spe
 					Price:        raw.price,
 					InputSchema:  raw.inputSchema,
 					OutputSchema: raw.outputSchema,
-					Source:       raw.sourceJSON,
+					Source:       sourceJSON,
 					CreatedAt:    now,
 					UpdatedAt:    now,
 				}

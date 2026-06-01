@@ -8,6 +8,24 @@ import (
 	"testing"
 )
 
+func TestValidateRedirectHostBlocked(t *testing.T) {
+	cases := []string{"localhost", "127.0.0.1", "::1", "192.168.1.1", "10.0.0.1", "169.254.1.1"}
+	for _, h := range cases {
+		if err := validateRedirectHost(h, false); err == nil {
+			t.Errorf("validateRedirectHost(%q, false): expected error, got nil", h)
+		}
+	}
+}
+
+func TestValidateRedirectHostAllowed(t *testing.T) {
+	cases := []string{"localhost", "127.0.0.1", "10.0.0.1"}
+	for _, h := range cases {
+		if err := validateRedirectHost(h, true); err != nil {
+			t.Errorf("validateRedirectHost(%q, true): unexpected error: %v", h, err)
+		}
+	}
+}
+
 func TestExecuteFederationSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Idempotency-Key") == "" {

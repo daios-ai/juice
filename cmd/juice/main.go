@@ -142,7 +142,7 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 		}
 	}
 
-	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout}
+	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
 	k := kernel.New(db, exec, httpExec, embedder, chatter, cfg, logger)
 
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).

@@ -68,7 +68,7 @@ func runRemoteAdd(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid remote URL: %w", err)
 	}
-	resp, err := newHTTPClient(30 * time.Second).Do(wellKnownReq)
+	resp, err := newHTTPClient(30 * time.Second, false).Do(wellKnownReq)
 	if err != nil {
 		return fmt.Errorf("fetch well-known: %w", err)
 	}
@@ -163,7 +163,7 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid remote URL: %w", err)
 	}
-	resp, err := newHTTPClient(30 * time.Second).Do(listReq)
+	resp, err := newHTTPClient(30 * time.Second, false).Do(listReq)
 	if err != nil {
 		return fmt.Errorf("fetch action list: %w", err)
 	}
@@ -200,7 +200,7 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid manifest URL: %w", err)
 	}
-	resp2, err := newHTTPClient(30 * time.Second).Do(manifestReq)
+	resp2, err := newHTTPClient(30 * time.Second, false).Do(manifestReq)
 	if err != nil {
 		return fmt.Errorf("fetch manifest: %w", err)
 	}

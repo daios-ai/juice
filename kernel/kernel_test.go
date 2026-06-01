@@ -1724,3 +1724,137 @@ func TestOpenAPIActivationRejectsPrivateBaseURL(t *testing.T) {
 		t.Error("expected error activating action with private base URL, got nil")
 	}
 }
+
+func TestParseOpenAPISpecRejectsSecurityRequirement(t *testing.T) {
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","security":[{"apiKey":[]}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	_, rejected, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
+	if err != nil {
+		t.Fatalf("parseOpenAPISpec: %v", err)
+	}
+	if len(rejected) != 1 || rejected[0].Reason != "operation has security requirements" {
+		t.Errorf("expected security rejection, got %+v", rejected)
+	}
+}
+
+func TestParseOpenAPISpecRejectsMultipartOnlyBody(t *testing.T) {
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/upload":{"post":{"operationId":"upload","description":"upload file","requestBody":{"content":{"multipart/form-data":{"schema":{"type":"object"}}}},"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	_, rejected, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
+	if err != nil {
+		t.Fatalf("parseOpenAPISpec: %v", err)
+	}
+	if len(rejected) != 1 || rejected[0].Reason != "requestBody has no application/json content" {
+		t.Errorf("expected multipart rejection, got %+v", rejected)
+	}
+}
+
+func TestParseOpenAPISpecRejectsAmbiguous2xxSchemas(t *testing.T) {
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/create":{"post":{"operationId":"create","description":"create item","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"string"}}}},"201":{"description":"created","content":{"application/json":{"schema":{"type":"integer"}}}}}}}}}`
+	_, rejected, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
+	if err != nil {
+		t.Fatalf("parseOpenAPISpec: %v", err)
+	}
+	if len(rejected) != 1 || rejected[0].Reason != "ambiguous 2xx response schemas" {
+		t.Errorf("expected ambiguous schema rejection, got %+v", rejected)
+	}
+}
+
+func TestImportOpenAPISetsOwnershipVerified(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@oapi-owner-verified", 0)
+	specURL := "https://spec.example.com/api.json"
+	specWithOwner := `{"openapi":"3.0.0","x-juice-owner":"@oapi-owner-verified","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+
+	result, err := k.ImportOpenAPI(ctx, owner.ID, specURL, []byte(specWithOwner))
+	if err != nil {
+		t.Fatalf("ImportOpenAPI: %v", err)
+	}
+	if len(result.Created) != 1 {
+		t.Fatalf("expected 1 created action, got %d", len(result.Created))
+	}
+	var src OpenAPISource
+	if err := json.Unmarshal([]byte(result.Created[0].Source), &src); err != nil {
+		t.Fatalf("source JSON invalid: %v", err)
+	}
+	if !src.OwnershipVerified {
+		t.Error("expected OwnershipVerified=true when x-juice-owner matches handle")
+	}
+}
+
+func TestGrantAllOpenAPIRequiresOwnershipVerified(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@oapi-grant-owner", 0)
+	src := OpenAPISource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: false}
+	srcBytes, _ := json.Marshal(src)
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "@oapi-grant-owner/sayHello",
+		Kind: KindHTTP, Active: false, Description: "test", Source: string(srcBytes),
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	err := k.GrantAll(ctx, owner.ID, a.ID)
+	if err == nil {
+		t.Fatal("expected error from GrantAll without ownership verification, got nil")
+	}
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestGrantAllOpenAPIWithOwnershipVerified(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@oapi-grant-verified", 0)
+	src := OpenAPISource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: true}
+	srcBytes, _ := json.Marshal(src)
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "@oapi-grant-verified/sayHello",
+		Kind: KindHTTP, Active: false, Description: "test", Source: string(srcBytes),
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := k.GrantAll(ctx, owner.ID, a.ID); err != nil {
+		t.Errorf("GrantAll with OwnershipVerified=true: unexpected error: %v", err)
+	}
+}
+
+func TestSetActivePublicOpenAPIRequiresOwnershipVerified(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@oapi-setactive-owner", 0)
+	src := OpenAPISource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: false}
+	srcBytes, _ := json.Marshal(src)
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "@oapi-setactive-owner/sayHello",
+		Kind: KindHTTP, Active: false, Public: true, Description: "test", Source: string(srcBytes),
+		InputSchema:  map[string]any{"type": "object", "properties": map[string]any{}},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	err := k.SetActive(ctx, owner.ID, a.ID, true)
+	if err == nil {
+		t.Fatal("expected error from SetActive on public unverified OpenAPI action, got nil")
+	}
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized, got %v", err)
+	}
+}

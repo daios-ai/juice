@@ -15,12 +15,34 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
+// validateRedirectHost returns an error if hostname should not be followed as a redirect.
+func validateRedirectHost(hostname string, allowLocal bool) error {
+	if allowLocal {
+		return nil
+	}
+	if strings.EqualFold(hostname, "localhost") || hostname == "" {
+		return kernel.ErrInvalidInput.Wrap("unsafe redirect target")
+	}
+	if ip := net.ParseIP(hostname); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			return kernel.ErrInvalidInput.Wrap("unsafe redirect target: private/loopback host")
+		}
+	}
+	return nil
+}
+
 // newHTTPClient returns an HTTP client with the given timeout (defaulting to 30s).
-func newHTTPClient(timeout time.Duration) *http.Client {
+// Redirects are blocked when allowLocal is false and the target is a private/loopback address.
+func newHTTPClient(timeout time.Duration, allowLocal bool) *http.Client {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
-	return &http.Client{Timeout: timeout}
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return validateRedirectHost(req.URL.Hostname(), allowLocal)
+		},
+	}
 }
 
 // ExecuteFederation calls a remote kernel's federation endpoint with an idempotency key.
@@ -58,7 +80,7 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idem
 		}
 	}
 
-	resp, err := newHTTPClient(e.timeout).Do(req)
+	resp, err := newHTTPClient(e.timeout, false).Do(req)
 	if err != nil {
 		return nil, "", kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
 	}
@@ -84,8 +106,9 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idem
 }
 
 type httpActionExecutor struct {
-	timeout  time.Duration
-	signerFn func() ed25519.PrivateKey // wired after kernel bootstrap; nil if not yet available
+	timeout    time.Duration
+	allowLocal bool
+	signerFn   func() ed25519.PrivateKey // wired after kernel bootstrap; nil if not yet available
 }
 
 func (e *httpActionExecutor) Execute(ctx context.Context, source string, args map[string]any) (map[string]any, error) {
@@ -104,7 +127,7 @@ func (e *httpActionExecutor) Execute(ctx context.Context, source string, args ma
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := newHTTPClient(e.timeout).Do(req)
+	resp, err := newHTTPClient(e.timeout, e.allowLocal).Do(req)
 	if err != nil {
 		return nil, kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
 	}
@@ -219,7 +242,7 @@ func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, source string, 
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := newHTTPClient(e.timeout).Do(req)
+	resp, err := newHTTPClient(e.timeout, e.allowLocal).Do(req)
 	if err != nil {
 		return nil, kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
 	}
@@ -266,7 +289,7 @@ func fetchOpenAPISpec(ctx context.Context, specURL string, allowLocal bool) ([]b
 	if err != nil {
 		return nil, kernel.ErrInvalidInput.Wrapf("invalid spec URL: %v", err)
 	}
-	resp, err := newHTTPClient(30 * time.Second).Do(req)
+	resp, err := newHTTPClient(30*time.Second, allowLocal).Do(req)
 	if err != nil {
 		return nil, kernel.ErrExecutionFailed.Wrapf("fetch spec: %v", err)
 	}
