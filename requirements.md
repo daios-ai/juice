@@ -286,15 +286,13 @@ OpenAPI provenance is stored in `Action.source`:
 
 `operation_key` is `x-juice-name` when present, otherwise `operationId`, otherwise a canonical derivation from method and path.
 
-Reimport matches only:
+`import` is idempotent — re-running it against a changed spec applies this policy, matched by:
 
 ```text
 owner_user_id + source.type + source.spec_url + source.operation_key
 ```
 
-Reimport must not affect manual actions or actions imported from another server.
-
-Reimport policy:
+Import must not affect manual actions or actions imported from another server.
 
 | Case                                | Result                                                              |
 | ----------------------------------- | ------------------------------------------------------------------- |
@@ -306,7 +304,7 @@ Reimport policy:
 
 An imported contract field includes description, method, path, parameter bindings, input schema, output schema, selected response, price, and execution source.
 
-`operation_hash` covers the imported contract fields. It excludes stats, ratings, timestamps, and formatting. Reimport preserves `Action.id` for matched actions so transaction and receipt history remain attached.
+`operation_hash` covers the imported contract fields. It excludes stats, ratings, timestamps, and formatting. Import preserves `Action.id` for matched actions so transaction and receipt history remain attached.
 
 OpenAPI webhooks are not imported as actions. They describe HTTP requests sent to Juice, not callable operations. Supporting them requires event-ingress configuration that validates the incoming payload and then calls `EmitEvent`; it must not bypass the normal listener and consume flow.
 
@@ -479,8 +477,7 @@ Discovery is manual only:
 ```text
 juice remote add <url>                       fetch and validate <url>/.well-known/juice-kernel.json
 juice remote list                            list registered peers
-juice remote import <remote-handle> <action-name>   fetch signed manifest and create local http proxy action
-juice remote reimport <remote-handle> <action-name> re-fetch manifest and apply reimport policy
+juice remote import <remote-handle> <action-name>   fetch signed manifest and create or update local http proxy action (idempotent)
 juice remote unimport <remote-handle> <action-name> deactivate local proxy action
 ```
 
@@ -501,13 +498,7 @@ artifact_hash stats updated_at signature
 
 Manifest descriptions and schemas are the canonical interface used by importing kernels for lookup and LLM function calling.
 
-Federated reimport matches by:
-
-```text
-owner_user_id + remote_action_id
-```
-
-Federated reimport policy:
+`remote import` is idempotent — re-running it re-fetches the manifest and applies this policy, matched by `owner_user_id + remote_action_id`:
 
 | Case                                      | Result                                                                          |
 | ----------------------------------------- | ------------------------------------------------------------------------------- |
@@ -551,8 +542,7 @@ juice action delete                       juice action enable
 juice action disable                      juice action list
 juice action acl grant                    juice action acl revoke
 juice action grant-all                    juice action revoke-all
-juice action import                       juice action reimport
-juice action unimport
+juice action import                       juice action unimport
 juice process start                       juice process list
 juice process show                        juice process fund
 juice process end                         juice call
@@ -568,15 +558,13 @@ juice admin user deposit                  juice admin action list
 juice admin action disable                juice admin process list
 juice admin tx list
 juice remote add                          juice remote list
-juice remote import                       juice remote reimport
-juice remote unimport
+juice remote import                       juice remote unimport
 ```
 
 OpenAPI action import uses:
 
 ```text
 juice action import --openapi <spec-url>
-juice action reimport --openapi <spec-url>
 juice action unimport --openapi <spec-url>
 juice action unimport --openapi <spec-url> --name <action-name>
 ```
@@ -607,9 +595,8 @@ Required endpoint behavior:
 | `DELETE /v1/actions/{id}`          | Owner or action admin; preserve transaction history.                                                                                        |
 | `POST /v1/actions/{id}/grant-all`  | Owner or action admin; CLI: `juice action grant-all --id`.                                                                                  |
 | `POST /v1/actions/{id}/revoke-all` | Owner or action admin; CLI: `juice action revoke-all --id`.                                                                                 |
-| `POST /v1/actions/import`          | Authenticated supervision operation; imports supported OpenAPI operations as inactive `http` actions when called with OpenAPI import input. |
-| `POST /v1/actions/reimport`        | Owner or action admin; applies OpenAPI reimport policy only to actions with matching OpenAPI provenance.                                    |
-| `POST /v1/actions/unimport`        | Owner or action admin; deactivates actions with matching import provenance without deleting history.                                        |
+| `POST /v1/actions/import`          | Authenticated supervision operation; idempotent — imports and reconciles OpenAPI operations as inactive `http` actions. |
+| `POST /v1/actions/unimport`        | Owner or action admin; deactivates actions with matching import provenance without deleting history.                     |
 | `GET /v1/processes`                | Authenticated owner's processes ordered by descending `created_at`.                                                                         |
 | `GET /v1/listeners`                | Authenticated owner's listeners.                                                                                                            |
 | `GET /v1/listeners/{id}/events`    | Listener owner or source; return pending event fields.                                                                                      |
@@ -700,15 +687,15 @@ zero-credit process satisfies fund locking for zero-price actions
 Kernel.Deposit rejected with ErrUnauthorized for non-superuser caller
 receipt created atomically with successful transaction commit
 receipt created atomically with failed transaction commit
-OpenAPI import/reimport/unimport flow for API-owned actions
+OpenAPI import/unimport flow for API-owned actions
 OpenAPI import compiles parameters and JSON body into one input schema
 OpenAPI activation rejects incomplete schemas or missing descriptions
 OpenAPI public activation requires ownership proof
-OpenAPI reimport affects only matching OpenAPI-provenance actions
-OpenAPI reimport preserves Action.id, deactivates on contract change, and resets current stats
+OpenAPI import affects only matching OpenAPI-provenance actions
+OpenAPI import preserves Action.id, deactivates on contract change, and resets current stats
 OpenAPI webhooks enter through event ingress, not actions
-remote import/reimport/unimport flow for signed manifests
-remote reimport preserves Action.id, deactivates on manifest contract change, and does not overwrite local Stats
+remote import/unimport flow for signed manifests
+remote import preserves Action.id, deactivates on manifest contract change, and does not overwrite local Stats
 ```
 
 Direct invariant tests:
@@ -748,7 +735,7 @@ Required user-flow tests:
 
 ```text
 API owner imports an OpenAPI document, activates an action, grants public call access, and a caller executes it through Call()
-API owner reimports a changed OpenAPI document; the matched action is deactivated, stats reset, and historical transactions remain attached
+API owner re-runs import against a changed OpenAPI document; the matched action is deactivated, stats reset, and historical transactions remain attached
 API owner unimports an OpenAPI document; matching actions are deactivated and history remains attached
 remote kernel is added, a signed manifest is imported, a caller executes the proxy through Call(), and local stats remain separate from manifest stats
 remote proxy is unimported; the local proxy is deactivated and the remote kernel is unaffected
