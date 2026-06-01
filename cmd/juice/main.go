@@ -137,7 +137,8 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 		}
 	}
 
-	k := kernel.New(db, exec, &httpActionExecutor{timeout: cfg.ScriptTimeout}, embedder, chatter, cfg, logger)
+	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout}
+	k := kernel.New(db, exec, httpExec, embedder, chatter, cfg, logger)
 
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).
 	if privB64, _ := db.GetConfig(context.Background(), configKeySigningPrivate); privB64 != "" {
@@ -148,6 +149,9 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 			}
 		}
 	}
+
+	// Wire signing key access into the HTTP executor after the kernel is fully constructed.
+	httpExec.signerFn = func() ed25519.PrivateKey { return k.GetSigningKey() }
 
 	return k, db, nil
 }

@@ -1076,6 +1076,8 @@ func TestCreateReadIdempotencyRecord(t *testing.T) {
 		ID:                 uuid.New().String(),
 		IdempotencyKey:     "key-abc-123",
 		CounterpartyUserID: counterparty.ID,
+		Status:             "complete",
+		ResultJSON:         `{"ok":true}`,
 		CreatedAt:          now,
 		ExpiresAt:          now.Add(24 * time.Hour),
 	}
@@ -1111,5 +1113,87 @@ func TestCreateReadIdempotencyRecord(t *testing.T) {
 	got2, _ := db.ReadIdempotencyRecord(ctx, "key-abc-123", counterparty.ID)
 	if got2.ID != r.ID {
 		t.Errorf("expected original ID after duplicate insert, got %q", got2.ID)
+	}
+}
+
+func TestIdempotencyStateMachine(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	cp := newUser("@cp-sm", 0)
+	_ = db.CreateUser(ctx, cp)
+
+	now := time.Now().UTC()
+	rec := &kernel.IdempotencyRecord{
+		ID:                 uuid.New().String(),
+		IdempotencyKey:     "sm-key-1",
+		CounterpartyUserID: cp.ID,
+		CreatedAt:          now,
+		ExpiresAt:          now.Add(24 * time.Hour),
+	}
+
+	// InsertPendingIdempotencyRecord succeeds on first call.
+	if err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatalf("InsertPendingIdempotencyRecord: %v", err)
+	}
+
+	// Status is "pending".
+	got, err := db.ReadIdempotencyRecord(ctx, "sm-key-1", cp.ID)
+	if err != nil {
+		t.Fatalf("ReadIdempotencyRecord: %v", err)
+	}
+	if got.Status != "pending" {
+		t.Errorf("status: want pending, got %q", got.Status)
+	}
+
+	// Duplicate insert returns unique constraint error.
+	dup := &kernel.IdempotencyRecord{
+		ID:                 uuid.New().String(),
+		IdempotencyKey:     "sm-key-1",
+		CounterpartyUserID: cp.ID,
+		CreatedAt:          now,
+		ExpiresAt:          now.Add(24 * time.Hour),
+	}
+	if err := db.InsertPendingIdempotencyRecord(ctx, dup); err == nil {
+		t.Error("expected unique constraint error on duplicate pending insert")
+	}
+
+	// CompleteIdempotencyRecord transitions to "complete" with result JSON.
+	if err := db.CompleteIdempotencyRecord(ctx, rec.ID, `{"answer":42}`); err != nil {
+		t.Fatalf("CompleteIdempotencyRecord: %v", err)
+	}
+	got2, _ := db.ReadIdempotencyRecord(ctx, "sm-key-1", cp.ID)
+	if got2.Status != "complete" {
+		t.Errorf("status after complete: want complete, got %q", got2.Status)
+	}
+	if got2.ResultJSON != `{"answer":42}` {
+		t.Errorf("result_json: got %q", got2.ResultJSON)
+	}
+
+	// DeleteIdempotencyRecord removes the record so retry is possible.
+	rec2 := &kernel.IdempotencyRecord{
+		ID:                 uuid.New().String(),
+		IdempotencyKey:     "sm-key-2",
+		CounterpartyUserID: cp.ID,
+		CreatedAt:          now,
+		ExpiresAt:          now.Add(24 * time.Hour),
+	}
+	_ = db.InsertPendingIdempotencyRecord(ctx, rec2)
+	if err := db.DeleteIdempotencyRecord(ctx, rec2.ID); err != nil {
+		t.Fatalf("DeleteIdempotencyRecord: %v", err)
+	}
+	if _, err := db.ReadIdempotencyRecord(ctx, "sm-key-2", cp.ID); err == nil {
+		t.Error("expected ErrNotFound after delete")
+	}
+	// Re-insert is possible after delete.
+	rec2b := &kernel.IdempotencyRecord{
+		ID:                 uuid.New().String(),
+		IdempotencyKey:     "sm-key-2",
+		CounterpartyUserID: cp.ID,
+		CreatedAt:          now,
+		ExpiresAt:          now.Add(24 * time.Hour),
+	}
+	if err := db.InsertPendingIdempotencyRecord(ctx, rec2b); err != nil {
+		t.Errorf("re-insert after delete should succeed: %v", err)
 	}
 }

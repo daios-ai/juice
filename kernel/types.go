@@ -238,11 +238,15 @@ type Rating struct {
 }
 
 // IdempotencyRecord prevents duplicate cross-kernel calls.
+// Status transitions: "pending" (inserted before execution) → "complete" (set after success).
+// On failure the record is deleted to allow retry.
 type IdempotencyRecord struct {
 	ID                 string
 	IdempotencyKey     string
 	CounterpartyUserID string
 	ReceiptID          *string
+	Status             string // "pending" | "complete"
+	ResultJSON         string // JSON-encoded result, set on completion
 	CreatedAt          time.Time
 	ExpiresAt          time.Time
 }

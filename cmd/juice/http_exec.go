@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -27,6 +29,23 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idem
 	req.Header.Set("Content-Type", "application/json")
 	if idempotencyKey != "" {
 		req.Header.Set("X-Idempotency-Key", idempotencyKey)
+	}
+
+	// Sign the request so the remote kernel can verify our identity.
+	if e.signerFn != nil {
+		if key := e.signerFn(); len(key) == ed25519.PrivateKeySize {
+			// Extract the "action" query param from source URL for the signed payload.
+			actionParam := ""
+			if u, err := url.Parse(source); err == nil {
+				actionParam = u.Query().Get("action")
+			}
+			ts := time.Now().UTC().Format(time.RFC3339)
+			sig, err := kernel.SignFederationPayload(key, actionParam, idempotencyKey, ts)
+			if err == nil {
+				req.Header.Set("X-Timestamp", ts)
+				req.Header.Set("X-Signature", sig)
+			}
+		}
 	}
 
 	timeout := e.timeout
@@ -60,7 +79,8 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idem
 }
 
 type httpActionExecutor struct {
-	timeout time.Duration
+	timeout  time.Duration
+	signerFn func() ed25519.PrivateKey // wired after kernel bootstrap; nil if not yet available
 }
 
 func (e *httpActionExecutor) Execute(ctx context.Context, source string, args map[string]any) (map[string]any, error) {

@@ -1822,12 +1822,38 @@ func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating,
 
 func (s *DB) CreateIdempotencyRecord(ctx context.Context, r *kernel.IdempotencyRecord) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO idempotency_records (id,idempotency_key,counterparty_user_id,receipt_id,created_at,expires_at)
-		 VALUES (?,?,?,?,?,?)`,
+		`INSERT OR IGNORE INTO idempotency_records (id,idempotency_key,counterparty_user_id,receipt_id,status,result_json,created_at,expires_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
 		r.ID, r.IdempotencyKey, r.CounterpartyUserID, r.ReceiptID,
+		r.Status, r.ResultJSON,
 		timeToStr(r.CreatedAt), timeToStr(r.ExpiresAt),
 	)
 	return dbErr(err, "create idempotency record")
+}
+
+func (s *DB) InsertPendingIdempotencyRecord(ctx context.Context, r *kernel.IdempotencyRecord) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,receipt_id,status,result_json,created_at,expires_at)
+		 VALUES (?,?,?,NULL,'pending','',?,?)`,
+		r.ID, r.IdempotencyKey, r.CounterpartyUserID,
+		timeToStr(r.CreatedAt), timeToStr(r.ExpiresAt),
+	)
+	return dbErr(err, "insert pending idempotency record")
+}
+
+func (s *DB) CompleteIdempotencyRecord(ctx context.Context, id, resultJSON string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE idempotency_records SET status='complete', result_json=? WHERE id=?`,
+		resultJSON, id,
+	)
+	return dbErr(err, "complete idempotency record")
+}
+
+func (s *DB) DeleteIdempotencyRecord(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM idempotency_records WHERE id=?`, id,
+	)
+	return dbErr(err, "delete idempotency record")
 }
 
 func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*kernel.IdempotencyRecord, error) {
@@ -1835,11 +1861,11 @@ func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID 
 	var receiptID *string
 	var createdAt, expiresAt string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,idempotency_key,counterparty_user_id,receipt_id,created_at,expires_at
+		`SELECT id,idempotency_key,counterparty_user_id,receipt_id,status,result_json,created_at,expires_at
 		 FROM idempotency_records
 		 WHERE idempotency_key=? AND counterparty_user_id=? AND expires_at > datetime('now')`,
 		key, counterpartyUserID,
-	).Scan(&r.ID, &r.IdempotencyKey, &r.CounterpartyUserID, &receiptID, &createdAt, &expiresAt)
+	).Scan(&r.ID, &r.IdempotencyKey, &r.CounterpartyUserID, &receiptID, &r.Status, &r.ResultJSON, &createdAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("idempotency record not found or expired")
 	}

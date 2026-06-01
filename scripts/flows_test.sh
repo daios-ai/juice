@@ -126,8 +126,10 @@ JUICE_ALLOW_LOCAL_SOURCES="true" \
 "$JUICE" --db "$REMOTE_DB" serve &
 REMOTE_KERNEL_PID=$!
 
+LOCAL_KERNEL_PID=""
 cleanup() {
     kill "$BACKEND_OK_PID" "$BACKEND_FAIL_PID" "$REMOTE_KERNEL_PID" 2>/dev/null || true
+    [ -n "$LOCAL_KERNEL_PID" ] && kill "$LOCAL_KERNEL_PID" 2>/dev/null || true
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
@@ -1002,6 +1004,23 @@ if echo "$REMOTE_ADD" | grep -qi "registered\|127.0.0.1:19875"; then
 else
     fail "20.1 remote kernel registered" "$REMOTE_ADD"
 fi
+
+# Start the local kernel as an HTTP server so the remote kernel can fetch its
+# /.well-known/juice-kernel.json and register it as a peer (mutual registration).
+HOME="$H_SYS" \
+JUICE_ADDR="127.0.0.1:19876" \
+JUICE_BASE_URL="http://127.0.0.1:19876" \
+JUICE_BOOTSTRAP_PASSWORD="$SYS_PASS" \
+JUICE_ALLOW_LOCAL_SOURCES="true" \
+"$JUICE" --db "$DB" serve &
+LOCAL_KERNEL_PID=$!
+wait_ready "http://127.0.0.1:19876"
+
+# Log in as remote @sys so the remote CLI can authenticate for remote add.
+rj "$H_REMOTE_SYS" auth login --handle @sys --password "$REMOTE_SYS_PASS" >/dev/null 2>&1
+
+# Register local kernel on the remote so the remote can verify local's signatures.
+rj "$H_REMOTE_SYS" remote add "http://127.0.0.1:19876" >/dev/null 2>&1
 
 # @sys lists remote kernels — @127.0.0.1:19875 should appear.
 REMOTE_LIST=$(j "$H_SYS" remote list 2>&1)

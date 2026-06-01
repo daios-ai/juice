@@ -129,6 +129,11 @@ func (k *Kernel) ReadUserByHandle(ctx context.Context, handle string) (*User, er
 	return k.store.ReadUserByHandle(ctx, handle)
 }
 
+// ReadUserByPublicKey returns the user with the given base64url Ed25519 public key.
+func (k *Kernel) ReadUserByPublicKey(ctx context.Context, publicKey string) (*User, error) {
+	return k.store.ReadUserByPublicKey(ctx, publicKey)
+}
+
 // Login authenticates handle+password and returns a signed JWT.
 func (k *Kernel) Login(ctx context.Context, handle, password string) (string, error) {
 	u, err := k.store.ReadUserByHandle(ctx, handle)
@@ -1231,6 +1236,26 @@ func (k *Kernel) CreateIdempotencyRecord(ctx context.Context, r *IdempotencyReco
 	return k.store.CreateIdempotencyRecord(ctx, r)
 }
 
+// InsertPendingIdempotencyRecord inserts a record with status="pending" before execution.
+func (k *Kernel) InsertPendingIdempotencyRecord(ctx context.Context, r *IdempotencyRecord) error {
+	return k.store.InsertPendingIdempotencyRecord(ctx, r)
+}
+
+// CompleteIdempotencyRecord transitions a pending record to "complete" with the result.
+func (k *Kernel) CompleteIdempotencyRecord(ctx context.Context, id, resultJSON string) error {
+	return k.store.CompleteIdempotencyRecord(ctx, id, resultJSON)
+}
+
+// DeleteIdempotencyRecord removes a record to allow retry after execution failure.
+func (k *Kernel) DeleteIdempotencyRecord(ctx context.Context, id string) error {
+	return k.store.DeleteIdempotencyRecord(ctx, id)
+}
+
+// GetSigningKey returns the kernel's Ed25519 private signing key (nil until bootstrap).
+func (k *Kernel) GetSigningKey() Ed25519PrivateKey {
+	return k.cfg.SigningKey
+}
+
 // EmitEvent queues an event for all active listeners matching (sourceUserID, eventName).
 // It does NOT call the target action — the listener owner must call ConsumeEvent explicitly.
 // causingTraceID is stored as a FOLLOWS_FROM reference on each event record.
@@ -1553,11 +1578,17 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 	if m.ActionID == "" {
 		return nil, ErrInvalidInput.Wrap("manifest missing action_id")
 	}
-	// action param uses "@owner/name" format; counterparty identifies this kernel to the remote.
-	localHandle, _ := k.store.GetConfig(ctx, "superuser_handle")
+	// counterparty is this kernel's base64url Ed25519 public key so the remote can
+	// look it up by key (handle-based lookup would require knowing what handle the
+	// remote assigned to us, which we don't have without a round-trip).
+	localCounterparty := ""
+	if len(k.cfg.SigningKey) == ed25519.PrivateKeySize {
+		pub := k.cfg.SigningKey.Public().(ed25519.PublicKey)
+		localCounterparty = base64.RawURLEncoding.EncodeToString(pub)
+	}
 	source := strings.TrimRight(remoteUser.RemoteBaseURL, "/") +
 		"/v1/federation/call?action=" + url.QueryEscape(m.OwnerHandle+m.Name) +
-		"&counterparty=" + url.QueryEscape(localHandle)
+		"&counterparty=" + url.QueryEscape(localCounterparty)
 
 	// Reimport: if we already have an action for this remote action, update it.
 	if existing, err := k.store.ReadActionByOwnerRemoteID(ctx, remoteUserID, m.ActionID); err == nil {
@@ -1689,6 +1720,44 @@ func VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
 		return ErrUnauthorized.Wrap("manifest signature is invalid")
 	}
 	return nil
+}
+
+// VerifyFederationSignature verifies an Ed25519 signature over the canonical federation payload
+// {"action": action, "idempotency_key": idempotencyKey, "timestamp": timestamp}.
+func VerifyFederationSignature(pubKeyB64, action, idempotencyKey, timestamp, sigB64 string) error {
+	pub, err := decodeRemotePublicKey(pubKeyB64)
+	if err != nil {
+		return ErrUnauthenticated.Wrap("invalid counterparty public key")
+	}
+	payload, err := CanonicalJSON(map[string]string{
+		"action":          action,
+		"idempotency_key": idempotencyKey,
+		"timestamp":       timestamp,
+	})
+	if err != nil {
+		return ErrInternal.Wrapf("canonicalize federation payload: %v", err)
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
+	if err != nil || !ed25519.Verify(pub, payload, sig) {
+		return ErrUnauthenticated.Wrap("federation signature is invalid")
+	}
+	return nil
+}
+
+// SignFederationPayload creates a base64url Ed25519 signature over the canonical federation payload.
+func SignFederationPayload(key Ed25519PrivateKey, action, idempotencyKey, timestamp string) (string, error) {
+	if len(key) != ed25519.PrivateKeySize {
+		return "", ErrInvalidState.Wrap("signing key is not configured")
+	}
+	payload, err := CanonicalJSON(map[string]string{
+		"action":          action,
+		"idempotency_key": idempotencyKey,
+		"timestamp":       timestamp,
+	})
+	if err != nil {
+		return "", ErrInternal.Wrapf("canonicalize federation payload: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
 }
 
 type manifestPayload struct {

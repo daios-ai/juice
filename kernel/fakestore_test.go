@@ -1047,6 +1047,45 @@ func (f *fakeStore) CreateIdempotencyRecord(_ context.Context, r *IdempotencyRec
 	return nil
 }
 
+func (f *fakeStore) InsertPendingIdempotencyRecord(_ context.Context, r *IdempotencyRecord) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := r.IdempotencyKey + ":" + r.CounterpartyUserID
+	if _, exists := f.idempotencyRecords[key]; exists {
+		return fmt.Errorf("UNIQUE constraint failed: idempotency_records.idempotency_key, idempotency_records.counterparty_user_id")
+	}
+	cp := *r
+	cp.Status = "pending"
+	cp.ResultJSON = ""
+	f.idempotencyRecords[key] = &cp
+	return nil
+}
+
+func (f *fakeStore) CompleteIdempotencyRecord(_ context.Context, id, resultJSON string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.idempotencyRecords {
+		if r.ID == id {
+			r.Status = "complete"
+			r.ResultJSON = resultJSON
+			return nil
+		}
+	}
+	return ErrNotFound.Wrap("idempotency record not found")
+}
+
+func (f *fakeStore) DeleteIdempotencyRecord(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for k, r := range f.idempotencyRecords {
+		if r.ID == id {
+			delete(f.idempotencyRecords, k)
+			return nil
+		}
+	}
+	return ErrNotFound.Wrap("idempotency record not found")
+}
+
 func (f *fakeStore) ReadIdempotencyRecord(_ context.Context, key, counterpartyUserID string) (*IdempotencyRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
