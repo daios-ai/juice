@@ -1361,4 +1361,55 @@ func TestFederationCall(t *testing.T) {
 	if resp3.StatusCode != http.StatusOK {
 		t.Errorf("unregistered counterparty should still work for public action: expected 200, got %d", resp3.StatusCode)
 	}
+
+	// Missing action param returns 422.
+	resp4 := httpDo(t, srv, "POST", "/v1/federation/call", map[string]any{}, "")
+	resp4.Body.Close()
+	if resp4.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("missing action param: expected 422, got %d", resp4.StatusCode)
+	}
+}
+
+func TestFederationCallRejectsNonPublicAction(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a private inactive action owned by @sys.
+	a, err := k.CreateAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID:  sys.ID,
+		Name:         "/secret",
+		Kind:         kernel.KindHTTP,
+		Source:       "http://127.0.0.1:19871",
+		Price:        0,
+		Description:  "private",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Not activated, not public.
+
+	// Private inactive action is rejected.
+	resp := httpDo(t, srv, "POST", "/v1/federation/call?action=@sys/secret", map[string]any{}, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("private action: expected 403, got %d", resp.StatusCode)
+	}
+
+	// Activate but keep private — still rejected.
+	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	resp2 := httpDo(t, srv, "POST", "/v1/federation/call?action=@sys/secret", map[string]any{}, "")
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Errorf("active but private action: expected 403, got %d", resp2.StatusCode)
+	}
 }
