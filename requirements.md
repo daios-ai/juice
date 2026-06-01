@@ -16,16 +16,16 @@ Call(subject, process, action, args)
 
 Execution and supervision are separate layers:
 
-- **Execution:** `Call()` performs action invocation, fund locking, tracing, settlement, statistics, and receipts. Native actions, WASM `juice.call`, event consumption, and remote proxies must use it.
-- **Supervision:** direct authenticated kernel operations manage users, actions, processes, ACLs, ratings, and deposits. They must not route through `Call()`.
-- A subject must not rate its own output or trigger rating propagation from execution code.
+* **Execution:** `Call()` performs action invocation, fund locking, tracing, settlement, statistics, and receipts. Native actions, WASM `juice.call`, event consumption, and remote proxies must use it.
+* **Supervision:** direct authenticated kernel operations manage users, actions, processes, ACLs, ratings, deposits, OpenAPI imports, and remote imports. They must not route through `Call()`.
+* A subject must not rate its own output or trigger rating propagation from execution code.
 
 ## 2. Implementation constraints
 
-- Use Go. `go build ./...` and `go test ./...` must pass.
-- Use ordinary Go interfaces for replaceable modules.
-- `kernel` must not import CLI, HTTP, SQLite, wazero, or Ollama implementations.
-- Use only these function-named production packages unless a dependency-cycle or cohesion reason requires otherwise:
+* Use Go. `go build ./...` and `go test ./...` must pass.
+* Use ordinary Go interfaces for replaceable modules.
+* `kernel` must not import CLI, HTTP, SQLite, wazero, or Ollama implementations.
+* Use only these function-named production packages unless a dependency-cycle or cohesion reason requires otherwise:
 
 ```text
 cmd/juice/   CLI and server entrypoint
@@ -36,29 +36,29 @@ llm/         local language and embedding interface
 log/         structured logging
 ```
 
-- Architectural package names such as `sqlite`, `wazero`, or `ollama` are forbidden; implementation-specific names may appear in concrete types or file names.
-- Keep the package and source-file counts small. Do not split files for size alone. Every production source file must have a corresponding `_test.go` file with independent tests for its logic.
+* Architectural package names such as `sqlite`, `wazero`, or `ollama` are forbidden; implementation-specific names may appear in concrete types or file names.
+* Keep the package and source-file counts small. Do not split files for size alone. Every production source file must have a corresponding `_test.go` file with independent tests for its logic.
 
 ## 3. Data model
 
 All IDs are stable opaque identifiers; action IDs are globally unique. Credit balances and prices are non-negative integers; credits are indivisible.
 
-| Object | Required fields | Rules |
-|---|---|---|
-| `User` | `id`, `handle`, `email`, `available`, `locked`, `suspended_at`, `public_key`, `remote_base_url`, `created_at`, `updated_at` | `handle` is unique. A suspended user is rejected at every authenticated request with `ErrUnauthenticated`. `public_key`, when set, is a unique base64url Ed25519 32-byte public key. Local users have null `public_key` and `remote_base_url`; remote peers set both. |
-| `Action` | `id`, `owner_user_id`, `name`, `kind`, `active`, `public`, `price`, `description`, `input_schema`, `output_schema`, `source`, `artifact_hash`, `created_at`, `updated_at` | `kind ∈ {http, wasm, native}`. `(owner_user_id, name)` is unique. An `active=false` action is not callable by non-owners. Public discovery returns active actions only unless an owner requests private state. Authorized users may inspect script source. Compiled artifacts are content-addressed by `artifact_hash`. |
-| `ACLEntry` | `subject_user_id`, `action_id`, `permission`, `created_at` | `permission ∈ {read, call, admin}`. ACLs are direct user-to-action grants. `read` permits inspection; `call` permits execution; `admin` permits ACL and lifecycle changes. Owners implicitly have `admin`. |
-| `Process` | `id`, `owner_user_id`, `available`, `locked`, `status`, `created_at`, `ended_at` | `status ∈ {open, closed}`. A process starts with user-provided funds and may start with zero credits (`available = 0`). Closing it returns all remaining funds to its owner. Closed processes cannot execute calls. |
-| `Trace` | `id`, `process_id`, `parent_trace_id`, `caused_by_trace_id`, `cost`, `latency_ms`, `created_at` | Every process has one root trace. Choose one root convention consistently: `parent_trace_id = id` or `parent_trace_id = null`. Every direct `Call()` creates exactly one child trace. |
-| `Transaction` | `id`, `process_id`, `trace_id`, `parent_trace_id`, `owner_user_id`, `subject_user_id`, `target_user_id`, `action_id`, `args_json`, `reply_json`, `status`, `gross`, `net`, `fee`, `reason`, `remote_receipt_hash`, `started_at`, `ended_at` | `status ∈ {success, failure}`. Every attempted call creates one immutable transaction. `remote_receipt_hash` is null locally and stores `SHA-256(remote_receipt_json)` for cross-kernel calls. |
-| `Stats` | `uses`, `successes`, `failures`, `rating_count`, `price_mean`, `latency_mean`, `rating_mean`, `last_used_at` | Missing stats have defined defaults. `uses = successes + failures`. |
-| `StatTag` | `action_id`, `key`, `value`, `source`, `updated_at` | Optional, queryable for lookup experiments, and never required for kernel execution. Experimental tags are namespaced by source and never alter fixed-stat semantics. |
-| `Listener` | `id`, `owner_user_id`, `source_user_id`, `event_name`, `target_action_id`, `active`, `created_at` | A listener subscribes its owner to an exact `(source_user_id, event_name)` pair. |
-| `Event` | `id`, `listener_id`, `args_json`, `causing_trace_id`, `consumed_at`, `tx_id`, `created_at` | Persistent queued work item. `causing_trace_id` is nullable. |
-| `Deposit` | `id`, `operator_user_id`, `target_user_id`, `amount`, `reason`, `created_at` | Immutable audit record for a positive out-of-band superuser credit grant. |
-| `Receipt` | `id`, `issuer_user_id`, `tx_id`, `trace_id`, `action_id`, `args_hash`, `reply_hash`, `status`, `gross`, `net`, `fee`, `reason`, `created_at`, `signature` | Immutable signed record for exactly one committed call. |
-| `Rating` | `id`, `rated_tx_id`, `rated_receipt_id`, `rater_user_id`, `rating`, `created_at`, `signature` | Immutable signed feedback record. `rating ∈ {0, 1}`. At most one rating exists per transaction. `rated_receipt_id` may be null only for pre-receipt transactions. |
-| `IdempotencyRecord` | `id`, `idempotency_key`, `counterparty_user_id`, `receipt_id`, `created_at`, `expires_at` | Used only for cross-kernel calls. |
+| Object              | Required fields                                                                                                                                                                                                                             | Rules                                                                                                                                                                                                                                                                                                                   |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `User`              | `id`, `handle`, `email`, `available`, `locked`, `suspended_at`, `public_key`, `remote_base_url`, `created_at`, `updated_at`                                                                                                                 | `handle` is unique. A suspended user is rejected at every authenticated request with `ErrUnauthenticated`. `public_key`, when set, is a unique base64url Ed25519 32-byte public key. Local users have null `public_key` and `remote_base_url`; remote peers set both.                                                   |
+| `Action`            | `id`, `owner_user_id`, `name`, `kind`, `active`, `public`, `price`, `description`, `input_schema`, `output_schema`, `source`, `artifact_hash`, `created_at`, `updated_at`                                                                   | `kind ∈ {http, wasm, native}`. `(owner_user_id, name)` is unique. An `active=false` action is not callable by non-owners. Public discovery returns active actions only unless an owner requests private state. Authorized users may inspect script source. Compiled artifacts are content-addressed by `artifact_hash`. |
+| `ACLEntry`          | `subject_user_id`, `action_id`, `permission`, `created_at`                                                                                                                                                                                  | `permission ∈ {read, call, admin}`. ACLs are direct user-to-action grants. `read` permits inspection; `call` permits execution; `admin` permits ACL and lifecycle changes. Owners implicitly have `admin`.                                                                                                              |
+| `Process`           | `id`, `owner_user_id`, `available`, `locked`, `status`, `created_at`, `ended_at`                                                                                                                                                            | `status ∈ {open, closed}`. A process starts with user-provided funds and may start with zero credits (`available = 0`). Closing it returns all remaining funds to its owner. Closed processes cannot execute calls.                                                                                                     |
+| `Trace`             | `id`, `process_id`, `parent_trace_id`, `caused_by_trace_id`, `cost`, `latency_ms`, `created_at`                                                                                                                                             | Every process has one root trace. Choose one root convention consistently: `parent_trace_id = id` or `parent_trace_id = null`. Every direct `Call()` creates exactly one child trace.                                                                                                                                   |
+| `Transaction`       | `id`, `process_id`, `trace_id`, `parent_trace_id`, `owner_user_id`, `subject_user_id`, `target_user_id`, `action_id`, `args_json`, `reply_json`, `status`, `gross`, `net`, `fee`, `reason`, `remote_receipt_hash`, `started_at`, `ended_at` | `status ∈ {success, failure}`. Every attempted call creates one immutable transaction. `remote_receipt_hash` is null locally and stores `SHA-256(remote_receipt_json)` for cross-kernel calls.                                                                                                                          |
+| `Stats`             | `uses`, `successes`, `failures`, `rating_count`, `price_mean`, `latency_mean`, `rating_mean`, `last_used_at`                                                                                                                                | Missing stats have defined defaults. `uses = successes + failures`.                                                                                                                                                                                                                                                     |
+| `StatTag`           | `action_id`, `key`, `value`, `source`, `updated_at`                                                                                                                                                                                         | Optional, queryable for lookup experiments, and never required for kernel execution. Experimental tags are namespaced by source and never alter fixed-stat semantics.                                                                                                                                                   |
+| `Listener`          | `id`, `owner_user_id`, `source_user_id`, `event_name`, `target_action_id`, `active`, `created_at`                                                                                                                                           | A listener subscribes its owner to an exact `(source_user_id, event_name)` pair.                                                                                                                                                                                                                                        |
+| `Event`             | `id`, `listener_id`, `args_json`, `causing_trace_id`, `consumed_at`, `tx_id`, `created_at`                                                                                                                                                  | Persistent queued work item. `causing_trace_id` is nullable.                                                                                                                                                                                                                                                            |
+| `Deposit`           | `id`, `operator_user_id`, `target_user_id`, `amount`, `reason`, `created_at`                                                                                                                                                                | Immutable audit record for a positive out-of-band superuser credit grant.                                                                                                                                                                                                                                               |
+| `Receipt`           | `id`, `issuer_user_id`, `tx_id`, `trace_id`, `action_id`, `args_hash`, `reply_hash`, `status`, `gross`, `net`, `fee`, `reason`, `created_at`, `signature`                                                                                   | Immutable signed record for exactly one committed call.                                                                                                                                                                                                                                                                 |
+| `Rating`            | `id`, `rated_tx_id`, `rated_receipt_id`, `rater_user_id`, `rating`, `created_at`, `signature`                                                                                                                                               | Immutable signed feedback record. `rating ∈ {0, 1}`. At most one rating exists per transaction. `rated_receipt_id` may be null only for pre-receipt transactions.                                                                                                                                                       |
+| `IdempotencyRecord` | `id`, `idempotency_key`, `counterparty_user_id`, `receipt_id`, `created_at`, `expires_at`                                                                                                                                                   | Used only for cross-kernel calls.                                                                                                                                                                                                                                                                                       |
 
 ### 3.1 ACL rule
 
@@ -70,22 +70,28 @@ CanCall(u, a) := Active(a) ∧ (Owner(u, a) ∨ Public(a) ∨ ACL(u, a, call) �
 
 `public` is stored directly on the action. Grant-all and revoke-all toggle this flag without replacing direct ACL entries; only the owner or an action admin may invoke them.
 
+For `http` actions, `source.type ∈ {direct, openapi, remote_proxy}`. This field determines HTTP execution configuration and import provenance only; it does not create a separate action kind or execution path.
+
+OpenAPI registration and federation do not create durable objects parallel to `Action`. They are supervision procedures that create or update ordinary `Action` rows. Execution always proceeds through `Call()`.
+
+Every active action must have a non-empty natural-language `description`, a valid `input_schema`, and a valid `output_schema`. Schemas used for active actions must contain enough field descriptions to support lookup and LLM function calling.
+
 ### 3.2 Trace relationships
 
-| Field | Relation | Scope | Use |
-|---|---|---|---|
-| `parent_trace_id` | `CHILD_OF` | Same process only | Direct calls within a process |
-| `caused_by_trace_id` | `FOLLOWS_FROM` | Cross-process | Contractor sub-calls and event-triggered calls |
+| Field                | Relation       | Scope             | Use                                            |
+| -------------------- | -------------- | ----------------- | ---------------------------------------------- |
+| `parent_trace_id`    | `CHILD_OF`     | Same process only | Direct calls within a process                  |
+| `caused_by_trace_id` | `FOLLOWS_FROM` | Cross-process     | Contractor sub-calls and event-triggered calls |
 
 Rules:
 
-- A child inherits its parent's `process_id`; trace trees are rooted per process. Every transaction references a trace. Trace lookup by process returns the execution tree; trace deletion never deletes transaction history.
-- The kernel must reject a missing or cross-process supplied `parent_trace_id` with `ErrInvalidInput`.
-- Direct calls have null `caused_by_trace_id`.
-- Contractor ephemeral-process roots set `caused_by_trace_id` to the calling action trace.
-- Event-triggered calls set `caused_by_trace_id` to the emitter trace stored at emit time.
-- `caused_by_trace_id` must never be treated as `parent_trace_id`.
-- Each completed descendant transaction updates ancestor `cost` and `latency_ms` automatically. The originating trace of a `FOLLOWS_FROM` relationship may already be closed; the referenced trace belongs to a different process.
+* A child inherits its parent's `process_id`; trace trees are rooted per process. Every transaction references a trace. Trace lookup by process returns the execution tree; trace deletion never deletes transaction history.
+* The kernel must reject a missing or cross-process supplied `parent_trace_id` with `ErrInvalidInput`.
+* Direct calls have null `caused_by_trace_id`.
+* Contractor ephemeral-process roots set `caused_by_trace_id` to the calling action trace.
+* Event-triggered calls set `caused_by_trace_id` to the emitter trace stored at emit time.
+* `caused_by_trace_id` must never be treated as `parent_trace_id`.
+* Each completed descendant transaction updates ancestor `cost` and `latency_ms` automatically. The originating trace of a `FOLLOWS_FROM` relationship may already be closed; the referenced trace belongs to a different process.
 
 ```text
 ∀ child. child.process_id = parent(child).process_id
@@ -116,15 +122,15 @@ CreateIdempotencyRecord ReadIdempotencyRecord
 
 All monetary transitions occur inside SQLite transactions. Each operation must atomically include:
 
-| Operation | Atomic writes |
-|---|---|
-| Start process | user debit, process creation, root trace creation |
-| Fund process | user debit, process credit |
+| Operation       | Atomic writes                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------------ |
+| Start process   | user debit, process creation, root trace creation                                                |
+| Fund process    | user debit, process credit                                                                       |
 | Successful call | transaction, receipt, locked-fund settlement, target payment, platform fee, trace metrics, stats |
-| Failed call | transaction, receipt, full refund, trace metrics, stats |
-| End process | process closure, return of remaining owner funds |
-| Deposit | user credit, deposit record |
-| Rating | rating record insert |
+| Failed call     | transaction, receipt, full refund, trace metrics, stats                                          |
+| End process     | process closure, return of remaining owner funds                                                 |
+| Deposit         | user credit, deposit record                                                                      |
+| Rating          | rating record insert                                                                             |
 
 A committed monetary transition must never exist without its audit record, or vice versa.
 
@@ -174,7 +180,7 @@ Zero-credit processes may execute actions with `price = 0` because `available >=
 
 ### 5.3 Settlement
 
-Only successful calls are charged in v1. Fee applies to value added only (VAT model):
+Only successful calls are charged in v1. Fee applies to value added only:
 
 ```text
 gross       = action.price
@@ -209,12 +215,12 @@ close ephemeral process and return unused funds
 
 Rules:
 
-- The caller's process pays only the top-level action price.
-- Each recursive action owner pays for its own direct sub-calls.
-- The ephemeral root's causal link is `FOLLOWS_FROM`, not `CHILD_OF`.
-- Insufficient owner funds fail the sub-call and propagate failure to the top-level call; the original caller is fully refunded.
-- Previously settled descendant costs are not reversed.
-- Ephemeral processes are always closed after completion.
+* The caller's process pays only the top-level action price.
+* Each recursive action owner pays for its own direct sub-calls.
+* The ephemeral root's causal link is `FOLLOWS_FROM`, not `CHILD_OF`.
+* Insufficient owner funds fail the sub-call and propagate failure to the top-level call; the original caller is fully refunded.
+* Previously settled descendant costs are not reversed.
+* Ephemeral processes are always closed after completion.
 
 ```text
 caller.process.available decreases by at most action.price per call, regardless of sub-call depth or cost
@@ -222,13 +228,95 @@ caller.process.available decreases by at most action.price per call, regardless 
 
 ## 6. Action lifecycle
 
-| Operation | Rules |
-|---|---|
-| Create | Create inactive by default. Validate owner, name, kind, non-negative price, description, schemas, and source. WASM creation validates or compiles its artifact. HTTP creation validates endpoint configuration without calling the endpoint unless explicitly requested. Reject non-HTTP(S), loopback, private IP ranges (RFC 1918), and link-local (`169.254.x.x`) source URLs at creation and activation. Normal `CreateAction` always rejects `Kind=native`; bootstrap uses `RegisterNativeAction` instead. |
-| Activate | Require owner or admin. Initialize stats if absent. Reject invalid schema, missing source, invalid artifact, invalid HTTP URL, or invalid runtime configuration. |
-| Update | Require owner or admin. Updating source, schema, kind, price, or endpoint deactivates unless explicitly marked safe. Recompute WASM `artifact_hash`; retain prior source and hash in transaction history. |
-| Delete | Require owner or admin. Disable discovery, remove ACL entries, and preserve historical transactions; soft deletion is permitted. |
-| Native | Register programmatically during bootstrap only, owned by `@sys`. Regular users cannot create, update, or delete native actions. |
+| Operation | Rules                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Create    | Create inactive by default. Validate owner, name, kind, non-negative price, description, schemas, and source. WASM creation validates or compiles its artifact. HTTP creation validates endpoint configuration without calling the endpoint unless explicitly requested. Reject non-HTTP(S), loopback, private IP ranges (RFC 1918), and link-local (`169.254.x.x`) source URLs at creation and activation. Normal `CreateAction` always rejects `Kind=native`; bootstrap uses `RegisterNativeAction` instead. |
+| Activate  | Require owner or admin. Initialize stats if absent. Reject invalid schema, missing source, invalid artifact, invalid HTTP URL, or invalid runtime configuration.                                                                                                                                                                                                                                                                                                                                               |
+| Update    | Require owner or admin. Updating source, schema, kind, price, or endpoint deactivates unless explicitly marked safe. Recompute WASM `artifact_hash`; retain prior source and hash in transaction history.                                                                                                                                                                                                                                                                                                      |
+| Delete    | Require owner or admin. Disable discovery, remove ACL entries, and preserve historical transactions; soft deletion is permitted.                                                                                                                                                                                                                                                                                                                                                                               |
+| Native    | Register programmatically during bootstrap only, owned by `@sys`. Regular users cannot create, update, or delete native actions.                                                                                                                                                                                                                                                                                                                                                                               |
+
+### 6.1 OpenAPI registration
+
+OpenAPI registration is a supervision operation. It imports HTTP operations as ordinary inactive `Action` rows with `kind = http` and `source.type = openapi`.
+
+OpenAPI import accepts any operation representable as:
+
+```text
+Call(args: JSON object) -> JSON object
+```
+
+GET, POST, PUT, PATCH, and DELETE operations may be imported. The HTTP method is stored in `Action.source`; it is not part of `Call()` semantics.
+
+An imported OpenAPI operation must provide, or be rejected or kept inactive with validation messages:
+
+```text
+operationId or x-juice-name
+description or summary
+parameters and/or requestBody schema
+2xx JSON response schema
+x-juice-price, defaulting to 0 when absent
+```
+
+Path parameters, query parameters, and JSON request-body fields are compiled into one canonical `input_schema`. The selected 2xx JSON response schema becomes `output_schema`. Non-JSON responses, streaming responses, multipart uploads, ambiguous success schemas, unsafe URLs, and unsupported authentication must not produce active actions.
+
+Ratings and stats are never imported from OpenAPI.
+
+Draft import may occur without API ownership proof. Public activation, `grant-all`, or any operation that makes the action callable by users other than the owner requires API ownership proof. Accepted proof mechanisms are:
+
+```text
+well-known challenge
+challenge embedded in the OpenAPI document
+verified credential supplied by the owner
+```
+
+OpenAPI provenance is stored in `Action.source`:
+
+```json
+{
+  "type": "openapi",
+  "spec_url": "...",
+  "base_url": "...",
+  "method": "...",
+  "path": "...",
+  "operation_key": "...",
+  "operation_hash": "..."
+}
+```
+
+`operation_key` is `x-juice-name` when present, otherwise `operationId`, otherwise a canonical derivation from method and path.
+
+Reimport matches only:
+
+```text
+owner_user_id + source.type + source.spec_url + source.operation_key
+```
+
+Reimport must not affect manual actions or actions imported from another server.
+
+Reimport policy:
+
+| Case                                | Result                                                              |
+| ----------------------------------- | ------------------------------------------------------------------- |
+| imported action unchanged           | preserve active state and stats                                     |
+| any imported contract field changed | update action, deactivate, refresh lookup data, reset current stats |
+| operation removed                   | deactivate, do not delete, reset current stats                      |
+| new operation                       | create inactive action                                              |
+| name collision with manual action   | reject                                                              |
+
+An imported contract field includes description, method, path, parameter bindings, input schema, output schema, selected response, price, and execution source.
+
+`operation_hash` covers the imported contract fields. It excludes stats, ratings, timestamps, and formatting. Reimport preserves `Action.id` for matched actions so transaction and receipt history remain attached.
+
+OpenAPI webhooks are not imported as actions. They describe HTTP requests sent to Juice, not callable operations. Supporting them requires event-ingress configuration that validates the incoming payload and then calls `EmitEvent`; it must not bypass the normal listener and consume flow.
+
+Unimporting OpenAPI actions deactivates matching actions; it does not delete them. It matches:
+
+```text
+owner_user_id + source.type=openapi + source.spec_url
+```
+
+For a single operation, it also matches `Action.name` or `source.operation_key`. Unimporting may remove ACL entries for the deactivated actions, but it must not delete transaction, receipt, rating, or trace history.
 
 ## 7. Adapters
 
@@ -263,10 +351,10 @@ Tests use fake embedding and chat implementations.
 
 ### 7.3 Native lookup and chat
 
-| Native action | Rules |
-|---|---|
-| `@sys/lookup` | Public, grant-all, and callable only through `Call()`. Rank active actions for a natural-language query using an explicit tested formula combining semantic similarity and action statistics. Ranking storage is replaceable; brute-force cosine similarity over stored embeddings is acceptable. Input: required string `query`, optional integer `limit` defaulting to `10`. Output: `results[]` with `action_id`, `name`, `owner_handle`, `description`, and numeric `score`. Direct lookup exists only for platform diagnostics and is not exposed through user-facing APIs or WASM hosts. |
-| `@sys/llm/chat` | Public, grant-all, and callable through `Call()`. Input: required `messages[]` of `{role, content}` plus optional prepended string `system`. Output: `message` object with `role` and `content`. Return `ErrInvalidState` if chat is unconfigured. |
+| Native action   | Rules                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@sys/lookup`   | Public, grant-all, and callable only through `Call()`. Rank active actions for a natural-language query using an explicit tested formula combining semantic similarity and action statistics. Ranking storage is replaceable; brute-force cosine similarity over stored embeddings is acceptable. Input: required string `query`, optional integer `limit` defaulting to `10`. Output: `results[]` with `action_id`, `name`, `owner_handle`, `description`, and numeric `score`. Direct lookup exists only for platform diagnostics and is not exposed through user-facing APIs or WASM hosts. |
+| `@sys/llm/chat` | Public, grant-all, and callable through `Call()`. Input: required `messages[]` of `{role, content}` plus optional prepended string `system`. Output: `message` object with `role` and `content`. Return `ErrInvalidState` if chat is unconfigured.                                                                                                                                                                                                                                                                                                                                             |
 
 ### 7.4 Statistics
 
@@ -276,9 +364,11 @@ Use incremental means:
 mean_(n+1) = mean_n + (x_(n+1) - mean_n) / (n + 1)
 ```
 
-- `price_mean`: successful calls only; denominator `successes`.
-- `latency_mean`: completed calls; denominator `uses`.
-- `rating_mean`: rated calls only; denominator `rating_count`, never `uses`.
+* `price_mean`: successful calls only; denominator `successes`.
+* `latency_mean`: completed calls; denominator `uses`.
+* `rating_mean`: rated calls only; denominator `rating_count`, never `uses`.
+
+Resetting current stats means writing the defined missing-stat defaults for that action. It does not alter transactions, receipts, ratings, or trace history.
 
 ## 8. Events
 
@@ -290,11 +380,11 @@ Creating a listener requires authenticated owner authority, an existing source u
 
 ### 8.2 Queue states and consume
 
-| State | Condition |
-|---|---|
-| Pending | `consumed_at = null` |
-| In-flight | `consumed_at != null ∧ tx_id = null` |
-| Consumed | `consumed_at != null ∧ tx_id != null` |
+| State     | Condition                             |
+| --------- | ------------------------------------- |
+| Pending   | `consumed_at = null`                  |
+| In-flight | `consumed_at != null ∧ tx_id = null`  |
+| Consumed  | `consumed_at != null ∧ tx_id != null` |
 
 Only the listener owner may consume; the source user may not consume unless also the owner. Consumption atomically locks a pending event, then invokes the normal call path using the supplied `process_id`, stored `args_json`, and stored `causing_trace_id` as `FOLLOWS_FROM`. Success stores the resulting `tx_id`; failure resets the event to pending. Reject inactive listeners and already-consumed events with `ErrInvalidState`. Delivery is at-least-once; the lock prevents concurrent double-processing. Startup resets in-flight events to pending.
 
@@ -306,8 +396,8 @@ Polling returns pending events with `id`, `args_json`, `causing_trace_id`, and `
 
 Every transaction references a trace. Trace lookup by process returns its execution tree; trace deletion must not remove transaction history. Every process and trace maintains cumulative cost and wall-clock latency aggregates automatically as transactions complete; no separate subtree-metric query is required. On descendant completion:
 
-- `trace.cost` is the sum of descendant transaction gross amounts.
-- `trace.latency_ms` is wall-clock elapsed time from trace creation until the latest descendant completion.
+* `trace.cost` is the sum of descendant transaction gross amounts.
+* `trace.latency_ms` is wall-clock elapsed time from trace creation until the latest descendant completion.
 
 Only the direct buyer (`tx.owner_user_id`'s process owner) may call `RateTransaction(tx_id, rating)` with `rating ∈ {0, 1}`; any other subject returns `ErrUnauthorized`. Rating is a supervision operation and must not route through `Call()`. Ratings are immutable rows; transaction rows never change. A duplicate rating returns `ErrInvalidInput`. Ratings do not cascade; each rating applies only to the rated transaction. Update stats accordingly.
 
@@ -319,11 +409,11 @@ Every committed success or failure has exactly one immutable receipt:
 ∀ committed call. ∃ exactly one receipt r. r.tx_id = call.tx_id
 ```
 
-- `issuer_user_id` is the local `@sys` user.
-- `args_hash` and `reply_hash` are SHA-256 hashes of RFC 8785 JCS canonical `args_json` and `reply_json`.
-- Receipt economic fields exactly match the transaction.
-- `signature` is the platform Ed25519 signature over canonical receipt JSON excluding `signature`.
-- Transaction and receipt creation are atomic in both `CommitCall` and `CommitFailedCall`.
+* `issuer_user_id` is the local `@sys` user.
+* `args_hash` and `reply_hash` are SHA-256 hashes of RFC 8785 JCS canonical `args_json` and `reply_json`.
+* Receipt economic fields exactly match the transaction.
+* `signature` is the platform Ed25519 signature over canonical receipt JSON excluding `signature`.
+* Transaction and receipt creation are atomic in both `CommitCall` and `CommitFailedCall`.
 
 ### 9.3 Signed JSON
 
@@ -389,21 +479,58 @@ Discovery is manual only:
 ```text
 juice remote add <url>                       fetch and validate <url>/.well-known/juice-kernel.json
 juice remote list                            list registered peers
-juice remote import <remote-handle> <action-name>   fetch signed manifest and create local http proxy action (kind = http)
+juice remote import <remote-handle> <action-name>   fetch signed manifest and create local http proxy action
+juice remote reimport <remote-handle> <action-name> re-fetch manifest and apply reimport policy
+juice remote unimport <remote-handle> <action-name> deactivate local proxy action
 ```
 
 No gossip or crawling exists in v1. Imported actions are local `http` actions owned by the remote-user record.
+
+Remote imports create ordinary `Action` rows with `kind = http` and `source.type = remote_proxy`. They do not expose or copy the remote action's internal implementation. The remote action may be implemented as HTTP, WASM, native, or an OpenAPI-imported action on the remote kernel.
 
 ### 12.2 Action manifests
 
 Only active public actions have signed manifests. Required fields:
 
 ```text
-owner_handle name description input_schema output_schema price kind
+action_id owner_handle name description input_schema output_schema price kind
 artifact_hash stats updated_at signature
 ```
 
 `artifact_hash` matches `action.artifact_hash`; `stats` is a fixed-stat snapshot; `signature` is the platform Ed25519 signature over canonical JSON excluding `signature`.
+
+Manifest descriptions and schemas are the canonical interface used by importing kernels for lookup and LLM function calling.
+
+A local remote-proxy action stores:
+
+```json
+{
+  "type": "remote_proxy",
+  "remote_user_id": "...",
+  "remote_action_id": "...",
+  "manifest_hash": "..."
+}
+```
+
+Federated reimport matches by:
+
+```text
+remote_user_id + remote_action_id
+```
+
+Federated reimport policy:
+
+| Case                                      | Result                                                                          |
+| ----------------------------------------- | ------------------------------------------------------------------------------- |
+| manifest unchanged                        | preserve active state and local stats                                           |
+| any manifest contract field changed       | update proxy action, deactivate, refresh lookup data, reset current local stats |
+| signature invalid                         | reject                                                                          |
+| remote action disappeared                 | deactivate, do not delete, reset current local stats                            |
+| remote action lost active or public state | deactivate, reset current local stats                                           |
+
+Manifest contract fields include description, input schema, output schema, price, kind, artifact hash, and execution identity. Manifest stats do not overwrite local `Stats`. They may be stored as `StatTag` entries with source `remote_manifest` and used by lookup experiments.
+
+Unimporting a remote action deactivates the local proxy action. It does not contact the remote kernel, delete history, or affect the remote action.
 
 Expose:
 
@@ -433,6 +560,8 @@ juice action delete                       juice action enable
 juice action disable                      juice action list
 juice action acl grant                    juice action acl revoke
 juice action grant-all                    juice action revoke-all
+juice action import                       juice action reimport
+juice action unimport
 juice process start                       juice process list
 juice process show                        juice process fund
 juice process end                         juice call
@@ -448,7 +577,17 @@ juice admin user deposit                  juice admin action list
 juice admin action disable                juice admin process list
 juice admin tx list
 juice remote add                          juice remote list
-juice remote import
+juice remote import                       juice remote reimport
+juice remote unimport
+```
+
+OpenAPI action import uses:
+
+```text
+juice action import --openapi <spec-url>
+juice action reimport --openapi <spec-url>
+juice action unimport --openapi <spec-url>
+juice action unimport --openapi <spec-url> --name <action-name>
 ```
 
 The HTTP API is primary. Every exposed endpoint has a corresponding CLI command. The server uses the shared kernel layer, propagates request, subject, process, trace, action, and transaction IDs into logs where available, maps authentication failure, authorization failure, invalid input, insufficient funds, missing resource, and internal failure to distinct HTTP statuses, and rate-limits authentication and account-creation endpoints per IP with HTTP `429` on excess.
@@ -469,18 +608,21 @@ juice admin tx list
 
 Required endpoint behavior:
 
-| Endpoint | Rule |
-|---|---|
-| `GET /health` | Unauthenticated server status; CLI: `juice health`. |
-| `GET /v1/me` | Authenticated subject profile: `id`, `handle`, `email`, `available`, `locked`; reject suspended users before handler. |
-| `PUT /v1/actions/{id}` | Owner or action admin; apply update/deactivation rules. |
-| `DELETE /v1/actions/{id}` | Owner or action admin; preserve transaction history. |
-| `POST /v1/actions/{id}/grant-all` | Owner or action admin; CLI: `juice action grant-all --id`. |
-| `POST /v1/actions/{id}/revoke-all` | Owner or action admin; CLI: `juice action revoke-all --id`. |
-| `GET /v1/processes` | Authenticated owner's processes ordered by descending `created_at`. |
-| `GET /v1/listeners` | Authenticated owner's listeners. |
-| `GET /v1/listeners/{id}/events` | Listener owner or source; return pending event fields. |
-| `POST /v1/auth/logout` | Accept refresh token in body, revoke it, and return `ErrUnauthenticated` for missing or already-revoked tokens. |
+| Endpoint                           | Rule                                                                                                                                        |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /health`                      | Unauthenticated server status; CLI: `juice health`.                                                                                         |
+| `GET /v1/me`                       | Authenticated subject profile: `id`, `handle`, `email`, `available`, `locked`; reject suspended users before handler.                       |
+| `PUT /v1/actions/{id}`             | Owner or action admin; apply update/deactivation rules.                                                                                     |
+| `DELETE /v1/actions/{id}`          | Owner or action admin; preserve transaction history.                                                                                        |
+| `POST /v1/actions/{id}/grant-all`  | Owner or action admin; CLI: `juice action grant-all --id`.                                                                                  |
+| `POST /v1/actions/{id}/revoke-all` | Owner or action admin; CLI: `juice action revoke-all --id`.                                                                                 |
+| `POST /v1/actions/import`          | Authenticated supervision operation; imports supported OpenAPI operations as inactive `http` actions when called with OpenAPI import input. |
+| `POST /v1/actions/reimport`        | Owner or action admin; applies OpenAPI reimport policy only to actions with matching OpenAPI provenance.                                    |
+| `POST /v1/actions/unimport`        | Owner or action admin; deactivates actions with matching import provenance without deleting history.                                        |
+| `GET /v1/processes`                | Authenticated owner's processes ordered by descending `created_at`.                                                                         |
+| `GET /v1/listeners`                | Authenticated owner's listeners.                                                                                                            |
+| `GET /v1/listeners/{id}/events`    | Listener owner or source; return pending event fields.                                                                                      |
+| `POST /v1/auth/logout`             | Accept refresh token in body, revoke it, and return `ErrUnauthenticated` for missing or already-revoked tokens.                             |
 
 ## 14. Logging and configuration
 
@@ -537,7 +679,7 @@ superuser first-boot prompt and config storage
 suspended user rejected at authentication
 direct buyer can rate transaction
 non-buyer cannot rate transaction
-contractor sub-call has fee = 0, contractor receives full price
+contractor sub-call taxed on value added only (VAT model)
 trace cost and latency updated on transaction completion
 native action callable through Call()
 non-superuser rejected from admin CLI commands
@@ -567,6 +709,15 @@ zero-credit process satisfies fund locking for zero-price actions
 Kernel.Deposit rejected with ErrUnauthorized for non-superuser caller
 receipt created atomically with successful transaction commit
 receipt created atomically with failed transaction commit
+OpenAPI import/reimport/unimport flow for API-owned actions
+OpenAPI import compiles parameters and JSON body into one input schema
+OpenAPI activation rejects incomplete schemas or missing descriptions
+OpenAPI public activation requires ownership proof
+OpenAPI reimport affects only matching OpenAPI-provenance actions
+OpenAPI reimport preserves Action.id, deactivates on contract change, and resets current stats
+OpenAPI webhooks enter through event ingress, not actions
+remote import/reimport/unimport flow for signed manifests
+remote reimport preserves Action.id, deactivates on manifest contract change, and does not overwrite local Stats
 ```
 
 Direct invariant tests:
@@ -596,23 +747,41 @@ consumed events never appear in ListPendingEvents
 pending events are absent after listener deletion
 transaction row is immutable after commit (no field updated post-creation)
 rating records reference valid tx_id and receipt_id
+imported action reimport or unimport never deletes transaction or receipt history
+imported action current stats reset never mutates transaction, receipt, or rating rows
+OpenAPI and remote imports create ordinary Actions, not separate action types
+all imported actions execute only through Call()
+```
+
+Required user-flow tests:
+
+```text
+API owner imports an OpenAPI document, activates an action, grants public call access, and a caller executes it through Call()
+API owner reimports a changed OpenAPI document; the matched action is deactivated, stats reset, and historical transactions remain attached
+API owner unimports an OpenAPI document; matching actions are deactivated and history remains attached
+remote kernel is added, a signed manifest is imported, a caller executes the proxy through Call(), and local stats remain separate from manifest stats
+remote proxy is unimported; the local proxy is deactivated and the remote kernel is unaffected
 ```
 
 ## 16. Design rationale
 
 These constraints preserve the original design intent:
 
-| Decision | Rationale |
-|---|---|
-| Stable kernel interfaces and explicit transitions | Kernel correctness must not depend on a transport or adapter. |
-| Small function-named package and file set with per-file tests | Lower coupling, replaceable implementations, and visible coverage gaps. |
-| Separate execution and supervision layers | Execution can be wrong; supervision supplies a correction signal that execution must not manipulate. |
-| Lock credits before execution | No action runs without reserving its budget. |
-| Full refund on v1 failures | Conservative, observable, and testable accounting separates execution failure from settlement. |
-| Validate input before lock and output before settlement | Invalid requests are not charged and malformed replies are not paid. |
-| Mediated WASM authority | Scripts compose kernel operations without bypassing authorization or exfiltrating reusable credentials. |
-| Replaceable lookup ranking | Research experiments can change ranking without changing kernel semantics. |
-| Incremental fixed statistics plus optional tags | Deterministic baseline metrics remain stable while experiments stay isolated; later risk-averse updates belong in experimental tags or lookup features. |
-| Automatic trace aggregates | Downstream cost and latency remain continuously visible without separate subtree queries. |
-| Fixed `@sys` handle and signing keypair | System actions are stably addressable and the installation can issue verifiable receipts and manifests. |
-| Structured terminal and file logs | Production operation and research reproduction require reconstructable execution records. |
+| Decision                                                      | Rationale                                                                                                                                               |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Stable kernel interfaces and explicit transitions             | Kernel correctness must not depend on a transport or adapter.                                                                                           |
+| Small function-named package and file set with per-file tests | Lower coupling, replaceable implementations, and visible coverage gaps.                                                                                 |
+| Separate execution and supervision layers                     | Execution can be wrong; supervision supplies a correction signal that execution must not manipulate.                                                    |
+| Lock credits before execution                                 | No action runs without reserving its budget.                                                                                                            |
+| Full refund on v1 failures                                    | Conservative, observable, and testable accounting separates execution failure from settlement.                                                          |
+| Validate input before lock and output before settlement       | Invalid requests are not charged and malformed replies are not paid.                                                                                    |
+| Mediated WASM authority                                       | Scripts compose kernel operations without bypassing authorization or exfiltrating reusable credentials.                                                 |
+| Replaceable lookup ranking                                    | Research experiments can change ranking without changing kernel semantics.                                                                              |
+| Incremental fixed statistics plus optional tags               | Deterministic baseline metrics remain stable while experiments stay isolated; later risk-averse updates belong in experimental tags or lookup features. |
+| Automatic trace aggregates                                    | Downstream cost and latency remain continuously visible without separate subtree queries.                                                               |
+| Fixed `@sys` handle and signing keypair                       | System actions are stably addressable and the installation can issue verifiable receipts and manifests.                                                 |
+| Structured terminal and file logs                             | Production operation and research reproduction require reconstructable execution records.                                                               |
+| OpenAPI import as action supervision                          | API registration remains low-friction while execution remains uniform.                                                                                  |
+| Federation as signed action import                            | Remote kernels expose action contracts without leaking implementation details.                                                                          |
+| Deactivation on imported contract changes                     | Callers and LLMs never silently use a changed callable contract.                                                                                        |
+| Unimport as deactivation                                      | Historical transactions, receipts, ratings, and traces remain auditable.                                                                                |
