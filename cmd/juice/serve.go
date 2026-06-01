@@ -1024,41 +1024,22 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 	defer s.kernel.EndProcess(ctx, counterparty.ID, proc.ID)
 
 	reply, callErr := s.kernel.Call(ctx, kernel.CallRequest{
-		SubjectID:    counterparty.ID,
-		ProcessID:    proc.ID,
-		TargetUserID: owner.ID,
-		ActionName:   actionName,
-		Args:         args,
+		SubjectID:           counterparty.ID,
+		ProcessID:           proc.ID,
+		TargetUserID:        owner.ID,
+		ActionName:          actionName,
+		Args:                args,
+		IdempotencyRecordID: rec.ID,
 	})
 	if callErr != nil {
-		// Call() commits a failure transaction+receipt after trace creation, so complete
-		// the record rather than delete it — a retry must not re-execute a committed call.
-		errResult, _ := json.Marshal(map[string]string{"error": callErr.Error()})
-		if completeErr := s.kernel.CompleteIdempotencyRecord(ctx, rec.ID, string(errResult), ""); completeErr != nil {
-			s.log.With(ctx).Error("federation.complete_idempotency_failed_call", "error", completeErr)
-			_ = s.kernel.DeleteIdempotencyRecord(ctx, rec.ID)
-		}
 		writeErr(w, callErr)
 		return
 	}
 
-	// Fetch receipt before completing the idempotency record so replays can return it.
+	// Fetch receipt for the response (idempotency record was already completed atomically in CommitCall).
 	var receipt *kernel.Receipt
-	var receiptJSON string
 	if reply.TxID != "" {
 		receipt, _ = s.kernel.GetReceiptByTxID(ctx, reply.TxID)
-		if receipt != nil {
-			b, _ := json.Marshal(receipt)
-			receiptJSON = string(b)
-		}
-	}
-
-	// Complete idempotency record; retry once on transient failure.
-	resultJSON, _ := json.Marshal(reply.Result)
-	if err := s.kernel.CompleteIdempotencyRecord(ctx, rec.ID, string(resultJSON), receiptJSON); err != nil {
-		if err2 := s.kernel.CompleteIdempotencyRecord(ctx, rec.ID, string(resultJSON), receiptJSON); err2 != nil {
-			s.log.With(ctx).Error("federation.complete_idempotency_failed", "error", err2)
-		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"result": reply.Result, "receipt": receipt})

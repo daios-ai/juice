@@ -116,13 +116,15 @@ type Store interface {
 	FundProcess(ctx context.Context, userID, processID string, amount int64) error
 
 	// CommitCall atomically records a successful transaction, creates its receipt, settles funds,
-	// updates trace cost/latency for all ancestor traces, upserts action stats, and (if eventID
-	// is non-empty) marks the event as consumed — all in one SQLite transaction.
-	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, eventID string) error
+	// updates trace cost/latency for all ancestor traces, upserts action stats, settles the event
+	// (if eventID is non-empty), and completes the idempotency record (if idempotencyRecordID is
+	// non-empty) — all in one SQLite transaction.
+	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, eventID, idempotencyRecordID string) error
 
 	// CommitFailedCall atomically refunds locked funds, records a failure transaction, creates its receipt,
-	// updates trace latency, and upserts action stats — all in one SQLite transaction.
-	CommitFailedCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID string, gross int64, stats *Stats) error
+	// updates trace latency, upserts action stats, and completes the idempotency record (if
+	// idempotencyRecordID is non-empty) — all in one SQLite transaction.
+	CommitFailedCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID string, gross int64, stats *Stats, idempotencyRecordID string) error
 
 	// EndProcess closes the process and returns all remaining funds to the owner.
 	EndProcess(ctx context.Context, processID string) error

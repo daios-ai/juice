@@ -34,6 +34,9 @@ type CallRequest struct {
 	// EventID, if non-empty, causes CommitCall to settle the event atomically.
 	// Set only by ConsumeEvent; leave empty for all direct calls.
 	EventID string
+	// IdempotencyRecordID, if non-empty, causes CommitCall/CommitFailedCall to atomically
+	// mark the pending idempotency record as complete. Set only by federation handlers.
+	IdempotencyRecordID string
 }
 
 // CallReply is the response from a successful Call().
@@ -233,7 +236,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			}
 			return nil, ErrInternal.Wrap("could not build receipt")
 		}
-		if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats); settlErr != nil {
+		if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats, req.IdempotencyRecordID); settlErr != nil {
 			logger.Error("call.settlement_failed", "action", action.Name, "exec_error", execErr, "settlement_error", settlErr)
 			return nil, ErrInternal.Wrap("could not record failure transaction")
 		}
@@ -254,7 +257,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			}
 			return nil, ErrInternal.Wrap("could not build receipt")
 		}
-		if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats); settlErr != nil {
+		if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats, req.IdempotencyRecordID); settlErr != nil {
 			logger.Error("call.settlement_failed", "action", action.Name, "schema_error", schemaErr, "settlement_error", settlErr)
 			return nil, ErrInternal.Wrap("could not record failure transaction")
 		}
@@ -283,7 +286,13 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
-	if err := k.store.CommitCall(ctx, tx, receipt, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.EventID); err != nil {
+	if fee > 0 && k.cfg.FeeRecipientID == "" {
+		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
+			logger.Error("call.refund_failed_no_fee_recipient", "action", action.Name, "refund_error", refundErr)
+		}
+		return nil, ErrInvalidState.Wrap("fee recipient not configured")
+	}
+	if err := k.store.CommitCall(ctx, tx, receipt, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.EventID, req.IdempotencyRecordID); err != nil {
 		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
 			logger.Error("call.refund_failed", "action", action.Name, "commit_error", err, "refund_error", refundErr)
 			return nil, ErrInternal.Wrap("could not refund funds after failed commit")

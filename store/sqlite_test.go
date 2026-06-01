@@ -422,7 +422,7 @@ func TestCommitCall(t *testing.T) {
 		ArgsHash: "ah1", ReplyHash: "rh1", Status: kernel.TxSuccess,
 		Gross: 100, Net: 80, Fee: 20, CreatedAt: time.Now().UTC(),
 	}
-	if err := db.CommitCall(ctx, tx, receipt, p.ID, target.ID, fee.ID, 80, 20, nil, ""); err != nil {
+	if err := db.CommitCall(ctx, tx, receipt, p.ID, target.ID, fee.ID, 80, 20, nil, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -587,7 +587,7 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	tx1 := makeTx("tx-inc-1", tr1.ID, 100)
 	rc1 := makeReceipt("rc-inc-1", tx1.ID, tr1.ID, 100)
 	stats1 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, PriceMean: 100, LatencyMean: 0.1, LastUsedAt: time.Now().UTC()}
-	if err := db.CommitCall(ctx, tx1, rc1, p.ID, target.ID, fee.ID, tx1.Net, tx1.Fee, stats1, ""); err != nil {
+	if err := db.CommitCall(ctx, tx1, rc1, p.ID, target.ID, fee.ID, tx1.Net, tx1.Fee, stats1, "", ""); err != nil {
 		t.Fatalf("CommitCall #1: %v", err)
 	}
 
@@ -595,7 +595,7 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	tx2 := makeTx("tx-inc-2", tr2.ID, 50) // different gross to verify mean formula
 	rc2 := makeReceipt("rc-inc-2", tx2.ID, tr2.ID, 50)
 	stats2 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, PriceMean: 50, LatencyMean: 0.3, LastUsedAt: time.Now().UTC()}
-	if err := db.CommitCall(ctx, tx2, rc2, p.ID, target.ID, fee.ID, tx2.Net, tx2.Fee, stats2, ""); err != nil {
+	if err := db.CommitCall(ctx, tx2, rc2, p.ID, target.ID, fee.ID, tx2.Net, tx2.Fee, stats2, "", ""); err != nil {
 		t.Fatalf("CommitCall #2: %v", err)
 	}
 
@@ -1464,5 +1464,170 @@ func TestInitFirstBootConfigPreservesExisting(t *testing.T) {
 	}
 	if got != "updated-value" {
 		t.Errorf("signing_key: got %q, want %q", got, "updated-value")
+	}
+}
+
+// ---- Fee destruction prevention ----
+
+func TestCommitCallFeeDestructionRejected(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	payer := newUser("@payer-fd", 1000)
+	target := newUser("@target-fd", 0)
+	_ = db.CreateUser(ctx, payer)
+	_ = db.CreateUser(ctx, target)
+
+	p := newProcess(payer.ID)
+	_ = db.CreateProcess(ctx, p)
+	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
+	_ = db.LockFunds(ctx, p.ID, 100)
+
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: "root", CreatedAt: time.Now().UTC()}
+	_ = db.CreateTrace(ctx, tr)
+
+	tx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: tr.ID,
+		OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: target.ID,
+		ActionID: "a1", Status: kernel.TxSuccess, Gross: 100, Net: 80, Fee: 20,
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	receipt := &kernel.Receipt{
+		ID: uuid.New().String(), IssuerUserID: payer.ID, TxID: tx.ID, TraceID: tr.ID,
+		ActionID: "a1", ArgsHash: "ah", ReplyHash: "rh", Status: kernel.TxSuccess,
+		Gross: 100, Net: 80, Fee: 20, CreatedAt: time.Now().UTC(),
+	}
+
+	// fee=20 with empty feeRecipientID must be rejected.
+	err := db.CommitCall(ctx, tx, receipt, p.ID, target.ID, "", 80, 20, nil, "", "")
+	if err == nil {
+		t.Fatal("expected error when fee > 0 and feeRecipientID is empty, got nil")
+	}
+}
+
+// ---- Idempotency atomicity in CommitCall / CommitFailedCall ----
+
+func newIdempotencyRecord(cpID string) *kernel.IdempotencyRecord {
+	now := time.Now().UTC()
+	return &kernel.IdempotencyRecord{
+		ID:                 uuid.New().String(),
+		IdempotencyKey:     uuid.New().String(),
+		CounterpartyUserID: cpID,
+		CreatedAt:          now,
+		ExpiresAt:          now.Add(24 * time.Hour),
+	}
+}
+
+func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	payer := newUser("@payer-idem", 1000)
+	target := newUser("@target-idem", 0)
+	fee := newUser("@fee-idem", 0)
+	cp := newUser("@cp-idem", 0)
+	_ = db.CreateUser(ctx, payer)
+	_ = db.CreateUser(ctx, target)
+	_ = db.CreateUser(ctx, fee)
+	_ = db.CreateUser(ctx, cp)
+
+	p := newProcess(payer.ID)
+	_ = db.CreateProcess(ctx, p)
+	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
+	_ = db.LockFunds(ctx, p.ID, 100)
+
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: "root", CreatedAt: time.Now().UTC()}
+	_ = db.CreateTrace(ctx, tr)
+
+	rec := newIdempotencyRecord(cp.ID)
+	if err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatalf("InsertPendingIdempotencyRecord: %v", err)
+	}
+
+	tx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: tr.ID,
+		OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: target.ID,
+		ActionID: "a1", Status: kernel.TxSuccess, Gross: 100, Net: 100, Fee: 0,
+		ReplyJSON: `{"ok":true}`,
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	receipt := &kernel.Receipt{
+		ID: uuid.New().String(), IssuerUserID: payer.ID, TxID: tx.ID, TraceID: tr.ID,
+		ActionID: "a1", ArgsHash: "ah", ReplyHash: "rh", Status: kernel.TxSuccess,
+		Gross: 100, Net: 100, Fee: 0, CreatedAt: time.Now().UTC(),
+	}
+
+	if err := db.CommitCall(ctx, tx, receipt, p.ID, target.ID, "", 100, 0, nil, "", rec.ID); err != nil {
+		t.Fatalf("CommitCall: %v", err)
+	}
+
+	got, err := db.ReadIdempotencyRecord(ctx, rec.IdempotencyKey, cp.ID)
+	if err != nil {
+		t.Fatalf("ReadIdempotencyRecord: %v", err)
+	}
+	if got.Status != "complete" {
+		t.Errorf("status: want complete, got %q", got.Status)
+	}
+	if got.ResultJSON != `{"ok":true}` {
+		t.Errorf("result_json: got %q, want {\"ok\":true}", got.ResultJSON)
+	}
+	var storedReceipt kernel.Receipt
+	if err := json.Unmarshal([]byte(got.ReceiptJSON), &storedReceipt); err != nil {
+		t.Errorf("receipt_json is not valid receipt JSON: %v", err)
+	}
+}
+
+func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	payer := newUser("@payer-idem2", 1000)
+	cp := newUser("@cp-idem2", 0)
+	_ = db.CreateUser(ctx, payer)
+	_ = db.CreateUser(ctx, cp)
+
+	p := newProcess(payer.ID)
+	_ = db.CreateProcess(ctx, p)
+	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
+	_ = db.LockFunds(ctx, p.ID, 100)
+
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: "root", CreatedAt: time.Now().UTC()}
+	_ = db.CreateTrace(ctx, tr)
+
+	rec := newIdempotencyRecord(cp.ID)
+	if err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatalf("InsertPendingIdempotencyRecord: %v", err)
+	}
+
+	tx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: tr.ID,
+		OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: payer.ID,
+		ActionID: "a1", Status: kernel.TxFailure, Gross: 0, Net: 0, Fee: 0,
+		Reason:    "execution failed",
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	receipt := &kernel.Receipt{
+		ID: uuid.New().String(), IssuerUserID: payer.ID, TxID: tx.ID, TraceID: tr.ID,
+		ActionID: "a1", ArgsHash: "ah", ReplyHash: "rh", Status: kernel.TxFailure,
+		Gross: 0, Net: 0, Fee: 0, CreatedAt: time.Now().UTC(),
+	}
+
+	if err := db.CommitFailedCall(ctx, tx, receipt, p.ID, 100, nil, rec.ID); err != nil {
+		t.Fatalf("CommitFailedCall: %v", err)
+	}
+
+	got, err := db.ReadIdempotencyRecord(ctx, rec.IdempotencyKey, cp.ID)
+	if err != nil {
+		t.Fatalf("ReadIdempotencyRecord: %v", err)
+	}
+	if got.Status != "complete" {
+		t.Errorf("status: want complete, got %q", got.Status)
+	}
+	var result map[string]string
+	if err := json.Unmarshal([]byte(got.ResultJSON), &result); err != nil {
+		t.Errorf("result_json is not valid JSON: %v", err)
+	}
+	if result["error"] != "execution failed" {
+		t.Errorf("result_json[\"error\"]: got %q, want \"execution failed\"", result["error"])
 	}
 }

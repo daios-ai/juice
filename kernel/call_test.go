@@ -683,6 +683,7 @@ func TestContractorSubCallChargedToActionOwner(t *testing.T) {
 	// alice owns the outer action (contractor); bob owns the inner action.
 	alice := setupUser(t, st, "@alice", 1000)
 	bob := setupUser(t, st, "@bob", 500)
+	feeUser := setupUser(t, st, "@fee-recipient", 0)
 
 	inner := &Action{
 		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "/inner",
@@ -698,7 +699,13 @@ func TestContractorSubCallChargedToActionOwner(t *testing.T) {
 	_ = st.CreateAction(ctx, outer)
 
 	exec := &contractorExec{targetUser: bob.ID, targetAction: "/inner"}
-	k := newTestKernelWithScripts(st, exec)
+	cfg := DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = "test-issuer-id"
+	cfg.FeeBPS = 2000
+	cfg.FeeRecipientID = feeUser.ID
+	cfg.SigningKey = testSigningKey()
+	k := New(st, exec, nil, nil, nil, cfg, nil)
 
 	// Grant alice call permission on inner so contractor sub-call passes ACL.
 	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: PermCall})
@@ -992,12 +999,12 @@ type failingCommitStore struct {
 	calls int
 }
 
-func (f *failingCommitStore) CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, eventID string) error {
+func (f *failingCommitStore) CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, eventID, idempotencyRecordID string) error {
 	f.calls++
 	if f.calls > 0 {
 		return ErrInternal.Wrap("injected commit failure")
 	}
-	return f.fakeStore.CommitCall(ctx, tx, receipt, processID, targetUserID, feeRecipientID, net, fee, stats, eventID)
+	return f.fakeStore.CommitCall(ctx, tx, receipt, processID, targetUserID, feeRecipientID, net, fee, stats, eventID, idempotencyRecordID)
 }
 
 func TestCommitCallAtomicOnFailure(t *testing.T) {
@@ -1115,7 +1122,7 @@ type failingCommitFailedCallStore struct {
 	*fakeStore
 }
 
-func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *Transaction, _ *Receipt, _ string, _ int64, _ *Stats) error {
+func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *Transaction, _ *Receipt, _ string, _ int64, _ *Stats, _ string) error {
 	return ErrInternal.Wrap("injected CommitFailedCall failure")
 }
 
@@ -1161,7 +1168,6 @@ func (f *fakeChatter) Chat(_ context.Context, _ []ChatMessage) (ChatMessage, err
 func newTestKernelWithChatter(st Store, c Chatter) *Kernel {
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
-	cfg.FeeBPS = 2000
 	cfg.IssuerUserID = "test-issuer-id"
 	cfg.SigningKey = testSigningKey()
 	return New(st, nil, nil, nil, c, cfg, nil)
@@ -1276,5 +1282,51 @@ func TestCallSuspendedSubjectRejected(t *testing.T) {
 	var ke *KernelError
 	if !errors.As(err, &ke) || ke.Code != "unauthenticated" {
 		t.Errorf("expected unauthenticated error, got %v", err)
+	}
+}
+
+// ---- Fee recipient enforcement ----
+
+func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
+	st := newFakeStore()
+	cfg := DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.FeeBPS = 2000 // 20% fee — no FeeRecipientID set
+	cfg.IssuerUserID = "test-issuer-id"
+	cfg.SigningKey = testSigningKey()
+	exec := &fakeScriptExec{result: `{"ok":true}`}
+	k := New(st, exec, nil, nil, nil, cfg, nil)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@owner", 1000)
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/paid",
+		Kind: KindWasm, Active: true, Price: 100, Public: true,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, 500)
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID:     owner.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: root.ID,
+		TargetUserID:  owner.ID,
+		ActionName:    "/paid",
+		Args:          map[string]any{},
+	})
+	if !errors.Is(err, ErrInvalidState) {
+		t.Errorf("expected ErrInvalidState when fee > 0 and FeeRecipientID is empty, got %v", err)
+	}
+
+	// Funds must be fully refunded — process.available back to 500.
+	proc, _ := st.ReadProcess(ctx, p.ID)
+	if proc.Available != 500 {
+		t.Errorf("process.available after fee pre-check failure: got %d, want 500", proc.Available)
+	}
+	if proc.Locked != 0 {
+		t.Errorf("process.locked after fee pre-check failure: got %d, want 0", proc.Locked)
 	}
 }

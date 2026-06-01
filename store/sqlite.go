@@ -735,15 +735,9 @@ func (s *DB) FundProcess(ctx context.Context, userID, processID string, amount i
 	return dbErr(tx.Commit(), "fund process commit")
 }
 
-func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, eventID string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin commit call")
-	}
-	defer tx.Rollback()
-
-	// Insert transaction record (immutable — no rating column written).
-	_, err = tx.ExecContext(ctx,
+// insertAuditRows inserts the transaction record and its mandatory receipt into an open SQLite transaction.
+func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, receipt *kernel.Receipt, label string) error {
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
 		  action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at)
@@ -753,16 +747,13 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		ktx.ArgsJSON, ktx.ReplyJSON, string(ktx.Status),
 		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason, nullStr(ktx.RemoteReceiptHash),
 		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
-	)
-	if err != nil {
-		return dbErr(err, "commit call: insert transaction")
+	); err != nil {
+		return dbErr(err, label+": insert transaction")
 	}
-
-	// Receipt is mandatory.
 	if receipt == nil {
-		return dbErr(fmt.Errorf("receipt is required"), "commit call")
+		return dbErr(fmt.Errorf("receipt is required"), label)
 	}
-	if _, err = tx.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		receipt.ID, receipt.IssuerUserID, receipt.TxID, receipt.TraceID, receipt.ActionID,
@@ -770,7 +761,76 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		receipt.Gross, receipt.Net, receipt.Fee, receipt.Reason,
 		timeToStr(receipt.CreatedAt), receipt.Signature,
 	); err != nil {
-		return dbErr(err, "commit call: insert receipt")
+		return dbErr(err, label+": insert receipt")
+	}
+	return nil
+}
+
+// updateAncestorTraces updates cost and latency for all ancestor traces via a recursive CTE.
+// costDelta is 0 for failures (latency-only update).
+func (s *DB) updateAncestorTraces(ctx context.Context, tx *sql.Tx, traceID string, costDelta int64, endedAt time.Time, label string) error {
+	_, err := tx.ExecContext(ctx, `
+WITH RECURSIVE ancestors(id, parent_id, caused_by_id) AS (
+    SELECT id, parent_trace_id, caused_by_trace_id FROM traces WHERE id=?
+    UNION ALL
+    SELECT t.id, t.parent_trace_id, t.caused_by_trace_id FROM traces t
+    JOIN ancestors a ON t.id=a.parent_id AND a.id!=a.parent_id
+    UNION ALL
+    SELECT t.id, t.parent_trace_id, t.caused_by_trace_id FROM traces t
+    JOIN ancestors a ON t.id=a.caused_by_id AND a.id=a.parent_id AND a.caused_by_id IS NOT NULL
+)
+UPDATE traces SET
+    cost=cost+?,
+    latency_ms=MAX(latency_ms, CAST((julianday(?)-julianday(created_at))*86400000 AS INTEGER))
+WHERE id IN (SELECT id FROM ancestors)`,
+		traceID, costDelta, timeToStr(endedAt),
+	)
+	return dbErr(err, label+": update trace ancestors")
+}
+
+// upsertActionStats updates the incremental success or failure counters for an action.
+// rating_count/rating_mean are excluded — owned by UpdateRating.
+func (s *DB) upsertActionStats(ctx context.Context, tx *sql.Tx, stats *kernel.Stats, success bool, label string) error {
+	if stats == nil {
+		return nil
+	}
+	var err error
+	if success {
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
+			 VALUES (?,1,1,0,0,?,?,0,?)
+			 ON CONFLICT(action_id) DO UPDATE SET
+			   uses=uses+1,
+			   successes=successes+1,
+			   price_mean=price_mean+(excluded.price_mean-price_mean)/(successes+1),
+			   latency_mean=latency_mean+(excluded.latency_mean-latency_mean)/(uses+1),
+			   last_used_at=excluded.last_used_at`,
+			stats.ActionID, stats.PriceMean, stats.LatencyMean, timeToStr(stats.LastUsedAt),
+		)
+	} else {
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
+			 VALUES (?,1,0,1,0,0,?,0,?)
+			 ON CONFLICT(action_id) DO UPDATE SET
+			   uses=uses+1,
+			   failures=failures+1,
+			   latency_mean=latency_mean+(excluded.latency_mean-latency_mean)/(uses+1),
+			   last_used_at=excluded.last_used_at`,
+			stats.ActionID, stats.LatencyMean, timeToStr(stats.LastUsedAt),
+		)
+	}
+	return dbErr(err, label+": upsert stats")
+}
+
+func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, eventID, idempotencyRecordID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin commit call")
+	}
+	defer tx.Rollback()
+
+	if err := s.insertAuditRows(ctx, tx, ktx, receipt, "commit call"); err != nil {
+		return err
 	}
 
 	gross := net + fee
@@ -800,51 +860,22 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		}
 	}
 
-	// Credit fee recipient.
-	if fee > 0 && feeRecipientID != "" {
+	// Credit fee recipient — hard-fail if recipient is unset to prevent fund destruction.
+	if fee > 0 {
+		if feeRecipientID == "" {
+			return fmt.Errorf("commit call: fee %d > 0 but feeRecipientID is empty: funds would be destroyed", fee)
+		}
 		if _, err = tx.ExecContext(ctx,
 			`UPDATE users SET available=available+? WHERE id=?`, fee, feeRecipientID); err != nil {
 			return dbErr(err, "commit call: credit fee recipient")
 		}
 	}
 
-	// Update trace cost and latency for all ancestor traces atomically.
-	// Follows parent_trace_id within a process, then caused_by_trace_id across process boundaries.
-	if _, err = tx.ExecContext(ctx, `
-WITH RECURSIVE ancestors(id, parent_id, caused_by_id) AS (
-    SELECT id, parent_trace_id, caused_by_trace_id FROM traces WHERE id=?
-    UNION ALL
-    SELECT t.id, t.parent_trace_id, t.caused_by_trace_id FROM traces t
-    JOIN ancestors a ON t.id=a.parent_id AND a.id!=a.parent_id
-    UNION ALL
-    SELECT t.id, t.parent_trace_id, t.caused_by_trace_id FROM traces t
-    JOIN ancestors a ON t.id=a.caused_by_id AND a.id=a.parent_id AND a.caused_by_id IS NOT NULL
-)
-UPDATE traces SET
-    cost=cost+?,
-    latency_ms=MAX(latency_ms, CAST((julianday(?)-julianday(created_at))*86400000 AS INTEGER))
-WHERE id IN (SELECT id FROM ancestors)`,
-		ktx.TraceID, ktx.Gross, timeToStr(ktx.EndedAt),
-	); err != nil {
-		return dbErr(err, "commit call: update trace cost")
+	if err := s.updateAncestorTraces(ctx, tx, ktx.TraceID, ktx.Gross, ktx.EndedAt, "commit call"); err != nil {
+		return err
 	}
-
-	// Upsert action stats incrementally to avoid concurrent-overwrite races.
-	// rating_count/rating_mean are excluded — owned by UpdateRating.
-	if stats != nil {
-		if _, err = tx.ExecContext(ctx,
-			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
-			 VALUES (?,1,1,0,0,?,?,0,?)
-			 ON CONFLICT(action_id) DO UPDATE SET
-			   uses=uses+1,
-			   successes=successes+1,
-			   price_mean=price_mean+(excluded.price_mean-price_mean)/(successes+1),
-			   latency_mean=latency_mean+(excluded.latency_mean-latency_mean)/(uses+1),
-			   last_used_at=excluded.last_used_at`,
-			stats.ActionID, stats.PriceMean, stats.LatencyMean, timeToStr(stats.LastUsedAt),
-		); err != nil {
-			return dbErr(err, "commit call: upsert stats")
-		}
+	if err := s.upsertActionStats(ctx, tx, stats, true, "commit call"); err != nil {
+		return err
 	}
 
 	if eventID != "" {
@@ -854,10 +885,20 @@ WHERE id IN (SELECT id FROM ancestors)`,
 		}
 	}
 
+	if idempotencyRecordID != "" {
+		receiptBytes, _ := json.Marshal(receipt)
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=?`,
+			ktx.ReplyJSON, string(receiptBytes), idempotencyRecordID,
+		); err != nil {
+			return dbErr(err, "commit call: complete idempotency record")
+		}
+	}
+
 	return dbErr(tx.Commit(), "commit call: commit")
 }
 
-func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID string, gross int64, stats *kernel.Stats) error {
+func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID string, gross int64, stats *kernel.Stats, idempotencyRecordID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return dbErr(err, "begin commit failed call")
@@ -873,69 +914,23 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, rece
 		}
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO transactions
-		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		  action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
-		ktx.OwnerUserID, ktx.SubjectUserID, ktx.TargetUserID, ktx.ActionID,
-		ktx.ArgsJSON, ktx.ReplyJSON, string(ktx.Status),
-		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason, nullStr(ktx.RemoteReceiptHash),
-		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
-	); err != nil {
-		return dbErr(err, "commit failed call: insert transaction")
+	if err := s.insertAuditRows(ctx, tx, ktx, receipt, "commit failed call"); err != nil {
+		return err
+	}
+	if err := s.updateAncestorTraces(ctx, tx, ktx.TraceID, 0, ktx.EndedAt, "commit failed call"); err != nil {
+		return err
+	}
+	if err := s.upsertActionStats(ctx, tx, stats, false, "commit failed call"); err != nil {
+		return err
 	}
 
-	// Receipt is mandatory.
-	if receipt == nil {
-		return dbErr(fmt.Errorf("receipt is required"), "commit failed call")
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		receipt.ID, receipt.IssuerUserID, receipt.TxID, receipt.TraceID, receipt.ActionID,
-		receipt.ArgsHash, receipt.ReplyHash, string(receipt.Status),
-		receipt.Gross, receipt.Net, receipt.Fee, receipt.Reason,
-		timeToStr(receipt.CreatedAt), receipt.Signature,
-	); err != nil {
-		return dbErr(err, "commit failed call: insert receipt")
-	}
-
-	// Update trace latency for all ancestor traces (cost delta is 0 for failures).
-	// Follows parent_trace_id within a process, then caused_by_trace_id across process boundaries.
-	if _, err := tx.ExecContext(ctx, `
-WITH RECURSIVE ancestors(id, parent_id, caused_by_id) AS (
-    SELECT id, parent_trace_id, caused_by_trace_id FROM traces WHERE id=?
-    UNION ALL
-    SELECT t.id, t.parent_trace_id, t.caused_by_trace_id FROM traces t
-    JOIN ancestors a ON t.id=a.parent_id AND a.id!=a.parent_id
-    UNION ALL
-    SELECT t.id, t.parent_trace_id, t.caused_by_trace_id FROM traces t
-    JOIN ancestors a ON t.id=a.caused_by_id AND a.id=a.parent_id AND a.caused_by_id IS NOT NULL
-)
-UPDATE traces SET
-    latency_ms=MAX(latency_ms, CAST((julianday(?)-julianday(created_at))*86400000 AS INTEGER))
-WHERE id IN (SELECT id FROM ancestors)`,
-		ktx.TraceID, timeToStr(ktx.EndedAt),
-	); err != nil {
-		return dbErr(err, "commit failed call: update trace latency")
-	}
-
-	// Upsert action stats incrementally to avoid concurrent-overwrite races.
-	// rating_count/rating_mean are excluded — owned by UpdateRating.
-	if stats != nil {
+	if idempotencyRecordID != "" {
+		errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason})
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
-			 VALUES (?,1,0,1,0,0,?,0,?)
-			 ON CONFLICT(action_id) DO UPDATE SET
-			   uses=uses+1,
-			   failures=failures+1,
-			   latency_mean=latency_mean+(excluded.latency_mean-latency_mean)/(uses+1),
-			   last_used_at=excluded.last_used_at`,
-			stats.ActionID, stats.LatencyMean, timeToStr(stats.LastUsedAt),
+			`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json='' WHERE id=?`,
+			string(errResult), idempotencyRecordID,
 		); err != nil {
-			return dbErr(err, "commit failed call: upsert stats")
+			return dbErr(err, "commit failed call: complete idempotency record")
 		}
 	}
 

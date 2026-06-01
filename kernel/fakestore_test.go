@@ -339,7 +339,7 @@ func (f *fakeStore) FundProcess(_ context.Context, userID, processID string, amo
 	return nil
 }
 
-func (f *fakeStore) CommitFailedCall(_ context.Context, tx *Transaction, receipt *Receipt, processID string, gross int64, stats *Stats) error {
+func (f *fakeStore) CommitFailedCall(_ context.Context, tx *Transaction, receipt *Receipt, processID string, gross int64, stats *Stats, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.processes[processID]
@@ -363,7 +363,7 @@ func (f *fakeStore) CommitFailedCall(_ context.Context, tx *Transaction, receipt
 	return nil
 }
 
-func (f *fakeStore) CommitCall(_ context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, eventID string) error {
+func (f *fakeStore) CommitCall(_ context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, eventID, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.processes[processID]
