@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
@@ -63,7 +64,11 @@ func runRemoteAdd(_ *cobra.Command, args []string) error {
 	}
 
 	// Fetch well-known metadata from the remote kernel.
-	resp, err := http.Get(baseURL + "/.well-known/juice-kernel.json")
+	wellKnownReq, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/.well-known/juice-kernel.json", nil)
+	if err != nil {
+		return fmt.Errorf("invalid remote URL: %w", err)
+	}
+	resp, err := newHTTPClient(30 * time.Second).Do(wellKnownReq)
 	if err != nil {
 		return fmt.Errorf("fetch well-known: %w", err)
 	}
@@ -153,7 +158,12 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 	base := strings.TrimRight(remoteUser.RemoteBaseURL, "/")
 
 	// Discover the action ID by listing.
-	resp, err := http.Get(fmt.Sprintf("%s/v1/actions?owner=%s&name=%s", base, remoteHandle, actionName))
+	listReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/v1/actions?owner=%s&name=%s", base, remoteHandle, actionName), nil)
+	if err != nil {
+		return fmt.Errorf("invalid remote URL: %w", err)
+	}
+	resp, err := newHTTPClient(30 * time.Second).Do(listReq)
 	if err != nil {
 		return fmt.Errorf("fetch action list: %w", err)
 	}
@@ -178,7 +188,12 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 	}
 
 	// Fetch and verify the signed manifest.
-	resp2, err := http.Get(fmt.Sprintf("%s/v1/actions/%s/manifest", base, actionID))
+	manifestReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/v1/actions/%s/manifest", base, actionID), nil)
+	if err != nil {
+		return fmt.Errorf("invalid manifest URL: %w", err)
+	}
+	resp2, err := newHTTPClient(30 * time.Second).Do(manifestReq)
 	if err != nil {
 		return fmt.Errorf("fetch manifest: %w", err)
 	}

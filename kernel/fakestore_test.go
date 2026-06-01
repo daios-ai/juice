@@ -281,14 +281,6 @@ func (f *fakeStore) StartProcess(_ context.Context, p *Process, t *Trace, ownerI
 	return nil
 }
 
-func (f *fakeStore) CreateProcess(_ context.Context, p *Process) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cp := *p
-	f.processes[p.ID] = &cp
-	return nil
-}
-
 func (f *fakeStore) ReadProcess(_ context.Context, id string) (*Process, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -472,14 +464,6 @@ func (f *fakeStore) ReadRootTrace(_ context.Context, processID string) (*Trace, 
 	return nil, ErrNotFound.Wrap("root trace not found for process")
 }
 
-func (f *fakeStore) CreateTransaction(_ context.Context, tx *Transaction) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cp := *tx
-	f.transactions[tx.ID] = &cp
-	return nil
-}
-
 func (f *fakeStore) UpdateTransaction(_ context.Context, tx *Transaction) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -644,17 +628,6 @@ func (f *fakeStore) LockEvent(_ context.Context, eventID string) error {
 	return nil
 }
 
-func (f *fakeStore) SettleEvent(_ context.Context, eventID, txID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	e, ok := f.events[eventID]
-	if !ok {
-		return ErrNotFound.Wrap("event not found")
-	}
-	e.TxID = &txID
-	return nil
-}
-
 func (f *fakeStore) UnlockEvent(_ context.Context, eventID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -666,17 +639,6 @@ func (f *fakeStore) UnlockEvent(_ context.Context, eventID string) error {
 		return nil // already settled, don't unlock
 	}
 	e.ConsumedAt = nil
-	return nil
-}
-
-func (f *fakeStore) PurgeListenerEvents(_ context.Context, listenerID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for id, e := range f.events {
-		if e.ListenerID == listenerID && e.ConsumedAt == nil {
-			delete(f.events, id)
-		}
-	}
 	return nil
 }
 
@@ -958,18 +920,6 @@ func (f *fakeStore) SetConfig(_ context.Context, key, value string) error {
 	return nil
 }
 
-func (f *fakeStore) InitSuperuser(_ context.Context, u *User, configKey, configValue string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, exists := f.userByHandle[u.Handle]; !exists {
-		cp := *u
-		f.users[u.ID] = &cp
-		f.userByHandle[u.Handle] = &cp
-	}
-	f.config[configKey] = configValue
-	return nil
-}
-
 func (f *fakeStore) InitFirstBoot(_ context.Context, u *User, configs map[string]string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1033,14 +983,6 @@ func (f *fakeStore) UpdateUser(_ context.Context, u *User) error {
 	return nil
 }
 
-func (f *fakeStore) CreateReceipt(_ context.Context, r *Receipt) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cp := *r
-	f.receipts[r.TxID] = &cp
-	return nil
-}
-
 func (f *fakeStore) ReadReceiptByTxID(_ context.Context, txID string) (*Receipt, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1050,17 +992,6 @@ func (f *fakeStore) ReadReceiptByTxID(_ context.Context, txID string) (*Receipt,
 	}
 	cp := *r
 	return &cp, nil
-}
-
-func (f *fakeStore) CreateRating(_ context.Context, r *Rating) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, exists := f.ratings[r.RatedTxID]; exists {
-		return ErrInvalidState.Wrap("already rated")
-	}
-	cp := *r
-	f.ratings[r.RatedTxID] = &cp
-	return nil
 }
 
 func (f *fakeStore) CreateRatingAndUpdateStats(_ context.Context, r *Rating, actionID string, rating float64) error {

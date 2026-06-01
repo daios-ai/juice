@@ -17,6 +17,9 @@
 *.env
 .env.*
 
+# Generated snapshot (reconstructed by snapshot.sh)
+/snapshot.go.txt
+
 # Scratch / archive
 /.old/
 

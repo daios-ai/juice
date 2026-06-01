@@ -576,33 +576,6 @@ func (k *Kernel) FirstBoot(ctx context.Context, password string) error {
 	return nil
 }
 
-// BootstrapSuperuser atomically creates the superuser account and registers the
-// superuser handle in config. If the handle already exists the user INSERT is
-// skipped and only the config key is (re-)set. Safe to call on every startup.
-func (k *Kernel) BootstrapSuperuser(ctx context.Context, req CreateUserRequest, configKey string) (*User, error) {
-	if req.Handle == "" {
-		return nil, ErrInvalidInput.Wrap("handle is required")
-	}
-	hash, err := HashPassword(req.Password)
-	if err != nil {
-		return nil, ErrInvalidInput.Wrapf("could not hash password: %v", err)
-	}
-	now := time.Now().UTC()
-	u := &User{
-		ID:           uuid.New().String(),
-		Handle:       req.Handle,
-		Email:        req.Email,
-		PasswordHash: hash,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := k.store.InitSuperuser(ctx, u, configKey, req.Handle); err != nil {
-		return nil, err
-	}
-	// Return the stored user (may differ from u if handle already existed).
-	return k.store.ReadUserByHandle(ctx, req.Handle)
-}
-
 // UpdateActionRequest holds validated input for action updates.
 type UpdateActionRequest struct {
 	ID           string

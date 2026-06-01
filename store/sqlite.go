@@ -1692,32 +1692,6 @@ func (s *DB) SetConfig(ctx context.Context, key, value string) error {
 	return dbErr(err, "set config")
 }
 
-func (s *DB) InitSuperuser(ctx context.Context, u *kernel.User, configKey, configValue string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin init superuser")
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx,
-		`INSERT OR IGNORE INTO users (id,handle,email,password_hash,available,locked,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?)`,
-		u.ID, u.Handle, u.Email, u.PasswordHash,
-		u.Available, u.Locked, timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
-	)
-	if err != nil {
-		return dbErr(err, "init superuser: insert user")
-	}
-
-	_, err = tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO config (key,value) VALUES (?,?)`, configKey, configValue)
-	if err != nil {
-		return dbErr(err, "init superuser: set config")
-	}
-
-	return dbErr(tx.Commit(), "init superuser: commit")
-}
-
 func (s *DB) InitFirstBoot(ctx context.Context, u *kernel.User, configs map[string]string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

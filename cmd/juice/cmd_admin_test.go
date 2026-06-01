@@ -84,9 +84,10 @@ func TestAdminDeposit(t *testing.T) {
 	ctx := context.Background()
 	k := newAdminTestKernel(t)
 
-	admin, err := k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
-		Handle: "@admin", Email: "admin@example.com", Password: "pass",
-	}, "superuser_handle")
+	if err := k.FirstBoot(ctx, "pass"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := k.ReadUserByHandle(ctx, "@sys")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,9 +197,10 @@ func TestAdminDepositEnforcesSuperuser(t *testing.T) {
 	ctx := context.Background()
 	env := newTestEnv(t)
 
-	su, err := env.k.BootstrapSuperuser(ctx, kernel.CreateUserRequest{
-		Handle: "@sys", Email: "sys@sys", Password: "pass",
-	}, "superuser_handle")
+	if err := env.k.FirstBoot(ctx, "pass"); err != nil {
+		t.Fatal(err)
+	}
+	su, err := env.k.ReadUserByHandle(ctx, "@sys")
 	if err != nil {
 		t.Fatal(err)
 	}

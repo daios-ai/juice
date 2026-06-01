@@ -43,9 +43,7 @@ func newRemoteTestKernel(t *testing.T) (*kernel.Kernel, *store.DB) {
 	cfg.TokenSecret = "remote-test-secret"
 	k := kernel.New(db, nil, nil, nil, nil, cfg, log.Discard())
 
-	if _, err := k.BootstrapSuperuser(t.Context(), kernel.CreateUserRequest{
-		Handle: "@sys", Email: "sys@sys", Password: "sys-pass",
-	}, "superuser_handle"); err != nil {
+	if err := k.FirstBoot(t.Context(), "sys-pass"); err != nil {
 		t.Fatal(err)
 	}
 

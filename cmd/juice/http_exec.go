@@ -15,6 +15,14 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
+// newHTTPClient returns an HTTP client with the given timeout (defaulting to 30s).
+func newHTTPClient(timeout time.Duration) *http.Client {
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	return &http.Client{Timeout: timeout}
+}
+
 // ExecuteFederation calls a remote kernel's federation endpoint with an idempotency key.
 // The response must be {"result": {...}, "receipt": <receipt-object>}.
 // Returns (result, receiptJSONString, error).
@@ -50,12 +58,7 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idem
 		}
 	}
 
-	timeout := e.timeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
-	}
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
+	resp, err := newHTTPClient(e.timeout).Do(req)
 	if err != nil {
 		return nil, "", kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
 	}
@@ -101,12 +104,7 @@ func (e *httpActionExecutor) Execute(ctx context.Context, source string, args ma
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	timeout := e.timeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
-	}
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
+	resp, err := newHTTPClient(e.timeout).Do(req)
 	if err != nil {
 		return nil, kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
 	}
@@ -221,12 +219,7 @@ func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, source string, 
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	timeout := e.timeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
-	}
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
+	resp, err := newHTTPClient(e.timeout).Do(req)
 	if err != nil {
 		return nil, kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
 	}
@@ -273,8 +266,7 @@ func fetchOpenAPISpec(ctx context.Context, specURL string, allowLocal bool) ([]b
 	if err != nil {
 		return nil, kernel.ErrInvalidInput.Wrapf("invalid spec URL: %v", err)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := newHTTPClient(30 * time.Second).Do(req)
 	if err != nil {
 		return nil, kernel.ErrExecutionFailed.Wrapf("fetch spec: %v", err)
 	}

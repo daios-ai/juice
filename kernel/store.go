@@ -100,7 +100,6 @@ type Store interface {
 	// All three writes occur in a single SQLite transaction. Either all succeed or none do.
 	StartProcess(ctx context.Context, p *Process, t *Trace, ownerID string, funds int64) error
 
-	CreateProcess(ctx context.Context, p *Process) error
 	ReadProcess(ctx context.Context, id string) (*Process, error)
 	ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error)
 	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
@@ -137,22 +136,16 @@ type Store interface {
 
 	// ---- Transactions ----
 
-	// CreateTransaction inserts a transaction record. Transactions are immutable after creation;
-	// there is no UpdateTransaction.
-	CreateTransaction(ctx context.Context, tx *Transaction) error
 	ReadTransaction(ctx context.Context, id string) (*Transaction, error)
 	ListTransactions(ctx context.Context, filter TxFilter) ([]*Transaction, error)
 	ListAllTransactions(ctx context.Context, limit, offset int) ([]*Transaction, error)
 
 	// ---- Receipts ----
 
-	CreateReceipt(ctx context.Context, r *Receipt) error
 	ReadReceiptByTxID(ctx context.Context, txID string) (*Receipt, error)
 
 	// ---- Ratings ----
 
-	// CreateRating inserts a rating record. Ratings do not cascade (§10.2).
-	CreateRating(ctx context.Context, r *Rating) error
 	ReadRatingByTxID(ctx context.Context, txID string) (*Rating, error)
 	// CreateRatingAndUpdateStats atomically inserts a rating and updates rating_count/rating_mean.
 	CreateRatingAndUpdateStats(ctx context.Context, r *Rating, actionID string, rating float64) error
@@ -194,12 +187,8 @@ type Store interface {
 	// LockEvent atomically marks an event as in-flight (sets consumed_at).
 	// Returns ErrInvalidState if the event is already consumed or in-flight.
 	LockEvent(ctx context.Context, eventID string) error
-	// SettleEvent records the transaction ID after a successful consume call.
-	SettleEvent(ctx context.Context, eventID, txID string) error
 	// UnlockEvent resets an in-flight event back to pending on consume failure.
 	UnlockEvent(ctx context.Context, eventID string) error
-	// PurgeListenerEvents deletes all pending (unconsumed) events for a listener.
-	PurgeListenerEvents(ctx context.Context, listenerID string) error
 	// DeleteListenerWithEvents atomically deactivates a listener and purges its pending events.
 	DeleteListenerWithEvents(ctx context.Context, listenerID string) error
 	// ResetInFlightEvents resets all in-flight events (consumed_at set, tx_id null)
@@ -225,10 +214,6 @@ type Store interface {
 
 	GetConfig(ctx context.Context, key string) (string, error)
 	SetConfig(ctx context.Context, key, value string) error
-
-	// InitSuperuser atomically creates a user and sets a config key.
-	// If the user handle already exists the user INSERT is skipped; the config is always set.
-	InitSuperuser(ctx context.Context, u *User, configKey, configValue string) error
 
 	// InitFirstBoot atomically creates a user and sets all given config entries.
 	// If the user handle already exists the user INSERT is skipped; config entries are always set.
