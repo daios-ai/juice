@@ -82,7 +82,7 @@ func setupAction(t *testing.T, st *fakeStore, ownerID, name string, price int64)
 
 func setupProcess(t *testing.T, k *Kernel, ownerID string, funds int64) (*Process, *Trace) {
 	t.Helper()
-	p, tr, err := k.StartProcess(context.Background(), ownerID, funds)
+	p, tr, err := k.StartProcess(context.Background(), ownerID, ownerID, funds)
 	if err != nil {
 		t.Fatalf("StartProcess: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestCreateNativeActionRejected(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@owner", 0)
-	_, err := k.CreateAction(ctx, CreateActionRequest{
+	_, err := k.CreateAction(ctx, owner.ID, CreateActionRequest{
 		OwnerUserID: owner.ID,
 		Name:        "/native-attempt",
 		Kind:        KindNative,
@@ -279,7 +279,7 @@ func TestStartAndEndProcess(t *testing.T) {
 
 	owner := setupUser(t, st, "@owner", 1000)
 
-	p, root, err := k.StartProcess(ctx, owner.ID, 500)
+	p, root, err := k.StartProcess(ctx, owner.ID, owner.ID, 500)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ func TestReadProcessUnauthorized(t *testing.T) {
 	alice := setupUser(t, st, "@alice-proc", 500)
 	bob := setupUser(t, st, "@bob-proc", 0)
 
-	p, _, err := k.StartProcess(ctx, alice.ID, 100)
+	p, _, err := k.StartProcess(ctx, alice.ID, alice.ID, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestProcessAvailablePlusLockedInvariant(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
+	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
 	checkInvariant := func(tag string, wantSum int64) {
 		t.Helper()
@@ -422,7 +422,7 @@ func TestUserLockedBalanceInvariant(t *testing.T) {
 
 	checkUser("initial", 1000, 0)
 
-	p, root, _ := k.StartProcess(ctx, alice.ID, 500)
+	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 	checkUser("after StartProcess(500)", 500, 500)
 
 	if err := k.FundProcess(ctx, alice.ID, p.ID, 200); err != nil {
@@ -570,7 +570,7 @@ func TestCreateHTTPActionRejectsSSRFURL(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@owner", 0)
-	_, err := k.CreateAction(ctx, CreateActionRequest{
+	_, err := k.CreateAction(ctx, owner.ID, CreateActionRequest{
 		OwnerUserID: owner.ID,
 		Name:        "/webhook",
 		Kind:        KindHTTP,
@@ -622,7 +622,7 @@ func TestConsumeEventSettlesAtomically(t *testing.T) {
 	}
 	_ = st.CreateEvent(ctx, e)
 
-	p, _, _ := k.StartProcess(ctx, owner.ID, 500)
+	p, _, _ := k.StartProcess(ctx, owner.ID, owner.ID, 500)
 
 	reply, err := k.ConsumeEvent(ctx, owner.ID, e.ID, p.ID, "")
 	if err != nil {
@@ -664,7 +664,7 @@ func TestConsumeEventRespectsParentTraceID(t *testing.T) {
 	}
 	_ = st.CreateEvent(ctx, e)
 
-	p, root, _ := k.StartProcess(ctx, owner.ID, 500)
+	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 500)
 
 	reply, err := k.ConsumeEvent(ctx, owner.ID, e.ID, p.ID, root.ID)
 	if err != nil {
@@ -743,7 +743,7 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, owner.ID, 100)
+	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: owner.ID, ActionName: "/rate-svc", Args: map[string]any{},
@@ -791,7 +791,7 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, owner.ID, 100)
+	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: owner.ID, ActionName: "/rerate-svc", Args: map[string]any{},
@@ -857,7 +857,7 @@ func TestReceiptCreatedWithCall(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: caller.ID, ActionID: a.ID, Permission: PermCall, CreatedAt: time.Now().UTC()})
 
-	p, root, _ := k.StartProcess(ctx, caller.ID, 200)
+	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 200)
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: caller.ID, ActionName: "/rcpt-svc", Args: map[string]any{},
@@ -898,7 +898,7 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, owner.ID, 200)
+	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 200)
 	reply, _ := k.Call(ctx, CallRequest{
 		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: owner.ID, ActionName: "/fail-svc", Args: map[string]any{},
@@ -973,7 +973,7 @@ func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	if err := st.CreateAction(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	p, root, _ := k.StartProcess(ctx, owner.ID, 50)
+	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 50)
 
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
@@ -1371,7 +1371,7 @@ func TestRatingRecordCreated(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, owner.ID, 100)
+	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: owner.ID, ActionName: "/rr-svc", Args: map[string]any{},
@@ -1417,7 +1417,7 @@ func TestRatingDuplicateRejected(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, owner.ID, 100)
+	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: owner.ID, ActionName: "/dup-svc", Args: map[string]any{},
@@ -1443,7 +1443,7 @@ func TestZeroCreditProcess(t *testing.T) {
 
 	owner := setupUser(t, st, "@zero-owner", 100)
 
-	p, _, err := k.StartProcess(ctx, owner.ID, 0)
+	p, _, err := k.StartProcess(ctx, owner.ID, owner.ID, 0)
 	if err != nil {
 		t.Fatalf("StartProcess with 0 funds: %v", err)
 	}
@@ -1512,7 +1512,7 @@ func TestSetActiveRequiresDescription(t *testing.T) {
 	ctx := context.Background()
 	owner := setupUser(t, st, "@desc-owner", 0)
 
-	a, err := k.CreateAction(ctx, CreateActionRequest{
+	a, err := k.CreateAction(ctx, owner.ID, CreateActionRequest{
 		OwnerUserID:  owner.ID,
 		Name:         "/nodesc",
 		Kind:         KindHTTP,
@@ -1542,7 +1542,7 @@ func TestSetActiveValidatesWasm(t *testing.T) {
 	owner := setupUser(t, st, "@alice", 0)
 
 	// WASM action with placeholder source.
-	a, err := newTestKernel(st).CreateAction(ctx, CreateActionRequest{
+	a, err := newTestKernel(st).CreateAction(ctx, owner.ID, CreateActionRequest{
 		OwnerUserID:  owner.ID,
 		Name:         "/wasm-act",
 		Kind:         KindWasm,
@@ -1593,7 +1593,7 @@ func TestImportOpenAPI(t *testing.T) {
 	owner := setupUser(t, st, "@oapi-import-owner", 0)
 	specURL := "https://spec.example.com/api.json"
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, specURL, []byte(minOpenAPISpec))
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec))
 	if err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
@@ -1617,7 +1617,7 @@ func TestImportOpenAPI(t *testing.T) {
 	}
 
 	// Re-import with identical spec → Unchanged.
-	result2, err := k.ImportOpenAPI(ctx, owner.ID, specURL, []byte(minOpenAPISpec))
+	result2, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec))
 	if err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
@@ -1635,7 +1635,7 @@ func TestUnimportOpenAPI(t *testing.T) {
 	owner := setupUser(t, st, "@oapi-unimport-owner", 0)
 	specURL := "https://spec.example.com/api.json"
 
-	if _, err := k.ImportOpenAPI(ctx, owner.ID, specURL, []byte(minOpenAPISpec)); err != nil {
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec)); err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
 
@@ -1648,7 +1648,7 @@ func TestUnimportOpenAPI(t *testing.T) {
 	}
 
 	// UnimportOpenAPI with name filter deactivates only the matching action.
-	if _, err := k.ImportOpenAPI(ctx, owner.ID, specURL, []byte(minOpenAPISpec)); err != nil {
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec)); err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
 	actions2, err := k.UnimportOpenAPI(ctx, owner.ID, specURL, "sayHello")
@@ -1668,7 +1668,7 @@ func TestOpenAPIActivation(t *testing.T) {
 	owner := setupUser(t, st, "@oapi-activate-owner", 0)
 	specURL := "https://spec.example.com/api.json"
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, specURL, []byte(minOpenAPISpec))
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec))
 	if err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
@@ -1767,7 +1767,7 @@ func TestImportOpenAPISetsOwnershipVerified(t *testing.T) {
 	specURL := "https://spec.example.com/api.json"
 	specWithOwner := `{"openapi":"3.0.0","x-juice-owner":"@oapi-owner-verified","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, specURL, []byte(specWithOwner))
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(specWithOwner))
 	if err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
@@ -1856,5 +1856,68 @@ func TestSetActivePublicOpenAPIRequiresOwnershipVerified(t *testing.T) {
 	}
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+// ---- #12 supervision authority tests ----
+
+func TestCreateActionSubjectMismatchRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	userA := setupUser(t, st, "@user-a", 0)
+	userB := setupUser(t, st, "@user-b", 0)
+
+	_, err := k.CreateAction(ctx, userA.ID, CreateActionRequest{
+		OwnerUserID: userB.ID,
+		Name:        "/action",
+		Kind:        KindHTTP,
+		Source:      "http://example.com",
+	})
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized when subject != owner, got %v", err)
+	}
+}
+
+func TestStartProcessSubjectMismatchRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	userA := setupUser(t, st, "@user-a-proc", 100)
+	userB := setupUser(t, st, "@user-b-proc", 0)
+
+	_, _, err := k.StartProcess(ctx, userA.ID, userB.ID, 0)
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized when subject != owner, got %v", err)
+	}
+}
+
+func TestImportOpenAPISubjectMismatchRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	userA := setupUser(t, st, "@user-a-imp", 0)
+	userB := setupUser(t, st, "@user-b-imp", 0)
+
+	_, err := k.ImportOpenAPI(ctx, userA.ID, userB.ID, "http://spec.example.com", []byte(minOpenAPISpec))
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized when subject != owner, got %v", err)
+	}
+}
+
+func TestEmitEventSubjectMismatchRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	userA := setupUser(t, st, "@user-a-emit", 0)
+	userB := setupUser(t, st, "@user-b-emit", 0)
+
+	_, err := k.EmitEvent(ctx, userA.ID, userB.ID, "test-event", nil, "")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized when subject != sourceUser, got %v", err)
 	}
 }

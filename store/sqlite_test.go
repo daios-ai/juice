@@ -1249,58 +1249,6 @@ func TestReadUserByPublicKey(t *testing.T) {
 
 // ---- Idempotency record tests ----
 
-func TestCreateReadIdempotencyRecord(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	counterparty := newUser("@cp", 0)
-	_ = db.CreateUser(ctx, counterparty)
-
-	now := time.Now().UTC()
-	r := &kernel.IdempotencyRecord{
-		ID:                 uuid.New().String(),
-		IdempotencyKey:     "key-abc-123",
-		CounterpartyUserID: counterparty.ID,
-		Status:             "complete",
-		ResultJSON:         `{"ok":true}`,
-		CreatedAt:          now,
-		ExpiresAt:          now.Add(24 * time.Hour),
-	}
-	if err := db.CreateIdempotencyRecord(ctx, r); err != nil {
-		t.Fatalf("CreateIdempotencyRecord: %v", err)
-	}
-
-	got, err := db.ReadIdempotencyRecord(ctx, "key-abc-123", counterparty.ID)
-	if err != nil {
-		t.Fatalf("ReadIdempotencyRecord: %v", err)
-	}
-	if got.ID != r.ID {
-		t.Errorf("record.ID: got %q, want %q", got.ID, r.ID)
-	}
-
-	// Unknown key returns ErrNotFound.
-	if _, err := db.ReadIdempotencyRecord(ctx, "no-such-key", counterparty.ID); err == nil {
-		t.Error("expected error for unknown idempotency key")
-	}
-
-	// Second INSERT with same key+counterparty is silently ignored (INSERT OR IGNORE).
-	dup := &kernel.IdempotencyRecord{
-		ID:                 uuid.New().String(),
-		IdempotencyKey:     "key-abc-123",
-		CounterpartyUserID: counterparty.ID,
-		CreatedAt:          now,
-		ExpiresAt:          now.Add(24 * time.Hour),
-	}
-	if err := db.CreateIdempotencyRecord(ctx, dup); err != nil {
-		t.Fatalf("duplicate idempotency insert should not error: %v", err)
-	}
-	// Confirm original record is still returned (not the duplicate ID).
-	got2, _ := db.ReadIdempotencyRecord(ctx, "key-abc-123", counterparty.ID)
-	if got2.ID != r.ID {
-		t.Errorf("expected original ID after duplicate insert, got %q", got2.ID)
-	}
-}
-
 func TestIdempotencyStateMachine(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

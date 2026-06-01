@@ -15,7 +15,7 @@ func TestStatsInitializedOnActivation(t *testing.T) {
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@statsowner", Email: "s@e.com", Password: "p",
 	})
-	a, _ := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
 		Name:         "/svc",
 		Kind:         kernel.KindHTTP,
@@ -71,7 +71,7 @@ func TestLookupCommandUsesCall(t *testing.T) {
 	if _, err := env.k.Deposit(ctx, sys.ID, user.ID, 10, "test"); err != nil {
 		t.Fatal(err)
 	}
-	proc, _, err := env.k.StartProcess(ctx, user.ID, 10)
+	proc, _, err := env.k.StartProcess(ctx, user.ID, user.ID, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

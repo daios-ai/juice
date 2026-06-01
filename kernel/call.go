@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -174,6 +173,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInternal.Wrap("could not create trace")
 	}
 
+	ctx = log.WithProcessID(ctx, req.ProcessID)
+	ctx = log.WithSubjectUserID(ctx, req.SubjectID)
 	ctx = log.WithTraceID(ctx, trace.ID)
 	ctx = log.WithActionID(ctx, action.ID)
 	logger = k.log.With(ctx)
@@ -301,7 +302,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 	k.upsertStatTag(ctx, action.ID, stats)
 
-	logger.Info("call.success", "action", action.Name, "tx_id", txID, "latency_ms", fmt.Sprintf("%.1f", latency*1000))
+	logger.Info("call.success", "action", action.Name, "tx_id", txID, "latency_ms", latency*1000)
 
 	return &CallReply{
 		Result:  reply,
@@ -557,7 +558,7 @@ func (h *kernelHostFunctions) Emit(ctx context.Context, event string, argsJSON [
 		}
 	}
 	// Pass current trace ID as causal context (FOLLOWS_FROM) for listener-triggered traces.
-	_, err := h.kernel.EmitEvent(ctx, h.ownerUserID, event, args, h.traceID)
+	_, err := h.kernel.EmitEvent(ctx, h.ownerUserID, h.ownerUserID, event, args, h.traceID)
 	return err
 }
 

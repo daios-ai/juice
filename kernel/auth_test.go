@@ -25,14 +25,14 @@ func TestHashPassword(t *testing.T) {
 
 func TestIssueAndVerifyToken(t *testing.T) {
 	secret := "test-secret"
-	id, err := IssueToken("user-1", secret, time.Hour)
+	id, err := IssueToken("user-1", secret, "", "", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if id == "" {
 		t.Fatal("expected non-empty token")
 	}
-	got, err := VerifyToken(id, secret)
+	got, err := VerifyToken(id, secret, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,22 +43,22 @@ func TestIssueAndVerifyToken(t *testing.T) {
 
 func TestVerifyTokenExpired(t *testing.T) {
 	secret := "test-secret"
-	tok, err := IssueToken("user-1", secret, -time.Second) // already expired
+	tok, err := IssueToken("user-1", secret, "", "", -time.Second) // already expired
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = VerifyToken(tok, secret)
+	_, err = VerifyToken(tok, secret, "", "")
 	if err == nil {
 		t.Error("expected error for expired token")
 	}
 }
 
 func TestVerifyTokenWrongSecret(t *testing.T) {
-	tok, err := IssueToken("user-1", "secret-a", time.Hour)
+	tok, err := IssueToken("user-1", "secret-a", "", "", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = VerifyToken(tok, "secret-b")
+	_, err = VerifyToken(tok, "secret-b", "", "")
 	if err == nil {
 		t.Error("expected error for wrong secret")
 	}
@@ -131,7 +131,7 @@ func TestStartAndExchangeAuthCode(t *testing.T) {
 		t.Fatalf("could not extract code from redirect: %s", redirect)
 	}
 
-	access, refresh, err := k.ExchangeAuthCode(ctx, code, verifier)
+	access, refresh, err := k.ExchangeAuthCode(ctx, code, verifier, "http://localhost:9999/cb")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestStartAndExchangeAuthCode(t *testing.T) {
 		t.Errorf("token subject: got %q, want %q", subjectID, u2.ID)
 	}
 
-	_, _, err = k.ExchangeAuthCode(ctx, code, verifier)
+	_, _, err = k.ExchangeAuthCode(ctx, code, verifier, "http://localhost:9999/cb")
 	if err == nil {
 		t.Error("expected error reusing auth code")
 	}
@@ -180,7 +180,7 @@ func TestExchangeAuthCodeWrongVerifier(t *testing.T) {
 		}
 	}
 
-	_, _, err = k.ExchangeAuthCode(ctx, code, "wrong-verifier")
+	_, _, err = k.ExchangeAuthCode(ctx, code, "wrong-verifier", "")
 	if err == nil {
 		t.Error("expected error with wrong code_verifier")
 	}
@@ -253,7 +253,7 @@ func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
 		t.Fatalf("StartAuthCode: got %v, want ErrUnauthenticated", err)
 	}
 	code := redirect[len("?code="):]
-	if _, _, err := k.ExchangeAuthCode(ctx, code, verifier); !errors.Is(err, ErrUnauthenticated) {
+	if _, _, err := k.ExchangeAuthCode(ctx, code, verifier, ""); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("ExchangeAuthCode: got %v, want ErrUnauthenticated", err)
 	}
 	if _, _, err := k.RefreshAccessToken(ctx, refresh); !errors.Is(err, ErrUnauthenticated) {
@@ -261,5 +261,72 @@ func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
 	}
 	if _, _, err := k.LoginWithRefresh(ctx, u.Handle, "pass"); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("LoginWithRefresh: got %v, want ErrUnauthenticated", err)
+	}
+}
+
+// ---- #15 issuer/audience and redirect_uri tests ----
+
+func TestIssueTokenWithIssuerAudience(t *testing.T) {
+	secret := "test-secret"
+	issuer := "https://auth.example.com"
+	audience := "my-api"
+
+	tok, err := IssueToken("user-1", secret, issuer, audience, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Correct issuer+audience should verify.
+	got, err := VerifyToken(tok, secret, issuer, audience)
+	if err != nil {
+		t.Fatalf("VerifyToken with correct iss/aud: %v", err)
+	}
+	if got != "user-1" {
+		t.Errorf("subject: got %q, want user-1", got)
+	}
+
+	// Wrong issuer must be rejected.
+	if _, err := VerifyToken(tok, secret, "https://wrong.example.com", audience); err == nil {
+		t.Error("expected error for wrong issuer")
+	}
+
+	// Wrong audience must be rejected.
+	if _, err := VerifyToken(tok, secret, issuer, "wrong-api"); err == nil {
+		t.Error("expected error for wrong audience")
+	}
+}
+
+func TestExchangeAuthCodeRedirectURIMismatch(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	_, err := k.CreateUser(ctx, CreateUserRequest{
+		Handle: "@redir-user", Email: "redir@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	verifier, _ := GenerateCodeVerifier()
+	challenge := CodeChallenge(verifier)
+	redirect, err := k.StartAuthCode(ctx, "@redir-user", "pass", challenge, "http://legit.example.com/cb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var code string
+	for i := 0; i+5 <= len(redirect); i++ {
+		if redirect[i:i+5] == "code=" {
+			code = redirect[i+5:]
+			break
+		}
+	}
+	if code == "" {
+		t.Fatalf("could not extract code from redirect: %s", redirect)
+	}
+
+	_, _, err = k.ExchangeAuthCode(ctx, code, verifier, "http://attacker.example.com/cb")
+	if err == nil {
+		t.Error("expected error when redirect_uri does not match stored value")
 	}
 }

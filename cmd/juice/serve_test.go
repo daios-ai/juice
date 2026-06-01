@@ -1480,7 +1480,7 @@ func TestFederationCall(t *testing.T) {
 	}
 
 	// Register a public /ping action on @sys pointing to the backend.
-	a, err := k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
 		Name:         "/ping",
 		Kind:         kernel.KindHTTP,
@@ -1565,7 +1565,7 @@ func TestFederationCallRejectsNonPublicAction(t *testing.T) {
 	}
 
 	// Create a private inactive action owned by @sys.
-	a, err := k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
 		Name:         "/secret",
 		Kind:         kernel.KindHTTP,
@@ -1628,7 +1628,7 @@ func TestFederationCallAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, err := k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
 		Name:         "/authtest",
 		Kind:         kernel.KindHTTP,
@@ -1749,7 +1749,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	_, _ = k.RegisterRemoteKernel(ctx, "@replay.example.com", pubB64, "http://replay.example.com")
 
-	a, _ := k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
 		Name:         "/replay-ping",
 		Kind:         kernel.KindHTTP,

@@ -117,11 +117,13 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	if os.Getenv("JUICE_ALLOW_LOCAL_SOURCES") == "true" {
 		cfg.AllowLocalSources = true
 	}
+	cfg.AuthIssuer = os.Getenv("JUICE_AUTH_ISSUER")
+	cfg.AuthAudience = os.Getenv("JUICE_AUTH_AUDIENCE")
 
 	logger, _ := log.New(log.Config{
 		Level:    envOr("JUICE_LOG_LEVEL", "info"),
 		FilePath: envOr("JUICE_LOG_FILE", ""),
-		Format:   "text",
+		Format:   envOr("JUICE_LOG_FORMAT", "text"),
 	})
 
 	exec := script.New(script.Config{

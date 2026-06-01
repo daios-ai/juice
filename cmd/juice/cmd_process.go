@@ -30,7 +30,7 @@ func processStartCmd() *cobra.Command {
 				return err
 			}
 
-			p, t, err := k.StartProcess(context.Background(), subjectID, funds)
+			p, t, err := k.StartProcess(context.Background(), subjectID, subjectID, funds)
 			if err != nil {
 				return err
 			}

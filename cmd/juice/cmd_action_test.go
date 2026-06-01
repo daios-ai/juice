@@ -23,7 +23,7 @@ func TestActionCreateAndToggle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, err := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
 		Name:         "/cli-action",
 		Kind:         kernel.KindHTTP,
@@ -67,7 +67,7 @@ func TestActionACLGrantRevoke(t *testing.T) {
 		Handle: "@other", Email: "other@example.com", Password: "pass",
 	})
 
-	a, _ := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "/acl-test",
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
@@ -90,7 +90,7 @@ func TestActionPriceUpdateDeactivates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
 		Name:         "/priced",
 		Kind:         kernel.KindHTTP,
@@ -130,7 +130,7 @@ func TestActionDelete(t *testing.T) {
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@delowner", Email: "del@example.com", Password: "pass",
 	})
-	a, _ := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "/to-delete",
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
@@ -156,7 +156,7 @@ func TestActionShowACL(t *testing.T) {
 		Handle: "@show-stranger", Email: "show-stranger@example.com", Password: "pass",
 	})
 
-	a, _ := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "/show-svc",
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
@@ -272,7 +272,7 @@ func TestActionListActive(t *testing.T) {
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@listowner", Email: "list@example.com", Password: "pass",
 	})
-	a, _ := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
 		Name:         "/listed",
 		Kind:         kernel.KindHTTP,

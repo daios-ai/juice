@@ -24,7 +24,7 @@ func TestProcessStartFundEnd(t *testing.T) {
 	owner.PasswordHash = hash
 	_ = env.db.CreateUser(ctx, owner)
 
-	p, root, err := env.k.StartProcess(ctx, owner.ID, 500)
+	p, root, err := env.k.StartProcess(ctx, owner.ID, owner.ID, 500)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,9 +64,9 @@ func TestProcessList(t *testing.T) {
 		Handle: "@list-proc-other", Email: "lpo@example.com", Password: "p",
 	})
 
-	env.k.StartProcess(ctx, owner.ID, 0)
-	env.k.StartProcess(ctx, owner.ID, 0)
-	env.k.StartProcess(ctx, other.ID, 0)
+	env.k.StartProcess(ctx, owner.ID, owner.ID, 0)
+	env.k.StartProcess(ctx, owner.ID, owner.ID, 0)
+	env.k.StartProcess(ctx, other.ID, other.ID, 0)
 
 	processes, err := env.k.ListProcesses(ctx, owner.ID, 100, 0)
 	if err != nil {
@@ -89,7 +89,7 @@ func TestProcessNegativeFundsFails(t *testing.T) {
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@negfund", Email: "nf@example.com", Password: "p",
 	})
-	_, _, err := env.k.StartProcess(ctx, owner.ID, -1)
+	_, _, err := env.k.StartProcess(ctx, owner.ID, owner.ID, -1)
 	if err == nil {
 		t.Error("expected error starting process with negative funds")
 	}
@@ -111,7 +111,7 @@ func TestProcessEndReturnsBalance(t *testing.T) {
 	owner.PasswordHash = hash
 	_ = env.db.CreateUser(ctx, owner)
 
-	p, _, err := env.k.StartProcess(ctx, owner.ID, 400)
+	p, _, err := env.k.StartProcess(ctx, owner.ID, owner.ID, 400)
 	if err != nil {
 		t.Fatal(err)
 	}

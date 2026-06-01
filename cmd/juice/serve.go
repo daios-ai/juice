@@ -358,7 +358,7 @@ func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	result, err := s.kernel.ImportOpenAPI(r.Context(), subjectFrom(r), req.SpecURL, specBytes)
+	result, err := s.kernel.ImportOpenAPI(r.Context(), subjectFrom(r), subjectFrom(r), req.SpecURL, specBytes)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -401,7 +401,7 @@ func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	a, err := s.kernel.CreateAction(r.Context(), kernel.CreateActionRequest{
+	a, err := s.kernel.CreateAction(r.Context(), subjectFrom(r), kernel.CreateActionRequest{
 		OwnerUserID:  subjectFrom(r),
 		Name:         req.Name,
 		Kind:         kernel.ActionKind(req.Kind),
@@ -546,7 +546,7 @@ func (s *server) postProcess(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	p, t, err := s.kernel.StartProcess(r.Context(), subjectFrom(r), req.Funds)
+	p, t, err := s.kernel.StartProcess(r.Context(), subjectFrom(r), subjectFrom(r), req.Funds)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -743,7 +743,8 @@ func (s *server) postTokenMulti(w http.ResponseWriter, r *http.Request) {
 		case "authorization_code":
 			code := r.FormValue("code")
 			verifier := r.FormValue("code_verifier")
-			access, refresh, err := s.kernel.ExchangeAuthCode(r.Context(), code, verifier)
+			redirectURI := r.FormValue("redirect_uri")
+			access, refresh, err := s.kernel.ExchangeAuthCode(r.Context(), code, verifier, redirectURI)
 			if err != nil {
 				writeErr(w, err)
 				return
@@ -833,7 +834,7 @@ func (s *server) postEmit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	eventIDs, err := s.kernel.EmitEvent(r.Context(), subjectFrom(r), req.EventName, req.Args, "")
+	eventIDs, err := s.kernel.EmitEvent(r.Context(), subjectFrom(r), subjectFrom(r), req.EventName, req.Args, "")
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1014,7 +1015,7 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Execute.
-	proc, _, err := s.kernel.StartProcess(ctx, counterparty.ID, action.Price)
+	proc, _, err := s.kernel.StartProcess(ctx, counterparty.ID, counterparty.ID, action.Price)
 	if err != nil {
 		// No call was attempted; safe to delete the pending record.
 		_ = s.kernel.DeleteIdempotencyRecord(ctx, rec.ID)

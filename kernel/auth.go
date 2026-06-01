@@ -35,16 +35,21 @@ type jwtClaims struct {
 }
 
 // IssueToken creates a signed JWT for userID, valid for ttl.
-func IssueToken(userID, secret string, ttl time.Duration) (string, error) {
+// When issuer or audience is non-empty the corresponding registered claim is set.
+func IssueToken(userID, secret, issuer, audience string, ttl time.Duration) (string, error) {
 	now := time.Now().UTC()
-	claims := jwtClaims{
-		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   userID,
-			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
-		},
+	rc := jwt.RegisteredClaims{
+		Subject:   userID,
+		IssuedAt:  jwt.NewNumericDate(now),
+		ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 	}
-	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	if issuer != "" {
+		rc.Issuer = issuer
+	}
+	if audience != "" {
+		rc.Audience = jwt.ClaimStrings{audience}
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwtClaims{RegisteredClaims: rc})
 	s, err := tok.SignedString([]byte(secret))
 	if err != nil {
 		return "", ErrInternal.Wrap("failed to sign token")
@@ -53,7 +58,8 @@ func IssueToken(userID, secret string, ttl time.Duration) (string, error) {
 }
 
 // VerifyToken parses and validates a JWT, returning the subject (user ID).
-func VerifyToken(tokenStr, secret string) (string, error) {
+// When issuer or audience is non-empty the corresponding claim is validated.
+func VerifyToken(tokenStr, secret, issuer, audience string) (string, error) {
 	tok, err := jwt.ParseWithClaims(tokenStr, &jwtClaims{}, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrUnauthenticated.Wrap("unexpected signing method")
@@ -66,6 +72,21 @@ func VerifyToken(tokenStr, secret string) (string, error) {
 	claims, ok := tok.Claims.(*jwtClaims)
 	if !ok || claims.Subject == "" {
 		return "", ErrUnauthenticated.Wrap("token has no subject")
+	}
+	if issuer != "" && claims.Issuer != issuer {
+		return "", ErrUnauthenticated.Wrap("token issuer mismatch")
+	}
+	if audience != "" {
+		found := false
+		for _, a := range claims.Audience {
+			if a == audience {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", ErrUnauthenticated.Wrap("token audience mismatch")
+		}
 	}
 	return claims.Subject, nil
 }
@@ -147,10 +168,14 @@ func (k *Kernel) StartAuthCode(ctx context.Context, handle, password, codeChalle
 }
 
 // ExchangeAuthCode exchanges a PKCE auth code for access + refresh tokens.
-func (k *Kernel) ExchangeAuthCode(ctx context.Context, code, codeVerifier string) (accessToken, refreshToken string, err error) {
+// redirectURI must match the URI used in StartAuthCode (if one was specified).
+func (k *Kernel) ExchangeAuthCode(ctx context.Context, code, codeVerifier, redirectURI string) (accessToken, refreshToken string, err error) {
 	ac, err := k.store.ConsumeAuthCode(ctx, code)
 	if err != nil {
 		return "", "", ErrUnauthenticated.Wrap("invalid or expired auth code")
+	}
+	if ac.RedirectURI != "" && ac.RedirectURI != redirectURI {
+		return "", "", ErrUnauthenticated.Wrap("redirect_uri mismatch")
 	}
 	if !VerifyCodeChallenge(codeVerifier, ac.CodeChallenge) {
 		return "", "", ErrUnauthenticated.Wrap("code_verifier does not match challenge")
@@ -161,7 +186,7 @@ func (k *Kernel) ExchangeAuthCode(ctx context.Context, code, codeVerifier string
 		return "", "", err
 	}
 
-	accessToken, err = IssueToken(ac.UserID, k.cfg.TokenSecret, k.cfg.TokenTTL)
+	accessToken, err = IssueToken(ac.UserID, k.cfg.TokenSecret, k.cfg.AuthIssuer, k.cfg.AuthAudience, k.cfg.TokenTTL)
 	if err != nil {
 		return "", "", err
 	}
@@ -183,7 +208,7 @@ func (k *Kernel) RefreshAccessToken(ctx context.Context, oldRefreshToken string)
 	} else if err := rejectSuspended(u); err != nil {
 		return "", "", err
 	}
-	accessToken, err = IssueToken(rt.UserID, k.cfg.TokenSecret, k.cfg.TokenTTL)
+	accessToken, err = IssueToken(rt.UserID, k.cfg.TokenSecret, k.cfg.AuthIssuer, k.cfg.AuthAudience, k.cfg.TokenTTL)
 	if err != nil {
 		return "", "", err
 	}
@@ -229,7 +254,7 @@ func (k *Kernel) LoginWithRefresh(ctx context.Context, handle, password string) 
 	if err := rejectSuspended(u); err != nil {
 		return "", "", err
 	}
-	accessToken, err = IssueToken(u.ID, k.cfg.TokenSecret, k.cfg.TokenTTL)
+	accessToken, err = IssueToken(u.ID, k.cfg.TokenSecret, k.cfg.AuthIssuer, k.cfg.AuthAudience, k.cfg.TokenTTL)
 	if err != nil {
 		return "", "", err
 	}

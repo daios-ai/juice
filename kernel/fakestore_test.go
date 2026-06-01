@@ -1045,18 +1045,6 @@ func (f *fakeStore) ListRatings(_ context.Context, actionID string, limit, offse
 	return result, nil
 }
 
-func (f *fakeStore) CreateIdempotencyRecord(_ context.Context, r *IdempotencyRecord) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	key := r.IdempotencyKey + ":" + r.CounterpartyUserID
-	if _, exists := f.idempotencyRecords[key]; exists {
-		return nil // INSERT OR IGNORE semantics
-	}
-	cp := *r
-	f.idempotencyRecords[key] = &cp
-	return nil
-}
-
 func (f *fakeStore) InsertPendingIdempotencyRecord(_ context.Context, r *IdempotencyRecord) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

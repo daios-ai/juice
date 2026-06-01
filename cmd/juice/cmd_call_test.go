@@ -25,11 +25,11 @@ func TestCallClosedProcess(t *testing.T) {
 	owner.PasswordHash = hash
 	_ = env.db.CreateUser(ctx, owner)
 
-	p, root, _ := env.k.StartProcess(ctx, owner.ID, 100)
+	p, root, _ := env.k.StartProcess(ctx, owner.ID, owner.ID, 100)
 	_ = env.k.EndProcess(ctx, owner.ID, p.ID)
 
 	// Create an HTTP action — Call will fail before exec (closed process).
-	a, _ := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "/echo",
 		Kind: kernel.KindHTTP, Source: "http://example.com/echo",
 	})
@@ -55,9 +55,9 @@ func TestCallInsufficientFunds(t *testing.T) {
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@poorowner", Email: "poor@example.com", Password: "p",
 	})
-	p, root, _ := env.k.StartProcess(ctx, owner.ID, 0)
+	p, root, _ := env.k.StartProcess(ctx, owner.ID, owner.ID, 0)
 
-	_, err := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+	_, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "/expensive",
 		Kind: kernel.KindHTTP, Source: "http://x.com", Price: 100,
 	})

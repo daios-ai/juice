@@ -264,7 +264,7 @@ func TestAdminListAllActions(t *testing.T) {
 	})
 
 	for i := 0; i < 3; i++ {
-		_, err := k.CreateAction(ctx, kernel.CreateActionRequest{
+		_, err := k.CreateAction(ctx, u.ID, kernel.CreateActionRequest{
 			OwnerUserID:  u.ID,
 			Name:         "/action" + string(rune('a'+i)),
 			Kind:         kernel.KindHTTP,

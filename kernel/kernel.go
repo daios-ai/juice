@@ -32,6 +32,8 @@ type Config struct {
 	SigningKey        ed25519.PrivateKey // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
 	IssuerUserID      string             // @sys user ID, set during bootstrap
 	SuperuserHandle   string             // cached superuser handle for deposit checks
+	AuthIssuer        string             // JUICE_AUTH_ISSUER — iss claim in JWTs; empty = no claim
+	AuthAudience      string             // JUICE_AUTH_AUDIENCE — aud claim in JWTs; empty = no validation
 }
 
 // DefaultConfig returns safe local defaults.
@@ -154,7 +156,7 @@ func (k *Kernel) Login(ctx context.Context, handle, password string) (string, er
 	if err := rejectSuspended(u); err != nil {
 		return "", err
 	}
-	tok, err := IssueToken(u.ID, k.cfg.TokenSecret, k.cfg.TokenTTL)
+	tok, err := IssueToken(u.ID, k.cfg.TokenSecret, k.cfg.AuthIssuer, k.cfg.AuthAudience, k.cfg.TokenTTL)
 	if err != nil {
 		return "", err
 	}
@@ -229,7 +231,7 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 
 // VerifyToken validates a bearer token and returns the subject user ID.
 func (k *Kernel) VerifyToken(token string) (string, error) {
-	return VerifyToken(token, k.cfg.TokenSecret)
+	return VerifyToken(token, k.cfg.TokenSecret, k.cfg.AuthIssuer, k.cfg.AuthAudience)
 }
 
 // ---- Action operations ----
@@ -281,7 +283,10 @@ func validateHTTPSource(source string, allowLocal bool) error {
 	return nil
 }
 
-func (k *Kernel) CreateAction(ctx context.Context, req CreateActionRequest) (*Action, error) {
+func (k *Kernel) CreateAction(ctx context.Context, subjectID string, req CreateActionRequest) (*Action, error) {
+	if err := k.requireSelf(ctx, subjectID, req.OwnerUserID); err != nil {
+		return nil, err
+	}
 	if req.Name == "" {
 		return nil, ErrInvalidInput.Wrap("name is required")
 	}
@@ -796,7 +801,10 @@ func (k *Kernel) RevokeACL(ctx context.Context, subjectID, actionID string, perm
 
 // StartProcess creates a new process and locks funds from the owner's account.
 // Process creation, user debit, and root trace creation are atomic.
-func (k *Kernel) StartProcess(ctx context.Context, ownerID string, funds int64) (*Process, *Trace, error) {
+func (k *Kernel) StartProcess(ctx context.Context, subjectID, ownerID string, funds int64) (*Process, *Trace, error) {
+	if err := k.requireSelf(ctx, subjectID, ownerID); err != nil {
+		return nil, nil, err
+	}
 	if funds < 0 {
 		return nil, nil, ErrInvalidInput.Wrap("funds must be non-negative")
 	}
@@ -1116,6 +1124,14 @@ func (k *Kernel) requireAdmin(ctx context.Context, subjectID string, a *Action) 
 	return nil
 }
 
+// requireSelf returns nil if subjectID == ownerID or subjectID is the platform superuser.
+func (k *Kernel) requireSelf(ctx context.Context, subjectID, ownerID string) error {
+	if subjectID == ownerID || k.isSuperuser(ctx, subjectID) {
+		return nil
+	}
+	return ErrUnauthorized.Wrap("cannot act on behalf of another user")
+}
+
 // isSuperuser returns true if subjectID is the platform superuser registered during bootstrap.
 func (k *Kernel) isSuperuser(ctx context.Context, subjectID string) bool {
 	handle, _ := k.store.GetConfig(ctx, "superuser_handle")
@@ -1253,11 +1269,6 @@ func (k *Kernel) GetIdempotencyRecord(ctx context.Context, key, counterpartyUser
 	return k.store.ReadIdempotencyRecord(ctx, key, counterpartyUserID)
 }
 
-// CreateIdempotencyRecord stores a new idempotency record.
-func (k *Kernel) CreateIdempotencyRecord(ctx context.Context, r *IdempotencyRecord) error {
-	return k.store.CreateIdempotencyRecord(ctx, r)
-}
-
 // InsertPendingIdempotencyRecord inserts a record with status="pending" before execution.
 func (k *Kernel) InsertPendingIdempotencyRecord(ctx context.Context, r *IdempotencyRecord) error {
 	return k.store.InsertPendingIdempotencyRecord(ctx, r)
@@ -1282,7 +1293,10 @@ func (k *Kernel) GetSigningKey() Ed25519PrivateKey {
 // It does NOT call the target action — the listener owner must call ConsumeEvent explicitly.
 // causingTraceID is stored as a FOLLOWS_FROM reference on each event record.
 // All events are inserted atomically: either every active listener receives its event or none do.
-func (k *Kernel) EmitEvent(ctx context.Context, sourceUserID, eventName string, args map[string]any, causingTraceID string) ([]string, error) {
+func (k *Kernel) EmitEvent(ctx context.Context, subjectID, sourceUserID, eventName string, args map[string]any, causingTraceID string) ([]string, error) {
+	if err := k.requireSelf(ctx, subjectID, sourceUserID); err != nil {
+		return nil, err
+	}
 	listeners, err := k.store.ListListeners(ctx, sourceUserID, eventName)
 	if err != nil {
 		return nil, err
@@ -1972,7 +1986,10 @@ func openAPISlug(s string) string {
 
 // ImportOpenAPI parses specBytes (caller-fetched OpenAPI JSON), reconciles operations with
 // existing OpenAPI-imported actions for the owner, and returns the diff. It is idempotent.
-func (k *Kernel) ImportOpenAPI(ctx context.Context, ownerID, specURL string, specBytes []byte) (*ImportResult, error) {
+func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL string, specBytes []byte) (*ImportResult, error) {
+	if err := k.requireSelf(ctx, subjectID, ownerID); err != nil {
+		return nil, err
+	}
 	owner, err := k.store.ReadUser(ctx, ownerID)
 	if err != nil {
 		return nil, err

@@ -1220,34 +1220,6 @@ func (s *DB) ListAllTransactions(ctx context.Context, limit, offset int) ([]*ker
 	return out, rows.Err()
 }
 
-func (s *DB) UpdateTraceCostLatency(ctx context.Context, traceID string, grossDelta int64, endedAt time.Time) error {
-	// Walk up the trace tree from traceID to the root, updating cost and latency_ms.
-	cur := traceID
-	for {
-		t, err := s.ReadTrace(ctx, cur)
-		if err != nil {
-			return err
-		}
-		// Compute latency as ms from trace creation to endedAt.
-		latencyMS := endedAt.Sub(t.CreatedAt).Milliseconds()
-
-		_, err = s.db.ExecContext(ctx,
-			`UPDATE traces SET cost=cost+?, latency_ms=MAX(latency_ms,?) WHERE id=?`,
-			grossDelta, latencyMS, cur,
-		)
-		if err != nil {
-			return dbErr(err, "update trace cost latency")
-		}
-
-		// Stop at root (parent_trace_id == id).
-		if t.ParentTraceID == cur {
-			break
-		}
-		cur = t.ParentTraceID
-	}
-	return nil
-}
-
 // ---- Stats ----
 
 func (s *DB) ReadStats(ctx context.Context, actionID string) (*kernel.Stats, error) {
@@ -1477,22 +1449,10 @@ func (s *DB) LockEvent(ctx context.Context, eventID string) error {
 	return nil
 }
 
-func (s *DB) SettleEvent(ctx context.Context, eventID, txID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE events SET tx_id=? WHERE id=?`, txID, eventID)
-	return dbErr(err, "settle event")
-}
-
 func (s *DB) UnlockEvent(ctx context.Context, eventID string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE events SET consumed_at=NULL WHERE id=? AND tx_id IS NULL`, eventID)
 	return dbErr(err, "unlock event")
-}
-
-func (s *DB) PurgeListenerEvents(ctx context.Context, listenerID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM events WHERE listener_id=? AND consumed_at IS NULL`, listenerID)
-	return dbErr(err, "purge listener events")
 }
 
 func (s *DB) DeleteListenerWithEvents(ctx context.Context, listenerID string) error {
@@ -1901,17 +1861,6 @@ func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating,
 }
 
 // ---- Idempotency ----
-
-func (s *DB) CreateIdempotencyRecord(ctx context.Context, r *kernel.IdempotencyRecord) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO idempotency_records (id,idempotency_key,counterparty_user_id,receipt_id,status,result_json,created_at,expires_at)
-		 VALUES (?,?,?,?,?,?,?,?)`,
-		r.ID, r.IdempotencyKey, r.CounterpartyUserID, r.ReceiptID,
-		r.Status, r.ResultJSON,
-		timeToStr(r.CreatedAt), timeToStr(r.ExpiresAt),
-	)
-	return dbErr(err, "create idempotency record")
-}
 
 func (s *DB) InsertPendingIdempotencyRecord(ctx context.Context, r *kernel.IdempotencyRecord) error {
 	_, err := s.db.ExecContext(ctx,

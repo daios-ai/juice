@@ -32,13 +32,13 @@ func TestTransactionRate(t *testing.T) {
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@rateowner", Email: "ro@example.com", Password: "p",
 	})
-	a, _ := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "/rateable",
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 
-	p, root, _ := env.k.StartProcess(ctx, owner.ID, 0)
+	p, root, _ := env.k.StartProcess(ctx, owner.ID, owner.ID, 0)
 	_ = root
 
 	// No calls made, so no transactions to rate.
@@ -57,13 +57,13 @@ func TestTransactionRating(t *testing.T) {
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@rater", Email: "r@e.com", Password: "p",
 	})
-	p, root, err := env.k.StartProcess(ctx, owner.ID, 0)
+	p, root, err := env.k.StartProcess(ctx, owner.ID, owner.ID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Create and enable a wasm action — but since we have no script executor, use HTTP kind.
-	a, _ := env.k.CreateAction(ctx, kernel.CreateActionRequest{
+	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
 		Name:        "/tx-rate-svc",
 		Kind:        kernel.KindHTTP,

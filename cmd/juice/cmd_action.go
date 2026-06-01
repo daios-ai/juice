@@ -72,7 +72,7 @@ func actionAddCmd() *cobra.Command {
 				}
 			}
 
-			a, err := k.CreateAction(context.Background(), kernel.CreateActionRequest{
+			a, err := k.CreateAction(context.Background(), subjectID, kernel.CreateActionRequest{
 				OwnerUserID:  subjectID,
 				Name:         name,
 				Kind:         kernel.ActionKind(kind),
@@ -452,7 +452,7 @@ func actionImportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			result, err := k.ImportOpenAPI(context.Background(), subjectID, specURL, specBytes)
+			result, err := k.ImportOpenAPI(context.Background(), subjectID, subjectID, specURL, specBytes)
 			if err != nil {
 				return err
 			}
