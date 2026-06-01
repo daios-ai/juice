@@ -2063,6 +2063,23 @@ func (k *Kernel) UnimportOpenAPI(ctx context.Context, ownerID, specURL, name str
 
 // ---- Federation import (refactored to use reconcileImport) ----
 
+// remoteActionContentHash returns a hex-encoded SHA-256 of the contract fields that
+// determine whether a remote action has changed. Using a content hash (rather than the
+// manifest signature) means key rotation on the remote side does not trigger spurious updates.
+func remoteActionContentHash(m ActionManifest) string {
+	inputJSON, _ := CanonicalJSON(m.InputSchema)
+	outputJSON, _ := CanonicalJSON(m.OutputSchema)
+	payload, _ := CanonicalJSON(map[string]any{
+		"description":   m.Description,
+		"input_schema":  string(inputJSON),
+		"name":          m.Name,
+		"output_schema": string(outputJSON),
+		"price":         m.Price,
+	})
+	h := sha256.Sum256(payload)
+	return hex.EncodeToString(h[:])
+}
+
 // ImportRemoteAction creates or updates a local remote_proxy action from a remote kernel's manifest.
 // The action is owned by the remote kernel user identified by remoteUserID.
 // It is idempotent: re-running with the same manifest preserves the action's active state.
@@ -2076,6 +2093,11 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 	}
 	if m.ActionID == "" {
 		return nil, ErrInvalidInput.Wrap("manifest missing action_id")
+	}
+	if remoteUser.PublicKey != "" {
+		if err := VerifyManifestSignature(remoteUser.PublicKey, &m); err != nil {
+			return nil, err
+		}
 	}
 	// counterparty is this kernel's base64url Ed25519 public key so the remote can
 	// look it up by key (handle-based lookup would require knowing what handle the
@@ -2094,17 +2116,18 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 		existingByKey[m.ActionID] = existing
 	}
 
+	contentHash := remoteActionContentHash(m)
 	name := m.Name
 	incoming := []incomingOp{{
 		key:  m.ActionID,
-		hash: m.Signature,
+		hash: contentHash,
 		apply: func(a *Action) {
 			a.Source       = source
 			a.Price        = m.Price
 			a.Description  = m.Description
 			a.InputSchema  = m.InputSchema
 			a.OutputSchema = m.OutputSchema
-			a.ArtifactHash = m.Signature
+			a.ArtifactHash = contentHash
 		},
 		new: func() *Action {
 			now := time.Now().UTC()
@@ -2119,7 +2142,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 				InputSchema:    m.InputSchema,
 				OutputSchema:   m.OutputSchema,
 				Source:         source,
-				ArtifactHash:   m.Signature,
+				ArtifactHash:   contentHash,
 				RemoteActionID: m.ActionID,
 				CreatedAt:      now,
 				UpdatedAt:      now,

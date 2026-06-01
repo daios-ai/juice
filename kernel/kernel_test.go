@@ -994,7 +994,7 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	remoteUser, err := k.RegisterRemoteKernel(ctx, "@remote-peer", base64.RawURLEncoding.EncodeToString(pub), "https://remote.example.com")
 	if err != nil {
 		t.Fatal(err)
@@ -1009,6 +1009,11 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 	}
+	sig, err := SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
 	result, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("ImportRemoteAction: %v", err)
@@ -1033,7 +1038,7 @@ func TestImportRemoteActionReimp(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	remoteUser, err := k.RegisterRemoteKernel(ctx, "@reimp-peer", base64.RawURLEncoding.EncodeToString(pub), "https://reimp.example.com")
 	if err != nil {
 		t.Fatal(err)
@@ -1048,6 +1053,11 @@ func TestImportRemoteActionReimp(t *testing.T) {
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 	}
+	sig, err := SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
 	firstResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("first import: %v", err)
@@ -1057,9 +1067,13 @@ func TestImportRemoteActionReimp(t *testing.T) {
 	}
 	firstID := firstResult.Created[0].ID
 
-	// Reimport with updated price (signature changes → Updated).
+	// Reimport with updated price — content hash changes → Updated.
 	m.Price = 99
-	m.Signature = "new-sig"
+	sig2, err := SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig2
 	secondResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("reimport: %v", err)
@@ -1073,6 +1087,33 @@ func TestImportRemoteActionReimp(t *testing.T) {
 	}
 	if second.Price != 99 {
 		t.Errorf("reimport price: got %d, want 99", second.Price)
+	}
+}
+
+func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	remoteUser, err := k.RegisterRemoteKernel(ctx, "@bad-sig-peer", base64.RawURLEncoding.EncodeToString(pub), "https://badsig.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := ActionManifest{
+		ActionID:    "bad-sig-action",
+		OwnerHandle: "@bad-sig-peer",
+		Name:        "/greet",
+		Kind:        KindHTTP,
+		Price:       0,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		Signature:   "invalidsignature",
+	}
+	_, err = k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	if err == nil {
+		t.Fatal("expected error for invalid manifest signature")
 	}
 }
 
