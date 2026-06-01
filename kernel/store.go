@@ -186,6 +186,9 @@ type Store interface {
 	ListListeners(ctx context.Context, sourceUserID, eventName string) ([]*Listener, error)
 	ListListenersByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Listener, error)
 	CreateEvent(ctx context.Context, e *Event) error
+	// CreateEvents inserts all events in a single atomic transaction.
+	// Either all events are created or none are.
+	CreateEvents(ctx context.Context, events []*Event) error
 	ReadEvent(ctx context.Context, id string) (*Event, error)
 	ListPendingEvents(ctx context.Context, listenerID string) ([]*Event, error)
 	// LockEvent atomically marks an event as in-flight (sets consumed_at).

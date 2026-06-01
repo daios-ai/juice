@@ -27,7 +27,7 @@ func TestFlowsIntegration(t *testing.T) {
 	}
 
 	cmd := exec.Command("bash", script)
-	cmd.Env = append(os.Environ(), "JUICE="+bin)
+	cmd.Env = append(os.Environ(), "JUICE="+bin, "JUICE_SECRET_KEY=flows-test-secret")
 	cmd.Dir = moduleRoot
 
 	stdout, err := cmd.StdoutPipe()

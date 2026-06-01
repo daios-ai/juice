@@ -67,7 +67,12 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	}
 
 	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = envOr("JUICE_SECRET_KEY", "dev-secret-change-me")
+	secret := os.Getenv("JUICE_SECRET_KEY")
+	if secret == "" {
+		db.Close()
+		return nil, nil, fmt.Errorf("JUICE_SECRET_KEY must be set")
+	}
+	cfg.TokenSecret = secret
 	cfg.FeeRecipientID = os.Getenv("JUICE_FEE_RECIPIENT")
 	if bps := os.Getenv("JUICE_FEE_BPS"); bps != "" {
 		v, err := strconv.ParseInt(bps, 10, 64)

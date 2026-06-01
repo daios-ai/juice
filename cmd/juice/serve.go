@@ -260,9 +260,13 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 			writeErr(w, err)
 			return
 		}
-		// Check suspension.
+		// Verify subject exists and is not suspended.
 		u, err := s.kernel.ReadUser(r.Context(), subjectID)
-		if err == nil && u.SuspendedAt != nil {
+		if err != nil {
+			writeErr(w, kernel.ErrUnauthenticated.Wrap("subject not found"))
+			return
+		}
+		if u.SuspendedAt != nil {
 			writeErr(w, kernel.ErrUnauthenticated.Wrap("account suspended"))
 			return
 		}
@@ -1012,6 +1016,7 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 	// Execute.
 	proc, _, err := s.kernel.StartProcess(ctx, counterparty.ID, action.Price)
 	if err != nil {
+		// No call was attempted; safe to delete the pending record.
 		_ = s.kernel.DeleteIdempotencyRecord(ctx, rec.ID)
 		writeErr(w, err)
 		return
@@ -1026,7 +1031,13 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		Args:         args,
 	})
 	if callErr != nil {
-		_ = s.kernel.DeleteIdempotencyRecord(ctx, rec.ID)
+		// Call() commits a failure transaction+receipt after trace creation, so complete
+		// the record rather than delete it — a retry must not re-execute a committed call.
+		errResult, _ := json.Marshal(map[string]string{"error": callErr.Error()})
+		if completeErr := s.kernel.CompleteIdempotencyRecord(ctx, rec.ID, string(errResult), ""); completeErr != nil {
+			s.log.With(ctx).Error("federation.complete_idempotency_failed_call", "error", completeErr)
+			_ = s.kernel.DeleteIdempotencyRecord(ctx, rec.ID)
+		}
 		writeErr(w, callErr)
 		return
 	}
@@ -1042,10 +1053,12 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Complete idempotency record.
+	// Complete idempotency record; retry once on transient failure.
 	resultJSON, _ := json.Marshal(reply.Result)
 	if err := s.kernel.CompleteIdempotencyRecord(ctx, rec.ID, string(resultJSON), receiptJSON); err != nil {
-		s.log.With(ctx).Error("federation.complete_idempotency_failed", "error", err)
+		if err2 := s.kernel.CompleteIdempotencyRecord(ctx, rec.ID, string(resultJSON), receiptJSON); err2 != nil {
+			s.log.With(ctx).Error("federation.complete_idempotency_failed", "error", err2)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"result": reply.Result, "receipt": receipt})

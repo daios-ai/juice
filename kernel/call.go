@@ -109,13 +109,15 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if err := ValidateInput(action.InputSchema, req.Args); err != nil {
 		return nil, err
 	}
-	if err := k.requireReceiptSigningReady(); err != nil {
-		return nil, err
-	}
 
 	// 8. Check process has sufficient available funds.
 	if process.Available < action.Price {
 		return nil, ErrInsufficientFunds.Wrapf("process has %d credits, action costs %d", process.Available, action.Price)
+	}
+
+	// Internal guard: kernel must be bootstrapped before any call can be committed.
+	if err := k.requireReceiptSigningReady(); err != nil {
+		return nil, err
 	}
 
 	// 9. Validate or resolve parent trace — precondition check, no state change yet.

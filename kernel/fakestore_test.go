@@ -594,6 +594,17 @@ func (f *fakeStore) CreateEvent(_ context.Context, e *Event) error {
 	return nil
 }
 
+func (f *fakeStore) CreateEvents(_ context.Context, events []*Event) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, e := range events {
+		cp := *e
+		cp.CreatedAt = time.Now().UTC()
+		f.events[e.ID] = &cp
+	}
+	return nil
+}
+
 func (f *fakeStore) ReadEvent(_ context.Context, id string) (*Event, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

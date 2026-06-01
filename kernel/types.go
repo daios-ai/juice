@@ -133,15 +133,15 @@ type Transaction struct {
 
 // Stats tracks fixed performance and usage statistics for an action.
 type Stats struct {
-	ActionID    string
-	Uses        int64
-	Successes   int64
-	Failures    int64
-	RatingCount int64 // number of rated observations (may be less than Uses)
-	PriceMean   float64
-	LatencyMean float64
-	RatingMean  float64
-	LastUsedAt  time.Time
+	ActionID    string    `json:"action_id"`
+	Uses        int64     `json:"uses"`
+	Successes   int64     `json:"successes"`
+	Failures    int64     `json:"failures"`
+	RatingCount int64     `json:"rating_count"`
+	PriceMean   float64   `json:"price_mean"`
+	LatencyMean float64   `json:"latency_mean"`
+	RatingMean  float64   `json:"rating_mean"`
+	LastUsedAt  time.Time `json:"last_used_at"`
 }
 
 // StatTag is an extensible key/value annotation on an action's stats.
@@ -209,32 +209,32 @@ type RefreshToken struct {
 // Receipt is an immutable signed record of a committed call.
 // Created atomically with the transaction in CommitCall or CommitFailedCall.
 type Receipt struct {
-	ID           string
-	IssuerUserID string   // @sys user of this kernel
-	TxID         string
-	TraceID      string
-	ActionID     string
-	ArgsHash     string   // hex SHA-256 of args JSON
-	ReplyHash    string   // hex SHA-256 of reply JSON
-	Status       TxStatus
-	Gross        int64
-	Net          int64
-	Fee          int64
-	Reason       string
-	CreatedAt    time.Time
-	Signature    string   // base64url Ed25519 signature over canonical payload
+	ID           string    `json:"id"`
+	IssuerUserID string    `json:"issuer_user_id"`
+	TxID         string    `json:"tx_id"`
+	TraceID      string    `json:"trace_id"`
+	ActionID     string    `json:"action_id"`
+	ArgsHash     string    `json:"args_hash"`
+	ReplyHash    string    `json:"reply_hash"`
+	Status       TxStatus  `json:"status"`
+	Gross        int64     `json:"gross"`
+	Net          int64     `json:"net"`
+	Fee          int64     `json:"fee"`
+	Reason       string    `json:"reason"`
+	CreatedAt    time.Time `json:"created_at"`
+	Signature    string    `json:"signature"`
 }
 
 // Rating is an immutable human-submitted rating for a transaction.
 // Stored in a separate ratings table; the transaction row is never modified after creation.
 type Rating struct {
-	ID             string
-	RatedTxID      string
-	RatedReceiptID *string  // nil for transactions predating the receipt requirement
-	RaterUserID    string
-	Rating         float64  // 0 or 1
-	CreatedAt      time.Time
-	Signature      string   // base64url Ed25519 signature
+	ID             string    `json:"id"`
+	RatedTxID      string    `json:"rated_tx_id"`
+	RatedReceiptID *string   `json:"rated_receipt_id"` // nil for transactions predating the receipt requirement
+	RaterUserID    string    `json:"rater_user_id"`
+	Rating         float64   `json:"rating"`
+	CreatedAt      time.Time `json:"created_at"`
+	Signature      string    `json:"signature"`
 }
 
 // IdempotencyRecord prevents duplicate cross-kernel calls.

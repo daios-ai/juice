@@ -1400,6 +1400,27 @@ func (s *DB) CreateEvent(ctx context.Context, e *kernel.Event) error {
 	return dbErr(err, "create event")
 }
 
+func (s *DB) CreateEvents(ctx context.Context, events []*kernel.Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "create events: begin")
+	}
+	for _, e := range events {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO events (id,listener_id,args_json,causing_trace_id,created_at)
+			 VALUES (?,?,?,?,?)`,
+			e.ID, e.ListenerID, e.ArgsJSON, nullStr(e.CausingTraceID), timeToStr(e.CreatedAt),
+		); err != nil {
+			_ = tx.Rollback()
+			return dbErr(err, "create events: insert")
+		}
+	}
+	return dbErr(tx.Commit(), "create events: commit")
+}
+
 func (s *DB) ReadEvent(ctx context.Context, id string) (*kernel.Event, error) {
 	var e kernel.Event
 	var causingTraceID, consumedAt, txID *string

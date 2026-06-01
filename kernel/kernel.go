@@ -560,7 +560,19 @@ func (k *Kernel) FirstBoot(ctx context.Context, password string) error {
 	if err != nil {
 		return err
 	}
-	k.SetSigningKey(ed25519.PrivateKey(priv), su.ID, "@sys")
+	// Read the persisted key rather than using the in-memory generated one.
+	// InitFirstBoot uses INSERT OR IGNORE, so on a re-run the stored key may differ
+	// from the key generated above. Using the stored key ensures the kernel always
+	// matches what is in the database.
+	storedPrivB64, err := k.store.GetConfig(ctx, "signing_private_key")
+	if err != nil {
+		return ErrInternal.Wrapf("read stored signing key: %v", err)
+	}
+	storedPriv, err := base64.RawURLEncoding.DecodeString(storedPrivB64)
+	if err != nil {
+		return ErrInternal.Wrapf("decode stored signing key: %v", err)
+	}
+	k.SetSigningKey(ed25519.PrivateKey(storedPriv), su.ID, "@sys")
 	return nil
 }
 
@@ -935,7 +947,7 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 		RatedTxID:   txID,
 		RaterUserID: subjectID,
 		Rating:      rating,
-		CreatedAt:   time.Now().UTC(),
+		CreatedAt:   time.Now().UTC().Truncate(time.Second),
 	}
 	if receipt != nil {
 		r.RatedReceiptID = &receipt.ID
@@ -1280,29 +1292,37 @@ func (k *Kernel) GetSigningKey() Ed25519PrivateKey {
 // EmitEvent queues an event for all active listeners matching (sourceUserID, eventName).
 // It does NOT call the target action — the listener owner must call ConsumeEvent explicitly.
 // causingTraceID is stored as a FOLLOWS_FROM reference on each event record.
+// All events are inserted atomically: either every active listener receives its event or none do.
 func (k *Kernel) EmitEvent(ctx context.Context, sourceUserID, eventName string, args map[string]any, causingTraceID string) ([]string, error) {
 	listeners, err := k.store.ListListeners(ctx, sourceUserID, eventName)
 	if err != nil {
 		return nil, err
 	}
 	argsJSON, _ := json.Marshal(args)
-	var eventIDs []string
+	now := time.Now().UTC()
+	var events []*Event
 	for _, l := range listeners {
 		if !l.Active {
 			continue
 		}
-		e := &Event{
+		events = append(events, &Event{
 			ID:             uuid.New().String(),
 			ListenerID:     l.ID,
 			ArgsJSON:       string(argsJSON),
 			CausingTraceID: causingTraceID,
-			CreatedAt:      time.Now().UTC(),
-		}
-		if err := k.store.CreateEvent(ctx, e); err != nil {
-			k.log.With(ctx).Warn("emit.event_create_failed", "listener_id", l.ID, "error", err.Error())
-			continue
-		}
-		eventIDs = append(eventIDs, e.ID)
+			CreatedAt:      now,
+		})
+	}
+	if len(events) == 0 {
+		k.log.With(ctx).Info("event.emitted", "source", sourceUserID, "event", eventName, "queued", 0)
+		return nil, nil
+	}
+	if err := k.store.CreateEvents(ctx, events); err != nil {
+		return nil, err
+	}
+	eventIDs := make([]string, len(events))
+	for i, e := range events {
+		eventIDs[i] = e.ID
 	}
 	k.log.With(ctx).Info("event.emitted", "source", sourceUserID, "event", eventName, "queued", len(eventIDs))
 	return eventIDs, nil
@@ -1394,7 +1414,7 @@ func (k *Kernel) buildReceipt(tx *Transaction) (*Receipt, error) {
 		Net:          tx.Net,
 		Fee:          tx.Fee,
 		Reason:       tx.Reason,
-		CreatedAt:    time.Now().UTC(),
+		CreatedAt:    time.Now().UTC().Truncate(time.Second),
 	}
 	sig, err := signReceipt(k.cfg.SigningKey, r)
 	if err != nil {
@@ -1416,90 +1436,32 @@ func sha256Hex(s string) string {
 	return fmt.Sprintf("%x", h)
 }
 
-// signReceipt signs the canonical receipt payload (excluding Signature) with JCS.
+// signReceipt signs the canonical Receipt object (with Signature cleared) using JCS.
 func signReceipt(key ed25519.PrivateKey, r *Receipt) (string, error) {
 	if len(key) != ed25519.PrivateKeySize {
 		return "", ErrInvalidState.Wrap("signing key is not configured")
 	}
-	payload, err := CanonicalJSON(receiptPayload{
-		ActionID:     r.ActionID,
-		ArgsHash:     r.ArgsHash,
-		CreatedAt:    r.CreatedAt.UTC().Format(time.RFC3339),
-		Fee:          r.Fee,
-		Gross:        r.Gross,
-		ID:           r.ID,
-		IssuerUserID: r.IssuerUserID,
-		Net:          r.Net,
-		Reason:       r.Reason,
-		ReplyHash:    r.ReplyHash,
-		Status:       string(r.Status),
-		TraceID:      r.TraceID,
-		TxID:         r.TxID,
-	})
+	cp := *r
+	cp.Signature = ""
+	payload, err := CanonicalJSON(cp)
 	if err != nil {
 		return "", ErrInternal.Wrapf("canonicalize receipt: %v", err)
 	}
-	sig := ed25519.Sign(key, payload)
-	return base64.RawURLEncoding.EncodeToString(sig), nil
+	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
 }
 
-// receiptPayload is the canonical signed form of a receipt (fields alphabetically ordered).
-type receiptPayload struct {
-	ActionID     string `json:"action_id"`
-	ArgsHash     string `json:"args_hash"`
-	CreatedAt    string `json:"created_at"`
-	Fee          int64  `json:"fee"`
-	Gross        int64  `json:"gross"`
-	ID           string `json:"id"`
-	IssuerUserID string `json:"issuer_user_id"`
-	Net          int64  `json:"net"`
-	Reason       string `json:"reason"`
-	ReplyHash    string `json:"reply_hash"`
-	Status       string `json:"status"`
-	TraceID      string `json:"trace_id"`
-	TxID         string `json:"tx_id"`
-}
-
-// signRating signs the canonical rating payload (excluding Signature) with JCS.
+// signRating signs the canonical Rating object (with Signature cleared) using JCS.
 func signRating(key ed25519.PrivateKey, r *Rating) (string, error) {
 	if len(key) != ed25519.PrivateKeySize {
 		return "", ErrInvalidState.Wrap("signing key is not configured")
 	}
-	payload, err := canonicalRatingPayload(r)
+	cp := *r
+	cp.Signature = ""
+	payload, err := CanonicalJSON(cp)
 	if err != nil {
-		return "", err
+		return "", ErrInternal.Wrapf("canonicalize rating: %v", err)
 	}
-	sig := ed25519.Sign(key, payload)
-	return base64.RawURLEncoding.EncodeToString(sig), nil
-}
-
-func canonicalRatingPayload(r *Rating) ([]byte, error) {
-	receiptID := ""
-	if r.RatedReceiptID != nil {
-		receiptID = *r.RatedReceiptID
-	}
-	payload, err := CanonicalJSON(ratingPayload{
-		CreatedAt:      r.CreatedAt.UTC().Format(time.RFC3339),
-		ID:             r.ID,
-		RatedReceiptID: receiptID,
-		RatedTxID:      r.RatedTxID,
-		RaterUserID:    r.RaterUserID,
-		Rating:         r.Rating,
-	})
-	if err != nil {
-		return nil, ErrInternal.Wrapf("canonicalize rating: %v", err)
-	}
-	return payload, nil
-}
-
-// ratingPayload is the canonical signed form of a rating (fields alphabetically ordered).
-type ratingPayload struct {
-	CreatedAt      string  `json:"created_at"`
-	ID             string  `json:"id"`
-	RatedReceiptID string  `json:"rated_receipt_id"`
-	RatedTxID      string  `json:"rated_tx_id"`
-	RaterUserID    string  `json:"rater_user_id"`
-	Rating         float64 `json:"rating"`
+	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
 }
 
 // ---- Federation operations ----
@@ -1636,6 +1598,7 @@ func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*
 				if err := k.store.UpsertStats(ctx, &Stats{ActionID: ex.ID}); err != nil {
 					return nil, err
 				}
+				k.embedActionAsync(ctx, ex)
 				result.Updated = append(result.Updated, ex)
 			}
 		} else {
@@ -1643,6 +1606,7 @@ func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*
 			if err := k.store.CreateAction(ctx, a); err != nil {
 				return nil, err
 			}
+			k.embedActionAsync(ctx, a)
 			result.Created = append(result.Created, a)
 		}
 	}
@@ -2145,7 +2109,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 			a.Description  = m.Description
 			a.InputSchema  = m.InputSchema
 			a.OutputSchema = m.OutputSchema
-			a.ArtifactHash = contentHash
+			a.ArtifactHash = m.ArtifactHash // manifest's artifact hash, not the local content hash
 		},
 		new: func() *Action {
 			now := time.Now().UTC()
@@ -2160,7 +2124,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 				InputSchema:    m.InputSchema,
 				OutputSchema:   m.OutputSchema,
 				Source:         source,
-				ArtifactHash:   contentHash,
+				ArtifactHash:   m.ArtifactHash, // manifest's artifact hash, not the local content hash
 				RemoteActionID: m.ActionID,
 				CreatedAt:      now,
 				UpdatedAt:      now,
@@ -2243,31 +2207,14 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 	return m, nil
 }
 
+// manifestCanonicalPayload returns the canonical JCS bytes of m with Signature cleared.
 func manifestCanonicalPayload(m *ActionManifest) ([]byte, error) {
-	inputJSON, _ := CanonicalJSON(m.InputSchema)
-	outputJSON, _ := CanonicalJSON(m.OutputSchema)
-	statsJSON := ""
-	if m.Stats != nil {
-		if b, err := CanonicalJSON(m.Stats); err == nil {
-			statsJSON = string(b)
-		}
-	}
-	return CanonicalJSON(manifestPayload{
-		ActionID:     m.ActionID,
-		ArtifactHash: m.ArtifactHash,
-		Description:  m.Description,
-		InputSchema:  string(inputJSON),
-		Kind:         string(m.Kind),
-		Name:         m.Name,
-		OutputSchema: string(outputJSON),
-		OwnerHandle:  m.OwnerHandle,
-		Price:        m.Price,
-		Stats:        statsJSON,
-		UpdatedAt:    m.UpdatedAt.UTC().Format(time.RFC3339),
-	})
+	cp := *m
+	cp.Signature = ""
+	return CanonicalJSON(cp)
 }
 
-// SignManifest creates a base64url Ed25519 signature over the canonical manifest payload.
+// SignManifest creates a base64url Ed25519 signature over the canonical ActionManifest.
 func SignManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
 	if len(key) != ed25519.PrivateKeySize {
 		return "", ErrInvalidState.Wrap("signing key is not configured")
@@ -2335,16 +2282,3 @@ func SignFederationPayload(key Ed25519PrivateKey, action, idempotencyKey, timest
 	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
 }
 
-type manifestPayload struct {
-	ActionID     string `json:"action_id"`
-	ArtifactHash string `json:"artifact_hash"`
-	Description  string `json:"description"`
-	InputSchema  string `json:"input_schema"`
-	Kind         string `json:"kind"`
-	Name         string `json:"name"`
-	OutputSchema string `json:"output_schema"`
-	OwnerHandle  string `json:"owner_handle"`
-	Price        int64  `json:"price"`
-	Stats        string `json:"stats"`
-	UpdatedAt    string `json:"updated_at"`
-}
