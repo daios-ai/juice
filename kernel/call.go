@@ -410,7 +410,12 @@ func (k *Kernel) executeChat(ctx context.Context, args map[string]any) (map[stri
 
 // executeWasm runs a compiled WASM artifact.
 // Returns (result, subCost, error) where subCost is the gross paid to direct sub-calls during execution.
-func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (map[string]any, int64, error) {
+func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (result map[string]any, subCost int64, execErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			execErr = ErrExecutionFailed.Wrapf("wasm panic: %v", r)
+		}
+	}()
 	if k.scripts == nil {
 		return nil, 0, ErrInvalidState.Wrap("script executor not configured")
 	}
@@ -437,7 +442,6 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 		return nil, 0, ErrExecutionFailed.Wrapf("wasm execution failed: %v", err)
 	}
 
-	var result map[string]any
 	if err := json.Unmarshal(outputJSON, &result); err != nil {
 		return nil, 0, ErrExecutionFailed.Wrap("wasm output is not valid JSON")
 	}

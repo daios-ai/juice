@@ -332,6 +332,33 @@ func TestFundProcess(t *testing.T) {
 	}
 }
 
+func TestFundProcessClosedFails(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@closed-fund", 1000)
+	_ = db.CreateUser(ctx, user)
+	p := newProcess(user.ID)
+	_ = db.CreateProcess(ctx, p)
+	_ = db.FundProcess(ctx, user.ID, p.ID, 200)
+
+	// Close the process.
+	if err := db.EndProcess(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// FundProcess on a closed process must fail atomically.
+	if err := db.FundProcess(ctx, user.ID, p.ID, 100); err == nil {
+		t.Error("expected error funding a closed process")
+	}
+
+	// User balance must be unchanged (deduction rolled back; EndProcess already returned the 200).
+	u, _ := db.ReadUser(ctx, user.ID)
+	if u.Available != 1000 {
+		t.Errorf("user.available after failed fund: got %d, want 1000", u.Available)
+	}
+}
+
 func TestLockAndRefundFunds(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

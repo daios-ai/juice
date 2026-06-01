@@ -1017,7 +1017,9 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 
 	// Complete idempotency record.
 	resultJSON, _ := json.Marshal(reply.Result)
-	_ = s.kernel.CompleteIdempotencyRecord(ctx, rec.ID, string(resultJSON))
+	if err := s.kernel.CompleteIdempotencyRecord(ctx, rec.ID, string(resultJSON)); err != nil {
+		s.log.With(ctx).Error("federation.complete_idempotency_failed", "error", err)
+	}
 
 	var receipt *kernel.Receipt
 	if reply.TxID != "" {

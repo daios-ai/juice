@@ -722,12 +722,15 @@ func (s *DB) FundProcess(ctx context.Context, userID, processID string, amount i
 		return kernel.ErrInsufficientFunds.Wrap("insufficient user balance")
 	}
 
-	_, err = tx.ExecContext(ctx,
-		`UPDATE processes SET available=available+? WHERE id=?`,
+	res, err = tx.ExecContext(ctx,
+		`UPDATE processes SET available=available+? WHERE id=? AND status='open'`,
 		amount, processID,
 	)
 	if err != nil {
 		return dbErr(err, "fund process: credit process")
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return kernel.ErrInvalidState.Wrap("process is not open")
 	}
 	return dbErr(tx.Commit(), "fund process commit")
 }

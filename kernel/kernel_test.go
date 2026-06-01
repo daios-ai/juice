@@ -97,6 +97,16 @@ type fakeScriptExec struct {
 	calls  int
 }
 
+type panicScriptExec struct{}
+
+func (p *panicScriptExec) Compile(_ context.Context, source []byte) ([]byte, string, error) {
+	return source, "fakehash", nil
+}
+
+func (p *panicScriptExec) Execute(_ context.Context, _ []byte, _ []byte, _ HostFunctions) ([]byte, error) {
+	panic("simulated wasm panic")
+}
+
 func (f *fakeScriptExec) Compile(_ context.Context, source []byte) ([]byte, string, error) {
 	return source, "fakehash", nil
 }
