@@ -440,7 +440,7 @@ Messages are concise and user-facing; logs may include diagnostics.
 
 ## 11. Superuser, bootstrap, and deposits
 
-The fixed platform superuser handle is `@sys`; it is not configurable. The kernel itself has no privileged subject concept and enforces normal ACL rules. CLI admin authority compares the authenticated handle to `config.superuser_handle`.
+The fixed platform superuser handle is `@sys`; it is not configurable. `@sys` has implicit admin authority on all actions. CLI admin authority compares the authenticated handle to `config.superuser_handle`.
 
 First boot prompts only for a password and atomically creates:
 
