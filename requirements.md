@@ -198,7 +198,7 @@ Any failure before or after target execution starts charges zero, refunds the fu
 
 ### 5.4 Schemas
 
-Every action has input and output schemas. The first implementation may support a strict JSON Schema subset, but unsupported forms must fail action creation or update. Validate input before locking funds and output before successful settlement.
+Every action has input and output schemas. The first implementation may support a strict JSON Schema subset, but unsupported forms must fail action creation or update. A schema node without a `type` key is treated as unconstrained (accepts any value); this is intentional and not an error. Validate input before locking funds and output before successful settlement.
 
 ### 5.5 Contractor sub-calls
 
@@ -230,7 +230,7 @@ caller.process.available decreases by at most action.price per call, regardless 
 
 | Operation | Rules                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Create    | Create inactive by default. Validate owner, name, kind, non-negative price, description, schemas, and source. WASM creation validates or compiles its artifact. HTTP creation validates endpoint configuration without calling the endpoint unless explicitly requested. Reject non-HTTP(S), loopback, private IP ranges (RFC 1918), and link-local (`169.254.x.x`) source URLs at creation and activation. Normal `CreateAction` always rejects `Kind=native`; bootstrap uses `RegisterNativeAction` instead. |
+| Create    | Create inactive by default. Validate owner, name, kind, and non-negative price. `description`, non-nil schemas, and source value are required at activation, not creation. WASM creation validates or compiles its artifact only when a script executor is configured. HTTP creation validates endpoint configuration without calling the endpoint unless explicitly requested. Reject non-HTTP(S), loopback, private IP ranges (RFC 1918), and link-local (`169.254.x.x`) source URLs at creation and activation. Normal `CreateAction` always rejects `Kind=native`; bootstrap uses `RegisterNativeAction` instead. `RegisterNativeAction` does not enforce `@sys` ownership; that is the caller's responsibility. |
 | Activate  | Require owner or admin. Initialize stats if absent. Reject invalid schema, missing source, invalid artifact, invalid HTTP URL, or invalid runtime configuration.                                                                                                                                                                                                                                                                                                                                               |
 | Update    | Require owner or admin. Updating source, schema, kind, price, or endpoint deactivates unless explicitly marked safe. Recompute WASM `artifact_hash`; retain prior source and hash in transaction history.                                                                                                                                                                                                                                                                                                      |
 | Delete    | Require owner or admin. Disable discovery, remove ACL entries, and preserve historical transactions; soft deletion is permitted.                                                                                                                                                                                                                                                                                                                                                                               |
@@ -423,7 +423,7 @@ Receipts, ratings, and action manifests use RFC 8785 JSON Canonicalization Schem
 CanonicalJSON(v any) ([]byte, error)
 ```
 
-Generate and verify signatures only over `CanonicalJSON` output. A rating signature covers all fields except `signature` and is signed with the platform key.
+Generate and verify signatures only over `CanonicalJSON` output. A rating signature covers all fields except `signature` and is signed with the platform key. Property ordering uses UTF-8 byte order; this matches RFC 8785 UTF-16 ordering for all-ASCII property names, which is all this implementation uses.
 
 ## 10. Authentication and errors
 
