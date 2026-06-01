@@ -12,10 +12,9 @@ Actions can be HTTP endpoints, WebAssembly modules, or native handlers. Every ca
 - **Tracing** — every call creates a child trace; nested WASM calls form a full trace tree across the process
 - **Auth** — bcrypt passwords, short-lived JWT access tokens (15 min), rotating refresh tokens (30 days), PKCE S256 flow
 - **Events** — named event listeners that fire an action when an event is emitted by a source user; pollable queues
-- **WASM host functions** — scripts can call other actions, emit events, and read/write per-process key-value storage via `juice.call`, `juice.emit`, `juice.log`, `juice.get`, `juice.put`
+- **WASM host functions** — scripts can call other actions, emit events, and log via `juice.call`, `juice.emit`, `juice.log`
 - **Stats** — incremental mean tracking per action for latency, price, success rate, and rating
 - **Feedback** — recursive cost and wall-clock latency for any subtree of the trace tree
-- **Rating propagation** — unrated child transactions automatically inherit the nearest rated ancestor's rating
 - **Lookup** — cosine similarity search over action embeddings, re-ranked by success rate
 - **HTTP API** — full REST API mirroring the CLI
 - **SQLite** — single-file database, WAL mode, pure Go (no CGO)
@@ -97,20 +96,26 @@ All routes except `POST /v1/auth/token`, `POST /v1/auth/authorize`, and `POST /v
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/health` | Health check (unauthenticated) |
+| `GET` | `/.well-known/juice-kernel.json` | Kernel manifest (unauthenticated) |
 | `POST` | `/v1/users` | Create user |
+| `GET` | `/v1/me` | Read current user |
 | `POST` | `/v1/auth/token` | Password grant or auth-code exchange |
 | `POST` | `/v1/auth/authorize` | PKCE authorization |
 | `POST` | `/v1/auth/refresh` | Rotate refresh token |
-| `GET` | `/v1/actions` | List active actions |
+| `POST` | `/v1/auth/logout` | Revoke refresh token |
+| `GET` | `/v1/actions` | List active public actions |
 | `POST` | `/v1/actions` | Create action |
 | `GET` | `/v1/actions/{id}` | Read action |
+| `PUT` | `/v1/actions/{id}` | Update action |
 | `DELETE` | `/v1/actions/{id}` | Delete action |
+| `GET` | `/v1/actions/{id}/manifest` | Read action manifest |
 | `POST` | `/v1/actions/{id}/enable` | Activate action |
 | `POST` | `/v1/actions/{id}/disable` | Deactivate action |
 | `POST` | `/v1/actions/{id}/acl` | Grant permission to a user |
 | `DELETE` | `/v1/actions/{id}/acl` | Revoke permission from a user |
 | `POST` | `/v1/actions/{id}/grant-all` | Make action publicly callable |
 | `POST` | `/v1/actions/{id}/revoke-all` | Revoke public access |
+| `GET` | `/v1/processes` | List processes |
 | `POST` | `/v1/processes` | Start process |
 | `GET` | `/v1/processes/{id}` | Read process |
 | `POST` | `/v1/processes/{id}/fund` | Add funds |
@@ -118,11 +123,12 @@ All routes except `POST /v1/auth/token`, `POST /v1/auth/authorize`, and `POST /v
 | `POST` | `/v1/call` | Call an action |
 | `GET` | `/v1/transactions` | List transactions |
 | `GET` | `/v1/transactions/{id}` | Read transaction |
-| `POST` | `/v1/transactions/{id}/rate` | Rate a transaction (0 or 1) |
+| `POST` | `/v1/transactions/{id}/rate` | Rate a transaction (0 or 1); returns signed rating |
 | `GET` | `/v1/stats/{action_id}` | Read action stats |
-| `POST` | `/v1/lookup` | Semantic search |
+| `GET` | `/v1/listeners` | List listeners |
 | `POST` | `/v1/listeners` | Create event listener |
-| `GET` | `/v1/listeners/{id}` | Poll listener queue |
+| `GET` | `/v1/listeners/{id}` | Read listener metadata |
+| `GET` | `/v1/listeners/{id}/events` | Poll pending events for a listener |
 | `DELETE` | `/v1/listeners/{id}` | Delete listener |
 | `POST` | `/v1/events/emit` | Emit a named event |
 | `POST` | `/v1/events/{id}/consume` | Consume a pending event |
