@@ -46,7 +46,7 @@ All IDs are stable opaque identifiers; action IDs are globally unique. Credit ba
 | Object              | Required fields                                                                                                                                                                                                                             | Rules                                                                                                                                                                                                                                                                                                                   |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `User`              | `id`, `handle`, `email`, `available`, `locked`, `suspended_at`, `public_key`, `remote_base_url`, `created_at`, `updated_at`                                                                                                                 | `handle` is unique. A suspended user is rejected at every authenticated request with `ErrUnauthenticated`. `public_key`, when set, is a unique base64url Ed25519 32-byte public key. Local users have null `public_key` and `remote_base_url`; remote peers set both.                                                   |
-| `Action`            | `id`, `owner_user_id`, `name`, `kind`, `active`, `public`, `price`, `description`, `input_schema`, `output_schema`, `source`, `artifact_hash`, `created_at`, `updated_at`                                                                   | `kind ∈ {http, wasm, native}`. `(owner_user_id, name)` is unique. An `active=false` action is not callable by non-owners. Public discovery returns active actions only unless an owner requests private state. Authorized users may inspect script source. Compiled artifacts are content-addressed by `artifact_hash`. |
+| `Action`            | `id`, `owner_user_id`, `name`, `kind`, `active`, `public`, `price`, `description`, `input_schema`, `output_schema`, `source`, `artifact_hash`, `remote_action_id`, `created_at`, `updated_at`                                               | `kind ∈ {http, wasm, native, remote_proxy}`. `(owner_user_id, name)` is unique. An `active=false` action is not callable by non-owners. Public discovery returns active actions only unless an owner requests private state. Authorized users may inspect script source. Compiled artifacts are content-addressed by `artifact_hash`. |
 | `ACLEntry`          | `subject_user_id`, `action_id`, `permission`, `created_at`                                                                                                                                                                                  | `permission ∈ {read, call, admin}`. ACLs are direct user-to-action grants. `read` permits inspection; `call` permits execution; `admin` permits ACL and lifecycle changes. Owners implicitly have `admin`.                                                                                                              |
 | `Process`           | `id`, `owner_user_id`, `available`, `locked`, `status`, `created_at`, `ended_at`                                                                                                                                                            | `status ∈ {open, closed}`. A process starts with user-provided funds and may start with zero credits (`available = 0`). Closing it returns all remaining funds to its owner. Closed processes cannot execute calls.                                                                                                     |
 | `Trace`             | `id`, `process_id`, `parent_trace_id`, `caused_by_trace_id`, `cost`, `latency_ms`, `created_at`                                                                                                                                             | Every process has one root trace. Choose one root convention consistently: `parent_trace_id = id` or `parent_trace_id = null`. Every direct `Call()` creates exactly one child trace.                                                                                                                                   |
@@ -70,7 +70,7 @@ CanCall(u, a) := Active(a) ∧ (Owner(u, a) ∨ Public(a) ∨ ACL(u, a, call) �
 
 `public` is stored directly on the action. Grant-all and revoke-all toggle this flag without replacing direct ACL entries; only the owner or an action admin may invoke them.
 
-For `http` actions, `source.type ∈ {direct, openapi, remote_proxy}`. This field determines HTTP execution configuration and import provenance only; it does not create a separate action kind or execution path.
+For `remote_proxy` actions, `source` is the federation call URL and `remote_action_id` is the action's ID on the remote kernel. `artifact_hash` stores the manifest hash. Dispatch in `Call()` is based on `kind`, not on the owner's identity.
 
 OpenAPI registration and federation do not create durable objects parallel to `Action`. They are supervision procedures that create or update ordinary `Action` rows. Execution always proceeds through `Call()`.
 
@@ -486,7 +486,7 @@ juice remote unimport <remote-handle> <action-name> deactivate local proxy actio
 
 No gossip or crawling exists in v1. Imported actions are local `http` actions owned by the remote-user record.
 
-Remote imports create ordinary `Action` rows with `kind = http` and `source.type = remote_proxy`. They do not expose or copy the remote action's internal implementation. The remote action may be implemented as HTTP, WASM, native, or an OpenAPI-imported action on the remote kernel.
+Remote imports create `Action` rows with `kind = remote_proxy`. `source` is the federation call URL; `remote_action_id` is the remote action's ID; `artifact_hash` is the manifest hash. They do not expose or copy the remote action's internal implementation.
 
 ### 12.2 Action manifests
 
@@ -501,21 +501,10 @@ artifact_hash stats updated_at signature
 
 Manifest descriptions and schemas are the canonical interface used by importing kernels for lookup and LLM function calling.
 
-A local remote-proxy action stores:
-
-```json
-{
-  "type": "remote_proxy",
-  "remote_user_id": "...",
-  "remote_action_id": "...",
-  "manifest_hash": "..."
-}
-```
-
 Federated reimport matches by:
 
 ```text
-remote_user_id + remote_action_id
+owner_user_id + remote_action_id
 ```
 
 Federated reimport policy:
@@ -543,7 +532,9 @@ GET /v1/actions/{id}/manifest        -> signed public-action manifest
 
 A local remote-proxy action follows the normal local call path. Its HTTP handler sends a UUID v4 `idempotency_key`. On remote success, store `SHA-256(receipt_json)` (the remote receipt JSON) in `transaction.remote_receipt_hash`; v1 defers remote receipt-signature verification to later audit.
 
-Idempotency applies only to cross-kernel calls. A repeated unexpired `(idempotency_key, counterparty_user_id)` returns the original receipt without re-execution. `expires_at = created_at + 24 hours`; expired records may be purged.
+Inbound federation calls are authenticated: the calling kernel signs `{idempotency_key, action, timestamp}` with its Ed25519 private key; the local kernel verifies against the stored `public_key` and rejects timestamps older than 5 minutes. Unregistered callers are rejected.
+
+Idempotency applies only to cross-kernel calls. A `pending` record is inserted before execution; a unique constraint on `(idempotency_key, counterparty_user_id)` prevents concurrent duplicates. On completion the record becomes `complete` and stores `result_json`. A `complete` replay returns the stored result; a `pending` replay returns 409. `IdempotencyRecord` gains `status` and `result_json` fields. `expires_at = created_at + 24 hours`; expired records may be purged.
 
 ## 13. CLI and HTTP server
 
