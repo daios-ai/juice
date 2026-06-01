@@ -547,13 +547,10 @@ func (h *kernelHostFunctions) Log(ctx context.Context, level, msg string) error 
 	return nil
 }
 
-// computeStats reads current stats, applies the call outcome, and returns the updated Stats.
-// The returned value is passed to CommitCall/CommitFailedCall so the upsert is atomic with settlement.
-func (k *Kernel) computeStats(ctx context.Context, actionID string, tx *Transaction, latency float64) *Stats {
-	stats, err := k.store.ReadStats(ctx, actionID)
-	if err != nil || stats == nil {
-		stats = DefaultStats(actionID)
-	}
+// computeStats builds a delta Stats for this call outcome. The SQL in CommitCall/CommitFailedCall
+// applies these as incremental updates, making concurrent calls safe.
+func (k *Kernel) computeStats(_ context.Context, actionID string, tx *Transaction, latency float64) *Stats {
+	stats := DefaultStats(actionID)
 	UpdateStats(stats, tx, latency)
 	return stats
 }

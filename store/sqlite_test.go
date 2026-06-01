@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"errors"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -450,6 +452,29 @@ func TestEndProcess(t *testing.T) {
 	}
 }
 
+func TestEndProcessWithLockedFunds(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@alice-locked", 500)
+	_ = db.CreateUser(ctx, user)
+	p := newProcess(user.ID)
+	_ = db.CreateProcess(ctx, p)
+	_ = db.FundProcess(ctx, user.ID, p.ID, 500)
+	// Lock 200 — simulates an in-flight sub-call.
+	if err := db.LockFunds(ctx, p.ID, 200); err != nil {
+		t.Fatal(err)
+	}
+
+	err := db.EndProcess(ctx, p.ID)
+	if err == nil {
+		t.Fatal("expected error ending process with locked funds, got nil")
+	}
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("expected ErrInvalidState, got %v", err)
+	}
+}
+
 // ---- Stats ----
 
 func TestStats(t *testing.T) {
@@ -487,6 +512,83 @@ func TestStats(t *testing.T) {
 	}
 	if got.Uses != 5 {
 		t.Errorf("uses: got %d, want 5", got.Uses)
+	}
+}
+
+func TestCommitCallIncrementalStats(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	payer := newUser("@payer-inc", 1000)
+	target := newUser("@target-inc", 0)
+	fee := newUser("@fee-inc", 0)
+	_ = db.CreateUser(ctx, payer)
+	_ = db.CreateUser(ctx, target)
+	_ = db.CreateUser(ctx, fee)
+
+	a := newAction(payer.ID, "/inc-svc", 100, true)
+	_ = db.CreateAction(ctx, a)
+
+	p := newProcess(payer.ID)
+	_ = db.CreateProcess(ctx, p)
+	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
+	_ = db.LockFunds(ctx, p.ID, 200) // lock for both calls
+
+	makeTrace := func(id string) *kernel.Trace {
+		tr := &kernel.Trace{ID: id, ProcessID: p.ID, ParentTraceID: id, CreatedAt: time.Now().UTC()}
+		_ = db.CreateTrace(ctx, tr)
+		return tr
+	}
+	makeTx := func(id, traceID string, gross int64) *kernel.Transaction {
+		return &kernel.Transaction{
+			ID: id, ProcessID: p.ID, TraceID: traceID, ParentTraceID: traceID,
+			OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: target.ID,
+			ActionID: a.ID, Status: kernel.TxSuccess, Gross: gross, Net: gross * 8 / 10, Fee: gross * 2 / 10,
+			StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+		}
+	}
+	makeReceipt := func(id, txID, traceID string, gross int64) *kernel.Receipt {
+		return &kernel.Receipt{
+			ID: id, IssuerUserID: payer.ID, TxID: txID, TraceID: traceID, ActionID: a.ID,
+			ArgsHash: "ah", ReplyHash: "rh", Status: kernel.TxSuccess,
+			Gross: gross, Net: gross * 8 / 10, Fee: gross * 2 / 10, CreatedAt: time.Now().UTC(),
+		}
+	}
+
+	tr1 := makeTrace("tr-inc-1")
+	tx1 := makeTx("tx-inc-1", tr1.ID, 100)
+	rc1 := makeReceipt("rc-inc-1", tx1.ID, tr1.ID, 100)
+	stats1 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, PriceMean: 100, LatencyMean: 0.1, LastUsedAt: time.Now().UTC()}
+	if err := db.CommitCall(ctx, tx1, rc1, p.ID, target.ID, fee.ID, tx1.Net, tx1.Fee, stats1); err != nil {
+		t.Fatalf("CommitCall #1: %v", err)
+	}
+
+	tr2 := makeTrace("tr-inc-2")
+	tx2 := makeTx("tx-inc-2", tr2.ID, 50) // different gross to verify mean formula
+	rc2 := makeReceipt("rc-inc-2", tx2.ID, tr2.ID, 50)
+	stats2 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, PriceMean: 50, LatencyMean: 0.3, LastUsedAt: time.Now().UTC()}
+	if err := db.CommitCall(ctx, tx2, rc2, p.ID, target.ID, fee.ID, tx2.Net, tx2.Fee, stats2); err != nil {
+		t.Fatalf("CommitCall #2: %v", err)
+	}
+
+	got, err := db.ReadStats(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("ReadStats: %v", err)
+	}
+	if got.Uses != 2 || got.Successes != 2 {
+		t.Errorf("uses=%d successes=%d, want 2/2", got.Uses, got.Successes)
+	}
+	// Mean of [100, 50] = 75
+	if math.Abs(got.PriceMean-75) > 1e-6 {
+		t.Errorf("price_mean: got %f, want 75", got.PriceMean)
+	}
+	// Mean of [0.1, 0.3] = 0.2
+	if math.Abs(got.LatencyMean-0.2) > 1e-6 {
+		t.Errorf("latency_mean: got %f, want 0.2", got.LatencyMean)
+	}
+	// rating_count must not be reset to 0 (stays at 0 since no ratings, but must not error)
+	if got.RatingCount != 0 {
+		t.Errorf("rating_count: got %d, want 0", got.RatingCount)
 	}
 }
 

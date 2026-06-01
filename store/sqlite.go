@@ -790,18 +790,19 @@ WHERE id IN (SELECT id FROM ancestors)`,
 		return dbErr(err, "commit call: update trace cost")
 	}
 
-	// Upsert action stats.
+	// Upsert action stats incrementally to avoid concurrent-overwrite races.
+	// rating_count/rating_mean are excluded — owned by UpdateRating.
 	if stats != nil {
 		if _, err = tx.ExecContext(ctx,
 			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
-			 VALUES (?,?,?,?,?,?,?,?,?)
+			 VALUES (?,1,1,0,0,?,?,0,?)
 			 ON CONFLICT(action_id) DO UPDATE SET
-			   uses=excluded.uses, successes=excluded.successes, failures=excluded.failures,
-			   rating_count=excluded.rating_count, price_mean=excluded.price_mean,
-			   latency_mean=excluded.latency_mean, rating_mean=excluded.rating_mean,
+			   uses=uses+1,
+			   successes=successes+1,
+			   price_mean=price_mean+(excluded.price_mean-price_mean)/(successes+1),
+			   latency_mean=latency_mean+(excluded.latency_mean-latency_mean)/(uses+1),
 			   last_used_at=excluded.last_used_at`,
-			stats.ActionID, stats.Uses, stats.Successes, stats.Failures, stats.RatingCount,
-			stats.PriceMean, stats.LatencyMean, stats.RatingMean, timeToStr(stats.LastUsedAt),
+			stats.ActionID, stats.PriceMean, stats.LatencyMean, timeToStr(stats.LastUsedAt),
 		); err != nil {
 			return dbErr(err, "commit call: upsert stats")
 		}
@@ -875,18 +876,18 @@ WHERE id IN (SELECT id FROM ancestors)`,
 		return dbErr(err, "commit failed call: update trace latency")
 	}
 
-	// Upsert action stats.
+	// Upsert action stats incrementally to avoid concurrent-overwrite races.
+	// rating_count/rating_mean are excluded — owned by UpdateRating.
 	if stats != nil {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
-			 VALUES (?,?,?,?,?,?,?,?,?)
+			 VALUES (?,1,0,1,0,0,?,0,?)
 			 ON CONFLICT(action_id) DO UPDATE SET
-			   uses=excluded.uses, successes=excluded.successes, failures=excluded.failures,
-			   rating_count=excluded.rating_count, price_mean=excluded.price_mean,
-			   latency_mean=excluded.latency_mean, rating_mean=excluded.rating_mean,
+			   uses=uses+1,
+			   failures=failures+1,
+			   latency_mean=latency_mean+(excluded.latency_mean-latency_mean)/(uses+1),
 			   last_used_at=excluded.last_used_at`,
-			stats.ActionID, stats.Uses, stats.Successes, stats.Failures, stats.RatingCount,
-			stats.PriceMean, stats.LatencyMean, stats.RatingMean, timeToStr(stats.LastUsedAt),
+			stats.ActionID, stats.LatencyMean, timeToStr(stats.LastUsedAt),
 		); err != nil {
 			return dbErr(err, "commit failed call: upsert stats")
 		}
@@ -969,15 +970,17 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 	if err != nil {
 		return dbErr(err, "end process: read")
 	}
+	if locked > 0 {
+		return kernel.ErrInvalidState.Wrap("process has locked funds")
+	}
 
-	total := available + locked
 	now := timeToStr(time.Now().UTC())
 
-	// Return all funds to owner.
-	if total > 0 {
+	// Return available funds to owner (locked is 0, so user.locked decrements by available).
+	if available > 0 {
 		_, err = tx.ExecContext(ctx,
 			`UPDATE users SET available=available+?, locked=locked-? WHERE id=?`,
-			total, total, ownerID)
+			available, available, ownerID)
 		if err != nil {
 			return dbErr(err, "end process: return funds")
 		}

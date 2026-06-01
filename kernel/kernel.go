@@ -1113,9 +1113,7 @@ func UpdateStats(s *Stats, tx *Transaction, latencySeconds float64) {
 
 	if tx.Status == TxSuccess {
 		s.Successes++
-		if tx.Gross > 0 {
-			s.PriceMean = IncrementalMean(s.PriceMean, s.Successes-1, float64(tx.Gross))
-		}
+		s.PriceMean = IncrementalMean(s.PriceMean, s.Successes-1, float64(tx.Gross))
 	} else {
 		s.Failures++
 	}

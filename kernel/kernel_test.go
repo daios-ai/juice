@@ -464,6 +464,24 @@ func TestUpdateStats(t *testing.T) {
 	}
 }
 
+func TestUpdateStatsZeroPrice(t *testing.T) {
+	s := DefaultStats("action-zp")
+	now := time.Now()
+
+	// First call: price=100
+	UpdateStats(s, &Transaction{Status: TxSuccess, Gross: 100, StartedAt: now, EndedAt: now}, 0.1)
+	// Second call: price=0 (zero-price)
+	UpdateStats(s, &Transaction{Status: TxSuccess, Gross: 0, StartedAt: now, EndedAt: now}, 0.1)
+
+	if s.Successes != 2 {
+		t.Fatalf("successes: got %d, want 2", s.Successes)
+	}
+	// Mean of [100, 0] = 50
+	if math.Abs(float64(s.PriceMean)-50) > 1e-6 {
+		t.Errorf("price_mean: got %f, want 50", s.PriceMean)
+	}
+}
+
 var _ = log.Default
 
 func TestValidateHTTPSourceSSRF(t *testing.T) {
