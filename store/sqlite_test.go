@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"path/filepath"
@@ -1196,4 +1197,59 @@ func TestIdempotencyStateMachine(t *testing.T) {
 	if err := db.InsertPendingIdempotencyRecord(ctx, rec2b); err != nil {
 		t.Errorf("re-insert after delete should succeed: %v", err)
 	}
+}
+
+func TestListActionsByOwnerOpenAPISpec(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@oapi-owner", 0)
+	other := newUser("@oapi-other", 0)
+	_ = db.CreateUser(ctx, owner)
+	_ = db.CreateUser(ctx, other)
+
+	specURL := "https://spec.example.com/api.json"
+	specURL2 := "https://spec.example.com/api2.json"
+
+	makeSrc := func(su, key string) string {
+		src := kernel.OpenAPISource{
+			Type: "openapi", SpecURL: su, OperationKey: key,
+			BaseURL: "https://api.example.com", Method: "GET", Path: "/" + key,
+		}
+		b, _ := json.Marshal(src)
+		return string(b)
+	}
+
+	// Action matching owner + specURL.
+	a1 := newAction(owner.ID, "@oapi-owner/op1", 0, false)
+	a1.Source = makeSrc(specURL, "op1")
+	_ = db.CreateAction(ctx, a1)
+
+	// Action matching owner + specURL2 (different spec; must not appear).
+	a2 := newAction(owner.ID, "@oapi-owner/op2", 0, false)
+	a2.Source = makeSrc(specURL2, "op2")
+	_ = db.CreateAction(ctx, a2)
+
+	// Action owned by other user for specURL (must not appear).
+	a3 := newAction(other.ID, "@oapi-other/op1", 0, false)
+	a3.Source = makeSrc(specURL, "op1")
+	_ = db.CreateAction(ctx, a3)
+
+	// Plain HTTP action with no OpenAPI source (must not appear).
+	a4 := newAction(owner.ID, "@oapi-owner/plain", 0, false)
+	_ = db.CreateAction(ctx, a4)
+
+	got, err := db.ListActionsByOwnerOpenAPISpec(ctx, owner.ID, specURL)
+	if err != nil {
+		t.Fatalf("ListActionsByOwnerOpenAPISpec: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 action, got %d", len(got))
+	}
+	if got[0].ID != a1.ID {
+		t.Errorf("id: got %q, want %q", got[0].ID, a1.ID)
+	}
+	_ = a2
+	_ = a3
+	_ = a4
 }

@@ -75,6 +75,8 @@ type Store interface {
 	ReadAction(ctx context.Context, id string) (*Action, error)
 	ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*Action, error)
 	ReadActionByOwnerRemoteID(ctx context.Context, ownerID, remoteActionID string) (*Action, error)
+	// ListActionsByOwnerOpenAPISpec returns all non-deleted actions with matching owner + OpenAPI spec_url.
+	ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL string) ([]*Action, error)
 	UpdateAction(ctx context.Context, a *Action) error
 	DeleteAction(ctx context.Context, id string) error
 	ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*Action, error)

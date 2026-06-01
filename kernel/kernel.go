@@ -6,10 +6,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -27,6 +30,7 @@ type Config struct {
 	ScriptTimeout     time.Duration
 	ScriptMemory      int64              // bytes
 	AllowLocalSources bool               // permit loopback/private URLs as action sources (tests only)
+	OpenAPIClient    *http.Client       // HTTP client for fetching OpenAPI specs; nil → http.DefaultClient
 	SigningKey        ed25519.PrivateKey // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
 	IssuerUserID      string             // @sys user ID, set during bootstrap
 	SuperuserHandle   string             // cached superuser handle for deposit checks
@@ -1564,10 +1568,483 @@ func (k *Kernel) ListRemoteKernels(ctx context.Context) ([]*User, error) {
 	return remote, nil
 }
 
+// ---- Import shared logic ----
+
+// incomingOp describes one operation from an external source (OpenAPI or federation manifest).
+type incomingOp struct {
+	key   string        // unique identifier: operation_key (OpenAPI) or remote_action_id (federation)
+	hash  string        // content hash for change detection
+	apply func(*Action) // update mutable fields on an existing action
+	new   func() *Action
+}
+
+// reconcileImport applies create/update/deactivate logic given existing actions (keyed by op key)
+// and incoming operations. hashOf extracts the stored content hash from an existing action.
+// Used by both ImportOpenAPI and ImportRemoteAction.
+func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*Action, hashOf func(*Action) string, incoming []incomingOp) (*ImportResult, error) {
+	incomingKeys := make(map[string]struct{}, len(incoming))
+	for _, op := range incoming {
+		incomingKeys[op.key] = struct{}{}
+	}
+
+	var result ImportResult
+
+	// Deactivate existing actions whose ops were removed from the spec.
+	for key, a := range existingByKey {
+		if _, ok := incomingKeys[key]; ok {
+			continue
+		}
+		a.Active = false
+		a.UpdatedAt = time.Now().UTC()
+		if err := k.store.UpdateAction(ctx, a); err != nil {
+			return nil, err
+		}
+		if err := k.store.UpsertStats(ctx, &Stats{ActionID: a.ID}); err != nil {
+			return nil, err
+		}
+		result.Deactivated = append(result.Deactivated, a)
+	}
+
+	// Process each incoming op.
+	for _, op := range incoming {
+		if ex, ok := existingByKey[op.key]; ok {
+			if hashOf(ex) == op.hash {
+				result.Unchanged = append(result.Unchanged, ex)
+			} else {
+				ex.Active = false
+				ex.UpdatedAt = time.Now().UTC()
+				op.apply(ex)
+				if err := k.store.UpdateAction(ctx, ex); err != nil {
+					return nil, err
+				}
+				if err := k.store.UpsertStats(ctx, &Stats{ActionID: ex.ID}); err != nil {
+					return nil, err
+				}
+				result.Updated = append(result.Updated, ex)
+			}
+		} else {
+			a := op.new()
+			if err := k.store.CreateAction(ctx, a); err != nil {
+				return nil, err
+			}
+			result.Created = append(result.Created, a)
+		}
+	}
+
+	return &result, nil
+}
+
+// deactivateActions sets Active=false and persists each action.
+// Used by both UnimportOpenAPI and UnimportRemoteAction.
+func (k *Kernel) deactivateActions(ctx context.Context, actions []*Action) error {
+	for _, a := range actions {
+		a.Active = false
+		a.UpdatedAt = time.Now().UTC()
+		if err := k.store.UpdateAction(ctx, a); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ---- OpenAPI import ----
+
+// rawOp is one parsed OpenAPI operation before it is bound to an owner.
+type rawOp struct {
+	key          string
+	description  string
+	method       string
+	path         string
+	baseURL      string
+	inputSchema  map[string]any
+	outputSchema map[string]any
+	price        int64
+	hash         string
+	sourceJSON   string
+}
+
+// parseOpenAPIOperations fetches specURL and returns one rawOp per supported operation
+// (GET/POST/PUT/PATCH/DELETE). Operations that cannot be imported are returned as rejections.
+func (k *Kernel) parseOpenAPIOperations(ctx context.Context, specURL string) ([]rawOp, []ImportRejection, error) {
+	if !k.cfg.AllowLocalSources {
+		u, err := url.Parse(specURL)
+		if err != nil {
+			return nil, nil, ErrInvalidInput.Wrapf("invalid spec URL: %v", err)
+		}
+		host := u.Hostname()
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+				return nil, nil, ErrInvalidInput.Wrap("unsafe spec URL: private/loopback host")
+			}
+		} else if host == "localhost" || host == "" {
+			return nil, nil, ErrInvalidInput.Wrap("unsafe spec URL: localhost")
+		}
+	}
+
+	client := k.cfg.OpenAPIClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, specURL, nil)
+	if err != nil {
+		return nil, nil, ErrInvalidInput.Wrapf("invalid spec URL: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, ErrExecutionFailed.Wrapf("fetch spec: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return nil, nil, ErrExecutionFailed.Wrap("read spec body")
+	}
+
+	var spec map[string]any
+	if err := json.Unmarshal(body, &spec); err != nil {
+		return nil, nil, ErrInvalidInput.Wrap("spec is not valid JSON")
+	}
+
+	// Extract base URL from first server entry.
+	baseURL := ""
+	if servers, ok := spec["servers"].([]any); ok && len(servers) > 0 {
+		if s, ok := servers[0].(map[string]any); ok {
+			baseURL, _ = s["url"].(string)
+		}
+	}
+	if baseURL == "" {
+		u, _ := url.Parse(specURL)
+		baseURL = u.Scheme + "://" + u.Host
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+
+	paths, _ := spec["paths"].(map[string]any)
+	var ops []rawOp
+	var rejected []ImportRejection
+
+	for path, pathItemRaw := range paths {
+		pathItem, ok := pathItemRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, method := range []string{"get", "post", "put", "patch", "delete"} {
+			opRaw, ok := pathItem[method]
+			if !ok {
+				continue
+			}
+			op, ok := opRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			key := openAPIOperationKey(op, method, path)
+			desc := openAPIDescription(op)
+			if desc == "" {
+				rejected = append(rejected, ImportRejection{Key: key, Reason: "missing description and summary"})
+				continue
+			}
+
+			outputSchema, ok := openAPIOutputSchema(op)
+			if !ok {
+				rejected = append(rejected, ImportRejection{Key: key, Reason: "no 2xx JSON response schema"})
+				continue
+			}
+
+			var price int64
+			if v, ok := op["x-juice-price"]; ok {
+				if f, ok := v.(float64); ok {
+					price = int64(f)
+				}
+			}
+
+			inputSchema := openAPIInputSchema(op, pathItem)
+			hash := openAPIOperationHash(baseURL, desc, method, path, inputSchema, outputSchema, price)
+
+			src := OpenAPISource{
+				Type:          "openapi",
+				SpecURL:       specURL,
+				BaseURL:       baseURL,
+				Method:        strings.ToUpper(method),
+				Path:          path,
+				OperationKey:  key,
+				OperationHash: hash,
+			}
+			srcBytes, _ := json.Marshal(src)
+
+			ops = append(ops, rawOp{
+				key:          key,
+				description:  desc,
+				method:       strings.ToUpper(method),
+				path:         path,
+				baseURL:      baseURL,
+				inputSchema:  inputSchema,
+				outputSchema: outputSchema,
+				price:        price,
+				hash:         hash,
+				sourceJSON:   string(srcBytes),
+			})
+		}
+	}
+	return ops, rejected, nil
+}
+
+func openAPIOperationKey(op map[string]any, method, path string) string {
+	if v, ok := op["x-juice-name"].(string); ok && v != "" {
+		return v
+	}
+	if v, ok := op["operationId"].(string); ok && v != "" {
+		return v
+	}
+	return openAPISlug(method + "-" + path)
+}
+
+func openAPIDescription(op map[string]any) string {
+	if v, ok := op["description"].(string); ok && v != "" {
+		return v
+	}
+	if v, ok := op["summary"].(string); ok && v != "" {
+		return v
+	}
+	return ""
+}
+
+func openAPIOutputSchema(op map[string]any) (map[string]any, bool) {
+	responses, ok := op["responses"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	for _, code := range []string{"200", "201", "202", "203", "204"} {
+		if schema := openAPIJSONSchema(responses[code]); schema != nil {
+			return schema, true
+		}
+	}
+	for code, resp := range responses {
+		if len(code) == 3 && code[0] == '2' {
+			if schema := openAPIJSONSchema(resp); schema != nil {
+				return schema, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func openAPIJSONSchema(respRaw any) map[string]any {
+	resp, ok := respRaw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	content, _ := resp["content"].(map[string]any)
+	jsonContent, _ := content["application/json"].(map[string]any)
+	schema, _ := jsonContent["schema"].(map[string]any)
+	if len(schema) > 0 {
+		return schema
+	}
+	return nil
+}
+
+func openAPIInputSchema(op, pathItem map[string]any) map[string]any {
+	properties := map[string]any{}
+	var required []string
+
+	for _, source := range []map[string]any{pathItem, op} {
+		params, _ := source["parameters"].([]any)
+		for _, pRaw := range params {
+			p, ok := pRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			in, _ := p["in"].(string)
+			if in != "path" && in != "query" {
+				continue
+			}
+			name, _ := p["name"].(string)
+			if name == "" {
+				continue
+			}
+			schema, _ := p["schema"].(map[string]any)
+			if schema == nil {
+				schema = map[string]any{"type": "string"}
+			}
+			if desc, ok := p["description"].(string); ok && desc != "" {
+				schema["description"] = desc
+			}
+			properties[name] = schema
+			if req, _ := p["required"].(bool); req || in == "path" {
+				required = append(required, name)
+			}
+		}
+	}
+
+	if rb, ok := op["requestBody"].(map[string]any); ok {
+		content, _ := rb["content"].(map[string]any)
+		jc, _ := content["application/json"].(map[string]any)
+		if bodySchema, ok := jc["schema"].(map[string]any); ok {
+			if props, ok := bodySchema["properties"].(map[string]any); ok {
+				for k, v := range props {
+					properties[k] = v
+				}
+			}
+			if reqs, ok := bodySchema["required"].([]any); ok {
+				for _, r := range reqs {
+					if s, ok := r.(string); ok {
+						required = append(required, s)
+					}
+				}
+			}
+		}
+	}
+
+	result := map[string]any{"type": "object", "properties": properties}
+	if len(required) > 0 {
+		result["required"] = required
+	}
+	return result
+}
+
+func openAPIOperationHash(baseURL, description, method, path string, inputSchema, outputSchema map[string]any, price int64) string {
+	payload := map[string]any{
+		"base_url":      baseURL,
+		"description":   description,
+		"input_schema":  inputSchema,
+		"method":        method,
+		"output_schema": outputSchema,
+		"path":          path,
+		"price":         price,
+	}
+	b, _ := CanonicalJSON(payload)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+func openAPISlug(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	prev := '-'
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prev = r
+		} else if prev != '-' {
+			b.WriteRune('-')
+			prev = '-'
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// ImportOpenAPI fetches specURL, parses supported operations, and reconciles them with
+// existing OpenAPI-imported actions for the owner. It is idempotent: re-running against
+// a changed spec updates changed operations, deactivates removed ones, and creates new ones.
+func (k *Kernel) ImportOpenAPI(ctx context.Context, ownerID, specURL string) (*ImportResult, error) {
+	owner, err := k.store.ReadUser(ctx, ownerID)
+	if err != nil {
+		return nil, err
+	}
+
+	rawOps, rejected, err := k.parseOpenAPIOperations(ctx, specURL)
+	if err != nil {
+		return nil, err
+	}
+
+	existing, err := k.store.ListActionsByOwnerOpenAPISpec(ctx, ownerID, specURL)
+	if err != nil {
+		return nil, err
+	}
+
+	existingByKey := make(map[string]*Action, len(existing))
+	for _, a := range existing {
+		var src OpenAPISource
+		if err := json.Unmarshal([]byte(a.Source), &src); err == nil {
+			existingByKey[src.OperationKey] = a
+		}
+	}
+
+	hashOf := func(a *Action) string {
+		var src OpenAPISource
+		if err := json.Unmarshal([]byte(a.Source), &src); err == nil {
+			return src.OperationHash
+		}
+		return ""
+	}
+
+	var incoming []incomingOp
+	for _, raw := range rawOps {
+		raw := raw
+		name := owner.Handle + "/" + raw.key
+		// Name collision: only check for truly new ops (not already imported).
+		if _, exists := existingByKey[raw.key]; !exists {
+			if _, err := k.store.ReadActionByOwnerName(ctx, ownerID, name); err == nil {
+				rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "name collision with existing action"})
+				continue
+			}
+		}
+		incoming = append(incoming, incomingOp{
+			key:  raw.key,
+			hash: raw.hash,
+			apply: func(a *Action) {
+				a.Description  = raw.description
+				a.Price        = raw.price
+				a.InputSchema  = raw.inputSchema
+				a.OutputSchema = raw.outputSchema
+				a.Source       = raw.sourceJSON
+			},
+			new: func() *Action {
+				now := time.Now().UTC()
+				return &Action{
+					ID:           uuid.New().String(),
+					OwnerUserID:  ownerID,
+					Name:         name,
+					Kind:         KindHTTP,
+					Active:       false,
+					Description:  raw.description,
+					Price:        raw.price,
+					InputSchema:  raw.inputSchema,
+					OutputSchema: raw.outputSchema,
+					Source:       raw.sourceJSON,
+					CreatedAt:    now,
+					UpdatedAt:    now,
+				}
+			},
+		})
+	}
+
+	result, err := k.reconcileImport(ctx, existingByKey, hashOf, incoming)
+	if err != nil {
+		return nil, err
+	}
+	result.Rejected = append(result.Rejected, rejected...)
+	return result, nil
+}
+
+// UnimportOpenAPI deactivates all OpenAPI-imported actions with matching owner + spec_url.
+// If name is non-empty, only actions whose name suffix or operation_key matches are deactivated.
+func (k *Kernel) UnimportOpenAPI(ctx context.Context, ownerID, specURL, name string) ([]*Action, error) {
+	actions, err := k.store.ListActionsByOwnerOpenAPISpec(ctx, ownerID, specURL)
+	if err != nil {
+		return nil, err
+	}
+	if name != "" {
+		var filtered []*Action
+		for _, a := range actions {
+			var src OpenAPISource
+			json.Unmarshal([]byte(a.Source), &src)
+			if strings.HasSuffix(a.Name, "/"+name) || src.OperationKey == name {
+				filtered = append(filtered, a)
+			}
+		}
+		actions = filtered
+	}
+	if err := k.deactivateActions(ctx, actions); err != nil {
+		return nil, err
+	}
+	return actions, nil
+}
+
+// ---- Federation import (refactored to use reconcileImport) ----
+
 // ImportRemoteAction creates or updates a local remote_proxy action from a remote kernel's manifest.
 // The action is owned by the remote kernel user identified by remoteUserID.
-// Reimport (same owner + remote_action_id) updates metadata and source URL in place.
-func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m ActionManifest) (*Action, error) {
+// It is idempotent: re-running with the same manifest preserves the action's active state.
+func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m ActionManifest) (*ImportResult, error) {
 	remoteUser, err := k.store.ReadUser(ctx, remoteUserID)
 	if err != nil {
 		return nil, err
@@ -1590,42 +2067,77 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 		"/v1/federation/call?action=" + url.QueryEscape(m.OwnerHandle+m.Name) +
 		"&counterparty=" + url.QueryEscape(localCounterparty)
 
-	// Reimport: if we already have an action for this remote action, update it.
+	existingByKey := map[string]*Action{}
 	if existing, err := k.store.ReadActionByOwnerRemoteID(ctx, remoteUserID, m.ActionID); err == nil {
-		existing.Source = source
-		existing.Price = m.Price
-		existing.Description = m.Description
-		existing.InputSchema = m.InputSchema
-		existing.OutputSchema = m.OutputSchema
-		existing.Active = false // deactivate on reimport so owner must review
-		existing.UpdatedAt = time.Now().UTC()
-		if err := k.store.UpdateAction(ctx, existing); err != nil {
-			return nil, err
-		}
-		k.log.With(ctx).Info("action.reimported_remote", "action_id", existing.ID, "name", existing.Name)
-		return existing, nil
+		existingByKey[m.ActionID] = existing
 	}
 
-	now := time.Now().UTC()
-	a := &Action{
-		ID:             uuid.New().String(),
-		OwnerUserID:    remoteUserID,
-		Name:           m.Name,
-		Kind:           KindRemoteProxy,
-		Active:         false,
-		Price:          m.Price,
-		Description:    m.Description,
-		InputSchema:    m.InputSchema,
-		OutputSchema:   m.OutputSchema,
-		Source:         source,
-		RemoteActionID: m.ActionID,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}
-	if err := k.store.CreateAction(ctx, a); err != nil {
+	name := m.Name
+	incoming := []incomingOp{{
+		key:  m.ActionID,
+		hash: m.Signature,
+		apply: func(a *Action) {
+			a.Source       = source
+			a.Price        = m.Price
+			a.Description  = m.Description
+			a.InputSchema  = m.InputSchema
+			a.OutputSchema = m.OutputSchema
+			a.ArtifactHash = m.Signature
+		},
+		new: func() *Action {
+			now := time.Now().UTC()
+			return &Action{
+				ID:             uuid.New().String(),
+				OwnerUserID:    remoteUserID,
+				Name:           name,
+				Kind:           KindRemoteProxy,
+				Active:         false,
+				Price:          m.Price,
+				Description:    m.Description,
+				InputSchema:    m.InputSchema,
+				OutputSchema:   m.OutputSchema,
+				Source:         source,
+				ArtifactHash:   m.Signature,
+				RemoteActionID: m.ActionID,
+				CreatedAt:      now,
+				UpdatedAt:      now,
+			}
+		},
+	}}
+
+	result, err := k.reconcileImport(ctx, existingByKey, func(a *Action) string { return a.ArtifactHash }, incoming)
+	if err != nil {
 		return nil, err
 	}
-	k.log.With(ctx).Info("action.imported_remote", "action_id", a.ID, "name", a.Name)
+
+	if len(result.Created) > 0 {
+		k.log.With(ctx).Info("action.imported_remote", "action_id", result.Created[0].ID, "name", result.Created[0].Name)
+	} else if len(result.Updated) > 0 {
+		k.log.With(ctx).Info("action.reimported_remote", "action_id", result.Updated[0].ID, "name", result.Updated[0].Name)
+	}
+	return result, nil
+}
+
+// UnimportRemoteAction deactivates the local proxy action for the given remote handle and action name.
+func (k *Kernel) UnimportRemoteAction(ctx context.Context, remoteHandle, actionName string) (*Action, error) {
+	remoteUser, err := k.store.ReadUserByHandle(ctx, remoteHandle)
+	if err != nil {
+		return nil, ErrNotFound.Wrapf("remote kernel %q not found", remoteHandle)
+	}
+	if remoteUser.RemoteBaseURL == "" {
+		return nil, ErrInvalidInput.Wrapf("%q is not a remote kernel", remoteHandle)
+	}
+	a, err := k.store.ReadActionByOwnerName(ctx, remoteUser.ID, actionName)
+	if err != nil {
+		return nil, err
+	}
+	if a.Kind != KindRemoteProxy {
+		return nil, ErrInvalidInput.Wrap("action is not a remote proxy")
+	}
+	if err := k.deactivateActions(ctx, []*Action{a}); err != nil {
+		return nil, err
+	}
+	k.log.With(ctx).Info("action.unimported_remote", "action_id", a.ID, "name", a.Name)
 	return a, nil
 }
 

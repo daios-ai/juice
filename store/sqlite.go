@@ -461,6 +461,30 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 	return out, rows.Err()
 }
 
+func (s *DB) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL string) ([]*kernel.Action, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at,deleted_at
+		 FROM actions
+		 WHERE owner_user_id=? AND deleted_at IS NULL
+		   AND json_valid(source)=1
+		   AND json_extract(source,'$.type')='openapi'
+		   AND json_extract(source,'$.spec_url')=?`,
+		ownerID, specURL)
+	if err != nil {
+		return nil, dbErr(err, "list actions by openapi spec")
+	}
+	defer rows.Close()
+	var out []*kernel.Action
+	for rows.Next() {
+		a, err := s.scanActionRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (s *DB) UpdateActionEmbedding(ctx context.Context, actionID string, vec []float32) error {
 	vecJSON, err := json.Marshal(vec)
 	if err != nil {

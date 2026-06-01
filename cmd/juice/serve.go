@@ -86,6 +86,8 @@ func runServer(addr string) error {
 	// Actions (authenticated).
 	r.Group(func(r chi.Router) {
 		r.Use(srv.authMiddleware)
+		r.Post("/v1/actions/import", srv.importOpenAPI)
+		r.Post("/v1/actions/unimport", srv.unimportOpenAPI)
 		r.Post("/v1/actions", srv.postAction)
 		r.Get("/v1/actions/{id}", srv.getAction)
 		r.Put("/v1/actions/{id}", srv.updateAction)
@@ -321,6 +323,47 @@ func (s *server) postUser(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 	actions, err := s.kernel.ListActions(r.Context(), true, 50, 0)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, actions)
+}
+
+func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SpecURL string `json:"spec_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+		return
+	}
+	if req.SpecURL == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("spec_url is required"))
+		return
+	}
+	result, err := s.kernel.ImportOpenAPI(r.Context(), subjectFrom(r), req.SpecURL)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *server) unimportOpenAPI(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SpecURL string `json:"spec_url"`
+		Name    string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+		return
+	}
+	if req.SpecURL == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("spec_url is required"))
+		return
+	}
+	actions, err := s.kernel.UnimportOpenAPI(r.Context(), subjectFrom(r), req.SpecURL, req.Name)
 	if err != nil {
 		writeErr(w, err)
 		return

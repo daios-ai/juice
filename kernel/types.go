@@ -251,6 +251,33 @@ type IdempotencyRecord struct {
 	ExpiresAt          time.Time
 }
 
+// ImportResult summarises the outcome of an import operation.
+// Used by both OpenAPI import and federation (remote) import.
+type ImportResult struct {
+	Created     []*Action
+	Unchanged   []*Action
+	Updated     []*Action   // deactivated: contract changed
+	Deactivated []*Action   // deactivated: removed from spec
+	Rejected    []ImportRejection
+}
+
+// ImportRejection records one operation that could not be imported.
+type ImportRejection struct {
+	Key    string // operation_key or action name
+	Reason string
+}
+
+// OpenAPISource is the provenance stored in Action.Source for OpenAPI-imported actions.
+type OpenAPISource struct {
+	Type          string `json:"type"`
+	SpecURL       string `json:"spec_url"`
+	BaseURL       string `json:"base_url"`
+	Method        string `json:"method"`
+	Path          string `json:"path"`
+	OperationKey  string `json:"operation_key"`
+	OperationHash string `json:"operation_hash"`
+}
+
 // ActionManifest is a signed, exportable description of a public active action.
 type ActionManifest struct {
 	ActionID     string         `json:"action_id"`

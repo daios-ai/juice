@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -128,6 +129,26 @@ func (f *fakeStore) ReadActionByOwnerRemoteID(_ context.Context, ownerID, remote
 		}
 	}
 	return nil, ErrNotFound.Wrap("action not found")
+}
+
+func (f *fakeStore) ListActionsByOwnerOpenAPISpec(_ context.Context, ownerID, specURL string) ([]*Action, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*Action
+	for _, a := range f.actions {
+		if a.DeletedAt != nil || a.OwnerUserID != ownerID {
+			continue
+		}
+		var src OpenAPISource
+		if err := json.Unmarshal([]byte(a.Source), &src); err != nil {
+			continue
+		}
+		if src.Type == "openapi" && src.SpecURL == specURL {
+			cp := *a
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeStore) UpdateAction(_ context.Context, a *Action) error {

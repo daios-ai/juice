@@ -23,6 +23,8 @@ func init() {
 		actionACLCmd(),
 		actionGrantAllCmd(),
 		actionRevokeAllCmd(),
+		actionImportCmd(),
+		actionUnimportCmd(),
 	)
 	rootCmd.AddCommand(actionCmd)
 }
@@ -427,6 +429,74 @@ func actionGrantAllCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
 	_ = cmd.MarkFlagRequired("id")
+	return cmd
+}
+
+func actionImportCmd() *cobra.Command {
+	var specURL string
+	cmd := &cobra.Command{
+		Use:   "import",
+		Short: "Import OpenAPI operations as inactive http actions (idempotent)",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+			result, err := k.ImportOpenAPI(context.Background(), subjectID, specURL)
+			if err != nil {
+				return err
+			}
+			if flagOutput == "json" {
+				return printJSON(result)
+			}
+			fmt.Printf("created=%d unchanged=%d updated=%d deactivated=%d rejected=%d\n",
+				len(result.Created), len(result.Unchanged), len(result.Updated),
+				len(result.Deactivated), len(result.Rejected))
+			for _, r := range result.Rejected {
+				fmt.Printf("  rejected %s: %s\n", r.Key, r.Reason)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&specURL, "openapi", "", "OpenAPI spec URL (required)")
+	_ = cmd.MarkFlagRequired("openapi")
+	return cmd
+}
+
+func actionUnimportCmd() *cobra.Command {
+	var specURL, name string
+	cmd := &cobra.Command{
+		Use:   "unimport",
+		Short: "Deactivate OpenAPI-imported actions without deleting history",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			k, db, err := openKernel()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			subjectID, err := requireSubjectID(k)
+			if err != nil {
+				return err
+			}
+			actions, err := k.UnimportOpenAPI(context.Background(), subjectID, specURL, name)
+			if err != nil {
+				return err
+			}
+			if flagOutput == "json" {
+				return printJSON(actions)
+			}
+			fmt.Printf("deactivated %d action(s)\n", len(actions))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&specURL, "openapi", "", "OpenAPI spec URL (required)")
+	cmd.Flags().StringVar(&name, "name", "", "Deactivate only the action with this name or operation_key")
+	_ = cmd.MarkFlagRequired("openapi")
 	return cmd
 }
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
@@ -187,6 +189,78 @@ func TestActionShowACL(t *testing.T) {
 		t.Errorf("reader with ACL: unexpected error: %v", err)
 	}
 	_ = stranger
+}
+
+func TestActionImportOpenAPI(t *testing.T) {
+	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(spec))
+	}))
+	defer specSrv.Close()
+
+	env := newTestEnv(t)
+	t.Setenv("JUICE_ALLOW_LOCAL_SOURCES", "true")
+
+	_, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{
+		Handle: "@cli-import-owner", Email: "cliimport@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := env.k.Login(context.Background(), "@cli-import-owner", "pass")
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runCmd(t, actionImportCmd(), "--openapi", specSrv.URL+"/spec.json"); err != nil {
+		t.Fatalf("action import: %v", err)
+	}
+
+	actions, err := env.k.ListActions(context.Background(), false, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, a := range actions {
+		if a.Name == "@cli-import-owner/sayHello" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected @cli-import-owner/sayHello in actions after import")
+	}
+}
+
+func TestActionUnimportOpenAPI(t *testing.T) {
+	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(spec))
+	}))
+	defer specSrv.Close()
+
+	env := newTestEnv(t)
+	t.Setenv("JUICE_ALLOW_LOCAL_SOURCES", "true")
+
+	_, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{
+		Handle: "@cli-unimport-owner", Email: "cliunimport@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := env.k.Login(context.Background(), "@cli-unimport-owner", "pass")
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+
+	specURL := specSrv.URL + "/spec.json"
+	if _, err := runCmd(t, actionImportCmd(), "--openapi", specURL); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if _, err := runCmd(t, actionUnimportCmd(), "--openapi", specURL); err != nil {
+		t.Fatalf("unimport: %v", err)
+	}
 }
 
 func TestActionListActive(t *testing.T) {

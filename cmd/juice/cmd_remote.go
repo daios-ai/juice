@@ -34,12 +34,19 @@ func init() {
 
 	remoteImportCmd := &cobra.Command{
 		Use:   "import <handle> <action-name>",
-		Short: "Import an action from a remote kernel as a local HTTP action",
+		Short: "Import an action from a remote kernel as a local proxy action (idempotent)",
 		Args:  cobra.ExactArgs(2),
 		RunE:  runRemoteImport,
 	}
 
-	remoteCmd.AddCommand(remoteAddCmd, remoteListCmd, remoteImportCmd)
+	remoteUnimportCmd := &cobra.Command{
+		Use:   "unimport <handle> <action-name>",
+		Short: "Deactivate a local proxy action without deleting history",
+		Args:  cobra.ExactArgs(2),
+		RunE:  runRemoteUnimport,
+	}
+
+	remoteCmd.AddCommand(remoteAddCmd, remoteListCmd, remoteImportCmd, remoteUnimportCmd)
 	rootCmd.AddCommand(remoteCmd)
 }
 
@@ -188,10 +195,36 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("manifest signature invalid: %w", err)
 	}
 
-	imported, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	result, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		return fmt.Errorf("import action: %w", err)
 	}
-	fmt.Printf("Imported action %s/%s (id=%s)\n", remoteHandle, imported.Name, imported.ID)
+	switch {
+	case len(result.Created) > 0:
+		fmt.Printf("Imported action %s (id=%s)\n", result.Created[0].Name, result.Created[0].ID)
+	case len(result.Updated) > 0:
+		fmt.Printf("Updated action %s (id=%s, deactivated for review)\n", result.Updated[0].Name, result.Updated[0].ID)
+	case len(result.Unchanged) > 0:
+		fmt.Printf("Action %s unchanged (id=%s)\n", result.Unchanged[0].Name, result.Unchanged[0].ID)
+	}
+	return nil
+}
+
+func runRemoteUnimport(_ *cobra.Command, args []string) error {
+	remoteHandle, actionName := args[0], args[1]
+	k, db, err := openKernel()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := requireSuperuser(k); err != nil {
+		return err
+	}
+	a, err := k.UnimportRemoteAction(ctx, remoteHandle, actionName)
+	if err != nil {
+		return fmt.Errorf("unimport action: %w", err)
+	}
+	fmt.Printf("Deactivated action %s (id=%s)\n", a.Name, a.ID)
 	return nil
 }

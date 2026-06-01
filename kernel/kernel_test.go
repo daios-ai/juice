@@ -5,8 +5,11 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -30,6 +33,14 @@ func newTestKernelWithScripts(st Store, exec ScriptExecutor) *Kernel {
 	cfg.IssuerUserID = "test-issuer-id"
 	cfg.SigningKey = testSigningKey()
 	return New(st, exec, nil, nil, nil, cfg, log.Default())
+}
+
+func newTestKernelWithOpenAPI(st Store, client *http.Client) *Kernel {
+	cfg := DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.AllowLocalSources = true
+	cfg.OpenAPIClient = client
+	return New(st, nil, nil, nil, nil, cfg, log.Default())
 }
 
 func testSigningKey() ed25519.PrivateKey {
@@ -1007,10 +1018,14 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 	}
-	a, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	result, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("ImportRemoteAction: %v", err)
 	}
+	if len(result.Created) != 1 {
+		t.Fatalf("expected 1 created action, got %d", len(result.Created))
+	}
+	a := result.Created[0]
 	if a.Kind != KindRemoteProxy {
 		t.Errorf("kind: got %q, want %q", a.Kind, KindRemoteProxy)
 	}
@@ -1042,19 +1057,28 @@ func TestImportRemoteActionReimp(t *testing.T) {
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 	}
-	first, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	firstResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("first import: %v", err)
 	}
+	if len(firstResult.Created) != 1 {
+		t.Fatalf("expected 1 created action, got %d", len(firstResult.Created))
+	}
+	firstID := firstResult.Created[0].ID
 
-	// Reimport with updated price.
+	// Reimport with updated price (signature changes → Updated).
 	m.Price = 99
-	second, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	m.Signature = "new-sig"
+	secondResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
-	if second.ID != first.ID {
-		t.Error("reimport must return the same action ID")
+	if len(secondResult.Updated) != 1 {
+		t.Fatalf("expected 1 updated action, got %d", len(secondResult.Updated))
+	}
+	second := secondResult.Updated[0]
+	if second.ID != firstID {
+		t.Error("reimport must preserve the same action ID")
 	}
 	if second.Price != 99 {
 		t.Errorf("reimport price: got %d, want 99", second.Price)
@@ -1293,5 +1317,95 @@ func TestSetActiveValidatesSchemas(t *testing.T) {
 	k := newTestKernel(st)
 	if err := k.SetActive(ctx, owner.ID, a.ID, true); err == nil {
 		t.Error("expected error activating action with nil input schema")
+	}
+}
+
+// minOpenAPISpec is a valid minimal OpenAPI 3.x spec with one GET /hello operation.
+const minOpenAPISpec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+
+func TestImportOpenAPI(t *testing.T) {
+	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(minOpenAPISpec))
+	}))
+	defer specSrv.Close()
+
+	st := newFakeStore()
+	k := newTestKernelWithOpenAPI(st, specSrv.Client())
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@oapi-import-owner", 0)
+	specURL := specSrv.URL + "/spec.json"
+
+	result, err := k.ImportOpenAPI(ctx, owner.ID, specURL)
+	if err != nil {
+		t.Fatalf("ImportOpenAPI: %v", err)
+	}
+	if len(result.Created) != 1 {
+		t.Fatalf("expected 1 created action, got %d (updated=%d unchanged=%d rejected=%d)",
+			len(result.Created), len(result.Updated), len(result.Unchanged), len(result.Rejected))
+	}
+	a := result.Created[0]
+	if a.Name != "@oapi-import-owner/sayHello" {
+		t.Errorf("name: got %q, want %q", a.Name, "@oapi-import-owner/sayHello")
+	}
+	if a.Active {
+		t.Error("imported action must be inactive")
+	}
+	var src OpenAPISource
+	if err := json.Unmarshal([]byte(a.Source), &src); err != nil {
+		t.Fatalf("action source is not valid OpenAPISource JSON: %v", err)
+	}
+	if src.OperationKey != "sayHello" {
+		t.Errorf("operation_key: got %q, want %q", src.OperationKey, "sayHello")
+	}
+
+	// Re-import with identical spec → Unchanged.
+	result2, err := k.ImportOpenAPI(ctx, owner.ID, specURL)
+	if err != nil {
+		t.Fatalf("reimport: %v", err)
+	}
+	if len(result2.Unchanged) != 1 || len(result2.Created) != 0 {
+		t.Errorf("reimport: want 1 unchanged, got created=%d updated=%d unchanged=%d",
+			len(result2.Created), len(result2.Updated), len(result2.Unchanged))
+	}
+}
+
+func TestUnimportOpenAPI(t *testing.T) {
+	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(minOpenAPISpec))
+	}))
+	defer specSrv.Close()
+
+	st := newFakeStore()
+	k := newTestKernelWithOpenAPI(st, specSrv.Client())
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@oapi-unimport-owner", 0)
+	specURL := specSrv.URL + "/spec.json"
+
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, specURL); err != nil {
+		t.Fatalf("ImportOpenAPI: %v", err)
+	}
+
+	actions, err := k.UnimportOpenAPI(ctx, owner.ID, specURL, "")
+	if err != nil {
+		t.Fatalf("UnimportOpenAPI: %v", err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("expected 1 deactivated action, got %d", len(actions))
+	}
+
+	// UnimportOpenAPI with name filter deactivates only the matching action.
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, specURL); err != nil {
+		t.Fatalf("reimport: %v", err)
+	}
+	actions2, err := k.UnimportOpenAPI(ctx, owner.ID, specURL, "sayHello")
+	if err != nil {
+		t.Fatalf("UnimportOpenAPI by name: %v", err)
+	}
+	if len(actions2) != 1 {
+		t.Fatalf("expected 1 action for name filter, got %d", len(actions2))
 	}
 }

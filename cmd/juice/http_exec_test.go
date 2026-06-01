@@ -93,3 +93,92 @@ func TestHTTPActionExecutorInvalidJSON(t *testing.T) {
 		t.Fatal("expected error for non-JSON response")
 	}
 }
+
+func TestExecuteOpenAPIGet(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "want GET", http.StatusMethodNotAllowed)
+			return
+		}
+		got := r.URL.Query().Get("name")
+		json.NewEncoder(w).Encode(map[string]any{"echo": got})
+	}))
+	defer srv.Close()
+
+	src := map[string]any{
+		"type":    "openapi",
+		"base_url": srv.URL,
+		"method":  "GET",
+		"path":    "/greet",
+	}
+	srcJSON, _ := json.Marshal(src)
+
+	exec := &httpActionExecutor{}
+	result, err := exec.Execute(context.Background(), string(srcJSON), map[string]any{"name": "world"})
+	if err != nil {
+		t.Fatalf("Execute OpenAPI GET: %v", err)
+	}
+	if result["echo"] != "world" {
+		t.Errorf("echo: got %v, want %q", result["echo"], "world")
+	}
+}
+
+func TestExecuteOpenAPIPost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "want POST", http.StatusMethodNotAllowed)
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		json.NewEncoder(w).Encode(map[string]any{"received": body["msg"]})
+	}))
+	defer srv.Close()
+
+	src := map[string]any{
+		"type":    "openapi",
+		"base_url": srv.URL,
+		"method":  "POST",
+		"path":    "/send",
+	}
+	srcJSON, _ := json.Marshal(src)
+
+	exec := &httpActionExecutor{}
+	result, err := exec.Execute(context.Background(), string(srcJSON), map[string]any{"msg": "hello"})
+	if err != nil {
+		t.Fatalf("Execute OpenAPI POST: %v", err)
+	}
+	if result["received"] != "hello" {
+		t.Errorf("received: got %v, want %q", result["received"], "hello")
+	}
+}
+
+func TestExecuteOpenAPIPathParam(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Path should be /items/42 with query ?filter=active.
+		path := r.URL.Path
+		filter := r.URL.Query().Get("filter")
+		json.NewEncoder(w).Encode(map[string]any{"path": path, "filter": filter})
+	}))
+	defer srv.Close()
+
+	src := map[string]any{
+		"type":    "openapi",
+		"base_url": srv.URL,
+		"method":  "GET",
+		"path":    "/items/{id}",
+	}
+	srcJSON, _ := json.Marshal(src)
+
+	exec := &httpActionExecutor{}
+	result, err := exec.Execute(context.Background(), string(srcJSON), map[string]any{"id": "42", "filter": "active"})
+	if err != nil {
+		t.Fatalf("Execute OpenAPI path param: %v", err)
+	}
+	if result["path"] != "/items/42" {
+		t.Errorf("path: got %v, want /items/42", result["path"])
+	}
+	if result["filter"] != "active" {
+		t.Errorf("filter: got %v, want active", result["filter"])
+	}
+}

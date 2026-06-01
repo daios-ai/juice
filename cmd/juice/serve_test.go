@@ -78,6 +78,8 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	r.Get("/v1/actions", srv.getActions)
 	r.Group(func(r chi.Router) {
 		r.Use(srv.authMiddleware)
+		r.Post("/v1/actions/import", srv.importOpenAPI)
+		r.Post("/v1/actions/unimport", srv.unimportOpenAPI)
 		r.Post("/v1/actions", srv.postAction)
 		r.Get("/v1/actions/{id}", srv.getAction)
 		r.Put("/v1/actions/{id}", srv.updateAction)
@@ -1647,5 +1649,73 @@ func TestHealthCmd(t *testing.T) {
 	_, err := runCmd(t, healthCmd(), "--url", srv.URL)
 	if err != nil {
 		t.Fatalf("health: unexpected error: %v", err)
+	}
+}
+
+func TestServeImportOpenAPI(t *testing.T) {
+	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(spec))
+	}))
+	defer specSrv.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@import-srv-owner")
+
+	resp := httpDo(t, srv, "POST", "/v1/actions/import",
+		map[string]any{"spec_url": specSrv.URL + "/spec.json"}, tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("import: want 200, got %d", resp.StatusCode)
+	}
+
+	var result kernel.ImportResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode import result: %v", err)
+	}
+	if len(result.Created) != 1 {
+		t.Fatalf("expected 1 created action, got %d", len(result.Created))
+	}
+	if result.Created[0].Name != "@import-srv-owner/sayHello" {
+		t.Errorf("name: got %q, want %q", result.Created[0].Name, "@import-srv-owner/sayHello")
+	}
+}
+
+func TestServeUnimportOpenAPI(t *testing.T) {
+	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(spec))
+	}))
+	defer specSrv.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@unimport-srv-owner")
+	specURL := specSrv.URL + "/spec.json"
+
+	// Import first.
+	ir := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{"spec_url": specURL}, tok)
+	ir.Body.Close()
+	if ir.StatusCode != http.StatusOK {
+		t.Fatalf("import: want 200, got %d", ir.StatusCode)
+	}
+
+	// Unimport all.
+	ur := httpDo(t, srv, "POST", "/v1/actions/unimport", map[string]any{"spec_url": specURL}, tok)
+	defer ur.Body.Close()
+	if ur.StatusCode != http.StatusOK {
+		t.Fatalf("unimport: want 200, got %d", ur.StatusCode)
+	}
+	var actions []kernel.Action
+	if err := json.NewDecoder(ur.Body).Decode(&actions); err != nil {
+		t.Fatalf("decode unimport result: %v", err)
+	}
+	if len(actions) != 1 {
+		t.Errorf("expected 1 deactivated action, got %d", len(actions))
 	}
 }

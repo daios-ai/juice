@@ -190,3 +190,45 @@ func TestRemoteImport(t *testing.T) {
 		t.Error("expected imported action /greet to appear in @import-remote's actions")
 	}
 }
+
+func TestRemoteUnimport(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+
+	remoteUser, err := k.RegisterRemoteKernel(t.Context(), "@unimport-peer", pubB64, "https://unimport.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := kernel.ActionManifest{
+		ActionID:     "unimport-action-id",
+		OwnerHandle:  "@unimport-peer",
+		Name:         "/greet",
+		Kind:         kernel.KindHTTP,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	}
+	sig, err := kernel.SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+
+	if _, err := k.ImportRemoteAction(t.Context(), remoteUser.ID, m); err != nil {
+		t.Fatalf("ImportRemoteAction: %v", err)
+	}
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	tok, _ := k.Login(t.Context(), "@sys", "sys-pass")
+	_ = saveToken(tok)
+
+	if err := runRemoteUnimport(nil, []string{"@unimport-peer", "/greet"}); err != nil {
+		t.Fatalf("runRemoteUnimport: %v", err)
+	}
+}
