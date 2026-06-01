@@ -982,7 +982,11 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 			if existing.Status == "complete" {
 				var result map[string]any
 				_ = json.Unmarshal([]byte(existing.ResultJSON), &result)
-				writeJSON(w, http.StatusOK, map[string]any{"result": result, "receipt": nil})
+				var receipt *kernel.Receipt
+				if existing.ReceiptJSON != "" {
+					_ = json.Unmarshal([]byte(existing.ReceiptJSON), &receipt)
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"result": result, "receipt": receipt})
 				return
 			}
 			// status == "pending": duplicate in-flight
@@ -1015,16 +1019,23 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fetch receipt before completing the idempotency record so replays can return it.
+	var receipt *kernel.Receipt
+	var receiptJSON string
+	if reply.TxID != "" {
+		receipt, _ = s.kernel.GetReceiptByTxID(ctx, reply.TxID)
+		if receipt != nil {
+			b, _ := json.Marshal(receipt)
+			receiptJSON = string(b)
+		}
+	}
+
 	// Complete idempotency record.
 	resultJSON, _ := json.Marshal(reply.Result)
-	if err := s.kernel.CompleteIdempotencyRecord(ctx, rec.ID, string(resultJSON)); err != nil {
+	if err := s.kernel.CompleteIdempotencyRecord(ctx, rec.ID, string(resultJSON), receiptJSON); err != nil {
 		s.log.With(ctx).Error("federation.complete_idempotency_failed", "error", err)
 	}
 
-	var receipt *kernel.Receipt
-	if reply.TxID != "" {
-		receipt, _ = s.kernel.GetReceiptByTxID(ctx, reply.TxID)
-	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": reply.Result, "receipt": receipt})
 }
 

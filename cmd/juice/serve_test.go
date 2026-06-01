@@ -1672,6 +1672,63 @@ func TestFederationCallAuth(t *testing.T) {
 	}
 }
 
+func TestFederationReplayReceiptNotNil(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"pong":true}`))
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	_, _ = k.RegisterRemoteKernel(ctx, "@replay.example.com", pubB64, "http://replay.example.com")
+
+	a, _ := k.CreateAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID:  sys.ID,
+		Name:         "/replay-ping",
+		Kind:         kernel.KindHTTP,
+		Source:       backend.URL,
+		Price:        0,
+		Description:  "replay ping",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	})
+	_ = k.SetActive(ctx, sys.ID, a.ID, true)
+	_ = k.GrantAll(ctx, sys.ID, a.ID)
+
+	path := "/v1/federation/call?action=@sys/replay-ping&counterparty=" + pubB64
+
+	// First call: must return a non-nil receipt.
+	r1 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/replay-ping", "replay-idem-1"))
+	defer r1.Body.Close()
+	if r1.StatusCode != http.StatusOK {
+		t.Fatalf("first call: want 200, got %d", r1.StatusCode)
+	}
+	var env1 map[string]any
+	json.NewDecoder(r1.Body).Decode(&env1)
+	if env1["receipt"] == nil {
+		t.Error("first call: receipt should be non-nil")
+	}
+
+	// Replay with same idempotency key: receipt must also be non-nil.
+	r2 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/replay-ping", "replay-idem-1"))
+	defer r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("replay: want 200, got %d", r2.StatusCode)
+	}
+	var env2 map[string]any
+	json.NewDecoder(r2.Body).Decode(&env2)
+	if env2["receipt"] == nil {
+		t.Error("idempotency replay: receipt should be non-nil (was not stored)")
+	}
+}
+
 func TestHealthCmd(t *testing.T) {
 	srv, _ := newTestHTTPServer(t)
 	defer srv.Close()

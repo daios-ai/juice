@@ -117,8 +117,9 @@ type Store interface {
 	FundProcess(ctx context.Context, userID, processID string, amount int64) error
 
 	// CommitCall atomically records a successful transaction, creates its receipt, settles funds,
-	// updates trace cost/latency for all ancestor traces, and upserts action stats — all in one SQLite transaction.
-	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats) error
+	// updates trace cost/latency for all ancestor traces, upserts action stats, and (if eventID
+	// is non-empty) marks the event as consumed — all in one SQLite transaction.
+	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, eventID string) error
 
 	// CommitFailedCall atomically refunds locked funds, records a failure transaction, creates its receipt,
 	// updates trace latency, and upserts action stats — all in one SQLite transaction.
@@ -153,6 +154,8 @@ type Store interface {
 	// CreateRating inserts a rating record. Ratings do not cascade (§10.2).
 	CreateRating(ctx context.Context, r *Rating) error
 	ReadRatingByTxID(ctx context.Context, txID string) (*Rating, error)
+	// CreateRatingAndUpdateStats atomically inserts a rating and updates rating_count/rating_mean.
+	CreateRatingAndUpdateStats(ctx context.Context, r *Rating, actionID string, rating float64) error
 
 	// ---- Idempotency ----
 
@@ -162,8 +165,8 @@ type Store interface {
 	// InsertPendingIdempotencyRecord inserts a record with status="pending". Returns a unique-constraint
 	// error (not ErrNotFound) if a record for the same key+counterparty already exists.
 	InsertPendingIdempotencyRecord(ctx context.Context, r *IdempotencyRecord) error
-	// CompleteIdempotencyRecord transitions a pending record to "complete" and stores the result.
-	CompleteIdempotencyRecord(ctx context.Context, id, resultJSON string) error
+	// CompleteIdempotencyRecord transitions a pending record to "complete" and stores the result and receipt.
+	CompleteIdempotencyRecord(ctx context.Context, id, resultJSON, receiptJSON string) error
 	// DeleteIdempotencyRecord removes a record (used to allow retry after execution failure).
 	DeleteIdempotencyRecord(ctx context.Context, id string) error
 

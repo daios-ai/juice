@@ -247,6 +247,7 @@ type IdempotencyRecord struct {
 	ReceiptID          *string
 	Status             string // "pending" | "complete"
 	ResultJSON         string // JSON-encoded result, set on completion
+	ReceiptJSON        string // JSON of the receipt, stored for idempotent replay
 	CreatedAt          time.Time
 	ExpiresAt          time.Time
 }

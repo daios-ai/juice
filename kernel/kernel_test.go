@@ -585,21 +585,12 @@ func TestCreateHTTPActionRejectsSSRFURL(t *testing.T) {
 
 // ---- Event / Listener tests ----
 
-type failingSettleStore struct {
-	*fakeStore
-}
-
-func (f *failingSettleStore) SettleEvent(_ context.Context, _, _ string) error {
-	return ErrInternal.Wrap("injected settle failure")
-}
-
-func TestConsumeEventSettleFailureReturnsError(t *testing.T) {
-	base := newFakeStore()
-	failing := &failingSettleStore{fakeStore: base}
-	k := newTestKernelWithScripts(failing, &fakeScriptExec{result: `{"ok":true}`})
+func TestConsumeEventSettlesAtomically(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	owner := setupUser(t, base, "@settle-owner", 1000)
+	owner := setupUser(t, st, "@settle-owner", 1000)
 
 	a := &Action{
 		ID:          uuid.New().String(),
@@ -612,7 +603,7 @@ func TestConsumeEventSettleFailureReturnsError(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
 	}
-	_ = base.CreateAction(ctx, a)
+	_ = st.CreateAction(ctx, a)
 
 	l := &Listener{
 		ID:             uuid.New().String(),
@@ -623,26 +614,30 @@ func TestConsumeEventSettleFailureReturnsError(t *testing.T) {
 		Active:         true,
 		CreatedAt:      time.Now().UTC(),
 	}
-	_ = base.CreateListener(ctx, l)
+	_ = st.CreateListener(ctx, l)
 
 	e := &Event{
-		ID:             uuid.New().String(),
-		ListenerID:     l.ID,
-		ArgsJSON:       `{}`,
-		CausingTraceID: "",
-		CreatedAt:      time.Now().UTC(),
+		ID:         uuid.New().String(),
+		ListenerID: l.ID,
+		ArgsJSON:   `{}`,
+		CreatedAt:  time.Now().UTC(),
 	}
-	_ = base.CreateEvent(ctx, e)
+	_ = st.CreateEvent(ctx, e)
 
 	p, _, _ := k.StartProcess(ctx, owner.ID, 500)
 
-	_, err := k.ConsumeEvent(ctx, owner.ID, e.ID, p.ID)
-	if err == nil {
-		t.Fatal("expected error from failing SettleEvent, got nil")
+	reply, err := k.ConsumeEvent(ctx, owner.ID, e.ID, p.ID)
+	if err != nil {
+		t.Fatalf("ConsumeEvent: %v", err)
 	}
-	var ke *KernelError
-	if !errors.As(err, &ke) || ke.Code != "internal" {
-		t.Errorf("want ErrInternal, got: %v", err)
+
+	// The event's TxID must be set atomically by CommitCall (not via a separate SettleEvent call).
+	got, _ := st.ReadEvent(ctx, e.ID)
+	if got.TxID == nil {
+		t.Fatal("event.TxID is nil after ConsumeEvent; expected it to be set atomically")
+	}
+	if *got.TxID != reply.TxID {
+		t.Errorf("event.TxID = %q, want %q", *got.TxID, reply.TxID)
 	}
 }
 

@@ -422,7 +422,7 @@ func TestCommitCall(t *testing.T) {
 		ArgsHash: "ah1", ReplyHash: "rh1", Status: kernel.TxSuccess,
 		Gross: 100, Net: 80, Fee: 20, CreatedAt: time.Now().UTC(),
 	}
-	if err := db.CommitCall(ctx, tx, receipt, p.ID, target.ID, fee.ID, 80, 20, nil); err != nil {
+	if err := db.CommitCall(ctx, tx, receipt, p.ID, target.ID, fee.ID, 80, 20, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -587,7 +587,7 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	tx1 := makeTx("tx-inc-1", tr1.ID, 100)
 	rc1 := makeReceipt("rc-inc-1", tx1.ID, tr1.ID, 100)
 	stats1 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, PriceMean: 100, LatencyMean: 0.1, LastUsedAt: time.Now().UTC()}
-	if err := db.CommitCall(ctx, tx1, rc1, p.ID, target.ID, fee.ID, tx1.Net, tx1.Fee, stats1); err != nil {
+	if err := db.CommitCall(ctx, tx1, rc1, p.ID, target.ID, fee.ID, tx1.Net, tx1.Fee, stats1, ""); err != nil {
 		t.Fatalf("CommitCall #1: %v", err)
 	}
 
@@ -595,7 +595,7 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	tx2 := makeTx("tx-inc-2", tr2.ID, 50) // different gross to verify mean formula
 	rc2 := makeReceipt("rc-inc-2", tx2.ID, tr2.ID, 50)
 	stats2 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, PriceMean: 50, LatencyMean: 0.3, LastUsedAt: time.Now().UTC()}
-	if err := db.CommitCall(ctx, tx2, rc2, p.ID, target.ID, fee.ID, tx2.Net, tx2.Fee, stats2); err != nil {
+	if err := db.CommitCall(ctx, tx2, rc2, p.ID, target.ID, fee.ID, tx2.Net, tx2.Fee, stats2, ""); err != nil {
 		t.Fatalf("CommitCall #2: %v", err)
 	}
 
@@ -1060,6 +1060,102 @@ func TestCreateRating(t *testing.T) {
 	}
 }
 
+func TestCreateRatingAndUpdateStats(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@owner", 1000)
+	_ = db.CreateUser(ctx, owner)
+	action := newAction(owner.ID, "/a", 10, true)
+	_ = db.CreateAction(ctx, action)
+
+	// Seed stats so rating_count starts at 0.
+	if err := db.UpsertStats(ctx, &kernel.Stats{
+		ActionID: action.ID,
+		LastUsedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("UpsertStats: %v", err)
+	}
+
+	rater := newUser("@rater", 0)
+	_ = db.CreateUser(ctx, rater)
+	tx := &kernel.Transaction{
+		ID:            uuid.New().String(),
+		OwnerUserID:   rater.ID,
+		SubjectUserID: rater.ID,
+		TargetUserID:  owner.ID,
+		ActionID:      action.ID,
+		Status:        kernel.TxSuccess,
+		StartedAt:     time.Now().UTC(),
+		EndedAt:       time.Now().UTC(),
+	}
+	_ = db.CreateTransaction(ctx, tx)
+
+	r := &kernel.Rating{
+		ID:          uuid.New().String(),
+		RatedTxID:   tx.ID,
+		RaterUserID: rater.ID,
+		Rating:      1.0,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := db.CreateRatingAndUpdateStats(ctx, r, action.ID, 1.0); err != nil {
+		t.Fatalf("CreateRatingAndUpdateStats: %v", err)
+	}
+
+	// Rating row must exist.
+	got, err := db.ReadRatingByTxID(ctx, tx.ID)
+	if err != nil {
+		t.Fatalf("ReadRatingByTxID: %v", err)
+	}
+	if got.Rating != 1.0 {
+		t.Errorf("rating: got %f, want 1.0", got.Rating)
+	}
+
+	// Stats must reflect the rating.
+	stats, err := db.ReadStats(ctx, action.ID)
+	if err != nil {
+		t.Fatalf("ReadStats: %v", err)
+	}
+	if stats.RatingCount != 1 {
+		t.Errorf("RatingCount: got %d, want 1", stats.RatingCount)
+	}
+	if stats.RatingMean != 1.0 {
+		t.Errorf("RatingMean: got %f, want 1.0", stats.RatingMean)
+	}
+
+	// Second rating (0) must update the running mean atomically.
+	rater2 := newUser("@rater2", 0)
+	_ = db.CreateUser(ctx, rater2)
+	tx2 := &kernel.Transaction{
+		ID:            uuid.New().String(),
+		OwnerUserID:   rater2.ID,
+		SubjectUserID: rater2.ID,
+		TargetUserID:  owner.ID,
+		ActionID:      action.ID,
+		Status:        kernel.TxSuccess,
+		StartedAt:     time.Now().UTC(),
+		EndedAt:       time.Now().UTC(),
+	}
+	_ = db.CreateTransaction(ctx, tx2)
+	r2 := &kernel.Rating{
+		ID:          uuid.New().String(),
+		RatedTxID:   tx2.ID,
+		RaterUserID: rater2.ID,
+		Rating:      0.0,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := db.CreateRatingAndUpdateStats(ctx, r2, action.ID, 0.0); err != nil {
+		t.Fatalf("CreateRatingAndUpdateStats second: %v", err)
+	}
+	stats2, _ := db.ReadStats(ctx, action.ID)
+	if stats2.RatingCount != 2 {
+		t.Errorf("RatingCount after second: got %d, want 2", stats2.RatingCount)
+	}
+	if stats2.RatingMean != 0.5 {
+		t.Errorf("RatingMean after second: got %f, want 0.5", stats2.RatingMean)
+	}
+}
+
 // ---- ReadUserByPublicKey tests ----
 
 func TestReadUserByPublicKey(t *testing.T) {
@@ -1187,7 +1283,7 @@ func TestIdempotencyStateMachine(t *testing.T) {
 	}
 
 	// CompleteIdempotencyRecord transitions to "complete" with result JSON.
-	if err := db.CompleteIdempotencyRecord(ctx, rec.ID, `{"answer":42}`); err != nil {
+	if err := db.CompleteIdempotencyRecord(ctx, rec.ID, `{"answer":42}`, ""); err != nil {
 		t.Fatalf("CompleteIdempotencyRecord: %v", err)
 	}
 	got2, _ := db.ReadIdempotencyRecord(ctx, "sm-key-1", cp.ID)

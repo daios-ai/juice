@@ -735,7 +735,7 @@ func (s *DB) FundProcess(ctx context.Context, userID, processID string, amount i
 	return dbErr(tx.Commit(), "fund process commit")
 }
 
-func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats) error {
+func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, eventID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return dbErr(err, "begin commit call")
@@ -844,6 +844,13 @@ WHERE id IN (SELECT id FROM ancestors)`,
 			stats.ActionID, stats.PriceMean, stats.LatencyMean, timeToStr(stats.LastUsedAt),
 		); err != nil {
 			return dbErr(err, "commit call: upsert stats")
+		}
+	}
+
+	if eventID != "" {
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE events SET tx_id=? WHERE id=?`, ktx.ID, eventID); err != nil {
+			return dbErr(err, "commit call: settle event")
 		}
 	}
 
@@ -1826,6 +1833,35 @@ func (s *DB) CreateRating(ctx context.Context, r *kernel.Rating) error {
 	return dbErr(err, "create rating")
 }
 
+func (s *DB) CreateRatingAndUpdateStats(ctx context.Context, r *kernel.Rating, actionID string, rating float64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin create rating")
+	}
+	defer tx.Rollback()
+
+	if _, err = tx.ExecContext(ctx,
+		`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature)
+		 VALUES (?,?,?,?,?,?,?)`,
+		r.ID, r.RatedTxID, r.RatedReceiptID, r.RaterUserID, r.Rating,
+		timeToStr(r.CreatedAt), r.Signature,
+	); err != nil {
+		return dbErr(err, "create rating and update stats: insert rating")
+	}
+
+	if _, err = tx.ExecContext(ctx,
+		`UPDATE action_stats SET
+		   rating_count = rating_count + 1,
+		   rating_mean  = rating_mean + (? - rating_mean) / (rating_count + 1)
+		 WHERE action_id = ?`,
+		rating, actionID,
+	); err != nil {
+		return dbErr(err, "create rating and update stats: update stats")
+	}
+
+	return dbErr(tx.Commit(), "create rating and update stats: commit")
+}
+
 func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating, error) {
 	var r kernel.Rating
 	var ratedReceiptID *string
@@ -1868,10 +1904,10 @@ func (s *DB) InsertPendingIdempotencyRecord(ctx context.Context, r *kernel.Idemp
 	return dbErr(err, "insert pending idempotency record")
 }
 
-func (s *DB) CompleteIdempotencyRecord(ctx context.Context, id, resultJSON string) error {
+func (s *DB) CompleteIdempotencyRecord(ctx context.Context, id, resultJSON, receiptJSON string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE idempotency_records SET status='complete', result_json=? WHERE id=?`,
-		resultJSON, id,
+		`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=?`,
+		resultJSON, receiptJSON, id,
 	)
 	return dbErr(err, "complete idempotency record")
 }
@@ -1888,11 +1924,11 @@ func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID 
 	var receiptID *string
 	var createdAt, expiresAt string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,idempotency_key,counterparty_user_id,receipt_id,status,result_json,created_at,expires_at
+		`SELECT id,idempotency_key,counterparty_user_id,receipt_id,status,result_json,receipt_json,created_at,expires_at
 		 FROM idempotency_records
 		 WHERE idempotency_key=? AND counterparty_user_id=? AND expires_at > datetime('now')`,
 		key, counterpartyUserID,
-	).Scan(&r.ID, &r.IdempotencyKey, &r.CounterpartyUserID, &receiptID, &r.Status, &r.ResultJSON, &createdAt, &expiresAt)
+	).Scan(&r.ID, &r.IdempotencyKey, &r.CounterpartyUserID, &receiptID, &r.Status, &r.ResultJSON, &r.ReceiptJSON, &createdAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("idempotency record not found or expired")
 	}

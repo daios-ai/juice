@@ -370,7 +370,7 @@ func (f *fakeStore) CommitFailedCall(_ context.Context, tx *Transaction, receipt
 	return nil
 }
 
-func (f *fakeStore) CommitCall(_ context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats) error {
+func (f *fakeStore) CommitCall(_ context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, eventID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.processes[processID]
@@ -408,6 +408,12 @@ func (f *fakeStore) CommitCall(_ context.Context, tx *Transaction, receipt *Rece
 	f.applyTraceLatency(tx.TraceID, tx.Gross, tx.EndedAt)
 	if stats != nil {
 		f.stats[stats.ActionID] = stats
+	}
+	if eventID != "" {
+		if e, ok := f.events[eventID]; ok {
+			txID := tx.ID
+			e.TxID = &txID
+		}
 	}
 	return nil
 }
@@ -1045,6 +1051,22 @@ func (f *fakeStore) CreateRating(_ context.Context, r *Rating) error {
 	return nil
 }
 
+func (f *fakeStore) CreateRatingAndUpdateStats(_ context.Context, r *Rating, actionID string, rating float64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, exists := f.ratings[r.RatedTxID]; exists {
+		return ErrInvalidState.Wrap("already rated")
+	}
+	cp := *r
+	f.ratings[r.RatedTxID] = &cp
+	s, ok := f.stats[actionID]
+	if ok {
+		s.RatingCount++
+		s.RatingMean = IncrementalMean(s.RatingMean, s.RatingCount-1, rating)
+	}
+	return nil
+}
+
 func (f *fakeStore) ReadRatingByTxID(_ context.Context, txID string) (*Rating, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1082,13 +1104,14 @@ func (f *fakeStore) InsertPendingIdempotencyRecord(_ context.Context, r *Idempot
 	return nil
 }
 
-func (f *fakeStore) CompleteIdempotencyRecord(_ context.Context, id, resultJSON string) error {
+func (f *fakeStore) CompleteIdempotencyRecord(_ context.Context, id, resultJSON, receiptJSON string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, r := range f.idempotencyRecords {
 		if r.ID == id {
 			r.Status = "complete"
 			r.ResultJSON = resultJSON
+			r.ReceiptJSON = receiptJSON
 			return nil
 		}
 	}

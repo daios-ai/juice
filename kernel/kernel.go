@@ -941,18 +941,8 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 		return nil, err
 	}
 	r.Signature = sig
-	if err := k.store.CreateRating(ctx, r); err != nil {
+	if err := k.store.CreateRatingAndUpdateStats(ctx, r, tx.ActionID, rating); err != nil {
 		return nil, err
-	}
-	// Update action stats to keep rating_mean and rating_count current.
-	stats, err := k.store.ReadStats(ctx, tx.ActionID)
-	if err != nil || stats == nil {
-		stats = DefaultStats(tx.ActionID)
-	}
-	stats.RatingCount++
-	stats.RatingMean = IncrementalMean(stats.RatingMean, stats.RatingCount-1, rating)
-	if updateErr := k.store.UpsertStats(ctx, stats); updateErr != nil {
-		k.log.With(ctx).Warn("rate.stats_update_failed", "action_id", tx.ActionID, "error", updateErr)
 	}
 	return r, nil
 }
@@ -1263,9 +1253,9 @@ func (k *Kernel) InsertPendingIdempotencyRecord(ctx context.Context, r *Idempote
 	return k.store.InsertPendingIdempotencyRecord(ctx, r)
 }
 
-// CompleteIdempotencyRecord transitions a pending record to "complete" with the result.
-func (k *Kernel) CompleteIdempotencyRecord(ctx context.Context, id, resultJSON string) error {
-	return k.store.CompleteIdempotencyRecord(ctx, id, resultJSON)
+// CompleteIdempotencyRecord transitions a pending record to "complete" with the result and receipt.
+func (k *Kernel) CompleteIdempotencyRecord(ctx context.Context, id, resultJSON, receiptJSON string) error {
+	return k.store.CompleteIdempotencyRecord(ctx, id, resultJSON, receiptJSON)
 }
 
 // DeleteIdempotencyRecord removes a record to allow retry after execution failure.
@@ -1346,7 +1336,8 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 	// Decode event args.
 	var args map[string]any
 	_ = json.Unmarshal([]byte(e.ArgsJSON), &args)
-	// Call the action using the supplied process.
+	// Call the action using the supplied process. EventID causes CommitCall to settle
+	// the event atomically in the same transaction, eliminating the double-charge window.
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID:       subjectID,
 		ProcessID:       processID,
@@ -1354,14 +1345,11 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 		TargetUserID:    owner.ID,
 		ActionName:      action.Name,
 		Args:            args,
+		EventID:         eventID,
 	})
 	if err != nil {
 		_ = k.store.UnlockEvent(ctx, eventID)
 		return nil, err
-	}
-	if err := k.store.SettleEvent(ctx, eventID, reply.TxID); err != nil {
-		k.log.With(ctx).Error("event.settle_failed", "event_id", eventID, "tx_id", reply.TxID, "error", err.Error())
-		return nil, ErrInternal.Wrap("could not settle event after successful call")
 	}
 	k.log.With(ctx).Info("event.consumed", "event_id", eventID, "tx_id", reply.TxID)
 	return reply, nil

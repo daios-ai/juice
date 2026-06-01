@@ -31,6 +31,9 @@ type CallRequest struct {
 	ActionName string
 	// Args is the JSON-decoded input arguments.
 	Args map[string]any
+	// EventID, if non-empty, causes CommitCall to settle the event atomically.
+	// Set only by ConsumeEvent; leave empty for all direct calls.
+	EventID string
 }
 
 // CallReply is the response from a successful Call().
@@ -268,7 +271,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
-	if err := k.store.CommitCall(ctx, tx, receipt, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats); err != nil {
+	if err := k.store.CommitCall(ctx, tx, receipt, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.EventID); err != nil {
 		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
 			logger.Error("call.refund_failed", "action", action.Name, "commit_error", err, "refund_error", refundErr)
 			return nil, ErrInternal.Wrap("could not refund funds after failed commit")

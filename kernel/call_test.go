@@ -939,12 +939,12 @@ type failingCommitStore struct {
 	calls int
 }
 
-func (f *failingCommitStore) CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats) error {
+func (f *failingCommitStore) CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, eventID string) error {
 	f.calls++
 	if f.calls > 0 {
 		return ErrInternal.Wrap("injected commit failure")
 	}
-	return f.fakeStore.CommitCall(ctx, tx, receipt, processID, targetUserID, feeRecipientID, net, fee, stats)
+	return f.fakeStore.CommitCall(ctx, tx, receipt, processID, targetUserID, feeRecipientID, net, fee, stats, eventID)
 }
 
 func TestCommitCallAtomicOnFailure(t *testing.T) {
