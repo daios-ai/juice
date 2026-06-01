@@ -338,6 +338,42 @@ func TestCallFailureRefundsFunds(t *testing.T) {
 	}
 }
 
+func TestWasmPanicRefundsFunds(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &panicScriptExec{})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@wasm-panic-alice", 500)
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/panic-svc",
+		Kind: KindWasm, Active: true, Price: 100,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	p, root, _ := k.StartProcess(ctx, alice.ID, 300)
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID:     alice.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: root.ID,
+		TargetUserID:  alice.ID,
+		ActionName:    "/panic-svc",
+		Args:          map[string]any{},
+	})
+	if err == nil {
+		t.Fatal("expected error from panicking WASM executor")
+	}
+
+	proc, _ := st.ReadProcess(ctx, p.ID)
+	if proc.Available != 300 {
+		t.Errorf("process.available after wasm panic: got %d, want 300", proc.Available)
+	}
+	if proc.Locked != 0 {
+		t.Errorf("process.locked after wasm panic: got %d, want 0", proc.Locked)
+	}
+}
+
 func TestCallNestedTraceTree(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
