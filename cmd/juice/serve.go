@@ -826,11 +826,22 @@ func (s *server) getWellKnown(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
-	actionName := r.URL.Query().Get("action")
-	if actionName == "" {
+	// action must be "@owner/name" format.
+	actionParam := r.URL.Query().Get("action")
+	if actionParam == "" {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("action query param required"))
 		return
 	}
+
+	// Parse "@owner/name" → ownerHandle, actionName.
+	slash := strings.Index(actionParam[1:], "/")
+	if slash < 0 || !strings.HasPrefix(actionParam, "@") {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("action must be @owner/name"))
+		return
+	}
+	ownerHandle := actionParam[:slash+1]
+	actionName := actionParam[slash+1:]
+
 	var args map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
@@ -838,10 +849,35 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	// Idempotency: replay a prior response if the same key is presented.
+	// Resolve the action owner and the action itself — must be active and public.
+	owner, err := s.kernel.ReadUserByHandle(ctx, ownerHandle)
+	if err != nil || owner == nil {
+		writeErr(w, kernel.ErrNotFound.Wrap("action owner not found"))
+		return
+	}
+	action, err := s.kernel.ReadActionByOwnerName(ctx, owner.ID, actionName)
+	if err != nil || action == nil {
+		writeErr(w, kernel.ErrNotFound.Wrapf("action %s not found", actionParam))
+		return
+	}
+	if !action.Active || !action.Public {
+		writeErr(w, kernel.ErrUnauthorized.Wrap("action is not active and public"))
+		return
+	}
+
+	// Optionally resolve the calling remote kernel for idempotency.
+	// If unregistered, execution proceeds but idempotency is not persisted.
+	var counterparty *kernel.User
+	if h := r.URL.Query().Get("counterparty"); h != "" {
+		if u, err := s.kernel.ReadUserByHandle(ctx, h); err == nil && u != nil && u.RemoteBaseURL != "" {
+			counterparty = u
+		}
+	}
+
+	// Idempotency: replay a prior response if counterparty is known and key is presented.
 	idempotencyKey := r.Header.Get("X-Idempotency-Key")
-	if idempotencyKey != "" {
-		if rec, err := s.kernel.GetIdempotencyRecord(ctx, idempotencyKey, ""); err == nil {
+	if idempotencyKey != "" && counterparty != nil {
+		if rec, err := s.kernel.GetIdempotencyRecord(ctx, idempotencyKey, counterparty.ID); err == nil {
 			var receipt *kernel.Receipt
 			if rec.ReceiptID != nil {
 				receipt, _ = s.kernel.GetReceiptByID(ctx, *rec.ReceiptID)
@@ -851,22 +887,29 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Determine the subject: use the registered counterparty or fall back to @sys.
 	suHandle, _ := s.kernel.GetConfig(ctx, configKeySuperuser)
-	su, err := s.kernel.ReadUserByHandle(ctx, suHandle)
-	if err != nil {
-		writeErr(w, kernel.ErrInvalidState.Wrap("kernel not bootstrapped"))
-		return
+	subject := counterparty
+	if subject == nil {
+		su, err := s.kernel.ReadUserByHandle(ctx, suHandle)
+		if err != nil {
+			writeErr(w, kernel.ErrInvalidState.Wrap("kernel not bootstrapped"))
+			return
+		}
+		subject = su
 	}
-	proc, _, err := s.kernel.StartProcess(ctx, su.ID, 0)
+
+	proc, _, err := s.kernel.StartProcess(ctx, subject.ID, action.Price)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	defer s.kernel.EndProcess(ctx, su.ID, proc.ID)
+	defer s.kernel.EndProcess(ctx, subject.ID, proc.ID)
+
 	reply, err := s.kernel.Call(ctx, kernel.CallRequest{
-		SubjectID:    su.ID,
+		SubjectID:    subject.ID,
 		ProcessID:    proc.ID,
-		TargetUserID: su.ID,
+		TargetUserID: owner.ID,
 		ActionName:   actionName,
 		Args:         args,
 	})
@@ -875,20 +918,22 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch receipt and record idempotency entry.
+	// Fetch receipt and record idempotency entry (only when counterparty is registered).
 	var receipt *kernel.Receipt
 	if reply.TxID != "" {
 		receipt, _ = s.kernel.GetReceiptByTxID(ctx, reply.TxID)
 	}
-	if idempotencyKey != "" && receipt != nil {
-		_ = s.kernel.CreateIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
+	if idempotencyKey != "" && counterparty != nil && receipt != nil {
+		if idemErr := s.kernel.CreateIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
 			ID:                 uuid.New().String(),
 			IdempotencyKey:     idempotencyKey,
-			CounterpartyUserID: "",
+			CounterpartyUserID: counterparty.ID,
 			ReceiptID:          &receipt.ID,
 			CreatedAt:          time.Now().UTC(),
 			ExpiresAt:          time.Now().UTC().Add(24 * time.Hour),
-		})
+		}); idemErr != nil {
+			log.Default().Warn("federation.idempotency_record_failed", "error", idemErr)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"result": reply.Result, "receipt": receipt})

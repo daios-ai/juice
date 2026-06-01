@@ -1307,6 +1307,12 @@ func TestFederationCall(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Register a remote peer to act as the calling counterparty (32 zero bytes as ed25519 public key).
+	_, err = k.RegisterRemoteKernel(ctx, "@remote.example.com", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "http://remote.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Register a public /ping action on @sys pointing to the backend.
 	a, err := k.CreateAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
@@ -1328,13 +1334,9 @@ func TestFederationCall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Store the superuser handle in config (required by postFederationCall).
-	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
-		t.Fatal(err)
-	}
-
 	// POST to federation endpoint — no auth required.
-	resp := httpDo(t, srv, "POST", "/v1/federation/call?action=/ping", map[string]any{}, "")
+	// action uses "@owner/name" format; counterparty identifies the calling remote kernel.
+	resp := httpDo(t, srv, "POST", "/v1/federation/call?action=@sys/ping&counterparty=@remote.example.com", map[string]any{}, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -1347,9 +1349,16 @@ func TestFederationCall(t *testing.T) {
 	}
 
 	// Unknown action returns not found.
-	resp2 := httpDo(t, srv, "POST", "/v1/federation/call?action=/nope", map[string]any{}, "")
+	resp2 := httpDo(t, srv, "POST", "/v1/federation/call?action=@sys/nope&counterparty=@remote.example.com", map[string]any{}, "")
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown action: expected 404, got %d", resp2.StatusCode)
+	}
+
+	// Unregistered counterparty is silently treated as anonymous (no idempotency).
+	resp3 := httpDo(t, srv, "POST", "/v1/federation/call?action=@sys/ping&counterparty=@unknown", map[string]any{}, "")
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Errorf("unregistered counterparty should still work for public action: expected 200, got %d", resp3.StatusCode)
 	}
 }

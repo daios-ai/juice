@@ -1531,8 +1531,11 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 	if remoteUser.RemoteBaseURL == "" {
 		return nil, ErrInvalidInput.Wrap("user is not a remote kernel")
 	}
+	// action param uses "@owner/name" format; counterparty identifies this kernel to the remote.
+	localHandle, _ := k.store.GetConfig(ctx, "superuser_handle")
 	source := strings.TrimRight(remoteUser.RemoteBaseURL, "/") +
-		"/v1/federation/call?action=" + url.QueryEscape(m.Name)
+		"/v1/federation/call?action=" + url.QueryEscape(m.OwnerHandle+m.Name) +
+		"&counterparty=" + url.QueryEscape(localHandle)
 	now := time.Now().UTC()
 	a := &Action{
 		ID:           uuid.New().String(),

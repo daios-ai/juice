@@ -31,9 +31,6 @@ type CallRequest struct {
 	ActionName string
 	// Args is the JSON-decoded input arguments.
 	Args map[string]any
-	// ContractorCall is true for sub-calls made via juice.call inside an action.
-	// Fee is set to 0 so the contractor receives its full action.price (§5.7).
-	ContractorCall bool
 }
 
 // CallReply is the response from a successful Call().
@@ -164,12 +161,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	logger = k.log.With(ctx)
 	logger.Info("call.start", "action", action.Name, "price", action.Price)
 
-	// Prepare transaction skeleton.
-	feeBPS := k.cfg.FeeBPS
-	if req.ContractorCall {
-		feeBPS = 0
-	}
-	net, fee := ComputeFee(action.Price, feeBPS)
+	// Prepare transaction skeleton (fee computed post-execution once subCost is known).
 	txID := uuid.New().String()
 	tx := &Transaction{
 		ID:            txID,
@@ -194,6 +186,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// use ExecuteFederation to carry an idempotency key and capture the remote receipt hash.
 	started := time.Now()
 	var reply map[string]any
+	var subCost int64
 	var execErr error
 	if target.RemoteBaseURL != "" {
 		if fe, ok := k.http.(federationExecutor); ok {
@@ -204,11 +197,11 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 				tx.RemoteReceiptHash = sha256Hex(receiptJSON)
 			}
 		} else {
-			reply, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
+			reply, subCost, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
 		}
 	} else {
 		// Pass action.OwnerUserID so host functions operate on behalf of the action author.
-		reply, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
+		reply, subCost, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
 	}
 	latency := time.Since(started).Seconds()
 	tx.EndedAt = time.Now().UTC()
@@ -255,6 +248,12 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	// 14 & 15. Record transaction, settle payment, update trace cost/latency, and upsert stats — all atomic.
+	// VAT fee: each kernel taxes only the value it adds (gross minus direct sub-call cost).
+	taxable := action.Price - subCost
+	if taxable < 0 {
+		taxable = 0
+	}
+	net, fee := ComputeFee(taxable, action.Price, k.cfg.FeeBPS)
 	replyJSON, _ := json.Marshal(reply)
 	tx.ReplyJSON = string(replyJSON)
 	tx.Status = TxSuccess
@@ -307,19 +306,22 @@ func (k *Kernel) canCall(ctx context.Context, subjectID string, action *Action) 
 }
 
 // execute dispatches to the correct execution backend.
-func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (map[string]any, error) {
+// Returns (result, subCost, error) where subCost is the total gross paid to direct WASM sub-calls.
+func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (map[string]any, int64, error) {
 	switch action.Kind {
 	case KindHTTP:
 		if k.http == nil {
-			return nil, ErrInvalidState.Wrap("HTTP executor not configured")
+			return nil, 0, ErrInvalidState.Wrap("HTTP executor not configured")
 		}
-		return k.http.Execute(ctx, action.Source, args)
+		result, err := k.http.Execute(ctx, action.Source, args)
+		return result, 0, err
 	case KindWasm:
 		return k.executeWasm(ctx, action, args, trace, ownerUserID)
 	case KindNative:
-		return k.executeNative(ctx, action, args)
+		result, err := k.executeNative(ctx, action, args)
+		return result, 0, err
 	default:
-		return nil, ErrInvalidState.Wrapf("unknown action kind %q", action.Kind)
+		return nil, 0, ErrInvalidState.Wrapf("unknown action kind %q", action.Kind)
 	}
 }
 
@@ -407,19 +409,20 @@ func (k *Kernel) executeChat(ctx context.Context, args map[string]any) (map[stri
 }
 
 // executeWasm runs a compiled WASM artifact.
-func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (map[string]any, error) {
+// Returns (result, subCost, error) where subCost is the gross paid to direct sub-calls during execution.
+func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (map[string]any, int64, error) {
 	if k.scripts == nil {
-		return nil, ErrInvalidState.Wrap("script executor not configured")
+		return nil, 0, ErrInvalidState.Wrap("script executor not configured")
 	}
 
 	inputJSON, err := json.Marshal(args)
 	if err != nil {
-		return nil, ErrInvalidInput.Wrap("could not serialize args")
+		return nil, 0, ErrInvalidInput.Wrap("could not serialize args")
 	}
 
 	artifact, _, err := k.scripts.Compile(ctx, []byte(action.Source))
 	if err != nil {
-		return nil, ErrExecutionFailed.Wrapf("wasm compile failed: %v", err)
+		return nil, 0, ErrExecutionFailed.Wrapf("wasm compile failed: %v", err)
 	}
 
 	host := &kernelHostFunctions{
@@ -431,14 +434,14 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 
 	outputJSON, err := k.scripts.Execute(ctx, artifact, inputJSON, host)
 	if err != nil {
-		return nil, ErrExecutionFailed.Wrapf("wasm execution failed: %v", err)
+		return nil, 0, ErrExecutionFailed.Wrapf("wasm execution failed: %v", err)
 	}
 
 	var result map[string]any
 	if err := json.Unmarshal(outputJSON, &result); err != nil {
-		return nil, ErrExecutionFailed.Wrap("wasm output is not valid JSON")
+		return nil, 0, ErrExecutionFailed.Wrap("wasm output is not valid JSON")
 	}
-	return result, nil
+	return result, host.subCost, nil
 }
 
 // kernelHostFunctions implements HostFunctions using the kernel itself.
@@ -448,6 +451,7 @@ type kernelHostFunctions struct {
 	processID   string
 	traceID     string
 	ownerUserID string
+	subCost     int64 // gross paid to direct sub-calls; used for VAT fee computation
 }
 
 func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJSON []byte) ([]byte, error) {
@@ -498,18 +502,18 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 		}
 		return nil, ErrInternal.Wrap("could not create ephemeral process")
 	}
+	h.subCost += action.Price
 	ep.Available = action.Price
 	// Always close the ephemeral process on return; any unused funds go back to owner.
 	// Use context.Background() so a cancelled request context does not prevent cleanup.
 	defer func() { _ = h.kernel.store.EndProcess(context.Background(), ep.ID) }()
 
 	reply, err := h.kernel.Call(ctx, CallRequest{
-		SubjectID:      h.ownerUserID,
-		ProcessID:      ep.ID,
-		TargetUserID:   target.ID,
-		ActionName:     subActionName,
-		Args:           args,
-		ContractorCall: true,
+		SubjectID:    h.ownerUserID,
+		ProcessID:    ep.ID,
+		TargetUserID: target.ID,
+		ActionName:   subActionName,
+		Args:         args,
 	})
 	if err != nil {
 		return nil, err
@@ -598,14 +602,14 @@ func strPtr(s string) *string {
 	return &s
 }
 
-// ComputeFee splits a gross amount into (net, fee) using basis points.
-// fee is rounded up to the nearest credit (ceiling division).
-// Invariant: net + fee == gross.
-func ComputeFee(gross, feeBPS int64) (net, fee int64) {
-	if gross == 0 || feeBPS == 0 {
+// ComputeFee computes (net, fee) for a gross amount using VAT-style basis points.
+// Only the taxable portion (gross minus direct sub-call cost) is subject to the fee.
+// fee is rounded up (ceiling division). Invariant: net + fee == gross.
+func ComputeFee(taxable, gross, feeBPS int64) (net, fee int64) {
+	if gross == 0 || feeBPS == 0 || taxable == 0 {
 		return gross, 0
 	}
-	fee = (gross*feeBPS + 9999) / 10000
+	fee = (taxable*feeBPS + 9999) / 10000
 	net = gross - fee
 	return
 }

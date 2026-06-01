@@ -67,6 +67,16 @@ rj() {
     "$JUICE" --db "$REMOTE_DB" "$@" 2>&1
 }
 
+# Poll GET <url>/health until HTTP 200 or 10-second timeout.
+wait_ready() {
+    local url=$1
+    local deadline=$(( $(date +%s) + 10 ))
+    until curl -sf "$url/health" > /dev/null 2>&1; do
+        [ "$(date +%s)" -ge "$deadline" ] && { echo "timeout waiting for $url"; return 1; }
+        sleep 0.2
+    done
+}
+
 # Extract a JSON string field: strfield "json" "fieldname"
 # Handles both "fieldName": "value" and "field_name": "value"
 strfield() {
@@ -121,7 +131,7 @@ cleanup() {
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
-sleep 1   # let backends start (remote kernel needs a moment to bootstrap)
+wait_ready "http://127.0.0.1:19875"  # wait for remote kernel to bootstrap
 
 # ═══════════════════════════════════════════════════════════════════════════════
 echo "=== FLOW 1: First boot and platform bootstrap ==="
@@ -133,7 +143,7 @@ HOME="$H_SYS" \
 JUICE_BOOTSTRAP_PASSWORD="$SYS_PASS" \
 "$JUICE" --db "$DB" serve --addr "127.0.0.1:$SERVE_PORT" >/dev/null 2>&1 &
 SERVE_PID=$!
-sleep 1   # wait for bootstrap to complete
+wait_ready "http://127.0.0.1:$SERVE_PORT"  # wait for bootstrap to complete
 kill "$SERVE_PID" 2>/dev/null || true
 wait "$SERVE_PID" 2>/dev/null || true
 

@@ -686,16 +686,16 @@ func TestContractorSubCallChargedToActionOwner(t *testing.T) {
 		t.Errorf("caller process.available: got %d, want 0 (outer price only)", proc.Available)
 	}
 
-	// Contractor sub-call has fee=0; Bob received full inner price = 100.
+	// VAT model: inner taxable=100, fee=20, net=80. Bob: 500+80=580.
 	bobUser, _ := st.ReadUser(ctx, bob.ID)
-	if bobUser.Available != 600 { // 500 + 100
-		t.Errorf("inner action owner available: got %d, want 600", bobUser.Available)
+	if bobUser.Available != 580 {
+		t.Errorf("inner action owner available: got %d, want 580", bobUser.Available)
 	}
 
-	// Alice spent 100 (inner sub-call, no fee) and received outer net = 50 - 10 = 40 (20% fee).
+	// VAT model: outer gross=50, sub_cost=100 → taxable=0, fee=0, net=50. Alice: 1000-100+50=950.
 	aliceUser, _ := st.ReadUser(ctx, alice.ID)
-	if aliceUser.Available != 940 { // 1000 - 100 + 40
-		t.Errorf("outer action owner available: got %d, want 940", aliceUser.Available)
+	if aliceUser.Available != 950 {
+		t.Errorf("outer action owner available: got %d, want 950", aliceUser.Available)
 	}
 }
 
@@ -857,22 +857,26 @@ func TestContractorEphemeralRootHasCausedByTraceID(t *testing.T) {
 
 func TestComputeFee(t *testing.T) {
 	tests := []struct {
-		gross, feeBPS, wantNet, wantFee int64
+		taxable, gross, feeBPS, wantNet, wantFee int64
 	}{
-		{0, 2000, 0, 0},
-		{100, 2000, 80, 20},
-		{1, 2000, 0, 1},
-		{5, 2000, 4, 1},
-		{1000, 2000, 800, 200},
-		{1, 0, 1, 0},
-		{100, 0, 100, 0},
-		{100, 10000, 0, 100},
+		// taxable == gross (no sub-calls): full fee applies
+		{0, 0, 2000, 0, 0},
+		{100, 100, 2000, 80, 20},
+		{1, 1, 2000, 0, 1},
+		{5, 5, 2000, 4, 1},
+		{1000, 1000, 2000, 800, 200},
+		{1, 1, 0, 1, 0},
+		{100, 100, 0, 100, 0},
+		{100, 100, 10000, 0, 100},
+		// VAT: taxable < gross (sub-calls consumed some gross)
+		{0, 50, 2000, 50, 0},   // outer action in contractor test: taxable=0, no fee
+		{30, 100, 2000, 94, 6}, // partial sub-cost: taxable=30, fee=ceil(30*0.2)=6, net=94
 	}
 	for _, tc := range tests {
-		net, fee := ComputeFee(tc.gross, tc.feeBPS)
+		net, fee := ComputeFee(tc.taxable, tc.gross, tc.feeBPS)
 		if net != tc.wantNet || fee != tc.wantFee {
-			t.Errorf("ComputeFee(%d, %d) = (%d, %d), want (%d, %d)",
-				tc.gross, tc.feeBPS, net, fee, tc.wantNet, tc.wantFee)
+			t.Errorf("ComputeFee(%d, %d, %d) = (%d, %d), want (%d, %d)",
+				tc.taxable, tc.gross, tc.feeBPS, net, fee, tc.wantNet, tc.wantFee)
 		}
 		if tc.gross > 0 && net+fee != tc.gross {
 			t.Errorf("invariant broken: gross=%d net=%d fee=%d", tc.gross, net, fee)
@@ -882,7 +886,7 @@ func TestComputeFee(t *testing.T) {
 
 func TestComputeFeeInvariant(t *testing.T) {
 	for gross := int64(0); gross <= 10000; gross++ {
-		net, fee := ComputeFee(gross, 2000)
+		net, fee := ComputeFee(gross, gross, 2000)
 		if net+fee != gross {
 			t.Fatalf("gross=%d: net(%d)+fee(%d) != gross", gross, net, fee)
 		}
