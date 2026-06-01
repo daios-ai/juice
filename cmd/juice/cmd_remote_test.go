@@ -189,6 +189,79 @@ func TestRemoteImport(t *testing.T) {
 	}
 }
 
+func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+
+	const actionID = "disappear-action-id"
+	m := kernel.ActionManifest{
+		ActionID:     actionID,
+		OwnerHandle:  "@disappear-remote",
+		Name:         "/bye",
+		Description:  "going away",
+		Kind:         kernel.KindHTTP,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	}
+	sig, err := kernel.SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+
+	// First: remote server returns the action.
+	serveAction := true
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/manifest") {
+			json.NewEncoder(w).Encode(m)
+			return
+		}
+		if serveAction {
+			json.NewEncoder(w).Encode([]map[string]string{{"ID": actionID, "Name": "/bye"}})
+		} else {
+			json.NewEncoder(w).Encode([]map[string]string{})
+		}
+	}))
+	defer remote.Close()
+
+	if _, err := k.RegisterRemoteKernel(t.Context(), "@disappear-remote", pubB64, remote.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	tok, _ := k.Login(t.Context(), "@sys", "sys-pass")
+	_ = saveToken(tok)
+
+	// Import the action.
+	if err := runRemoteImport(nil, []string{"@disappear-remote", "/bye"}); err != nil {
+		t.Fatalf("initial import: %v", err)
+	}
+
+	// Reimport with remote no longer listing the action.
+	serveAction = false
+	if err := runRemoteImport(nil, []string{"@disappear-remote", "/bye"}); err != nil {
+		t.Fatalf("reimport after disappearance: %v", err)
+	}
+
+	// Local proxy must be deactivated.
+	actions, err := k.ListActions(t.Context(), false, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range actions {
+		if a.Name == "/bye" && a.Active {
+			t.Error("expected local proxy to be deactivated after remote action disappeared")
+		}
+	}
+}
+
 func TestRemoteUnimport(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 

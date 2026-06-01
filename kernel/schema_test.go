@@ -28,6 +28,34 @@ func TestValidateSchema(t *testing.T) {
 			t.Error("expected error for anyOf")
 		}
 	})
+
+	t.Run("allOf in typed node rejected", func(t *testing.T) {
+		s := map[string]any{"type": "object", "allOf": []any{}}
+		if err := ValidateSchema(s); err == nil {
+			t.Error("expected error for allOf in typed node")
+		}
+	})
+
+	t.Run("$ref in typed node rejected", func(t *testing.T) {
+		s := map[string]any{"type": "string", "$ref": "#/definitions/foo"}
+		if err := ValidateSchema(s); err == nil {
+			t.Error("expected error for $ref in typed node")
+		}
+	})
+
+	t.Run("patternProperties in typed node rejected", func(t *testing.T) {
+		s := map[string]any{"type": "object", "patternProperties": map[string]any{}}
+		if err := ValidateSchema(s); err == nil {
+			t.Error("expected error for patternProperties in typed node")
+		}
+	})
+
+	t.Run("unknown keyword in primitive rejected", func(t *testing.T) {
+		s := map[string]any{"type": "integer", "minimum": float64(0)}
+		if err := ValidateSchema(s); err == nil {
+			t.Error("expected error for minimum keyword on integer")
+		}
+	})
 }
 
 func TestValidateInput(t *testing.T) {

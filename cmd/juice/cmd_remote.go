@@ -184,6 +184,13 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 		}
 	}
 	if actionID == "" {
+		// Remote action disappeared or lost public/active state.
+		// Deactivate any existing local proxy and reset its stats.
+		if a, unimportErr := k.UnimportRemoteAction(ctx, remoteHandle, actionName); unimportErr == nil {
+			_ = db.UpsertStats(ctx, &kernel.Stats{ActionID: a.ID})
+			fmt.Printf("Remote action %q no longer available; deactivated local proxy %s\n", actionName, a.Name)
+			return nil
+		}
 		return fmt.Errorf("action %q not found on remote kernel %q", actionName, remoteHandle)
 	}
 

@@ -2082,7 +2082,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 			a.Description  = m.Description
 			a.InputSchema  = m.InputSchema
 			a.OutputSchema = m.OutputSchema
-			a.ArtifactHash = m.ArtifactHash // manifest's artifact hash, not the local content hash
+			a.ArtifactHash = contentHash // store content hash so reconcileImport can compare on re-import
 		},
 		new: func() *Action {
 			now := time.Now().UTC()
@@ -2097,7 +2097,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 				InputSchema:    m.InputSchema,
 				OutputSchema:   m.OutputSchema,
 				Source:         source,
-				ArtifactHash:   m.ArtifactHash, // manifest's artifact hash, not the local content hash
+				ArtifactHash:   contentHash, // store content hash so reconcileImport can compare on re-import
 				RemoteActionID: m.ActionID,
 				CreatedAt:      now,
 				UpdatedAt:      now,

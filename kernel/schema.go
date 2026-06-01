@@ -45,7 +45,35 @@ func validateSchemaNode(node map[string]any, path string, depth int) error {
 	}
 }
 
+// allowedSchemaKeys returns the set of permitted keywords for a given JSON Schema type.
+// Returns nil for unknown types.
+func allowedSchemaKeys(typ string) map[string]bool {
+	base := map[string]bool{"type": true, "nullable": true, "enum": true}
+	switch typ {
+	case "object":
+		base["properties"] = true
+		base["required"] = true
+		return base
+	case "array":
+		base["items"] = true
+		return base
+	case "string", "integer", "number", "boolean":
+		return base
+	default:
+		return nil
+	}
+}
+
 func validateTypedNode(typ string, node map[string]any, path string, depth int) error {
+	allowed := allowedSchemaKeys(typ)
+	if allowed == nil {
+		return ErrSchemaViolation.Wrapf("schema at %s: unsupported type %q", path, typ)
+	}
+	for k := range node {
+		if !allowed[k] {
+			return ErrSchemaViolation.Wrapf("schema at %s: unsupported keyword %q", path, k)
+		}
+	}
 	switch typ {
 	case "object":
 		props, _ := node["properties"].(map[string]any)
@@ -70,10 +98,6 @@ func validateTypedNode(typ string, node map[string]any, path string, depth int) 
 		if err := validateSchemaNode(child, path+".items", depth+1); err != nil {
 			return err
 		}
-	case "string", "integer", "number", "boolean":
-		// primitives — valid
-	default:
-		return ErrSchemaViolation.Wrapf("schema at %s: unsupported type %q", path, typ)
 	}
 	return nil
 }

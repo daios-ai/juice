@@ -196,7 +196,9 @@ func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions
 				mem := mod.Memory()
 				event, _ := mem.Read(eventPtr, eventLen)
 				args, _ := mem.Read(argsPtr, argsLen)
-				_ = host.Emit(ctx, string(event), args)
+				if err := host.Emit(ctx, string(event), args); err != nil {
+					panic(err.Error())
+				}
 			}),
 			[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32},
 			[]api.ValueType{},

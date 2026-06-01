@@ -137,6 +137,16 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		req.ParentTraceID = root.ID
 	}
 
+	// Causal trace invariants.
+	// Direct calls must not carry a FOLLOWS_FROM reference.
+	if req.CausedByTraceID != "" && req.EventID == "" {
+		return nil, ErrInvalidInput.Wrap("CausedByTraceID must be empty for direct calls")
+	}
+	// FOLLOWS_FROM and CHILD_OF must reference distinct traces.
+	if req.CausedByTraceID != "" && req.CausedByTraceID == req.ParentTraceID {
+		return nil, ErrInvalidInput.Wrap("CausedByTraceID must differ from ParentTraceID")
+	}
+
 	// 10. Lock funds atomically — first state change.
 	if action.Price > 0 {
 		if err := k.store.LockFunds(ctx, req.ProcessID, action.Price); err != nil {

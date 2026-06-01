@@ -889,6 +889,59 @@ func TestContractorEphemeralRootHasCausedByTraceID(t *testing.T) {
 	}
 }
 
+func TestDirectCallWithCausedByTraceIDRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 0)
+	a := setupAction(t, st, alice.ID, "/svc", 0)
+	a.Kind = KindWasm
+	a.Active = true
+	_ = st.UpdateAction(ctx, a)
+	p, root, _ := k.StartProcess(ctx, alice.ID, 0)
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID:       alice.ID,
+		ProcessID:       p.ID,
+		ParentTraceID:   root.ID,
+		CausedByTraceID: root.ID, // must be empty for direct calls
+		TargetUserID:    alice.ID,
+		ActionName:      "/svc",
+		Args:            map[string]any{},
+	})
+	if err == nil {
+		t.Fatal("expected error when direct call supplies CausedByTraceID")
+	}
+}
+
+func TestCausedByEqualsParentRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 0)
+	a := setupAction(t, st, alice.ID, "/svc", 0)
+	a.Kind = KindWasm
+	a.Active = true
+	_ = st.UpdateAction(ctx, a)
+	p, root, _ := k.StartProcess(ctx, alice.ID, 0)
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID:       alice.ID,
+		ProcessID:       p.ID,
+		ParentTraceID:   root.ID,
+		CausedByTraceID: root.ID, // same as parent — FOLLOWS_FROM must differ from CHILD_OF
+		EventID:         "fake-event-id",
+		TargetUserID:    alice.ID,
+		ActionName:      "/svc",
+		Args:            map[string]any{},
+	})
+	if err == nil {
+		t.Fatal("expected error when CausedByTraceID equals ParentTraceID")
+	}
+}
+
 // ---- Accounting (ComputeFee is defined in call.go) ----
 
 func TestComputeFee(t *testing.T) {

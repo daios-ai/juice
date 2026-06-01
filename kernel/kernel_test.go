@@ -1170,6 +1170,68 @@ func TestImportRemoteActionReimp(t *testing.T) {
 	}
 }
 
+func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	remoteUser, err := k.RegisterRemoteKernel(ctx, "@stable-peer", base64.RawURLEncoding.EncodeToString(pub), "https://stable.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := ActionManifest{
+		ActionID:     "stable-action-id",
+		OwnerHandle:  "@stable-peer",
+		Name:         "/stable",
+		Kind:         KindHTTP,
+		Price:        5,
+		Description:  "A stable action",
+		ArtifactHash: "abc123",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	}
+	sig, err := SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+
+	// First import.
+	firstResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	if len(firstResult.Created) != 1 {
+		t.Fatalf("expected 1 created action, got %d", len(firstResult.Created))
+	}
+	firstID := firstResult.Created[0].ID
+
+	// Activate it so we can verify active state is preserved.
+	firstResult.Created[0].Active = true
+	firstResult.Created[0].Source = "https://stable.example.com/v1/federation/call?action=%40stable-peer%2Fstable&counterparty="
+	_ = st.UpdateAction(ctx, firstResult.Created[0])
+
+	// Re-import the identical manifest (same signature).
+	secondResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("second import: %v", err)
+	}
+	if len(secondResult.Unchanged) != 1 {
+		t.Fatalf("expected 1 unchanged action, got: created=%d updated=%d unchanged=%d",
+			len(secondResult.Created), len(secondResult.Updated), len(secondResult.Unchanged))
+	}
+	if secondResult.Unchanged[0].ID != firstID {
+		t.Error("unchanged reimport must preserve the same action ID")
+	}
+	// Action must remain active.
+	a, _ := st.ReadAction(ctx, firstID)
+	if !a.Active {
+		t.Error("unchanged reimport must preserve active state")
+	}
+}
+
 func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)
