@@ -68,12 +68,12 @@ type Action struct {
 	Description  string
 	InputSchema  map[string]any
 	OutputSchema map[string]any
-	Source          string // URL for http; WAT/WASM source for wasm; federation URL for remote_proxy
-	ArtifactHash    string // content-addressed compiled WASM artifact
-	RemoteActionID  string // ID of the action on the remote kernel (remote_proxy only)
-	CreatedAt       time.Time
-	UpdatedAt    time.Time
-	DeletedAt    *time.Time // nil unless soft-deleted
+	Source         string // URL for http; WAT/WASM source for wasm; federation URL for remote_proxy
+	ArtifactHash   string // content-addressed compiled WASM artifact
+	RemoteActionID string // ID of the action on the remote kernel (remote_proxy only)
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	DeletedAt      *time.Time // nil unless soft-deleted
 }
 
 // ACLEntry grants a permission to a subject over an action.
