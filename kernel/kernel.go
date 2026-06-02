@@ -83,6 +83,11 @@ func (k *Kernel) SetSigningKey(priv ed25519.PrivateKey, issuerUserID, superuserH
 	k.cfg.SuperuserHandle = superuserHandle
 }
 
+// SetTokenSecret updates the JWT HMAC secret after bootstrap completes.
+func (k *Kernel) SetTokenSecret(secret string) {
+	k.cfg.TokenSecret = secret
+}
+
 // ---- User operations ----
 
 // CreateUserRequest holds validated input for user creation.
@@ -561,10 +566,15 @@ func (k *Kernel) FirstBoot(ctx context.Context, password string) error {
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
+	jwtRaw := make([]byte, 32)
+	if _, err := rand.Read(jwtRaw); err != nil {
+		return ErrInternal.Wrapf("generate jwt secret: %v", err)
+	}
 	configs := map[string]string{
 		"superuser_handle":    "@sys",
 		"signing_public_key":  base64.RawURLEncoding.EncodeToString(pub),
 		"signing_private_key": base64.RawURLEncoding.EncodeToString(priv),
+		"jwt_secret":          hex.EncodeToString(jwtRaw),
 	}
 	if err := k.store.InitFirstBoot(ctx, u, configs); err != nil {
 		return err
@@ -573,9 +583,9 @@ func (k *Kernel) FirstBoot(ctx context.Context, password string) error {
 	if err != nil {
 		return err
 	}
-	// Read the persisted key rather than using the in-memory generated one.
-	// InitFirstBoot uses INSERT OR IGNORE, so on a re-run the stored key may differ
-	// from the key generated above. Using the stored key ensures the kernel always
+	// Read persisted values rather than using in-memory generated ones.
+	// InitFirstBoot uses INSERT OR IGNORE, so on a re-run the stored values may differ
+	// from those generated above. Using stored values ensures the kernel always
 	// matches what is in the database.
 	storedPrivB64, err := k.store.GetConfig(ctx, "signing_private_key")
 	if err != nil {
@@ -586,6 +596,16 @@ func (k *Kernel) FirstBoot(ctx context.Context, password string) error {
 		return ErrInternal.Wrapf("decode stored signing key: %v", err)
 	}
 	k.SetSigningKey(ed25519.PrivateKey(storedPriv), su.ID, "@sys")
+	// Only apply the stored secret when no secret was provided at construction
+	// (e.g. no JUICE_SECRET_KEY env var). If one was already configured, it takes
+	// precedence and the stored value serves as the fallback for future startups.
+	if k.cfg.TokenSecret == "" {
+		storedJWT, err := k.store.GetConfig(ctx, "jwt_secret")
+		if err != nil {
+			return ErrInternal.Wrapf("read stored jwt secret: %v", err)
+		}
+		k.SetTokenSecret(storedJWT)
+	}
 	return nil
 }
 

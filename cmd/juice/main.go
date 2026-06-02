@@ -67,12 +67,12 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	}
 
 	cfg := kernel.DefaultConfig()
-	secret := os.Getenv("JUICE_SECRET_KEY")
-	if secret == "" {
-		db.Close()
-		return nil, nil, fmt.Errorf("JUICE_SECRET_KEY must be set")
+	if secret := os.Getenv("JUICE_SECRET_KEY"); secret != "" {
+		cfg.TokenSecret = secret
+	} else if stored, _ := db.GetConfig(context.Background(), "jwt_secret"); stored != "" {
+		cfg.TokenSecret = stored
 	}
-	cfg.TokenSecret = secret
+	// If neither is set, FirstBoot will generate and set the secret via SetTokenSecret.
 	cfg.FeeRecipientID = os.Getenv("JUICE_FEE_RECIPIENT")
 	if bps := os.Getenv("JUICE_FEE_BPS"); bps != "" {
 		v, err := strconv.ParseInt(bps, 10, 64)

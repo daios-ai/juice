@@ -18,12 +18,18 @@ func TestFirstBootAtomic(t *testing.T) {
 		t.Fatalf("FirstBoot: %v", err)
 	}
 
-	// All three config entries must be present.
-	for _, key := range []string{"superuser_handle", "signing_public_key", "signing_private_key"} {
+	// All config entries must be present.
+	for _, key := range []string{"superuser_handle", "signing_public_key", "signing_private_key", "jwt_secret"} {
 		v, err := k.GetConfig(ctx, key)
 		if err != nil || v == "" {
 			t.Errorf("config %q missing after FirstBoot: %v", key, err)
 		}
+	}
+
+	// jwt_secret must be a 64-char hex string (32 bytes).
+	jwtSecret, _ := k.GetConfig(ctx, "jwt_secret")
+	if len(jwtSecret) != 64 {
+		t.Errorf("jwt_secret length = %d, want 64", len(jwtSecret))
 	}
 
 	// @sys user must exist.
@@ -32,9 +38,13 @@ func TestFirstBootAtomic(t *testing.T) {
 		t.Fatalf("@sys not found after FirstBoot: %v", err)
 	}
 
-	// Second call must be a no-op (idempotent).
+	// Second call must be a no-op (idempotent) and preserve the same secret.
 	if err := k.FirstBoot(ctx, "secret"); err != nil {
 		t.Errorf("second FirstBoot should be idempotent, got: %v", err)
+	}
+	jwtSecret2, _ := k.GetConfig(ctx, "jwt_secret")
+	if jwtSecret2 != jwtSecret {
+		t.Error("jwt_secret changed across idempotent FirstBoot calls")
 	}
 }
 
