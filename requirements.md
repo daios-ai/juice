@@ -569,6 +569,8 @@ juice action unimport --openapi <spec-url>
 juice action unimport --openapi <spec-url> --name <action-name>
 ```
 
+`juice serve` catches `SIGTERM` and `SIGINT`, stops accepting new requests, drains in-flight calls to completion, and exits cleanly. No `juice stop` command is provided; process lifecycle is managed by the OS or a process manager.
+
 The HTTP API is primary. Every exposed endpoint has a corresponding CLI command. The server uses the shared kernel layer, propagates request, subject, process, trace, action, and transaction IDs into logs where available, maps authentication failure, authorization failure, invalid input, insufficient funds, missing resource, and internal failure to distinct HTTP statuses, and rate-limits authentication and account-creation endpoints per IP with HTTP `429` on excess.
 
 Admin operations are CLI-only: do not register `/v1/admin/*` routes. They authenticate the caller, reject a non-superuser with `ErrUnauthorized`, require `@sys`, stay outside `Call()`, and include user list/show/suspend/unsuspend/deposit, action list/disable, process list, and transaction list.
