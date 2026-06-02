@@ -21,36 +21,26 @@ func txListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List transactions",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			txs, err := k.ListTransactions(context.Background(), kernel.TxFilter{
-				OwnerUserID: subjectID,
-				ProcessID:   processID,
-				Limit:       limit,
-				Offset:      offset,
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				txs, err := k.ListTransactions(context.Background(), kernel.TxFilter{
+					OwnerUserID: subjectID,
+					ProcessID:   processID,
+					Limit:       limit,
+					Offset:      offset,
+				})
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(txs)
+				}
+				for _, tx := range txs {
+					fmt.Printf("[%s] %s  action:%s  status:%s  gross:%d\n",
+						tx.StartedAt.Format("2006-01-02T15:04:05"),
+						tx.ID[:8], tx.ActionID[:8], tx.Status, tx.Gross)
+				}
+				return nil
 			})
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(txs)
-			}
-			for _, tx := range txs {
-				fmt.Printf("[%s] %s  action:%s  status:%s  gross:%d\n",
-					tx.StartedAt.Format("2006-01-02T15:04:05"),
-					tx.ID[:8], tx.ActionID[:8], tx.Status, tx.Gross)
-			}
-			return nil
 		},
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
@@ -65,28 +55,18 @@ func txShowCmd() *cobra.Command {
 		Use:   "show",
 		Short: "Show a transaction",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			tx, err := k.ReadTransaction(context.Background(), subjectID, txID)
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(tx)
-			}
-			fmt.Printf("Transaction: %s\n  status:  %s\n  action:  %s\n  gross:   %d\n  net:     %d\n  fee:     %d\n  reason:  %s\n",
-				tx.ID, tx.Status, tx.ActionID, tx.Gross, tx.Net, tx.Fee, tx.Reason)
-			return nil
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				tx, err := k.ReadTransaction(context.Background(), subjectID, txID)
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(tx)
+				}
+				fmt.Printf("Transaction: %s\n  status:  %s\n  action:  %s\n  gross:   %d\n  net:     %d\n  fee:     %d\n  reason:  %s\n",
+					tx.ID, tx.Status, tx.ActionID, tx.Gross, tx.Net, tx.Fee, tx.Reason)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&txID, "id", "", "Transaction ID (required)")
@@ -101,22 +81,13 @@ func txRateCmd() *cobra.Command {
 		Use:   "rate",
 		Short: "Rate a transaction (0 or 1)",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			if _, err := k.RateTransaction(context.Background(), subjectID, txID, rating); err != nil {
-				return err
-			}
-			fmt.Printf("Transaction %s rated %.0f.\n", txID, rating)
-			return nil
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				if _, err := k.RateTransaction(context.Background(), subjectID, txID, rating); err != nil {
+					return err
+				}
+				fmt.Printf("Transaction %s rated %.0f.\n", txID, rating)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&txID, "id", "", "Transaction ID (required)")

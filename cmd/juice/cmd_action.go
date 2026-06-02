@@ -37,60 +37,50 @@ func actionAddCmd() *cobra.Command {
 		Use:   "add",
 		Short: "Create a new action",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			inputSchema := map[string]any{}
-			if inputSchemaStr != "" {
-				if err := json.Unmarshal([]byte(inputSchemaStr), &inputSchema); err != nil {
-					return fmt.Errorf("invalid --input-schema: %w", err)
-				}
-			}
-			outputSchema := map[string]any{}
-			if outputSchemaStr != "" {
-				if err := json.Unmarshal([]byte(outputSchemaStr), &outputSchema); err != nil {
-					return fmt.Errorf("invalid --output-schema: %w", err)
-				}
-			}
-
-			srcData := source
-			if source != "" {
-				if _, err := os.Stat(source); err == nil {
-					data, err := os.ReadFile(source)
-					if err != nil {
-						return fmt.Errorf("reading source file: %w", err)
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				inputSchema := map[string]any{}
+				if inputSchemaStr != "" {
+					if err := json.Unmarshal([]byte(inputSchemaStr), &inputSchema); err != nil {
+						return fmt.Errorf("invalid --input-schema: %w", err)
 					}
-					srcData = string(data)
 				}
-			}
+				outputSchema := map[string]any{}
+				if outputSchemaStr != "" {
+					if err := json.Unmarshal([]byte(outputSchemaStr), &outputSchema); err != nil {
+						return fmt.Errorf("invalid --output-schema: %w", err)
+					}
+				}
 
-			a, err := k.CreateAction(context.Background(), subjectID, kernel.CreateActionRequest{
-				OwnerUserID:  subjectID,
-				Name:         name,
-				Kind:         kernel.ActionKind(kind),
-				Price:        price,
-				Description:  description,
-				InputSchema:  inputSchema,
-				OutputSchema: outputSchema,
-				Source:       srcData,
+				srcData := source
+				if source != "" {
+					if _, err := os.Stat(source); err == nil {
+						data, err := os.ReadFile(source)
+						if err != nil {
+							return fmt.Errorf("reading source file: %w", err)
+						}
+						srcData = string(data)
+					}
+				}
+
+				a, err := k.CreateAction(context.Background(), subjectID, kernel.CreateActionRequest{
+					OwnerUserID:  subjectID,
+					Name:         name,
+					Kind:         kernel.ActionKind(kind),
+					Price:        price,
+					Description:  description,
+					InputSchema:  inputSchema,
+					OutputSchema: outputSchema,
+					Source:       srcData,
+				})
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(a)
+				}
+				fmt.Printf("Action created: %s (id: %s)\n", a.Name, a.ID)
+				return nil
 			})
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(a)
-			}
-			fmt.Printf("Action created: %s (id: %s)\n", a.Name, a.ID)
-			return nil
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "Action name, e.g. /hello (required)")
@@ -112,53 +102,41 @@ func actionUpdateCmd() *cobra.Command {
 		Use:   "update",
 		Short: "Update an action's metadata",
 		RunE: func(c *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			req := kernel.UpdateActionRequest{ID: actionID}
-
-			if c.Flags().Changed("description") {
-				req.Description = &description
-			}
-			if c.Flags().Changed("source") {
-				req.Source = &source
-			}
-			if c.Flags().Changed("price") {
-				req.Price = &price
-			}
-			if inputSchemaStr != "" {
-				m := map[string]any{}
-				if err := json.Unmarshal([]byte(inputSchemaStr), &m); err != nil {
-					return fmt.Errorf("invalid --input-schema: %w", err)
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				req := kernel.UpdateActionRequest{ID: actionID}
+				if c.Flags().Changed("description") {
+					req.Description = &description
 				}
-				req.InputSchema = m
-			}
-			if outputSchemaStr != "" {
-				m := map[string]any{}
-				if err := json.Unmarshal([]byte(outputSchemaStr), &m); err != nil {
-					return fmt.Errorf("invalid --output-schema: %w", err)
+				if c.Flags().Changed("source") {
+					req.Source = &source
 				}
-				req.OutputSchema = m
-			}
-
-			a, err := k.UpdateAction(context.Background(), subjectID, req)
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(a)
-			}
-			fmt.Printf("Action %s updated (active=%v).\n", a.Name, a.Active)
-			return nil
+				if c.Flags().Changed("price") {
+					req.Price = &price
+				}
+				if inputSchemaStr != "" {
+					m := map[string]any{}
+					if err := json.Unmarshal([]byte(inputSchemaStr), &m); err != nil {
+						return fmt.Errorf("invalid --input-schema: %w", err)
+					}
+					req.InputSchema = m
+				}
+				if outputSchemaStr != "" {
+					m := map[string]any{}
+					if err := json.Unmarshal([]byte(outputSchemaStr), &m); err != nil {
+						return fmt.Errorf("invalid --output-schema: %w", err)
+					}
+					req.OutputSchema = m
+				}
+				a, err := k.UpdateAction(context.Background(), subjectID, req)
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(a)
+				}
+				fmt.Printf("Action %s updated (active=%v).\n", a.Name, a.Active)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
@@ -200,26 +178,17 @@ func actionDisableCmd() *cobra.Command {
 }
 
 func setActionActive(actionID string, active bool) error {
-	k, db, err := openKernel()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	subjectID, err := requireSubjectID(k)
-	if err != nil {
-		return err
-	}
-
-	if err := k.SetActive(context.Background(), subjectID, actionID, active); err != nil {
-		return err
-	}
-	state := "disabled"
-	if active {
-		state = "enabled"
-	}
-	fmt.Printf("Action %s %s.\n", actionID, state)
-	return nil
+	return withSubject(func(k *kernel.Kernel, subjectID string) error {
+		if err := k.SetActive(context.Background(), subjectID, actionID, active); err != nil {
+			return err
+		}
+		state := "disabled"
+		if active {
+			state = "enabled"
+		}
+		fmt.Printf("Action %s %s.\n", actionID, state)
+		return nil
+	})
 }
 
 func actionListCmd() *cobra.Command {
@@ -229,28 +198,23 @@ func actionListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List actions",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			actions, err := k.ListActions(context.Background(), !all, limit, offset)
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(actions)
-			}
-			for _, a := range actions {
-				active := " "
-				if a.Active {
-					active = "*"
+			return withKernel(func(k *kernel.Kernel) error {
+				actions, err := k.ListActions(context.Background(), !all, limit, offset)
+				if err != nil {
+					return err
 				}
-				fmt.Printf("[%s] %s  %-30s  %d credits\n", active, a.ID[:8], a.Name, a.Price)
-			}
-			return nil
+				if flagOutput == "json" {
+					return printJSON(actions)
+				}
+				for _, a := range actions {
+					active := " "
+					if a.Active {
+						active = "*"
+					}
+					fmt.Printf("[%s] %s  %-30s  %d credits\n", active, a.ID[:8], a.Name, a.Price)
+				}
+				return nil
+			})
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Include inactive actions")
@@ -265,35 +229,26 @@ func actionShowCmd() *cobra.Command {
 		Use:   "show",
 		Short: "Show action details",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-			a, err := k.ReadActionForSubject(context.Background(), subjectID, actionID)
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(a)
-			}
-			active := "inactive"
-			if a.Active {
-				active = "active"
-			}
-			public := "private"
-			if a.Public {
-				public = "public"
-			}
-			fmt.Printf("Action: %s\n  name:        %s\n  kind:        %s\n  status:      %s  (%s)\n  price:       %d credits\n  owner:       %s\n  description: %s\n",
-				a.ID, a.Name, a.Kind, active, public, a.Price, a.OwnerUserID, a.Description)
-			return nil
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				a, err := k.ReadActionForSubject(context.Background(), subjectID, actionID)
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(a)
+				}
+				active := "inactive"
+				if a.Active {
+					active = "active"
+				}
+				public := "private"
+				if a.Public {
+					public = "public"
+				}
+				fmt.Printf("Action: %s\n  name:        %s\n  kind:        %s\n  status:      %s  (%s)\n  price:       %d credits\n  owner:       %s\n  description: %s\n",
+					a.ID, a.Name, a.Kind, active, public, a.Price, a.OwnerUserID, a.Description)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
@@ -307,22 +262,13 @@ func actionDeleteCmd() *cobra.Command {
 		Use:   "delete",
 		Short: "Delete an action",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			if err := k.DeleteAction(context.Background(), subjectID, actionID); err != nil {
-				return err
-			}
-			fmt.Printf("Action %s deleted.\n", actionID)
-			return nil
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				if err := k.DeleteAction(context.Background(), subjectID, actionID); err != nil {
+					return err
+				}
+				fmt.Printf("Action %s deleted.\n", actionID)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
@@ -371,36 +317,26 @@ func aclRevokeCmd() *cobra.Command {
 }
 
 func modifyACL(actionID, subjectHandle string, perm kernel.Permission, grant bool) error {
-	k, db, err := openKernel()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	grantorID, err := requireSubjectID(k)
-	if err != nil {
-		return err
-	}
-
-	subject, err := k.ReadUserByHandle(context.Background(), subjectHandle)
-	if err != nil {
-		return fmt.Errorf("user %s not found: %w", subjectHandle, err)
-	}
-
-	if grant {
-		err = k.GrantACL(context.Background(), subject.ID, actionID, perm, grantorID)
-	} else {
-		err = k.RevokeACL(context.Background(), subject.ID, actionID, perm, grantorID)
-	}
-	if err != nil {
-		return err
-	}
-	op := "revoked"
-	if grant {
-		op = "granted"
-	}
-	fmt.Printf("Permission %s %s on %s for %s.\n", perm, op, actionID, subjectHandle)
-	return nil
+	return withSubject(func(k *kernel.Kernel, grantorID string) error {
+		subject, err := k.ReadUserByHandle(context.Background(), subjectHandle)
+		if err != nil {
+			return fmt.Errorf("user %s not found: %w", subjectHandle, err)
+		}
+		if grant {
+			err = k.GrantACL(context.Background(), subject.ID, actionID, perm, grantorID)
+		} else {
+			err = k.RevokeACL(context.Background(), subject.ID, actionID, perm, grantorID)
+		}
+		if err != nil {
+			return err
+		}
+		op := "revoked"
+		if grant {
+			op = "granted"
+		}
+		fmt.Printf("Permission %s %s on %s for %s.\n", perm, op, actionID, subjectHandle)
+		return nil
+	})
 }
 
 func actionGrantAllCmd() *cobra.Command {
@@ -409,22 +345,13 @@ func actionGrantAllCmd() *cobra.Command {
 		Use:   "grant-all",
 		Short: "Grant public (grant-all) access to an action",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			if err := k.GrantAll(context.Background(), subjectID, actionID); err != nil {
-				return err
-			}
-			fmt.Printf("Action %s is now publicly callable.\n", actionID)
-			return nil
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				if err := k.GrantAll(context.Background(), subjectID, actionID); err != nil {
+					return err
+				}
+				fmt.Printf("Action %s is now publicly callable.\n", actionID)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
@@ -438,34 +365,27 @@ func actionImportCmd() *cobra.Command {
 		Use:   "import",
 		Short: "Import OpenAPI operations as inactive http actions (idempotent)",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-			allowLocal := os.Getenv("JUICE_ALLOW_LOCAL_SOURCES") == "true"
-			specBytes, err := fetchOpenAPISpec(context.Background(), specURL, allowLocal)
-			if err != nil {
-				return err
-			}
-			result, err := k.ImportOpenAPI(context.Background(), subjectID, subjectID, specURL, specBytes)
-			if err != nil {
-				return err
-			}
-			if flagOutput == "json" {
-				return printJSON(result)
-			}
-			fmt.Printf("created=%d unchanged=%d updated=%d deactivated=%d rejected=%d\n",
-				len(result.Created), len(result.Unchanged), len(result.Updated),
-				len(result.Deactivated), len(result.Rejected))
-			for _, r := range result.Rejected {
-				fmt.Printf("  rejected %s: %s\n", r.Key, r.Reason)
-			}
-			return nil
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				allowLocal := os.Getenv("JUICE_ALLOW_LOCAL_SOURCES") == "true"
+				specBytes, err := fetchOpenAPISpec(context.Background(), specURL, allowLocal)
+				if err != nil {
+					return err
+				}
+				result, err := k.ImportOpenAPI(context.Background(), subjectID, subjectID, specURL, specBytes)
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(result)
+				}
+				fmt.Printf("created=%d unchanged=%d updated=%d deactivated=%d rejected=%d\n",
+					len(result.Created), len(result.Unchanged), len(result.Updated),
+					len(result.Deactivated), len(result.Rejected))
+				for _, r := range result.Rejected {
+					fmt.Printf("  rejected %s: %s\n", r.Key, r.Reason)
+				}
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&specURL, "openapi", "", "OpenAPI spec URL (required)")
@@ -479,24 +399,17 @@ func actionUnimportCmd() *cobra.Command {
 		Use:   "unimport",
 		Short: "Deactivate OpenAPI-imported actions without deleting history",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-			actions, err := k.UnimportOpenAPI(context.Background(), subjectID, subjectID, specURL, name)
-			if err != nil {
-				return err
-			}
-			if flagOutput == "json" {
-				return printJSON(actions)
-			}
-			fmt.Printf("deactivated %d action(s)\n", len(actions))
-			return nil
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				actions, err := k.UnimportOpenAPI(context.Background(), subjectID, subjectID, specURL, name)
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(actions)
+				}
+				fmt.Printf("deactivated %d action(s)\n", len(actions))
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&specURL, "openapi", "", "OpenAPI spec URL (required)")
@@ -511,22 +424,13 @@ func actionRevokeAllCmd() *cobra.Command {
 		Use:   "revoke-all",
 		Short: "Revoke public (grant-all) access from an action",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			if err := k.RevokeAll(context.Background(), subjectID, actionID); err != nil {
-				return err
-			}
-			fmt.Printf("Action %s public access revoked.\n", actionID)
-			return nil
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				if err := k.RevokeAll(context.Background(), subjectID, actionID); err != nil {
+					return err
+				}
+				fmt.Printf("Action %s public access revoked.\n", actionID)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")

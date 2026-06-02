@@ -11,8 +11,7 @@ import (
 
 func init() {
 	userCmd := &cobra.Command{Use: "user", Short: "User account commands"}
-	userCmd.AddCommand(userCreateCmd())
-	userCmd.AddCommand(userMeCmd())
+	userCmd.AddCommand(userCreateCmd(), userMeCmd())
 	rootCmd.AddCommand(userCmd)
 }
 
@@ -29,27 +28,21 @@ func userCreateCmd() *cobra.Command {
 				}
 				password = p
 			}
-
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			u, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
-				Handle:   handle,
-				Email:    email,
-				Password: password,
+			return withKernel(func(k *kernel.Kernel) error {
+				u, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
+					Handle:   handle,
+					Email:    email,
+					Password: password,
+				})
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(u)
+				}
+				fmt.Printf("User created: %s (id: %s)\n", u.Handle, u.ID)
+				return nil
 			})
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(u)
-			}
-			fmt.Printf("User created: %s (id: %s)\n", u.Handle, u.ID)
-			return nil
 		},
 	}
 	cmd.Flags().StringVar(&handle, "handle", "", "Unique handle, e.g. @alice (required)")
@@ -65,34 +58,24 @@ func userMeCmd() *cobra.Command {
 		Use:   "me",
 		Short: "Show the authenticated user's profile",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			u, err := k.ReadUser(context.Background(), subjectID)
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(map[string]any{
-					"id":        u.ID,
-					"handle":    u.Handle,
-					"email":     u.Email,
-					"available": u.Available,
-					"locked":    u.Locked,
-				})
-			}
-			fmt.Printf("id:        %s\nhandle:    %s\nemail:     %s\navailable: %d\nlocked:    %d\n",
-				u.ID, u.Handle, u.Email, u.Available, u.Locked)
-			return nil
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				u, err := k.ReadUser(context.Background(), subjectID)
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(map[string]any{
+						"id":        u.ID,
+						"handle":    u.Handle,
+						"email":     u.Email,
+						"available": u.Available,
+						"locked":    u.Locked,
+					})
+				}
+				fmt.Printf("id:        %s\nhandle:    %s\nemail:     %s\navailable: %d\nlocked:    %d\n",
+					u.ID, u.Handle, u.Email, u.Available, u.Locked)
+				return nil
+			})
 		},
 	}
 }

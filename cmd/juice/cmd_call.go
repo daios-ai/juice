@@ -19,43 +19,32 @@ func callCmd() *cobra.Command {
 		Use:   "call",
 		Short: "Call an action within a process",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			args := map[string]any{}
-			if argsStr != "" {
-				if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
-					return fmt.Errorf("invalid --args JSON: %w", err)
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				args := map[string]any{}
+				if argsStr != "" {
+					if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
+						return fmt.Errorf("invalid --args JSON: %w", err)
+					}
 				}
-			}
-
-			reply, err := k.Call(context.Background(), kernel.CallRequest{
-				SubjectID:     subjectID,
-				ProcessID:     processID,
-				ParentTraceID: parentTraceID,
-				TargetUserID:  target,
-				ActionName:    actionName,
-				Args:          args,
+				reply, err := k.Call(context.Background(), kernel.CallRequest{
+					SubjectID:     subjectID,
+					ProcessID:     processID,
+					ParentTraceID: parentTraceID,
+					TargetUserID:  target,
+					ActionName:    actionName,
+					Args:          args,
+				})
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(reply)
+				}
+				resultJSON, _ := json.MarshalIndent(reply.Result, "", "  ")
+				fmt.Printf("tx_id:    %s\ntrace_id: %s\nresult:\n%s\n",
+					reply.TxID, reply.TraceID, string(resultJSON))
+				return nil
 			})
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(reply)
-			}
-			resultJSON, _ := json.MarshalIndent(reply.Result, "", "  ")
-			fmt.Printf("tx_id:    %s\ntrace_id: %s\nresult:\n%s\n",
-				reply.TxID, reply.TraceID, string(resultJSON))
-			return nil
 		},
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Process ID (required)")

@@ -243,6 +243,38 @@ func requireSubjectID(k *kernel.Kernel) (string, error) {
 	return subjectID, nil
 }
 
+// withKernel opens the kernel, calls fn, then closes the store.
+func withKernel(fn func(*kernel.Kernel) error) error {
+	k, db, err := openKernel()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return fn(k)
+}
+
+// withSubject opens the kernel, resolves the authenticated subject, and calls fn.
+func withSubject(fn func(*kernel.Kernel, string) error) error {
+	return withKernel(func(k *kernel.Kernel) error {
+		subjectID, err := requireSubjectID(k)
+		if err != nil {
+			return err
+		}
+		return fn(k, subjectID)
+	})
+}
+
+// withSuperuser opens the kernel, requires the caller to be the superuser, and calls fn.
+func withSuperuser(fn func(*kernel.Kernel, string) error) error {
+	return withKernel(func(k *kernel.Kernel) error {
+		operatorID, err := requireSuperuser(k)
+		if err != nil {
+			return err
+		}
+		return fn(k, operatorID)
+	})
+}
+
 func promptPassword(prompt string) (string, error) {
 	fmt.Fprint(os.Stderr, prompt)
 	b, err := term.ReadPassword(int(os.Stdin.Fd()))

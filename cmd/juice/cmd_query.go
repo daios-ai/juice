@@ -22,29 +22,24 @@ func statsShowCmd() *cobra.Command {
 		Use:   "show",
 		Short: "Show statistics for an action",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			stats, err := k.ReadStats(context.Background(), actionID)
-			if err != nil {
-				return err
-			}
-			if stats == nil {
-				fmt.Println("No statistics yet.")
+			return withKernel(func(k *kernel.Kernel) error {
+				stats, err := k.ReadStats(context.Background(), actionID)
+				if err != nil {
+					return err
+				}
+				if stats == nil {
+					fmt.Println("No statistics yet.")
+					return nil
+				}
+				if flagOutput == "json" {
+					return printJSON(stats)
+				}
+				fmt.Printf("Stats for %s:\n  uses:         %d\n  successes:    %d\n  failures:     %d\n  price_mean:   %.2f\n  latency_mean: %.3fs\n  rating_mean:  %.3f\n  last_used:    %s\n",
+					stats.ActionID, stats.Uses, stats.Successes, stats.Failures,
+					stats.PriceMean, stats.LatencyMean, stats.RatingMean,
+					stats.LastUsedAt.Format("2006-01-02T15:04:05"))
 				return nil
-			}
-
-			if flagOutput == "json" {
-				return printJSON(stats)
-			}
-			fmt.Printf("Stats for %s:\n  uses:         %d\n  successes:    %d\n  failures:     %d\n  price_mean:   %.2f\n  latency_mean: %.3fs\n  rating_mean:  %.3f\n  last_used:    %s\n",
-				stats.ActionID, stats.Uses, stats.Successes, stats.Failures,
-				stats.PriceMean, stats.LatencyMean, stats.RatingMean,
-				stats.LastUsedAt.Format("2006-01-02T15:04:05"))
-			return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&actionID, "action", "", "Action ID (required)")
@@ -60,48 +55,38 @@ func lookupCmd() *cobra.Command {
 		Use:   "lookup",
 		Short: "Search for actions using a natural-language query",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			reply, err := k.Call(context.Background(), kernel.CallRequest{
-				SubjectID:    subjectID,
-				ProcessID:    processID,
-				TargetUserID: "@sys",
-				ActionName:   "/lookup",
-				Args: map[string]any{
-					"query": query,
-					"limit": float64(limit),
-				},
-			})
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(reply.Result)
-			}
-			results, _ := reply.Result["results"].([]any)
-			for _, item := range results {
-				r, _ := item.(map[string]any)
-				score, _ := r["score"].(float64)
-				actionID, _ := r["action_id"].(string)
-				name, _ := r["name"].(string)
-				owner, _ := r["owner_handle"].(string)
-				shortID := actionID
-				if len(shortID) > 8 {
-					shortID = shortID[:8]
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				reply, err := k.Call(context.Background(), kernel.CallRequest{
+					SubjectID:    subjectID,
+					ProcessID:    processID,
+					TargetUserID: "@sys",
+					ActionName:   "/lookup",
+					Args: map[string]any{
+						"query": query,
+						"limit": float64(limit),
+					},
+				})
+				if err != nil {
+					return err
 				}
-				fmt.Printf("%.4f  %s  %s%s\n", score, shortID, owner, name)
-			}
-			return nil
+				if flagOutput == "json" {
+					return printJSON(reply.Result)
+				}
+				results, _ := reply.Result["results"].([]any)
+				for _, item := range results {
+					r, _ := item.(map[string]any)
+					score, _ := r["score"].(float64)
+					actionID, _ := r["action_id"].(string)
+					name, _ := r["name"].(string)
+					owner, _ := r["owner_handle"].(string)
+					shortID := actionID
+					if len(shortID) > 8 {
+						shortID = shortID[:8]
+					}
+					fmt.Printf("%.4f  %s  %s%s\n", score, shortID, owner, name)
+				}
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&query, "query", "", "Natural-language query (required)")

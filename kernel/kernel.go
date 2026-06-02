@@ -1008,6 +1008,11 @@ func (k *Kernel) ReadStats(ctx context.Context, actionID string) (*Stats, error)
 	return k.store.ReadStats(ctx, actionID)
 }
 
+// ResetActionStats resets the statistics row for an action to zero counters.
+func (k *Kernel) ResetActionStats(ctx context.Context, actionID string) error {
+	return k.store.UpsertStats(ctx, &Stats{ActionID: actionID})
+}
+
 // ---- Lookup ----
 
 // LookupRequest is a natural-language query for actions.

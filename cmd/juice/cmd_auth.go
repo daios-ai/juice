@@ -49,40 +49,33 @@ func loginCmd() *cobra.Command {
 	return cmd
 }
 
-// loginDirect authenticates directly against the local SQLite kernel and stores both tokens.
 func loginDirect(handle, password string) error {
-	k, db, err := openKernel()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	access, refresh, err := k.LoginWithRefresh(context.Background(), handle, password)
-	if err != nil {
-		return err
-	}
-	if err := saveToken(access); err != nil {
-		return fmt.Errorf("could not save token: %w", err)
-	}
-	if refresh != "" {
-		if err := saveRefreshToken(refresh); err != nil {
-			_ = err // non-fatal
+	return withKernel(func(k *kernel.Kernel) error {
+		access, refresh, err := k.LoginWithRefresh(context.Background(), handle, password)
+		if err != nil {
+			return err
 		}
-	}
-	fmt.Println("Logged in.")
-	return nil
+		if err := saveToken(access); err != nil {
+			return fmt.Errorf("could not save token: %w", err)
+		}
+		if refresh != "" {
+			if err := saveRefreshToken(refresh); err != nil {
+				_ = err // non-fatal
+			}
+		}
+		fmt.Println("Logged in.")
+		return nil
+	})
 }
 
 // loginPKCE performs the authorization code + PKCE flow against a running juice server.
 func loginPKCE(handle, password, server string) error {
-	// Generate PKCE verifier/challenge.
 	verifier, err := kernel.GenerateCodeVerifier()
 	if err != nil {
 		return err
 	}
 	challenge := kernel.CodeChallenge(verifier)
 
-	// Start a local loopback server to catch the redirect.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("could not start loopback server: %w", err)
@@ -104,7 +97,6 @@ func loginPKCE(handle, password, server string) error {
 	go srv.Serve(ln)
 	defer srv.Close()
 
-	// Request an auth code from the server.
 	form := url.Values{}
 	form.Set("handle", handle)
 	form.Set("password", password)
@@ -121,7 +113,6 @@ func loginPKCE(handle, password, server string) error {
 		return fmt.Errorf("server returned status %d", resp.StatusCode)
 	}
 
-	// Wait for the callback.
 	var code string
 	select {
 	case code = <-codeCh:
@@ -129,7 +120,6 @@ func loginPKCE(handle, password, server string) error {
 		return fmt.Errorf("timed out waiting for authorization code")
 	}
 
-	// Exchange code for tokens.
 	form2 := url.Values{}
 	form2.Set("grant_type", "authorization_code")
 	form2.Set("code", code)
@@ -167,14 +157,11 @@ func logoutCmd() *cobra.Command {
 		Use:   "logout",
 		Short: "Revoke the stored refresh token and remove local credentials",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			// Revoke refresh token server-side if one is stored.
 			if rt, err := loadRefreshToken(); err == nil {
-				k, db, err := openKernel()
-				if err != nil {
-					return err
-				}
-				_ = k.RevokeRefreshToken(context.Background(), rt)
-				db.Close()
+				_ = withKernel(func(k *kernel.Kernel) error {
+					_ = k.RevokeRefreshToken(context.Background(), rt)
+					return nil
+				})
 			}
 			if err := removeToken(); err != nil && !os.IsNotExist(err) {
 				return err
@@ -191,28 +178,24 @@ func refreshCmd() *cobra.Command {
 		Use:   "refresh",
 		Short: "Rotate the refresh token and get a new access token",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
 			rt, err := loadRefreshToken()
 			if err != nil {
 				return fmt.Errorf("no refresh token stored; run: juice auth login")
 			}
-			access, newRT, err := k.RefreshAccessToken(context.Background(), rt)
-			if err != nil {
-				return err
-			}
-			if err := saveToken(access); err != nil {
-				return err
-			}
-			if err := saveRefreshToken(newRT); err != nil {
-				return err
-			}
-			fmt.Println("Token refreshed.")
-			return nil
+			return withKernel(func(k *kernel.Kernel) error {
+				access, newRT, err := k.RefreshAccessToken(context.Background(), rt)
+				if err != nil {
+					return err
+				}
+				if err := saveToken(access); err != nil {
+					return err
+				}
+				if err := saveRefreshToken(newRT); err != nil {
+					return err
+				}
+				fmt.Println("Token refreshed.")
+				return nil
+			})
 		},
 	}
 }

@@ -21,37 +21,26 @@ func eventsListenCmd() *cobra.Command {
 		Use:   "listen",
 		Short: "Register a listener that calls an action when an event fires",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			sourceUser, err := k.ReadUserByHandle(context.Background(), sourceHandle)
-			if err != nil {
-				return fmt.Errorf("source user not found: %w", err)
-			}
-
-			l, err := k.CreateListener(context.Background(), kernel.CreateListenerRequest{
-				OwnerUserID:    subjectID,
-				SourceUserID:   sourceUser.ID,
-				EventName:      eventName,
-				TargetActionID: actionID,
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				sourceUser, err := k.ReadUserByHandle(context.Background(), sourceHandle)
+				if err != nil {
+					return fmt.Errorf("source user not found: %w", err)
+				}
+				l, err := k.CreateListener(context.Background(), kernel.CreateListenerRequest{
+					OwnerUserID:    subjectID,
+					SourceUserID:   sourceUser.ID,
+					EventName:      eventName,
+					TargetActionID: actionID,
+				})
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(l)
+				}
+				fmt.Printf("Listener created: %s\n", l.ID)
+				return nil
 			})
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(l)
-			}
-			fmt.Printf("Listener created: %s\n", l.ID)
-			return nil
 		},
 	}
 	cmd.Flags().StringVar(&sourceHandle, "source", "", "Source user handle to listen for (required)")
@@ -68,34 +57,24 @@ func eventsListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List listeners owned by the current user",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			listeners, err := k.ListListeners(context.Background(), subjectID, 100, 0)
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(listeners)
-			}
-			for _, l := range listeners {
-				active := "active"
-				if !l.Active {
-					active = "inactive"
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				listeners, err := k.ListListeners(context.Background(), subjectID, 100, 0)
+				if err != nil {
+					return err
 				}
-				fmt.Printf("%s  %-8s  event:%-20s  action:%s\n",
-					l.ID[:8], active, l.EventName, l.TargetActionID[:8])
-			}
-			return nil
+				if flagOutput == "json" {
+					return printJSON(listeners)
+				}
+				for _, l := range listeners {
+					active := "active"
+					if !l.Active {
+						active = "inactive"
+					}
+					fmt.Printf("%s  %-8s  event:%-20s  action:%s\n",
+						l.ID[:8], active, l.EventName, l.TargetActionID[:8])
+				}
+				return nil
+			})
 		},
 	}
 	return cmd
@@ -107,22 +86,13 @@ func eventsUnlistenCmd() *cobra.Command {
 		Use:   "unlisten",
 		Short: "Deactivate a listener",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			if err := k.DeleteListener(context.Background(), subjectID, listenerID); err != nil {
-				return err
-			}
-			fmt.Println("Listener deactivated.")
-			return nil
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				if err := k.DeleteListener(context.Background(), subjectID, listenerID); err != nil {
+					return err
+				}
+				fmt.Println("Listener deactivated.")
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&listenerID, "id", "", "Listener ID (required)")
@@ -136,37 +106,26 @@ func eventsEmitCmd() *cobra.Command {
 		Use:   "emit",
 		Short: "Emit a named event, firing all matching listeners",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			args := map[string]any{}
-			if argsStr != "" {
-				if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
-					return fmt.Errorf("invalid --args JSON: %w", err)
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				args := map[string]any{}
+				if argsStr != "" {
+					if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
+						return fmt.Errorf("invalid --args JSON: %w", err)
+					}
 				}
-			}
-
-			txIDs, err := k.EmitEvent(context.Background(), subjectID, subjectID, eventName, args, "")
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(map[string]any{"event_ids": txIDs})
-			}
-			fmt.Printf("Event queued for %d listener(s)\n", len(txIDs))
-			for _, id := range txIDs {
-				fmt.Printf("  event: %s\n", id)
-			}
-			return nil
+				txIDs, err := k.EmitEvent(context.Background(), subjectID, subjectID, eventName, args, "")
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(map[string]any{"event_ids": txIDs})
+				}
+				fmt.Printf("Event queued for %d listener(s)\n", len(txIDs))
+				for _, id := range txIDs {
+					fmt.Printf("  event: %s\n", id)
+				}
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&eventName, "event", "", "Event name (required)")
@@ -181,30 +140,20 @@ func eventsPollCmd() *cobra.Command {
 		Use:   "poll",
 		Short: "Poll a listener's event queue",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			events, err := k.PollListener(context.Background(), subjectID, listenerID)
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(map[string]any{"events": events})
-			}
-			fmt.Printf("Pending events: %d\n", len(events))
-			for _, e := range events {
-				fmt.Printf("  %s  args: %s\n", e.ID, e.ArgsJSON)
-			}
-			return nil
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				events, err := k.PollListener(context.Background(), subjectID, listenerID)
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(map[string]any{"events": events})
+				}
+				fmt.Printf("Pending events: %d\n", len(events))
+				for _, e := range events {
+					fmt.Printf("  %s  args: %s\n", e.ID, e.ArgsJSON)
+				}
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&listenerID, "id", "", "Listener ID (required)")
@@ -218,27 +167,17 @@ func eventsConsumeCmd() *cobra.Command {
 		Use:   "consume",
 		Short: "Consume a pending event, calling its listener's target action",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			k, db, err := openKernel()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			subjectID, err := requireSubjectID(k)
-			if err != nil {
-				return err
-			}
-
-			reply, err := k.ConsumeEvent(context.Background(), subjectID, eventID, processID, parentTraceID)
-			if err != nil {
-				return err
-			}
-
-			if flagOutput == "json" {
-				return printJSON(reply)
-			}
-			fmt.Printf("Event consumed: tx=%s\n", reply.TxID)
-			return nil
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				reply, err := k.ConsumeEvent(context.Background(), subjectID, eventID, processID, parentTraceID)
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(reply)
+				}
+				fmt.Printf("Event consumed: tx=%s\n", reply.TxID)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&eventID, "id", "", "Event ID (required)")

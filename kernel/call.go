@@ -229,19 +229,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if execErr != nil {
 		tx.Status = TxFailure
 		tx.Reason = execErr.Error()
-		stats := k.computeStats(ctx, action.ID, tx, latency)
-		receipt, receiptErr := k.buildReceipt(tx)
-		if receiptErr != nil {
-			if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
-				logger.Error("call.refund_failed_on_receipt_error", "action", action.Name, "refund_error", refundErr)
-			}
-			return nil, ErrInternal.Wrap("could not build receipt")
+		if err := k.settleFailedCall(ctx, logger, tx, req, action, latency, execErr); err != nil {
+			return nil, err
 		}
-		if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats, req.IdempotencyRecordID, kernelErrorCode(execErr)); settlErr != nil {
-			logger.Error("call.settlement_failed", "action", action.Name, "exec_error", execErr, "settlement_error", settlErr)
-			return nil, ErrInternal.Wrap("could not record failure transaction")
-		}
-		k.upsertStatTag(ctx, action.ID, stats)
 		logger.Warn("call.failed", "action", action.Name, "error", execErr)
 		return nil, execErr
 	}
@@ -250,19 +240,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if schemaErr := ValidateInput(action.OutputSchema, anyOf(reply)); schemaErr != nil {
 		tx.Status = TxFailure
 		tx.Reason = "output schema violation: " + schemaErr.Error()
-		stats := k.computeStats(ctx, action.ID, tx, latency)
-		receipt, receiptErr := k.buildReceipt(tx)
-		if receiptErr != nil {
-			if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
-				logger.Error("call.refund_failed_on_receipt_error", "action", action.Name, "refund_error", refundErr)
-			}
-			return nil, ErrInternal.Wrap("could not build receipt")
+		if err := k.settleFailedCall(ctx, logger, tx, req, action, latency, schemaErr); err != nil {
+			return nil, err
 		}
-		if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats, req.IdempotencyRecordID, kernelErrorCode(schemaErr)); settlErr != nil {
-			logger.Error("call.settlement_failed", "action", action.Name, "schema_error", schemaErr, "settlement_error", settlErr)
-			return nil, ErrInternal.Wrap("could not record failure transaction")
-		}
-		k.upsertStatTag(ctx, action.ID, stats)
 		return nil, schemaErr
 	}
 
@@ -582,6 +562,25 @@ func (k *Kernel) computeStats(_ context.Context, actionID string, tx *Transactio
 	stats := DefaultStats(actionID)
 	UpdateStats(stats, tx, latency)
 	return stats
+}
+
+// settleFailedCall builds a receipt, commits the failed transaction atomically, and upserts
+// stat tags. tx.Status and tx.Reason must be set by the caller before invoking this.
+func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, req CallRequest, action *Action, latency float64, callErr error) error {
+	stats := k.computeStats(ctx, action.ID, tx, latency)
+	receipt, receiptErr := k.buildReceipt(tx)
+	if receiptErr != nil {
+		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
+			logger.Error("call.refund_failed_on_receipt_error", "action", action.Name, "refund_error", refundErr)
+		}
+		return ErrInternal.Wrap("could not build receipt")
+	}
+	if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats, req.IdempotencyRecordID, kernelErrorCode(callErr)); settlErr != nil {
+		logger.Error("call.settlement_failed", "action", action.Name, "error", callErr, "settlement_error", settlErr)
+		return ErrInternal.Wrap("could not record failure transaction")
+	}
+	k.upsertStatTag(ctx, action.ID, stats)
+	return nil
 }
 
 // upsertStatTag writes the latency bucket tag. Best-effort: errors are logged, not fatal.
