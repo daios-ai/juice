@@ -3,11 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
@@ -132,7 +136,30 @@ func runServer(addr string) error {
 	})
 
 	logger.Info("server.start", "addr", addr)
-	return http.ListenAndServe(addr, r)
+
+	httpSrv := &http.Server{Addr: addr, Handler: r}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		if err := httpSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
+		}
+		close(serveErr)
+	}()
+
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	select {
+	case err := <-serveErr:
+		return err
+	case <-sigCtx.Done():
+		stop()
+		logger.Info("server.shutdown")
+		shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return httpSrv.Shutdown(shutCtx)
+	}
 }
 
 // ---- server ----
