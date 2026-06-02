@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +13,18 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 )
+
+// validateResolvedIP returns an error if a DNS-resolved IP is loopback, private, or link-local.
+func validateResolvedIP(ipStr string) error {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return fmt.Errorf("invalid resolved IP %q", ipStr)
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+		return kernel.ErrInvalidInput.Wrap("resolved address is private or loopback")
+	}
+	return nil
+}
 
 // validateRedirectHost returns an error if hostname should not be followed as a redirect.
 func validateRedirectHost(hostname string, allowLocal bool) error {
@@ -32,17 +43,69 @@ func validateRedirectHost(hostname string, allowLocal bool) error {
 }
 
 // newHTTPClient returns an HTTP client with the given timeout (defaulting to 30s).
-// Redirects are blocked when allowLocal is false and the target is a private/loopback address.
+// When allowLocal is false it installs a DialContext that resolves hostnames and
+// rejects connections to loopback, RFC 1918, and link-local addresses.
 func newHTTPClient(timeout time.Duration, allowLocal bool) *http.Client {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
+	var transport http.RoundTripper
+	if !allowLocal {
+		base := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		transport = &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				host, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, err
+				}
+				// Literal IPs were validated at URL parse time; skip re-resolution.
+				if net.ParseIP(host) != nil {
+					return base.DialContext(ctx, network, addr)
+				}
+				resolved, err := net.DefaultResolver.LookupHost(ctx, host)
+				if err != nil {
+					return nil, err
+				}
+				for _, ip := range resolved {
+					if err := validateResolvedIP(ip); err != nil {
+						return nil, err
+					}
+				}
+				return base.DialContext(ctx, network, net.JoinHostPort(resolved[0], port))
+			},
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
+	}
 	return &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return validateRedirectHost(req.URL.Hostname(), allowLocal)
 		},
 	}
+}
+
+// doHTTP executes one HTTP request and returns (body, statusCode, error).
+// Enforces a 10 MiB response size limit.
+func doHTTP(ctx context.Context, method, rawURL string, headers map[string]string, body io.Reader, timeout time.Duration, allowLocal bool) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
+	if err != nil {
+		return nil, 0, kernel.ErrInvalidInput.Wrapf("invalid URL: %v", err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := newHTTPClient(timeout, allowLocal).Do(req)
+	if err != nil {
+		return nil, 0, kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return nil, resp.StatusCode, kernel.ErrExecutionFailed.Wrap("could not read response body")
+	}
+	return respBody, resp.StatusCode, nil
 }
 
 // ExecuteFederation calls a remote kernel's federation endpoint with an idempotency key.
@@ -53,48 +116,27 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idem
 	if err != nil {
 		return nil, "", kernel.ErrInvalidInput.Wrap("could not serialize args")
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, source, strings.NewReader(string(body)))
-	if err != nil {
-		return nil, "", kernel.ErrInvalidInput.Wrapf("invalid action URL: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
+	headers := map[string]string{"Content-Type": "application/json"}
 	if idempotencyKey != "" {
-		req.Header.Set("X-Idempotency-Key", idempotencyKey)
+		headers["X-Idempotency-Key"] = idempotencyKey
 	}
-
-	// Sign the request so the remote kernel can verify our identity.
 	if e.signerFn != nil {
-		if key := e.signerFn(); len(key) == ed25519.PrivateKeySize {
-			// Extract the "action" query param from source URL for the signed payload.
-			actionParam := ""
-			if u, err := url.Parse(source); err == nil {
-				actionParam = u.Query().Get("action")
-			}
-			ts := time.Now().UTC().Format(time.RFC3339)
-			sig, err := kernel.SignFederationPayload(key, actionParam, idempotencyKey, ts)
-			if err == nil {
-				req.Header.Set("X-Timestamp", ts)
-				req.Header.Set("X-Signature", sig)
-			}
+		actionParam := ""
+		if u, err := url.Parse(source); err == nil {
+			actionParam = u.Query().Get("action")
+		}
+		if sig, ts, err := e.signerFn(actionParam, idempotencyKey); err == nil {
+			headers["X-Timestamp"] = ts
+			headers["X-Signature"] = sig
 		}
 	}
-
-	resp, err := newHTTPClient(e.timeout, false).Do(req)
+	respBody, status, err := doHTTP(ctx, http.MethodPost, source, headers, strings.NewReader(string(body)), e.timeout, false)
 	if err != nil {
-		return nil, "", kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
+		return nil, "", err
 	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
-	if err != nil {
-		return nil, "", kernel.ErrExecutionFailed.Wrap("could not read response body")
+	if status != http.StatusOK {
+		return nil, "", kernel.ErrExecutionFailed.Wrapf("action returned status %d: %s", status, string(respBody))
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", kernel.ErrExecutionFailed.Wrapf("action returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
 	var envelope struct {
 		Result  map[string]any  `json:"result"`
 		Receipt json.RawMessage `json:"receipt"`
@@ -108,40 +150,25 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idem
 type httpActionExecutor struct {
 	timeout    time.Duration
 	allowLocal bool
-	signerFn   func() ed25519.PrivateKey // wired after kernel bootstrap; nil if not yet available
+	signerFn   func(action, idempotencyKey string) (sig, ts string, err error) // wired after bootstrap
 }
 
 func (e *httpActionExecutor) Execute(ctx context.Context, source string, args map[string]any) (map[string]any, error) {
 	if strings.HasPrefix(strings.TrimSpace(source), "{") {
 		return e.executeOpenAPI(ctx, source, args)
 	}
-
 	body, err := json.Marshal(args)
 	if err != nil {
 		return nil, kernel.ErrInvalidInput.Wrap("could not serialize args")
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, source, strings.NewReader(string(body)))
+	headers := map[string]string{"Content-Type": "application/json"}
+	respBody, status, err := doHTTP(ctx, http.MethodPost, source, headers, strings.NewReader(string(body)), e.timeout, e.allowLocal)
 	if err != nil {
-		return nil, kernel.ErrInvalidInput.Wrapf("invalid action URL: %v", err)
+		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := newHTTPClient(e.timeout, e.allowLocal).Do(req)
-	if err != nil {
-		return nil, kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
+	if status != http.StatusOK {
+		return nil, kernel.ErrExecutionFailed.Wrapf("action returned status %d: %s", status, string(respBody))
 	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
-	if err != nil {
-		return nil, kernel.ErrExecutionFailed.Wrap("could not read response body")
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, kernel.ErrExecutionFailed.Wrapf("action returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
 	var result map[string]any
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, kernel.ErrExecutionFailed.Wrap("action response is not valid JSON")
@@ -160,7 +187,6 @@ func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, source string, 
 	bodyArgs := map[string]any{}
 
 	if len(src.Params) > 0 {
-		// Use stored param bindings to route each arg correctly.
 		for _, p := range src.Params {
 			v, ok := args[p.Name]
 			if !ok {
@@ -176,7 +202,6 @@ func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, source string, 
 			}
 		}
 	} else {
-		// Fallback for actions imported before param binding was added.
 		pathParams := map[string]struct{}{}
 		for {
 			start := strings.Index(path, "{")
@@ -211,7 +236,6 @@ func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, source string, 
 	rawURL := strings.TrimRight(src.BaseURL, "/") + path
 	method := strings.ToUpper(src.Method)
 
-	var reqBody io.Reader
 	if len(queryVals) > 0 {
 		u, err := url.Parse(rawURL)
 		if err != nil {
@@ -226,37 +250,25 @@ func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, source string, 
 		u.RawQuery = existing.Encode()
 		rawURL = u.String()
 	}
+
+	var reqBody io.Reader
+	var headers map[string]string
 	if len(bodyArgs) > 0 || (method != http.MethodGet && len(src.Params) > 0) {
 		b, err := json.Marshal(bodyArgs)
 		if err != nil {
 			return nil, kernel.ErrInvalidInput.Wrap("could not serialize args")
 		}
 		reqBody = strings.NewReader(string(b))
+		headers = map[string]string{"Content-Type": "application/json"}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, reqBody)
+	respBody, status, err := doHTTP(ctx, method, rawURL, headers, reqBody, e.timeout, e.allowLocal)
 	if err != nil {
-		return nil, kernel.ErrInvalidInput.Wrapf("invalid action URL: %v", err)
+		return nil, err
 	}
-	if reqBody != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if status < 200 || status >= 300 {
+		return nil, kernel.ErrExecutionFailed.Wrapf("action returned status %d: %s", status, string(respBody))
 	}
-
-	resp, err := newHTTPClient(e.timeout, e.allowLocal).Do(req)
-	if err != nil {
-		return nil, kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
-	if err != nil {
-		return nil, kernel.ErrExecutionFailed.Wrap("could not read response body")
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, kernel.ErrExecutionFailed.Wrapf("action returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
 	var result map[string]any
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, kernel.ErrExecutionFailed.Wrap("action response is not valid JSON")
@@ -285,21 +297,12 @@ func fetchOpenAPISpec(ctx context.Context, specURL string, allowLocal bool) ([]b
 			}
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, specURL, nil)
+	respBody, status, err := doHTTP(ctx, http.MethodGet, specURL, nil, nil, 30*time.Second, allowLocal)
 	if err != nil {
-		return nil, kernel.ErrInvalidInput.Wrapf("invalid spec URL: %v", err)
+		return nil, err
 	}
-	resp, err := newHTTPClient(30*time.Second, allowLocal).Do(req)
-	if err != nil {
-		return nil, kernel.ErrExecutionFailed.Wrapf("fetch spec: %v", err)
+	if status != http.StatusOK {
+		return nil, kernel.ErrExecutionFailed.Wrapf("spec server returned %d", status)
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-	if err != nil {
-		return nil, kernel.ErrExecutionFailed.Wrap("read spec body")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, kernel.ErrExecutionFailed.Wrapf("spec server returned %d", resp.StatusCode)
-	}
-	return body, nil
+	return respBody, nil
 }

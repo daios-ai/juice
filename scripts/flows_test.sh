@@ -130,8 +130,12 @@ srv = http.server.HTTPServer(('127.0.0.1', port), H)
 srv.serve_forever()
 PYEOF
     BACKEND_PID=$!
-    sleep 0.3
-    kill -0 "$BACKEND_PID" 2>/dev/null || return 1
+    local deadline=$(( $(date +%s) + 5 ))
+    until curl -sf -X POST "http://127.0.0.1:${port}/" -d '{}' -H 'Content-Type: application/json' >/dev/null 2>&1; do
+        if ! kill -0 "$BACKEND_PID" 2>/dev/null; then return 1; fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then kill "$BACKEND_PID" 2>/dev/null; return 1; fi
+        sleep 0.05
+    done
 }
 
 stop_backend() {
@@ -165,8 +169,12 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
 PYEOF
     API_SERVER_PID=$!
-    sleep 0.3
-    kill -0 "$API_SERVER_PID" 2>/dev/null || return 1
+    local deadline=$(( $(date +%s) + 5 ))
+    until curl -sf "http://127.0.0.1:${port}/" >/dev/null 2>&1; do
+        if ! kill -0 "$API_SERVER_PID" 2>/dev/null; then return 1; fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then kill "$API_SERVER_PID" 2>/dev/null; return 1; fi
+        sleep 0.05
+    done
 }
 
 stop_api_server() {
@@ -963,7 +971,7 @@ flow_input_schema_failure() {
     local create_out action_id
     create_out=$(jj "$db" "$home_alice" action add --name /schema-in --kind http \
         --source "http://127.0.0.1:1/schema-in" --price 50 --description "schema test" \
-        --input-schema '{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}')
+        --input-schema '{"type":"object","properties":{"x":{"type":"string","description":"the x parameter"}},"required":["x"]}')
     action_id=$(strfield "$create_out" "ID")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
     j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
@@ -1026,7 +1034,7 @@ flow_output_schema_failure() {
     local create_out action_id
     create_out=$(jj "$db" "$home_alice" action add --name /schema-out --kind http \
         --source "http://127.0.0.1:${backend_port}/schema-out" --price 50 --description "schema out test" \
-        --output-schema '{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}')
+        --output-schema '{"type":"object","properties":{"id":{"type":"string","description":"the record id"}},"required":["id"]}')
     action_id=$(strfield "$create_out" "ID")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
     j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
@@ -2000,7 +2008,7 @@ spec = {
                     "200": {
                         "content": {
                             "application/json": {
-                                "schema": {"type": "object", "properties": {"message": {"type": "string"}}}
+                                "schema": {"type": "object", "properties": {"message": {"type": "string", "description": "the response message"}}}
                             }
                         }
                     }
@@ -2045,10 +2053,10 @@ PYEOF
         && ok "openapi_import_execute.call_succeeds" \
         || fail "openapi_import_execute.call_succeeds" "no tx_id: $call_out"
 
-    # Action name includes owner handle prefix (OpenAPI convention)
-    [ "$action_name" = "@alice/greet" ] \
+    # Action name uses /operation_key convention; owner is encoded in owner_user_id only.
+    [ "$action_name" = "/greet" ] \
         && ok "openapi_import_execute.action_name_correct" \
-        || fail "openapi_import_execute.action_name_correct" "expected @alice/greet, got: $action_name"
+        || fail "openapi_import_execute.action_name_correct" "expected /greet, got: $action_name"
 
     stop_api_server "$api_pid"
 }
@@ -2089,7 +2097,7 @@ spec = {
                     "200": {
                         "content": {
                             "application/json": {
-                                "schema": {"type": "object", "properties": {"message": {"type": "string"}}}
+                                "schema": {"type": "object", "properties": {"message": {"type": "string", "description": "the response message"}}}
                             }
                         }
                     }
@@ -2130,7 +2138,7 @@ spec = {
                     "200": {
                         "content": {
                             "application/json": {
-                                "schema": {"type": "object", "properties": {"message": {"type": "string"}}}
+                                "schema": {"type": "object", "properties": {"message": {"type": "string", "description": "the response message"}}}
                             }
                         }
                     }

@@ -10,6 +10,106 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestWasmTimeoutReturnsErrTimeout(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &sleepingFailExec{err: context.DeadlineExceeded})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 500)
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/slow",
+		Kind: KindWasm, Active: true, Price: 10,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 100)
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: alice.ID, ActionName: "/slow", Args: map[string]any{},
+	})
+	if !errors.Is(err, ErrTimeout) {
+		t.Errorf("expected ErrTimeout for DeadlineExceeded, got %v", err)
+	}
+}
+
+// failingSubCallExec dispatches on source: "outer" calls the inner action but
+// handles the failure gracefully (returns success); anything else returns an error.
+type failingSubCallExec struct {
+	targetUser   string
+	targetAction string
+}
+
+func (f *failingSubCallExec) Compile(_ context.Context, src []byte) ([]byte, string, error) {
+	return src, "fakehash", nil
+}
+
+func (f *failingSubCallExec) Execute(ctx context.Context, src []byte, _ []byte, host HostFunctions) ([]byte, error) {
+	if string(src) == "outer" {
+		_, _ = host.Call(ctx, f.targetUser+"/"+f.targetAction[1:], []byte(`{}`))
+		return []byte(`{"handled":true}`), nil
+	}
+	return nil, ErrExecutionFailed.Wrap("inner always fails")
+}
+
+func TestSubCostNotIncrementedOnFailedSubCall(t *testing.T) {
+	st := newFakeStore()
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice-vat", 500)
+	bob := setupUser(t, st, "@bob-vat", 0)
+	feeUser := setupUser(t, st, "@fee-vat", 0)
+	carol := setupUser(t, st, "@carol-vat", 50)
+
+	inner := &Action{
+		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "/inner",
+		Kind: KindWasm, Source: "inner", Active: true, Price: 100,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, inner)
+	outer := &Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/outer",
+		Kind: KindWasm, Source: "outer", Active: true, Price: 50,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, outer)
+
+	exec := &failingSubCallExec{targetUser: bob.ID, targetAction: "/inner"}
+	cfg := DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = "test-issuer-id"
+	cfg.FeeBPS = 2000
+	cfg.FeeRecipientID = feeUser.ID
+	cfg.SigningKey = testSigningKey()
+	k := New(st, exec, nil, nil, nil, cfg, nil)
+
+	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: PermCall})
+	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: carol.ID, ActionID: outer.ID, Permission: PermCall})
+
+	p, root, _ := k.StartProcess(ctx, carol.ID, carol.ID, 50)
+
+	reply, err := k.Call(ctx, CallRequest{
+		SubjectID: carol.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: alice.ID, ActionName: "/outer", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("outer call should succeed when it handles sub-call failure: %v", err)
+	}
+
+	// subCost must be 0 (failed sub-call not counted), so taxable == gross == 50.
+	// fee = ceil(50 * 2000 / 10000) = 10, net = 40.
+	tx, err := st.ReadTransaction(ctx, reply.TxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tx.Fee != 10 {
+		t.Errorf("fee: got %d, want 10 (full fee on gross=50 with feeBPS=2000)", tx.Fee)
+	}
+	if tx.Net != 40 {
+		t.Errorf("net: got %d, want 40", tx.Net)
+	}
+}
+
 // ---- Call invariant tests ----
 
 func TestCallClosedProcessFails(t *testing.T) {

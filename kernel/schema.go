@@ -3,7 +3,26 @@ package kernel
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
+
+// validateSchemaDescriptions returns an error if any named property in the schema
+// (recursively) is missing a non-empty description. Called at activation to ensure
+// schemas are usable for lookup and LLM function calling (§3.1).
+func validateSchemaDescriptions(schema map[string]any, path string) error {
+	props, _ := schema["properties"].(map[string]any)
+	for name, raw := range props {
+		child, _ := raw.(map[string]any)
+		desc, _ := child["description"].(string)
+		if strings.TrimSpace(desc) == "" {
+			return ErrSchemaViolation.Wrapf("property %s.%s: description is required for activation", path, name)
+		}
+		if err := validateSchemaDescriptions(child, path+"."+name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // ValidateSchema checks that schema is a supported JSON Schema subset.
 // Supported: type, properties, required, items, enum, nullable.

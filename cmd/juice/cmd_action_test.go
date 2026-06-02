@@ -225,12 +225,12 @@ func TestActionImportOpenAPI(t *testing.T) {
 	}
 	found := false
 	for _, a := range actions {
-		if a.Name == "@cli-import-owner/sayHello" {
+		if a.Name == "/sayHello" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected @cli-import-owner/sayHello in actions after import")
+		t.Error("expected /sayHello in actions after import")
 	}
 }
 

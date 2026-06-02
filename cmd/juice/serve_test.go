@@ -1828,8 +1828,8 @@ func TestServeImportOpenAPI(t *testing.T) {
 	if len(result.Created) != 1 {
 		t.Fatalf("expected 1 created action, got %d", len(result.Created))
 	}
-	if result.Created[0].Name != "@import-srv-owner/sayHello" {
-		t.Errorf("name: got %q, want %q", result.Created[0].Name, "@import-srv-owner/sayHello")
+	if result.Created[0].Name != "/sayHello" {
+		t.Errorf("name: got %q, want %q", result.Created[0].Name, "/sayHello")
 	}
 }
 

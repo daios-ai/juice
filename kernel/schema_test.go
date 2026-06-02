@@ -73,6 +73,57 @@ func TestValidateSchema(t *testing.T) {
 	})
 }
 
+func TestValidateSchemaDescriptions(t *testing.T) {
+	t.Run("no properties passes", func(t *testing.T) {
+		s := map[string]any{"type": "object"}
+		if err := validateSchemaDescriptions(s, "#"); err != nil {
+			t.Errorf("empty properties: unexpected error: %v", err)
+		}
+	})
+
+	t.Run("property with description passes", func(t *testing.T) {
+		s := map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{"type": "string", "description": "the name"},
+			},
+		}
+		if err := validateSchemaDescriptions(s, "#"); err != nil {
+			t.Errorf("described property: unexpected error: %v", err)
+		}
+	})
+
+	t.Run("property without description fails", func(t *testing.T) {
+		s := map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{"type": "string"},
+			},
+		}
+		if err := validateSchemaDescriptions(s, "#"); err == nil {
+			t.Error("expected error for property missing description")
+		}
+	})
+
+	t.Run("nested property without description fails", func(t *testing.T) {
+		s := map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"outer": map[string]any{
+					"type":        "object",
+					"description": "outer field",
+					"properties": map[string]any{
+						"inner": map[string]any{"type": "string"},
+					},
+				},
+			},
+		}
+		if err := validateSchemaDescriptions(s, "#"); err == nil {
+			t.Error("expected error for nested property missing description")
+		}
+	})
+}
+
 func TestValidateInput(t *testing.T) {
 	schema := map[string]any{
 		"type": "object",

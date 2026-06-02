@@ -464,17 +464,6 @@ func (f *fakeStore) ReadRootTrace(_ context.Context, processID string) (*Trace, 
 	return nil, ErrNotFound.Wrap("root trace not found for process")
 }
 
-func (f *fakeStore) UpdateTransaction(_ context.Context, tx *Transaction) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, ok := f.transactions[tx.ID]; !ok {
-		return ErrNotFound.Wrap("transaction not found")
-	}
-	cp := *tx
-	f.transactions[tx.ID] = &cp
-	return nil
-}
-
 func (f *fakeStore) ReadTransaction(_ context.Context, id string) (*Transaction, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -548,14 +537,6 @@ func (f *fakeStore) ReadListener(_ context.Context, id string) (*Listener, error
 	return &cp, nil
 }
 
-func (f *fakeStore) UpdateListener(_ context.Context, l *Listener) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cp := *l
-	f.listeners[l.ID] = &cp
-	return nil
-}
-
 func (f *fakeStore) ListListeners(_ context.Context, sourceUserID, eventName string) ([]*Listener, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -567,15 +548,6 @@ func (f *fakeStore) ListListeners(_ context.Context, sourceUserID, eventName str
 		}
 	}
 	return result, nil
-}
-
-func (f *fakeStore) CreateEvent(_ context.Context, e *Event) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cp := *e
-	cp.CreatedAt = time.Now().UTC()
-	f.events[e.ID] = &cp
-	return nil
 }
 
 func (f *fakeStore) CreateEvents(_ context.Context, events []*Event) error {
@@ -1057,20 +1029,6 @@ func (f *fakeStore) InsertPendingIdempotencyRecord(_ context.Context, r *Idempot
 	cp.ResultJSON = ""
 	f.idempotencyRecords[key] = &cp
 	return nil
-}
-
-func (f *fakeStore) CompleteIdempotencyRecord(_ context.Context, id, resultJSON, receiptJSON string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, r := range f.idempotencyRecords {
-		if r.ID == id {
-			r.Status = "complete"
-			r.ResultJSON = resultJSON
-			r.ReceiptJSON = receiptJSON
-			return nil
-		}
-	}
-	return ErrNotFound.Wrap("idempotency record not found")
 }
 
 func (f *fakeStore) DeleteIdempotencyRecord(_ context.Context, id string) error {

@@ -444,6 +444,9 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 
 	outputJSON, err := k.scripts.Execute(ctx, artifact, inputJSON, host)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, 0, ErrTimeout.Wrapf("wasm execution timed out: %v", err)
+		}
 		return nil, 0, ErrExecutionFailed.Wrapf("wasm execution failed: %v", err)
 	}
 
@@ -511,7 +514,6 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 		}
 		return nil, ErrInternal.Wrap("could not create ephemeral process")
 	}
-	h.subCost += action.Price
 	ep.Available = action.Price
 	// Always close the ephemeral process on return; any unused funds go back to owner.
 	// Use context.Background() so a cancelled request context does not prevent cleanup.
@@ -527,6 +529,7 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	if err != nil {
 		return nil, err
 	}
+	h.subCost += action.Price // only count gross for successful sub-calls (VAT model)
 	return json.Marshal(reply.Result)
 }
 

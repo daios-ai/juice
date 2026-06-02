@@ -225,6 +225,18 @@ func (k *Kernel) requireSuperuser(ctx context.Context, operatorID string) error 
 
 // Deposit adds credits directly to a user's available balance and records an audit entry.
 // Only the superuser may call this; the check is enforced here, not only at the CLI boundary.
+// ValidateFeeRecipient returns an error if FeeBPS > 0 and the configured fee
+// recipient user does not exist. Call after bootstrap to catch misconfiguration.
+func (k *Kernel) ValidateFeeRecipient(ctx context.Context) error {
+	if k.cfg.FeeBPS == 0 || k.cfg.FeeRecipientID == "" {
+		return nil
+	}
+	if _, err := k.store.ReadUser(ctx, k.cfg.FeeRecipientID); err != nil {
+		return ErrInvalidState.Wrapf("fee recipient %q not found in database", k.cfg.FeeRecipientID)
+	}
+	return nil
+}
+
 func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, amount int64, reason string) (*Deposit, error) {
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
 		return nil, err
@@ -723,6 +735,12 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 		if err := ValidateSchema(a.OutputSchema); err != nil {
 			return ErrInvalidState.Wrapf("invalid output schema: %v", err)
 		}
+		if err := validateSchemaDescriptions(a.InputSchema, "input"); err != nil {
+			return ErrInvalidState.Wrapf("input schema: %v", err)
+		}
+		if err := validateSchemaDescriptions(a.OutputSchema, "output"); err != nil {
+			return ErrInvalidState.Wrapf("output schema: %v", err)
+		}
 		if a.Kind == KindHTTP {
 			src := a.Source
 			if strings.HasPrefix(strings.TrimSpace(src), "{") {
@@ -1214,28 +1232,28 @@ func DefaultStats(actionID string) *Stats {
 
 // CreateListenerRequest holds input for registering a listener.
 type CreateListenerRequest struct {
-	OwnerUserID    string
 	SourceUserID   string
 	EventName      string
 	TargetActionID string
 }
 
-// CreateListener registers a new listener and returns it.
-func (k *Kernel) CreateListener(ctx context.Context, req CreateListenerRequest) (*Listener, error) {
+// CreateListener registers a new listener owned by subjectID and returns it.
+func (k *Kernel) CreateListener(ctx context.Context, subjectID string, req CreateListenerRequest) (*Listener, error) {
 	if req.EventName == "" {
 		return nil, ErrInvalidInput.Wrap("event_name is required")
 	}
-	if req.SourceUserID != "" {
-		if _, err := k.store.ReadUser(ctx, req.SourceUserID); err != nil {
-			return nil, ErrNotFound.Wrap("source_user_id not found")
-		}
+	if req.SourceUserID == "" {
+		return nil, ErrInvalidInput.Wrap("source_user_id is required")
+	}
+	if _, err := k.store.ReadUser(ctx, req.SourceUserID); err != nil {
+		return nil, ErrNotFound.Wrap("source_user_id not found")
 	}
 	a, err := k.store.ReadAction(ctx, req.TargetActionID)
 	if err != nil {
 		return nil, err
 	}
-	if a.OwnerUserID != req.OwnerUserID {
-		ok, err := k.canCall(ctx, req.OwnerUserID, a)
+	if a.OwnerUserID != subjectID {
+		ok, err := k.canCall(ctx, subjectID, a)
 		if err != nil {
 			return nil, err
 		}
@@ -1245,7 +1263,7 @@ func (k *Kernel) CreateListener(ctx context.Context, req CreateListenerRequest) 
 	}
 	l := &Listener{
 		ID:             uuid.New().String(),
-		OwnerUserID:    req.OwnerUserID,
+		OwnerUserID:    subjectID,
 		SourceUserID:   req.SourceUserID,
 		EventName:      req.EventName,
 		TargetActionID: req.TargetActionID,
@@ -1320,19 +1338,17 @@ func (k *Kernel) InsertPendingIdempotencyRecord(ctx context.Context, r *Idempote
 	return k.store.InsertPendingIdempotencyRecord(ctx, r)
 }
 
-// CompleteIdempotencyRecord transitions a pending record to "complete" with the result and receipt.
-func (k *Kernel) CompleteIdempotencyRecord(ctx context.Context, id, resultJSON, receiptJSON string) error {
-	return k.store.CompleteIdempotencyRecord(ctx, id, resultJSON, receiptJSON)
-}
-
 // DeleteIdempotencyRecord removes a record to allow retry after execution failure.
 func (k *Kernel) DeleteIdempotencyRecord(ctx context.Context, id string) error {
 	return k.store.DeleteIdempotencyRecord(ctx, id)
 }
 
-// GetSigningKey returns the kernel's Ed25519 private signing key (nil until bootstrap).
-func (k *Kernel) GetSigningKey() Ed25519PrivateKey {
-	return k.cfg.SigningKey
+// SignFederation signs a federation payload with the platform key and returns
+// (signature, timestamp). Returns an error if the signing key is not configured.
+func (k *Kernel) SignFederation(action, idempotencyKey string) (sig, ts string, err error) {
+	ts = time.Now().UTC().Format(time.RFC3339)
+	sig, err = SignFederationPayload(k.cfg.SigningKey, action, idempotencyKey, ts)
+	return
 }
 
 // EmitEvent queues an event for all active listeners matching (sourceUserID, eventName).
@@ -2074,7 +2090,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 	var incoming []incomingOp
 	for _, raw := range rawOps {
 		raw := raw
-		name := owner.Handle + "/" + raw.key
+		name := "/" + raw.key
 		// Name collision: only check for truly new ops (not already imported).
 		if _, exists := existingByKey[raw.key]; !exists {
 			if _, err := k.store.ReadActionByOwnerName(ctx, ownerID, name); err == nil {
@@ -2130,7 +2146,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 }
 
 // UnimportOpenAPI deactivates all OpenAPI-imported actions with matching owner + spec_url.
-// If name is non-empty, only actions whose name suffix or operation_key matches are deactivated.
+// If name is non-empty, only actions whose name or operation_key matches are deactivated.
 func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specURL, name string) ([]*Action, error) {
 	if subjectID != ownerID {
 		if err := k.requireSuperuser(ctx, subjectID); err != nil {
@@ -2146,7 +2162,7 @@ func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specUR
 		for _, a := range actions {
 			var src OpenAPISource
 			json.Unmarshal([]byte(a.Source), &src)
-			if strings.HasSuffix(a.Name, "/"+name) || src.OperationKey == name {
+			if a.Name == "/"+name || src.OperationKey == name {
 				filtered = append(filtered, a)
 			}
 		}
@@ -2173,6 +2189,7 @@ func remoteActionContentHash(m ActionManifest) string {
 		"kind":          string(m.Kind),
 		"name":          m.Name,
 		"output_schema": string(outputJSON),
+		"owner_handle":  m.OwnerHandle,
 		"price":         m.Price,
 	})
 	h := sha256.Sum256(payload)
@@ -2221,12 +2238,13 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 		key:  m.ActionID,
 		hash: contentHash,
 		apply: func(a *Action) {
+			a.Name         = name
 			a.Source       = source
 			a.Price        = m.Price
 			a.Description  = m.Description
 			a.InputSchema  = m.InputSchema
 			a.OutputSchema = m.OutputSchema
-			a.ArtifactHash = m.ArtifactHash
+			a.ArtifactHash = contentHash
 		},
 		new: func() *Action {
 			now := time.Now().UTC()

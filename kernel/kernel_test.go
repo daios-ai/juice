@@ -620,7 +620,7 @@ func TestConsumeEventSettlesAtomically(t *testing.T) {
 		ArgsJSON:   `{}`,
 		CreatedAt:  time.Now().UTC(),
 	}
-	_ = st.CreateEvent(ctx, e)
+	_ = st.CreateEvents(ctx, []*Event{e})
 
 	p, _, _ := k.StartProcess(ctx, owner.ID, owner.ID, 500)
 
@@ -662,7 +662,7 @@ func TestConsumeEventRespectsParentTraceID(t *testing.T) {
 		ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: "{}",
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = st.CreateEvent(ctx, e)
+	_ = st.CreateEvents(ctx, []*Event{e})
 
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 500)
 
@@ -697,9 +697,7 @@ func TestDeleteListenerPurgesEventsAtomically(t *testing.T) {
 	pending1 := &Event{ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: `{}`, CreatedAt: time.Now().UTC()}
 	pending2 := &Event{ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: `{}`, CreatedAt: time.Now().UTC()}
 	inFlight := &Event{ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: `{}`, CreatedAt: time.Now().UTC()}
-	_ = st.CreateEvent(ctx, pending1)
-	_ = st.CreateEvent(ctx, pending2)
-	_ = st.CreateEvent(ctx, inFlight)
+	_ = st.CreateEvents(ctx, []*Event{pending1, pending2, inFlight})
 	// Mark inFlight as consumed (in-flight — ConsumedAt set, TxID nil).
 	_ = st.LockEvent(ctx, inFlight.ID)
 
@@ -1230,6 +1228,67 @@ func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
 	}
 }
 
+func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	remoteUser, err := k.RegisterRemoteKernel(ctx, "@idem-peer", base64.RawURLEncoding.EncodeToString(pub), "https://idem.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := ActionManifest{
+		ActionID:     "idem-action-id",
+		OwnerHandle:  "@idem-peer",
+		Name:         "/svc",
+		Kind:         KindHTTP,
+		Price:        10,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	}
+	sign := func() {
+		t.Helper()
+		sig, err := SignManifest(priv, &m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Signature = sig
+	}
+
+	sign()
+	firstResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	if err != nil || len(firstResult.Created) != 1 {
+		t.Fatalf("first import: err=%v created=%d", err, len(firstResult.Created))
+	}
+	firstID := firstResult.Created[0].ID
+
+	// Second import: price change → Updated, ArtifactHash stored as contentHash.
+	m.Price = 99
+	sign()
+	secondResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	if err != nil || len(secondResult.Updated) != 1 {
+		t.Fatalf("second import: err=%v updated=%d", err, len(secondResult.Updated))
+	}
+	if secondResult.Updated[0].ID != firstID {
+		t.Error("reimport must preserve the same action ID")
+	}
+
+	// Third import: same manifest as second → Unchanged (ArtifactHash stored correctly).
+	thirdResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("third import: %v", err)
+	}
+	if len(thirdResult.Unchanged) != 1 {
+		t.Errorf("expected 1 unchanged, got created=%d updated=%d unchanged=%d",
+			len(thirdResult.Created), len(thirdResult.Updated), len(thirdResult.Unchanged))
+	}
+	if thirdResult.Unchanged[0].ID != firstID {
+		t.Error("third import must reference the same action ID")
+	}
+}
+
 func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)
@@ -1536,6 +1595,44 @@ func TestSetActiveRequiresDescription(t *testing.T) {
 	}
 }
 
+func TestActivationRejectsPropertyMissingDescription(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "@desc-prop-owner", 0)
+
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/nodesc-prop",
+		Kind: KindHTTP, Source: "http://example.com", Active: false,
+		Description: "My service",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{"type": "string"}, // no description
+			},
+		},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err == nil {
+		t.Error("expected error activating action with schema property missing description")
+	}
+
+	// Adding a description to the property allows activation.
+	a.InputSchema = map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query": map[string]any{"type": "string", "description": "the search query"},
+		},
+	}
+	_ = st.UpdateAction(ctx, a)
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Errorf("SetActive with described property: %v", err)
+	}
+}
+
 func TestSetActiveValidatesWasm(t *testing.T) {
 	st := newFakeStore()
 	ctx := context.Background()
@@ -1602,8 +1699,8 @@ func TestImportOpenAPI(t *testing.T) {
 			len(result.Created), len(result.Updated), len(result.Unchanged), len(result.Rejected))
 	}
 	a := result.Created[0]
-	if a.Name != "@oapi-import-owner/sayHello" {
-		t.Errorf("name: got %q, want %q", a.Name, "@oapi-import-owner/sayHello")
+	if a.Name != "/sayHello" {
+		t.Errorf("name: got %q, want %q", a.Name, "/sayHello")
 	}
 	if a.Active {
 		t.Error("imported action must be inactive")

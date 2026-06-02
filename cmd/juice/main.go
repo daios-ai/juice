@@ -45,10 +45,46 @@ func init() {
 }
 
 func main() {
+	if err := loadConfigFile(); err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		os.Exit(1)
+	}
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// loadConfigFile reads an optional JSON config file and sets any missing environment
+// variables from it. File path comes from JUICE_CONFIG_FILE, defaulting to juice.json.
+// Environment variables always take precedence over file values.
+func loadConfigFile() error {
+	path := os.Getenv("JUICE_CONFIG_FILE")
+	if path == "" {
+		path = "juice.json"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read config file %q: %w", path, err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("parse config file %q: %w", path, err)
+	}
+	for k, v := range cfg {
+		if os.Getenv(k) == "" {
+			switch val := v.(type) {
+			case string:
+				_ = os.Setenv(k, val)
+			default:
+				_ = os.Setenv(k, fmt.Sprintf("%v", val))
+			}
+		}
+	}
+	return nil
 }
 
 func envOr(key, def string) string {
@@ -157,8 +193,8 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 		}
 	}
 
-	// Wire signing key access into the HTTP executor after the kernel is fully constructed.
-	httpExec.signerFn = func() ed25519.PrivateKey { return k.GetSigningKey() }
+	// Wire signing callback into the HTTP executor; private key stays inside kernel.
+	httpExec.signerFn = k.SignFederation
 
 	return k, db, nil
 }

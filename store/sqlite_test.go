@@ -310,7 +310,7 @@ func TestFundProcess(t *testing.T) {
 	user := newUser("@alice", 1000)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
-	_ = db.CreateProcess(ctx, p)
+	_ = db.createProcess(ctx, p)
 
 	if err := db.FundProcess(ctx, user.ID, p.ID, 400); err != nil {
 		t.Fatal(err)
@@ -339,7 +339,7 @@ func TestFundProcessClosedFails(t *testing.T) {
 	user := newUser("@closed-fund", 1000)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
-	_ = db.CreateProcess(ctx, p)
+	_ = db.createProcess(ctx, p)
 	_ = db.FundProcess(ctx, user.ID, p.ID, 200)
 
 	// Close the process.
@@ -366,7 +366,7 @@ func TestLockAndRefundFunds(t *testing.T) {
 	user := newUser("@alice", 500)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
-	_ = db.CreateProcess(ctx, p)
+	_ = db.createProcess(ctx, p)
 	_ = db.FundProcess(ctx, user.ID, p.ID, 500)
 
 	if err := db.LockFunds(ctx, p.ID, 200); err != nil {
@@ -404,7 +404,7 @@ func TestCommitCall(t *testing.T) {
 	_ = db.CreateUser(ctx, fee)
 
 	p := newProcess(payer.ID)
-	_ = db.CreateProcess(ctx, p)
+	_ = db.createProcess(ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
 	_ = db.LockFunds(ctx, p.ID, 100)
 
@@ -455,7 +455,7 @@ func TestEndProcess(t *testing.T) {
 	user := newUser("@alice", 1000)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
-	_ = db.CreateProcess(ctx, p)
+	_ = db.createProcess(ctx, p)
 	_ = db.FundProcess(ctx, user.ID, p.ID, 600)
 
 	if err := db.EndProcess(ctx, p.ID); err != nil {
@@ -487,7 +487,7 @@ func TestEndProcessWithLockedFunds(t *testing.T) {
 	user := newUser("@alice-locked", 500)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
-	_ = db.CreateProcess(ctx, p)
+	_ = db.createProcess(ctx, p)
 	_ = db.FundProcess(ctx, user.ID, p.ID, 500)
 	// Lock 200 — simulates an in-flight sub-call.
 	if err := db.LockFunds(ctx, p.ID, 200); err != nil {
@@ -558,7 +558,7 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	_ = db.CreateAction(ctx, a)
 
 	p := newProcess(payer.ID)
-	_ = db.CreateProcess(ctx, p)
+	_ = db.createProcess(ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
 	_ = db.LockFunds(ctx, p.ID, 200) // lock for both calls
 
@@ -629,7 +629,7 @@ func TestListTraces(t *testing.T) {
 	user := newUser("@alice", 0)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
-	_ = db.CreateProcess(ctx, p)
+	_ = db.createProcess(ctx, p)
 
 	root := &kernel.Trace{
 		ID:        uuid.New().String(),
@@ -760,7 +760,7 @@ func TestTransactionCRUD(t *testing.T) {
 	_ = db.CreateAction(ctx, a)
 
 	p := newProcess(owner.ID)
-	_ = db.CreateProcess(ctx, p)
+	_ = db.createProcess(ctx, p)
 
 	tr := &kernel.Trace{
 		ID:        uuid.New().String(),
@@ -786,7 +786,7 @@ func TestTransactionCRUD(t *testing.T) {
 		StartedAt:     time.Now().UTC(),
 		EndedAt:       time.Now().UTC(),
 	}
-	if err := db.CreateTransaction(ctx, tx); err != nil {
+	if err := db.createTransaction(ctx, tx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -966,7 +966,7 @@ func TestCreateReadReceipt(t *testing.T) {
 		StartedAt:     time.Now().UTC(),
 		EndedAt:       time.Now().UTC(),
 	}
-	_ = db.CreateTransaction(ctx, tx)
+	_ = db.createTransaction(ctx, tx)
 
 	r := &kernel.Receipt{
 		ID:           uuid.New().String(),
@@ -984,7 +984,7 @@ func TestCreateReadReceipt(t *testing.T) {
 		CreatedAt:    time.Now().UTC(),
 		Signature:    "sig",
 	}
-	if err := db.CreateReceipt(ctx, r); err != nil {
+	if err := db.createReceipt(ctx, r); err != nil {
 		t.Fatalf("CreateReceipt: %v", err)
 	}
 
@@ -1005,7 +1005,7 @@ func TestCreateReadReceipt(t *testing.T) {
 
 // ---- Rating tests ----
 
-func TestCreateRating(t *testing.T) {
+func TestCreateRatingDirect(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -1022,7 +1022,7 @@ func TestCreateRating(t *testing.T) {
 		StartedAt:     time.Now().UTC(),
 		EndedAt:       time.Now().UTC(),
 	}
-	_ = db.CreateTransaction(ctx, tx)
+	_ = db.createTransaction(ctx, tx)
 
 	rating := &kernel.Rating{
 		ID:          uuid.New().String(),
@@ -1032,7 +1032,7 @@ func TestCreateRating(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 		Signature:   "",
 	}
-	if err := db.CreateRating(ctx, rating); err != nil {
+	if err := db.createRating(ctx, rating); err != nil {
 		t.Fatalf("CreateRating: %v", err)
 	}
 
@@ -1055,7 +1055,7 @@ func TestCreateRating(t *testing.T) {
 		Rating:      0.0,
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := db.CreateRating(ctx, dup); err == nil {
+	if err := db.createRating(ctx, dup); err == nil {
 		t.Error("expected error for duplicate rating")
 	}
 }
@@ -1089,7 +1089,7 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 		StartedAt:     time.Now().UTC(),
 		EndedAt:       time.Now().UTC(),
 	}
-	_ = db.CreateTransaction(ctx, tx)
+	_ = db.createTransaction(ctx, tx)
 
 	r := &kernel.Rating{
 		ID:          uuid.New().String(),
@@ -1136,7 +1136,7 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 		StartedAt:     time.Now().UTC(),
 		EndedAt:       time.Now().UTC(),
 	}
-	_ = db.CreateTransaction(ctx, tx2)
+	_ = db.createTransaction(ctx, tx2)
 	r2 := &kernel.Rating{
 		ID:          uuid.New().String(),
 		RatedTxID:   tx2.ID,
@@ -1179,7 +1179,7 @@ func TestListRatings(t *testing.T) {
 			StartedAt:     time.Now().UTC(),
 			EndedAt:       time.Now().UTC(),
 		}
-		_ = db.CreateTransaction(ctx, tx)
+		_ = db.createTransaction(ctx, tx)
 		r := &kernel.Rating{
 			ID:          "r-" + id,
 			RatedTxID:   id,
@@ -1187,7 +1187,7 @@ func TestListRatings(t *testing.T) {
 			Rating:      rating,
 			CreatedAt:   time.Now().UTC().Add(offset),
 		}
-		_ = db.CreateRating(ctx, r)
+		_ = db.createRating(ctx, r)
 	}
 	makeTxAndRating("tx-list-1", 1.0, 0)
 	makeTxAndRating("tx-list-2", 0.0, time.Second)
@@ -1291,9 +1291,9 @@ func TestIdempotencyStateMachine(t *testing.T) {
 		t.Error("expected unique constraint error on duplicate pending insert")
 	}
 
-	// CompleteIdempotencyRecord transitions to "complete" with result JSON.
-	if err := db.CompleteIdempotencyRecord(ctx, rec.ID, `{"answer":42}`, ""); err != nil {
-		t.Fatalf("CompleteIdempotencyRecord: %v", err)
+	// completeIdempotencyRecord transitions to "complete" with result JSON.
+	if err := db.completeIdempotencyRecord(ctx, rec.ID, `{"answer":42}`, ""); err != nil {
+		t.Fatalf("completeIdempotencyRecord: %v", err)
 	}
 	got2, _ := db.ReadIdempotencyRecord(ctx, "sm-key-1", cp.ID)
 	if got2.Status != "complete" {
@@ -1427,7 +1427,7 @@ func TestCommitCallFeeDestructionRejected(t *testing.T) {
 	_ = db.CreateUser(ctx, target)
 
 	p := newProcess(payer.ID)
-	_ = db.CreateProcess(ctx, p)
+	_ = db.createProcess(ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
 	_ = db.LockFunds(ctx, p.ID, 100)
 
@@ -1480,7 +1480,7 @@ func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	_ = db.CreateUser(ctx, cp)
 
 	p := newProcess(payer.ID)
-	_ = db.CreateProcess(ctx, p)
+	_ = db.createProcess(ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
 	_ = db.LockFunds(ctx, p.ID, 100)
 
@@ -1535,7 +1535,7 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	_ = db.CreateUser(ctx, cp)
 
 	p := newProcess(payer.ID)
-	_ = db.CreateProcess(ctx, p)
+	_ = db.createProcess(ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
 	_ = db.LockFunds(ctx, p.ID, 100)
 

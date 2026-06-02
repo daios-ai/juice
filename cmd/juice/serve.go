@@ -53,6 +53,9 @@ func runServer(addr string) error {
 	if err := bootstrap(k); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
+	if err := k.ValidateFeeRecipient(context.Background()); err != nil {
+		return fmt.Errorf("startup: %w", err)
+	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
@@ -382,7 +385,7 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 	if name := r.URL.Query().Get("name"); name != "" {
 		filtered := actions[:0]
 		for _, a := range actions {
-			if a.Name == name || strings.HasSuffix(a.Name, "/"+name) {
+			if a.Name == name {
 				filtered = append(filtered, a)
 			}
 		}
@@ -391,7 +394,16 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 	if actions == nil {
 		actions = []*kernel.Action{}
 	}
-	writeJSON(w, http.StatusOK, actions)
+	// Strip execution-internal fields from public discovery; authorized users use
+	// the authenticated get-by-id endpoint to retrieve source and artifact data.
+	projected := make([]*kernel.Action, len(actions))
+	for i, a := range actions {
+		cp := *a
+		cp.Source = ""
+		cp.ArtifactHash = ""
+		projected[i] = &cp
+	}
+	writeJSON(w, http.StatusOK, projected)
 }
 
 func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
@@ -837,8 +849,7 @@ func (s *server) postListener(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	l, err := s.kernel.CreateListener(r.Context(), kernel.CreateListenerRequest{
-		OwnerUserID:    subjectFrom(r),
+	l, err := s.kernel.CreateListener(r.Context(), subjectFrom(r), kernel.CreateListenerRequest{
 		SourceUserID:   req.SourceUserID,
 		EventName:      req.EventName,
 		TargetActionID: req.TargetActionID,

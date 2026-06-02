@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -35,8 +36,7 @@ func TestCreateListener(t *testing.T) {
 	source := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, owner.ID, "/handler")
 
-	l, err := k.CreateListener(ctx, CreateListenerRequest{
-		OwnerUserID:    owner.ID,
+	l, err := k.CreateListener(ctx, owner.ID, CreateListenerRequest{
 		SourceUserID:   source.ID,
 		EventName:      "ping",
 		TargetActionID: a.ID,
@@ -58,8 +58,8 @@ func TestDeleteListener(t *testing.T) {
 	source := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, owner.ID, "/handler")
 
-	l, _ := k.CreateListener(ctx, CreateListenerRequest{
-		OwnerUserID: owner.ID, SourceUserID: source.ID, EventName: "ping",
+	l, _ := k.CreateListener(ctx, owner.ID, CreateListenerRequest{
+		SourceUserID: source.ID, EventName: "ping",
 		TargetActionID: a.ID,
 	})
 
@@ -83,8 +83,8 @@ func TestEmitQueuesNotFires(t *testing.T) {
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
-	l, err := k.CreateListener(ctx, CreateListenerRequest{
-		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "greet",
+	l, err := k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+		SourceUserID: bob.ID, EventName: "greet",
 		TargetActionID: a.ID,
 	})
 	if err != nil {
@@ -128,8 +128,8 @@ func TestEmitInactiveListenerNotQueued(t *testing.T) {
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 
-	l, _ := k.CreateListener(ctx, CreateListenerRequest{
-		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "greet",
+	l, _ := k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+		SourceUserID: bob.ID, EventName: "greet",
 		TargetActionID: a.ID,
 	})
 	_ = k.DeleteListener(ctx, alice.ID, l.ID)
@@ -151,8 +151,8 @@ func TestConsumeEventSuccess(t *testing.T) {
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
-	l, _ := k.CreateListener(ctx, CreateListenerRequest{
-		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "greet",
+	l, _ := k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+		SourceUserID: bob.ID, EventName: "greet",
 		TargetActionID: a.ID,
 	})
 
@@ -198,8 +198,8 @@ func TestConsumeEventAlreadyConsumed(t *testing.T) {
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
-	_, _ = k.CreateListener(ctx, CreateListenerRequest{
-		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "x",
+	_, _ = k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+		SourceUserID: bob.ID, EventName: "x",
 		TargetActionID: a.ID,
 	})
 
@@ -224,8 +224,8 @@ func TestConsumeEventUnauthorized(t *testing.T) {
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
-	_, _ = k.CreateListener(ctx, CreateListenerRequest{
-		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "x",
+	_, _ = k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+		SourceUserID: bob.ID, EventName: "x",
 		TargetActionID: a.ID,
 	})
 
@@ -245,8 +245,8 @@ func TestDeleteListenerPurgesEvents(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 500)
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	l, _ := k.CreateListener(ctx, CreateListenerRequest{
-		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "x",
+	l, _ := k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+		SourceUserID: bob.ID, EventName: "x",
 		TargetActionID: a.ID,
 	})
 
@@ -284,7 +284,7 @@ func TestResetInFlightEvents(t *testing.T) {
 		ArgsJSON:   "{}",
 		CreatedAt:  time.Now().UTC(),
 	}
-	_ = st.CreateEvent(ctx, e)
+	_ = st.CreateEvents(ctx, []*Event{e})
 	_ = st.LockEvent(ctx, e.ID) // sets consumed_at, leaving tx_id nil
 
 	// Verify it's in-flight.
@@ -314,8 +314,8 @@ func TestEmitEventCausalTraceID(t *testing.T) {
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
-	_, _ = k.CreateListener(ctx, CreateListenerRequest{
-		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "ping",
+	_, _ = k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+		SourceUserID: bob.ID, EventName: "ping",
 		TargetActionID: a.ID,
 	})
 
@@ -373,8 +373,8 @@ func TestEmitDirectCallHasNilCausalID(t *testing.T) {
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
-	_, _ = k.CreateListener(ctx, CreateListenerRequest{
-		OwnerUserID: alice.ID, SourceUserID: bob.ID, EventName: "ping",
+	_, _ = k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+		SourceUserID: bob.ID, EventName: "ping",
 		TargetActionID: a.ID,
 	})
 
@@ -411,8 +411,8 @@ func TestPollListenerUnauthorized(t *testing.T) {
 	source := setupUser(t, st, "@bob", 0)
 	stranger := setupUser(t, st, "@carol", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	l, _ := k.CreateListener(ctx, CreateListenerRequest{
-		OwnerUserID: alice.ID, SourceUserID: source.ID, EventName: "x",
+	l, _ := k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+		SourceUserID: source.ID, EventName: "x",
 		TargetActionID: a.ID,
 	})
 
@@ -421,5 +421,23 @@ func TestPollListenerUnauthorized(t *testing.T) {
 	}
 	if _, err := k.PollListener(ctx, source.ID, l.ID); err != nil {
 		t.Errorf("source user should be able to poll: %v", err)
+	}
+}
+
+func TestCreateListenerRequiresSourceUser(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@alice", 100)
+	a := setupActiveWasmAction(t, st, owner.ID, "/handler")
+
+	_, err := k.CreateListener(ctx, owner.ID, CreateListenerRequest{
+		SourceUserID:   "",
+		EventName:      "ping",
+		TargetActionID: a.ID,
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("expected ErrInvalidInput for empty SourceUserID, got %v", err)
 	}
 }

@@ -26,8 +26,7 @@ func eventsListenCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("source user not found: %w", err)
 				}
-				l, err := k.CreateListener(context.Background(), kernel.CreateListenerRequest{
-					OwnerUserID:    subjectID,
+				l, err := k.CreateListener(context.Background(), subjectID, kernel.CreateListenerRequest{
 					SourceUserID:   sourceUser.ID,
 					EventName:      eventName,
 					TargetActionID: actionID,

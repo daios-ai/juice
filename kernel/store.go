@@ -161,8 +161,6 @@ type Store interface {
 	// InsertPendingIdempotencyRecord inserts a record with status="pending". Returns a unique-constraint
 	// error (not ErrNotFound) if a record for the same key+counterparty already exists.
 	InsertPendingIdempotencyRecord(ctx context.Context, r *IdempotencyRecord) error
-	// CompleteIdempotencyRecord transitions a pending record to "complete" and stores the result and receipt.
-	CompleteIdempotencyRecord(ctx context.Context, id, resultJSON, receiptJSON string) error
 	// DeleteIdempotencyRecord removes a record (used to allow retry after execution failure).
 	DeleteIdempotencyRecord(ctx context.Context, id string) error
 
@@ -176,10 +174,8 @@ type Store interface {
 
 	CreateListener(ctx context.Context, l *Listener) error
 	ReadListener(ctx context.Context, id string) (*Listener, error)
-	UpdateListener(ctx context.Context, l *Listener) error
 	ListListeners(ctx context.Context, sourceUserID, eventName string) ([]*Listener, error)
 	ListListenersByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Listener, error)
-	CreateEvent(ctx context.Context, e *Event) error
 	// CreateEvents inserts all events in a single atomic transaction.
 	// Either all events are created or none are.
 	CreateEvents(ctx context.Context, events []*Event) error

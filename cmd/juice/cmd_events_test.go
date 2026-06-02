@@ -48,8 +48,7 @@ func TestListenerCreateAndDelete(t *testing.T) {
 
 	a := makeActiveAction(t, env, owner.ID, "/evt-handler")
 
-	l, err := env.k.CreateListener(ctx, kernel.CreateListenerRequest{
-		OwnerUserID:    owner.ID,
+	l, err := env.k.CreateListener(ctx, owner.ID, kernel.CreateListenerRequest{
 		SourceUserID:   source.ID,
 		EventName:      "ping",
 		TargetActionID: a.ID,
@@ -101,8 +100,7 @@ func TestListenerDeletedNotFired(t *testing.T) {
 
 	a := makeActiveAction(t, env, owner.ID, "/del-handler")
 
-	l, _ := env.k.CreateListener(ctx, kernel.CreateListenerRequest{
-		OwnerUserID:    owner.ID,
+	l, _ := env.k.CreateListener(ctx, owner.ID, kernel.CreateListenerRequest{
 		SourceUserID:   source.ID,
 		EventName:      "gone",
 		TargetActionID: a.ID,
@@ -128,16 +126,16 @@ func TestListListeners(t *testing.T) {
 
 	a := makeActiveAction(t, env, owner.ID, "/list-lst-action")
 
-	env.k.CreateListener(ctx, kernel.CreateListenerRequest{
-		OwnerUserID: owner.ID, SourceUserID: other.ID,
+	env.k.CreateListener(ctx, owner.ID, kernel.CreateListenerRequest{
+		SourceUserID: other.ID,
 		EventName: "ev1", TargetActionID: a.ID,
 	})
-	env.k.CreateListener(ctx, kernel.CreateListenerRequest{
-		OwnerUserID: owner.ID, SourceUserID: other.ID,
+	env.k.CreateListener(ctx, owner.ID, kernel.CreateListenerRequest{
+		SourceUserID: other.ID,
 		EventName: "ev2", TargetActionID: a.ID,
 	})
-	env.k.CreateListener(ctx, kernel.CreateListenerRequest{
-		OwnerUserID: other.ID, SourceUserID: owner.ID,
+	env.k.CreateListener(ctx, other.ID, kernel.CreateListenerRequest{
+		SourceUserID: owner.ID,
 		EventName: "ev3", TargetActionID: a.ID,
 	})
 

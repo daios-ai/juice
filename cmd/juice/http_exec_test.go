@@ -8,6 +8,24 @@ import (
 	"testing"
 )
 
+func TestValidateResolvedIPBlocked(t *testing.T) {
+	blocked := []string{"127.0.0.1", "::1", "192.168.1.1", "10.0.0.1", "172.16.0.1", "169.254.1.1"}
+	for _, ip := range blocked {
+		if err := validateResolvedIP(ip); err == nil {
+			t.Errorf("validateResolvedIP(%q): expected error, got nil", ip)
+		}
+	}
+}
+
+func TestValidateResolvedIPAllowed(t *testing.T) {
+	allowed := []string{"8.8.8.8", "1.1.1.1", "93.184.216.34"}
+	for _, ip := range allowed {
+		if err := validateResolvedIP(ip); err != nil {
+			t.Errorf("validateResolvedIP(%q): unexpected error: %v", ip, err)
+		}
+	}
+}
+
 func TestValidateRedirectHostBlocked(t *testing.T) {
 	cases := []string{"localhost", "127.0.0.1", "::1", "192.168.1.1", "10.0.0.1", "169.254.1.1"}
 	for _, h := range cases {

@@ -648,7 +648,7 @@ func (s *DB) StartProcess(ctx context.Context, p *kernel.Process, t *kernel.Trac
 	return dbErr(tx.Commit(), "start process: commit")
 }
 
-func (s *DB) CreateProcess(ctx context.Context, p *kernel.Process) error {
+func (s *DB) createProcess(ctx context.Context, p *kernel.Process) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at)
 		 VALUES (?,?,?,?,?,?,?)`,
@@ -860,14 +860,18 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		}
 	}
 
-	// Credit fee recipient — hard-fail if recipient is unset to prevent fund destruction.
+	// Credit fee recipient — hard-fail if recipient is unset or nonexistent to prevent fund destruction.
 	if fee > 0 {
 		if feeRecipientID == "" {
 			return fmt.Errorf("commit call: fee %d > 0 but feeRecipientID is empty: funds would be destroyed", fee)
 		}
-		if _, err = tx.ExecContext(ctx,
-			`UPDATE users SET available=available+? WHERE id=?`, fee, feeRecipientID); err != nil {
-			return dbErr(err, "commit call: credit fee recipient")
+		res, feeErr := tx.ExecContext(ctx,
+			`UPDATE users SET available=available+? WHERE id=?`, fee, feeRecipientID)
+		if feeErr != nil {
+			return dbErr(feeErr, "commit call: credit fee recipient")
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return fmt.Errorf("commit call: fee recipient %q not found: funds would be destroyed", feeRecipientID)
 		}
 	}
 
@@ -1090,7 +1094,7 @@ func (s *DB) ReadRootTrace(ctx context.Context, processID string) (*kernel.Trace
 
 // ---- Transactions ----
 
-func (s *DB) CreateTransaction(ctx context.Context, tx *kernel.Transaction) error {
+func (s *DB) createTransaction(ctx context.Context, tx *kernel.Transaction) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
@@ -1296,12 +1300,6 @@ func (s *DB) ReadListener(ctx context.Context, id string) (*kernel.Listener, err
 	return &l, nil
 }
 
-func (s *DB) UpdateListener(ctx context.Context, l *kernel.Listener) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE listeners SET active=? WHERE id=?`, boolInt(l.Active), l.ID)
-	return dbErr(err, "update listener")
-}
-
 func (s *DB) ListListeners(ctx context.Context, sourceUserID, eventName string) ([]*kernel.Listener, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id,owner_user_id,source_user_id,event_name,target_action_id,active,created_at
@@ -1356,15 +1354,6 @@ func (s *DB) ListListenersByOwner(ctx context.Context, ownerID string, limit, of
 		out = append(out, &l)
 	}
 	return out, rows.Err()
-}
-
-func (s *DB) CreateEvent(ctx context.Context, e *kernel.Event) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO events (id,listener_id,args_json,causing_trace_id,created_at)
-		 VALUES (?,?,?,?,?)`,
-		e.ID, e.ListenerID, e.ArgsJSON, nullStr(e.CausingTraceID), timeToStr(e.CreatedAt),
-	)
-	return dbErr(err, "create event")
 }
 
 func (s *DB) CreateEvents(ctx context.Context, events []*kernel.Event) error {
@@ -1719,7 +1708,7 @@ func dbErr(err error, op string) error {
 
 // ---- Receipts ----
 
-func (s *DB) CreateReceipt(ctx context.Context, r *kernel.Receipt) error {
+func (s *DB) createReceipt(ctx context.Context, r *kernel.Receipt) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -1773,7 +1762,7 @@ func (s *DB) ReadReceipt(ctx context.Context, id string) (*kernel.Receipt, error
 
 // ---- Ratings ----
 
-func (s *DB) CreateRating(ctx context.Context, r *kernel.Rating) error {
+func (s *DB) createRating(ctx context.Context, r *kernel.Rating) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature)
 		 VALUES (?,?,?,?,?,?,?)`,
@@ -1872,7 +1861,7 @@ func (s *DB) InsertPendingIdempotencyRecord(ctx context.Context, r *kernel.Idemp
 	return dbErr(err, "insert pending idempotency record")
 }
 
-func (s *DB) CompleteIdempotencyRecord(ctx context.Context, id, resultJSON, receiptJSON string) error {
+func (s *DB) completeIdempotencyRecord(ctx context.Context, id, resultJSON, receiptJSON string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=?`,
 		resultJSON, receiptJSON, id,
