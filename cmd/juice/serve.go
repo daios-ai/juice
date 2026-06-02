@@ -31,7 +31,7 @@ func init() {
 			return runServer(addr)
 		},
 	}
-	serveCmd.Flags().StringVar(&addr, "addr", envOr("JUICE_ADDR", ":8080"), "Listen address")
+	serveCmd.Flags().StringVar(&addr, "addr", envOr("JUICE_ADDR", ":4040"), "Listen address")
 	rootCmd.AddCommand(serveCmd)
 
 	rootCmd.AddCommand(healthCmd())
@@ -1158,7 +1158,7 @@ func healthCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&healthURL, "url", envOr("JUICE_URL", "http://localhost:8080"), "Server base URL")
+	cmd.Flags().StringVar(&healthURL, "url", envOr("JUICE_URL", "http://localhost:4040"), "Server base URL")
 	return cmd
 }
 

@@ -88,7 +88,7 @@ All commands accept `--output json` for machine-readable output.
 ## HTTP API
 
 ```bash
-./juice serve --addr :8080
+./juice serve --addr :4040
 ```
 
 All routes except `POST /v1/auth/token`, `POST /v1/auth/authorize`, and `POST /v1/users` require `Authorization: Bearer <token>`.
@@ -139,7 +139,7 @@ All routes except `POST /v1/auth/token`, `POST /v1/auth/authorize`, and `POST /v
 |---|---|---|
 | `JUICE_DB_PATH` | `juice.db` | SQLite file path |
 | `JUICE_SECRET_KEY` | `dev-secret-change-me` | JWT signing secret — **change in production** |
-| `JUICE_ADDR` | `:8080` | HTTP server listen address |
+| `JUICE_ADDR` | `:4040` | HTTP server listen address |
 | `JUICE_FEE_RECIPIENT` | — | User ID that receives platform fees |
 | `JUICE_FEE_BPS` | `2000` | Fee in basis points (2000 = 20%) |
 | `JUICE_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |

@@ -44,7 +44,7 @@ func loginCmd() *cobra.Command {
 	cmd.Flags().StringVar(&handle, "handle", "", "User handle (required)")
 	cmd.Flags().StringVar(&password, "password", "", "Password (prompted if omitted)")
 	cmd.Flags().BoolVar(&usePKCE, "pkce", false, "Use PKCE authorization code flow")
-	cmd.Flags().StringVar(&serverURL, "server", "", "Juice server URL for PKCE flow (e.g. http://localhost:8080)")
+	cmd.Flags().StringVar(&serverURL, "server", "", "Juice server URL for PKCE flow (e.g. http://localhost:4040)")
 	_ = cmd.MarkFlagRequired("handle")
 	return cmd
 }
