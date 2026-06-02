@@ -1845,6 +1845,10 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 			var price int64
 			if v, ok := op["x-juice-price"]; ok {
 				if f, ok := v.(float64); ok {
+					if int64(f) < 0 {
+						rejected = append(rejected, ImportRejection{Key: key, Reason: "price must be non-negative"})
+						continue
+					}
 					price = int64(f)
 				}
 			}

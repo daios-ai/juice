@@ -1855,6 +1855,17 @@ func TestParseOpenAPISpecRejectsAmbiguous2xxSchemas(t *testing.T) {
 	}
 }
 
+func TestParseOpenAPISpecRejectsNegativePrice(t *testing.T) {
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/op":{"get":{"operationId":"getOp","description":"an op","x-juice-price":-5,"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	_, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
+	if err != nil {
+		t.Fatalf("parseOpenAPISpec: %v", err)
+	}
+	if len(rejected) != 1 || rejected[0].Reason != "price must be non-negative" {
+		t.Errorf("expected negative price rejection, got %+v", rejected)
+	}
+}
+
 func TestImportOpenAPISetsOwnershipVerified(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)
