@@ -447,9 +447,10 @@ First boot prompts only for a password and atomically creates:
 config.superuser_handle = @sys
 config.signing_public_key  = base64url Ed25519 public key
 config.signing_private_key = base64url Ed25519 private key
+config.jwt_secret          = 32 random bytes, hex-encoded
 ```
 
-The private key is sensitive: never log or return it. Partial first boot must remain safely rerunnable.
+`config.signing_private_key` and `config.jwt_secret` are sensitive: never log or return them. Partial first boot must remain safely rerunnable. `JUICE_SECRET_KEY`, when set, overrides `config.jwt_secret` at runtime without altering the stored value.
 
 Every server startup reads `config.superuser_handle` to confirm first boot and identify `@sys`. Before accepting requests:
 
@@ -619,7 +620,7 @@ Load configuration from environment variables and an optional config file. Use s
 
 ```text
 JUICE_DB_PATH JUICE_LOG_LEVEL JUICE_LOG_FILE JUICE_FEE_BPS JUICE_FEE_RECIPIENT
-JUICE_AUTH_ISSUER JUICE_AUTH_AUDIENCE JUICE_TOKEN_TTL
+JUICE_AUTH_ISSUER JUICE_AUTH_AUDIENCE JUICE_TOKEN_TTL JUICE_SECRET_KEY
 JUICE_OLLAMA_URL JUICE_OLLAMA_CHAT_MODEL JUICE_OLLAMA_EMBED_MODEL
 JUICE_SCRIPT_TIMEOUT_MS JUICE_SCRIPT_MEMORY_BYTES
 ```
