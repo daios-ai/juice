@@ -26,7 +26,8 @@ FAIL=0
 ERRS=""
 
 _NEXT_PORT=39000
-alloc_port() { local p=$_NEXT_PORT; _NEXT_PORT=$((_NEXT_PORT + 1)); echo "$p"; }
+_ALLOC_PORT=0
+alloc_port() { _ALLOC_PORT=$_NEXT_PORT; _NEXT_PORT=$((_NEXT_PORT + 1)); }
 
 # ---------------------------------------------------------------------------
 # Assertion helpers
@@ -61,15 +62,21 @@ jj() {
 bootstrap_kernel() {
     local db="$1" pass="$2" home="$3" port="$4"
     JUICE_LOG_LEVEL=error JUICE_BOOTSTRAP_PASSWORD="$pass" JUICE_ALLOW_LOCAL_SOURCES=true \
-        HOME="$home" "$JUICE" --db "$db" serve --addr "127.0.0.1:$port" &
+        HOME="$home" "$JUICE" --db "$db" serve --addr "127.0.0.1:$port" >/dev/null 2>&1 &
     local pid=$!
     local deadline=$(( $(date +%s) + 15 ))
     until curl -sf "http://127.0.0.1:${port}/health" >/dev/null 2>&1; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid" 2>/dev/null; return 1
+        fi
         if [ "$(date +%s)" -ge "$deadline" ]; then
             kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 1
         fi
         sleep 0.2
     done
+    if ! kill -0 "$pid" 2>/dev/null; then
+        return 1
+    fi
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 0
 }
 
@@ -79,15 +86,21 @@ SERVE_PID=""
 start_serve() {
     local db="$1" addr="$2" pass="$3" home="$4"
     JUICE_LOG_LEVEL=error JUICE_BOOTSTRAP_PASSWORD="$pass" JUICE_ALLOW_LOCAL_SOURCES=true \
-        HOME="$home" "$JUICE" --db "$db" serve --addr "$addr" &
+        HOME="$home" "$JUICE" --db "$db" serve --addr "$addr" >/dev/null 2>&1 &
     SERVE_PID=$!
     local deadline=$(( $(date +%s) + 15 ))
     until curl -sf "http://${addr}/health" >/dev/null 2>&1; do
+        if ! kill -0 "$SERVE_PID" 2>/dev/null; then
+            wait "$SERVE_PID" 2>/dev/null; return 1
+        fi
         if [ "$(date +%s)" -ge "$deadline" ]; then
             kill "$SERVE_PID" 2>/dev/null; return 1
         fi
         sleep 0.2
     done
+    if ! kill -0 "$SERVE_PID" 2>/dev/null; then
+        return 1
+    fi
 }
 
 stop_serve() {
@@ -102,7 +115,7 @@ start_backend() {
     local port="$1" code="${2:-200}" body="${3}"
     [ -z "$body" ] && body='{"ok":true}'
     python3 - "$port" "$code" "$body" <<'PYEOF' &
-import sys, http.server
+import sys, http.server, socket
 port, code, body = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3].encode()
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
@@ -113,14 +126,51 @@ class H(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
     def log_message(self, *a): pass
-http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
+srv = http.server.HTTPServer(('127.0.0.1', port), H)
+srv.serve_forever()
 PYEOF
     BACKEND_PID=$!
     sleep 0.3
+    kill -0 "$BACKEND_PID" 2>/dev/null || return 1
 }
 
 stop_backend() {
     local pid="${1:-$BACKEND_PID}"
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 0
+}
+
+# start_api_server port spec_file
+# Serves spec_file on GET and '{"message":"ok"}' on POST. Sets API_SERVER_PID.
+API_SERVER_PID=""
+start_api_server() {
+    local port="$1" spec_file="$2"
+    python3 - "$port" "$spec_file" <<'PYEOF' &
+import sys, http.server
+port, spec_file = int(sys.argv[1]), sys.argv[2]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        with open(spec_file, 'rb') as f: body = f.read()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(body)
+    def do_POST(self):
+        n = int(self.headers.get('Content-Length', 0))
+        self.rfile.read(n)
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(b'{"message":"ok"}')
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
+PYEOF
+    API_SERVER_PID=$!
+    sleep 0.3
+    kill -0 "$API_SERVER_PID" 2>/dev/null || return 1
+}
+
+stop_api_server() {
+    local pid="${1:-$API_SERVER_PID}"
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 0
 }
 
@@ -245,7 +295,7 @@ flow_bootstrap() {
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys"; mkdir -p "$home_sys/.juice"
-    port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
 
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "bootstrap.first_boot" "bootstrap_kernel failed"; return; }
@@ -274,7 +324,7 @@ assert '/llm/chat' in names, f'/llm/chat missing; got {names}'
 
     # Second boot is idempotent — starts cleanly without re-creating @sys
     local port2
-    port2=$(alloc_port)
+    alloc_port; port2=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port2" \
         || { fail "bootstrap.idempotent" "second boot failed"; return; }
     ok "bootstrap.idempotent"
@@ -293,7 +343,7 @@ flow_local_auth() {
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys"; mkdir -p "$home_sys/.juice"
-    port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "local_auth.boot" "bootstrap failed"; return; }
 
@@ -361,7 +411,7 @@ flow_suspension() {
     db="$dir/juice.db"
     home_sys="$dir/sys";   mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
-    port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "suspension.boot" "bootstrap failed"; return; }
 
@@ -413,7 +463,7 @@ flow_deposits() {
     home_sys="$dir/sys";   mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";   mkdir -p "$home_bob/.juice"
-    port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "deposits.boot" "bootstrap failed"; return; }
 
@@ -467,7 +517,7 @@ flow_action_lifecycle() {
     home_sys="$dir/sys";   mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     local home_bob="$dir/bob"; mkdir -p "$home_bob/.juice"
-    port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "action_lifecycle.boot" "bootstrap failed"; return; }
 
@@ -549,7 +599,7 @@ flow_process_lifecycle() {
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
-    port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "process_lifecycle.boot" "bootstrap failed"; return; }
 
@@ -607,7 +657,7 @@ flow_process_funding() {
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
-    port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "process_funding.boot" "bootstrap failed"; return; }
 
@@ -658,7 +708,7 @@ flow_acl_public() {
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
-    port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "acl_public.boot" "bootstrap failed"; return; }
 
@@ -730,8 +780,8 @@ flow_successful_paid_call() {
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
-    port=$(alloc_port)
-    backend_port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "successful_paid_call.boot" "bootstrap failed"; return; }
 
@@ -824,8 +874,8 @@ flow_failed_call_refund() {
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
-    port=$(alloc_port)
-    backend_port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "failed_call_refund.boot" "bootstrap failed"; return; }
 
@@ -898,7 +948,7 @@ flow_input_schema_failure() {
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
-    port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "input_schema_failure.boot" "bootstrap failed"; return; }
 
@@ -955,8 +1005,8 @@ flow_output_schema_failure() {
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
-    port=$(alloc_port)
-    backend_port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "output_schema_failure.boot" "bootstrap failed"; return; }
 
@@ -1039,7 +1089,7 @@ flow_wasm_execution() {
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
-    port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "wasm_execution.boot" "bootstrap failed"; return; }
 
@@ -1111,8 +1161,8 @@ flow_contractor_subcall() {
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
     home_carol="$dir/carol"; mkdir -p "$home_carol/.juice"
-    port=$(alloc_port)
-    backend_port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "contractor_subcall.boot" "bootstrap failed"; return; }
 
@@ -1193,8 +1243,8 @@ flow_contractor_failure() {
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
     home_carol="$dir/carol"; mkdir -p "$home_carol/.juice"
-    port=$(alloc_port)
-    backend_port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "contractor_failure.boot" "bootstrap failed"; return; }
 
@@ -1269,8 +1319,8 @@ flow_event_queue_success() {
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
-    port=$(alloc_port)
-    backend_port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "event_queue_success.boot" "bootstrap failed"; return; }
 
@@ -1354,8 +1404,8 @@ flow_event_queue_failure() {
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
     home_carol="$dir/carol"; mkdir -p "$home_carol/.juice"
-    port=$(alloc_port)
-    backend_port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "event_queue_failure.boot" "bootstrap failed"; return; }
 
@@ -1429,8 +1479,8 @@ flow_event_deletion_restart() {
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
-    port=$(alloc_port)
-    backend_port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "event_deletion_restart.boot" "bootstrap failed"; return; }
 
@@ -1480,7 +1530,7 @@ PYEOF
 
     # bootstrap_kernel on same DB → bootstrap() calls ResetInFlightEvents → consumed_at=NULL
     local port2
-    port2=$(alloc_port)
+    alloc_port; port2=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port2" >/dev/null 2>&1
 
     # @alice polls again → event restored
@@ -1513,8 +1563,8 @@ flow_rating() {
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
-    port=$(alloc_port)
-    backend_port=$(alloc_port)
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "rating.boot" "bootstrap failed"; return; }
 
@@ -1577,9 +1627,1172 @@ flow_rating() {
 }
 
 # ===========================================================================
+# BATCH 4 — PKCE, Refresh, Receipts, LLM, OpenAPI
+# ===========================================================================
+
+flow_pkce_auth() {
+    echo "=== FLOW pkce_auth ==="
+    local dir db home_sys home_alice port serve_port addr
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; serve_port=$_ALLOC_PORT
+    addr="127.0.0.1:$serve_port"
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "pkce_auth.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    # Generate PKCE verifier + challenge
+    local verifier challenge
+    verifier=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+    challenge=$(python3 -c "
+import sys, hashlib, base64
+v = sys.argv[1].encode()
+print(base64.urlsafe_b64encode(hashlib.sha256(v).digest()).rstrip(b'=').decode())
+" "$verifier")
+
+    # Authorize → get code
+    local auth_resp code
+    auth_resp=$(curl -sf -X POST "http://$addr/v1/auth/authorize" \
+        -d "handle=@alice&password=alicepass&code_challenge=$challenge" 2>/dev/null)
+    code=$(python3 -c "
+import sys, urllib.parse, json
+d = json.loads(sys.argv[1])
+qs = urllib.parse.urlparse(d['redirect']).query
+print(urllib.parse.parse_qs(qs)['code'][0])
+" "$auth_resp" 2>/dev/null)
+
+    # Exchange code → access_token
+    local token_resp access_token
+    token_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "grant_type=authorization_code&code=$code&code_verifier=$verifier" 2>/dev/null)
+    access_token=$(strfield "$token_resp" "access_token")
+    [ -n "$access_token" ] \
+        && ok "pkce_auth.token_obtained" \
+        || fail "pkce_auth.token_obtained" "no access_token in: $token_resp"
+
+    # Code reuse → rejected (code already marked used)
+    local reuse_resp
+    reuse_resp=$(curl -s -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "grant_type=authorization_code&code=$code&code_verifier=$verifier" 2>/dev/null)
+    echo "$reuse_resp" | grep -qi "invalid\|error\|unauthenticated" \
+        && ok "pkce_auth.code_reuse_rejected" \
+        || fail "pkce_auth.code_reuse_rejected" "expected error on reuse, got: $reuse_resp"
+
+    # Wrong verifier → rejected
+    local auth_resp2 code2 bad_resp
+    auth_resp2=$(curl -sf -X POST "http://$addr/v1/auth/authorize" \
+        -d "handle=@alice&password=alicepass&code_challenge=$challenge" 2>/dev/null)
+    code2=$(python3 -c "
+import sys, urllib.parse, json
+d = json.loads(sys.argv[1])
+qs = urllib.parse.urlparse(d['redirect']).query
+print(urllib.parse.parse_qs(qs)['code'][0])
+" "$auth_resp2" 2>/dev/null)
+    bad_resp=$(curl -s -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "grant_type=authorization_code&code=$code2&code_verifier=wrong-verifier-value" 2>/dev/null)
+    echo "$bad_resp" | grep -qi "invalid\|error\|unauthenticated" \
+        && ok "pkce_auth.wrong_verifier_rejected" \
+        || fail "pkce_auth.wrong_verifier_rejected" "expected error for wrong verifier, got: $bad_resp"
+
+    stop_serve "$serve_pid"
+}
+
+flow_refresh_rotation() {
+    echo "=== FLOW refresh_rotation ==="
+    local dir db home_sys home_alice port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "refresh_rotation.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+
+    # Capture RT1 before refresh
+    local rt1
+    rt1=$(cat "$home_alice/.juice/refresh_token" 2>/dev/null)
+
+    # Refresh → RT1 rotated to RT2
+    local refresh_out
+    refresh_out=$(j "$db" "$home_alice" auth refresh 2>&1)
+    echo "$refresh_out" | grep -q "refreshed" \
+        && ok "refresh_rotation.refresh_succeeds" \
+        || fail "refresh_rotation.refresh_succeeds" "unexpected output: $refresh_out"
+
+    local rt2
+    rt2=$(cat "$home_alice/.juice/refresh_token" 2>/dev/null)
+
+    # Old RT1 rejected
+    local home_old="$dir/old"; mkdir -p "$home_old/.juice"
+    echo "$rt1" > "$home_old/.juice/refresh_token"
+    local bad_refresh
+    bad_refresh=$(j "$db" "$home_old" auth refresh 2>&1)
+    echo "$bad_refresh" | grep -qi "invalid\|expired\|unauthenticated" \
+        && ok "refresh_rotation.old_rt_rejected" \
+        || fail "refresh_rotation.old_rt_rejected" "expected invalid/expired, got: $bad_refresh"
+
+    # Logout (revokes RT2) → RT2 rejected
+    j "$db" "$home_alice" auth logout >/dev/null 2>&1
+    local home_rt2="$dir/rt2"; mkdir -p "$home_rt2/.juice"
+    echo "$rt2" > "$home_rt2/.juice/refresh_token"
+    local after_logout
+    after_logout=$(j "$db" "$home_rt2" auth refresh 2>&1)
+    echo "$after_logout" | grep -qi "invalid\|expired\|unauthenticated" \
+        && ok "refresh_rotation.revoked_rt_rejected" \
+        || fail "refresh_rotation.revoked_rt_rejected" "expected invalid after logout, got: $after_logout"
+}
+
+flow_successful_receipt() {
+    echo "=== FLOW successful_receipt ==="
+    local dir db home_sys home_alice home_bob port backend_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "successful_receipt.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 100 >/dev/null 2>&1
+
+    start_backend "$backend_port" 200 '{"ok":true}'
+    local backend_pid=$BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    local create_out action_id
+    create_out=$(jj "$db" "$home_alice" action add --name /receipt-action --kind http \
+        --source "http://127.0.0.1:${backend_port}/act" --price 10 --description "receipt test action")
+    action_id=$(strfield "$create_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_bob" process start --funds 50)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    local call_out tx_id
+    call_out=$(jj "$db" "$home_bob" call \
+        --process "$proc_id" --target @alice --action /receipt-action --args '{}')
+    tx_id=$(strfield "$call_out" "tx_id")
+    [ -n "$tx_id" ] \
+        && ok "successful_receipt.call_succeeded" \
+        || fail "successful_receipt.call_succeeded" "no tx_id: $call_out"
+
+    # Verify receipt record was created in DB
+    local receipt_id
+    receipt_id=$(python3 - "$db" "$tx_id" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute("SELECT id FROM receipts WHERE tx_id=?", [sys.argv[2]]).fetchone()
+conn.close()
+print(row[0] if row else "")
+PYEOF
+)
+    [ -n "$receipt_id" ] \
+        && ok "successful_receipt.receipt_created" \
+        || fail "successful_receipt.receipt_created" "no receipt for tx_id=$tx_id"
+
+    stop_backend "$backend_pid"
+}
+
+flow_failed_receipt() {
+    echo "=== FLOW failed_receipt ==="
+    local dir db home_sys home_alice home_bob port backend_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "failed_receipt.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 100 >/dev/null 2>&1
+
+    start_backend "$backend_port" 500 '{"error":"backend error"}'
+    local backend_pid=$BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    local create_out action_id
+    create_out=$(jj "$db" "$home_alice" action add --name /fail-action --kind http \
+        --source "http://127.0.0.1:${backend_port}/fail" --price 10 --description "fail action")
+    action_id=$(strfield "$create_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_bob" process start --funds 50)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    # Failing call — ignore error, tx is recorded in DB
+    j "$db" "$home_bob" call --process "$proc_id" --target @alice --action /fail-action --args '{}' \
+        >/dev/null 2>&1 || true
+
+    # Find the failed tx
+    local tx_list tx_id tx_status
+    tx_list=$(jj "$db" "$home_bob" tx list --process "$proc_id")
+    tx_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])[0]['ID'])" "$tx_list" 2>/dev/null)
+    tx_status=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])[0]['Status'])" "$tx_list" 2>/dev/null)
+    [ "$tx_status" = "failure" ] \
+        && ok "failed_receipt.failure_tx_recorded" \
+        || fail "failed_receipt.failure_tx_recorded" "expected failure status, got: $tx_list"
+
+    # Verify receipt was also created for the failed tx
+    local receipt_id
+    receipt_id=$(python3 - "$db" "$tx_id" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute("SELECT id FROM receipts WHERE tx_id=?", [sys.argv[2]]).fetchone()
+conn.close()
+print(row[0] if row else "")
+PYEOF
+)
+    [ -n "$receipt_id" ] \
+        && ok "failed_receipt.receipt_created_for_failure" \
+        || fail "failed_receipt.receipt_created_for_failure" "no receipt for failed tx_id=$tx_id"
+
+    stop_backend "$backend_pid"
+}
+
+flow_lookup() {
+    echo "=== FLOW lookup ==="
+    local dir db home_sys home_alice port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "lookup.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+
+    # @sys/lookup price=0; start a zero-fund process
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_alice" process start --funds 0)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    # Call without embedder → ErrInvalidState
+    local lookup_out
+    lookup_out=$(j "$db" "$home_alice" call \
+        --process "$proc_id" --target @sys --action /lookup \
+        --args '{"query":"greet","limit":5}' 2>&1)
+    echo "$lookup_out" | grep -qi "embedding\|invalid.state\|invalid_state" \
+        && ok "lookup.no_embedder_error" \
+        || fail "lookup.no_embedder_error" "expected ErrInvalidState, got: $lookup_out"
+
+    # Missing required 'query' field → schema violation
+    local schema_out
+    schema_out=$(j "$db" "$home_alice" call \
+        --process "$proc_id" --target @sys --action /lookup \
+        --args '{}' 2>&1)
+    echo "$schema_out" | grep -qi "query\|required\|schema" \
+        && ok "lookup.missing_query_rejected" \
+        || fail "lookup.missing_query_rejected" "expected schema/query error, got: $schema_out"
+}
+
+flow_chat() {
+    echo "=== FLOW chat ==="
+    local dir db home_sys home_alice port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "chat.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_alice" process start --funds 0)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    # Call without chatter → ErrInvalidState
+    local chat_out
+    chat_out=$(j "$db" "$home_alice" call \
+        --process "$proc_id" --target @sys --action /llm/chat \
+        --args '{"messages":[{"role":"user","content":"hello"}]}' 2>&1)
+    echo "$chat_out" | grep -qi "chat\|invalid.state\|invalid_state" \
+        && ok "chat.no_chatter_error" \
+        || fail "chat.no_chatter_error" "expected ErrInvalidState, got: $chat_out"
+
+    # Missing required 'messages' field → schema violation
+    local schema_out
+    schema_out=$(j "$db" "$home_alice" call \
+        --process "$proc_id" --target @sys --action /llm/chat \
+        --args '{}' 2>&1)
+    echo "$schema_out" | grep -qi "messages\|required\|schema" \
+        && ok "chat.missing_messages_rejected" \
+        || fail "chat.missing_messages_rejected" "expected schema/messages error, got: $schema_out"
+}
+
+flow_openapi_import_execute() {
+    echo "=== FLOW openapi_import_execute ==="
+    local dir db home_sys home_alice home_bob port api_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; api_port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "openapi_import_execute.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 50 >/dev/null 2>&1
+
+    # Write spec to file; start combined spec+backend server
+    local spec_file="$dir/spec.json"
+    python3 - "$api_port" "$spec_file" <<'PYEOF'
+import json, sys
+api_port, spec_file = sys.argv[1], sys.argv[2]
+spec = {
+    "openapi": "3.0.0",
+    "info": {"title": "Test API", "version": "1.0.0"},
+    "x-juice-owner": "@alice",
+    "servers": [{"url": f"http://127.0.0.1:{api_port}"}],
+    "paths": {
+        "/greet": {
+            "post": {
+                "operationId": "greet",
+                "description": "Say hello",
+                "x-juice-price": 5,
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {"type": "object", "properties": {"message": {"type": "string"}}}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+with open(spec_file, 'w') as f:
+    json.dump(spec, f)
+PYEOF
+    start_api_server "$api_port" "$spec_file"
+    local api_pid=$API_SERVER_PID
+    trap "rm -rf '$dir'; kill '$api_pid' 2>/dev/null; wait '$api_pid' 2>/dev/null" RETURN
+
+    # Import spec → created=1
+    local import_out created_count action_id action_name
+    import_out=$(jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
+    created_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]).get('Created',[])))" \
+        "$import_out" 2>/dev/null || echo 0)
+    [ "$created_count" -eq 1 ] \
+        && ok "openapi_import_execute.import_created_1" \
+        || fail "openapi_import_execute.import_created_1" "expected 1 created, got: $import_out"
+
+    action_id=$(python3 -c "import sys,json; r=json.loads(sys.argv[1]); print(r['Created'][0]['ID'])" \
+        "$import_out" 2>/dev/null)
+    action_name=$(python3 -c "import sys,json; r=json.loads(sys.argv[1]); print(r['Created'][0]['Name'])" \
+        "$import_out" 2>/dev/null)
+
+    # Enable + grant-all (requires x-juice-owner for public access)
+    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+
+    # @bob calls the imported action
+    local proc_out proc_id call_out tx_id
+    proc_out=$(jj "$db" "$home_bob" process start --funds 20)
+    proc_id=$(strfield "$proc_out" "process_id")
+    call_out=$(jj "$db" "$home_bob" call \
+        --process "$proc_id" --target @alice --action "$action_name" --args '{}')
+    tx_id=$(strfield "$call_out" "tx_id")
+    [ -n "$tx_id" ] \
+        && ok "openapi_import_execute.call_succeeds" \
+        || fail "openapi_import_execute.call_succeeds" "no tx_id: $call_out"
+
+    # Action name includes owner handle prefix (OpenAPI convention)
+    [ "$action_name" = "@alice/greet" ] \
+        && ok "openapi_import_execute.action_name_correct" \
+        || fail "openapi_import_execute.action_name_correct" "expected @alice/greet, got: $action_name"
+
+    stop_api_server "$api_pid"
+}
+
+flow_openapi_changed_reimport() {
+    echo "=== FLOW openapi_changed_reimport ==="
+    local dir db home_sys home_alice port api_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; api_port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "openapi_changed_reimport.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+
+    # Write v1 spec; start server
+    local spec_file="$dir/spec.json"
+    python3 - "$api_port" "$spec_file" "Say hello v1" <<'PYEOF'
+import json, sys
+api_port, spec_file, desc = sys.argv[1], sys.argv[2], sys.argv[3]
+spec = {
+    "openapi": "3.0.0",
+    "info": {"title": "Test API", "version": "1.0.0"},
+    "x-juice-owner": "@alice",
+    "servers": [{"url": f"http://127.0.0.1:{api_port}"}],
+    "paths": {
+        "/greet": {
+            "post": {
+                "operationId": "greet",
+                "description": desc,
+                "x-juice-price": 5,
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {"type": "object", "properties": {"message": {"type": "string"}}}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+with open(spec_file, 'w') as f:
+    json.dump(spec, f)
+PYEOF
+    start_api_server "$api_port" "$spec_file"
+    local api_pid=$API_SERVER_PID
+    trap "rm -rf '$dir'; kill '$api_pid' 2>/dev/null; wait '$api_pid' 2>/dev/null" RETURN
+
+    # First import
+    local import1_out action_id
+    import1_out=$(jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
+    action_id=$(python3 -c "import sys,json; r=json.loads(sys.argv[1]); print(r['Created'][0]['ID'])" \
+        "$import1_out" 2>/dev/null)
+
+    # Update spec on disk (change description → hash changes)
+    python3 - "$api_port" "$spec_file" "Say hello v2" <<'PYEOF'
+import json, sys
+api_port, spec_file, desc = sys.argv[1], sys.argv[2], sys.argv[3]
+spec = {
+    "openapi": "3.0.0",
+    "info": {"title": "Test API", "version": "1.0.0"},
+    "x-juice-owner": "@alice",
+    "servers": [{"url": f"http://127.0.0.1:{api_port}"}],
+    "paths": {
+        "/greet": {
+            "post": {
+                "operationId": "greet",
+                "description": desc,
+                "x-juice-price": 5,
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {"type": "object", "properties": {"message": {"type": "string"}}}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+with open(spec_file, 'w') as f:
+    json.dump(spec, f)
+PYEOF
+
+    # Reimport → updated=1 (description changed → hash changed → action deactivated)
+    local import2_out updated_count
+    import2_out=$(jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
+    updated_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]).get('Updated',[])))" \
+        "$import2_out" 2>/dev/null || echo 0)
+    [ "$updated_count" -eq 1 ] \
+        && ok "openapi_changed_reimport.reimport_updated_1" \
+        || fail "openapi_changed_reimport.reimport_updated_1" "expected 1 updated, got: $import2_out"
+
+    # Action is now inactive
+    local action_show active
+    action_show=$(jj "$db" "$home_alice" action show --id "$action_id")
+    active=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['Active'])" "$action_show" 2>/dev/null)
+    [ "$active" = "False" ] \
+        && ok "openapi_changed_reimport.action_deactivated" \
+        || fail "openapi_changed_reimport.action_deactivated" "expected False, got: $action_show"
+
+    # Action ID unchanged
+    local updated_id
+    updated_id=$(python3 -c "import sys,json; r=json.loads(sys.argv[1]); print(r['Updated'][0]['ID'])" \
+        "$import2_out" 2>/dev/null)
+    [ "$updated_id" = "$action_id" ] \
+        && ok "openapi_changed_reimport.action_id_preserved" \
+        || fail "openapi_changed_reimport.action_id_preserved" "expected $action_id, got: $updated_id"
+
+    stop_api_server "$api_pid"
+}
+
+flow_openapi_unimport() {
+    echo "=== FLOW openapi_unimport ==="
+    local dir db home_sys home_alice port api_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; api_port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "openapi_unimport.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+
+    # Write spec with 2 operations
+    local spec_file="$dir/spec.json"
+    python3 - "$api_port" "$spec_file" <<'PYEOF'
+import json, sys
+api_port, spec_file = sys.argv[1], sys.argv[2]
+spec = {
+    "openapi": "3.0.0",
+    "info": {"title": "Test API", "version": "1.0.0"},
+    "x-juice-owner": "@alice",
+    "servers": [{"url": f"http://127.0.0.1:{api_port}"}],
+    "paths": {
+        "/greet": {
+            "post": {
+                "operationId": "greet",
+                "description": "Say hello",
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {"schema": {"type": "object"}}
+                        }
+                    }
+                }
+            }
+        },
+        "/farewell": {
+            "post": {
+                "operationId": "farewell",
+                "description": "Say goodbye",
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {"schema": {"type": "object"}}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+with open(spec_file, 'w') as f:
+    json.dump(spec, f)
+PYEOF
+    start_api_server "$api_port" "$spec_file"
+    local api_pid=$API_SERVER_PID
+    trap "rm -rf '$dir'; kill '$api_pid' 2>/dev/null; wait '$api_pid' 2>/dev/null" RETURN
+
+    # Import 2 operations
+    local import_out greet_id
+    import_out=$(jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
+    greet_id=$(python3 -c "
+import sys,json
+r=json.loads(sys.argv[1])
+for a in r.get('Created',[]):
+    if 'greet' in a['Name']: print(a['ID']); break
+" "$import_out" 2>/dev/null)
+
+    # Create a manual (non-OpenAPI) action
+    local manual_out manual_id
+    manual_out=$(jj "$db" "$home_alice" action add --name /manual --kind http \
+        --source "http://127.0.0.1:${api_port}/manual" --price 0 --description "manual action")
+    manual_id=$(strfield "$manual_out" "ID")
+    j "$db" "$home_alice" action enable --id "$manual_id" >/dev/null 2>&1
+
+    # Unimport → both OpenAPI actions deactivated
+    local unimport_out
+    unimport_out=$(j "$db" "$home_alice" action unimport \
+        --openapi "http://127.0.0.1:${api_port}/" 2>&1)
+    echo "$unimport_out" | grep -q "deactivated 2" \
+        && ok "openapi_unimport.two_deactivated" \
+        || fail "openapi_unimport.two_deactivated" "expected 'deactivated 2', got: $unimport_out"
+
+    # Greet action is now inactive
+    local greet_show greet_active
+    greet_show=$(jj "$db" "$home_alice" action show --id "$greet_id")
+    greet_active=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['Active'])" "$greet_show" 2>/dev/null)
+    [ "$greet_active" = "False" ] \
+        && ok "openapi_unimport.openapi_action_deactivated" \
+        || fail "openapi_unimport.openapi_action_deactivated" "expected False, got: $greet_show"
+
+    # Manual action still active
+    local manual_show manual_active
+    manual_show=$(jj "$db" "$home_alice" action show --id "$manual_id")
+    manual_active=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['Active'])" "$manual_show" 2>/dev/null)
+    [ "$manual_active" = "True" ] \
+        && ok "openapi_unimport.manual_action_unaffected" \
+        || fail "openapi_unimport.manual_action_unaffected" "expected True, got: $manual_show"
+
+    stop_api_server "$api_pid"
+}
+
+# ---------------------------------------------------------------------------
+# Batch 5: Federation and Admin
+# ---------------------------------------------------------------------------
+
+# _fed_setup dir_var db_l db_r home_l home_r port_l port_r port_b
+# Common federation setup: two bootstrapped kernels, backend, serves started,
+# both registered as peers, /greet imported and enabled on LOCAL.
+# Returns proxy_id via stdout (last line of output).
+_fed_setup() {
+    local dir="$1" db_l="$2" db_r="$3" home_l="$4" home_r="$5"
+    local port_l="$6" port_r="$7" port_b="$8"
+
+    mkdir -p "$home_l/.juice" "$home_r/.juice"
+
+    local boot_l boot_r
+    alloc_port; boot_l=$_ALLOC_PORT; alloc_port; boot_r=$_ALLOC_PORT
+    bootstrap_kernel "$db_l" syspass "$home_l" "$boot_l" || return 1
+    bootstrap_kernel "$db_r" syspass "$home_r" "$boot_r" || return 1
+
+    j "$db_l" "$home_l" auth login --handle @sys --password syspass >/dev/null 2>&1
+    j "$db_r" "$home_r" auth login --handle @sys --password syspass >/dev/null 2>&1
+
+    # Backend for remote action
+    start_backend "$port_b" 200 '{"greeting":"hello"}'
+    echo "$BACKEND_PID" > "$dir/bpid"
+
+    # Create /greet on REMOTE, enable, grant-all
+    local action_id_r
+    action_id_r=$(jj "$db_r" "$home_r" action add \
+        --name /greet --kind http \
+        --source "http://127.0.0.1:$port_b" \
+        --description "greet endpoint" \
+        --price 0 | python3 -c "import sys,json; print(json.load(sys.stdin)['ID'])" 2>/dev/null)
+    [ -n "$action_id_r" ] || { echo "_fed_setup: action_id_r empty (port_b=$port_b)" >&2; return 1; }
+    j "$db_r" "$home_r" action enable --id "$action_id_r" >/dev/null 2>&1
+    j "$db_r" "$home_r" action grant-all --id "$action_id_r" >/dev/null 2>&1
+
+    # Start both serves
+    start_serve "$db_l" "127.0.0.1:$port_l" syspass "$home_l" \
+        || { echo "_fed_setup: start_serve local ($port_l) failed" >&2; return 1; }
+    echo "$SERVE_PID" > "$dir/pid_l"
+    start_serve "$db_r" "127.0.0.1:$port_r" syspass "$home_r" \
+        || { echo "_fed_setup: start_serve remote ($port_r) failed" >&2; return 1; }
+    echo "$SERVE_PID" > "$dir/pid_r"
+
+    # Register each as peer of the other
+    local ra_out
+    ra_out=$(j "$db_l" "$home_l" remote add "http://127.0.0.1:$port_r" 2>&1)
+    echo "$ra_out" | grep -q "Registered" || { echo "_fed_setup: remote add l->r failed: $ra_out" >&2; return 1; }
+    j "$db_r" "$home_r" remote add "http://127.0.0.1:$port_l" >/dev/null 2>&1
+
+    # Import /greet from REMOTE into LOCAL
+    local remote_handle="@127.0.0.1:$port_r"
+    local ri_out
+    ri_out=$(j "$db_l" "$home_l" remote import "$remote_handle" /greet 2>&1)
+    echo "$ri_out" | grep -qi "imported\|unchanged" || { echo "_fed_setup: remote import failed: $ri_out" >&2; return 1; }
+
+    # Find proxy action ID on LOCAL
+    local proxy_id
+    proxy_id=$(python3 - "$db_l" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute("SELECT id FROM actions WHERE name='/greet' AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1").fetchone()
+conn.close()
+print(row[0] if row else "")
+PYEOF
+)
+    # Enable proxy and grant-all (superuser can admin remote proxy)
+    j "$db_l" "$home_l" action enable --id "$proxy_id" >/dev/null 2>&1
+    j "$db_l" "$home_l" action grant-all --id "$proxy_id" >/dev/null 2>&1
+
+    echo "$proxy_id" > "$dir/proxy_id"
+}
+
+_fed_teardown() {
+    local dir="$1"
+    local pid_l pid_r bpid
+    pid_l=$(cat "$dir/pid_l" 2>/dev/null); pid_r=$(cat "$dir/pid_r" 2>/dev/null)
+    bpid=$(cat "$dir/bpid" 2>/dev/null)
+    [ -n "$pid_l" ] && { kill "$pid_l" 2>/dev/null; wait "$pid_l" 2>/dev/null; }
+    [ -n "$pid_r" ] && { kill "$pid_r" 2>/dev/null; wait "$pid_r" 2>/dev/null; }
+    [ -n "$bpid" ] && { kill "$bpid" 2>/dev/null; wait "$bpid" 2>/dev/null; }
+}
+
+flow_federation_import_execute() {
+    echo "=== FLOW federation_import_execute ==="
+    local dir db_l db_r home_l home_r port_l port_r port_b proxy_id
+    dir=$(mktemp -d); trap "_fed_teardown '$dir'; rm -rf '$dir'" RETURN
+    db_l="$dir/local.db"; db_r="$dir/remote.db"
+    home_l="$dir/lsys";   home_r="$dir/rsys"
+    alloc_port; port_l=$_ALLOC_PORT;  alloc_port; port_r=$_ALLOC_PORT; alloc_port; port_b=$_ALLOC_PORT
+
+    _fed_setup "$dir" "$db_l" "$db_r" "$home_l" "$home_r" "$port_l" "$port_r" "$port_b" \
+        || { fail "fed_import.setup" "setup failed"; return; }
+    proxy_id=$(cat "$dir/proxy_id" 2>/dev/null)
+    [ -n "$proxy_id" ] || { fail "fed_import.setup" "no proxy_id"; return; }
+
+    local remote_handle="@127.0.0.1:$port_r"
+
+    # Start process for @sys on LOCAL (price=0, no funds needed)
+    local proc_out proc_id
+    proc_out=$(jj "$db_l" "$home_l" process start --funds 0)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    # Call the proxy
+    local call_out tx_id
+    call_out=$(jj "$db_l" "$home_l" call \
+        --process "$proc_id" \
+        --target "$remote_handle" \
+        --action /greet \
+        --args '{}')
+    tx_id=$(strfield "$call_out" "tx_id")
+    [ -n "$tx_id" ] \
+        && ok "fed_import.call_succeeds" \
+        || fail "fed_import.call_succeeds" "no tx_id in: $call_out"
+
+    # Verify remote_receipt_hash stored in local db
+    local rrh
+    rrh=$(python3 - "$db_l" "$tx_id" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute("SELECT remote_receipt_hash FROM transactions WHERE id=?", [sys.argv[2]]).fetchone()
+conn.close()
+print(row[0] if row and row[0] else "")
+PYEOF
+)
+    [ -n "$rrh" ] \
+        && ok "fed_import.remote_receipt_hash" \
+        || fail "fed_import.remote_receipt_hash" "remote_receipt_hash empty for tx $tx_id"
+
+    # Local stats: uses=1
+    local stats_out uses
+    stats_out=$(jj "$db_l" "$home_l" stats show --action "$proxy_id")
+    uses=$(numfield "$stats_out" "uses")
+    [ "$uses" -eq 1 ] \
+        && ok "fed_import.local_stats_updated" \
+        || fail "fed_import.local_stats_updated" "expected uses=1, got $uses"
+}
+
+flow_federation_changed_reimport() {
+    echo "=== FLOW federation_changed_reimport ==="
+    local dir db_l db_r home_l home_r port_l port_r port_b proxy_id
+    dir=$(mktemp -d); trap "_fed_teardown '$dir'; rm -rf '$dir'" RETURN
+    db_l="$dir/local.db"; db_r="$dir/remote.db"
+    home_l="$dir/lsys";   home_r="$dir/rsys"
+    alloc_port; port_l=$_ALLOC_PORT;  alloc_port; port_r=$_ALLOC_PORT; alloc_port; port_b=$_ALLOC_PORT
+
+    _fed_setup "$dir" "$db_l" "$db_r" "$home_l" "$home_r" "$port_l" "$port_r" "$port_b" \
+        || { fail "fed_reimport.setup" "setup failed"; return; }
+    proxy_id=$(cat "$dir/proxy_id" 2>/dev/null)
+
+    local remote_handle="@127.0.0.1:$port_r"
+
+    # Make one call so there's a tx in history
+    local proc_id tx_id
+    proc_id=$(strfield "$(jj "$db_l" "$home_l" process start --funds 0)" "process_id")
+    tx_id=$(strfield "$(jj "$db_l" "$home_l" call \
+        --process "$proc_id" --target "$remote_handle" \
+        --action /greet --args '{}')" "tx_id")
+
+    # Update action description on REMOTE (stop serve, update db, restart)
+    local pid_r
+    pid_r=$(cat "$dir/pid_r")
+    kill "$pid_r" 2>/dev/null; wait "$pid_r" 2>/dev/null
+
+    # Change description directly in REMOTE db
+    python3 - "$db_r" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("UPDATE actions SET description='v2 greeting' WHERE name='/greet'")
+conn.commit()
+conn.close()
+PYEOF
+
+    # Restart REMOTE serve
+    start_serve "$db_r" "127.0.0.1:$port_r" syspass "$home_r"
+    echo "$SERVE_PID" > "$dir/pid_r"
+
+    # Re-import
+    local reimport_out
+    reimport_out=$(j "$db_l" "$home_l" remote import "$remote_handle" /greet 2>&1)
+    echo "$reimport_out" | grep -qi "updated\|deactivated" \
+        && ok "fed_reimport.updated" \
+        || fail "fed_reimport.updated" "expected Updated, got: $reimport_out"
+
+    # Proxy should now be inactive
+    local proxy_active
+    proxy_active=$(python3 - "$db_l" "$proxy_id" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute("SELECT active FROM actions WHERE id=?", [sys.argv[2]]).fetchone()
+conn.close()
+print(row[0] if row else -1)
+PYEOF
+)
+    [ "$proxy_active" = "0" ] \
+        && ok "fed_reimport.proxy_deactivated" \
+        || fail "fed_reimport.proxy_deactivated" "expected active=0, got $proxy_active"
+
+    # Proxy ID preserved
+    local new_proxy_id
+    new_proxy_id=$(python3 - "$db_l" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute("SELECT id FROM actions WHERE name='/greet' AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1").fetchone()
+conn.close()
+print(row[0] if row else "")
+PYEOF
+)
+    [ "$new_proxy_id" = "$proxy_id" ] \
+        && ok "fed_reimport.id_preserved" \
+        || fail "fed_reimport.id_preserved" "expected $proxy_id, got $new_proxy_id"
+
+    # Prior tx still in history
+    local tx_check
+    tx_check=$(python3 - "$db_l" "$tx_id" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute("SELECT id FROM transactions WHERE id=?", [sys.argv[2]]).fetchone()
+conn.close()
+print(row[0] if row else "")
+PYEOF
+)
+    [ -n "$tx_check" ] \
+        && ok "fed_reimport.tx_history_intact" \
+        || fail "fed_reimport.tx_history_intact" "prior tx $tx_id missing from local db"
+}
+
+flow_federation_unimport() {
+    echo "=== FLOW federation_unimport ==="
+    local dir db_l db_r home_l home_r port_l port_r port_b proxy_id
+    dir=$(mktemp -d); trap "_fed_teardown '$dir'; rm -rf '$dir'" RETURN
+    db_l="$dir/local.db"; db_r="$dir/remote.db"
+    home_l="$dir/lsys";   home_r="$dir/rsys"
+    alloc_port; port_l=$_ALLOC_PORT;  alloc_port; port_r=$_ALLOC_PORT; alloc_port; port_b=$_ALLOC_PORT
+
+    _fed_setup "$dir" "$db_l" "$db_r" "$home_l" "$home_r" "$port_l" "$port_r" "$port_b" \
+        || { fail "fed_unimport.setup" "setup failed"; return; }
+    proxy_id=$(cat "$dir/proxy_id" 2>/dev/null)
+
+    local remote_handle="@127.0.0.1:$port_r"
+
+    # Unimport
+    local unimport_out
+    unimport_out=$(j "$db_l" "$home_l" remote unimport "$remote_handle" /greet 2>&1)
+    echo "$unimport_out" | grep -qi "deactivated" \
+        && ok "fed_unimport.deactivated" \
+        || fail "fed_unimport.deactivated" "expected deactivated, got: $unimport_out"
+
+    # Proxy inactive on LOCAL
+    local proxy_active
+    proxy_active=$(python3 - "$db_l" "$proxy_id" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute("SELECT active FROM actions WHERE id=?", [sys.argv[2]]).fetchone()
+conn.close()
+print(row[0] if row else -1)
+PYEOF
+)
+    [ "$proxy_active" = "0" ] \
+        && ok "fed_unimport.proxy_inactive" \
+        || fail "fed_unimport.proxy_inactive" "expected active=0, got $proxy_active"
+
+    # Remote action still active
+    local remote_active
+    remote_active=$(python3 - "$db_r" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute("SELECT active FROM actions WHERE name='/greet' AND deleted_at IS NULL LIMIT 1").fetchone()
+conn.close()
+print(row[0] if row else -1)
+PYEOF
+)
+    [ "$remote_active" = "1" ] \
+        && ok "fed_unimport.remote_still_active" \
+        || fail "fed_unimport.remote_still_active" "expected remote active=1, got $remote_active"
+}
+
+flow_federation_replay() {
+    echo "=== FLOW federation_replay ==="
+    local dir db_l db_r home_l home_r port_l port_r port_b
+    dir=$(mktemp -d); trap "_fed_teardown '$dir'; rm -rf '$dir'" RETURN
+    db_l="$dir/local.db"; db_r="$dir/remote.db"
+    home_l="$dir/lsys";   home_r="$dir/rsys"
+    alloc_port; port_l=$_ALLOC_PORT;  alloc_port; port_r=$_ALLOC_PORT; alloc_port; port_b=$_ALLOC_PORT
+
+    _fed_setup "$dir" "$db_l" "$db_r" "$home_l" "$home_r" "$port_l" "$port_r" "$port_b" >/dev/null \
+        || { fail "fed_replay.setup" "setup failed"; return; }
+
+    # Get LOCAL's public key (used as counterparty param in direct calls to REMOTE)
+    local local_pub
+    local_pub=$(python3 - "$db_l" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute("SELECT value FROM config WHERE key='signing_public_key'").fetchone()
+conn.close()
+print(row[0] if row else "")
+PYEOF
+)
+    [ -n "$local_pub" ] || { fail "fed_replay.local_pub" "no signing_public_key in local config"; return; }
+
+    # Send federation call, replay, then test 409
+    local replay_results
+    replay_results=$(python3 - "$db_l" "$db_r" "$port_r" "@sys/greet" "$local_pub" <<'PYEOF'
+import sys, sqlite3, base64, json, nacl.signing, datetime, uuid, urllib.request
+
+db_l, db_r, port_r, action_param, local_pub = sys.argv[1:]
+
+conn = sqlite3.connect(db_l)
+priv_b64 = conn.execute("SELECT value FROM config WHERE key='signing_private_key'").fetchone()[0]
+conn.close()
+priv_bytes = base64.urlsafe_b64decode(priv_b64 + '==')[:32]
+sk = nacl.signing.SigningKey(priv_bytes)
+
+def fed_call(ikey):
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload = json.dumps({"action": action_param, "idempotency_key": ikey, "timestamp": ts},
+                         separators=(",", ":"), sort_keys=True).encode()
+    signed = sk.sign(payload)
+    sig_b64 = base64.urlsafe_b64encode(signed.signature).rstrip(b"=").decode()
+    url = (f"http://127.0.0.1:{port_r}/v1/federation/call"
+           f"?action={action_param}&counterparty={local_pub}")
+    req = urllib.request.Request(url, data=b"{}", method="POST", headers={
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": ikey,
+        "X-Timestamp": ts,
+        "X-Signature": sig_b64,
+    })
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+ikey1 = str(uuid.uuid4())
+s1, r1 = fed_call(ikey1)
+print(f"first:{s1}")
+
+# Replay same key — should return 200 with cached result
+s2, r2 = fed_call(ikey1)
+print(f"replay:{s2}")
+
+# Inject a pending idempotency record and verify 409
+conn_r = sqlite3.connect(db_r)
+row = conn_r.execute(
+    "SELECT counterparty_user_id FROM idempotency_records WHERE idempotency_key=? LIMIT 1",
+    [ikey1]).fetchone()
+cp_id = row[0] if row else None
+ikey2 = str(uuid.uuid4())
+if cp_id:
+    now = datetime.datetime.utcnow().isoformat()
+    exp = (datetime.datetime.utcnow() + datetime.timedelta(hours=1)).isoformat()
+    conn_r.execute(
+        "INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,receipt_id,status,result_json,created_at,expires_at)"
+        " VALUES (?,?,?,NULL,'pending','',?,?)",
+        [str(uuid.uuid4()), ikey2, cp_id, now, exp])
+    conn_r.commit()
+conn_r.close()
+
+s3, r3 = fed_call(ikey2)
+print(f"pending:{s3}")
+PYEOF
+)
+
+    echo "$replay_results" | grep -q "first:200" \
+        && ok "fed_replay.first_call_200" \
+        || fail "fed_replay.first_call_200" "first call failed: $replay_results"
+
+    echo "$replay_results" | grep -q "replay:200" \
+        && ok "fed_replay.replay_200" \
+        || fail "fed_replay.replay_200" "replay not cached 200: $replay_results"
+
+    echo "$replay_results" | grep -q "pending:409" \
+        && ok "fed_replay.pending_409" \
+        || fail "fed_replay.pending_409" "expected 409 for pending, got: $replay_results"
+}
+
+flow_admin_supervision() {
+    echo "=== FLOW admin_supervision ==="
+    local dir db home_sys home_alice
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    local port
+    alloc_port; port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "admin.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys" auth login --handle @sys --password syspass >/dev/null 2>&1
+
+    # Create alice
+    local alice_id
+    j "$db" "$home_sys" user create \
+        --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    alice_id=$(strfield "$(jj "$db" "$home_sys" admin user show --handle @alice)" "ID")
+
+    # admin user list shows both
+    local user_list
+    user_list=$(jj "$db" "$home_sys" admin user list)
+    echo "$user_list" | python3 -c "
+import sys,json
+users = json.load(sys.stdin)
+handles = [u.get('Handle','') for u in users]
+assert '@sys' in handles and '@alice' in handles, f'missing user in {handles}'
+" 2>/dev/null \
+        && ok "admin.user_list" \
+        || fail "admin.user_list" "expected @sys and @alice in list"
+
+    # admin user show --handle @alice
+    local show_out
+    show_out=$(jj "$db" "$home_sys" admin user show --handle @alice)
+    echo "$show_out" | python3 -c "
+import sys,json; d=json.load(sys.stdin); assert d.get('Handle')=='@alice'
+" 2>/dev/null \
+        && ok "admin.user_show" \
+        || fail "admin.user_show" "expected Handle=@alice, got: $show_out"
+
+    # Suspend alice
+    j "$db" "$home_sys" admin user suspend --id "$alice_id" >/dev/null 2>&1
+    local me_out
+    me_out=$(j "$db" "$home_alice" user me)
+    echo "$me_out" | grep -qi "suspended\|unauthenticated\|invalid\|error" \
+        && ok "admin.suspend_blocks_alice" \
+        || fail "admin.suspend_blocks_alice" "expected auth failure, got: $me_out"
+
+    # Unsuspend alice
+    j "$db" "$home_sys" admin user unsuspend --id "$alice_id" >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    local me2_out
+    me2_out=$(jj "$db" "$home_alice" user me)
+    [ "$(strfield "$me2_out" "handle")" = "@alice" ] \
+        && ok "admin.unsuspend_restores_alice" \
+        || fail "admin.unsuspend_restores_alice" "expected alice me, got: $me2_out"
+
+    # Create and enable an action for admin action tests
+    local action_id
+    local bport; alloc_port; bport=$_ALLOC_PORT
+    start_backend "$bport" 200 '{"ok":true}' \
+        || { fail "admin.backend" "backend failed to start"; return; }
+    local bpid=$BACKEND_PID
+    trap "kill '$bpid' 2>/dev/null; wait '$bpid' 2>/dev/null; rm -rf '$dir'" RETURN
+    action_id=$(strfield "$(jj "$db" "$home_sys" action add \
+        --name /test --kind http \
+        --source "http://127.0.0.1:$bport" \
+        --description "admin test action" --price 0)" "ID")
+    j "$db" "$home_sys" action enable --id "$action_id" >/dev/null 2>&1
+
+    # admin action list shows the action
+    local act_list
+    act_list=$(jj "$db" "$home_sys" admin action list)
+    echo "$act_list" | python3 -c "
+import sys,json; ids=[a['ID'] for a in json.load(sys.stdin)]
+assert sys.argv[1] in ids
+" "$action_id" 2>/dev/null \
+        && ok "admin.action_list" \
+        || fail "admin.action_list" "action $action_id not in list"
+
+    # admin action disable
+    j "$db" "$home_sys" admin action disable --id "$action_id" >/dev/null 2>&1
+    local show_action
+    show_action=$(jj "$db" "$home_sys" action show --id "$action_id")
+    echo "$show_action" | python3 -c "
+import sys,json; d=json.load(sys.stdin); assert not d.get('Active'), f'still active: {d}'
+" 2>/dev/null \
+        && ok "admin.action_disable" \
+        || fail "admin.action_disable" "action still active after disable: $show_action"
+
+    # Re-enable and call to create a process and tx for admin list tests
+    j "$db" "$home_sys" action enable --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_sys" action grant-all --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys" admin user deposit --handle @alice --amount 100 >/dev/null 2>&1
+    local proc_id
+    proc_id=$(strfield "$(jj "$db" "$home_alice" process start --funds 50)" "process_id")
+    jj "$db" "$home_alice" call \
+        --process "$proc_id" --target @sys --action /test --args '{}' >/dev/null 2>&1
+
+    # admin process list shows the process
+    local proc_list
+    proc_list=$(jj "$db" "$home_sys" admin process list)
+    echo "$proc_list" | python3 -c "
+import sys,json; ids=[p['ID'] for p in json.load(sys.stdin)]
+assert sys.argv[1] in ids
+" "$proc_id" 2>/dev/null \
+        && ok "admin.process_list" \
+        || fail "admin.process_list" "process $proc_id not in list"
+
+    # admin tx list shows transactions
+    local tx_list
+    tx_list=$(jj "$db" "$home_sys" admin tx list)
+    echo "$tx_list" | python3 -c "
+import sys,json; txs=json.load(sys.stdin); assert len(txs)>0
+" 2>/dev/null \
+        && ok "admin.tx_list" \
+        || fail "admin.tx_list" "expected at least one tx, got: $tx_list"
+
+    # Non-sys user rejected from admin commands
+    local alice_admin_out
+    alice_admin_out=$(j "$db" "$home_alice" admin user list 2>&1)
+    echo "$alice_admin_out" | grep -qi "unauthorized\|superuser" \
+        && ok "admin.non_sys_rejected" \
+        || fail "admin.non_sys_rejected" "expected rejection, got: $alice_admin_out"
+
+    stop_backend "$bpid"
+}
+
+# ===========================================================================
 # Main runner
 # ===========================================================================
 main() {
+    # Kill all stray juice serves and Python test-backends from interrupted runs.
+    pkill -9 -f "juice_b5" 2>/dev/null || true
+    pkill -9 -f "python3 - [0-9]" 2>/dev/null || true
+    sleep 0.5
+
     flow_bootstrap
     flow_local_auth
     flow_suspension
@@ -1599,6 +2812,20 @@ main() {
     flow_event_queue_failure
     flow_event_deletion_restart
     flow_rating
+    flow_pkce_auth
+    flow_refresh_rotation
+    flow_successful_receipt
+    flow_failed_receipt
+    flow_lookup
+    flow_chat
+    flow_openapi_import_execute
+    flow_openapi_changed_reimport
+    flow_openapi_unimport
+    flow_federation_import_execute
+    flow_federation_changed_reimport
+    flow_federation_unimport
+    flow_federation_replay
+    flow_admin_supervision
 
     echo ""
     echo "Results: ${PASS} passed, ${FAIL} failed"
