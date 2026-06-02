@@ -43,6 +43,28 @@ func HTTPStatus(err error) int {
 	return 500
 }
 
+// kernelErrorCode returns the stable error code string, or "internal" if unknown.
+func kernelErrorCode(err error) string {
+	if ke, ok := err.(*KernelError); ok {
+		return ke.Code
+	}
+	return "internal"
+}
+
+// HTTPStatusFromCode maps a stored error code back to an HTTP status.
+func HTTPStatusFromCode(code string) int {
+	for _, sentinel := range []*KernelError{
+		ErrUnauthenticated, ErrUnauthorized, ErrNotFound, ErrInvalidInput,
+		ErrInvalidState, ErrInsufficientFunds, ErrExecutionFailed,
+		ErrSchemaViolation, ErrTimeout, ErrInternal,
+	} {
+		if sentinel.Code == code {
+			return sentinel.HTTP
+		}
+	}
+	return 500
+}
+
 // Sentinel errors.
 var (
 	ErrUnauthenticated   = &KernelError{Code: "unauthenticated", HTTP: 401}

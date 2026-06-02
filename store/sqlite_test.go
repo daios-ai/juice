@@ -1560,7 +1560,7 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 		Gross: 0, Net: 0, Fee: 0, CreatedAt: time.Now().UTC(),
 	}
 
-	if err := db.CommitFailedCall(ctx, tx, receipt, p.ID, 100, nil, rec.ID); err != nil {
+	if err := db.CommitFailedCall(ctx, tx, receipt, p.ID, 100, nil, rec.ID, "execution_failed"); err != nil {
 		t.Fatalf("CommitFailedCall: %v", err)
 	}
 

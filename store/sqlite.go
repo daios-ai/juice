@@ -898,7 +898,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 	return dbErr(tx.Commit(), "commit call: commit")
 }
 
-func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID string, gross int64, stats *kernel.Stats, idempotencyRecordID string) error {
+func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID string, gross int64, stats *kernel.Stats, idempotencyRecordID, errorCode string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return dbErr(err, "begin commit failed call")
@@ -925,7 +925,7 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, rece
 	}
 
 	if idempotencyRecordID != "" {
-		errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason})
+		errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json='' WHERE id=?`,
 			string(errResult), idempotencyRecordID,
@@ -1894,7 +1894,7 @@ func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID 
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id,idempotency_key,counterparty_user_id,receipt_id,status,result_json,receipt_json,created_at,expires_at
 		 FROM idempotency_records
-		 WHERE idempotency_key=? AND counterparty_user_id=? AND expires_at > datetime('now')`,
+		 WHERE idempotency_key=? AND counterparty_user_id=? AND datetime(expires_at) > datetime('now')`,
 		key, counterpartyUserID,
 	).Scan(&r.ID, &r.IdempotencyKey, &r.CounterpartyUserID, &receiptID, &r.Status, &r.ResultJSON, &r.ReceiptJSON, &createdAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {

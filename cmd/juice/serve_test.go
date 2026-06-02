@@ -21,6 +21,7 @@ import (
 	"github.com/daios-ai/juice/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 )
 
 func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
@@ -1865,5 +1866,75 @@ func TestServeUnimportOpenAPI(t *testing.T) {
 	}
 	if len(actions) != 1 {
 		t.Errorf("expected 1 deactivated action, got %d", len(actions))
+	}
+}
+
+// TestFederationReplay verifies inbound federation idempotency:
+// first call → 200, replay of same key → 200, pending in-flight key → 409.
+// Replaces the shell flow that required Python nacl.signing.
+func TestFederationReplay(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"greeting": "hello"})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+
+	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
+		OwnerUserID:  sys.ID,
+		Name:         "/fed-greet",
+		Kind:         kernel.KindHTTP,
+		Price:        0,
+		Description:  "greet endpoint",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		Source:       backend.URL,
+	})
+	if err != nil {
+		t.Fatalf("CreateAction: %v", err)
+	}
+	_ = k.SetActive(ctx, sys.ID, a.ID, true)
+	_ = k.GrantAll(ctx, sys.ID, a.ID)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	_, _ = k.RegisterRemoteKernel(ctx, "@replay-caller", pubB64, "http://localhost:0")
+
+	path := "/v1/federation/call?action=@sys/fed-greet&counterparty=" + pubB64
+
+	ikey1 := uuid.New().String()
+	r1 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/fed-greet", ikey1))
+	defer r1.Body.Close()
+	if r1.StatusCode != http.StatusOK {
+		t.Fatalf("first call: want 200, got %d", r1.StatusCode)
+	}
+
+	// Replay same key → 200.
+	r2 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/fed-greet", ikey1))
+	defer r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Errorf("replay: want 200, got %d", r2.StatusCode)
+	}
+
+	// Pending in-flight key → 409.
+	caller, _ := k.ReadUserByHandle(ctx, "@replay-caller")
+	ikey2 := uuid.New().String()
+	now := time.Now().UTC()
+	_ = k.InsertPendingIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
+		ID:                 uuid.New().String(),
+		IdempotencyKey:     ikey2,
+		CounterpartyUserID: caller.ID,
+		CreatedAt:          now,
+		ExpiresAt:          now.Add(time.Hour),
+	})
+	r3 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/fed-greet", ikey2))
+	defer r3.Body.Close()
+	if r3.StatusCode != http.StatusConflict {
+		t.Errorf("pending: want 409, got %d", r3.StatusCode)
 	}
 }

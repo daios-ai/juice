@@ -1122,7 +1122,7 @@ type failingCommitFailedCallStore struct {
 	*fakeStore
 }
 
-func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *Transaction, _ *Receipt, _ string, _ int64, _ *Stats, _ string) error {
+func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *Transaction, _ *Receipt, _ string, _ int64, _ *Stats, _, _ string) error {
 	return ErrInternal.Wrap("injected CommitFailedCall failure")
 }
 

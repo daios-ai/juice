@@ -56,6 +56,21 @@ func TestValidateSchema(t *testing.T) {
 			t.Error("expected error for minimum keyword on integer")
 		}
 	})
+
+	t.Run("description allowed on all types", func(t *testing.T) {
+		schemas := []map[string]any{
+			{"type": "string", "description": "a string field"},
+			{"type": "integer", "description": "an integer field"},
+			{"type": "object", "description": "an object", "properties": map[string]any{
+				"x": map[string]any{"type": "string", "description": "nested"},
+			}},
+		}
+		for _, s := range schemas {
+			if err := ValidateSchema(s); err != nil {
+				t.Errorf("schema with description should be valid, got: %v", err)
+			}
+		}
+	})
 }
 
 func TestValidateInput(t *testing.T) {

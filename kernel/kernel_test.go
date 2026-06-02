@@ -1639,7 +1639,7 @@ func TestUnimportOpenAPI(t *testing.T) {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
 
-	actions, err := k.UnimportOpenAPI(ctx, owner.ID, specURL, "")
+	actions, err := k.UnimportOpenAPI(ctx, owner.ID, owner.ID, specURL, "")
 	if err != nil {
 		t.Fatalf("UnimportOpenAPI: %v", err)
 	}
@@ -1651,7 +1651,7 @@ func TestUnimportOpenAPI(t *testing.T) {
 	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec)); err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
-	actions2, err := k.UnimportOpenAPI(ctx, owner.ID, specURL, "sayHello")
+	actions2, err := k.UnimportOpenAPI(ctx, owner.ID, owner.ID, specURL, "sayHello")
 	if err != nil {
 		t.Fatalf("UnimportOpenAPI by name: %v", err)
 	}

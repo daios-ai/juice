@@ -488,7 +488,7 @@ func actionUnimportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			actions, err := k.UnimportOpenAPI(context.Background(), subjectID, specURL, name)
+			actions, err := k.UnimportOpenAPI(context.Background(), subjectID, subjectID, specURL, name)
 			if err != nil {
 				return err
 			}

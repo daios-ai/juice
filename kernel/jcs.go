@@ -10,6 +10,19 @@ import (
 	"strconv"
 )
 
+// jsonEncodeNoEscape encodes v to JSON without HTML-escaping <, >, or &.
+// RFC 8785 requires ECMAScript-compatible serialization; Go's json.Marshal
+// escapes those characters by default, which would produce wrong signatures.
+func jsonEncodeNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
 // CanonicalJSON serializes v per RFC 8785: objects with Unicode-sorted keys, recursively.
 func CanonicalJSON(v any) ([]byte, error) {
 	raw, err := json.Marshal(v)
@@ -37,7 +50,10 @@ func canonicalValue(v any) ([]byte, error) {
 			if i > 0 {
 				buf.WriteByte(',')
 			}
-			keyJSON, _ := json.Marshal(k)
+			keyJSON, err := jsonEncodeNoEscape(k)
+			if err != nil {
+				return nil, err
+			}
 			buf.Write(keyJSON)
 			buf.WriteByte(':')
 			valJSON, err := canonicalValue(val[k])
@@ -69,6 +85,8 @@ func canonicalValue(v any) ([]byte, error) {
 			return []byte(strconv.FormatInt(int64(val), 10)), nil
 		}
 		return json.Marshal(val)
+	case string:
+		return jsonEncodeNoEscape(val)
 	default:
 		return json.Marshal(v)
 	}

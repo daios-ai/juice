@@ -124,7 +124,7 @@ type Store interface {
 	// CommitFailedCall atomically refunds locked funds, records a failure transaction, creates its receipt,
 	// updates trace latency, upserts action stats, and completes the idempotency record (if
 	// idempotencyRecordID is non-empty) — all in one SQLite transaction.
-	CommitFailedCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID string, gross int64, stats *Stats, idempotencyRecordID string) error
+	CommitFailedCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID string, gross int64, stats *Stats, idempotencyRecordID, errorCode string) error
 
 	// EndProcess closes the process and returns all remaining funds to the owner.
 	EndProcess(ctx context.Context, processID string) error

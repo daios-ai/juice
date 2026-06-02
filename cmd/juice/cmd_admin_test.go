@@ -52,6 +52,13 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 	ctx := context.Background()
 	k := newAdminTestKernel(t)
 
+	if err := k.FirstBoot(ctx, "pass"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@target", Email: "target@example.com", Password: "pass",
 	})
@@ -60,7 +67,7 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 	}
 
 	// Suspend.
-	if err := k.SuspendUser(ctx, u.ID); err != nil {
+	if err := k.SuspendUser(ctx, admin.ID, u.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -70,7 +77,7 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 	}
 
 	// Unsuspend.
-	if err := k.UnsuspendUser(ctx, u.ID); err != nil {
+	if err := k.UnsuspendUser(ctx, admin.ID, u.ID); err != nil {
 		t.Fatal(err)
 	}
 

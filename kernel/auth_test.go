@@ -230,6 +230,15 @@ func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
+	admin, err := k.CreateUser(ctx, CreateUserRequest{
+		Handle: "@su", Email: "su@example.com", Password: "su-pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetConfig(ctx, "superuser_handle", "@su"); err != nil {
+		t.Fatal(err)
+	}
 	u, err := k.CreateUser(ctx, CreateUserRequest{
 		Handle: "@suspended-auth", Email: "suspended@example.com", Password: "pass",
 	})
@@ -246,7 +255,7 @@ func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.SuspendUser(ctx, u.ID); err != nil {
+	if err := k.SuspendUser(ctx, admin.ID, u.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := k.StartAuthCode(ctx, u.Handle, "pass", challenge, ""); !errors.Is(err, ErrUnauthenticated) {

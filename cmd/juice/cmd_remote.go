@@ -142,7 +142,8 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 	ctx := context.Background()
-	if _, err := requireSuperuser(k); err != nil {
+	subjectID, err := requireSuperuser(k)
+	if err != nil {
 		return err
 	}
 
@@ -157,9 +158,10 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 
 	base := strings.TrimRight(remoteUser.RemoteBaseURL, "/")
 
-	// Discover the action ID by listing.
+	// Discover the action ID by listing (filter by name only; owner on the remote
+	// is the remote kernel's own @sys user, not the local alias we use for it).
 	listReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/v1/actions?owner=%s&name=%s", base, remoteHandle, actionName), nil)
+		fmt.Sprintf("%s/v1/actions?name=%s", base, url.QueryEscape(actionName)), nil)
 	if err != nil {
 		return fmt.Errorf("invalid remote URL: %w", err)
 	}
@@ -186,7 +188,7 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 	if actionID == "" {
 		// Remote action disappeared or lost public/active state.
 		// Deactivate any existing local proxy and reset its stats.
-		if a, unimportErr := k.UnimportRemoteAction(ctx, remoteHandle, actionName); unimportErr == nil {
+		if a, unimportErr := k.UnimportRemoteAction(ctx, subjectID, remoteHandle, actionName); unimportErr == nil {
 			_ = db.UpsertStats(ctx, &kernel.Stats{ActionID: a.ID})
 			fmt.Printf("Remote action %q no longer available; deactivated local proxy %s\n", actionName, a.Name)
 			return nil
@@ -240,10 +242,11 @@ func runRemoteUnimport(_ *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 	ctx := context.Background()
-	if _, err := requireSuperuser(k); err != nil {
+	subjectID, err := requireSuperuser(k)
+	if err != nil {
 		return err
 	}
-	a, err := k.UnimportRemoteAction(ctx, remoteHandle, actionName)
+	a, err := k.UnimportRemoteAction(ctx, subjectID, remoteHandle, actionName)
 	if err != nil {
 		return fmt.Errorf("unimport action: %w", err)
 	}

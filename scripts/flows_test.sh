@@ -2555,104 +2555,8 @@ PYEOF
         || fail "fed_unimport.remote_still_active" "expected remote active=1, got $remote_active"
 }
 
-flow_federation_replay() {
-    echo "=== FLOW federation_replay ==="
-    local dir db_l db_r home_l home_r port_l port_r port_b
-    dir=$(mktemp -d); trap "_fed_teardown '$dir'; rm -rf '$dir'" RETURN
-    db_l="$dir/local.db"; db_r="$dir/remote.db"
-    home_l="$dir/lsys";   home_r="$dir/rsys"
-    alloc_port; port_l=$_ALLOC_PORT;  alloc_port; port_r=$_ALLOC_PORT; alloc_port; port_b=$_ALLOC_PORT
-
-    _fed_setup "$dir" "$db_l" "$db_r" "$home_l" "$home_r" "$port_l" "$port_r" "$port_b" >/dev/null \
-        || { fail "fed_replay.setup" "setup failed"; return; }
-
-    # Get LOCAL's public key (used as counterparty param in direct calls to REMOTE)
-    local local_pub
-    local_pub=$(python3 - "$db_l" <<'PYEOF'
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-row = conn.execute("SELECT value FROM config WHERE key='signing_public_key'").fetchone()
-conn.close()
-print(row[0] if row else "")
-PYEOF
-)
-    [ -n "$local_pub" ] || { fail "fed_replay.local_pub" "no signing_public_key in local config"; return; }
-
-    # Send federation call, replay, then test 409
-    local replay_results
-    replay_results=$(python3 - "$db_l" "$db_r" "$port_r" "@sys/greet" "$local_pub" <<'PYEOF'
-import sys, sqlite3, base64, json, nacl.signing, datetime, uuid, urllib.request
-
-db_l, db_r, port_r, action_param, local_pub = sys.argv[1:]
-
-conn = sqlite3.connect(db_l)
-priv_b64 = conn.execute("SELECT value FROM config WHERE key='signing_private_key'").fetchone()[0]
-conn.close()
-priv_bytes = base64.urlsafe_b64decode(priv_b64 + '==')[:32]
-sk = nacl.signing.SigningKey(priv_bytes)
-
-def fed_call(ikey):
-    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    payload = json.dumps({"action": action_param, "idempotency_key": ikey, "timestamp": ts},
-                         separators=(",", ":"), sort_keys=True).encode()
-    signed = sk.sign(payload)
-    sig_b64 = base64.urlsafe_b64encode(signed.signature).rstrip(b"=").decode()
-    url = (f"http://127.0.0.1:{port_r}/v1/federation/call"
-           f"?action={action_param}&counterparty={local_pub}")
-    req = urllib.request.Request(url, data=b"{}", method="POST", headers={
-        "Content-Type": "application/json",
-        "X-Idempotency-Key": ikey,
-        "X-Timestamp": ts,
-        "X-Signature": sig_b64,
-    })
-    try:
-        with urllib.request.urlopen(req) as r:
-            return r.status, r.read().decode()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
-
-ikey1 = str(uuid.uuid4())
-s1, r1 = fed_call(ikey1)
-print(f"first:{s1}")
-
-# Replay same key — should return 200 with cached result
-s2, r2 = fed_call(ikey1)
-print(f"replay:{s2}")
-
-# Inject a pending idempotency record and verify 409
-conn_r = sqlite3.connect(db_r)
-row = conn_r.execute(
-    "SELECT counterparty_user_id FROM idempotency_records WHERE idempotency_key=? LIMIT 1",
-    [ikey1]).fetchone()
-cp_id = row[0] if row else None
-ikey2 = str(uuid.uuid4())
-if cp_id:
-    now = datetime.datetime.utcnow().isoformat()
-    exp = (datetime.datetime.utcnow() + datetime.timedelta(hours=1)).isoformat()
-    conn_r.execute(
-        "INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,receipt_id,status,result_json,created_at,expires_at)"
-        " VALUES (?,?,?,NULL,'pending','',?,?)",
-        [str(uuid.uuid4()), ikey2, cp_id, now, exp])
-    conn_r.commit()
-conn_r.close()
-
-s3, r3 = fed_call(ikey2)
-print(f"pending:{s3}")
-PYEOF
-)
-
-    echo "$replay_results" | grep -q "first:200" \
-        && ok "fed_replay.first_call_200" \
-        || fail "fed_replay.first_call_200" "first call failed: $replay_results"
-
-    echo "$replay_results" | grep -q "replay:200" \
-        && ok "fed_replay.replay_200" \
-        || fail "fed_replay.replay_200" "replay not cached 200: $replay_results"
-
-    echo "$replay_results" | grep -q "pending:409" \
-        && ok "fed_replay.pending_409" \
-        || fail "fed_replay.pending_409" "expected 409 for pending, got: $replay_results"
-}
+# flow_federation_replay has been moved to TestFederationReplay in cmd/juice/cmd_remote_test.go
+# using crypto/ed25519 — the previous implementation required Python nacl.signing.
 
 flow_admin_supervision() {
     echo "=== FLOW admin_supervision ==="
@@ -2824,7 +2728,6 @@ main() {
     flow_federation_import_execute
     flow_federation_changed_reimport
     flow_federation_unimport
-    flow_federation_replay
     flow_admin_supervision
 
     echo ""

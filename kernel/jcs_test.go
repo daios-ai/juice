@@ -73,6 +73,27 @@ func TestCanonicalJSONIntegerFloats(t *testing.T) {
 	}
 }
 
+func TestCanonicalJSONNoHTMLEscape(t *testing.T) {
+	// RFC 8785 requires ECMAScript serialization — <, >, & must not be \uXXXX-escaped.
+	cases := []struct {
+		input any
+		want  string
+	}{
+		{map[string]string{"x": "<>&"}, `{"x":"<>&"}`},
+		{map[string]string{"k<ey": "v"}, `{"k<ey":"v"}`},
+		{[]any{"<", ">", "&"}, `["<",">","&"]`},
+	}
+	for _, tc := range cases {
+		out, err := CanonicalJSON(tc.input)
+		if err != nil {
+			t.Fatalf("CanonicalJSON(%v): %v", tc.input, err)
+		}
+		if string(out) != tc.want {
+			t.Errorf("got %s, want %s", out, tc.want)
+		}
+	}
+}
+
 func TestJCSHashStrDeterministic(t *testing.T) {
 	// Same JSON with different key order must produce the same hash.
 	a := `{"z":1,"a":2}`

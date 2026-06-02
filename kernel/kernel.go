@@ -182,7 +182,11 @@ func (k *Kernel) ListUsers(ctx context.Context, limit, offset int) ([]*User, err
 }
 
 // SuspendUser marks the user as suspended, preventing login.
-func (k *Kernel) SuspendUser(ctx context.Context, targetID string) error {
+// Only the superuser may call this.
+func (k *Kernel) SuspendUser(ctx context.Context, operatorID, targetID string) error {
+	if err := k.requireSuperuser(ctx, operatorID); err != nil {
+		return err
+	}
 	if err := k.store.SuspendUser(ctx, targetID); err != nil {
 		return err
 	}
@@ -191,7 +195,11 @@ func (k *Kernel) SuspendUser(ctx context.Context, targetID string) error {
 }
 
 // UnsuspendUser removes the suspension from a user.
-func (k *Kernel) UnsuspendUser(ctx context.Context, targetID string) error {
+// Only the superuser may call this.
+func (k *Kernel) UnsuspendUser(ctx context.Context, operatorID, targetID string) error {
+	if err := k.requireSuperuser(ctx, operatorID); err != nil {
+		return err
+	}
 	if err := k.store.UnsuspendUser(ctx, targetID); err != nil {
 		return err
 	}
@@ -199,19 +207,27 @@ func (k *Kernel) UnsuspendUser(ctx context.Context, targetID string) error {
 	return nil
 }
 
-// Deposit adds credits directly to a user's available balance and records an audit entry.
-// Only the superuser may call this; the check is enforced here, not only at the CLI boundary.
-func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, amount int64, reason string) (*Deposit, error) {
+// requireSuperuser returns ErrUnauthorized if operatorID is not the configured superuser.
+func (k *Kernel) requireSuperuser(ctx context.Context, operatorID string) error {
 	operator, err := k.store.ReadUser(ctx, operatorID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	suHandle := k.cfg.SuperuserHandle
 	if suHandle == "" {
 		suHandle, _ = k.store.GetConfig(ctx, "superuser_handle")
 	}
 	if operator.Handle != suHandle {
-		return nil, ErrUnauthorized.Wrap("only the superuser may issue deposits")
+		return ErrUnauthorized.Wrap("only the superuser may perform this operation")
+	}
+	return nil
+}
+
+// Deposit adds credits directly to a user's available balance and records an audit entry.
+// Only the superuser may call this; the check is enforced here, not only at the CLI boundary.
+func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, amount int64, reason string) (*Deposit, error) {
+	if err := k.requireSuperuser(ctx, operatorID); err != nil {
+		return nil, err
 	}
 	if amount <= 0 {
 		return nil, ErrInvalidInput.Wrap("amount must be positive")
@@ -1204,6 +1220,11 @@ func (k *Kernel) CreateListener(ctx context.Context, req CreateListenerRequest) 
 	if req.EventName == "" {
 		return nil, ErrInvalidInput.Wrap("event_name is required")
 	}
+	if req.SourceUserID != "" {
+		if _, err := k.store.ReadUser(ctx, req.SourceUserID); err != nil {
+			return nil, ErrNotFound.Wrap("source_user_id not found")
+		}
+	}
 	a, err := k.store.ReadAction(ctx, req.TargetActionID)
 	if err != nil {
 		return nil, err
@@ -2105,7 +2126,12 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 
 // UnimportOpenAPI deactivates all OpenAPI-imported actions with matching owner + spec_url.
 // If name is non-empty, only actions whose name suffix or operation_key matches are deactivated.
-func (k *Kernel) UnimportOpenAPI(ctx context.Context, ownerID, specURL, name string) ([]*Action, error) {
+func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specURL, name string) ([]*Action, error) {
+	if subjectID != ownerID {
+		if err := k.requireSuperuser(ctx, subjectID); err != nil {
+			return nil, ErrUnauthorized.Wrap("owner or superuser required to unimport OpenAPI actions")
+		}
+	}
 	actions, err := k.store.ListActionsByOwnerOpenAPISpec(ctx, ownerID, specURL)
 	if err != nil {
 		return nil, err
@@ -2195,7 +2221,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 			a.Description  = m.Description
 			a.InputSchema  = m.InputSchema
 			a.OutputSchema = m.OutputSchema
-			a.ArtifactHash = contentHash // store content hash so reconcileImport can compare on re-import
+			a.ArtifactHash = m.ArtifactHash
 		},
 		new: func() *Action {
 			now := time.Now().UTC()
@@ -2232,7 +2258,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 }
 
 // UnimportRemoteAction deactivates the local proxy action for the given remote handle and action name.
-func (k *Kernel) UnimportRemoteAction(ctx context.Context, remoteHandle, actionName string) (*Action, error) {
+func (k *Kernel) UnimportRemoteAction(ctx context.Context, subjectID, remoteHandle, actionName string) (*Action, error) {
 	remoteUser, err := k.store.ReadUserByHandle(ctx, remoteHandle)
 	if err != nil {
 		return nil, ErrNotFound.Wrapf("remote kernel %q not found", remoteHandle)
@@ -2246,6 +2272,11 @@ func (k *Kernel) UnimportRemoteAction(ctx context.Context, remoteHandle, actionN
 	}
 	if a.Kind != KindRemoteProxy {
 		return nil, ErrInvalidInput.Wrap("action is not a remote proxy")
+	}
+	if subjectID != a.OwnerUserID {
+		if err := k.requireSuperuser(ctx, subjectID); err != nil {
+			return nil, ErrUnauthorized.Wrap("owner or superuser required to unimport remote action")
+		}
 	}
 	if err := k.deactivateActions(ctx, []*Action{a}); err != nil {
 		return nil, err

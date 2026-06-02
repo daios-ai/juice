@@ -365,6 +365,32 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	if owner := r.URL.Query().Get("owner"); owner != "" {
+		u, err := s.kernel.ReadUserByHandle(r.Context(), owner)
+		if err != nil {
+			writeJSON(w, http.StatusOK, []*kernel.Action{})
+			return
+		}
+		filtered := actions[:0]
+		for _, a := range actions {
+			if a.OwnerUserID == u.ID {
+				filtered = append(filtered, a)
+			}
+		}
+		actions = filtered
+	}
+	if name := r.URL.Query().Get("name"); name != "" {
+		filtered := actions[:0]
+		for _, a := range actions {
+			if a.Name == name || strings.HasSuffix(a.Name, "/"+name) {
+				filtered = append(filtered, a)
+			}
+		}
+		actions = filtered
+	}
+	if actions == nil {
+		actions = []*kernel.Action{}
+	}
 	writeJSON(w, http.StatusOK, actions)
 }
 
@@ -406,7 +432,8 @@ func (s *server) unimportOpenAPI(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("spec_url is required"))
 		return
 	}
-	actions, err := s.kernel.UnimportOpenAPI(r.Context(), subjectFrom(r), req.SpecURL, req.Name)
+	sub := subjectFrom(r)
+	actions, err := s.kernel.UnimportOpenAPI(r.Context(), sub, sub, req.SpecURL, req.Name)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1026,6 +1053,12 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 			if existing.Status == "complete" {
 				var result map[string]any
 				_ = json.Unmarshal([]byte(existing.ResultJSON), &result)
+				// Failed calls store {"error":"...","code":"..."} with no receipt_json.
+				if _, isErr := result["error"]; isErr && existing.ReceiptJSON == "" {
+					code, _ := result["code"].(string)
+					writeJSON(w, kernel.HTTPStatusFromCode(code), map[string]any{"result": result, "receipt": nil})
+					return
+				}
 				var receipt *kernel.Receipt
 				if existing.ReceiptJSON != "" {
 					_ = json.Unmarshal([]byte(existing.ReceiptJSON), &receipt)

@@ -48,7 +48,7 @@ func validateSchemaNode(node map[string]any, path string, depth int) error {
 // allowedSchemaKeys returns the set of permitted keywords for a given JSON Schema type.
 // Returns nil for unknown types.
 func allowedSchemaKeys(typ string) map[string]bool {
-	base := map[string]bool{"type": true, "nullable": true, "enum": true}
+	base := map[string]bool{"type": true, "nullable": true, "enum": true, "description": true}
 	switch typ {
 	case "object":
 		base["properties"] = true
