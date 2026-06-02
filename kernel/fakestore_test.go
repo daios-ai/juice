@@ -11,26 +11,27 @@ import (
 
 // fakeStore is an in-memory Store implementation for tests.
 type fakeStore struct {
-	mu                 sync.Mutex
-	users              map[string]*User
-	userByHandle       map[string]*User
-	actions            map[string]*Action
-	actionEmbeds       map[string][]float32
-	acl                map[string]map[Permission]bool // key: subjectID+":"+actionID
-	processes          map[string]*Process
-	traces             map[string]*Trace
-	transactions       map[string]*Transaction
-	stats              map[string]*Stats
-	statTags           []*StatTag
-	listeners          map[string]*Listener
-	events             map[string]*Event // eventID -> Event
-	authCodes          map[string]*AuthCode
-	refreshTokens      map[string]*RefreshToken
-	config             map[string]string
-	deposits           []*Deposit
-	receipts           map[string]*Receipt           // txID -> Receipt
-	ratings            map[string]*Rating            // txID -> Rating
-	idempotencyRecords map[string]*IdempotencyRecord // key+counterparty -> record
+	mu                  sync.Mutex
+	users               map[string]*User
+	userByHandle        map[string]*User
+	actions             map[string]*Action
+	actionEmbeds        map[string][]float32
+	acl                 map[string]map[Permission]bool // key: subjectID+":"+actionID
+	processes           map[string]*Process
+	processAuthorities  map[string]map[string]bool // processID -> set of subjectUserIDs
+	traces              map[string]*Trace
+	transactions        map[string]*Transaction
+	stats               map[string]*Stats
+	statTags            []*StatTag
+	listeners           map[string]*Listener
+	events              map[string]*Event // eventID -> Event
+	authCodes           map[string]*AuthCode
+	refreshTokens       map[string]*RefreshToken
+	config              map[string]string
+	deposits            []*Deposit
+	receipts            map[string]*Receipt           // txID -> Receipt
+	ratings             map[string]*Rating            // txID -> Rating
+	idempotencyRecords  map[string]*IdempotencyRecord // key+counterparty -> record
 }
 
 func newFakeStore() *fakeStore {
@@ -41,6 +42,7 @@ func newFakeStore() *fakeStore {
 		actionEmbeds:       make(map[string][]float32),
 		acl:                make(map[string]map[Permission]bool),
 		processes:          make(map[string]*Process),
+		processAuthorities: make(map[string]map[string]bool),
 		traces:             make(map[string]*Trace),
 		transactions:       make(map[string]*Transaction),
 		stats:              make(map[string]*Stats),
@@ -257,6 +259,35 @@ func (f *fakeStore) CheckACL(_ context.Context, subjectID, actionID string, perm
 		return false, nil
 	}
 	return m[perm], nil
+}
+
+func (f *fakeStore) GrantProcessAuthority(_ context.Context, subjectUserID, processID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.processAuthorities[processID] == nil {
+		f.processAuthorities[processID] = make(map[string]bool)
+	}
+	f.processAuthorities[processID][subjectUserID] = true
+	return nil
+}
+
+func (f *fakeStore) RevokeProcessAuthority(_ context.Context, subjectUserID, processID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if m, ok := f.processAuthorities[processID]; ok {
+		delete(m, subjectUserID)
+	}
+	return nil
+}
+
+func (f *fakeStore) CheckProcessAuthority(_ context.Context, subjectUserID, processID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m, ok := f.processAuthorities[processID]
+	if !ok {
+		return false, nil
+	}
+	return m[subjectUserID], nil
 }
 
 func (f *fakeStore) StartProcess(_ context.Context, p *Process, t *Trace, ownerID string, funds int64) error {

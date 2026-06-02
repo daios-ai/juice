@@ -1849,6 +1849,33 @@ func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating,
 	return &r, nil
 }
 
+// ---- Process authority ----
+
+func (s *DB) GrantProcessAuthority(ctx context.Context, subjectUserID, processID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO process_authorities (process_id, subject_user_id, created_at) VALUES (?,?,?)`,
+		processID, subjectUserID, timeToStr(time.Now().UTC()),
+	)
+	return dbErr(err, "grant process authority")
+}
+
+func (s *DB) RevokeProcessAuthority(ctx context.Context, subjectUserID, processID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM process_authorities WHERE process_id=? AND subject_user_id=?`,
+		processID, subjectUserID,
+	)
+	return dbErr(err, "revoke process authority")
+}
+
+func (s *DB) CheckProcessAuthority(ctx context.Context, subjectUserID, processID string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM process_authorities WHERE process_id=? AND subject_user_id=?`,
+		processID, subjectUserID,
+	).Scan(&n)
+	return n > 0, dbErr(err, "check process authority")
+}
+
 // ---- Idempotency ----
 
 func (s *DB) InsertPendingIdempotencyRecord(ctx context.Context, r *kernel.IdempotencyRecord) error {

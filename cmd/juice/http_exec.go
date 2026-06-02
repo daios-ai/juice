@@ -153,6 +153,18 @@ type httpActionExecutor struct {
 	signerFn   func(action, idempotencyKey string) (sig, ts string, err error) // wired after bootstrap
 }
 
+// FetchURL retrieves the body of a URL. Implements kernel.URLFetcher for ownership proof checks.
+func (e *httpActionExecutor) FetchURL(ctx context.Context, rawURL string) ([]byte, error) {
+	body, status, err := doHTTP(ctx, http.MethodGet, rawURL, nil, nil, 0, e.allowLocal)
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("HTTP %d from %s", status, rawURL)
+	}
+	return body, nil
+}
+
 func (e *httpActionExecutor) Execute(ctx context.Context, source string, args map[string]any) (map[string]any, error) {
 	if strings.HasPrefix(strings.TrimSpace(source), "{") {
 		return e.executeOpenAPI(ctx, source, args)

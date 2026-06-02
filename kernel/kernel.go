@@ -99,6 +99,9 @@ type CreateUserRequest struct {
 
 // CreateUser creates a new user account and returns the user.
 func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*User, error) {
+	start := time.Now()
+	logger := k.log.With(ctx)
+	logger.Info("user.create.start", "handle", req.Handle)
 	if req.Handle == "" {
 		return nil, ErrInvalidInput.Wrap("handle is required")
 	}
@@ -125,9 +128,10 @@ func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*User, 
 	}
 
 	if err := k.store.CreateUser(ctx, u); err != nil {
+		logger.Warn("user.create.failed", "handle", req.Handle, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, err
 	}
-	k.log.With(ctx).Info("user.created", "user_id", u.ID, "handle", u.Handle)
+	logger.Info("user.created", "user_id", u.ID, "handle", u.Handle, "status", "success", "duration_ms", time.Since(start).Milliseconds())
 	return u, nil
 }
 
@@ -184,26 +188,36 @@ func (k *Kernel) ListUsers(ctx context.Context, limit, offset int) ([]*User, err
 // SuspendUser marks the user as suspended, preventing login.
 // Only the superuser may call this.
 func (k *Kernel) SuspendUser(ctx context.Context, operatorID, targetID string) error {
+	start := time.Now()
+	logger := k.log.With(ctx)
+	logger.Info("user.suspend.start", "target_id", targetID)
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
+		logger.Warn("user.suspend.failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return err
 	}
 	if err := k.store.SuspendUser(ctx, targetID); err != nil {
+		logger.Warn("user.suspend.failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return err
 	}
-	k.log.With(ctx).Info("user.suspended", "target_id", targetID)
+	logger.Info("user.suspended", "target_id", targetID, "status", "success", "duration_ms", time.Since(start).Milliseconds())
 	return nil
 }
 
 // UnsuspendUser removes the suspension from a user.
 // Only the superuser may call this.
 func (k *Kernel) UnsuspendUser(ctx context.Context, operatorID, targetID string) error {
+	start := time.Now()
+	logger := k.log.With(ctx)
+	logger.Info("user.unsuspend.start", "target_id", targetID)
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
+		logger.Warn("user.unsuspend.failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return err
 	}
 	if err := k.store.UnsuspendUser(ctx, targetID); err != nil {
+		logger.Warn("user.unsuspend.failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return err
 	}
-	k.log.With(ctx).Info("user.unsuspended", "target_id", targetID)
+	logger.Info("user.unsuspended", "target_id", targetID, "status", "success", "duration_ms", time.Since(start).Milliseconds())
 	return nil
 }
 
@@ -238,7 +252,11 @@ func (k *Kernel) ValidateFeeRecipient(ctx context.Context) error {
 }
 
 func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, amount int64, reason string) (*Deposit, error) {
+	start := time.Now()
+	logger := k.log.With(ctx)
+	logger.Info("deposit.start", "target_user_id", targetUserID, "amount", amount)
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
+		logger.Warn("deposit.failed", "target_user_id", targetUserID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, err
 	}
 	if amount <= 0 {
@@ -256,9 +274,10 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 		CreatedAt:      time.Now().UTC(),
 	}
 	if err := k.store.CreateDeposit(ctx, d); err != nil {
+		logger.Warn("deposit.failed", "target_user_id", targetUserID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, err
 	}
-	k.log.With(ctx).Info("deposit.created", "deposit_id", d.ID, "target_user_id", targetUserID, "amount", amount)
+	logger.Info("deposit.created", "deposit_id", d.ID, "target_user_id", targetUserID, "amount", amount, "status", "success", "duration_ms", time.Since(start).Milliseconds())
 	return d, nil
 }
 
@@ -376,7 +395,7 @@ func (k *Kernel) CreateAction(ctx context.Context, subjectID string, req CreateA
 		return nil, err
 	}
 	k.embedActionAsync(ctx, a)
-	k.log.With(ctx).Info("action.created", "action_id", a.ID, "name", a.Name)
+	k.log.With(ctx).Info("action.created", "action_id", a.ID, "name", a.Name, "status", "success")
 	return a, nil
 }
 
@@ -706,7 +725,7 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 	if req.Description != nil {
 		k.embedActionAsync(ctx, a)
 	}
-	k.log.With(ctx).Info("action.updated", "action_id", a.ID)
+	k.log.With(ctx).Info("action.updated", "action_id", a.ID, "status", "success")
 	return a, nil
 }
 
@@ -789,7 +808,7 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 	if active {
 		event = "action.enabled"
 	}
-	k.log.With(ctx).Info(event, "action_id", actionID)
+	k.log.With(ctx).Info(event, "action_id", actionID, "status", "success")
 	return nil
 }
 
@@ -808,7 +827,7 @@ func (k *Kernel) DeleteAction(ctx context.Context, subjectID, actionID string) e
 	if err := k.store.DeleteAction(ctx, actionID); err != nil {
 		return err
 	}
-	k.log.With(ctx).Info("action.deleted", "action_id", actionID)
+	k.log.With(ctx).Info("action.deleted", "action_id", actionID, "status", "success")
 	return nil
 }
 
@@ -856,7 +875,11 @@ func (k *Kernel) RevokeACL(ctx context.Context, subjectID, actionID string, perm
 // StartProcess creates a new process and locks funds from the owner's account.
 // Process creation, user debit, and root trace creation are atomic.
 func (k *Kernel) StartProcess(ctx context.Context, subjectID, ownerID string, funds int64) (*Process, *Trace, error) {
+	start := time.Now()
+	logger := k.log.With(ctx)
+	logger.Info("process.start.start", "owner", ownerID, "funds", funds)
 	if err := k.requireSelf(ctx, subjectID, ownerID); err != nil {
+		logger.Warn("process.start.failed", "owner", ownerID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, nil, err
 	}
 	if funds < 0 {
@@ -879,11 +902,12 @@ func (k *Kernel) StartProcess(ctx context.Context, subjectID, ownerID string, fu
 	t.ParentTraceID = t.ID
 
 	if err := k.store.StartProcess(ctx, p, t, ownerID, funds); err != nil {
+		logger.Warn("process.start.failed", "owner", ownerID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, nil, err
 	}
 	p.Available = funds
 
-	k.log.With(ctx).Info("process.started", "process_id", p.ID, "owner", ownerID, "funds", funds)
+	logger.Info("process.started", "process_id", p.ID, "owner", ownerID, "funds", funds, "status", "success", "duration_ms", time.Since(start).Milliseconds())
 	return p, t, nil
 }
 
@@ -905,7 +929,7 @@ func (k *Kernel) FundProcess(ctx context.Context, subjectID, processID string, f
 	if err := k.store.FundProcess(ctx, subjectID, processID, funds); err != nil {
 		return err
 	}
-	k.log.With(ctx).Info("process.funded", "process_id", processID, "funds", funds)
+	k.log.With(ctx).Info("process.funded", "process_id", processID, "funds", funds, "status", "success")
 	return nil
 }
 
@@ -924,7 +948,41 @@ func (k *Kernel) EndProcess(ctx context.Context, subjectID, processID string) er
 	if err := k.store.EndProcess(ctx, processID); err != nil {
 		return err
 	}
-	k.log.With(ctx).Info("process.ended", "process_id", processID)
+	k.log.With(ctx).Info("process.ended", "process_id", processID, "status", "success")
+	return nil
+}
+
+// GrantProcessAuthority grants another user explicit authority to use a process.
+// Only the process owner may grant this right.
+func (k *Kernel) GrantProcessAuthority(ctx context.Context, operatorID, subjectID, processID string) error {
+	p, err := k.store.ReadProcess(ctx, processID)
+	if err != nil {
+		return err
+	}
+	if p.OwnerUserID != operatorID {
+		return ErrUnauthorized.Wrap("only the process owner may grant process authority")
+	}
+	if err := k.store.GrantProcessAuthority(ctx, subjectID, processID); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("process.authority_granted", "process_id", processID, "subject_id", subjectID)
+	return nil
+}
+
+// RevokeProcessAuthority removes explicit call authority over a process from a user.
+// Only the process owner may revoke.
+func (k *Kernel) RevokeProcessAuthority(ctx context.Context, operatorID, subjectID, processID string) error {
+	p, err := k.store.ReadProcess(ctx, processID)
+	if err != nil {
+		return err
+	}
+	if p.OwnerUserID != operatorID {
+		return ErrUnauthorized.Wrap("only the process owner may revoke process authority")
+	}
+	if err := k.store.RevokeProcessAuthority(ctx, subjectID, processID); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("process.authority_revoked", "process_id", processID, "subject_id", subjectID)
 	return nil
 }
 
@@ -1273,7 +1331,7 @@ func (k *Kernel) CreateListener(ctx context.Context, subjectID string, req Creat
 	if err := k.store.CreateListener(ctx, l); err != nil {
 		return nil, err
 	}
-	k.log.With(ctx).Info("listener.created", "listener_id", l.ID, "event", req.EventName)
+	k.log.With(ctx).Info("listener.created", "listener_id", l.ID, "event", req.EventName, "status", "success")
 	return l, nil
 }
 
@@ -1446,7 +1504,7 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 		_ = k.store.UnlockEvent(ctx, eventID)
 		return nil, err
 	}
-	k.log.With(ctx).Info("event.consumed", "event_id", eventID, "tx_id", reply.TxID)
+	k.log.With(ctx).Info("event.consumed", "event_id", eventID, "tx_id", reply.TxID, "status", "success")
 	return reply, nil
 }
 
@@ -1711,10 +1769,11 @@ type rawOp struct {
 
 // parseOpenAPISpec parses specBytes (already-fetched JSON) and returns one rawOp per supported
 // operation (GET/POST/PUT/PATCH/DELETE). specURL is stored in provenance only; no HTTP is performed.
-func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportRejection, error) {
+// The third return value is the base URL extracted from the spec's servers array.
+func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportRejection, string, error) {
 	var spec map[string]any
 	if err := json.Unmarshal(specBytes, &spec); err != nil {
-		return nil, nil, ErrInvalidInput.Wrap("spec is not valid JSON")
+		return nil, nil, "", ErrInvalidInput.Wrap("spec is not valid JSON")
 	}
 
 	// Extract base URL from first server entry.
@@ -1821,7 +1880,7 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 			})
 		}
 	}
-	return ops, rejected, nil
+	return ops, rejected, baseURL, nil
 }
 
 func openAPIOperationKey(op map[string]any, method, path string) string {
@@ -2049,7 +2108,11 @@ func openAPISlug(s string) string {
 // ImportOpenAPI parses specBytes (caller-fetched OpenAPI JSON), reconciles operations with
 // existing OpenAPI-imported actions for the owner, and returns the diff. It is idempotent.
 func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL string, specBytes []byte) (*ImportResult, error) {
+	start := time.Now()
+	logger := k.log.With(ctx)
+	logger.Info("openapi.import.start", "spec_url", specURL)
 	if err := k.requireSelf(ctx, subjectID, ownerID); err != nil {
+		logger.Warn("openapi.import.failed", "spec_url", specURL, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, err
 	}
 	owner, err := k.store.ReadUser(ctx, ownerID)
@@ -2057,14 +2120,27 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 		return nil, err
 	}
 
-	rawOps, rejected, err := parseOpenAPISpec(specBytes, specURL)
+	rawOps, rejected, baseURL, err := parseOpenAPISpec(specBytes, specURL)
 	if err != nil {
 		return nil, err
 	}
 
-	var specMap map[string]any
-	_ = json.Unmarshal(specBytes, &specMap)
-	ownershipVerified := specMap["x-juice-owner"] == owner.Handle
+	// Proof 1: well-known challenge — GET {baseURL}/.well-known/juice-owner.txt must return the owner handle.
+	// Proof 2: x-juice-owner field in the spec document (embedded challenge, less strong).
+	ownershipVerified := false
+	if baseURL != "" {
+		if uf, ok := k.http.(URLFetcher); ok {
+			wkURL := strings.TrimRight(baseURL, "/") + "/.well-known/juice-owner.txt"
+			if body, fetchErr := uf.FetchURL(ctx, wkURL); fetchErr == nil {
+				ownershipVerified = strings.TrimSpace(string(body)) == owner.Handle
+			}
+		}
+	}
+	if !ownershipVerified {
+		var specMap map[string]any
+		_ = json.Unmarshal(specBytes, &specMap)
+		ownershipVerified = specMap["x-juice-owner"] == owner.Handle
+	}
 
 	existing, err := k.store.ListActionsByOwnerOpenAPISpec(ctx, ownerID, specURL)
 	if err != nil {
@@ -2141,7 +2217,23 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 	if err != nil {
 		return nil, err
 	}
+
+	// Staleness fix: re-evaluate ownership on Unchanged actions too.
+	// Proof state may have changed since the last import (e.g., well-known file removed).
+	for _, a := range result.Unchanged {
+		var src OpenAPISource
+		if jsonErr := json.Unmarshal([]byte(a.Source), &src); jsonErr == nil && src.OwnershipVerified != ownershipVerified {
+			src.OwnershipVerified = ownershipVerified
+			if b, marshalErr := json.Marshal(src); marshalErr == nil {
+				a.Source = string(b)
+				a.UpdatedAt = time.Now().UTC()
+				_ = k.store.UpdateAction(ctx, a)
+			}
+		}
+	}
+
 	result.Rejected = append(result.Rejected, rejected...)
+	logger.Info("openapi.import.done", "spec_url", specURL, "created", len(result.Created), "updated", len(result.Updated), "unchanged", len(result.Unchanged), "deactivated", len(result.Deactivated), "status", "success", "duration_ms", time.Since(start).Milliseconds())
 	return result, nil
 }
 
@@ -2273,9 +2365,11 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 	}
 
 	if len(result.Created) > 0 {
-		k.log.With(ctx).Info("action.imported_remote", "action_id", result.Created[0].ID, "name", result.Created[0].Name)
+		k.log.With(ctx).Info("action.imported_remote", "action_id", result.Created[0].ID, "name", result.Created[0].Name, "status", "success")
 	} else if len(result.Updated) > 0 {
-		k.log.With(ctx).Info("action.reimported_remote", "action_id", result.Updated[0].ID, "name", result.Updated[0].Name)
+		k.log.With(ctx).Info("action.reimported_remote", "action_id", result.Updated[0].ID, "name", result.Updated[0].Name, "status", "success")
+	} else {
+		k.log.With(ctx).Info("action.remote_unchanged", "remote_action_id", m.ActionID, "status", "success")
 	}
 	return result, nil
 }

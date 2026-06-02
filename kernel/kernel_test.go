@@ -1824,7 +1824,7 @@ func TestOpenAPIActivationRejectsPrivateBaseURL(t *testing.T) {
 
 func TestParseOpenAPISpecRejectsSecurityRequirement(t *testing.T) {
 	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","security":[{"apiKey":[]}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
-	_, rejected, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
+	_, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
 	if err != nil {
 		t.Fatalf("parseOpenAPISpec: %v", err)
 	}
@@ -1835,7 +1835,7 @@ func TestParseOpenAPISpecRejectsSecurityRequirement(t *testing.T) {
 
 func TestParseOpenAPISpecRejectsMultipartOnlyBody(t *testing.T) {
 	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/upload":{"post":{"operationId":"upload","description":"upload file","requestBody":{"content":{"multipart/form-data":{"schema":{"type":"object"}}}},"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
-	_, rejected, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
+	_, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
 	if err != nil {
 		t.Fatalf("parseOpenAPISpec: %v", err)
 	}
@@ -1846,7 +1846,7 @@ func TestParseOpenAPISpecRejectsMultipartOnlyBody(t *testing.T) {
 
 func TestParseOpenAPISpecRejectsAmbiguous2xxSchemas(t *testing.T) {
 	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/create":{"post":{"operationId":"create","description":"create item","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"string"}}}},"201":{"description":"created","content":{"application/json":{"schema":{"type":"integer"}}}}}}}}}`
-	_, rejected, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
+	_, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
 	if err != nil {
 		t.Fatalf("parseOpenAPISpec: %v", err)
 	}
@@ -2016,5 +2016,190 @@ func TestEmitEventSubjectMismatchRejected(t *testing.T) {
 	_, err := k.EmitEvent(ctx, userA.ID, userB.ID, "test-event", nil, "")
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized when subject != sourceUser, got %v", err)
+	}
+}
+
+// ---- Process authority tests ----
+
+func TestGrantProcessAuthorityAllowsCallByDelegate(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@pa-owner", 100)
+	delegate := setupUser(t, st, "@pa-delegate", 0)
+	target := setupUser(t, st, "@pa-target", 0)
+	// Public wasm action so delegate passes CanCall check (precondition #6).
+	a := &Action{
+		ID: uuid.New().String(), OwnerUserID: target.ID, Name: "/echo",
+		Kind: KindWasm, Active: true, Public: true, Price: 0,
+		Source: "wat", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 50)
+
+	// Without authority, delegate cannot use owner's process.
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: target.ID, ActionName: "/echo", Args: map[string]any{},
+	})
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized before grant, got %v", err)
+	}
+
+	// Grant authority.
+	if err := k.GrantProcessAuthority(ctx, owner.ID, delegate.ID, p.ID); err != nil {
+		t.Fatalf("GrantProcessAuthority: %v", err)
+	}
+
+	_, err = k.Call(ctx, CallRequest{
+		SubjectID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: target.ID, ActionName: "/echo", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Errorf("Call with granted process authority: unexpected error: %v", err)
+	}
+}
+
+func TestRevokeProcessAuthorityBlocksDelegate(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@pa-rev-owner", 100)
+	delegate := setupUser(t, st, "@pa-rev-delegate", 0)
+	_ = setupUser(t, st, "@pa-rev-target", 0)
+	setupAction(t, st, st.userByHandle["@pa-rev-target"].ID, "/echo", 0)
+
+	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 50)
+	if err := k.GrantProcessAuthority(ctx, owner.ID, delegate.ID, p.ID); err != nil {
+		t.Fatalf("GrantProcessAuthority: %v", err)
+	}
+	if err := k.RevokeProcessAuthority(ctx, owner.ID, delegate.ID, p.ID); err != nil {
+		t.Fatalf("RevokeProcessAuthority: %v", err)
+	}
+
+	_, err := k.Call(ctx, CallRequest{
+		SubjectID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: "@pa-rev-target", ActionName: "/echo", Args: map[string]any{},
+	})
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized after revoke, got %v", err)
+	}
+}
+
+func TestGrantProcessAuthorityRequiresOwner(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@pa-nonowner", 100)
+	other := setupUser(t, st, "@pa-other", 0)
+
+	p, _, _ := k.StartProcess(ctx, owner.ID, owner.ID, 10)
+
+	err := k.GrantProcessAuthority(ctx, other.ID, other.ID, p.ID)
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized for non-owner grant attempt, got %v", err)
+	}
+}
+
+// ---- OpenAPI well-known ownership proof tests ----
+
+// fakeURLFetcher implements both HTTPExecutor and URLFetcher for testing ownership proof.
+type fakeURLFetcher struct {
+	wellKnown map[string]string // URL -> response body
+}
+
+func (f *fakeURLFetcher) Execute(_ context.Context, _ string, _ map[string]any) (map[string]any, error) {
+	return nil, ErrInvalidState.Wrap("not used in tests")
+}
+
+func (f *fakeURLFetcher) FetchURL(_ context.Context, rawURL string) ([]byte, error) {
+	if body, ok := f.wellKnown[rawURL]; ok {
+		return []byte(body), nil
+	}
+	return nil, ErrNotFound.Wrapf("URL not found: %s", rawURL)
+}
+
+func newTestKernelWithHTTP(st Store, http HTTPExecutor) *Kernel {
+	cfg := DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = "test-issuer-id"
+	cfg.SigningKey = testSigningKey()
+	return New(st, nil, http, nil, nil, cfg, log.Default())
+}
+
+func TestImportOpenAPIWellKnownSetsOwnershipVerified(t *testing.T) {
+	st := newFakeStore()
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@wk-owner", 0)
+	fetcher := &fakeURLFetcher{wellKnown: map[string]string{
+		"http://api.example.com/.well-known/juice-owner.txt": "@wk-owner",
+	}}
+	k := newTestKernelWithHTTP(st, fetcher)
+
+	specURL := "https://spec.example.com/api.json"
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
+
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	if err != nil {
+		t.Fatalf("ImportOpenAPI: %v", err)
+	}
+	if len(result.Created) != 1 {
+		t.Fatalf("expected 1 created action, got %d", len(result.Created))
+	}
+	var src OpenAPISource
+	if err := json.Unmarshal([]byte(result.Created[0].Source), &src); err != nil {
+		t.Fatalf("source JSON invalid: %v", err)
+	}
+	if !src.OwnershipVerified {
+		t.Error("expected OwnershipVerified=true from well-known challenge")
+	}
+}
+
+func TestImportOpenAPIOwnershipStalenessFixed(t *testing.T) {
+	st := newFakeStore()
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@stale-owner", 0)
+	// First import: well-known returns owner handle → OwnershipVerified=true.
+	fetcher := &fakeURLFetcher{wellKnown: map[string]string{
+		"http://api.example.com/.well-known/juice-owner.txt": "@stale-owner",
+	}}
+	k := newTestKernelWithHTTP(st, fetcher)
+
+	specURL := "https://spec.example.com/api.json"
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
+
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	if err != nil || len(result.Created) != 1 {
+		t.Fatalf("first import failed: %v, created=%d", err, len(result.Created))
+	}
+
+	// Second import: well-known now returns wrong handle → proof revoked.
+	fetcher.wellKnown["http://api.example.com/.well-known/juice-owner.txt"] = "@other-owner"
+	k2 := newTestKernelWithHTTP(st, fetcher)
+
+	result2, err := k2.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	if err != nil {
+		t.Fatalf("second import failed: %v", err)
+	}
+	// Action is Unchanged (hash same) but OwnershipVerified must be updated to false.
+	if len(result2.Unchanged) != 1 {
+		t.Fatalf("expected 1 unchanged action, got %d", len(result2.Unchanged))
+	}
+	a, err := st.ReadAction(ctx, result2.Unchanged[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var src OpenAPISource
+	if err := json.Unmarshal([]byte(a.Source), &src); err != nil {
+		t.Fatalf("source JSON: %v", err)
+	}
+	if src.OwnershipVerified {
+		t.Error("expected OwnershipVerified=false after proof was revoked")
 	}
 }

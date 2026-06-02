@@ -71,9 +71,15 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInvalidState.Wrap("process is closed")
 	}
 
-	// 3. Subject is the process owner.
+	// 3. Subject is the process owner or has explicit process authority.
 	if process.OwnerUserID != req.SubjectID {
-		return nil, ErrUnauthorized.Wrap("subject is not the process owner")
+		authorized, authErr := k.store.CheckProcessAuthority(ctx, req.SubjectID, req.ProcessID)
+		if authErr != nil {
+			return nil, ErrInternal.Wrapf("process authority check failed: %v", authErr)
+		}
+		if !authorized {
+			return nil, ErrUnauthorized.Wrap("subject is not the process owner")
+		}
 	}
 
 	// 4. Resolve action.

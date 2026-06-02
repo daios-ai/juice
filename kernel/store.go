@@ -17,6 +17,12 @@ type HTTPExecutor interface {
 	Execute(ctx context.Context, source string, args map[string]any) (map[string]any, error)
 }
 
+// URLFetcher retrieves the body of a URL. Used for OpenAPI ownership proof (well-known challenge).
+// HTTPExecutor implementations may optionally implement this interface; kernel checks via type assertion.
+type URLFetcher interface {
+	FetchURL(ctx context.Context, rawURL string) ([]byte, error)
+}
+
 // HostFunctions are the callbacks available to a running script.
 type HostFunctions interface {
 	Call(ctx context.Context, actionName string, args []byte) ([]byte, error)
@@ -103,6 +109,13 @@ type Store interface {
 	ReadProcess(ctx context.Context, id string) (*Process, error)
 	ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error)
 	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
+
+	// GrantProcessAuthority grants explicit call authority over a process to a subject.
+	GrantProcessAuthority(ctx context.Context, subjectUserID, processID string) error
+	// RevokeProcessAuthority removes explicit call authority from a subject.
+	RevokeProcessAuthority(ctx context.Context, subjectUserID, processID string) error
+	// CheckProcessAuthority returns true if subjectUserID has explicit authority over processID.
+	CheckProcessAuthority(ctx context.Context, subjectUserID, processID string) (bool, error)
 
 	// LockFunds moves `amount` from process.available to process.locked.
 	// Fails atomically if process.available < amount.
