@@ -9,7 +9,7 @@ import (
 )
 
 // TestFlowsIntegration builds the juice binary and runs scripts/flows_test.sh.
-// It covers all 18 CLI user-story flows end-to-end against a real SQLite database.
+// It covers all 34 CLI user-story flows end-to-end against a real SQLite database.
 func TestFlowsIntegration(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "juice")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
