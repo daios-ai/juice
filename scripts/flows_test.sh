@@ -95,6 +95,35 @@ stop_serve() {
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 0
 }
 
+# start_backend port [status_code] [body]
+# Starts a minimal HTTP server in background. Sets BACKEND_PID.
+BACKEND_PID=""
+start_backend() {
+    local port="$1" code="${2:-200}" body="${3}"
+    [ -z "$body" ] && body='{"ok":true}'
+    python3 - "$port" "$code" "$body" <<'PYEOF' &
+import sys, http.server
+port, code, body = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3].encode()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get('Content-Length', 0))
+        self.rfile.read(n)
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
+PYEOF
+    BACKEND_PID=$!
+    sleep 0.3
+}
+
+stop_backend() {
+    local pid="${1:-$BACKEND_PID}"
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 0
+}
+
 # ---------------------------------------------------------------------------
 # JSON field extractors (Python-backed for robustness)
 # ---------------------------------------------------------------------------
@@ -510,6 +539,495 @@ flow_action_lifecycle() {
 }
 
 # ===========================================================================
+# BATCH 2 — Process, ACL, and call semantics
+# ===========================================================================
+
+flow_process_lifecycle() {
+    echo "=== FLOW process_lifecycle ==="
+    local dir db home_sys home_alice port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "process_lifecycle.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 1000 >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+
+    # Start process with 300 funds
+    local proc_out proc_id root_trace
+    proc_out=$(jj "$db" "$home_alice" process start --funds 300)
+    proc_id=$(strfield "$proc_out" "process_id")
+    root_trace=$(strfield "$proc_out" "trace_id")
+    [ -n "$proc_id" ] \
+        && ok "process_lifecycle.started" \
+        || fail "process_lifecycle.started" "no process_id in: $proc_out"
+    [ -n "$root_trace" ] \
+        && ok "process_lifecycle.root_trace" \
+        || fail "process_lifecycle.root_trace" "no trace_id in: $proc_out"
+
+    # User.available debited by 300 (1000 - 300 = 700)
+    local me_after
+    me_after=$(jj "$db" "$home_alice" user me)
+    [ "$(numfield "$me_after" "available")" -eq 700 ] \
+        && ok "process_lifecycle.funds_debited" \
+        || fail "process_lifecycle.funds_debited" "expected 700, got: $me_after"
+
+    # Process fields
+    local proc_show
+    proc_show=$(jj "$db" "$home_alice" process show --id "$proc_id")
+    [ "$(numfield "$proc_show" "Available")" -eq 300 ] \
+        && ok "process_lifecycle.process_available" \
+        || fail "process_lifecycle.process_available" "expected 300, got: $proc_show"
+    [ "$(strfield "$proc_show" "Status")" = "open" ] \
+        && ok "process_lifecycle.status_open" \
+        || fail "process_lifecycle.status_open" "expected open, got: $proc_show"
+
+    # End process — returns funds
+    j "$db" "$home_alice" process end --id "$proc_id" >/dev/null 2>&1
+    local me_restored
+    me_restored=$(jj "$db" "$home_alice" user me)
+    [ "$(numfield "$me_restored" "available")" -eq 1000 ] \
+        && ok "process_lifecycle.funds_restored" \
+        || fail "process_lifecycle.funds_restored" "expected 1000, got: $me_restored"
+    proc_show=$(jj "$db" "$home_alice" process show --id "$proc_id")
+    [ "$(strfield "$proc_show" "Status")" = "closed" ] \
+        && ok "process_lifecycle.status_closed" \
+        || fail "process_lifecycle.status_closed" "expected closed, got: $proc_show"
+}
+
+flow_process_funding() {
+    echo "=== FLOW process_funding ==="
+    local dir db home_sys home_alice port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "process_funding.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 500 >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+
+    # Start process with 0 funds
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_alice" process start --funds 0)
+    proc_id=$(strfield "$proc_out" "process_id")
+    [ -n "$proc_id" ] \
+        && ok "process_funding.started" \
+        || fail "process_funding.started" "no process_id in: $proc_out"
+
+    # Fund +200
+    j "$db" "$home_alice" process fund --id "$proc_id" --funds 200 >/dev/null 2>&1
+
+    # User debited 200 (500 - 200 = 300)
+    local me
+    me=$(jj "$db" "$home_alice" user me)
+    [ "$(numfield "$me" "available")" -eq 300 ] \
+        && ok "process_funding.user_debited" \
+        || fail "process_funding.user_debited" "expected 300, got: $me"
+
+    # Process.available = 200
+    local proc_show
+    proc_show=$(jj "$db" "$home_alice" process show --id "$proc_id")
+    [ "$(numfield "$proc_show" "Available")" -eq 200 ] \
+        && ok "process_funding.process_available" \
+        || fail "process_funding.process_available" "expected 200, got: $proc_show"
+
+    # Fund rejected after close
+    j "$db" "$home_alice" process end --id "$proc_id" >/dev/null 2>&1
+    local fund_closed
+    fund_closed=$(j "$db" "$home_alice" process fund --id "$proc_id" --funds 100)
+    echo "$fund_closed" | grep -qi "closed\|invalid\|error" \
+        && ok "process_funding.fund_after_close_rejected" \
+        || fail "process_funding.fund_after_close_rejected" "fund after close was accepted: $fund_closed"
+}
+
+flow_acl_public() {
+    echo "=== FLOW acl_public ==="
+    local dir db home_sys home_alice home_bob port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "acl_public.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+
+    # @alice creates and enables an action pointing to unreachable backend (port 1)
+    local create_out action_id
+    create_out=$(jj "$db" "$home_alice" action add --name /target --kind http \
+        --source "http://127.0.0.1:1/target" --price 0 --description "acl test")
+    action_id=$(strfield "$create_out" "ID")
+    j "$db" "$home_alice" action enable --id "$action_id" >/dev/null 2>&1
+
+    # @bob starts a zero-funded process
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_bob" process start --funds 0)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    # Without ACL: permission error
+    local out
+    out=$(j "$db" "$home_bob" call --process "$proc_id" --target @alice --action /target)
+    echo "$out" | grep -qi "unauthorized\|permission\|error" \
+        && ok "acl_public.no_acl_rejected" \
+        || fail "acl_public.no_acl_rejected" "call without ACL succeeded: $out"
+
+    # Grant call ACL — now @bob passes the permission check (fails at backend instead)
+    j "$db" "$home_alice" action acl grant --action "$action_id" --user @bob --perm call >/dev/null 2>&1
+    out=$(j "$db" "$home_bob" call --process "$proc_id" --target @alice --action /target)
+    echo "$out" | grep -qiv "unauthorized\|permission denied" \
+        && ok "acl_public.with_acl_passes_permission" \
+        || fail "acl_public.with_acl_passes_permission" "permission check still failed after grant: $out"
+
+    # Revoke — permission check enforced again
+    j "$db" "$home_alice" action acl revoke --action "$action_id" --user @bob --perm call >/dev/null 2>&1
+    out=$(j "$db" "$home_bob" call --process "$proc_id" --target @alice --action /target)
+    echo "$out" | grep -qi "unauthorized\|permission\|error" \
+        && ok "acl_public.revoke_enforced" \
+        || fail "acl_public.revoke_enforced" "call after revoke was accepted: $out"
+
+    # Non-owner cannot grant-all
+    out=$(j "$db" "$home_bob" action grant-all --id "$action_id")
+    echo "$out" | grep -qi "unauthorized\|error" \
+        && ok "acl_public.grant_all_owner_only" \
+        || fail "acl_public.grant_all_owner_only" "non-owner grant-all succeeded: $out"
+
+    # grant-all: any authenticated user passes permission check
+    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+    out=$(j "$db" "$home_bob" call --process "$proc_id" --target @alice --action /target)
+    echo "$out" | grep -qiv "unauthorized\|permission denied" \
+        && ok "acl_public.grant_all_passes_permission" \
+        || fail "acl_public.grant_all_passes_permission" "grant-all still hit permission error: $out"
+
+    # revoke-all: permission check enforced again
+    j "$db" "$home_alice" action revoke-all --id "$action_id" >/dev/null 2>&1
+    out=$(j "$db" "$home_bob" call --process "$proc_id" --target @alice --action /target)
+    echo "$out" | grep -qi "unauthorized\|permission\|error" \
+        && ok "acl_public.revoke_all_enforced" \
+        || fail "acl_public.revoke_all_enforced" "call after revoke-all was accepted: $out"
+}
+
+flow_successful_paid_call() {
+    echo "=== FLOW successful_paid_call ==="
+    local dir db home_sys home_alice home_bob port backend_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    port=$(alloc_port)
+    backend_port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "successful_paid_call.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 500 >/dev/null 2>&1
+
+    start_backend "$backend_port" 200 '{"result":"ok"}'
+    local backend_pid=$BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    # @alice creates price=100 action with grant-all
+    local create_out action_id
+    create_out=$(jj "$db" "$home_alice" action add --name /pay --kind http \
+        --source "http://127.0.0.1:${backend_port}/pay" --price 100 --description "paid action")
+    action_id=$(strfield "$create_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+
+    # Get @sys ID and starting balance for fee accounting
+    local sys_show sys_id sys_start
+    sys_show=$(jj "$db" "$home_sys" admin user show --handle @sys)
+    sys_id=$(strfield "$sys_show" "ID")
+    sys_start=$(numfield "$sys_show" "Available")
+
+    # @bob starts process with 300 funds
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_bob" process start --funds 300)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    # Call with fee_bps=2000 → fee=20, net=80, gross=100
+    local call_out tx_id
+    call_out=$(JUICE_FEE_BPS=2000 JUICE_FEE_RECIPIENT="$sys_id" \
+        JUICE_LOG_LEVEL=error HOME="$home_bob" JUICE_ALLOW_LOCAL_SOURCES=true \
+        "$JUICE" --db "$db" --output json call \
+        --process "$proc_id" --target @alice --action /pay --args '{}' 2>/dev/null)
+    tx_id=$(strfield "$call_out" "tx_id")
+    [ -n "$tx_id" ] \
+        && ok "successful_paid_call.call_succeeded" \
+        || fail "successful_paid_call.call_succeeded" "call returned no tx_id: $call_out"
+
+    # tx fields
+    local tx_show
+    tx_show=$(jj "$db" "$home_bob" tx show --id "$tx_id")
+    [ "$(numfield "$tx_show" "Gross")" -eq 100 ] \
+        && ok "successful_paid_call.tx_gross" \
+        || fail "successful_paid_call.tx_gross" "expected Gross=100, got: $tx_show"
+    [ "$(numfield "$tx_show" "Fee")" -eq 20 ] \
+        && ok "successful_paid_call.tx_fee" \
+        || fail "successful_paid_call.tx_fee" "expected Fee=20, got: $tx_show"
+    [ "$(numfield "$tx_show" "Net")" -eq 80 ] \
+        && ok "successful_paid_call.tx_net" \
+        || fail "successful_paid_call.tx_net" "expected Net=80, got: $tx_show"
+    [ "$(strfield "$tx_show" "Status")" = "success" ] \
+        && ok "successful_paid_call.tx_status" \
+        || fail "successful_paid_call.tx_status" "expected success, got: $tx_show"
+
+    # Process debited by 100 (300 - 100 = 200)
+    local proc_show
+    proc_show=$(jj "$db" "$home_bob" process show --id "$proc_id")
+    [ "$(numfield "$proc_show" "Available")" -eq 200 ] \
+        && ok "successful_paid_call.process_debited" \
+        || fail "successful_paid_call.process_debited" "expected 200, got: $proc_show"
+
+    # @alice credited net=80
+    local alice_me
+    alice_me=$(jj "$db" "$home_alice" user me)
+    [ "$(numfield "$alice_me" "available")" -eq 80 ] \
+        && ok "successful_paid_call.target_credited" \
+        || fail "successful_paid_call.target_credited" "expected 80, got: $alice_me"
+
+    # Fee recipient (@sys) credited fee=20
+    local sys_end
+    sys_end=$(numfield "$(jj "$db" "$home_sys" admin user show --handle @sys)" "Available")
+    [ "$sys_end" -eq $(( sys_start + 20 )) ] \
+        && ok "successful_paid_call.fee_credited" \
+        || fail "successful_paid_call.fee_credited" "expected +20; start=$sys_start end=$sys_end"
+
+    stop_backend "$backend_pid"
+}
+
+flow_failed_call_refund() {
+    echo "=== FLOW failed_call_refund ==="
+    local dir db home_sys home_alice home_bob port backend_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    port=$(alloc_port)
+    backend_port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "failed_call_refund.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 500 >/dev/null 2>&1
+
+    start_backend "$backend_port" 500 '{"error":"backend error"}'
+    local backend_pid=$BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    # @alice creates price=100 action
+    local create_out action_id
+    create_out=$(jj "$db" "$home_alice" action add --name /fail --kind http \
+        --source "http://127.0.0.1:${backend_port}/fail" --price 100 --description "failing action")
+    action_id=$(strfield "$create_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+
+    # @bob starts process with 300 funds
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_bob" process start --funds 300)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    # Call — backend returns 500 → execution failure
+    j "$db" "$home_bob" call --process "$proc_id" --target @alice --action /fail --args '{}' \
+        >/dev/null 2>&1
+
+    # Process available unchanged (full refund)
+    local proc_show
+    proc_show=$(jj "$db" "$home_bob" process show --id "$proc_id")
+    [ "$(numfield "$proc_show" "Available")" -eq 300 ] \
+        && ok "failed_call_refund.process_unchanged" \
+        || fail "failed_call_refund.process_unchanged" "expected 300, got: $proc_show"
+
+    # @alice received nothing
+    local alice_me
+    alice_me=$(jj "$db" "$home_alice" user me)
+    [ "$(numfield "$alice_me" "available")" -eq 0 ] \
+        && ok "failed_call_refund.target_not_credited" \
+        || fail "failed_call_refund.target_not_credited" "expected 0, got: $alice_me"
+
+    # Failure tx IS recorded
+    local tx_list tx_count
+    tx_list=$(jj "$db" "$home_bob" tx list --process "$proc_id")
+    tx_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" "$tx_list" 2>/dev/null || echo 0)
+    [ "$tx_count" -ge 1 ] \
+        && ok "failed_call_refund.failure_tx_recorded" \
+        || fail "failed_call_refund.failure_tx_recorded" "expected >=1 tx, count=$tx_count list=$tx_list"
+
+    # tx.Status = failure
+    local tx_id tx_show
+    tx_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])[0]['ID'])" "$tx_list" 2>/dev/null)
+    tx_show=$(jj "$db" "$home_bob" tx show --id "$tx_id")
+    [ "$(strfield "$tx_show" "Status")" = "failure" ] \
+        && ok "failed_call_refund.tx_status_failure" \
+        || fail "failed_call_refund.tx_status_failure" "expected failure, got: $tx_show"
+
+    stop_backend "$backend_pid"
+}
+
+flow_input_schema_failure() {
+    echo "=== FLOW input_schema_failure ==="
+    local dir db home_sys home_alice home_bob port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "input_schema_failure.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 300 >/dev/null 2>&1
+
+    # @alice creates action with input schema requiring field "x"
+    local create_out action_id
+    create_out=$(jj "$db" "$home_alice" action add --name /schema-in --kind http \
+        --source "http://127.0.0.1:1/schema-in" --price 50 --description "schema test" \
+        --input-schema '{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}')
+    action_id=$(strfield "$create_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+
+    # @bob starts process with 200 funds
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_bob" process start --funds 200)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    # Call without required field "x" → schema error before any fund lock
+    local call_out
+    call_out=$(j "$db" "$home_bob" call \
+        --process "$proc_id" --target @alice --action /schema-in --args '{}')
+    echo "$call_out" | grep -qi "schema\|invalid\|required\|error" \
+        && ok "input_schema_failure.error_returned" \
+        || fail "input_schema_failure.error_returned" "expected schema error, got: $call_out"
+
+    # Process available unchanged (no debit happened)
+    local proc_show
+    proc_show=$(jj "$db" "$home_bob" process show --id "$proc_id")
+    [ "$(numfield "$proc_show" "Available")" -eq 200 ] \
+        && ok "input_schema_failure.process_unchanged" \
+        || fail "input_schema_failure.process_unchanged" "expected 200, got: $proc_show"
+
+    # No tx created
+    local tx_list tx_count
+    tx_list=$(jj "$db" "$home_bob" tx list --process "$proc_id")
+    tx_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" "$tx_list" 2>/dev/null || echo 0)
+    [ "$tx_count" -eq 0 ] \
+        && ok "input_schema_failure.no_tx_created" \
+        || fail "input_schema_failure.no_tx_created" "expected 0 txs, got $tx_count: $tx_list"
+}
+
+flow_output_schema_failure() {
+    echo "=== FLOW output_schema_failure ==="
+    local dir db home_sys home_alice home_bob port backend_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    port=$(alloc_port)
+    backend_port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "output_schema_failure.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 300 >/dev/null 2>&1
+
+    # Backend returns {"ok":true} — missing required output field "id"
+    start_backend "$backend_port" 200 '{"ok":true}'
+    local backend_pid=$BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    # @alice creates action with output schema requiring field "id"
+    local create_out action_id
+    create_out=$(jj "$db" "$home_alice" action add --name /schema-out --kind http \
+        --source "http://127.0.0.1:${backend_port}/schema-out" --price 50 --description "schema out test" \
+        --output-schema '{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}')
+    action_id=$(strfield "$create_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+
+    # @bob starts process with 200 funds
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_bob" process start --funds 200)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    # Call — execution runs, output schema check fails → CommitFailedCall
+    local call_out
+    call_out=$(j "$db" "$home_bob" call \
+        --process "$proc_id" --target @alice --action /schema-out --args '{}')
+    echo "$call_out" | grep -qi "schema\|invalid\|error" \
+        && ok "output_schema_failure.error_returned" \
+        || fail "output_schema_failure.error_returned" "expected schema error, got: $call_out"
+
+    # Full refund — process.available unchanged
+    local proc_show
+    proc_show=$(jj "$db" "$home_bob" process show --id "$proc_id")
+    [ "$(numfield "$proc_show" "Available")" -eq 200 ] \
+        && ok "output_schema_failure.process_refunded" \
+        || fail "output_schema_failure.process_refunded" "expected 200, got: $proc_show"
+
+    # Failure tx IS recorded (unlike input schema failure)
+    local tx_list tx_count
+    tx_list=$(jj "$db" "$home_bob" tx list --process "$proc_id")
+    tx_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" "$tx_list" 2>/dev/null || echo 0)
+    [ "$tx_count" -ge 1 ] \
+        && ok "output_schema_failure.failure_tx_recorded" \
+        || fail "output_schema_failure.failure_tx_recorded" "expected >=1 tx, count=$tx_count"
+
+    # tx.Status = failure
+    local tx_id tx_show
+    tx_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])[0]['ID'])" "$tx_list" 2>/dev/null)
+    tx_show=$(jj "$db" "$home_bob" tx show --id "$tx_id")
+    [ "$(strfield "$tx_show" "Status")" = "failure" ] \
+        && ok "output_schema_failure.tx_status_failure" \
+        || fail "output_schema_failure.tx_status_failure" "expected failure, got: $tx_show"
+
+    # @alice received nothing (refund)
+    local alice_me
+    alice_me=$(jj "$db" "$home_alice" user me)
+    [ "$(numfield "$alice_me" "available")" -eq 0 ] \
+        && ok "output_schema_failure.target_not_credited" \
+        || fail "output_schema_failure.target_not_credited" "expected 0, got: $alice_me"
+
+    stop_backend "$backend_pid"
+}
+
+# ===========================================================================
 # Main runner
 # ===========================================================================
 main() {
@@ -518,6 +1036,13 @@ main() {
     flow_suspension
     flow_deposits
     flow_action_lifecycle
+    flow_process_lifecycle
+    flow_process_funding
+    flow_acl_public
+    flow_successful_paid_call
+    flow_failed_call_refund
+    flow_input_schema_failure
+    flow_output_schema_failure
 
     echo ""
     echo "Results: ${PASS} passed, ${FAIL} failed"
