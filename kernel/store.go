@@ -117,9 +117,10 @@ type Store interface {
 	// CheckProcessAuthority returns true if subjectUserID has explicit authority over processID.
 	CheckProcessAuthority(ctx context.Context, subjectUserID, processID string) (bool, error)
 
-	// LockFunds moves `amount` from process.available to process.locked.
-	// Fails atomically if process.available < amount.
-	LockFunds(ctx context.Context, processID string, amount int64) error
+	// BeginCall atomically locks price credits in the process and creates the child trace.
+	// Either both succeed or neither does. Returns ErrInsufficientFunds if the process
+	// has insufficient available credits; any other error is a store failure.
+	BeginCall(ctx context.Context, processID string, t *Trace, price int64) error
 
 	// RefundFunds moves `amount` back from process.locked to process.available.
 	RefundFunds(ctx context.Context, processID string, amount int64) error
@@ -144,7 +145,6 @@ type Store interface {
 
 	// ---- Traces ----
 
-	CreateTrace(ctx context.Context, t *Trace) error
 	ReadTrace(ctx context.Context, id string) (*Trace, error)
 	// ReadRootTrace returns the root trace (ParentTraceID == ID) for the given process.
 	ReadRootTrace(ctx context.Context, processID string) (*Trace, error)

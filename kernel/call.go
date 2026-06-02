@@ -155,14 +155,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInvalidInput.Wrap("CausedByTraceID must differ from ParentTraceID")
 	}
 
-	// 10. Lock funds atomically — first state change.
-	if action.Price > 0 {
-		if err := k.store.LockFunds(ctx, req.ProcessID, action.Price); err != nil {
-			return nil, ErrInsufficientFunds.Wrap("could not lock funds")
-		}
-	}
-
-	// 11. Create child trace.
+	// 10–11. Atomically lock funds and create child trace.
 	now := time.Now().UTC()
 	trace := &Trace{
 		ID:              uuid.New().String(),
@@ -171,12 +164,11 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		CausedByTraceID: strPtr(req.CausedByTraceID),
 		CreatedAt:       now,
 	}
-	if err := k.store.CreateTrace(ctx, trace); err != nil {
-		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
-			logger.Error("call.refund_failed_on_trace_error", "refund_error", refundErr)
-			return nil, ErrInternal.Wrap("could not refund funds after trace creation failure")
+	if err := k.store.BeginCall(ctx, req.ProcessID, trace, action.Price); err != nil {
+		if errors.Is(err, ErrInsufficientFunds) {
+			return nil, err
 		}
-		return nil, ErrInternal.Wrap("could not create trace")
+		return nil, ErrInternal.Wrap("could not begin call")
 	}
 
 	ctx = log.WithProcessID(ctx, req.ProcessID)

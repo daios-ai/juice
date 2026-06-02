@@ -238,8 +238,7 @@ type Rating struct {
 }
 
 // IdempotencyRecord prevents duplicate cross-kernel calls.
-// Status transitions: "pending" (inserted before execution) → "complete" (set after success).
-// On failure the record is deleted to allow retry.
+// Status transitions: "pending" (inserted before execution) → "complete" (set after success or failure).
 type IdempotencyRecord struct {
 	ID                 string
 	IdempotencyKey     string

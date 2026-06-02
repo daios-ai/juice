@@ -3,12 +3,35 @@ package script
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
 )
+
+// FakeExecutor is a deterministic script executor for tests.
+type FakeExecutor struct {
+	Result []byte
+	Err    error
+}
+
+func (f *FakeExecutor) Compile(_ context.Context, source []byte) ([]byte, string, error) {
+	h := sha256.Sum256(source)
+	return source, hex.EncodeToString(h[:]), nil
+}
+
+func (f *FakeExecutor) Execute(_ context.Context, _ []byte, input []byte, _ kernel.HostFunctions) ([]byte, error) {
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	if f.Result != nil {
+		return f.Result, nil
+	}
+	return input, nil
+}
 
 func TestFakeExecutorEchoes(t *testing.T) {
 	f := &FakeExecutor{}

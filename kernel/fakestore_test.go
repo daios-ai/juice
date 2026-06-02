@@ -323,18 +323,22 @@ func (f *fakeStore) ReadProcess(_ context.Context, id string) (*Process, error) 
 	return &cp, nil
 }
 
-func (f *fakeStore) LockFunds(_ context.Context, processID string, amount int64) error {
+func (f *fakeStore) BeginCall(_ context.Context, processID string, t *Trace, price int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.processes[processID]
 	if !ok {
 		return ErrNotFound.Wrap("process not found")
 	}
-	if p.Available < amount {
-		return ErrInsufficientFunds.Wrap("insufficient process funds")
+	if price > 0 {
+		if p.Available < price {
+			return ErrInsufficientFunds.Wrap("insufficient process funds")
+		}
+		p.Available -= price
+		p.Locked += price
 	}
-	p.Available -= amount
-	p.Locked += amount
+	cp := *t
+	f.traces[t.ID] = &cp
 	return nil
 }
 
@@ -461,14 +465,6 @@ func (f *fakeStore) EndProcess(_ context.Context, processID string) error {
 	p.Available = 0
 	p.Locked = 0
 	p.Status = ProcessClosed
-	return nil
-}
-
-func (f *fakeStore) CreateTrace(_ context.Context, t *Trace) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cp := *t
-	f.traces[t.ID] = &cp
 	return nil
 }
 

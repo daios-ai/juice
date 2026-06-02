@@ -222,30 +222,6 @@ func writeToMem(ctx context.Context, mod api.Module, data []byte) []uint64 {
 	return []uint64{uint64(ptr), uint64(len(data))}
 }
 
-// FakeExecutor is a deterministic script executor for tests.
-type FakeExecutor struct {
-	// Result is returned by Execute if set.
-	Result []byte
-	// Err is returned by Execute if set.
-	Err error
-}
-
-func (f *FakeExecutor) Compile(_ context.Context, source []byte) ([]byte, string, error) {
-	h := sha256.Sum256(source)
-	return source, hex.EncodeToString(h[:]), nil
-}
-
-func (f *FakeExecutor) Execute(_ context.Context, _ []byte, input []byte, _ kernel.HostFunctions) ([]byte, error) {
-	if f.Err != nil {
-		return nil, f.Err
-	}
-	if f.Result != nil {
-		return f.Result, nil
-	}
-	// Echo input as output by default.
-	return input, nil
-}
-
 // MemoryPages converts bytes to wasm memory pages (64KiB each), rounding up.
 func MemoryPages(bytes int64) uint32 {
 	if bytes <= 0 {

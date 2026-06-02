@@ -648,16 +648,6 @@ func (s *DB) StartProcess(ctx context.Context, p *kernel.Process, t *kernel.Trac
 	return dbErr(tx.Commit(), "start process: commit")
 }
 
-func (s *DB) createProcess(ctx context.Context, p *kernel.Process) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at)
-		 VALUES (?,?,?,?,?,?,?)`,
-		p.ID, p.OwnerUserID, p.Available, p.Locked, string(p.Status),
-		timeToStr(p.CreatedAt), nullTimeToStr(p.EndedAt),
-	)
-	return dbErr(err, "create process")
-}
-
 func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error) {
 	var p kernel.Process
 	var status, createdAt string
@@ -691,6 +681,39 @@ func (s *DB) LockFunds(ctx context.Context, processID string, amount int64) erro
 		return kernel.ErrInsufficientFunds.Wrap("not enough process funds or process closed")
 	}
 	return nil
+}
+
+// BeginCall atomically locks price credits in the process and inserts the child trace.
+// Either both succeed or neither does, preserving the transition invariant.
+func (s *DB) BeginCall(ctx context.Context, processID string, t *kernel.Trace, price int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin call: begin tx")
+	}
+	defer tx.Rollback()
+
+	if price > 0 {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE processes SET available=available-?, locked=locked+?
+			 WHERE id=? AND available>=? AND status='open'`,
+			price, price, processID, price,
+		)
+		if err != nil {
+			return dbErr(err, "begin call: lock funds")
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return kernel.ErrInsufficientFunds.Wrap("not enough process funds or process closed")
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO traces (id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
+		t.ID, t.ProcessID, t.ParentTraceID, t.CausedByTraceID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
+	); err != nil {
+		return dbErr(err, "begin call: create trace")
+	}
+
+	return dbErr(tx.Commit(), "begin call: commit")
 }
 
 func (s *DB) RefundFunds(ctx context.Context, processID string, amount int64) error {
@@ -1708,18 +1731,6 @@ func dbErr(err error, op string) error {
 
 // ---- Receipts ----
 
-func (s *DB) createReceipt(ctx context.Context, r *kernel.Receipt) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		r.ID, r.IssuerUserID, r.TxID, r.TraceID, r.ActionID,
-		r.ArgsHash, r.ReplyHash, string(r.Status),
-		r.Gross, r.Net, r.Fee, r.Reason,
-		timeToStr(r.CreatedAt), r.Signature,
-	)
-	return dbErr(err, "create receipt")
-}
-
 func (s *DB) ReadReceiptByTxID(ctx context.Context, txID string) (*kernel.Receipt, error) {
 	var r kernel.Receipt
 	var status, createdAt string
@@ -1761,16 +1772,6 @@ func (s *DB) ReadReceipt(ctx context.Context, id string) (*kernel.Receipt, error
 }
 
 // ---- Ratings ----
-
-func (s *DB) createRating(ctx context.Context, r *kernel.Rating) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature)
-		 VALUES (?,?,?,?,?,?,?)`,
-		r.ID, r.RatedTxID, r.RatedReceiptID, r.RaterUserID, r.Rating,
-		timeToStr(r.CreatedAt), r.Signature,
-	)
-	return dbErr(err, "create rating")
-}
 
 func (s *DB) CreateRatingAndUpdateStats(ctx context.Context, r *kernel.Rating, actionID string, rating float64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1886,14 +1887,6 @@ func (s *DB) InsertPendingIdempotencyRecord(ctx context.Context, r *kernel.Idemp
 		timeToStr(r.CreatedAt), timeToStr(r.ExpiresAt),
 	)
 	return dbErr(err, "insert pending idempotency record")
-}
-
-func (s *DB) completeIdempotencyRecord(ctx context.Context, id, resultJSON, receiptJSON string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=?`,
-		resultJSON, receiptJSON, id,
-	)
-	return dbErr(err, "complete idempotency record")
 }
 
 func (s *DB) DeleteIdempotencyRecord(ctx context.Context, id string) error {

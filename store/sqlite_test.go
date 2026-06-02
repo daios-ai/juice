@@ -310,7 +310,7 @@ func TestFundProcess(t *testing.T) {
 	user := newUser("@alice", 1000)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
-	_ = db.createProcess(ctx, p)
+	startProc(t, db, ctx, p)
 
 	if err := db.FundProcess(ctx, user.ID, p.ID, 400); err != nil {
 		t.Fatal(err)
@@ -339,7 +339,7 @@ func TestFundProcessClosedFails(t *testing.T) {
 	user := newUser("@closed-fund", 1000)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
-	_ = db.createProcess(ctx, p)
+	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, user.ID, p.ID, 200)
 
 	// Close the process.
@@ -366,7 +366,7 @@ func TestLockAndRefundFunds(t *testing.T) {
 	user := newUser("@alice", 500)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
-	_ = db.createProcess(ctx, p)
+	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, user.ID, p.ID, 500)
 
 	if err := db.LockFunds(ctx, p.ID, 200); err != nil {
@@ -404,7 +404,7 @@ func TestCommitCall(t *testing.T) {
 	_ = db.CreateUser(ctx, fee)
 
 	p := newProcess(payer.ID)
-	_ = db.createProcess(ctx, p)
+	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
 	_ = db.LockFunds(ctx, p.ID, 100)
 
@@ -455,7 +455,7 @@ func TestEndProcess(t *testing.T) {
 	user := newUser("@alice", 1000)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
-	_ = db.createProcess(ctx, p)
+	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, user.ID, p.ID, 600)
 
 	if err := db.EndProcess(ctx, p.ID); err != nil {
@@ -487,7 +487,7 @@ func TestEndProcessWithLockedFunds(t *testing.T) {
 	user := newUser("@alice-locked", 500)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
-	_ = db.createProcess(ctx, p)
+	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, user.ID, p.ID, 500)
 	// Lock 200 — simulates an in-flight sub-call.
 	if err := db.LockFunds(ctx, p.ID, 200); err != nil {
@@ -558,7 +558,7 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	_ = db.CreateAction(ctx, a)
 
 	p := newProcess(payer.ID)
-	_ = db.createProcess(ctx, p)
+	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
 	_ = db.LockFunds(ctx, p.ID, 200) // lock for both calls
 
@@ -629,15 +629,12 @@ func TestListTraces(t *testing.T) {
 	user := newUser("@alice", 0)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
-	_ = db.createProcess(ctx, p)
+	startProc(t, db, ctx, p)
 
-	root := &kernel.Trace{
-		ID:        uuid.New().String(),
-		ProcessID: p.ID,
-		CreatedAt: time.Now().UTC(),
+	root, err := db.ReadRootTrace(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("ReadRootTrace: %v", err)
 	}
-	root.ParentTraceID = root.ID
-	_ = db.CreateTrace(ctx, root)
 
 	child := &kernel.Trace{
 		ID:            uuid.New().String(),
@@ -760,7 +757,7 @@ func TestTransactionCRUD(t *testing.T) {
 	_ = db.CreateAction(ctx, a)
 
 	p := newProcess(owner.ID)
-	_ = db.createProcess(ctx, p)
+	startProc(t, db, ctx, p)
 
 	tr := &kernel.Trace{
 		ID:        uuid.New().String(),
@@ -1427,7 +1424,7 @@ func TestCommitCallFeeDestructionRejected(t *testing.T) {
 	_ = db.CreateUser(ctx, target)
 
 	p := newProcess(payer.ID)
-	_ = db.createProcess(ctx, p)
+	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
 	_ = db.LockFunds(ctx, p.ID, 100)
 
@@ -1480,7 +1477,7 @@ func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	_ = db.CreateUser(ctx, cp)
 
 	p := newProcess(payer.ID)
-	_ = db.createProcess(ctx, p)
+	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
 	_ = db.LockFunds(ctx, p.ID, 100)
 
@@ -1535,7 +1532,7 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	_ = db.CreateUser(ctx, cp)
 
 	p := newProcess(payer.ID)
-	_ = db.createProcess(ctx, p)
+	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
 	_ = db.LockFunds(ctx, p.ID, 100)
 
@@ -1578,4 +1575,47 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	if result["error"] != "execution failed" {
 		t.Errorf("result_json[\"error\"]: got %q, want \"execution failed\"", result["error"])
 	}
+}
+
+// ---- Test-only store helpers ----
+// These low-level helpers exist only in test builds to keep test setup simple.
+// Production code uses the higher-level atomic methods (CommitCall, CommitFailedCall, etc.).
+
+func startProc(t *testing.T, db *DB, ctx context.Context, p *kernel.Process) {
+	t.Helper()
+	trID := uuid.New().String()
+	tr := &kernel.Trace{ID: trID, ProcessID: p.ID, ParentTraceID: trID, CreatedAt: time.Now().UTC()}
+	if err := db.StartProcess(ctx, p, tr, p.OwnerUserID, 0); err != nil {
+		t.Fatalf("startProc: %v", err)
+	}
+}
+
+func (s *DB) createReceipt(ctx context.Context, r *kernel.Receipt) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		r.ID, r.IssuerUserID, r.TxID, r.TraceID, r.ActionID,
+		r.ArgsHash, r.ReplyHash, string(r.Status),
+		r.Gross, r.Net, r.Fee, r.Reason,
+		timeToStr(r.CreatedAt), r.Signature,
+	)
+	return dbErr(err, "create receipt")
+}
+
+func (s *DB) createRating(ctx context.Context, r *kernel.Rating) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature)
+		 VALUES (?,?,?,?,?,?,?)`,
+		r.ID, r.RatedTxID, r.RatedReceiptID, r.RaterUserID, r.Rating,
+		timeToStr(r.CreatedAt), r.Signature,
+	)
+	return dbErr(err, "create rating")
+}
+
+func (s *DB) completeIdempotencyRecord(ctx context.Context, id, resultJSON, receiptJSON string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=?`,
+		resultJSON, receiptJSON, id,
+	)
+	return dbErr(err, "complete idempotency record")
 }
