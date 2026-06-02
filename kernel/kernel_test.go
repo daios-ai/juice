@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -1855,14 +1856,20 @@ func TestParseOpenAPISpecRejectsAmbiguous2xxSchemas(t *testing.T) {
 	}
 }
 
-func TestParseOpenAPISpecRejectsNegativePrice(t *testing.T) {
-	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/op":{"get":{"operationId":"getOp","description":"an op","x-juice-price":-5,"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
-	_, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
-	if err != nil {
-		t.Fatalf("parseOpenAPISpec: %v", err)
-	}
-	if len(rejected) != 1 || rejected[0].Reason != "price must be non-negative" {
-		t.Errorf("expected negative price rejection, got %+v", rejected)
+func TestParseOpenAPISpecRejectsInvalidPrice(t *testing.T) {
+	opTpl := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/op":{"get":{"operationId":"getOp","description":"an op","x-juice-price":%s,"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	for _, tc := range []struct{ price, reason string }{
+		{"-5", "price must be a non-negative integer"},
+		{"1.5", "price must be a non-negative integer"},
+	} {
+		spec := fmt.Sprintf(opTpl, tc.price)
+		_, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
+		if err != nil {
+			t.Fatalf("price=%s: parseOpenAPISpec: %v", tc.price, err)
+		}
+		if len(rejected) != 1 || rejected[0].Reason != tc.reason {
+			t.Errorf("price=%s: expected rejection %q, got %+v", tc.price, tc.reason, rejected)
+		}
 	}
 }
 

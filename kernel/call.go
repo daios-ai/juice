@@ -123,11 +123,6 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInsufficientFunds.Wrapf("process has %d credits, action costs %d", process.Available, action.Price)
 	}
 
-	// Internal guard: kernel must be bootstrapped before any call can be committed.
-	if err := k.requireReceiptSigningReady(); err != nil {
-		return nil, err
-	}
-
 	// 9. Validate or resolve parent trace — precondition check, no state change yet.
 	if req.ParentTraceID != "" {
 		parent, err := k.store.ReadTrace(ctx, req.ParentTraceID)
@@ -153,6 +148,11 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// FOLLOWS_FROM and CHILD_OF must reference distinct traces.
 	if req.CausedByTraceID != "" && req.CausedByTraceID == req.ParentTraceID {
 		return nil, ErrInvalidInput.Wrap("CausedByTraceID must differ from ParentTraceID")
+	}
+
+	// Kernel must be bootstrapped before any call can be committed.
+	if err := k.requireReceiptSigningReady(); err != nil {
+		return nil, err
 	}
 
 	// 10–11. Atomically lock funds and create child trace.

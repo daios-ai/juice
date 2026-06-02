@@ -842,6 +842,9 @@ func (k *Kernel) GrantACL(ctx context.Context, subjectID, actionID string, perm 
 	if err := k.requireAdmin(ctx, grantorID, a); err != nil {
 		return err
 	}
+	if perm != PermRead && perm != PermCall && perm != PermAdmin {
+		return ErrInvalidInput.Wrapf("unknown permission %q", perm)
+	}
 	if err := k.store.GrantACL(ctx, &ACLEntry{
 		SubjectUserID: subjectID,
 		ActionID:      actionID,
@@ -1845,8 +1848,8 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 			var price int64
 			if v, ok := op["x-juice-price"]; ok {
 				if f, ok := v.(float64); ok {
-					if int64(f) < 0 {
-						rejected = append(rejected, ImportRejection{Key: key, Reason: "price must be non-negative"})
+					if int64(f) < 0 || f != float64(int64(f)) {
+						rejected = append(rejected, ImportRejection{Key: key, Reason: "price must be a non-negative integer"})
 						continue
 					}
 					price = int64(f)
@@ -2306,10 +2309,11 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 	if m.ActionID == "" {
 		return nil, ErrInvalidInput.Wrap("manifest missing action_id")
 	}
-	if remoteUser.PublicKey != "" {
-		if err := VerifyManifestSignature(remoteUser.PublicKey, &m); err != nil {
-			return nil, err
-		}
+	if remoteUser.PublicKey == "" {
+		return nil, ErrInvalidInput.Wrap("remote kernel has no public key")
+	}
+	if err := VerifyManifestSignature(remoteUser.PublicKey, &m); err != nil {
+		return nil, err
 	}
 	// counterparty is this kernel's base64url Ed25519 public key so the remote can
 	// look it up by key (handle-based lookup would require knowing what handle the
