@@ -1028,6 +1028,555 @@ flow_output_schema_failure() {
 }
 
 # ===========================================================================
+# BATCH 3 — WASM, Events, Rating
+# ===========================================================================
+
+flow_wasm_execution() {
+    echo "=== FLOW wasm_execution ==="
+    local dir db home_sys home_alice home_bob port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "wasm_execution.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 200 >/dev/null 2>&1
+
+    # @alice creates echo WASM action
+    local echo_wasm="$dir/echo.wasm"
+    make_echo_wasm "$echo_wasm"
+    local create_out action_id
+    create_out=$(jj "$db" "$home_alice" action add --name /echo --kind wasm \
+        --source "$echo_wasm" --price 10 --description "echo wasm")
+    action_id=$(strfield "$create_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+
+    # ArtifactHash is set after enable (WASM compiled on activation)
+    local action_show artifact_hash
+    action_show=$(jj "$db" "$home_alice" action show --id "$action_id")
+    artifact_hash=$(strfield "$action_show" "ArtifactHash")
+    [ -n "$artifact_hash" ] \
+        && ok "wasm_execution.artifact_hash" \
+        || fail "wasm_execution.artifact_hash" "expected non-empty ArtifactHash: $action_show"
+
+    # @bob calls echo WASM
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_bob" process start --funds 100)
+    proc_id=$(strfield "$proc_out" "process_id")
+    local call_out tx_id
+    call_out=$(jj "$db" "$home_bob" call --process "$proc_id" \
+        --target @alice --action /echo --args '{"msg":"hello"}')
+    tx_id=$(strfield "$call_out" "tx_id")
+    [ -n "$tx_id" ] \
+        && ok "wasm_execution.echo_call_succeeds" \
+        || fail "wasm_execution.echo_call_succeeds" "echo call returned no tx_id: $call_out"
+
+    # Infinite-loop WASM → timeout error
+    local loop_wasm="$dir/loop.wasm"
+    make_infinite_loop_wasm "$loop_wasm"
+    local loop_out loop_id
+    loop_out=$(jj "$db" "$home_alice" action add --name /loop --kind wasm \
+        --source "$loop_wasm" --price 10 --description "infinite loop")
+    loop_id=$(strfield "$loop_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$loop_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$loop_id" >/dev/null 2>&1
+
+    local proc2_out proc2_id timeout_out
+    proc2_out=$(jj "$db" "$home_bob" process start --funds 100)
+    proc2_id=$(strfield "$proc2_out" "process_id")
+    timeout_out=$(JUICE_SCRIPT_TIMEOUT_MS=200 JUICE_LOG_LEVEL=error \
+        HOME="$home_bob" JUICE_ALLOW_LOCAL_SOURCES=true \
+        "$JUICE" --db "$db" call \
+        --process "$proc2_id" --target @alice --action /loop --args '{}' 2>&1)
+    echo "$timeout_out" | grep -qi "timeout\|timed\|execution" \
+        && ok "wasm_execution.infinite_loop_timeout" \
+        || fail "wasm_execution.infinite_loop_timeout" "expected timeout error, got: $timeout_out"
+}
+
+flow_contractor_subcall() {
+    echo "=== FLOW contractor_subcall ==="
+    local dir db home_sys home_alice home_bob home_carol port backend_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    home_carol="$dir/carol"; mkdir -p "$home_carol/.juice"
+    port=$(alloc_port)
+    backend_port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "contractor_subcall.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @carol --email carol@test.com --password carolpass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_carol" auth login --handle @carol --password carolpass >/dev/null 2>&1
+    # @alice needs 50 credits to fund sub-calls on behalf of the contractor
+    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 50 >/dev/null 2>&1
+
+    start_backend "$backend_port" 200 '{"ok":true}'
+    local backend_pid=$BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    # @bob creates sub-target HTTP action (price=50)
+    local sub_out sub_id
+    sub_out=$(jj "$db" "$home_bob" action add --name /sub-target --kind http \
+        --source "http://127.0.0.1:${backend_port}/sub" --price 50 --description "sub target")
+    sub_id=$(strfield "$sub_out" "ID")
+    j "$db" "$home_bob" action enable   --id "$sub_id" >/dev/null 2>&1
+    j "$db" "$home_bob" action grant-all --id "$sub_id" >/dev/null 2>&1
+
+    # @alice creates contractor WASM (price=0) that calls @bob/sub-target
+    local contractor_wasm="$dir/contractor.wasm"
+    make_contractor_wasm "$contractor_wasm" "@bob/sub-target"
+    local cont_out cont_id
+    cont_out=$(jj "$db" "$home_alice" action add --name /contractor --kind wasm \
+        --source "$contractor_wasm" --price 0 --description "contractor wasm")
+    cont_id=$(strfield "$cont_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$cont_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$cont_id" >/dev/null 2>&1
+
+    # @carol calls contractor (price=0 → process needs 0 funds)
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_carol" process start --funds 0)
+    proc_id=$(strfield "$proc_out" "process_id")
+    local call_out tx_id
+    call_out=$(jj "$db" "$home_carol" call \
+        --process "$proc_id" --target @alice --action /contractor --args '{}')
+    tx_id=$(strfield "$call_out" "tx_id")
+    [ -n "$tx_id" ] \
+        && ok "contractor_subcall.call_succeeds" \
+        || fail "contractor_subcall.call_succeeds" "contractor call returned no tx_id: $call_out"
+
+    # @carol process.available unchanged (contractor price=0)
+    local proc_show
+    proc_show=$(jj "$db" "$home_carol" process show --id "$proc_id")
+    [ "$(numfield "$proc_show" "Available")" -eq 0 ] \
+        && ok "contractor_subcall.caller_process_unchanged" \
+        || fail "contractor_subcall.caller_process_unchanged" "expected 0, got: $proc_show"
+
+    # @alice.available = 0 (started 50, spent 50 on ephemeral sub-call)
+    local alice_me
+    alice_me=$(jj "$db" "$home_alice" user me)
+    [ "$(numfield "$alice_me" "available")" -eq 0 ] \
+        && ok "contractor_subcall.alice_debited" \
+        || fail "contractor_subcall.alice_debited" "expected 0, got: $alice_me"
+
+    # @bob.available = 50 (received net from sub-call, no fee)
+    local bob_me
+    bob_me=$(jj "$db" "$home_bob" user me)
+    [ "$(numfield "$bob_me" "available")" -eq 50 ] \
+        && ok "contractor_subcall.bob_credited" \
+        || fail "contractor_subcall.bob_credited" "expected 50, got: $bob_me"
+
+    stop_backend "$backend_pid"
+}
+
+flow_contractor_failure() {
+    echo "=== FLOW contractor_failure ==="
+    local dir db home_sys home_alice home_bob home_carol port backend_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    home_carol="$dir/carol"; mkdir -p "$home_carol/.juice"
+    port=$(alloc_port)
+    backend_port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "contractor_failure.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @carol --email carol@test.com --password carolpass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_carol" auth login --handle @carol --password carolpass >/dev/null 2>&1
+    # @alice has 0 credits (no deposit) → sub-call will fail with ErrInsufficientFunds
+    j "$db" "$home_sys" admin user deposit --handle @carol --amount 200 >/dev/null 2>&1
+
+    start_backend "$backend_port" 200 '{"ok":true}'
+    local backend_pid=$BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    # @bob creates sub-target (price=50)
+    local sub_out sub_id
+    sub_out=$(jj "$db" "$home_bob" action add --name /sub-target --kind http \
+        --source "http://127.0.0.1:${backend_port}/sub" --price 50 --description "sub target")
+    sub_id=$(strfield "$sub_out" "ID")
+    j "$db" "$home_bob" action enable   --id "$sub_id" >/dev/null 2>&1
+    j "$db" "$home_bob" action grant-all --id "$sub_id" >/dev/null 2>&1
+
+    # @alice creates contractor WASM (price=0)
+    local contractor_wasm="$dir/contractor.wasm"
+    make_contractor_wasm "$contractor_wasm" "@bob/sub-target"
+    local cont_out cont_id
+    cont_out=$(jj "$db" "$home_alice" action add --name /contractor --kind wasm \
+        --source "$contractor_wasm" --price 0 --description "contractor wasm")
+    cont_id=$(strfield "$cont_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$cont_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$cont_id" >/dev/null 2>&1
+
+    # @carol starts process (100 funds, contractor price=0 so nothing locked)
+    local proc_out proc_id
+    j "$db" "$home_sys" admin user deposit --handle @carol --amount 0 >/dev/null 2>&1
+    proc_out=$(jj "$db" "$home_carol" process start --funds 100)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    # Call contractor → @alice has 0 credits → ephemeral process creation fails
+    local call_out
+    call_out=$(j "$db" "$home_carol" call \
+        --process "$proc_id" --target @alice --action /contractor --args '{}' 2>&1)
+    echo "$call_out" | grep -qi "insufficient\|balance\|funds" \
+        && ok "contractor_failure.error_returned" \
+        || fail "contractor_failure.error_returned" "expected insufficient-funds error, got: $call_out"
+
+    # @carol process.available unchanged (nothing was locked for price=0 contractor)
+    local proc_show
+    proc_show=$(jj "$db" "$home_carol" process show --id "$proc_id")
+    [ "$(numfield "$proc_show" "Available")" -eq 100 ] \
+        && ok "contractor_failure.caller_process_unchanged" \
+        || fail "contractor_failure.caller_process_unchanged" "expected 100, got: $proc_show"
+
+    # @alice.available = 0 (unchanged, no deposit made)
+    local alice_me
+    alice_me=$(jj "$db" "$home_alice" user me)
+    [ "$(numfield "$alice_me" "available")" -eq 0 ] \
+        && ok "contractor_failure.alice_unchanged" \
+        || fail "contractor_failure.alice_unchanged" "expected 0, got: $alice_me"
+
+    stop_backend "$backend_pid"
+}
+
+flow_event_queue_success() {
+    echo "=== FLOW event_queue_success ==="
+    local dir db home_sys home_alice home_bob port backend_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    port=$(alloc_port)
+    backend_port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "event_queue_success.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+
+    start_backend "$backend_port" 200 '{"ok":true}'
+    local backend_pid=$BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    # @alice creates handler action (price=0) and a listener (source=@bob, event=test.evt)
+    local handler_out handler_id
+    handler_out=$(jj "$db" "$home_alice" action add --name /handler --kind http \
+        --source "http://127.0.0.1:${backend_port}/handler" --price 0 --description "event handler")
+    handler_id=$(strfield "$handler_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$handler_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$handler_id" >/dev/null 2>&1
+
+    local listen_out listener_id
+    listen_out=$(jj "$db" "$home_alice" events listen \
+        --source @bob --event test.evt --action "$handler_id")
+    listener_id=$(strfield "$listen_out" "ID")
+
+    # @bob emits the event
+    local emit_out event_id
+    emit_out=$(jj "$db" "$home_bob" events emit --event test.evt --args '{}')
+    event_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['event_ids'][0])" \
+        "$emit_out" 2>/dev/null)
+    [ -n "$event_id" ] \
+        && ok "event_queue_success.emit_returns_id" \
+        || fail "event_queue_success.emit_returns_id" "emit returned no event_id: $emit_out"
+
+    # @alice polls → 1 pending event
+    local poll_out event_count
+    poll_out=$(jj "$db" "$home_alice" events poll --id "$listener_id")
+    event_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]).get('events',[])))" \
+        "$poll_out" 2>/dev/null || echo 0)
+    [ "$event_count" -eq 1 ] \
+        && ok "event_queue_success.poll_returns_event" \
+        || fail "event_queue_success.poll_returns_event" "expected 1, got: $poll_out"
+
+    # @alice consumes the event (action price=0, no funds needed)
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_alice" process start --funds 0)
+    proc_id=$(strfield "$proc_out" "process_id")
+    local consume_out consume_tx
+    consume_out=$(jj "$db" "$home_alice" events consume --id "$event_id" --process "$proc_id")
+    consume_tx=$(strfield "$consume_out" "tx_id")
+    [ -n "$consume_tx" ] \
+        && ok "event_queue_success.consume_returns_tx" \
+        || fail "event_queue_success.consume_returns_tx" "consume returned no tx_id: $consume_out"
+
+    # @alice polls again → 0 pending events
+    local poll2_out event_count2
+    poll2_out=$(jj "$db" "$home_alice" events poll --id "$listener_id")
+    event_count2=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]).get('events',[])))" \
+        "$poll2_out" 2>/dev/null || echo 0)
+    [ "$event_count2" -eq 0 ] \
+        && ok "event_queue_success.poll_empty_after_consume" \
+        || fail "event_queue_success.poll_empty_after_consume" "expected 0, got: $poll2_out"
+
+    # @alice unlistens
+    local unlisten_out
+    unlisten_out=$(j "$db" "$home_alice" events unlisten --id "$listener_id")
+    echo "$unlisten_out" | grep -q "Listener deactivated" \
+        && ok "event_queue_success.unlisten" \
+        || fail "event_queue_success.unlisten" "unexpected unlisten output: $unlisten_out"
+
+    stop_backend "$backend_pid"
+}
+
+flow_event_queue_failure() {
+    echo "=== FLOW event_queue_failure ==="
+    local dir db home_sys home_alice home_bob home_carol port backend_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    home_carol="$dir/carol"; mkdir -p "$home_carol/.juice"
+    port=$(alloc_port)
+    backend_port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "event_queue_failure.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @carol --email carol@test.com --password carolpass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_carol" auth login --handle @carol --password carolpass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @carol --amount 10 >/dev/null 2>&1
+
+    start_backend "$backend_port" 200 '{"ok":true}'
+    local backend_pid=$BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    # @alice creates handler action and listener (source=@bob)
+    local handler_out handler_id
+    handler_out=$(jj "$db" "$home_alice" action add --name /handler --kind http \
+        --source "http://127.0.0.1:${backend_port}/handler" --price 0 --description "event handler")
+    handler_id=$(strfield "$handler_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$handler_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$handler_id" >/dev/null 2>&1
+
+    local listen_out listener_id
+    listen_out=$(jj "$db" "$home_alice" events listen \
+        --source @bob --event fail.evt --action "$handler_id")
+    listener_id=$(strfield "$listen_out" "ID")
+
+    # @bob emits event_1; @alice consumes it
+    local emit1_out event1_id
+    emit1_out=$(jj "$db" "$home_bob" events emit --event fail.evt --args '{}')
+    event1_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['event_ids'][0])" \
+        "$emit1_out" 2>/dev/null)
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_alice" process start --funds 0)
+    proc_id=$(strfield "$proc_out" "process_id")
+    jj "$db" "$home_alice" events consume --id "$event1_id" --process "$proc_id" >/dev/null 2>&1
+
+    # Consume event_1 again → ErrInvalidState (already consumed)
+    local consume2_out
+    consume2_out=$(j "$db" "$home_alice" events consume --id "$event1_id" --process "$proc_id" 2>&1)
+    echo "$consume2_out" | grep -qi "invalid.state\|already.consumed\|in-flight" \
+        && ok "event_queue_failure.double_consume_rejected" \
+        || fail "event_queue_failure.double_consume_rejected" "expected invalid state, got: $consume2_out"
+
+    # @bob emits event_2; @alice polls to get id
+    local emit2_out event2_id
+    emit2_out=$(jj "$db" "$home_bob" events emit --event fail.evt --args '{}')
+    event2_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['event_ids'][0])" \
+        "$emit2_out" 2>/dev/null)
+
+    # @carol (non-owner) tries to consume event_2 → ErrUnauthorized
+    local carol_proc_out carol_proc_id
+    carol_proc_out=$(jj "$db" "$home_carol" process start --funds 0)
+    carol_proc_id=$(strfield "$carol_proc_out" "process_id")
+    local consume3_out
+    consume3_out=$(j "$db" "$home_carol" events consume --id "$event2_id" --process "$carol_proc_id" 2>&1)
+    echo "$consume3_out" | grep -qi "unauthorized\|permission\|owner" \
+        && ok "event_queue_failure.non_owner_rejected" \
+        || fail "event_queue_failure.non_owner_rejected" "expected unauthorized, got: $consume3_out"
+
+    stop_backend "$backend_pid"
+}
+
+flow_event_deletion_restart() {
+    echo "=== FLOW event_deletion_restart ==="
+    local dir db home_sys home_alice home_bob port backend_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    port=$(alloc_port)
+    backend_port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "event_deletion_restart.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+
+    start_backend "$backend_port" 200 '{"ok":true}'
+    local backend_pid=$BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    # @alice creates handler + listener (source=@bob)
+    local handler_out handler_id
+    handler_out=$(jj "$db" "$home_alice" action add --name /handler --kind http \
+        --source "http://127.0.0.1:${backend_port}/handler" --price 0 --description "event handler")
+    handler_id=$(strfield "$handler_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$handler_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$handler_id" >/dev/null 2>&1
+
+    local listen_out listener_id
+    listen_out=$(jj "$db" "$home_alice" events listen \
+        --source @bob --event restart.evt --action "$handler_id")
+    listener_id=$(strfield "$listen_out" "ID")
+
+    # @bob emits; @alice polls → 1 event
+    jj "$db" "$home_bob" events emit --event restart.evt --args '{}' >/dev/null 2>&1
+    local poll_out event_id event_count
+    poll_out=$(jj "$db" "$home_alice" events poll --id "$listener_id")
+    event_id=$(python3 -c "import sys,json; evs=json.loads(sys.argv[1]).get('events',[]); print(evs[0]['ID'] if evs else '')" \
+        "$poll_out" 2>/dev/null)
+    event_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]).get('events',[])))" \
+        "$poll_out" 2>/dev/null || echo 0)
+    [ "$event_count" -eq 1 ] \
+        && ok "event_deletion_restart.initial_poll" \
+        || fail "event_deletion_restart.initial_poll" "expected 1, got: $poll_out"
+
+    # Inject in-flight state: set consumed_at (but leave tx_id=NULL)
+    python3 - "$db" "$event_id" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("UPDATE events SET consumed_at = datetime('now') WHERE id = ?", [sys.argv[2]])
+conn.commit()
+conn.close()
+PYEOF
+
+    # bootstrap_kernel on same DB → bootstrap() calls ResetInFlightEvents → consumed_at=NULL
+    local port2
+    port2=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port2" >/dev/null 2>&1
+
+    # @alice polls again → event restored
+    local poll2_out event_count2
+    poll2_out=$(jj "$db" "$home_alice" events poll --id "$listener_id")
+    event_count2=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]).get('events',[])))" \
+        "$poll2_out" 2>/dev/null || echo 0)
+    [ "$event_count2" -eq 1 ] \
+        && ok "event_deletion_restart.inflight_reset" \
+        || fail "event_deletion_restart.inflight_reset" "expected 1 after reset, got: $poll2_out"
+
+    # Unlisten → pending events purged; poll returns empty
+    j "$db" "$home_alice" events unlisten --id "$listener_id" >/dev/null 2>&1
+    local poll3_out event_count3
+    poll3_out=$(jj "$db" "$home_alice" events poll --id "$listener_id")
+    event_count3=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]).get('events',[])))" \
+        "$poll3_out" 2>/dev/null || echo 0)
+    [ "$event_count3" -eq 0 ] \
+        && ok "event_deletion_restart.unlisten_purges_events" \
+        || fail "event_deletion_restart.unlisten_purges_events" "expected 0 after unlisten, got: $poll3_out"
+
+    stop_backend "$backend_pid"
+}
+
+flow_rating() {
+    echo "=== FLOW rating ==="
+    local dir db home_sys home_alice home_bob port backend_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    port=$(alloc_port)
+    backend_port=$(alloc_port)
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "rating.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 200 >/dev/null 2>&1
+
+    start_backend "$backend_port" 200 '{"ok":true}'
+    local backend_pid=$BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    # @alice creates action (price=10)
+    local create_out action_id
+    create_out=$(jj "$db" "$home_alice" action add --name /rate-me --kind http \
+        --source "http://127.0.0.1:${backend_port}/rate" --price 10 --description "rateable action")
+    action_id=$(strfield "$create_out" "ID")
+    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+
+    # @bob calls @alice's action → tx_id
+    local proc_out proc_id call_out tx_id
+    proc_out=$(jj "$db" "$home_bob" process start --funds 100)
+    proc_id=$(strfield "$proc_out" "process_id")
+    call_out=$(jj "$db" "$home_bob" call \
+        --process "$proc_id" --target @alice --action /rate-me --args '{}')
+    tx_id=$(strfield "$call_out" "tx_id")
+
+    # @bob rates tx → success
+    local rate_out
+    rate_out=$(j "$db" "$home_bob" tx rate --id "$tx_id" --rating 1 2>&1)
+    echo "$rate_out" | grep -q "rated" \
+        && ok "rating.rate_succeeds" \
+        || fail "rating.rate_succeeds" "unexpected rate output: $rate_out"
+
+    # stats.rating_count = 1
+    local stats_out
+    stats_out=$(jj "$db" "$home_bob" stats show --action "$action_id")
+    [ "$(numfield "$stats_out" "rating_count")" -eq 1 ] \
+        && ok "rating.stats_updated" \
+        || fail "rating.stats_updated" "expected rating_count=1, got: $stats_out"
+
+    # Duplicate rate → ErrInvalidInput
+    local rate2_out
+    rate2_out=$(j "$db" "$home_bob" tx rate --id "$tx_id" --rating 0 2>&1)
+    echo "$rate2_out" | grep -qi "invalid.input\|already.rated\|already" \
+        && ok "rating.duplicate_rejected" \
+        || fail "rating.duplicate_rejected" "expected already-rated error, got: $rate2_out"
+
+    # @alice (non-buyer) rates → ErrUnauthorized
+    local rate3_out
+    rate3_out=$(j "$db" "$home_alice" tx rate --id "$tx_id" --rating 1 2>&1)
+    echo "$rate3_out" | grep -qi "unauthorized\|buyer\|permission" \
+        && ok "rating.non_buyer_rejected" \
+        || fail "rating.non_buyer_rejected" "expected unauthorized, got: $rate3_out"
+
+    stop_backend "$backend_pid"
+}
+
+# ===========================================================================
 # Main runner
 # ===========================================================================
 main() {
@@ -1043,6 +1592,13 @@ main() {
     flow_failed_call_refund
     flow_input_schema_failure
     flow_output_schema_failure
+    flow_wasm_execution
+    flow_contractor_subcall
+    flow_contractor_failure
+    flow_event_queue_success
+    flow_event_queue_failure
+    flow_event_deletion_restart
+    flow_rating
 
     echo ""
     echo "Results: ${PASS} passed, ${FAIL} failed"
