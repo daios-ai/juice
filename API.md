@@ -119,6 +119,7 @@ Log lines, progress messages, and error text go to stderr. The only content writ
 | Get manifest | `GET /v1/actions/{id}/manifest` → signed manifest | — (used internally by `remote import`) |
 | Get stats | `GET /v1/stats/{action_id}` → stats | `juice action stats --id` |
 | List ratings | `GET /v1/actions/{id}/ratings` → rating[] | — |
+| List provider receipts | `GET /v1/actions/{id}/receipts` (owner) → receipt[] | `juice action receipts --id` |
 
 Action responses include a computed `action` field (`@owner/name`) alongside `id`.
 

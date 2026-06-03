@@ -56,7 +56,7 @@ All IDs are stable opaque identifiers; action IDs are globally unique. Credit ba
 | `Listener`          | `id`, `owner_user_id`, `source_user_id`, `event_name`, `target_action_id`, `active`, `created_at`                                                                                                                                           | A listener subscribes its owner to an exact `(source_user_id, event_name)` pair.                                                                                                                                                                                                                                        |
 | `Event`             | `id`, `listener_id`, `args_json`, `causing_trace_id`, `consumed_at`, `tx_id`, `created_at`                                                                                                                                                  | Persistent queued work item. `causing_trace_id` is nullable.                                                                                                                                                                                                                                                            |
 | `Deposit`           | `id`, `operator_user_id`, `target_user_id`, `amount`, `reason`, `created_at`                                                                                                                                                                | Immutable audit record for a positive out-of-band superuser credit grant.                                                                                                                                                                                                                                               |
-| `Receipt`           | `id`, `issuer_user_id`, `tx_id`, `trace_id`, `action_id`, `args_hash`, `reply_hash`, `status`, `gross`, `net`, `fee`, `reason`, `created_at`, `signature`                                                                                   | Immutable signed record for exactly one committed call.                                                                                                                                                                                                                                                                 |
+| `Receipt`           | `id`, `issuer_user_id`, `tx_id`, `trace_id`, `action_id`, `caller_user_id`, `process_id`, `args_hash`, `reply_hash`, `status`, `gross`, `net`, `fee`, `reason`, `started_at`, `created_at`, `signature`                                     | Immutable signed record for exactly one committed call. `caller_user_id` is the authenticated subject of the call. `started_at` is the wall-clock time the call began; `created_at` is settlement time.                                                                                                                 |
 | `Rating`            | `id`, `rated_tx_id`, `rated_receipt_id`, `rater_user_id`, `rating`, `created_at`, `signature`                                                                                                                                               | Immutable signed feedback record. `rating ∈ {0, 1}`. At most one rating exists per transaction. `rated_receipt_id` may be null only for pre-receipt transactions.                                                                                                                                                       |
 | `IdempotencyRecord` | `id`, `idempotency_key`, `counterparty_user_id`, `receipt_id`, `created_at`, `expires_at`                                                                                                                                                   | Used only for cross-kernel calls.                                                                                                                                                                                                                                                                                       |
 
@@ -113,7 +113,7 @@ ReadStats UpdateStats
 CreateListener ReadListener ListListeners
 CreateEvent ListPendingEvents ConsumeEvent PurgeListenerEvents
 GetConfig SetConfig CreateDeposit
-CreateReceipt ReadReceipt
+CreateReceipt ReadReceipt ListReceiptsByAction
 CreateRating ReadRating ListRatings
 CreateIdempotencyRecord ReadIdempotencyRecord
 ```
@@ -423,6 +423,18 @@ CanonicalJSON(v any) ([]byte, error)
 
 Generate and verify signatures only over `CanonicalJSON` output. A rating signature covers all fields except `signature` and is signed with the platform key. Property ordering uses UTF-8 byte order; this matches RFC 8785 UTF-16 ordering for all-ASCII property names, which is all this implementation uses.
 
+### 9.4 Provider receipt access
+
+An action owner may list receipts for calls to their action. This rule is independent of caller permissions; a caller's authority to invoke an action does not grant authority to conceal the resulting economic record from the action owner.
+
+```text
+CanReadProviderReceipt(u, r) := u = Action(r.action_id).owner_user_id ∨ IsSuperuser(u)
+```
+
+`IsSuperuser` follows from `@sys` implicit admin authority (§11); no separate route is required. Results are ordered by descending `started_at`.
+
+Invariant: every credit to an action owner must be reconstructible from receipts readable by that owner.
+
 ## 10. Authentication and errors
 
 Human authentication uses an OAuth/OIDC-style flow. Browser login supports authorization code with PKCE; CLI login supports device authorization or loopback login. API calls use short-lived bearer access tokens. Refresh tokens, if used, are rotatable; logout revokes them server-side. Scripts never receive access or refresh tokens; internal script calls use trace-scoped authority.
@@ -610,6 +622,7 @@ Required endpoint behavior:
 | `POST /v1/call`                    | Requires `args` field; rejected with `ErrInvalidInput` when absent. `{}` is valid for unconstrained inputs. `action` is `@owner/name`.     |
 | `POST /v1/events/emit`             | Does not accept `source_user_id`; the event source is always the authenticated subject. Requires `args` field.                              |
 | `POST /v1/auth/logout`             | Accept refresh token in body, revoke it, and return `ErrUnauthenticated` for missing or already-revoked tokens.                             |
+| `GET /v1/actions/{id}/receipts`    | Action owner only; receipts for calls to that action in descending `started_at` order. CLI: `juice action receipts --id`.                   |
 
 ## 14. Logging and configuration
 
@@ -696,6 +709,8 @@ zero-credit process satisfies fund locking for zero-price actions
 Kernel.Deposit rejected with ErrUnauthorized for non-superuser caller
 receipt created atomically with successful transaction commit
 receipt created atomically with failed transaction commit
+action owner lists provider receipts for their action
+non-owner denied access to provider receipts
 OpenAPI import/unimport flow for API-owned actions
 OpenAPI import compiles parameters and JSON body into one input schema
 OpenAPI activation rejects incomplete schemas or missing descriptions
@@ -734,6 +749,7 @@ consumed events never appear in ListPendingEvents
 pending events are absent after listener deletion
 transaction row is immutable after commit (no field updated post-creation)
 rating records reference valid tx_id and receipt_id
+every credit to an action owner is reconstructible from ListReceiptsByAction
 imported action reimport or unimport never deletes transaction or receipt history
 imported action current stats reset never mutates transaction, receipt, or rating rows
 OpenAPI and remote imports create ordinary Actions, not separate action types
