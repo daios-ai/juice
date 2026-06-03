@@ -107,8 +107,13 @@ func TestRemoteAdd(t *testing.T) {
 func TestRemoteList(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 
+	sys, err := k.ReadUserByHandle(t.Context(), "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Register a remote kernel directly via kernel API.
-	if _, err := k.RegisterRemoteKernel(t.Context(), "@list-remote", remoteTestPublicKey(t), "https://list.example.com"); err != nil {
+	if _, err := k.RegisterRemoteKernel(t.Context(), sys.ID, "@list-remote", remoteTestPublicKey(t), "https://list.example.com"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -159,8 +164,13 @@ func TestRemoteImport(t *testing.T) {
 	}))
 	defer remote.Close()
 
+	sys, err := k.ReadUserByHandle(t.Context(), "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Register the remote kernel with the real public key.
-	if _, err := k.RegisterRemoteKernel(t.Context(), "@import-remote", pubB64, remote.URL); err != nil {
+	if _, err := k.RegisterRemoteKernel(t.Context(), sys.ID, "@import-remote", pubB64, remote.URL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -230,7 +240,11 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 	}))
 	defer remote.Close()
 
-	if _, err := k.RegisterRemoteKernel(t.Context(), "@disappear-remote", pubB64, remote.URL); err != nil {
+	sys, err := k.ReadUserByHandle(t.Context(), "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.RegisterRemoteKernel(t.Context(), sys.ID, "@disappear-remote", pubB64, remote.URL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -271,7 +285,11 @@ func TestRemoteUnimport(t *testing.T) {
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
-	remoteUser, err := k.RegisterRemoteKernel(t.Context(), "@unimport-peer", pubB64, "https://unimport.example.com")
+	sys, err := k.ReadUserByHandle(t.Context(), "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteUser, err := k.RegisterRemoteKernel(t.Context(), sys.ID, "@unimport-peer", pubB64, "https://unimport.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +308,7 @@ func TestRemoteUnimport(t *testing.T) {
 	}
 	m.Signature = sig
 
-	if _, err := k.ImportRemoteAction(t.Context(), remoteUser.ID, m); err != nil {
+	if _, err := k.ImportRemoteAction(t.Context(), sys.ID, remoteUser.ID, m); err != nil {
 		t.Fatalf("ImportRemoteAction: %v", err)
 	}
 

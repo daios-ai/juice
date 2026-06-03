@@ -330,6 +330,9 @@ func (f *fakeStore) BeginCall(_ context.Context, processID string, t *Trace, pri
 	if !ok {
 		return ErrNotFound.Wrap("process not found")
 	}
+	if p.Status != ProcessOpen {
+		return ErrInvalidState.Wrap("process is closed")
+	}
 	if price > 0 {
 		if p.Available < price {
 			return ErrInsufficientFunds.Wrap("insufficient process funds")

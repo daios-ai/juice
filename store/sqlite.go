@@ -704,6 +704,19 @@ func (s *DB) BeginCall(ctx context.Context, processID string, t *kernel.Trace, p
 		if n, _ := res.RowsAffected(); n == 0 {
 			return kernel.ErrInsufficientFunds.Wrap("not enough process funds or process closed")
 		}
+	} else {
+		// price == 0: atomically verify the process is still open to close the
+		// TOCTOU window between the precondition read in Call() and this transition.
+		res, err := tx.ExecContext(ctx,
+			`UPDATE processes SET available=available WHERE id=? AND status='open'`,
+			processID,
+		)
+		if err != nil {
+			return dbErr(err, "begin call: verify process open")
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return kernel.ErrInvalidState.Wrap("process is closed")
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx,

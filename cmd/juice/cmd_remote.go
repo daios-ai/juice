@@ -69,7 +69,7 @@ func init() {
 
 func runRemoteAdd(baseURLArg string) error {
 	baseURL := strings.TrimRight(baseURLArg, "/")
-	return withSuperuser(func(k *kernel.Kernel, _ string) error {
+	return withSuperuser(func(k *kernel.Kernel, operatorID string) error {
 		ctx := context.Background()
 
 		wellKnownReq, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/.well-known/juice-kernel.json", nil)
@@ -107,7 +107,7 @@ func runRemoteAdd(baseURLArg string) error {
 		}
 		localHandle := "@" + parsed.Host
 
-		u, err := k.RegisterRemoteKernel(ctx, localHandle, meta.PublicKey, meta.BaseURL)
+		u, err := k.RegisterRemoteKernel(ctx, operatorID, localHandle, meta.PublicKey, meta.BaseURL)
 		if err != nil {
 			return fmt.Errorf("register remote kernel: %w", err)
 		}
@@ -205,7 +205,7 @@ func runRemoteImport(remoteHandle, actionName string) error {
 			return fmt.Errorf("manifest signature invalid: %w", err)
 		}
 
-		result, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+		result, err := k.ImportRemoteAction(ctx, subjectID, remoteUser.ID, m)
 		if err != nil {
 			return fmt.Errorf("import action: %w", err)
 		}

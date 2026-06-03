@@ -161,7 +161,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		CreatedAt:       now,
 	}
 	if err := k.store.BeginCall(ctx, req.ProcessID, trace, action.Price); err != nil {
-		if errors.Is(err, ErrInsufficientFunds) {
+		if errors.Is(err, ErrInsufficientFunds) || errors.Is(err, ErrInvalidState) {
 			return nil, err
 		}
 		return nil, ErrInternal.Wrap("could not begin call")

@@ -1430,3 +1430,50 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 		t.Errorf("process.locked after fee pre-check failure: got %d, want 0", proc.Locked)
 	}
 }
+
+// TestZeroPriceCallOnClosedProcessReturnsErrInvalidState verifies that
+// BeginCall enforces the open-process invariant atomically even when price == 0.
+func TestZeroPriceCallOnClosedProcessReturnsErrInvalidState(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@owner", 0)
+	a := &Action{
+		ID:           uuid.New().String(),
+		OwnerUserID:  owner.ID,
+		Name:         "free",
+		Kind:         KindHTTP,
+		Active:       true,
+		Price:        0,
+		Public:       true,
+		Source:       "http://example.com",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	p, root, err := k.StartProcess(ctx, owner.ID, owner.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.EndProcess(ctx, owner.ID, p.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = k.Call(ctx, CallRequest{
+		SubjectID:     owner.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: root.ID,
+		TargetUserID:  owner.ID,
+		ActionName:    "free",
+		Args:          map[string]any{},
+	})
+	if !errors.Is(err, ErrInvalidState) {
+		t.Errorf("zero-price call on closed process: want ErrInvalidState, got %v", err)
+	}
+}

@@ -81,6 +81,15 @@ func setupAction(t *testing.T, st *fakeStore, ownerID, name string, price int64)
 	return a
 }
 
+// setupSys creates the @sys superuser and wires it into the kernel config.
+// Call this in any test that invokes RegisterRemoteKernel or ImportRemoteAction.
+func setupSys(t *testing.T, k *Kernel, st *fakeStore) *User {
+	t.Helper()
+	sys := setupUser(t, st, "@sys", 0)
+	k.cfg.SuperuserHandle = "@sys"
+	return sys
+}
+
 func setupProcess(t *testing.T, k *Kernel, ownerID string, funds int64) (*Process, *Trace) {
 	t.Helper()
 	p, tr, err := k.StartProcess(context.Background(), ownerID, ownerID, funds)
@@ -284,9 +293,10 @@ func TestLoginRejectsRemotePeer(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)
 	ctx := context.Background()
+	sys := setupSys(t, k, st)
 
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	_, err := k.RegisterRemoteKernel(ctx, "@peer", base64.RawURLEncoding.EncodeToString(pub), "https://peer.example.com")
+	_, err := k.RegisterRemoteKernel(ctx, sys.ID, "@peer", base64.RawURLEncoding.EncodeToString(pub), "https://peer.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1107,13 +1117,14 @@ func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)
 	ctx := context.Background()
+	sys := setupSys(t, k, st)
 
-	if _, err := k.RegisterRemoteKernel(ctx, "@bad-key", "not-base64url", "https://remote.example.com"); !errors.Is(err, ErrInvalidInput) {
+	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@bad-key", "not-base64url", "https://remote.example.com"); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for malformed public key, got %v", err)
 	}
 
 	shortKey := base64.RawURLEncoding.EncodeToString([]byte("short"))
-	if _, err := k.RegisterRemoteKernel(ctx, "@short-key", shortKey, "https://remote.example.com"); !errors.Is(err, ErrInvalidInput) {
+	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@short-key", shortKey, "https://remote.example.com"); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for short public key, got %v", err)
 	}
 
@@ -1122,10 +1133,10 @@ func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	validKey := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.RegisterRemoteKernel(ctx, "@bad-url", validKey, "ftp://remote.example.com"); !errors.Is(err, ErrInvalidInput) {
+	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@bad-url", validKey, "ftp://remote.example.com"); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for unsupported URL scheme, got %v", err)
 	}
-	if _, err := k.RegisterRemoteKernel(ctx, "@remote", validKey, "https://remote.example.com"); err != nil {
+	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@remote", validKey, "https://remote.example.com"); err != nil {
 		t.Fatalf("valid remote kernel should register: %v", err)
 	}
 }
@@ -1136,9 +1147,10 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)
 	ctx := context.Background()
+	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.RegisterRemoteKernel(ctx, "@remote-peer", base64.RawURLEncoding.EncodeToString(pub), "https://remote.example.com")
+	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@remote-peer", base64.RawURLEncoding.EncodeToString(pub), "https://remote.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1157,7 +1169,7 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Signature = sig
-	result, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	result, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("ImportRemoteAction: %v", err)
 	}
@@ -1180,9 +1192,10 @@ func TestImportRemoteActionReimp(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)
 	ctx := context.Background()
+	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.RegisterRemoteKernel(ctx, "@reimp-peer", base64.RawURLEncoding.EncodeToString(pub), "https://reimp.example.com")
+	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@reimp-peer", base64.RawURLEncoding.EncodeToString(pub), "https://reimp.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1201,7 +1214,7 @@ func TestImportRemoteActionReimp(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Signature = sig
-	firstResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	firstResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("first import: %v", err)
 	}
@@ -1217,7 +1230,7 @@ func TestImportRemoteActionReimp(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Signature = sig2
-	secondResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	secondResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
@@ -1237,9 +1250,10 @@ func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)
 	ctx := context.Background()
+	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.RegisterRemoteKernel(ctx, "@stable-peer", base64.RawURLEncoding.EncodeToString(pub), "https://stable.example.com")
+	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@stable-peer", base64.RawURLEncoding.EncodeToString(pub), "https://stable.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1262,7 +1276,7 @@ func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
 	m.Signature = sig
 
 	// First import.
-	firstResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	firstResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("first import: %v", err)
 	}
@@ -1277,7 +1291,7 @@ func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
 	_ = st.UpdateAction(ctx, firstResult.Created[0])
 
 	// Re-import the identical manifest (same signature).
-	secondResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	secondResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("second import: %v", err)
 	}
@@ -1299,9 +1313,10 @@ func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)
 	ctx := context.Background()
+	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.RegisterRemoteKernel(ctx, "@idem-peer", base64.RawURLEncoding.EncodeToString(pub), "https://idem.example.com")
+	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@idem-peer", base64.RawURLEncoding.EncodeToString(pub), "https://idem.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1325,7 +1340,7 @@ func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
 	}
 
 	sign()
-	firstResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	firstResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
 	if err != nil || len(firstResult.Created) != 1 {
 		t.Fatalf("first import: err=%v created=%d", err, len(firstResult.Created))
 	}
@@ -1334,7 +1349,7 @@ func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
 	// Second import: price change → Updated, ArtifactHash stored as contentHash.
 	m.Price = 99
 	sign()
-	secondResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	secondResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
 	if err != nil || len(secondResult.Updated) != 1 {
 		t.Fatalf("second import: err=%v updated=%d", err, len(secondResult.Updated))
 	}
@@ -1343,7 +1358,7 @@ func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
 	}
 
 	// Third import: same manifest as second → Unchanged (ArtifactHash stored correctly).
-	thirdResult, err := k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	thirdResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("third import: %v", err)
 	}
@@ -1360,9 +1375,10 @@ func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)
 	ctx := context.Background()
+	sys := setupSys(t, k, st)
 
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.RegisterRemoteKernel(ctx, "@bad-sig-peer", base64.RawURLEncoding.EncodeToString(pub), "https://badsig.example.com")
+	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@bad-sig-peer", base64.RawURLEncoding.EncodeToString(pub), "https://badsig.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1377,9 +1393,42 @@ func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
 		OutputSchema: map[string]any{"type": "object"},
 		Signature:   "invalidsignature",
 	}
-	_, err = k.ImportRemoteAction(ctx, remoteUser.ID, m)
+	_, err = k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
 	if err == nil {
 		t.Fatal("expected error for invalid manifest signature")
+	}
+}
+
+func TestImportRemoteActionRejectsNegativePrice(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@neg-price-peer", base64.RawURLEncoding.EncodeToString(pub), "https://neg.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := ActionManifest{
+		ActionID:     "neg-price-action",
+		OwnerHandle:  "@neg-price-peer",
+		Name:         "cheap",
+		Kind:         KindHTTP,
+		Price:        -1,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	}
+	sig, err := SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+
+	_, err = k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("negative price manifest: want ErrInvalidInput, got %v", err)
 	}
 }
 

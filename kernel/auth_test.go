@@ -2,6 +2,9 @@ package kernel
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"testing"
 	"time"
@@ -382,5 +385,88 @@ func TestExchangeAuthCodeRedirectURIMismatch(t *testing.T) {
 	_, _, err = k.ExchangeAuthCode(ctx, code, verifier, "http://attacker.example.com/cb")
 	if err == nil {
 		t.Error("expected error when redirect_uri does not match stored value")
+	}
+}
+
+// TestSuspendedSubjectRejectedByProcessAndListenerOps verifies that the nine
+// supervision methods added in fix 3 enforce the kernel-level suspension check.
+func TestSuspendedSubjectRejectedByProcessAndListenerOps(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	// Set up @sys so requireSuperuser-based methods work in this kernel.
+	setupSys(t, k, st)
+
+	// Create and immediately suspend the victim user.
+	victim := setupUser(t, st, "@victim2", 1000)
+	now := time.Now().UTC()
+	victim.SuspendedAt = &now
+	if err := st.SuspendUser(ctx, victim.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a live process owned by another user to test fund/end/authority ops.
+	other := setupUser(t, st, "@other2", 500)
+	p, _, err := k.StartProcess(ctx, other.ID, other.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(name string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrUnauthenticated) {
+			t.Errorf("%s: want ErrUnauthenticated for suspended subject, got %v", name, err)
+		}
+	}
+
+	check("FundProcess", k.FundProcess(ctx, victim.ID, p.ID, 10))
+	check("EndProcess", k.EndProcess(ctx, victim.ID, p.ID))
+	check("GrantProcessAuthority", k.GrantProcessAuthority(ctx, victim.ID, other.ID, p.ID))
+	check("RevokeProcessAuthority", k.RevokeProcessAuthority(ctx, victim.ID, other.ID, p.ID))
+
+	// Create a listener owned by @other2 to test listener ops.
+	target := setupAction(t, st, other.ID, "tgt", 0)
+	target.Public = true
+	_ = st.UpdateAction(ctx, target)
+	l, err := k.CreateListener(ctx, other.ID, CreateListenerRequest{
+		SourceUserID:   other.ID,
+		EventName:      "evt",
+		TargetActionID: target.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateListener setup: %v", err)
+	}
+
+	check("CreateListener (suspended)", func() error {
+		_, err := k.CreateListener(ctx, victim.ID, CreateListenerRequest{
+			SourceUserID:   other.ID,
+			EventName:      "evt",
+			TargetActionID: target.ID,
+		})
+		return err
+	}())
+	check("PollListener", func() error { _, err := k.PollListener(ctx, victim.ID, l.ID); return err }())
+	check("DeleteListener", k.DeleteListener(ctx, victim.ID, l.ID))
+	check("GetListener", func() error { _, err := k.GetListener(ctx, victim.ID, l.ID); return err }())
+}
+
+// TestRegisterRemoteKernelRequiresSuperuser verifies that non-superusers cannot
+// register remote peers at the kernel boundary.
+func TestRegisterRemoteKernelRequiresSuperuser(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	setupSys(t, k, st)
+	notSys := setupUser(t, st, "@not-sys", 0)
+
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub := priv.Public().(ed25519.PublicKey)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+
+	_, err := k.RegisterRemoteKernel(ctx, notSys.ID, "@peer", pubB64, "https://peer.example.com")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("non-superuser RegisterRemoteKernel: want ErrUnauthorized, got %v", err)
 	}
 }

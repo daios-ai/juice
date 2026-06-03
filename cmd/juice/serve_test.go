@@ -1452,7 +1452,7 @@ func TestFederationCall(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
 	// Register the remote peer with its real public key.
-	_, err = k.RegisterRemoteKernel(ctx, "@remote.example.com", pubB64, "http://remote.example.com")
+	_, err = k.RegisterRemoteKernel(ctx, sys.ID, "@remote.example.com", pubB64, "http://remote.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1538,7 +1538,7 @@ func TestFederationCallRejectsNonPublicAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.RegisterRemoteKernel(ctx, "@remote-caller", pubB64, "http://remote-caller.example.com"); err != nil {
+	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@remote-caller", pubB64, "http://remote-caller.example.com"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1602,7 +1602,7 @@ func TestFederationCallAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.RegisterRemoteKernel(ctx, "@auth-test-remote", pubB64, "http://auth-remote.example.com"); err != nil {
+	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@auth-test-remote", pubB64, "http://auth-remote.example.com"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1725,7 +1725,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.RegisterRemoteKernel(ctx, "@replay.example.com", pubB64, "http://replay.example.com")
+	_, _ = k.RegisterRemoteKernel(ctx, sys.ID, "@replay.example.com", pubB64, "http://replay.example.com")
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
@@ -1880,7 +1880,7 @@ func TestFederationReplay(t *testing.T) {
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.RegisterRemoteKernel(ctx, "@replay-caller", pubB64, "http://localhost:0")
+	_, _ = k.RegisterRemoteKernel(ctx, sys.ID, "@replay-caller", pubB64, "http://localhost:0")
 
 	path := "/v1/federation/call?action=@sys/fed-greet&counterparty=" + pubB64
 

@@ -921,6 +921,9 @@ func (k *Kernel) StartProcess(ctx context.Context, subjectID, ownerID string, fu
 
 // FundProcess adds more credits to an existing open process.
 func (k *Kernel) FundProcess(ctx context.Context, subjectID, processID string, funds int64) error {
+	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+		return err
+	}
 	p, err := k.store.ReadProcess(ctx, processID)
 	if err != nil {
 		return err
@@ -943,6 +946,9 @@ func (k *Kernel) FundProcess(ctx context.Context, subjectID, processID string, f
 
 // EndProcess closes a process and returns all remaining funds to the owner.
 func (k *Kernel) EndProcess(ctx context.Context, subjectID, processID string) error {
+	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+		return err
+	}
 	p, err := k.store.ReadProcess(ctx, processID)
 	if err != nil {
 		return err
@@ -963,6 +969,9 @@ func (k *Kernel) EndProcess(ctx context.Context, subjectID, processID string) er
 // GrantProcessAuthority grants another user explicit authority to use a process.
 // Only the process owner may grant this right.
 func (k *Kernel) GrantProcessAuthority(ctx context.Context, operatorID, subjectID, processID string) error {
+	if _, err := k.authenticatedSubject(ctx, operatorID); err != nil {
+		return err
+	}
 	p, err := k.store.ReadProcess(ctx, processID)
 	if err != nil {
 		return err
@@ -980,6 +989,9 @@ func (k *Kernel) GrantProcessAuthority(ctx context.Context, operatorID, subjectI
 // RevokeProcessAuthority removes explicit call authority over a process from a user.
 // Only the process owner may revoke.
 func (k *Kernel) RevokeProcessAuthority(ctx context.Context, operatorID, subjectID, processID string) error {
+	if _, err := k.authenticatedSubject(ctx, operatorID); err != nil {
+		return err
+	}
 	p, err := k.store.ReadProcess(ctx, processID)
 	if err != nil {
 		return err
@@ -1325,6 +1337,9 @@ type CreateListenerRequest struct {
 
 // CreateListener registers a new listener owned by subjectID and returns it.
 func (k *Kernel) CreateListener(ctx context.Context, subjectID string, req CreateListenerRequest) (*Listener, error) {
+	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+		return nil, err
+	}
 	if req.EventName == "" {
 		return nil, ErrInvalidInput.Wrap("event_name is required")
 	}
@@ -1365,6 +1380,9 @@ func (k *Kernel) CreateListener(ctx context.Context, subjectID string, req Creat
 
 // PollListener returns the pending (unconsumed) events for a listener.
 func (k *Kernel) PollListener(ctx context.Context, subjectID, listenerID string) ([]*Event, error) {
+	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+		return nil, err
+	}
 	l, err := k.store.ReadListener(ctx, listenerID)
 	if err != nil {
 		return nil, err
@@ -1377,6 +1395,9 @@ func (k *Kernel) PollListener(ctx context.Context, subjectID, listenerID string)
 
 // DeleteListener atomically deactivates a listener and purges its pending events.
 func (k *Kernel) DeleteListener(ctx context.Context, subjectID, listenerID string) error {
+	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+		return err
+	}
 	l, err := k.store.ReadListener(ctx, listenerID)
 	if err != nil {
 		return err
@@ -1394,6 +1415,9 @@ func (k *Kernel) ListListeners(ctx context.Context, ownerID string, limit, offse
 
 // GetListener returns listener metadata. Subject must be the owner or source user.
 func (k *Kernel) GetListener(ctx context.Context, subjectID, listenerID string) (*Listener, error) {
+	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+		return nil, err
+	}
 	l, err := k.store.ReadListener(ctx, listenerID)
 	if err != nil {
 		return nil, err
@@ -1618,7 +1642,11 @@ func signRating(key ed25519.PrivateKey, r *Rating) (string, error) {
 // ---- Federation operations ----
 
 // RegisterRemoteKernel creates or updates a local user record representing a remote kernel peer.
-func (k *Kernel) RegisterRemoteKernel(ctx context.Context, handle, publicKey, baseURL string) (*User, error) {
+// Only the superuser may register remote peers.
+func (k *Kernel) RegisterRemoteKernel(ctx context.Context, subjectID, handle, publicKey, baseURL string) (*User, error) {
+	if err := k.requireSuperuser(ctx, subjectID); err != nil {
+		return nil, err
+	}
 	if handle == "" || publicKey == "" || baseURL == "" {
 		return nil, ErrInvalidInput.Wrap("handle, public_key, and base_url are required")
 	}
@@ -2272,10 +2300,8 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 // UnimportOpenAPI deactivates all OpenAPI-imported actions with matching owner + spec_url.
 // If name is non-empty, only actions whose name or operation_key matches are deactivated.
 func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specURL, name string) ([]*Action, error) {
-	if subjectID != ownerID {
-		if err := k.requireSuperuser(ctx, subjectID); err != nil {
-			return nil, ErrUnauthorized.Wrap("owner or superuser required to unimport OpenAPI actions")
-		}
+	if err := k.requireSelf(ctx, subjectID, ownerID); err != nil {
+		return nil, err
 	}
 	actions, err := k.store.ListActionsByOwnerOpenAPISpec(ctx, ownerID, specURL)
 	if err != nil {
@@ -2325,7 +2351,11 @@ func remoteManifestHash(m ActionManifest) string {
 // ImportRemoteAction creates or updates a local remote_proxy action from a remote kernel's manifest.
 // The action is owned by the remote kernel user identified by remoteUserID.
 // It is idempotent: re-running with the same manifest preserves the action's active state.
-func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m ActionManifest) (*ImportResult, error) {
+// Only the superuser may import remote actions.
+func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID string, m ActionManifest) (*ImportResult, error) {
+	if err := k.requireSuperuser(ctx, subjectID); err != nil {
+		return nil, err
+	}
 	remoteUser, err := k.store.ReadUser(ctx, remoteUserID)
 	if err != nil {
 		return nil, err
@@ -2341,6 +2371,9 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 	}
 	if err := VerifyManifestSignature(remoteUser.PublicKey, &m); err != nil {
 		return nil, err
+	}
+	if m.Price < 0 {
+		return nil, ErrInvalidInput.Wrap("price must be non-negative")
 	}
 	// counterparty is this kernel's base64url Ed25519 public key so the remote can
 	// look it up by key (handle-based lookup would require knowing what handle the
