@@ -273,6 +273,51 @@ func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
 	}
 }
 
+func TestSuspendedSubjectRejectedBySupervisionOps(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	su := setupUser(t, st, "@su", 0)
+	if err := st.SetConfig(ctx, "superuser_handle", "@su"); err != nil {
+		t.Fatal(err)
+	}
+	k.cfg.SuperuserHandle = "@su"
+
+	u := setupUser(t, st, "@victim", 1000)
+	now := time.Now().UTC()
+	u.SuspendedAt = &now
+	if err := st.SuspendUser(ctx, u.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	target := setupUser(t, st, "@target", 0)
+
+	// CreateAction: requireSelf rejects suspended subject.
+	_, err := k.CreateAction(ctx, u.ID, CreateActionRequest{
+		OwnerUserID: u.ID, Name: "x", Kind: KindHTTP, Price: 0,
+	})
+	if !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("CreateAction: got %v, want ErrUnauthenticated", err)
+	}
+
+	// StartProcess: requireSelf rejects suspended subject.
+	_, _, err = k.StartProcess(ctx, u.ID, u.ID, 0)
+	if !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("StartProcess: got %v, want ErrUnauthenticated", err)
+	}
+
+	// requireSuperuser rejects a suspended @su.
+	suNow := time.Now().UTC()
+	su.SuspendedAt = &suNow
+	if err := st.SuspendUser(ctx, su.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SuspendUser(ctx, su.ID, target.ID); !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("SuspendUser via suspended su: got %v, want ErrUnauthenticated", err)
+	}
+}
+
 // ---- #15 issuer/audience and redirect_uri tests ----
 
 func TestIssueTokenWithIssuerAudience(t *testing.T) {

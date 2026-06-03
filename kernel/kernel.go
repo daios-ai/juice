@@ -226,15 +226,11 @@ func (k *Kernel) UnsuspendUser(ctx context.Context, operatorID, targetID string)
 
 // requireSuperuser returns ErrUnauthorized if operatorID is not the configured superuser.
 func (k *Kernel) requireSuperuser(ctx context.Context, operatorID string) error {
-	operator, err := k.store.ReadUser(ctx, operatorID)
+	u, err := k.authenticatedSubject(ctx, operatorID)
 	if err != nil {
 		return err
 	}
-	suHandle := k.cfg.SuperuserHandle
-	if suHandle == "" {
-		suHandle, _ = k.store.GetConfig(ctx, "superuser_handle")
-	}
-	if operator.Handle != suHandle {
+	if !k.isUserSuperuser(ctx, u) {
 		return ErrUnauthorized.Wrap("only the superuser may perform this operation")
 	}
 	return nil
@@ -1039,12 +1035,8 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	if rating != 0 && rating != 1 {
 		return nil, ErrInvalidInput.Wrap("rating must be 0 or 1")
 	}
-	rater, err := k.store.ReadUser(ctx, subjectID)
-	if err != nil {
+	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
 		return nil, err
-	}
-	if rater.SuspendedAt != nil {
-		return nil, ErrUnauthenticated.Wrap("account suspended")
 	}
 	tx, err := k.store.ReadTransaction(ctx, txID)
 	if err != nil {
@@ -1235,12 +1227,37 @@ func sqrt32(x float32) float32 {
 
 // ---- Helpers ----
 
-// requireAdmin returns nil if subjectID is the owner of a, the platform superuser, or has admin ACL.
-func (k *Kernel) requireAdmin(ctx context.Context, subjectID string, a *Action) error {
-	if a.OwnerUserID == subjectID {
-		return nil
+// authenticatedSubject reads the subject user and rejects missing or suspended users.
+// All supervision operations call this first so that Authenticated(s) ∧ ¬Suspended(s)
+// is a kernel-level invariant, not just an adapter-level check.
+func (k *Kernel) authenticatedSubject(ctx context.Context, subjectID string) (*User, error) {
+	u, err := k.store.ReadUser(ctx, subjectID)
+	if err != nil {
+		return nil, ErrUnauthenticated.Wrap("subject not found")
 	}
-	if k.isSuperuser(ctx, subjectID) {
+	if u.SuspendedAt != nil {
+		return nil, ErrUnauthenticated.Wrap("account suspended")
+	}
+	return u, nil
+}
+
+// isUserSuperuser returns true if u is the configured platform superuser.
+func (k *Kernel) isUserSuperuser(ctx context.Context, u *User) bool {
+	handle := k.cfg.SuperuserHandle
+	if handle == "" {
+		handle, _ = k.store.GetConfig(ctx, "superuser_handle")
+	}
+	return handle != "" && u.Handle == handle
+}
+
+// requireAdmin returns nil if subjectID is authenticated, non-suspended, and is the owner
+// of a, the platform superuser, or holds admin ACL on a.
+func (k *Kernel) requireAdmin(ctx context.Context, subjectID string, a *Action) error {
+	u, err := k.authenticatedSubject(ctx, subjectID)
+	if err != nil {
+		return err
+	}
+	if a.OwnerUserID == subjectID || k.isUserSuperuser(ctx, u) {
 		return nil
 	}
 	ok, err := k.store.CheckACL(ctx, subjectID, a.ID, PermAdmin)
@@ -1253,22 +1270,17 @@ func (k *Kernel) requireAdmin(ctx context.Context, subjectID string, a *Action) 
 	return nil
 }
 
-// requireSelf returns nil if subjectID == ownerID or subjectID is the platform superuser.
+// requireSelf returns nil if subjectID is authenticated, non-suspended, and equals ownerID
+// or is the platform superuser.
 func (k *Kernel) requireSelf(ctx context.Context, subjectID, ownerID string) error {
-	if subjectID == ownerID || k.isSuperuser(ctx, subjectID) {
+	u, err := k.authenticatedSubject(ctx, subjectID)
+	if err != nil {
+		return err
+	}
+	if u.ID == ownerID || k.isUserSuperuser(ctx, u) {
 		return nil
 	}
 	return ErrUnauthorized.Wrap("cannot act on behalf of another user")
-}
-
-// isSuperuser returns true if subjectID is the platform superuser registered during bootstrap.
-func (k *Kernel) isSuperuser(ctx context.Context, subjectID string) bool {
-	handle, _ := k.store.GetConfig(ctx, "superuser_handle")
-	if handle == "" {
-		return false
-	}
-	u, err := k.store.ReadUserByHandle(ctx, handle)
-	return err == nil && u.ID == subjectID
 }
 
 // ---- Stats helpers ----

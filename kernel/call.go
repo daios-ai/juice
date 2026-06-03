@@ -54,12 +54,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if req.SubjectID == "" {
 		return nil, ErrUnauthenticated.Wrap("subject is required")
 	}
-	subject, err := k.store.ReadUser(ctx, req.SubjectID)
-	if err != nil || subject == nil {
-		return nil, ErrUnauthorized.Wrap("subject user not found")
-	}
-	if subject.SuspendedAt != nil {
-		return nil, ErrUnauthenticated.Wrap("account suspended")
+	if _, err := k.authenticatedSubject(ctx, req.SubjectID); err != nil {
+		return nil, err
 	}
 
 	// 2. Process must exist and be open.
