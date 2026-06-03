@@ -1,11 +1,13 @@
 # Juice Action Make — Specification
 
-**Version:** 0.1
+**Version:** 0.2
 **Status:** design requirement
 
 ## 1. Scope
 
 This document specifies the synthesis pipeline that turns a natural-language task description into a registered, active WASM action. The pipeline is implemented as a single native action, `@sys/make`, callable through `Call()` and subject to the same funding, tracing, and ACL rules as every other action. Its output is an ordinary `Action` row owned by the caller.
+
+`@sys/make` is an optional extension. It is not a required bootstrap invariant and is disabled by default; see §7.
 
 `kernel` must not import a TinyGo toolchain or any subprocess-invoking code. The source compiler is an optional dependency injected at construction, analogous to `ScriptExecutor` and `Chatter`.
 
@@ -13,7 +15,7 @@ This document specifies the synthesis pipeline that turns a natural-language tas
 
 ### 2.1 Language choice
 
-Generated WASM actions are written in TinyGo. Standard Go (`GOOS=wasip1 GOARCH=wasm`) cannot declare host function imports under arbitrary module names — it supports only the fixed WASI import namespace. The existing kernel uses a custom `juice` host module; changing that namespace would break every existing WASM action. TinyGo's `//go:wasmimport` annotation accepts any `(module, name)` pair and is therefore the only Go-family compiler that satisfies the current ABI without modifications to the kernel. Over AssemblyScript, TinyGo requires no Node.js runtime and produces a single-binary toolchain install. Over Rust, TinyGo generates code that LLMs can produce reliably from a short in-context SDK, since the generated actions are simple functions, not systems programs.
+Generated WASM actions are written in TinyGo. Standard Go (`GOOS=wasip1 GOARCH=wasm`) cannot declare host function imports under arbitrary module names — it supports only the fixed WASI import namespace. The existing kernel uses a custom `juice` host module; changing that namespace would break every existing WASM action. TinyGo's `//go:wasmimport` annotation accepts any `(module, name)` pair and is therefore the only Go-family compiler that satisfies the current ABI without modifications to the kernel. Over AssemblyScript, TinyGo requires no Node.js runtime and produces a single-binary toolchain install. Over Rust, TinyGo generates code that LLMs can produce reliably from a short in-context SDK, since the generated actions are simple functions rather than systems programs.
 
 ### 2.2 SDK
 
@@ -51,11 +53,18 @@ Generated code must provide one additional export, not part of the SDK:
 func run(inputPtr, inputLen uint32) (uint32, uint32)
 ```
 
-`run` receives the input JSON via linear memory and returns the output JSON via the same mechanism. The SDK handles memory layout; the generated code calls `JuiceCall`, `JuiceEmit`, and `JuiceLog` and never touches memory pointers directly.
+`run` receives the input JSON via linear memory and returns the output JSON via the same mechanism. The SDK handles memory layout; generated code calls `JuiceCall`, `JuiceEmit`, and `JuiceLog` and never touches memory pointers directly.
+
+`script/tinygosdk/sdk.go` is a production source file and must have a corresponding `sdk_test.go` verifying that it compiles to a valid WASM module with the correct exports and no disallowed imports.
 
 ## 3. Script package additions
 
-`kernel.SourceCompiler` is a new interface, separate from `ScriptExecutor`:
+The two interfaces have distinct responsibilities:
+
+- `SourceCompiler`: TinyGo source bytes → WASM bytes. Invokes an external compiler.
+- `ScriptExecutor.Compile`: WASM bytes → runtime-validated artifact + SHA-256 hash. Runs inside the process via wazero.
+
+`kernel.SourceCompiler`:
 
 ```go
 type SourceCompiler interface {
@@ -63,11 +72,25 @@ type SourceCompiler interface {
 }
 ```
 
-The implementation in `script` invokes `tinygo build -target wasm` in a subprocess. The subprocess runs in a fresh temporary directory with no network access. The compilation timeout is `cfg.CompileTimeoutMS` (default 30 000 ms), independent of `cfg.TimeoutMS`. These are separate because compilation dominates execution time for generated actions and must not be capped by the per-execution limit.
+The implementation in `script` invokes `tinygo build -target wasm` in a subprocess inside a fresh temporary directory. No intentional network inputs are passed to the build; the subprocess has access only to the local filesystem and the TinyGo toolchain. The compilation timeout is `cfg.CompileTimeoutMS` (default 30 000 ms), independent of `cfg.TimeoutMS`; these are decoupled because compilation dominates execution time and must not be capped by the per-call execution limit.
 
-`CompileSource` returns `ErrInvalidInput` on compilation errors (the compiler's stderr is included in the error message) and `ErrInvalidState` when the `tinygo` binary is absent from PATH.
+`CompileSource` returns `ErrInvalidInput` on compilation failure (compiler stderr is included) and `ErrInvalidState` when the `tinygo` binary is absent from PATH.
 
 `Kernel` gains a `compiler SourceCompiler` field set at construction. When nil, `@sys/make` returns `ErrInvalidState`.
+
+### 3.1 Source type detection and WASM cache
+
+`action.Source` stores TinyGo source for synthesized actions, not compiled WASM bytes. This preserves the existing "authorized users may inspect script source" requirement and keeps the data model consistent: `Source` is always human-readable source code.
+
+All paths that currently call `k.scripts.Compile(ctx, []byte(action.Source))` — `CreateAction`, `SetActive`, and `executeWasm` — first check whether the source is already compiled WASM by testing for the WASM magic bytes (`\x00asm` at offset 0). If the source starts with the magic bytes, it is passed directly to `ScriptExecutor.Compile` as before. If not, `k.compiler.CompileSource` is called first to produce WASM bytes, which are then passed to `ScriptExecutor.Compile`.
+
+To avoid re-invoking the TinyGo toolchain on every call, `script.Executor` gains an in-process WASM bytes cache:
+
+```go
+wasmCache map[string][]byte  // keyed by SHA-256(TinyGo source)
+```
+
+On a cache hit, the cached WASM bytes are passed directly to `ScriptExecutor.Compile` (which has its own wazero module cache keyed by artifact hash). On a cache miss — after a process restart — the TinyGo source is recompiled and the result is stored. The per-action recompilation cost is bounded by `CompileTimeoutMS` and is expected to be rare.
 
 A free function `ListImports` enumerates the `(module, name)` import pairs from a WASM binary without executing it, using wazero's module decoder:
 
@@ -79,18 +102,40 @@ type ImportedFunc struct{ Module, Name string }
 
 ## 4. Context document
 
-The context document is a UTF-8 plain-text string constructed at each LLM call rather than cached, so it reflects the action catalog at synthesis time. It contains, in order:
+The context document is a UTF-8 plain-text string constructed at each LLM call so it reflects the current action catalog. It contains, in order:
 
 1. The complete text of `sdk.go`.
-2. A fixed prose section describing the `@owner/name` call convention, the JSON I/O contract over linear memory, and what `juice.call`, `juice.emit`, and `juice.log` do semantically (one sentence each).
-3. The active action catalog: for each active public action, a block of the form `@owner/name | description | input_schema | output_schema | price | uses | successes | latency_mean_ms`.
-4. The synthesis request: the task description; the caller-supplied `input_schema` and `output_schema` if provided; the `sync` preference.
+2. A fixed prose section (one sentence each) describing: the `@owner/name` call convention; the JSON I/O contract over linear memory; what `juice.call`, `juice.emit`, and `juice.log` do semantically.
+3. An explicit dynamic dispatch pattern showing how to call `@sys/lookup` at runtime and use the result to invoke a sub-action:
+
+```go
+// To call a sub-action by capability, look it up first:
+rawResults, _ := JuiceCall("@sys/lookup", mustMarshal(map[string]any{
+    "query": "describe the capability you need here",
+    "limit": 1,
+}))
+var resp struct {
+    Results []struct {
+        OwnerHandle string `json:"owner_handle"`
+        Name        string `json:"name"`
+    } `json:"results"`
+}
+json.Unmarshal(rawResults, &resp)
+if len(resp.Results) == 0 {
+    // handle: no suitable action found, implement inline or return error
+}
+actionRef := resp.Results[0].OwnerHandle + "/" + resp.Results[0].Name
+result, err := JuiceCall(actionRef, args)
+```
+
+This pattern is included verbatim because compositionality — calling existing actions rather than reimplementing their logic — is the primary mechanism by which synthesized actions stay small, correct, and maintainable.
+
+4. The active action catalog: for each active public action, a block of the form `@owner/name | description | input_schema | output_schema | price | uses | successes | latency_mean_ms`.
+5. The synthesis request: the task description; the caller-supplied `input_schema` and `output_schema` if provided.
 
 ## 5. MakeSpec
 
-The first LLM call produces a `MakeSpec`, a structured JSON object that describes the action before code exists. Validating the spec before code generation is a deliberate fail-fast: structural problems (invalid schemas, missing dependencies) are caught without spending compilation time, and the caller receives a precise error immediately.
-
-The pipeline extracts the first JSON code block from the LLM response and attempts to unmarshal it:
+The first LLM call produces a `MakeSpec` JSON object describing the action before code exists. Validating it before code generation catches structural problems (invalid schemas, unresolvable queries) without spending compilation time.
 
 ```json
 {
@@ -98,29 +143,30 @@ The pipeline extracts the first JSON code block from the LLM response and attemp
   "description":    "string — non-empty",
   "input_schema":   { "type": "object", "...": "..." },
   "output_schema":  { "type": "object", "...": "..." },
-  "sync":           true,
-  "dependencies":   ["@owner/name"],
+  "dependencies":   [{"query": "string", "purpose": "string"}],
   "price":          0,
   "failure_modes":  ["string"]
 }
 ```
 
+`dependencies` is a list of capability queries, not hard-coded action references. Each entry describes a subtask the generated action will delegate to an existing action found via `@sys/lookup` at runtime. The LLM must set `price` to be no less than the expected sum of sub-action prices per invocation; a price below total sub-call cost makes the action unprofitable for its owner and will cause the contractor model to debit more from `owner.available` than the caller pays.
+
 Validation rules:
 
-- `name` is non-empty and contains no `@`.
+- `name` is non-empty, contains no `@`, and conforms to the action name grammar (§3 of requirements.md).
 - `description` is non-empty.
 - `input_schema` passes `kernel.ValidateSchema`.
 - `output_schema` passes `kernel.ValidateSchema`.
-- Each entry in `dependencies` resolves to an existing active action via `store.ReadActionByOwnerName`.
+- For each entry in `dependencies`: `query` is non-empty and `k.Lookup(query)` returns at least one result with `score >= JUICE_MAKE_LOOKUP_THRESHOLD` (default 0.7), or the entry is explicitly marked `"inline": true`.
 - `price` is non-negative.
 
 Validation failure returns `ErrInvalidInput`. No retry is attempted at this stage.
 
 ## 6. The @sys/make native action
 
-`@sys/make` is registered at bootstrap alongside `@sys/lookup` and `@sys/llm/chat`. It is public and grant-all. Its price is set via config key `make_price` (env: `JUICE_MAKE_PRICE`; default 0).
+`@sys/make` is registered at bootstrap when `JUICE_MAKE_ENABLED=true`. It is public and grant-all. Its price is set via config key `make_price` (env: `JUICE_MAKE_PRICE`; default 0).
 
-Staging the pipeline across multiple native actions would require the caller to orchestrate them and would create partial-state cleanup problems (a stage-6 failure has already consumed LLM calls). `@sys/make` runs all stages internally; the retry at stage 4 is the only recovery path needed because compilation is the only stage with a recoverable transient failure mode.
+Staging the pipeline across multiple native actions would require the caller to orchestrate them and creates partial-state cleanup problems (a stage-6 failure has already consumed LLM calls). `@sys/make` runs all stages internally; the retry at stage 4 is the only recovery path needed because compilation is the only stage with a recoverable transient failure mode.
 
 **Input schema:**
 
@@ -129,7 +175,6 @@ Staging the pipeline across multiple native actions would require the caller to 
 | `task` | string | yes | Natural-language description of the desired action |
 | `input_schema` | object | no | Desired input JSON Schema |
 | `output_schema` | object | no | Desired output JSON Schema |
-| `sync` | boolean | no | True for synchronous execution; default true |
 
 **Output schema:**
 
@@ -158,29 +203,29 @@ Build the context document. Call `k.chatter.Chat()` with a system prompt instruc
 
 **Stage 2 — Composition plan**
 
-For each action in `spec.dependencies`, call `k.Lookup()` with the action's description as a query. If the best result has `score < JUICE_MAKE_LOOKUP_THRESHOLD` (default 0.7), mark the dependency as "inline". The plan — a list of actions to call via `juice.call` and subtasks to implement directly — is a Go-level data structure, not produced by the LLM. Delegating this decision to the LLM would risk the model inventing dependencies or ignoring existing actions; keeping it in Go makes the selection rule explicit and testable.
+For each entry in `spec.dependencies`, call `k.Lookup()` with `entry.query`. If `score >= JUICE_MAKE_LOOKUP_THRESHOLD`, mark as "dynamic call" — the generated code will call `@sys/lookup` at runtime with that query. If below the threshold, mark as "inline" — the logic must be implemented directly. The plan is a Go-level data structure; the lookup decision is kept in Go rather than delegated to the LLM so it remains testable and deterministic.
 
 **Stage 3 — Code generation**
 
-Build the context document, appending the `MakeSpec` and the composition plan. Call `k.chatter.Chat()` instructing the model to produce a single TinyGo file that imports the SDK and exports `run`. Extract the first Go code block from the response. Prepend `sdk.go` to produce the full source.
+Build the context document, appending the `MakeSpec` and the composition plan. Call `k.chatter.Chat()` instructing the model to produce a single TinyGo file that imports the SDK and exports `run`. For each "dynamic call" dependency, the generated code must use the `@sys/lookup` dispatch pattern from the context document with the dependency's `query` string. Extract the first Go code block from the response. Prepend `sdk.go` to produce the full source.
 
 **Stage 4 — Compilation**
 
-Call `k.compiler.CompileSource()`. On failure, retry once: append the compiler error to the code-generation context, repeat stage 3, repeat compilation. A second pass with the compiler's error message recovers the common failure (wrong import path, missing export). A third attempt rarely succeeds without a structural change to the spec; at that point the task description is the problem, not the code generator. If the second attempt also fails, return `ErrExecutionFailed` with the last compiler error.
+Call `k.compiler.CompileSource()`. On failure, retry once: append the compiler error to the code-generation context, repeat stage 3, repeat compilation. A second pass with the compiler error message recovers the common failure class (wrong import path, missing export). A third attempt rarely succeeds without a structural change to the spec; at that point the task description is the problem. If the second attempt fails, return `ErrExecutionFailed` with the last compiler error.
 
 **Stage 5 — Static checks**
 
-Call `script.ListImports()`. The check passes iff:
+Call `script.ListImports()` on the compiled artifact. The check passes iff:
 
 - `imports(artifact) ⊆ {(juice, call), (juice, emit), (juice, log)}`
 - `exports(artifact) ⊇ {alloc, run}`
-- Each `@owner/name` in `spec.dependencies` not flagged "inline" appears as a literal string in the extracted source.
+- For each "dynamic call" dependency: the literal string `@sys/lookup` appears in the extracted source.
 
-Any violation returns `ErrInvalidInput`.
-
-If `spec.sync = true` and the artifact imports `juice.emit`, log a warning but do not reject.
+Any violation returns `ErrInvalidInput`. These checks are limited to claims the implementation can enforce by static analysis of the WASM binary and source text; runtime behavior is validated by the dry run.
 
 **Stage 6 — Registration**
+
+The action is created at `price = 0` for the duration of the dry run. This avoids self-payment fees during testing: a price-0 call costs the test process nothing, so no fee accrues to the fee recipient from quality-control work. After a successful dry run the price is updated to `spec.price`.
 
 Call `k.CreateAction()`:
 
@@ -191,32 +236,34 @@ Kind         = KindWasm
 Description  = spec.description
 InputSchema  = spec.input_schema
 OutputSchema = spec.output_schema
-Source       = string(compiledWASMBytes)
-Price        = spec.price
+Source       = tinyGoSource   (the generated TinyGo source, not WASM bytes)
+Price        = 0
 Active       = false
 ```
 
-`ArtifactHash` is set by `CreateAction` via `k.scripts.Compile()` on the WASM bytes. The TinyGo source is stored as `StatTag{ActionID: actionID, Key: "make_source", Value: tinyGoSource, Source: "make"}`. Storing the source in `StatTag` avoids adding a column to the `actions` table; the tradeoff is that `StatTag` is semantically for statistics. A future migration to a dedicated column is straightforward when the feature stabilises.
+`CreateAction` detects that the source is TinyGo (no WASM magic bytes), calls `k.compiler.CompileSource`, passes the result to `k.scripts.Compile`, and sets `ArtifactHash` from the compiled WASM hash. The TinyGo source is stored in `action.Source` and remains inspectable.
 
 **Stage 7 — Test generation and dry run**
 
-Call `k.chatter.Chat()` with the spec and a system prompt requesting a JSON array of test cases, each `{args: object, expect_success: bool}`. The minimum acceptable set is two cases: one schema-valid expected-success case and one schema-invalid expected-failure case. If the LLM returns fewer than two cases, the pipeline constructs the missing ones: an empty `{}` args object serves as the schema-invalid case when the input schema requires fields.
+The precondition is: `caller.available >= spec.price × len(test_cases)`. Sub-actions called by the synthesized action are funded from `owner.available` via the contractor model (§5.5 of requirements.md), not from the test process. `spec.price` must cover expected sub-call costs per invocation (§5 constraint), so this check is a sufficient proxy. If the precondition fails, return `ErrInsufficientFunds` before creating any process.
 
-Precondition: verify `caller.available >= spec.price × len(test_cases)`. The test process is funded from `caller.available` rather than from a `@sys` balance because the caller initiates the work and bears the cost; this avoids requiring an operator deposit to `@sys` before synthesis can run. If the precondition fails, return `ErrInsufficientFunds` before creating any process.
+The `@sys` activation postcondition: `@sys` activates a caller-owned action only after `Owner(a) = caller ∧ StaticOK(a) ∧ DryRunOK(a)`. This limits the scope of `@sys`'s implicit admin authority to a well-defined synthesis postcondition.
+
+Call `k.chatter.Chat()` with the spec, requesting a JSON array of test cases, each `{args: object, expect_success: bool}`. The minimum set is two cases: one schema-valid expected-success case and one schema-invalid expected-failure case. If the LLM returns fewer than two, the pipeline constructs the missing schema-invalid case as an empty `{}` object when the input schema requires fields.
 
 Activate the action: `k.SetActive(ctx, sysUserID, actionID, true)`.
 
-Start a test process: `k.StartProcess(ctx, callerID, callerID, spec.price × len(test_cases))`. For each test case, call `k.Call()` using `callerID` as subject, the test process, and the synthesized action. For expected-failure schema-invalid cases, verify the error is `ErrSchemaViolation`. For expected-success cases, verify the call succeeds and the reply satisfies `spec.output_schema`.
+Start a test process: `k.StartProcess(ctx, callerID, callerID, 0)`. For each test case, call `k.Call()` using `callerID` as subject, the test process, and the synthesized action. For schema-invalid cases, verify the error is `ErrSchemaViolation`. For expected-success cases, verify success and that the reply satisfies `spec.output_schema`.
 
 Close the test process with `k.EndProcess()` regardless of outcome; unused credits return to the caller.
 
-If any test case produces an unexpected outcome: `k.SetActive(ctx, sysUserID, actionID, false)`, return `ErrExecutionFailed` with the failing case.
+If any test case fails: `k.SetActive(ctx, sysUserID, actionID, false)`, return `ErrExecutionFailed` with the failing case.
 
-If all tests pass: the action remains active. Return `action_id`, `action_ref`, the transaction ID of the first successful call, and the `MakeSpec`.
+If all tests pass: call `k.UpdateAction(ctx, sysUserID, {ID: actionID, Price: &spec.price})`, which sets the final price and deactivates the action per existing kernel behavior. Then call `k.SetActive(ctx, sysUserID, actionID, true)` to reactivate. Return `action_id`, `action_ref`, the transaction ID of the first successful test call, and the `MakeSpec`.
 
 ## 7. Bootstrap changes
 
-Bootstrap registers `@sys/make` only when `JUICE_MAKE_ENABLED=true` (default false). The default is false because `tinygo` is an optional runtime dependency; a deployment without it must not fail bootstrap. If enabled but `tinygo` is absent, bootstrap logs a warning and skips registration without aborting. Registration is idempotent.
+`@sys/make` is an optional extension outside the required native-action set (`@sys/lookup` and `@sys/llm/chat`). Bootstrap registers it only when `JUICE_MAKE_ENABLED=true` (default false). If enabled but `tinygo` is absent from PATH, bootstrap logs a warning and skips registration without aborting. Registration is idempotent.
 
 The `Kernel` constructor gains an optional `compiler SourceCompiler` parameter. When nil and `@sys/make` is called, it returns `ErrInvalidState`.
 
@@ -230,21 +277,30 @@ ListImports returns correct (module, name) pairs for a known artifact
 Static check rejects artifact with imports outside {juice.call, juice.emit, juice.log}
 Static check rejects artifact missing run export
 Static check rejects artifact missing alloc export
+Magic-byte detection routes WASM source through ScriptExecutor.Compile directly
+Magic-byte detection routes TinyGo source through SourceCompiler then ScriptExecutor.Compile
+WASM cache hit avoids invoking SourceCompiler a second time for the same TinyGo source
 MakeSpec validation rejects empty name
 MakeSpec validation rejects invalid input_schema
-MakeSpec validation rejects unknown dependency
+MakeSpec validation rejects dependency query with no lookup result above threshold
 MakeSpec validation rejects negative price
 Stage 1 produces valid MakeSpec from FakeChatter returning a known JSON block
-Stage 3 produces compilable source from FakeChatter returning a known SDK-conforming template
+Stage 2 marks dependency as inline when lookup score is below threshold
+Stage 2 marks dependency as dynamic call when lookup score is at or above threshold
+Stage 3 generates source containing @sys/lookup call for each dynamic call dependency
 Stage 4 retries once on compilation failure, succeeds on second attempt
 Stage 4 returns ErrExecutionFailed after two consecutive compilation failures
-Stage 5 rejects artifact that imports env.malloc
-Stage 6 creates an inactive Action with correct fields and stores TinyGo source as StatTag
-Stage 7 precondition fails with ErrInsufficientFunds when caller lacks test budget
-Stage 7 dry run activates action, runs tests, leaves action active on success
+Stage 5 rejects artifact with disallowed import
+Stage 5 rejects artifact missing @sys/lookup reference for a dynamic call dependency
+Stage 6 stores TinyGo source in action.Source and sets ArtifactHash from compiled WASM
+Stage 6 creates action at price 0
+Stage 7 precondition fails with ErrInsufficientFunds when caller.available < spec.price × cases
+Stage 7 dry run activates action, runs tests, updates price, reactivates on success
 Stage 7 deactivates action and returns ErrExecutionFailed when a test case fails
+Stage 7 sub-call costs are funded from caller.available, not the test process
 @sys/make is callable through Call() with a funded process (fake chatter + fake compiler)
 @sys/make returns ErrInvalidState when compiler is nil
-Bootstrap registers @sys/make when enabled; idempotent on re-run
+Bootstrap registers @sys/make when enabled; skips without error when tinygo is absent
+Bootstrap does not register @sys/make when JUICE_MAKE_ENABLED is false
 Synthesized action callable by its owner immediately after successful synthesis
 ```
