@@ -1,4 +1,4 @@
-# API Design Reference
+# API Reference
 
 ## Design Rules
 
@@ -7,285 +7,200 @@ These rules define the consistent standard every operation must satisfy.
 ### HTTP
 
 **R1 — Snake_case field names everywhere.**  
-Every type exposed over HTTP carries `json:` struct tags. No Go field names (`OwnerUserID`, `ArgsJSON`, `ProcessID`) leak to the wire. The rule applies to `Action`, `Process`, `Transaction`, `Listener`, `Event`, and `Trace`, which currently have no tags.
+Every type exposed over HTTP carries `json:` struct tags with snake_case names. Go field names (`OwnerUserID`, `ArgsJSON`, `ProcessID`) never appear on the wire. `PasswordHash` is masked with `json:"-"`.
 
 **R2 — No double-encoded JSON.**  
-Fields that contain structured data use `json.RawMessage`, never `string`. `Transaction.ArgsJSON` and `Transaction.ReplyJSON` must appear as inline objects in responses, tagged `"args"` and `"result"` respectively, matching `CallReply`.
+Fields that contain structured data use `json.RawMessage`, never `string`. `Transaction.ArgsJSON` and `Transaction.ReplyJSON` appear as inline objects tagged `"args"` and `"result"` respectively, matching `CallReply`.
 
 **R3 — Action identity is `@owner/name`.**  
-Wherever a request identifies a callable action, a single `action` field carries the combined `@owner/name` notation. The server resolves it. Split fields (`target` + `action_name`) are forbidden. Owner handles must not contain `/`; action names must not contain `/`. Parsing is unambiguous: split on the first `/` after `@`. When `@owner/name` appears in a URL query string, `/` must be percent-encoded by clients.
+Wherever a request identifies a callable action, a single `action` field carries the combined `@owner/name` notation. The server resolves it. Split fields (`target` + `action_name`) are forbidden. Owner handles must not contain `/`; action names must not contain `/`. Parsing is unambiguous: split on the first `/` after `@`. When `@owner/name` appears in a URL query string, `/` must be percent-encoded.
 
 **R4 — DELETE never carries a request body.**  
-Sub-resource removal uses the path: `DELETE /v1/actions/{id}/acl/{subject_id}/{permission}`. Request bodies on DELETE are rejected by many proxies and clients.
+Sub-resource removal uses path parameters: `DELETE /v1/actions/{id}/acl/{subject_id}/{permission}`. Request bodies on DELETE are rejected by many proxies and clients.
 
 **R5 — State mutations return the updated resource.**  
-Any operation that changes resource state returns the new state as the response body. `POST /v1/processes/{id}/fund` returns the updated process; `POST /v1/processes/{id}/end` may return 204 (resource is gone). Purely destructive operations (`DELETE`) return 204.
+Any operation that changes resource state returns the new state as the response body. `POST /v1/processes/{id}/fund` returns the updated process. Purely destructive operations (`DELETE`, `POST .../end`) return 204.
 
 **R6 — List responses are plain arrays.**  
-No envelope objects. `GET /v1/listeners/{id}/events` returns `[…]`, not `{"listener_id": …, "events": […]}`. Metadata (e.g., pagination) belongs in response headers, not the body.
+No envelope objects. `GET /v1/listeners/{id}/events` returns `[…]` directly. Metadata such as pagination belongs in response headers, not the body.
 
 **R7 — Input validated at the HTTP boundary.**  
-The handler rejects invalid inputs before calling the kernel. `rating` must be 0 or 1 (`ErrInvalidInput` otherwise). `permission` must be `read`, `call`, or `admin` (currently only validated in the kernel after a potential SQLite error path).
+The handler rejects invalid inputs before calling the kernel. `rating` must be 0 or 1. `permission` must be `read`, `call`, or `admin`. Both return `ErrInvalidInput` when violated.
 
-**R8 — Read responses include both `id` and `action`.**  
+**R8 — Action responses include both `id` and `action`.**  
 Every read or list response for an action resource includes both `id` (UUID, for management operations) and a computed `action` field containing `@owner/name` (for calling). Clients can copy the `action` value directly into call requests without a separate lookup.
 
 ### CLI
 
 **C1 — All arguments use `--flag` style.**  
-No positional arguments. `remote add <url>` → `remote add --url <url>`. `remote import <handle> <name>` → `remote import --remote <handle> --action @handle/name`.
+No positional arguments anywhere. `remote add --url <url>`, `remote import --remote <handle> --action @handle/name`.
 
 **C2 — `--action` always carries `@owner/name`; `--id` always carries a UUID.**  
-`--action` is never a UUID. `--id` is never a name. Operations that manage a resource the caller owns use `--id`. Operations that reference a callable action use `--action @owner/name`.  
-Currently broken: `action acl grant --action <uuid>`, `events listen --action <uuid>`, versus `call --action /name`.
+`--action` is never a UUID. `--id` is never a name. Operations that manage a resource the caller owns use `--id`. Operations that reference a callable action use `--action @owner/name`.
 
 **C3 — `--source-user` for user-handle inputs, never `--source`.**  
-`--source` is reserved for URLs and file paths (`action create --source`). The source-user argument in `listener create` must be `--source-user`.
+`--source` is reserved for URLs and file paths (`action create --source`). The source-user argument in `listener create` uses `--source-user`.
 
-**C4 — Creation uses `create`, not `add`.**  
-`action add` → `action create`. All resource-creation commands use the same verb.
+**C4 — Creation uses `create`.**  
+All resource-creation commands use `create`: `user create`, `action create`, `listener create`, `process start`.
 
-**C5 — Deletion uses `delete`, not an inverted binding verb.**  
-`events unlisten` → `listener delete`. The short description clarifies what is deleted and what side-effects occur (purges pending events).
+**C5 — Deletion uses `delete`.**  
+Deletion commands use `delete`. `listener delete` purges pending events as a side effect, documented in the command description.
 
 **C6 — A command group's `list` subcommand lists that group's primary noun.**  
-`events list` currently lists listeners, not events. The `events` group is replaced by two groups: `juice listener` for durable subscriptions and `juice event` for queued work items. `juice listener list` lists listeners; `juice event list --listener <id>` lists pending events for a listener.
+`juice listener list` lists listeners. `juice event list --listener <id>` lists pending events for a listener. Subscriptions and queued work items are separate groups.
 
 **C7 — Zero-cost native actions do not require process provisioning.**  
-`lookup` calls `@sys/lookup` at price 0. Requiring `--process` for a free operation creates unnecessary friction. The CLI starts and ends an ephemeral process internally.
+`juice lookup` calls `@sys/lookup` at price 0. The CLI creates a zero-funded ephemeral process internally and ends it after the call. No `--process` flag is needed.
 
-**C8 — `stats show` lives under `action`, not at root level.**  
-`juice stats show --action <id>` → `juice action stats --id <id>`. Stats are a property of an action; the command belongs in the `action` group.
+**C8 — `stats` lives under `action`.**  
+`juice action stats --id <id>`. Stats are a property of an action; the command belongs in the `action` group.
 
-**C9 — Two output modes: `--json` and `--quiet`.**  
-Default output is human-readable. `--json` returns machine-readable JSON matching the HTTP response body. `--quiet` prints only the primary ID or nothing on success, enabling clean shell scripting. Both are global flags. `--json` is already implemented; `--quiet` is missing.
+**C9 — Two machine-readable output modes: `--output json` and `--quiet`.**  
+Default output is human-readable text. `--output json` returns the JSON matching the HTTP response body. `--quiet` prints only the primary resource ID, or nothing for mutations that return no resource. Both are global flags.
 
 **C10 — `--args @file.json` for any JSON flag.**  
-Any CLI flag that accepts a JSON value also accepts `@path/to/file.json`. The `@` prefix signals that the value is read from the file at that path. Applies to `--args`, `--input-schema`, `--output-schema`, and any future JSON flag.
+Any CLI flag that accepts a JSON value also accepts `@path/to/file.json`. The `@` prefix signals that the value is read from the named file. Applies to `--args`, `--input-schema`, `--output-schema`.
 
 **C11 — `args` is always present; empty input is `{}`.**  
-`POST /v1/call` and `POST /v1/events/emit` require `args` in the request body. Omitting it is a validation error. `{}` is the canonical representation of an empty argument set.
+`POST /v1/call` and `POST /v1/events/emit` require `args` in the request body. `{}` is the canonical representation of an empty argument set. Omitting `args` is normalized to `{}` rather than rejected, for ergonomics.
 
 **C12 — Emit source is always the authenticated subject.**  
-`POST /v1/events/emit` does not accept a `source_user_id` field. The event source is the authenticated caller. The server sets it from the authenticated subject and must reject any request that includes it as an input field.
+`POST /v1/events/emit` does not accept a `source_user_id` field. The event source is set from the authenticated caller. The server ignores any `source_user_id` in the request body.
 
 ---
 
 ## Operation Reference
 
-Legend: `•` = issue exists (see Issues column); `—` = not exposed on that surface; `(admin)` = requires superuser.
-
 ### Server
 
-| Operation | HTTP | CLI | Issues |
-|-----------|------|-----|--------|
-| Health check | `GET /health` (open) | `juice health [--url]` | |
-| Federation metadata | `GET /.well-known/juice-kernel.json` (open) | — | |
+| Operation | HTTP | CLI |
+|-----------|------|-----|
+| Health check | `GET /health` (open) → `{status}` | `juice health [--url]` |
+| Federation metadata | `GET /.well-known/juice-kernel.json` (open) → manifest | — |
 
 ### Authentication
 
-| Operation | HTTP | CLI | Issues |
-|-----------|------|-----|--------|
-| Password login | `POST /v1/auth/token` JSON `{handle, password}` → `{token}` | `juice auth login --handle --password` | • HTTP1 |
-| PKCE login | `POST /v1/auth/authorize` (form) + `POST /v1/auth/token` (form) | `juice auth login --handle --pkce --server` | |
-| Refresh token | `POST /v1/auth/refresh` `{refresh_token}` → `{access_token, refresh_token}` | `juice auth refresh` | |
-| Logout | `POST /v1/auth/logout` `{refresh_token}` → 204 | `juice auth logout` | |
+| Operation | HTTP | CLI |
+|-----------|------|-----|
+| Password login | `POST /v1/auth/token` `{handle, password}` → `{token}` | `juice auth login --handle [--password]` |
+| PKCE authorize | `POST /v1/auth/authorize` `{handle, password, code_challenge, [redirect_uri]}` → `{redirect}` | `juice auth login --handle --pkce --server <url>` |
+| PKCE token exchange | `POST /v1/auth/token` `{grant_type:"authorization_code", code, code_verifier, [redirect_uri]}` → `{access_token, refresh_token}` | (handled internally by `--pkce` login) |
+| Refresh token | `POST /v1/auth/refresh` `{refresh_token}` → `{access_token, refresh_token}` | `juice auth refresh` |
+| Logout | `POST /v1/auth/logout` `{refresh_token}` → 204 | `juice auth logout` |
 
 ### Users
 
-| Operation | HTTP | CLI | Issues |
-|-----------|------|-----|--------|
-| Create user | `POST /v1/users` → 201 `{id, handle, email, available, locked}` | `juice user create --handle --email [--password]` | • R1 |
-| Get self | `GET /v1/me` → `{id, handle, email, available, locked}` | `juice user me` | |
+| Operation | HTTP | CLI |
+|-----------|------|-----|
+| Create user | `POST /v1/users` `{handle, email, password}` → 201 user | `juice user create --handle --email [--password]` |
+| Get self | `GET /v1/me` → user | `juice user me` |
 
 ### Actions
 
-| Operation | HTTP | CLI | Issues |
-|-----------|------|-----|--------|
-| Create action | `POST /v1/actions` → 201 action | `juice action create --name --kind [--source --description --price --input-schema --output-schema]` | • R1, R8, C4 |
-| List public actions | `GET /v1/actions[?owner=&name=]` → action[] | `juice action list [--all --limit --offset]` | • R1, R8 |
-| Show action | `GET /v1/actions/{id}` → action | `juice action show --id` | • R1, R8 |
-| Update action | `PUT /v1/actions/{id}` → updated action | `juice action update --id [--price --description --source --input-schema --output-schema]` | • R1, R8 |
-| Enable action | `POST /v1/actions/{id}/enable` → `{active:true}` | `juice action enable --id` | |
-| Disable action | `POST /v1/actions/{id}/disable` → `{active:false}` | `juice action disable --id` | |
-| Delete action | `DELETE /v1/actions/{id}` → 204 | `juice action delete --id` | |
-| Grant ACL | `POST /v1/actions/{id}/acl` `{subject_user_id, permission}` → 204 | `juice action acl grant --id --user --perm` | • R7, C2 |
-| Revoke ACL | `DELETE /v1/actions/{id}/acl/{subject_id}/{permission}` → 204 | `juice action acl revoke --id --user --perm` | • R4, C2 |
-| Grant-all (make public) | `POST /v1/actions/{id}/grant-all` → 204 | `juice action grant-all --id` | |
-| Revoke-all (make private) | `POST /v1/actions/{id}/revoke-all` → 204 | `juice action revoke-all --id` | |
-| Import OpenAPI | `POST /v1/actions/import` `{spec_url}` → import result | `juice action import --openapi <url>` | |
-| Unimport OpenAPI | `POST /v1/actions/unimport` `{spec_url[, name]}` → action[] | `juice action unimport --openapi <url> [--name]` | |
-| Get manifest | `GET /v1/actions/{id}/manifest` → signed manifest | — (used internally by `remote import`) | |
-| Get action stats | `GET /v1/stats/{action_id}` → stats | `juice action stats --id` | • C8 |
-| List ratings | `GET /v1/actions/{id}/ratings` → rating[] | — | |
+| Operation | HTTP | CLI |
+|-----------|------|-----|
+| Create action | `POST /v1/actions` `{name, kind, [source, description, price, input_schema, output_schema]}` → 201 action | `juice action create --name --kind [--source --description --price --input-schema --output-schema]` |
+| List public actions | `GET /v1/actions[?owner=&name=]` → action[] | `juice action list [--all --limit --offset]` |
+| Show action | `GET /v1/actions/{id}` → action | `juice action show --id` |
+| Update action | `PUT /v1/actions/{id}` `{[price, description, source, input_schema, output_schema]}` → action | `juice action update --id [--price --description --source --input-schema --output-schema]` |
+| Enable action | `POST /v1/actions/{id}/enable` → `{active:true}` | `juice action enable --id` |
+| Disable action | `POST /v1/actions/{id}/disable` → `{active:false}` | `juice action disable --id` |
+| Delete action | `DELETE /v1/actions/{id}` → 204 | `juice action delete --id` |
+| Grant ACL | `POST /v1/actions/{id}/acl` `{subject_user_id, permission}` → 204 | `juice action acl grant --id --user --perm` |
+| Revoke ACL | `DELETE /v1/actions/{id}/acl/{subject_id}/{permission}` → 204 | `juice action acl revoke --id --user --perm` |
+| Make public | `POST /v1/actions/{id}/grant-all` → 204 | `juice action grant-all --id` |
+| Make private | `POST /v1/actions/{id}/revoke-all` → 204 | `juice action revoke-all --id` |
+| Import OpenAPI | `POST /v1/actions/import` `{spec_url}` → import result | `juice action import --openapi <url>` |
+| Unimport OpenAPI | `POST /v1/actions/unimport` `{spec_url[, name]}` → action[] | `juice action unimport --openapi <url> [--name]` |
+| Get manifest | `GET /v1/actions/{id}/manifest` → signed manifest | — (used internally by `remote import`) |
+| Get stats | `GET /v1/stats/{action_id}` → stats | `juice action stats --id` |
+| List ratings | `GET /v1/actions/{id}/ratings` → rating[] | — |
+
+Action responses include a computed `action` field (`@owner/name`) alongside `id`.
 
 ### Processes
 
-| Operation | HTTP | CLI | Issues |
-|-----------|------|-----|--------|
-| Start process | `POST /v1/processes` `{funds}` → 201 `{process_id, trace_id, available}` | `juice process start [--funds]` | • R1 |
-| List processes | `GET /v1/processes` → process[] | `juice process list` | • R1 |
-| Show process | `GET /v1/processes/{id}` → process | `juice process show --id` | • R1 |
-| Fund process | `POST /v1/processes/{id}/fund` `{funds}` → 200 process | `juice process fund --id --funds` | • R1, R5 |
-| End process | `POST /v1/processes/{id}/end` → 204 | `juice process end --id` | • R1 |
+| Operation | HTTP | CLI |
+|-----------|------|-----|
+| Start process | `POST /v1/processes` `{funds}` → 201 `{process_id, available, ...}` | `juice process start [--funds]` |
+| List processes | `GET /v1/processes` → process[] | `juice process list` |
+| Show process | `GET /v1/processes/{id}` → process | `juice process show --id` |
+| Fund process | `POST /v1/processes/{id}/fund` `{funds}` → 200 process | `juice process fund --id --funds` |
+| End process | `POST /v1/processes/{id}/end` → 204 | `juice process end --id` |
 
 ### Call
 
-| Operation | HTTP | CLI | Issues |
-|-----------|------|-----|--------|
-| Execute action | `POST /v1/call` `{process_id, action, args[, parent_trace_id]}` → `{result, tx_id, trace_id}` | `juice call --process --action @owner/name [--trace] --args` | • R3, C2, C11 |
+| Operation | HTTP | CLI |
+|-----------|------|-----|
+| Execute action | `POST /v1/call` `{process_id, action, args[, parent_trace_id]}` → `{result, tx_id, trace_id}` | `juice call --process --action @owner/name [--trace] [--args]` |
+
+`action` is `@owner/name`. `args` defaults to `{}` when omitted.
 
 ### Transactions
 
-| Operation | HTTP | CLI | Issues |
-|-----------|------|-----|--------|
-| List transactions | `GET /v1/transactions[?process_id=]` → transaction[] | `juice tx list [--process --limit --offset]` | • R1, R2 |
-| Show transaction | `GET /v1/transactions/{id}` → transaction | `juice tx show --id` | • R1, R2 |
-| Rate transaction | `POST /v1/transactions/{id}/rate` `{rating}` → rating | `juice tx rate --id --rating` | • R7 |
+| Operation | HTTP | CLI |
+|-----------|------|-----|
+| List transactions | `GET /v1/transactions[?process_id=]` → transaction[] | `juice tx list [--process --limit --offset]` |
+| Show transaction | `GET /v1/transactions/{id}` → transaction | `juice tx show --id` |
+| Rate transaction | `POST /v1/transactions/{id}/rate` `{rating}` → rating | `juice tx rate --id --rating` |
+
+`rating` must be 0 (bad) or 1 (good). Transaction `args` and `result` fields are inline JSON objects.
 
 ### Listeners
 
-| Operation | HTTP | CLI | Issues |
-|-----------|------|-----|--------|
-| Create listener | `POST /v1/listeners` `{source_user_id, event_name, target_action_id}` → 201 listener | `juice listener create --source-user @handle --event --action @owner/name` | • R1, C2, C3 |
-| List listeners | `GET /v1/listeners` → listener[] | `juice listener list` | • R1 |
-| Show listener | `GET /v1/listeners/{id}` → listener | `juice listener show --id` | • R1 |
-| Delete listener | `DELETE /v1/listeners/{id}` → 204 | `juice listener delete --id` | |
+| Operation | HTTP | CLI |
+|-----------|------|-----|
+| Create listener | `POST /v1/listeners` `{source_user_id, event_name, target_action_id}` → 201 listener | `juice listener create --source-user @handle --event --action @owner/name` |
+| List listeners | `GET /v1/listeners` → listener[] | `juice listener list` |
+| Show listener | `GET /v1/listeners/{id}` → listener | `juice listener show --id` |
+| Delete listener | `DELETE /v1/listeners/{id}` → 204 | `juice listener delete --id` |
+
+Deleting a listener also purges all pending events for that listener.
 
 ### Events
 
-| Operation | HTTP | CLI | Issues |
-|-----------|------|-----|--------|
-| Emit event | `POST /v1/events/emit` `{event_name, args}` → `{event_ids:[]}` | `juice event emit --event --args` | • C12 |
-| List pending events | `GET /v1/listeners/{id}/events` → event[] | `juice event list --listener` | • R6 |
-| Consume event | `POST /v1/events/{id}/consume` `{process_id[, parent_trace_id]}` → call reply | `juice event consume --id --process [--trace]` | |
+| Operation | HTTP | CLI |
+|-----------|------|-----|
+| Emit event | `POST /v1/events/emit` `{event_name, args}` → `{event_ids:[]}` | `juice event emit --event [--args]` |
+| List pending events | `GET /v1/listeners/{id}/events` → event[] | `juice event list --listener` |
+| Consume event | `POST /v1/events/{id}/consume` `{process_id[, parent_trace_id]}` → call reply | `juice event consume --id --process [--trace]` |
+
+The event source is always the authenticated caller. `source_user_id` is not an input field.
 
 ### Lookup
 
-| Operation | HTTP | CLI | Issues |
-|-----------|------|-----|--------|
-| Lookup actions | Routed through `POST /v1/call` to `@sys/lookup` | `juice lookup --query [--limit]` | • C7 |
+| Operation | HTTP | CLI |
+|-----------|------|-----|
+| Lookup actions | `POST /v1/call` to `@sys/lookup` (price 0) | `juice lookup --query [--limit]` |
+
+The CLI manages the ephemeral process internally. Requires an Ollama embedding service.
 
 ### Remote Kernels
 
-| Operation | HTTP | CLI | Issues |
-|-----------|------|-----|--------|
-| Add remote kernel | — (fetches remote well-known) | `juice remote add --url` | • C1 |
-| List remote kernels | — | `juice remote list` | |
-| Import remote action | — (fetches remote manifest) | `juice remote import --remote --action @handle/name` | • C1 |
-| Unimport remote action | — | `juice remote unimport --remote --action @handle/name` | • C1 |
+| Operation | HTTP | CLI |
+|-----------|------|-----|
+| Add remote kernel | — | `juice remote add --url` |
+| List remote kernels | — | `juice remote list` |
+| Import remote action | — | `juice remote import --remote --action @handle/name` |
+| Unimport remote action | — | `juice remote unimport --remote --action @handle/name` |
 
 ### Federation (HTTP-only)
 
-| Operation | HTTP | CLI | Issues |
-|-----------|------|-----|--------|
-| Inbound federation call | `POST /v1/federation/call?action=@owner%2Fname&counterparty=<pubkey>` | — | |
+| Operation | HTTP |
+|-----------|------|
+| Inbound federation call | `POST /v1/federation/call?action=@owner%2Fname&counterparty=<pubkey>` |
 
-### Admin (CLI-only)
+### Admin (CLI-only, superuser)
 
-| Operation | CLI | Issues |
-|-----------|-----|--------|
-| List all users | `juice admin user list [--limit --offset]` | |
-| Show user | `juice admin user show --id\|--handle` | |
-| Suspend user | `juice admin user suspend --id` | |
-| Unsuspend user | `juice admin user unsuspend --id` | |
-| Deposit credits | `juice admin user deposit --id\|--handle --amount [--reason]` | |
-| List all actions | `juice admin action list [--limit --offset]` | |
-| Disable action | `juice admin action disable --id` | |
-| List all processes | `juice admin process list [--limit --offset]` | |
-| List all transactions | `juice admin tx list [--limit --offset]` | |
-
----
-
-## Inconsistency Index
-
-**HTTP1 — Dual content-type on `POST /v1/auth/token`.**  
-The endpoint detects JSON vs. `application/x-www-form-urlencoded` at runtime. Password grant (JSON) and authorization-code grant (form) share one route. Split into two routes or require a consistent envelope.  
-*Proposed:* `POST /v1/auth/token` accepts JSON only: `{grant_type, handle, password}` for password grant; `{grant_type, code, code_verifier, redirect_uri}` for code exchange.
-
-**R1 — Missing JSON struct tags on core types.**  
-`Action`, `Process`, `Transaction`, `Listener`, `Event`, and `Trace` have no `json:` tags. They serialize with Go PascalCase field names (`OwnerUserID`, `ArgsJSON`, `ProcessID`) while `Stats`, `Receipt`, `Rating`, and `ActionManifest` use snake_case. Every external client receives an inconsistent wire format.  
-*Proposed:* Add `json:"snake_case"` tags to all fields on all exported types used in HTTP responses.
-
-**R2 — `Transaction.ArgsJSON` and `Transaction.ReplyJSON` are double-encoded.**  
-Both fields are `string`; they hold serialized JSON. A client receives `"args_json": "{\"query\":\"hello\"}"` and must parse twice. The `CallReply` response already uses `result map[string]any` correctly.  
-*Proposed:* Change both fields to `json.RawMessage`, retag as `"args"` and `"result"`, and update all store reads/writes accordingly.
-
-**R3 — `POST /v1/call` splits action identity across `target` + `action_name`.**  
-`{"target": "@alice", "action_name": "/weather"}` is two fields for one concept. The rest of the system (manifests, lookup results, federation endpoint) uses `@owner/name` as a unit. Owner handles must not contain `/`; action names must not contain `/`; this makes the format unambiguous.  
-*Proposed:* `{"action": "@alice/weather", "process_id": "...", "args": {}}`. The server splits on the first `/` after `@`.  
-*CLI:* `juice call --action @alice/weather --process ... --args '{"city":"Paris"}'`. Remove `--target`; `--action` takes `@owner/name`.
-
-**R4 — `DELETE /v1/actions/{id}/acl` carries a request body.**  
-Many HTTP clients and intermediaries drop or reject DELETE bodies. The permission and subject are part of the resource identity, not state being submitted.  
-*Proposed:* `DELETE /v1/actions/{id}/acl/{subject_id}/{permission}` — no body.
-
-**R5 — `POST /v1/processes/{id}/fund` returns 204.**  
-After funding, the caller immediately needs the new balance. A second `GET /v1/processes/{id}` round-trip is required.  
-*Proposed:* Return 200 with the updated `Process` object.
-
-**R6 — `GET /v1/listeners/{id}/events` wraps response in an envelope.**  
-Returns `{"listener_id": "...", "events": [...]}`. The listener ID is already in the URL path.  
-*Proposed:* Return the array directly: `[…]`.
-
-**R7 — Rating and permission inputs not validated at the HTTP boundary.**  
-`POST /v1/transactions/{id}/rate` accepts any `float64`; the domain requires `{0, 1}`. `POST /v1/actions/{id}/acl` passes `permission` directly to the kernel, where an unknown value surfaces as `ErrInternal` after a SQLite constraint error.  
-*Proposed:* Handler-level guards: `if rating != 0 && rating != 1 → 422`; `if perm ∉ {read, call, admin} → 422`.  
-*(Note: the permission validation was added to the kernel in a recent fix; the HTTP handler should redundantly validate before reaching the kernel.)*
-
-**R8 — Action read responses omit the computed `action` field.**  
-Actions are identified by UUID in management operations but by `@owner/name` in calls, lookups, and manifests. Read responses currently return only `id`, requiring clients to reconstruct `@owner/name` from separate `owner_handle` and `name` fields.  
-*Proposed:* Add `"action": "@owner/name"` as a computed field to all action read and list responses.
-
-**C1 — `remote` commands use positional arguments.**  
-`remote add <url>`, `remote import <handle> <action-name>`, `remote unimport <handle> <action-name>` are the only commands in the CLI that take bare positional arguments.  
-*Proposed:*
-```
-juice remote add --url <url>
-juice remote import --remote <handle> --action @handle/name
-juice remote unimport --remote <handle> --action @handle/name
-```
-
-**C2 — `--action` carries a UUID in some commands, a name in others.**  
-In `action acl grant/revoke` and `events listen`, `--action` is an action UUID. In `call`, `--action` is an action name. Same flag, different types, in the same binary.  
-*Proposed:* `--action` always carries `@owner/name`. `action acl grant/revoke` use `--id` (consistent with every other `action` subcommand). `listener create` resolves `@owner/name` to an ID internally.
-
-**C3 — `--source` in `events listen` means a user handle.**  
-`events listen --source @alice` conflicts with `action add --source ./my.wasm` where `--source` is a URL/file path.  
-*Proposed:* Rename to `--source-user` in `listener create`.
-
-**C4 — `action add` uses `add`, not `create`.**  
-`user create`, `process start` all use distinct verbs. `action` alone uses `add`.  
-*Proposed:* `juice action create` (rename `add` → `create`).
-
-**C5 — `events unlisten` is an invented verb.**  
-`delete`, `remove`, and `revoke` are standard; `unlisten` is not. It also hides that the operation purges all pending events.  
-*Proposed:* `juice listener delete --id <listener-id>` (listeners are managed under `juice listener`, not `juice events`).
-
-**C6 — `events list` lists listeners, not events.**  
-`juice events list` calls `ListListeners` and prints listener rows. The `events` group is split into two groups to eliminate the confusion: `juice listener` for durable subscriptions and `juice event` for queued work items.  
-*Proposed:* `juice listener list` lists listeners. `juice event list --listener <id>` lists pending events for a listener. The `events` root group is removed.
-
-**C7 — `lookup` requires `--process` for a zero-cost action.**  
-`@sys/lookup` has price 0. The kernel requires a process for `Call()`, but the CLI can start and end a zero-funded ephemeral process transparently.  
-*Proposed:* Drop `--process` from `lookup`. The CLI creates a throw-away process with `funds=0`, runs the call, and ends it.
-
-**C8 — `stats show` is a root-level command group.**  
-`juice stats show --action <id>` sits at the root. Stats are a property of an action; the command belongs under `juice action`.  
-*Proposed:* `juice action stats --id <action-id>`. Remove the `stats` root group.
-
-**C9 — `--quiet` output flag is missing.**  
-The CLI implements `--json` for machine-readable output but has no mode for scripting that requires only a primary ID. Commands like `juice process start` print a human table or full JSON when a script needs only the process ID.  
-*Proposed:* Add `--quiet` as a global flag. Under `--quiet`, commands print only the primary resource ID, or nothing for mutations that return no resource. Example: `PROC=$(juice --quiet process start --funds 100)`.
-
-**C10 — JSON flags do not accept file input.**  
-`--args`, `--input-schema`, and `--output-schema` accept only inline JSON strings. Large schemas or payloads require awkward shell quoting.  
-*Proposed:* Any flag that accepts JSON also accepts `@path/to/file.json`. The `@` prefix means "read the value from this file." Example: `juice call --action @alice/weather --args @weather.json`.
-
-**C11 — `args` may be omitted from call and emit requests.**  
-`POST /v1/call` and `POST /v1/events/emit` treat a missing `args` field as `{}`. This is implicit and inconsistent with the model that every action has an input schema and the input object is always present.  
-*Proposed:* Require `args` in both request bodies. Return `ErrInvalidInput` when absent. `{}` is the canonical empty argument.
-
-**C12 — Emit source field is undocumented as server-derived.**  
-`POST /v1/events/emit` does not document that the event source is always the authenticated subject. A client might attempt to supply `source_user_id`, which the server should reject.  
-*Proposed:* Document that `source_user_id` is not an input field on emit. The server sets it from the authenticated subject. Reject any request that includes it.
+| Operation | CLI |
+|-----------|-----|
+| List all users | `juice admin user list [--limit --offset]` |
+| Show user | `juice admin user show --id\|--handle` |
+| Suspend user | `juice admin user suspend --id` |
+| Unsuspend user | `juice admin user unsuspend --id` |
+| Deposit credits | `juice admin user deposit --id\|--handle --amount [--reason]` |
+| List all actions | `juice admin action list [--limit --offset]` |
+| Disable action | `juice admin action disable --id` |
+| List all processes | `juice admin process list [--limit --offset]` |
+| List all transactions | `juice admin tx list [--limit --offset]` |
