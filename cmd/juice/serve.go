@@ -708,7 +708,8 @@ func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Args == nil {
-		req.Args = map[string]any{}
+		writeErr(w, kernel.ErrInvalidInput.Wrap("args is required"))
+		return
 	}
 	// Parse @owner/name format.
 	ownerHandle, actionName, err := parseActionRef(req.Action)
@@ -983,7 +984,8 @@ func (s *server) postEmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Args == nil {
-		req.Args = map[string]any{}
+		writeErr(w, kernel.ErrInvalidInput.Wrap("args is required"))
+		return
 	}
 	eventIDs, err := s.kernel.EmitEvent(r.Context(), subjectFrom(r), subjectFrom(r), req.EventName, req.Args, "")
 	if err != nil {

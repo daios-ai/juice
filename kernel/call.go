@@ -333,7 +333,7 @@ func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[str
 	switch action.Name {
 	case "lookup":
 		return k.executeLookup(ctx, args)
-	case "llm-chat":
+	case "llm/chat":
 		return k.executeChat(ctx, args)
 	default:
 		return nil, ErrInvalidState.Wrapf("unknown native action %q", action.Name)

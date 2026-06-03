@@ -324,8 +324,8 @@ flow_bootstrap() {
 import sys,json
 acts = json.load(sys.stdin)
 names = [a['name'] for a in acts]
-assert 'lookup' in names, f'/lookup missing; got {names}'
-assert 'llm-chat' in names, f'/llm/chat missing; got {names}'
+assert 'lookup' in names, f'lookup missing; got {names}'
+assert 'llm/chat' in names, f'llm/chat missing; got {names}'
 " 2>/dev/null \
         && ok "bootstrap.native_actions_registered" \
         || fail "bootstrap.native_actions_registered" "lookup or llm-chat not in action list"
@@ -2055,10 +2055,10 @@ PYEOF
         && ok "openapi_import_execute.call_succeeds" \
         || fail "openapi_import_execute.call_succeeds" "no tx_id: $call_out"
 
-    # Action name uses /operation_key convention; owner is encoded in owner_user_id only.
-    [ "$action_name" = "/greet" ] \
+    # Action name is the operation_key; owner is encoded in owner_user_id only.
+    [ "$action_name" = "greet" ] \
         && ok "openapi_import_execute.action_name_correct" \
-        || fail "openapi_import_execute.action_name_correct" "expected /greet, got: $action_name"
+        || fail "openapi_import_execute.action_name_correct" "expected greet, got: $action_name"
 
     stop_api_server "$api_pid"
 }

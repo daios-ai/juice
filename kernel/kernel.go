@@ -345,9 +345,6 @@ func (k *Kernel) CreateAction(ctx context.Context, subjectID string, req CreateA
 	if req.Name == "" {
 		return nil, ErrInvalidInput.Wrap("name is required")
 	}
-	if strings.Contains(req.Name, "/") {
-		return nil, ErrInvalidInput.Wrap("action name must not contain /")
-	}
 	if req.Kind != KindHTTP && req.Kind != KindWasm && req.Kind != KindNative {
 		return nil, ErrInvalidInput.Wrapf("unknown kind %q", req.Kind)
 	}
@@ -413,9 +410,6 @@ func (k *Kernel) ResetInFlightEvents(ctx context.Context) error {
 // RegisterNativeAction creates a native action for bootstrap use.
 // Unlike CreateAction, it does not reject KindNative. Call only from bootstrap.
 func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionRequest) (*Action, error) {
-	if strings.Contains(req.Name, "/") {
-		return nil, ErrInvalidInput.Wrap("action name must not contain /")
-	}
 	now := time.Now().UTC()
 	a := &Action{
 		ID:           uuid.New().String(),
@@ -2188,7 +2182,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 	var incoming []incomingOp
 	for _, raw := range rawOps {
 		raw := raw
-		name := "/" + raw.key
+		name := raw.key
 		// Name collision: only check for truly new ops (not already imported).
 		if _, exists := existingByKey[raw.key]; !exists {
 			if _, err := k.store.ReadActionByOwnerName(ctx, ownerID, name); err == nil {
@@ -2276,7 +2270,7 @@ func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specUR
 		for _, a := range actions {
 			var src OpenAPISource
 			json.Unmarshal([]byte(a.Source), &src)
-			if a.Name == "/"+name || src.OperationKey == name {
+			if a.Name == name || src.OperationKey == name {
 				filtered = append(filtered, a)
 			}
 		}

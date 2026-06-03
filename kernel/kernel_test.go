@@ -1725,8 +1725,8 @@ func TestImportOpenAPI(t *testing.T) {
 			len(result.Created), len(result.Updated), len(result.Unchanged), len(result.Rejected))
 	}
 	a := result.Created[0]
-	if a.Name != "/sayHello" {
-		t.Errorf("name: got %q, want %q", a.Name, "/sayHello")
+	if a.Name != "sayHello" {
+		t.Errorf("name: got %q, want %q", a.Name, "sayHello")
 	}
 	if a.Active {
 		t.Error("imported action must be inactive")

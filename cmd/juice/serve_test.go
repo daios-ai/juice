@@ -522,7 +522,7 @@ func TestServeACL(t *testing.T) {
 
 	// user2 tries to call — should be denied (403).
 	r1 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": pid, "action": "@acl-owner/acl-action",
+		"process_id": pid, "action": "@acl-owner/acl-action", "args": map[string]any{},
 	}, user2Tok)
 	r1.Body.Close()
 	if r1.StatusCode != http.StatusForbidden {
@@ -541,7 +541,7 @@ func TestServeACL(t *testing.T) {
 
 	// user2 calls — should succeed.
 	r2 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": pid, "action": "@acl-owner/acl-action",
+		"process_id": pid, "action": "@acl-owner/acl-action", "args": map[string]any{},
 	}, user2Tok)
 	r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
@@ -557,7 +557,7 @@ func TestServeACL(t *testing.T) {
 
 	// user2 calls again — should be denied.
 	r3 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": pid, "action": "@acl-owner/acl-action",
+		"process_id": pid, "action": "@acl-owner/acl-action", "args": map[string]any{},
 	}, user2Tok)
 	r3.Body.Close()
 	if r3.StatusCode != http.StatusForbidden {
@@ -594,7 +594,7 @@ func TestServeGrantRevokeAll(t *testing.T) {
 
 	// Before grant-all: user3 cannot call.
 	r1 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": pid, "action": "@ga-owner/public-action",
+		"process_id": pid, "action": "@ga-owner/public-action", "args": map[string]any{},
 	}, user3Tok)
 	r1.Body.Close()
 	if r1.StatusCode != http.StatusForbidden {
@@ -610,7 +610,7 @@ func TestServeGrantRevokeAll(t *testing.T) {
 
 	// user3 can now call.
 	r2 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": pid, "action": "@ga-owner/public-action",
+		"process_id": pid, "action": "@ga-owner/public-action", "args": map[string]any{},
 	}, user3Tok)
 	r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
@@ -626,7 +626,7 @@ func TestServeGrantRevokeAll(t *testing.T) {
 
 	// user3 can no longer call.
 	r3 := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": pid, "action": "@ga-owner/public-action",
+		"process_id": pid, "action": "@ga-owner/public-action", "args": map[string]any{},
 	}, user3Tok)
 	r3.Body.Close()
 	if r3.StatusCode != http.StatusForbidden {
@@ -795,7 +795,7 @@ func TestServeListAndGetTransaction(t *testing.T) {
 	pid := proc["process_id"].(string)
 
 	call := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": pid, "action": "@tx-owner/tx-action",
+		"process_id": pid, "action": "@tx-owner/tx-action", "args": map[string]any{},
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -857,7 +857,7 @@ func TestServeRateTransaction(t *testing.T) {
 	pid := proc["process_id"].(string)
 
 	call := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": pid, "action": "@rate-owner/rate-action",
+		"process_id": pid, "action": "@rate-owner/rate-action", "args": map[string]any{},
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -916,7 +916,7 @@ func TestServeListActionRatings(t *testing.T) {
 	pid := proc["process_id"].(string)
 
 	call := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": pid, "action": "@list-ratings-owner/list-ratings-action",
+		"process_id": pid, "action": "@list-ratings-owner/list-ratings-action", "args": map[string]any{},
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -991,7 +991,7 @@ func TestServeGetStats(t *testing.T) {
 	var proc map[string]any
 	decodeResponse(t, pr, &proc)
 	httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": proc["process_id"], "action": "@stats-owner/stats-action",
+		"process_id": proc["process_id"], "action": "@stats-owner/stats-action", "args": map[string]any{},
 	}, callerTok).Body.Close()
 
 	get := httpDo(t, srv, "GET", "/v1/stats/"+action.ID, nil, ownerTok)
@@ -1805,8 +1805,8 @@ func TestServeImportOpenAPI(t *testing.T) {
 	if len(result.Created) != 1 {
 		t.Fatalf("expected 1 created action, got %d", len(result.Created))
 	}
-	if result.Created[0].Name != "/sayHello" {
-		t.Errorf("name: got %q, want %q", result.Created[0].Name, "/sayHello")
+	if result.Created[0].Name != "sayHello" {
+		t.Errorf("name: got %q, want %q", result.Created[0].Name, "sayHello")
 	}
 }
 

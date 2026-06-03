@@ -1255,7 +1255,7 @@ func TestCommitFailedCallSettlementError(t *testing.T) {
 	}
 }
 
-// ---- llm-chat native action tests ----
+// ---- llm/chat native action tests ----
 
 type fakeChatter struct {
 	reply ChatMessage
@@ -1283,7 +1283,7 @@ func TestCallLLMChat(t *testing.T) {
 	chatAction := &Action{
 		ID:           uuid.New().String(),
 		OwnerUserID:  owner.ID,
-		Name:         "llm-chat",
+		Name:         "llm/chat",
 		Kind:         KindNative,
 		Active:       true,
 		Price:        0,
@@ -1300,7 +1300,7 @@ func TestCallLLMChat(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  owner.ID,
-		ActionName:    "llm-chat",
+		ActionName:    "llm/chat",
 		Args: map[string]any{
 			"messages": []any{
 				map[string]any{"role": "user", "content": "hi"},
@@ -1308,7 +1308,7 @@ func TestCallLLMChat(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatalf("Call llm-chat: %v", err)
+		t.Fatalf("Call llm/chat: %v", err)
 	}
 	msg, ok := reply.Result["message"].(map[string]any)
 	if !ok {
@@ -1328,7 +1328,7 @@ func TestCallLLMChatNoChatter(t *testing.T) {
 	chatAction := &Action{
 		ID:           uuid.New().String(),
 		OwnerUserID:  owner.ID,
-		Name:         "llm-chat",
+		Name:         "llm/chat",
 		Kind:         KindNative,
 		Active:       true,
 		Price:        0,
@@ -1345,7 +1345,7 @@ func TestCallLLMChatNoChatter(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  owner.ID,
-		ActionName:    "llm-chat",
+		ActionName:    "llm/chat",
 		Args:          map[string]any{"messages": []any{}},
 	})
 	if err == nil {
