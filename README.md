@@ -39,7 +39,7 @@ Requires Go 1.25+.
 ./juice auth login --handle @alice
 
 # Register an action
-./juice action add --name /echo --kind http --source https://httpbin.org/post --price 0
+./juice action create --name echo --kind http --source https://httpbin.org/post --price 0
 
 # Activate it
 ./juice action enable --id <action-id>
@@ -48,7 +48,7 @@ Requires Go 1.25+.
 ./juice process start --funds 1000
 
 # Call the action
-./juice call --process <pid> --target @alice --action /echo --args '{"msg":"hello"}'
+./juice call --process <pid> --action @alice/echo --args '{"msg":"hello"}'
 
 # Inspect the transaction
 ./juice tx show --id <txid>
@@ -65,22 +65,24 @@ Requires Go 1.25+.
 | `juice auth login` | Authenticate and store a token |
 | `juice auth logout` | Remove the stored token |
 | `juice auth refresh` | Rotate the refresh token |
-| `juice action add` | Register a new action |
+| `juice action create` | Register a new action |
 | `juice action update` | Update action metadata |
 | `juice action enable / disable` | Activate or deactivate an action |
 | `juice action list` | List actions |
 | `juice action delete` | Delete an action |
 | `juice action acl grant / revoke` | Manage per-user call permissions |
+| `juice action stats` | View incremental stats for an action |
 | `juice process start` | Open a funded process |
 | `juice process fund` | Add credits to a running process |
 | `juice process show` | Read process state |
 | `juice process end` | Close a process and return remaining funds |
 | `juice call` | Call an action within a process |
 | `juice tx list / show` | View transactions |
-| `juice stats show` | View incremental stats for an action |
 | `juice lookup` | Semantic action search (requires Ollama) |
-| `juice events listen / unlisten` | Register and remove event listeners |
-| `juice events emit / poll` | Emit events and poll listener queues |
+| `juice listener create / delete` | Register and remove event listeners |
+| `juice listener list / show` | List and inspect listeners |
+| `juice event emit` | Emit a named event |
+| `juice event list / consume` | Poll and consume pending events |
 | `juice serve` | Start the HTTP API server |
 
 All commands accept `--output json` for machine-readable output.
@@ -112,7 +114,7 @@ All routes except `POST /v1/auth/token`, `POST /v1/auth/authorize`, and `POST /v
 | `POST` | `/v1/actions/{id}/enable` | Activate action |
 | `POST` | `/v1/actions/{id}/disable` | Deactivate action |
 | `POST` | `/v1/actions/{id}/acl` | Grant permission to a user |
-| `DELETE` | `/v1/actions/{id}/acl` | Revoke permission from a user |
+| `DELETE` | `/v1/actions/{id}/acl/{subject_id}/{permission}` | Revoke permission from a user |
 | `POST` | `/v1/actions/{id}/grant-all` | Make action publicly callable |
 | `POST` | `/v1/actions/{id}/revoke-all` | Revoke public access |
 | `GET` | `/v1/processes` | List processes |

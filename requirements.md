@@ -45,8 +45,8 @@ All IDs are stable opaque identifiers; action IDs are globally unique. Credit ba
 
 | Object              | Required fields                                                                                                                                                                                                                             | Rules                                                                                                                                                                                                                                                                                                                   |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `User`              | `id`, `handle`, `email`, `available`, `locked`, `suspended_at`, `public_key`, `remote_base_url`, `created_at`, `updated_at`                                                                                                                 | `handle` is unique. A suspended user is rejected at every authenticated request with `ErrUnauthenticated`. `public_key`, when set, is a unique base64url Ed25519 32-byte public key. Local users have null `public_key` and `remote_base_url`; remote peers set both.                                                   |
-| `Action`            | `id`, `owner_user_id`, `name`, `kind`, `active`, `public`, `price`, `description`, `input_schema`, `output_schema`, `source`, `artifact_hash`, `remote_action_id`, `created_at`, `updated_at`                                               | `kind ∈ {http, wasm, native, remote_proxy}`. `(owner_user_id, name)` is unique. An `active=false` action is not callable by non-owners. Public discovery returns active actions only unless an owner requests private state. Authorized users may inspect script source. Compiled artifacts are content-addressed by `artifact_hash`. |
+| `User`              | `id`, `handle`, `email`, `available`, `locked`, `suspended_at`, `public_key`, `remote_base_url`, `created_at`, `updated_at`                                                                                                                 | `handle` is unique and must not contain `/`. A suspended user is rejected at every authenticated request with `ErrUnauthenticated`. `public_key`, when set, is a unique base64url Ed25519 32-byte public key. Local users have null `public_key` and `remote_base_url`; remote peers set both.                          |
+| `Action`            | `id`, `owner_user_id`, `name`, `kind`, `active`, `public`, `price`, `description`, `input_schema`, `output_schema`, `source`, `artifact_hash`, `remote_action_id`, `created_at`, `updated_at`                                               | `kind ∈ {http, wasm, native, remote_proxy}`. `(owner_user_id, name)` is unique. `name` must not contain `/`. An `active=false` action is not callable by non-owners. Public discovery returns active actions only unless an owner requests private state. Authorized users may inspect script source. Compiled artifacts are content-addressed by `artifact_hash`. |
 | `ACLEntry`          | `subject_user_id`, `action_id`, `permission`, `created_at`                                                                                                                                                                                  | `permission ∈ {read, call, admin}`. ACLs are direct user-to-action grants. `read` permits inspection; `call` permits execution; `admin` permits ACL and lifecycle changes. Owners implicitly have `admin`.                                                                                                              |
 | `Process`           | `id`, `owner_user_id`, `available`, `locked`, `status`, `created_at`, `ended_at`                                                                                                                                                            | `status ∈ {open, closed}`. A process starts with user-provided funds and may start with zero credits (`available = 0`). Closing it returns all remaining funds to its owner. Closed processes cannot execute calls.                                                                                                     |
 | `Trace`             | `id`, `process_id`, `parent_trace_id`, `caused_by_trace_id`, `cost`, `latency_ms`, `created_at`                                                                                                                                             | Every process has one root trace. Choose one root convention consistently: `parent_trace_id = id` or `parent_trace_id = null`. Every direct `Call()` creates exactly one child trace.                                                                                                                                   |
@@ -538,21 +538,23 @@ Required commands:
 juice serve
 juice user create                         juice user me
 juice auth login                          juice auth logout
-juice action add                          juice action update
+juice action create                       juice action update
 juice action delete                       juice action enable
 juice action disable                      juice action list
 juice action acl grant                    juice action acl revoke
 juice action grant-all                    juice action revoke-all
 juice action import                       juice action unimport
+juice action stats
 juice process start                       juice process list
 juice process show                        juice process fund
 juice process end                         juice call
-juice events listen                       juice events list
-juice events unlisten                     juice events emit
-juice events poll                         juice events consume
+juice listener create                     juice listener list
+juice listener show                       juice listener delete
+juice event emit                          juice event list
+juice event consume
 juice tx list                             juice tx show
-juice tx rate                             juice stats show
-juice lookup                              juice health
+juice tx rate                             juice lookup
+juice health
 juice admin user list                     juice admin user show
 juice admin user suspend                  juice admin user unsuspend
 juice admin user deposit                  juice admin action list
@@ -573,6 +575,8 @@ juice action unimport --openapi <spec-url> --name <action-name>
 `juice serve` catches `SIGTERM` and `SIGINT`, stops accepting new requests, drains in-flight calls to completion, and exits cleanly. No `juice stop` command is provided; process lifecycle is managed by the OS or a process manager.
 
 The HTTP API is primary. Every exposed endpoint has a corresponding CLI command. The server uses the shared kernel layer, propagates request, subject, process, trace, action, and transaction IDs into logs where available, maps authentication failure, authorization failure, invalid input, insufficient funds, missing resource, and internal failure to distinct HTTP statuses, and rate-limits authentication and account-creation endpoints per IP with HTTP `429` on excess.
+
+Action read and list responses include a computed `action` field of the form `@owner/name` alongside the resource `id`, so that lookup results and list output can be used directly in call requests without a separate resolution step. `juice lookup` does not require `--process`; the CLI creates and ends a zero-funded ephemeral process internally.
 
 Admin operations are CLI-only: do not register `/v1/admin/*` routes. They authenticate the caller, reject a non-superuser with `ErrUnauthorized`, require `@sys`, stay outside `Call()`, and include user list/show/suspend/unsuspend/deposit, action list/disable, process list, and transaction list.
 
@@ -603,6 +607,8 @@ Required endpoint behavior:
 | `GET /v1/processes`                | Authenticated owner's processes ordered by descending `created_at`.                                                                         |
 | `GET /v1/listeners`                | Authenticated owner's listeners.                                                                                                            |
 | `GET /v1/listeners/{id}/events`    | Listener owner or source; return pending event fields.                                                                                      |
+| `POST /v1/call`                    | Requires `args` field; rejected with `ErrInvalidInput` when absent. `{}` is valid for unconstrained inputs. `action` is `@owner/name`.     |
+| `POST /v1/events/emit`             | Does not accept `source_user_id`; the event source is always the authenticated subject. Requires `args` field.                              |
 | `POST /v1/auth/logout`             | Accept refresh token in body, revoke it, and return `ErrUnauthenticated` for missing or already-revoked tokens.                             |
 
 ## 14. Logging and configuration
