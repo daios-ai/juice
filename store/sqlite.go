@@ -506,37 +506,6 @@ func (s *DB) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL
 	return out, rows.Err()
 }
 
-func (s *DB) UpdateActionEmbedding(ctx context.Context, actionID string, vec []float32) error {
-	vecJSON, err := json.Marshal(vec)
-	if err != nil {
-		return dbErr(err, "marshal embedding")
-	}
-	_, err = s.db.ExecContext(ctx, `UPDATE actions SET embed_vec=? WHERE id=?`, string(vecJSON), actionID)
-	return dbErr(err, "update action embedding")
-}
-
-func (s *DB) ListActionEmbeddings(ctx context.Context, limit int) (map[string][]float32, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, embed_vec FROM actions WHERE active=1 AND embed_vec IS NOT NULL LIMIT ?`, limit)
-	if err != nil {
-		return nil, dbErr(err, "list action embeddings")
-	}
-	defer rows.Close()
-	out := make(map[string][]float32)
-	for rows.Next() {
-		var id, vecJSON string
-		if err := rows.Scan(&id, &vecJSON); err != nil {
-			return nil, dbErr(err, "scan action embedding")
-		}
-		var vec []float32
-		if err := json.Unmarshal([]byte(vecJSON), &vec); err != nil {
-			continue
-		}
-		out[id] = vec
-	}
-	return out, rows.Err()
-}
-
 func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
 	var a kernel.Action
 	var kind, inJSON, outJSON, createdAt, updatedAt string
@@ -1320,15 +1289,6 @@ func (s *DB) UpsertStats(ctx context.Context, st *kernel.Stats) error {
 		st.PriceMean, st.LatencyMean, st.RatingMean, timeToStr(st.LastUsedAt),
 	)
 	return dbErr(err, "upsert stats")
-}
-
-func (s *DB) UpsertStatTag(ctx context.Context, tag *kernel.StatTag) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO stat_tags (action_id,key,value,source,updated_at) VALUES (?,?,?,?,?)
-		 ON CONFLICT(action_id,key,source) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
-		tag.ActionID, tag.Key, tag.Value, tag.Source, timeToStr(tag.UpdatedAt),
-	)
-	return dbErr(err, "upsert stat tag")
 }
 
 // ---- Listeners & Events ----

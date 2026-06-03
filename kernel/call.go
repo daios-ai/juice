@@ -274,7 +274,6 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 		return nil, ErrInternal.Wrap("could not commit transaction")
 	}
-	k.upsertStatTag(ctx, action.ID, stats)
 
 	logger.Info("call.success", "action", action.Name, "tx_id", txID, "latency_ms", latency*1000)
 
@@ -319,6 +318,8 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 	case KindNative:
 		result, err := k.executeNative(ctx, action, args)
 		return result, 0, err
+	case KindRemoteProxy:
+		return nil, 0, ErrInvalidState.Wrap("federation executor not configured")
 	default:
 		return nil, 0, ErrInvalidState.Wrapf("unknown action kind %q", action.Kind)
 	}
@@ -576,31 +577,7 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 		logger.Error("call.settlement_failed", "action", action.Name, "error", callErr, "settlement_error", settlErr)
 		return ErrInternal.Wrap("could not record failure transaction")
 	}
-	k.upsertStatTag(ctx, action.ID, stats)
 	return nil
-}
-
-// upsertStatTag writes the latency bucket tag. Best-effort: errors are logged, not fatal.
-func (k *Kernel) upsertStatTag(ctx context.Context, actionID string, stats *Stats) {
-	_ = k.store.UpsertStatTag(ctx, &StatTag{
-		ActionID:  actionID,
-		Key:       "latency_bucket",
-		Value:     latencyBucket(stats.LatencyMean),
-		Source:    "kernel",
-		UpdatedAt: time.Now().UTC(),
-	})
-}
-
-// latencyBucket categorises observed mean latency for lookup filtering.
-func latencyBucket(meanSeconds float64) string {
-	switch {
-	case meanSeconds < 0.1:
-		return "fast"
-	case meanSeconds < 1.0:
-		return "medium"
-	default:
-		return "slow"
-	}
 }
 
 // anyOf converts a map[string]any to any for schema validation.

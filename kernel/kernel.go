@@ -398,7 +398,6 @@ func (k *Kernel) CreateAction(ctx context.Context, subjectID string, req CreateA
 	if err := k.store.CreateAction(ctx, a); err != nil {
 		return nil, err
 	}
-	k.embedActionAsync(ctx, a)
 	k.log.With(ctx).Info("action.created", "action_id", a.ID, "name", a.Name, "status", "success")
 	return a, nil
 }
@@ -737,9 +736,6 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 
 	if err := k.store.UpdateAction(ctx, a); err != nil {
 		return nil, err
-	}
-	if req.Description != nil {
-		k.embedActionAsync(ctx, a)
 	}
 	k.log.With(ctx).Info("action.updated", "action_id", a.ID, "status", "success")
 	return a, nil
@@ -1136,25 +1132,9 @@ type LookupResult struct {
 	Score       float32
 }
 
-// embedActionAsync computes and stores an embedding for an action's description.
-// No-op if the embedder is nil or the description is empty. Errors are logged, not surfaced.
-func (k *Kernel) embedActionAsync(ctx context.Context, a *Action) {
-	if k.llm == nil || a.Description == "" {
-		return
-	}
-	vec, err := k.llm.Embed(ctx, a.Description)
-	if err != nil {
-		k.log.With(ctx).Warn("embed.failed", "action_id", a.ID, "error", err.Error())
-		return
-	}
-	if err := k.store.UpdateActionEmbedding(ctx, a.ID, vec); err != nil {
-		k.log.With(ctx).Warn("embed.store_failed", "action_id", a.ID, "error", err.Error())
-	}
-}
-
 // Lookup returns active actions ranked by semantic similarity to the query.
-// Uses pre-computed stored embeddings — O(1) embedding API calls regardless of catalog size.
-// Actions without a stored embedding are not returned until their description is set or updated.
+// Embeddings are computed at query time over all active actions, so every active
+// action with a non-empty description is eligible regardless of prior history.
 // Returns ErrInvalidState if no embedder is configured.
 func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult, error) {
 	if k.llm == nil {
@@ -1169,31 +1149,24 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	if limit <= 0 || limit > 50 {
 		limit = 10
 	}
-	embeddings, err := k.store.ListActionEmbeddings(ctx, 200)
-	if err != nil {
-		return nil, err
-	}
-	if len(embeddings) == 0 {
-		return nil, nil
-	}
-	// Fetch action metadata for the actions that have stored embeddings.
+
 	actions, err := k.store.ListActions(ctx, true, 200, 0)
 	if err != nil {
 		return nil, err
-	}
-	actionByID := make(map[string]*Action, len(actions))
-	for _, a := range actions {
-		actionByID[a.ID] = a
 	}
 
 	type scored struct {
 		a     *Action
 		score float32
 	}
-	results := make([]scored, 0, len(embeddings))
-	for id, vec := range embeddings {
-		a, ok := actionByID[id]
-		if !ok {
+	results := make([]scored, 0, len(actions))
+	for _, a := range actions {
+		if a.Description == "" {
+			continue
+		}
+		vec, err := k.llm.Embed(ctx, a.Description)
+		if err != nil {
+			k.log.With(ctx).Warn("lookup.embed_failed", "action_id", a.ID, "error", err.Error())
 			continue
 		}
 		sim := cosine(qvec, vec)
@@ -1788,7 +1761,6 @@ func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*
 				if err := k.store.UpsertStats(ctx, &Stats{ActionID: ex.ID}); err != nil {
 					return nil, err
 				}
-				k.embedActionAsync(ctx, ex)
 				result.Updated = append(result.Updated, ex)
 			}
 		} else {
@@ -1796,7 +1768,6 @@ func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*
 			if err := k.store.CreateAction(ctx, a); err != nil {
 				return nil, err
 			}
-			k.embedActionAsync(ctx, a)
 			result.Created = append(result.Created, a)
 		}
 	}

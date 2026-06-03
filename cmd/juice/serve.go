@@ -317,23 +317,6 @@ func subjectFromContext(ctx context.Context) string {
 
 // ---- handlers ----
 
-func (s *server) postToken(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Handle   string `json:"handle"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
-		return
-	}
-	tok, err := s.kernel.Login(r.Context(), req.Handle, req.Password)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": tok})
-}
-
 func (s *server) postUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Handle   string `json:"handle"`
