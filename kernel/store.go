@@ -159,6 +159,8 @@ type Store interface {
 	// ---- Receipts ----
 
 	ReadReceiptByTxID(ctx context.Context, txID string) (*Receipt, error)
+	// ListReceiptsByAction returns receipts for the given action ordered by started_at DESC.
+	ListReceiptsByAction(ctx context.Context, actionID string, limit, offset int) ([]*Receipt, error)
 
 	// ---- Ratings ----
 

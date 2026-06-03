@@ -1011,6 +1011,112 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 	}
 }
 
+func TestListReceiptsByActionOwnerAllowed(t *testing.T) {
+	st := newTestStore(t)
+	su := setupUser(t, st, "@sys", 0)
+	if err := st.SetConfig(context.Background(), "superuser_handle", "@sys"); err != nil {
+		t.Fatal(err)
+	}
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	k.SetSuperuserHandle("@sys")
+	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@provider", 500)
+	caller := setupUser(t, st, "@buyer", 500)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pvd-svc",
+		Kind: kernel.KindWasm, Active: true, Price: 10, Source: "wat",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: caller.ID, ActionID: a.ID, Permission: kernel.PermCall, CreatedAt: time.Now().UTC()})
+
+	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 100)
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: owner.ID, ActionName: "pvd-svc", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	_ = reply
+
+	receipts, err := k.ListReceiptsByAction(ctx, owner.ID, a.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("owner ListReceiptsByAction: %v", err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("want 1 receipt, got %d", len(receipts))
+	}
+	if receipts[0].CallerUserID != caller.ID {
+		t.Errorf("CallerUserID: got %q, want %q", receipts[0].CallerUserID, caller.ID)
+	}
+	if receipts[0].ProcessID != p.ID {
+		t.Errorf("ProcessID: got %q, want %q", receipts[0].ProcessID, p.ID)
+	}
+	if receipts[0].StartedAt.IsZero() {
+		t.Error("StartedAt must not be zero")
+	}
+}
+
+func TestListReceiptsByActionNonOwnerDenied(t *testing.T) {
+	st := newTestStore(t)
+	su := setupUser(t, st, "@sys", 0)
+	if err := st.SetConfig(context.Background(), "superuser_handle", "@sys"); err != nil {
+		t.Fatal(err)
+	}
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	k.SetSuperuserHandle("@sys")
+	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@pvd2", 500)
+	other := setupUser(t, st, "@other2", 500)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pvd2-svc",
+		Kind: kernel.KindWasm, Active: true, Price: 0, Source: "wat",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	_, err := k.ListReceiptsByAction(ctx, other.ID, a.ID, 10, 0)
+	if !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized for non-owner, got %v", err)
+	}
+}
+
+func TestListReceiptsByActionSuperuserAllowed(t *testing.T) {
+	st := newTestStore(t)
+	su := setupUser(t, st, "@sys", 0)
+	if err := st.SetConfig(context.Background(), "superuser_handle", "@sys"); err != nil {
+		t.Fatal(err)
+	}
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	k.SetSuperuserHandle("@sys")
+	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@pvd3", 500)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pvd3-svc",
+		Kind: kernel.KindWasm, Active: true, Price: 0, Source: "wat",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	_, err := k.ListReceiptsByAction(ctx, su.ID, a.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("superuser ListReceiptsByAction: %v", err)
+	}
+}
+
 func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	st := newTestStore(t)
 	exec := &fakeScriptExec{result: `{"ok":true}`}

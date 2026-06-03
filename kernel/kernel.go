@@ -1448,6 +1448,23 @@ func (k *Kernel) GetReceiptByID(ctx context.Context, id string) (*Receipt, error
 	return k.store.ReadReceipt(ctx, id)
 }
 
+// ListReceiptsByAction returns receipts for calls to the given action, ordered by started_at DESC.
+// Only the action owner or the platform superuser may call this.
+func (k *Kernel) ListReceiptsByAction(ctx context.Context, subjectID, actionID string, limit, offset int) ([]*Receipt, error) {
+	u, err := k.authenticatedSubject(ctx, subjectID)
+	if err != nil {
+		return nil, err
+	}
+	action, err := k.store.ReadAction(ctx, actionID)
+	if err != nil {
+		return nil, err
+	}
+	if action.OwnerUserID != subjectID && !k.isUserSuperuser(ctx, u) {
+		return nil, ErrUnauthorized.Wrap("only the action owner may list provider receipts")
+	}
+	return k.store.ListReceiptsByAction(ctx, actionID, limit, offset)
+}
+
 // GetIdempotencyRecord returns an unexpired idempotency record matching key + counterparty.
 func (k *Kernel) GetIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*IdempotencyRecord, error) {
 	return k.store.ReadIdempotencyRecord(ctx, key, counterpartyUserID)
@@ -1592,6 +1609,8 @@ func (k *Kernel) buildReceipt(tx *Transaction) (*Receipt, error) {
 		TxID:         tx.ID,
 		TraceID:      tx.TraceID,
 		ActionID:     tx.ActionID,
+		CallerUserID: tx.SubjectUserID,
+		ProcessID:    tx.ProcessID,
 		ArgsHash:     argsHash,
 		ReplyHash:    replyHash,
 		Status:       tx.Status,
@@ -1599,6 +1618,7 @@ func (k *Kernel) buildReceipt(tx *Transaction) (*Receipt, error) {
 		Net:          tx.Net,
 		Fee:          tx.Fee,
 		Reason:       tx.Reason,
+		StartedAt:    tx.StartedAt,
 		CreatedAt:    time.Now().UTC().Truncate(time.Second),
 	}
 	sig, err := signReceipt(k.cfg.SigningKey, r)

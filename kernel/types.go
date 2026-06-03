@@ -216,6 +216,8 @@ type Receipt struct {
 	TxID         string    `json:"tx_id"`
 	TraceID      string    `json:"trace_id"`
 	ActionID     string    `json:"action_id"`
+	CallerUserID string    `json:"caller_user_id"`
+	ProcessID    string    `json:"process_id"`
 	ArgsHash     string    `json:"args_hash"`
 	ReplyHash    string    `json:"reply_hash"`
 	Status       TxStatus  `json:"status"`
@@ -223,6 +225,7 @@ type Receipt struct {
 	Net          int64     `json:"net"`
 	Fee          int64     `json:"fee"`
 	Reason       string    `json:"reason"`
+	StartedAt    time.Time `json:"started_at"`
 	CreatedAt    time.Time `json:"created_at"`
 	Signature    string    `json:"signature"`
 }

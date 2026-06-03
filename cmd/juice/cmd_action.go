@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
@@ -26,6 +27,7 @@ func init() {
 		actionImportCmd(),
 		actionUnimportCmd(),
 		actionStatsCmd(),
+		actionReceiptsCmd(),
 	)
 	rootCmd.AddCommand(actionCmd)
 }
@@ -458,6 +460,33 @@ func actionStatsCmd() *cobra.Command {
 					stats.ActionID, stats.Uses, stats.Successes, stats.Failures,
 					stats.PriceMean, stats.LatencyMean, stats.RatingMean,
 					stats.LastUsedAt.Format("2006-01-02T15:04:05"))
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
+	_ = cmd.MarkFlagRequired("id")
+	return cmd
+}
+
+func actionReceiptsCmd() *cobra.Command {
+	var actionID string
+	cmd := &cobra.Command{
+		Use:   "receipts",
+		Short: "List provider receipts for an action",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				receipts, err := k.ListReceiptsByAction(context.Background(), subjectID, actionID, 50, 0)
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(receipts)
+				}
+				for _, r := range receipts {
+					fmt.Printf("%s  %-7s  gross=%-6d net=%-6d  %s\n",
+						r.ID[:8], r.Status, r.Gross, r.Net, r.StartedAt.Format(time.RFC3339))
+				}
 				return nil
 			})
 		},

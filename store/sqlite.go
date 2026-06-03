@@ -780,12 +780,14 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 		return dbErr(fmt.Errorf("receipt is required"), label)
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
+		                       args_hash,reply_hash,status,gross,net,fee,reason,started_at,created_at,signature)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		receipt.ID, receipt.IssuerUserID, receipt.TxID, receipt.TraceID, receipt.ActionID,
+		receipt.CallerUserID, receipt.ProcessID,
 		receipt.ArgsHash, receipt.ReplyHash, string(receipt.Status),
 		receipt.Gross, receipt.Net, receipt.Fee, receipt.Reason,
-		timeToStr(receipt.CreatedAt), receipt.Signature,
+		timeToStr(receipt.StartedAt), timeToStr(receipt.CreatedAt), receipt.Signature,
 	); err != nil {
 		return dbErr(err, label+": insert receipt")
 	}
@@ -1785,13 +1787,15 @@ func dbErr(err error, op string) error {
 
 func (s *DB) ReadReceiptByTxID(ctx context.Context, txID string) (*kernel.Receipt, error) {
 	var r kernel.Receipt
-	var status, createdAt string
+	var status, startedAt, createdAt string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature
+		`SELECT id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
+		        args_hash,reply_hash,status,gross,net,fee,reason,started_at,created_at,signature
 		 FROM receipts WHERE tx_id=?`, txID,
 	).Scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
+		&r.CallerUserID, &r.ProcessID,
 		&r.ArgsHash, &r.ReplyHash, &status,
-		&r.Gross, &r.Net, &r.Fee, &r.Reason, &createdAt, &r.Signature)
+		&r.Gross, &r.Net, &r.Fee, &r.Reason, &startedAt, &createdAt, &r.Signature)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("receipt not found")
 	}
@@ -1799,19 +1803,22 @@ func (s *DB) ReadReceiptByTxID(ctx context.Context, txID string) (*kernel.Receip
 		return nil, dbErr(err, "read receipt by tx_id")
 	}
 	r.Status = kernel.TxStatus(status)
+	r.StartedAt = strToTime(startedAt)
 	r.CreatedAt = strToTime(createdAt)
 	return &r, nil
 }
 
 func (s *DB) ReadReceipt(ctx context.Context, id string) (*kernel.Receipt, error) {
 	var r kernel.Receipt
-	var status, createdAt string
+	var status, startedAt, createdAt string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,issuer_user_id,tx_id,trace_id,action_id,args_hash,reply_hash,status,gross,net,fee,reason,created_at,signature
+		`SELECT id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
+		        args_hash,reply_hash,status,gross,net,fee,reason,started_at,created_at,signature
 		 FROM receipts WHERE id=?`, id,
 	).Scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
+		&r.CallerUserID, &r.ProcessID,
 		&r.ArgsHash, &r.ReplyHash, &status,
-		&r.Gross, &r.Net, &r.Fee, &r.Reason, &createdAt, &r.Signature)
+		&r.Gross, &r.Net, &r.Fee, &r.Reason, &startedAt, &createdAt, &r.Signature)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("receipt not found")
 	}
@@ -1819,8 +1826,40 @@ func (s *DB) ReadReceipt(ctx context.Context, id string) (*kernel.Receipt, error
 		return nil, dbErr(err, "read receipt")
 	}
 	r.Status = kernel.TxStatus(status)
+	r.StartedAt = strToTime(startedAt)
 	r.CreatedAt = strToTime(createdAt)
 	return &r, nil
+}
+
+func (s *DB) ListReceiptsByAction(ctx context.Context, actionID string, limit, offset int) ([]*kernel.Receipt, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
+		        args_hash,reply_hash,status,gross,net,fee,reason,started_at,created_at,signature
+		 FROM receipts WHERE action_id=?
+		 ORDER BY started_at DESC
+		 LIMIT ? OFFSET ?`,
+		actionID, limit, offset,
+	)
+	if err != nil {
+		return nil, dbErr(err, "list receipts by action")
+	}
+	defer rows.Close()
+	var result []*kernel.Receipt
+	for rows.Next() {
+		var r kernel.Receipt
+		var status, startedAt, createdAt string
+		if err := rows.Scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
+			&r.CallerUserID, &r.ProcessID,
+			&r.ArgsHash, &r.ReplyHash, &status,
+			&r.Gross, &r.Net, &r.Fee, &r.Reason, &startedAt, &createdAt, &r.Signature); err != nil {
+			return nil, dbErr(err, "list receipts by action: scan")
+		}
+		r.Status = kernel.TxStatus(status)
+		r.StartedAt = strToTime(startedAt)
+		r.CreatedAt = strToTime(createdAt)
+		result = append(result, &r)
+	}
+	return result, dbErr(rows.Err(), "list receipts by action: rows")
 }
 
 // ---- Ratings ----
