@@ -30,7 +30,7 @@ func TestCallClosedProcess(t *testing.T) {
 
 	// Create an HTTP action — Call will fail before exec (closed process).
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "/echo",
+		OwnerUserID: owner.ID, Name: "echo",
 		Kind: kernel.KindHTTP, Source: "http://example.com/echo",
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
@@ -40,7 +40,7 @@ func TestCallClosedProcess(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  owner.ID,
-		ActionName:    "/echo",
+		ActionName:    "echo",
 		Args:          map[string]any{},
 	})
 	if err == nil {
@@ -58,14 +58,14 @@ func TestCallInsufficientFunds(t *testing.T) {
 	p, root, _ := env.k.StartProcess(ctx, owner.ID, owner.ID, 0)
 
 	_, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "/expensive",
+		OwnerUserID: owner.ID, Name: "expensive",
 		Kind: kernel.KindHTTP, Source: "http://x.com", Price: 100,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Activate it.
-	a, _ := env.k.ReadActionByOwnerName(ctx, owner.ID, "/expensive")
+	a, _ := env.k.ReadActionByOwnerName(ctx, owner.ID, "expensive")
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 
 	_, err = env.k.Call(ctx, kernel.CallRequest{
@@ -73,7 +73,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  owner.ID,
-		ActionName:    "/expensive",
+		ActionName:    "expensive",
 		Args:          map[string]any{},
 	})
 	if err == nil {

@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -281,7 +282,7 @@ func TestResetInFlightEvents(t *testing.T) {
 	e := &Event{
 		ID:         uuid.New().String(),
 		ListenerID: "fake-listener",
-		ArgsJSON:   "{}",
+		ArgsJSON:   json.RawMessage("{}"),
 		CreatedAt:  time.Now().UTC(),
 	}
 	_ = st.CreateEvents(ctx, []*Event{e})

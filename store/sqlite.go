@@ -372,14 +372,14 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at,deleted_at
-		 FROM actions WHERE id=? AND deleted_at IS NULL`, id))
+		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
+		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.id=? AND a.deleted_at IS NULL`, id))
 }
 
 func (s *DB) ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at,deleted_at
-		 FROM actions WHERE owner_user_id=? AND name=? AND deleted_at IS NULL`, ownerID, name))
+		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
+		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.name=? AND a.deleted_at IS NULL`, ownerID, name))
 }
 
 func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
@@ -414,12 +414,12 @@ func (s *DB) DeleteAction(ctx context.Context, id string) error {
 }
 
 func (s *DB) ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*kernel.Action, error) {
-	q := `SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at,deleted_at FROM actions WHERE deleted_at IS NULL`
+	q := `SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.deleted_at IS NULL`
 	args := []any{}
 	if activeOnly {
-		q += ` AND active=1 AND public=1`
+		q += ` AND a.active=1 AND a.public=1`
 	}
-	q += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	q += ` ORDER BY a.created_at DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -444,8 +444,8 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at,deleted_at
-		 FROM actions WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
+		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.deleted_at IS NULL ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list all actions")
 	}
@@ -463,12 +463,12 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 
 func (s *DB) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL string) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at,deleted_at
-		 FROM actions
-		 WHERE owner_user_id=? AND deleted_at IS NULL
-		   AND json_valid(source)=1
-		   AND json_extract(source,'$.type')='openapi'
-		   AND json_extract(source,'$.spec_url')=?`,
+		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
+		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
+		 WHERE a.owner_user_id=? AND a.deleted_at IS NULL
+		   AND json_valid(a.source)=1
+		   AND json_extract(a.source,'$.type')='openapi'
+		   AND json_extract(a.source,'$.spec_url')=?`,
 		ownerID, specURL)
 	if err != nil {
 		return nil, dbErr(err, "list actions by openapi spec")
@@ -521,7 +521,7 @@ func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
 	var kind, inJSON, outJSON, createdAt, updatedAt string
 	var active, public int
 	var deletedAt *string
-	err := row.Scan(&a.ID, &a.OwnerUserID, &a.Name, &kind, &active, &public, &a.Price,
+	err := row.Scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &a.Name, &kind, &active, &public, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.RemoteActionID,
 		&createdAt, &updatedAt, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -538,7 +538,7 @@ func (s *DB) scanActionRow(rows *sql.Rows) (*kernel.Action, error) {
 	var kind, inJSON, outJSON, createdAt, updatedAt string
 	var active, public int
 	var deletedAt *string
-	err := rows.Scan(&a.ID, &a.OwnerUserID, &a.Name, &kind, &active, &public, &a.Price,
+	err := rows.Scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &a.Name, &kind, &active, &public, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.RemoteActionID,
 		&createdAt, &updatedAt, &deletedAt)
 	if err != nil {
@@ -549,8 +549,8 @@ func (s *DB) scanActionRow(rows *sql.Rows) (*kernel.Action, error) {
 
 func (s *DB) ReadActionByOwnerRemoteID(ctx context.Context, ownerID, remoteActionID string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at,deleted_at
-		 FROM actions WHERE owner_user_id=? AND remote_action_id=? AND remote_action_id!='' AND deleted_at IS NULL`,
+		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
+		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.remote_action_id=? AND a.remote_action_id!='' AND a.deleted_at IS NULL`,
 		ownerID, remoteActionID))
 }
 
@@ -767,7 +767,7 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
 		ktx.OwnerUserID, ktx.SubjectUserID, ktx.TargetUserID, ktx.ActionID,
-		ktx.ArgsJSON, ktx.ReplyJSON, string(ktx.Status),
+		rawJSONStr(ktx.ArgsJSON), rawJSONStr(ktx.ReplyJSON), string(ktx.Status),
 		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason, nullStr(ktx.RemoteReceiptHash),
 		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
 	); err != nil {
@@ -916,7 +916,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		receiptBytes, _ := json.Marshal(receipt)
 		if _, err = tx.ExecContext(ctx,
 			`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=?`,
-			ktx.ReplyJSON, string(receiptBytes), idempotencyRecordID,
+			rawJSONStr(ktx.ReplyJSON), string(receiptBytes), idempotencyRecordID,
 		); err != nil {
 			return dbErr(err, "commit call: complete idempotency record")
 		}
@@ -1125,7 +1125,7 @@ func (s *DB) createTransaction(ctx context.Context, tx *kernel.Transaction) erro
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		tx.ID, tx.ProcessID, tx.TraceID, tx.ParentTraceID,
 		tx.OwnerUserID, tx.SubjectUserID, tx.TargetUserID, tx.ActionID,
-		tx.ArgsJSON, tx.ReplyJSON, string(tx.Status),
+		rawJSONStr(tx.ArgsJSON), rawJSONStr(tx.ReplyJSON), string(tx.Status),
 		tx.Gross, tx.Net, tx.Fee, tx.Reason, nullStr(tx.RemoteReceiptHash),
 		timeToStr(tx.StartedAt), timeToStr(tx.EndedAt),
 	)
@@ -1134,7 +1134,7 @@ func (s *DB) createTransaction(ctx context.Context, tx *kernel.Transaction) erro
 
 func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transaction, error) {
 	var tx kernel.Transaction
-	var status, startedAt, endedAt string
+	var status, startedAt, endedAt, argsJSON, replyJSON string
 	var remoteReceiptHash *string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
@@ -1142,7 +1142,7 @@ func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transactio
 		 FROM transactions WHERE id=?`, id,
 	).Scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
 		&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
-		&tx.ArgsJSON, &tx.ReplyJSON, &status,
+		&argsJSON, &replyJSON, &status,
 		&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash,
 		&startedAt, &endedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1151,6 +1151,8 @@ func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transactio
 	if err != nil {
 		return nil, dbErr(err, "read transaction")
 	}
+	tx.ArgsJSON = strToRawJSON(argsJSON)
+	tx.ReplyJSON = strToRawJSON(replyJSON)
 	tx.Status = kernel.TxStatus(status)
 	tx.RemoteReceiptHash = strVal(remoteReceiptHash)
 	tx.StartedAt = strToTime(startedAt)
@@ -1196,15 +1198,17 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 	var out []*kernel.Transaction
 	for rows.Next() {
 		var tx kernel.Transaction
-		var status, startedAt, endedAt string
+		var status, startedAt, endedAt, argsJSON, replyJSON string
 		var remoteReceiptHash *string
 		if err := rows.Scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
 			&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
-			&tx.ArgsJSON, &tx.ReplyJSON, &status,
+			&argsJSON, &replyJSON, &status,
 			&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash,
 			&startedAt, &endedAt); err != nil {
 			return nil, dbErr(err, "scan transaction")
 		}
+		tx.ArgsJSON = strToRawJSON(argsJSON)
+		tx.ReplyJSON = strToRawJSON(replyJSON)
 		tx.Status = kernel.TxStatus(status)
 		tx.RemoteReceiptHash = strVal(remoteReceiptHash)
 		tx.StartedAt = strToTime(startedAt)
@@ -1229,15 +1233,17 @@ func (s *DB) ListAllTransactions(ctx context.Context, limit, offset int) ([]*ker
 	var out []*kernel.Transaction
 	for rows.Next() {
 		var tx kernel.Transaction
-		var status, startedAt, endedAt string
+		var status, startedAt, endedAt, argsJSON, replyJSON string
 		var remoteReceiptHash *string
 		if err := rows.Scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
 			&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
-			&tx.ArgsJSON, &tx.ReplyJSON, &status,
+			&argsJSON, &replyJSON, &status,
 			&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash,
 			&startedAt, &endedAt); err != nil {
 			return nil, dbErr(err, "scan transaction")
 		}
+		tx.ArgsJSON = strToRawJSON(argsJSON)
+		tx.ReplyJSON = strToRawJSON(replyJSON)
 		tx.Status = kernel.TxStatus(status)
 		tx.RemoteReceiptHash = strVal(remoteReceiptHash)
 		tx.StartedAt = strToTime(startedAt)
@@ -1391,7 +1397,7 @@ func (s *DB) CreateEvents(ctx context.Context, events []*kernel.Event) error {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO events (id,listener_id,args_json,causing_trace_id,created_at)
 			 VALUES (?,?,?,?,?)`,
-			e.ID, e.ListenerID, e.ArgsJSON, nullStr(e.CausingTraceID), timeToStr(e.CreatedAt),
+			e.ID, e.ListenerID, string(e.ArgsJSON), nullStr(e.CausingTraceID), timeToStr(e.CreatedAt),
 		); err != nil {
 			_ = tx.Rollback()
 			return dbErr(err, "create events: insert")
@@ -1403,17 +1409,18 @@ func (s *DB) CreateEvents(ctx context.Context, events []*kernel.Event) error {
 func (s *DB) ReadEvent(ctx context.Context, id string) (*kernel.Event, error) {
 	var e kernel.Event
 	var causingTraceID, consumedAt, txID *string
-	var createdAt string
+	var createdAt, argsJSON string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id,listener_id,args_json,causing_trace_id,consumed_at,tx_id,created_at
 		 FROM events WHERE id=?`, id,
-	).Scan(&e.ID, &e.ListenerID, &e.ArgsJSON, &causingTraceID, &consumedAt, &txID, &createdAt)
+	).Scan(&e.ID, &e.ListenerID, &argsJSON, &causingTraceID, &consumedAt, &txID, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("event not found")
 	}
 	if err != nil {
 		return nil, dbErr(err, "read event")
 	}
+	e.ArgsJSON = strToRawJSON(argsJSON)
 	if causingTraceID != nil {
 		e.CausingTraceID = *causingTraceID
 	}
@@ -1435,10 +1442,11 @@ func (s *DB) ListPendingEvents(ctx context.Context, listenerID string) ([]*kerne
 	for rows.Next() {
 		var e kernel.Event
 		var causingTraceID *string
-		var createdAt string
-		if err := rows.Scan(&e.ID, &e.ListenerID, &e.ArgsJSON, &causingTraceID, &createdAt); err != nil {
+		var createdAt, argsJSON string
+		if err := rows.Scan(&e.ID, &e.ListenerID, &argsJSON, &causingTraceID, &createdAt); err != nil {
 			return nil, dbErr(err, "scan event")
 		}
+		e.ArgsJSON = strToRawJSON(argsJSON)
 		if causingTraceID != nil {
 			e.CausingTraceID = *causingTraceID
 		}
@@ -1496,6 +1504,22 @@ func nullStr(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// rawJSONStr returns the string form of a json.RawMessage, defaulting to "null" when empty.
+func rawJSONStr(r json.RawMessage) string {
+	if len(r) == 0 {
+		return "null"
+	}
+	return string(r)
+}
+
+// strToRawJSON converts a DB string to json.RawMessage, defaulting to null when empty.
+func strToRawJSON(s string) json.RawMessage {
+	if s == "" {
+		return json.RawMessage("null")
+	}
+	return json.RawMessage(s)
 }
 
 // ---- Traces (by process) ----

@@ -105,6 +105,9 @@ func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*User, 
 	if req.Handle == "" {
 		return nil, ErrInvalidInput.Wrap("handle is required")
 	}
+	if strings.Contains(req.Handle, "/") {
+		return nil, ErrInvalidInput.Wrap("handle must not contain /")
+	}
 	if req.Email == "" {
 		return nil, ErrInvalidInput.Wrap("email is required")
 	}
@@ -342,6 +345,9 @@ func (k *Kernel) CreateAction(ctx context.Context, subjectID string, req CreateA
 	if req.Name == "" {
 		return nil, ErrInvalidInput.Wrap("name is required")
 	}
+	if strings.Contains(req.Name, "/") {
+		return nil, ErrInvalidInput.Wrap("action name must not contain /")
+	}
 	if req.Kind != KindHTTP && req.Kind != KindWasm && req.Kind != KindNative {
 		return nil, ErrInvalidInput.Wrapf("unknown kind %q", req.Kind)
 	}
@@ -407,6 +413,9 @@ func (k *Kernel) ResetInFlightEvents(ctx context.Context) error {
 // RegisterNativeAction creates a native action for bootstrap use.
 // Unlike CreateAction, it does not reject KindNative. Call only from bootstrap.
 func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionRequest) (*Action, error) {
+	if strings.Contains(req.Name, "/") {
+		return nil, ErrInvalidInput.Wrap("action name must not contain /")
+	}
 	now := time.Now().UTC()
 	a := &Action{
 		ID:           uuid.New().String(),
@@ -1440,7 +1449,7 @@ func (k *Kernel) EmitEvent(ctx context.Context, subjectID, sourceUserID, eventNa
 		events = append(events, &Event{
 			ID:             uuid.New().String(),
 			ListenerID:     l.ID,
-			ArgsJSON:       string(argsJSON),
+			ArgsJSON:       json.RawMessage(argsJSON),
 			CausingTraceID: causingTraceID,
 			CreatedAt:      now,
 		})
@@ -1496,7 +1505,7 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 	}
 	// Decode event args.
 	var args map[string]any
-	_ = json.Unmarshal([]byte(e.ArgsJSON), &args)
+	_ = json.Unmarshal(e.ArgsJSON, &args)
 	// Call the action using the supplied process. EventID causes CommitCall to settle
 	// the event atomically in the same transaction, eliminating the double-charge window.
 	reply, err := k.Call(ctx, CallRequest{
@@ -1525,11 +1534,11 @@ func (k *Kernel) buildReceipt(tx *Transaction) (*Receipt, error) {
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
-	argsHash, err := jcsHashStr(tx.ArgsJSON)
+	argsHash, err := jcsHashStr(string(tx.ArgsJSON))
 	if err != nil {
 		return nil, ErrInternal.Wrapf("hash args: %v", err)
 	}
-	replyHash, err := jcsHashStr(tx.ReplyJSON)
+	replyHash, err := jcsHashStr(string(tx.ReplyJSON))
 	if err != nil {
 		return nil, ErrInternal.Wrapf("hash reply: %v", err)
 	}
@@ -2330,7 +2339,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 		localCounterparty = base64.RawURLEncoding.EncodeToString(pub)
 	}
 	source := strings.TrimRight(remoteUser.RemoteBaseURL, "/") +
-		"/v1/federation/call?action=" + url.QueryEscape(m.OwnerHandle+m.Name) +
+		"/v1/federation/call?action=" + url.QueryEscape(m.OwnerHandle+"/"+m.Name) +
 		"&counterparty=" + url.QueryEscape(localCounterparty)
 
 	existingByKey := map[string]*Action{}

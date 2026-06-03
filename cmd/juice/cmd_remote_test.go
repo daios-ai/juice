@@ -84,7 +84,7 @@ func TestRemoteAdd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = runRemoteAdd(nil, []string{remote.URL})
+	err = runRemoteAdd(remote.URL)
 	if err != nil {
 		t.Fatalf("runRemoteAdd: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestRemoteImport(t *testing.T) {
 	m := kernel.ActionManifest{
 		ActionID:     actionID,
 		OwnerHandle:  "@import-remote",
-		Name:         "/greet",
+		Name:         "greet",
 		Description:  "says hello",
 		Kind:         kernel.KindHTTP,
 		InputSchema:  map[string]any{"type": "object"},
@@ -154,7 +154,7 @@ func TestRemoteImport(t *testing.T) {
 		if strings.Contains(r.URL.Path, "/manifest") {
 			json.NewEncoder(w).Encode(m)
 		} else {
-			json.NewEncoder(w).Encode([]map[string]string{{"ID": actionID, "Name": "/greet"}})
+			json.NewEncoder(w).Encode([]map[string]string{{"ID": actionID, "Name": "greet"}})
 		}
 	}))
 	defer remote.Close()
@@ -169,7 +169,7 @@ func TestRemoteImport(t *testing.T) {
 	tok, _ := k.Login(t.Context(), "@sys", "sys-pass")
 	_ = saveToken(tok)
 
-	if err := runRemoteImport(nil, []string{"@import-remote", "/greet"}); err != nil {
+	if err := runRemoteImport("@import-remote", "greet"); err != nil {
 		t.Fatalf("runRemoteImport: %v", err)
 	}
 
@@ -180,7 +180,7 @@ func TestRemoteImport(t *testing.T) {
 	}
 	found := false
 	for _, a := range actions {
-		if a.Name == "/greet" {
+		if a.Name == "greet" {
 			found = true
 		}
 	}
@@ -202,7 +202,7 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 	m := kernel.ActionManifest{
 		ActionID:     actionID,
 		OwnerHandle:  "@disappear-remote",
-		Name:         "/bye",
+		Name:         "bye",
 		Description:  "going away",
 		Kind:         kernel.KindHTTP,
 		InputSchema:  map[string]any{"type": "object"},
@@ -223,7 +223,7 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 			return
 		}
 		if serveAction {
-			json.NewEncoder(w).Encode([]map[string]string{{"ID": actionID, "Name": "/bye"}})
+			json.NewEncoder(w).Encode([]map[string]string{{"ID": actionID, "Name": "bye"}})
 		} else {
 			json.NewEncoder(w).Encode([]map[string]string{})
 		}
@@ -240,13 +240,13 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 	_ = saveToken(tok)
 
 	// Import the action.
-	if err := runRemoteImport(nil, []string{"@disappear-remote", "/bye"}); err != nil {
+	if err := runRemoteImport("@disappear-remote", "bye"); err != nil {
 		t.Fatalf("initial import: %v", err)
 	}
 
 	// Reimport with remote no longer listing the action.
 	serveAction = false
-	if err := runRemoteImport(nil, []string{"@disappear-remote", "/bye"}); err != nil {
+	if err := runRemoteImport("@disappear-remote", "bye"); err != nil {
 		t.Fatalf("reimport after disappearance: %v", err)
 	}
 
@@ -256,7 +256,7 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, a := range actions {
-		if a.Name == "/bye" && a.Active {
+		if a.Name == "bye" && a.Active {
 			t.Error("expected local proxy to be deactivated after remote action disappeared")
 		}
 	}
@@ -279,7 +279,7 @@ func TestRemoteUnimport(t *testing.T) {
 	m := kernel.ActionManifest{
 		ActionID:     "unimport-action-id",
 		OwnerHandle:  "@unimport-peer",
-		Name:         "/greet",
+		Name:         "greet",
 		Kind:         kernel.KindHTTP,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -299,7 +299,7 @@ func TestRemoteUnimport(t *testing.T) {
 	tok, _ := k.Login(t.Context(), "@sys", "sys-pass")
 	_ = saveToken(tok)
 
-	if err := runRemoteUnimport(nil, []string{"@unimport-peer", "/greet"}); err != nil {
+	if err := runRemoteUnimport("@unimport-peer", "greet"); err != nil {
 		t.Fatalf("runRemoteUnimport: %v", err)
 	}
 }

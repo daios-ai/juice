@@ -66,12 +66,12 @@ func bootstrap(k *kernel.Kernel) error {
 	}
 	k.SetSigningKey(ed25519.PrivateKey(privKeyBytes), su.ID, handle)
 
-	// Register /lookup native action if absent.
+	// Register lookup native action if absent.
 	if err := ensureSysLookup(ctx, k, handle); err != nil {
 		return err
 	}
 
-	// Register /llm/chat native action if absent.
+	// Register llm-chat native action if absent.
 	if err := ensureSysLLMChat(ctx, k, handle); err != nil {
 		return err
 	}
@@ -110,7 +110,7 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 		return fmt.Errorf("read superuser: %w", err)
 	}
 
-	actionName := "/lookup"
+	actionName := "lookup"
 	a, err := k.ReadActionByOwnerName(ctx, su.ID, actionName)
 	if err == nil && a != nil {
 		// Already registered — ensure active and grant-all is set.
@@ -125,11 +125,11 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 
 	// Create the native lookup action.
 	a, err = k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
-		OwnerUserID:  su.ID,
-		Name:         actionName,
-		Kind:         kernel.KindNative,
-		Price:        0,
-		Description:  "Semantic search over active actions",
+		OwnerUserID: su.ID,
+		Name:        actionName,
+		Kind:        kernel.KindNative,
+		Price:       0,
+		Description: "Semantic search over active actions",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -179,14 +179,14 @@ func ensureSysLLMChat(ctx context.Context, k *kernel.Kernel, superuserHandle str
 		return fmt.Errorf("read superuser: %w", err)
 	}
 
-	actionName := "/llm/chat"
+	actionName := "llm-chat"
 	a, err := k.ReadActionByOwnerName(ctx, su.ID, actionName)
 	if err == nil && a != nil {
 		if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
-			return fmt.Errorf("activate @sys/llm/chat: %w", err)
+			return fmt.Errorf("activate @sys/llm-chat: %w", err)
 		}
 		if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
-			return fmt.Errorf("grant-all @sys/llm/chat: %w", err)
+			return fmt.Errorf("grant-all @sys/llm-chat: %w", err)
 		}
 		return nil
 	}
@@ -228,15 +228,15 @@ func ensureSysLLMChat(ctx context.Context, k *kernel.Kernel, superuserHandle str
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("create @sys/llm/chat: %w", err)
+		return fmt.Errorf("create @sys/llm-chat: %w", err)
 	}
 
 	if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
-		return fmt.Errorf("activate @sys/llm/chat: %w", err)
+		return fmt.Errorf("activate @sys/llm-chat: %w", err)
 	}
 
 	if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
-		return fmt.Errorf("grant-all @sys/llm/chat: %w", err)
+		return fmt.Errorf("grant-all @sys/llm-chat: %w", err)
 	}
 
 	return nil

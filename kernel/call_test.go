@@ -17,7 +17,7 @@ func TestWasmTimeoutReturnsErrTimeout(t *testing.T) {
 
 	alice := setupUser(t, st, "@alice", 500)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/slow",
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "slow",
 		Kind: KindWasm, Active: true, Price: 10,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -26,7 +26,7 @@ func TestWasmTimeoutReturnsErrTimeout(t *testing.T) {
 
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "/slow", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "slow", Args: map[string]any{},
 	})
 	if !errors.Is(err, ErrTimeout) {
 		t.Errorf("expected ErrTimeout for DeadlineExceeded, got %v", err)
@@ -46,7 +46,7 @@ func (f *failingSubCallExec) Compile(_ context.Context, src []byte) ([]byte, str
 
 func (f *failingSubCallExec) Execute(ctx context.Context, src []byte, _ []byte, host HostFunctions) ([]byte, error) {
 	if string(src) == "outer" {
-		_, _ = host.Call(ctx, f.targetUser+"/"+f.targetAction[1:], []byte(`{}`))
+		_, _ = host.Call(ctx, f.targetUser+"/"+f.targetAction, []byte(`{}`))
 		return []byte(`{"handled":true}`), nil
 	}
 	return nil, ErrExecutionFailed.Wrap("inner always fails")
@@ -62,19 +62,19 @@ func TestSubCostNotIncrementedOnFailedSubCall(t *testing.T) {
 	carol := setupUser(t, st, "@carol-vat", 50)
 
 	inner := &Action{
-		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "/inner",
+		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
 		Kind: KindWasm, Source: "inner", Active: true, Price: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, inner)
 	outer := &Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/outer",
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "outer",
 		Kind: KindWasm, Source: "outer", Active: true, Price: 50,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, outer)
 
-	exec := &failingSubCallExec{targetUser: bob.ID, targetAction: "/inner"}
+	exec := &failingSubCallExec{targetUser: bob.ID, targetAction: "inner"}
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = "test-issuer-id"
@@ -90,7 +90,7 @@ func TestSubCostNotIncrementedOnFailedSubCall(t *testing.T) {
 
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: carol.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "/outer", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("outer call should succeed when it handles sub-call failure: %v", err)
@@ -119,7 +119,7 @@ func TestCallClosedProcessFails(t *testing.T) {
 
 	owner := setupUser(t, st, "@alice", 1000)
 	target := setupUser(t, st, "@bob", 0)
-	_ = setupAction(t, st, target.ID, "/echo", 0)
+	_ = setupAction(t, st, target.ID, "echo", 0)
 
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
 	_ = k.EndProcess(ctx, owner.ID, p.ID)
@@ -129,7 +129,7 @@ func TestCallClosedProcessFails(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  target.ID,
-		ActionName:    "/echo",
+		ActionName:    "echo",
 		Args:          map[string]any{},
 	})
 	if err == nil {
@@ -151,7 +151,7 @@ func TestCallInactiveActionDenied(t *testing.T) {
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: owner.ID,
-		Name:        "/svc",
+		Name:        "svc",
 		Kind:        KindNative,
 		Active:      false,
 		Price:       0,
@@ -167,7 +167,7 @@ func TestCallInactiveActionDenied(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  owner.ID,
-		ActionName:    "/svc",
+		ActionName:    "svc",
 		Args:          map[string]any{},
 	})
 	if err == nil {
@@ -186,7 +186,7 @@ func TestCallACLDenied(t *testing.T) {
 
 	alice := setupUser(t, st, "@alice", 1000)
 	bob := setupUser(t, st, "@bob", 0)
-	_ = setupAction(t, st, bob.ID, "/private", 0)
+	_ = setupAction(t, st, bob.ID, "private", 0)
 
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 100)
 
@@ -195,7 +195,7 @@ func TestCallACLDenied(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  bob.ID,
-		ActionName:    "/private",
+		ActionName:    "private",
 		Args:          map[string]any{},
 	})
 	if err == nil {
@@ -217,7 +217,7 @@ func TestCallACLGrantAndRevoke(t *testing.T) {
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: bob.ID,
-		Name:        "/svc",
+		Name:        "svc",
 		Kind:        KindWasm,
 		Active:      true,
 		Price:       0,
@@ -234,7 +234,7 @@ func TestCallACLGrantAndRevoke(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  bob.ID,
-		ActionName:    "/svc",
+		ActionName:    "svc",
 		Args:          map[string]any{},
 	})
 	if err != nil {
@@ -248,7 +248,7 @@ func TestCallACLGrantAndRevoke(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  bob.ID,
-		ActionName:    "/svc",
+		ActionName:    "svc",
 		Args:          map[string]any{},
 	})
 	if err == nil {
@@ -262,7 +262,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	ctx := context.Background()
 
 	alice := setupUser(t, st, "@alice", 50)
-	_ = setupAction(t, st, alice.ID, "/expensive", 200)
+	_ = setupAction(t, st, alice.ID, "expensive", 200)
 
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 50)
 
@@ -271,7 +271,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  alice.ID,
-		ActionName:    "/expensive",
+		ActionName:    "expensive",
 		Args:          map[string]any{},
 	})
 	if err == nil {
@@ -292,7 +292,7 @@ func TestCallGrossEqualsNetPlusFee(t *testing.T) {
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: alice.ID,
-		Name:        "/paid",
+		Name:        "paid",
 		Kind:        KindWasm,
 		Active:      true,
 		Price:       100,
@@ -308,7 +308,7 @@ func TestCallGrossEqualsNetPlusFee(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  alice.ID,
-		ActionName:    "/paid",
+		ActionName:    "paid",
 		Args:          map[string]any{},
 	})
 	if err != nil {
@@ -336,7 +336,7 @@ func TestCallCreatesExactlyOneTransaction(t *testing.T) {
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: alice.ID,
-		Name:        "/svc",
+		Name:        "svc",
 		Kind:        KindWasm,
 		Active:      true,
 		Price:       10,
@@ -353,7 +353,7 @@ func TestCallCreatesExactlyOneTransaction(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  alice.ID,
-		ActionName:    "/svc",
+		ActionName:    "svc",
 		Args:          map[string]any{},
 	})
 	if err != nil {
@@ -371,7 +371,7 @@ func TestCallCreatesChildTrace(t *testing.T) {
 
 	alice := setupUser(t, st, "@alice", 1000)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/svc",
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "svc",
 		Kind: KindWasm, Active: true, Price: 0,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -384,7 +384,7 @@ func TestCallCreatesChildTrace(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  alice.ID,
-		ActionName:    "/svc",
+		ActionName:    "svc",
 		Args:          map[string]any{},
 	})
 	if err != nil {
@@ -409,7 +409,7 @@ func TestCallFailureRefundsFunds(t *testing.T) {
 
 	alice := setupUser(t, st, "@alice", 1000)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/risky",
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "risky",
 		Kind: KindWasm, Active: true, Price: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -422,7 +422,7 @@ func TestCallFailureRefundsFunds(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  alice.ID,
-		ActionName:    "/risky",
+		ActionName:    "risky",
 		Args:          map[string]any{},
 	})
 	if err == nil {
@@ -445,7 +445,7 @@ func TestWasmPanicRefundsFunds(t *testing.T) {
 
 	alice := setupUser(t, st, "@wasm-panic-alice", 500)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/panic-svc",
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "panic-svc",
 		Kind: KindWasm, Active: true, Price: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -458,7 +458,7 @@ func TestWasmPanicRefundsFunds(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  alice.ID,
-		ActionName:    "/panic-svc",
+		ActionName:    "panic-svc",
 		Args:          map[string]any{},
 	})
 	if err == nil {
@@ -480,7 +480,7 @@ func TestCallNestedTraceTree(t *testing.T) {
 	ctx := context.Background()
 
 	alice := setupUser(t, st, "@alice", 1000)
-	for _, name := range []string{"/a", "/b", "/c"} {
+	for _, name := range []string{"a", "b", "c"} {
 		_ = st.CreateAction(ctx, &Action{
 			ID: uuid.New().String(), OwnerUserID: alice.ID, Name: name,
 			Kind: KindWasm, Active: true, Price: 0, Source: "fake",
@@ -492,21 +492,21 @@ func TestCallNestedTraceTree(t *testing.T) {
 
 	replyA, err := k.Call(ctx, CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "/a", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "a", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	replyB, err := k.Call(ctx, CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: replyA.TraceID,
-		TargetUserID: alice.ID, ActionName: "/b", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "b", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	replyC, err := k.Call(ctx, CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: replyB.TraceID,
-		TargetUserID: alice.ID, ActionName: "/c", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "c", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -547,7 +547,7 @@ func TestCallInputSchemaRejection(t *testing.T) {
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: alice.ID,
-		Name:        "/strict",
+		Name:        "strict",
 		Kind:        KindWasm,
 		Active:      true,
 		Price:       0,
@@ -566,7 +566,7 @@ func TestCallInputSchemaRejection(t *testing.T) {
 
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "/strict",
+		TargetUserID: alice.ID, ActionName: "strict",
 		Args: map[string]any{"wrong_field": "value"},
 	})
 	if err == nil {
@@ -587,7 +587,7 @@ func TestCallOutputSchemaRejection(t *testing.T) {
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: alice.ID,
-		Name:        "/typed",
+		Name:        "typed",
 		Kind:        KindWasm,
 		Active:      true,
 		Price:       50,
@@ -606,7 +606,7 @@ func TestCallOutputSchemaRejection(t *testing.T) {
 
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "/typed", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "typed", Args: map[string]any{},
 	})
 	if err == nil {
 		t.Error("expected schema violation error for bad output")
@@ -632,7 +632,7 @@ func TestFailedExecutionUpdatesTraceLatencyNotCost(t *testing.T) {
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: alice.ID,
-		Name:        "/fails",
+		Name:        "fails",
 		Kind:        KindWasm,
 		Active:      true,
 		Price:       50,
@@ -644,7 +644,7 @@ func TestFailedExecutionUpdatesTraceLatencyNotCost(t *testing.T) {
 
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "/fails", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "fails", Args: map[string]any{},
 	})
 	if err == nil {
 		t.Fatal("expected execution failure")
@@ -710,26 +710,26 @@ func TestWasmHostCallRespectsACL(t *testing.T) {
 	bob := setupUser(t, st, "@bob", 0)
 
 	innerAction := &Action{
-		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "/private",
+		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "private",
 		Kind: KindNative, Active: true,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, innerAction)
 
 	outerAction := &Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/outer",
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "outer",
 		Kind: KindWasm, Active: true,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, outerAction)
 
-	exec := &hostCallExec{targetUser: bob.ID, targetAction: "/private"}
+	exec := &hostCallExec{targetUser: bob.ID, targetAction: "private"}
 	k := newTestKernelWithScripts(st, exec)
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "/outer", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
 	if err == nil {
 		t.Error("expected ACL denial when script calls action without permission")
@@ -746,7 +746,7 @@ func (h *hostCallExec) Compile(_ context.Context, source []byte) ([]byte, string
 }
 
 func (h *hostCallExec) Execute(ctx context.Context, _ []byte, _ []byte, host HostFunctions) ([]byte, error) {
-	result, err := host.Call(ctx, h.targetUser+"/"+h.targetAction[1:], []byte(`{}`))
+	result, err := host.Call(ctx, h.targetUser+"/"+h.targetAction, []byte(`{}`))
 	if err != nil {
 		return nil, err
 	}
@@ -767,7 +767,7 @@ func (c *contractorExec) Compile(_ context.Context, src []byte) ([]byte, string,
 
 func (c *contractorExec) Execute(ctx context.Context, src []byte, _ []byte, host HostFunctions) ([]byte, error) {
 	if string(src) == "outer" {
-		result, err := host.Call(ctx, c.targetUser+"/"+c.targetAction[1:], []byte(`{}`))
+		result, err := host.Call(ctx, c.targetUser+"/"+c.targetAction, []byte(`{}`))
 		if err != nil {
 			return nil, err
 		}
@@ -786,19 +786,19 @@ func TestContractorSubCallChargedToActionOwner(t *testing.T) {
 	feeUser := setupUser(t, st, "@fee-recipient", 0)
 
 	inner := &Action{
-		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "/inner",
+		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
 		Kind: KindWasm, Source: "inner", Active: true, Price: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, inner)
 	outer := &Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/outer",
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "outer",
 		Kind: KindWasm, Source: "outer", Active: true, Price: 50,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, outer)
 
-	exec := &contractorExec{targetUser: bob.ID, targetAction: "/inner"}
+	exec := &contractorExec{targetUser: bob.ID, targetAction: "inner"}
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = "test-issuer-id"
@@ -817,7 +817,7 @@ func TestContractorSubCallChargedToActionOwner(t *testing.T) {
 
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: carol.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "/outer", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call failed: %v", err)
@@ -850,19 +850,19 @@ func TestContractorOwnerInsufficientBalanceFails(t *testing.T) {
 	bob := setupUser(t, st, "@bob", 0)
 
 	inner := &Action{
-		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "/inner",
+		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
 		Kind: KindWasm, Source: "inner", Active: true, Price: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, inner)
 	outer := &Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/outer",
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "outer",
 		Kind: KindWasm, Source: "outer", Active: true, Price: 50,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, outer)
 
-	exec := &contractorExec{targetUser: bob.ID, targetAction: "/inner"}
+	exec := &contractorExec{targetUser: bob.ID, targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
 	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: PermCall})
 
@@ -872,7 +872,7 @@ func TestContractorOwnerInsufficientBalanceFails(t *testing.T) {
 
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: carol.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "/outer", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
 	if err == nil {
 		t.Fatal("expected error when action owner has insufficient balance")
@@ -895,7 +895,7 @@ func TestDirectCallHasNilCausedByTraceID(t *testing.T) {
 
 	alice := setupUser(t, st, "@alice", 0)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/svc",
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "svc",
 		Kind: KindWasm, Active: true, Price: 0,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -904,7 +904,7 @@ func TestDirectCallHasNilCausedByTraceID(t *testing.T) {
 
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "/svc", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "svc", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -923,14 +923,14 @@ func TestContractorEphemeralRootHasCausedByTraceID(t *testing.T) {
 	bob := setupUser(t, st, "@bob", 0)
 
 	inner := &Action{
-		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "/inner",
+		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
 		Kind: KindWasm, Source: "inner", Active: true, Price: 0,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, inner)
 	outer := &Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/outer",
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "outer",
 		Kind: KindWasm, Source: "outer", Active: true, Price: 0,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -938,13 +938,13 @@ func TestContractorEphemeralRootHasCausedByTraceID(t *testing.T) {
 	_ = st.CreateAction(ctx, outer)
 	_ = st.GrantACL(ctx, &ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: PermCall})
 
-	exec := &contractorExec{targetUser: bob.ID, targetAction: "/inner"}
+	exec := &contractorExec{targetUser: bob.ID, targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
 
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "/outer", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call failed: %v", err)
@@ -1002,7 +1002,7 @@ func TestDirectCallWithCausedByTraceIDRejected(t *testing.T) {
 	ctx := context.Background()
 
 	alice := setupUser(t, st, "@alice", 0)
-	a := setupAction(t, st, alice.ID, "/svc", 0)
+	a := setupAction(t, st, alice.ID, "svc", 0)
 	a.Kind = KindWasm
 	a.Active = true
 	_ = st.UpdateAction(ctx, a)
@@ -1014,7 +1014,7 @@ func TestDirectCallWithCausedByTraceIDRejected(t *testing.T) {
 		ParentTraceID:   root.ID,
 		CausedByTraceID: root.ID, // must be empty for direct calls
 		TargetUserID:    alice.ID,
-		ActionName:      "/svc",
+		ActionName:      "svc",
 		Args:            map[string]any{},
 	})
 	if err == nil {
@@ -1028,7 +1028,7 @@ func TestCausedByEqualsParentRejected(t *testing.T) {
 	ctx := context.Background()
 
 	alice := setupUser(t, st, "@alice", 0)
-	a := setupAction(t, st, alice.ID, "/svc", 0)
+	a := setupAction(t, st, alice.ID, "svc", 0)
 	a.Kind = KindWasm
 	a.Active = true
 	_ = st.UpdateAction(ctx, a)
@@ -1041,7 +1041,7 @@ func TestCausedByEqualsParentRejected(t *testing.T) {
 		CausedByTraceID: root.ID, // same as parent — FOLLOWS_FROM must differ from CHILD_OF
 		EventID:         "fake-event-id",
 		TargetUserID:    alice.ID,
-		ActionName:      "/svc",
+		ActionName:      "svc",
 		Args:            map[string]any{},
 	})
 	if err == nil {
@@ -1115,7 +1115,7 @@ func TestCommitCallAtomicOnFailure(t *testing.T) {
 
 	caller := setupUser(t, base, "@caller", 1000)
 	actionOwner := setupUser(t, base, "@owner", 0)
-	a := setupAction(t, base, actionOwner.ID, "/echo", 100)
+	a := setupAction(t, base, actionOwner.ID, "echo", 100)
 	base.GrantACL(ctx, &ACLEntry{SubjectUserID: caller.ID, ActionID: a.ID, Permission: PermCall})
 
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 500)
@@ -1123,7 +1123,7 @@ func TestCommitCallAtomicOnFailure(t *testing.T) {
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: caller.ID, ProcessID: p.ID,
 		ParentTraceID: root.ID, TargetUserID: actionOwner.ID,
-		ActionName: "/echo", Args: map[string]any{},
+		ActionName: "echo", Args: map[string]any{},
 	})
 	if err == nil {
 		t.Fatal("expected error from injected commit failure")
@@ -1155,7 +1155,7 @@ func TestCallInvalidParentTraceDoesNotLockFunds(t *testing.T) {
 	ctx := context.Background()
 
 	alice := setupUser(t, st, "@alice", 1000)
-	a := setupAction(t, st, alice.ID, "/svc", 100)
+	a := setupAction(t, st, alice.ID, "svc", 100)
 	st.GrantACL(ctx, &ACLEntry{SubjectUserID: alice.ID, ActionID: a.ID, Permission: PermCall})
 
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
@@ -1165,7 +1165,7 @@ func TestCallInvalidParentTraceDoesNotLockFunds(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: "nonexistent-trace-id",
 		TargetUserID:  alice.ID,
-		ActionName:    "/svc",
+		ActionName:    "svc",
 		Args:          map[string]any{},
 	})
 	if !errors.Is(err, ErrInvalidInput) {
@@ -1188,7 +1188,7 @@ func TestCallCrossProcessParentTraceDoesNotLockFunds(t *testing.T) {
 	ctx := context.Background()
 
 	alice := setupUser(t, st, "@alice", 1000)
-	a := setupAction(t, st, alice.ID, "/svc", 100)
+	a := setupAction(t, st, alice.ID, "svc", 100)
 	st.GrantACL(ctx, &ACLEntry{SubjectUserID: alice.ID, ActionID: a.ID, Permission: PermCall})
 
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
@@ -1200,7 +1200,7 @@ func TestCallCrossProcessParentTraceDoesNotLockFunds(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: otherRoot.ID, // belongs to a different process
 		TargetUserID:  alice.ID,
-		ActionName:    "/svc",
+		ActionName:    "svc",
 		Args:          map[string]any{},
 	})
 	if !errors.Is(err, ErrInvalidInput) {
@@ -1234,7 +1234,7 @@ func TestCommitFailedCallSettlementError(t *testing.T) {
 
 	alice := setupUser(t, base, "@alice", 1000)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/risky",
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "risky",
 		Kind: KindWasm, Active: true, Price: 100,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -1246,7 +1246,7 @@ func TestCommitFailedCallSettlementError(t *testing.T) {
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID,
 		ParentTraceID: root.ID, TargetUserID: alice.ID,
-		ActionName: "/risky", Args: map[string]any{},
+		ActionName: "risky", Args: map[string]any{},
 	})
 
 	// When CommitFailedCall fails, Call must return ErrInternal (not the original exec error).
@@ -1255,7 +1255,7 @@ func TestCommitFailedCallSettlementError(t *testing.T) {
 	}
 }
 
-// ---- /llm/chat native action tests ----
+// ---- llm-chat native action tests ----
 
 type fakeChatter struct {
 	reply ChatMessage
@@ -1283,7 +1283,7 @@ func TestCallLLMChat(t *testing.T) {
 	chatAction := &Action{
 		ID:           uuid.New().String(),
 		OwnerUserID:  owner.ID,
-		Name:         "/llm/chat",
+		Name:         "llm-chat",
 		Kind:         KindNative,
 		Active:       true,
 		Price:        0,
@@ -1300,7 +1300,7 @@ func TestCallLLMChat(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  owner.ID,
-		ActionName:    "/llm/chat",
+		ActionName:    "llm-chat",
 		Args: map[string]any{
 			"messages": []any{
 				map[string]any{"role": "user", "content": "hi"},
@@ -1308,7 +1308,7 @@ func TestCallLLMChat(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatalf("Call /llm/chat: %v", err)
+		t.Fatalf("Call llm-chat: %v", err)
 	}
 	msg, ok := reply.Result["message"].(map[string]any)
 	if !ok {
@@ -1328,7 +1328,7 @@ func TestCallLLMChatNoChatter(t *testing.T) {
 	chatAction := &Action{
 		ID:           uuid.New().String(),
 		OwnerUserID:  owner.ID,
-		Name:         "/llm/chat",
+		Name:         "llm-chat",
 		Kind:         KindNative,
 		Active:       true,
 		Price:        0,
@@ -1345,7 +1345,7 @@ func TestCallLLMChatNoChatter(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  owner.ID,
-		ActionName:    "/llm/chat",
+		ActionName:    "llm-chat",
 		Args:          map[string]any{"messages": []any{}},
 	})
 	if err == nil {
@@ -1360,7 +1360,7 @@ func TestCallSuspendedSubjectRejected(t *testing.T) {
 
 	owner := setupUser(t, st, "@alice", 1000)
 	target := setupUser(t, st, "@bob", 0)
-	_ = setupAction(t, st, target.ID, "/echo", 0)
+	_ = setupAction(t, st, target.ID, "echo", 0)
 
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
 
@@ -1373,7 +1373,7 @@ func TestCallSuspendedSubjectRejected(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  target.ID,
-		ActionName:    "/echo",
+		ActionName:    "echo",
 		Args:          map[string]any{},
 	})
 	if err == nil {
@@ -1400,7 +1400,7 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 
 	owner := setupUser(t, st, "@owner", 1000)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/paid",
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "paid",
 		Kind: KindWasm, Active: true, Price: 100, Public: true,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -1414,7 +1414,7 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  owner.ID,
-		ActionName:    "/paid",
+		ActionName:    "paid",
 		Args:          map[string]any{},
 	})
 	if !errors.Is(err, ErrInvalidState) {

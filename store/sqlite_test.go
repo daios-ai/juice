@@ -1493,7 +1493,7 @@ func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: tr.ID,
 		OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: target.ID,
 		ActionID: "a1", Status: kernel.TxSuccess, Gross: 100, Net: 100, Fee: 0,
-		ReplyJSON: `{"ok":true}`,
+		ReplyJSON: json.RawMessage(`{"ok":true}`),
 		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
 	}
 	receipt := &kernel.Receipt{

@@ -25,7 +25,7 @@ func TestActionCreateAndToggle(t *testing.T) {
 
 	a, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
-		Name:         "/cli-action",
+		Name:         "cli-action",
 		Kind:         kernel.KindHTTP,
 		Source:       "http://example.com",
 		Description:  "test action",
@@ -68,7 +68,7 @@ func TestActionACLGrantRevoke(t *testing.T) {
 	})
 
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "/acl-test",
+		OwnerUserID: owner.ID, Name: "acl-test",
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
 
@@ -92,7 +92,7 @@ func TestActionPriceUpdateDeactivates(t *testing.T) {
 	}
 	a, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
-		Name:         "/priced",
+		Name:         "priced",
 		Kind:         kernel.KindHTTP,
 		Price:        10,
 		Source:       "http://example.com",
@@ -131,7 +131,7 @@ func TestActionDelete(t *testing.T) {
 		Handle: "@delowner", Email: "del@example.com", Password: "pass",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "/to-delete",
+		OwnerUserID: owner.ID, Name: "to-delete",
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
 	if err := env.k.DeleteAction(ctx, owner.ID, a.ID); err != nil {
@@ -157,7 +157,7 @@ func TestActionShowACL(t *testing.T) {
 	})
 
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "/show-svc",
+		OwnerUserID: owner.ID, Name: "show-svc",
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
 
@@ -274,7 +274,7 @@ func TestActionListActive(t *testing.T) {
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
-		Name:         "/listed",
+		Name:         "listed",
 		Kind:         kernel.KindHTTP,
 		Source:       "http://example.com",
 		Description:  "test action",

@@ -17,7 +17,7 @@ func TestStatsInitializedOnActivation(t *testing.T) {
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
-		Name:         "/svc",
+		Name:         "svc",
 		Kind:         kernel.KindHTTP,
 		Source:       "http://x.com",
 		Description:  "test action",
@@ -58,20 +58,12 @@ func TestLookupCommandUsesCall(t *testing.T) {
 	if err := ensureSysLookup(ctx, env.k, "@sys"); err != nil {
 		t.Fatal(err)
 	}
-	sys, err := env.k.ReadUserByHandle(ctx, "@sys")
-	if err != nil {
+	if _, err := env.k.ReadUserByHandle(ctx, "@sys"); err != nil {
 		t.Fatal(err)
 	}
 	user, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@lookup-cli", Email: "lookup-cli@example.com", Password: "pass",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := env.k.Deposit(ctx, sys.ID, user.ID, 10, "test"); err != nil {
-		t.Fatal(err)
-	}
-	proc, _, err := env.k.StartProcess(ctx, user.ID, user.ID, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,12 +75,14 @@ func TestLookupCommandUsesCall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = runCmd(t, lookupCmd(), "--query", "weather", "--process", proc.ID)
+	// lookupCmd creates its own ephemeral process internally (no --process flag).
+	_, err = runCmd(t, lookupCmd(), "--query", "weather")
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected lookup native action to fail without embedder, got %v", err)
 	}
 
-	txs, err := env.k.ListTransactions(ctx, kernel.TxFilter{ProcessID: proc.ID})
+	// Verify the call was routed through a transaction.
+	txs, err := env.k.ListTransactions(ctx, kernel.TxFilter{SubjectUserID: user.ID})
 	if err != nil {
 		t.Fatal(err)
 	}

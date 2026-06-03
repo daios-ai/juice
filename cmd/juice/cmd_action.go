@@ -13,7 +13,7 @@ import (
 func init() {
 	actionCmd := &cobra.Command{Use: "action", Short: "Action management commands"}
 	actionCmd.AddCommand(
-		actionAddCmd(),
+		actionCreateCmd(),
 		actionUpdateCmd(),
 		actionEnableCmd(),
 		actionDisableCmd(),
@@ -25,16 +25,17 @@ func init() {
 		actionRevokeAllCmd(),
 		actionImportCmd(),
 		actionUnimportCmd(),
+		actionStatsCmd(),
 	)
 	rootCmd.AddCommand(actionCmd)
 }
 
-func actionAddCmd() *cobra.Command {
+func actionCreateCmd() *cobra.Command {
 	var name, kind, source, description string
 	var price int64
 	var inputSchemaStr, outputSchemaStr string
 	cmd := &cobra.Command{
-		Use:   "add",
+		Use:   "create",
 		Short: "Create a new action",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSubject(func(k *kernel.Kernel, subjectID string) error {
@@ -291,10 +292,10 @@ func aclGrantCmd() *cobra.Command {
 			return modifyACL(actionID, subjectHandle, kernel.Permission(perm), true)
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "action", "", "Action ID (required)")
+	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
 	cmd.Flags().StringVar(&subjectHandle, "user", "", "Subject user handle (required)")
 	cmd.Flags().StringVar(&perm, "perm", "call", "Permission: read, call, admin")
-	_ = cmd.MarkFlagRequired("action")
+	_ = cmd.MarkFlagRequired("id")
 	_ = cmd.MarkFlagRequired("user")
 	return cmd
 }
@@ -308,10 +309,10 @@ func aclRevokeCmd() *cobra.Command {
 			return modifyACL(actionID, subjectHandle, kernel.Permission(perm), false)
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "action", "", "Action ID (required)")
+	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
 	cmd.Flags().StringVar(&subjectHandle, "user", "", "Subject user handle (required)")
 	cmd.Flags().StringVar(&perm, "perm", "call", "Permission to revoke")
-	_ = cmd.MarkFlagRequired("action")
+	_ = cmd.MarkFlagRequired("id")
 	_ = cmd.MarkFlagRequired("user")
 	return cmd
 }
@@ -415,6 +416,37 @@ func actionUnimportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&specURL, "openapi", "", "OpenAPI spec URL (required)")
 	cmd.Flags().StringVar(&name, "name", "", "Deactivate only the action with this name or operation_key")
 	_ = cmd.MarkFlagRequired("openapi")
+	return cmd
+}
+
+func actionStatsCmd() *cobra.Command {
+	var actionID string
+	cmd := &cobra.Command{
+		Use:   "stats",
+		Short: "Show statistics for an action",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return withKernel(func(k *kernel.Kernel) error {
+				stats, err := k.ReadStats(context.Background(), actionID)
+				if err != nil {
+					return err
+				}
+				if stats == nil {
+					fmt.Println("No statistics yet.")
+					return nil
+				}
+				if flagOutput == "json" {
+					return printJSON(stats)
+				}
+				fmt.Printf("Stats for %s:\n  uses:         %d\n  successes:    %d\n  failures:     %d\n  price_mean:   %.2f\n  latency_mean: %.3fs\n  rating_mean:  %.3f\n  last_used:    %s\n",
+					stats.ActionID, stats.Uses, stats.Successes, stats.Failures,
+					stats.PriceMean, stats.LatencyMean, stats.RatingMean,
+					stats.LastUsedAt.Format("2006-01-02T15:04:05"))
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
+	_ = cmd.MarkFlagRequired("id")
 	return cmd
 }
 

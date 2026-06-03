@@ -20,12 +20,16 @@ func init() {
 		Short: "Manage remote kernel peers",
 	}
 
+	var addURL string
 	remoteAddCmd := &cobra.Command{
-		Use:   "add <url>",
+		Use:   "add",
 		Short: "Register a remote kernel by fetching its well-known metadata",
-		Args:  cobra.ExactArgs(1),
-		RunE:  runRemoteAdd,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runRemoteAdd(addURL)
+		},
 	}
+	remoteAddCmd.Flags().StringVar(&addURL, "url", "", "Remote kernel base URL (required)")
+	_ = remoteAddCmd.MarkFlagRequired("url")
 
 	remoteListCmd := &cobra.Command{
 		Use:   "list",
@@ -33,26 +37,38 @@ func init() {
 		RunE:  runRemoteList,
 	}
 
+	var importRemote, importAction string
 	remoteImportCmd := &cobra.Command{
-		Use:   "import <handle> <action-name>",
+		Use:   "import",
 		Short: "Import an action from a remote kernel as a local proxy action (idempotent)",
-		Args:  cobra.ExactArgs(2),
-		RunE:  runRemoteImport,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runRemoteImport(importRemote, importAction)
+		},
 	}
+	remoteImportCmd.Flags().StringVar(&importRemote, "remote", "", "Remote kernel handle (required)")
+	remoteImportCmd.Flags().StringVar(&importAction, "action", "", "Action name on the remote kernel (required)")
+	_ = remoteImportCmd.MarkFlagRequired("remote")
+	_ = remoteImportCmd.MarkFlagRequired("action")
 
+	var unimportRemote, unimportAction string
 	remoteUnimportCmd := &cobra.Command{
-		Use:   "unimport <handle> <action-name>",
+		Use:   "unimport",
 		Short: "Deactivate a local proxy action without deleting history",
-		Args:  cobra.ExactArgs(2),
-		RunE:  runRemoteUnimport,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runRemoteUnimport(unimportRemote, unimportAction)
+		},
 	}
+	remoteUnimportCmd.Flags().StringVar(&unimportRemote, "remote", "", "Remote kernel handle (required)")
+	remoteUnimportCmd.Flags().StringVar(&unimportAction, "action", "", "Action name to unimport (required)")
+	_ = remoteUnimportCmd.MarkFlagRequired("remote")
+	_ = remoteUnimportCmd.MarkFlagRequired("action")
 
 	remoteCmd.AddCommand(remoteAddCmd, remoteListCmd, remoteImportCmd, remoteUnimportCmd)
 	rootCmd.AddCommand(remoteCmd)
 }
 
-func runRemoteAdd(_ *cobra.Command, args []string) error {
-	baseURL := strings.TrimRight(args[0], "/")
+func runRemoteAdd(baseURLArg string) error {
+	baseURL := strings.TrimRight(baseURLArg, "/")
 	return withSuperuser(func(k *kernel.Kernel, _ string) error {
 		ctx := context.Background()
 
@@ -118,8 +134,7 @@ func runRemoteList(_ *cobra.Command, _ []string) error {
 	})
 }
 
-func runRemoteImport(_ *cobra.Command, args []string) error {
-	remoteHandle, actionName := args[0], args[1]
+func runRemoteImport(remoteHandle, actionName string) error {
 	ctx := context.Background()
 	return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
 		remoteUser, err := k.ReadUserByHandle(ctx, remoteHandle)
@@ -206,8 +221,7 @@ func runRemoteImport(_ *cobra.Command, args []string) error {
 	})
 }
 
-func runRemoteUnimport(_ *cobra.Command, args []string) error {
-	remoteHandle, actionName := args[0], args[1]
+func runRemoteUnimport(remoteHandle, actionName string) error {
 	ctx := context.Background()
 	return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
 		a, err := k.UnimportRemoteAction(ctx, subjectID, remoteHandle, actionName)

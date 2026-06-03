@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"time"
 )
 
@@ -43,56 +44,57 @@ const (
 // User is an authenticated subject with balances.
 // A user with PublicKey and RemoteBaseURL set represents a remote kernel peer.
 type User struct {
-	ID            string
-	Handle        string
-	Email         string
-	PasswordHash  string
-	Available     int64
-	Locked        int64
-	SuspendedAt   *time.Time
-	PublicKey     string // Ed25519 public key, base64url; empty for local users
-	RemoteBaseURL string // HTTP API base URL of the remote kernel; empty for local users
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID            string     `json:"id"`
+	Handle        string     `json:"handle"`
+	Email         string     `json:"email"`
+	PasswordHash  string     `json:"-"`
+	Available     int64      `json:"available"`
+	Locked        int64      `json:"locked"`
+	SuspendedAt   *time.Time `json:"suspended_at,omitempty"`
+	PublicKey     string     `json:"public_key,omitempty"`      // Ed25519 public key, base64url; empty for local users
+	RemoteBaseURL string     `json:"remote_base_url,omitempty"` // HTTP API base URL of the remote kernel; empty for local users
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // Action is a callable capability.
 type Action struct {
-	ID           string
-	OwnerUserID  string
-	Name         string
-	Kind         ActionKind
-	Active       bool
-	Public       bool
-	Price        int64
-	Description  string
-	InputSchema  map[string]any
-	OutputSchema map[string]any
-	Source         string // URL for http; WAT/WASM source for wasm; federation URL for remote_proxy
-	ArtifactHash   string // content-addressed compiled WASM artifact
-	RemoteActionID string // ID of the action on the remote kernel (remote_proxy only)
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	DeletedAt      *time.Time // nil unless soft-deleted
+	ID             string         `json:"id"`
+	OwnerUserID    string         `json:"owner_user_id"`
+	OwnerHandle    string         `json:"owner_handle,omitempty"` // populated via JOIN; empty if not loaded
+	Name           string         `json:"name"`
+	Kind           ActionKind     `json:"kind"`
+	Active         bool           `json:"active"`
+	Public         bool           `json:"public"`
+	Price          int64          `json:"price"`
+	Description    string         `json:"description"`
+	InputSchema    map[string]any `json:"input_schema"`
+	OutputSchema   map[string]any `json:"output_schema"`
+	Source         string         `json:"source,omitempty"`           // URL for http; WAT/WASM source for wasm; federation URL for remote_proxy
+	ArtifactHash   string         `json:"artifact_hash,omitempty"`    // content-addressed compiled WASM artifact
+	RemoteActionID string         `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	DeletedAt      *time.Time     `json:"deleted_at,omitempty"` // nil unless soft-deleted
 }
 
 // ACLEntry grants a permission to a subject over an action.
 type ACLEntry struct {
-	SubjectUserID string
-	ActionID      string
-	Permission    Permission
-	CreatedAt     time.Time
+	SubjectUserID string     `json:"subject_user_id"`
+	ActionID      string     `json:"action_id"`
+	Permission    Permission `json:"permission"`
+	CreatedAt     time.Time  `json:"created_at"`
 }
 
 // Process is a budgeted execution context.
 type Process struct {
-	ID          string
-	OwnerUserID string
-	Available   int64
-	Locked      int64
-	Status      ProcessStatus
-	CreatedAt   time.Time
-	EndedAt     *time.Time
+	ID          string        `json:"id"`
+	OwnerUserID string        `json:"owner_user_id"`
+	Available   int64         `json:"available"`
+	Locked      int64         `json:"locked"`
+	Status      ProcessStatus `json:"status"`
+	CreatedAt   time.Time     `json:"created_at"`
+	EndedAt     *time.Time    `json:"ended_at,omitempty"`
 }
 
 // Trace records causal structure for one step in a call tree.
@@ -100,35 +102,35 @@ type Process struct {
 // CausedByTraceID is a FOLLOWS_FROM reference set for event-triggered calls;
 // it references the emitting action's trace and may cross process boundaries.
 type Trace struct {
-	ID              string
-	ProcessID       string
-	ParentTraceID   string
-	CausedByTraceID *string
-	Cost            int64
-	LatencyMS       int64
-	CreatedAt       time.Time
+	ID              string    `json:"id"`
+	ProcessID       string    `json:"process_id"`
+	ParentTraceID   string    `json:"parent_trace_id"`
+	CausedByTraceID *string   `json:"caused_by_trace_id,omitempty"`
+	Cost            int64     `json:"cost"`
+	LatencyMS       int64     `json:"latency_ms"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 // Transaction records one attempted call. Immutable after creation.
 type Transaction struct {
-	ID                 string
-	ProcessID          string
-	TraceID            string
-	ParentTraceID      string
-	OwnerUserID        string
-	SubjectUserID      string
-	TargetUserID       string
-	ActionID           string
-	ArgsJSON           string
-	ReplyJSON          string
-	Status             TxStatus
-	Gross              int64
-	Net                int64
-	Fee                int64
-	Reason             string
-	RemoteReceiptHash  string // SHA-256 of the remote receipt JSON for cross-kernel calls; empty for local
-	StartedAt          time.Time
-	EndedAt            time.Time
+	ID                string          `json:"id"`
+	ProcessID         string          `json:"process_id"`
+	TraceID           string          `json:"trace_id"`
+	ParentTraceID     string          `json:"parent_trace_id"`
+	OwnerUserID       string          `json:"owner_user_id"`
+	SubjectUserID     string          `json:"subject_user_id"`
+	TargetUserID      string          `json:"target_user_id"`
+	ActionID          string          `json:"action_id"`
+	ArgsJSON          json.RawMessage `json:"args"`
+	ReplyJSON         json.RawMessage `json:"result"`
+	Status            TxStatus        `json:"status"`
+	Gross             int64           `json:"gross"`
+	Net               int64           `json:"net"`
+	Fee               int64           `json:"fee"`
+	Reason            string          `json:"reason"`
+	RemoteReceiptHash string          `json:"remote_receipt_hash,omitempty"` // SHA-256 of the remote receipt JSON for cross-kernel calls; empty for local
+	StartedAt         time.Time       `json:"started_at"`
+	EndedAt           time.Time       `json:"ended_at"`
 }
 
 // Stats tracks fixed performance and usage statistics for an action.
@@ -146,45 +148,45 @@ type Stats struct {
 
 // StatTag is an extensible key/value annotation on an action's stats.
 type StatTag struct {
-	ActionID  string
-	Key       string
-	Value     string
-	Source    string
-	UpdatedAt time.Time
+	ActionID  string    `json:"action_id"`
+	Key       string    `json:"key"`
+	Value     string    `json:"value"`
+	Source    string    `json:"source"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // Listener binds a named event to a kernel call.
 type Listener struct {
-	ID             string
-	OwnerUserID    string
-	SourceUserID   string
-	EventName      string
-	TargetActionID string
-	Active         bool
-	CreatedAt      time.Time
+	ID             string    `json:"id"`
+	OwnerUserID    string    `json:"owner_user_id"`
+	SourceUserID   string    `json:"source_user_id"`
+	EventName      string    `json:"event_name"`
+	TargetActionID string    `json:"target_action_id"`
+	Active         bool      `json:"active"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // Event is a queued occurrence of a named event for a specific listener.
 // States: pending (ConsumedAt=nil, TxID=nil), in-flight (ConsumedAt set, TxID=nil),
 // consumed (both set). In-flight events are reset to pending on bootstrap restart.
 type Event struct {
-	ID              string
-	ListenerID      string
-	ArgsJSON        string
-	CausingTraceID  string
-	ConsumedAt      *time.Time
-	TxID            *string
-	CreatedAt       time.Time
+	ID             string          `json:"id"`
+	ListenerID     string          `json:"listener_id"`
+	ArgsJSON       json.RawMessage `json:"args"`
+	CausingTraceID string          `json:"causing_trace_id,omitempty"`
+	ConsumedAt     *time.Time      `json:"consumed_at,omitempty"`
+	TxID           *string         `json:"tx_id,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
 }
 
 // Deposit is an admin credit grant to a user's available balance.
 type Deposit struct {
-	ID             string
-	OperatorUserID string
-	TargetUserID   string
-	Amount         int64
-	Reason         string
-	CreatedAt      time.Time
+	ID             string    `json:"id"`
+	OperatorUserID string    `json:"operator_user_id"`
+	TargetUserID   string    `json:"target_user_id"`
+	Amount         int64     `json:"amount"`
+	Reason         string    `json:"reason"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // AuthCode is a short-lived PKCE authorization code.

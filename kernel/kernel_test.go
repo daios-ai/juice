@@ -131,7 +131,7 @@ func TestCreateNativeActionRejected(t *testing.T) {
 	owner := setupUser(t, st, "@owner", 0)
 	_, err := k.CreateAction(ctx, owner.ID, CreateActionRequest{
 		OwnerUserID: owner.ID,
-		Name:        "/native-attempt",
+		Name:        "native-attempt",
 		Kind:        KindNative,
 	})
 	if err == nil {
@@ -147,7 +147,7 @@ func TestNativeActionNormalLifecycleRejected(t *testing.T) {
 	owner := setupUser(t, st, "@sys", 0)
 	a, err := k.RegisterNativeAction(ctx, CreateActionRequest{
 		OwnerUserID: owner.ID,
-		Name:        "/native",
+		Name:        "native",
 		Kind:        KindNative,
 	})
 	if err != nil {
@@ -174,7 +174,7 @@ func TestActivateNativeActionBootstrapPath(t *testing.T) {
 	owner := setupUser(t, st, "@sys", 0)
 	a, err := k.RegisterNativeAction(ctx, CreateActionRequest{
 		OwnerUserID: owner.ID,
-		Name:        "/native",
+		Name:        "native",
 		Kind:        KindNative,
 	})
 	if err != nil {
@@ -206,7 +206,7 @@ func TestActivateNativeActionRejectsSchemaWithoutDescriptions(t *testing.T) {
 	owner := setupUser(t, st, "@sys", 0)
 	a, err := k.RegisterNativeAction(ctx, CreateActionRequest{
 		OwnerUserID: owner.ID,
-		Name:        "/native-bad",
+		Name:        "native-bad",
 		Kind:        KindNative,
 		InputSchema: map[string]any{
 			"type": "object",
@@ -366,7 +366,7 @@ func TestProcessAvailablePlusLockedInvariant(t *testing.T) {
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: alice.ID,
-		Name:        "/svc",
+		Name:        "svc",
 		Kind:        KindWasm,
 		Active:      true,
 		Price:       100,
@@ -399,7 +399,7 @@ func TestProcessAvailablePlusLockedInvariant(t *testing.T) {
 
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "/svc", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "svc", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -457,7 +457,7 @@ func TestUserLockedBalanceInvariant(t *testing.T) {
 	checkUser("after FundProcess(200)", 300, 700)
 
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "/svc",
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "svc",
 		Kind: KindWasm, Active: true, Price: 100,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -467,7 +467,7 @@ func TestUserLockedBalanceInvariant(t *testing.T) {
 
 	if _, err := k.Call(ctx, CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "/svc", Args: map[string]any{},
+		TargetUserID: alice.ID, ActionName: "svc", Args: map[string]any{},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -598,7 +598,7 @@ func TestCreateHTTPActionRejectsSSRFURL(t *testing.T) {
 	owner := setupUser(t, st, "@owner", 0)
 	_, err := k.CreateAction(ctx, owner.ID, CreateActionRequest{
 		OwnerUserID: owner.ID,
-		Name:        "/webhook",
+		Name:        "webhook",
 		Kind:        KindHTTP,
 		Source:      "http://169.254.169.254/latest/meta-data/",
 	})
@@ -619,7 +619,7 @@ func TestConsumeEventSettlesAtomically(t *testing.T) {
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: owner.ID,
-		Name:        "/settle-svc",
+		Name:        "settle-svc",
 		Kind:        KindWasm,
 		Active:      true,
 		Price:       10,
@@ -643,7 +643,7 @@ func TestConsumeEventSettlesAtomically(t *testing.T) {
 	e := &Event{
 		ID:         uuid.New().String(),
 		ListenerID: l.ID,
-		ArgsJSON:   `{}`,
+		ArgsJSON:   json.RawMessage(`{}`),
 		CreatedAt:  time.Now().UTC(),
 	}
 	_ = st.CreateEvents(ctx, []*Event{e})
@@ -672,7 +672,7 @@ func TestConsumeEventRespectsParentTraceID(t *testing.T) {
 
 	owner := setupUser(t, st, "@parent-trace-owner", 1000)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/pt-svc",
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pt-svc",
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -685,7 +685,7 @@ func TestConsumeEventRespectsParentTraceID(t *testing.T) {
 	}
 	_ = st.CreateListener(ctx, l)
 	e := &Event{
-		ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: "{}",
+		ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: json.RawMessage("{}"),
 		CreatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateEvents(ctx, []*Event{e})
@@ -707,7 +707,7 @@ func TestDeleteListenerPurgesEventsAtomically(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@dl-owner", 100)
-	a := setupAction(t, st, owner.ID, "/lookup", 0)
+	a := setupAction(t, st, owner.ID, "lookup", 0)
 
 	l := &Listener{
 		ID:             uuid.New().String(),
@@ -720,9 +720,9 @@ func TestDeleteListenerPurgesEventsAtomically(t *testing.T) {
 	}
 	_ = st.CreateListener(ctx, l)
 
-	pending1 := &Event{ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: `{}`, CreatedAt: time.Now().UTC()}
-	pending2 := &Event{ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: `{}`, CreatedAt: time.Now().UTC()}
-	inFlight := &Event{ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: `{}`, CreatedAt: time.Now().UTC()}
+	pending1 := &Event{ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: json.RawMessage(`{}`), CreatedAt: time.Now().UTC()}
+	pending2 := &Event{ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: json.RawMessage(`{}`), CreatedAt: time.Now().UTC()}
+	inFlight := &Event{ID: uuid.New().String(), ListenerID: l.ID, ArgsJSON: json.RawMessage(`{}`), CreatedAt: time.Now().UTC()}
 	_ = st.CreateEvents(ctx, []*Event{pending1, pending2, inFlight})
 	// Mark inFlight as consumed (in-flight — ConsumedAt set, TxID nil).
 	_ = st.LockEvent(ctx, inFlight.ID)
@@ -757,7 +757,7 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: owner.ID,
-		Name:        "/rate-svc",
+		Name:        "rate-svc",
 		Kind:        KindWasm,
 		Active:      true,
 		Price:       0,
@@ -770,7 +770,7 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: owner.ID, ActionName: "/rate-svc", Args: map[string]any{},
+		TargetUserID: owner.ID, ActionName: "rate-svc", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -805,7 +805,7 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: owner.ID,
-		Name:        "/rerate-svc",
+		Name:        "rerate-svc",
 		Kind:        KindWasm,
 		Active:      true,
 		Price:       0,
@@ -818,7 +818,7 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: owner.ID, ActionName: "/rerate-svc", Args: map[string]any{},
+		TargetUserID: owner.ID, ActionName: "rerate-svc", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -872,7 +872,7 @@ func TestReceiptCreatedWithCall(t *testing.T) {
 
 	caller := setupUser(t, st, "@rcpt-caller", 500)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: caller.ID, Name: "/rcpt-svc",
+		ID: uuid.New().String(), OwnerUserID: caller.ID, Name: "rcpt-svc",
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -884,7 +884,7 @@ func TestReceiptCreatedWithCall(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 200)
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: caller.ID, ActionName: "/rcpt-svc", Args: map[string]any{},
+		TargetUserID: caller.ID, ActionName: "rcpt-svc", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -914,7 +914,7 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 
 	owner := setupUser(t, st, "@fail-owner", 500)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/fail-svc",
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "fail-svc",
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -925,7 +925,7 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 200)
 	reply, _ := k.Call(ctx, CallRequest{
 		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: owner.ID, ActionName: "/fail-svc", Args: map[string]any{},
+		TargetUserID: owner.ID, ActionName: "fail-svc", Args: map[string]any{},
 	})
 
 	// Find the failed transaction.
@@ -963,8 +963,8 @@ func TestReceiptSigningRequiresConfiguredKey(t *testing.T) {
 		ID:        "tx-id",
 		TraceID:   "trace-id",
 		ActionID:  "action-id",
-		ArgsJSON:  `{}`,
-		ReplyJSON: `{}`,
+		ArgsJSON:  json.RawMessage(`{}`),
+		ReplyJSON: json.RawMessage(`{}`),
 		Status:    TxSuccess,
 		EndedAt:   time.Now().UTC(),
 	})
@@ -984,7 +984,7 @@ func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	a := &Action{
 		ID:           uuid.New().String(),
 		OwnerUserID:  owner.ID,
-		Name:         "/no-receipt",
+		Name:         "no-receipt",
 		Kind:         KindWasm,
 		Active:       true,
 		Price:        10,
@@ -1001,7 +1001,7 @@ func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: owner.ID, ActionName: "/no-receipt", Args: map[string]any{},
+		TargetUserID: owner.ID, ActionName: "no-receipt", Args: map[string]any{},
 	})
 	if !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState, got %v", err)
@@ -1029,7 +1029,7 @@ func TestManifestSigningRequiresConfiguredKey(t *testing.T) {
 	a := &Action{
 		ID:           uuid.New().String(),
 		OwnerUserID:  owner.ID,
-		Name:         "/manifest",
+		Name:         "manifest",
 		Kind:         KindHTTP,
 		Active:       true,
 		Public:       true,
@@ -1105,7 +1105,7 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 	m := ActionManifest{
 		ActionID:    "remote-action-id-1",
 		OwnerHandle: "@remote-peer",
-		Name:        "/sum",
+		Name:        "sum",
 		Kind:        KindHTTP,
 		Price:       50,
 		InputSchema:  map[string]any{"type": "object"},
@@ -1149,7 +1149,7 @@ func TestImportRemoteActionReimp(t *testing.T) {
 	m := ActionManifest{
 		ActionID:    "reimp-action-id",
 		OwnerHandle: "@reimp-peer",
-		Name:        "/calc",
+		Name:        "calc",
 		Kind:        KindHTTP,
 		Price:       10,
 		InputSchema:  map[string]any{"type": "object"},
@@ -1206,7 +1206,7 @@ func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
 	m := ActionManifest{
 		ActionID:     "stable-action-id",
 		OwnerHandle:  "@stable-peer",
-		Name:         "/stable",
+		Name:         "stable",
 		Kind:         KindHTTP,
 		Price:        5,
 		Description:  "A stable action",
@@ -1268,7 +1268,7 @@ func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
 	m := ActionManifest{
 		ActionID:     "idem-action-id",
 		OwnerHandle:  "@idem-peer",
-		Name:         "/svc",
+		Name:         "svc",
 		Kind:         KindHTTP,
 		Price:        10,
 		InputSchema:  map[string]any{"type": "object"},
@@ -1329,7 +1329,7 @@ func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
 	m := ActionManifest{
 		ActionID:    "bad-sig-action",
 		OwnerHandle: "@bad-sig-peer",
-		Name:        "/greet",
+		Name:        "greet",
 		Kind:        KindHTTP,
 		Price:       0,
 		InputSchema:  map[string]any{"type": "object"},
@@ -1346,7 +1346,7 @@ func TestRemoteActionContentHashIncludesKindAndArtifact(t *testing.T) {
 	base := ActionManifest{
 		ActionID:     "act-1",
 		OwnerHandle:  "@peer",
-		Name:         "/svc",
+		Name:         "svc",
 		Description:  "test",
 		Kind:         KindHTTP,
 		ArtifactHash: "abc123",
@@ -1413,7 +1413,7 @@ func TestGetActionManifestIncludesActionID(t *testing.T) {
 	a := &Action{
 		ID:           uuid.New().String(),
 		OwnerUserID:  owner.ID,
-		Name:         "/manifest2",
+		Name:         "manifest2",
 		Kind:         KindHTTP,
 		Active:       true,
 		Public:       true,
@@ -1448,7 +1448,7 @@ func TestRatingRecordCreated(t *testing.T) {
 
 	owner := setupUser(t, st, "@rr-owner", 500)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/rr-svc",
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "rr-svc",
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -1459,7 +1459,7 @@ func TestRatingRecordCreated(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: owner.ID, ActionName: "/rr-svc", Args: map[string]any{},
+		TargetUserID: owner.ID, ActionName: "rr-svc", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -1494,7 +1494,7 @@ func TestRatingDuplicateRejected(t *testing.T) {
 
 	owner := setupUser(t, st, "@dup-owner", 500)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/dup-svc",
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "dup-svc",
 		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -1505,7 +1505,7 @@ func TestRatingDuplicateRejected(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: owner.ID, ActionName: "/dup-svc", Args: map[string]any{},
+		TargetUserID: owner.ID, ActionName: "dup-svc", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -1555,7 +1555,7 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: owner.ID,
-		Name:        "/sd-svc",
+		Name:        "sd-svc",
 		Kind:        KindHTTP,
 		Active:      true,
 		Price:       0,
@@ -1599,7 +1599,7 @@ func TestSetActiveRequiresDescription(t *testing.T) {
 
 	a, err := k.CreateAction(ctx, owner.ID, CreateActionRequest{
 		OwnerUserID:  owner.ID,
-		Name:         "/nodesc",
+		Name:         "nodesc",
 		Kind:         KindHTTP,
 		Source:       "http://example.com",
 		Price:        0,
@@ -1628,7 +1628,7 @@ func TestActivationRejectsPropertyMissingDescription(t *testing.T) {
 	owner := setupUser(t, st, "@desc-prop-owner", 0)
 
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/nodesc-prop",
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "nodesc-prop",
 		Kind: KindHTTP, Source: "http://example.com", Active: false,
 		Description: "My service",
 		InputSchema: map[string]any{
@@ -1667,7 +1667,7 @@ func TestSetActiveValidatesWasm(t *testing.T) {
 	// WASM action with placeholder source.
 	a, err := newTestKernel(st).CreateAction(ctx, owner.ID, CreateActionRequest{
 		OwnerUserID:  owner.ID,
-		Name:         "/wasm-act",
+		Name:         "wasm-act",
 		Kind:         KindWasm,
 		Source:       "invalid-wasm",
 		Price:        0,
@@ -1693,7 +1693,7 @@ func TestSetActiveValidatesSchemas(t *testing.T) {
 
 	// Create action via store directly with a nil schema to bypass CreateAction validation.
 	a := &Action{
-		ID: "schema-test", OwnerUserID: owner.ID, Name: "/no-schema",
+		ID: "schema-test", OwnerUserID: owner.ID, Name: "no-schema",
 		Kind: KindHTTP, Source: "http://example.com", Active: false, Price: 0,
 	}
 	_ = st.CreateAction(ctx, a)
@@ -2011,7 +2011,7 @@ func TestCreateActionSubjectMismatchRejected(t *testing.T) {
 
 	_, err := k.CreateAction(ctx, userA.ID, CreateActionRequest{
 		OwnerUserID: userB.ID,
-		Name:        "/action",
+		Name:        "action",
 		Kind:        KindHTTP,
 		Source:      "http://example.com",
 	})
@@ -2074,7 +2074,7 @@ func TestGrantProcessAuthorityAllowsCallByDelegate(t *testing.T) {
 	target := setupUser(t, st, "@pa-target", 0)
 	// Public wasm action so delegate passes CanCall check (precondition #6).
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: target.ID, Name: "/echo",
+		ID: uuid.New().String(), OwnerUserID: target.ID, Name: "echo",
 		Kind: KindWasm, Active: true, Public: true, Price: 0,
 		Source: "wat", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -2085,7 +2085,7 @@ func TestGrantProcessAuthorityAllowsCallByDelegate(t *testing.T) {
 	// Without authority, delegate cannot use owner's process.
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: target.ID, ActionName: "/echo", Args: map[string]any{},
+		TargetUserID: target.ID, ActionName: "echo", Args: map[string]any{},
 	})
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized before grant, got %v", err)
@@ -2098,7 +2098,7 @@ func TestGrantProcessAuthorityAllowsCallByDelegate(t *testing.T) {
 
 	_, err = k.Call(ctx, CallRequest{
 		SubjectID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: target.ID, ActionName: "/echo", Args: map[string]any{},
+		TargetUserID: target.ID, ActionName: "echo", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Errorf("Call with granted process authority: unexpected error: %v", err)
@@ -2113,7 +2113,7 @@ func TestRevokeProcessAuthorityBlocksDelegate(t *testing.T) {
 	owner := setupUser(t, st, "@pa-rev-owner", 100)
 	delegate := setupUser(t, st, "@pa-rev-delegate", 0)
 	_ = setupUser(t, st, "@pa-rev-target", 0)
-	setupAction(t, st, st.userByHandle["@pa-rev-target"].ID, "/echo", 0)
+	setupAction(t, st, st.userByHandle["@pa-rev-target"].ID, "echo", 0)
 
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 50)
 	if err := k.GrantProcessAuthority(ctx, owner.ID, delegate.ID, p.ID); err != nil {
@@ -2125,7 +2125,7 @@ func TestRevokeProcessAuthorityBlocksDelegate(t *testing.T) {
 
 	_, err := k.Call(ctx, CallRequest{
 		SubjectID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: "@pa-rev-target", ActionName: "/echo", Args: map[string]any{},
+		TargetUserID: "@pa-rev-target", ActionName: "echo", Args: map[string]any{},
 	})
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized after revoke, got %v", err)

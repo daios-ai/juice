@@ -33,7 +33,7 @@ func TestTransactionRate(t *testing.T) {
 		Handle: "@rateowner", Email: "ro@example.com", Password: "p",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "/rateable",
+		OwnerUserID: owner.ID, Name: "rateable",
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
@@ -65,7 +65,7 @@ func TestTransactionRating(t *testing.T) {
 	// Create and enable a wasm action — but since we have no script executor, use HTTP kind.
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
-		Name:        "/tx-rate-svc",
+		Name:        "tx-rate-svc",
 		Kind:        kernel.KindHTTP,
 		Source:      "http://example.com",
 	})

@@ -46,7 +46,7 @@ func TestListenerCreateAndDelete(t *testing.T) {
 		Handle: "@evt-source", Email: "esrc@example.com", Password: "p",
 	})
 
-	a := makeActiveAction(t, env, owner.ID, "/evt-handler")
+	a := makeActiveAction(t, env, owner.ID, "evt-handler")
 
 	l, err := env.k.CreateListener(ctx, owner.ID, kernel.CreateListenerRequest{
 		SourceUserID:   source.ID,
@@ -98,7 +98,7 @@ func TestListenerDeletedNotFired(t *testing.T) {
 		Handle: "@del-lst-src", Email: "dls@example.com", Password: "p",
 	})
 
-	a := makeActiveAction(t, env, owner.ID, "/del-handler")
+	a := makeActiveAction(t, env, owner.ID, "del-handler")
 
 	l, _ := env.k.CreateListener(ctx, owner.ID, kernel.CreateListenerRequest{
 		SourceUserID:   source.ID,
@@ -124,7 +124,7 @@ func TestListListeners(t *testing.T) {
 		Handle: "@list-lst-other", Email: "llot@example.com", Password: "p",
 	})
 
-	a := makeActiveAction(t, env, owner.ID, "/list-lst-action")
+	a := makeActiveAction(t, env, owner.ID, "list-lst-action")
 
 	env.k.CreateListener(ctx, owner.ID, kernel.CreateListenerRequest{
 		SourceUserID: other.ID,

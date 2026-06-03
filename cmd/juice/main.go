@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
@@ -37,11 +38,13 @@ var rootCmd = &cobra.Command{
 var (
 	flagDB     string
 	flagOutput string
+	flagQuiet  bool
 )
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&flagDB, "db", envOr("JUICE_DB_PATH", "juice.db"), "SQLite database path")
 	rootCmd.PersistentFlags().StringVar(&flagOutput, "output", "text", "Output format: text or json")
+	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "Print only the created resource ID")
 }
 
 func main() {
@@ -316,4 +319,37 @@ func promptPassword(prompt string) (string, error) {
 	b, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Fprintln(os.Stderr)
 	return string(b), err
+}
+
+// printQuiet prints only the resource ID, used when --quiet is set.
+func printQuiet(id string) {
+	fmt.Println(id)
+}
+
+// readJSONArg parses a JSON argument string, supporting @file.json to read from a file.
+func readJSONArg(s string) (map[string]any, error) {
+	if s == "" || s == "{}" {
+		return map[string]any{}, nil
+	}
+	if strings.HasPrefix(s, "@") {
+		data, err := os.ReadFile(s[1:])
+		if err != nil {
+			return nil, fmt.Errorf("read file %s: %w", s[1:], err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, fmt.Errorf("parse JSON from file: %w", err)
+		}
+		return m, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		return nil, fmt.Errorf("parse JSON: %w", err)
+	}
+	return m, nil
+}
+
+// jsonMarshalIndent is a helper for pretty-printing JSON.
+func jsonMarshalIndent(v any) ([]byte, error) {
+	return json.MarshalIndent(v, "", "  ")
 }

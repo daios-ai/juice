@@ -9,58 +9,34 @@ import (
 )
 
 func init() {
-	statsCmd := &cobra.Command{Use: "stats", Short: "Action statistics"}
-	statsCmd.AddCommand(statsShowCmd())
-	rootCmd.AddCommand(statsCmd)
-
 	rootCmd.AddCommand(lookupCmd())
-}
-
-func statsShowCmd() *cobra.Command {
-	var actionID string
-	cmd := &cobra.Command{
-		Use:   "show",
-		Short: "Show statistics for an action",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return withKernel(func(k *kernel.Kernel) error {
-				stats, err := k.ReadStats(context.Background(), actionID)
-				if err != nil {
-					return err
-				}
-				if stats == nil {
-					fmt.Println("No statistics yet.")
-					return nil
-				}
-				if flagOutput == "json" {
-					return printJSON(stats)
-				}
-				fmt.Printf("Stats for %s:\n  uses:         %d\n  successes:    %d\n  failures:     %d\n  price_mean:   %.2f\n  latency_mean: %.3fs\n  rating_mean:  %.3f\n  last_used:    %s\n",
-					stats.ActionID, stats.Uses, stats.Successes, stats.Failures,
-					stats.PriceMean, stats.LatencyMean, stats.RatingMean,
-					stats.LastUsedAt.Format("2006-01-02T15:04:05"))
-				return nil
-			})
-		},
-	}
-	cmd.Flags().StringVar(&actionID, "action", "", "Action ID (required)")
-	_ = cmd.MarkFlagRequired("action")
-	return cmd
 }
 
 func lookupCmd() *cobra.Command {
 	var query string
 	var limit int
-	var processID string
 	cmd := &cobra.Command{
 		Use:   "lookup",
 		Short: "Search for actions using a natural-language query",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				// Create an ephemeral free process for the lookup call.
+				proc, _, err := k.StartProcess(context.Background(), subjectID, subjectID, 0)
+				if err != nil {
+					return fmt.Errorf("start process: %w", err)
+				}
+				defer k.EndProcess(context.Background(), subjectID, proc.ID)
+
+				sys, err := k.ReadUserByHandle(context.Background(), "@sys")
+				if err != nil {
+					return fmt.Errorf("read @sys: %w", err)
+				}
+
 				reply, err := k.Call(context.Background(), kernel.CallRequest{
 					SubjectID:    subjectID,
-					ProcessID:    processID,
-					TargetUserID: "@sys",
-					ActionName:   "/lookup",
+					ProcessID:    proc.ID,
+					TargetUserID: sys.ID,
+					ActionName:   "lookup",
 					Args: map[string]any{
 						"query": query,
 						"limit": float64(limit),
@@ -83,7 +59,7 @@ func lookupCmd() *cobra.Command {
 					if len(shortID) > 8 {
 						shortID = shortID[:8]
 					}
-					fmt.Printf("%.4f  %s  %s%s\n", score, shortID, owner, name)
+					fmt.Printf("%.4f  %s  %s/%s\n", score, shortID, owner, name)
 				}
 				return nil
 			})
@@ -91,8 +67,6 @@ func lookupCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&query, "query", "", "Natural-language query (required)")
 	cmd.Flags().IntVar(&limit, "limit", 10, "Maximum results")
-	cmd.Flags().StringVar(&processID, "process", "", "Process ID (required)")
 	_ = cmd.MarkFlagRequired("query")
-	_ = cmd.MarkFlagRequired("process")
 	return cmd
 }

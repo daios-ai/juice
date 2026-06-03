@@ -197,7 +197,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	argsJSON, _ := json.Marshal(req.Args)
-	tx.ArgsJSON = string(argsJSON)
+	tx.ArgsJSON = json.RawMessage(argsJSON)
 
 	// 12. Execute. If the target is a remote kernel and the HTTP executor supports federation,
 	// use ExecuteFederation to carry an idempotency key and capture the remote receipt hash.
@@ -252,7 +252,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 	net, fee := ComputeFee(taxable, action.Price, k.cfg.FeeBPS)
 	replyJSON, _ := json.Marshal(reply)
-	tx.ReplyJSON = string(replyJSON)
+	tx.ReplyJSON = json.RawMessage(replyJSON)
 	tx.Status = TxSuccess
 	tx.Gross = action.Price
 	tx.Net = net
@@ -331,9 +331,9 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 // executeNative dispatches to built-in native action implementations.
 func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any) (map[string]any, error) {
 	switch action.Name {
-	case "/lookup":
+	case "lookup":
 		return k.executeLookup(ctx, args)
-	case "/llm/chat":
+	case "llm-chat":
 		return k.executeChat(ctx, args)
 	default:
 		return nil, ErrInvalidState.Wrapf("unknown native action %q", action.Name)
@@ -470,7 +470,7 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	if len(parts) != 2 {
 		return nil, ErrInvalidInput.Wrap("actionName must be handle/name")
 	}
-	subActionName := "/" + parts[1]
+	subActionName := parts[1]
 
 	var args map[string]any
 	if err := json.Unmarshal(argsJSON, &args); err != nil {

@@ -103,7 +103,7 @@ func runServer(addr string) error {
 		r.Post("/v1/actions/{id}/disable", srv.disableAction)
 		r.Delete("/v1/actions/{id}", srv.deleteAction)
 		r.Post("/v1/actions/{id}/acl", srv.grantACL)
-		r.Delete("/v1/actions/{id}/acl", srv.revokeACL)
+		r.Delete("/v1/actions/{id}/acl/{subject_id}/{permission}", srv.revokeACL)
 		r.Post("/v1/actions/{id}/grant-all", srv.grantAll)
 		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
 
@@ -362,6 +362,20 @@ func (s *server) postUser(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// actionResp wraps an action with the computed @owner/name reference field (R8).
+type actionResp struct {
+	*kernel.Action
+	ActionRef string `json:"action"`
+}
+
+func withActionRef(a *kernel.Action) actionResp {
+	ref := ""
+	if a.OwnerHandle != "" && a.Name != "" {
+		ref = a.OwnerHandle + "/" + a.Name
+	}
+	return actionResp{Action: a, ActionRef: ref}
+}
+
 func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 	actions, err := s.kernel.ListActions(r.Context(), true, 50, 0)
 	if err != nil {
@@ -391,19 +405,19 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 		}
 		actions = filtered
 	}
-	if actions == nil {
-		actions = []*kernel.Action{}
-	}
 	// Strip execution-internal fields from public discovery; authorized users use
 	// the authenticated get-by-id endpoint to retrieve source and artifact data.
-	projected := make([]*kernel.Action, len(actions))
+	resps := make([]actionResp, len(actions))
 	for i, a := range actions {
 		cp := *a
 		cp.Source = ""
 		cp.ArtifactHash = ""
-		projected[i] = &cp
+		resps[i] = withActionRef(&cp)
 	}
-	writeJSON(w, http.StatusOK, projected)
+	if resps == nil {
+		resps = []actionResp{}
+	}
+	writeJSON(w, http.StatusOK, resps)
 }
 
 func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
@@ -481,7 +495,13 @@ func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, a)
+	// Re-read to populate OwnerHandle via store JOIN.
+	full, err := s.kernel.ReadActionForSubject(r.Context(), subjectFrom(r), a.ID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, withActionRef(full))
 }
 
 func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
@@ -491,7 +511,7 @@ func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, a)
+	writeJSON(w, http.StatusOK, withActionRef(a))
 }
 
 func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
@@ -529,7 +549,7 @@ func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, a)
+	writeJSON(w, http.StatusOK, withActionRef(a))
 }
 
 func (s *server) enableAction(w http.ResponseWriter, r *http.Request) {
@@ -569,6 +589,16 @@ func (s *server) grantACL(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
+	if req.SubjectUserID == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("subject_user_id is required"))
+		return
+	}
+	switch kernel.Permission(req.Permission) {
+	case kernel.PermRead, kernel.PermCall, kernel.PermAdmin:
+	default:
+		writeErr(w, kernel.ErrInvalidInput.Wrap("permission must be read, call, or admin"))
+		return
+	}
 	if err := s.kernel.GrantACL(r.Context(), req.SubjectUserID, id,
 		kernel.Permission(req.Permission), subjectFrom(r)); err != nil {
 		writeErr(w, err)
@@ -579,16 +609,14 @@ func (s *server) grantACL(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) revokeACL(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	var req struct {
-		SubjectUserID string `json:"subject_user_id"`
-		Permission    string `json:"permission"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	subjectID := chi.URLParam(r, "subject_id")
+	permission := chi.URLParam(r, "permission")
+	if subjectID == "" || permission == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("subject_id and permission are required"))
 		return
 	}
-	if err := s.kernel.RevokeACL(r.Context(), req.SubjectUserID, id,
-		kernel.Permission(req.Permission), subjectFrom(r)); err != nil {
+	if err := s.kernel.RevokeACL(r.Context(), subjectID, id,
+		kernel.Permission(permission), subjectFrom(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -647,7 +675,12 @@ func (s *server) fundProcess(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	p, err := s.kernel.ReadProcess(r.Context(), subjectFrom(r), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
 }
 
 func (s *server) endProcess(w http.ResponseWriter, r *http.Request) {
@@ -663,20 +696,37 @@ func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProcessID     string         `json:"process_id"`
 		ParentTraceID string         `json:"parent_trace_id"`
-		Target        string         `json:"target"`
-		ActionName    string         `json:"action_name"`
+		Action        string         `json:"action"`
 		Args          map[string]any `json:"args"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
+	if req.Action == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("action is required"))
+		return
+	}
+	if req.Args == nil {
+		req.Args = map[string]any{}
+	}
+	// Parse @owner/name format.
+	ownerHandle, actionName, err := parseActionRef(req.Action)
+	if err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap(err.Error()))
+		return
+	}
+	owner, err := s.kernel.ReadUserByHandle(r.Context(), ownerHandle)
+	if err != nil {
+		writeErr(w, kernel.ErrNotFound.Wrap("action owner not found"))
+		return
+	}
 	reply, err := s.kernel.Call(r.Context(), kernel.CallRequest{
 		SubjectID:     subjectFrom(r),
 		ProcessID:     req.ProcessID,
 		ParentTraceID: req.ParentTraceID,
-		TargetUserID:  req.Target,
-		ActionName:    req.ActionName,
+		TargetUserID:  owner.ID,
+		ActionName:    actionName,
 		Args:          req.Args,
 	})
 	if err != nil {
@@ -684,6 +734,23 @@ func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, reply)
+}
+
+// parseActionRef parses "@owner/name" into ownerHandle and actionName.
+func parseActionRef(ref string) (string, string, error) {
+	if !strings.HasPrefix(ref, "@") {
+		return "", "", fmt.Errorf("action must be @owner/name")
+	}
+	idx := strings.Index(ref[1:], "/")
+	if idx < 0 {
+		return "", "", fmt.Errorf("action must be @owner/name")
+	}
+	ownerHandle := ref[:idx+1]
+	actionName := ref[idx+2:]
+	if ownerHandle == "" || actionName == "" {
+		return "", "", fmt.Errorf("action must be @owner/name")
+	}
+	return ownerHandle, actionName, nil
 }
 
 func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
@@ -719,6 +786,10 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
+	if req.Rating != 0 && req.Rating != 1 {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("rating must be 0 or 1"))
+		return
+	}
 	rating, err := s.kernel.RateTransaction(r.Context(), subjectFrom(r), id, req.Rating)
 	if err != nil {
 		writeErr(w, err)
@@ -740,20 +811,26 @@ func (s *server) getStats(w http.ResponseWriter, r *http.Request) {
 // ---- PKCE / auth handlers ----
 
 func (s *server) postAuthorize(w http.ResponseWriter, r *http.Request) {
-	handle := r.FormValue("handle")
-	password := r.FormValue("password")
-	challenge := r.FormValue("code_challenge")
-	redirectURI := r.FormValue("redirect_uri")
-	if handle == "" || password == "" || challenge == "" {
+	var req struct {
+		Handle        string `json:"handle"`
+		Password      string `json:"password"`
+		CodeChallenge string `json:"code_challenge"`
+		RedirectURI   string `json:"redirect_uri"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+		return
+	}
+	if req.Handle == "" || req.Password == "" || req.CodeChallenge == "" {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("handle, password, and code_challenge are required"))
 		return
 	}
-	redirect, err := s.kernel.StartAuthCode(r.Context(), handle, password, challenge, redirectURI)
+	redirect, err := s.kernel.StartAuthCode(r.Context(), req.Handle, req.Password, req.CodeChallenge, req.RedirectURI)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if redirectURI != "" {
+	if req.RedirectURI != "" {
 		http.Redirect(w, r, redirect, http.StatusFound)
 		return
 	}
@@ -794,38 +871,37 @@ func (s *server) postLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// Override postToken to support both password grant and authorization_code grant.
-// The existing postToken handles password grant; this adds code exchange.
+// postTokenMulti handles POST /v1/auth/token (JSON only).
+// grant_type "authorization_code" exchanges a PKCE code for tokens;
+// all other values (or omitted) are treated as password grant.
 func (s *server) postTokenMulti(w http.ResponseWriter, r *http.Request) {
-	// Detect form vs JSON.
-	ct := r.Header.Get("Content-Type")
-	if strings.Contains(ct, "application/x-www-form-urlencoded") {
-		if err := r.ParseForm(); err != nil {
-			writeErr(w, kernel.ErrInvalidInput.Wrap("invalid form data"))
-			return
-		}
-		grantType := r.FormValue("grant_type")
-		switch grantType {
-		case "authorization_code":
-			code := r.FormValue("code")
-			verifier := r.FormValue("code_verifier")
-			redirectURI := r.FormValue("redirect_uri")
-			access, refresh, err := s.kernel.ExchangeAuthCode(r.Context(), code, verifier, redirectURI)
-			if err != nil {
-				writeErr(w, err)
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]string{
-				"access_token":  access,
-				"refresh_token": refresh,
-			})
-		default:
-			writeErr(w, kernel.ErrInvalidInput.Wrap("unsupported grant_type"))
-		}
+	var req struct {
+		GrantType    string `json:"grant_type"`
+		Handle       string `json:"handle"`
+		Password     string `json:"password"`
+		Code         string `json:"code"`
+		CodeVerifier string `json:"code_verifier"`
+		RedirectURI  string `json:"redirect_uri"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	// Fall back to JSON password grant.
-	s.postToken(w, r)
+	if req.GrantType == "authorization_code" {
+		access, refresh, err := s.kernel.ExchangeAuthCode(r.Context(), req.Code, req.CodeVerifier, req.RedirectURI)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"access_token": access, "refresh_token": refresh})
+		return
+	}
+	tok, err := s.kernel.Login(r.Context(), req.Handle, req.Password)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": tok})
 }
 
 // ---- Listener / Event handlers ----
@@ -878,7 +954,10 @@ func (s *server) pollListenerEvents(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"listener_id": id, "events": events})
+	if events == nil {
+		events = []*kernel.Event{}
+	}
+	writeJSON(w, http.StatusOK, events)
 }
 
 func (s *server) deleteListener(w http.ResponseWriter, r *http.Request) {
@@ -898,6 +977,13 @@ func (s *server) postEmit(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
+	}
+	if req.EventName == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("event_name is required"))
+		return
+	}
+	if req.Args == nil {
+		req.Args = map[string]any{}
 	}
 	eventIDs, err := s.kernel.EmitEvent(r.Context(), subjectFrom(r), subjectFrom(r), req.EventName, req.Args, "")
 	if err != nil {
@@ -1024,7 +1110,7 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ownerHandle := actionParam[:slash+1]
-	actionName := actionParam[slash+1:]
+	actionName := actionParam[slash+2:]
 
 	var args map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
