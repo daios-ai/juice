@@ -170,18 +170,15 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 		MemoryBytes: cfg.ScriptMemory,
 	})
 
-	var embedder kernel.Embedder
-	var chatter kernel.Chatter
-	if ollamaURL := os.Getenv("JUICE_OLLAMA_URL"); ollamaURL != "" {
-		embedder = &llm.OllamaEmbedder{
-			URL:   ollamaURL,
-			Model: envOr("JUICE_OLLAMA_EMBED_MODEL", "nomic-embed-text"),
-		}
-		chatter = &llm.OllamaChatter{
-			URL:   ollamaURL,
-			Model: envOr("JUICE_OLLAMA_CHAT_MODEL", "gemma4:26b"),
-		}
-	}
+	ollamaURL := envOr("JUICE_OLLAMA_URL", "http://localhost:11434")
+	embedder := kernel.Embedder(&llm.OllamaEmbedder{
+		URL:   ollamaURL,
+		Model: envOr("JUICE_OLLAMA_EMBED_MODEL", "nomic-embed-text"),
+	})
+	chatter := kernel.Chatter(&llm.OllamaChatter{
+		URL:   ollamaURL,
+		Model: envOr("JUICE_OLLAMA_CHAT_MODEL", "gemma4:26b"),
+	})
 
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
 	k := kernel.New(db, exec, httpExec, embedder, chatter, cfg, logger)
