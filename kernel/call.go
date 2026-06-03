@@ -358,7 +358,7 @@ func (k *Kernel) executeLookup(ctx context.Context, args map[string]any) (map[st
 			"name":         r.Action.Name,
 			"owner_handle": r.OwnerHandle,
 			"description":  r.Action.Description,
-			"score":        r.Score,
+			"score":        float64(r.Score),
 		}
 	}
 	return map[string]any{"results": items}, nil
