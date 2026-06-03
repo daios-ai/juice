@@ -146,6 +146,69 @@ func TestLookupInactiveActionsExcluded(t *testing.T) {
 	}
 }
 
+func TestLookupACLGrantedNonPublicActionVisible(t *testing.T) {
+	st := newTestStore(t)
+	emb := &fakeEmbedder{}
+	k := newTestKernelWithEmbedder(st, emb)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@alice", 0)
+	granted := setupUser(t, st, "@bob", 0)
+	other := setupUser(t, st, "@carol", 0)
+
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/private-svc",
+		Kind: kernel.KindHTTP, Active: true, Public: false,
+		Description: "private service only for granted users",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	vec, _ := emb.Embed(ctx, a.Description)
+	_ = st.UpsertEmbedding(ctx, a.ID, vec)
+
+	// Grant bob call permission.
+	_ = st.GrantACL(ctx, &kernel.ACLEntry{
+		SubjectUserID: granted.ID, ActionID: a.ID, Permission: kernel.PermCall,
+		CreatedAt: time.Now().UTC(),
+	})
+
+	// Owner sees their own non-public action.
+	ownerResults, err := k.Lookup(ctx, kernel.LookupRequest{Query: "private service", Limit: 10, SubjectID: owner.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAction(ownerResults, a.ID) {
+		t.Error("owner should see their own non-public action in lookup")
+	}
+
+	// Granted user sees the action.
+	grantedResults, err := k.Lookup(ctx, kernel.LookupRequest{Query: "private service", Limit: 10, SubjectID: granted.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAction(grantedResults, a.ID) {
+		t.Error("ACL-granted user should see non-public action in lookup")
+	}
+
+	// Ungranted user does not see it.
+	otherResults, err := k.Lookup(ctx, kernel.LookupRequest{Query: "private service", Limit: 10, SubjectID: other.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsAction(otherResults, a.ID) {
+		t.Error("ungranted user must not see non-public action in lookup")
+	}
+}
+
+func containsAction(results []*kernel.LookupResult, actionID string) bool {
+	for _, r := range results {
+		if r.Action.ID == actionID {
+			return true
+		}
+	}
+	return false
+}
+
 func TestLookupEmbeddingStoredOnActivate(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithEmbedder(st, &fakeEmbedder{})

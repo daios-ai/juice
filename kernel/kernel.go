@@ -1127,9 +1127,10 @@ func (k *Kernel) ResetActionStats(ctx context.Context, actionID string) error {
 
 // LookupRequest is a natural-language query for actions.
 type LookupRequest struct {
-	Query  string
-	Limit  int
-	Offset int
+	Query     string
+	Limit     int
+	Offset    int
+	SubjectID string // authenticated caller; used to include owned and ACL-granted actions
 }
 
 // LookupResult is a ranked action for a lookup query.
@@ -1198,6 +1199,15 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		a, err := k.store.ReadAction(ctx, c.actionID)
 		if err != nil {
 			continue
+		}
+		// Only include actions the subject can call per CanCall rule.
+		if !a.Public {
+			if req.SubjectID == "" || (a.OwnerUserID != req.SubjectID) {
+				ok, _ := k.canCall(ctx, req.SubjectID, a)
+				if !ok {
+					continue
+				}
+			}
 		}
 		if _, cached := ownerHandles[a.OwnerUserID]; !cached {
 			if u, err := k.store.ReadUser(ctx, a.OwnerUserID); err == nil {

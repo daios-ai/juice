@@ -1745,7 +1745,7 @@ func (s *DB) UpsertEmbedding(ctx context.Context, actionID string, vec []float32
 func (s *DB) ListEmbeddings(ctx context.Context) (map[string][]float32, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, embed_vec FROM actions
-		 WHERE active=1 AND public=1 AND deleted_at IS NULL AND embed_vec IS NOT NULL`)
+		 WHERE active=1 AND deleted_at IS NULL AND embed_vec IS NOT NULL`)
 	if err != nil {
 		return nil, dbErr(err, "list embeddings")
 	}

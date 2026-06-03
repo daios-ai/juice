@@ -1613,7 +1613,7 @@ func TestUpsertAndListEmbeddings(t *testing.T) {
 		t.Error("active action embedding missing from ListEmbeddings")
 	}
 	if _, ok := embeddings[inactive.ID]; ok {
-		t.Error("inactive action embedding must not appear in ListEmbeddings")
+		t.Error("inactive action embedding must not appear in ListEmbeddings (active=0)")
 	}
 
 	// UpsertEmbedding is idempotent.

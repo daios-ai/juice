@@ -210,11 +210,11 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 				tx.RemoteReceiptHash = sha256Hex(receiptJSON)
 			}
 		} else {
-			reply, subCost, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
+			reply, subCost, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID, req.SubjectID)
 		}
 	} else {
 		// Pass action.OwnerUserID so host functions operate on behalf of the action author.
-		reply, subCost, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID)
+		reply, subCost, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID, req.SubjectID)
 	}
 	latency := time.Since(started).Seconds()
 	tx.EndedAt = time.Now().UTC()
@@ -305,7 +305,7 @@ func (k *Kernel) canCall(ctx context.Context, subjectID string, action *Action) 
 
 // execute dispatches to the correct execution backend.
 // Returns (result, subCost, error) where subCost is the total gross paid to direct WASM sub-calls.
-func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (map[string]any, int64, error) {
+func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID, subjectID string) (map[string]any, int64, error) {
 	switch action.Kind {
 	case KindHTTP:
 		if k.http == nil {
@@ -316,7 +316,7 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 	case KindWasm:
 		return k.executeWasm(ctx, action, args, trace, ownerUserID)
 	case KindNative:
-		result, err := k.executeNative(ctx, action, args)
+		result, err := k.executeNative(ctx, action, args, subjectID)
 		return result, 0, err
 	case KindRemoteProxy:
 		return nil, 0, ErrInvalidState.Wrap("federation executor not configured")
@@ -326,10 +326,10 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 }
 
 // executeNative dispatches to built-in native action implementations.
-func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any) (map[string]any, error) {
+func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any, subjectID string) (map[string]any, error) {
 	switch action.Name {
 	case "lookup":
-		return k.executeLookup(ctx, args)
+		return k.executeLookup(ctx, args, subjectID)
 	case "llm/chat":
 		return k.executeChat(ctx, args)
 	default:
@@ -338,7 +338,7 @@ func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[str
 }
 
 // executeLookup implements the /lookup native action.
-func (k *Kernel) executeLookup(ctx context.Context, args map[string]any) (map[string]any, error) {
+func (k *Kernel) executeLookup(ctx context.Context, args map[string]any, subjectID string) (map[string]any, error) {
 	query, _ := args["query"].(string)
 	if query == "" {
 		return nil, ErrInvalidInput.Wrap("lookup requires query argument")
@@ -347,7 +347,7 @@ func (k *Kernel) executeLookup(ctx context.Context, args map[string]any) (map[st
 	if l, ok := args["limit"].(float64); ok {
 		limit = int(l)
 	}
-	results, err := k.Lookup(ctx, LookupRequest{Query: query, Limit: limit})
+	results, err := k.Lookup(ctx, LookupRequest{Query: query, Limit: limit, SubjectID: subjectID})
 	if err != nil {
 		return nil, err
 	}
