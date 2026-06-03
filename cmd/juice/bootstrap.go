@@ -142,15 +142,16 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 			"type": "object",
 			"properties": map[string]any{
 				"results": map[string]any{
-					"type": "array",
+					"type":        "array",
+					"description": "Ranked list of matching actions",
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
-							"action_id":    map[string]any{"type": "string"},
-							"name":         map[string]any{"type": "string"},
-							"owner_handle": map[string]any{"type": "string"},
-							"description":  map[string]any{"type": "string"},
-							"score":        map[string]any{"type": "number"},
+							"action_id":    map[string]any{"type": "string", "description": "Unique action identifier"},
+							"name":         map[string]any{"type": "string", "description": "Action name"},
+							"owner_handle": map[string]any{"type": "string", "description": "Handle of the action owner"},
+							"description":  map[string]any{"type": "string", "description": "Human-readable description of the action"},
+							"score":        map[string]any{"type": "number", "description": "Relevance score between 0 and 1"},
 						},
 					},
 				},
@@ -193,8 +194,8 @@ func ensureSysLLMChat(ctx context.Context, k *kernel.Kernel, superuserHandle str
 	msgItemSchema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"role":    map[string]any{"type": "string"},
-			"content": map[string]any{"type": "string"},
+			"role":    map[string]any{"type": "string", "description": "Role of the message sender (user or assistant)"},
+			"content": map[string]any{"type": "string", "description": "Text content of the message"},
 		},
 		"required": []string{"role", "content"},
 	}
@@ -216,10 +217,11 @@ func ensureSysLLMChat(ctx context.Context, k *kernel.Kernel, superuserHandle str
 			"type": "object",
 			"properties": map[string]any{
 				"message": map[string]any{
-					"type": "object",
+					"type":        "object",
+					"description": "Generated reply message",
 					"properties": map[string]any{
-						"role":    map[string]any{"type": "string"},
-						"content": map[string]any{"type": "string"},
+						"role":    map[string]any{"type": "string", "description": "Role of the message sender (assistant)"},
+						"content": map[string]any{"type": "string", "description": "Text content of the reply"},
 					},
 				},
 			},

@@ -198,6 +198,31 @@ func TestActivateNativeActionBootstrapPath(t *testing.T) {
 	}
 }
 
+func TestActivateNativeActionRejectsSchemaWithoutDescriptions(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@sys", 0)
+	a, err := k.RegisterNativeAction(ctx, CreateActionRequest{
+		OwnerUserID: owner.ID,
+		Name:        "/native-bad",
+		Kind:        KindNative,
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"x": map[string]any{"type": "string"}, // missing description
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.ActivateNativeAction(ctx, a.ID); !errors.Is(err, ErrSchemaViolation) {
+		t.Fatalf("ActivateNativeAction with missing schema descriptions: got %v, want ErrSchemaViolation", err)
+	}
+}
+
 func TestCreateUser(t *testing.T) {
 	st := newFakeStore()
 	k := newTestKernel(st)

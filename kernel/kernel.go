@@ -439,6 +439,12 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID string) erro
 	if a.Kind != KindNative {
 		return ErrInvalidInput.Wrap("action is not native")
 	}
+	if err := validateSchemaDescriptions(a.InputSchema, "input"); err != nil {
+		return err
+	}
+	if err := validateSchemaDescriptions(a.OutputSchema, "output"); err != nil {
+		return err
+	}
 	stats, _ := k.store.ReadStats(ctx, actionID)
 	if stats == nil {
 		if err := k.store.UpsertStats(ctx, DefaultStats(actionID)); err != nil {
