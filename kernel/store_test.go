@@ -1,5 +1,5 @@
-package kernel
+package kernel_test
 
-// Compile-time assertion: fakeStore must implement Store.
-// This file ensures the interface and its fake remain in sync.
-var _ Store = (*fakeStore)(nil)
+// This file is a placeholder for store-interface tests.
+// The compile-time assertion that the real store implements kernel.Store
+// is covered by store/sqlite_test.go.

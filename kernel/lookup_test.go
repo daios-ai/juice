@@ -1,10 +1,12 @@
-package kernel
+package kernel_test
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
+	"github.com/daios-ai/juice/kernel"
 	"github.com/google/uuid"
 )
 
@@ -21,7 +23,7 @@ func (f *fakeEmbedder) Embed(_ context.Context, text string) ([]float32, error) 
 		norm += v * v
 	}
 	if norm > 0 {
-		sq := sqrt32(norm)
+		sq := float32(math.Sqrt(float64(norm)))
 		for i := range vec {
 			vec[i] /= sq
 		}
@@ -29,16 +31,16 @@ func (f *fakeEmbedder) Embed(_ context.Context, text string) ([]float32, error) 
 	return vec, nil
 }
 
-func newTestKernelWithEmbedder(st Store, emb Embedder) *Kernel {
-	cfg := DefaultConfig()
+func newTestKernelWithEmbedder(st kernel.Store, emb kernel.Embedder) *kernel.Kernel {
+	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
-	cfg.IssuerUserID = "test-issuer-id"
-	return New(st, nil, nil, emb, nil, cfg, nil)
+	cfg.IssuerUserID = testIssuerUserID
+	return kernel.New(st, nil, nil, emb, nil, cfg, nil)
 }
 
 func TestLookupRanking(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	emb := &fakeEmbedder{}
 	k := newTestKernelWithEmbedder(st, emb)
 	ctx := context.Background()
@@ -48,9 +50,9 @@ func TestLookupRanking(t *testing.T) {
 		{"/weather", "weather forecast temperature rain"},
 		{"/news", "latest news headlines today"},
 	} {
-		a := &Action{
+		a := &kernel.Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: desc.name,
-			Kind: KindHTTP, Active: true, Public: true, Description: desc.text,
+			Kind: kernel.KindHTTP, Active: true, Public: true, Description: desc.text,
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)
@@ -58,7 +60,7 @@ func TestLookupRanking(t *testing.T) {
 		_ = st.UpdateActionEmbedding(ctx, a.ID, vec)
 	}
 
-	results, err := k.Lookup(ctx, LookupRequest{Query: "weather forecast", Limit: 10})
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "weather forecast", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +84,7 @@ func TestLookupRanking(t *testing.T) {
 }
 
 func TestLookupRankingWithStats(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernelWithEmbedder(st, &fakeEmbedder{})
 	ctx := context.Background()
 
@@ -90,9 +92,9 @@ func TestLookupRankingWithStats(t *testing.T) {
 	owner := setupUser(t, st, "@alice", 0)
 	ids := map[string]string{}
 	for _, name := range []string{"/reliable", "/unreliable"} {
-		a := &Action{
+		a := &kernel.Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: name,
-			Kind: KindHTTP, Active: true, Public: true, Description: "compute data results",
+			Kind: kernel.KindHTTP, Active: true, Public: true, Description: "compute data results",
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)
@@ -100,10 +102,10 @@ func TestLookupRankingWithStats(t *testing.T) {
 		_ = st.UpdateActionEmbedding(ctx, a.ID, vec)
 		ids[name] = a.ID
 	}
-	_ = st.UpsertStats(ctx, &Stats{ActionID: ids["/reliable"], Uses: 10, Successes: 10, LastUsedAt: time.Now()})
-	_ = st.UpsertStats(ctx, &Stats{ActionID: ids["/unreliable"], Uses: 10, Successes: 2, LastUsedAt: time.Now()})
+	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/reliable"], Uses: 10, Successes: 10, LastUsedAt: time.Now()})
+	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/unreliable"], Uses: 10, Successes: 2, LastUsedAt: time.Now()})
 
-	results, err := k.Lookup(ctx, LookupRequest{Query: "compute data", Limit: 10})
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "compute data", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,27 +118,27 @@ func TestLookupRankingWithStats(t *testing.T) {
 }
 
 func TestLookupNoEmbedder(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
-	_, err := k.Lookup(context.Background(), LookupRequest{Query: "test"})
+	_, err := k.Lookup(context.Background(), kernel.LookupRequest{Query: "test"})
 	if err == nil {
 		t.Error("expected error when no embedder configured")
 	}
 }
 
 func TestLookupInactiveActionsExcluded(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernelWithEmbedder(st, &fakeEmbedder{})
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@alice", 0)
-	_ = st.CreateAction(ctx, &Action{
+	_ = st.CreateAction(ctx, &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/hidden",
-		Kind: KindHTTP, Active: false, Description: "hidden service do not show",
+		Kind: kernel.KindHTTP, Active: false, Description: "hidden service do not show",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	})
 
-	results, _ := k.Lookup(ctx, LookupRequest{Query: "hidden service", Limit: 10})
+	results, _ := k.Lookup(ctx, kernel.LookupRequest{Query: "hidden service", Limit: 10})
 	for _, r := range results {
 		if r.Action.Name == "/hidden" {
 			t.Error("inactive action should not appear in lookup results")

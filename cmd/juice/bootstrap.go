@@ -80,13 +80,13 @@ func bootstrap(k *kernel.Kernel) error {
 }
 
 func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
-	fmt.Println("First boot: no superuser configured.")
+	fmt.Fprintln(os.Stderr, "First boot: no superuser configured.")
 
 	password := os.Getenv("JUICE_BOOTSTRAP_PASSWORD")
 	if password == "" {
-		fmt.Print("Superuser password: ")
+		fmt.Fprint(os.Stderr, "Superuser password: ")
 		passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 		if err != nil {
 			return "", fmt.Errorf("reading password: %w", err)
 		}
@@ -100,7 +100,7 @@ func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 		return "", fmt.Errorf("first boot: %w", err)
 	}
 
-	fmt.Printf("Superuser %q created.\n", superuserHandle)
+	fmt.Fprintf(os.Stderr, "Superuser %q created.\n", superuserHandle)
 	return superuserHandle, nil
 }
 

@@ -1,4 +1,4 @@
-package kernel
+package kernel_test
 
 import (
 	"context"
@@ -7,16 +7,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daios-ai/juice/kernel"
 	"github.com/google/uuid"
 )
 
-func setupActiveWasmAction(t *testing.T, st *fakeStore, ownerID, name string) *Action {
+func setupActiveWasmAction(t *testing.T, st kernel.Store, ownerID, name string) *kernel.Action {
 	t.Helper()
-	a := &Action{
+	a := &kernel.Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: ownerID,
 		Name:        name,
-		Kind:        KindWasm,
+		Kind:        kernel.KindWasm,
 		Active:      true,
 		Price:       0,
 		CreatedAt:   time.Now().UTC(),
@@ -29,7 +30,7 @@ func setupActiveWasmAction(t *testing.T, st *fakeStore, ownerID, name string) *A
 }
 
 func TestCreateListener(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
@@ -37,7 +38,7 @@ func TestCreateListener(t *testing.T) {
 	source := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, owner.ID, "/handler")
 
-	l, err := k.CreateListener(ctx, owner.ID, CreateListenerRequest{
+	l, err := k.CreateListener(ctx, owner.ID, kernel.CreateListenerRequest{
 		SourceUserID:   source.ID,
 		EventName:      "ping",
 		TargetActionID: a.ID,
@@ -51,7 +52,7 @@ func TestCreateListener(t *testing.T) {
 }
 
 func TestDeleteListener(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
@@ -59,7 +60,7 @@ func TestDeleteListener(t *testing.T) {
 	source := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, owner.ID, "/handler")
 
-	l, _ := k.CreateListener(ctx, owner.ID, CreateListenerRequest{
+	l, _ := k.CreateListener(ctx, owner.ID, kernel.CreateListenerRequest{
 		SourceUserID: source.ID, EventName: "ping",
 		TargetActionID: a.ID,
 	})
@@ -75,7 +76,7 @@ func TestDeleteListener(t *testing.T) {
 // TestEmitQueuesNotFires verifies that EmitEvent creates event records without
 // calling the target action. The action is only called on ConsumeEvent.
 func TestEmitQueuesNotFires(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"fired":true}`})
 	ctx := context.Background()
 
@@ -84,7 +85,7 @@ func TestEmitQueuesNotFires(t *testing.T) {
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
-	l, err := k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+	l, err := k.CreateListener(ctx, alice.ID, kernel.CreateListenerRequest{
 		SourceUserID: bob.ID, EventName: "greet",
 		TargetActionID: a.ID,
 	})
@@ -101,7 +102,7 @@ func TestEmitQueuesNotFires(t *testing.T) {
 	}
 
 	// No transactions should exist yet — emit only queues.
-	txs, _ := st.ListTransactions(ctx, TxFilter{})
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{})
 	if len(txs) != 0 {
 		t.Errorf("expected 0 transactions after emit, got %d (action was fired prematurely)", len(txs))
 	}
@@ -121,7 +122,7 @@ func TestEmitQueuesNotFires(t *testing.T) {
 }
 
 func TestEmitInactiveListenerNotQueued(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
@@ -129,7 +130,7 @@ func TestEmitInactiveListenerNotQueued(t *testing.T) {
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 
-	l, _ := k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+	l, _ := k.CreateListener(ctx, alice.ID, kernel.CreateListenerRequest{
 		SourceUserID: bob.ID, EventName: "greet",
 		TargetActionID: a.ID,
 	})
@@ -143,7 +144,7 @@ func TestEmitInactiveListenerNotQueued(t *testing.T) {
 
 // TestConsumeEventSuccess verifies the full consume path: lock → call → settle.
 func TestConsumeEventSuccess(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
@@ -152,7 +153,7 @@ func TestConsumeEventSuccess(t *testing.T) {
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
-	l, _ := k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+	l, _ := k.CreateListener(ctx, alice.ID, kernel.CreateListenerRequest{
 		SourceUserID: bob.ID, EventName: "greet",
 		TargetActionID: a.ID,
 	})
@@ -191,7 +192,7 @@ func TestConsumeEventSuccess(t *testing.T) {
 
 // TestConsumeEventAlreadyConsumed verifies that a second consume returns ErrInvalidState.
 func TestConsumeEventAlreadyConsumed(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
@@ -199,7 +200,7 @@ func TestConsumeEventAlreadyConsumed(t *testing.T) {
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
-	_, _ = k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+	_, _ = k.CreateListener(ctx, alice.ID, kernel.CreateListenerRequest{
 		SourceUserID: bob.ID, EventName: "x",
 		TargetActionID: a.ID,
 	})
@@ -217,7 +218,7 @@ func TestConsumeEventAlreadyConsumed(t *testing.T) {
 
 // TestConsumeEventUnauthorized verifies non-owners cannot consume.
 func TestConsumeEventUnauthorized(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
@@ -225,7 +226,7 @@ func TestConsumeEventUnauthorized(t *testing.T) {
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
-	_, _ = k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+	_, _ = k.CreateListener(ctx, alice.ID, kernel.CreateListenerRequest{
 		SourceUserID: bob.ID, EventName: "x",
 		TargetActionID: a.ID,
 	})
@@ -239,14 +240,14 @@ func TestConsumeEventUnauthorized(t *testing.T) {
 
 // TestDeleteListenerPurgesEvents verifies pending events are removed when a listener is deleted.
 func TestDeleteListenerPurgesEvents(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
 	alice := setupUser(t, st, "@alice", 500)
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	l, _ := k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+	l, _ := k.CreateListener(ctx, alice.ID, kernel.CreateListenerRequest{
 		SourceUserID: bob.ID, EventName: "x",
 		TargetActionID: a.ID,
 	})
@@ -274,22 +275,41 @@ func TestDeleteListenerPurgesEvents(t *testing.T) {
 // TestResetInFlightEvents verifies that in-flight events (consumed_at set, tx_id null)
 // are reset to pending by ResetInFlightEvents.
 func TestResetInFlightEvents(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
+	// Create a real listener so that the event FK constraint is satisfied.
+	owner := setupUser(t, st, "@rife-owner", 0)
+	source := setupUser(t, st, "@rife-source", 0)
+	a := setupActiveWasmAction(t, st, owner.ID, "/rife-handler")
+	l, err := k.CreateListener(ctx, owner.ID, kernel.CreateListenerRequest{
+		SourceUserID: source.ID, EventName: "rife-evt",
+		TargetActionID: a.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateListener: %v", err)
+	}
+
 	// Create an event directly in the in-flight state.
-	e := &Event{
+	e := &kernel.Event{
 		ID:         uuid.New().String(),
-		ListenerID: "fake-listener",
+		ListenerID: l.ID,
 		ArgsJSON:   json.RawMessage("{}"),
 		CreatedAt:  time.Now().UTC(),
 	}
-	_ = st.CreateEvents(ctx, []*Event{e})
-	_ = st.LockEvent(ctx, e.ID) // sets consumed_at, leaving tx_id nil
+	if err := st.CreateEvents(ctx, []*kernel.Event{e}); err != nil {
+		t.Fatalf("CreateEvents: %v", err)
+	}
+	if err := st.LockEvent(ctx, e.ID); err != nil { // sets consumed_at, leaving tx_id nil
+		t.Fatalf("LockEvent: %v", err)
+	}
 
 	// Verify it's in-flight.
-	got, _ := st.ReadEvent(ctx, e.ID)
+	got, err := st.ReadEvent(ctx, e.ID)
+	if err != nil {
+		t.Fatalf("ReadEvent: %v", err)
+	}
 	if got.ConsumedAt == nil {
 		t.Fatal("event should be in-flight before reset")
 	}
@@ -306,7 +326,7 @@ func TestResetInFlightEvents(t *testing.T) {
 
 // TestEmitEventCausalTraceID verifies the causing_trace_id is stored on the event.
 func TestEmitEventCausalTraceID(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"fired":true}`})
 	ctx := context.Background()
 
@@ -315,7 +335,7 @@ func TestEmitEventCausalTraceID(t *testing.T) {
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
-	_, _ = k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+	_, _ = k.CreateListener(ctx, alice.ID, kernel.CreateListenerRequest{
 		SourceUserID: bob.ID, EventName: "ping",
 		TargetActionID: a.ID,
 	})
@@ -366,7 +386,7 @@ func TestEmitEventCausalTraceID(t *testing.T) {
 // TestEmitDirectCallHasNilCausalID verifies that a direct emit (no causing trace)
 // results in a nil CausedByTraceID on the event and resulting trace.
 func TestEmitDirectCallHasNilCausalID(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"fired":true}`})
 	ctx := context.Background()
 
@@ -374,7 +394,7 @@ func TestEmitDirectCallHasNilCausalID(t *testing.T) {
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
-	_, _ = k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+	_, _ = k.CreateListener(ctx, alice.ID, kernel.CreateListenerRequest{
 		SourceUserID: bob.ID, EventName: "ping",
 		TargetActionID: a.ID,
 	})
@@ -404,7 +424,7 @@ func TestEmitDirectCallHasNilCausalID(t *testing.T) {
 }
 
 func TestPollListenerUnauthorized(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
@@ -412,7 +432,7 @@ func TestPollListenerUnauthorized(t *testing.T) {
 	source := setupUser(t, st, "@bob", 0)
 	stranger := setupUser(t, st, "@carol", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	l, _ := k.CreateListener(ctx, alice.ID, CreateListenerRequest{
+	l, _ := k.CreateListener(ctx, alice.ID, kernel.CreateListenerRequest{
 		SourceUserID: source.ID, EventName: "x",
 		TargetActionID: a.ID,
 	})
@@ -426,19 +446,19 @@ func TestPollListenerUnauthorized(t *testing.T) {
 }
 
 func TestCreateListenerRequiresSourceUser(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@alice", 100)
 	a := setupActiveWasmAction(t, st, owner.ID, "/handler")
 
-	_, err := k.CreateListener(ctx, owner.ID, CreateListenerRequest{
+	_, err := k.CreateListener(ctx, owner.ID, kernel.CreateListenerRequest{
 		SourceUserID:   "",
 		EventName:      "ping",
 		TargetActionID: a.ID,
 	})
-	if !errors.Is(err, ErrInvalidInput) {
+	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for empty SourceUserID, got %v", err)
 	}
 }

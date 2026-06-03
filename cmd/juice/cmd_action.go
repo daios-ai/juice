@@ -199,8 +199,29 @@ func actionListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List actions",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if all {
+				// Owner private view: authenticated, returns owner's own actions including inactive.
+				return withSubject(func(k *kernel.Kernel, subjectID string) error {
+					actions, err := k.ListOwnedActions(context.Background(), subjectID, limit, offset)
+					if err != nil {
+						return err
+					}
+					if flagOutput == "json" {
+						return printJSON(actions)
+					}
+					for _, a := range actions {
+						active := " "
+						if a.Active {
+							active = "*"
+						}
+						fmt.Printf("[%s] %s  %-30s  %d credits\n", active, a.ID[:8], a.Name, a.Price)
+					}
+					return nil
+				})
+			}
+			// Public view: active public actions only.
 			return withKernel(func(k *kernel.Kernel) error {
-				actions, err := k.ListActions(context.Background(), !all, limit, offset)
+				actions, err := k.ListActions(context.Background(), true, limit, offset)
 				if err != nil {
 					return err
 				}
@@ -208,17 +229,13 @@ func actionListCmd() *cobra.Command {
 					return printJSON(actions)
 				}
 				for _, a := range actions {
-					active := " "
-					if a.Active {
-						active = "*"
-					}
-					fmt.Printf("[%s] %s  %-30s  %d credits\n", active, a.ID[:8], a.Name, a.Price)
+					fmt.Printf("  %s  %-30s  %d credits\n", a.ID[:8], a.Name, a.Price)
 				}
 				return nil
 			})
 		},
 	}
-	cmd.Flags().BoolVar(&all, "all", false, "Include inactive actions")
+	cmd.Flags().BoolVar(&all, "all", false, "Include own inactive/private actions (requires auth)")
 	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
 	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
 	return cmd

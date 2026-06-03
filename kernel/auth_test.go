@@ -1,4 +1,4 @@
-package kernel
+package kernel_test
 
 import (
 	"context"
@@ -8,34 +8,36 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/daios-ai/juice/kernel"
 )
 
 func TestHashPassword(t *testing.T) {
-	hash, err := HashPassword("secret")
+	hash, err := kernel.HashPassword("secret")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if hash == "" || hash == "secret" {
 		t.Fatal("expected non-trivial hash")
 	}
-	if !CheckPassword("secret", hash) {
+	if !kernel.CheckPassword("secret", hash) {
 		t.Error("CheckPassword should return true for correct password")
 	}
-	if CheckPassword("wrong", hash) {
+	if kernel.CheckPassword("wrong", hash) {
 		t.Error("CheckPassword should return false for wrong password")
 	}
 }
 
 func TestIssueAndVerifyToken(t *testing.T) {
 	secret := "test-secret"
-	id, err := IssueToken("user-1", secret, "", "", time.Hour)
+	id, err := kernel.IssueToken("user-1", secret, "", "", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if id == "" {
 		t.Fatal("expected non-empty token")
 	}
-	got, err := VerifyToken(id, secret, "", "")
+	got, err := kernel.VerifyToken(id, secret, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,22 +48,22 @@ func TestIssueAndVerifyToken(t *testing.T) {
 
 func TestVerifyTokenExpired(t *testing.T) {
 	secret := "test-secret"
-	tok, err := IssueToken("user-1", secret, "", "", -time.Second) // already expired
+	tok, err := kernel.IssueToken("user-1", secret, "", "", -time.Second) // already expired
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = VerifyToken(tok, secret, "", "")
+	_, err = kernel.VerifyToken(tok, secret, "", "")
 	if err == nil {
 		t.Error("expected error for expired token")
 	}
 }
 
 func TestVerifyTokenWrongSecret(t *testing.T) {
-	tok, err := IssueToken("user-1", "secret-a", "", "", time.Hour)
+	tok, err := kernel.IssueToken("user-1", "secret-a", "", "", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = VerifyToken(tok, "secret-b", "", "")
+	_, err = kernel.VerifyToken(tok, "secret-b", "", "")
 	if err == nil {
 		t.Error("expected error for wrong secret")
 	}
@@ -70,14 +72,14 @@ func TestVerifyTokenWrongSecret(t *testing.T) {
 // ---- PKCE / auth code flow ----
 
 func TestGenerateCodeVerifier(t *testing.T) {
-	v, err := GenerateCodeVerifier()
+	v, err := kernel.GenerateCodeVerifier()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(v) < 40 {
 		t.Errorf("code verifier too short: %q", v)
 	}
-	v2, _ := GenerateCodeVerifier()
+	v2, _ := kernel.GenerateCodeVerifier()
 	if v == v2 {
 		t.Error("code verifiers should be unique")
 	}
@@ -85,24 +87,24 @@ func TestGenerateCodeVerifier(t *testing.T) {
 
 func TestCodeChallenge(t *testing.T) {
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-	challenge := CodeChallenge(verifier)
+	challenge := kernel.CodeChallenge(verifier)
 	if challenge == "" {
 		t.Error("expected non-empty challenge")
 	}
-	if !VerifyCodeChallenge(verifier, challenge) {
+	if !kernel.VerifyCodeChallenge(verifier, challenge) {
 		t.Error("VerifyCodeChallenge should return true for matching pair")
 	}
-	if VerifyCodeChallenge("wrong-verifier", challenge) {
+	if kernel.VerifyCodeChallenge("wrong-verifier", challenge) {
 		t.Error("VerifyCodeChallenge should return false for wrong verifier")
 	}
 }
 
 func TestStartAndExchangeAuthCode(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	u, err := k.CreateUser(ctx, CreateUserRequest{
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle:   "@charlie",
 		Email:    "charlie@example.com",
 		Password: "pw123",
@@ -112,8 +114,8 @@ func TestStartAndExchangeAuthCode(t *testing.T) {
 	}
 	_ = u
 
-	verifier, _ := GenerateCodeVerifier()
-	challenge := CodeChallenge(verifier)
+	verifier, _ := kernel.GenerateCodeVerifier()
+	challenge := kernel.CodeChallenge(verifier)
 
 	redirect, err := k.StartAuthCode(ctx, "@charlie", "pw123", challenge, "http://localhost:9999/cb")
 	if err != nil {
@@ -158,11 +160,11 @@ func TestStartAndExchangeAuthCode(t *testing.T) {
 }
 
 func TestExchangeAuthCodeWrongVerifier(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	_, err := k.CreateUser(ctx, CreateUserRequest{
+	_, err := k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle:   "@dave",
 		Email:    "dave@example.com",
 		Password: "pass",
@@ -171,8 +173,8 @@ func TestExchangeAuthCodeWrongVerifier(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	verifier, _ := GenerateCodeVerifier()
-	challenge := CodeChallenge(verifier)
+	verifier, _ := kernel.GenerateCodeVerifier()
+	challenge := kernel.CodeChallenge(verifier)
 
 	redirect, _ := k.StartAuthCode(ctx, "@dave", "pass", challenge, "")
 	var code string
@@ -190,11 +192,11 @@ func TestExchangeAuthCodeWrongVerifier(t *testing.T) {
 }
 
 func TestRefreshAccessToken(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	_, err := k.CreateUser(ctx, CreateUserRequest{
+	_, err := k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle:   "@eve",
 		Email:    "eve@example.com",
 		Password: "pass",
@@ -229,11 +231,11 @@ func TestRefreshAccessToken(t *testing.T) {
 }
 
 func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	admin, err := k.CreateUser(ctx, CreateUserRequest{
+	admin, err := k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@su", Email: "su@example.com", Password: "su-pass",
 	})
 	if err != nil {
@@ -242,14 +244,14 @@ func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
 	if err := st.SetConfig(ctx, "superuser_handle", "@su"); err != nil {
 		t.Fatal(err)
 	}
-	u, err := k.CreateUser(ctx, CreateUserRequest{
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@suspended-auth", Email: "suspended@example.com", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	verifier, _ := GenerateCodeVerifier()
-	challenge := CodeChallenge(verifier)
+	verifier, _ := kernel.GenerateCodeVerifier()
+	challenge := kernel.CodeChallenge(verifier)
 	redirect, err := k.StartAuthCode(ctx, u.Handle, "pass", challenge, "")
 	if err != nil {
 		t.Fatal(err)
@@ -261,23 +263,23 @@ func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
 	if err := k.SuspendUser(ctx, admin.ID, u.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.StartAuthCode(ctx, u.Handle, "pass", challenge, ""); !errors.Is(err, ErrUnauthenticated) {
+	if _, err := k.StartAuthCode(ctx, u.Handle, "pass", challenge, ""); !errors.Is(err, kernel.ErrUnauthenticated) {
 		t.Fatalf("StartAuthCode: got %v, want ErrUnauthenticated", err)
 	}
 	code := redirect[len("?code="):]
-	if _, _, err := k.ExchangeAuthCode(ctx, code, verifier, ""); !errors.Is(err, ErrUnauthenticated) {
+	if _, _, err := k.ExchangeAuthCode(ctx, code, verifier, ""); !errors.Is(err, kernel.ErrUnauthenticated) {
 		t.Fatalf("ExchangeAuthCode: got %v, want ErrUnauthenticated", err)
 	}
-	if _, _, err := k.RefreshAccessToken(ctx, refresh); !errors.Is(err, ErrUnauthenticated) {
+	if _, _, err := k.RefreshAccessToken(ctx, refresh); !errors.Is(err, kernel.ErrUnauthenticated) {
 		t.Fatalf("RefreshAccessToken: got %v, want ErrUnauthenticated", err)
 	}
-	if _, _, err := k.LoginWithRefresh(ctx, u.Handle, "pass"); !errors.Is(err, ErrUnauthenticated) {
+	if _, _, err := k.LoginWithRefresh(ctx, u.Handle, "pass"); !errors.Is(err, kernel.ErrUnauthenticated) {
 		t.Fatalf("LoginWithRefresh: got %v, want ErrUnauthenticated", err)
 	}
 }
 
 func TestSuspendedSubjectRejectedBySupervisionOps(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
@@ -285,7 +287,7 @@ func TestSuspendedSubjectRejectedBySupervisionOps(t *testing.T) {
 	if err := st.SetConfig(ctx, "superuser_handle", "@su"); err != nil {
 		t.Fatal(err)
 	}
-	k.cfg.SuperuserHandle = "@su"
+	k.SetSuperuserHandle("@su")
 
 	u := setupUser(t, st, "@victim", 1000)
 	now := time.Now().UTC()
@@ -297,16 +299,16 @@ func TestSuspendedSubjectRejectedBySupervisionOps(t *testing.T) {
 	target := setupUser(t, st, "@target", 0)
 
 	// CreateAction: requireSelf rejects suspended subject.
-	_, err := k.CreateAction(ctx, u.ID, CreateActionRequest{
-		OwnerUserID: u.ID, Name: "x", Kind: KindHTTP, Price: 0,
+	_, err := k.CreateAction(ctx, u.ID, kernel.CreateActionRequest{
+		OwnerUserID: u.ID, Name: "x", Kind: kernel.KindHTTP, Price: 0,
 	})
-	if !errors.Is(err, ErrUnauthenticated) {
+	if !errors.Is(err, kernel.ErrUnauthenticated) {
 		t.Errorf("CreateAction: got %v, want ErrUnauthenticated", err)
 	}
 
 	// StartProcess: requireSelf rejects suspended subject.
 	_, _, err = k.StartProcess(ctx, u.ID, u.ID, 0)
-	if !errors.Is(err, ErrUnauthenticated) {
+	if !errors.Is(err, kernel.ErrUnauthenticated) {
 		t.Errorf("StartProcess: got %v, want ErrUnauthenticated", err)
 	}
 
@@ -316,7 +318,7 @@ func TestSuspendedSubjectRejectedBySupervisionOps(t *testing.T) {
 	if err := st.SuspendUser(ctx, su.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := k.SuspendUser(ctx, su.ID, target.ID); !errors.Is(err, ErrUnauthenticated) {
+	if err := k.SuspendUser(ctx, su.ID, target.ID); !errors.Is(err, kernel.ErrUnauthenticated) {
 		t.Errorf("SuspendUser via suspended su: got %v, want ErrUnauthenticated", err)
 	}
 }
@@ -328,13 +330,13 @@ func TestIssueTokenWithIssuerAudience(t *testing.T) {
 	issuer := "https://auth.example.com"
 	audience := "my-api"
 
-	tok, err := IssueToken("user-1", secret, issuer, audience, time.Hour)
+	tok, err := kernel.IssueToken("user-1", secret, issuer, audience, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Correct issuer+audience should verify.
-	got, err := VerifyToken(tok, secret, issuer, audience)
+	got, err := kernel.VerifyToken(tok, secret, issuer, audience)
 	if err != nil {
 		t.Fatalf("VerifyToken with correct iss/aud: %v", err)
 	}
@@ -343,30 +345,30 @@ func TestIssueTokenWithIssuerAudience(t *testing.T) {
 	}
 
 	// Wrong issuer must be rejected.
-	if _, err := VerifyToken(tok, secret, "https://wrong.example.com", audience); err == nil {
+	if _, err := kernel.VerifyToken(tok, secret, "https://wrong.example.com", audience); err == nil {
 		t.Error("expected error for wrong issuer")
 	}
 
 	// Wrong audience must be rejected.
-	if _, err := VerifyToken(tok, secret, issuer, "wrong-api"); err == nil {
+	if _, err := kernel.VerifyToken(tok, secret, issuer, "wrong-api"); err == nil {
 		t.Error("expected error for wrong audience")
 	}
 }
 
 func TestExchangeAuthCodeRedirectURIMismatch(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	_, err := k.CreateUser(ctx, CreateUserRequest{
+	_, err := k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@redir-user", Email: "redir@example.com", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	verifier, _ := GenerateCodeVerifier()
-	challenge := CodeChallenge(verifier)
+	verifier, _ := kernel.GenerateCodeVerifier()
+	challenge := kernel.CodeChallenge(verifier)
 	redirect, err := k.StartAuthCode(ctx, "@redir-user", "pass", challenge, "http://legit.example.com/cb")
 	if err != nil {
 		t.Fatal(err)
@@ -391,7 +393,7 @@ func TestExchangeAuthCodeRedirectURIMismatch(t *testing.T) {
 // TestSuspendedSubjectRejectedByProcessAndListenerOps verifies that the nine
 // supervision methods added in fix 3 enforce the kernel-level suspension check.
 func TestSuspendedSubjectRejectedByProcessAndListenerOps(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
@@ -415,7 +417,7 @@ func TestSuspendedSubjectRejectedByProcessAndListenerOps(t *testing.T) {
 
 	check := func(name string, err error) {
 		t.Helper()
-		if !errors.Is(err, ErrUnauthenticated) {
+		if !errors.Is(err, kernel.ErrUnauthenticated) {
 			t.Errorf("%s: want ErrUnauthenticated for suspended subject, got %v", name, err)
 		}
 	}
@@ -429,7 +431,7 @@ func TestSuspendedSubjectRejectedByProcessAndListenerOps(t *testing.T) {
 	target := setupAction(t, st, other.ID, "tgt", 0)
 	target.Public = true
 	_ = st.UpdateAction(ctx, target)
-	l, err := k.CreateListener(ctx, other.ID, CreateListenerRequest{
+	l, err := k.CreateListener(ctx, other.ID, kernel.CreateListenerRequest{
 		SourceUserID:   other.ID,
 		EventName:      "evt",
 		TargetActionID: target.ID,
@@ -439,7 +441,7 @@ func TestSuspendedSubjectRejectedByProcessAndListenerOps(t *testing.T) {
 	}
 
 	check("CreateListener (suspended)", func() error {
-		_, err := k.CreateListener(ctx, victim.ID, CreateListenerRequest{
+		_, err := k.CreateListener(ctx, victim.ID, kernel.CreateListenerRequest{
 			SourceUserID:   other.ID,
 			EventName:      "evt",
 			TargetActionID: target.ID,
@@ -454,7 +456,7 @@ func TestSuspendedSubjectRejectedByProcessAndListenerOps(t *testing.T) {
 // TestRegisterRemoteKernelRequiresSuperuser verifies that non-superusers cannot
 // register remote peers at the kernel boundary.
 func TestRegisterRemoteKernelRequiresSuperuser(t *testing.T) {
-	st := newFakeStore()
+	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
@@ -466,7 +468,7 @@ func TestRegisterRemoteKernelRequiresSuperuser(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
 	_, err := k.RegisterRemoteKernel(ctx, notSys.ID, "@peer", pubB64, "https://peer.example.com")
-	if !errors.Is(err, ErrUnauthorized) {
+	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("non-superuser RegisterRemoteKernel: want ErrUnauthorized, got %v", err)
 	}
 }

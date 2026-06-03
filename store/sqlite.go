@@ -439,6 +439,27 @@ func (s *DB) ListActions(ctx context.Context, activeOnly bool, limit, offset int
 	return out, rows.Err()
 }
 
+func (s *DB) ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Action, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
+		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
+		 WHERE a.deleted_at IS NULL AND a.owner_user_id=?
+		 ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, ownerID, limit, offset)
+	if err != nil {
+		return nil, dbErr(err, "list actions by owner")
+	}
+	defer rows.Close()
+	var out []*kernel.Action
+	for rows.Next() {
+		a, err := s.scanActionRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.Action, error) {
 	if limit <= 0 {
 		limit = 100

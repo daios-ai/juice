@@ -63,6 +63,10 @@ type TxFilter struct {
 // Store is the persistence interface for all kernel objects.
 // All monetary transitions are executed atomically inside the store.
 // kernel/ must not import any concrete store implementation.
+//
+// The compound methods (StartProcess, BeginCall, CommitCall, CommitFailedCall) are the
+// supported realization of the spec's atomic write sets; they enforce atomicity that
+// individual primitive calls cannot. There is no parallel primitive-transaction API.
 type Store interface {
 	// ---- Users ----
 
@@ -86,6 +90,9 @@ type Store interface {
 	UpdateAction(ctx context.Context, a *Action) error
 	DeleteAction(ctx context.Context, id string) error
 	ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*Action, error)
+	// ListActionsByOwner returns all non-deleted actions owned by ownerID, including
+	// inactive and private ones. Used to give an owner their full private view.
+	ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Action, error)
 	ListAllActions(ctx context.Context, limit, offset int) ([]*Action, error)
 
 	// UpdateActionEmbedding stores a pre-computed embedding vector for an action's description.

@@ -83,6 +83,11 @@ func (k *Kernel) SetSigningKey(priv ed25519.PrivateKey, issuerUserID, superuserH
 	k.cfg.SuperuserHandle = superuserHandle
 }
 
+// SetSuperuserHandle updates the in-memory superuser handle. Used in tests.
+func (k *Kernel) SetSuperuserHandle(handle string) {
+	k.cfg.SuperuserHandle = handle
+}
+
 // SetTokenSecret updates the JWT HMAC secret after bootstrap completes.
 func (k *Kernel) SetTokenSecret(secret string) {
 	k.cfg.TokenSecret = secret
@@ -519,6 +524,12 @@ func (k *Kernel) ReadActionByOwnerName(ctx context.Context, ownerID, name string
 // ListActions returns public actions. With activeOnly set it returns public active actions.
 func (k *Kernel) ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*Action, error) {
 	return k.store.ListActions(ctx, activeOnly, limit, offset)
+}
+
+// ListOwnedActions returns all non-deleted actions owned by ownerID, including inactive
+// and private ones. Intended for authenticated owner list views.
+func (k *Kernel) ListOwnedActions(ctx context.Context, ownerID string, limit, offset int) ([]*Action, error) {
+	return k.store.ListActionsByOwner(ctx, ownerID, limit, offset)
 }
 
 // ListAllActions returns all actions regardless of active state.
@@ -2468,6 +2479,25 @@ func (k *Kernel) UnimportRemoteAction(ctx context.Context, subjectID, remoteHand
 	}
 	k.log.With(ctx).Info("action.unimported_remote", "action_id", a.ID, "name", a.Name)
 	return a, nil
+}
+
+// ReconcileRemoteAction applies the remote-import policy for a single action.
+// When manifest is nil (manifest endpoint non-200 or action gone), the local proxy is
+// deactivated and stats are reset. When manifest is non-nil, ImportRemoteAction runs.
+func (k *Kernel) ReconcileRemoteAction(ctx context.Context, subjectID, remoteHandle, actionName string, manifest *ActionManifest) (*ImportResult, error) {
+	if manifest == nil {
+		a, err := k.UnimportRemoteAction(ctx, subjectID, remoteHandle, actionName)
+		if err != nil {
+			return nil, err
+		}
+		_ = k.ResetActionStats(ctx, a.ID)
+		return &ImportResult{}, nil
+	}
+	remoteUser, err := k.store.ReadUserByHandle(ctx, remoteHandle)
+	if err != nil {
+		return nil, ErrNotFound.Wrapf("remote kernel %q not found", remoteHandle)
+	}
+	return k.ImportRemoteAction(ctx, subjectID, remoteUser.ID, *manifest)
 }
 
 // GetActionManifest returns a signed manifest for a public active action.

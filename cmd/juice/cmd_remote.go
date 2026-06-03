@@ -175,12 +175,13 @@ func runRemoteImport(remoteHandle, actionName string) error {
 			}
 		}
 		if actionID == "" {
-			if a, unimportErr := k.UnimportRemoteAction(ctx, subjectID, remoteHandle, actionName); unimportErr == nil {
-				_ = k.ResetActionStats(ctx, a.ID)
-				fmt.Printf("Remote action %q no longer available; deactivated local proxy %s\n", actionName, a.Name)
-				return nil
+			result, err := k.ReconcileRemoteAction(ctx, subjectID, remoteHandle, actionName, nil)
+			if err != nil {
+				return fmt.Errorf("action %q not found on remote kernel %q and no local proxy to deactivate: %w", actionName, remoteHandle, err)
 			}
-			return fmt.Errorf("action %q not found on remote kernel %q", actionName, remoteHandle)
+			_ = result
+			fmt.Printf("Remote action %q no longer available; deactivated local proxy\n", actionName)
+			return nil
 		}
 
 		manifestReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
@@ -194,9 +195,18 @@ func runRemoteImport(remoteHandle, actionName string) error {
 		}
 		defer resp2.Body.Close()
 		body2, _ := io.ReadAll(resp2.Body)
+
+		// Non-200 means the action lost active/public state; deactivate local proxy.
 		if resp2.StatusCode != http.StatusOK {
-			return fmt.Errorf("remote kernel returned %d: %s", resp2.StatusCode, body2)
+			result, reconcileErr := k.ReconcileRemoteAction(ctx, subjectID, remoteHandle, actionName, nil)
+			if reconcileErr != nil {
+				return fmt.Errorf("manifest unavailable (status %d) and could not deactivate local proxy: %w", resp2.StatusCode, reconcileErr)
+			}
+			_ = result
+			fmt.Printf("Remote action %q manifest unavailable (status %d); deactivated local proxy\n", actionName, resp2.StatusCode)
+			return nil
 		}
+
 		var m kernel.ActionManifest
 		if err := json.Unmarshal(body2, &m); err != nil {
 			return fmt.Errorf("parse manifest: %w", err)
@@ -205,7 +215,7 @@ func runRemoteImport(remoteHandle, actionName string) error {
 			return fmt.Errorf("manifest signature invalid: %w", err)
 		}
 
-		result, err := k.ImportRemoteAction(ctx, subjectID, remoteUser.ID, m)
+		result, err := k.ReconcileRemoteAction(ctx, subjectID, remoteHandle, actionName, &m)
 		if err != nil {
 			return fmt.Errorf("import action: %w", err)
 		}
