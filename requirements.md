@@ -553,7 +553,7 @@ juice listener show                       juice listener delete
 juice event emit                          juice event list
 juice event consume
 juice tx list                             juice tx show
-juice tx rate                             juice lookup
+juice tx rate
 juice health
 juice admin user list                     juice admin user show
 juice admin user suspend                  juice admin user unsuspend
@@ -576,7 +576,7 @@ juice action unimport --openapi <spec-url> --name <action-name>
 
 The HTTP API is primary. Every exposed endpoint has a corresponding CLI command. The server uses the shared kernel layer, propagates request, subject, process, trace, action, and transaction IDs into logs where available, maps authentication failure, authorization failure, invalid input, insufficient funds, missing resource, and internal failure to distinct HTTP statuses, and rate-limits authentication and account-creation endpoints per IP with HTTP `429` on excess.
 
-Action read and list responses include a computed `action` field of the form `@owner/name` alongside the resource `id`, so that lookup results and list output can be used directly in call requests without a separate resolution step. `juice lookup` does not require `--process`; the CLI creates and ends a zero-funded ephemeral process internally.
+Action read and list responses include a computed `action` field of the form `@owner/name` alongside the resource `id`, so that lookup results and list output can be used directly in call requests without a separate resolution step.
 
 Admin operations are CLI-only: do not register `/v1/admin/*` routes. They authenticate the caller, reject a non-superuser with `ErrUnauthorized`, require `@sys`, stay outside `Call()`, and include user list/show/suspend/unsuspend/deposit, action list/disable, process list, and transaction list.
 
@@ -613,7 +613,7 @@ Required endpoint behavior:
 
 ## 14. Logging and configuration
 
-Log structured records to terminal and file simultaneously. Format (`text` or `JSON`), file path, and level are configurable. Every kernel transition logs start and end; errors include stable codes; script logs include trace ID.
+Log structured records to stderr and optionally to a file simultaneously. Diagnostic output (logs, progress, errors) must never go to stdout; stdout is reserved for resource payloads only. Format (`text` or `JSON`), file path, and level are configurable. Every kernel transition logs start and end; errors include stable codes; script logs include trace ID.
 
 Required fields:
 

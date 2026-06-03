@@ -68,6 +68,9 @@ Any CLI flag that accepts a JSON value also accepts `@path/to/file.json`. The `@
 **C12 — Emit source is always the authenticated subject.**  
 `POST /v1/events/emit` does not accept a `source_user_id` field. The event source is set from the authenticated caller. The server ignores any `source_user_id` in the request body.
 
+**C13 — Diagnostic output goes to stderr; resource data goes to stdout.**  
+Log lines, progress messages, and error text go to stderr. The only content written to stdout is the resource payload: human-readable summaries, `--output json` bodies, and `--quiet` IDs. This makes every command pipeable and keeps `$(juice ... --quiet)` capture reliable.
+
 ---
 
 ## Operation Reference
@@ -168,13 +171,9 @@ Deleting a listener also purges all pending events for that listener.
 
 The event source is always the authenticated caller. `source_user_id` is not an input field.
 
-### Lookup
+### System Actions
 
-| Operation | HTTP | CLI |
-|-----------|------|-----|
-| Lookup actions | `POST /v1/call` to `@sys/lookup` (price 0) | `juice lookup --query [--limit]` |
-
-The CLI manages the ephemeral process internally. Requires an Ollama embedding service.
+`@sys/lookup` and `@sys/llm-chat` are native actions registered at bootstrap. They are public, price 0, and callable through `juice call` like any other action. No dedicated CLI command exists for them; no special process handling is applied.
 
 ### Remote Kernels
 

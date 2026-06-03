@@ -78,7 +78,6 @@ Requires Go 1.25+.
 | `juice process end` | Close a process and return remaining funds |
 | `juice call` | Call an action within a process |
 | `juice tx list / show` | View transactions |
-| `juice lookup` | Semantic action search (requires Ollama) |
 | `juice listener create / delete` | Register and remove event listeners |
 | `juice listener list / show` | List and inspect listeners |
 | `juice event emit` | Emit a named event |
@@ -145,7 +144,7 @@ All routes except `POST /v1/auth/token`, `POST /v1/auth/authorize`, and `POST /v
 | `JUICE_FEE_RECIPIENT` | — | User ID that receives platform fees |
 | `JUICE_FEE_BPS` | `2000` | Fee in basis points (2000 = 20%) |
 | `JUICE_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
-| `JUICE_LOG_FILE` | — | JSON log file path (stdout only if unset) |
+| `JUICE_LOG_FILE` | — | JSON log file path (stderr only if unset) |
 | `JUICE_OLLAMA_URL` | — | Ollama base URL for semantic lookup |
 | `JUICE_OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model name |
 
