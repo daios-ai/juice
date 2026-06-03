@@ -1,6 +1,6 @@
 # Juice Action Make — Specification
 
-**Version:** 0.2
+**Version:** 0.3
 **Status:** design requirement
 
 ## 1. Scope
@@ -19,7 +19,7 @@ Generated WASM actions are written in TinyGo. Standard Go (`GOOS=wasip1 GOARCH=w
 
 ### 2.2 SDK
 
-The Juice WASM SDK is a single TinyGo source file stored at `script/tinygosdk/sdk.go`. It is embedded into the `script` package as a `string` constant (`TinyGoSDK`) and prepended to every generated action's source before compilation. Its complete public surface:
+The Juice WASM SDK is a single TinyGo source file stored at `script/tinygosdk/sdk.tmpl`. It is embedded into the `script` package via `//go:embed` as a `string` constant (`TinyGoSDK`) and prepended to every generated action's source before compilation. The `.tmpl` extension reflects that the SDK is input text for an external compiler, not production Go for this kernel; a `.go` file in a subdirectory would create a new package and violate the package constraint in CLAUDE.md. Its complete public surface:
 
 ```go
 // Host imports — declared; implementations provided by the kernel.
@@ -55,7 +55,7 @@ func run(inputPtr, inputLen uint32) (uint32, uint32)
 
 `run` receives the input JSON via linear memory and returns the output JSON via the same mechanism. The SDK handles memory layout; generated code calls `JuiceCall`, `JuiceEmit`, and `JuiceLog` and never touches memory pointers directly.
 
-`script/tinygosdk/sdk.go` is a production source file and must have a corresponding `sdk_test.go` verifying that it compiles to a valid WASM module with the correct exports and no disallowed imports.
+The Go file in `package script` that embeds `sdk.tmpl` must have a test verifying that the embedded SDK compiles to a valid WASM module with the correct exports and no disallowed imports.
 
 ## 3. Script package additions
 
@@ -80,7 +80,7 @@ The implementation in `script` invokes `tinygo build -target wasm` in a subproce
 
 ### 3.1 Source type detection and WASM cache
 
-`action.Source` stores TinyGo source for synthesized actions, not compiled WASM bytes. This preserves the existing "authorized users may inspect script source" requirement and keeps the data model consistent: `Source` is always human-readable source code.
+`action.Source` stores TinyGo source for synthesized actions. Existing actions may store compiled WASM bytes in `action.Source`; the magic-byte test (`\x00asm` at offset 0) is the only distinction between the two representations. Synthesized actions store TinyGo source because it is inspectable and re-compilable; WASM bytes in `action.Source` remain valid and are passed directly to `ScriptExecutor.Compile` as before.
 
 All paths that currently call `k.scripts.Compile(ctx, []byte(action.Source))` — `CreateAction`, `SetActive`, and `executeWasm` — first check whether the source is already compiled WASM by testing for the WASM magic bytes (`\x00asm` at offset 0). If the source starts with the magic bytes, it is passed directly to `ScriptExecutor.Compile` as before. If not, `k.compiler.CompileSource` is called first to produce WASM bytes, which are then passed to `ScriptExecutor.Compile`.
 
@@ -92,10 +92,10 @@ wasmCache map[string][]byte  // keyed by SHA-256(TinyGo source)
 
 On a cache hit, the cached WASM bytes are passed directly to `ScriptExecutor.Compile` (which has its own wazero module cache keyed by artifact hash). On a cache miss — after a process restart — the TinyGo source is recompiled and the result is stored. The per-action recompilation cost is bounded by `CompileTimeoutMS` and is expected to be rare.
 
-A free function `ListImports` enumerates the `(module, name)` import pairs from a WASM binary without executing it, using wazero's module decoder:
+A free function `InspectModule` enumerates both the `(module, name)` import pairs and the exported names from a WASM binary without executing it, using wazero's module decoder:
 
 ```go
-func ListImports(artifact []byte) ([]ImportedFunc, error)
+func InspectModule(artifact []byte) (imports []ImportedFunc, exports []string, err error)
 
 type ImportedFunc struct{ Module, Name string }
 ```
@@ -104,7 +104,7 @@ type ImportedFunc struct{ Module, Name string }
 
 The context document is a UTF-8 plain-text string constructed at each LLM call so it reflects the current action catalog. It contains, in order:
 
-1. The complete text of `sdk.go`.
+1. The complete text of `TinyGoSDK` (the embedded `sdk.tmpl` content).
 2. A fixed prose section (one sentence each) describing: the `@owner/name` call convention; the JSON I/O contract over linear memory; what `juice.call`, `juice.emit`, and `juice.log` do semantically.
 3. An explicit dynamic dispatch pattern showing how to call `@sys/lookup` at runtime and use the result to invoke a sub-action:
 
@@ -157,7 +157,7 @@ Validation rules:
 - `description` is non-empty.
 - `input_schema` passes `kernel.ValidateSchema`.
 - `output_schema` passes `kernel.ValidateSchema`.
-- For each entry in `dependencies`: `query` is non-empty and `k.Lookup(query)` returns at least one result with `score >= JUICE_MAKE_LOOKUP_THRESHOLD` (default 0.7), or the entry is explicitly marked `"inline": true`.
+- For each entry in `dependencies`: `query` is non-empty. Stage 2 determines inline-vs-dynamic by running `k.Lookup(query)` and comparing the top score against `JUICE_MAKE_LOOKUP_THRESHOLD` (default 0.7); no explicit `inline` flag is needed in `MakeSpec`.
 - `price` is non-negative.
 
 Validation failure returns `ErrInvalidInput`. No retry is attempted at this stage.
@@ -187,13 +187,13 @@ Staging the pipeline across multiple native actions would require the caller to 
 
 ### 6.1 Subject ID threading
 
-`Call()` sets the subject ID in the context before dispatching to `executeNative`, using an unexported context key:
+`executeNative` takes an explicit `subjectID` parameter:
 
 ```go
-ctx = withMakeSubject(ctx, req.SubjectID)
+func (k *Kernel) executeNative(ctx context.Context, subjectID string, action *Action, args map[string]any) (map[string]any, error)
 ```
 
-`executeMake` retrieves it with `makeSubjectFromCtx(ctx)`. This avoids changing the signature of `executeNative` or the other dispatch cases.
+`Call()` passes `req.SubjectID` at the dispatch site. `executeMake` receives `subjectID` as a parameter and uses it directly, keeping identity explicit and testable without ambient context state.
 
 ### 6.2 Pipeline stages
 
@@ -207,7 +207,7 @@ For each entry in `spec.dependencies`, call `k.Lookup()` with `entry.query`. If 
 
 **Stage 3 — Code generation**
 
-Build the context document, appending the `MakeSpec` and the composition plan. Call `k.chatter.Chat()` instructing the model to produce a single TinyGo file that imports the SDK and exports `run`. For each "dynamic call" dependency, the generated code must use the `@sys/lookup` dispatch pattern from the context document with the dependency's `query` string. Extract the first Go code block from the response. Prepend `sdk.go` to produce the full source.
+Build the context document, appending the `MakeSpec` and the composition plan. Call `k.chatter.Chat()` instructing the model to produce a single TinyGo file that imports the SDK and exports `run`. For each "dynamic call" dependency, the generated code must use the `@sys/lookup` dispatch pattern from the context document with the dependency's `query` string. Extract the first Go code block from the response. Prepend `TinyGoSDK` to produce the full source.
 
 **Stage 4 — Compilation**
 
@@ -215,7 +215,7 @@ Call `k.compiler.CompileSource()`. On failure, retry once: append the compiler e
 
 **Stage 5 — Static checks**
 
-Call `script.ListImports()` on the compiled artifact. The check passes iff:
+Call `script.InspectModule()` on the compiled artifact. The check passes iff:
 
 - `imports(artifact) ⊆ {(juice, call), (juice, emit), (juice, log)}`
 - `exports(artifact) ⊇ {alloc, run}`
@@ -257,7 +257,7 @@ Start a test process: `k.StartProcess(ctx, callerID, callerID, 0)`. For each tes
 
 Close the test process with `k.EndProcess()` regardless of outcome; unused credits return to the caller.
 
-If any test case fails: `k.SetActive(ctx, sysUserID, actionID, false)`, return `ErrExecutionFailed` with the failing case.
+If any test case fails: `k.SetActive(ctx, sysUserID, actionID, false)`, return `ErrExecutionFailed` with the failing case. By the contractor model (§5.5 of requirements.md), sub-call costs settled during the dry run are not reversed on failure; those funds have already been committed to the sub-action owners.
 
 If all tests pass: call `k.UpdateAction(ctx, sysUserID, {ID: actionID, Price: &spec.price})`, which sets the final price and deactivates the action per existing kernel behavior. Then call `k.SetActive(ctx, sysUserID, actionID, true)` to reactivate. Return `action_id`, `action_ref`, the transaction ID of the first successful test call, and the `MakeSpec`.
 
@@ -273,7 +273,7 @@ The `Kernel` constructor gains an optional `compiler SourceCompiler` parameter. 
 SDK compiles to WASM with correct exports {alloc, run} and no disallowed imports
 CompileSource returns ErrInvalidInput on TinyGo syntax error
 CompileSource returns ErrInvalidState when tinygo binary is absent
-ListImports returns correct (module, name) pairs for a known artifact
+InspectModule returns correct imports and exports for a known artifact
 Static check rejects artifact with imports outside {juice.call, juice.emit, juice.log}
 Static check rejects artifact missing run export
 Static check rejects artifact missing alloc export
@@ -282,7 +282,7 @@ Magic-byte detection routes TinyGo source through SourceCompiler then ScriptExec
 WASM cache hit avoids invoking SourceCompiler a second time for the same TinyGo source
 MakeSpec validation rejects empty name
 MakeSpec validation rejects invalid input_schema
-MakeSpec validation rejects dependency query with no lookup result above threshold
+MakeSpec validation rejects dependency with empty query
 MakeSpec validation rejects negative price
 Stage 1 produces valid MakeSpec from FakeChatter returning a known JSON block
 Stage 2 marks dependency as inline when lookup score is below threshold
