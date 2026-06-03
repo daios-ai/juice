@@ -338,7 +338,7 @@ ScriptAuthority ⊆ KernelAuthority(trace, process, subject)
 
 ### 7.2 Local language services
 
-`llm` exposes replaceable interfaces; concrete adapters call Ollama. The kernel must not import Ollama adapters. Model names are configurable; default chat model: `gemma4:26b`.
+`llm` exposes replaceable interfaces; concrete adapters call Ollama. The kernel must not import Ollama adapters. Model names and URL are configurable; defaults: URL `http://localhost:11434`, chat model `gemma4:26b`, embedding model `nomic-embed-text`.
 
 ```text
 Embed(ctx, text) -> vector
