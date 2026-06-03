@@ -459,6 +459,7 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID string) erro
 	if err := k.store.UpdateAction(ctx, a); err != nil {
 		return err
 	}
+	k.storeEmbedding(ctx, actionID, a.Description)
 	k.log.With(ctx).Info("action.native_enabled", "action_id", actionID)
 	return nil
 }
@@ -737,6 +738,9 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 	if err := k.store.UpdateAction(ctx, a); err != nil {
 		return nil, err
 	}
+	if req.Description != nil {
+		k.storeEmbedding(ctx, a.ID, a.Description)
+	}
 	k.log.With(ctx).Info("action.updated", "action_id", a.ID, "status", "success")
 	return a, nil
 }
@@ -815,6 +819,9 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 	a.UpdatedAt = time.Now().UTC()
 	if err := k.store.UpdateAction(ctx, a); err != nil {
 		return err
+	}
+	if active {
+		k.storeEmbedding(ctx, actionID, a.Description)
 	}
 	event := "action.disabled"
 	if active {
@@ -1133,9 +1140,8 @@ type LookupResult struct {
 }
 
 // Lookup returns active actions ranked by semantic similarity to the query.
-// Embeddings are computed at query time over all active actions, so every active
-// action with a non-empty description is eligible regardless of prior history.
-// Returns ErrInvalidState if no embedder is configured.
+// Embeddings are pre-stored at activation time; only actions with a stored vector
+// are ranked. Returns ErrInvalidState if no embedder is configured.
 func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult, error) {
 	if k.llm == nil {
 		return nil, ErrInvalidState.Wrap("lookup requires an embedding service")
@@ -1150,62 +1156,72 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		limit = 10
 	}
 
-	actions, err := k.store.ListActions(ctx, true, 200, 0)
+	embeddings, err := k.store.ListEmbeddings(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	type scored struct {
-		a     *Action
-		score float32
+	type candidate struct {
+		actionID string
+		score    float32
 	}
-	results := make([]scored, 0, len(actions))
-	for _, a := range actions {
-		if a.Description == "" {
-			continue
-		}
-		vec, err := k.llm.Embed(ctx, a.Description)
-		if err != nil {
-			k.log.With(ctx).Warn("lookup.embed_failed", "action_id", a.ID, "error", err.Error())
-			continue
-		}
-		sim := cosine(qvec, vec)
-		// Combine semantic similarity with quality: score = sim * (0.5 + 0.5 * successRate)
-		// An action with no call history gets 0.5 weight; perfect success gets full weight.
+	scored := make([]candidate, 0, len(embeddings))
+	for actionID, vec := range embeddings {
+		scored = append(scored, candidate{actionID: actionID, score: cosine(qvec, vec)})
+	}
+
+	// Sort by cosine similarity and oversample for quality re-ranking.
+	sort.Slice(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
+	oversub := limit * 10
+	if oversub > len(scored) {
+		oversub = len(scored)
+	}
+	scored = scored[:oversub]
+
+	// Apply quality factor (success rate) to the oversampled candidates.
+	for i := range scored {
 		quality := float32(0.5)
-		if stats, _ := k.store.ReadStats(ctx, a.ID); stats != nil && stats.Uses > 0 {
+		if stats, _ := k.store.ReadStats(ctx, scored[i].actionID); stats != nil && stats.Uses > 0 {
 			quality = float32(0.5 + 0.5*float64(stats.Successes)/float64(stats.Uses))
 		}
-		results = append(results, scored{a: a, score: sim * quality})
+		scored[i].score *= quality
 	}
 
-	// Simple insertion sort — adequate for small catalogs in milestone 1.
-	for i := 1; i < len(results); i++ {
-		for j := i; j > 0 && results[j].score > results[j-1].score; j-- {
-			results[j], results[j-1] = results[j-1], results[j]
-		}
+	sort.Slice(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
+	if len(scored) > limit {
+		scored = scored[:limit]
 	}
 
-	out := make([]*LookupResult, 0, limit)
-	for i, r := range results {
-		if i >= limit {
-			break
-		}
-		out = append(out, &LookupResult{Action: r.a, Score: r.score})
-	}
-
-	// Resolve owner handles; cache to avoid redundant store reads.
+	out := make([]*LookupResult, 0, len(scored))
 	ownerHandles := make(map[string]string)
-	for _, r := range out {
-		if _, cached := ownerHandles[r.Action.OwnerUserID]; !cached {
-			if u, err := k.store.ReadUser(ctx, r.Action.OwnerUserID); err == nil {
-				ownerHandles[r.Action.OwnerUserID] = u.Handle
+	for _, c := range scored {
+		a, err := k.store.ReadAction(ctx, c.actionID)
+		if err != nil {
+			continue
+		}
+		if _, cached := ownerHandles[a.OwnerUserID]; !cached {
+			if u, err := k.store.ReadUser(ctx, a.OwnerUserID); err == nil {
+				ownerHandles[a.OwnerUserID] = u.Handle
 			}
 		}
-		r.OwnerHandle = ownerHandles[r.Action.OwnerUserID]
+		out = append(out, &LookupResult{Action: a, OwnerHandle: ownerHandles[a.OwnerUserID], Score: c.score})
 	}
-
 	return out, nil
+}
+
+// storeEmbedding embeds the description and persists the vector. Best-effort: logs on failure, never returns an error.
+func (k *Kernel) storeEmbedding(ctx context.Context, actionID, description string) {
+	if k.llm == nil || strings.TrimSpace(description) == "" {
+		return
+	}
+	vec, err := k.llm.Embed(ctx, description)
+	if err != nil {
+		k.log.With(ctx).Warn("lookup.embed_failed", "action_id", actionID, "error", err.Error())
+		return
+	}
+	if err := k.store.UpsertEmbedding(ctx, actionID, vec); err != nil {
+		k.log.With(ctx).Warn("lookup.embed_store_failed", "action_id", actionID, "error", err.Error())
+	}
 }
 
 func cosine(a, b []float32) float32 {

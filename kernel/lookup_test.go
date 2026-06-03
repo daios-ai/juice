@@ -56,6 +56,8 @@ func TestLookupRanking(t *testing.T) {
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)
+		vec, _ := emb.Embed(ctx, desc.text)
+		_ = st.UpsertEmbedding(ctx, a.ID, vec)
 	}
 
 	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "weather forecast", Limit: 10})
@@ -83,7 +85,8 @@ func TestLookupRanking(t *testing.T) {
 
 func TestLookupRankingWithStats(t *testing.T) {
 	st := newTestStore(t)
-	k := newTestKernelWithEmbedder(st, &fakeEmbedder{})
+	emb := &fakeEmbedder{}
+	k := newTestKernelWithEmbedder(st, emb)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@alice", 0)
@@ -96,6 +99,8 @@ func TestLookupRankingWithStats(t *testing.T) {
 		}
 		_ = st.CreateAction(ctx, a)
 		ids[name] = a.ID
+		vec, _ := emb.Embed(ctx, a.Description)
+		_ = st.UpsertEmbedding(ctx, a.ID, vec)
 	}
 	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/reliable"], Uses: 10, Successes: 10, LastUsedAt: time.Now()})
 	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/unreliable"], Uses: 10, Successes: 2, LastUsedAt: time.Now()})
@@ -138,5 +143,47 @@ func TestLookupInactiveActionsExcluded(t *testing.T) {
 		if r.Action.Name == "/hidden" {
 			t.Error("inactive action should not appear in lookup results")
 		}
+	}
+}
+
+func TestLookupEmbeddingStoredOnActivate(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithEmbedder(st, &fakeEmbedder{})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@alice", 0)
+	sys := setupUser(t, st, "@sys", 0)
+	_ = sys
+
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/svc",
+		Kind: kernel.KindHTTP, Active: false, Public: true,
+		Description: "unique service description for lookup",
+		Source:      "https://example.com/api",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string", "description": "query"}}},
+		OutputSchema: map[string]any{"type": "object", "properties": map[string]any{"r": map[string]any{"type": "string", "description": "result"}}},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	// Activate via kernel so storeEmbedding is called.
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "unique service", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range results {
+		if r.Action.ID == a.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("activated action should appear in lookup results via stored embedding")
 	}
 }

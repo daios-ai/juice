@@ -1731,6 +1731,40 @@ func (s *DB) CreateDeposit(ctx context.Context, d *kernel.Deposit) error {
 	return dbErr(tx.Commit(), "deposit: commit")
 }
 
+// ---- Embeddings ----
+
+func (s *DB) UpsertEmbedding(ctx context.Context, actionID string, vec []float32) error {
+	data, err := json.Marshal(vec)
+	if err != nil {
+		return dbErr(err, "upsert embedding: marshal")
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE actions SET embed_vec=? WHERE id=?`, string(data), actionID)
+	return dbErr(err, "upsert embedding")
+}
+
+func (s *DB) ListEmbeddings(ctx context.Context) (map[string][]float32, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, embed_vec FROM actions
+		 WHERE active=1 AND public=1 AND deleted_at IS NULL AND embed_vec IS NOT NULL`)
+	if err != nil {
+		return nil, dbErr(err, "list embeddings")
+	}
+	defer rows.Close()
+	out := make(map[string][]float32)
+	for rows.Next() {
+		var id, vecJSON string
+		if err := rows.Scan(&id, &vecJSON); err != nil {
+			return nil, dbErr(err, "list embeddings: scan")
+		}
+		var vec []float32
+		if err := json.Unmarshal([]byte(vecJSON), &vec); err != nil {
+			continue // corrupt entry; skip silently
+		}
+		out[id] = vec
+	}
+	return out, rows.Err()
+}
+
 // ---- helpers ----
 
 func boolInt(b bool) int {

@@ -1577,6 +1577,57 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	}
 }
 
+func TestUpsertAndListEmbeddings(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@owner-emb", 0)
+	_ = db.CreateUser(ctx, owner)
+
+	active := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/active",
+		Kind: kernel.KindHTTP, Active: true, Public: true,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	inactive := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/inactive",
+		Kind: kernel.KindHTTP, Active: false, Public: true,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = db.CreateAction(ctx, active)
+	_ = db.CreateAction(ctx, inactive)
+
+	vec := []float32{0.1, 0.2, 0.3}
+	if err := db.UpsertEmbedding(ctx, active.ID, vec); err != nil {
+		t.Fatalf("UpsertEmbedding active: %v", err)
+	}
+	if err := db.UpsertEmbedding(ctx, inactive.ID, vec); err != nil {
+		t.Fatalf("UpsertEmbedding inactive: %v", err)
+	}
+
+	embeddings, err := db.ListEmbeddings(ctx)
+	if err != nil {
+		t.Fatalf("ListEmbeddings: %v", err)
+	}
+	if _, ok := embeddings[active.ID]; !ok {
+		t.Error("active action embedding missing from ListEmbeddings")
+	}
+	if _, ok := embeddings[inactive.ID]; ok {
+		t.Error("inactive action embedding must not appear in ListEmbeddings")
+	}
+
+	// UpsertEmbedding is idempotent.
+	vec2 := []float32{0.4, 0.5, 0.6}
+	if err := db.UpsertEmbedding(ctx, active.ID, vec2); err != nil {
+		t.Fatalf("UpsertEmbedding overwrite: %v", err)
+	}
+	embeddings, _ = db.ListEmbeddings(ctx)
+	got := embeddings[active.ID]
+	if len(got) != len(vec2) || got[0] != vec2[0] {
+		t.Errorf("UpsertEmbedding overwrite: got %v, want %v", got, vec2)
+	}
+}
+
 // ---- Test-only store helpers ----
 // These low-level helpers exist only in test builds to keep test setup simple.
 // Production code uses the higher-level atomic methods (CommitCall, CommitFailedCall, etc.).

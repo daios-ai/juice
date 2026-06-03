@@ -237,4 +237,12 @@ type Store interface {
 	// ---- Deposits ----
 
 	CreateDeposit(ctx context.Context, d *Deposit) error
+
+	// ---- Embeddings ----
+
+	// UpsertEmbedding stores a pre-computed embedding vector for an action.
+	UpsertEmbedding(ctx context.Context, actionID string, vec []float32) error
+	// ListEmbeddings returns stored embedding vectors keyed by action ID,
+	// filtered to active, public, non-deleted actions only.
+	ListEmbeddings(ctx context.Context) (map[string][]float32, error)
 }
