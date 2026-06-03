@@ -1049,6 +1049,10 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	if subjectID != tx.OwnerUserID {
 		return nil, ErrUnauthorized.Wrap("only the direct buyer may rate a transaction")
 	}
+	// A subject may not rate its own output.
+	if subjectID == tx.TargetUserID {
+		return nil, ErrUnauthorized.Wrap("subject may not rate its own output")
+	}
 	// Check for duplicate rating (transaction already has a rating record).
 	if existing, _ := k.store.ReadRatingByTxID(ctx, txID); existing != nil {
 		return nil, ErrInvalidInput.Wrap("transaction already rated")
@@ -2296,13 +2300,15 @@ func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specUR
 
 // ---- Federation import (refactored to use reconcileImport) ----
 
-// remoteActionContentHash returns a hex-encoded SHA-256 of the contract fields that
-// determine whether a remote action has changed. Using a content hash (rather than the
-// manifest signature) means key rotation on the remote side does not trigger spurious updates.
-func remoteActionContentHash(m ActionManifest) string {
+// remoteManifestHash returns the manifest hash for a remote_proxy action: a hex-encoded
+// SHA-256 over the manifest contract fields defined in §12.2 (description, input/output
+// schemas, price, kind, artifact_hash, and execution identity: action_id, name,
+// owner_handle). Stats and updated_at are excluded because they are not contract fields.
+func remoteManifestHash(m ActionManifest) string {
 	inputJSON, _ := CanonicalJSON(m.InputSchema)
 	outputJSON, _ := CanonicalJSON(m.OutputSchema)
 	payload, _ := CanonicalJSON(map[string]any{
+		"action_id":     m.ActionID,
 		"artifact_hash": m.ArtifactHash,
 		"description":   m.Description,
 		"input_schema":  string(inputJSON),
@@ -2353,7 +2359,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, remoteUserID string, m 
 		existingByKey[m.ActionID] = existing
 	}
 
-	contentHash := remoteActionContentHash(m)
+	contentHash := remoteManifestHash(m)
 	name := m.Name
 	incoming := []incomingOp{{
 		key:  m.ActionID,

@@ -131,6 +131,9 @@ func validateValue(schema map[string]any, data any, path string) error {
 	if len(schema) == 0 {
 		return nil // empty schema accepts anything
 	}
+	if _, hasType := schema["type"]; !hasType {
+		return nil // no type key — unconstrained, accept any value
+	}
 
 	nullable, _ := schema["nullable"].(bool)
 	if data == nil {

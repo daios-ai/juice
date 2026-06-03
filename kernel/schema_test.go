@@ -160,4 +160,14 @@ func TestValidateInput(t *testing.T) {
 			t.Error(err)
 		}
 	})
+
+	t.Run("schema without type is unconstrained and accepts nil", func(t *testing.T) {
+		schema := map[string]any{"description": "x"}
+		if err := ValidateInput(schema, nil); err != nil {
+			t.Errorf("schema without type should accept nil: %v", err)
+		}
+		if err := ValidateInput(schema, "anything"); err != nil {
+			t.Errorf("schema without type should accept any value: %v", err)
+		}
+	})
 }

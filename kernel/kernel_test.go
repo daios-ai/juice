@@ -753,13 +753,15 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@rate-owner", 1000)
+	buyer := setupUser(t, st, "@rate-buyer", 1000)
+	provider := setupUser(t, st, "@rate-provider", 0)
 	a := &Action{
 		ID:          uuid.New().String(),
-		OwnerUserID: owner.ID,
+		OwnerUserID: provider.ID,
 		Name:        "rate-svc",
 		Kind:        KindWasm,
 		Active:      true,
+		Public:      true,
 		Price:       0,
 		Source:      "wat",
 		CreatedAt:   time.Now().UTC(),
@@ -767,17 +769,17 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
+	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
 	reply, err := k.Call(ctx, CallRequest{
-		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: owner.ID, ActionName: "rate-svc", Args: map[string]any{},
+		SubjectID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: provider.ID, ActionName: "rate-svc", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
 
 	const rating = 1.0
-	if _, err := k.RateTransaction(ctx, owner.ID, reply.TxID, rating); err != nil {
+	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, rating); err != nil {
 		t.Fatalf("RateTransaction: %v", err)
 	}
 
@@ -801,11 +803,53 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@rerate-owner", 500)
+	buyer := setupUser(t, st, "@rerate-buyer", 500)
+	provider := setupUser(t, st, "@rerate-provider", 0)
+	a := &Action{
+		ID:          uuid.New().String(),
+		OwnerUserID: provider.ID,
+		Name:        "rerate-svc",
+		Kind:        KindWasm,
+		Active:      true,
+		Public:      true,
+		Price:       0,
+		Source:      "wat",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
+	reply, err := k.Call(ctx, CallRequest{
+		SubjectID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: provider.ID, ActionName: "rerate-svc", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 1.0); err != nil {
+		t.Fatalf("first RateTransaction: %v", err)
+	}
+	_, err = k.RateTransaction(ctx, buyer.ID, reply.TxID, 0.0)
+	if err == nil {
+		t.Fatal("expected error on second rating, got nil")
+	}
+	ke, ok := err.(*KernelError)
+	if !ok || ke.Code != "invalid_input" {
+		t.Errorf("expected invalid_input error, got %v", err)
+	}
+}
+
+func TestRateTransactionSelfRatingRejected(t *testing.T) {
+	st := newFakeStore()
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@self-rater", 500)
 	a := &Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: owner.ID,
-		Name:        "rerate-svc",
+		Name:        "self-svc",
 		Kind:        KindWasm,
 		Active:      true,
 		Price:       0,
@@ -818,21 +862,18 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
 	reply, err := k.Call(ctx, CallRequest{
 		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: owner.ID, ActionName: "rerate-svc", Args: map[string]any{},
+		TargetUserID: owner.ID, ActionName: "self-svc", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	if _, err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
-		t.Fatalf("first RateTransaction: %v", err)
-	}
-	_, err = k.RateTransaction(ctx, owner.ID, reply.TxID, 0.0)
+	_, err = k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0)
 	if err == nil {
-		t.Fatal("expected error on second rating, got nil")
+		t.Fatal("expected error when owner rates own output, got nil")
 	}
 	ke, ok := err.(*KernelError)
-	if !ok || ke.Code != "invalid_input" {
-		t.Errorf("expected invalid_input error, got %v", err)
+	if !ok || ke.Code != "unauthorized" {
+		t.Errorf("expected unauthorized error, got %v", err)
 	}
 }
 
@@ -1342,7 +1383,7 @@ func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
 	}
 }
 
-func TestRemoteActionContentHashIncludesKindAndArtifact(t *testing.T) {
+func TestRemoteManifestHashIncludesKindAndArtifact(t *testing.T) {
 	base := ActionManifest{
 		ActionID:     "act-1",
 		OwnerHandle:  "@peer",
@@ -1358,19 +1399,33 @@ func TestRemoteActionContentHashIncludesKindAndArtifact(t *testing.T) {
 	// Different kind must produce a different hash.
 	wasmVariant := base
 	wasmVariant.Kind = KindWasm
-	if remoteActionContentHash(base) == remoteActionContentHash(wasmVariant) {
+	if remoteManifestHash(base) == remoteManifestHash(wasmVariant) {
 		t.Error("kind change should produce different hash")
 	}
 
 	// Different artifact_hash must produce a different hash.
 	newArtifact := base
 	newArtifact.ArtifactHash = "def456"
-	if remoteActionContentHash(base) == remoteActionContentHash(newArtifact) {
+	if remoteManifestHash(base) == remoteManifestHash(newArtifact) {
 		t.Error("artifact_hash change should produce different hash")
 	}
 
+	// Different action_id (execution identity) must produce a different hash.
+	differentID := base
+	differentID.ActionID = "act-2"
+	if remoteManifestHash(base) == remoteManifestHash(differentID) {
+		t.Error("action_id change should produce different hash")
+	}
+
+	// Stats changes must NOT affect the hash (stats are not contract fields per §12.2).
+	withStats := base
+	withStats.Stats = &Stats{Uses: 99, Successes: 99}
+	if remoteManifestHash(base) != remoteManifestHash(withStats) {
+		t.Error("stats change must not affect the manifest hash")
+	}
+
 	// Identical manifests must produce the same hash.
-	if remoteActionContentHash(base) != remoteActionContentHash(base) {
+	if remoteManifestHash(base) != remoteManifestHash(base) {
 		t.Error("identical manifests should produce the same hash")
 	}
 }
@@ -1446,26 +1501,27 @@ func TestRatingRecordCreated(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@rr-owner", 500)
+	buyer := setupUser(t, st, "@rr-buyer", 500)
+	provider := setupUser(t, st, "@rr-provider", 0)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "rr-svc",
-		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
+		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "rr-svc",
+		Kind: KindWasm, Active: true, Public: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
+	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
 	reply, err := k.Call(ctx, CallRequest{
-		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: owner.ID, ActionName: "rr-svc", Args: map[string]any{},
+		SubjectID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: provider.ID, ActionName: "rr-svc", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
 
-	if _, err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
+	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 1.0); err != nil {
 		t.Fatalf("RateTransaction: %v", err)
 	}
 
@@ -1482,8 +1538,8 @@ func TestRatingRecordCreated(t *testing.T) {
 	if rating.Rating != 1.0 {
 		t.Errorf("rating.Rating: got %f, want 1.0", rating.Rating)
 	}
-	if rating.RaterUserID != owner.ID {
-		t.Errorf("rating.RaterUserID: got %q, want %q", rating.RaterUserID, owner.ID)
+	if rating.RaterUserID != buyer.ID {
+		t.Errorf("rating.RaterUserID: got %q, want %q", rating.RaterUserID, buyer.ID)
 	}
 }
 
@@ -1492,29 +1548,30 @@ func TestRatingDuplicateRejected(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@dup-owner", 500)
+	buyer := setupUser(t, st, "@dup-buyer", 500)
+	provider := setupUser(t, st, "@dup-provider", 0)
 	a := &Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "dup-svc",
-		Kind: KindWasm, Active: true, Price: 0, Source: "wat",
+		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "dup-svc",
+		Kind: KindWasm, Active: true, Public: true, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
+	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
 	reply, err := k.Call(ctx, CallRequest{
-		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: owner.ID, ActionName: "dup-svc", Args: map[string]any{},
+		SubjectID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: provider.ID, ActionName: "dup-svc", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
 
-	if _, err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0); err != nil {
+	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 1.0); err != nil {
 		t.Fatalf("first RateTransaction: %v", err)
 	}
-	if _, err := k.RateTransaction(ctx, owner.ID, reply.TxID, 0.0); !errors.Is(err, ErrInvalidInput) {
+	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 0.0); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for duplicate rating, got %v", err)
 	}
 }
