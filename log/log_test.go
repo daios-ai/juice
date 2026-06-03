@@ -1,7 +1,9 @@
 package log
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,5 +97,26 @@ func TestWithEmptyContext(t *testing.T) {
 	l2 := l.With(context.Background())
 	if l2 == nil {
 		t.Error("With(empty ctx) returned nil")
+	}
+}
+
+func TestTerminalWritesToStderr(t *testing.T) {
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	l, _ := New(Config{Level: "info", Format: "text"})
+	l.Info("stderr.test.event")
+
+	w.Close()
+	os.Stderr = origStderr
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	if !strings.Contains(buf.String(), "stderr.test.event") {
+		t.Errorf("expected log output on stderr, got: %q", buf.String())
 	}
 }

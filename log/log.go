@@ -40,9 +40,9 @@ func New(cfg Config) (*Logger, error) {
 
 	var terminal slog.Handler
 	if cfg.Format == "json" {
-		terminal = slog.NewJSONHandler(os.Stdout, opts)
+		terminal = slog.NewJSONHandler(os.Stderr, opts)
 	} else {
-		terminal = tint.NewHandler(os.Stdout, &tint.Options{
+		terminal = tint.NewHandler(os.Stderr, &tint.Options{
 			Level:      level,
 			TimeFormat: time.TimeOnly,
 			NoColor:    false,

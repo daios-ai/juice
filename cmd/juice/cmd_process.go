@@ -25,6 +25,10 @@ func processStartCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				if flagQuiet {
+					printQuiet(p.ID)
+					return nil
+				}
 				if flagOutput == "json" {
 					return printJSON(map[string]any{
 						"process_id": p.ID,
