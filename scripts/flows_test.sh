@@ -2567,6 +2567,77 @@ PYEOF
 # flow_federation_replay has been moved to TestFederationReplay in cmd/juice/cmd_remote_test.go
 # using crypto/ed25519 — the previous implementation required Python nacl.signing.
 
+flow_provider_receipts() {
+    echo "=== FLOW provider_receipts ==="
+    local dir db home_sys home_alice home_bob port backend_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "provider_receipts.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 300 >/dev/null 2>&1
+
+    start_backend "$backend_port" 200 '{"ok":true}'
+    local backend_pid=$BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    # @alice creates a paid action (price=10) and makes it callable by @bob.
+    local create_out action_id
+    create_out=$(jj "$db" "$home_alice" action create --name pvd-action --kind http \
+        --source "http://127.0.0.1:${backend_port}/pvd" --price 10 --description "provider receipt test")
+    action_id=$(strfield "$create_out" "id")
+    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+
+    # @bob calls @alice's action 3 times.
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_bob" process start --funds 200)
+    proc_id=$(strfield "$proc_out" "process_id")
+    local i
+    for i in 1 2 3; do
+        jj "$db" "$home_bob" call \
+            --process "$proc_id" --action @alice/pvd-action --args '{}' >/dev/null
+    done
+
+    # @alice lists provider receipts — must see 3 entries.
+    local receipts_out receipt_count
+    receipts_out=$(jj "$db" "$home_alice" action receipts --id "$action_id")
+    receipt_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" "$receipts_out" 2>/dev/null || echo 0)
+    [ "$receipt_count" -eq 3 ] \
+        && ok "provider_receipts.count" \
+        || fail "provider_receipts.count" "expected 3 receipts, got $receipt_count: $receipts_out"
+
+    # Sum of receipt net amounts must equal @alice's credited balance.
+    local alice_out alice_balance receipt_net_sum
+    alice_out=$(jj "$db" "$home_alice" user me)
+    alice_balance=$(numfield "$alice_out" "available")
+    receipt_net_sum=$(python3 -c "import sys,json; rs=json.loads(sys.argv[1]); print(sum(r['net'] for r in rs))" \
+        "$receipts_out" 2>/dev/null || echo -1)
+    [ "$receipt_net_sum" -eq "$alice_balance" ] \
+        && ok "provider_receipts.reconstructibility" \
+        || fail "provider_receipts.reconstructibility" \
+           "receipt net sum=$receipt_net_sum != alice balance=$alice_balance"
+
+    # @bob cannot list @alice's provider receipts.
+    local bob_receipts_out
+    bob_receipts_out=$(j "$db" "$home_bob" action receipts --id "$action_id" 2>&1)
+    echo "$bob_receipts_out" | grep -qi "unauthorized\|permission\|forbidden" \
+        && ok "provider_receipts.non_owner_denied" \
+        || fail "provider_receipts.non_owner_denied" "expected unauthorized, got: $bob_receipts_out"
+
+    stop_backend "$backend_pid"
+}
+
 flow_admin_supervision() {
     echo "=== FLOW admin_supervision ==="
     local dir db home_sys home_alice
@@ -2737,6 +2808,7 @@ main() {
     flow_federation_import_execute
     flow_federation_changed_reimport
     flow_federation_unimport
+    flow_provider_receipts
     flow_admin_supervision
 
     echo ""

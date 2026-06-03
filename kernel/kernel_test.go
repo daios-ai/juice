@@ -1117,6 +1117,7 @@ func TestListReceiptsByActionSuperuserAllowed(t *testing.T) {
 	}
 }
 
+
 func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	st := newTestStore(t)
 	exec := &fakeScriptExec{result: `{"ok":true}`}

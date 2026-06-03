@@ -764,6 +764,7 @@ API owner re-runs import against a changed OpenAPI document; the matched action 
 API owner unimports an OpenAPI document; matching actions are deactivated and history remains attached
 remote kernel is added, a signed manifest is imported, a caller executes the proxy through Call(), and local stats remain separate from manifest stats
 remote proxy is unimported; the local proxy is deactivated and the remote kernel is unaffected
+caller executes a paid action multiple times; the action owner lists provider receipts and the sum of receipt net amounts equals the total credits received by the owner
 ```
 
 ## 16. Design rationale
