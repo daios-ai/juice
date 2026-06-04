@@ -5,18 +5,43 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"sigs.k8s.io/yaml"
+	yaml "go.yaml.in/yaml/v2"
 )
 
 // yamlToJSON converts a YAML byte slice to canonical JSON bytes.
 func yamlToJSON(src []byte) ([]byte, error) {
-	return yaml.YAMLToJSON(src)
+	var v any
+	if err := yaml.Unmarshal(src, &v); err != nil {
+		return nil, err
+	}
+	return json.Marshal(normalizeYAML(v))
+}
+
+// normalizeYAML converts map[interface{}]interface{} values produced by yaml/v2
+// into map[string]any so encoding/json can marshal them.
+func normalizeYAML(v any) any {
+	switch val := v.(type) {
+	case map[interface{}]interface{}:
+		out := make(map[string]any, len(val))
+		for k, v := range val {
+			out[fmt.Sprintf("%v", k)] = normalizeYAML(v)
+		}
+		return out
+	case []interface{}:
+		for i, item := range val {
+			val[i] = normalizeYAML(item)
+		}
+		return val
+	default:
+		return v
+	}
 }
 
 // rawOp is one parsed OpenAPI operation before it is bound to an owner.
