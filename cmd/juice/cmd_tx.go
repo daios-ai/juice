@@ -23,7 +23,7 @@ func txListCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSubject(func(k *kernel.Kernel, subjectID string) error {
 				txs, err := k.ListTransactions(context.Background(), kernel.TxFilter{
-					OwnerUserID: subjectID,
+					PartyUserID: subjectID,
 					ProcessID:   processID,
 					Limit:       limit,
 					Offset:      offset,

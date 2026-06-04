@@ -56,8 +56,11 @@ type TxFilter struct {
 	SubjectUserID string
 	TargetUserID  string
 	ProcessID     string
-	Limit         int
-	Offset        int
+	// PartyUserID matches transactions where the user is a party: buyer
+	// (owner_user_id) or seller (owner of the called action). See §9.4.
+	PartyUserID string
+	Limit       int
+	Offset      int
 }
 
 // Store is the persistence interface for all kernel objects.
@@ -159,8 +162,6 @@ type Store interface {
 	// ---- Receipts ----
 
 	ReadReceiptByTxID(ctx context.Context, txID string) (*Receipt, error)
-	// ListReceiptsByAction returns receipts for the given action ordered by started_at DESC.
-	ListReceiptsByAction(ctx context.Context, actionID string, limit, offset int) ([]*Receipt, error)
 
 	// ---- Ratings ----
 

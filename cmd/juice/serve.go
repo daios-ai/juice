@@ -98,7 +98,6 @@ func runServer(addr string) error {
 		r.Post("/v1/actions", srv.postAction)
 		r.Get("/v1/actions/{id}", srv.getAction)
 		r.Get("/v1/actions/{id}/ratings", srv.listActionRatings)
-		r.Get("/v1/actions/{id}/receipts", srv.listActionReceipts)
 		r.Put("/v1/actions/{id}", srv.updateAction)
 		r.Post("/v1/actions/{id}/enable", srv.enableAction)
 		r.Post("/v1/actions/{id}/disable", srv.disableAction)
@@ -508,19 +507,6 @@ func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ratings)
 }
 
-func (s *server) listActionReceipts(w http.ResponseWriter, r *http.Request) {
-	actionID := chi.URLParam(r, "id")
-	receipts, err := s.kernel.ListReceiptsByAction(r.Context(), subjectFrom(r), actionID, 50, 0)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if receipts == nil {
-		receipts = []*kernel.Receipt{}
-	}
-	writeJSON(w, http.StatusOK, receipts)
-}
-
 func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var body struct {
@@ -754,7 +740,7 @@ func parseActionRef(ref string) (string, string, error) {
 func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
 	subjectID := subjectFrom(r)
 	txs, err := s.kernel.ListTransactions(r.Context(), kernel.TxFilter{
-		OwnerUserID: subjectID,
+		PartyUserID: subjectID,
 		ProcessID:   r.URL.Query().Get("process_id"),
 		Limit:       50,
 	})

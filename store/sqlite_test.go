@@ -1214,21 +1214,23 @@ func TestListRatings(t *testing.T) {
 	}
 }
 
-func TestListReceiptsByAction(t *testing.T) {
+func TestListTransactionsByParty(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@rcpt-list-owner", 0)
-	caller := newUser("@rcpt-list-caller", 0)
+	owner := newUser("@tx-party-owner", 0)   // seller
+	caller := newUser("@tx-party-caller", 0) // buyer
+	other := newUser("@tx-party-other", 0)   // non-party
 	_ = db.CreateUser(ctx, owner)
 	_ = db.CreateUser(ctx, caller)
-	action := newAction(owner.ID, "/list-rcpt", 0, true)
+	_ = db.CreateUser(ctx, other)
+	action := newAction(owner.ID, "/party-tx", 0, true)
 	_ = db.CreateAction(ctx, action)
 
 	p := newProcess(caller.ID)
 	startProc(t, db, ctx, p)
 
-	makeReceipt := func(id string, offset time.Duration) {
+	mkTx := func(id string, offset time.Duration) {
 		tx := &kernel.Transaction{
 			ID:            id,
 			ProcessID:     p.ID,
@@ -1243,53 +1245,29 @@ func TestListReceiptsByAction(t *testing.T) {
 			EndedAt:       time.Now().UTC().Add(offset),
 		}
 		_ = db.createTransaction(ctx, tx)
-		r := &kernel.Receipt{
-			ID:           "rc-" + id,
-			IssuerUserID: owner.ID,
-			TxID:         id,
-			TraceID:      id + "-tr",
-			ActionID:     action.ID,
-			CallerUserID: caller.ID,
-			ProcessID:    p.ID,
-			ArgsHash:     "ah",
-			ReplyHash:    "rh",
-			Status:       kernel.TxSuccess,
-			StartedAt:    tx.StartedAt,
-			CreatedAt:    time.Now().UTC().Add(offset),
-		}
-		_ = db.createReceipt(ctx, r)
 	}
-	makeReceipt("rcpt-tx-1", 0)
-	makeReceipt("rcpt-tx-2", time.Second)
+	mkTx("party-tx-1", 0)
+	mkTx("party-tx-2", time.Second)
 
-	// Returns all receipts ordered by started_at DESC.
-	all, err := db.ListReceiptsByAction(ctx, action.ID, 10, 0)
+	// Seller (action owner) sees both, newest first.
+	asSeller, err := db.ListTransactions(ctx, kernel.TxFilter{PartyUserID: owner.ID, Limit: 10})
 	if err != nil {
-		t.Fatalf("ListReceiptsByAction: %v", err)
+		t.Fatalf("ListTransactions seller: %v", err)
 	}
-	if len(all) != 2 {
-		t.Fatalf("want 2 receipts, got %d", len(all))
-	}
-	if all[0].TxID != "rcpt-tx-2" {
-		t.Errorf("first result should be newest (rcpt-tx-2), got %s", all[0].TxID)
-	}
-	if all[0].CallerUserID != caller.ID {
-		t.Errorf("CallerUserID: got %q, want %q", all[0].CallerUserID, caller.ID)
-	}
-	if all[0].ProcessID != p.ID {
-		t.Errorf("ProcessID: got %q, want %q", all[0].ProcessID, p.ID)
+	if len(asSeller) != 2 || asSeller[0].ID != "party-tx-2" {
+		t.Fatalf("seller should see 2 txs newest-first, got %v", asSeller)
 	}
 
-	// Offset skips the first.
-	page2, _ := db.ListReceiptsByAction(ctx, action.ID, 10, 1)
-	if len(page2) != 1 || page2[0].TxID != "rcpt-tx-1" {
-		t.Errorf("offset=1 should return rcpt-tx-1, got %v", page2)
+	// Buyer (process owner) sees both too.
+	asBuyer, _ := db.ListTransactions(ctx, kernel.TxFilter{PartyUserID: caller.ID, Limit: 10})
+	if len(asBuyer) != 2 {
+		t.Fatalf("buyer should see 2 txs, got %d", len(asBuyer))
 	}
 
-	// Wrong action ID returns empty.
-	none, _ := db.ListReceiptsByAction(ctx, "no-such-action", 10, 0)
+	// A non-party sees none.
+	none, _ := db.ListTransactions(ctx, kernel.TxFilter{PartyUserID: other.ID, Limit: 10})
 	if len(none) != 0 {
-		t.Errorf("expected no receipts for unknown action, got %d", len(none))
+		t.Errorf("non-party should see 0 txs, got %d", len(none))
 	}
 }
 

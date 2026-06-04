@@ -1043,10 +1043,25 @@ func (k *Kernel) ReadTransaction(ctx context.Context, subjectID, txID string) (*
 	if tx == nil {
 		return nil, ErrNotFound.Wrap("transaction not found")
 	}
-	if tx.OwnerUserID != subjectID && tx.SubjectUserID != subjectID && tx.TargetUserID != subjectID {
-		return nil, ErrUnauthorized.Wrap("not authorized to view this transaction")
+	if !k.canReadTransaction(ctx, subjectID, tx) {
+		return nil, ErrNotFound.Wrap("transaction not found")
 	}
 	return tx, nil
+}
+
+// canReadTransaction reports whether subjectID is a party to tx — the buyer
+// (owner_user_id) or the seller (owner of the called action) — or a superuser. See §9.4.
+func (k *Kernel) canReadTransaction(ctx context.Context, subjectID string, tx *Transaction) bool {
+	if tx.OwnerUserID == subjectID {
+		return true
+	}
+	if a, err := k.store.ReadAction(ctx, tx.ActionID); err == nil && a != nil && a.OwnerUserID == subjectID {
+		return true
+	}
+	if u, err := k.store.ReadUser(ctx, subjectID); err == nil && u != nil && k.isUserSuperuser(ctx, u) {
+		return true
+	}
+	return false
 }
 
 // ListTransactions returns transactions matching the filter.
@@ -1446,23 +1461,6 @@ func (k *Kernel) GetReceiptByTxID(ctx context.Context, txID string) (*Receipt, e
 // GetReceiptByID returns the receipt with the given ID.
 func (k *Kernel) GetReceiptByID(ctx context.Context, id string) (*Receipt, error) {
 	return k.store.ReadReceipt(ctx, id)
-}
-
-// ListReceiptsByAction returns receipts for calls to the given action, ordered by started_at DESC.
-// Only the action owner or the platform superuser may call this.
-func (k *Kernel) ListReceiptsByAction(ctx context.Context, subjectID, actionID string, limit, offset int) ([]*Receipt, error) {
-	u, err := k.authenticatedSubject(ctx, subjectID)
-	if err != nil {
-		return nil, err
-	}
-	action, err := k.store.ReadAction(ctx, actionID)
-	if err != nil {
-		return nil, err
-	}
-	if action.OwnerUserID != subjectID && !k.isUserSuperuser(ctx, u) {
-		return nil, ErrUnauthorized.Wrap("only the action owner may list provider receipts")
-	}
-	return k.store.ListReceiptsByAction(ctx, actionID, limit, offset)
 }
 
 // GetIdempotencyRecord returns an unexpired idempotency record matching key + counterparty.

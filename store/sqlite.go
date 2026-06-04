@@ -1186,6 +1186,10 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 		q += ` AND process_id=?`
 		args = append(args, f.ProcessID)
 	}
+	if f.PartyUserID != "" {
+		q += ` AND (owner_user_id=? OR action_id IN (SELECT id FROM actions WHERE owner_user_id=?))`
+		args = append(args, f.PartyUserID, f.PartyUserID)
+	}
 	q += ` ORDER BY started_at DESC`
 	limit := f.Limit
 	if limit <= 0 {
@@ -1829,37 +1833,6 @@ func (s *DB) ReadReceipt(ctx context.Context, id string) (*kernel.Receipt, error
 	r.StartedAt = strToTime(startedAt)
 	r.CreatedAt = strToTime(createdAt)
 	return &r, nil
-}
-
-func (s *DB) ListReceiptsByAction(ctx context.Context, actionID string, limit, offset int) ([]*kernel.Receipt, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
-		        args_hash,reply_hash,status,gross,net,fee,reason,started_at,created_at,signature
-		 FROM receipts WHERE action_id=?
-		 ORDER BY started_at DESC
-		 LIMIT ? OFFSET ?`,
-		actionID, limit, offset,
-	)
-	if err != nil {
-		return nil, dbErr(err, "list receipts by action")
-	}
-	defer rows.Close()
-	var result []*kernel.Receipt
-	for rows.Next() {
-		var r kernel.Receipt
-		var status, startedAt, createdAt string
-		if err := rows.Scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
-			&r.CallerUserID, &r.ProcessID,
-			&r.ArgsHash, &r.ReplyHash, &status,
-			&r.Gross, &r.Net, &r.Fee, &r.Reason, &startedAt, &createdAt, &r.Signature); err != nil {
-			return nil, dbErr(err, "list receipts by action: scan")
-		}
-		r.Status = kernel.TxStatus(status)
-		r.StartedAt = strToTime(startedAt)
-		r.CreatedAt = strToTime(createdAt)
-		result = append(result, &r)
-	}
-	return result, dbErr(rows.Err(), "list receipts by action: rows")
 }
 
 // ---- Ratings ----

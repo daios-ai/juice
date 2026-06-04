@@ -1011,7 +1011,7 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 	}
 }
 
-func TestListReceiptsByActionOwnerAllowed(t *testing.T) {
+func TestReadTransactionPartyAccess(t *testing.T) {
 	st := newTestStore(t)
 	su := setupUser(t, st, "@sys", 0)
 	if err := st.SetConfig(context.Background(), "superuser_handle", "@sys"); err != nil {
@@ -1022,8 +1022,9 @@ func TestListReceiptsByActionOwnerAllowed(t *testing.T) {
 	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@provider", 500)
-	caller := setupUser(t, st, "@buyer", 500)
+	owner := setupUser(t, st, "@provider", 500) // seller
+	caller := setupUser(t, st, "@buyer", 500)   // buyer
+	other := setupUser(t, st, "@other", 500)    // non-party
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pvd-svc",
 		Kind: kernel.KindWasm, Active: true, Price: 10, Source: "wat",
@@ -1042,81 +1043,22 @@ func TestListReceiptsByActionOwnerAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	_ = reply
 
-	receipts, err := k.ListReceiptsByAction(ctx, owner.ID, a.ID, 10, 0)
-	if err != nil {
-		t.Fatalf("owner ListReceiptsByAction: %v", err)
+	// Buyer (process owner) and seller (action owner) may both read the full transaction.
+	if _, err := k.ReadTransaction(ctx, caller.ID, reply.TxID); err != nil {
+		t.Errorf("buyer ReadTransaction: %v", err)
 	}
-	if len(receipts) != 1 {
-		t.Fatalf("want 1 receipt, got %d", len(receipts))
+	if _, err := k.ReadTransaction(ctx, owner.ID, reply.TxID); err != nil {
+		t.Errorf("seller ReadTransaction: %v", err)
 	}
-	if receipts[0].CallerUserID != caller.ID {
-		t.Errorf("CallerUserID: got %q, want %q", receipts[0].CallerUserID, caller.ID)
+	if _, err := k.ReadTransaction(ctx, su.ID, reply.TxID); err != nil {
+		t.Errorf("superuser ReadTransaction: %v", err)
 	}
-	if receipts[0].ProcessID != p.ID {
-		t.Errorf("ProcessID: got %q, want %q", receipts[0].ProcessID, p.ID)
-	}
-	if receipts[0].StartedAt.IsZero() {
-		t.Error("StartedAt must not be zero")
+	// A non-party gets ErrNotFound; existence is not leaked.
+	if _, err := k.ReadTransaction(ctx, other.ID, reply.TxID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("non-party ReadTransaction: got %v, want ErrNotFound", err)
 	}
 }
-
-func TestListReceiptsByActionNonOwnerDenied(t *testing.T) {
-	st := newTestStore(t)
-	su := setupUser(t, st, "@sys", 0)
-	if err := st.SetConfig(context.Background(), "superuser_handle", "@sys"); err != nil {
-		t.Fatal(err)
-	}
-	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
-	k.SetSuperuserHandle("@sys")
-	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "@pvd2", 500)
-	other := setupUser(t, st, "@other2", 500)
-	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pvd2-svc",
-		Kind: kernel.KindWasm, Active: true, Price: 0, Source: "wat",
-		InputSchema:  map[string]any{"type": "object"},
-		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	_ = st.CreateAction(ctx, a)
-
-	_, err := k.ListReceiptsByAction(ctx, other.ID, a.ID, 10, 0)
-	if !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Fatalf("expected ErrUnauthorized for non-owner, got %v", err)
-	}
-}
-
-func TestListReceiptsByActionSuperuserAllowed(t *testing.T) {
-	st := newTestStore(t)
-	su := setupUser(t, st, "@sys", 0)
-	if err := st.SetConfig(context.Background(), "superuser_handle", "@sys"); err != nil {
-		t.Fatal(err)
-	}
-	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
-	k.SetSuperuserHandle("@sys")
-	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "@pvd3", 500)
-	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pvd3-svc",
-		Kind: kernel.KindWasm, Active: true, Price: 0, Source: "wat",
-		InputSchema:  map[string]any{"type": "object"},
-		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	_ = st.CreateAction(ctx, a)
-
-	_, err := k.ListReceiptsByAction(ctx, su.ID, a.ID, 10, 0)
-	if err != nil {
-		t.Fatalf("superuser ListReceiptsByAction: %v", err)
-	}
-}
-
 
 func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	st := newTestStore(t)

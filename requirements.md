@@ -113,7 +113,7 @@ ReadStats UpdateStats
 CreateListener ReadListener ListListeners
 CreateEvent ListPendingEvents ConsumeEvent PurgeListenerEvents
 GetConfig SetConfig CreateDeposit
-CreateReceipt ReadReceipt ListReceiptsByAction
+CreateReceipt ReadReceipt
 CreateRating ReadRating ListRatings
 CreateIdempotencyRecord ReadIdempotencyRecord
 ```
@@ -423,17 +423,17 @@ CanonicalJSON(v any) ([]byte, error)
 
 Generate and verify signatures only over `CanonicalJSON` output. A rating signature covers all fields except `signature` and is signed with the platform key. Property ordering uses UTF-8 byte order; this matches RFC 8785 UTF-16 ordering for all-ASCII property names, which is all this implementation uses.
 
-### 9.4 Provider receipt access
+### 9.4 Transaction access
 
-An action owner may list receipts for calls to their action. This rule is independent of caller permissions; a caller's authority to invoke an action does not grant authority to conceal the resulting economic record from the action owner.
+Both parties to a transaction may read it in full — the buyer (`owner_user_id`) and the seller (the called action's owner) — so an owner can debug and audit calls to their action.
 
 ```text
-CanReadProviderReceipt(u, r) := u = Action(r.action_id).owner_user_id ∨ IsSuperuser(u)
+CanReadTransaction(u, t) := u = t.owner_user_id ∨ u = Action(t.action_id).owner_user_id ∨ IsSuperuser(u)
 ```
 
-`IsSuperuser` follows from `@sys` implicit admin authority (§11); no separate route is required. Results are ordered by descending `started_at`.
+Receipts stay an internal settlement artifact for federation and verification (§9.2, §12); there is no provider-receipt endpoint.
 
-Invariant: every credit to an action owner must be reconstructible from receipts readable by that owner.
+Invariant: every credit to an action owner is reconstructible from the transactions readable by that owner.
 
 ## 10. Authentication and errors
 
@@ -622,7 +622,7 @@ Required endpoint behavior:
 | `POST /v1/call`                    | Requires `args` field; rejected with `ErrInvalidInput` when absent. `{}` is valid for unconstrained inputs. `action` is `@owner/name`.     |
 | `POST /v1/events/emit`             | Does not accept `source_user_id`; the event source is always the authenticated subject. Requires `args` field.                              |
 | `POST /v1/auth/logout`             | Accept refresh token in body, revoke it, and return `ErrUnauthenticated` for missing or already-revoked tokens.                             |
-| `GET /v1/actions/{id}/receipts`    | Action owner only; receipts for calls to that action in descending `started_at` order. CLI: `juice action receipts --id`.                   |
+| `GET /v1/transactions`             | Subject's transactions as buyer or seller per `CanReadTransaction`; `GET /v1/transactions/{id}` returns `ErrNotFound` to non-parties.       |
 
 ## 14. Logging and configuration
 
@@ -709,8 +709,8 @@ zero-credit process satisfies fund locking for zero-price actions
 Kernel.Deposit rejected with ErrUnauthorized for non-superuser caller
 receipt created atomically with successful transaction commit
 receipt created atomically with failed transaction commit
-action owner lists provider receipts for their action
-non-owner denied access to provider receipts
+action owner reads transactions for calls to their action
+non-party denied access to a transaction
 OpenAPI import/unimport flow for API-owned actions
 OpenAPI import compiles parameters and JSON body into one input schema
 OpenAPI activation rejects incomplete schemas or missing descriptions
@@ -749,7 +749,7 @@ consumed events never appear in ListPendingEvents
 pending events are absent after listener deletion
 transaction row is immutable after commit (no field updated post-creation)
 rating records reference valid tx_id and receipt_id
-every credit to an action owner is reconstructible from ListReceiptsByAction
+every credit to an action owner is reconstructible from transactions readable by that owner
 imported action reimport or unimport never deletes transaction or receipt history
 imported action current stats reset never mutates transaction, receipt, or rating rows
 OpenAPI and remote imports create ordinary Actions, not separate action types
@@ -764,7 +764,7 @@ API owner re-runs import against a changed OpenAPI document; the matched action 
 API owner unimports an OpenAPI document; matching actions are deactivated and history remains attached
 remote kernel is added, a signed manifest is imported, a caller executes the proxy through Call(), and local stats remain separate from manifest stats
 remote proxy is unimported; the local proxy is deactivated and the remote kernel is unaffected
-caller executes a paid action multiple times; the action owner lists provider receipts and the sum of receipt net amounts equals the total credits received by the owner
+caller executes a paid action multiple times; the action owner lists transactions for their action and the sum of transaction net amounts equals the total credits received by the owner
 ```
 
 ## 16. Design rationale

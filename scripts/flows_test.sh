@@ -932,7 +932,7 @@ flow_failed_call_refund() {
     # Failure tx IS recorded
     local tx_list tx_count
     tx_list=$(jj "$db" "$home_bob" tx list --process "$proc_id")
-    tx_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" "$tx_list" 2>/dev/null || echo 0)
+    tx_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" "$tx_list" 2>/dev/null || echo 0)
     [ "$tx_count" -ge 1 ] \
         && ok "failed_call_refund.failure_tx_recorded" \
         || fail "failed_call_refund.failure_tx_recorded" "expected >=1 tx, count=$tx_count list=$tx_list"
@@ -999,7 +999,7 @@ flow_input_schema_failure() {
     # No tx created
     local tx_list tx_count
     tx_list=$(jj "$db" "$home_bob" tx list --process "$proc_id")
-    tx_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" "$tx_list" 2>/dev/null || echo 0)
+    tx_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" "$tx_list" 2>/dev/null || echo 0)
     [ "$tx_count" -eq 0 ] \
         && ok "input_schema_failure.no_tx_created" \
         || fail "input_schema_failure.no_tx_created" "expected 0 txs, got $tx_count: $tx_list"
@@ -1062,7 +1062,7 @@ flow_output_schema_failure() {
     # Failure tx IS recorded (unlike input schema failure)
     local tx_list tx_count
     tx_list=$(jj "$db" "$home_bob" tx list --process "$proc_id")
-    tx_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" "$tx_list" 2>/dev/null || echo 0)
+    tx_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" "$tx_list" 2>/dev/null || echo 0)
     [ "$tx_count" -ge 1 ] \
         && ok "output_schema_failure.failure_tx_recorded" \
         || fail "output_schema_failure.failure_tx_recorded" "expected >=1 tx, count=$tx_count"
@@ -1367,7 +1367,7 @@ flow_event_queue_success() {
     # @alice polls → 1 pending event
     local poll_out event_count
     poll_out=$(jj "$db" "$home_alice" event list --listener "$listener_id")
-    event_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" \
+    event_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" \
         "$poll_out" 2>/dev/null || echo 0)
     [ "$event_count" -eq 1 ] \
         && ok "event_queue_success.poll_returns_event" \
@@ -1387,7 +1387,7 @@ flow_event_queue_success() {
     # @alice polls again → 0 pending events
     local poll2_out event_count2
     poll2_out=$(jj "$db" "$home_alice" event list --listener "$listener_id")
-    event_count2=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" \
+    event_count2=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" \
         "$poll2_out" 2>/dev/null || echo 0)
     [ "$event_count2" -eq 0 ] \
         && ok "event_queue_success.poll_empty_after_consume" \
@@ -1521,7 +1521,7 @@ flow_event_deletion_restart() {
     poll_out=$(jj "$db" "$home_alice" event list --listener "$listener_id")
     event_id=$(python3 -c "import sys,json; evs=json.loads(sys.argv[1]); print(evs[0]['id'] if evs else '')" \
         "$poll_out" 2>/dev/null)
-    event_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" \
+    event_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" \
         "$poll_out" 2>/dev/null || echo 0)
     [ "$event_count" -eq 1 ] \
         && ok "event_deletion_restart.initial_poll" \
@@ -1544,7 +1544,7 @@ PYEOF
     # @alice polls again → event restored
     local poll2_out event_count2
     poll2_out=$(jj "$db" "$home_alice" event list --listener "$listener_id")
-    event_count2=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" \
+    event_count2=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" \
         "$poll2_out" 2>/dev/null || echo 0)
     [ "$event_count2" -eq 1 ] \
         && ok "event_deletion_restart.inflight_reset" \
@@ -1554,7 +1554,7 @@ PYEOF
     j "$db" "$home_alice" listener delete --id "$listener_id" >/dev/null 2>&1
     local poll3_out event_count3
     poll3_out=$(jj "$db" "$home_alice" event list --listener "$listener_id")
-    event_count3=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" \
+    event_count3=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" \
         "$poll3_out" 2>/dev/null || echo 0)
     [ "$event_count3" -eq 0 ] \
         && ok "event_deletion_restart.unlisten_purges_events" \
@@ -2567,73 +2567,89 @@ PYEOF
 # flow_federation_replay has been moved to TestFederationReplay in cmd/juice/cmd_remote_test.go
 # using crypto/ed25519 — the previous implementation required Python nacl.signing.
 
-flow_provider_receipts() {
-    echo "=== FLOW provider_receipts ==="
-    local dir db home_sys home_alice home_bob port backend_port
+flow_transaction_access() {
+    echo "=== FLOW transaction_access ==="
+    local dir db home_sys home_alice home_bob home_carol port backend_port
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     home_bob="$dir/bob";     mkdir -p "$home_bob/.juice"
+    home_carol="$dir/carol"; mkdir -p "$home_carol/.juice"
     alloc_port; port=$_ALLOC_PORT
     alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
-        || { fail "provider_receipts.boot" "bootstrap failed"; return; }
+        || { fail "tx_access.boot" "bootstrap failed"; return; }
 
     j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
     j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
     j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @carol --email carol@test.com --password carolpass >/dev/null 2>&1
     j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
     j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_carol" auth login --handle @carol --password carolpass >/dev/null 2>&1
     j "$db" "$home_sys"   admin user deposit --handle @bob --amount 300 >/dev/null 2>&1
 
     start_backend "$backend_port" 200 '{"ok":true}'
     local backend_pid=$BACKEND_PID
     trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
 
-    # @alice creates a paid action (price=10) and makes it callable by @bob.
+    # @alice (seller) creates a paid action (price=10) callable by anyone.
     local create_out action_id
     create_out=$(jj "$db" "$home_alice" action create --name pvd-action --kind http \
-        --source "http://127.0.0.1:${backend_port}/pvd" --price 10 --description "provider receipt test")
+        --source "http://127.0.0.1:${backend_port}/pvd" --price 10 --description "tx access test")
     action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
     j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
 
-    # @bob calls @alice's action 3 times.
-    local proc_out proc_id
+    # @bob (buyer) calls @alice's action 3 times.
+    local proc_out proc_id i call_out a_tx_id
     proc_out=$(jj "$db" "$home_bob" process start --funds 200)
     proc_id=$(strfield "$proc_out" "process_id")
-    local i
     for i in 1 2 3; do
-        jj "$db" "$home_bob" call \
-            --process "$proc_id" --action @alice/pvd-action --args '{}' >/dev/null
+        call_out=$(jj "$db" "$home_bob" call \
+            --process "$proc_id" --action @alice/pvd-action --args '{}')
+        a_tx_id=$(strfield "$call_out" "tx_id")
     done
 
-    # @alice lists provider receipts — must see 3 entries.
-    local receipts_out receipt_count
-    receipts_out=$(jj "$db" "$home_alice" action receipts --id "$action_id")
-    receipt_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" "$receipts_out" 2>/dev/null || echo 0)
-    [ "$receipt_count" -eq 3 ] \
-        && ok "provider_receipts.count" \
-        || fail "provider_receipts.count" "expected 3 receipts, got $receipt_count: $receipts_out"
+    # @alice (seller) lists transactions for calls to her action — sees all 3.
+    local alice_txs alice_count
+    alice_txs=$(jj "$db" "$home_alice" tx list)
+    alice_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" "$alice_txs" 2>/dev/null || echo 0)
+    [ "$alice_count" -eq 3 ] \
+        && ok "tx_access.seller_sees_all" \
+        || fail "tx_access.seller_sees_all" "expected 3 txs for seller, got $alice_count: $alice_txs"
 
-    # Sum of receipt net amounts must equal @alice's credited balance.
-    local alice_out alice_balance receipt_net_sum
+    # Sum of transaction net amounts equals @alice's credited balance.
+    local alice_out alice_balance net_sum
     alice_out=$(jj "$db" "$home_alice" user me)
     alice_balance=$(numfield "$alice_out" "available")
-    receipt_net_sum=$(python3 -c "import sys,json; rs=json.loads(sys.argv[1]); print(sum(r['net'] for r in rs))" \
-        "$receipts_out" 2>/dev/null || echo -1)
-    [ "$receipt_net_sum" -eq "$alice_balance" ] \
-        && ok "provider_receipts.reconstructibility" \
-        || fail "provider_receipts.reconstructibility" \
-           "receipt net sum=$receipt_net_sum != alice balance=$alice_balance"
+    net_sum=$(python3 -c "import sys,json; rs=json.loads(sys.argv[1]); print(sum(t['net'] for t in rs))" \
+        "$alice_txs" 2>/dev/null || echo -1)
+    [ "$net_sum" -eq "$alice_balance" ] \
+        && ok "tx_access.reconstructibility" \
+        || fail "tx_access.reconstructibility" "tx net sum=$net_sum != alice balance=$alice_balance"
 
-    # @bob cannot list @alice's provider receipts.
-    local bob_receipts_out
-    bob_receipts_out=$(j "$db" "$home_bob" action receipts --id "$action_id" 2>&1)
-    echo "$bob_receipts_out" | grep -qi "unauthorized\|permission\|forbidden" \
-        && ok "provider_receipts.non_owner_denied" \
-        || fail "provider_receipts.non_owner_denied" "expected unauthorized, got: $bob_receipts_out"
+    # @bob (buyer) also sees the same 3 transactions.
+    local bob_txs bob_count
+    bob_txs=$(jj "$db" "$home_bob" tx list)
+    bob_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" "$bob_txs" 2>/dev/null || echo 0)
+    [ "$bob_count" -eq 3 ] \
+        && ok "tx_access.buyer_sees_all" \
+        || fail "tx_access.buyer_sees_all" "expected 3 txs for buyer, got $bob_count: $bob_txs"
+
+    # @carol is not a party — sees none, and tx show returns not found.
+    local carol_txs carol_count carol_show
+    carol_txs=$(jj "$db" "$home_carol" tx list)
+    carol_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" "$carol_txs" 2>/dev/null || echo -1)
+    [ "$carol_count" -eq 0 ] \
+        && ok "tx_access.non_party_sees_none" \
+        || fail "tx_access.non_party_sees_none" "expected 0 txs for non-party, got $carol_count: $carol_txs"
+
+    carol_show=$(j "$db" "$home_carol" tx show --id "$a_tx_id" 2>&1)
+    echo "$carol_show" | grep -qi "not found" \
+        && ok "tx_access.non_party_denied" \
+        || fail "tx_access.non_party_denied" "expected not found, got: $carol_show"
 
     stop_backend "$backend_pid"
 }
@@ -2808,7 +2824,7 @@ main() {
     flow_federation_import_execute
     flow_federation_changed_reimport
     flow_federation_unimport
-    flow_provider_receipts
+    flow_transaction_access
     flow_admin_supervision
 
     echo ""
