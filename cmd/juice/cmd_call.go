@@ -19,7 +19,7 @@ func callCmd() *cobra.Command {
 		Short: "Call an action within a process",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				ownerHandle, actionName, err := parseActionRefCLI(actionRef)
+				ownerHandle, actionName, err := parseActionRef(actionRef)
 				if err != nil {
 					return err
 				}
@@ -63,30 +63,4 @@ func callCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("process")
 	_ = cmd.MarkFlagRequired("action")
 	return cmd
-}
-
-// parseActionRefCLI parses "@owner/name" for CLI usage.
-func parseActionRefCLI(ref string) (string, string, error) {
-	if ref == "" {
-		return "", "", fmt.Errorf("action must be @owner/name")
-	}
-	if ref[0] != '@' {
-		return "", "", fmt.Errorf("action must be @owner/name")
-	}
-	idx := -1
-	for i := 1; i < len(ref); i++ {
-		if ref[i] == '/' {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return "", "", fmt.Errorf("action must be @owner/name")
-	}
-	ownerHandle := ref[:idx]
-	actionName := ref[idx+1:]
-	if ownerHandle == "" || actionName == "" {
-		return "", "", fmt.Errorf("action must be @owner/name")
-	}
-	return ownerHandle, actionName, nil
 }

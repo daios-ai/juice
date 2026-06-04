@@ -61,12 +61,6 @@ type Kernel struct {
 	log     *log.Logger
 }
 
-// federationExecutor is an optional extension of HTTPExecutor for cross-kernel calls.
-// When the HTTP executor also implements this interface, Call() uses it for remote-kernel targets
-// to send an idempotency key and receive the remote receipt for audit purposes.
-type federationExecutor interface {
-	ExecuteFederation(ctx context.Context, source, idempotencyKey string, args map[string]any) (result map[string]any, receiptJSON string, err error)
-}
 
 // New constructs a Kernel. scripts, http, llm, and chatter may be nil if those features are unused.
 func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, chatter Chatter, cfg Config, logger *log.Logger) *Kernel {
@@ -96,16 +90,25 @@ type CreateUserRequest struct {
 	Password string
 }
 
+// validateHandle rejects empty handles and handles containing /, enforcing the
+// invariant that @owner/name references are unambiguous (handles ≡ hostnames, no /).
+func validateHandle(handle string) error {
+	if handle == "" {
+		return ErrInvalidInput.Wrap("handle is required")
+	}
+	if strings.Contains(handle, "/") {
+		return ErrInvalidInput.Wrap("handle must not contain /")
+	}
+	return nil
+}
+
 // CreateUser creates a new user account and returns the user.
 func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*User, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
 	logger.Info("user.create.start", "handle", req.Handle)
-	if req.Handle == "" {
-		return nil, ErrInvalidInput.Wrap("handle is required")
-	}
-	if strings.Contains(req.Handle, "/") {
-		return nil, ErrInvalidInput.Wrap("handle must not contain /")
+	if err := validateHandle(req.Handle); err != nil {
+		return nil, err
 	}
 	if req.Email == "" {
 		return nil, ErrInvalidInput.Wrap("email is required")
@@ -742,6 +745,11 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 		a.Active = false
 	}
 	if req.Source != nil {
+		if a.Kind == KindHTTP {
+			if err := validateHTTPSource(ctx, *req.Source, k.cfg.AllowLocalSources); err != nil {
+				return nil, err
+			}
+		}
 		a.Source = *req.Source
 		a.Active = false
 		if a.Kind == KindWasm && k.scripts != nil {
@@ -1685,8 +1693,11 @@ func (k *Kernel) RegisterRemoteKernel(ctx context.Context, subjectID, handle, pu
 	if err := k.requireSuperuser(ctx, subjectID); err != nil {
 		return nil, err
 	}
-	if handle == "" || publicKey == "" || baseURL == "" {
+	if publicKey == "" || baseURL == "" {
 		return nil, ErrInvalidInput.Wrap("handle, public_key, and base_url are required")
+	}
+	if err := validateHandle(handle); err != nil {
+		return nil, err
 	}
 	if _, err := decodeRemotePublicKey(publicKey); err != nil {
 		return nil, err
@@ -2359,6 +2370,26 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 				continue
 			}
 		}
+		// Validate schemas before storing to prevent invalid data from being written.
+		if raw.inputSchema != nil {
+			if err := ValidateSchema(raw.inputSchema); err != nil {
+				rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "invalid input schema: " + err.Error()})
+				continue
+			}
+		}
+		if raw.outputSchema != nil {
+			if err := ValidateSchema(raw.outputSchema); err != nil {
+				rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "invalid output schema: " + err.Error()})
+				continue
+			}
+		}
+		// Validate base URL against SSRF rules (same as CreateAction for KindHTTP).
+		if raw.baseURL != "" {
+			if err := validateHTTPSource(ctx, raw.baseURL, k.cfg.AllowLocalSources); err != nil {
+				rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "unsafe source URL: " + err.Error()})
+				continue
+			}
+		}
 		sourceJSON := raw.sourceJSON
 		if ownershipVerified {
 			var osrc OpenAPISource
@@ -2424,8 +2455,10 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 
 // UnimportOpenAPI deactivates all OpenAPI-imported actions with matching owner + spec_url.
 // If name is non-empty, only actions whose name or operation_key matches are deactivated.
+// The subject must be the owner, @sys, or hold admin ACL on every matched action.
 func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specURL, name string) ([]*Action, error) {
-	if err := k.requireSelf(ctx, subjectID, ownerID); err != nil {
+	// Always require an authenticated, non-suspended subject.
+	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
 		return nil, err
 	}
 	actions, err := k.store.ListActionsByOwnerOpenAPISpec(ctx, ownerID, specURL)
@@ -2442,6 +2475,17 @@ func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specUR
 			}
 		}
 		actions = filtered
+	}
+	// If no actions match the spec, require subject == owner (or @sys) to prevent
+	// arbitrary users from probing spec URLs for existence.
+	if len(actions) == 0 {
+		return nil, k.requireSelf(ctx, subjectID, ownerID)
+	}
+	// For each matched action, require owner, @sys, or action admin ACL.
+	for _, a := range actions {
+		if err := k.requireAdmin(ctx, subjectID, a); err != nil {
+			return nil, err
+		}
 	}
 	if err := k.deactivateImported(ctx, actions, false); err != nil {
 		return nil, err

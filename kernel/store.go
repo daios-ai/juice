@@ -23,6 +23,12 @@ type URLFetcher interface {
 	FetchURL(ctx context.Context, rawURL string) ([]byte, error)
 }
 
+// FederationExecutor sends a cross-kernel call to a remote proxy target.
+// HTTPExecutor implementations may optionally implement this interface; kernel checks via type assertion.
+type FederationExecutor interface {
+	ExecuteFederation(ctx context.Context, source, idempotencyKey string, args map[string]any) (result map[string]any, receiptJSON string, err error)
+}
+
 // HostFunctions are the callbacks available to a running script.
 type HostFunctions interface {
 	Call(ctx context.Context, actionName string, args []byte) ([]byte, error)

@@ -430,8 +430,9 @@ func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) unimportOpenAPI(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SpecURL string `json:"spec_url"`
-		Name    string `json:"name"`
+		SpecURL     string `json:"spec_url"`
+		Name        string `json:"name"`
+		OwnerHandle string `json:"owner_handle"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
@@ -442,7 +443,16 @@ func (s *server) unimportOpenAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sub := subjectFrom(r)
-	actions, err := s.kernel.UnimportOpenAPI(r.Context(), sub, sub, req.SpecURL, req.Name)
+	ownerID := sub
+	if req.OwnerHandle != "" {
+		owner, err := s.kernel.ReadUserByHandle(r.Context(), req.OwnerHandle)
+		if err != nil {
+			writeErr(w, kernel.ErrNotFound.Wrap("owner not found"))
+			return
+		}
+		ownerID = owner.ID
+	}
+	actions, err := s.kernel.UnimportOpenAPI(r.Context(), sub, ownerID, req.SpecURL, req.Name)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1088,14 +1098,11 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse "@owner/name".
-	slash := strings.Index(actionParam[1:], "/")
-	if slash < 0 || !strings.HasPrefix(actionParam, "@") {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("action must be @owner/name"))
+	ownerHandle, actionName, err := parseActionRef(actionParam)
+	if err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap(err.Error()))
 		return
 	}
-	ownerHandle := actionParam[:slash+1]
-	actionName := actionParam[slash+2:]
 
 	var args map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {

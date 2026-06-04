@@ -39,7 +39,7 @@ func listenerCreateCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("source user not found: %w", err)
 				}
-				ownerHandle, actionName, err := parseActionRefCLI(actionRef)
+				ownerHandle, actionName, err := parseActionRef(actionRef)
 				if err != nil {
 					return err
 				}

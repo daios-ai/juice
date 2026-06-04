@@ -1132,6 +1132,10 @@ func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
 	ctx := context.Background()
 	sys := setupSys(t, k, st)
 
+	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@bad/handle", "not-base64url", "https://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for handle containing /, got %v", err)
+	}
+
 	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@bad-key", "not-base64url", "https://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for malformed public key, got %v", err)
 	}
@@ -2239,6 +2243,161 @@ func TestImportOpenAPIOwnershipStalenessFixed(t *testing.T) {
 	}
 	if src.OwnershipVerified {
 		t.Error("expected OwnershipVerified=false after proof was revoked")
+	}
+}
+
+// ---- Remote proxy execution test ----
+
+// fakeFederationHTTP implements HTTPExecutor and FederationExecutor for Call() tests.
+type fakeFederationHTTP struct {
+	result      map[string]any
+	receiptJSON string
+}
+
+func (f *fakeFederationHTTP) Execute(_ context.Context, _ string, _ map[string]any) (map[string]any, error) {
+	return nil, kernel.ErrInvalidState.Wrap("not used in federation tests")
+}
+
+func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, _ string, _ map[string]any) (map[string]any, string, error) {
+	result := f.result
+	if result == nil {
+		result = map[string]any{}
+	}
+	return result, f.receiptJSON, nil
+}
+
+func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sys := setupSys(t, nil, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+
+	fakeReceiptJSON := `{"tx_id":"remote-tx-1","status":"success"}`
+	fake := &fakeFederationHTTP{receiptJSON: fakeReceiptJSON}
+	k := newTestKernelWithHTTP(st, fake)
+
+	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@proxy-peer", base64.RawURLEncoding.EncodeToString(pub), "https://proxy.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := kernel.ActionManifest{
+		ActionID:     "proxy-action-1",
+		OwnerHandle:  "@proxy-peer",
+		Name:         "add",
+		Kind:         kernel.KindHTTP,
+		Price:        0,
+		Description:  "add two numbers",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	}
+	sig, err := kernel.SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+
+	result, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("ImportRemoteAction: %v", err)
+	}
+	if len(result.Created) != 1 {
+		t.Fatalf("expected 1 created action, got %d", len(result.Created))
+	}
+	a := result.Created[0]
+
+	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+	if err := k.GrantAll(ctx, sys.ID, a.ID); err != nil {
+		t.Fatalf("GrantAll: %v", err)
+	}
+
+	caller := setupUser(t, st, "@proxy-caller", 0)
+	p, _ := setupProcess(t, k, caller.ID, 0)
+
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		SubjectID:    caller.ID,
+		ProcessID:    p.ID,
+		TargetUserID: "@proxy-peer",
+		ActionName:   "add",
+		Args:         map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if reply == nil {
+		t.Fatal("expected non-nil reply")
+	}
+
+	txs, err := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID})
+	if err != nil {
+		t.Fatalf("ListTransactions: %v", err)
+	}
+	if len(txs) != 1 {
+		t.Fatalf("expected 1 transaction, got %d", len(txs))
+	}
+	tx := txs[0]
+	if tx.RemoteReceiptHash == "" {
+		t.Fatal("expected RemoteReceiptHash to be set")
+	}
+	h := sha256.Sum256([]byte(fakeReceiptJSON))
+	expected := fmt.Sprintf("%x", h)
+	if tx.RemoteReceiptHash != expected {
+		t.Errorf("RemoteReceiptHash: got %s, want %s", tx.RemoteReceiptHash, expected)
+	}
+	if tx.Status != kernel.TxSuccess {
+		t.Errorf("expected TxSuccess, got %s", tx.Status)
+	}
+}
+
+// ---- UnimportOpenAPI action admin test ----
+
+func TestUnimportOpenAPIActionAdmin(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@openapi-owner", 0)
+	admin := setupUser(t, st, "@openapi-admin", 0)
+
+	specURL := "https://spec.example.com/admin-test.json"
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"adminHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
+
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	if err != nil {
+		t.Fatalf("ImportOpenAPI: %v", err)
+	}
+	if len(result.Created) != 1 {
+		t.Fatalf("expected 1 created action, got %d", len(result.Created))
+	}
+	a := result.Created[0]
+
+	// Grant admin ACL to the admin user.
+	if err := k.GrantACL(ctx, admin.ID, a.ID, kernel.PermAdmin, owner.ID); err != nil {
+		t.Fatalf("GrantACL: %v", err)
+	}
+
+	// Admin (not owner) should be able to unimport with owner_handle passed as ownerID.
+	deactivated, err := k.UnimportOpenAPI(ctx, admin.ID, owner.ID, specURL, "")
+	if err != nil {
+		t.Fatalf("UnimportOpenAPI as action admin: %v", err)
+	}
+	if len(deactivated) != 1 {
+		t.Errorf("expected 1 deactivated action, got %d", len(deactivated))
+	}
+
+	// Non-admin (unrelated user) should be rejected.
+	other := setupUser(t, st, "@openapi-other", 0)
+	// Re-import to have an action to unimport.
+	result2, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	_ = result2
+	if _, err := k.UnimportOpenAPI(ctx, other.ID, owner.ID, specURL, ""); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized for non-admin, got %v", err)
 	}
 }
 

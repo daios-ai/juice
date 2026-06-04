@@ -307,7 +307,7 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 		res, err := k.executeNative(ctx, action, args, subjectID)
 		return res, 0, "", err
 	case KindRemoteProxy:
-		if fe, ok := k.http.(federationExecutor); ok {
+		if fe, ok := k.http.(FederationExecutor); ok {
 			idempotencyKey := uuid.New().String()
 			res, receiptJSON, err := fe.ExecuteFederation(ctx, action.Source, idempotencyKey, args)
 			return res, 0, receiptJSON, err
