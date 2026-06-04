@@ -238,8 +238,22 @@ type Rating struct {
 	RatedReceiptID *string   `json:"rated_receipt_id"` // nil for transactions predating the receipt requirement
 	RaterUserID    string    `json:"rater_user_id"`
 	Rating         float64   `json:"rating"`
+	Note           *string   `json:"note,omitempty"` // optional human-readable justification
 	CreatedAt      time.Time `json:"created_at"`
 	Signature      string    `json:"signature"`
+}
+
+// EmbeddedRating is the rating summary embedded in TransactionView responses.
+type EmbeddedRating struct {
+	Value float64 `json:"value"`
+	Note  *string `json:"note"`
+}
+
+// TransactionView is a Transaction with its associated rating embedded.
+// Rating is null when the transaction has not been rated.
+type TransactionView struct {
+	*Transaction
+	Rating *EmbeddedRating `json:"rating"`
 }
 
 // IdempotencyRecord prevents duplicate cross-kernel calls.

@@ -1799,9 +1799,9 @@ func (s *DB) CreateRatingAndUpdateStats(ctx context.Context, r *kernel.Rating, a
 	defer tx.Rollback()
 
 	if _, err = tx.ExecContext(ctx,
-		`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature)
-		 VALUES (?,?,?,?,?,?,?)`,
-		r.ID, r.RatedTxID, r.RatedReceiptID, r.RaterUserID, r.Rating,
+		`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,note,created_at,signature)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		r.ID, r.RatedTxID, r.RatedReceiptID, r.RaterUserID, r.Rating, r.Note,
 		timeToStr(r.CreatedAt), r.Signature,
 	); err != nil {
 		return dbErr(err, "create rating and update stats: insert rating")
@@ -1822,7 +1822,7 @@ func (s *DB) CreateRatingAndUpdateStats(ctx context.Context, r *kernel.Rating, a
 
 func (s *DB) ListRatings(ctx context.Context, actionID string, limit, offset int) ([]*kernel.Rating, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT r.id, r.rated_tx_id, r.rated_receipt_id, r.rater_user_id, r.rating, r.created_at, r.signature
+		`SELECT r.id, r.rated_tx_id, r.rated_receipt_id, r.rater_user_id, r.rating, r.note, r.created_at, r.signature
 		 FROM ratings r
 		 JOIN transactions t ON t.id = r.rated_tx_id
 		 WHERE t.action_id = ?
@@ -1839,7 +1839,7 @@ func (s *DB) ListRatings(ctx context.Context, actionID string, limit, offset int
 		var r kernel.Rating
 		var ratedReceiptID *string
 		var createdAt string
-		if err := rows.Scan(&r.ID, &r.RatedTxID, &ratedReceiptID, &r.RaterUserID, &r.Rating, &createdAt, &r.Signature); err != nil {
+		if err := rows.Scan(&r.ID, &r.RatedTxID, &ratedReceiptID, &r.RaterUserID, &r.Rating, &r.Note, &createdAt, &r.Signature); err != nil {
 			return nil, dbErr(err, "list ratings: scan")
 		}
 		r.RatedReceiptID = ratedReceiptID
@@ -1854,9 +1854,9 @@ func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating,
 	var ratedReceiptID *string
 	var createdAt string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature
+		`SELECT id,rated_tx_id,rated_receipt_id,rater_user_id,rating,note,created_at,signature
 		 FROM ratings WHERE rated_tx_id=?`, txID,
-	).Scan(&r.ID, &r.RatedTxID, &ratedReceiptID, &r.RaterUserID, &r.Rating, &createdAt, &r.Signature)
+	).Scan(&r.ID, &r.RatedTxID, &ratedReceiptID, &r.RaterUserID, &r.Rating, &r.Note, &createdAt, &r.Signature)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("rating not found")
 	}

@@ -788,7 +788,7 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	}
 
 	const rating = 1.0
-	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, rating); err != nil {
+	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, rating, nil); err != nil {
 		t.Fatalf("RateTransaction: %v", err)
 	}
 
@@ -836,10 +836,10 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 1.0); err != nil {
+	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 1.0, nil); err != nil {
 		t.Fatalf("first RateTransaction: %v", err)
 	}
-	_, err = k.RateTransaction(ctx, buyer.ID, reply.TxID, 0.0)
+	_, err = k.RateTransaction(ctx, buyer.ID, reply.TxID, 0.0, nil)
 	if err == nil {
 		t.Fatal("expected error on second rating, got nil")
 	}
@@ -876,7 +876,7 @@ func TestRateTransactionSelfRatingRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	_, err = k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0)
+	_, err = k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0, nil)
 	if err == nil {
 		t.Fatal("expected error when owner rates own output, got nil")
 	}
@@ -1513,7 +1513,7 @@ func TestRatingRecordCreated(t *testing.T) {
 		t.Fatalf("Call: %v", err)
 	}
 
-	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 1.0); err != nil {
+	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 1.0, nil); err != nil {
 		t.Fatalf("RateTransaction: %v", err)
 	}
 
@@ -1560,11 +1560,89 @@ func TestRatingDuplicateRejected(t *testing.T) {
 		t.Fatalf("Call: %v", err)
 	}
 
-	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 1.0); err != nil {
+	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 1.0, nil); err != nil {
 		t.Fatalf("first RateTransaction: %v", err)
 	}
-	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 0.0); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 0.0, nil); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for duplicate rating, got %v", err)
+	}
+}
+
+func TestTransactionViewEmbeddedRating(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	buyer := setupUser(t, st, "@tv-buyer", 500)
+	provider := setupUser(t, st, "@tv-provider", 0)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "tv-svc",
+		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0, Source: "wat",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		SubjectID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: provider.ID, ActionName: "tv-svc", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+
+	// Before rating: ReadTransaction returns a view with Rating == nil.
+	viewBefore, err := k.ReadTransaction(ctx, buyer.ID, reply.TxID)
+	if err != nil {
+		t.Fatalf("ReadTransaction before rating: %v", err)
+	}
+	if viewBefore.Rating != nil {
+		t.Errorf("expected nil Rating before rating, got %+v", viewBefore.Rating)
+	}
+
+	// After rating with note: view embeds value and note.
+	note := "worked perfectly"
+	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 1.0, &note); err != nil {
+		t.Fatalf("RateTransaction: %v", err)
+	}
+
+	viewAfter, err := k.ReadTransaction(ctx, buyer.ID, reply.TxID)
+	if err != nil {
+		t.Fatalf("ReadTransaction after rating: %v", err)
+	}
+	if viewAfter.Rating == nil {
+		t.Fatal("expected non-nil Rating after rating")
+	}
+	if viewAfter.Rating.Value != 1.0 {
+		t.Errorf("Rating.Value: got %f, want 1.0", viewAfter.Rating.Value)
+	}
+	if viewAfter.Rating.Note == nil || *viewAfter.Rating.Note != note {
+		t.Errorf("Rating.Note: got %v, want %q", viewAfter.Rating.Note, note)
+	}
+
+	// ListTransactions also returns the embedded rating.
+	views, err := k.ListTransactions(ctx, kernel.TxFilter{PartyUserID: buyer.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListTransactions: %v", err)
+	}
+	if len(views) == 0 {
+		t.Fatal("expected at least one transaction")
+	}
+	found := false
+	for _, v := range views {
+		if v.ID == reply.TxID {
+			found = true
+			if v.Rating == nil {
+				t.Error("list view: expected non-nil Rating")
+			} else if v.Rating.Value != 1.0 {
+				t.Errorf("list view Rating.Value: got %f, want 1.0", v.Rating.Value)
+			}
+		}
+	}
+	if !found {
+		t.Error("rated transaction not found in list")
 	}
 }
 

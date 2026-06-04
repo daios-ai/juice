@@ -775,6 +775,7 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var req struct {
 		Rating float64 `json:"rating"`
+		Note   *string `json:"note"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
@@ -784,7 +785,7 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("rating must be 0 or 1"))
 		return
 	}
-	rating, err := s.kernel.RateTransaction(r.Context(), subjectFrom(r), id, req.Rating)
+	rating, err := s.kernel.RateTransaction(r.Context(), subjectFrom(r), id, req.Rating, req.Note)
 	if err != nil {
 		writeErr(w, err)
 		return

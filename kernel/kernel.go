@@ -1051,8 +1051,8 @@ func (k *Kernel) ReadProcess(ctx context.Context, subjectID, id string) (*Proces
 
 // ---- Transaction operations ----
 
-// ReadTransaction returns a transaction by ID, checking subject authority.
-func (k *Kernel) ReadTransaction(ctx context.Context, subjectID, txID string) (*Transaction, error) {
+// ReadTransaction returns a transaction by ID with embedded rating, checking subject authority.
+func (k *Kernel) ReadTransaction(ctx context.Context, subjectID, txID string) (*TransactionView, error) {
 	tx, err := k.store.ReadTransaction(ctx, txID)
 	if err != nil {
 		return nil, err
@@ -1063,7 +1063,7 @@ func (k *Kernel) ReadTransaction(ctx context.Context, subjectID, txID string) (*
 	if !k.canReadTransaction(ctx, subjectID, tx) {
 		return nil, ErrNotFound.Wrap("transaction not found")
 	}
-	return tx, nil
+	return k.toTransactionView(ctx, tx), nil
 }
 
 // canReadTransaction reports whether subjectID is a party to tx — the buyer
@@ -1081,15 +1081,32 @@ func (k *Kernel) canReadTransaction(ctx context.Context, subjectID string, tx *T
 	return false
 }
 
-// ListTransactions returns transactions matching the filter.
-func (k *Kernel) ListTransactions(ctx context.Context, filter TxFilter) ([]*Transaction, error) {
-	return k.store.ListTransactions(ctx, filter)
+// ListTransactions returns transactions matching the filter, each with an embedded rating.
+func (k *Kernel) ListTransactions(ctx context.Context, filter TxFilter) ([]*TransactionView, error) {
+	txs, err := k.store.ListTransactions(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]*TransactionView, len(txs))
+	for i, tx := range txs {
+		views[i] = k.toTransactionView(ctx, tx)
+	}
+	return views, nil
+}
+
+// toTransactionView wraps a Transaction with its associated rating (if any).
+func (k *Kernel) toTransactionView(ctx context.Context, tx *Transaction) *TransactionView {
+	v := &TransactionView{Transaction: tx}
+	if r, err := k.store.ReadRatingByTxID(ctx, tx.ID); err == nil && r != nil {
+		v.Rating = &EmbeddedRating{Value: r.Rating, Note: r.Note}
+	}
+	return v
 }
 
 // RateTransaction submits a rating for a completed transaction.
 // Only the direct buyer (the process owner who paid) may rate.
 // Ratings are stored in a separate ratings table; the transaction row is never modified.
-func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, rating float64) (*Rating, error) {
+func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, rating float64, note *string) (*Rating, error) {
 	if rating != 0 && rating != 1 {
 		return nil, ErrInvalidInput.Wrap("rating must be 0 or 1")
 	}
@@ -1122,6 +1139,7 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 		RatedTxID:   txID,
 		RaterUserID: subjectID,
 		Rating:      rating,
+		Note:        note,
 		CreatedAt:   time.Now().UTC().Truncate(time.Second),
 	}
 	if receipt != nil {

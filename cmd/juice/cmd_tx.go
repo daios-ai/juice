@@ -56,15 +56,22 @@ func txShowCmd() *cobra.Command {
 		Short: "Show a transaction",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				tx, err := k.ReadTransaction(context.Background(), subjectID, txID)
+				tv, err := k.ReadTransaction(context.Background(), subjectID, txID)
 				if err != nil {
 					return err
 				}
 				if flagOutput == "json" {
-					return printJSON(tx)
+					return printJSON(tv)
 				}
 				fmt.Printf("Transaction: %s\n  status:  %s\n  action:  %s\n  gross:   %d\n  net:     %d\n  fee:     %d\n  reason:  %s\n",
-					tx.ID, tx.Status, tx.ActionID, tx.Gross, tx.Net, tx.Fee, tx.Reason)
+					tv.ID, tv.Status, tv.ActionID, tv.Gross, tv.Net, tv.Fee, tv.Reason)
+				if tv.Rating != nil {
+					if tv.Rating.Note != nil {
+						fmt.Printf("  rating:  %.0f (%s)\n", tv.Rating.Value, *tv.Rating.Note)
+					} else {
+						fmt.Printf("  rating:  %.0f\n", tv.Rating.Value)
+					}
+				}
 				return nil
 			})
 		},
@@ -77,12 +84,17 @@ func txShowCmd() *cobra.Command {
 func txRateCmd() *cobra.Command {
 	var txID string
 	var rating float64
+	var note string
 	cmd := &cobra.Command{
 		Use:   "rate",
 		Short: "Rate a transaction (0 or 1)",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				if _, err := k.RateTransaction(context.Background(), subjectID, txID, rating); err != nil {
+				var notePtr *string
+				if note != "" {
+					notePtr = &note
+				}
+				if _, err := k.RateTransaction(context.Background(), subjectID, txID, rating, notePtr); err != nil {
 					return err
 				}
 				fmt.Printf("Transaction %s rated %.0f.\n", txID, rating)
@@ -92,6 +104,7 @@ func txRateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&txID, "id", "", "Transaction ID (required)")
 	cmd.Flags().Float64Var(&rating, "rating", -1, "Rating: 0 (bad) or 1 (good) (required)")
+	cmd.Flags().StringVar(&note, "note", "", "Optional justification note")
 	_ = cmd.MarkFlagRequired("id")
 	_ = cmd.MarkFlagRequired("rating")
 	return cmd

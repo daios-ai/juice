@@ -1055,11 +1055,13 @@ func TestCreateRatingDirect(t *testing.T) {
 	}
 	_ = db.createTransaction(ctx, tx)
 
+	note := "store test note"
 	rating := &kernel.Rating{
 		ID:          uuid.New().String(),
 		RatedTxID:   tx.ID,
 		RaterUserID: rater.ID,
 		Rating:      1.0,
+		Note:        &note,
 		CreatedAt:   time.Now().UTC(),
 		Signature:   "",
 	}
@@ -1076,6 +1078,9 @@ func TestCreateRatingDirect(t *testing.T) {
 	}
 	if got.RaterUserID != rater.ID {
 		t.Errorf("rating.RaterUserID: got %q, want %q", got.RaterUserID, rater.ID)
+	}
+	if got.Note == nil || *got.Note != note {
+		t.Errorf("rating.Note: got %v, want %q", got.Note, note)
 	}
 
 	// Duplicate rating must fail.
@@ -1781,9 +1786,9 @@ func (s *DB) createReceipt(ctx context.Context, r *kernel.Receipt) error {
 
 func (s *DB) createRating(ctx context.Context, r *kernel.Rating) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,created_at,signature)
-		 VALUES (?,?,?,?,?,?,?)`,
-		r.ID, r.RatedTxID, r.RatedReceiptID, r.RaterUserID, r.Rating,
+		`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,note,created_at,signature)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		r.ID, r.RatedTxID, r.RatedReceiptID, r.RaterUserID, r.Rating, r.Note,
 		timeToStr(r.CreatedAt), r.Signature,
 	)
 	return dbErr(err, "create rating")
