@@ -1603,9 +1603,17 @@ flow_rating() {
         --process "$proc_id" --action @alice/rate-me --args '{}')
     tx_id=$(strfield "$call_out" "tx_id")
 
-    # @bob rates tx → success
+    # Before rating: detail response has null rating field.
+    local show_before
+    show_before=$(jj "$db" "$home_bob" tx show --id "$tx_id")
+    python3 -c "import sys,json; d=json.loads(sys.argv[1]); assert d.get('rating') is None, d" \
+        "$show_before" 2>/dev/null \
+        && ok "rating.unrated_null" \
+        || fail "rating.unrated_null" "expected null rating before rating, got: $show_before"
+
+    # @bob rates tx with a note → success
     local rate_out
-    rate_out=$(j "$db" "$home_bob" tx rate --id "$tx_id" --rating 1 2>&1)
+    rate_out=$(j "$db" "$home_bob" tx rate --id "$tx_id" --rating 1 --note "great service" 2>&1)
     echo "$rate_out" | grep -q "rated" \
         && ok "rating.rate_succeeds" \
         || fail "rating.rate_succeeds" "unexpected rate output: $rate_out"
@@ -1616,6 +1624,49 @@ flow_rating() {
     [ "$(numfield "$stats_out" "rating_count")" -eq 1 ] \
         && ok "rating.stats_updated" \
         || fail "rating.stats_updated" "expected rating_count=1, got: $stats_out"
+
+    # Buyer (@bob) sees embedded rating with value and note in detail.
+    local show_buyer
+    show_buyer=$(jj "$db" "$home_bob" tx show --id "$tx_id")
+    python3 -c "
+import sys, json
+d = json.loads(sys.argv[1])
+r = d.get('rating')
+assert r is not None, 'rating is null'
+assert r['value'] == 1, f'value={r[\"value\"]}'
+assert r['note'] == 'great service', f'note={r[\"note\"]}'
+" "$show_buyer" 2>/dev/null \
+        && ok "rating.buyer_sees_embedded_rating" \
+        || fail "rating.buyer_sees_embedded_rating" "buyer detail wrong: $show_buyer"
+
+    # Seller (@alice) also sees embedded rating with note in detail.
+    local show_seller
+    show_seller=$(jj "$db" "$home_alice" tx show --id "$tx_id")
+    python3 -c "
+import sys, json
+d = json.loads(sys.argv[1])
+r = d.get('rating')
+assert r is not None, 'rating is null'
+assert r['value'] == 1, f'value={r[\"value\"]}'
+assert r['note'] == 'great service', f'note={r[\"note\"]}'
+" "$show_seller" 2>/dev/null \
+        && ok "rating.seller_sees_embedded_rating" \
+        || fail "rating.seller_sees_embedded_rating" "seller detail wrong: $show_seller"
+
+    # Embedded rating also appears in the list response.
+    local list_out
+    list_out=$(jj "$db" "$home_bob" tx list)
+    python3 -c "
+import sys, json
+txs = json.loads(sys.argv[1])
+match = next((t for t in txs if t['id'] == sys.argv[2]), None)
+assert match is not None, 'tx not in list'
+r = match.get('rating')
+assert r is not None, 'rating is null in list'
+assert r['value'] == 1, f'value={r[\"value\"]}'
+" "$list_out" "$tx_id" 2>/dev/null \
+        && ok "rating.embedded_in_list" \
+        || fail "rating.embedded_in_list" "list view wrong: $list_out"
 
     # Duplicate rate → ErrInvalidInput
     local rate2_out
