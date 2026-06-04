@@ -93,8 +93,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrNotFound.Wrapf("action %s/%s not found", req.TargetUserID, req.ActionName)
 	}
 
-	// 5. Action must be active.
-	if !action.Active {
+	// 5. Action must be active (owners may call their own inactive actions).
+	if !action.Active && action.OwnerUserID != req.SubjectID {
 		return nil, ErrInvalidState.Wrap("action is inactive")
 	}
 
@@ -136,12 +136,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		req.ParentTraceID = root.ID
 	}
 
-	// Causal trace invariants.
-	// Direct calls must not carry a FOLLOWS_FROM reference.
-	if req.CausedByTraceID != "" && req.EventID == "" {
-		return nil, ErrInvalidInput.Wrap("CausedByTraceID must be empty for direct calls")
-	}
-	// FOLLOWS_FROM and CHILD_OF must reference distinct traces.
+	// Causal trace invariants: FOLLOWS_FROM and CHILD_OF must reference distinct traces.
 	if req.CausedByTraceID != "" && req.CausedByTraceID == req.ParentTraceID {
 		return nil, ErrInvalidInput.Wrap("CausedByTraceID must differ from ParentTraceID")
 	}
@@ -195,26 +190,17 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	argsJSON, _ := json.Marshal(req.Args)
 	tx.ArgsJSON = json.RawMessage(argsJSON)
 
-	// 12. Execute. If the target is a remote kernel and the HTTP executor supports federation,
-	// use ExecuteFederation to carry an idempotency key and capture the remote receipt hash.
+	// 12. Execute. Dispatch is based on action.Kind; KindRemoteProxy is handled inside execute().
 	started := time.Now()
-	var reply map[string]any
-	var subCost int64
-	var execErr error
-	if action.Kind == KindRemoteProxy {
-		if fe, ok := k.http.(federationExecutor); ok {
-			idempotencyKey := uuid.New().String()
-			var receiptJSON string
-			reply, receiptJSON, execErr = fe.ExecuteFederation(ctx, action.Source, idempotencyKey, req.Args)
-			if execErr == nil && receiptJSON != "" {
-				tx.RemoteReceiptHash = sha256Hex(receiptJSON)
-			}
-		} else {
-			reply, subCost, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID, req.SubjectID)
-		}
-	} else {
-		// Pass action.OwnerUserID so host functions operate on behalf of the action author.
-		reply, subCost, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID, req.SubjectID)
+	var (
+		reply             map[string]any
+		subCost           int64
+		remoteReceiptHash string
+		execErr           error
+	)
+	reply, subCost, remoteReceiptHash, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID, req.SubjectID)
+	if remoteReceiptHash != "" {
+		tx.RemoteReceiptHash = sha256Hex(remoteReceiptHash)
 	}
 	latency := time.Since(started).Seconds()
 	tx.EndedAt = time.Now().UTC()
@@ -304,24 +290,31 @@ func (k *Kernel) canCall(ctx context.Context, subjectID string, action *Action) 
 }
 
 // execute dispatches to the correct execution backend.
-// Returns (result, subCost, error) where subCost is the total gross paid to direct WASM sub-calls.
-func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID, subjectID string) (map[string]any, int64, error) {
+// Returns (result, subCost, remoteReceiptHash, error). remoteReceiptHash is non-empty only
+// for successful KindRemoteProxy calls and holds the raw receipt JSON from the remote kernel.
+func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID, subjectID string) (map[string]any, int64, string, error) {
 	switch action.Kind {
 	case KindHTTP:
 		if k.http == nil {
-			return nil, 0, ErrInvalidState.Wrap("HTTP executor not configured")
+			return nil, 0, "", ErrInvalidState.Wrap("HTTP executor not configured")
 		}
-		result, err := k.http.Execute(ctx, action.Source, args)
-		return result, 0, err
+		res, err := k.http.Execute(ctx, action.Source, args)
+		return res, 0, "", err
 	case KindWasm:
-		return k.executeWasm(ctx, action, args, trace, ownerUserID)
+		res, cost, err := k.executeWasm(ctx, action, args, trace, ownerUserID)
+		return res, cost, "", err
 	case KindNative:
-		result, err := k.executeNative(ctx, action, args, subjectID)
-		return result, 0, err
+		res, err := k.executeNative(ctx, action, args, subjectID)
+		return res, 0, "", err
 	case KindRemoteProxy:
-		return nil, 0, ErrInvalidState.Wrap("federation executor not configured")
+		if fe, ok := k.http.(federationExecutor); ok {
+			idempotencyKey := uuid.New().String()
+			res, receiptJSON, err := fe.ExecuteFederation(ctx, action.Source, idempotencyKey, args)
+			return res, 0, receiptJSON, err
+		}
+		return nil, 0, "", ErrInvalidState.Wrap("federation executor not configured")
 	default:
-		return nil, 0, ErrInvalidState.Wrapf("unknown action kind %q", action.Kind)
+		return nil, 0, "", ErrInvalidState.Wrapf("unknown action kind %q", action.Kind)
 	}
 }
 

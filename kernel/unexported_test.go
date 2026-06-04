@@ -5,6 +5,7 @@ package kernel
 // remoteManifestHash, openAPIOperationHash, parseOpenAPISpec, buildReceipt).
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,8 +35,9 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 		"file:///etc/passwd",
 		"://broken",
 	}
+	ctx := context.Background()
 	for _, u := range rejected {
-		if err := validateHTTPSource(u, false); err == nil {
+		if err := validateHTTPSource(ctx, u, false); err == nil {
 			t.Errorf("validateHTTPSource(%q): expected error, got nil", u)
 		}
 	}
@@ -46,7 +48,7 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 		"https://api.stripe.com/v1/charges",
 	}
 	for _, u := range accepted {
-		if err := validateHTTPSource(u, false); err != nil {
+		if err := validateHTTPSource(ctx, u, false); err != nil {
 			t.Errorf("validateHTTPSource(%q): unexpected error: %v", u, err)
 		}
 	}
@@ -153,6 +155,94 @@ func TestOpenAPIOperationHashIncludesParams(t *testing.T) {
 		schema, schema, 0, p2)
 	if h1 != h2 {
 		t.Error("param order should not affect hash")
+	}
+}
+
+func TestParseOpenAPISpecAcceptsYAML(t *testing.T) {
+	spec := `
+openapi: "3.0.0"
+info:
+  title: T
+  version: "1"
+servers:
+  - url: http://api.example.com
+paths:
+  /hello:
+    get:
+      operationId: sayHello
+      description: says hello
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+`
+	ops, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.yaml")
+	if err != nil {
+		t.Fatalf("parseOpenAPISpec (YAML): %v", err)
+	}
+	if len(rejected) != 0 {
+		t.Errorf("unexpected rejections: %+v", rejected)
+	}
+	if len(ops) != 1 || ops[0].key != "sayHello" {
+		t.Errorf("expected 1 op with key sayHello, got %+v", ops)
+	}
+}
+
+func TestParseOpenAPISpecResolvesRefInResponseSchema(t *testing.T) {
+	spec := `{
+		"openapi":"3.0.0","info":{"title":"T","version":"1"},
+		"servers":[{"url":"http://api.example.com"}],
+		"components":{"schemas":{"Reply":{"type":"object","properties":{"id":{"type":"string","description":"the id"}}}}},
+		"paths":{"/op":{"post":{
+			"operationId":"doOp",
+			"description":"does op",
+			"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Reply"}}}}}
+		}}}
+	}`
+	ops, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
+	if err != nil {
+		t.Fatalf("parseOpenAPISpec ($ref): %v", err)
+	}
+	if len(rejected) != 0 {
+		t.Errorf("unexpected rejections: %+v", rejected)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 op, got %d", len(ops))
+	}
+	props, _ := ops[0].outputSchema["properties"].(map[string]any)
+	if _, ok := props["id"]; !ok {
+		t.Errorf("$ref not resolved in output schema: got %+v", ops[0].outputSchema)
+	}
+}
+
+func TestParseOpenAPISpecResolvesRefInRequestBodySchema(t *testing.T) {
+	spec := `{
+		"openapi":"3.0.0","info":{"title":"T","version":"1"},
+		"servers":[{"url":"http://api.example.com"}],
+		"components":{"schemas":{"Body":{"type":"object","properties":{"name":{"type":"string","description":"the name"}},"required":["name"]}}},
+		"paths":{"/op":{"post":{
+			"operationId":"doOp",
+			"description":"does op",
+			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Body"}}}},
+			"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}
+		}}}
+	}`
+	ops, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
+	if err != nil {
+		t.Fatalf("parseOpenAPISpec ($ref body): %v", err)
+	}
+	if len(rejected) != 0 {
+		t.Errorf("unexpected rejections: %+v", rejected)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 op, got %d", len(ops))
+	}
+	props, _ := ops[0].inputSchema["properties"].(map[string]any)
+	if _, ok := props["name"]; !ok {
+		t.Errorf("$ref not resolved in input schema body: got %+v", ops[0].inputSchema)
 	}
 }
 

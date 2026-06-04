@@ -142,16 +142,17 @@ func TestCallClosedProcessFails(t *testing.T) {
 	}
 }
 
-func TestCallInactiveActionDenied(t *testing.T) {
+func TestCallInactiveActionDeniedForNonOwner(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@alice", 1000)
+	alice := setupUser(t, st, "@alice", 1000)
+	bob := setupUser(t, st, "@bob", 0)
 
 	a := &kernel.Action{
 		ID:          uuid.New().String(),
-		OwnerUserID: owner.ID,
+		OwnerUserID: bob.ID,
 		Name:        "svc",
 		Kind:        kernel.KindNative,
 		Active:      false,
@@ -161,22 +162,58 @@ func TestCallInactiveActionDenied(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
+	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 100)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     owner.ID,
+		SubjectID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
-		TargetUserID:  owner.ID,
+		TargetUserID:  bob.ID,
 		ActionName:    "svc",
 		Args:          map[string]any{},
 	})
 	if err == nil {
-		t.Error("expected error calling inactive action")
+		t.Error("expected error calling inactive action as non-owner")
 	}
 	var ke *kernel.KernelError
 	if !errors.As(err, &ke) || ke.Code != "invalid_state" {
 		t.Errorf("expected invalid_state error, got %v", err)
+	}
+}
+
+func TestOwnerCanCallInactiveAction(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 0)
+	a := &kernel.Action{
+		ID:          uuid.New().String(),
+		OwnerUserID: alice.ID,
+		Name:        "svc",
+		Kind:        kernel.KindWasm,
+		Active:      false, // inactive
+		Price:       0,
+		Source:      "fake-wasm",
+		InputSchema: map[string]any{},
+		OutputSchema: map[string]any{},
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
+
+	_, err := k.Call(ctx, kernel.CallRequest{
+		SubjectID:     alice.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: root.ID,
+		TargetUserID:  alice.ID,
+		ActionName:    "svc",
+		Args:          map[string]any{},
+	})
+	if err != nil {
+		t.Errorf("owner should be able to call their own inactive action; got %v", err)
 	}
 }
 
@@ -999,7 +1036,9 @@ func TestContractorEphemeralRootHasCausedByTraceID(t *testing.T) {
 	}
 }
 
-func TestDirectCallWithCausedByTraceIDRejected(t *testing.T) {
+func TestDirectCallWithCausedByTraceIDAccepted(t *testing.T) {
+	// After relaxing the restriction: a CallRequest may carry CausedByTraceID as long as it
+	// differs from ParentTraceID. The only remaining invariant is caused_by ≠ parent.
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -1011,17 +1050,21 @@ func TestDirectCallWithCausedByTraceIDRejected(t *testing.T) {
 	_ = st.UpdateAction(ctx, a)
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
 
+	// Use a distinct trace ID (e.g. from a second process) as the causal reference.
+	p2, root2, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
+	_ = p2
+
 	_, err := k.Call(ctx, kernel.CallRequest{
 		SubjectID:       alice.ID,
 		ProcessID:       p.ID,
 		ParentTraceID:   root.ID,
-		CausedByTraceID: root.ID, // must be empty for direct calls
+		CausedByTraceID: root2.ID, // valid: differs from ParentTraceID
 		TargetUserID:    alice.ID,
 		ActionName:      "svc",
 		Args:            map[string]any{},
 	})
-	if err == nil {
-		t.Fatal("expected error when direct call supplies CausedByTraceID")
+	if err != nil {
+		t.Fatalf("expected success when CausedByTraceID differs from ParentTraceID; got %v", err)
 	}
 }
 
@@ -1042,7 +1085,6 @@ func TestCausedByEqualsParentRejected(t *testing.T) {
 		ProcessID:       p.ID,
 		ParentTraceID:   root.ID,
 		CausedByTraceID: root.ID, // same as parent — FOLLOWS_FROM must differ from CHILD_OF
-		EventID:         "fake-event-id",
 		TargetUserID:    alice.ID,
 		ActionName:      "svc",
 		Args:            map[string]any{},

@@ -18,6 +18,7 @@ import (
 
 	"github.com/daios-ai/juice/log"
 	"github.com/google/uuid"
+	"sigs.k8s.io/yaml"
 )
 
 // Config holds kernel-level configuration.
@@ -301,7 +302,9 @@ type CreateActionRequest struct {
 // validateHTTPSource rejects URLs that could be used for SSRF attacks.
 // Allowed: http and https schemes with public hostnames or IPs.
 // Rejected: other schemes, localhost, loopback, private, and link-local addresses.
-func validateHTTPSource(source string, allowLocal bool) error {
+// When allowLocal is false and the host is not a literal IP, DNS is resolved and each
+// resolved address is checked against the same rules so hostname-based SSRF is also caught.
+func validateHTTPSource(ctx context.Context, source string, allowLocal bool) error {
 	u, err := url.Parse(source)
 	if err != nil {
 		return ErrInvalidInput.Wrapf("invalid URL: %v", err)
@@ -327,6 +330,19 @@ func validateHTTPSource(source string, allowLocal bool) error {
 			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
 				return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
 			}
+		} else {
+			// Not a literal IP: resolve the hostname and check each result.
+			// DNS failure is treated as unknown (fail open) since the address
+			// may be legitimately unreachable at creation time.
+			if addrs, dnsErr := net.DefaultResolver.LookupHost(ctx, host); dnsErr == nil {
+				for _, addr := range addrs {
+					if ip := net.ParseIP(addr); ip != nil {
+						if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+							return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
+						}
+					}
+				}
+			}
 		}
 	}
 	return nil
@@ -349,7 +365,7 @@ func (k *Kernel) CreateAction(ctx context.Context, subjectID string, req CreateA
 		return nil, ErrInvalidInput.Wrap("price must be non-negative")
 	}
 	if req.Kind == KindHTTP && req.Source != "" {
-		if err := validateHTTPSource(req.Source, k.cfg.AllowLocalSources); err != nil {
+		if err := validateHTTPSource(ctx, req.Source, k.cfg.AllowLocalSources); err != nil {
 			return nil, err
 		}
 	}
@@ -425,6 +441,25 @@ func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionReque
 	return a, nil
 }
 
+// validateAndInitActivation validates schema descriptions and ensures a stats row exists.
+// Called by both SetActive and ActivateNativeAction to eliminate duplicated checks.
+// Errors from validateSchemaDescriptions are returned as-is (ErrSchemaViolation).
+func (k *Kernel) validateAndInitActivation(ctx context.Context, a *Action) error {
+	if err := validateSchemaDescriptions(a.InputSchema, "input"); err != nil {
+		return err
+	}
+	if err := validateSchemaDescriptions(a.OutputSchema, "output"); err != nil {
+		return err
+	}
+	stats, _ := k.store.ReadStats(ctx, a.ID)
+	if stats == nil {
+		if err := k.store.UpsertStats(ctx, DefaultStats(a.ID)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ActivateNativeAction activates a native action for bootstrap use.
 // Native actions are not managed by the normal user-facing action lifecycle.
 func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID string) error {
@@ -435,17 +470,8 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID string) erro
 	if a.Kind != KindNative {
 		return ErrInvalidInput.Wrap("action is not native")
 	}
-	if err := validateSchemaDescriptions(a.InputSchema, "input"); err != nil {
+	if err := k.validateAndInitActivation(ctx, a); err != nil {
 		return err
-	}
-	if err := validateSchemaDescriptions(a.OutputSchema, "output"); err != nil {
-		return err
-	}
-	stats, _ := k.store.ReadStats(ctx, actionID)
-	if stats == nil {
-		if err := k.store.UpsertStats(ctx, DefaultStats(actionID)); err != nil {
-			return err
-		}
 	}
 	a.Active = true
 	a.UpdatedAt = time.Now().UTC()
@@ -763,11 +789,8 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 		if err := ValidateSchema(a.OutputSchema); err != nil {
 			return ErrInvalidState.Wrapf("invalid output schema: %v", err)
 		}
-		if err := validateSchemaDescriptions(a.InputSchema, "input"); err != nil {
-			return ErrInvalidState.Wrapf("input schema: %v", err)
-		}
-		if err := validateSchemaDescriptions(a.OutputSchema, "output"); err != nil {
-			return ErrInvalidState.Wrapf("output schema: %v", err)
+		if err := k.validateAndInitActivation(ctx, a); err != nil {
+			return err
 		}
 		if a.Kind == KindHTTP {
 			src := a.Source
@@ -778,7 +801,7 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 				}
 				src = osrc.BaseURL
 			}
-			if err := validateHTTPSource(src, k.cfg.AllowLocalSources); err != nil {
+			if err := validateHTTPSource(ctx, src, k.cfg.AllowLocalSources); err != nil {
 				return err
 			}
 		}
@@ -798,13 +821,6 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 				if !osrc.OwnershipVerified {
 					return ErrUnauthorized.Wrap("ownership not verified: add x-juice-owner to spec")
 				}
-			}
-		}
-		// Ensure stats exist.
-		stats, _ := k.store.ReadStats(ctx, actionID)
-		if stats == nil {
-			if err := k.store.UpsertStats(ctx, DefaultStats(actionID)); err != nil {
-				return err
 			}
 		}
 	}
@@ -1628,6 +1644,11 @@ func sha256Hex(s string) string {
 	return fmt.Sprintf("%x", h)
 }
 
+// yamlToJSON converts a YAML byte slice to canonical JSON bytes.
+func yamlToJSON(src []byte) ([]byte, error) {
+	return yaml.YAMLToJSON(src)
+}
+
 // signReceipt signs the canonical Receipt object (with Signature cleared) using JCS.
 func signReceipt(key ed25519.PrivateKey, r *Receipt) (string, error) {
 	if len(key) != ed25519.PrivateKeySize {
@@ -1764,20 +1785,17 @@ func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*
 	var result ImportResult
 
 	// Deactivate existing actions whose ops were removed from the spec.
+	var stale []*Action
 	for key, a := range existingByKey {
 		if _, ok := incomingKeys[key]; ok {
 			continue
 		}
-		a.Active = false
-		a.UpdatedAt = time.Now().UTC()
-		if err := k.store.UpdateAction(ctx, a); err != nil {
-			return nil, err
-		}
-		if err := k.store.UpsertStats(ctx, &Stats{ActionID: a.ID}); err != nil {
-			return nil, err
-		}
-		result.Deactivated = append(result.Deactivated, a)
+		stale = append(stale, a)
 	}
+	if err := k.deactivateImported(ctx, stale, true); err != nil {
+		return nil, err
+	}
+	result.Deactivated = append(result.Deactivated, stale...)
 
 	// Process each incoming op.
 	for _, op := range incoming {
@@ -1808,14 +1826,19 @@ func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*
 	return &result, nil
 }
 
-// deactivateActions sets Active=false and persists each action.
-// Used by both UnimportOpenAPI and UnimportRemoteAction.
-func (k *Kernel) deactivateActions(ctx context.Context, actions []*Action) error {
+// deactivateImported sets Active=false for each action and optionally resets its stats.
+// Invariant: unimport ⇒ active=false ∧ history unchanged.
+func (k *Kernel) deactivateImported(ctx context.Context, actions []*Action, resetStats bool) error {
 	for _, a := range actions {
 		a.Active = false
 		a.UpdatedAt = time.Now().UTC()
 		if err := k.store.UpdateAction(ctx, a); err != nil {
 			return err
+		}
+		if resetStats {
+			if err := k.store.UpsertStats(ctx, &Stats{ActionID: a.ID}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -1838,12 +1861,96 @@ type rawOp struct {
 	sourceJSON   string
 }
 
-// parseOpenAPISpec parses specBytes (already-fetched JSON) and returns one rawOp per supported
-// operation (GET/POST/PUT/PATCH/DELETE). specURL is stored in provenance only; no HTTP is performed.
-// The third return value is the base URL extracted from the spec's servers array.
+// resolveJSONPointer follows a JSON Pointer path (e.g. "components/schemas/Foo") inside doc.
+func resolveJSONPointer(doc map[string]any, ptr string) any {
+	var curr any = doc
+	for _, part := range strings.Split(ptr, "/") {
+		if part == "" {
+			continue
+		}
+		m, ok := curr.(map[string]any)
+		if !ok {
+			return nil
+		}
+		curr = m[part]
+	}
+	return curr
+}
+
+// resolveRefsValue recursively inlines local #/... $ref values found anywhere in node.
+// External $ref values (not starting with "#/") are left as-is.
+// depth limits recursion to prevent infinite loops from circular schemas.
+func resolveRefsValue(doc map[string]any, node any, depth int) any {
+	if depth > 10 {
+		return node
+	}
+	switch v := node.(type) {
+	case map[string]any:
+		if ref, ok := v["$ref"].(string); ok && strings.HasPrefix(ref, "#/") {
+			target := resolveJSONPointer(doc, strings.TrimPrefix(ref, "#/"))
+			if target == nil {
+				return v
+			}
+			return resolveRefsValue(doc, target, depth+1)
+		}
+		out := make(map[string]any, len(v))
+		for k, val := range v {
+			out[k] = resolveRefsValue(doc, val, depth+1)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = resolveRefsValue(doc, item, depth+1)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// resolveRefsMap resolves all local $ref values in schema using doc as the root document.
+func resolveRefsMap(doc, schema map[string]any) map[string]any {
+	if schema == nil {
+		return nil
+	}
+	resolved := resolveRefsValue(doc, schema, 0)
+	if m, ok := resolved.(map[string]any); ok {
+		return m
+	}
+	return schema
+}
+
+// looksLikeJSON reports whether b (ignoring leading whitespace) starts with '{' or '['.
+func looksLikeJSON(b []byte) bool {
+	for _, c := range b {
+		switch c {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '{', '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// parseOpenAPISpec parses specBytes (already-fetched JSON or YAML) and returns one rawOp per
+// supported operation (GET/POST/PUT/PATCH/DELETE). specURL is stored in provenance only; no HTTP
+// is performed. The third return value is the base URL extracted from the spec's servers array.
+// Local $ref values (#/components/schemas/…) in parameter and response schemas are resolved inline.
 func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportRejection, string, error) {
+	jsonBytes := specBytes
+	if !looksLikeJSON(specBytes) {
+		var yamlErr error
+		jsonBytes, yamlErr = yamlToJSON(specBytes)
+		if yamlErr != nil {
+			return nil, nil, "", ErrInvalidInput.Wrapf("spec is not valid JSON or YAML: %v", yamlErr)
+		}
+	}
 	var spec map[string]any
-	if err := json.Unmarshal(specBytes, &spec); err != nil {
+	if err := json.Unmarshal(jsonBytes, &spec); err != nil {
 		return nil, nil, "", ErrInvalidInput.Wrap("spec is not valid JSON")
 	}
 
@@ -1886,7 +1993,7 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 				continue
 			}
 
-			outputSchema, ok := openAPIOutputSchema(op)
+			outputSchema, ok := openAPIOutputSchema(op, spec)
 			if !ok {
 				rejected = append(rejected, ImportRejection{Key: key, Reason: "no 2xx JSON response schema"})
 				continue
@@ -1908,7 +2015,7 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 				}
 			}
 
-			if ambig, reason := openAPIAmbiguous2xxSchema(op); ambig {
+			if ambig, reason := openAPIAmbiguous2xxSchema(op, spec); ambig {
 				rejected = append(rejected, ImportRejection{Key: key, Reason: reason})
 				continue
 			}
@@ -1925,7 +2032,7 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 			}
 
 			params := openAPIParams(op, pathItem)
-			inputSchema := openAPIInputSchema(op, pathItem)
+			inputSchema := openAPIInputSchema(op, pathItem, spec)
 			hash := openAPIOperationHash(baseURL, desc, method, path, inputSchema, outputSchema, price, params)
 
 			src := OpenAPISource{
@@ -1978,19 +2085,19 @@ func openAPIDescription(op map[string]any) string {
 	return ""
 }
 
-func openAPIOutputSchema(op map[string]any) (map[string]any, bool) {
+func openAPIOutputSchema(op, doc map[string]any) (map[string]any, bool) {
 	responses, ok := op["responses"].(map[string]any)
 	if !ok {
 		return nil, false
 	}
 	for _, code := range []string{"200", "201", "202", "203", "204"} {
-		if schema := openAPIJSONSchema(responses[code]); schema != nil {
+		if schema := openAPIJSONSchema(responses[code], doc); schema != nil {
 			return schema, true
 		}
 	}
 	for code, resp := range responses {
 		if len(code) == 3 && code[0] == '2' {
-			if schema := openAPIJSONSchema(resp); schema != nil {
+			if schema := openAPIJSONSchema(resp, doc); schema != nil {
 				return schema, true
 			}
 		}
@@ -1998,7 +2105,7 @@ func openAPIOutputSchema(op map[string]any) (map[string]any, bool) {
 	return nil, false
 }
 
-func openAPIJSONSchema(respRaw any) map[string]any {
+func openAPIJSONSchema(respRaw any, doc map[string]any) map[string]any {
 	resp, ok := respRaw.(map[string]any)
 	if !ok {
 		return nil
@@ -2006,20 +2113,20 @@ func openAPIJSONSchema(respRaw any) map[string]any {
 	content, _ := resp["content"].(map[string]any)
 	jsonContent, _ := content["application/json"].(map[string]any)
 	schema, _ := jsonContent["schema"].(map[string]any)
-	if len(schema) > 0 {
-		return schema
+	if len(schema) == 0 {
+		return nil
 	}
-	return nil
+	return resolveRefsMap(doc, schema)
 }
 
-func openAPIAmbiguous2xxSchema(op map[string]any) (bool, string) {
+func openAPIAmbiguous2xxSchema(op, doc map[string]any) (bool, string) {
 	responses, _ := op["responses"].(map[string]any)
 	var seen []string
 	for code, resp := range responses {
 		if len(code) != 3 || code[0] != '2' {
 			continue
 		}
-		s := openAPIJSONSchema(resp)
+		s := openAPIJSONSchema(resp, doc)
 		if s == nil {
 			continue
 		}
@@ -2038,7 +2145,7 @@ func openAPIAmbiguous2xxSchema(op map[string]any) (bool, string) {
 	return false, ""
 }
 
-func openAPIInputSchema(op, pathItem map[string]any) map[string]any {
+func openAPIInputSchema(op, pathItem, doc map[string]any) map[string]any {
 	properties := map[string]any{}
 	var required []string
 
@@ -2060,6 +2167,8 @@ func openAPIInputSchema(op, pathItem map[string]any) map[string]any {
 			schema, _ := p["schema"].(map[string]any)
 			if schema == nil {
 				schema = map[string]any{"type": "string"}
+			} else {
+				schema = resolveRefsMap(doc, schema)
 			}
 			if desc, ok := p["description"].(string); ok && desc != "" {
 				schema["description"] = desc
@@ -2074,7 +2183,8 @@ func openAPIInputSchema(op, pathItem map[string]any) map[string]any {
 	if rb, ok := op["requestBody"].(map[string]any); ok {
 		content, _ := rb["content"].(map[string]any)
 		jc, _ := content["application/json"].(map[string]any)
-		if bodySchema, ok := jc["schema"].(map[string]any); ok {
+		if rawSchema, ok := jc["schema"].(map[string]any); ok {
+			bodySchema := resolveRefsMap(doc, rawSchema)
 			if props, ok := bodySchema["properties"].(map[string]any); ok {
 				for k, v := range props {
 					properties[k] = v
@@ -2333,7 +2443,7 @@ func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specUR
 		}
 		actions = filtered
 	}
-	if err := k.deactivateActions(ctx, actions); err != nil {
+	if err := k.deactivateImported(ctx, actions, false); err != nil {
 		return nil, err
 	}
 	return actions, nil
@@ -2478,7 +2588,7 @@ func (k *Kernel) UnimportRemoteAction(ctx context.Context, subjectID, remoteHand
 			return nil, ErrUnauthorized.Wrap("owner or superuser required to unimport remote action")
 		}
 	}
-	if err := k.deactivateActions(ctx, []*Action{a}); err != nil {
+	if err := k.deactivateImported(ctx, []*Action{a}, false); err != nil {
 		return nil, err
 	}
 	k.log.With(ctx).Info("action.unimported_remote", "action_id", a.ID, "name", a.Name)

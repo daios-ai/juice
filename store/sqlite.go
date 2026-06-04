@@ -370,16 +370,18 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 	return dbErr(err, "create action")
 }
 
+// actionCols is the canonical column list for action SELECT statements.
+// Must stay in sync with scanAction/scanActionRow/finishAction.
+const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at`
+
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
-		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.id=? AND a.deleted_at IS NULL`, id))
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.id=? AND a.deleted_at IS NULL`, id))
 }
 
 func (s *DB) ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
-		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.name=? AND a.deleted_at IS NULL`, ownerID, name))
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.name=? AND a.deleted_at IS NULL`, ownerID, name))
 }
 
 func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
@@ -415,8 +417,7 @@ func (s *DB) DeleteAction(ctx context.Context, id string) error {
 
 func (s *DB) ListPublicActions(ctx context.Context, limit, offset int) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
-		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
 		 WHERE a.deleted_at IS NULL AND a.active=1 AND a.public=1
 		 ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
@@ -437,8 +438,7 @@ func (s *DB) ListPublicActions(ctx context.Context, limit, offset int) ([]*kerne
 
 func (s *DB) ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
-		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
 		 WHERE a.deleted_at IS NULL AND a.owner_user_id=?
 		 ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, ownerID, limit, offset)
 	if err != nil {
@@ -461,8 +461,7 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
-		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.deleted_at IS NULL ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.deleted_at IS NULL ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list all actions")
 	}
@@ -480,8 +479,7 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 
 func (s *DB) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL string) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
-		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
 		 WHERE a.owner_user_id=? AND a.deleted_at IS NULL
 		   AND json_valid(a.source)=1
 		   AND json_extract(a.source,'$.type')='openapi'
@@ -535,8 +533,7 @@ func (s *DB) scanActionRow(rows *sql.Rows) (*kernel.Action, error) {
 
 func (s *DB) ReadActionByOwnerRemoteID(ctx context.Context, ownerID, remoteActionID string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
-		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.remote_action_id=? AND a.remote_action_id!='' AND a.deleted_at IS NULL`,
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.remote_action_id=? AND a.remote_action_id!='' AND a.deleted_at IS NULL`,
 		ownerID, remoteActionID))
 }
 
