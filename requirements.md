@@ -50,7 +50,7 @@ All IDs are stable opaque identifiers; action IDs are globally unique. Credit ba
 | `ACLEntry`          | `subject_user_id`, `action_id`, `permission`, `created_at`                                                                                                                                                                                  | `permission ∈ {read, call, admin}`. ACLs are direct user-to-action grants. `read` permits inspection; `call` permits execution; `admin` permits ACL and lifecycle changes. Owners implicitly have `admin`.                                                                                                              |
 | `Process`           | `id`, `owner_user_id`, `available`, `locked`, `status`, `created_at`, `ended_at`                                                                                                                                                            | `status ∈ {open, closed}`. A process starts with user-provided funds and may start with zero credits (`available = 0`). Closing it returns all remaining funds to its owner. Closed processes cannot execute calls.                                                                                                     |
 | `Trace`             | `id`, `process_id`, `parent_trace_id`, `caused_by_trace_id`, `cost`, `latency_ms`, `created_at`                                                                                                                                             | Every process has one root trace. Choose one root convention consistently: `parent_trace_id = id` or `parent_trace_id = null`. Every direct `Call()` creates exactly one child trace.                                                                                                                                   |
-| `Transaction`       | `id`, `process_id`, `trace_id`, `parent_trace_id`, `owner_user_id`, `subject_user_id`, `target_user_id`, `action_id`, `args_json`, `reply_json`, `status`, `gross`, `net`, `fee`, `reason`, `remote_receipt_hash`, `started_at`, `ended_at` | `status ∈ {success, failure}`. Every attempted call creates one immutable transaction. `remote_receipt_hash` is null locally and stores `SHA-256(remote_receipt_json)` for cross-kernel calls.                                                                                                                          |
+| `Transaction`       | `id`, `process_id`, `trace_id`, `parent_trace_id`, `owner_user_id`, `subject_user_id`, `target_user_id`, `action_id`, `args_json`, `reply_json`, `status`, `gross`, `net`, `fee`, `reason`, `remote_receipt_hash`, `remote_receipt_json`, `started_at`, `ended_at` | `status ∈ {success, failure}`. Every attempted call creates one immutable transaction. `remote_receipt_hash` and `remote_receipt_json` are null for local calls. For cross-kernel calls, `remote_receipt_hash` stores `SHA-256(remote_receipt_json)` and `remote_receipt_json` stores the full receipt JSON returned by the remote kernel; both are set atomically with the transaction at `CommitCall` time.                                                                                                                          |
 | `Stats`             | `uses`, `successes`, `failures`, `rating_count`, `price_mean`, `latency_mean`, `rating_mean`, `last_used_at`                                                                                                                                | Missing stats have defined defaults. `uses = successes + failures`.                                                                                                                                                                                                                                                     |
 | `StatTag`           | `action_id`, `key`, `value`, `source`, `updated_at`                                                                                                                                                                                         | Optional, queryable for lookup experiments, and never required for kernel execution. Experimental tags are namespaced by source and never alter fixed-stat semantics.                                                                                                                                                   |
 | `Listener`          | `id`, `owner_user_id`, `source_user_id`, `event_name`, `target_action_id`, `active`, `created_at`                                                                                                                                           | A listener subscribes its owner to an exact `(source_user_id, event_name)` pair.                                                                                                                                                                                                                                        |
@@ -58,7 +58,7 @@ All IDs are stable opaque identifiers; action IDs are globally unique. Credit ba
 | `Deposit`           | `id`, `operator_user_id`, `target_user_id`, `amount`, `reason`, `created_at`                                                                                                                                                                | Immutable audit record for a positive out-of-band superuser credit grant.                                                                                                                                                                                                                                               |
 | `Receipt`           | `id`, `issuer_user_id`, `tx_id`, `trace_id`, `action_id`, `caller_user_id`, `process_id`, `args_hash`, `reply_hash`, `status`, `gross`, `net`, `fee`, `reason`, `started_at`, `created_at`, `signature`                                     | Immutable signed record for exactly one committed call. `caller_user_id` is the authenticated subject of the call. `started_at` is the wall-clock time the call began; `created_at` is settlement time.                                                                                                                 |
 | `Rating`            | `id`, `rated_tx_id`, `rated_receipt_id`, `rater_user_id`, `rating`, `note`, `created_at`, `signature`                                                                                                                                          | Immutable signed feedback record. `rating ∈ {0, 1}`. At most one rating exists per transaction. `rated_receipt_id` may be null only for pre-receipt transactions. `note` is an optional nullable string for human-readable justification; it is included in the Ed25519 signature payload.                                                    |
-| `IdempotencyRecord` | `id`, `idempotency_key`, `counterparty_user_id`, `receipt_id`, `created_at`, `expires_at`                                                                                                                                                   | Used only for cross-kernel calls.                                                                                                                                                                                                                                                                                       |
+| `IdempotencyRecord` | `id`, `idempotency_key`, `counterparty_user_id`, `receipt_id`, `status`, `result_json`, `created_at`, `expires_at`                                                                                                                          | Used only for cross-kernel calls. `status ∈ {pending, complete}`. Inserted as `pending` before execution; updated to `complete` atomically with the transaction and receipt. `result_json` stores the call result on completion.                                                                                        |
 
 ### 3.1 ACL rule
 
@@ -485,6 +485,8 @@ The superuser may suspend or unsuspend users. Suspension preserves data and caus
 
 A remote kernel is an ordinary user with `public_key` and `remote_base_url` set. Its public key is the remote platform signing key; its URL is the remote HTTP API base. Remote users cannot authenticate with passwords or receive tokens. Convention: unique handle `@<hostname>`; for example, `remote_base_url = https://remote.example.com`.
 
+`public_key` is the stable identity of a remote kernel; `remote_base_url` is its mutable network location. Re-running `remote add` for an existing `public_key` updates `remote_base_url` on the existing user record and updates `Action.source` on all `remote_proxy` actions owned by that peer to reflect the new base URL. If `remote add` encounters a handle or base URL already associated with a different `public_key`, it must fail with a clear error; silently creating a duplicate remote identity is not permitted. Key rotation is unsupported unless a specific key-transition mechanism is added.
+
 Discovery is manual only:
 
 ```text
@@ -494,7 +496,7 @@ juice remote import <remote-handle> <action-name>   fetch signed manifest and cr
 juice remote unimport <remote-handle> <action-name> deactivate local proxy action
 ```
 
-No gossip or crawling exists in v1. Imported actions are local `http` actions owned by the remote-user record.
+No gossip or crawling exists in v1. Imported actions are local `remote_proxy` actions owned by the remote-user record. Remote peers are ordinary users and appear in ordinary user listings; `remote list` is a convenience view over users with `remote_base_url` set.
 
 Remote imports create `Action` rows with `kind = remote_proxy`. `source` is the federation call URL; `remote_action_id` is the remote action's ID; `artifact_hash` is the manifest hash. They do not expose or copy the remote action's internal implementation.
 
@@ -521,7 +523,7 @@ Manifest descriptions and schemas are the canonical interface used by importing 
 | remote action disappeared                 | deactivate, do not delete, reset current local stats                            |
 | remote action lost active or public state | deactivate, reset current local stats                                           |
 
-Manifest contract fields include description, input schema, output schema, price, kind, artifact hash, and execution identity. Manifest stats do not overwrite local `Stats`. They may be stored as `StatTag` entries with source `remote_manifest` and used by lookup experiments.
+Manifest contract fields are exactly: `action_id`, `artifact_hash`, `description`, `input_schema`, `kind`, `name`, `output_schema`, `owner_handle`, `price`. `stats` and `updated_at` are excluded from the contract hash; changes to them do not constitute a contract change. Manifest stats do not overwrite local `Stats` and are not stored as `StatTag` entries.
 
 Unimporting a remote action deactivates the local proxy action. It does not contact the remote kernel, delete history, or affect the remote action.
 
@@ -534,11 +536,13 @@ GET /v1/actions/{id}/manifest        -> signed public-action manifest
 
 ### 12.3 Cross-kernel calls and idempotency
 
-A local remote-proxy action follows the normal local call path. Its HTTP handler sends a UUID v4 `idempotency_key`. On remote success, store `SHA-256(receipt_json)` (the remote receipt JSON) in `transaction.remote_receipt_hash`; v1 defers remote receipt-signature verification to later audit.
+A local remote-proxy action follows the normal local call path. Its HTTP handler sends a UUID v4 `idempotency_key`. On remote success, store `SHA-256(receipt_json)` in `transaction.remote_receipt_hash` and the full receipt JSON in `transaction.remote_receipt_json`; both are populated atomically with the transaction at `CommitCall` time.
 
-Inbound federation calls are authenticated: the calling kernel signs `{idempotency_key, action, timestamp}` with its Ed25519 private key; the local kernel verifies against the stored `public_key` and rejects timestamps older than 5 minutes. Unregistered callers are rejected.
+Inbound federation calls are authenticated: the calling kernel signs `JCS({action, counterparty, idempotency_key, timestamp, args_hash})` with its Ed25519 private key, where `counterparty` is the caller's base64url public key and `args_hash = SHA-256(raw request body bytes)`; the local kernel verifies the signature and `args_hash` against the raw request body, and rejects timestamps older than 5 minutes. Unregistered callers are rejected.
 
-Idempotency applies only to cross-kernel calls. A `pending` record is inserted before execution; a unique constraint on `(idempotency_key, counterparty_user_id)` prevents concurrent duplicates. On completion the record becomes `complete` and stores `result_json`. A `complete` replay returns the stored result; a `pending` replay returns 409. `IdempotencyRecord` gains `status` and `result_json` fields. `expires_at = created_at + 24 hours`; expired records may be purged.
+Idempotency applies only to cross-kernel calls. A `pending` record is inserted before execution; a unique constraint on `(idempotency_key, counterparty_user_id)` prevents concurrent duplicates. On completion the record becomes `complete` and stores `result_json` and `receipt_json`. A `complete` replay returns the stored result and receipt; a `pending` replay returns 409. `expires_at = created_at + 24 hours`; expired records may be purged.
+
+`VerifyRemoteReceipt(subject_id, tx_id)` is available to any party satisfying `CanReadTransaction`. It verifies entirely from local data: the Ed25519 signature on `remote_receipt_json` against the remote peer's `public_key`; `SHA-256(remote_receipt_json) == transaction.remote_receipt_hash`; and that `action_id`, `status`, `gross`, `net`, `fee`, `args_hash`, and `reply_hash` in the receipt match the local transaction fields. The result exposes each check individually and a top-level `valid` flag. Returns `ErrInvalidState` when the transaction is not a remote-proxy call. Exposed as `GET /v1/transactions/{id}/receipt-verification` and `juice tx verify-receipt --id`.
 
 ## 13. CLI and HTTP server
 
@@ -565,7 +569,7 @@ juice listener show                       juice listener delete
 juice event emit                          juice event list
 juice event consume
 juice tx list                             juice tx show
-juice tx rate
+juice tx rate                             juice tx verify-receipt
 juice health
 juice admin user list                     juice admin user show
 juice admin user suspend                  juice admin user unsuspend
@@ -623,6 +627,7 @@ Required endpoint behavior:
 | `POST /v1/events/emit`             | Does not accept `source_user_id`; the event source is always the authenticated subject. Requires `args` field.                              |
 | `POST /v1/auth/logout`             | Accept refresh token in body, revoke it, and return `ErrUnauthenticated` for missing or already-revoked tokens.                             |
 | `GET /v1/transactions`             | Subject's transactions as buyer or seller per `CanReadTransaction`; `GET /v1/transactions/{id}` returns `ErrNotFound` to non-parties. Both list and detail responses include a `rating` field: `{"value": 0\|1, "note": string\|null}` when a rating exists, `null` when unrated. Both buyer and seller receive the field. |
+| `GET /v1/transactions/{id}/receipt-verification` | Any party satisfying `CanReadTransaction`; returns per-field verification result for the stored remote receipt. Returns `ErrInvalidState` for non-remote-proxy transactions. CLI: `juice tx verify-receipt --id`. |
 
 ## 14. Logging and configuration
 
@@ -720,6 +725,14 @@ OpenAPI import preserves Action.id, deactivates on contract change, and resets c
 OpenAPI webhooks enter through event ingress, not actions
 remote import/unimport flow for signed manifests
 remote import preserves Action.id, deactivates on manifest contract change, and does not overwrite local Stats
+remote add updates remote_proxy source URLs when base URL changes for an existing public key
+remote add rejects same handle or base URL paired with a different public key
+inbound federation call rejected when args_hash does not match request body
+full remote receipt JSON stored atomically with transaction on remote-proxy call
+receipt verification returns valid for a well-formed stored remote receipt
+receipt verification detects signature tampering
+receipt verification detects field mismatch (action_id, status, gross)
+receipt verification returns ErrInvalidState for a non-remote-proxy transaction
 ```
 
 Direct invariant tests:
@@ -766,6 +779,7 @@ remote kernel is added, a signed manifest is imported, a caller executes the pro
 remote proxy is unimported; the local proxy is deactivated and the remote kernel is unaffected
 caller executes a paid action multiple times; the action owner lists transactions for their action and the sum of transaction net amounts equals the total credits received by the owner
 caller rates a transaction with a note; the note and rating value appear in the transaction detail and list responses for both buyer and seller; an unrated transaction returns null for the rating field
+caller executes a remote proxy action; buyer and seller both call verify-receipt; all checks pass and valid is true
 ```
 
 ## 16. Design rationale
