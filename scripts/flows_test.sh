@@ -2444,8 +2444,8 @@ flow_federation_import_execute() {
         && ok "fed_import.call_succeeds" \
         || fail "fed_import.call_succeeds" "no tx_id in: $call_out"
 
-    # Verify remote_receipt_hash stored in local db
-    local rrh
+    # Verify remote_receipt_hash and remote_receipt_json stored in local db
+    local rrh rrj
     rrh=$(python3 - "$db_l" "$tx_id" <<'PYEOF'
 import sqlite3, sys
 conn = sqlite3.connect(sys.argv[1])
@@ -2457,6 +2457,18 @@ PYEOF
     [ -n "$rrh" ] \
         && ok "fed_import.remote_receipt_hash" \
         || fail "fed_import.remote_receipt_hash" "remote_receipt_hash empty for tx $tx_id"
+
+    rrj=$(python3 - "$db_l" "$tx_id" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute("SELECT remote_receipt_json FROM transactions WHERE id=?", [sys.argv[2]]).fetchone()
+conn.close()
+print(row[0] if row and row[0] else "")
+PYEOF
+)
+    [ -n "$rrj" ] \
+        && ok "fed_import.remote_receipt_json" \
+        || fail "fed_import.remote_receipt_json" "remote_receipt_json empty for tx $tx_id"
 
     # Local stats: uses=1
     local stats_out uses
@@ -2608,6 +2620,66 @@ PYEOF
 
 # flow_federation_replay has been moved to TestFederationReplay in cmd/juice/cmd_remote_test.go
 # using crypto/ed25519 — the previous implementation required Python nacl.signing.
+
+flow_fed_verify_receipt() {
+    echo "=== FLOW fed_verify_receipt ==="
+    local dir db_l db_r home_l home_r port_l port_r port_b proxy_id
+    dir=$(mktemp -d); trap "_fed_teardown '$dir'; rm -rf '$dir'" RETURN
+    db_l="$dir/local.db"; db_r="$dir/remote.db"
+    home_l="$dir/lsys";   home_r="$dir/rsys"
+    alloc_port; port_l=$_ALLOC_PORT;  alloc_port; port_r=$_ALLOC_PORT; alloc_port; port_b=$_ALLOC_PORT
+
+    _fed_setup "$dir" "$db_l" "$db_r" "$home_l" "$home_r" "$port_l" "$port_r" "$port_b" \
+        || { fail "fed_verify.setup" "setup failed"; return; }
+
+    local remote_handle="@127.0.0.1:$port_r"
+
+    # Make a call through the remote proxy.
+    local proc_id tx_id
+    proc_id=$(strfield "$(jj "$db_l" "$home_l" process start --funds 0)" "process_id")
+    tx_id=$(strfield "$(jj "$db_l" "$home_l" call \
+        --process "$proc_id" \
+        --action "$remote_handle/greet" \
+        --args '{}')" "tx_id")
+    [ -n "$tx_id" ] || { fail "fed_verify.call" "call failed, no tx_id"; return; }
+
+    # Buyer: verify as @sys on local kernel.
+    local vr_out
+    vr_out=$(jj "$db_l" "$home_l" tx verify-receipt --id "$tx_id" 2>&1)
+
+    # top-level valid must be true
+    local valid
+    valid=$(echo "$vr_out" | python3 -c "import json,sys; d=json.load(sys.stdin); print(str(d.get('valid',False)).lower())" 2>/dev/null)
+    [ "$valid" = "true" ] \
+        && ok "fed_verify.buyer_valid" \
+        || fail "fed_verify.buyer_valid" "expected valid=true, checks=$(echo "$vr_out" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('checks',{}))" 2>/dev/null)"
+
+    # checks.signature must be true
+    local sig_check
+    sig_check=$(echo "$vr_out" | python3 -c "import json,sys; d=json.load(sys.stdin); print(str(d.get('checks',{}).get('signature',False)).lower())" 2>/dev/null)
+    [ "$sig_check" = "true" ] \
+        && ok "fed_verify.signature_check" \
+        || fail "fed_verify.signature_check" "signature check not true"
+
+    # checks.receipt_hash must be true
+    local receipt_hash_check
+    receipt_hash_check=$(echo "$vr_out" | python3 -c "import json,sys; d=json.load(sys.stdin); print(str(d.get('checks',{}).get('receipt_hash',False)).lower())" 2>/dev/null)
+    [ "$receipt_hash_check" = "true" ] \
+        && ok "fed_verify.receipt_hash_check" \
+        || fail "fed_verify.receipt_hash_check" "receipt_hash check not true"
+
+    # Non-remote-proxy transaction returns an error (ErrInvalidState → exit non-zero).
+    local local_proc_id local_tx_id
+    local_proc_id=$(strfield "$(jj "$db_l" "$home_l" process start --funds 0)" "process_id")
+    local_tx_id=$(strfield "$(jj "$db_l" "$home_l" call \
+        --process "$local_proc_id" \
+        --action "@sys/lookup" \
+        --args '{"query":"test"}' 2>/dev/null)" "tx_id")
+    [ -n "$local_tx_id" ] || { fail "fed_verify.local_call" "local call failed"; return; }
+    j "$db_l" "$home_l" tx verify-receipt --id "$local_tx_id" >/dev/null 2>&1 \
+        && fail "fed_verify.local_tx_rejected" "expected error for non-remote-proxy tx, got success" \
+        || ok "fed_verify.local_tx_rejected"
+}
 
 flow_transaction_access() {
     echo "=== FLOW transaction_access ==="
@@ -2866,6 +2938,7 @@ main() {
     flow_federation_import_execute
     flow_federation_changed_reimport
     flow_federation_unimport
+    flow_fed_verify_receipt
     flow_transaction_access
     flow_admin_supervision
 

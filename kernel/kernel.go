@@ -1558,7 +1558,13 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	}
 
 	// 3–9. Field equality checks.
-	checks.ActionID = r.ActionID == tx.ActionID
+	// For remote_proxy actions, the receipt carries the remote action's ID, not the local proxy ID.
+	// Match against RemoteActionID when present, falling back to the local action ID.
+	if action.RemoteActionID != "" {
+		checks.ActionID = r.ActionID == action.RemoteActionID
+	} else {
+		checks.ActionID = r.ActionID == tx.ActionID
+	}
 	checks.Status = r.Status == tx.Status
 	checks.Gross = r.Gross == tx.Gross
 	checks.Net = r.Net == tx.Net

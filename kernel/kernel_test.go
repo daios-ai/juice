@@ -2634,9 +2634,10 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	p, _ := setupProcess(t, k, caller.ID, 0)
 
 	// Build a receipt whose fields match what Call() will record in the transaction.
+	// ActionID must be the remote action's ID (manifest ActionID), not the local proxy ID.
 	remoteReceipt := &kernel.Receipt{
 		ID: uuid.New().String(), IssuerUserID: "remote-sys",
-		TxID: "remote-tx-verify", TraceID: "t1", ActionID: a.ID,
+		TxID: "remote-tx-verify", TraceID: "t1", ActionID: m.ActionID,
 		CallerUserID: "c1", ProcessID: "p1",
 		ArgsHash:  jcsHashForTest(t, `{}`),
 		ReplyHash: jcsHashForTest(t, `{}`),
