@@ -565,6 +565,9 @@ func (k *Kernel) computeStats(_ context.Context, actionID string, tx *Transactio
 // settleFailedCall builds a receipt, commits the failed transaction atomically, and upserts
 // stat tags. tx.Status and tx.Reason must be set by the caller before invoking this.
 func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, req CallRequest, action *Action, latency float64, callErr error) error {
+	if len(tx.ReplyJSON) == 0 {
+		tx.ReplyJSON = json.RawMessage("null")
+	}
 	stats := k.computeStats(ctx, action.ID, tx, latency)
 	receipt, receiptErr := k.buildReceipt(tx)
 	if receiptErr != nil {

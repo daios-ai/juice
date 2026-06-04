@@ -221,7 +221,7 @@ func actionListCmd() *cobra.Command {
 			}
 			// Public view: active public actions only.
 			return withKernel(func(k *kernel.Kernel) error {
-				actions, err := k.ListActions(context.Background(), true, limit, offset)
+				actions, err := k.ListPublicActions(context.Background(), limit, offset)
 				if err != nil {
 					return err
 				}

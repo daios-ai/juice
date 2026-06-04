@@ -211,11 +211,11 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 		t.Error("expected error reading soft-deleted action, got nil")
 	}
 
-	// ListActions excludes the deleted action.
-	all, _ := db.ListActions(ctx, false, 100, 0)
+	// ListAllActions excludes the deleted action.
+	all, _ := db.ListAllActions(ctx, 100, 0)
 	for _, listed := range all {
 		if listed.ID == a.ID {
-			t.Error("soft-deleted action should not appear in ListActions")
+			t.Error("soft-deleted action should not appear in ListAllActions")
 		}
 	}
 
@@ -242,20 +242,20 @@ func TestListActions(t *testing.T) {
 	_ = db.CreateAction(ctx, inactive)
 	_ = db.CreateAction(ctx, private)
 
-	all, err := db.ListActions(ctx, false, 100, 0)
+	all, err := db.ListAllActions(ctx, 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(all) != 3 {
-		t.Errorf("ListActions(all): got %d, want 3", len(all))
+		t.Errorf("ListAllActions: got %d, want 3", len(all))
 	}
 
-	activeOnly, err := db.ListActions(ctx, true, 100, 0)
+	publicActive, err := db.ListPublicActions(ctx, 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(activeOnly) != 1 || activeOnly[0].Name != "/active" {
-		t.Errorf("ListActions(active): unexpected result")
+	if len(publicActive) != 1 || publicActive[0].Name != "/active" {
+		t.Errorf("ListPublicActions: unexpected result")
 	}
 }
 
@@ -369,7 +369,12 @@ func TestLockAndRefundFunds(t *testing.T) {
 	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, user.ID, p.ID, 500)
 
-	if err := db.LockFunds(ctx, p.ID, 200); err != nil {
+	root, err := db.ReadRootTrace(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginCall(ctx, p.ID, tr, 200); err != nil {
 		t.Fatal(err)
 	}
 	proc, _ := db.ReadProcess(ctx, p.ID)
@@ -377,8 +382,9 @@ func TestLockAndRefundFunds(t *testing.T) {
 		t.Errorf("after lock: available=%d locked=%d, want 300/200", proc.Available, proc.Locked)
 	}
 
-	// Lock more than available should fail.
-	if err := db.LockFunds(ctx, p.ID, 400); err == nil {
+	// BeginCall for more than available should fail.
+	tr2 := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginCall(ctx, p.ID, tr2, 400); err == nil {
 		t.Error("expected error locking more than available")
 	}
 
@@ -406,19 +412,24 @@ func TestCommitCall(t *testing.T) {
 	p := newProcess(payer.ID)
 	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
-	_ = db.LockFunds(ctx, p.ID, 100)
 
-	tr := &kernel.Trace{ID: "tr1", ProcessID: p.ID, ParentTraceID: "tr1", CreatedAt: time.Now().UTC()}
-	_ = db.CreateTrace(ctx, tr)
+	root, err := db.ReadRootTrace(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginCall(ctx, p.ID, tr, 100); err != nil {
+		t.Fatal(err)
+	}
 
 	tx := &kernel.Transaction{
-		ID: "tx1", ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: tr.ID,
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: root.ID,
 		OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: target.ID,
 		ActionID: "a1", Status: kernel.TxSuccess, Gross: 100, Net: 80, Fee: 20,
 		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
 	}
 	receipt := &kernel.Receipt{
-		ID: "rc1", IssuerUserID: payer.ID, TxID: tx.ID, TraceID: tr.ID, ActionID: "a1",
+		ID: uuid.New().String(), IssuerUserID: payer.ID, TxID: tx.ID, TraceID: tr.ID, ActionID: "a1",
 		ArgsHash: "ah1", ReplyHash: "rh1", Status: kernel.TxSuccess,
 		Gross: 100, Net: 80, Fee: 20, CreatedAt: time.Now().UTC(),
 	}
@@ -489,12 +500,17 @@ func TestEndProcessWithLockedFunds(t *testing.T) {
 	p := newProcess(user.ID)
 	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, user.ID, p.ID, 500)
-	// Lock 200 — simulates an in-flight sub-call.
-	if err := db.LockFunds(ctx, p.ID, 200); err != nil {
+	// Lock 200 via BeginCall — simulates an in-flight sub-call.
+	root, err := db.ReadRootTrace(ctx, p.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	if bErr := db.BeginCall(ctx, p.ID, tr, 200); bErr != nil {
+		t.Fatal(bErr)
+	}
 
-	err := db.EndProcess(ctx, p.ID)
+	err = db.EndProcess(ctx, p.ID)
 	if err == nil {
 		t.Fatal("expected error ending process with locked funds, got nil")
 	}
@@ -560,11 +576,16 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	p := newProcess(payer.ID)
 	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
-	_ = db.LockFunds(ctx, p.ID, 200) // lock for both calls
 
-	makeTrace := func(id string) *kernel.Trace {
-		tr := &kernel.Trace{ID: id, ProcessID: p.ID, ParentTraceID: id, CreatedAt: time.Now().UTC()}
-		_ = db.CreateTrace(ctx, tr)
+	root, err := db.ReadRootTrace(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginTrace := func(price int64) *kernel.Trace {
+		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+		if err := db.BeginCall(ctx, p.ID, tr, price); err != nil {
+			t.Fatalf("BeginCall: %v", err)
+		}
 		return tr
 	}
 	makeTx := func(id, traceID string, gross int64) *kernel.Transaction {
@@ -583,17 +604,17 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 		}
 	}
 
-	tr1 := makeTrace("tr-inc-1")
-	tx1 := makeTx("tx-inc-1", tr1.ID, 100)
-	rc1 := makeReceipt("rc-inc-1", tx1.ID, tr1.ID, 100)
+	tr1 := beginTrace(100)
+	tx1 := makeTx(uuid.New().String(), tr1.ID, 100)
+	rc1 := makeReceipt(uuid.New().String(), tx1.ID, tr1.ID, 100)
 	stats1 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, PriceMean: 100, LatencyMean: 0.1, LastUsedAt: time.Now().UTC()}
 	if err := db.CommitCall(ctx, tx1, rc1, p.ID, target.ID, fee.ID, tx1.Net, tx1.Fee, stats1, "", ""); err != nil {
 		t.Fatalf("CommitCall #1: %v", err)
 	}
 
-	tr2 := makeTrace("tr-inc-2")
-	tx2 := makeTx("tx-inc-2", tr2.ID, 50) // different gross to verify mean formula
-	rc2 := makeReceipt("rc-inc-2", tx2.ID, tr2.ID, 50)
+	tr2 := beginTrace(50)
+	tx2 := makeTx(uuid.New().String(), tr2.ID, 50) // different gross to verify mean formula
+	rc2 := makeReceipt(uuid.New().String(), tx2.ID, tr2.ID, 50)
 	stats2 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, PriceMean: 50, LatencyMean: 0.3, LastUsedAt: time.Now().UTC()}
 	if err := db.CommitCall(ctx, tx2, rc2, p.ID, target.ID, fee.ID, tx2.Net, tx2.Fee, stats2, "", ""); err != nil {
 		t.Fatalf("CommitCall #2: %v", err)
@@ -626,10 +647,11 @@ func TestListTraces(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@alice", 0)
+	user := newUser("@alice", 200)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
 	startProc(t, db, ctx, p)
+	_ = db.FundProcess(ctx, user.ID, p.ID, 200)
 
 	root, err := db.ReadRootTrace(ctx, p.ID)
 	if err != nil {
@@ -642,7 +664,9 @@ func TestListTraces(t *testing.T) {
 		ParentTraceID: root.ID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	_ = db.CreateTrace(ctx, child)
+	if err := db.BeginCall(ctx, p.ID, child, 200); err != nil {
+		t.Fatalf("BeginCall: %v", err)
+	}
 
 	traces, err := db.ListTraces(ctx, p.ID)
 	if err != nil {
@@ -748,30 +772,35 @@ func TestTransactionCRUD(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 0)
+	owner := newUser("@owner", 100)
 	target := newUser("@target", 0)
+	feeUser := newUser("@fee-crud", 0)
 	_ = db.CreateUser(ctx, owner)
 	_ = db.CreateUser(ctx, target)
+	_ = db.CreateUser(ctx, feeUser)
 
-	a := newAction(owner.ID, "/svc", 0, true)
+	a := newAction(owner.ID, "/svc", 100, true)
 	_ = db.CreateAction(ctx, a)
 
 	p := newProcess(owner.ID)
 	startProc(t, db, ctx, p)
+	_ = db.FundProcess(ctx, owner.ID, p.ID, 100)
 
-	tr := &kernel.Trace{
-		ID:        uuid.New().String(),
-		ProcessID: p.ID,
-		CreatedAt: time.Now().UTC(),
+	root, err := db.ReadRootTrace(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	tr.ParentTraceID = tr.ID
-	_ = db.CreateTrace(ctx, tr)
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginCall(ctx, p.ID, tr, 100); err != nil {
+		t.Fatal(err)
+	}
 
+	now := time.Now().UTC()
 	tx := &kernel.Transaction{
 		ID:            uuid.New().String(),
 		ProcessID:     p.ID,
 		TraceID:       tr.ID,
-		ParentTraceID: tr.ID,
+		ParentTraceID: root.ID,
 		OwnerUserID:   owner.ID,
 		SubjectUserID: owner.ID,
 		TargetUserID:  target.ID,
@@ -780,10 +809,15 @@ func TestTransactionCRUD(t *testing.T) {
 		Gross:         100,
 		Net:           80,
 		Fee:           20,
-		StartedAt:     time.Now().UTC(),
-		EndedAt:       time.Now().UTC(),
+		StartedAt:     now,
+		EndedAt:       now,
 	}
-	if err := db.createTransaction(ctx, tx); err != nil {
+	receipt := &kernel.Receipt{
+		ID: uuid.New().String(), IssuerUserID: owner.ID, TxID: tx.ID, TraceID: tr.ID, ActionID: a.ID,
+		ArgsHash: "ah", ReplyHash: "rh", Status: kernel.TxSuccess,
+		Gross: 100, Net: 80, Fee: 20, CreatedAt: now,
+	}
+	if err := db.CommitCall(ctx, tx, receipt, p.ID, target.ID, feeUser.ID, 80, 20, nil, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1483,13 +1517,18 @@ func TestCommitCallFeeDestructionRejected(t *testing.T) {
 	p := newProcess(payer.ID)
 	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
-	_ = db.LockFunds(ctx, p.ID, 100)
 
-	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: "root", CreatedAt: time.Now().UTC()}
-	_ = db.CreateTrace(ctx, tr)
+	root, err := db.ReadRootTrace(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginCall(ctx, p.ID, tr, 100); err != nil {
+		t.Fatal(err)
+	}
 
 	tx := &kernel.Transaction{
-		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: tr.ID,
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: root.ID,
 		OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: target.ID,
 		ActionID: "a1", Status: kernel.TxSuccess, Gross: 100, Net: 80, Fee: 20,
 		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
@@ -1501,7 +1540,7 @@ func TestCommitCallFeeDestructionRejected(t *testing.T) {
 	}
 
 	// fee=20 with empty feeRecipientID must be rejected.
-	err := db.CommitCall(ctx, tx, receipt, p.ID, target.ID, "", 80, 20, nil, "", "")
+	err = db.CommitCall(ctx, tx, receipt, p.ID, target.ID, "", 80, 20, nil, "", "")
 	if err == nil {
 		t.Fatal("expected error when fee > 0 and feeRecipientID is empty, got nil")
 	}
@@ -1536,10 +1575,15 @@ func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	p := newProcess(payer.ID)
 	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
-	_ = db.LockFunds(ctx, p.ID, 100)
 
-	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: "root", CreatedAt: time.Now().UTC()}
-	_ = db.CreateTrace(ctx, tr)
+	root, err := db.ReadRootTrace(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginCall(ctx, p.ID, tr, 100); err != nil {
+		t.Fatal(err)
+	}
 
 	rec := newIdempotencyRecord(cp.ID)
 	if err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
@@ -1547,7 +1591,7 @@ func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	}
 
 	tx := &kernel.Transaction{
-		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: tr.ID,
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: root.ID,
 		OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: target.ID,
 		ActionID: "a1", Status: kernel.TxSuccess, Gross: 100, Net: 100, Fee: 0,
 		ReplyJSON: json.RawMessage(`{"ok":true}`),
@@ -1591,10 +1635,15 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	p := newProcess(payer.ID)
 	startProc(t, db, ctx, p)
 	_ = db.FundProcess(ctx, payer.ID, p.ID, 1000)
-	_ = db.LockFunds(ctx, p.ID, 100)
 
-	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: "root", CreatedAt: time.Now().UTC()}
-	_ = db.CreateTrace(ctx, tr)
+	root, err := db.ReadRootTrace(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginCall(ctx, p.ID, tr, 100); err != nil {
+		t.Fatal(err)
+	}
 
 	rec := newIdempotencyRecord(cp.ID)
 	if err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
@@ -1602,7 +1651,7 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	}
 
 	tx := &kernel.Transaction{
-		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: tr.ID,
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: root.ID,
 		OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: payer.ID,
 		ActionID: "a1", Status: kernel.TxFailure, Gross: 0, Net: 0, Fee: 0,
 		Reason:    "execution failed",
@@ -1688,6 +1737,24 @@ func TestUpsertAndListEmbeddings(t *testing.T) {
 // ---- Test-only store helpers ----
 // These low-level helpers exist only in test builds to keep test setup simple.
 // Production code uses the higher-level atomic methods (CommitCall, CommitFailedCall, etc.).
+
+// createTransaction inserts a transaction record directly. Used only to set up
+// data for tests that exercise receipt, rating, and listing logic independent of
+// the full call flow.
+func (s *DB) createTransaction(ctx context.Context, tx *kernel.Transaction) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO transactions
+		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
+		  action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		tx.ID, tx.ProcessID, tx.TraceID, tx.ParentTraceID,
+		tx.OwnerUserID, tx.SubjectUserID, tx.TargetUserID, tx.ActionID,
+		rawJSONStr(tx.ArgsJSON), rawJSONStr(tx.ReplyJSON), string(tx.Status),
+		tx.Gross, tx.Net, tx.Fee, tx.Reason, nullStr(tx.RemoteReceiptHash),
+		timeToStr(tx.StartedAt), timeToStr(tx.EndedAt),
+	)
+	return dbErr(err, "create transaction")
+}
 
 func startProc(t *testing.T, db *DB, ctx context.Context, p *kernel.Process) {
 	t.Helper()

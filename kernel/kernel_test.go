@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -112,13 +113,11 @@ func setupAction(t *testing.T, st kernel.Store, ownerID, name string, price int6
 	return a
 }
 
-// setupSys creates the @sys superuser and wires it into the kernel config.
+// setupSys creates the @sys superuser.
 // Call this in any test that invokes RegisterRemoteKernel or ImportRemoteAction.
-func setupSys(t *testing.T, k *kernel.Kernel, st kernel.Store) *kernel.User {
+func setupSys(t *testing.T, _ *kernel.Kernel, st kernel.Store) *kernel.User {
 	t.Helper()
-	sys := setupUser(t, st, "@sys", 0)
-	k.SetSuperuserHandle("@sys")
-	return sys
+	return setupUser(t, st, "@sys", 0)
 }
 
 func setupProcess(t *testing.T, k *kernel.Kernel, ownerID string, funds int64) (*kernel.Process, *kernel.Trace) {
@@ -895,10 +894,6 @@ func TestDepositNonSuperuserRejected(t *testing.T) {
 	ctx := context.Background()
 
 	su := setupUser(t, st, "@sys", 0)
-	if err := st.SetConfig(ctx, "superuser_handle", "@sys"); err != nil {
-		t.Fatal(err)
-	}
-	k.SetSuperuserHandle("@sys")
 	regular := setupUser(t, st, "@regular", 0)
 	recipient := setupUser(t, st, "@recipient", 0)
 
@@ -917,12 +912,8 @@ func TestDepositNonSuperuserRejected(t *testing.T) {
 func TestReceiptCreatedWithCall(t *testing.T) {
 	st := newTestStore(t)
 	su := setupUser(t, st, "@sys", 0)
-	if err := st.SetConfig(context.Background(), "superuser_handle", "@sys"); err != nil {
-		t.Fatal(err)
-	}
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
-	k.SetSuperuserHandle("@sys")
-	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
+	k.SetSigningKey(testSigningKey(), su.ID)
 	ctx := context.Background()
 
 	caller := setupUser(t, st, "@rcpt-caller", 500)
@@ -960,12 +951,8 @@ func TestReceiptCreatedWithCall(t *testing.T) {
 func TestReceiptCreatedWithFailedCall(t *testing.T) {
 	st := newTestStore(t)
 	su := setupUser(t, st, "@sys", 0)
-	if err := st.SetConfig(context.Background(), "superuser_handle", "@sys"); err != nil {
-		t.Fatal(err)
-	}
 	k := newTestKernelWithScripts(st, &fakeScriptExec{err: kernel.ErrExecutionFailed.Wrap("boom")})
-	k.SetSuperuserHandle("@sys")
-	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
+	k.SetSigningKey(testSigningKey(), su.ID)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@fail-owner", 500)
@@ -1009,17 +996,20 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 	if r.Status != kernel.TxFailure {
 		t.Errorf("receipt.Status: got %q, want %q", r.Status, kernel.TxFailure)
 	}
+	// reply_hash must be the JCS hash of the literal JSON null stored in the transaction.
+	// JCS of null serializes to the 4-byte literal "null".
+	nullHash := sha256.Sum256([]byte("null"))
+	wantReplyHash := fmt.Sprintf("%x", nullHash)
+	if r.ReplyHash != wantReplyHash {
+		t.Errorf("receipt.ReplyHash for failed call: got %q, want %q (hash of JSON null)", r.ReplyHash, wantReplyHash)
+	}
 }
 
 func TestReadTransactionPartyAccess(t *testing.T) {
 	st := newTestStore(t)
 	su := setupUser(t, st, "@sys", 0)
-	if err := st.SetConfig(context.Background(), "superuser_handle", "@sys"); err != nil {
-		t.Fatal(err)
-	}
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
-	k.SetSuperuserHandle("@sys")
-	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
+	k.SetSigningKey(testSigningKey(), su.ID)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@provider", 500) // seller
@@ -1064,7 +1054,7 @@ func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	st := newTestStore(t)
 	exec := &fakeScriptExec{result: `{"ok":true}`}
 	k := newTestKernelWithScripts(st, exec)
-	k.SetSigningKey(nil, "issuer-id", "@sys")
+	k.SetSigningKey(nil, "issuer-id")
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@no-receipt-owner", 100)
@@ -1109,7 +1099,7 @@ func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 func TestManifestSigningRequiresConfiguredKey(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
-	k.SetSigningKey(nil, "issuer-id", "@sys")
+	k.SetSigningKey(nil, "issuer-id")
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@manifest-owner", 0)
@@ -1458,12 +1448,8 @@ func TestImportRemoteActionRejectsNegativePrice(t *testing.T) {
 func TestGetActionManifestIncludesActionID(t *testing.T) {
 	st := newTestStore(t)
 	su := setupUser(t, st, "@sys", 0)
-	if err := st.SetConfig(context.Background(), "superuser_handle", "@sys"); err != nil {
-		t.Fatal(err)
-	}
 	k := newTestKernel(st)
-	k.SetSuperuserHandle("@sys")
-	k.SetSigningKey(testSigningKey(), su.ID, "@sys")
+	k.SetSigningKey(testSigningKey(), su.ID)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@manifest-owner2", 0)
@@ -1636,10 +1622,10 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 	}
 
 	// Action should not appear in listings.
-	list, _ := st.ListActions(ctx, false, 100, 0)
+	list, _ := st.ListAllActions(ctx, 100, 0)
 	for _, listed := range list {
 		if listed.ID == a.ID {
-			t.Error("deleted action should not appear in ListActions")
+			t.Error("deleted action should not appear in ListAllActions")
 		}
 	}
 

@@ -56,7 +56,7 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		t.Fatal(err)
 	}
 	priv := ed25519.PrivateKey(privBytes)
-	k.SetSigningKey(priv, sys.ID, "@sys")
+	k.SetSigningKey(priv, sys.ID)
 	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
 		t.Fatal(err)
 	}

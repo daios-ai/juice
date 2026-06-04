@@ -413,18 +413,14 @@ func (s *DB) DeleteAction(ctx context.Context, id string) error {
 	return dbErr(tx.Commit(), "delete action: commit")
 }
 
-func (s *DB) ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*kernel.Action, error) {
-	q := `SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.deleted_at IS NULL`
-	args := []any{}
-	if activeOnly {
-		q += ` AND a.active=1 AND a.public=1`
-	}
-	q += ` ORDER BY a.created_at DESC LIMIT ? OFFSET ?`
-	args = append(args, limit, offset)
-
-	rows, err := s.db.QueryContext(ctx, q, args...)
+func (s *DB) ListPublicActions(ctx context.Context, limit, offset int) ([]*kernel.Action, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at
+		 FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
+		 WHERE a.deleted_at IS NULL AND a.active=1 AND a.public=1
+		 ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
-		return nil, dbErr(err, "list actions")
+		return nil, dbErr(err, "list public actions")
 	}
 	defer rows.Close()
 
@@ -655,22 +651,6 @@ func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error
 	p.CreatedAt = strToTime(createdAt)
 	p.EndedAt = strToNullTime(endedAt)
 	return &p, nil
-}
-
-func (s *DB) LockFunds(ctx context.Context, processID string, amount int64) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE processes SET available=available-?, locked=locked+?
-		 WHERE id=? AND available>=? AND status='open'`,
-		amount, amount, processID, amount,
-	)
-	if err != nil {
-		return dbErr(err, "lock funds")
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return kernel.ErrInsufficientFunds.Wrap("not enough process funds or process closed")
-	}
-	return nil
 }
 
 // BeginCall atomically locks price credits in the process and inserts the child trace.
@@ -1071,14 +1051,6 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 
 // ---- Traces ----
 
-func (s *DB) CreateTrace(ctx context.Context, t *kernel.Trace) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
-		t.ID, t.ProcessID, t.ParentTraceID, t.CausedByTraceID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
-	)
-	return dbErr(err, "create trace")
-}
-
 func (s *DB) ReadTrace(ctx context.Context, id string) (*kernel.Trace, error) {
 	var t kernel.Trace
 	var createdAt string
@@ -1121,21 +1093,6 @@ func (s *DB) ReadRootTrace(ctx context.Context, processID string) (*kernel.Trace
 }
 
 // ---- Transactions ----
-
-func (s *DB) createTransaction(ctx context.Context, tx *kernel.Transaction) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO transactions
-		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		  action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		tx.ID, tx.ProcessID, tx.TraceID, tx.ParentTraceID,
-		tx.OwnerUserID, tx.SubjectUserID, tx.TargetUserID, tx.ActionID,
-		rawJSONStr(tx.ArgsJSON), rawJSONStr(tx.ReplyJSON), string(tx.Status),
-		tx.Gross, tx.Net, tx.Fee, tx.Reason, nullStr(tx.RemoteReceiptHash),
-		timeToStr(tx.StartedAt), timeToStr(tx.EndedAt),
-	)
-	return dbErr(err, "create transaction")
-}
 
 func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transaction, error) {
 	var tx kernel.Transaction

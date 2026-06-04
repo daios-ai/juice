@@ -186,9 +186,8 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).
 	if privB64, _ := db.GetConfig(context.Background(), configKeySigningPrivate); privB64 != "" {
 		if privBytes, err := base64.RawURLEncoding.DecodeString(privB64); err == nil && len(privBytes) == ed25519.PrivateKeySize {
-			suHandle, _ := db.GetConfig(context.Background(), configKeySuperuser)
-			if su, err := db.ReadUserByHandle(context.Background(), suHandle); err == nil {
-				k.SetSigningKey(ed25519.PrivateKey(privBytes), su.ID, suHandle)
+			if su, err := db.ReadUserByHandle(context.Background(), "@sys"); err == nil {
+				k.SetSigningKey(ed25519.PrivateKey(privBytes), su.ID)
 			}
 		}
 	}

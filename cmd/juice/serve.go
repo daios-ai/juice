@@ -360,7 +360,7 @@ func withActionRef(a *kernel.Action) actionResp {
 }
 
 func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
-	actions, err := s.kernel.ListActions(r.Context(), true, 50, 0)
+	actions, err := s.kernel.ListPublicActions(r.Context(), 50, 0)
 	if err != nil {
 		writeErr(w, err)
 		return

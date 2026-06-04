@@ -236,12 +236,9 @@ func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
 	ctx := context.Background()
 
 	admin, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@su", Email: "su@example.com", Password: "su-pass",
+		Handle: "@sys", Email: "sys@sys", Password: "su-pass",
 	})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.SetConfig(ctx, "superuser_handle", "@su"); err != nil {
 		t.Fatal(err)
 	}
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
@@ -283,11 +280,7 @@ func TestSuspendedSubjectRejectedBySupervisionOps(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	su := setupUser(t, st, "@su", 0)
-	if err := st.SetConfig(ctx, "superuser_handle", "@su"); err != nil {
-		t.Fatal(err)
-	}
-	k.SetSuperuserHandle("@su")
+	su := setupUser(t, st, "@sys", 0)
 
 	u := setupUser(t, st, "@victim", 1000)
 	now := time.Now().UTC()
@@ -312,14 +305,14 @@ func TestSuspendedSubjectRejectedBySupervisionOps(t *testing.T) {
 		t.Errorf("StartProcess: got %v, want ErrUnauthenticated", err)
 	}
 
-	// requireSuperuser rejects a suspended @su.
+	// requireSuperuser rejects a suspended @sys.
 	suNow := time.Now().UTC()
 	su.SuspendedAt = &suNow
 	if err := st.SuspendUser(ctx, su.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := k.SuspendUser(ctx, su.ID, target.ID); !errors.Is(err, kernel.ErrUnauthenticated) {
-		t.Errorf("SuspendUser via suspended su: got %v, want ErrUnauthenticated", err)
+		t.Errorf("SuspendUser via suspended sys: got %v, want ErrUnauthenticated", err)
 	}
 }
 

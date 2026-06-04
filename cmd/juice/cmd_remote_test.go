@@ -184,7 +184,7 @@ func TestRemoteImport(t *testing.T) {
 	}
 
 	// Imported action should be findable in the full action list.
-	actions, err := k.ListActions(t.Context(), false, 100, 0)
+	actions, err := k.ListAllActions(t.Context(), 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 	}
 
 	// Local proxy must be deactivated.
-	actions, err := k.ListActions(t.Context(), false, 100, 0)
+	actions, err := k.ListAllActions(t.Context(), 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

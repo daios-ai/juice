@@ -31,7 +31,6 @@ type Config struct {
 	AllowLocalSources bool               // permit loopback/private URLs as action sources (tests only)
 	SigningKey        ed25519.PrivateKey // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
 	IssuerUserID      string             // @sys user ID, set during bootstrap
-	SuperuserHandle   string             // cached superuser handle for deposit checks
 	AuthIssuer        string             // JUICE_AUTH_ISSUER — iss claim in JWTs; empty = no claim
 	AuthAudience      string             // JUICE_AUTH_AUDIENCE — aud claim in JWTs; empty = no validation
 }
@@ -77,15 +76,9 @@ func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, c
 }
 
 // SetSigningKey stores the Ed25519 signing key and issuer user ID after bootstrap completes.
-func (k *Kernel) SetSigningKey(priv ed25519.PrivateKey, issuerUserID, superuserHandle string) {
+func (k *Kernel) SetSigningKey(priv ed25519.PrivateKey, issuerUserID string) {
 	k.cfg.SigningKey = priv
 	k.cfg.IssuerUserID = issuerUserID
-	k.cfg.SuperuserHandle = superuserHandle
-}
-
-// SetSuperuserHandle updates the in-memory superuser handle. Used in tests.
-func (k *Kernel) SetSuperuserHandle(handle string) {
-	k.cfg.SuperuserHandle = handle
 }
 
 // SetTokenSecret updates the JWT HMAC secret after bootstrap completes.
@@ -521,9 +514,9 @@ func (k *Kernel) ReadActionByOwnerName(ctx context.Context, ownerID, name string
 	return k.store.ReadActionByOwnerName(ctx, ownerID, name)
 }
 
-// ListActions returns public actions. With activeOnly set it returns public active actions.
-func (k *Kernel) ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*Action, error) {
-	return k.store.ListActions(ctx, activeOnly, limit, offset)
+// ListPublicActions returns public active actions.
+func (k *Kernel) ListPublicActions(ctx context.Context, limit, offset int) ([]*Action, error) {
+	return k.store.ListPublicActions(ctx, limit, offset)
 }
 
 // ListOwnedActions returns all non-deleted actions owned by ownerID, including inactive
@@ -658,7 +651,7 @@ func (k *Kernel) FirstBoot(ctx context.Context, password string) error {
 	if err != nil {
 		return ErrInternal.Wrapf("decode stored signing key: %v", err)
 	}
-	k.SetSigningKey(ed25519.PrivateKey(storedPriv), su.ID, "@sys")
+	k.SetSigningKey(ed25519.PrivateKey(storedPriv), su.ID)
 	// Only apply the stored secret when no secret was provided at construction
 	// (e.g. no JUICE_SECRET_KEY env var). If one was already configured, it takes
 	// precedence and the stored value serves as the fallback for future startups.
@@ -1282,13 +1275,9 @@ func (k *Kernel) authenticatedSubject(ctx context.Context, subjectID string) (*U
 	return u, nil
 }
 
-// isUserSuperuser returns true if u is the configured platform superuser.
-func (k *Kernel) isUserSuperuser(ctx context.Context, u *User) bool {
-	handle := k.cfg.SuperuserHandle
-	if handle == "" {
-		handle, _ = k.store.GetConfig(ctx, "superuser_handle")
-	}
-	return handle != "" && u.Handle == handle
+// isUserSuperuser returns true if u is the platform superuser (@sys is fixed by the spec).
+func (k *Kernel) isUserSuperuser(_ context.Context, u *User) bool {
+	return u.Handle == "@sys"
 }
 
 // requireAdmin returns nil if subjectID is authenticated, non-suspended, and is the owner

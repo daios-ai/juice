@@ -54,7 +54,7 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 
 func TestReceiptSigningRequiresConfiguredKey(t *testing.T) {
 	k := newMinimalKernel()
-	k.SetSigningKey(nil, "issuer-id", "@sys")
+	k.SetSigningKey(nil, "issuer-id")
 
 	_, err := k.buildReceipt(&Transaction{
 		ID:        "tx-id",

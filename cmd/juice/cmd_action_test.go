@@ -219,7 +219,7 @@ func TestActionImportOpenAPI(t *testing.T) {
 		t.Fatalf("action import: %v", err)
 	}
 
-	actions, err := env.k.ListActions(context.Background(), false, 100, 0)
+	actions, err := env.k.ListAllActions(context.Background(), 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestActionListActive(t *testing.T) {
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 	_ = env.k.GrantAll(ctx, owner.ID, a.ID)
 
-	actions, err := env.k.ListActions(ctx, true, 10, 0)
+	actions, err := env.k.ListPublicActions(ctx, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

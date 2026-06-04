@@ -64,7 +64,7 @@ func bootstrap(k *kernel.Kernel) error {
 	if err != nil {
 		return fmt.Errorf("read superuser: %w", err)
 	}
-	k.SetSigningKey(ed25519.PrivateKey(privKeyBytes), su.ID, handle)
+	k.SetSigningKey(ed25519.PrivateKey(privKeyBytes), su.ID)
 
 	// Register lookup native action if absent.
 	if err := ensureSysLookup(ctx, k, handle); err != nil {

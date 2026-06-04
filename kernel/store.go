@@ -92,7 +92,7 @@ type Store interface {
 	ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL string) ([]*Action, error)
 	UpdateAction(ctx context.Context, a *Action) error
 	DeleteAction(ctx context.Context, id string) error
-	ListActions(ctx context.Context, activeOnly bool, limit, offset int) ([]*Action, error)
+	ListPublicActions(ctx context.Context, limit, offset int) ([]*Action, error)
 	// ListActionsByOwner returns all non-deleted actions owned by ownerID, including
 	// inactive and private ones. Used to give an owner their full private view.
 	ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Action, error)
