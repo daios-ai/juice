@@ -765,6 +765,7 @@ API owner unimports an OpenAPI document; matching actions are deactivated and hi
 remote kernel is added, a signed manifest is imported, a caller executes the proxy through Call(), and local stats remain separate from manifest stats
 remote proxy is unimported; the local proxy is deactivated and the remote kernel is unaffected
 caller executes a paid action multiple times; the action owner lists transactions for their action and the sum of transaction net amounts equals the total credits received by the owner
+caller rates a transaction with a note; the note and rating value appear in the transaction detail and list responses for both buyer and seller; an unrated transaction returns null for the rating field
 ```
 
 ## 16. Design rationale
