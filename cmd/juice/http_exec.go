@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,11 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 )
+
+func sha256HexBytes(b []byte) string {
+	h := sha256.Sum256(b)
+	return fmt.Sprintf("%x", h)
+}
 
 // validateResolvedIP returns an error if a DNS-resolved IP is loopback, private, or link-local.
 func validateResolvedIP(ipStr string) error {
@@ -116,16 +122,18 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idem
 	if err != nil {
 		return nil, "", kernel.ErrInvalidInput.Wrap("could not serialize args")
 	}
+	argsHash := sha256HexBytes(body)
 	headers := map[string]string{"Content-Type": "application/json"}
 	if idempotencyKey != "" {
 		headers["X-Idempotency-Key"] = idempotencyKey
 	}
 	if e.signerFn != nil {
-		actionParam := ""
+		var actionParam, counterparty string
 		if u, err := url.Parse(source); err == nil {
 			actionParam = u.Query().Get("action")
+			counterparty = u.Query().Get("counterparty")
 		}
-		if sig, ts, err := e.signerFn(actionParam, idempotencyKey); err == nil {
+		if sig, ts, err := e.signerFn(actionParam, counterparty, idempotencyKey, argsHash); err == nil {
 			headers["X-Timestamp"] = ts
 			headers["X-Signature"] = sig
 		}
@@ -150,7 +158,7 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idem
 type httpActionExecutor struct {
 	timeout    time.Duration
 	allowLocal bool
-	signerFn   func(action, idempotencyKey string) (sig, ts string, err error) // wired after bootstrap
+	signerFn   func(action, counterparty, idempotencyKey, argsHash string) (sig, ts string, err error) // wired after bootstrap
 }
 
 // FetchURL retrieves the body of a URL. Implements kernel.URLFetcher for ownership proof checks.

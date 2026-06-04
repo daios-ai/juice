@@ -10,7 +10,7 @@ import (
 
 func init() {
 	txCmd := &cobra.Command{Use: "tx", Short: "Transaction commands"}
-	txCmd.AddCommand(txListCmd(), txShowCmd(), txRateCmd())
+	txCmd.AddCommand(txListCmd(), txShowCmd(), txRateCmd(), txVerifyReceiptCmd())
 	rootCmd.AddCommand(txCmd)
 }
 
@@ -72,6 +72,40 @@ func txShowCmd() *cobra.Command {
 						fmt.Printf("  rating:  %.0f\n", tv.Rating.Value)
 					}
 				}
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&txID, "id", "", "Transaction ID (required)")
+	_ = cmd.MarkFlagRequired("id")
+	return cmd
+}
+
+func txVerifyReceiptCmd() *cobra.Command {
+	var txID string
+	cmd := &cobra.Command{
+		Use:   "verify-receipt",
+		Short: "Verify the remote receipt for a transaction",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+				v, err := k.VerifyRemoteReceipt(context.Background(), subjectID, txID)
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(v)
+				}
+				status := "PASS"
+				if !v.Valid {
+					status = "FAIL"
+				}
+				fmt.Printf("Receipt verification: %s  [%s]\n  remote: %s\n", txID[:8], status, v.RemoteKernelHandle)
+				fmt.Printf("  receipt_hash:  %v\n  signature:     %v\n  action_id:     %v\n",
+					v.Checks.ReceiptHash, v.Checks.Signature, v.Checks.ActionID)
+				fmt.Printf("  status:        %v\n  gross:         %v\n  net:           %v\n  fee:           %v\n",
+					v.Checks.Status, v.Checks.Gross, v.Checks.Net, v.Checks.Fee)
+				fmt.Printf("  args_hash:     %v\n  reply_hash:    %v\n",
+					v.Checks.ArgsHash, v.Checks.ReplyHash)
 				return nil
 			})
 		},

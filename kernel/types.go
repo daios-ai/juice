@@ -129,6 +129,7 @@ type Transaction struct {
 	Fee               int64           `json:"fee"`
 	Reason            string          `json:"reason"`
 	RemoteReceiptHash string          `json:"remote_receipt_hash,omitempty"` // SHA-256 of the remote receipt JSON for cross-kernel calls; empty for local
+	RemoteReceiptJSON string          `json:"remote_receipt_json,omitempty"` // full receipt JSON from the remote kernel; empty for local calls
 	StartedAt         time.Time       `json:"started_at"`
 	EndedAt           time.Time       `json:"ended_at"`
 }
@@ -319,6 +320,29 @@ type ActionManifest struct {
 	UpdatedAt    time.Time      `json:"updated_at"`
 	Stats        *Stats         `json:"stats"`
 	Signature    string         `json:"signature"` // base64url Ed25519 signature
+}
+
+// ReceiptVerification is the result of VerifyRemoteReceipt.
+type ReceiptVerification struct {
+	TransactionID         string        `json:"transaction_id"`
+	Valid                 bool          `json:"valid"`
+	RemoteKernelHandle    string        `json:"remote_kernel_handle"`
+	RemoteKernelPublicKey string        `json:"remote_kernel_public_key"`
+	Checks                ReceiptChecks `json:"checks"`
+	Receipt               *Receipt      `json:"receipt"`
+}
+
+// ReceiptChecks holds the per-field results of a remote receipt verification.
+type ReceiptChecks struct {
+	ReceiptHash bool `json:"receipt_hash"`
+	Signature   bool `json:"signature"`
+	ActionID    bool `json:"action_id"`
+	Status      bool `json:"status"`
+	Gross       bool `json:"gross"`
+	Net         bool `json:"net"`
+	Fee         bool `json:"fee"`
+	ArgsHash    bool `json:"args_hash"`
+	ReplyHash   bool `json:"reply_hash"`
 }
 
 // Ed25519 key type aliases for clarity at call sites.

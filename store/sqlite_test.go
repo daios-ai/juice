@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1739,6 +1740,71 @@ func TestUpsertAndListEmbeddings(t *testing.T) {
 	}
 }
 
+// ---- Federation store methods ----
+
+func TestUpdateRemoteProxySourceURLs(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@proxy-owner", 0)
+	owner.PublicKey = "validkey"
+	owner.RemoteBaseURL = "https://old.example.com"
+	if err := db.CreateUser(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "act",
+		Kind: kernel.KindRemoteProxy, Active: false, Price: 0,
+		Source:       "https://old.example.com/v1/federation/call?action=@owner/act&counterparty=abc",
+		InputSchema:  map[string]any{}, OutputSchema: map[string]any{},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := db.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.UpdateRemoteProxySourceURLs(ctx, owner.ID, "https://old.example.com", "https://new.example.com"); err != nil {
+		t.Fatalf("UpdateRemoteProxySourceURLs: %v", err)
+	}
+
+	updated, err := db.ReadAction(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(updated.Source, "old.example.com") {
+		t.Errorf("old base URL still in source: %s", updated.Source)
+	}
+	if !strings.Contains(updated.Source, "new.example.com") {
+		t.Errorf("new base URL not in source: %s", updated.Source)
+	}
+}
+
+func TestReadRemoteKernelByBaseURL(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	peer := newUser("@rburl-peer", 0)
+	peer.PublicKey = "somepubkey"
+	peer.RemoteBaseURL = "https://rburl.example.com"
+	if err := db.CreateUser(ctx, peer); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := db.ReadRemoteKernelByBaseURL(ctx, "https://rburl.example.com")
+	if err != nil {
+		t.Fatalf("ReadRemoteKernelByBaseURL: %v", err)
+	}
+	if found.ID != peer.ID {
+		t.Errorf("expected peer ID %s, got %s", peer.ID, found.ID)
+	}
+
+	_, err = db.ReadRemoteKernelByBaseURL(ctx, "https://notfound.example.com")
+	if !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for unknown base URL, got %v", err)
+	}
+}
+
 // ---- Test-only store helpers ----
 // These low-level helpers exist only in test builds to keep test setup simple.
 // Production code uses the higher-level atomic methods (CommitCall, CommitFailedCall, etc.).
@@ -1750,12 +1816,12 @@ func (s *DB) createTransaction(ctx context.Context, tx *kernel.Transaction) erro
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		  action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		  action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		tx.ID, tx.ProcessID, tx.TraceID, tx.ParentTraceID,
 		tx.OwnerUserID, tx.SubjectUserID, tx.TargetUserID, tx.ActionID,
 		rawJSONStr(tx.ArgsJSON), rawJSONStr(tx.ReplyJSON), string(tx.Status),
-		tx.Gross, tx.Net, tx.Fee, tx.Reason, nullStr(tx.RemoteReceiptHash),
+		tx.Gross, tx.Net, tx.Fee, tx.Reason, nullStr(tx.RemoteReceiptHash), tx.RemoteReceiptJSON,
 		timeToStr(tx.StartedAt), timeToStr(tx.EndedAt),
 	)
 	return dbErr(err, "create transaction")

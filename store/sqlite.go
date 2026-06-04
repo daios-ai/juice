@@ -743,12 +743,12 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		  action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		  action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
 		ktx.OwnerUserID, ktx.SubjectUserID, ktx.TargetUserID, ktx.ActionID,
 		rawJSONStr(ktx.ArgsJSON), rawJSONStr(ktx.ReplyJSON), string(ktx.Status),
-		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason, nullStr(ktx.RemoteReceiptHash),
+		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason, nullStr(ktx.RemoteReceiptHash), ktx.RemoteReceiptJSON,
 		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
 	); err != nil {
 		return dbErr(err, label+": insert transaction")
@@ -1097,12 +1097,12 @@ func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transactio
 	var remoteReceiptHash *string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		        action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at
+		        action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at
 		 FROM transactions WHERE id=?`, id,
 	).Scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
 		&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
 		&argsJSON, &replyJSON, &status,
-		&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash,
+		&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON,
 		&startedAt, &endedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("transaction not found")
@@ -1121,7 +1121,7 @@ func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transactio
 
 func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel.Transaction, error) {
 	q := `SELECT id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-	             action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at
+	             action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at
 	      FROM transactions WHERE 1=1`
 	args := []any{}
 	if f.OwnerUserID != "" {
@@ -1166,7 +1166,7 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 		if err := rows.Scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
 			&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
 			&argsJSON, &replyJSON, &status,
-			&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash,
+			&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON,
 			&startedAt, &endedAt); err != nil {
 			return nil, dbErr(err, "scan transaction")
 		}
@@ -1187,7 +1187,7 @@ func (s *DB) ListAllTransactions(ctx context.Context, limit, offset int) ([]*ker
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		        action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,started_at,ended_at
+		        action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at
 		 FROM transactions ORDER BY started_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list all transactions")
@@ -1201,7 +1201,7 @@ func (s *DB) ListAllTransactions(ctx context.Context, limit, offset int) ([]*ker
 		if err := rows.Scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
 			&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
 			&argsJSON, &replyJSON, &status,
-			&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash,
+			&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON,
 			&startedAt, &endedAt); err != nil {
 			return nil, dbErr(err, "scan transaction")
 		}
@@ -1723,6 +1723,22 @@ func (s *DB) ListEmbeddings(ctx context.Context) (map[string][]float32, error) {
 		out[id] = vec
 	}
 	return out, rows.Err()
+}
+
+// ---- Federation ----
+
+func (s *DB) UpdateRemoteProxySourceURLs(ctx context.Context, ownerUserID, oldBase, newBase string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE actions SET source=REPLACE(source,?,?) WHERE owner_user_id=? AND kind='remote_proxy' AND deleted_at IS NULL`,
+		oldBase, newBase, ownerUserID,
+	)
+	return dbErr(err, "update remote proxy source urls")
+}
+
+func (s *DB) ReadRemoteKernelByBaseURL(ctx context.Context, baseURL string) (*kernel.User, error) {
+	return s.scanUser(s.db.QueryRowContext(ctx,
+		`SELECT id,handle,email,password_hash,available,locked,suspended_at,public_key,remote_base_url,created_at,updated_at
+		 FROM users WHERE remote_base_url=? AND remote_base_url!=''`, baseURL))
 }
 
 // ---- helpers ----

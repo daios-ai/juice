@@ -254,4 +254,14 @@ type Store interface {
 	// ListEmbeddings returns stored embedding vectors keyed by action ID,
 	// filtered to active, public, non-deleted actions only.
 	ListEmbeddings(ctx context.Context) (map[string][]float32, error)
+
+	// ---- Federation ----
+
+	// UpdateRemoteProxySourceURLs replaces oldBase with newBase in Action.source for all
+	// remote_proxy actions owned by ownerUserID. Used when a remote peer's base URL changes.
+	UpdateRemoteProxySourceURLs(ctx context.Context, ownerUserID, oldBase, newBase string) error
+
+	// ReadRemoteKernelByBaseURL returns the remote-kernel user with the given base URL,
+	// or ErrNotFound if no such user exists.
+	ReadRemoteKernelByBaseURL(ctx context.Context, baseURL string) (*User, error)
 }

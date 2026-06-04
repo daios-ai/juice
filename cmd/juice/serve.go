@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -121,6 +122,7 @@ func runServer(addr string) error {
 		r.Get("/v1/transactions", srv.listTransactions)
 		r.Get("/v1/transactions/{id}", srv.getTransaction)
 		r.Post("/v1/transactions/{id}/rate", srv.rateTransaction)
+		r.Get("/v1/transactions/{id}/receipt-verification", srv.getReceiptVerification)
 
 		// Stats.
 		r.Get("/v1/stats/{action_id}", srv.getStats)
@@ -793,6 +795,16 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rating)
 }
 
+func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	v, err := s.kernel.VerifyRemoteReceipt(r.Context(), subjectFrom(r), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
 func (s *server) getStats(w http.ResponseWriter, r *http.Request) {
 	actionID := chi.URLParam(r, "action_id")
 	stats, err := s.kernel.ReadStats(r.Context(), actionID)
@@ -1092,9 +1104,17 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Verify Ed25519 signature.
+	// 5. Read raw body so we can verify args_hash before decoding.
+	rawBody, readErr := io.ReadAll(r.Body)
+	if readErr != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("could not read request body"))
+		return
+	}
+	argsHash := sha256HexBytes(rawBody)
+
+	// 6. Verify Ed25519 signature (covers action, args_hash, counterparty, idempotency_key, timestamp).
 	sigStr := r.Header.Get("X-Signature")
-	if verifyErr := kernel.VerifyFederationSignature(counterparty.PublicKey, actionParam, idempotencyKey, tsStr, sigStr); verifyErr != nil {
+	if verifyErr := kernel.VerifyFederationSignature(counterparty.PublicKey, actionParam, cpPubKey, idempotencyKey, tsStr, argsHash, sigStr); verifyErr != nil {
 		writeErr(w, verifyErr)
 		return
 	}
@@ -1106,7 +1126,7 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var args map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+	if err := json.Unmarshal(rawBody, &args); err != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}

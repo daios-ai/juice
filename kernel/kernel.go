@@ -1509,11 +1509,87 @@ func (k *Kernel) DeleteIdempotencyRecord(ctx context.Context, id string) error {
 	return k.store.DeleteIdempotencyRecord(ctx, id)
 }
 
+// VerifyRemoteReceipt verifies the stored remote receipt for a remote-proxy transaction.
+// Available to any party satisfying CanReadTransaction. Returns ErrInvalidState for
+// non-remote-proxy transactions (no remote receipt stored).
+func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string) (*ReceiptVerification, error) {
+	tv, err := k.ReadTransaction(ctx, subjectID, txID)
+	if err != nil {
+		return nil, err
+	}
+	tx := tv.Transaction
+	if tx.RemoteReceiptJSON == "" {
+		return nil, ErrInvalidState.Wrap("transaction has no remote receipt")
+	}
+
+	// Decode the stored receipt.
+	var r Receipt
+	if err := json.Unmarshal([]byte(tx.RemoteReceiptJSON), &r); err != nil {
+		return nil, ErrInternal.Wrapf("decode remote receipt: %v", err)
+	}
+
+	// Resolve the remote kernel's public key via the action's owner.
+	action, err := k.store.ReadAction(ctx, tx.ActionID)
+	if err != nil {
+		return nil, err
+	}
+	owner, err := k.store.ReadUser(ctx, action.OwnerUserID)
+	if err != nil {
+		return nil, err
+	}
+
+	var checks ReceiptChecks
+
+	// 1. Hash: SHA-256(receipt JSON) must equal stored hash.
+	checks.ReceiptHash = sha256Hex(tx.RemoteReceiptJSON) == tx.RemoteReceiptHash
+
+	// 2. Signature: verify Ed25519 over CanonicalJSON of receipt with Signature cleared.
+	if owner.PublicKey != "" {
+		pub, pubErr := decodeRemotePublicKey(owner.PublicKey)
+		if pubErr == nil {
+			cp := r
+			cp.Signature = ""
+			if payload, jcsErr := CanonicalJSON(cp); jcsErr == nil {
+				if sig, decErr := base64.RawURLEncoding.DecodeString(r.Signature); decErr == nil {
+					checks.Signature = ed25519.Verify(pub, payload, sig)
+				}
+			}
+		}
+	}
+
+	// 3–9. Field equality checks.
+	checks.ActionID = r.ActionID == tx.ActionID
+	checks.Status = r.Status == tx.Status
+	checks.Gross = r.Gross == tx.Gross
+	checks.Net = r.Net == tx.Net
+	checks.Fee = r.Fee == tx.Fee
+
+	if h, hashErr := jcsHashStr(string(tx.ArgsJSON)); hashErr == nil {
+		checks.ArgsHash = r.ArgsHash == h
+	}
+	if h, hashErr := jcsHashStr(string(tx.ReplyJSON)); hashErr == nil {
+		checks.ReplyHash = r.ReplyHash == h
+	}
+
+	valid := checks.ReceiptHash && checks.Signature && checks.ActionID &&
+		checks.Status && checks.Gross && checks.Net && checks.Fee &&
+		checks.ArgsHash && checks.ReplyHash
+
+	return &ReceiptVerification{
+		TransactionID:         txID,
+		Valid:                 valid,
+		RemoteKernelHandle:    owner.Handle,
+		RemoteKernelPublicKey: owner.PublicKey,
+		Checks:                checks,
+		Receipt:               &r,
+	}, nil
+}
+
 // SignFederation signs a federation payload with the platform key and returns
 // (signature, timestamp). Returns an error if the signing key is not configured.
-func (k *Kernel) SignFederation(action, idempotencyKey string) (sig, ts string, err error) {
+func (k *Kernel) SignFederation(action, counterparty, idempotencyKey, argsHash string) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = SignFederationPayload(k.cfg.SigningKey, action, idempotencyKey, ts)
+	sig, err = SignFederationPayload(k.cfg.SigningKey, action, counterparty, idempotencyKey, ts, argsHash)
 	return
 }
 
@@ -1726,13 +1802,26 @@ func (k *Kernel) RegisterRemoteKernel(ctx context.Context, subjectID, handle, pu
 	// Check if a user with this public key already exists.
 	existing, err := k.store.ReadUserByPublicKey(ctx, publicKey)
 	if err == nil && existing != nil {
-		// Update the existing record's base URL.
+		// Same identity — update base URL and propagate to owned proxy actions if it changed.
+		oldBase := existing.RemoteBaseURL
 		existing.RemoteBaseURL = baseURL
 		existing.UpdatedAt = time.Now().UTC()
 		if err := k.store.UpdateUser(ctx, existing); err != nil {
 			return nil, err
 		}
+		if oldBase != baseURL {
+			if err := k.store.UpdateRemoteProxySourceURLs(ctx, existing.ID, oldBase, baseURL); err != nil {
+				return nil, err
+			}
+		}
 		return existing, nil
+	}
+	// D5: guard against the same handle or base URL being claimed by a different public key.
+	if byHandle, err := k.store.ReadUserByHandle(ctx, handle); err == nil && byHandle != nil {
+		return nil, ErrInvalidInput.Wrap("handle already registered with a different public key")
+	}
+	if byURL, err := k.store.ReadRemoteKernelByBaseURL(ctx, baseURL); err == nil && byURL != nil {
+		return nil, ErrInvalidInput.Wrap("base URL already registered with a different public key")
 	}
 	now := time.Now().UTC()
 	u := &User{
@@ -2753,14 +2842,16 @@ func VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
 }
 
 // VerifyFederationSignature verifies an Ed25519 signature over the canonical federation payload
-// {"action": action, "idempotency_key": idempotencyKey, "timestamp": timestamp}.
-func VerifyFederationSignature(pubKeyB64, action, idempotencyKey, timestamp, sigB64 string) error {
+// JCS({action, args_hash, counterparty, idempotency_key, timestamp}).
+func VerifyFederationSignature(pubKeyB64, action, counterparty, idempotencyKey, timestamp, argsHash, sigB64 string) error {
 	pub, err := decodeRemotePublicKey(pubKeyB64)
 	if err != nil {
 		return ErrUnauthenticated.Wrap("invalid counterparty public key")
 	}
 	payload, err := CanonicalJSON(map[string]string{
 		"action":          action,
+		"args_hash":       argsHash,
+		"counterparty":    counterparty,
 		"idempotency_key": idempotencyKey,
 		"timestamp":       timestamp,
 	})
@@ -2775,12 +2866,14 @@ func VerifyFederationSignature(pubKeyB64, action, idempotencyKey, timestamp, sig
 }
 
 // SignFederationPayload creates a base64url Ed25519 signature over the canonical federation payload.
-func SignFederationPayload(key Ed25519PrivateKey, action, idempotencyKey, timestamp string) (string, error) {
+func SignFederationPayload(key Ed25519PrivateKey, action, counterparty, idempotencyKey, timestamp, argsHash string) (string, error) {
 	if len(key) != ed25519.PrivateKeySize {
 		return "", ErrInvalidState.Wrap("signing key is not configured")
 	}
 	payload, err := CanonicalJSON(map[string]string{
 		"action":          action,
+		"args_hash":       argsHash,
+		"counterparty":    counterparty,
 		"idempotency_key": idempotencyKey,
 		"timestamp":       timestamp,
 	})

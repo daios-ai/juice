@@ -2327,6 +2327,13 @@ func TestImportOpenAPIOwnershipStalenessFixed(t *testing.T) {
 // ---- Remote proxy execution test ----
 
 // fakeFederationHTTP implements HTTPExecutor and FederationExecutor for Call() tests.
+// fakeSuccessHTTP is a minimal HTTPExecutor that returns an empty result for any Execute call.
+type fakeSuccessHTTP struct{}
+
+func (f *fakeSuccessHTTP) Execute(_ context.Context, _ string, _ map[string]any) (map[string]any, error) {
+	return map[string]any{}, nil
+}
+
 type fakeFederationHTTP struct {
 	result      map[string]any
 	receiptJSON string
@@ -2425,6 +2432,9 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	if tx.RemoteReceiptHash != expected {
 		t.Errorf("RemoteReceiptHash: got %s, want %s", tx.RemoteReceiptHash, expected)
 	}
+	if tx.RemoteReceiptJSON != fakeReceiptJSON {
+		t.Errorf("RemoteReceiptJSON: got %q, want %q", tx.RemoteReceiptJSON, fakeReceiptJSON)
+	}
 	if tx.Status != kernel.TxSuccess {
 		t.Errorf("expected TxSuccess, got %s", tx.Status)
 	}
@@ -2477,6 +2487,330 @@ func TestUnimportOpenAPIActionAdmin(t *testing.T) {
 	if _, err := k.UnimportOpenAPI(ctx, other.ID, owner.ID, specURL, ""); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized for non-admin, got %v", err)
 	}
+}
+
+// ---- D1: source URL update on base URL change ----
+
+func TestRegisterRemoteKernelUpdatesSourceURLs(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+
+	peer, err := k.RegisterRemoteKernel(ctx, sys.ID, "@url-update-peer", pubB64, "https://old.example.com")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// Import an action whose Source URL contains the old base URL.
+	m := kernel.ActionManifest{
+		ActionID: "url-update-action-1", OwnerHandle: "@url-update-peer", Name: "act",
+		Kind: kernel.KindHTTP, Price: 0, Description: "d",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+	}
+	sig, _ := kernel.SignManifest(priv, &m)
+	m.Signature = sig
+	result, err := k.ImportRemoteAction(ctx, sys.ID, peer.ID, m)
+	if err != nil {
+		t.Fatalf("ImportRemoteAction: %v", err)
+	}
+	a := result.Created[0]
+	if !contains(a.Source, "old.example.com") {
+		t.Fatalf("expected old base URL in source, got %s", a.Source)
+	}
+
+	// Re-register with new base URL using the same public key.
+	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@url-update-peer", pubB64, "https://new.example.com"); err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+
+	// Source URL on existing proxy action must reflect new base URL.
+	updated, err := st.ReadAction(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("ReadAction: %v", err)
+	}
+	if contains(updated.Source, "old.example.com") {
+		t.Errorf("old base URL still present in source after base URL change: %s", updated.Source)
+	}
+	if !contains(updated.Source, "new.example.com") {
+		t.Errorf("new base URL not found in source: %s", updated.Source)
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
+}
+
+func containsStr(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+// ---- D5: duplicate identity guard ----
+
+func TestRegisterRemoteKernelRejectsDuplicateHandle(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	pub1, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub1B64 := base64.RawURLEncoding.EncodeToString(pub1)
+	pub2B64 := base64.RawURLEncoding.EncodeToString(pub2)
+
+	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@dup-handle", pub1B64, "https://a.example.com"); err != nil {
+		t.Fatalf("first register: %v", err)
+	}
+	// Same handle, different public key → must fail.
+	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@dup-handle", pub2B64, "https://b.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("expected ErrInvalidInput for duplicate handle, got %v", err)
+	}
+}
+
+func TestRegisterRemoteKernelRejectsDuplicateBaseURL(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	pub1, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub1B64 := base64.RawURLEncoding.EncodeToString(pub1)
+	pub2B64 := base64.RawURLEncoding.EncodeToString(pub2)
+
+	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@dup-url-a", pub1B64, "https://shared.example.com"); err != nil {
+		t.Fatalf("first register: %v", err)
+	}
+	// Same base URL, different public key → must fail.
+	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@dup-url-b", pub2B64, "https://shared.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("expected ErrInvalidInput for duplicate base URL, got %v", err)
+	}
+}
+
+// ---- D4: VerifyRemoteReceipt ----
+
+func TestVerifyRemoteReceiptValid(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sys := setupSys(t, nil, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	fake := &fakeFederationHTTP{}
+	k := newTestKernelWithHTTP(st, fake)
+
+	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@verify-peer", base64.RawURLEncoding.EncodeToString(pub), "https://verify.example.com")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	m := kernel.ActionManifest{
+		ActionID: "verify-action-1", OwnerHandle: "@verify-peer", Name: "vact",
+		Kind: kernel.KindHTTP, Price: 0, Description: "v",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+	}
+	msig, _ := kernel.SignManifest(priv, &m)
+	m.Signature = msig
+	result, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	a := result.Created[0]
+	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.GrantAll(ctx, sys.ID, a.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	caller := setupUser(t, st, "@verify-caller", 0)
+	p, _ := setupProcess(t, k, caller.ID, 0)
+
+	// Build a receipt whose fields match what Call() will record in the transaction.
+	remoteReceipt := &kernel.Receipt{
+		ID: uuid.New().String(), IssuerUserID: "remote-sys",
+		TxID: "remote-tx-verify", TraceID: "t1", ActionID: a.ID,
+		CallerUserID: "c1", ProcessID: "p1",
+		ArgsHash:  jcsHashForTest(t, `{}`),
+		ReplyHash: jcsHashForTest(t, `{}`),
+		Status: kernel.TxSuccess, Gross: 0, Net: 0, Fee: 0,
+		StartedAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
+	}
+	// Sign with the remote peer's private key using the same method as the kernel.
+	receiptSig := signReceiptForTest(t, priv, remoteReceipt)
+	remoteReceipt.Signature = receiptSig
+	receiptBytes, _ := json.Marshal(remoteReceipt)
+	fake.receiptJSON = string(receiptBytes)
+
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		SubjectID: caller.ID, ProcessID: p.ID,
+		TargetUserID: "@verify-peer", ActionName: "vact", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	_ = reply
+
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID})
+	v, err := k.VerifyRemoteReceipt(ctx, caller.ID, txs[0].ID)
+	if err != nil {
+		t.Fatalf("VerifyRemoteReceipt: %v", err)
+	}
+	if !v.Checks.ReceiptHash {
+		t.Error("expected ReceiptHash check=true")
+	}
+	if !v.Checks.Signature {
+		t.Error("expected Signature check=true")
+	}
+	if !v.Checks.ActionID {
+		t.Error("expected ActionID check=true")
+	}
+}
+
+func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sys := setupSys(t, nil, st)
+	caller := setupUser(t, st, "@vrr-caller", 100)
+
+	// Use a fake HTTP executor so we can call a KindHTTP action and get a local tx.
+	fakeHTTP := &fakeSuccessHTTP{}
+	k := newTestKernelWithHTTP(st, fakeHTTP)
+	p, _ := setupProcess(t, k, caller.ID, 10)
+
+	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
+		OwnerUserID:  sys.ID,
+		Name:         "vrr-local",
+		Kind:         kernel.KindHTTP,
+		Source:       "https://local.example.com/api",
+		Description:  "local",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		Price:        5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.GrantAll(ctx, sys.ID, a.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		SubjectID: caller.ID, ProcessID: p.ID,
+		TargetUserID: sys.ID, ActionName: "vrr-local", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	_ = reply
+
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID})
+	if len(txs) == 0 {
+		t.Fatal("no transactions")
+	}
+	_, err = k.VerifyRemoteReceipt(ctx, caller.ID, txs[0].ID)
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("expected ErrInvalidState for non-remote-proxy tx, got %v", err)
+	}
+}
+
+func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sys := setupSys(t, nil, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
+
+	fake := &fakeFederationHTTP{}
+	k := newTestKernelWithHTTP(st, fake)
+
+	remoteUser, _ := k.RegisterRemoteKernel(ctx, sys.ID, "@tamper-peer", base64.RawURLEncoding.EncodeToString(pub), "https://tamper.example.com")
+	m := kernel.ActionManifest{
+		ActionID: "tamper-action-1", OwnerHandle: "@tamper-peer", Name: "tact",
+		Kind: kernel.KindHTTP, Price: 0, Description: "t",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+	}
+	msig, _ := kernel.SignManifest(priv, &m)
+	m.Signature = msig
+	result, _ := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	a := result.Created[0]
+	_ = k.SetActive(ctx, sys.ID, a.ID, true)
+	_ = k.GrantAll(ctx, sys.ID, a.ID)
+
+	remoteReceipt := &kernel.Receipt{
+		ID: uuid.New().String(), IssuerUserID: "rs",
+		TxID: "rt", TraceID: "t1", ActionID: a.ID,
+		CallerUserID: "c1", ProcessID: "p1",
+		ArgsHash: "aa", ReplyHash: "bb",
+		Status: kernel.TxSuccess, Gross: 0, Net: 0, Fee: 0,
+		StartedAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
+	}
+	// Sign with a different key — signature should fail verification.
+	remoteReceipt.Signature = signReceiptForTest(t, otherPriv, remoteReceipt)
+	receiptBytes, _ := json.Marshal(remoteReceipt)
+	fake.receiptJSON = string(receiptBytes)
+
+	caller := setupUser(t, st, "@tamper-caller", 0)
+	p, _ := setupProcess(t, k, caller.ID, 0)
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		SubjectID: caller.ID, ProcessID: p.ID,
+		TargetUserID: "@tamper-peer", ActionName: "tact", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	_ = reply
+
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID})
+	v, err := k.VerifyRemoteReceipt(ctx, caller.ID, txs[0].ID)
+	if err != nil {
+		t.Fatalf("VerifyRemoteReceipt: %v", err)
+	}
+	if v.Checks.Signature {
+		t.Error("expected Signature check=false for receipt signed with wrong key")
+	}
+	if v.Valid {
+		t.Error("expected Valid=false for tampered receipt")
+	}
+}
+
+// jcsHashForTest computes SHA-256(JCS(jsonStr)) using the exported CanonicalJSON.
+func jcsHashForTest(t *testing.T, jsonStr string) string {
+	t.Helper()
+	var v any
+	if err := json.Unmarshal([]byte(jsonStr), &v); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := kernel.CanonicalJSON(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256(canonical)
+	return fmt.Sprintf("%x", h)
+}
+
+// signReceiptForTest signs a Receipt using the same method as the kernel's signReceipt:
+// Ed25519 over CanonicalJSON of the receipt with Signature cleared.
+func signReceiptForTest(t *testing.T, key ed25519.PrivateKey, r *kernel.Receipt) string {
+	t.Helper()
+	cp := *r
+	cp.Signature = ""
+	payload, err := kernel.CanonicalJSON(cp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload))
 }
 
 // Ensure fmt is used.

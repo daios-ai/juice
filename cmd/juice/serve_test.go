@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -100,6 +101,7 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		r.Get("/v1/transactions", srv.listTransactions)
 		r.Get("/v1/transactions/{id}", srv.getTransaction)
 		r.Post("/v1/transactions/{id}/rate", srv.rateTransaction)
+		r.Get("/v1/transactions/{id}/receipt-verification", srv.getReceiptVerification)
 		r.Get("/v1/stats/{action_id}", srv.getStats)
 		r.Get("/v1/listeners", srv.listListeners)
 		r.Post("/v1/listeners", srv.postListener)
@@ -195,10 +197,16 @@ func httpDoWithHeaders(t *testing.T, srv *httptest.Server, method, path string, 
 }
 
 // fedHeaders builds signed auth headers for a federation call.
+// All test federation calls use an empty JSON body (json.Encoder output of {}).
 func fedHeaders(t *testing.T, priv ed25519.PrivateKey, action, idempKey string) map[string]string {
 	t.Helper()
 	ts := time.Now().UTC().Format(time.RFC3339)
-	sig, err := kernel.SignFederationPayload(priv, action, idempKey, ts)
+	counterparty := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	// json.NewEncoder appends a newline; match what httpDoWithHeaders sends.
+	var bodyBuf bytes.Buffer
+	json.NewEncoder(&bodyBuf).Encode(map[string]any{})
+	argsHash := sha256HexBytes(bodyBuf.Bytes())
+	sig, err := kernel.SignFederationPayload(priv, action, counterparty, idempKey, ts, argsHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1660,7 +1668,11 @@ func TestFederationCallAuth(t *testing.T) {
 
 	// Expired timestamp → 401.
 	oldTS := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
-	sig, _ := kernel.SignFederationPayload(priv, action, "idem-auth-4", oldTS)
+	cpKey := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	var authBuf bytes.Buffer
+	json.NewEncoder(&authBuf).Encode(map[string]any{})
+	authArgsHash := sha256HexBytes(authBuf.Bytes())
+	sig, _ := kernel.SignFederationPayload(priv, action, cpKey, "idem-auth-4", oldTS, authArgsHash)
 	r4 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", map[string]string{
 		"X-Timestamp":       oldTS,
 		"X-Idempotency-Key": "idem-auth-4",
@@ -1673,7 +1685,7 @@ func TestFederationCallAuth(t *testing.T) {
 
 	// Missing X-Idempotency-Key → 422 (ErrInvalidInput).
 	ts5 := time.Now().UTC().Format(time.RFC3339)
-	sig5, _ := kernel.SignFederationPayload(priv, action, "", ts5)
+	sig5, _ := kernel.SignFederationPayload(priv, action, cpKey, "", ts5, authArgsHash)
 	r5 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", map[string]string{
 		"X-Timestamp": ts5,
 		"X-Signature": sig5,
@@ -1913,5 +1925,110 @@ func TestFederationReplay(t *testing.T) {
 	defer r3.Body.Close()
 	if r3.StatusCode != http.StatusConflict {
 		t.Errorf("pending: want 409, got %d", r3.StatusCode)
+	}
+}
+
+// TestFederationCallRejectsArgsHashMismatch verifies that a federation call
+// whose body has been tampered with (args_hash no longer matches) is rejected.
+func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+	ctx := context.Background()
+
+	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	_, err := k.RegisterRemoteKernel(ctx, sys.ID, "@args-hash-peer", pubB64, "http://argshash.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
+		OwnerUserID: sys.ID, Name: "hash-check", Kind: kernel.KindHTTP,
+		Source: backend.URL, Description: "hash-check",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+	})
+	k.SetActive(ctx, sys.ID, a.ID, true)
+	k.GrantAll(ctx, sys.ID, a.ID)
+
+	path := "/v1/federation/call?action=@sys/hash-check&counterparty=" + pubB64
+	// Sign with empty body {} but send a different body — args_hash mismatch.
+	hdrs := fedHeaders(t, priv, "@sys/hash-check", "idem-hash-1")
+	// Send a body different from what was signed.
+	var buf bytes.Buffer
+	json.NewEncoder(&buf).Encode(map[string]any{"injected": true})
+	req, _ := http.NewRequest("POST", srv.URL+path, &buf)
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range hdrs {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("args_hash mismatch: want 401, got %d", resp.StatusCode)
+	}
+}
+
+// TestReceiptVerificationEndpoint tests GET /v1/transactions/{id}/receipt-verification.
+func TestReceiptVerificationEndpoint(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+	ctx := context.Background()
+	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+
+	userID, tok := makeUser(t, k, "@vrr-http-user")
+	giveCredits(t, k, userID, 100)
+	p, _, _ := k.StartProcess(ctx, userID, userID, 100)
+
+	// Create a local HTTP action and make a call to get a local (non-remote-proxy) transaction.
+	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
+		OwnerUserID: sys.ID, Name: "vrr-http", Kind: kernel.KindHTTP,
+		Source: backend.URL, Description: "vrr-http",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+	})
+	k.SetActive(ctx, sys.ID, a.ID, true)
+	k.GrantAll(ctx, sys.ID, a.ID)
+
+	callResp := httpDo(t, srv, "POST", "/v1/call", map[string]any{
+		"process_id": p.ID, "action": "@sys/vrr-http", "args": map[string]any{},
+	}, tok)
+	if callResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(callResp.Body)
+		callResp.Body.Close()
+		t.Fatalf("call: want 200, got %d: %s", callResp.StatusCode, body)
+	}
+	var callResult kernel.CallReply
+	decodeResponse(t, callResp, &callResult)
+	txID := callResult.TxID
+	if txID == "" {
+		t.Fatal("call returned empty tx_id")
+	}
+
+	// Non-remote-proxy transaction → 409 ErrInvalidState.
+	resp := httpDo(t, srv, "GET", "/v1/transactions/"+txID+"/receipt-verification", nil, tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("non-remote-proxy: want 409, got %d", resp.StatusCode)
+	}
+
+	// Unknown transaction → 404.
+	resp2 := httpDo(t, srv, "GET", "/v1/transactions/"+uuid.New().String()+"/receipt-verification", nil, tok)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown tx: want 404, got %d", resp2.StatusCode)
 	}
 }

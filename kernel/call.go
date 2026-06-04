@@ -201,6 +201,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	reply, subCost, remoteReceiptHash, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID, req.SubjectID)
 	if remoteReceiptHash != "" {
 		tx.RemoteReceiptHash = sha256Hex(remoteReceiptHash)
+		tx.RemoteReceiptJSON = remoteReceiptHash
 	}
 	latency := time.Since(started).Seconds()
 	tx.EndedAt = time.Now().UTC()
