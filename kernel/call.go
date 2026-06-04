@@ -248,12 +248,6 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
-	if fee > 0 && k.cfg.FeeRecipientID == "" {
-		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
-			logger.Error("call.refund_failed_no_fee_recipient", "action", action.Name, "refund_error", refundErr)
-		}
-		return nil, ErrInvalidState.Wrap("fee recipient not configured")
-	}
 	if err := k.store.CommitCall(ctx, tx, receipt, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.EventID, req.IdempotencyRecordID); err != nil {
 		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
 			logger.Error("call.refund_failed", "action", action.Name, "commit_error", err, "refund_error", refundErr)

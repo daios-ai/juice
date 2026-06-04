@@ -1433,47 +1433,40 @@ func TestCallSuspendedSubjectRejected(t *testing.T) {
 // ---- Fee recipient enforcement ----
 
 func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
-	st := newTestStore(t)
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.FeeBPS = 2000 // 20% fee — no FeeRecipientID set
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	exec := &fakeScriptExec{result: `{"ok":true}`}
-	k := kernel.New(st, exec, nil, nil, nil, cfg, nil)
+	// The invariant fee_bps > 0 => fee_recipient_id != "" is now enforced at
+	// startup via ValidateFeeRecipient, not at call time.
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@owner", 1000)
-	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "paid",
-		Kind: kernel.KindWasm, Active: true, Price: 100, Public: true,
-		InputSchema:  map[string]any{"type": "object"},
-		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	_ = st.CreateAction(ctx, a)
-
-	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 500)
-	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     owner.ID,
-		ProcessID:     p.ID,
-		ParentTraceID: root.ID,
-		TargetUserID:  owner.ID,
-		ActionName:    "paid",
-		Args:          map[string]any{},
+	t.Run("missing recipient rejected at startup", func(t *testing.T) {
+		st := newTestStore(t)
+		cfg := kernel.DefaultConfig()
+		cfg.FeeBPS = 2000 // 20% fee — no FeeRecipientID set
+		k := kernel.New(st, nil, nil, nil, nil, cfg, nil)
+		if err := k.ValidateFeeRecipient(ctx); !errors.Is(err, kernel.ErrInvalidState) {
+			t.Errorf("expected ErrInvalidState for fee_bps>0 with empty recipient, got %v", err)
+		}
 	})
-	if !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("expected ErrInvalidState when fee > 0 and FeeRecipientID is empty, got %v", err)
-	}
 
-	// Funds must be fully refunded — process.available back to 500.
-	proc, _ := st.ReadProcess(ctx, p.ID)
-	if proc.Available != 500 {
-		t.Errorf("process.available after fee pre-check failure: got %d, want 500", proc.Available)
-	}
-	if proc.Locked != 0 {
-		t.Errorf("process.locked after fee pre-check failure: got %d, want 0", proc.Locked)
-	}
+	t.Run("nonexistent recipient rejected at startup", func(t *testing.T) {
+		st := newTestStore(t)
+		cfg := kernel.DefaultConfig()
+		cfg.FeeBPS = 2000
+		cfg.FeeRecipientID = "no-such-user"
+		k := kernel.New(st, nil, nil, nil, nil, cfg, nil)
+		if err := k.ValidateFeeRecipient(ctx); !errors.Is(err, kernel.ErrInvalidState) {
+			t.Errorf("expected ErrInvalidState for unknown fee recipient, got %v", err)
+		}
+	})
+
+	t.Run("zero fee_bps passes with no recipient", func(t *testing.T) {
+		st := newTestStore(t)
+		cfg := kernel.DefaultConfig()
+		cfg.FeeBPS = 0
+		k := kernel.New(st, nil, nil, nil, nil, cfg, nil)
+		if err := k.ValidateFeeRecipient(ctx); err != nil {
+			t.Errorf("expected no error when fee_bps=0, got %v", err)
+		}
+	})
 }
 
 // TestZeroPriceCallOnClosedProcessReturnsErrInvalidState verifies that

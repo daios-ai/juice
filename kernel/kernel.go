@@ -237,11 +237,15 @@ func (k *Kernel) requireSuperuser(ctx context.Context, operatorID string) error 
 
 // Deposit adds credits directly to a user's available balance and records an audit entry.
 // Only the superuser may call this; the check is enforced here, not only at the CLI boundary.
-// ValidateFeeRecipient returns an error if FeeBPS > 0 and the configured fee
-// recipient user does not exist. Call after bootstrap to catch misconfiguration.
+// ValidateFeeRecipient returns an error if the fee configuration is inconsistent.
+// fee_bps > 0 requires a non-empty fee_recipient_id that resolves to a known user.
+// Call after bootstrap to reject misconfiguration before serving requests.
 func (k *Kernel) ValidateFeeRecipient(ctx context.Context) error {
-	if k.cfg.FeeBPS == 0 || k.cfg.FeeRecipientID == "" {
+	if k.cfg.FeeBPS == 0 {
 		return nil
+	}
+	if k.cfg.FeeRecipientID == "" {
+		return ErrInvalidState.Wrap("fee_bps > 0 requires fee_recipient_id to be set")
 	}
 	if _, err := k.store.ReadUser(ctx, k.cfg.FeeRecipientID); err != nil {
 		return ErrInvalidState.Wrapf("fee recipient %q not found in database", k.cfg.FeeRecipientID)

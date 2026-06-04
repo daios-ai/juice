@@ -130,10 +130,17 @@ func (k *Kernel) RegisterRemoteKernel(ctx context.Context, subjectID, handle, pu
 	if err := validateRemoteBaseURL(baseURL); err != nil {
 		return nil, err
 	}
-	// Check if a user with this public key already exists.
+	// Reject if the handle or base URL is already claimed by a different public key.
+	// This invariant holds for both new registrations and base-URL updates.
+	if byHandle, err := k.store.ReadUserByHandle(ctx, handle); err == nil && byHandle != nil && byHandle.PublicKey != publicKey {
+		return nil, ErrInvalidInput.Wrap("handle already registered with a different public key")
+	}
+	if byURL, err := k.store.ReadRemoteKernelByBaseURL(ctx, baseURL); err == nil && byURL != nil && byURL.PublicKey != publicKey {
+		return nil, ErrInvalidInput.Wrap("base URL already registered with a different public key")
+	}
+	// Same identity — update base URL and propagate to owned proxy actions if it changed.
 	existing, err := k.store.ReadUserByPublicKey(ctx, publicKey)
 	if err == nil && existing != nil {
-		// Same identity — update base URL and propagate to owned proxy actions if it changed.
 		oldBase := existing.RemoteBaseURL
 		existing.RemoteBaseURL = baseURL
 		existing.UpdatedAt = time.Now().UTC()
@@ -146,13 +153,6 @@ func (k *Kernel) RegisterRemoteKernel(ctx context.Context, subjectID, handle, pu
 			}
 		}
 		return existing, nil
-	}
-	// D5: guard against the same handle or base URL being claimed by a different public key.
-	if byHandle, err := k.store.ReadUserByHandle(ctx, handle); err == nil && byHandle != nil {
-		return nil, ErrInvalidInput.Wrap("handle already registered with a different public key")
-	}
-	if byURL, err := k.store.ReadRemoteKernelByBaseURL(ctx, baseURL); err == nil && byURL != nil {
-		return nil, ErrInvalidInput.Wrap("base URL already registered with a different public key")
 	}
 	now := time.Now().UTC()
 	u := &User{
