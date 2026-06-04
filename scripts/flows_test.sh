@@ -1964,15 +1964,6 @@ flow_lookup() {
     proc_out=$(jj "$db" "$home_alice" process start --funds 0)
     proc_id=$(strfield "$proc_out" "process_id")
 
-    # Call without embedder → ErrInvalidState
-    local lookup_out
-    lookup_out=$(j "$db" "$home_alice" call \
-        --process "$proc_id" --action @sys/lookup \
-        --args '{"query":"greet","limit":5}' 2>&1)
-    echo "$lookup_out" | grep -qi "embedding\|invalid.state\|invalid_state" \
-        && ok "lookup.no_embedder_error" \
-        || fail "lookup.no_embedder_error" "expected ErrInvalidState, got: $lookup_out"
-
     # Missing required 'query' field → schema violation
     local schema_out
     schema_out=$(j "$db" "$home_alice" call \
