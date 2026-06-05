@@ -1,4 +1,4 @@
-package kernel
+package native
 
 import (
 	"context"
@@ -6,18 +6,28 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/daios-ai/juice/kernel"
 )
+
+// MakeDeps holds the external dependencies injected into the @sys/make handler at registration.
+type MakeDeps struct {
+	Store    kernel.Store
+	Scripts  kernel.ScriptExecutor
+	Compiler kernel.SourceCompiler
+	Chatter  kernel.Chatter
+	Embedder kernel.Embedder
+}
 
 // RegisterMakeHandler registers the @sys/make native action handler on k.
 // sdk is the TinyGo SDK source (script.TinyGoSDK) prepended to every generated action.
 // maxSteps is the maximum number of synthesis repair iterations; 0 uses the default of 5.
-// Pass "" sdk and 0 maxSteps in tests that use FakeCompiler.
-func RegisterMakeHandler(k *Kernel, sdk string, maxSteps int) {
+func RegisterMakeHandler(k *kernel.Kernel, deps MakeDeps, sdk string, maxSteps int) {
 	if maxSteps <= 0 {
 		maxSteps = 5
 	}
 	k.RegisterNativeHandler("make", func(ctx context.Context, args map[string]any, subjectID, processID, parentTraceID string) (map[string]any, error) {
-		return k.executeMake(ctx, args, subjectID, processID, parentTraceID, sdk, maxSteps)
+		return executeMake(ctx, args, subjectID, processID, parentTraceID, k, deps, sdk, maxSteps)
 	})
 }
 
@@ -31,11 +41,6 @@ type actionContract struct {
 	Plan         string // identifies capabilities needed for implementation
 }
 
-// makeExample is one LLM-generated test input used in step 8.
-type makeExample struct {
-	Args map[string]any `json:"args"`
-}
-
 // MakeTest records the outcome of one test case run during synthesis.
 type MakeTest struct {
 	Name   string `json:"name"`
@@ -45,8 +50,8 @@ type MakeTest struct {
 
 // MakeResult is the output schema of the @sys/make native action.
 type MakeResult struct {
-	Status      string     `json:"status"`               // "success" | "failure"
-	ActionID    string     `json:"action_id,omitempty"`  // registered action ID on success
+	Status      string     `json:"status"`                // "success" | "failure"
+	ActionID    string     `json:"action_id,omitempty"`   // registered action ID on success
 	ActionName  string     `json:"action_name,omitempty"` // registered action name on success
 	Diagnostics []string   `json:"diagnostics"`
 	Tests       []MakeTest `json:"tests,omitempty"`
@@ -57,7 +62,7 @@ type makeInput struct {
 	Description string
 }
 
-// makeTestHost implements HostFunctions for testing generated WASM during synthesis.
+// makeTestHost implements kernel.HostFunctions for testing generated WASM during synthesis.
 // All sub-calls return {} — output values cannot be predicted when the action uses
 // catalog actions whose real responses are unknown at synthesis time.
 type makeTestHost struct{}
@@ -69,12 +74,12 @@ func (h *makeTestHost) Emit(_ context.Context, _ string, _ []byte) error { retur
 func (h *makeTestHost) Log(_ context.Context, _, _ string) error         { return nil }
 
 // executeMake implements the full @sys/make 10-step pipeline.
-func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID, processID, parentTraceID, sdk string, maxSteps int) (map[string]any, error) {
-	if k.compiler == nil {
-		return nil, ErrInvalidState.Wrap("source compiler not configured")
+func executeMake(ctx context.Context, args map[string]any, subjectID, processID, parentTraceID string, k *kernel.Kernel, deps MakeDeps, sdk string, maxSteps int) (map[string]any, error) {
+	if deps.Compiler == nil {
+		return nil, kernel.ErrInvalidState.Wrap("source compiler not configured")
 	}
-	if k.chatter == nil {
-		return nil, ErrInvalidState.Wrap("LLM chat service not configured")
+	if deps.Chatter == nil {
+		return nil, kernel.ErrInvalidState.Wrap("LLM chat service not configured")
 	}
 
 	// Step 1: validate input.
@@ -84,7 +89,7 @@ func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID
 	}
 
 	// Step 2: derive contract + plan.
-	contract, diag := k.deriveContract(ctx, in.Description, subjectID, processID, parentTraceID)
+	contract, diag := deriveContract(ctx, in.Description, subjectID, processID, parentTraceID, k)
 	if diag != "" {
 		return marshalMakeResult(&MakeResult{
 			Status:      "failure",
@@ -94,10 +99,10 @@ func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID
 	}
 
 	// Step 3: resolve explicit @owner/name references in the description.
-	refs := k.resolveActionRefs(ctx, in.Description)
+	refs := resolveActionRefs(ctx, in.Description, deps.Store)
 
 	// Step 4: search catalog based on capabilities identified in the plan.
-	found := k.searchCatalog(ctx, contract, subjectID, processID, parentTraceID)
+	found := searchCatalog(ctx, contract, subjectID, processID, parentTraceID, k, deps)
 
 	// Merge steps 3+4, deduplicated by action ID.
 	composable := mergeActions(refs, found)
@@ -107,7 +112,7 @@ func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID
 
 	for step := 0; step < maxSteps; step++ {
 		// Step 5: generate TinyGo source.
-		runFunc, genDiag := k.generateSource(ctx, in, contract, composable, sdk, diagnostics, subjectID, processID, parentTraceID)
+		runFunc, genDiag := generateSource(ctx, in, contract, composable, sdk, diagnostics, subjectID, processID, parentTraceID, k, deps.Store)
 		if genDiag != "" {
 			diagnostics = append(diagnostics, fmt.Sprintf("step %d: LLM generation failed: %s", step+1, genDiag))
 			continue
@@ -115,14 +120,14 @@ func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID
 		source := prepareSource(sdk, runFunc)
 
 		// Step 6: compile to WASM.
-		wasm, _, compileErr := k.compiler.CompileSource(ctx, []byte(source))
+		wasm, _, compileErr := deps.Compiler.CompileSource(ctx, []byte(source))
 		if compileErr != nil {
 			diagnostics = append(diagnostics, fmt.Sprintf("step %d: compile error: %v", step+1, compileErr))
 			continue
 		}
 
 		// Step 7: validate WASM artifact.
-		if checkDiag := k.checkWASMImports(wasm, nil); checkDiag != "" {
+		if checkDiag := checkWASMImports(wasm, deps.Scripts); checkDiag != "" {
 			return marshalMakeResult(&MakeResult{
 				Status:      "failure",
 				Diagnostics: append(diagnostics, checkDiag),
@@ -131,7 +136,7 @@ func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID
 		}
 
 		// Step 8: generate examples and run them.
-		tests = k.generateAndRunExamples(ctx, contract, wasm, subjectID, processID, parentTraceID)
+		tests = generateAndRunExamples(ctx, contract, wasm, subjectID, processID, parentTraceID, k, deps.Scripts)
 
 		allPassed := true
 		for _, t := range tests {
@@ -145,10 +150,10 @@ func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID
 		if allPassed {
 			inSchema := sanitizeSchemaForRegistration(contract.InputSchema)
 			outSchema := sanitizeSchemaForRegistration(contract.OutputSchema)
-			action, createErr := k.CreateAction(ctx, subjectID, CreateActionRequest{
+			action, createErr := k.CreateAction(ctx, subjectID, kernel.CreateActionRequest{
 				OwnerUserID:  subjectID,
 				Name:         contract.Name,
-				Kind:         KindWasm,
+				Kind:         kernel.KindWasm,
 				Price:        0,
 				Description:  in.Description,
 				InputSchema:  inSchema,
@@ -188,14 +193,14 @@ func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID
 func parseMakeInput(args map[string]any) (*makeInput, error) {
 	desc, _ := args["description"].(string)
 	if strings.TrimSpace(desc) == "" {
-		return nil, ErrInvalidInput.Wrap("description is required")
+		return nil, kernel.ErrInvalidInput.Wrap("description is required")
 	}
 	return &makeInput{Description: desc}, nil
 }
 
 // deriveContract calls @sys/llm/chat to produce a name, input schema, output schema,
 // and implementation plan from the natural language description.
-func (k *Kernel) deriveContract(ctx context.Context, description, subjectID, processID, parentTraceID string) (*actionContract, string) {
+func deriveContract(ctx context.Context, description, subjectID, processID, parentTraceID string, k *kernel.Kernel) (*actionContract, string) {
 	prompt := fmt.Sprintf(`You are designing a callable API action for the Juice platform.
 Given the description, produce a JSON object with exactly these fields:
 {
@@ -209,7 +214,7 @@ Respond with ONLY the JSON object, nothing else.
 
 Description: %s`, description)
 
-	reply, err := k.callLLM(ctx, prompt, subjectID, processID, parentTraceID)
+	reply, err := callLLM(ctx, prompt, subjectID, processID, parentTraceID, k)
 	if err != nil {
 		return nil, err.Error()
 	}
@@ -244,10 +249,10 @@ var actionRefRe = regexp.MustCompile(`@[\w-]+/[\w./-]+`)
 
 // resolveActionRefs extracts explicit @owner/name references from the description
 // and looks them up in the store.
-func (k *Kernel) resolveActionRefs(ctx context.Context, description string) []*Action {
+func resolveActionRefs(ctx context.Context, description string, store kernel.Store) []*kernel.Action {
 	matches := actionRefRe.FindAllString(description, -1)
 	seen := map[string]bool{}
-	var result []*Action
+	var result []*kernel.Action
 	for _, ref := range matches {
 		if seen[ref] {
 			continue
@@ -259,11 +264,11 @@ func (k *Kernel) resolveActionRefs(ctx context.Context, description string) []*A
 		}
 		ownerHandle := ref[:idx+1]
 		actionName := ref[idx+2:]
-		owner, err := k.store.ReadUserByHandle(ctx, ownerHandle)
+		owner, err := store.ReadUserByHandle(ctx, ownerHandle)
 		if err != nil {
 			continue
 		}
-		a, err := k.store.ReadActionByOwnerName(ctx, owner.ID, actionName)
+		a, err := store.ReadActionByOwnerName(ctx, owner.ID, actionName)
 		if err != nil || a == nil || !a.Active {
 			continue
 		}
@@ -274,22 +279,21 @@ func (k *Kernel) resolveActionRefs(ctx context.Context, description string) []*A
 
 // searchCatalog calls @sys/lookup for each capability identified in the contract plan.
 // Actions with a failure rate above 50% (over at least 5 uses) are excluded.
-func (k *Kernel) searchCatalog(ctx context.Context, contract *actionContract, subjectID, processID, parentTraceID string) []*Action {
-	if contract.Plan == "" || k.llm == nil {
+func searchCatalog(ctx context.Context, contract *actionContract, subjectID, processID, parentTraceID string, k *kernel.Kernel, deps MakeDeps) []*kernel.Action {
+	if contract.Plan == "" || deps.Embedder == nil {
 		return nil
 	}
 
-	// Extract search queries from the plan — each sentence or clause that names a capability.
 	queries := extractCapabilityQueries(contract.Plan)
 
 	seen := map[string]bool{}
-	var result []*Action
+	var result []*kernel.Action
 
 	for _, q := range queries {
 		if q == "" {
 			continue
 		}
-		reply, err := k.Call(ctx, CallRequest{
+		reply, err := k.Call(ctx, kernel.CallRequest{
 			SubjectID:     subjectID,
 			ProcessID:     processID,
 			ParentTraceID: parentTraceID,
@@ -311,11 +315,11 @@ func (k *Kernel) searchCatalog(ctx context.Context, contract *actionContract, su
 				continue
 			}
 			seen[actionID] = true
-			a, err := k.store.ReadAction(ctx, actionID)
+			a, err := deps.Store.ReadAction(ctx, actionID)
 			if err != nil || a == nil || !a.Active {
 				continue
 			}
-			if isUnreliableAction(k.store.ReadStats(ctx, a.ID)) {
+			if isUnreliableAction(deps.Store.ReadStats(ctx, a.ID)) {
 				continue
 			}
 			result = append(result, a)
@@ -325,8 +329,7 @@ func (k *Kernel) searchCatalog(ctx context.Context, contract *actionContract, su
 }
 
 // isUnreliableAction returns true when stats show a failure rate above 50% over at least 5 uses.
-// Actions with no usage history pass through — they may be new and untested.
-func isUnreliableAction(stats *Stats, _ error) bool {
+func isUnreliableAction(stats *kernel.Stats, _ error) bool {
 	if stats == nil {
 		return false
 	}
@@ -339,14 +342,12 @@ func isUnreliableAction(stats *Stats, _ error) bool {
 
 // extractCapabilityQueries splits a plan string into focused search queries.
 func extractCapabilityQueries(plan string) []string {
-	// Split on common delimiters: semicolons, commas, "and", newlines.
 	plan = strings.ReplaceAll(plan, ";", "\n")
 	plan = strings.ReplaceAll(plan, ",", "\n")
 	parts := strings.Split(plan, "\n")
 	var queries []string
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
-		// Strip leading list markers.
 		p = strings.TrimLeft(p, "-•*123456789. ")
 		if len(p) > 4 {
 			queries = append(queries, p)
@@ -356,10 +357,10 @@ func extractCapabilityQueries(plan string) []string {
 }
 
 // mergeActions combines two action lists, deduplicating by action ID.
-func mergeActions(a, b []*Action) []*Action {
+func mergeActions(a, b []*kernel.Action) []*kernel.Action {
 	seen := map[string]bool{}
-	var result []*Action
-	for _, list := range [][]*Action{a, b} {
+	var result []*kernel.Action
+	for _, list := range [][]*kernel.Action{a, b} {
 		for _, act := range list {
 			if !seen[act.ID] {
 				seen[act.ID] = true
@@ -371,7 +372,7 @@ func mergeActions(a, b []*Action) []*Action {
 }
 
 // generateSource calls @sys/llm/chat to produce the TinyGo run function.
-func (k *Kernel) generateSource(ctx context.Context, in *makeInput, contract *actionContract, composable []*Action, sdk string, prevDiagnostics []string, subjectID, processID, parentTraceID string) (source, diag string) {
+func generateSource(ctx context.Context, in *makeInput, contract *actionContract, composable []*kernel.Action, sdk string, prevDiagnostics []string, subjectID, processID, parentTraceID string, k *kernel.Kernel, store kernel.Store) (source, diag string) {
 	var sb strings.Builder
 	sb.WriteString("You are a TinyGo programmer generating a WASM action for the Juice platform.\n\n")
 
@@ -392,7 +393,7 @@ func (k *Kernel) generateSource(ctx context.Context, in *makeInput, contract *ac
 		sb.WriteString("Composable actions available via JuiceCall(\"@owner/name\", argsJSON):\n")
 		for _, a := range composable {
 			ownerHandle := a.OwnerUserID
-			u, err := k.store.ReadUser(ctx, a.OwnerUserID)
+			u, err := store.ReadUser(ctx, a.OwnerUserID)
 			if err == nil && u != nil {
 				ownerHandle = u.Handle
 			}
@@ -421,7 +422,7 @@ func (k *Kernel) generateSource(ctx context.Context, in *makeInput, contract *ac
 		}
 	}
 
-	reply, err := k.callLLM(ctx, sb.String(), subjectID, processID, parentTraceID)
+	reply, err := callLLM(ctx, sb.String(), subjectID, processID, parentTraceID, k)
 	if err != nil {
 		return "", err.Error()
 	}
@@ -433,21 +434,18 @@ func (k *Kernel) generateSource(ctx context.Context, in *makeInput, contract *ac
 }
 
 // generateAndRunExamples asks the LLM for test inputs, executes them against the WASM,
-// and validates the output structure. Expected values are NOT checked because the action
-// may call catalog actions whose real responses are unknown at synthesis time.
-func (k *Kernel) generateAndRunExamples(ctx context.Context, contract *actionContract, wasm []byte, subjectID, processID, parentTraceID string) []MakeTest {
-	if k.scripts == nil {
+// and validates the output structure.
+func generateAndRunExamples(ctx context.Context, contract *actionContract, wasm []byte, subjectID, processID, parentTraceID string, k *kernel.Kernel, scripts kernel.ScriptExecutor) []MakeTest {
+	if scripts == nil {
 		return []MakeTest{{Name: "compile", Status: "failed", Reason: "script executor not configured"}}
 	}
 
-	// Always run a compile smoke test first.
-	artifact, _, err := k.scripts.Compile(ctx, wasm)
+	artifact, _, err := scripts.Compile(ctx, wasm)
 	if err != nil {
 		return []MakeTest{{Name: "compile", Status: "failed", Reason: fmt.Sprintf("WASM compile: %v", err)}}
 	}
 	results := []MakeTest{{Name: "compile", Status: "passed"}}
 
-	// Ask LLM to generate test input examples.
 	inJSON, _ := json.MarshalIndent(contract.InputSchema, "", "  ")
 	prompt := fmt.Sprintf(`Given this JSON input schema, generate 2 realistic example inputs.
 Respond with ONLY a JSON array of objects, each matching the schema.
@@ -455,9 +453,8 @@ Respond with ONLY a JSON array of objects, each matching the schema.
 Schema:
 %s`, string(inJSON))
 
-	reply, err := k.callLLM(ctx, prompt, subjectID, processID, parentTraceID)
+	reply, err := callLLM(ctx, prompt, subjectID, processID, parentTraceID, k)
 	if err != nil {
-		// LLM unavailable — compile-only is acceptable.
 		return results
 	}
 
@@ -466,10 +463,8 @@ Schema:
 		return results
 	}
 
-	// Handle both array and single object responses.
 	var examples []map[string]any
 	if err := json.Unmarshal([]byte(jsonStr), &examples); err != nil {
-		// Try wrapping as array.
 		var single map[string]any
 		if err2 := json.Unmarshal([]byte(jsonStr), &single); err2 == nil {
 			examples = []map[string]any{single}
@@ -483,7 +478,7 @@ Schema:
 	for i, exArgs := range examples {
 		name := fmt.Sprintf("example-%d", i+1)
 		inputJSON, _ := json.Marshal(exArgs)
-		outputJSON, execErr := k.scripts.Execute(ctx, artifact, inputJSON, &makeTestHost{})
+		outputJSON, execErr := scripts.Execute(ctx, artifact, inputJSON, &makeTestHost{})
 		if execErr != nil {
 			results = append(results, MakeTest{Name: name, Status: "failed", Reason: "execution: " + execErr.Error()})
 			continue
@@ -493,7 +488,6 @@ Schema:
 			results = append(results, MakeTest{Name: name, Status: "failed", Reason: "output not valid JSON"})
 			continue
 		}
-		// Validate that required output keys are present.
 		missing := []string{}
 		for _, key := range outKeys {
 			if _, ok := output[key]; !ok {
@@ -523,7 +517,6 @@ func topLevelKeys(schema map[string]any) []string {
 			keys = append(keys, s)
 		}
 	}
-	// Fall back to all property names if no required list.
 	if len(keys) == 0 {
 		props, _ := schema["properties"].(map[string]any)
 		for k := range props {
@@ -534,8 +527,8 @@ func topLevelKeys(schema map[string]any) []string {
 }
 
 // callLLM calls @sys/llm/chat through kernel.Call() producing a sub-transaction and trace.
-func (k *Kernel) callLLM(ctx context.Context, prompt, subjectID, processID, parentTraceID string) (string, error) {
-	reply, err := k.Call(ctx, CallRequest{
+func callLLM(ctx context.Context, prompt, subjectID, processID, parentTraceID string, k *kernel.Kernel) (string, error) {
+	reply, err := k.Call(ctx, kernel.CallRequest{
 		SubjectID:     subjectID,
 		ProcessID:     processID,
 		ParentTraceID: parentTraceID,
@@ -555,30 +548,9 @@ func (k *Kernel) callLLM(ctx context.Context, prompt, subjectID, processID, pare
 	return content, nil
 }
 
-// buildCatalog returns a concise text summary of active public actions.
-func (k *Kernel) buildCatalog(ctx context.Context) string {
-	actions, err := k.store.ListPublicActions(ctx, 50, 0)
-	if err != nil || len(actions) == 0 {
-		return "(no actions in catalog)\n"
-	}
-	var sb strings.Builder
-	for _, a := range actions {
-		if !a.Active {
-			continue
-		}
-		u, _ := k.store.ReadUser(ctx, a.OwnerUserID)
-		handle := a.OwnerUserID
-		if u != nil {
-			handle = u.Handle
-		}
-		fmt.Fprintf(&sb, "@%s/%s — %s\n", strings.TrimPrefix(handle, "@"), a.Name, a.Description)
-	}
-	return sb.String()
-}
-
 // checkWASMImports validates that the artifact only imports allowed host functions.
-func (k *Kernel) checkWASMImports(wasm []byte, _ []string) string {
-	insp, ok := k.scripts.(WASMInspector)
+func checkWASMImports(wasm []byte, scripts kernel.ScriptExecutor) string {
+	insp, ok := scripts.(kernel.WASMInspector)
 	if !ok {
 		return ""
 	}
@@ -589,7 +561,7 @@ func (k *Kernel) checkWASMImports(wasm []byte, _ []string) string {
 	allowedImports := map[string]bool{"call": true, "emit": true, "log": true}
 	for _, imp := range imports {
 		if imp.Module == "wasi_snapshot_preview1" {
-			continue // required by TinyGo wasip1 target runtime
+			continue
 		}
 		if imp.Module != "juice" || !allowedImports[imp.Name] {
 			return fmt.Sprintf("WASM imports disallowed function %q from module %q", imp.Name, imp.Module)
@@ -671,11 +643,11 @@ func marshalMakeResult(r *MakeResult) (map[string]any, error) {
 	}
 	b, err := json.Marshal(r)
 	if err != nil {
-		return nil, ErrInternal.Wrapf("marshal make result: %v", err)
+		return nil, kernel.ErrInternal.Wrapf("marshal make result: %v", err)
 	}
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, ErrInternal.Wrapf("unmarshal make result: %v", err)
+		return nil, kernel.ErrInternal.Wrapf("unmarshal make result: %v", err)
 	}
 	return m, nil
 }
@@ -701,7 +673,6 @@ func extractGoBlock(s string) string {
 
 // extractJSON extracts the first {...} or [...] JSON value from a string.
 func extractJSON(s string) string {
-	// Try object first.
 	if i := strings.Index(s, "{"); i >= 0 {
 		depth := 0
 		for j := i; j < len(s); j++ {
@@ -716,7 +687,6 @@ func extractJSON(s string) string {
 			}
 		}
 	}
-	// Try array.
 	if i := strings.Index(s, "["); i >= 0 {
 		depth := 0
 		for j := i; j < len(s); j++ {
@@ -732,31 +702,4 @@ func extractJSON(s string) string {
 		}
 	}
 	return ""
-}
-
-// deriveName creates a slug action name from a description (fallback if contract has none).
-func deriveName(desc string) string {
-	words := strings.Fields(strings.ToLower(desc))
-	if len(words) == 0 {
-		return "generated"
-	}
-	if len(words) > 3 {
-		words = words[:3]
-	}
-	var clean strings.Builder
-	for i, w := range words {
-		if i > 0 {
-			clean.WriteByte('-')
-		}
-		for _, r := range w {
-			if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
-				clean.WriteRune(r)
-			}
-		}
-	}
-	result := strings.Trim(clean.String(), "-")
-	if result == "" {
-		return "generated"
-	}
-	return result
 }

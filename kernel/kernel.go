@@ -55,7 +55,6 @@ type NativeFunc func(ctx context.Context, args map[string]any, subjectID, proces
 type Kernel struct {
 	store          Store
 	scripts        ScriptExecutor
-	compiler       SourceCompiler
 	http           HTTPExecutor
 	llm            Embedder
 	chatter        Chatter
@@ -96,12 +95,6 @@ func (k *Kernel) SetSigningKey(priv ed25519.PrivateKey, issuerUserID string) {
 // SetTokenSecret updates the JWT HMAC secret after bootstrap completes.
 func (k *Kernel) SetTokenSecret(secret string) {
 	k.cfg.TokenSecret = secret
-}
-
-// SetCompiler sets the SourceCompiler for TinyGo-to-WASM compilation.
-// Called from bootstrap alongside RegisterMakeHandler.
-func (k *Kernel) SetCompiler(c SourceCompiler) {
-	k.compiler = c
 }
 
 // ---- User operations ----

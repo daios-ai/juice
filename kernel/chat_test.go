@@ -8,6 +8,7 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/llm"
+	"github.com/daios-ai/juice/native"
 	"github.com/google/uuid"
 )
 
@@ -22,7 +23,7 @@ func newChatKernel(t *testing.T, chatter kernel.Chatter) (*kernel.Kernel, kernel
 		cfg.SigningKey = testSigningKey()
 		k = kernel.New(st, nil, nil, nil, chatter, cfg, nil)
 	}
-	kernel.RegisterChatHandler(k)
+	native.RegisterChatHandler(k, chatter)
 	return k, st
 }
 

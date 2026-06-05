@@ -1,24 +1,28 @@
-package kernel
+package native
 
-import "context"
+import (
+	"context"
+
+	"github.com/daios-ai/juice/kernel"
+)
 
 // RegisterLookupHandler registers the @sys/lookup native action handler on k.
-func RegisterLookupHandler(k *Kernel) {
+func RegisterLookupHandler(k *kernel.Kernel) {
 	k.RegisterNativeHandler("lookup", func(ctx context.Context, args map[string]any, subjectID, _, _ string) (map[string]any, error) {
-		return executeLookup(k, ctx, args, subjectID)
+		return executeLookup(ctx, args, subjectID, k)
 	})
 }
 
-func executeLookup(k *Kernel, ctx context.Context, args map[string]any, subjectID string) (map[string]any, error) {
+func executeLookup(ctx context.Context, args map[string]any, subjectID string, k *kernel.Kernel) (map[string]any, error) {
 	query, _ := args["query"].(string)
 	if query == "" {
-		return nil, ErrInvalidInput.Wrap("lookup requires query argument")
+		return nil, kernel.ErrInvalidInput.Wrap("lookup requires query argument")
 	}
 	limit := 10
 	if l, ok := args["limit"].(float64); ok {
 		limit = int(l)
 	}
-	results, err := k.Lookup(ctx, LookupRequest{Query: query, Limit: limit, SubjectID: subjectID})
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: query, Limit: limit, SubjectID: subjectID})
 	if err != nil {
 		return nil, err
 	}

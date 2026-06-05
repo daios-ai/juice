@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/native"
 	"github.com/google/uuid"
 )
 
@@ -1316,7 +1317,7 @@ func newTestKernelWithChatter(st kernel.Store, c kernel.Chatter) *kernel.Kernel 
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
 	k := kernel.New(st, nil, nil, nil, c, cfg, nil)
-	kernel.RegisterChatHandler(k)
+	native.RegisterChatHandler(k, c)
 	return k
 }
 
@@ -1370,7 +1371,7 @@ func TestCallLLMChatNoChatter(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
 	k := newTestKernel(st)
-	kernel.RegisterChatHandler(k)
+	native.RegisterChatHandler(k, nil)
 
 	owner := setupUser(t, st, "@sys", 1000)
 	chatAction := &kernel.Action{

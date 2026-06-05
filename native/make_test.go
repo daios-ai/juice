@@ -1,7 +1,9 @@
-package kernel_test
+package native_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -9,11 +11,71 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/llm"
+	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/native"
 	"github.com/daios-ai/juice/script"
+	"github.com/daios-ai/juice/store"
 	"github.com/google/uuid"
 )
 
-// newMakeKernel builds a kernel wired for @sys/make tests.
+// testIssuerUserID is a fixed sentinel user ID inserted into every test store.
+const testIssuerUserID = "00000000-0000-0000-0000-000000000001"
+
+func newTestStore(t testing.TB) kernel.Store {
+	t.Helper()
+	db, err := store.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("newTestStore: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	hash, err := kernel.HashPassword("issuer-password")
+	if err != nil {
+		t.Fatalf("newTestStore: hash password: %v", err)
+	}
+	issuer := &kernel.User{
+		ID:           testIssuerUserID,
+		Handle:       "@_test_issuer",
+		Email:        "issuer@test.internal",
+		PasswordHash: hash,
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	if err := db.CreateUser(context.Background(), issuer); err != nil {
+		t.Fatalf("newTestStore: seed issuer user: %v", err)
+	}
+	return db
+}
+
+func testSigningKey() ed25519.PrivateKey {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return priv
+}
+
+func setupUser(t *testing.T, st kernel.Store, handle string, balance int64) *kernel.User {
+	t.Helper()
+	hash, err := kernel.HashPassword("password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := &kernel.User{
+		ID:           uuid.New().String(),
+		Handle:       handle,
+		Email:        handle + "@example.com",
+		PasswordHash: hash,
+		Available:    balance,
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	if err := st.CreateUser(context.Background(), u); err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+// newMakeKernel builds a kernel and registers the native handlers for @sys/make tests.
 func newMakeKernel(t *testing.T, chatter kernel.Chatter) (*kernel.Kernel, kernel.Store) {
 	t.Helper()
 	st := newTestStore(t)
@@ -22,15 +84,19 @@ func newMakeKernel(t *testing.T, chatter kernel.Chatter) (*kernel.Kernel, kernel
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
 	exec := script.New(script.Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
-	k := kernel.New(st, exec, nil, nil, chatter, cfg, nil)
-	k.SetCompiler(&script.FakeCompiler{})
-	kernel.RegisterChatHandler(k)
-	kernel.RegisterMakeHandler(k, "", 0)
+	k := kernel.New(st, exec, nil, nil, chatter, cfg, log.Default())
+	fakeComp := &script.FakeCompiler{}
+	native.RegisterChatHandler(k, chatter)
+	native.RegisterMakeHandler(k, native.MakeDeps{
+		Store:    st,
+		Scripts:  exec,
+		Compiler: fakeComp,
+		Chatter:  chatter,
+	}, "", 0)
 	return k, st
 }
 
 // seedMakeAction seeds @sys user, @sys/make native action, and @sys/llm/chat in the store.
-// Returns the @sys user.
 func seedMakeAction(t *testing.T, st kernel.Store) *kernel.User {
 	t.Helper()
 	ctx := context.Background()
@@ -95,6 +161,15 @@ func seedMakeAction(t *testing.T, st kernel.Store) *kernel.User {
 	return sys
 }
 
+// fakeContract is a minimal valid contract JSON response for tests.
+const fakeContract = `{"name":"test-action","input_schema":{"type":"object","properties":{}},"output_schema":{"type":"object","properties":{"result":{"type":"string"}},"required":["result"]},"plan":"simple fixed response"}`
+
+// fakeCode is a minimal valid TinyGo run function for tests.
+const fakeCode = "```go\n//export run\nfunc run(inputPtr, inputLen uint32) (uint32, uint32) { return 0, 2 }\n```"
+
+// fakeExamples is an empty example list — unit tests use the compile smoke test only.
+const fakeExamples = `[]`
+
 func TestMakeRejectsEmptyDescription(t *testing.T) {
 	k, st := newMakeKernel(t, &llm.FakeChatter{})
 	ctx := context.Background()
@@ -105,18 +180,28 @@ func TestMakeRejectsEmptyDescription(t *testing.T) {
 	_, err := k.Call(ctx, kernel.CallRequest{
 		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: sys.ID, ActionName: "make",
-		Args: map[string]any{}, // missing description
+		Args: map[string]any{},
 	})
-	// Missing required field is caught by ValidateInput (ErrSchemaViolation) or
-	// parseMakeInput (ErrInvalidInput) depending on schema configuration.
 	if !errors.Is(err, kernel.ErrSchemaViolation) && !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrSchemaViolation or ErrInvalidInput for missing description, got %v", err)
 	}
 }
 
 func TestMakeReturnsErrInvalidStateWithoutCompiler(t *testing.T) {
-	k, st := newMakeKernel(t, &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}})
-	k.SetCompiler(nil) // remove compiler
+	st := newTestStore(t)
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	exec := script.New(script.Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
+	chatter := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
+	k := kernel.New(st, exec, nil, nil, chatter, cfg, log.Default())
+	native.RegisterChatHandler(k, chatter)
+	// Compiler: nil — no compiler configured.
+	native.RegisterMakeHandler(k, native.MakeDeps{
+		Store: st, Scripts: exec, Compiler: nil, Chatter: chatter,
+	}, "", 0)
+
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
@@ -132,20 +217,11 @@ func TestMakeReturnsErrInvalidStateWithoutCompiler(t *testing.T) {
 	}
 }
 
-// fakeContract is a minimal valid contract JSON response for tests.
-const fakeContract = `{"name":"test-action","input_schema":{"type":"object","properties":{}},"output_schema":{"type":"object","properties":{"result":{"type":"string"}},"required":["result"]},"plan":"simple fixed response"}`
-
-// fakeCode is a minimal valid TinyGo run function for tests.
-const fakeCode = "```go\n//export run\nfunc run(inputPtr, inputLen uint32) (uint32, uint32) { return 0, 2 }\n```"
-
-// fakeExamples is an empty example list — unit tests use the compile smoke test only.
-const fakeExamples = `[]`
-
 func TestMakeRegistersActionOnSuccess(t *testing.T) {
 	fakeChat := &cycleFakeChatter{responses: []string{
-		fakeContract, // step 2: contract derivation
-		fakeCode,     // step 5: source generation
-		fakeExamples, // step 8: example generation
+		fakeContract,
+		fakeCode,
+		fakeExamples,
 	}}
 	k, st := newMakeKernel(t, fakeChat)
 	ctx := context.Background()
@@ -165,7 +241,7 @@ func TestMakeRegistersActionOnSuccess(t *testing.T) {
 	}
 
 	b, _ := json.Marshal(reply.Result)
-	var result kernel.MakeResult
+	var result native.MakeResult
 	if err := json.Unmarshal(b, &result); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
 	}
@@ -215,10 +291,10 @@ func TestMakeRegisteredActionHasName(t *testing.T) {
 		t.Fatalf("Call: %v", err)
 	}
 	b, _ := json.Marshal(reply.Result)
-	var result kernel.MakeResult
+	var result native.MakeResult
 	_ = json.Unmarshal(b, &result)
 	if result.Status != "success" {
-		return // failure tested elsewhere
+		return
 	}
 	if result.ActionName == "" {
 		t.Error("expected non-empty action_name on success")
@@ -226,9 +302,7 @@ func TestMakeRegisteredActionHasName(t *testing.T) {
 }
 
 func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
-	// FakeChatter always returns unparseable content — forces the loop to exhaust steps.
 	fakeChat := &llm.FakeChatter{Reply: kernel.ChatMessage{Role: "assistant", Content: "not a go block"}}
-	// FakeCompiler always fails.
 	fakeComp := &script.FakeCompiler{Err: kernel.ErrInvalidInput.Wrap("syntax error")}
 
 	st := newTestStore(t)
@@ -237,10 +311,11 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
 	exec := script.New(script.Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
-	k := kernel.New(st, exec, nil, nil, fakeChat, cfg, nil)
-	k.SetCompiler(fakeComp)
-	kernel.RegisterChatHandler(k)
-	kernel.RegisterMakeHandler(k, "", 0)
+	k := kernel.New(st, exec, nil, nil, fakeChat, cfg, log.Default())
+	native.RegisterChatHandler(k, fakeChat)
+	native.RegisterMakeHandler(k, native.MakeDeps{
+		Store: st, Scripts: exec, Compiler: fakeComp, Chatter: fakeChat,
+	}, "", 0)
 
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
@@ -250,15 +325,13 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 	reply, err := k.Call(ctx, kernel.CallRequest{
 		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: sys.ID, ActionName: "make",
-		Args: map[string]any{
-			"description":   "always fail",
-		},
+		Args: map[string]any{"description": "always fail"},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
 	b, _ := json.Marshal(reply.Result)
-	var result kernel.MakeResult
+	var result native.MakeResult
 	_ = json.Unmarshal(b, &result)
 	if result.Status != "failure" {
 		t.Errorf("expected status=failure after exhausted steps, got %q", result.Status)
@@ -281,15 +354,12 @@ func TestMakeInternalChatCallCreatesChildTrace(t *testing.T) {
 	_, err := k.Call(ctx, kernel.CallRequest{
 		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: sys.ID, ActionName: "make",
-		Args: map[string]any{
-			"description":   "test",
-		},
+		Args: map[string]any{"description": "test"},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
 
-	// @sys/make itself + at least one @sys/llm/chat sub-call.
 	txs, err := k.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID, Limit: 100})
 	if err != nil {
 		t.Fatal(err)
@@ -300,8 +370,6 @@ func TestMakeInternalChatCallCreatesChildTrace(t *testing.T) {
 }
 
 func TestMakeNameCollisionReturnsFailure(t *testing.T) {
-	// Both calls produce the same contract name ("test-action" from fakeContract),
-	// so the second registration hits the unique (owner, name) constraint.
 	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
 	k, st := newMakeKernel(t, fakeChat)
 	ctx := context.Background()
@@ -325,7 +393,7 @@ func TestMakeNameCollisionReturnsFailure(t *testing.T) {
 		t.Fatalf("second Call returned kernel error (expected status=failure): %v", err)
 	}
 	b, _ := json.Marshal(reply2.Result)
-	var result kernel.MakeResult
+	var result native.MakeResult
 	_ = json.Unmarshal(b, &result)
 	if result.Status != "failure" {
 		t.Errorf("expected status=failure on name collision, got %q", result.Status)

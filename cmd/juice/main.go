@@ -16,6 +16,7 @@ import (
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/llm"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/native"
 	"github.com/daios-ai/juice/script"
 	"github.com/daios-ai/juice/store"
 	"github.com/spf13/cobra"
@@ -137,11 +138,17 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
 	k := kernel.New(db, exec, httpExec, embedder, chatter, cfg, logger)
 
-	// Register native action handlers. Must happen on every kernel open, not just bootstrap.
-	kernel.RegisterLookupHandler(k)
-	kernel.RegisterChatHandler(k)
-	kernel.RegisterMakeHandler(k, script.TinyGoSDK, globalCfg.MakeMaxSteps)
-	k.SetCompiler(script.NewTinyGoCompiler(script.CompileConfig{}))
+	// Register native action plugins. Must happen on every kernel open, not just bootstrap.
+	compiler := script.NewTinyGoCompiler(script.CompileConfig{})
+	native.RegisterLookupHandler(k)
+	native.RegisterChatHandler(k, chatter)
+	native.RegisterMakeHandler(k, native.MakeDeps{
+		Store:    db,
+		Scripts:  exec,
+		Compiler: compiler,
+		Chatter:  chatter,
+		Embedder: embedder,
+	}, script.TinyGoSDK, globalCfg.MakeMaxSteps)
 
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).
 	if privB64, _ := db.GetConfig(context.Background(), configKeySigningPrivate); privB64 != "" {
