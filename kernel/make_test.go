@@ -135,7 +135,6 @@ func TestMakeReturnsErrInvalidStateWithoutCompiler(t *testing.T) {
 func TestMakeReturnsDraftOnSuccess(t *testing.T) {
 	fakeChat := &cycleFakeChatter{responses: []string{
 		// Schema derivation — not needed since we supply schemas
-		`{"input_schema": {"type": "object"}, "output_schema": {"type": "object"}}`,
 		// Code generation
 		"```go\npackage main\n//export run\nfunc run(inputPtr, inputLen uint32) (uint32, uint32) { return 0, 2 }\n```",
 	}}
@@ -150,8 +149,6 @@ func TestMakeReturnsDraftOnSuccess(t *testing.T) {
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{
 			"description":   "An action that returns a fixed result",
-			"input_schema":  map[string]any{"type": "object"},
-			"output_schema": map[string]any{"type": "object"},
 		},
 	})
 	if err != nil {
@@ -181,9 +178,8 @@ func TestMakeReturnsDraftOnSuccess(t *testing.T) {
 	}
 }
 
-func TestMakeDefaultsPrice0(t *testing.T) {
+func TestMakeDraftHasNameAndKind(t *testing.T) {
 	fakeChat := &cycleFakeChatter{responses: []string{
-		`{"input_schema": {"type": "object"}, "output_schema": {"type": "object"}}`,
 		"```go\npackage main\n//export run\nfunc run(inputPtr, inputLen uint32) (uint32, uint32) { return 0, 2 }\n```",
 	}}
 	k, st := newMakeKernel(t, fakeChat)
@@ -195,11 +191,7 @@ func TestMakeDefaultsPrice0(t *testing.T) {
 	reply, err := k.Call(ctx, kernel.CallRequest{
 		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: sys.ID, ActionName: "make",
-		Args: map[string]any{
-			"description":   "test",
-			"input_schema":  map[string]any{"type": "object"},
-			"output_schema": map[string]any{"type": "object"},
-		},
+		Args: map[string]any{"description": "compute something interesting"},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -207,8 +199,14 @@ func TestMakeDefaultsPrice0(t *testing.T) {
 	b, _ := json.Marshal(reply.Result)
 	var result kernel.MakeResult
 	_ = json.Unmarshal(b, &result)
-	if result.Draft != nil && result.Draft.Price != 0 {
-		t.Errorf("expected default price=0, got %d", result.Draft.Price)
+	if result.Draft == nil {
+		return // already tested elsewhere
+	}
+	if result.Draft.Kind != "wasm" {
+		t.Errorf("expected kind=wasm, got %q", result.Draft.Kind)
+	}
+	if result.Draft.Name == "" {
+		t.Error("expected non-empty name derived from description")
 	}
 }
 
@@ -239,9 +237,6 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{
 			"description":   "always fail",
-			"input_schema":  map[string]any{"type": "object"},
-			"output_schema": map[string]any{"type": "object"},
-			"max_steps":     float64(2),
 		},
 	})
 	if err != nil {
@@ -260,7 +255,6 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 
 func TestMakeInternalChatCallCreatesChildTrace(t *testing.T) {
 	fakeChat := &cycleFakeChatter{responses: []string{
-		`{"input_schema": {"type": "object"}, "output_schema": {"type": "object"}}`,
 		"```go\npackage main\n//export run\nfunc run(inputPtr, inputLen uint32) (uint32, uint32) { return 0, 2 }\n```",
 	}}
 	k, st := newMakeKernel(t, fakeChat)
@@ -274,8 +268,6 @@ func TestMakeInternalChatCallCreatesChildTrace(t *testing.T) {
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{
 			"description":   "test",
-			"input_schema":  map[string]any{"type": "object"},
-			"output_schema": map[string]any{"type": "object"},
 		},
 	})
 	if err != nil {

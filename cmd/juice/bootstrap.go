@@ -196,14 +196,6 @@ func ensureSysMake(ctx context.Context, k *kernel.Kernel, superuserHandle string
 		return nil
 	}
 
-	exampleItem := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"args":  map[string]any{"description": "Example call arguments"},
-			"reply": map[string]any{"description": "Expected reply"},
-		},
-		"required": []string{"args", "reply"},
-	}
 	a, err = k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID: su.ID,
 		Name:        actionName,
@@ -211,18 +203,9 @@ func ensureSysMake(ctx context.Context, k *kernel.Kernel, superuserHandle string
 		Price:       20,
 		Description: "Generate a WASM action from a natural-language description",
 		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"description":     map[string]any{"type": "string", "description": "Natural-language description of the action to generate"},
-				"name":            map[string]any{"type": "string", "description": "Optional preferred action name"},
-				"input_schema":    map[string]any{"type": "object", "description": "Optional desired JSON input schema"},
-				"output_schema":   map[string]any{"type": "object", "description": "Optional desired JSON output schema"},
-				"examples":        map[string]any{"type": "array", "description": "Optional input-output examples used as tests", "items": exampleItem},
-				"allowed_actions": map[string]any{"type": "array", "description": "Optional list of action references the generated WASM may call", "items": map[string]any{"type": "string"}},
-				"price":           map[string]any{"type": "integer", "minimum": 0, "description": "Optional requested default price for the generated action"},
-				"max_steps":       map[string]any{"type": "integer", "minimum": 1, "maximum": 10, "description": "Optional synthesis repair-step limit; defaults to 5"},
-			},
-			"required": []string{"description"},
+			"type":       "object",
+			"properties": map[string]any{"description": map[string]any{"type": "string", "description": "Natural-language description of the action to generate"}},
+			"required":   []string{"description"},
 		},
 		OutputSchema: map[string]any{
 			"type": "object",
