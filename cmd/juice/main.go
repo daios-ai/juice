@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -37,67 +36,45 @@ var rootCmd = &cobra.Command{
 // Global flags.
 var (
 	flagDB     string
+	flagConfig string
 	flagOutput string
 	flagQuiet  bool
 )
 
+// globalCfg is populated from the config file before any command runs.
+var globalCfg ServerConfig
+
 func init() {
-	rootCmd.PersistentFlags().StringVar(&flagDB, "db", envOr("JUICE_DB_PATH", "juice.db"), "SQLite database path")
+	rootCmd.PersistentFlags().StringVar(&flagDB, "db", "juice.db", "SQLite database path")
+	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", "", "JSON config file (default: juice.json in --db directory)")
 	rootCmd.PersistentFlags().StringVar(&flagOutput, "output", "text", "Output format: text or json")
 	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "Print only the created resource ID")
+	cobra.OnInitialize(initConfig)
 }
 
-func main() {
-	if err := loadConfigFile(); err != nil {
+// initConfig loads the JSON config file. The path defaults to juice.json
+// in the same directory as --db so that both files stay co-located.
+func initConfig() {
+	path := flagConfig
+	if path == "" {
+		path = filepath.Join(filepath.Dir(flagDB), "juice.json")
+	}
+	cfg, err := LoadOrCreateConfig(path)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
 	}
+	globalCfg = cfg
+}
+
+func main() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-// loadConfigFile reads an optional JSON config file and sets any missing environment
-// variables from it. File path comes from JUICE_CONFIG_FILE, defaulting to juice.json.
-// Environment variables always take precedence over file values.
-func loadConfigFile() error {
-	path := os.Getenv("JUICE_CONFIG_FILE")
-	if path == "" {
-		path = "juice.json"
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read config file %q: %w", path, err)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("parse config file %q: %w", path, err)
-	}
-	for k, v := range cfg {
-		if os.Getenv(k) == "" {
-			switch val := v.(type) {
-			case string:
-				_ = os.Setenv(k, val)
-			default:
-				_ = os.Setenv(k, fmt.Sprintf("%v", val))
-			}
-		}
-	}
-	return nil
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-// openKernel opens the SQLite store and constructs a Kernel with defaults.
+// openKernel opens the SQLite store and constructs a Kernel from globalCfg.
 // The caller is responsible for closing the store when done.
 func openKernel() (*kernel.Kernel, *store.DB, error) {
 	db, err := store.Open(flagDB)
@@ -106,63 +83,41 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	}
 
 	cfg := kernel.DefaultConfig()
+
+	// JWT secret: env var only (never stored in config file).
 	if secret := os.Getenv("JUICE_SECRET_KEY"); secret != "" {
 		cfg.TokenSecret = secret
 	} else if stored, _ := db.GetConfig(context.Background(), "jwt_secret"); stored != "" {
 		cfg.TokenSecret = stored
 	}
-	// If neither is set, FirstBoot will generate and set the secret via SetTokenSecret.
-	cfg.FeeRecipientID = os.Getenv("JUICE_FEE_RECIPIENT")
-	if bps := os.Getenv("JUICE_FEE_BPS"); bps != "" {
-		v, err := strconv.ParseInt(bps, 10, 64)
-		if err != nil {
-			db.Close()
-			return nil, nil, fmt.Errorf("JUICE_FEE_BPS invalid: %w", err)
-		}
-		if v < 0 || v > 10000 {
-			db.Close()
-			return nil, nil, fmt.Errorf("JUICE_FEE_BPS must be 0-10000")
-		}
-		cfg.FeeBPS = v
+
+	cfg.FeeRecipientID = globalCfg.FeeRecipient
+	cfg.FeeBPS = globalCfg.FeeBPS
+	if globalCfg.FeeBPS < 0 || globalCfg.FeeBPS > 10000 {
+		db.Close()
+		return nil, nil, fmt.Errorf("fee_bps must be 0–10000")
 	}
 	if cfg.FeeBPS > 0 && cfg.FeeRecipientID == "" {
 		db.Close()
-		return nil, nil, fmt.Errorf("JUICE_FEE_RECIPIENT required when JUICE_FEE_BPS > 0")
+		return nil, nil, fmt.Errorf("fee_recipient required when fee_bps > 0")
 	}
-	if ttl := os.Getenv("JUICE_TOKEN_TTL"); ttl != "" {
-		d, err := time.ParseDuration(ttl)
-		if err != nil {
-			db.Close()
-			return nil, nil, fmt.Errorf("JUICE_TOKEN_TTL invalid: %w", err)
-		}
-		cfg.TokenTTL = d
+
+	tokenTTL, err := time.ParseDuration(globalCfg.TokenTTL)
+	if err != nil {
+		db.Close()
+		return nil, nil, fmt.Errorf("token_ttl invalid: %w", err)
 	}
-	if ms := os.Getenv("JUICE_SCRIPT_TIMEOUT_MS"); ms != "" {
-		v, err := strconv.ParseInt(ms, 10, 64)
-		if err != nil {
-			db.Close()
-			return nil, nil, fmt.Errorf("JUICE_SCRIPT_TIMEOUT_MS invalid: %w", err)
-		}
-		cfg.ScriptTimeout = time.Duration(v) * time.Millisecond
-	}
-	if mb := os.Getenv("JUICE_SCRIPT_MEMORY_BYTES"); mb != "" {
-		v, err := strconv.ParseInt(mb, 10, 64)
-		if err != nil {
-			db.Close()
-			return nil, nil, fmt.Errorf("JUICE_SCRIPT_MEMORY_BYTES invalid: %w", err)
-		}
-		cfg.ScriptMemory = v
-	}
-	if os.Getenv("JUICE_ALLOW_LOCAL_SOURCES") == "true" {
-		cfg.AllowLocalSources = true
-	}
-	cfg.AuthIssuer = os.Getenv("JUICE_AUTH_ISSUER")
-	cfg.AuthAudience = os.Getenv("JUICE_AUTH_AUDIENCE")
+	cfg.TokenTTL = tokenTTL
+	cfg.ScriptTimeout = time.Duration(globalCfg.ScriptTimeoutMS) * time.Millisecond
+	cfg.ScriptMemory = globalCfg.ScriptMemoryBytes
+	cfg.AllowLocalSources = globalCfg.AllowLocalSources
+	cfg.AuthIssuer = globalCfg.AuthIssuer
+	cfg.AuthAudience = globalCfg.AuthAudience
 
 	logger, _ := log.New(log.Config{
-		Level:    envOr("JUICE_LOG_LEVEL", "info"),
-		FilePath: envOr("JUICE_LOG_FILE", ""),
-		Format:   envOr("JUICE_LOG_FORMAT", "text"),
+		Level:    globalCfg.LogLevel,
+		FilePath: globalCfg.LogFile,
+		Format:   globalCfg.LogFormat,
 	})
 
 	exec := script.New(script.Config{
@@ -170,14 +125,13 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 		MemoryBytes: cfg.ScriptMemory,
 	})
 
-	ollamaURL := envOr("JUICE_OLLAMA_URL", "http://localhost:11434")
 	embedder := kernel.Embedder(&llm.OllamaEmbedder{
-		URL:   ollamaURL,
-		Model: envOr("JUICE_OLLAMA_EMBED_MODEL", "nomic-embed-text"),
+		URL:   globalCfg.OllamaURL,
+		Model: globalCfg.OllamaEmbedModel,
 	})
 	chatter := kernel.Chatter(&llm.OllamaChatter{
-		URL:   ollamaURL,
-		Model: envOr("JUICE_OLLAMA_CHAT_MODEL", "gemma4:26b"),
+		URL:   globalCfg.OllamaURL,
+		Model: globalCfg.OllamaChatModel,
 	})
 
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
@@ -186,7 +140,7 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	// Register native action handlers. Must happen on every kernel open, not just bootstrap.
 	kernel.RegisterLookupHandler(k)
 	kernel.RegisterChatHandler(k)
-	kernel.RegisterMakeHandler(k, script.TinyGoSDK)
+	kernel.RegisterMakeHandler(k, script.TinyGoSDK, globalCfg.MakeMaxSteps)
 	k.SetCompiler(script.NewTinyGoCompiler(script.CompileConfig{}))
 
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).

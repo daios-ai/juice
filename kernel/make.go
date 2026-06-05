@@ -10,10 +10,14 @@ import (
 
 // RegisterMakeHandler registers the @sys/make native action handler on k.
 // sdk is the TinyGo SDK source (script.TinyGoSDK) prepended to every generated action.
-// Pass "" in tests that use FakeCompiler (which ignores source content).
-func RegisterMakeHandler(k *Kernel, sdk string) {
+// maxSteps is the maximum number of synthesis repair iterations; 0 uses the default of 5.
+// Pass "" sdk and 0 maxSteps in tests that use FakeCompiler.
+func RegisterMakeHandler(k *Kernel, sdk string, maxSteps int) {
+	if maxSteps <= 0 {
+		maxSteps = 5
+	}
 	k.RegisterNativeHandler("make", func(ctx context.Context, args map[string]any, subjectID, processID, parentTraceID string) (map[string]any, error) {
-		return k.executeMake(ctx, args, subjectID, processID, parentTraceID, sdk)
+		return k.executeMake(ctx, args, subjectID, processID, parentTraceID, sdk, maxSteps)
 	})
 }
 
@@ -75,7 +79,7 @@ func (h *makeTestHost) Emit(_ context.Context, _ string, _ []byte) error { retur
 func (h *makeTestHost) Log(_ context.Context, _, _ string) error         { return nil }
 
 // executeMake implements the full @sys/make 10-step pipeline.
-func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID, processID, parentTraceID, sdk string) (map[string]any, error) {
+func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID, processID, parentTraceID, sdk string, maxSteps int) (map[string]any, error) {
 	if k.compiler == nil {
 		return nil, ErrInvalidState.Wrap("source compiler not configured")
 	}
@@ -111,7 +115,6 @@ func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID
 	diagnostics := []string{}
 	tests := []MakeTest{}
 
-	const maxSteps = 5
 	for step := 0; step < maxSteps; step++ {
 		// Step 5: generate TinyGo source.
 		runFunc, genDiag := k.generateSource(ctx, in, contract, composable, sdk, diagnostics, subjectID, processID, parentTraceID)

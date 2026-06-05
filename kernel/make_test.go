@@ -25,7 +25,7 @@ func newMakeKernel(t *testing.T, chatter kernel.Chatter) (*kernel.Kernel, kernel
 	k := kernel.New(st, exec, nil, nil, chatter, cfg, nil)
 	k.SetCompiler(&script.FakeCompiler{})
 	kernel.RegisterChatHandler(k)
-	kernel.RegisterMakeHandler(k, "")
+	kernel.RegisterMakeHandler(k, "", 0)
 	return k, st
 }
 
@@ -242,7 +242,7 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 	k := kernel.New(st, exec, nil, nil, fakeChat, cfg, nil)
 	k.SetCompiler(fakeComp)
 	kernel.RegisterChatHandler(k)
-	kernel.RegisterMakeHandler(k, "")
+	kernel.RegisterMakeHandler(k, "", 0)
 
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)

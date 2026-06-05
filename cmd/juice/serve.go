@@ -32,7 +32,7 @@ func init() {
 			return runServer(addr)
 		},
 	}
-	serveCmd.Flags().StringVar(&addr, "addr", envOr("JUICE_ADDR", ":4040"), "Listen address")
+	serveCmd.Flags().StringVar(&addr, "addr", ":4040", "Listen address")
 	rootCmd.AddCommand(serveCmd)
 
 	rootCmd.AddCommand(healthCmd())
@@ -46,9 +46,9 @@ func runServer(addr string) error {
 	defer db.Close()
 
 	logger, _ := log.New(log.Config{
-		Level:    envOr("JUICE_LOG_LEVEL", "info"),
-		FilePath: envOr("JUICE_LOG_FILE", ""),
-		Format:   "text",
+		Level:    globalCfg.LogLevel,
+		FilePath: globalCfg.LogFile,
+		Format:   globalCfg.LogFormat,
 	})
 
 	if err := bootstrap(k); err != nil {
@@ -1050,7 +1050,7 @@ func (s *server) getWellKnown(w http.ResponseWriter, r *http.Request) {
 	if handle == "" {
 		handle = "@sys"
 	}
-	baseURL := envOr("JUICE_BASE_URL", "")
+	baseURL := globalCfg.ServerURL
 	writeJSON(w, http.StatusOK, map[string]string{
 		"handle":     handle,
 		"public_key": pubKey,
@@ -1268,7 +1268,7 @@ func healthCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&healthURL, "url", envOr("JUICE_URL", "http://localhost:4040"), "Server base URL")
+	cmd.Flags().StringVar(&healthURL, "url", "http://localhost:4040", "Server base URL")
 	return cmd
 }
 

@@ -36,21 +36,58 @@ ok()   { echo "  PASS: $1"; ((PASS++)); }
 fail() { echo "  FAIL: $1 — $2"; ((FAIL++)); ERRS="${ERRS}\n  [$1] $2"; }
 
 # ---------------------------------------------------------------------------
+# Config file helpers
+# ---------------------------------------------------------------------------
+
+# write_test_config db [key=value ...]
+# Writes juice.json next to the db file with test defaults and optional overrides.
+# Keys: fee_bps fee_recipient script_timeout_ms (all others use defaults).
+write_test_config() {
+    local db="$1"; shift
+    local fee_bps=0 fee_recipient="" script_timeout_ms=10000
+    for arg in "$@"; do
+        case "$arg" in
+            fee_bps=*)           fee_bps="${arg#*=}" ;;
+            fee_recipient=*)     fee_recipient="${arg#*=}" ;;
+            script_timeout_ms=*) script_timeout_ms="${arg#*=}" ;;
+        esac
+    done
+    cat > "$(dirname "$db")/juice.json" << EOF
+{
+  "ollama_url": "http://localhost:11434",
+  "ollama_chat_model": "gemma4:26b",
+  "ollama_embed_model": "nomic-embed-text",
+  "script_timeout_ms": $script_timeout_ms,
+  "script_memory_bytes": 67108864,
+  "fee_bps": $fee_bps,
+  "fee_recipient": "$fee_recipient",
+  "token_ttl": "15m",
+  "auth_issuer": "",
+  "auth_audience": "",
+  "log_level": "error",
+  "log_file": "",
+  "log_format": "text",
+  "make_max_steps": 5,
+  "allow_local_sources": true,
+  "server_url": ""
+}
+EOF
+}
+
+# ---------------------------------------------------------------------------
 # CLI wrappers
 # j  db home [args...] — run juice against db with the given HOME
 # jj db home [args...] — same with --output json
 # ---------------------------------------------------------------------------
 j() {
     local db="$1" home="$2"; shift 2
-    JUICE_LOG_LEVEL=error HOME="$home" JUICE_ALLOW_LOCAL_SOURCES=true \
-        "$JUICE" --db "$db" "$@" 2>&1
+    HOME="$home" "$JUICE" --db "$db" "$@" 2>&1
 }
 
 # jj — JSON output; stderr suppressed so log lines don't corrupt JSON parsing.
 jj() {
     local db="$1" home="$2"; shift 2
-    JUICE_LOG_LEVEL=error HOME="$home" JUICE_ALLOW_LOCAL_SOURCES=true \
-        "$JUICE" --db "$db" --output json "$@" 2>/dev/null
+    HOME="$home" "$JUICE" --db "$db" --output json "$@" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -58,10 +95,12 @@ jj() {
 # ---------------------------------------------------------------------------
 
 # bootstrap_kernel db pass home port
-# Starts juice serve briefly to trigger first-boot initialisation, then stops it.
+# Writes the default config file, then starts juice serve briefly to trigger
+# first-boot initialisation and stops it.
 bootstrap_kernel() {
     local db="$1" pass="$2" home="$3" port="$4"
-    JUICE_LOG_LEVEL=error JUICE_BOOTSTRAP_PASSWORD="$pass" JUICE_ALLOW_LOCAL_SOURCES=true \
+    write_test_config "$db"
+    JUICE_BOOTSTRAP_PASSWORD="$pass" \
         HOME="$home" "$JUICE" --db "$db" serve --addr "127.0.0.1:$port" >/dev/null 2>&1 &
     local pid=$!
     local deadline=$(( $(date +%s) + 15 ))
@@ -85,7 +124,7 @@ bootstrap_kernel() {
 SERVE_PID=""
 start_serve() {
     local db="$1" addr="$2" pass="$3" home="$4"
-    JUICE_LOG_LEVEL=error JUICE_BOOTSTRAP_PASSWORD="$pass" JUICE_ALLOW_LOCAL_SOURCES=true \
+    JUICE_BOOTSTRAP_PASSWORD="$pass" \
         HOME="$home" "$JUICE" --db "$db" serve --addr "$addr" >/dev/null 2>&1 &
     SERVE_PID=$!
     local deadline=$(( $(date +%s) + 15 ))
@@ -824,9 +863,9 @@ flow_successful_paid_call() {
     proc_id=$(strfield "$proc_out" "process_id")
 
     # Call with fee_bps=2000 → fee=20, net=80, gross=100
+    write_test_config "$db" "fee_bps=2000" "fee_recipient=$sys_id"
     local call_out tx_id
-    call_out=$(JUICE_FEE_BPS=2000 JUICE_FEE_RECIPIENT="$sys_id" \
-        JUICE_LOG_LEVEL=error HOME="$home_bob" JUICE_ALLOW_LOCAL_SOURCES=true \
+    call_out=$(HOME="$home_bob" \
         "$JUICE" --db "$db" --output json call \
         --process "$proc_id" --action @alice/pay --args '{}' 2>/dev/null)
     tx_id=$(strfield "$call_out" "tx_id")
@@ -1151,9 +1190,8 @@ flow_wasm_execution() {
     local proc2_out proc2_id timeout_out
     proc2_out=$(jj "$db" "$home_bob" process start --funds 100)
     proc2_id=$(strfield "$proc2_out" "process_id")
-    timeout_out=$(JUICE_SCRIPT_TIMEOUT_MS=200 JUICE_LOG_LEVEL=error \
-        HOME="$home_bob" JUICE_ALLOW_LOCAL_SOURCES=true \
-        "$JUICE" --db "$db" call \
+    write_test_config "$db" "script_timeout_ms=200"
+    timeout_out=$(HOME="$home_bob" "$JUICE" --db "$db" call \
         --process "$proc2_id" --action @alice/loop --args '{}' 2>&1)
     echo "$timeout_out" | grep -qi "timeout\|timed\|execution" \
         && ok "wasm_execution.infinite_loop_timeout" \
