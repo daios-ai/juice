@@ -34,6 +34,7 @@ store/       persistence interface and SQLite implementation
 script/      WebAssembly execution
 llm/         local language and embedding interface
 log/         structured logging
+native/      native function implementations
 ```
 
 * Architectural package names such as `sqlite`, `wazero`, or `ollama` are forbidden; implementation-specific names may appear in concrete types or file names.
