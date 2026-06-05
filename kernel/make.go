@@ -257,6 +257,7 @@ func (k *Kernel) resolveActionRefs(ctx context.Context, description string) []*A
 }
 
 // searchCatalog calls @sys/lookup for each capability identified in the contract plan.
+// Actions with a failure rate above 50% (over at least 5 uses) are excluded.
 func (k *Kernel) searchCatalog(ctx context.Context, contract *actionContract, subjectID, processID, parentTraceID string) []*Action {
 	if contract.Plan == "" || k.llm == nil {
 		return nil
@@ -278,7 +279,7 @@ func (k *Kernel) searchCatalog(ctx context.Context, contract *actionContract, su
 			ParentTraceID: parentTraceID,
 			TargetUserID:  "@sys",
 			ActionName:    "lookup",
-			Args:          map[string]any{"query": q, "limit": 3},
+			Args:          map[string]any{"query": q, "limit": float64(5)},
 		})
 		if err != nil {
 			continue
@@ -295,12 +296,29 @@ func (k *Kernel) searchCatalog(ctx context.Context, contract *actionContract, su
 			}
 			seen[actionID] = true
 			a, err := k.store.ReadAction(ctx, actionID)
-			if err == nil && a != nil && a.Active {
-				result = append(result, a)
+			if err != nil || a == nil || !a.Active {
+				continue
 			}
+			if isUnreliableAction(k.store.ReadStats(ctx, a.ID)) {
+				continue
+			}
+			result = append(result, a)
 		}
 	}
 	return result
+}
+
+// isUnreliableAction returns true when stats show a failure rate above 50% over at least 5 uses.
+// Actions with no usage history pass through — they may be new and untested.
+func isUnreliableAction(stats *Stats, _ error) bool {
+	if stats == nil {
+		return false
+	}
+	total := stats.Successes + stats.Failures
+	if total < 5 {
+		return false
+	}
+	return stats.Failures > stats.Successes
 }
 
 // extractCapabilityQueries splits a plan string into focused search queries.
