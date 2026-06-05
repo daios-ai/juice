@@ -1,0 +1,559 @@
+package kernel
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+)
+
+// RegisterMakeHandler registers the @sys/make native action handler on k.
+func RegisterMakeHandler(k *Kernel) {
+	k.RegisterNativeHandler("make", func(ctx context.Context, args map[string]any, subjectID, processID, parentTraceID string) (map[string]any, error) {
+		return k.executeMake(ctx, args, subjectID, processID, parentTraceID)
+	})
+}
+
+// MakeDraft is the generated action draft returned by @sys/make on success.
+// The source field holds TinyGo source (not compiled WASM bytes).
+// ArtifactHash is the SHA-256 of the compiled WASM artifact.
+type MakeDraft struct {
+	Name         string         `json:"name"`
+	Kind         string         `json:"kind"` // always "wasm"
+	Description  string         `json:"description"`
+	InputSchema  map[string]any `json:"input_schema"`
+	OutputSchema map[string]any `json:"output_schema"`
+	Source       string         `json:"source"`
+	ArtifactHash string         `json:"artifact_hash"`
+	Price        int64          `json:"price"`
+	UsesActions  []string       `json:"uses_actions,omitempty"`
+}
+
+// MakeTest records the outcome of one test case run during synthesis.
+type MakeTest struct {
+	Name   string `json:"name"`
+	Status string `json:"status"` // "passed" | "failed"
+	Reason string `json:"reason,omitempty"`
+}
+
+// MakeResult is the output schema of the @sys/make native action.
+type MakeResult struct {
+	Status      string     `json:"status"` // "success" | "failure"
+	Draft       *MakeDraft `json:"draft,omitempty"`
+	Diagnostics []string   `json:"diagnostics"`
+	Tests       []MakeTest `json:"tests,omitempty"`
+}
+
+// makeInput holds the parsed and defaulted input to @sys/make.
+type makeInput struct {
+	Description    string
+	Name           string
+	InputSchema    map[string]any
+	OutputSchema   map[string]any
+	Examples       []makeExample
+	AllowedActions []string
+	Price          int64
+	MaxSteps       int
+}
+
+type makeExample struct {
+	Args  map[string]any `json:"args"`
+	Reply map[string]any `json:"reply"`
+}
+
+// makeTestHost implements HostFunctions for testing generated WASM.
+// It returns {} for any action in allowed, and errors for all others.
+type makeTestHost struct {
+	allowed map[string]bool
+}
+
+func (h *makeTestHost) Call(_ context.Context, actionName string, _ []byte) ([]byte, error) {
+	if h.allowed[actionName] {
+		return []byte("{}"), nil
+	}
+	return nil, ErrUnauthorized.Wrapf("action %q not in allowed_actions", actionName)
+}
+func (h *makeTestHost) Emit(_ context.Context, _ string, _ []byte) error { return nil }
+func (h *makeTestHost) Log(_ context.Context, _, _ string) error         { return nil }
+
+// executeMake implements the @sys/make native action.
+func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID, processID, parentTraceID string) (map[string]any, error) {
+	if k.compiler == nil {
+		return nil, ErrInvalidState.Wrap("source compiler not configured")
+	}
+	if k.chatter == nil {
+		return nil, ErrInvalidState.Wrap("LLM chat service not configured")
+	}
+
+	in, err := parseMakeInput(args)
+	if err != nil {
+		return nil, err
+	}
+
+	// Derive missing schemas via LLM.
+	if in.InputSchema == nil || in.OutputSchema == nil {
+		derived, diags := k.deriveSchemas(ctx, in, subjectID, processID, parentTraceID)
+		if derived == nil {
+			res := &MakeResult{Status: "failure", Diagnostics: diags}
+			return marshalMakeResult(res)
+		}
+		if in.InputSchema == nil {
+			in.InputSchema = derived.InputSchema
+		}
+		if in.OutputSchema == nil {
+			in.OutputSchema = derived.OutputSchema
+		}
+	}
+
+	// Build action catalog for context.
+	catalog := k.buildCatalog(ctx)
+
+	var diagnostics []string
+	var tests []MakeTest
+
+	for step := 0; step < in.MaxSteps; step++ {
+		// Generate TinyGo source.
+		source, diag := k.generateSource(ctx, in, catalog, diagnostics, subjectID, processID, parentTraceID)
+		if diag != "" {
+			diagnostics = append(diagnostics, fmt.Sprintf("step %d: LLM generation failed: %s", step+1, diag))
+			continue
+		}
+
+		// Compile.
+		wasm, hash, compileErr := k.compiler.CompileSource(ctx, []byte(source))
+		if compileErr != nil {
+			diagnostics = append(diagnostics, fmt.Sprintf("step %d: compile error: %v", step+1, compileErr))
+			continue
+		}
+
+		// Static WASM validation — done via script package's InspectModule if available.
+		// We import via the Kernel's InspectWASM helper (avoids kernel→script import).
+		if checkDiag := k.checkWASMImports(wasm, in.AllowedActions); checkDiag != "" {
+			return marshalMakeResult(&MakeResult{Status: "failure", Diagnostics: append(diagnostics, checkDiag)})
+		}
+
+		// Run tests.
+		tests = k.runMakeTests(ctx, wasm, in)
+
+		allPassed := true
+		for _, t := range tests {
+			if t.Status == "failed" {
+				allPassed = false
+				diagnostics = append(diagnostics, fmt.Sprintf("step %d: test %q failed: %s", step+1, t.Name, t.Reason))
+			}
+		}
+
+		if allPassed {
+			name := in.Name
+			if name == "" {
+				name = deriveName(in.Description)
+			}
+			draft := &MakeDraft{
+				Name:         name,
+				Kind:         "wasm",
+				Description:  in.Description,
+				InputSchema:  in.InputSchema,
+				OutputSchema: in.OutputSchema,
+				Source:       source,
+				ArtifactHash: hash,
+				Price:        in.Price,
+				UsesActions:  in.AllowedActions,
+			}
+			res := &MakeResult{Status: "success", Draft: draft, Diagnostics: diagnostics, Tests: tests}
+			return marshalMakeResult(res)
+		}
+	}
+
+	res := &MakeResult{Status: "failure", Diagnostics: diagnostics, Tests: tests}
+	return marshalMakeResult(res)
+}
+
+// parseMakeInput validates and defaults @sys/make arguments.
+func parseMakeInput(args map[string]any) (*makeInput, error) {
+	desc, _ := args["description"].(string)
+	if strings.TrimSpace(desc) == "" {
+		return nil, ErrInvalidInput.Wrap("description is required")
+	}
+	in := &makeInput{
+		Description: desc,
+		MaxSteps:    5,
+	}
+	if v, ok := args["name"].(string); ok {
+		in.Name = v
+	}
+	if v, ok := args["price"].(float64); ok {
+		if v < 0 {
+			return nil, ErrInvalidInput.Wrap("price must be non-negative")
+		}
+		in.Price = int64(v)
+	}
+	if v, ok := args["max_steps"].(float64); ok {
+		ms := int(v)
+		if ms < 1 {
+			return nil, ErrInvalidInput.Wrap("max_steps must be at least 1")
+		}
+		if ms > 10 {
+			return nil, ErrInvalidInput.Wrap("max_steps must be at most 10")
+		}
+		in.MaxSteps = ms
+	}
+	if v, ok := args["input_schema"].(map[string]any); ok {
+		if err := ValidateSchema(v); err != nil {
+			return nil, ErrInvalidInput.Wrapf("invalid input_schema: %v", err)
+		}
+		in.InputSchema = v
+	}
+	if v, ok := args["output_schema"].(map[string]any); ok {
+		if err := ValidateSchema(v); err != nil {
+			return nil, ErrInvalidInput.Wrapf("invalid output_schema: %v", err)
+		}
+		in.OutputSchema = v
+	}
+	if v, ok := args["allowed_actions"].([]any); ok {
+		for _, a := range v {
+			if s, ok := a.(string); ok {
+				in.AllowedActions = append(in.AllowedActions, s)
+			}
+		}
+	}
+	if v, ok := args["examples"].([]any); ok {
+		for _, raw := range v {
+			m, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			ex := makeExample{}
+			if a, ok := m["args"].(map[string]any); ok {
+				ex.Args = a
+			}
+			if r, ok := m["reply"].(map[string]any); ok {
+				ex.Reply = r
+			}
+			in.Examples = append(in.Examples, ex)
+		}
+	}
+	return in, nil
+}
+
+// deriveSchemas asks the LLM to propose input_schema and output_schema.
+type derivedSchemas struct {
+	InputSchema  map[string]any
+	OutputSchema map[string]any
+}
+
+func (k *Kernel) deriveSchemas(ctx context.Context, in *makeInput, subjectID, processID, parentTraceID string) (*derivedSchemas, []string) {
+	prompt := fmt.Sprintf(`You are designing a JSON API action. Given the task description, propose a JSON Schema for the input and output.
+Respond ONLY with a JSON object: {"input_schema": {...}, "output_schema": {...}}
+
+Task: %s`, in.Description)
+
+	reply, err := k.callLLM(ctx, prompt, subjectID, processID, parentTraceID)
+	if err != nil {
+		return nil, []string{fmt.Sprintf("schema derivation failed: %v", err)}
+	}
+
+	// Extract JSON from the reply.
+	jsonStr := extractJSON(reply)
+	if jsonStr == "" {
+		return nil, []string{"schema derivation: LLM did not return JSON"}
+	}
+
+	var schemas struct {
+		InputSchema  map[string]any `json:"input_schema"`
+		OutputSchema map[string]any `json:"output_schema"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &schemas); err != nil {
+		return nil, []string{fmt.Sprintf("schema derivation: invalid JSON: %v", err)}
+	}
+	if schemas.InputSchema == nil || schemas.OutputSchema == nil {
+		return nil, []string{"schema derivation: missing input_schema or output_schema"}
+	}
+	if err := ValidateSchema(schemas.InputSchema); err != nil {
+		return nil, []string{fmt.Sprintf("schema derivation: invalid input_schema: %v", err)}
+	}
+	if err := ValidateSchema(schemas.OutputSchema); err != nil {
+		return nil, []string{fmt.Sprintf("schema derivation: invalid output_schema: %v", err)}
+	}
+	return &derivedSchemas{InputSchema: schemas.InputSchema, OutputSchema: schemas.OutputSchema}, nil
+}
+
+// generateSource calls @sys/llm/chat via kernel.Call() to produce TinyGo source.
+func (k *Kernel) generateSource(ctx context.Context, in *makeInput, catalog string, prevDiagnostics []string, subjectID, processID, parentTraceID string) (source, diag string) {
+	var sb strings.Builder
+	sb.WriteString("You are a TinyGo programmer generating a WASM action for the Juice platform.\n")
+	sb.WriteString("Produce ONLY a single TinyGo source file in a ```go ... ``` code block.\n")
+	sb.WriteString("The file must:\n")
+	sb.WriteString("- Declare package main\n")
+	sb.WriteString("- Export a run function: //export run\n  func run(inputPtr, inputLen uint32) (uint32, uint32)\n")
+	sb.WriteString("- Use JuiceCall, JuiceEmit, JuiceLog from the SDK (do NOT re-declare them)\n\n")
+
+	if len(in.AllowedActions) > 0 {
+		sb.WriteString("Allowed sub-actions (use JuiceCall to invoke): " + strings.Join(in.AllowedActions, ", ") + "\n\n")
+	} else {
+		sb.WriteString("Do NOT call any sub-actions (allowed_actions is empty).\n\n")
+	}
+
+	sb.WriteString("Available actions in the catalog:\n")
+	sb.WriteString(catalog)
+	sb.WriteString("\n\nInput schema:\n")
+	inJSON, _ := json.Marshal(in.InputSchema)
+	sb.Write(inJSON)
+	sb.WriteString("\n\nOutput schema:\n")
+	outJSON, _ := json.Marshal(in.OutputSchema)
+	sb.Write(outJSON)
+	sb.WriteString("\n\nTask: " + in.Description + "\n")
+
+	if len(prevDiagnostics) > 0 {
+		sb.WriteString("\n\nFix these issues from the previous attempt:\n")
+		for _, d := range prevDiagnostics {
+			sb.WriteString("- " + d + "\n")
+		}
+	}
+
+	reply, err := k.callLLM(ctx, sb.String(), subjectID, processID, parentTraceID)
+	if err != nil {
+		return "", err.Error()
+	}
+	src := extractGoBlock(reply)
+	if src == "" {
+		return "", "LLM did not return a Go code block"
+	}
+	return src, ""
+}
+
+// callLLM calls @sys/llm/chat through kernel.Call() to produce a sub-transaction and trace.
+func (k *Kernel) callLLM(ctx context.Context, prompt, subjectID, processID, parentTraceID string) (string, error) {
+	reply, err := k.Call(ctx, CallRequest{
+		SubjectID:     subjectID,
+		ProcessID:     processID,
+		ParentTraceID: parentTraceID,
+		TargetUserID:  "@sys",
+		ActionName:    "llm/chat",
+		Args: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": prompt},
+			},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	msg, _ := reply.Result["message"].(map[string]any)
+	content, _ := msg["content"].(string)
+	return content, nil
+}
+
+// buildCatalog returns a concise text summary of active public actions for the LLM context.
+func (k *Kernel) buildCatalog(ctx context.Context) string {
+	actions, err := k.store.ListPublicActions(ctx, 50, 0)
+	if err != nil || len(actions) == 0 {
+		return "(no actions in catalog)\n"
+	}
+	var sb strings.Builder
+	for _, a := range actions {
+		if !a.Active {
+			continue
+		}
+		u, _ := k.store.ReadUser(ctx, a.OwnerUserID)
+		handle := a.OwnerUserID
+		if u != nil {
+			handle = u.Handle
+		}
+		fmt.Fprintf(&sb, "@%s/%s — %s\n", strings.TrimPrefix(handle, "@"), a.Name, a.Description)
+	}
+	return sb.String()
+}
+
+// checkWASMImports validates that the artifact only imports allowed host functions.
+// Uses WASMInspector if the script executor implements it; otherwise skips the check.
+// Returns a diagnostic string on failure, or "" on success.
+func (k *Kernel) checkWASMImports(wasm []byte, _ []string) string {
+	insp, ok := k.scripts.(WASMInspector)
+	if !ok {
+		return ""
+	}
+	imports, exports, err := insp.InspectWASM(wasm)
+	if err != nil {
+		return fmt.Sprintf("WASM inspection failed: %v", err)
+	}
+	allowedImports := map[string]bool{"call": true, "emit": true, "log": true}
+	for _, imp := range imports {
+		if imp.Module != "juice" || !allowedImports[imp.Name] {
+			return fmt.Sprintf("WASM imports disallowed function %q from module %q", imp.Name, imp.Module)
+		}
+	}
+	hasAlloc, hasRun := false, false
+	for _, e := range exports {
+		if e == "alloc" {
+			hasAlloc = true
+		}
+		if e == "run" {
+			hasRun = true
+		}
+	}
+	if !hasAlloc {
+		return "WASM does not export required function alloc"
+	}
+	if !hasRun {
+		return "WASM does not export required function run"
+	}
+	return ""
+}
+
+// runMakeTests executes each example against the compiled WASM and returns test results.
+// When no examples are provided, a compile-smoke test is always included.
+func (k *Kernel) runMakeTests(ctx context.Context, wasm []byte, in *makeInput) []MakeTest {
+	host := &makeTestHost{allowed: make(map[string]bool)}
+	for _, a := range in.AllowedActions {
+		host.allowed[a] = true
+	}
+
+	var results []MakeTest
+
+	// Always run a compile smoke test.
+	if k.scripts != nil {
+		_, _, err := k.scripts.Compile(ctx, wasm)
+		st := "passed"
+		reason := ""
+		if err != nil {
+			st = "failed"
+			reason = fmt.Sprintf("WASM compile: %v", err)
+		}
+		results = append(results, MakeTest{Name: "compile", Status: st, Reason: reason})
+	}
+
+	// Run each example.
+	for i, ex := range in.Examples {
+		name := fmt.Sprintf("example-%d", i+1)
+		result := k.runOneExample(ctx, wasm, ex, in, host, name)
+		results = append(results, result)
+	}
+
+	return results
+}
+
+func (k *Kernel) runOneExample(ctx context.Context, wasm []byte, ex makeExample, in *makeInput, host *makeTestHost, name string) MakeTest {
+	if k.scripts == nil {
+		return MakeTest{Name: name, Status: "failed", Reason: "script executor not configured"}
+	}
+
+	// Validate input.
+	if err := ValidateInput(in.InputSchema, ex.Args); err != nil {
+		return MakeTest{Name: name, Status: "failed", Reason: "input schema: " + err.Error()}
+	}
+
+	artifact, _, err := k.scripts.Compile(ctx, wasm)
+	if err != nil {
+		return MakeTest{Name: name, Status: "failed", Reason: "compile: " + err.Error()}
+	}
+
+	inputJSON, _ := json.Marshal(ex.Args)
+	outputJSON, execErr := k.scripts.Execute(ctx, artifact, inputJSON, host)
+	if execErr != nil {
+		return MakeTest{Name: name, Status: "failed", Reason: "execution: " + execErr.Error()}
+	}
+
+	var reply map[string]any
+	if err := json.Unmarshal(outputJSON, &reply); err != nil {
+		return MakeTest{Name: name, Status: "failed", Reason: "output not valid JSON: " + err.Error()}
+	}
+
+	// Validate output schema.
+	if err := ValidateInput(in.OutputSchema, reply); err != nil {
+		return MakeTest{Name: name, Status: "failed", Reason: "output schema: " + err.Error()}
+	}
+
+	// Check expected reply fields when provided.
+	if ex.Reply != nil {
+		for key, expected := range ex.Reply {
+			got, ok := reply[key]
+			if !ok {
+				return MakeTest{Name: name, Status: "failed", Reason: fmt.Sprintf("reply missing field %q", key)}
+			}
+			expJSON, _ := json.Marshal(expected)
+			gotJSON, _ := json.Marshal(got)
+			if string(expJSON) != string(gotJSON) {
+				return MakeTest{Name: name, Status: "failed", Reason: fmt.Sprintf("reply[%q]: expected %s, got %s", key, expJSON, gotJSON)}
+			}
+		}
+	}
+
+	return MakeTest{Name: name, Status: "passed"}
+}
+
+// marshalMakeResult converts a MakeResult to the map[string]any expected by Call().
+func marshalMakeResult(r *MakeResult) (map[string]any, error) {
+	b, err := json.Marshal(r)
+	if err != nil {
+		return nil, ErrInternal.Wrapf("marshal make result: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, ErrInternal.Wrapf("unmarshal make result: %v", err)
+	}
+	return m, nil
+}
+
+// extractGoBlock extracts the first ```go ... ``` block from an LLM response.
+func extractGoBlock(s string) string {
+	const start = "```go"
+	const end = "```"
+	idx := strings.Index(s, start)
+	if idx < 0 {
+		return ""
+	}
+	rest := s[idx+len(start):]
+	// Skip the newline after the fence.
+	if len(rest) > 0 && rest[0] == '\n' {
+		rest = rest[1:]
+	}
+	end2 := strings.Index(rest, end)
+	if end2 < 0 {
+		return rest
+	}
+	return rest[:end2]
+}
+
+// extractJSON extracts the first {...} JSON object from a string.
+func extractJSON(s string) string {
+	start := strings.Index(s, "{")
+	if start < 0 {
+		return ""
+	}
+	depth := 0
+	for i := start; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return ""
+}
+
+// deriveName creates a slug action name from a description.
+func deriveName(desc string) string {
+	words := strings.Fields(strings.ToLower(desc))
+	if len(words) == 0 {
+		return "generated"
+	}
+	if len(words) > 3 {
+		words = words[:3]
+	}
+	name := strings.Join(words, "-")
+	var clean strings.Builder
+	for _, r := range name {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' {
+			clean.WriteRune(r)
+		}
+	}
+	result := strings.Trim(clean.String(), "-")
+	if result == "" {
+		return "generated"
+	}
+	return result
+}

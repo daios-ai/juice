@@ -1,0 +1,81 @@
+package main
+
+import (
+	"encoding/json"
+	"unsafe"
+)
+
+// Host imports — provided by the Juice kernel.
+//
+//go:wasmimport juice call
+func hostCall(namePtr, nameLen, argsPtr, argsLen uint32) (uint32, uint32)
+
+//go:wasmimport juice emit
+func hostEmit(eventPtr, eventLen, argsPtr, argsLen uint32)
+
+//go:wasmimport juice log
+func hostLog(lvlPtr, lvlLen, msgPtr, msgLen uint32)
+
+// _nextAlloc is a bump-pointer allocator base for memory handed to the host.
+var _nextAlloc uint32
+
+// alloc must be exported so the kernel can write input bytes into WASM memory.
+//
+//export alloc
+func alloc(size uint32) uint32 {
+	ptr := _nextAlloc
+	_nextAlloc += size
+	return ptr
+}
+
+func _ptrLen(b []byte) (uint32, uint32) {
+	if len(b) == 0 {
+		return 0, 0
+	}
+	return uint32(uintptr(unsafe.Pointer(&b[0]))), uint32(len(b))
+}
+
+func _strPtrLen(s string) (uint32, uint32) {
+	b := []byte(s)
+	return _ptrLen(b)
+}
+
+// JuiceCall calls the action at @owner/name with JSON args and returns the JSON reply.
+func JuiceCall(action string, args []byte) ([]byte, error) {
+	aPtr, aLen := _strPtrLen(action)
+	argPtr, argLen := _ptrLen(args)
+	outPtr, outLen := hostCall(aPtr, aLen, argPtr, argLen)
+	if outLen == 0 {
+		return []byte("{}"), nil
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(uintptr(outPtr))), int(outLen)), nil
+}
+
+// JuiceEmit emits a named event with JSON args through the kernel event path.
+func JuiceEmit(event string, args []byte) {
+	ePtr, eLen := _strPtrLen(event)
+	aPtr, aLen := _ptrLen(args)
+	hostEmit(ePtr, eLen, aPtr, aLen)
+}
+
+// JuiceLog writes a structured log record associated with the current trace.
+func JuiceLog(level, msg string) {
+	lPtr, lLen := _strPtrLen(level)
+	mPtr, mLen := _strPtrLen(msg)
+	hostLog(lPtr, lLen, mPtr, mLen)
+}
+
+// mustMarshal encodes v to JSON, returning []byte("null") on error.
+func mustMarshal(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return []byte("null")
+	}
+	return b
+}
+
+// run is the entry point. Generated actions must implement and export this function.
+// It receives JSON input via linear memory and must return JSON output via linear memory.
+//
+//	//export run
+//	func run(inputPtr, inputLen uint32) (uint32, uint32) { ... }
