@@ -70,7 +70,8 @@ type makeTestHost struct {
 }
 
 func (h *makeTestHost) Call(_ context.Context, actionName string, _ []byte) ([]byte, error) {
-	if h.allowed[actionName] {
+	// Empty allowed map means unrestricted — synthesizer may use any catalog action.
+	if len(h.allowed) == 0 || h.allowed[actionName] {
 		return []byte("{}"), nil
 	}
 	return nil, ErrUnauthorized.Wrapf("action %q not in allowed_actions", actionName)
@@ -304,7 +305,7 @@ func (k *Kernel) generateSource(ctx context.Context, in *makeInput, catalog stri
 	if len(in.AllowedActions) > 0 {
 		sb.WriteString("Allowed sub-actions (use JuiceCall to invoke): " + strings.Join(in.AllowedActions, ", ") + "\n\n")
 	} else {
-		sb.WriteString("Do NOT call any sub-actions (allowed_actions is empty).\n\n")
+		sb.WriteString("You may call any action from the catalog above using JuiceCall.\n\n")
 	}
 
 	sb.WriteString("Available actions in the catalog:\n")
