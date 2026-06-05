@@ -222,7 +222,10 @@ func TestActivateNativeActionBootstrapPath(t *testing.T) {
 	if a.Active {
 		t.Fatal("registered native action should start inactive")
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
+	desc := "A native action"
+	in := map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string", "description": "x"}}}
+	out := map[string]any{"type": "object"}
+	if err := k.ActivateNativeAction(ctx, a.ID, desc, in, out); err != nil {
 		t.Fatal(err)
 	}
 	active, err := k.ReadAction(ctx, a.ID)
@@ -232,8 +235,50 @@ func TestActivateNativeActionBootstrapPath(t *testing.T) {
 	if !active.Active {
 		t.Fatal("ActivateNativeAction should activate native action")
 	}
+	if active.Description != desc {
+		t.Errorf("description = %q, want %q", active.Description, desc)
+	}
 	if stats, err := k.ReadStats(ctx, a.ID); err != nil || stats == nil {
 		t.Fatalf("ActivateNativeAction should initialize stats, stats=%v err=%v", stats, err)
+	}
+}
+
+func TestActivateNativeActionReconcilesSchema(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@sys", 0)
+	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID:  owner.ID,
+		Name:         "native-reconcile",
+		Kind:         kernel.KindNative,
+		Description:  "old",
+		InputSchema:  map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string", "description": "x"}}},
+		OutputSchema: map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newIn := map[string]any{"type": "object", "properties": map[string]any{"y": map[string]any{"type": "integer", "description": "y"}}}
+	newOut := map[string]any{"type": "object", "properties": map[string]any{"z": map[string]any{"type": "string", "description": "z"}}}
+	if err := k.ActivateNativeAction(ctx, a.ID, "new desc", newIn, newOut); err != nil {
+		t.Fatalf("ActivateNativeAction: %v", err)
+	}
+
+	got, err := k.ReadAction(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != "new desc" {
+		t.Errorf("description = %q, want %q", got.Description, "new desc")
+	}
+	if props, _ := got.InputSchema["properties"].(map[string]any); props == nil || props["y"] == nil {
+		t.Error("input schema not reconciled")
+	}
+	if props, _ := got.OutputSchema["properties"].(map[string]any); props == nil || props["z"] == nil {
+		t.Error("output schema not reconciled")
 	}
 }
 
@@ -247,17 +292,17 @@ func TestActivateNativeActionRejectsSchemaWithoutDescriptions(t *testing.T) {
 		OwnerUserID: owner.ID,
 		Name:        "native-bad",
 		Kind:        kernel.KindNative,
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"x": map[string]any{"type": "string"}, // missing description
-			},
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID); !errors.Is(err, kernel.ErrSchemaViolation) {
+	badIn := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"x": map[string]any{"type": "string"}, // missing description
+		},
+	}
+	if err := k.ActivateNativeAction(ctx, a.ID, "desc", badIn, nil); !errors.Is(err, kernel.ErrSchemaViolation) {
 		t.Fatalf("ActivateNativeAction with missing schema descriptions: got %v, want ErrSchemaViolation", err)
 	}
 }

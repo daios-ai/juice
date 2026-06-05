@@ -490,7 +490,7 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 		}
 		return ErrInternal.Wrap("could not build receipt")
 	}
-	if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats, req.IdempotencyRecordID, kernelErrorCode(callErr)); settlErr != nil {
+	if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats, req.IdempotencyRecordID, KernelErrorCode(callErr)); settlErr != nil {
 		logger.Error("call.settlement_failed", "action", action.Name, "error", callErr, "settlement_error", settlErr)
 		return ErrInternal.Wrap("could not record failure transaction")
 	}

@@ -61,6 +61,15 @@ func newTestKernel(t *testing.T) *kernel.Kernel {
 	return kernel.New(db, nil, nil, nil, nil, cfg, log.Discard())
 }
 
+func sysSpec(name string) sysNativeSpec {
+	for _, s := range sysNativeSpecs {
+		if s.name == name {
+			return s
+		}
+	}
+	panic("sysNativeSpec not found: " + name)
+}
+
 func TestEnsureSysLookupIdempotent(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)
@@ -76,28 +85,30 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	spec := sysSpec("lookup")
+
 	// First call: creates the action.
-	if err := ensureSysLookup(ctx, k, u.Handle); err != nil {
-		t.Fatalf("first ensureSysLookup: %v", err)
+	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+		t.Fatalf("first ensureSysNative(lookup): %v", err)
 	}
 	a, err := k.ReadActionByOwnerName(ctx, u.ID, "lookup")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !a.Active {
-		t.Fatal("lookup should be active after ensureSysLookup")
+		t.Fatal("lookup should be active after ensureSysNative")
 	}
 
 	// Second call: idempotent — must also enforce grant-all.
-	if err := ensureSysLookup(ctx, k, u.Handle); err != nil {
-		t.Fatalf("second ensureSysLookup: %v", err)
+	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+		t.Fatalf("second ensureSysNative(lookup): %v", err)
 	}
 	a, err = k.ReadActionByOwnerName(ctx, u.ID, "lookup")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !a.Public {
-		t.Error("lookup should be public after idempotent ensureSysLookup")
+		t.Error("lookup should be public after idempotent ensureSysNative")
 	}
 }
 
@@ -112,28 +123,30 @@ func TestEnsureSysLLMChatIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	spec := sysSpec("llm/chat")
+
 	// First call: creates the action.
-	if err := ensureSysLLMChat(ctx, k, u.Handle); err != nil {
-		t.Fatalf("first ensureSysLLMChat: %v", err)
+	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+		t.Fatalf("first ensureSysNative(llm/chat): %v", err)
 	}
 	a, err := k.ReadActionByOwnerName(ctx, u.ID, "llm/chat")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !a.Active {
-		t.Fatal("llm/chat should be active after ensureSysLLMChat")
+		t.Fatal("llm/chat should be active after ensureSysNative")
 	}
 
 	// Second call: idempotent — must also enforce grant-all.
-	if err := ensureSysLLMChat(ctx, k, u.Handle); err != nil {
-		t.Fatalf("second ensureSysLLMChat: %v", err)
+	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+		t.Fatalf("second ensureSysNative(llm/chat): %v", err)
 	}
 	a, err = k.ReadActionByOwnerName(ctx, u.ID, "llm/chat")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !a.Public {
-		t.Error("llm/chat should be public after idempotent ensureSysLLMChat")
+		t.Error("llm/chat should be public after idempotent ensureSysNative")
 	}
 }
 
@@ -172,22 +185,23 @@ func TestEnsureSysMakeIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := ensureSysMake(ctx, k, u.Handle); err != nil {
-		t.Fatalf("first ensureSysMake: %v", err)
+	spec := sysSpec("make")
+	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+		t.Fatalf("first ensureSysNative(make): %v", err)
 	}
 	a, err := k.ReadActionByOwnerName(ctx, u.ID, "make")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !a.Active {
-		t.Fatal("@sys/make should be active after ensureSysMake")
+		t.Fatal("@sys/make should be active after ensureSysNative")
 	}
 	if a.Price != 20 {
 		t.Errorf("@sys/make price = %d, want 20", a.Price)
 	}
 
-	if err := ensureSysMake(ctx, k, u.Handle); err != nil {
-		t.Fatalf("second ensureSysMake: %v", err)
+	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+		t.Fatalf("second ensureSysNative(make): %v", err)
 	}
 	a2, err := k.ReadActionByOwnerName(ctx, u.ID, "make")
 	if err != nil {
@@ -198,6 +212,62 @@ func TestEnsureSysMakeIdempotent(t *testing.T) {
 	}
 	if !a2.Public {
 		t.Error("@sys/make should be public after idempotent ensureSysMake")
+	}
+}
+
+func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
+	ctx := context.Background()
+	k := newTestKernel(t)
+
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@sys", Email: "sys@sys", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetConfig(ctx, configKeySuperuser, u.Handle); err != nil {
+		t.Fatal(err)
+	}
+
+	// Register with a stale schema that does not match the spec.
+	stale := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"old_field": map[string]any{"type": "string", "description": "stale field"},
+		},
+	}
+	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID:  u.ID,
+		Name:         "lookup",
+		Kind:         kernel.KindNative,
+		Price:        0,
+		Description:  "old description",
+		InputSchema:  stale,
+		OutputSchema: stale,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.ActivateNativeAction(ctx, a.ID, "old description", stale, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	// ensureSysNative must correct drift for all specs, not just @sys/make.
+	spec := sysSpec("lookup")
+	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+		t.Fatalf("ensureSysNative: %v", err)
+	}
+
+	got, err := k.ReadActionByOwnerName(ctx, u.ID, "lookup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != spec.description {
+		t.Errorf("description = %q, want %q", got.Description, spec.description)
+	}
+	props, _ := got.InputSchema["properties"].(map[string]any)
+	if props == nil || props["query"] == nil {
+		t.Error("input schema not reconciled: missing 'query' property")
 	}
 }
 

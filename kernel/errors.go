@@ -43,8 +43,8 @@ func HTTPStatus(err error) int {
 	return 500
 }
 
-// kernelErrorCode returns the stable error code string, or "internal" if unknown.
-func kernelErrorCode(err error) string {
+// KernelErrorCode returns the stable error code string, or "internal" if unknown.
+func KernelErrorCode(err error) string {
 	if ke, ok := err.(*KernelError); ok {
 		return ke.Code
 	}

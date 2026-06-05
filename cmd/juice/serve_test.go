@@ -1943,6 +1943,120 @@ func TestFederationReplay(t *testing.T) {
 	}
 }
 
+// TestFederationIdempotencyPreconditionFailure verifies that a schema-validation failure
+// (precondition 7) completes the idempotency record so replays return the error, not 409.
+func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
+	// Backend won't be reached (schema validation fails first), but needs to exist for activation.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+	ctx := context.Background()
+
+	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	_, _ = k.RegisterRemoteKernel(ctx, sys.ID, "@schema-fail-peer", pubB64, "http://schema-fail.example.com")
+
+	// Action requires a "name" field; empty body {} will fail schema validation.
+	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
+		OwnerUserID: sys.ID, Name: "strict", Kind: kernel.KindHTTP,
+		Source: backend.URL, Description: "strict schema action",
+		InputSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"name": map[string]any{"type": "string", "description": "The name"}},
+			"required":   []string{"name"},
+		},
+		OutputSchema: map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.GrantAll(ctx, sys.ID, a.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	path := "/v1/federation/call?action=@sys/strict&counterparty=" + pubB64
+	ikey := uuid.New().String()
+	// fedHeaders signs an empty body {}; strict schema requires "name" → schema error.
+	r1 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/strict", ikey))
+	defer r1.Body.Close()
+	if r1.StatusCode == http.StatusConflict {
+		t.Fatal("first call returned 409: idempotency record was not created")
+	}
+	// Must be a client error (schema violation → 422).
+	if r1.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("schema failure: want 422, got %d", r1.StatusCode)
+	}
+
+	// Replay same key → must return the same error, not 409.
+	r2 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/strict", ikey))
+	defer r2.Body.Close()
+	if r2.StatusCode == http.StatusConflict {
+		t.Errorf("replay after precondition failure: got 409 (record still pending), want error response")
+	}
+	if r2.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("replay: want 422, got %d", r2.StatusCode)
+	}
+}
+
+// TestFederationIdempotencyCommittedFailureHasReceipt verifies that replaying a key
+// whose call was committed as a failure returns a non-nil receipt (Bug 1b fix).
+func TestFederationIdempotencyCommittedFailureHasReceipt(t *testing.T) {
+	// Backend always returns 500 → execution failure → CommitFailedCall.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+	ctx := context.Background()
+
+	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	_, _ = k.RegisterRemoteKernel(ctx, sys.ID, "@committed-fail-peer", pubB64, "http://committed-fail.example.com")
+
+	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
+		OwnerUserID: sys.ID, Name: "fail-exec", Kind: kernel.KindHTTP,
+		Source: backend.URL, Description: "always-failing action",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	})
+	k.SetActive(ctx, sys.ID, a.ID, true)
+	k.GrantAll(ctx, sys.ID, a.ID)
+
+	path := "/v1/federation/call?action=@sys/fail-exec&counterparty=" + pubB64
+	ikey := uuid.New().String()
+	r1 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/fail-exec", ikey))
+	defer r1.Body.Close()
+	if r1.StatusCode == http.StatusConflict {
+		t.Fatal("first call returned 409")
+	}
+
+	// Replay same key: must return error (not 409) and a non-nil receipt.
+	r2 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/fail-exec", ikey))
+	if r2.StatusCode == http.StatusConflict {
+		t.Errorf("committed failure replay: got 409, want error response")
+	}
+	var body struct {
+		Receipt *kernel.Receipt `json:"receipt"`
+	}
+	decodeResponse(t, r2, &body)
+	if body.Receipt == nil {
+		t.Error("committed failure replay: receipt is nil, want non-nil")
+	}
+}
+
 // TestFederationCallRejectsArgsHashMismatch verifies that a federation call
 // whose body has been tampered with (args_hash no longer matches) is rejected.
 func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {

@@ -1182,15 +1182,14 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 			if existing.Status == "complete" {
 				var result map[string]any
 				_ = json.Unmarshal([]byte(existing.ResultJSON), &result)
-				// Failed calls store {"error":"...","code":"..."} with no receipt_json.
-				if _, isErr := result["error"]; isErr && existing.ReceiptJSON == "" {
-					code, _ := result["code"].(string)
-					writeJSON(w, kernel.HTTPStatusFromCode(code), map[string]any{"result": result, "receipt": nil})
-					return
-				}
 				var receipt *kernel.Receipt
 				if existing.ReceiptJSON != "" {
 					_ = json.Unmarshal([]byte(existing.ReceiptJSON), &receipt)
+				}
+				if _, isErr := result["error"]; isErr {
+					code, _ := result["code"].(string)
+					writeJSON(w, kernel.HTTPStatusFromCode(code), map[string]any{"result": result, "receipt": receipt})
+					return
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"result": result, "receipt": receipt})
 				return
@@ -1222,6 +1221,13 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		IdempotencyRecordID: rec.ID,
 	})
 	if callErr != nil {
+		// Complete the pending record so replays return the error instead of 409.
+		// If CommitFailedCall already completed it, this is a no-op (AND status='pending' guard).
+		errJSON, _ := json.Marshal(map[string]string{
+			"error": callErr.Error(),
+			"code":  kernel.KernelErrorCode(callErr),
+		})
+		_ = s.kernel.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), "")
 		writeErr(w, callErr)
 		return
 	}

@@ -483,9 +483,9 @@ func (k *Kernel) validateAndInitActivation(ctx context.Context, a *Action) error
 	return nil
 }
 
-// ActivateNativeAction activates a native action for bootstrap use.
-// Native actions are not managed by the normal user-facing action lifecycle.
-func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID string) error {
+// ActivateNativeAction reconciles spec fields and activates a native action for bootstrap use.
+// It overwrites description, inputSchema, and outputSchema so schema drift is corrected on every boot.
+func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description string, inputSchema, outputSchema map[string]any) error {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return err
@@ -493,6 +493,9 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID string) erro
 	if a.Kind != KindNative {
 		return ErrInvalidInput.Wrap("action is not native")
 	}
+	a.Description = description
+	a.InputSchema = inputSchema
+	a.OutputSchema = outputSchema
 	if err := k.validateAndInitActivation(ctx, a); err != nil {
 		return err
 	}
@@ -1527,6 +1530,12 @@ func (k *Kernel) InsertPendingIdempotencyRecord(ctx context.Context, r *Idempote
 // DeleteIdempotencyRecord removes a record to allow retry after execution failure.
 func (k *Kernel) DeleteIdempotencyRecord(ctx context.Context, id string) error {
 	return k.store.DeleteIdempotencyRecord(ctx, id)
+}
+
+// CompleteIdempotencyRecordIfPending transitions a pending idempotency record to complete.
+// If the record is already complete (CommitFailedCall already ran), this is a no-op.
+func (k *Kernel) CompleteIdempotencyRecordIfPending(ctx context.Context, id, resultJSON, receiptJSON string) error {
+	return k.store.CompleteIdempotencyRecordIfPending(ctx, id, resultJSON, receiptJSON)
 }
 
 // EmitEvent queues an event for all active listeners matching (sourceUserID, eventName).

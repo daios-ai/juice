@@ -935,9 +935,10 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, rece
 
 	if idempotencyRecordID != "" {
 		errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
+		receiptBytes, _ := json.Marshal(receipt)
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json='' WHERE id=?`,
-			string(errResult), idempotencyRecordID,
+			`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=?`,
+			string(errResult), string(receiptBytes), idempotencyRecordID,
 		); err != nil {
 			return dbErr(err, "commit failed call: complete idempotency record")
 		}
@@ -1091,24 +1092,21 @@ func (s *DB) ReadRootTrace(ctx context.Context, processID string) (*kernel.Trace
 
 // ---- Transactions ----
 
-func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transaction, error) {
+const txColumns = `id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,` +
+	`action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at`
+
+// scanTx scans one transaction row using the provided scan function.
+// scan must be called with exactly the destinations expected by txColumns.
+func scanTx(scan func(...any) error) (kernel.Transaction, error) {
 	var tx kernel.Transaction
 	var status, startedAt, endedAt, argsJSON, replyJSON string
 	var remoteReceiptHash *string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		        action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at
-		 FROM transactions WHERE id=?`, id,
-	).Scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
+	if err := scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
 		&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
 		&argsJSON, &replyJSON, &status,
 		&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON,
-		&startedAt, &endedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, kernel.ErrNotFound.Wrap("transaction not found")
-	}
-	if err != nil {
-		return nil, dbErr(err, "read transaction")
+		&startedAt, &endedAt); err != nil {
+		return tx, err
 	}
 	tx.ArgsJSON = strToRawJSON(argsJSON)
 	tx.ReplyJSON = strToRawJSON(replyJSON)
@@ -1116,13 +1114,24 @@ func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transactio
 	tx.RemoteReceiptHash = strVal(remoteReceiptHash)
 	tx.StartedAt = strToTime(startedAt)
 	tx.EndedAt = strToTime(endedAt)
+	return tx, nil
+}
+
+func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transaction, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+txColumns+` FROM transactions WHERE id=?`, id)
+	tx, err := scanTx(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("transaction not found")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read transaction")
+	}
 	return &tx, nil
 }
 
 func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel.Transaction, error) {
-	q := `SELECT id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-	             action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at
-	      FROM transactions WHERE 1=1`
+	q := `SELECT ` + txColumns + ` FROM transactions WHERE 1=1`
 	args := []any{}
 	if f.OwnerUserID != "" {
 		q += ` AND owner_user_id=?`
@@ -1160,22 +1169,10 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 
 	var out []*kernel.Transaction
 	for rows.Next() {
-		var tx kernel.Transaction
-		var status, startedAt, endedAt, argsJSON, replyJSON string
-		var remoteReceiptHash *string
-		if err := rows.Scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
-			&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
-			&argsJSON, &replyJSON, &status,
-			&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON,
-			&startedAt, &endedAt); err != nil {
+		tx, err := scanTx(rows.Scan)
+		if err != nil {
 			return nil, dbErr(err, "scan transaction")
 		}
-		tx.ArgsJSON = strToRawJSON(argsJSON)
-		tx.ReplyJSON = strToRawJSON(replyJSON)
-		tx.Status = kernel.TxStatus(status)
-		tx.RemoteReceiptHash = strVal(remoteReceiptHash)
-		tx.StartedAt = strToTime(startedAt)
-		tx.EndedAt = strToTime(endedAt)
 		out = append(out, &tx)
 	}
 	return out, rows.Err()
@@ -1186,31 +1183,18 @@ func (s *DB) ListAllTransactions(ctx context.Context, limit, offset int) ([]*ker
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		        action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at
-		 FROM transactions ORDER BY started_at DESC LIMIT ? OFFSET ?`, limit, offset)
+		`SELECT `+txColumns+` FROM transactions ORDER BY started_at DESC LIMIT ? OFFSET ?`,
+		limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list all transactions")
 	}
 	defer rows.Close()
 	var out []*kernel.Transaction
 	for rows.Next() {
-		var tx kernel.Transaction
-		var status, startedAt, endedAt, argsJSON, replyJSON string
-		var remoteReceiptHash *string
-		if err := rows.Scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
-			&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
-			&argsJSON, &replyJSON, &status,
-			&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON,
-			&startedAt, &endedAt); err != nil {
+		tx, err := scanTx(rows.Scan)
+		if err != nil {
 			return nil, dbErr(err, "scan transaction")
 		}
-		tx.ArgsJSON = strToRawJSON(argsJSON)
-		tx.ReplyJSON = strToRawJSON(replyJSON)
-		tx.Status = kernel.TxStatus(status)
-		tx.RemoteReceiptHash = strVal(remoteReceiptHash)
-		tx.StartedAt = strToTime(startedAt)
-		tx.EndedAt = strToTime(endedAt)
 		out = append(out, &tx)
 	}
 	return out, rows.Err()
@@ -1928,6 +1912,14 @@ func (s *DB) DeleteIdempotencyRecord(ctx context.Context, id string) error {
 		`DELETE FROM idempotency_records WHERE id=?`, id,
 	)
 	return dbErr(err, "delete idempotency record")
+}
+
+func (s *DB) CompleteIdempotencyRecordIfPending(ctx context.Context, id, resultJSON, receiptJSON string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=? AND status='pending'`,
+		resultJSON, receiptJSON, id,
+	)
+	return dbErr(err, "complete idempotency record if pending")
 }
 
 func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*kernel.IdempotencyRecord, error) {

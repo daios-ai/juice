@@ -66,19 +66,10 @@ func bootstrap(k *kernel.Kernel) error {
 	}
 	k.SetSigningKey(ed25519.PrivateKey(privKeyBytes), su.ID)
 
-	// Register lookup native action if absent.
-	if err := ensureSysLookup(ctx, k, handle); err != nil {
-		return err
-	}
-
-	// Register llm/chat native action if absent.
-	if err := ensureSysLLMChat(ctx, k, handle); err != nil {
-		return err
-	}
-
-	// Register make native action if absent.
-	if err := ensureSysMake(ctx, k, handle); err != nil {
-		return err
+	for _, spec := range sysNativeSpecs {
+		if err := ensureSysNative(ctx, k, handle, spec); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -109,33 +100,71 @@ func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 	return superuserHandle, nil
 }
 
-func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle string) error {
+// sysNativeSpec describes one @sys native action to register during bootstrap.
+type sysNativeSpec struct {
+	name         string
+	price        int64
+	description  string
+	inputSchema  map[string]any
+	outputSchema map[string]any
+}
+
+// ensureSysNative idempotently registers, activates, and grants public call access to a
+// @sys native action. If the action already exists, its description and schemas are always
+// reconciled to the spec so that schema drift is corrected on every boot.
+func ensureSysNative(ctx context.Context, k *kernel.Kernel, superuserHandle string, spec sysNativeSpec) error {
 	su, err := k.ReadUserByHandle(ctx, superuserHandle)
 	if err != nil {
 		return fmt.Errorf("read superuser: %w", err)
 	}
-
-	actionName := "lookup"
-	a, err := k.ReadActionByOwnerName(ctx, su.ID, actionName)
-	if err == nil && a != nil {
-		// Already registered — ensure active and grant-all is set.
-		if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
-			return fmt.Errorf("activate @sys/lookup: %w", err)
+	a, err := k.ReadActionByOwnerName(ctx, su.ID, spec.name)
+	if err != nil || a == nil {
+		a, err = k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
+			OwnerUserID: su.ID,
+			Name:        spec.name,
+			Kind:        kernel.KindNative,
+			Price:       spec.price,
+		})
+		if err != nil {
+			return fmt.Errorf("create @sys/%s: %w", spec.name, err)
 		}
-		if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
-			return fmt.Errorf("grant-all @sys/lookup: %w", err)
-		}
-		return nil
 	}
+	if err := k.ActivateNativeAction(ctx, a.ID, spec.description, spec.inputSchema, spec.outputSchema); err != nil {
+		return fmt.Errorf("activate @sys/%s: %w", spec.name, err)
+	}
+	if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
+		return fmt.Errorf("grant-all @sys/%s: %w", spec.name, err)
+	}
+	return nil
+}
 
-	// Create the native lookup action.
-	a, err = k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
-		OwnerUserID: su.ID,
-		Name:        actionName,
-		Kind:        kernel.KindNative,
-		Price:       0,
-		Description: "Semantic search over active actions",
-		InputSchema: map[string]any{
+var makeOutputSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"status":      map[string]any{"type": "string", "description": "success or failure"},
+		"action_id":   map[string]any{"type": "string", "description": "Registered action ID, present on success"},
+		"action_name": map[string]any{"type": "string", "description": "Registered action name, present on success"},
+		"diagnostics": map[string]any{"type": "array", "description": "Synthesis diagnostics", "items": map[string]any{"type": "string"}},
+		"tests":       map[string]any{"type": "array", "description": "Test results from smoke-test execution", "items": map[string]any{"type": "object"}},
+	},
+	"required": []string{"status", "diagnostics"},
+}
+
+var msgItemSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"role":    map[string]any{"type": "string", "description": "Role of the message sender (user or assistant)"},
+		"content": map[string]any{"type": "string", "description": "Text content of the message"},
+	},
+	"required": []string{"role", "content"},
+}
+
+var sysNativeSpecs = []sysNativeSpec{
+	{
+		name:        "lookup",
+		price:       0,
+		description: "Semantic search over active actions",
+		inputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"query": map[string]any{"type": "string", "description": "Semantic search query"},
@@ -143,7 +172,7 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 			},
 			"required": []string{"query"},
 		},
-		OutputSchema: map[string]any{
+		outputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"results": map[string]any{
@@ -162,124 +191,12 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 				},
 			},
 		},
-	})
-	if err != nil {
-		return fmt.Errorf("create @sys/lookup: %w", err)
-	}
-
-	if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
-		return fmt.Errorf("activate @sys/lookup: %w", err)
-	}
-
-	if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
-		return fmt.Errorf("grant-all @sys/lookup: %w", err)
-	}
-
-	return nil
-}
-
-func ensureSysMake(ctx context.Context, k *kernel.Kernel, superuserHandle string) error {
-	su, err := k.ReadUserByHandle(ctx, superuserHandle)
-	if err != nil {
-		return fmt.Errorf("read superuser: %w", err)
-	}
-
-	makeOutputSchema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"status":      map[string]any{"type": "string", "description": "success or failure"},
-			"action_id":   map[string]any{"type": "string", "description": "Registered action ID, present on success"},
-			"action_name": map[string]any{"type": "string", "description": "Registered action name, present on success"},
-			"diagnostics": map[string]any{"type": "array", "description": "Synthesis diagnostics", "items": map[string]any{"type": "string"}},
-			"tests":       map[string]any{"type": "array", "description": "Test results from smoke-test execution", "items": map[string]any{"type": "object"}},
-		},
-		"required": []string{"status", "diagnostics"},
-	}
-
-	actionName := "make"
-	a, err := k.ReadActionByOwnerName(ctx, su.ID, actionName)
-	if err == nil && a != nil {
-		// Correct stale output schema (old schema used "draft" instead of "action_id"/"action_name").
-		if props, _ := a.OutputSchema["properties"].(map[string]any); props != nil {
-			if _, hasDraft := props["draft"]; hasDraft {
-				if _, uerr := k.UpdateAction(ctx, su.ID, kernel.UpdateActionRequest{
-					ID:           a.ID,
-					OutputSchema: makeOutputSchema,
-				}); uerr != nil {
-					return fmt.Errorf("update @sys/make output schema: %w", uerr)
-				}
-			}
-		}
-		if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
-			return fmt.Errorf("activate @sys/make: %w", err)
-		}
-		if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
-			return fmt.Errorf("grant-all @sys/make: %w", err)
-		}
-		return nil
-	}
-
-	a, err = k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
-		OwnerUserID: su.ID,
-		Name:        actionName,
-		Kind:        kernel.KindNative,
-		Price:       20,
-		Description: "Generate a WASM action from a natural-language description",
-		InputSchema: map[string]any{
-			"type":       "object",
-			"properties": map[string]any{"description": map[string]any{"type": "string", "description": "Natural-language description of the action to generate"}},
-			"required":   []string{"description"},
-		},
-		OutputSchema: makeOutputSchema,
-	})
-	if err != nil {
-		return fmt.Errorf("create @sys/make: %w", err)
-	}
-
-	if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
-		return fmt.Errorf("activate @sys/make: %w", err)
-	}
-
-	if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
-		return fmt.Errorf("grant-all @sys/make: %w", err)
-	}
-
-	return nil
-}
-
-func ensureSysLLMChat(ctx context.Context, k *kernel.Kernel, superuserHandle string) error {
-	su, err := k.ReadUserByHandle(ctx, superuserHandle)
-	if err != nil {
-		return fmt.Errorf("read superuser: %w", err)
-	}
-
-	actionName := "llm/chat"
-	a, err := k.ReadActionByOwnerName(ctx, su.ID, actionName)
-	if err == nil && a != nil {
-		if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
-			return fmt.Errorf("activate @sys/llm/chat: %w", err)
-		}
-		if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
-			return fmt.Errorf("grant-all @sys/llm/chat: %w", err)
-		}
-		return nil
-	}
-
-	msgItemSchema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"role":    map[string]any{"type": "string", "description": "Role of the message sender (user or assistant)"},
-			"content": map[string]any{"type": "string", "description": "Text content of the message"},
-		},
-		"required": []string{"role", "content"},
-	}
-	a, err = k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
-		OwnerUserID: su.ID,
-		Name:        actionName,
-		Kind:        kernel.KindNative,
-		Price:       0,
-		Description: "Chat completion via the configured language model",
-		InputSchema: map[string]any{
+	},
+	{
+		name:        "llm/chat",
+		price:       0,
+		description: "Chat completion via the configured language model",
+		inputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"messages": map[string]any{"type": "array", "items": msgItemSchema, "description": "Conversation history"},
@@ -287,7 +204,7 @@ func ensureSysLLMChat(ctx context.Context, k *kernel.Kernel, superuserHandle str
 			},
 			"required": []string{"messages"},
 		},
-		OutputSchema: map[string]any{
+		outputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"message": map[string]any{
@@ -300,18 +217,12 @@ func ensureSysLLMChat(ctx context.Context, k *kernel.Kernel, superuserHandle str
 				},
 			},
 		},
-	})
-	if err != nil {
-		return fmt.Errorf("create @sys/llm/chat: %w", err)
-	}
-
-	if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
-		return fmt.Errorf("activate @sys/llm/chat: %w", err)
-	}
-
-	if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
-		return fmt.Errorf("grant-all @sys/llm/chat: %w", err)
-	}
-
-	return nil
+	},
+	{
+		name:         "make",
+		price:        20,
+		description:  "Generate a WASM action from a natural-language description",
+		inputSchema:  map[string]any{"type": "object", "properties": map[string]any{"description": map[string]any{"type": "string", "description": "Natural-language description of the action to generate"}}, "required": []string{"description"}},
+		outputSchema: makeOutputSchema,
+	},
 }

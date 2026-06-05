@@ -205,6 +205,10 @@ type Store interface {
 	InsertPendingIdempotencyRecord(ctx context.Context, r *IdempotencyRecord) error
 	// DeleteIdempotencyRecord removes a record (used to allow retry after execution failure).
 	DeleteIdempotencyRecord(ctx context.Context, id string) error
+	// CompleteIdempotencyRecordIfPending atomically transitions a record from pending to
+	// complete, storing resultJSON and receiptJSON. If the record is already complete
+	// (e.g. CommitFailedCall already ran), this is a no-op.
+	CompleteIdempotencyRecordIfPending(ctx context.Context, id, resultJSON, receiptJSON string) error
 
 	// ---- Stats ----
 
