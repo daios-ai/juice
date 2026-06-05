@@ -184,9 +184,32 @@ func ensureSysMake(ctx context.Context, k *kernel.Kernel, superuserHandle string
 		return fmt.Errorf("read superuser: %w", err)
 	}
 
+	makeOutputSchema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"status":      map[string]any{"type": "string", "description": "success or failure"},
+			"action_id":   map[string]any{"type": "string", "description": "Registered action ID, present on success"},
+			"action_name": map[string]any{"type": "string", "description": "Registered action name, present on success"},
+			"diagnostics": map[string]any{"type": "array", "description": "Synthesis diagnostics", "items": map[string]any{"type": "string"}},
+			"tests":       map[string]any{"type": "array", "description": "Test results from smoke-test execution", "items": map[string]any{"type": "object"}},
+		},
+		"required": []string{"status", "diagnostics"},
+	}
+
 	actionName := "make"
 	a, err := k.ReadActionByOwnerName(ctx, su.ID, actionName)
 	if err == nil && a != nil {
+		// Correct stale output schema (old schema used "draft" instead of "action_id"/"action_name").
+		if props, _ := a.OutputSchema["properties"].(map[string]any); props != nil {
+			if _, hasDraft := props["draft"]; hasDraft {
+				if _, uerr := k.UpdateAction(ctx, su.ID, kernel.UpdateActionRequest{
+					ID:           a.ID,
+					OutputSchema: makeOutputSchema,
+				}); uerr != nil {
+					return fmt.Errorf("update @sys/make output schema: %w", uerr)
+				}
+			}
+		}
 		if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
 			return fmt.Errorf("activate @sys/make: %w", err)
 		}
@@ -207,16 +230,7 @@ func ensureSysMake(ctx context.Context, k *kernel.Kernel, superuserHandle string
 			"properties": map[string]any{"description": map[string]any{"type": "string", "description": "Natural-language description of the action to generate"}},
 			"required":   []string{"description"},
 		},
-		OutputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"status":      map[string]any{"type": "string", "description": "success or failure"},
-				"draft":       map[string]any{"type": "object", "description": "Generated action draft, present on success"},
-				"diagnostics": map[string]any{"type": "array", "description": "Synthesis diagnostics", "items": map[string]any{"type": "string"}},
-				"tests":       map[string]any{"type": "array", "description": "Test results from dry-run execution"},
-			},
-			"required": []string{"status", "diagnostics"},
-		},
+		OutputSchema: makeOutputSchema,
 	})
 	if err != nil {
 		return fmt.Errorf("create @sys/make: %w", err)
