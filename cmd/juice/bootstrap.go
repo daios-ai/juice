@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/script"
 	"golang.org/x/term"
 )
 
@@ -66,6 +67,12 @@ func bootstrap(k *kernel.Kernel) error {
 	}
 	k.SetSigningKey(ed25519.PrivateKey(privKeyBytes), su.ID)
 
+	// Register native action handlers. Each handler is self-contained in its own kernel file.
+	kernel.RegisterLookupHandler(k)
+	kernel.RegisterChatHandler(k)
+	kernel.RegisterMakeHandler(k)
+	k.SetCompiler(script.NewTinyGoCompiler(script.CompileConfig{}))
+
 	// Register lookup native action if absent.
 	if err := ensureSysLookup(ctx, k, handle); err != nil {
 		return err
@@ -73,6 +80,11 @@ func bootstrap(k *kernel.Kernel) error {
 
 	// Register llm/chat native action if absent.
 	if err := ensureSysLLMChat(ctx, k, handle); err != nil {
+		return err
+	}
+
+	// Register make native action if absent.
+	if err := ensureSysMake(ctx, k, handle); err != nil {
 		return err
 	}
 
@@ -168,6 +180,78 @@ func ensureSysLookup(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 
 	if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
 		return fmt.Errorf("grant-all @sys/lookup: %w", err)
+	}
+
+	return nil
+}
+
+func ensureSysMake(ctx context.Context, k *kernel.Kernel, superuserHandle string) error {
+	su, err := k.ReadUserByHandle(ctx, superuserHandle)
+	if err != nil {
+		return fmt.Errorf("read superuser: %w", err)
+	}
+
+	actionName := "make"
+	a, err := k.ReadActionByOwnerName(ctx, su.ID, actionName)
+	if err == nil && a != nil {
+		if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
+			return fmt.Errorf("activate @sys/make: %w", err)
+		}
+		if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
+			return fmt.Errorf("grant-all @sys/make: %w", err)
+		}
+		return nil
+	}
+
+	exampleItem := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"args":  map[string]any{"description": "Example call arguments"},
+			"reply": map[string]any{"description": "Expected reply"},
+		},
+		"required": []string{"args", "reply"},
+	}
+	a, err = k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID: su.ID,
+		Name:        actionName,
+		Kind:        kernel.KindNative,
+		Price:       20,
+		Description: "Generate a WASM action from a natural-language description",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"description":     map[string]any{"type": "string", "description": "Natural-language description of the action to generate"},
+				"name":            map[string]any{"type": "string", "description": "Optional preferred action name"},
+				"input_schema":    map[string]any{"type": "object", "description": "Optional desired JSON input schema"},
+				"output_schema":   map[string]any{"type": "object", "description": "Optional desired JSON output schema"},
+				"examples":        map[string]any{"type": "array", "description": "Optional input-output examples used as tests", "items": exampleItem},
+				"allowed_actions": map[string]any{"type": "array", "description": "Optional list of action references the generated WASM may call", "items": map[string]any{"type": "string"}},
+				"price":           map[string]any{"type": "integer", "minimum": 0, "description": "Optional requested default price for the generated action"},
+				"max_steps":       map[string]any{"type": "integer", "minimum": 1, "maximum": 10, "description": "Optional synthesis repair-step limit; defaults to 5"},
+			},
+			"required": []string{"description"},
+		},
+		OutputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"status":      map[string]any{"type": "string", "description": "success or failure"},
+				"draft":       map[string]any{"type": "object", "description": "Generated action draft, present on success"},
+				"diagnostics": map[string]any{"type": "array", "description": "Synthesis diagnostics", "items": map[string]any{"type": "string"}},
+				"tests":       map[string]any{"type": "array", "description": "Test results from dry-run execution"},
+			},
+			"required": []string{"status", "diagnostics"},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create @sys/make: %w", err)
+	}
+
+	if err := k.ActivateNativeAction(ctx, a.ID); err != nil {
+		return fmt.Errorf("activate @sys/make: %w", err)
+	}
+
+	if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
+		return fmt.Errorf("grant-all @sys/make: %w", err)
 	}
 
 	return nil

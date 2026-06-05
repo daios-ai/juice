@@ -1315,7 +1315,9 @@ func newTestKernelWithChatter(st kernel.Store, c kernel.Chatter) *kernel.Kernel 
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	return kernel.New(st, nil, nil, nil, c, cfg, nil)
+	k := kernel.New(st, nil, nil, nil, c, cfg, nil)
+	kernel.RegisterChatHandler(k)
+	return k
 }
 
 func TestCallLLMChat(t *testing.T) {
@@ -1367,7 +1369,8 @@ func TestCallLLMChat(t *testing.T) {
 func TestCallLLMChatNoChatter(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
-	k := newTestKernel(st) // no chatter
+	k := newTestKernel(st)
+	kernel.RegisterChatHandler(k)
 
 	owner := setupUser(t, st, "@sys", 1000)
 	chatAction := &kernel.Action{

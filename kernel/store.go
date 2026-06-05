@@ -4,6 +4,25 @@ import "context"
 
 // ---- Script execution interfaces ----
 
+// SourceCompiler compiles TinyGo source bytes to WASM.
+// kernel/ defines this interface; script/ provides the TinyGo implementation.
+// Returns ErrInvalidInput on compile failure; ErrInvalidState when tinygo binary absent.
+type SourceCompiler interface {
+	CompileSource(ctx context.Context, source []byte) (artifact []byte, hash string, err error)
+}
+
+// WASMImport describes one function import inside a WASM binary.
+type WASMImport struct {
+	Module string
+	Name   string
+}
+
+// WASMInspector enumerates a WASM binary's imports and exports without executing it.
+// ScriptExecutor implementations may optionally implement this; kernel checks via type assertion.
+type WASMInspector interface {
+	InspectWASM(artifact []byte) (imports []WASMImport, exports []string, err error)
+}
+
 // ScriptExecutor compiles and runs WebAssembly scripts.
 // kernel/ defines this interface; script/ provides the wazero implementation.
 type ScriptExecutor interface {

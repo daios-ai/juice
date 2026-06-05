@@ -157,3 +157,82 @@ func TestBootstrapRejectsKeyMismatch(t *testing.T) {
 		t.Error("expected error for mismatched signing keys, got nil")
 	}
 }
+
+func TestEnsureSysMakeIdempotent(t *testing.T) {
+	ctx := context.Background()
+	k := newTestKernel(t)
+
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@sys", Email: "sys@sys", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetConfig(ctx, configKeySuperuser, u.Handle); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureSysMake(ctx, k, u.Handle); err != nil {
+		t.Fatalf("first ensureSysMake: %v", err)
+	}
+	a, err := k.ReadActionByOwnerName(ctx, u.ID, "make")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Active {
+		t.Fatal("@sys/make should be active after ensureSysMake")
+	}
+	if a.Price != 20 {
+		t.Errorf("@sys/make price = %d, want 20", a.Price)
+	}
+
+	if err := ensureSysMake(ctx, k, u.Handle); err != nil {
+		t.Fatalf("second ensureSysMake: %v", err)
+	}
+	a2, err := k.ReadActionByOwnerName(ctx, u.ID, "make")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ID != a2.ID {
+		t.Error("idempotent ensureSysMake must not create a second action")
+	}
+	if !a2.Public {
+		t.Error("@sys/make should be public after idempotent ensureSysMake")
+	}
+}
+
+func TestBootstrapRegistersMake(t *testing.T) {
+	ctx := context.Background()
+	k := newTestKernel(t)
+
+	if err := k.FirstBoot(ctx, "secret"); err != nil {
+		t.Fatalf("FirstBoot: %v", err)
+	}
+	if err := bootstrap(k); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := k.ReadActionByOwnerName(ctx, sys.ID, "make")
+	if err != nil {
+		t.Fatalf("@sys/make not registered after bootstrap: %v", err)
+	}
+	if !a.Active {
+		t.Error("@sys/make should be active after bootstrap")
+	}
+	if !a.Public {
+		t.Error("@sys/make should be public after bootstrap")
+	}
+	if a.Kind != kernel.KindNative {
+		t.Errorf("@sys/make kind = %q, want native", a.Kind)
+	}
+	if a.Price != 20 {
+		t.Errorf("@sys/make price = %d, want 20", a.Price)
+	}
+	if a.OwnerUserID != sys.ID {
+		t.Errorf("@sys/make owner = %q, want sys ID", a.OwnerUserID)
+	}
+}

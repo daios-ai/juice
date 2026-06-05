@@ -46,25 +46,45 @@ func DefaultConfig() Config {
 // AllowsLocalSources reports whether the kernel is configured to permit loopback/private source URLs.
 func (k *Kernel) AllowsLocalSources() bool { return k.cfg.AllowLocalSources }
 
+// NativeFunc is the signature for a registered native action handler.
+// subjectID, processID, and parentTraceID are the calling context from Call().
+type NativeFunc func(ctx context.Context, args map[string]any, subjectID, processID, parentTraceID string) (map[string]any, error)
+
 // Kernel is the central service object.
 // It holds all dependencies and exposes operations to both the CLI and HTTP server.
 type Kernel struct {
-	store   Store
-	scripts ScriptExecutor
-	http    HTTPExecutor
-	llm     Embedder
-	chatter Chatter
-	cfg     Config
-	log     *log.Logger
+	store          Store
+	scripts        ScriptExecutor
+	compiler       SourceCompiler
+	http           HTTPExecutor
+	llm            Embedder
+	chatter        Chatter
+	cfg            Config
+	log            *log.Logger
+	nativeHandlers map[string]NativeFunc
 }
-
 
 // New constructs a Kernel. scripts, http, llm, and chatter may be nil if those features are unused.
 func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, chatter Chatter, cfg Config, logger *log.Logger) *Kernel {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Kernel{store: store, scripts: scripts, http: http, llm: llm, chatter: chatter, cfg: cfg, log: logger}
+	return &Kernel{
+		store:          store,
+		scripts:        scripts,
+		http:           http,
+		llm:            llm,
+		chatter:        chatter,
+		cfg:            cfg,
+		log:            logger,
+		nativeHandlers: make(map[string]NativeFunc),
+	}
+}
+
+// RegisterNativeHandler registers a native action handler by action name.
+// Call from bootstrap to wire each native action without touching call.go.
+func (k *Kernel) RegisterNativeHandler(name string, fn NativeFunc) {
+	k.nativeHandlers[name] = fn
 }
 
 // SetSigningKey stores the Ed25519 signing key and issuer user ID after bootstrap completes.
@@ -76,6 +96,12 @@ func (k *Kernel) SetSigningKey(priv ed25519.PrivateKey, issuerUserID string) {
 // SetTokenSecret updates the JWT HMAC secret after bootstrap completes.
 func (k *Kernel) SetTokenSecret(secret string) {
 	k.cfg.TokenSecret = secret
+}
+
+// SetCompiler sets the SourceCompiler for TinyGo-to-WASM compilation.
+// Called from bootstrap alongside RegisterMakeHandler.
+func (k *Kernel) SetCompiler(c SourceCompiler) {
+	k.compiler = c
 }
 
 // ---- User operations ----

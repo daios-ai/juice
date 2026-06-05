@@ -299,7 +299,7 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 		res, cost, err := k.executeWasm(ctx, action, args, trace, ownerUserID)
 		return res, cost, "", err
 	case KindNative:
-		res, err := k.executeNative(ctx, action, args, subjectID)
+		res, err := k.executeNative(ctx, action, args, subjectID, trace.ProcessID, trace.ID)
 		return res, 0, "", err
 	case KindRemoteProxy:
 		if fe, ok := k.http.(FederationExecutor); ok {
@@ -313,87 +313,13 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 	}
 }
 
-// executeNative dispatches to built-in native action implementations.
-func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any, subjectID string) (map[string]any, error) {
-	switch action.Name {
-	case "lookup":
-		return k.executeLookup(ctx, args, subjectID)
-	case "llm/chat":
-		return k.executeChat(ctx, args)
-	default:
+// executeNative dispatches to a registered native action handler.
+func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any, subjectID, processID, parentTraceID string) (map[string]any, error) {
+	fn, ok := k.nativeHandlers[action.Name]
+	if !ok {
 		return nil, ErrInvalidState.Wrapf("unknown native action %q", action.Name)
 	}
-}
-
-// executeLookup implements the /lookup native action.
-func (k *Kernel) executeLookup(ctx context.Context, args map[string]any, subjectID string) (map[string]any, error) {
-	query, _ := args["query"].(string)
-	if query == "" {
-		return nil, ErrInvalidInput.Wrap("lookup requires query argument")
-	}
-	limit := 10
-	if l, ok := args["limit"].(float64); ok {
-		limit = int(l)
-	}
-	results, err := k.Lookup(ctx, LookupRequest{Query: query, Limit: limit, SubjectID: subjectID})
-	if err != nil {
-		return nil, err
-	}
-	items := make([]any, len(results))
-	for i, r := range results {
-		items[i] = map[string]any{
-			"action_id":    r.Action.ID,
-			"name":         r.Action.Name,
-			"owner_handle": r.OwnerHandle,
-			"description":  r.Action.Description,
-			"score":        float64(r.Score),
-		}
-	}
-	return map[string]any{"results": items}, nil
-}
-
-// executeChat implements the /llm/chat native action.
-func (k *Kernel) executeChat(ctx context.Context, args map[string]any) (map[string]any, error) {
-	if k.chatter == nil {
-		return nil, ErrInvalidState.Wrap("chat service not configured")
-	}
-
-	rawMsgs, ok := args["messages"]
-	if !ok {
-		return nil, ErrInvalidInput.Wrap("chat requires messages argument")
-	}
-	msgList, ok := rawMsgs.([]any)
-	if !ok {
-		return nil, ErrInvalidInput.Wrap("messages must be an array")
-	}
-
-	var messages []ChatMessage
-	if sys, ok := args["system"].(string); ok && sys != "" {
-		messages = append(messages, ChatMessage{Role: "system", Content: sys})
-	}
-	for _, item := range msgList {
-		m, ok := item.(map[string]any)
-		if !ok {
-			return nil, ErrInvalidInput.Wrap("each message must be an object")
-		}
-		role, _ := m["role"].(string)
-		content, _ := m["content"].(string)
-		if role == "" || content == "" {
-			return nil, ErrInvalidInput.Wrap("each message must have role and content")
-		}
-		messages = append(messages, ChatMessage{Role: role, Content: content})
-	}
-
-	reply, err := k.chatter.Chat(ctx, messages)
-	if err != nil {
-		return nil, ErrExecutionFailed.Wrapf("chat failed: %v", err)
-	}
-	return map[string]any{
-		"message": map[string]any{
-			"role":    reply.Role,
-			"content": reply.Content,
-		},
-	}, nil
+	return fn(ctx, args, subjectID, processID, parentTraceID)
 }
 
 // executeWasm runs a compiled WASM artifact.
