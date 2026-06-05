@@ -2951,18 +2951,13 @@ print(json.dumps(m) if m else 'null')
         && ok "make.missing_description_rejected" \
         || fail "make.missing_description_rejected" "expected schema error, got: $no_desc_out"
 
-    # Call with description + explicit schemas.
+    # Call with description only (the only accepted input).
     # Succeeds as a kernel call regardless of whether tinygo/Ollama is available.
     # Returns {status: "success"|"failure", diagnostics: [...]} — never a hard kernel error.
     local make_out make_result status
     make_out=$(j "$db" "$home_alice" call \
         --process "$proc_id" --action @sys/make \
-        --args '{
-            "description": "Return a fixed greeting message",
-            "input_schema":  {"type":"object","properties":{"name":{"type":"string","description":"recipient name"}},"required":["name"]},
-            "output_schema": {"type":"object","properties":{"greeting":{"type":"string","description":"greeting text"}},"required":["greeting"]},
-            "max_steps": 1
-        }' 2>&1)
+        --args '{"description": "Return a fixed greeting message that says Hello followed by the name"}' 2>&1)
     make_result=$(echo "$make_out" | python3 -c "
 import sys, json, re
 text = sys.stdin.read()

@@ -12,6 +12,7 @@ import (
 	"github.com/daios-ai/juice/kernel"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
 // Executor implements kernel.ScriptExecutor using wazero.
@@ -35,7 +36,10 @@ func New(cfg Config) *Executor {
 	if cfg.MemoryBytes > 0 {
 		rCfg = rCfg.WithMemoryLimitPages(MemoryPages(cfg.MemoryBytes))
 	}
-	rt := wazero.NewRuntimeWithConfig(context.Background(), rCfg)
+	ctx := context.Background()
+	rt := wazero.NewRuntimeWithConfig(ctx, rCfg)
+	// Provide WASI host functions required by TinyGo's wasip1 target.
+	wasi_snapshot_preview1.MustInstantiate(ctx, rt)
 	return &Executor{
 		runtime: rt,
 		cfg:     cfg,
@@ -97,7 +101,9 @@ func (e *Executor) Execute(ctx context.Context, artifact []byte, input []byte, h
 	}
 	defer hostMod.Close(ctx)
 
-	modCfg := wazero.NewModuleConfig().WithName("")
+	// WithStartFunctions() skips _start so proc_exit(0) never closes the module.
+	// TinyGo's wasip1 runtime initializes lazily on first exported-function call.
+	modCfg := wazero.NewModuleConfig().WithName("").WithStartFunctions()
 	mod, err := e.runtime.InstantiateModule(ctx, compiled, modCfg)
 	if err != nil {
 		return nil, kernel.ErrExecutionFailed.Wrapf("instantiate wasm module: %v", err)
@@ -130,12 +136,19 @@ func (e *Executor) Execute(ctx context.Context, artifact []byte, input []byte, h
 	if err != nil {
 		return nil, kernel.ErrExecutionFailed.Wrapf("run failed: %v", err)
 	}
-	if len(results) != 2 {
-		return nil, kernel.ErrExecutionFailed.Wrap("run must return (ptr, len)")
+	// Support two calling conventions:
+	// - (i32, i32): hand-crafted WASM with multi-value return
+	// - (i64):      TinyGo wasm-unknown packed return (upper 32 = ptr, lower 32 = len)
+	var outputPtr, outputLen uint32
+	switch len(results) {
+	case 2:
+		outputPtr, outputLen = uint32(results[0]), uint32(results[1])
+	case 1:
+		outputPtr, outputLen = uint32(results[0]>>32), uint32(results[0])
+	default:
+		return nil, kernel.ErrExecutionFailed.Wrap("run must return (ptr, len) or packed i64")
 	}
 
-	outputPtr := uint32(results[0])
-	outputLen := uint32(results[1])
 	output, ok := mem.Read(outputPtr, outputLen)
 	if !ok {
 		return nil, kernel.ErrExecutionFailed.Wrap("failed to read output from wasm memory")

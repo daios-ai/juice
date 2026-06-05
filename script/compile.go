@@ -114,7 +114,7 @@ func (c *TinyGoCompiler) CompileSource(ctx context.Context, source []byte) ([]by
 	defer cancel()
 
 	outPath := filepath.Join(dir, "out.wasm")
-	cmd := exec.CommandContext(compileCtx, "tinygo", "build", "-target", "wasm-unknown", "-o", outPath, srcPath)
+	cmd := exec.CommandContext(compileCtx, "tinygo", "build", "-target", "wasip1", "-o", outPath, srcPath)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

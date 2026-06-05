@@ -115,7 +115,7 @@ func TestMakeRejectsEmptyDescription(t *testing.T) {
 }
 
 func TestMakeReturnsErrInvalidStateWithoutCompiler(t *testing.T) {
-	k, st := newMakeKernel(t, &llm.FakeChatter{})
+	k, st := newMakeKernel(t, &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}})
 	k.SetCompiler(nil) // remove compiler
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
@@ -132,11 +132,20 @@ func TestMakeReturnsErrInvalidStateWithoutCompiler(t *testing.T) {
 	}
 }
 
+// fakeContract is a minimal valid contract JSON response for tests.
+const fakeContract = `{"name":"test-action","input_schema":{"type":"object","properties":{}},"output_schema":{"type":"object","properties":{"result":{"type":"string"}},"required":["result"]},"plan":"simple fixed response"}`
+
+// fakeCode is a minimal valid TinyGo run function for tests.
+const fakeCode = "```go\n//export run\nfunc run(inputPtr, inputLen uint32) (uint32, uint32) { return 0, 2 }\n```"
+
+// fakeExamples is an empty example list — unit tests use the compile smoke test only.
+const fakeExamples = `[]`
+
 func TestMakeReturnsDraftOnSuccess(t *testing.T) {
 	fakeChat := &cycleFakeChatter{responses: []string{
-		// Schema derivation — not needed since we supply schemas
-		// Code generation
-		"```go\npackage main\n//export run\nfunc run(inputPtr, inputLen uint32) (uint32, uint32) { return 0, 2 }\n```",
+		fakeContract, // step 2: contract derivation
+		fakeCode,     // step 5: source generation
+		fakeExamples, // step 8: example generation
 	}}
 	k, st := newMakeKernel(t, fakeChat)
 	ctx := context.Background()
@@ -176,11 +185,19 @@ func TestMakeReturnsDraftOnSuccess(t *testing.T) {
 	if result.Draft.Source == "" {
 		t.Error("expected non-empty source in draft")
 	}
+	if result.Draft.InputSchema == nil {
+		t.Error("expected non-nil input_schema in draft")
+	}
+	if result.Draft.OutputSchema == nil {
+		t.Error("expected non-nil output_schema in draft")
+	}
 }
 
 func TestMakeDraftHasNameAndKind(t *testing.T) {
 	fakeChat := &cycleFakeChatter{responses: []string{
-		"```go\npackage main\n//export run\nfunc run(inputPtr, inputLen uint32) (uint32, uint32) { return 0, 2 }\n```",
+		fakeContract,
+		fakeCode,
+		fakeExamples,
 	}}
 	k, st := newMakeKernel(t, fakeChat)
 	ctx := context.Background()
@@ -255,7 +272,7 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 
 func TestMakeInternalChatCallCreatesChildTrace(t *testing.T) {
 	fakeChat := &cycleFakeChatter{responses: []string{
-		"```go\npackage main\n//export run\nfunc run(inputPtr, inputLen uint32) (uint32, uint32) { return 0, 2 }\n```",
+		fakeContract, fakeCode, fakeExamples,
 	}}
 	k, st := newMakeKernel(t, fakeChat)
 	ctx := context.Background()

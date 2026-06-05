@@ -17,16 +17,16 @@ func hostEmit(eventPtr, eventLen, argsPtr, argsLen uint32)
 //go:wasmimport juice log
 func hostLog(lvlPtr, lvlLen, msgPtr, msgLen uint32)
 
-// _nextAlloc is a bump-pointer allocator base for memory handed to the host.
-var _nextAlloc uint32
-
 // alloc must be exported so the kernel can write input bytes into WASM memory.
+// Uses TinyGo's heap allocator to avoid stomping on runtime data at address 0.
 //
 //export alloc
 func alloc(size uint32) uint32 {
-	ptr := _nextAlloc
-	_nextAlloc += size
-	return ptr
+	b := make([]byte, int(size))
+	if len(b) == 0 {
+		return 0
+	}
+	return uint32(uintptr(unsafe.Pointer(&b[0])))
 }
 
 func _ptrLen(b []byte) (uint32, uint32) {
@@ -76,11 +76,15 @@ func mustMarshal(v any) []byte {
 	return b
 }
 
-// main is required by the TinyGo WASM target.
+// main is required by the TinyGo wasip1 target.
 func main() {}
 
 // run is the entry point. Generated actions must implement and export this function.
-// It receives JSON input via linear memory and must return JSON output via linear memory.
+// Returns a packed i64: upper 32 bits = outputPtr, lower 32 bits = outputLen.
 //
 //	//export run
-//	func run(inputPtr, inputLen uint32) (uint32, uint32) { ... }
+//	func run(inputPtr, inputLen uint32) uint64 {
+//	    out := mustMarshal(result)
+//	    p, l := _ptrLen(out)
+//	    return uint64(p)<<32 | uint64(l)
+//	}
