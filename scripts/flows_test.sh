@@ -309,7 +309,7 @@ def leb128u(n):
 def vec(d): return leb128u(len(d)) + bytes(d)
 def sec(id_, p): return bytes([id_]) + vec(p)
 
-types   = leb128u(3) + b'\x60\x04\x7f\x7f\x7f\x7f\x02\x7f\x7f' + b'\x60\x01\x7f\x01\x7f' + b'\x60\x02\x7f\x7f\x02\x7f\x7f'
+types   = leb128u(3) + b'\x60\x04\x7f\x7f\x7f\x7f\x01\x7e' + b'\x60\x01\x7f\x01\x7f' + b'\x60\x02\x7f\x7f\x01\x7e'
 imports = leb128u(1) + vec(b'juice') + vec(b'call') + b'\x00\x00'
 funcs   = leb128u(2) + b'\x01\x02'
 mems    = leb128u(1) + b'\x00\x01'
@@ -2108,7 +2108,7 @@ PYEOF
 
     # Import spec → created=1
     local import_out created_count action_id action_name
-    import_out=$(jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
+    import_out=$(JUICE_ALLOW_LOCAL_SOURCES=true jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
     created_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]).get('Created',[])))" \
         "$import_out" 2>/dev/null || echo 0)
     [ "$created_count" -eq 1 ] \
@@ -2197,7 +2197,7 @@ PYEOF
 
     # First import
     local import1_out action_id
-    import1_out=$(jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
+    import1_out=$(JUICE_ALLOW_LOCAL_SOURCES=true jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
     action_id=$(python3 -c "import sys,json; r=json.loads(sys.argv[1]); print(r['Created'][0]['id'])" \
         "$import1_out" 2>/dev/null)
 
@@ -2235,7 +2235,7 @@ PYEOF
 
     # Reimport → updated=1 (description changed → hash changed → action deactivated)
     local import2_out updated_count
-    import2_out=$(jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
+    import2_out=$(JUICE_ALLOW_LOCAL_SOURCES=true jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
     updated_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]).get('Updated',[])))" \
         "$import2_out" 2>/dev/null || echo 0)
     [ "$updated_count" -eq 1 ] \
@@ -2325,7 +2325,7 @@ PYEOF
 
     # Import 2 operations
     local import_out greet_id
-    import_out=$(jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
+    import_out=$(JUICE_ALLOW_LOCAL_SOURCES=true jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
     greet_id=$(python3 -c "
 import sys,json
 r=json.loads(sys.argv[1])
