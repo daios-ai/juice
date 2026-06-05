@@ -347,12 +347,13 @@ Chat(ctx, messages) -> message
 
 Tests use fake embedding and chat implementations.
 
-### 7.3 Native lookup and chat
+### 7.3 Native actions
 
 | Native action   | Rules                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `@sys/lookup`   | Public, grant-all, and callable only through `Call()`. Rank active actions for a natural-language query using an explicit tested formula combining semantic similarity and action statistics. Ranking storage is replaceable; brute-force cosine similarity over stored embeddings is acceptable. Input: required string `query`, optional integer `limit` defaulting to `10`. Output: `results[]` with `action_id`, `name`, `owner_handle`, `description`, and numeric `score`. Direct lookup exists only for platform diagnostics and is not exposed through user-facing APIs or WASM hosts. |
 | `@sys/llm/chat` | Public, grant-all, and callable through `Call()`. Input: required `messages[]` of `{role, content}` plus optional prepended string `system`. Output: `message` object with `role` and `content`. Return `ErrInvalidState` if chat is unconfigured.                                                                                                                                                                                                                                                                                                                                             |
+| `@sys/make`     | Public, grant-all, price 20 credits, callable through `Call()`. Synthesizes a WASM action from a natural-language description using the platform LLM and TinyGo compiler. Input: required string `description`. Runs a repair loop of up to `maxSteps` (default 5) iterations: derive contract, search catalog for composable actions, generate TinyGo source, compile, validate WASM imports/exports, smoke-test with stub host. On success, registers and activates the action under the caller's account; output includes `status="success"`, `action_id`, `action_name`, `diagnostics`, and `tests`. A name collision returns `status="failure"` — the loop does not retry with a different name. Returns `ErrInvalidState` if the LLM or compiler is unavailable; returns `ErrInvalidInput` for an empty description. Synthesis failures use `status="failure"`, not kernel errors. |
 
 ### 7.4 Statistics
 
@@ -468,8 +469,8 @@ Every server startup reads `config.superuser_handle` to confirm first boot and i
 
 ```text
 verify both signing keys exist; abort if either is missing
-register and enable @sys/lookup and @sys/llm/chat if absent
-apply grant-all to both native actions
+register and enable @sys/lookup, @sys/llm/chat, and @sys/make if absent
+apply grant-all to all three native actions
 reset in-flight events to pending (`consumed_at = NULL` where `consumed_at IS NOT NULL AND tx_id IS NULL`)
 ```
 
