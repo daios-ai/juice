@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/daios-ai/juice/kernel"
-	"github.com/daios-ai/juice/script"
 	"golang.org/x/term"
 )
 
@@ -66,12 +65,6 @@ func bootstrap(k *kernel.Kernel) error {
 		return fmt.Errorf("read superuser: %w", err)
 	}
 	k.SetSigningKey(ed25519.PrivateKey(privKeyBytes), su.ID)
-
-	// Register native action handlers. Each handler is self-contained in its own kernel file.
-	kernel.RegisterLookupHandler(k)
-	kernel.RegisterChatHandler(k)
-	kernel.RegisterMakeHandler(k)
-	k.SetCompiler(script.NewTinyGoCompiler(script.CompileConfig{}))
 
 	// Register lookup native action if absent.
 	if err := ensureSysLookup(ctx, k, handle); err != nil {

@@ -183,6 +183,12 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
 	k := kernel.New(db, exec, httpExec, embedder, chatter, cfg, logger)
 
+	// Register native action handlers. Must happen on every kernel open, not just bootstrap.
+	kernel.RegisterLookupHandler(k)
+	kernel.RegisterChatHandler(k)
+	kernel.RegisterMakeHandler(k)
+	k.SetCompiler(script.NewTinyGoCompiler(script.CompileConfig{}))
+
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).
 	if privB64, _ := db.GetConfig(context.Background(), configKeySigningPrivate); privB64 != "" {
 		if privBytes, err := base64.RawURLEncoding.DecodeString(privB64); err == nil && len(privBytes) == ed25519.PrivateKeySize {

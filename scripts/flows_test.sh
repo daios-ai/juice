@@ -2898,6 +2898,100 @@ import sys,json; txs=json.load(sys.stdin); assert len(txs)>0
     stop_backend "$bpid"
 }
 
+flow_make() {
+    echo "=== FLOW make ==="
+    local dir db home_sys home_alice port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "make.boot" "bootstrap failed"; return; }
+
+    # @sys/make must be registered, active, and public after bootstrap.
+    local actions_out make_json
+    actions_out=$(jj "$db" "$home_sys" action list 2>/dev/null)
+    make_json=$(echo "$actions_out" | python3 -c "
+import sys,json
+actions = json.load(sys.stdin)
+m = next((a for a in actions if a.get('name') == 'make'), None)
+print(json.dumps(m) if m else 'null')
+" 2>/dev/null)
+    [ "$make_json" != "null" ] && [ -n "$make_json" ] \
+        && ok "make.registered" \
+        || fail "make.registered" "@sys/make not found in action list"
+
+    echo "$make_json" | python3 -c "import sys,json; a=json.load(sys.stdin); assert a.get('active') and a.get('public')" 2>/dev/null \
+        && ok "make.active_public" \
+        || fail "make.active_public" "@sys/make not active+public: $make_json"
+
+    local price
+    price=$(echo "$make_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('price',0))" 2>/dev/null)
+    [ "$price" = "20" ] \
+        && ok "make.price_20" \
+        || fail "make.price_20" "expected price 20, got: $price"
+
+    # Set up alice with credits.
+    j "$db" "$home_sys"   auth login --handle @sys --password syspass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 500 >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_alice" process start --funds 300)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    # Missing description → schema violation before any execution.
+    local no_desc_out
+    no_desc_out=$(j "$db" "$home_alice" call \
+        --process "$proc_id" --action @sys/make \
+        --args '{}' 2>&1)
+    echo "$no_desc_out" | grep -qi "description\|required\|schema" \
+        && ok "make.missing_description_rejected" \
+        || fail "make.missing_description_rejected" "expected schema error, got: $no_desc_out"
+
+    # Call with description + explicit schemas.
+    # Succeeds as a kernel call regardless of whether tinygo/Ollama is available.
+    # Returns {status: "success"|"failure", diagnostics: [...]} — never a hard kernel error.
+    local make_out make_result status
+    make_out=$(j "$db" "$home_alice" call \
+        --process "$proc_id" --action @sys/make \
+        --args '{
+            "description": "Return a fixed greeting message",
+            "input_schema":  {"type":"object","properties":{"name":{"type":"string","description":"recipient name"}},"required":["name"]},
+            "output_schema": {"type":"object","properties":{"greeting":{"type":"string","description":"greeting text"}},"required":["greeting"]},
+            "max_steps": 1
+        }' 2>&1)
+    make_result=$(echo "$make_out" | python3 -c "
+import sys, json, re
+text = sys.stdin.read()
+# Extract JSON object from the result: section
+m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
+if m:
+    try: print(json.dumps(json.loads(m.group(1))))
+    except: print('{}')
+else:
+    print('{}')
+" 2>/dev/null)
+    status=$(echo "$make_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+    [ "$status" = "success" ] || [ "$status" = "failure" ] \
+        && ok "make.returns_structured_result" \
+        || fail "make.returns_structured_result" "expected success|failure status, got: $make_out"
+
+    # Transactions must have been recorded for the process (make + any sub-calls).
+    local tx_out tx_count
+    tx_out=$(jj "$db" "$home_alice" tx list 2>/dev/null)
+    tx_count=$(echo "$tx_out" | python3 -c "
+import sys,json
+txs = json.load(sys.stdin)
+print(sum(1 for t in txs if t.get('process_id') == sys.argv[1]))
+" "$proc_id" 2>/dev/null)
+    [ "${tx_count:-0}" -ge 1 ] \
+        && ok "make.transaction_recorded" \
+        || fail "make.transaction_recorded" "expected >=1 tx for process, got count=$tx_count"
+}
+
 # ===========================================================================
 # Main runner
 # ===========================================================================
@@ -2941,6 +3035,7 @@ main() {
     flow_fed_verify_receipt
     flow_transaction_access
     flow_admin_supervision
+    flow_make
 
     echo ""
     echo "Results: ${PASS} passed, ${FAIL} failed"
