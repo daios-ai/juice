@@ -6,9 +6,10 @@ import (
 )
 
 // Host imports — provided by the Juice kernel.
+// juice.call returns a packed i64: upper 32 bits = resultPtr, lower 32 bits = resultLen.
 //
 //go:wasmimport juice call
-func hostCall(namePtr, nameLen, argsPtr, argsLen uint32) (uint32, uint32)
+func hostCall(namePtr, nameLen, argsPtr, argsLen uint32) uint64
 
 //go:wasmimport juice emit
 func hostEmit(eventPtr, eventLen, argsPtr, argsLen uint32)
@@ -44,7 +45,8 @@ func _strPtrLen(s string) (uint32, uint32) {
 func JuiceCall(action string, args []byte) ([]byte, error) {
 	aPtr, aLen := _strPtrLen(action)
 	argPtr, argLen := _ptrLen(args)
-	outPtr, outLen := hostCall(aPtr, aLen, argPtr, argLen)
+	packed := hostCall(aPtr, aLen, argPtr, argLen)
+	outPtr, outLen := uint32(packed>>32), uint32(packed)
 	if outLen == 0 {
 		return []byte("{}"), nil
 	}
@@ -73,6 +75,9 @@ func mustMarshal(v any) []byte {
 	}
 	return b
 }
+
+// main is required by the TinyGo WASM target.
+func main() {}
 
 // run is the entry point. Generated actions must implement and export this function.
 // It receives JSON input via linear memory and must return JSON output via linear memory.

@@ -186,7 +186,7 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	// Register native action handlers. Must happen on every kernel open, not just bootstrap.
 	kernel.RegisterLookupHandler(k)
 	kernel.RegisterChatHandler(k)
-	kernel.RegisterMakeHandler(k)
+	kernel.RegisterMakeHandler(k, script.TinyGoSDK)
 	k.SetCompiler(script.NewTinyGoCompiler(script.CompileConfig{}))
 
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).

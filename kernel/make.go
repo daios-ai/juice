@@ -8,9 +8,11 @@ import (
 )
 
 // RegisterMakeHandler registers the @sys/make native action handler on k.
-func RegisterMakeHandler(k *Kernel) {
+// sdk is the TinyGo SDK source (script.TinyGoSDK) prepended to every generated action.
+// Pass "" in tests that use FakeCompiler (which ignores source content).
+func RegisterMakeHandler(k *Kernel, sdk string) {
 	k.RegisterNativeHandler("make", func(ctx context.Context, args map[string]any, subjectID, processID, parentTraceID string) (map[string]any, error) {
-		return k.executeMake(ctx, args, subjectID, processID, parentTraceID)
+		return k.executeMake(ctx, args, subjectID, processID, parentTraceID, sdk)
 	})
 }
 
@@ -77,7 +79,7 @@ func (h *makeTestHost) Emit(_ context.Context, _ string, _ []byte) error { retur
 func (h *makeTestHost) Log(_ context.Context, _, _ string) error         { return nil }
 
 // executeMake implements the @sys/make native action.
-func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID, processID, parentTraceID string) (map[string]any, error) {
+func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID, processID, parentTraceID, sdk string) (map[string]any, error) {
 	if k.compiler == nil {
 		return nil, ErrInvalidState.Wrap("source compiler not configured")
 	}
@@ -108,16 +110,17 @@ func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID
 	// Build action catalog for context.
 	catalog := k.buildCatalog(ctx)
 
-	var diagnostics []string
-	var tests []MakeTest
+	diagnostics := []string{}
+	tests := []MakeTest{}
 
 	for step := 0; step < in.MaxSteps; step++ {
-		// Generate TinyGo source.
-		source, diag := k.generateSource(ctx, in, catalog, diagnostics, subjectID, processID, parentTraceID)
+		// Generate TinyGo source (run function only) and prepend SDK.
+		runFunc, diag := k.generateSource(ctx, in, catalog, sdk, diagnostics, subjectID, processID, parentTraceID)
 		if diag != "" {
 			diagnostics = append(diagnostics, fmt.Sprintf("step %d: LLM generation failed: %s", step+1, diag))
 			continue
 		}
+		source := prepareSource(sdk, runFunc)
 
 		// Compile.
 		wasm, hash, compileErr := k.compiler.CompileSource(ctx, []byte(source))
@@ -277,15 +280,26 @@ Task: %s`, in.Description)
 	return &derivedSchemas{InputSchema: schemas.InputSchema, OutputSchema: schemas.OutputSchema}, nil
 }
 
-// generateSource calls @sys/llm/chat via kernel.Call() to produce TinyGo source.
-func (k *Kernel) generateSource(ctx context.Context, in *makeInput, catalog string, prevDiagnostics []string, subjectID, processID, parentTraceID string) (source, diag string) {
+// generateSource calls @sys/llm/chat via kernel.Call() to produce the run function.
+func (k *Kernel) generateSource(ctx context.Context, in *makeInput, catalog string, sdk string, prevDiagnostics []string, subjectID, processID, parentTraceID string) (source, diag string) {
 	var sb strings.Builder
-	sb.WriteString("You are a TinyGo programmer generating a WASM action for the Juice platform.\n")
-	sb.WriteString("Produce ONLY a single TinyGo source file in a ```go ... ``` code block.\n")
-	sb.WriteString("The file must:\n")
-	sb.WriteString("- Declare package main\n")
-	sb.WriteString("- Export a run function: //export run\n  func run(inputPtr, inputLen uint32) (uint32, uint32)\n")
-	sb.WriteString("- Use JuiceCall, JuiceEmit, JuiceLog from the SDK (do NOT re-declare them)\n\n")
+	sb.WriteString("You are a TinyGo programmer generating a WASM action for the Juice platform.\n\n")
+	sb.WriteString("The following SDK code is ALREADY included in the final file — DO NOT redeclare anything from it:\n\n")
+	if sdk != "" {
+		sb.WriteString("```go\n")
+		sb.WriteString(sdk)
+		sb.WriteString("\n```\n\n")
+	}
+	sb.WriteString("Generate ONLY the exported `run` function and any PRIVATE helper functions it needs.\n")
+	sb.WriteString("STRICT rules — violating any will cause a compile error:\n")
+	sb.WriteString("- NO `package main` line\n")
+	sb.WriteString("- NO import statements\n")
+	sb.WriteString("- NO redeclaration of: hostCall, hostEmit, hostLog, _nextAlloc, _ptrLen, _strPtrLen, alloc, JuiceCall, JuiceEmit, JuiceLog, mustMarshal, main\n")
+	sb.WriteString("- The entry point must be:\n  //export run\n  func run(inputPtr, inputLen uint32) (uint32, uint32)\n")
+	sb.WriteString("- Read input: input := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(inputPtr))), int(inputLen))\n")
+	sb.WriteString("- Parse: json.Unmarshal(input, &req)\n")
+	sb.WriteString("- Return: p, l := _ptrLen(mustMarshal(result)); return p, l\n")
+	sb.WriteString("Wrap ONLY the new functions in a ```go ... ``` block.\n\n")
 
 	if len(in.AllowedActions) > 0 {
 		sb.WriteString("Allowed sub-actions (use JuiceCall to invoke): " + strings.Join(in.AllowedActions, ", ") + "\n\n")
@@ -479,6 +493,23 @@ func (k *Kernel) runOneExample(ctx context.Context, wasm []byte, ex makeExample,
 	}
 
 	return MakeTest{Name: name, Status: "passed"}
+}
+
+// prepareSource combines the SDK with the LLM-generated run function.
+// It strips any `package main` line from generated to avoid duplicate declarations.
+func prepareSource(sdk, generated string) string {
+	var kept []string
+	for _, line := range strings.Split(generated, "\n") {
+		if strings.TrimSpace(line) == "package main" {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	body := strings.TrimSpace(strings.Join(kept, "\n"))
+	if sdk == "" {
+		return "package main\n\n" + body
+	}
+	return sdk + "\n" + body
 }
 
 // marshalMakeResult converts a MakeResult to the map[string]any expected by Call().

@@ -152,7 +152,9 @@ func (e *Executor) Execute(ctx context.Context, artifact []byte, input []byte, h
 // registerHostFunctions wires kernel.HostFunctions into the wazero host module.
 // Each host function receives/returns JSON via wasm linear memory.
 func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions) {
-	// juice.call(actionNamePtr, actionNameLen, argsPtr, argsLen) -> (resultPtr, resultLen)
+	// juice.call(actionNamePtr, actionNameLen, argsPtr, argsLen) -> packedI64
+	// Returns resultPtr in upper 32 bits and resultLen in lower 32 bits.
+	// TinyGo //go:wasmimport only supports a single return value.
 	b.NewFunctionBuilder().
 		WithGoModuleFunction(
 			api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
@@ -166,10 +168,10 @@ func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions
 					panic(err.Error())
 				}
 				ptrs := writeToMem(ctx, mod, result)
-				stack[0], stack[1] = ptrs[0], ptrs[1]
+				stack[0] = ptrs[0]<<32 | ptrs[1]
 			}),
 			[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32},
-			[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32},
+			[]api.ValueType{api.ValueTypeI64},
 		).Export("call")
 
 	// juice.log(levelPtr, levelLen, msgPtr, msgLen)
