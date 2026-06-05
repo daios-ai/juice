@@ -5,7 +5,7 @@ Status: implementation requirements
 
 ## 1. Purpose
 
-`@sys/make` is a native kernel action that synthesizes a new WASM action from a natural-language description. It uses the platform LLM and the action catalog to design, generate, compile, and smoke-test a TinyGo WASM artifact, returning a draft ready for registration.
+`@sys/make` is a native kernel action that synthesizes a new WASM action from a natural-language description. It uses the platform LLM and the action catalog to design, generate, compile, and smoke-test a TinyGo WASM artifact, then registers and activates the resulting action in the catalog under the calling user's account.
 
 `@sys/make` executes through the normal `Call()` path. It is owned by `@sys`, registered at bootstrap, and callable by any authenticated user.
 
@@ -50,26 +50,17 @@ Bootstrap is idempotent: if the action already exists, it is activated and grant
 {
   "type": "object",
   "properties": {
-    "status":      { "type": "string",  "description": "\"success\" or \"failure\"" },
-    "draft":       { "type": "object",  "description": "Generated action draft; present only on success" },
-    "diagnostics": { "type": "array",   "items": { "type": "string" }, "description": "Compilation and test feedback from each iteration" },
-    "tests":       { "type": "array",   "description": "Test results from the final dry-run; present only on success" }
+    "status":      { "type": "string", "description": "\"success\" or \"failure\"" },
+    "action_id":   { "type": "string", "description": "ID of the registered action; present only on success" },
+    "action_name": { "type": "string", "description": "Name of the registered action; present only on success" },
+    "diagnostics": { "type": "array",  "items": { "type": "string" }, "description": "Compilation and test feedback from each iteration" },
+    "tests":       { "type": "array",  "description": "Test results from the final smoke run; present only on success" }
   },
   "required": ["status", "diagnostics"]
 }
 ```
 
-The `draft` object contains:
-
-| Field          | Type   | Description                                  |
-| -------------- | ------ | -------------------------------------------- |
-| `name`         | string | Kebab-case action name (≤ 3 words)           |
-| `kind`         | string | Always `"wasm"`                              |
-| `description`  | string | Natural-language description from input      |
-| `input_schema` | object | JSON Schema derived for the action's input   |
-| `output_schema`| object | JSON Schema derived for the action's output  |
-| `source`       | string | Complete TinyGo source code                  |
-| `artifact_hash`| string | SHA-256 hex hash of the compiled WASM binary |
+On success the action is already registered in the caller's catalog and immediately active. A name collision (the caller already owns an action with the generated name) returns `status: "failure"` with a descriptive diagnostic — `@sys/make` never mangles the name.
 
 `@sys/make` returns `status: "success"` or `status: "failure"` — it does not return a kernel-level error for synthesis failures. Kernel-level errors (`ErrInvalidInput`, `ErrInvalidState`, etc.) are reserved for precondition failures (bad input, missing LLM, missing compiler).
 
@@ -80,19 +71,20 @@ The `draft` object contains:
 ### 4.1 Step ordering
 
 ```
-1. Validate input (description non-empty)
-2. Derive contract and plan via LLM
-3. Resolve explicit action references from description
-4. Search catalog for composable actions
-5. Merge and deduplicate composable action list
-6. Generate TinyGo source via LLM            ← repair loop re-enters here
-7. Compile source to WASM
-8. Validate WASM imports and exports
-9. Generate and run smoke tests
-10. Return success or loop with diagnostics
+1.  Validate input (description non-empty)
+2.  Derive contract and plan via LLM
+3.  Resolve explicit action references from description
+4.  Search catalog for composable actions
+5.  Merge and deduplicate composable action list
+6.  Generate TinyGo source via LLM            ← repair loop re-enters here
+7.  Compile source to WASM
+8.  Validate WASM imports and exports
+9.  Generate and run smoke tests
+10. Register and activate the action under the caller's account; return action_id and action_name
+    — or loop with diagnostics on failure
 ```
 
-Steps 2–5 run once. Steps 6–10 repeat up to `maxSteps` times.
+Steps 2–5 run once. Steps 6–10 repeat up to `maxSteps` times. Registration (step 10) uses `CreateAction` with the caller as owner and `SetActive` to activate immediately. A name collision at step 10 is a terminal failure (status: "failure") — the loop does not retry with a different name.
 
 ### 4.2 Contract derivation (step 2)
 
@@ -175,10 +167,10 @@ Record each test as passed or failed. If any test fails, append the failure diag
 On success, return:
 
 ```json
-{ "status": "success", "draft": { ... }, "diagnostics": [...], "tests": [...] }
+{ "status": "success", "action_id": "...", "action_name": "...", "diagnostics": [...], "tests": [...] }
 ```
 
-After `maxSteps` failed iterations, return:
+After `maxSteps` failed iterations, or after a registration/activation failure, return:
 
 ```json
 { "status": "failure", "diagnostics": [...] }
@@ -231,7 +223,9 @@ make: import validation rejects forbidden host imports
 make: import validation rejects missing alloc or run exports
 make: smoke tests execute with stub host returning {}
 make: failed smoke test appends diagnostic and retries
-make: returns status=success with draft after passing smoke tests
+make: registers and activates action under caller's account on success
+make: registered action is owned by the caller, kind=wasm, active=true
+make: name collision returns status=failure with diagnostic
 make: returns status=failure after exhausting maxSteps without passing tests
 make: bootstrap is idempotent (second call does not recreate the action)
 make: @sys/make is callable through Call() with normal preconditions enforced

@@ -36,17 +36,6 @@ type makeExample struct {
 	Args map[string]any `json:"args"`
 }
 
-// MakeDraft is the generated action draft returned by @sys/make on success.
-type MakeDraft struct {
-	Name         string         `json:"name"`
-	Kind         string         `json:"kind"` // always "wasm"
-	Description  string         `json:"description"`
-	InputSchema  map[string]any `json:"input_schema"`
-	OutputSchema map[string]any `json:"output_schema"`
-	Source       string         `json:"source"`
-	ArtifactHash string         `json:"artifact_hash"`
-}
-
 // MakeTest records the outcome of one test case run during synthesis.
 type MakeTest struct {
 	Name   string `json:"name"`
@@ -56,8 +45,9 @@ type MakeTest struct {
 
 // MakeResult is the output schema of the @sys/make native action.
 type MakeResult struct {
-	Status      string     `json:"status"` // "success" | "failure"
-	Draft       *MakeDraft `json:"draft,omitempty"`
+	Status      string     `json:"status"`               // "success" | "failure"
+	ActionID    string     `json:"action_id,omitempty"`  // registered action ID on success
+	ActionName  string     `json:"action_name,omitempty"` // registered action name on success
 	Diagnostics []string   `json:"diagnostics"`
 	Tests       []MakeTest `json:"tests,omitempty"`
 }
@@ -125,7 +115,7 @@ func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID
 		source := prepareSource(sdk, runFunc)
 
 		// Step 6: compile to WASM.
-		wasm, hash, compileErr := k.compiler.CompileSource(ctx, []byte(source))
+		wasm, _, compileErr := k.compiler.CompileSource(ctx, []byte(source))
 		if compileErr != nil {
 			diagnostics = append(diagnostics, fmt.Sprintf("step %d: compile error: %v", step+1, compileErr))
 			continue
@@ -151,18 +141,41 @@ func (k *Kernel) executeMake(ctx context.Context, args map[string]any, subjectID
 			}
 		}
 
-		// Step 10: return success.
+		// Step 10: register and activate the action under the caller's account.
 		if allPassed {
-			draft := &MakeDraft{
+			inSchema := sanitizeSchemaForRegistration(contract.InputSchema)
+			outSchema := sanitizeSchemaForRegistration(contract.OutputSchema)
+			action, createErr := k.CreateAction(ctx, subjectID, CreateActionRequest{
+				OwnerUserID:  subjectID,
 				Name:         contract.Name,
-				Kind:         "wasm",
+				Kind:         KindWasm,
+				Price:        0,
 				Description:  in.Description,
-				InputSchema:  contract.InputSchema,
-				OutputSchema: contract.OutputSchema,
-				Source:       source,
-				ArtifactHash: hash,
+				InputSchema:  inSchema,
+				OutputSchema: outSchema,
+				Source:       string(wasm),
+			})
+			if createErr != nil {
+				return marshalMakeResult(&MakeResult{
+					Status:      "failure",
+					Diagnostics: append(diagnostics, "registration failed: "+createErr.Error()),
+					Tests:       tests,
+				})
 			}
-			return marshalMakeResult(&MakeResult{Status: "success", Draft: draft, Diagnostics: diagnostics, Tests: tests})
+			if activateErr := k.SetActive(ctx, subjectID, action.ID, true); activateErr != nil {
+				return marshalMakeResult(&MakeResult{
+					Status:      "failure",
+					Diagnostics: append(diagnostics, "activation failed: "+activateErr.Error()),
+					Tests:       tests,
+				})
+			}
+			return marshalMakeResult(&MakeResult{
+				Status:      "success",
+				ActionID:    action.ID,
+				ActionName:  action.Name,
+				Diagnostics: diagnostics,
+				Tests:       tests,
+			})
 		}
 		// Step 9: loop with diagnostics.
 	}
@@ -614,6 +627,38 @@ func prepareSource(sdk, generated string) string {
 		return "package main\n\n" + body
 	}
 	return sdk + "\n" + body
+}
+
+// sanitizeSchemaForRegistration strips unsupported JSON Schema keywords and ensures
+// every property has a description so the result passes ValidateSchema and
+// validateSchemaDescriptions at activation time.
+func sanitizeSchemaForRegistration(schema map[string]any) map[string]any {
+	if schema == nil {
+		return map[string]any{}
+	}
+	allowed := []string{"type", "nullable", "enum", "description", "properties", "required", "items"}
+	result := make(map[string]any)
+	for _, key := range allowed {
+		if v, ok := schema[key]; ok {
+			result[key] = v
+		}
+	}
+	if props, ok := result["properties"].(map[string]any); ok {
+		sanitized := make(map[string]any, len(props))
+		for name, raw := range props {
+			child, _ := raw.(map[string]any)
+			s := sanitizeSchemaForRegistration(child)
+			if _, hasDesc := s["description"]; !hasDesc {
+				s["description"] = name
+			}
+			sanitized[name] = s
+		}
+		result["properties"] = sanitized
+	}
+	if items, ok := result["items"].(map[string]any); ok {
+		result["items"] = sanitizeSchemaForRegistration(items)
+	}
+	return result
 }
 
 // marshalMakeResult converts a MakeResult to the map[string]any expected by Call().

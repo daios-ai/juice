@@ -141,7 +141,7 @@ const fakeCode = "```go\n//export run\nfunc run(inputPtr, inputLen uint32) (uint
 // fakeExamples is an empty example list — unit tests use the compile smoke test only.
 const fakeExamples = `[]`
 
-func TestMakeReturnsDraftOnSuccess(t *testing.T) {
+func TestMakeRegistersActionOnSuccess(t *testing.T) {
 	fakeChat := &cycleFakeChatter{responses: []string{
 		fakeContract, // step 2: contract derivation
 		fakeCode,     // step 5: source generation
@@ -157,7 +157,7 @@ func TestMakeReturnsDraftOnSuccess(t *testing.T) {
 		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{
-			"description":   "An action that returns a fixed result",
+			"description": "An action that returns a fixed result",
 		},
 	})
 	if err != nil {
@@ -173,27 +173,28 @@ func TestMakeReturnsDraftOnSuccess(t *testing.T) {
 		t.Errorf("expected status=success, got %q; diagnostics: %v", result.Status, result.Diagnostics)
 		return
 	}
-	if result.Draft == nil {
-		t.Fatal("expected non-nil draft on success")
+	if result.ActionID == "" {
+		t.Fatal("expected non-empty action_id on success")
 	}
-	if result.Draft.Kind != "wasm" {
-		t.Errorf("expected kind=wasm, got %q", result.Draft.Kind)
+	if result.ActionName == "" {
+		t.Fatal("expected non-empty action_name on success")
 	}
-	if result.Draft.ArtifactHash == "" {
-		t.Error("expected non-empty artifact_hash")
+	action, err := st.ReadAction(ctx, result.ActionID)
+	if err != nil {
+		t.Fatalf("ReadAction: %v", err)
 	}
-	if result.Draft.Source == "" {
-		t.Error("expected non-empty source in draft")
+	if !action.Active {
+		t.Error("expected registered action to be active")
 	}
-	if result.Draft.InputSchema == nil {
-		t.Error("expected non-nil input_schema in draft")
+	if action.OwnerUserID != caller.ID {
+		t.Errorf("expected action owned by caller %q, got %q", caller.ID, action.OwnerUserID)
 	}
-	if result.Draft.OutputSchema == nil {
-		t.Error("expected non-nil output_schema in draft")
+	if action.Kind != kernel.KindWasm {
+		t.Errorf("expected kind=wasm, got %q", action.Kind)
 	}
 }
 
-func TestMakeDraftHasNameAndKind(t *testing.T) {
+func TestMakeRegisteredActionHasName(t *testing.T) {
 	fakeChat := &cycleFakeChatter{responses: []string{
 		fakeContract,
 		fakeCode,
@@ -216,14 +217,11 @@ func TestMakeDraftHasNameAndKind(t *testing.T) {
 	b, _ := json.Marshal(reply.Result)
 	var result kernel.MakeResult
 	_ = json.Unmarshal(b, &result)
-	if result.Draft == nil {
-		return // already tested elsewhere
+	if result.Status != "success" {
+		return // failure tested elsewhere
 	}
-	if result.Draft.Kind != "wasm" {
-		t.Errorf("expected kind=wasm, got %q", result.Draft.Kind)
-	}
-	if result.Draft.Name == "" {
-		t.Error("expected non-empty name derived from description")
+	if result.ActionName == "" {
+		t.Error("expected non-empty action_name on success")
 	}
 }
 
@@ -298,6 +296,42 @@ func TestMakeInternalChatCallCreatesChildTrace(t *testing.T) {
 	}
 	if len(txs) < 2 {
 		t.Errorf("expected at least 2 transactions (make + chat sub-calls), got %d", len(txs))
+	}
+}
+
+func TestMakeNameCollisionReturnsFailure(t *testing.T) {
+	// Both calls produce the same contract name ("test-action" from fakeContract),
+	// so the second registration hits the unique (owner, name) constraint.
+	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
+	k, st := newMakeKernel(t, fakeChat)
+	ctx := context.Background()
+	sys := seedMakeAction(t, st)
+	caller := setupUser(t, st, "@alice", 1000)
+	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 200)
+
+	desc := map[string]any{"description": "An action that returns a fixed result"}
+	_, err := k.Call(ctx, kernel.CallRequest{
+		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: sys.ID, ActionName: "make", Args: desc,
+	})
+	if err != nil {
+		t.Fatalf("first Call: %v", err)
+	}
+	reply2, err := k.Call(ctx, kernel.CallRequest{
+		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: sys.ID, ActionName: "make", Args: desc,
+	})
+	if err != nil {
+		t.Fatalf("second Call returned kernel error (expected status=failure): %v", err)
+	}
+	b, _ := json.Marshal(reply2.Result)
+	var result kernel.MakeResult
+	_ = json.Unmarshal(b, &result)
+	if result.Status != "failure" {
+		t.Errorf("expected status=failure on name collision, got %q", result.Status)
+	}
+	if len(result.Diagnostics) == 0 {
+		t.Error("expected diagnostics on collision failure")
 	}
 }
 
