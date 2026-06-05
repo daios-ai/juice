@@ -409,6 +409,7 @@ func TestServeListActions(t *testing.T) {
 	decodeResponse(t, cr, &action)
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok).Body.Close()
 
+	// Authenticated owner sees their own inactive private action.
 	resp := httpDo(t, srv, "GET", "/v1/actions", nil, tok)
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
@@ -416,18 +417,32 @@ func TestServeListActions(t *testing.T) {
 	}
 	var actions []kernel.Action
 	decodeResponse(t, resp, &actions)
-	if len(actions) != 0 {
-		t.Fatal("private action should not appear in public list")
+	if len(actions) != 1 {
+		t.Fatalf("owner should see their own inactive action, got %d actions", len(actions))
 	}
+
+	// Unauthenticated caller does not see the private action.
+	resp2 := httpDo(t, srv, "GET", "/v1/actions", nil, "")
+	if resp2.StatusCode != http.StatusOK {
+		resp2.Body.Close()
+		t.Fatalf("unauthenticated list actions: expected 200, got %d", resp2.StatusCode)
+	}
+	var actions2 []kernel.Action
+	decodeResponse(t, resp2, &actions2)
+	if len(actions2) != 0 {
+		t.Fatal("private action should not appear in unauthenticated list")
+	}
+
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/grant-all", nil, tok).Body.Close()
-	resp = httpDo(t, srv, "GET", "/v1/actions", nil, tok)
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		t.Fatalf("list actions after grant-all: expected 200, got %d", resp.StatusCode)
+	resp3 := httpDo(t, srv, "GET", "/v1/actions", nil, tok)
+	if resp3.StatusCode != http.StatusOK {
+		resp3.Body.Close()
+		t.Fatalf("list actions after grant-all: expected 200, got %d", resp3.StatusCode)
 	}
-	decodeResponse(t, resp, &actions)
-	if len(actions) == 0 {
-		t.Error("expected public action in list")
+	var actions3 []kernel.Action
+	decodeResponse(t, resp3, &actions3)
+	if len(actions3) == 0 {
+		t.Error("expected public action in list after grant-all")
 	}
 }
 
