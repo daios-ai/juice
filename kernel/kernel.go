@@ -245,7 +245,7 @@ func (k *Kernel) UnsuspendUser(ctx context.Context, operatorID, targetID string)
 
 // requireSuperuser returns ErrUnauthorized if operatorID is not the configured superuser.
 func (k *Kernel) requireSuperuser(ctx context.Context, operatorID string) error {
-	u, err := k.authenticatedCaller(ctx, operatorID)
+	u, err := k.requireActiveUser(ctx, operatorID)
 	if err != nil {
 		return err
 	}
@@ -972,7 +972,7 @@ func (k *Kernel) StartProcess(ctx context.Context, callerID, ownerID string, fun
 
 // FundProcess adds more credits to an existing open process.
 func (k *Kernel) FundProcess(ctx context.Context, callerID, processID string, funds int64) error {
-	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return err
 	}
 	p, err := k.store.ReadProcess(ctx, processID)
@@ -997,7 +997,7 @@ func (k *Kernel) FundProcess(ctx context.Context, callerID, processID string, fu
 
 // EndProcess closes a process and returns all remaining funds to the owner.
 func (k *Kernel) EndProcess(ctx context.Context, callerID, processID string) error {
-	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return err
 	}
 	p, err := k.store.ReadProcess(ctx, processID)
@@ -1020,7 +1020,7 @@ func (k *Kernel) EndProcess(ctx context.Context, callerID, processID string) err
 // GrantProcessAuthority grants another user explicit authority to use a process.
 // Only the process owner may grant this right.
 func (k *Kernel) GrantProcessAuthority(ctx context.Context, operatorID, callerID, processID string) error {
-	if _, err := k.authenticatedCaller(ctx, operatorID); err != nil {
+	if _, err := k.requireActiveUser(ctx, operatorID); err != nil {
 		return err
 	}
 	p, err := k.store.ReadProcess(ctx, processID)
@@ -1040,7 +1040,7 @@ func (k *Kernel) GrantProcessAuthority(ctx context.Context, operatorID, callerID
 // RevokeProcessAuthority removes explicit call authority over a process from a user.
 // Only the process owner may revoke.
 func (k *Kernel) RevokeProcessAuthority(ctx context.Context, operatorID, callerID, processID string) error {
-	if _, err := k.authenticatedCaller(ctx, operatorID); err != nil {
+	if _, err := k.requireActiveUser(ctx, operatorID); err != nil {
 		return err
 	}
 	p, err := k.store.ReadProcess(ctx, processID)
@@ -1130,7 +1130,7 @@ func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rat
 	if rating != 0 && rating != 1 {
 		return nil, ErrInvalidInput.Wrap("rating must be 0 or 1")
 	}
-	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return nil, err
 	}
 	tx, err := k.store.ReadTransaction(ctx, txID)
@@ -1323,13 +1323,11 @@ func sqrt32(x float32) float32 {
 
 // ---- Helpers ----
 
-// authenticatedCaller reads the subject user and rejects missing or suspended users.
-// All supervision operations call this first so that Authenticated(s) ∧ ¬Suspended(s)
-// is a kernel-level invariant, not just an adapter-level check.
-func (k *Kernel) authenticatedCaller(ctx context.Context, callerID string) (*User, error) {
-	u, err := k.store.ReadUser(ctx, callerID)
+// requireActiveUser rejects missing or suspended users.
+func (k *Kernel) requireActiveUser(ctx context.Context, userID string) (*User, error) {
+	u, err := k.store.ReadUser(ctx, userID)
 	if err != nil {
-		return nil, ErrUnauthenticated.Wrap("subject not found")
+		return nil, ErrUnauthenticated.Wrap("user not found")
 	}
 	if u.SuspendedAt != nil {
 		return nil, ErrUnauthenticated.Wrap("account suspended")
@@ -1345,7 +1343,7 @@ func (k *Kernel) isUserSuperuser(_ context.Context, u *User) bool {
 // requireAdmin returns nil if callerID is authenticated, non-suspended, and is the owner
 // of a, the platform superuser, or holds admin ACL on a.
 func (k *Kernel) requireAdmin(ctx context.Context, callerID string, a *Action) error {
-	u, err := k.authenticatedCaller(ctx, callerID)
+	u, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return err
 	}
@@ -1365,7 +1363,7 @@ func (k *Kernel) requireAdmin(ctx context.Context, callerID string, a *Action) e
 // requireSelf returns nil if callerID is authenticated, non-suspended, and equals ownerID
 // or is the platform superuser.
 func (k *Kernel) requireSelf(ctx context.Context, callerID, ownerID string) error {
-	u, err := k.authenticatedCaller(ctx, callerID)
+	u, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return err
 	}
@@ -1413,7 +1411,7 @@ type CreateListenerRequest struct {
 
 // CreateListener registers a new listener owned by callerID and returns it.
 func (k *Kernel) CreateListener(ctx context.Context, callerID string, req CreateListenerRequest) (*Listener, error) {
-	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return nil, err
 	}
 	if req.EventName == "" {
@@ -1456,7 +1454,7 @@ func (k *Kernel) CreateListener(ctx context.Context, callerID string, req Create
 
 // PollListener returns the pending (unconsumed) events for a listener.
 func (k *Kernel) PollListener(ctx context.Context, callerID, listenerID string) ([]*Event, error) {
-	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return nil, err
 	}
 	l, err := k.store.ReadListener(ctx, listenerID)
@@ -1471,7 +1469,7 @@ func (k *Kernel) PollListener(ctx context.Context, callerID, listenerID string) 
 
 // DeleteListener atomically deactivates a listener and purges its pending events.
 func (k *Kernel) DeleteListener(ctx context.Context, callerID, listenerID string) error {
-	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return err
 	}
 	l, err := k.store.ReadListener(ctx, listenerID)
@@ -1491,7 +1489,7 @@ func (k *Kernel) ListListeners(ctx context.Context, ownerID string, limit, offse
 
 // GetListener returns listener metadata. Subject must be the owner or source user.
 func (k *Kernel) GetListener(ctx context.Context, callerID, listenerID string) (*Listener, error) {
-	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return nil, err
 	}
 	l, err := k.store.ReadListener(ctx, listenerID)

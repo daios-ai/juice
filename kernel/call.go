@@ -53,7 +53,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if req.CallerID == "" {
 		return nil, ErrUnauthenticated.Wrap("subject is required")
 	}
-	if _, err := k.authenticatedCaller(ctx, req.CallerID); err != nil {
+	if _, err := k.requireActiveUser(ctx, req.CallerID); err != nil {
 		return nil, err
 	}
 
