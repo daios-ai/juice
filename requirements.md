@@ -193,7 +193,9 @@ net         = gross - fee
 
 Negative value added does not create a fee credit or a kernel payout.
 
-Success decreases the process and owner locked balances by `gross`, credits the target by `net`, and credits the fee recipient by `fee`. Each kernel taxes only its own layer; remote sub-calls are subject to the remote kernel's fee policy independently.
+The default `fee_bps` is 2000 (20%). The fee recipient is always the superuser (`@sys`); it is not configurable.
+
+Success decreases the process and owner locked balances by `gross`, credits the target by `net`, and credits `@sys` by `fee`. Each kernel taxes only its own layer; remote sub-calls are subject to the remote kernel's fee policy independently.
 
 Any failure before or after target execution starts charges zero, refunds the full locked gross amount, records a failure transaction, and exposes the failure class through `status` and `reason`. A later partial-failure policy must be represented explicitly in the transaction.
 
@@ -645,7 +647,7 @@ status duration_ms error
 Load configuration from environment variables and an optional config file. Use safe local defaults where possible; commit no production secrets; reject invalid startup configuration clearly.
 
 ```text
-JUICE_DB_PATH JUICE_LOG_LEVEL JUICE_LOG_FILE JUICE_FEE_BPS JUICE_FEE_RECIPIENT
+JUICE_DB_PATH JUICE_LOG_LEVEL JUICE_LOG_FILE JUICE_FEE_BPS
 JUICE_AUTH_ISSUER JUICE_AUTH_AUDIENCE JUICE_TOKEN_TTL JUICE_SECRET_KEY
 JUICE_OLLAMA_URL JUICE_OLLAMA_CHAT_MODEL JUICE_OLLAMA_EMBED_MODEL
 JUICE_SCRIPT_TIMEOUT_MS JUICE_SCRIPT_MEMORY_BYTES

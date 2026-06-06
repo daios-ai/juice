@@ -92,15 +92,10 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 		cfg.TokenSecret = stored
 	}
 
-	cfg.FeeRecipientID = globalCfg.FeeRecipient
 	cfg.FeeBPS = globalCfg.FeeBPS
 	if globalCfg.FeeBPS < 0 || globalCfg.FeeBPS > 10000 {
 		db.Close()
 		return nil, nil, fmt.Errorf("fee_bps must be 0–10000")
-	}
-	if cfg.FeeBPS > 0 && cfg.FeeRecipientID == "" {
-		db.Close()
-		return nil, nil, fmt.Errorf("fee_recipient required when fee_bps > 0")
 	}
 
 	tokenTTL, err := time.ParseDuration(globalCfg.TokenTTL)

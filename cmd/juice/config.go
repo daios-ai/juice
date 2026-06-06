@@ -16,7 +16,6 @@ type ServerConfig struct {
 	ScriptTimeoutMS   int64  `json:"script_timeout_ms"`
 	ScriptMemoryBytes int64  `json:"script_memory_bytes"`
 	FeeBPS            int64  `json:"fee_bps"`
-	FeeRecipient      string `json:"fee_recipient"`
 	TokenTTL          string `json:"token_ttl"`
 	AuthIssuer        string `json:"auth_issuer"`
 	AuthAudience      string `json:"auth_audience"`
@@ -36,8 +35,7 @@ func DefaultServerConfig() ServerConfig {
 		OllamaEmbedModel:  "nomic-embed-text",
 		ScriptTimeoutMS:   10000,
 		ScriptMemoryBytes: 64 * 1024 * 1024,
-		FeeBPS:            0,
-		FeeRecipient:      "",
+		FeeBPS:            2000,
 		TokenTTL:          "15m",
 		AuthIssuer:        "",
 		AuthAudience:      "",

@@ -90,6 +90,7 @@ func (k *Kernel) RegisterNativeHandler(name string, fn NativeFunc) {
 func (k *Kernel) SetSigningKey(priv ed25519.PrivateKey, issuerUserID string) {
 	k.cfg.SigningKey = priv
 	k.cfg.IssuerUserID = issuerUserID
+	k.cfg.FeeRecipientID = issuerUserID
 }
 
 // SetTokenSecret updates the JWT HMAC secret after bootstrap completes.
