@@ -40,9 +40,10 @@ type CallRequest struct {
 
 // CallReply is the response from a successful Call().
 type CallReply struct {
-	Result  map[string]any `json:"result"`
-	TxID    string         `json:"tx_id"`
-	TraceID string         `json:"trace_id"`
+	Result    map[string]any `json:"result"`
+	TxID      string         `json:"tx_id"`
+	TraceID   string         `json:"trace_id"`
+	ReceiptID string         `json:"receipt_id"`
 }
 
 // Call executes the central kernel transition.
@@ -260,9 +261,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	logger.Info("call.success", "action", action.Name, "tx_id", txID, "latency_ms", latency*1000)
 
 	return &CallReply{
-		Result:  reply,
-		TxID:    txID,
-		TraceID: trace.ID,
+		Result:    reply,
+		TxID:      txID,
+		TraceID:   trace.ID,
+		ReceiptID: receipt.ID,
 	}, nil
 }
 

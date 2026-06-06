@@ -1232,12 +1232,10 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch receipt for the response (idempotency record was already completed atomically in CommitCall).
 	var receipt *kernel.Receipt
-	if reply.TxID != "" {
-		receipt, _ = s.kernel.GetReceiptByTxID(ctx, reply.TxID)
+	if reply.ReceiptID != "" {
+		receipt, _ = s.kernel.GetReceiptByID(ctx, reply.ReceiptID)
 	}
-
 	writeJSON(w, http.StatusOK, map[string]any{"result": reply.Result, "receipt": receipt})
 }
 
