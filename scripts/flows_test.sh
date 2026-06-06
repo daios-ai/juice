@@ -558,13 +558,14 @@ flow_deposits() {
 
 flow_action_lifecycle() {
     echo "=== FLOW action_lifecycle ==="
-    local dir db home_sys home_alice port
+    local dir db home_sys home_alice port backend_port
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";   mkdir -p "$home_sys/.juice"
     home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
     local home_bob="$dir/bob"; mkdir -p "$home_bob/.juice"
     alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "action_lifecycle.boot" "bootstrap failed"; return; }
 
@@ -633,6 +634,47 @@ flow_action_lifecycle() {
     echo "$bob_delete" | grep -qi "unauthorized\|not found\|error" \
         && ok "action_lifecycle.owner_enforced" \
         || fail "action_lifecycle.owner_enforced" "non-owner delete succeeded: $bob_delete"
+
+    # Name reuse: after deleting an action, the same name can be registered again
+    j "$db" "$home_alice" action delete --id "$alice_action_id" >/dev/null 2>&1
+    local reuse_out
+    reuse_out=$(jj "$db" "$home_alice" action create --name hello --kind http \
+        --source "http://127.0.0.1:1/hello2" --description "reused name")
+    local reuse_id
+    reuse_id=$(strfield "$reuse_out" "id")
+    [ -n "$reuse_id" ] \
+        && ok "action_lifecycle.name_reuse_after_delete" \
+        || fail "action_lifecycle.name_reuse_after_delete" "name reuse failed: $reuse_out"
+
+    # action_name is captured in transactions and survives action deletion
+    start_backend "$backend_port" 200 '{"answer":42}'
+    local backend_pid=$BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    local tx_action_id
+    create_out=$(jj "$db" "$home_alice" action create --name callable \
+        --kind http --source "http://127.0.0.1:${backend_port}/call" \
+        --description "for tx test" --price 0)
+    tx_action_id=$(strfield "$create_out" "id")
+    j "$db" "$home_alice" action enable    --id "$tx_action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action grant-all --id "$tx_action_id" >/dev/null 2>&1
+
+    j "$db" "$home_bob"   auth login --handle @bob --password bobpass >/dev/null 2>&1
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_bob" process start)
+    proc_id=$(strfield "$proc_out" "process_id")
+    local call_out tx_id
+    call_out=$(jj "$db" "$home_bob" call --process "$proc_id" --action "@alice/callable" --args '{}')
+    tx_id=$(strfield "$call_out" "tx_id")
+
+    # Delete the action — transaction must still carry the name
+    j "$db" "$home_alice" action delete --id "$tx_action_id" >/dev/null 2>&1
+    local tx_show action_name_in_tx
+    tx_show=$(jj "$db" "$home_bob" tx show --id "$tx_id")
+    action_name_in_tx=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('action_name',''))" "$tx_show" 2>/dev/null)
+    [ "$action_name_in_tx" = "callable" ] \
+        && ok "action_lifecycle.action_name_in_tx_after_delete" \
+        || fail "action_lifecycle.action_name_in_tx_after_delete" "action_name='$action_name_in_tx', want 'callable'; tx: $tx_show"
 }
 
 # ===========================================================================
