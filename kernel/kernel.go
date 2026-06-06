@@ -47,8 +47,8 @@ func DefaultConfig() Config {
 func (k *Kernel) AllowsLocalSources() bool { return k.cfg.AllowLocalSources }
 
 // NativeFunc is the signature for a registered native action handler.
-// ownerUserID is the process owner (the payer / act-on-behalf principal).
-type NativeFunc func(ctx context.Context, args map[string]any, ownerUserID, processID, parentTraceID string) (map[string]any, error)
+// targetID is the action's owner; ownerUserID is the process owner.
+type NativeFunc func(ctx context.Context, args map[string]any, targetID, ownerUserID, processID, parentTraceID string) (map[string]any, error)
 
 // Kernel is the central service object.
 // It holds all dependencies and exposes operations to both the CLI and HTTP server.
@@ -245,7 +245,7 @@ func (k *Kernel) UnsuspendUser(ctx context.Context, operatorID, targetID string)
 
 // requireSuperuser returns ErrUnauthorized if operatorID is not the configured superuser.
 func (k *Kernel) requireSuperuser(ctx context.Context, operatorID string) error {
-	u, err := k.authenticatedSubject(ctx, operatorID)
+	u, err := k.authenticatedCaller(ctx, operatorID)
 	if err != nil {
 		return err
 	}
@@ -372,8 +372,8 @@ func validateHTTPSource(ctx context.Context, source string, allowLocal bool) err
 	return nil
 }
 
-func (k *Kernel) CreateAction(ctx context.Context, subjectID string, req CreateActionRequest) (*Action, error) {
-	if err := k.requireSelf(ctx, subjectID, req.OwnerUserID); err != nil {
+func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateActionRequest) (*Action, error) {
+	if err := k.requireSelf(ctx, callerID, req.OwnerUserID); err != nil {
 		return nil, err
 	}
 	if req.Name == "" {
@@ -523,15 +523,15 @@ func (k *Kernel) ReadAction(ctx context.Context, id string) (*Action, error) {
 
 // ReadActionForSubject returns an action only if the subject has read access.
 // Public actions are readable by anyone. Otherwise Owner ∨ ACL(read) ∨ ACL(admin) is required.
-func (k *Kernel) ReadActionForSubject(ctx context.Context, subjectID, actionID string) (*Action, error) {
+func (k *Kernel) ReadActionForSubject(ctx context.Context, callerID, actionID string) (*Action, error) {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return nil, err
 	}
-	if a.Public || a.OwnerUserID == subjectID {
+	if a.Public || a.OwnerUserID == callerID {
 		return a, nil
 	}
-	ok, err := k.canRead(ctx, subjectID, a)
+	ok, err := k.canRead(ctx, callerID, a)
 	if err != nil {
 		return nil, err
 	}
@@ -541,18 +541,18 @@ func (k *Kernel) ReadActionForSubject(ctx context.Context, subjectID, actionID s
 	return a, nil
 }
 
-// canRead returns true if subjectID may read action a.
+// canRead returns true if callerID may read action a.
 // CanRead(u,a) := Owner(u,a) ∨ Public(a) ∨ ACL(u,a,read) ∨ ACL(u,a,admin)
-func (k *Kernel) canRead(ctx context.Context, subjectID string, a *Action) (bool, error) {
-	if a.OwnerUserID == subjectID || a.Public {
+func (k *Kernel) canRead(ctx context.Context, callerID string, a *Action) (bool, error) {
+	if a.OwnerUserID == callerID || a.Public {
 		return true, nil
 	}
-	if ok, err := k.store.CheckACL(ctx, subjectID, a.ID, PermRead); err != nil {
+	if ok, err := k.store.CheckACL(ctx, callerID, a.ID, PermRead); err != nil {
 		return false, ErrInternal.Wrapf("acl check: %v", err)
 	} else if ok {
 		return true, nil
 	}
-	ok, err := k.store.CheckACL(ctx, subjectID, a.ID, PermAdmin)
+	ok, err := k.store.CheckACL(ctx, callerID, a.ID, PermAdmin)
 	if err != nil {
 		return false, ErrInternal.Wrapf("acl check: %v", err)
 	}
@@ -595,12 +595,12 @@ func (k *Kernel) ListAllTransactions(ctx context.Context, limit, offset int) ([]
 }
 
 // GrantAll sets the public flag on an action, allowing anyone to call it.
-func (k *Kernel) GrantAll(ctx context.Context, subjectID, actionID string) error {
+func (k *Kernel) GrantAll(ctx context.Context, callerID, actionID string) error {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return err
 	}
-	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
+	if err := k.requireAdmin(ctx, callerID, a); err != nil {
 		return err
 	}
 	if strings.HasPrefix(strings.TrimSpace(a.Source), "{") {
@@ -616,17 +616,17 @@ func (k *Kernel) GrantAll(ctx context.Context, subjectID, actionID string) error
 	if err := k.store.UpdateAction(ctx, a); err != nil {
 		return err
 	}
-	k.log.With(ctx).Info("action.grant_all", "action_id", actionID, "subject", subjectID)
+	k.log.With(ctx).Info("action.grant_all", "action_id", actionID, "subject", callerID)
 	return nil
 }
 
 // RevokeAll clears the public flag on an action.
-func (k *Kernel) RevokeAll(ctx context.Context, subjectID, actionID string) error {
+func (k *Kernel) RevokeAll(ctx context.Context, callerID, actionID string) error {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return err
 	}
-	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
+	if err := k.requireAdmin(ctx, callerID, a); err != nil {
 		return err
 	}
 	a.Public = false
@@ -634,7 +634,7 @@ func (k *Kernel) RevokeAll(ctx context.Context, subjectID, actionID string) erro
 	if err := k.store.UpdateAction(ctx, a); err != nil {
 		return err
 	}
-	k.log.With(ctx).Info("action.revoke_all", "action_id", actionID, "subject", subjectID)
+	k.log.With(ctx).Info("action.revoke_all", "action_id", actionID, "subject", callerID)
 	return nil
 }
 
@@ -726,7 +726,7 @@ type UpdateActionRequest struct {
 }
 
 // UpdateAction modifies an action and deactivates it (schema/source changes require re-activation).
-func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateActionRequest) (*Action, error) {
+func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateActionRequest) (*Action, error) {
 	a, err := k.store.ReadAction(ctx, req.ID)
 	if err != nil {
 		return nil, err
@@ -737,7 +737,7 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 	if a.Kind == KindNative {
 		return nil, ErrUnauthorized.Wrap("native actions are managed by bootstrap")
 	}
-	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
+	if err := k.requireAdmin(ctx, callerID, a); err != nil {
 		return nil, err
 	}
 
@@ -794,7 +794,7 @@ func (k *Kernel) UpdateAction(ctx context.Context, subjectID string, req UpdateA
 }
 
 // SetActive activates or deactivates an action.
-func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, active bool) error {
+func (k *Kernel) SetActive(ctx context.Context, callerID, actionID string, active bool) error {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return err
@@ -802,7 +802,7 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 	if a.Kind == KindNative {
 		return ErrUnauthorized.Wrap("native actions are managed by bootstrap")
 	}
-	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
+	if err := k.requireAdmin(ctx, callerID, a); err != nil {
 		return err
 	}
 	if active {
@@ -870,7 +870,7 @@ func (k *Kernel) SetActive(ctx context.Context, subjectID, actionID string, acti
 }
 
 // DeleteAction removes an action (marks deleted; keeps transaction history).
-func (k *Kernel) DeleteAction(ctx context.Context, subjectID, actionID string) error {
+func (k *Kernel) DeleteAction(ctx context.Context, callerID, actionID string) error {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return err
@@ -878,7 +878,7 @@ func (k *Kernel) DeleteAction(ctx context.Context, subjectID, actionID string) e
 	if a.Kind == KindNative {
 		return ErrUnauthorized.Wrap("native actions are managed by bootstrap")
 	}
-	if err := k.requireAdmin(ctx, subjectID, a); err != nil {
+	if err := k.requireAdmin(ctx, callerID, a); err != nil {
 		return err
 	}
 	if err := k.store.DeleteAction(ctx, actionID); err != nil {
@@ -891,7 +891,7 @@ func (k *Kernel) DeleteAction(ctx context.Context, subjectID, actionID string) e
 // ---- ACL operations ----
 
 // GrantACL grants a permission to a subject on an action.
-func (k *Kernel) GrantACL(ctx context.Context, subjectID, actionID string, perm Permission, grantorID string) error {
+func (k *Kernel) GrantACL(ctx context.Context, callerID, actionID string, perm Permission, grantorID string) error {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return err
@@ -903,19 +903,19 @@ func (k *Kernel) GrantACL(ctx context.Context, subjectID, actionID string, perm 
 		return ErrInvalidInput.Wrapf("unknown permission %q", perm)
 	}
 	if err := k.store.GrantACL(ctx, &ACLEntry{
-		SubjectUserID: subjectID,
+		CallerUserID: callerID,
 		ActionID:      actionID,
 		Permission:    perm,
 		CreatedAt:     time.Now().UTC(),
 	}); err != nil {
 		return err
 	}
-	k.log.With(ctx).Info("acl.granted", "action_id", actionID, "subject", subjectID, "perm", perm)
+	k.log.With(ctx).Info("acl.granted", "action_id", actionID, "subject", callerID, "perm", perm)
 	return nil
 }
 
 // RevokeACL removes a permission.
-func (k *Kernel) RevokeACL(ctx context.Context, subjectID, actionID string, perm Permission, revokerID string) error {
+func (k *Kernel) RevokeACL(ctx context.Context, callerID, actionID string, perm Permission, revokerID string) error {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return err
@@ -923,10 +923,10 @@ func (k *Kernel) RevokeACL(ctx context.Context, subjectID, actionID string, perm
 	if err := k.requireAdmin(ctx, revokerID, a); err != nil {
 		return err
 	}
-	if err := k.store.RevokeACL(ctx, subjectID, actionID, perm); err != nil {
+	if err := k.store.RevokeACL(ctx, callerID, actionID, perm); err != nil {
 		return err
 	}
-	k.log.With(ctx).Info("acl.revoked", "action_id", actionID, "subject", subjectID, "perm", perm)
+	k.log.With(ctx).Info("acl.revoked", "action_id", actionID, "subject", callerID, "perm", perm)
 	return nil
 }
 
@@ -934,11 +934,11 @@ func (k *Kernel) RevokeACL(ctx context.Context, subjectID, actionID string, perm
 
 // StartProcess creates a new process and locks funds from the owner's account.
 // Process creation, user debit, and root trace creation are atomic.
-func (k *Kernel) StartProcess(ctx context.Context, subjectID, ownerID string, funds int64) (*Process, *Trace, error) {
+func (k *Kernel) StartProcess(ctx context.Context, callerID, ownerID string, funds int64) (*Process, *Trace, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
 	logger.Info("process.start.start", "owner", ownerID, "funds", funds)
-	if err := k.requireSelf(ctx, subjectID, ownerID); err != nil {
+	if err := k.requireSelf(ctx, callerID, ownerID); err != nil {
 		logger.Warn("process.start.failed", "owner", ownerID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, nil, err
 	}
@@ -971,8 +971,8 @@ func (k *Kernel) StartProcess(ctx context.Context, subjectID, ownerID string, fu
 }
 
 // FundProcess adds more credits to an existing open process.
-func (k *Kernel) FundProcess(ctx context.Context, subjectID, processID string, funds int64) error {
-	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+func (k *Kernel) FundProcess(ctx context.Context, callerID, processID string, funds int64) error {
+	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
 		return err
 	}
 	p, err := k.store.ReadProcess(ctx, processID)
@@ -982,13 +982,13 @@ func (k *Kernel) FundProcess(ctx context.Context, subjectID, processID string, f
 	if p.Status != ProcessOpen {
 		return ErrInvalidState.Wrap("process is closed")
 	}
-	if p.OwnerUserID != subjectID {
+	if p.OwnerUserID != callerID {
 		return ErrUnauthorized.Wrap("only the process owner may add funds")
 	}
 	if funds <= 0 {
 		return ErrInvalidInput.Wrap("funds must be positive")
 	}
-	if err := k.store.FundProcess(ctx, subjectID, processID, funds); err != nil {
+	if err := k.store.FundProcess(ctx, callerID, processID, funds); err != nil {
 		return err
 	}
 	k.log.With(ctx).Info("process.funded", "process_id", processID, "funds", funds, "status", "success")
@@ -996,15 +996,15 @@ func (k *Kernel) FundProcess(ctx context.Context, subjectID, processID string, f
 }
 
 // EndProcess closes a process and returns all remaining funds to the owner.
-func (k *Kernel) EndProcess(ctx context.Context, subjectID, processID string) error {
-	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+func (k *Kernel) EndProcess(ctx context.Context, callerID, processID string) error {
+	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
 		return err
 	}
 	p, err := k.store.ReadProcess(ctx, processID)
 	if err != nil {
 		return err
 	}
-	if p.OwnerUserID != subjectID {
+	if p.OwnerUserID != callerID {
 		return ErrUnauthorized.Wrap("only the process owner may end it")
 	}
 	if p.Status != ProcessOpen {
@@ -1019,8 +1019,8 @@ func (k *Kernel) EndProcess(ctx context.Context, subjectID, processID string) er
 
 // GrantProcessAuthority grants another user explicit authority to use a process.
 // Only the process owner may grant this right.
-func (k *Kernel) GrantProcessAuthority(ctx context.Context, operatorID, subjectID, processID string) error {
-	if _, err := k.authenticatedSubject(ctx, operatorID); err != nil {
+func (k *Kernel) GrantProcessAuthority(ctx context.Context, operatorID, callerID, processID string) error {
+	if _, err := k.authenticatedCaller(ctx, operatorID); err != nil {
 		return err
 	}
 	p, err := k.store.ReadProcess(ctx, processID)
@@ -1030,17 +1030,17 @@ func (k *Kernel) GrantProcessAuthority(ctx context.Context, operatorID, subjectI
 	if p.OwnerUserID != operatorID {
 		return ErrUnauthorized.Wrap("only the process owner may grant process authority")
 	}
-	if err := k.store.GrantProcessAuthority(ctx, subjectID, processID); err != nil {
+	if err := k.store.GrantProcessAuthority(ctx, callerID, processID); err != nil {
 		return err
 	}
-	k.log.With(ctx).Info("process.authority_granted", "process_id", processID, "subject_id", subjectID)
+	k.log.With(ctx).Info("process.authority_granted", "process_id", processID, "subject_id", callerID)
 	return nil
 }
 
 // RevokeProcessAuthority removes explicit call authority over a process from a user.
 // Only the process owner may revoke.
-func (k *Kernel) RevokeProcessAuthority(ctx context.Context, operatorID, subjectID, processID string) error {
-	if _, err := k.authenticatedSubject(ctx, operatorID); err != nil {
+func (k *Kernel) RevokeProcessAuthority(ctx context.Context, operatorID, callerID, processID string) error {
+	if _, err := k.authenticatedCaller(ctx, operatorID); err != nil {
 		return err
 	}
 	p, err := k.store.ReadProcess(ctx, processID)
@@ -1050,20 +1050,20 @@ func (k *Kernel) RevokeProcessAuthority(ctx context.Context, operatorID, subject
 	if p.OwnerUserID != operatorID {
 		return ErrUnauthorized.Wrap("only the process owner may revoke process authority")
 	}
-	if err := k.store.RevokeProcessAuthority(ctx, subjectID, processID); err != nil {
+	if err := k.store.RevokeProcessAuthority(ctx, callerID, processID); err != nil {
 		return err
 	}
-	k.log.With(ctx).Info("process.authority_revoked", "process_id", processID, "subject_id", subjectID)
+	k.log.With(ctx).Info("process.authority_revoked", "process_id", processID, "subject_id", callerID)
 	return nil
 }
 
 // ReadProcess returns a process by ID, requiring the caller to be its owner.
-func (k *Kernel) ReadProcess(ctx context.Context, subjectID, id string) (*Process, error) {
+func (k *Kernel) ReadProcess(ctx context.Context, callerID, id string) (*Process, error) {
 	p, err := k.store.ReadProcess(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if p.OwnerUserID != subjectID {
+	if p.OwnerUserID != callerID {
 		return nil, ErrUnauthorized.Wrap("not authorized to view this process")
 	}
 	return p, nil
@@ -1072,7 +1072,7 @@ func (k *Kernel) ReadProcess(ctx context.Context, subjectID, id string) (*Proces
 // ---- Transaction operations ----
 
 // ReadTransaction returns a transaction by ID with embedded rating, checking subject authority.
-func (k *Kernel) ReadTransaction(ctx context.Context, subjectID, txID string) (*TransactionView, error) {
+func (k *Kernel) ReadTransaction(ctx context.Context, callerID, txID string) (*TransactionView, error) {
 	tx, err := k.store.ReadTransaction(ctx, txID)
 	if err != nil {
 		return nil, err
@@ -1080,22 +1080,22 @@ func (k *Kernel) ReadTransaction(ctx context.Context, subjectID, txID string) (*
 	if tx == nil {
 		return nil, ErrNotFound.Wrap("transaction not found")
 	}
-	if !k.canReadTransaction(ctx, subjectID, tx) {
+	if !k.canReadTransaction(ctx, callerID, tx) {
 		return nil, ErrNotFound.Wrap("transaction not found")
 	}
 	return k.toTransactionView(ctx, tx), nil
 }
 
-// canReadTransaction reports whether subjectID is a party to tx — the buyer
+// canReadTransaction reports whether callerID is a party to tx — the buyer
 // (owner_user_id) or the seller (owner of the called action) — or a superuser. See §9.4.
-func (k *Kernel) canReadTransaction(ctx context.Context, subjectID string, tx *Transaction) bool {
-	if tx.OwnerUserID == subjectID {
+func (k *Kernel) canReadTransaction(ctx context.Context, callerID string, tx *Transaction) bool {
+	if tx.OwnerUserID == callerID {
 		return true
 	}
-	if a, err := k.store.ReadAction(ctx, tx.ActionID); err == nil && a != nil && a.OwnerUserID == subjectID {
+	if a, err := k.store.ReadAction(ctx, tx.ActionID); err == nil && a != nil && a.OwnerUserID == callerID {
 		return true
 	}
-	if u, err := k.store.ReadUser(ctx, subjectID); err == nil && u != nil && k.isUserSuperuser(ctx, u) {
+	if u, err := k.store.ReadUser(ctx, callerID); err == nil && u != nil && k.isUserSuperuser(ctx, u) {
 		return true
 	}
 	return false
@@ -1126,11 +1126,11 @@ func (k *Kernel) toTransactionView(ctx context.Context, tx *Transaction) *Transa
 // RateTransaction submits a rating for a completed transaction.
 // Only the direct buyer (the process owner who paid) may rate.
 // Ratings are stored in a separate ratings table; the transaction row is never modified.
-func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, rating float64, note *string) (*Rating, error) {
+func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rating float64, note *string) (*Rating, error) {
 	if rating != 0 && rating != 1 {
 		return nil, ErrInvalidInput.Wrap("rating must be 0 or 1")
 	}
-	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
 		return nil, err
 	}
 	tx, err := k.store.ReadTransaction(ctx, txID)
@@ -1141,11 +1141,11 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 		return nil, ErrNotFound.Wrap("transaction not found")
 	}
 	// Only the direct buyer (process owner) may rate.
-	if subjectID != tx.OwnerUserID {
+	if callerID != tx.OwnerUserID {
 		return nil, ErrUnauthorized.Wrap("only the direct buyer may rate a transaction")
 	}
 	// A subject may not rate its own output.
-	if subjectID == tx.TargetUserID {
+	if callerID == tx.TargetUserID {
 		return nil, ErrUnauthorized.Wrap("subject may not rate its own output")
 	}
 	// Check for duplicate rating (transaction already has a rating record).
@@ -1157,7 +1157,7 @@ func (k *Kernel) RateTransaction(ctx context.Context, subjectID, txID string, ra
 	r := &Rating{
 		ID:          uuid.New().String(),
 		RatedTxID:   txID,
-		RaterUserID: subjectID,
+		RaterUserID: callerID,
 		Rating:      rating,
 		Note:        note,
 		CreatedAt:   time.Now().UTC().Truncate(time.Second),
@@ -1200,7 +1200,7 @@ type LookupRequest struct {
 	Query     string
 	Limit     int
 	Offset    int
-	SubjectID string // authenticated caller; used to include owned and ACL-granted actions
+	CallerID string // authenticated caller; used to include owned and ACL-granted actions
 }
 
 // LookupResult is a ranked action for a lookup query.
@@ -1272,8 +1272,8 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		}
 		// Only include actions the subject can call per CanCall rule.
 		if !a.Public {
-			if req.SubjectID == "" || (a.OwnerUserID != req.SubjectID) {
-				ok, _ := k.canCall(ctx, req.SubjectID, a)
+			if req.CallerID == "" || (a.OwnerUserID != req.CallerID) {
+				ok, _ := k.canCall(ctx, req.CallerID, a)
 				if !ok {
 					continue
 				}
@@ -1323,11 +1323,11 @@ func sqrt32(x float32) float32 {
 
 // ---- Helpers ----
 
-// authenticatedSubject reads the subject user and rejects missing or suspended users.
+// authenticatedCaller reads the subject user and rejects missing or suspended users.
 // All supervision operations call this first so that Authenticated(s) ∧ ¬Suspended(s)
 // is a kernel-level invariant, not just an adapter-level check.
-func (k *Kernel) authenticatedSubject(ctx context.Context, subjectID string) (*User, error) {
-	u, err := k.store.ReadUser(ctx, subjectID)
+func (k *Kernel) authenticatedCaller(ctx context.Context, callerID string) (*User, error) {
+	u, err := k.store.ReadUser(ctx, callerID)
 	if err != nil {
 		return nil, ErrUnauthenticated.Wrap("subject not found")
 	}
@@ -1342,17 +1342,17 @@ func (k *Kernel) isUserSuperuser(_ context.Context, u *User) bool {
 	return u.Handle == "@sys"
 }
 
-// requireAdmin returns nil if subjectID is authenticated, non-suspended, and is the owner
+// requireAdmin returns nil if callerID is authenticated, non-suspended, and is the owner
 // of a, the platform superuser, or holds admin ACL on a.
-func (k *Kernel) requireAdmin(ctx context.Context, subjectID string, a *Action) error {
-	u, err := k.authenticatedSubject(ctx, subjectID)
+func (k *Kernel) requireAdmin(ctx context.Context, callerID string, a *Action) error {
+	u, err := k.authenticatedCaller(ctx, callerID)
 	if err != nil {
 		return err
 	}
-	if a.OwnerUserID == subjectID || k.isUserSuperuser(ctx, u) {
+	if a.OwnerUserID == callerID || k.isUserSuperuser(ctx, u) {
 		return nil
 	}
-	ok, err := k.store.CheckACL(ctx, subjectID, a.ID, PermAdmin)
+	ok, err := k.store.CheckACL(ctx, callerID, a.ID, PermAdmin)
 	if err != nil {
 		return ErrInternal.Wrapf("acl check failed: %v", err)
 	}
@@ -1362,10 +1362,10 @@ func (k *Kernel) requireAdmin(ctx context.Context, subjectID string, a *Action) 
 	return nil
 }
 
-// requireSelf returns nil if subjectID is authenticated, non-suspended, and equals ownerID
+// requireSelf returns nil if callerID is authenticated, non-suspended, and equals ownerID
 // or is the platform superuser.
-func (k *Kernel) requireSelf(ctx context.Context, subjectID, ownerID string) error {
-	u, err := k.authenticatedSubject(ctx, subjectID)
+func (k *Kernel) requireSelf(ctx context.Context, callerID, ownerID string) error {
+	u, err := k.authenticatedCaller(ctx, callerID)
 	if err != nil {
 		return err
 	}
@@ -1411,9 +1411,9 @@ type CreateListenerRequest struct {
 	TargetActionID string
 }
 
-// CreateListener registers a new listener owned by subjectID and returns it.
-func (k *Kernel) CreateListener(ctx context.Context, subjectID string, req CreateListenerRequest) (*Listener, error) {
-	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+// CreateListener registers a new listener owned by callerID and returns it.
+func (k *Kernel) CreateListener(ctx context.Context, callerID string, req CreateListenerRequest) (*Listener, error) {
+	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
 		return nil, err
 	}
 	if req.EventName == "" {
@@ -1429,8 +1429,8 @@ func (k *Kernel) CreateListener(ctx context.Context, subjectID string, req Creat
 	if err != nil {
 		return nil, err
 	}
-	if a.OwnerUserID != subjectID {
-		ok, err := k.canCall(ctx, subjectID, a)
+	if a.OwnerUserID != callerID {
+		ok, err := k.canCall(ctx, callerID, a)
 		if err != nil {
 			return nil, err
 		}
@@ -1440,7 +1440,7 @@ func (k *Kernel) CreateListener(ctx context.Context, subjectID string, req Creat
 	}
 	l := &Listener{
 		ID:             uuid.New().String(),
-		OwnerUserID:    subjectID,
+		OwnerUserID:    callerID,
 		SourceUserID:   req.SourceUserID,
 		EventName:      req.EventName,
 		TargetActionID: req.TargetActionID,
@@ -1455,30 +1455,30 @@ func (k *Kernel) CreateListener(ctx context.Context, subjectID string, req Creat
 }
 
 // PollListener returns the pending (unconsumed) events for a listener.
-func (k *Kernel) PollListener(ctx context.Context, subjectID, listenerID string) ([]*Event, error) {
-	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+func (k *Kernel) PollListener(ctx context.Context, callerID, listenerID string) ([]*Event, error) {
+	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
 		return nil, err
 	}
 	l, err := k.store.ReadListener(ctx, listenerID)
 	if err != nil {
 		return nil, err
 	}
-	if l.OwnerUserID != subjectID && l.SourceUserID != subjectID {
+	if l.OwnerUserID != callerID && l.SourceUserID != callerID {
 		return nil, ErrUnauthorized.Wrap("not authorized to poll this listener")
 	}
 	return k.store.ListPendingEvents(ctx, listenerID)
 }
 
 // DeleteListener atomically deactivates a listener and purges its pending events.
-func (k *Kernel) DeleteListener(ctx context.Context, subjectID, listenerID string) error {
-	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+func (k *Kernel) DeleteListener(ctx context.Context, callerID, listenerID string) error {
+	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
 		return err
 	}
 	l, err := k.store.ReadListener(ctx, listenerID)
 	if err != nil {
 		return err
 	}
-	if l.OwnerUserID != subjectID {
+	if l.OwnerUserID != callerID {
 		return ErrUnauthorized.Wrap("only the listener owner may remove it")
 	}
 	return k.store.DeleteListenerWithEvents(ctx, listenerID)
@@ -1490,15 +1490,15 @@ func (k *Kernel) ListListeners(ctx context.Context, ownerID string, limit, offse
 }
 
 // GetListener returns listener metadata. Subject must be the owner or source user.
-func (k *Kernel) GetListener(ctx context.Context, subjectID, listenerID string) (*Listener, error) {
-	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+func (k *Kernel) GetListener(ctx context.Context, callerID, listenerID string) (*Listener, error) {
+	if _, err := k.authenticatedCaller(ctx, callerID); err != nil {
 		return nil, err
 	}
 	l, err := k.store.ReadListener(ctx, listenerID)
 	if err != nil {
 		return nil, err
 	}
-	if l.OwnerUserID != subjectID && l.SourceUserID != subjectID {
+	if l.OwnerUserID != callerID && l.SourceUserID != callerID {
 		return nil, ErrUnauthorized.Wrap("not authorized to view this listener")
 	}
 	return l, nil
@@ -1539,8 +1539,8 @@ func (k *Kernel) CompleteIdempotencyRecordIfPending(ctx context.Context, id, res
 // It does NOT call the target action — the listener owner must call ConsumeEvent explicitly.
 // causingTraceID is stored as a FOLLOWS_FROM reference on each event record.
 // All events are inserted atomically: either every active listener receives its event or none do.
-func (k *Kernel) EmitEvent(ctx context.Context, subjectID, sourceUserID, eventName string, args map[string]any, causingTraceID string) ([]string, error) {
-	if err := k.requireSelf(ctx, subjectID, sourceUserID); err != nil {
+func (k *Kernel) EmitEvent(ctx context.Context, callerID, sourceUserID, eventName string, args map[string]any, causingTraceID string) ([]string, error) {
+	if err := k.requireSelf(ctx, callerID, sourceUserID); err != nil {
 		return nil, err
 	}
 	listeners, err := k.store.ListListeners(ctx, sourceUserID, eventName)
@@ -1581,7 +1581,7 @@ func (k *Kernel) EmitEvent(ctx context.Context, subjectID, sourceUserID, eventNa
 // At-least-once delivery: if the action call fails, the event is reset to pending.
 // processID is the caller's open process; the parent trace is set to the emitting action's
 // trace (e.CausingTraceID), providing a cross-process causal link.
-func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID string) (*CallReply, error) {
+func (k *Kernel) ConsumeEvent(ctx context.Context, callerID, eventID, processID string) (*CallReply, error) {
 	e, err := k.store.ReadEvent(ctx, eventID)
 	if err != nil {
 		return nil, err
@@ -1590,7 +1590,7 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 	if err != nil {
 		return nil, err
 	}
-	if l.OwnerUserID != subjectID {
+	if l.OwnerUserID != callerID {
 		return nil, ErrUnauthorized.Wrap("only the listener owner may consume events")
 	}
 	if !l.Active {
@@ -1618,7 +1618,7 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 	// (may cross process boundaries). EventID causes CommitCall to settle the event
 	// atomically in the same transaction, eliminating the double-charge window.
 	reply, err := k.Call(ctx, CallRequest{
-		SubjectID:     subjectID,
+		CallerID:      callerID,
 		ProcessID:     processID,
 		ParentTraceID: e.CausingTraceID,
 		TargetUserID:  owner.ID,
@@ -1656,7 +1656,7 @@ func (k *Kernel) buildReceipt(tx *Transaction) (*Receipt, error) {
 		TxID:         tx.ID,
 		TraceID:      tx.TraceID,
 		ActionID:     tx.ActionID,
-		CallerUserID: tx.SubjectUserID,
+		CallerUserID: tx.CallerUserID,
 		ProcessID:    tx.ProcessID,
 		ArgsHash:     argsHash,
 		ReplyHash:    replyHash,

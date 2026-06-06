@@ -93,15 +93,15 @@ func TestRevokeRefreshToken(t *testing.T) {
 	}
 }
 
-func TestRequireSubjectIDExpired(t *testing.T) {
+func TestRequireCallerIDExpired(t *testing.T) {
 	dir := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", dir)
 	t.Cleanup(func() { os.Setenv("HOME", origHome) })
 
 	env := newTestEnv(t)
-	// No token saved — requireSubjectID must fail.
-	_, err := requireSubjectID(env.k)
+	// No token saved — requireCallerID must fail.
+	_, err := requireCallerID(env.k)
 	if err == nil {
 		t.Error("expected error when no token saved")
 	}

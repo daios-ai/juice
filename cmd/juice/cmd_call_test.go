@@ -36,7 +36,7 @@ func TestCallClosedProcess(t *testing.T) {
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 
 	_, err := env.k.Call(ctx, kernel.CallRequest{
-		SubjectID:     owner.ID,
+		CallerID:     owner.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  owner.ID,
@@ -69,7 +69,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 
 	_, err = env.k.Call(ctx, kernel.CallRequest{
-		SubjectID:     owner.ID,
+		CallerID:     owner.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  owner.ID,

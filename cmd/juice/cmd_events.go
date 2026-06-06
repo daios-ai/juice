@@ -33,7 +33,7 @@ func listenerCreateCmd() *cobra.Command {
 		Use:   "create",
 		Short: "Register a listener that calls an action when an event fires",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				ctx := context.Background()
 				sourceUser, err := k.ReadUserByHandle(ctx, sourceHandle)
 				if err != nil {
@@ -51,7 +51,7 @@ func listenerCreateCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("action %s not found: %w", actionRef, err)
 				}
-				l, err := k.CreateListener(ctx, subjectID, kernel.CreateListenerRequest{
+				l, err := k.CreateListener(ctx, callerID, kernel.CreateListenerRequest{
 					SourceUserID:   sourceUser.ID,
 					EventName:      eventName,
 					TargetActionID: action.ID,
@@ -85,8 +85,8 @@ func listenerListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List listeners owned by the current user",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				listeners, err := k.ListListeners(context.Background(), subjectID, 100, 0)
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				listeners, err := k.ListListeners(context.Background(), callerID, 100, 0)
 				if err != nil {
 					return err
 				}
@@ -114,8 +114,8 @@ func listenerShowCmd() *cobra.Command {
 		Use:   "show",
 		Short: "Show a listener",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				l, err := k.GetListener(context.Background(), subjectID, listenerID)
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				l, err := k.GetListener(context.Background(), callerID, listenerID)
 				if err != nil {
 					return err
 				}
@@ -143,8 +143,8 @@ func listenerDeleteCmd() *cobra.Command {
 		Use:   "delete",
 		Short: "Delete a listener and purge its pending events",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				if err := k.DeleteListener(context.Background(), subjectID, listenerID); err != nil {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				if err := k.DeleteListener(context.Background(), callerID, listenerID); err != nil {
 					return err
 				}
 				if !flagQuiet {
@@ -165,12 +165,12 @@ func eventEmitCmd() *cobra.Command {
 		Use:   "emit",
 		Short: "Emit a named event, firing all matching listeners",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				args, err := readJSONArg(argsStr)
 				if err != nil {
 					return fmt.Errorf("invalid --args: %w", err)
 				}
-				eventIDs, err := k.EmitEvent(context.Background(), subjectID, subjectID, eventName, args, "")
+				eventIDs, err := k.EmitEvent(context.Background(), callerID, callerID, eventName, args, "")
 				if err != nil {
 					return err
 				}
@@ -203,8 +203,8 @@ func eventListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List pending events for a listener",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				events, err := k.PollListener(context.Background(), subjectID, listenerID)
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				events, err := k.PollListener(context.Background(), callerID, listenerID)
 				if err != nil {
 					return err
 				}
@@ -232,8 +232,8 @@ func eventConsumeCmd() *cobra.Command {
 		Use:   "consume",
 		Short: "Consume a pending event, calling its listener's target action",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				reply, err := k.ConsumeEvent(context.Background(), subjectID, eventID, processID)
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				reply, err := k.ConsumeEvent(context.Background(), callerID, eventID, processID)
 				if err != nil {
 					return err
 				}

@@ -14,7 +14,7 @@ type contextKey int
 
 const (
 	keyRequestID contextKey = iota
-	keySubjectUserID
+	keyCallerUserID
 	keyProcessID
 	keyTraceID
 	keyActionID
@@ -90,8 +90,8 @@ func (l *Logger) With(ctx context.Context) *Logger {
 	if v, ok := ctx.Value(keyRequestID).(string); ok && v != "" {
 		args = append(args, "request_id", v)
 	}
-	if v, ok := ctx.Value(keySubjectUserID).(string); ok && v != "" {
-		args = append(args, "subject_user_id", v)
+	if v, ok := ctx.Value(keyCallerUserID).(string); ok && v != "" {
+		args = append(args, "caller_user_id", v)
 	}
 	if v, ok := ctx.Value(keyProcessID).(string); ok && v != "" {
 		args = append(args, "process_id", v)
@@ -116,8 +116,8 @@ func (l *Logger) With(ctx context.Context) *Logger {
 func WithRequestID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, keyRequestID, id)
 }
-func WithSubjectUserID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, keySubjectUserID, id)
+func WithCallerUserID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, keyCallerUserID, id)
 }
 func WithProcessID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, keyProcessID, id)

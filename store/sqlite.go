@@ -540,26 +540,26 @@ func finishAction(a *kernel.Action, kind string, active, public int, inJSON, out
 
 func (s *DB) GrantACL(ctx context.Context, e *kernel.ACLEntry) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO acl_entries (subject_user_id,action_id,permission,created_at)
+		`INSERT OR IGNORE INTO acl_entries (caller_user_id,action_id,permission,created_at)
 		 VALUES (?,?,?,?)`,
-		e.SubjectUserID, e.ActionID, string(e.Permission), timeToStr(e.CreatedAt),
+		e.CallerUserID, e.ActionID, string(e.Permission), timeToStr(e.CreatedAt),
 	)
 	return dbErr(err, "grant acl")
 }
 
-func (s *DB) RevokeACL(ctx context.Context, subjectID, actionID string, perm kernel.Permission) error {
+func (s *DB) RevokeACL(ctx context.Context, callerID, actionID string, perm kernel.Permission) error {
 	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM acl_entries WHERE subject_user_id=? AND action_id=? AND permission=?`,
-		subjectID, actionID, string(perm),
+		`DELETE FROM acl_entries WHERE caller_user_id=? AND action_id=? AND permission=?`,
+		callerID, actionID, string(perm),
 	)
 	return dbErr(err, "revoke acl")
 }
 
-func (s *DB) CheckACL(ctx context.Context, subjectID, actionID string, perm kernel.Permission) (bool, error) {
+func (s *DB) CheckACL(ctx context.Context, callerID, actionID string, perm kernel.Permission) (bool, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM acl_entries WHERE subject_user_id=? AND action_id=? AND permission=?`,
-		subjectID, actionID, string(perm),
+		`SELECT COUNT(*) FROM acl_entries WHERE caller_user_id=? AND action_id=? AND permission=?`,
+		callerID, actionID, string(perm),
 	).Scan(&count)
 	if err != nil {
 		return false, dbErr(err, "check acl")
@@ -722,11 +722,11 @@ func (s *DB) FundProcess(ctx context.Context, userID, processID string, amount i
 func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, receipt *kernel.Receipt, label string) error {
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO transactions
-		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
+		 (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,
 		  action_id,action_name,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
-		ktx.OwnerUserID, ktx.SubjectUserID, ktx.TargetUserID, ktx.ActionID, ktx.ActionName,
+		ktx.OwnerUserID, ktx.CallerUserID, ktx.TargetUserID, ktx.ActionID, ktx.ActionName,
 		rawJSONStr(ktx.ArgsJSON), rawJSONStr(ktx.ReplyJSON), string(ktx.Status),
 		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason, nullStr(ktx.RemoteReceiptHash), ktx.RemoteReceiptJSON,
 		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
@@ -1062,7 +1062,7 @@ func (s *DB) ReadRootTrace(ctx context.Context, processID string) (*kernel.Trace
 
 // ---- Transactions ----
 
-const txColumns = `id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,` +
+const txColumns = `id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,` +
 	`action_id,action_name,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at`
 
 // scanTx scans one transaction row using the provided scan function.
@@ -1072,7 +1072,7 @@ func scanTx(scan func(...any) error) (kernel.Transaction, error) {
 	var status, startedAt, endedAt, argsJSON, replyJSON string
 	var remoteReceiptHash *string
 	if err := scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
-		&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID, &tx.ActionName,
+		&tx.OwnerUserID, &tx.CallerUserID, &tx.TargetUserID, &tx.ActionID, &tx.ActionName,
 		&argsJSON, &replyJSON, &status,
 		&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON,
 		&startedAt, &endedAt); err != nil {
@@ -1107,9 +1107,9 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 		q += ` AND owner_user_id=?`
 		args = append(args, f.OwnerUserID)
 	}
-	if f.SubjectUserID != "" {
-		q += ` AND subject_user_id=?`
-		args = append(args, f.SubjectUserID)
+	if f.CallerUserID != "" {
+		q += ` AND caller_user_id=?`
+		args = append(args, f.CallerUserID)
 	}
 	if f.TargetUserID != "" {
 		q += ` AND target_user_id=?`
@@ -1849,27 +1849,27 @@ func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating,
 
 // ---- Process authority ----
 
-func (s *DB) GrantProcessAuthority(ctx context.Context, subjectUserID, processID string) error {
+func (s *DB) GrantProcessAuthority(ctx context.Context, callerUserID, processID string) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO process_authorities (process_id, subject_user_id, created_at) VALUES (?,?,?)`,
-		processID, subjectUserID, timeToStr(time.Now().UTC()),
+		`INSERT OR IGNORE INTO process_authorities (process_id, caller_user_id, created_at) VALUES (?,?,?)`,
+		processID, callerUserID, timeToStr(time.Now().UTC()),
 	)
 	return dbErr(err, "grant process authority")
 }
 
-func (s *DB) RevokeProcessAuthority(ctx context.Context, subjectUserID, processID string) error {
+func (s *DB) RevokeProcessAuthority(ctx context.Context, callerUserID, processID string) error {
 	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM process_authorities WHERE process_id=? AND subject_user_id=?`,
-		processID, subjectUserID,
+		`DELETE FROM process_authorities WHERE process_id=? AND caller_user_id=?`,
+		processID, callerUserID,
 	)
 	return dbErr(err, "revoke process authority")
 }
 
-func (s *DB) CheckProcessAuthority(ctx context.Context, subjectUserID, processID string) (bool, error) {
+func (s *DB) CheckProcessAuthority(ctx context.Context, callerUserID, processID string) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM process_authorities WHERE process_id=? AND subject_user_id=?`,
-		processID, subjectUserID,
+		`SELECT COUNT(*) FROM process_authorities WHERE process_id=? AND caller_user_id=?`,
+		processID, callerUserID,
 	).Scan(&n)
 	return n > 0, dbErr(err, "check process authority")
 }

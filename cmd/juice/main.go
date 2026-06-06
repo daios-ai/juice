@@ -203,16 +203,16 @@ func decodeJSON(r io.Reader, v any) error {
 	return json.NewDecoder(r).Decode(v)
 }
 
-// requireSubjectID loads the stored access token and verifies it.
+// requireCallerID loads the stored access token and verifies it.
 // If the access token is expired, it silently uses the refresh token to obtain
-// a new one, saves both new tokens, and returns the subject ID.
+// a new one, saves both new tokens, and returns the caller ID.
 // Returns ErrUnauthenticated if the account is suspended.
-func requireSubjectID(k *kernel.Kernel) (string, error) {
+func requireCallerID(k *kernel.Kernel) (string, error) {
 	tok, err := loadToken()
 	if err != nil {
 		return "", err
 	}
-	subjectID, err := k.VerifyToken(tok)
+	callerID, err := k.VerifyToken(tok)
 	if err != nil {
 		// Access token invalid — attempt silent refresh.
 		rt, rtErr := loadRefreshToken()
@@ -227,17 +227,17 @@ func requireSubjectID(k *kernel.Kernel) (string, error) {
 			return "", err
 		}
 		_ = saveRefreshToken(newRT)
-		subjectID, err = k.VerifyToken(access)
+		callerID, err = k.VerifyToken(access)
 		if err != nil {
 			return "", err
 		}
 	}
 	// Mirror authMiddleware: reject suspended accounts at every authenticated CLI call.
-	u, uErr := k.ReadUser(context.Background(), subjectID)
+	u, uErr := k.ReadUser(context.Background(), callerID)
 	if uErr == nil && u.SuspendedAt != nil {
 		return "", kernel.ErrUnauthenticated.Wrap("account suspended")
 	}
-	return subjectID, nil
+	return callerID, nil
 }
 
 // withKernel opens the kernel, calls fn, then closes the store.
@@ -250,14 +250,14 @@ func withKernel(fn func(*kernel.Kernel) error) error {
 	return fn(k)
 }
 
-// withSubject opens the kernel, resolves the authenticated subject, and calls fn.
-func withSubject(fn func(*kernel.Kernel, string) error) error {
+// withCaller opens the kernel, resolves the authenticated caller, and calls fn.
+func withCaller(fn func(*kernel.Kernel, string) error) error {
 	return withKernel(func(k *kernel.Kernel) error {
-		subjectID, err := requireSubjectID(k)
+		callerID, err := requireCallerID(k)
 		if err != nil {
 			return err
 		}
-		return fn(k, subjectID)
+		return fn(k, callerID)
 	})
 }
 

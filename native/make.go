@@ -26,8 +26,8 @@ func RegisterMakeHandler(k *kernel.Kernel, deps MakeDeps, sdk string, maxSteps i
 	if maxSteps <= 0 {
 		maxSteps = 5
 	}
-	k.RegisterNativeHandler("make", func(ctx context.Context, args map[string]any, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
-		return executeMake(ctx, args, ownerUserID, processID, parentTraceID, k, deps, sdk, maxSteps)
+	k.RegisterNativeHandler("make", func(ctx context.Context, args map[string]any, targetID, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
+		return executeMake(ctx, args, targetID, ownerUserID, processID, parentTraceID, k, deps, sdk, maxSteps)
 	})
 }
 
@@ -74,8 +74,8 @@ func (h *makeTestHost) Emit(_ context.Context, _ string, _ []byte) error { retur
 func (h *makeTestHost) Log(_ context.Context, _, _ string) error         { return nil }
 
 // executeMake implements the full @sys/make 10-step pipeline.
-// ownerUserID is the process owner (requester).
-func executeMake(ctx context.Context, args map[string]any, ownerUserID, processID, parentTraceID string, k *kernel.Kernel, deps MakeDeps, sdk string, maxSteps int) (map[string]any, error) {
+// targetID is make's action owner (@sys); ownerUserID is the process owner (requester).
+func executeMake(ctx context.Context, args map[string]any, targetID, ownerUserID, processID, parentTraceID string, k *kernel.Kernel, deps MakeDeps, sdk string, maxSteps int) (map[string]any, error) {
 	if deps.Compiler == nil {
 		return nil, kernel.ErrInvalidState.Wrap("source compiler not configured")
 	}
@@ -90,7 +90,7 @@ func executeMake(ctx context.Context, args map[string]any, ownerUserID, processI
 	}
 
 	// Step 2: derive contract + plan.
-	contract, diag := deriveContract(ctx, in.Description, ownerUserID, processID, parentTraceID, k)
+	contract, diag := deriveContract(ctx, in.Description, targetID, processID, parentTraceID, k)
 	if diag != "" {
 		return marshalMakeResult(&MakeResult{
 			Status:      "failure",
@@ -103,7 +103,7 @@ func executeMake(ctx context.Context, args map[string]any, ownerUserID, processI
 	refs := resolveActionRefs(ctx, in.Description, deps.Store)
 
 	// Step 4: search catalog based on capabilities identified in the plan.
-	found := searchCatalog(ctx, contract, ownerUserID, processID, parentTraceID, k, deps)
+	found := searchCatalog(ctx, contract, targetID, processID, parentTraceID, k, deps)
 
 	// Merge steps 3+4, deduplicated by action ID.
 	composable := mergeActions(refs, found)
@@ -113,7 +113,7 @@ func executeMake(ctx context.Context, args map[string]any, ownerUserID, processI
 
 	for step := 0; step < maxSteps; step++ {
 		// Step 5: generate TinyGo source.
-		runFunc, genDiag := generateSource(ctx, in, contract, composable, sdk, diagnostics, ownerUserID, processID, parentTraceID, k, deps.Store)
+		runFunc, genDiag := generateSource(ctx, in, contract, composable, sdk, diagnostics, targetID, processID, parentTraceID, k, deps.Store)
 		if genDiag != "" {
 			diagnostics = append(diagnostics, fmt.Sprintf("step %d: LLM generation failed: %s", step+1, genDiag))
 			continue
@@ -137,7 +137,7 @@ func executeMake(ctx context.Context, args map[string]any, ownerUserID, processI
 		}
 
 		// Step 8: generate examples and run them.
-		tests = generateAndRunExamples(ctx, contract, wasm, ownerUserID, processID, parentTraceID, k, deps.Scripts)
+		tests = generateAndRunExamples(ctx, contract, wasm, targetID, processID, parentTraceID, k, deps.Scripts)
 
 		allPassed := true
 		for _, t := range tests {
@@ -201,7 +201,7 @@ func parseMakeInput(args map[string]any) (*makeInput, error) {
 
 // deriveContract calls @sys/llm/chat to produce a name, input schema, output schema,
 // and implementation plan from the natural language description.
-func deriveContract(ctx context.Context, description, ownerUserID, processID, parentTraceID string, k *kernel.Kernel) (*actionContract, string) {
+func deriveContract(ctx context.Context, description, targetID, processID, parentTraceID string, k *kernel.Kernel) (*actionContract, string) {
 	prompt := fmt.Sprintf(`You are designing a callable API action for the Juice platform.
 Given the description, produce a JSON object with exactly these fields:
 {
@@ -215,7 +215,7 @@ Respond with ONLY the JSON object, nothing else.
 
 Description: %s`, description)
 
-	reply, err := callLLM(ctx, prompt, ownerUserID, processID, parentTraceID, k)
+	reply, err := callLLM(ctx, prompt, targetID, processID, parentTraceID, k)
 	if err != nil {
 		return nil, err.Error()
 	}
@@ -280,7 +280,7 @@ func resolveActionRefs(ctx context.Context, description string, store kernel.Sto
 
 // searchCatalog calls @sys/lookup for each capability identified in the contract plan.
 // Actions with a failure rate above 50% (over at least 5 uses) are excluded.
-func searchCatalog(ctx context.Context, contract *actionContract, ownerUserID, processID, parentTraceID string, k *kernel.Kernel, deps MakeDeps) []*kernel.Action {
+func searchCatalog(ctx context.Context, contract *actionContract, targetID, processID, parentTraceID string, k *kernel.Kernel, deps MakeDeps) []*kernel.Action {
 	if contract.Plan == "" || deps.Embedder == nil {
 		return nil
 	}
@@ -295,7 +295,7 @@ func searchCatalog(ctx context.Context, contract *actionContract, ownerUserID, p
 			continue
 		}
 		reply, err := k.Call(ctx, kernel.CallRequest{
-			SubjectID:     ownerUserID,
+			CallerID:      targetID,
 			ProcessID:     processID,
 			ParentTraceID: parentTraceID,
 			TargetUserID:  "@sys",
@@ -373,7 +373,7 @@ func mergeActions(a, b []*kernel.Action) []*kernel.Action {
 }
 
 // generateSource calls @sys/llm/chat to produce the TinyGo run function.
-func generateSource(ctx context.Context, in *makeInput, contract *actionContract, composable []*kernel.Action, sdk string, prevDiagnostics []string, ownerUserID, processID, parentTraceID string, k *kernel.Kernel, store kernel.Store) (source, diag string) {
+func generateSource(ctx context.Context, in *makeInput, contract *actionContract, composable []*kernel.Action, sdk string, prevDiagnostics []string, targetID, processID, parentTraceID string, k *kernel.Kernel, store kernel.Store) (source, diag string) {
 	var sb strings.Builder
 	sb.WriteString("You are a TinyGo programmer generating a WASM action for the Juice platform.\n\n")
 
@@ -423,7 +423,7 @@ func generateSource(ctx context.Context, in *makeInput, contract *actionContract
 		}
 	}
 
-	reply, err := callLLM(ctx, sb.String(), ownerUserID, processID, parentTraceID, k)
+	reply, err := callLLM(ctx, sb.String(), targetID, processID, parentTraceID, k)
 	if err != nil {
 		return "", err.Error()
 	}
@@ -436,7 +436,7 @@ func generateSource(ctx context.Context, in *makeInput, contract *actionContract
 
 // generateAndRunExamples asks the LLM for test inputs, executes them against the WASM,
 // and validates the output structure.
-func generateAndRunExamples(ctx context.Context, contract *actionContract, wasm []byte, ownerUserID, processID, parentTraceID string, k *kernel.Kernel, scripts kernel.ScriptExecutor) []MakeTest {
+func generateAndRunExamples(ctx context.Context, contract *actionContract, wasm []byte, targetID, processID, parentTraceID string, k *kernel.Kernel, scripts kernel.ScriptExecutor) []MakeTest {
 	if scripts == nil {
 		return []MakeTest{{Name: "compile", Status: "failed", Reason: "script executor not configured"}}
 	}
@@ -454,7 +454,7 @@ Respond with ONLY a JSON array of objects, each matching the schema.
 Schema:
 %s`, string(inJSON))
 
-	reply, err := callLLM(ctx, prompt, ownerUserID, processID, parentTraceID, k)
+	reply, err := callLLM(ctx, prompt, targetID, processID, parentTraceID, k)
 	if err != nil {
 		return results
 	}
@@ -528,9 +528,9 @@ func topLevelKeys(schema map[string]any) []string {
 }
 
 // callLLM calls @sys/llm/chat through kernel.Call() producing a sub-transaction and trace.
-func callLLM(ctx context.Context, prompt, ownerUserID, processID, parentTraceID string, k *kernel.Kernel) (string, error) {
+func callLLM(ctx context.Context, prompt, targetID, processID, parentTraceID string, k *kernel.Kernel) (string, error) {
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     ownerUserID,
+		CallerID:      targetID,
 		ProcessID:     processID,
 		ParentTraceID: parentTraceID,
 		TargetUserID:  "@sys",

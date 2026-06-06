@@ -430,7 +430,7 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	p, _ := setupProcess(t, k, caller.ID, 0)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:    caller.ID,
+		CallerID:    caller.ID,
 		ProcessID:    p.ID,
 		TargetUserID: "@proxy-peer",
 		ActionName:   "add",
@@ -616,7 +616,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	fake.receiptJSON = string(receiptBytes)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID,
+		CallerID: caller.ID, ProcessID: p.ID,
 		TargetUserID: "@verify-peer", ActionName: "vact", Args: map[string]any{},
 	})
 	if err != nil {
@@ -672,7 +672,7 @@ func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
 	}
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID,
+		CallerID: caller.ID, ProcessID: p.ID,
 		TargetUserID: sys.ID, ActionName: "vrr-local", Args: map[string]any{},
 	})
 	if err != nil {
@@ -730,7 +730,7 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	caller := setupUser(t, st, "@tamper-caller", 0)
 	p, _ := setupProcess(t, k, caller.ID, 0)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID,
+		CallerID: caller.ID, ProcessID: p.ID,
 		TargetUserID: "@tamper-peer", ActionName: "tact", Args: map[string]any{},
 	})
 	if err != nil {

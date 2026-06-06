@@ -18,7 +18,7 @@ func callCmd() *cobra.Command {
 		Use:   "call",
 		Short: "Call an action within a process",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				ownerHandle, actionName, err := parseActionRef(actionRef)
 				if err != nil {
 					return err
@@ -32,7 +32,7 @@ func callCmd() *cobra.Command {
 					return fmt.Errorf("invalid --args: %w", err)
 				}
 				reply, err := k.Call(context.Background(), kernel.CallRequest{
-					SubjectID:     subjectID,
+					CallerID:      callerID,
 					ProcessID:     processID,
 					ParentTraceID: parentTraceID,
 					TargetUserID:  owner.ID,

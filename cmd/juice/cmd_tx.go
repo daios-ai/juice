@@ -21,9 +21,9 @@ func txListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List transactions",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				txs, err := k.ListTransactions(context.Background(), kernel.TxFilter{
-					PartyUserID: subjectID,
+					PartyUserID: callerID,
 					ProcessID:   processID,
 					Limit:       limit,
 					Offset:      offset,
@@ -55,8 +55,8 @@ func txShowCmd() *cobra.Command {
 		Use:   "show",
 		Short: "Show a transaction",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				tv, err := k.ReadTransaction(context.Background(), subjectID, txID)
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				tv, err := k.ReadTransaction(context.Background(), callerID, txID)
 				if err != nil {
 					return err
 				}
@@ -87,8 +87,8 @@ func txVerifyReceiptCmd() *cobra.Command {
 		Use:   "verify-receipt",
 		Short: "Verify the remote receipt for a transaction",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				v, err := k.VerifyRemoteReceipt(context.Background(), subjectID, txID)
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				v, err := k.VerifyRemoteReceipt(context.Background(), callerID, txID)
 				if err != nil {
 					return err
 				}
@@ -123,12 +123,12 @@ func txRateCmd() *cobra.Command {
 		Use:   "rate",
 		Short: "Rate a transaction (0 or 1)",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				var notePtr *string
 				if note != "" {
 					notePtr = &note
 				}
-				if _, err := k.RateTransaction(context.Background(), subjectID, txID, rating, notePtr); err != nil {
+				if _, err := k.RateTransaction(context.Background(), callerID, txID, rating, notePtr); err != nil {
 					return err
 				}
 				fmt.Printf("Transaction %s rated %.0f.\n", txID, rating)

@@ -20,8 +20,8 @@ func processStartCmd() *cobra.Command {
 		Use:   "start",
 		Short: "Start a new budgeted process",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				p, t, err := k.StartProcess(context.Background(), subjectID, subjectID, funds)
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				p, t, err := k.StartProcess(context.Background(), callerID, callerID, funds)
 				if err != nil {
 					return err
 				}
@@ -51,8 +51,8 @@ func processListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List processes owned by the current user",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				processes, err := k.ListProcesses(context.Background(), subjectID, 100, 0)
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				processes, err := k.ListProcesses(context.Background(), callerID, 100, 0)
 				if err != nil {
 					return err
 				}
@@ -77,8 +77,8 @@ func processFundCmd() *cobra.Command {
 		Use:   "fund",
 		Short: "Add credits to an open process",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				if err := k.FundProcess(context.Background(), subjectID, processID, funds); err != nil {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				if err := k.FundProcess(context.Background(), callerID, processID, funds); err != nil {
 					return err
 				}
 				fmt.Printf("Added %d credits to process %s.\n", funds, processID)
@@ -99,8 +99,8 @@ func processEndCmd() *cobra.Command {
 		Use:   "end",
 		Short: "End a process and return remaining funds",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				if err := k.EndProcess(context.Background(), subjectID, processID); err != nil {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				if err := k.EndProcess(context.Background(), callerID, processID); err != nil {
 					return err
 				}
 				fmt.Printf("Process %s ended.\n", processID)
@@ -119,8 +119,8 @@ func processShowCmd() *cobra.Command {
 		Use:   "show",
 		Short: "Show process details",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				p, err := k.ReadProcess(context.Background(), subjectID, processID)
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				p, err := k.ReadProcess(context.Background(), callerID, processID)
 				if err != nil {
 					return err
 				}

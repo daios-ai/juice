@@ -184,7 +184,7 @@ func TestDeleteActionHardDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.GrantACL(ctx, &kernel.ACLEntry{
-		SubjectUserID: caller.ID,
+		CallerUserID: caller.ID,
 		ActionID:      a.ID,
 		Permission:    kernel.PermCall,
 		CreatedAt:     time.Now().UTC(),
@@ -276,7 +276,7 @@ func TestACL(t *testing.T) {
 	}
 
 	if err := db.GrantACL(ctx, &kernel.ACLEntry{
-		SubjectUserID: caller.ID,
+		CallerUserID: caller.ID,
 		ActionID:      a.ID,
 		Permission:    kernel.PermCall,
 		CreatedAt:     time.Now().UTC(),
@@ -421,7 +421,7 @@ func TestCommitCall(t *testing.T) {
 
 	tx := &kernel.Transaction{
 		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: root.ID,
-		OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: target.ID,
+		OwnerUserID: payer.ID, CallerUserID: payer.ID, TargetUserID: target.ID,
 		ActionID: "a1", Status: kernel.TxSuccess, Gross: 100, Net: 80, Fee: 20,
 		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
 	}
@@ -627,7 +627,7 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	makeTx := func(id, traceID string, gross int64) *kernel.Transaction {
 		return &kernel.Transaction{
 			ID: id, ProcessID: p.ID, TraceID: traceID, ParentTraceID: traceID,
-			OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: target.ID,
+			OwnerUserID: payer.ID, CallerUserID: payer.ID, TargetUserID: target.ID,
 			ActionID: a.ID, Status: kernel.TxSuccess, Gross: gross, Net: gross * 8 / 10, Fee: gross * 2 / 10,
 			StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
 		}
@@ -838,7 +838,7 @@ func TestTransactionCRUD(t *testing.T) {
 		TraceID:       tr.ID,
 		ParentTraceID: root.ID,
 		OwnerUserID:   owner.ID,
-		SubjectUserID: owner.ID,
+		CallerUserID: owner.ID,
 		TargetUserID:  target.ID,
 		ActionID:      a.ID,
 		Status:        kernel.TxSuccess,
@@ -1025,7 +1025,7 @@ func TestCreateReadReceipt(t *testing.T) {
 	tx := &kernel.Transaction{
 		ID:            uuid.New().String(),
 		OwnerUserID:   issuer.ID,
-		SubjectUserID: issuer.ID,
+		CallerUserID: issuer.ID,
 		TargetUserID:  issuer.ID,
 		ActionID:      uuid.New().String(),
 		Status:        kernel.TxSuccess,
@@ -1081,7 +1081,7 @@ func TestCreateRatingDirect(t *testing.T) {
 	tx := &kernel.Transaction{
 		ID:            uuid.New().String(),
 		OwnerUserID:   rater.ID,
-		SubjectUserID: rater.ID,
+		CallerUserID: rater.ID,
 		TargetUserID:  rater.ID,
 		ActionID:      uuid.New().String(),
 		Status:        kernel.TxSuccess,
@@ -1153,7 +1153,7 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 	tx := &kernel.Transaction{
 		ID:            uuid.New().String(),
 		OwnerUserID:   rater.ID,
-		SubjectUserID: rater.ID,
+		CallerUserID: rater.ID,
 		TargetUserID:  owner.ID,
 		ActionID:      action.ID,
 		Status:        kernel.TxSuccess,
@@ -1200,7 +1200,7 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 	tx2 := &kernel.Transaction{
 		ID:            uuid.New().String(),
 		OwnerUserID:   rater2.ID,
-		SubjectUserID: rater2.ID,
+		CallerUserID: rater2.ID,
 		TargetUserID:  owner.ID,
 		ActionID:      action.ID,
 		Status:        kernel.TxSuccess,
@@ -1243,7 +1243,7 @@ func TestListRatings(t *testing.T) {
 		tx := &kernel.Transaction{
 			ID:            id,
 			OwnerUserID:   rater.ID,
-			SubjectUserID: rater.ID,
+			CallerUserID: rater.ID,
 			TargetUserID:  owner.ID,
 			ActionID:      action.ID,
 			Status:        kernel.TxSuccess,
@@ -1311,7 +1311,7 @@ func TestListTransactionsByParty(t *testing.T) {
 			TraceID:       id + "-tr",
 			ParentTraceID: id + "-tr",
 			OwnerUserID:   caller.ID,
-			SubjectUserID: caller.ID,
+			CallerUserID: caller.ID,
 			TargetUserID:  owner.ID,
 			ActionID:      action.ID,
 			Status:        kernel.TxSuccess,
@@ -1569,7 +1569,7 @@ func TestCommitCallFeeDestructionRejected(t *testing.T) {
 
 	tx := &kernel.Transaction{
 		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: root.ID,
-		OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: target.ID,
+		OwnerUserID: payer.ID, CallerUserID: payer.ID, TargetUserID: target.ID,
 		ActionID: "a1", Status: kernel.TxSuccess, Gross: 100, Net: 80, Fee: 20,
 		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
 	}
@@ -1632,7 +1632,7 @@ func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 
 	tx := &kernel.Transaction{
 		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: root.ID,
-		OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: target.ID,
+		OwnerUserID: payer.ID, CallerUserID: payer.ID, TargetUserID: target.ID,
 		ActionID: "a1", Status: kernel.TxSuccess, Gross: 100, Net: 100, Fee: 0,
 		ReplyJSON: json.RawMessage(`{"ok":true}`),
 		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
@@ -1692,7 +1692,7 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 
 	tx := &kernel.Transaction{
 		ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID, ParentTraceID: root.ID,
-		OwnerUserID: payer.ID, SubjectUserID: payer.ID, TargetUserID: payer.ID,
+		OwnerUserID: payer.ID, CallerUserID: payer.ID, TargetUserID: payer.ID,
 		ActionID: "a1", Status: kernel.TxFailure, Gross: 0, Net: 0, Fee: 0,
 		Reason:    "execution failed",
 		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
@@ -1849,11 +1849,11 @@ func TestReadRemoteKernelByBaseURL(t *testing.T) {
 func (s *DB) createTransaction(ctx context.Context, tx *kernel.Transaction) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO transactions
-		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
+		 (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,
 		  action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		tx.ID, tx.ProcessID, tx.TraceID, tx.ParentTraceID,
-		tx.OwnerUserID, tx.SubjectUserID, tx.TargetUserID, tx.ActionID,
+		tx.OwnerUserID, tx.CallerUserID, tx.TargetUserID, tx.ActionID,
 		rawJSONStr(tx.ArgsJSON), rawJSONStr(tx.ReplyJSON), string(tx.Status),
 		tx.Gross, tx.Net, tx.Fee, tx.Reason, nullStr(tx.RemoteReceiptHash), tx.RemoteReceiptJSON,
 		timeToStr(tx.StartedAt), timeToStr(tx.EndedAt),

@@ -58,8 +58,8 @@ func userMeCmd() *cobra.Command {
 		Use:   "me",
 		Short: "Show the authenticated user's profile",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				u, err := k.ReadUser(context.Background(), subjectID)
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				u, err := k.ReadUser(context.Background(), callerID)
 				if err != nil {
 					return err
 				}

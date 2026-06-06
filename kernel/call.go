@@ -13,8 +13,8 @@ import (
 
 // CallRequest is input to the central Call() operation.
 type CallRequest struct {
-	// SubjectID is the authenticated user making the call.
-	SubjectID string
+	// CallerID is the authenticated user making the call.
+	CallerID string
 	// ProcessID is the budgeted execution context.
 	ProcessID string
 	// ParentTraceID is the trace from which this call originates.
@@ -50,10 +50,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	logger := k.log.With(ctx)
 
 	// 1. Subject must be authenticated: non-empty, exists, and not suspended.
-	if req.SubjectID == "" {
+	if req.CallerID == "" {
 		return nil, ErrUnauthenticated.Wrap("subject is required")
 	}
-	if _, err := k.authenticatedSubject(ctx, req.SubjectID); err != nil {
+	if _, err := k.authenticatedCaller(ctx, req.CallerID); err != nil {
 		return nil, err
 	}
 
@@ -68,14 +68,14 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 
 	// 3. Subject may use this process: is the owner, holds explicit process authority,
 	// or owns the action currently executing in the parent trace (trace-scoped subcall authority).
-	if process.OwnerUserID != req.SubjectID {
-		authorized, authErr := k.store.CheckProcessAuthority(ctx, req.SubjectID, req.ProcessID)
+	if process.OwnerUserID != req.CallerID {
+		authorized, authErr := k.store.CheckProcessAuthority(ctx, req.CallerID, req.ProcessID)
 		if authErr != nil {
 			return nil, ErrInternal.Wrapf("process authority check failed: %v", authErr)
 		}
 		if !authorized && req.ParentTraceID != "" {
 			parent, parentErr := k.store.ReadTrace(ctx, req.ParentTraceID)
-			if parentErr == nil && parent.ProcessID == req.ProcessID && parent.ActionOwnerID == req.SubjectID {
+			if parentErr == nil && parent.ProcessID == req.ProcessID && parent.ActionOwnerID == req.CallerID {
 				authorized = true
 			}
 		}
@@ -160,7 +160,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	ctx = log.WithProcessID(ctx, req.ProcessID)
-	ctx = log.WithSubjectUserID(ctx, req.SubjectID)
+	ctx = log.WithCallerUserID(ctx, req.CallerID)
 	ctx = log.WithTraceID(ctx, trace.ID)
 	ctx = log.WithActionID(ctx, action.ID)
 	logger = k.log.With(ctx)
@@ -174,7 +174,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		TraceID:       trace.ID,
 		ParentTraceID: req.ParentTraceID,
 		OwnerUserID:   process.OwnerUserID,
-		SubjectUserID: req.SubjectID,
+		CallerUserID: req.CallerID,
 		TargetUserID:  target.ID,
 		ActionID:      action.ID,
 		ActionName:    action.Name,
@@ -265,19 +265,19 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}, nil
 }
 
-// canCall checks public flag, ACL(subject, action, call), or ACL(subject, action, admin).
-func (k *Kernel) canCall(ctx context.Context, subjectID string, action *Action) (bool, error) {
+// canCall checks public flag, ACL(owner, action, call), or ACL(owner, action, admin).
+func (k *Kernel) canCall(ctx context.Context, ownerID string, action *Action) (bool, error) {
 	if action.Public {
 		return true, nil
 	}
-	ok, err := k.store.CheckACL(ctx, subjectID, action.ID, PermCall)
+	ok, err := k.store.CheckACL(ctx, ownerID, action.ID, PermCall)
 	if err != nil {
 		return false, ErrInternal.Wrapf("acl check: %v", err)
 	}
 	if ok {
 		return true, nil
 	}
-	ok, err = k.store.CheckACL(ctx, subjectID, action.ID, PermAdmin)
+	ok, err = k.store.CheckACL(ctx, ownerID, action.ID, PermAdmin)
 	if err != nil {
 		return false, ErrInternal.Wrapf("acl check: %v", err)
 	}
@@ -287,8 +287,8 @@ func (k *Kernel) canCall(ctx context.Context, subjectID string, action *Action) 
 // execute dispatches to the correct execution backend.
 // Returns (result, subCost, remoteReceiptHash, error). remoteReceiptHash is non-empty only
 // for successful KindRemoteProxy calls and holds the raw receipt JSON from the remote kernel.
-// callerID is the action owner (immediate caller); ownerUserID is the process owner (payer).
-func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, callerID, ownerUserID string) (map[string]any, int64, string, error) {
+// targetID is the action's owner; ownerUserID is the process owner.
+func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID, ownerUserID string) (map[string]any, int64, string, error) {
 	switch action.Kind {
 	case KindHTTP:
 		if k.http == nil {
@@ -297,10 +297,10 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 		res, err := k.http.Execute(ctx, action.Source, args)
 		return res, 0, "", err
 	case KindWasm:
-		res, cost, err := k.executeWasm(ctx, action, args, trace, callerID)
+		res, cost, err := k.executeWasm(ctx, action, args, trace, targetID)
 		return res, cost, "", err
 	case KindNative:
-		res, err := k.executeNative(ctx, action, args, ownerUserID, trace.ProcessID, trace.ID)
+		res, err := k.executeNative(ctx, action, args, targetID, ownerUserID, trace.ProcessID, trace.ID)
 		return res, 0, "", err
 	case KindRemoteProxy:
 		if fe, ok := k.http.(FederationExecutor); ok {
@@ -315,17 +315,17 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 }
 
 // executeNative dispatches to a registered native action handler.
-func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
+func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any, targetID, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
 	fn, ok := k.nativeHandlers[action.Name]
 	if !ok {
 		return nil, ErrInvalidState.Wrapf("unknown native action %q", action.Name)
 	}
-	return fn(ctx, args, ownerUserID, processID, parentTraceID)
+	return fn(ctx, args, targetID, ownerUserID, processID, parentTraceID)
 }
 
 // executeWasm runs a compiled WASM artifact.
 // Returns (result, subCost, error) where subCost is the gross paid to direct sub-calls during execution.
-func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID string) (result map[string]any, subCost int64, execErr error) {
+func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID string) (result map[string]any, subCost int64, execErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			execErr = ErrExecutionFailed.Wrapf("wasm panic: %v", r)
@@ -346,10 +346,10 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 	}
 
 	host := &kernelHostFunctions{
-		kernel:      k,
-		processID:   trace.ProcessID,
-		traceID:     trace.ID,
-		ownerUserID: ownerUserID,
+		kernel:    k,
+		processID: trace.ProcessID,
+		traceID:   trace.ID,
+		targetID:  targetID,
 	}
 
 	outputJSON, err := k.scripts.Execute(ctx, artifact, inputJSON, host)
@@ -367,13 +367,13 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 }
 
 // kernelHostFunctions implements HostFunctions using the kernel itself.
-// Scripts never receive the subject's JWT — they inherit process+trace authority.
+// Scripts never receive the caller's JWT — they inherit process+trace authority.
 type kernelHostFunctions struct {
-	kernel      *Kernel
-	processID   string
-	traceID     string
-	ownerUserID string
-	subCost     int64 // gross paid to direct sub-calls; used for VAT fee computation
+	kernel    *Kernel
+	processID string
+	traceID   string
+	targetID  string // action owner; used as CallerID for subcalls
+	subCost   int64  // gross paid to direct sub-calls; used for VAT fee computation
 }
 
 func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJSON []byte) ([]byte, error) {
@@ -386,7 +386,7 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 		return nil, ErrInvalidInput.Wrap("args must be a JSON object")
 	}
 	reply, err := h.kernel.Call(ctx, CallRequest{
-		SubjectID:     h.ownerUserID,
+		CallerID:      h.targetID,
 		ProcessID:     h.processID,
 		ParentTraceID: h.traceID,
 		TargetUserID:  parts[0],
@@ -408,7 +408,7 @@ func (h *kernelHostFunctions) Emit(ctx context.Context, event string, argsJSON [
 		}
 	}
 	// Pass current trace ID as causal context (FOLLOWS_FROM) for listener-triggered traces.
-	_, err := h.kernel.EmitEvent(ctx, h.ownerUserID, h.ownerUserID, event, args, h.traceID)
+	_, err := h.kernel.EmitEvent(ctx, h.targetID, h.targetID, event, args, h.traceID)
 	return err
 }
 

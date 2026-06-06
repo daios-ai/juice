@@ -34,7 +34,7 @@ func init() {
 }
 
 func requireSuperuser(k *kernel.Kernel) (string, error) {
-	subjectID, err := requireSubjectID(k)
+	subjectID, err := requireCallerID(k)
 	if err != nil {
 		return "", err
 	}

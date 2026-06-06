@@ -104,7 +104,7 @@ func runServer(addr string) error {
 		r.Post("/v1/actions/{id}/disable", srv.disableAction)
 		r.Delete("/v1/actions/{id}", srv.deleteAction)
 		r.Post("/v1/actions/{id}/acl", srv.grantACL)
-		r.Delete("/v1/actions/{id}/acl/{subject_id}/{permission}", srv.revokeACL)
+		r.Delete("/v1/actions/{id}/acl/{caller_id}/{permission}", srv.revokeACL)
 		r.Post("/v1/actions/{id}/grant-all", srv.grantAll)
 		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
 
@@ -178,7 +178,7 @@ type server struct {
 
 type ctxKey string
 
-const ctxSubjectID ctxKey = "subject_id"
+const ctxCallerID ctxKey = "caller_id"
 
 // ipRateLimiter returns a middleware that limits requests from each IP address
 // using a token bucket: ratePerSec tokens refilled per second, burst maximum tokens.
@@ -287,33 +287,33 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		tok := strings.TrimPrefix(auth, "Bearer ")
-		subjectID, err := s.kernel.VerifyToken(tok)
+		callerID, err := s.kernel.VerifyToken(tok)
 		if err != nil {
 			writeErr(w, err)
 			return
 		}
-		// Verify subject exists and is not suspended.
-		u, err := s.kernel.ReadUser(r.Context(), subjectID)
+		// Verify caller exists and is not suspended.
+		u, err := s.kernel.ReadUser(r.Context(), callerID)
 		if err != nil {
-			writeErr(w, kernel.ErrUnauthenticated.Wrap("subject not found"))
+			writeErr(w, kernel.ErrUnauthenticated.Wrap("caller not found"))
 			return
 		}
 		if u.SuspendedAt != nil {
 			writeErr(w, kernel.ErrUnauthenticated.Wrap("account suspended"))
 			return
 		}
-		ctx := context.WithValue(r.Context(), ctxSubjectID, subjectID)
-		ctx = log.WithSubjectUserID(ctx, subjectID)
+		ctx := context.WithValue(r.Context(), ctxCallerID, callerID)
+		ctx = log.WithCallerUserID(ctx, callerID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-func subjectFrom(r *http.Request) string {
-	return subjectFromContext(r.Context())
+func callerFrom(r *http.Request) string {
+	return callerFromContext(r.Context())
 }
 
-func subjectFromContext(ctx context.Context) string {
-	v, _ := ctx.Value(ctxSubjectID).(string)
+func callerFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(ctxCallerID).(string)
 	return v
 }
 
@@ -441,7 +441,7 @@ func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	result, err := s.kernel.ImportOpenAPI(r.Context(), subjectFrom(r), subjectFrom(r), req.SpecURL, specBytes)
+	result, err := s.kernel.ImportOpenAPI(r.Context(), callerFrom(r), callerFrom(r), req.SpecURL, specBytes)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -463,7 +463,7 @@ func (s *server) unimportOpenAPI(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("spec_url is required"))
 		return
 	}
-	sub := subjectFrom(r)
+	sub := callerFrom(r)
 	ownerID := sub
 	if req.OwnerHandle != "" {
 		owner, err := s.kernel.ReadUserByHandle(r.Context(), req.OwnerHandle)
@@ -495,8 +495,8 @@ func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	a, err := s.kernel.CreateAction(r.Context(), subjectFrom(r), kernel.CreateActionRequest{
-		OwnerUserID:  subjectFrom(r),
+	a, err := s.kernel.CreateAction(r.Context(), callerFrom(r), kernel.CreateActionRequest{
+		OwnerUserID:  callerFrom(r),
 		Name:         req.Name,
 		Kind:         kernel.ActionKind(req.Kind),
 		Price:        req.Price,
@@ -510,7 +510,7 @@ func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Re-read to populate OwnerHandle via store JOIN.
-	full, err := s.kernel.ReadActionForSubject(r.Context(), subjectFrom(r), a.ID)
+	full, err := s.kernel.ReadActionForSubject(r.Context(), callerFrom(r), a.ID)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -520,7 +520,7 @@ func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	a, err := s.kernel.ReadActionForSubject(r.Context(), subjectFrom(r), id)
+	a, err := s.kernel.ReadActionForSubject(r.Context(), callerFrom(r), id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -551,7 +551,7 @@ func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	a, err := s.kernel.UpdateAction(r.Context(), subjectFrom(r), kernel.UpdateActionRequest{
+	a, err := s.kernel.UpdateAction(r.Context(), callerFrom(r), kernel.UpdateActionRequest{
 		ID:           id,
 		Price:        body.Price,
 		Description:  body.Description,
@@ -568,7 +568,7 @@ func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) enableAction(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := s.kernel.SetActive(r.Context(), subjectFrom(r), id, true); err != nil {
+	if err := s.kernel.SetActive(r.Context(), callerFrom(r), id, true); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -577,7 +577,7 @@ func (s *server) enableAction(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) disableAction(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := s.kernel.SetActive(r.Context(), subjectFrom(r), id, false); err != nil {
+	if err := s.kernel.SetActive(r.Context(), callerFrom(r), id, false); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -586,7 +586,7 @@ func (s *server) disableAction(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) deleteAction(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := s.kernel.DeleteAction(r.Context(), subjectFrom(r), id); err != nil {
+	if err := s.kernel.DeleteAction(r.Context(), callerFrom(r), id); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -596,15 +596,15 @@ func (s *server) deleteAction(w http.ResponseWriter, r *http.Request) {
 func (s *server) grantACL(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var req struct {
-		SubjectUserID string `json:"subject_user_id"`
-		Permission    string `json:"permission"`
+		CallerUserID string `json:"caller_user_id"`
+		Permission   string `json:"permission"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	if req.SubjectUserID == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("subject_user_id is required"))
+	if req.CallerUserID == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("caller_user_id is required"))
 		return
 	}
 	switch kernel.Permission(req.Permission) {
@@ -613,8 +613,8 @@ func (s *server) grantACL(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("permission must be read, call, or admin"))
 		return
 	}
-	if err := s.kernel.GrantACL(r.Context(), req.SubjectUserID, id,
-		kernel.Permission(req.Permission), subjectFrom(r)); err != nil {
+	if err := s.kernel.GrantACL(r.Context(), req.CallerUserID, id,
+		kernel.Permission(req.Permission), callerFrom(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -623,14 +623,14 @@ func (s *server) grantACL(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) revokeACL(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	subjectID := chi.URLParam(r, "subject_id")
+	callerID := chi.URLParam(r, "caller_id")
 	permission := chi.URLParam(r, "permission")
-	if subjectID == "" || permission == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("subject_id and permission are required"))
+	if callerID == "" || permission == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("caller_id and permission are required"))
 		return
 	}
-	if err := s.kernel.RevokeACL(r.Context(), subjectID, id,
-		kernel.Permission(permission), subjectFrom(r)); err != nil {
+	if err := s.kernel.RevokeACL(r.Context(), callerID, id,
+		kernel.Permission(permission), callerFrom(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -638,7 +638,7 @@ func (s *server) revokeACL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listProcesses(w http.ResponseWriter, r *http.Request) {
-	processes, err := s.kernel.ListProcesses(r.Context(), subjectFrom(r), 100, 0)
+	processes, err := s.kernel.ListProcesses(r.Context(), callerFrom(r), 100, 0)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -654,7 +654,7 @@ func (s *server) postProcess(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	p, t, err := s.kernel.StartProcess(r.Context(), subjectFrom(r), subjectFrom(r), req.Funds)
+	p, t, err := s.kernel.StartProcess(r.Context(), callerFrom(r), callerFrom(r), req.Funds)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -668,7 +668,7 @@ func (s *server) postProcess(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getProcess(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	p, err := s.kernel.ReadProcess(r.Context(), subjectFrom(r), id)
+	p, err := s.kernel.ReadProcess(r.Context(), callerFrom(r), id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -685,11 +685,11 @@ func (s *server) fundProcess(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	if err := s.kernel.FundProcess(r.Context(), subjectFrom(r), id, req.Funds); err != nil {
+	if err := s.kernel.FundProcess(r.Context(), callerFrom(r), id, req.Funds); err != nil {
 		writeErr(w, err)
 		return
 	}
-	p, err := s.kernel.ReadProcess(r.Context(), subjectFrom(r), id)
+	p, err := s.kernel.ReadProcess(r.Context(), callerFrom(r), id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -699,7 +699,7 @@ func (s *server) fundProcess(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) endProcess(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := s.kernel.EndProcess(r.Context(), subjectFrom(r), id); err != nil {
+	if err := s.kernel.EndProcess(r.Context(), callerFrom(r), id); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -737,7 +737,7 @@ func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reply, err := s.kernel.Call(r.Context(), kernel.CallRequest{
-		SubjectID:     subjectFrom(r),
+		CallerID:      callerFrom(r),
 		ProcessID:     req.ProcessID,
 		ParentTraceID: req.ParentTraceID,
 		TargetUserID:  owner.ID,
@@ -769,9 +769,9 @@ func parseActionRef(ref string) (string, string, error) {
 }
 
 func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
-	subjectID := subjectFrom(r)
+	callerID := callerFrom(r)
 	txs, err := s.kernel.ListTransactions(r.Context(), kernel.TxFilter{
-		PartyUserID: subjectID,
+		PartyUserID: callerID,
 		ProcessID:   r.URL.Query().Get("process_id"),
 		Limit:       50,
 	})
@@ -784,7 +784,7 @@ func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getTransaction(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	tx, err := s.kernel.ReadTransaction(r.Context(), subjectFrom(r), id)
+	tx, err := s.kernel.ReadTransaction(r.Context(), callerFrom(r), id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -806,7 +806,7 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("rating must be 0 or 1"))
 		return
 	}
-	rating, err := s.kernel.RateTransaction(r.Context(), subjectFrom(r), id, req.Rating, req.Note)
+	rating, err := s.kernel.RateTransaction(r.Context(), callerFrom(r), id, req.Rating, req.Note)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -816,7 +816,7 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	v, err := s.kernel.VerifyRemoteReceipt(r.Context(), subjectFrom(r), id)
+	v, err := s.kernel.VerifyRemoteReceipt(r.Context(), callerFrom(r), id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -933,7 +933,7 @@ func (s *server) postTokenMulti(w http.ResponseWriter, r *http.Request) {
 // ---- Listener / Event handlers ----
 
 func (s *server) listListeners(w http.ResponseWriter, r *http.Request) {
-	listeners, err := s.kernel.ListListeners(r.Context(), subjectFrom(r), 100, 0)
+	listeners, err := s.kernel.ListListeners(r.Context(), callerFrom(r), 100, 0)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -951,7 +951,7 @@ func (s *server) postListener(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return
 	}
-	l, err := s.kernel.CreateListener(r.Context(), subjectFrom(r), kernel.CreateListenerRequest{
+	l, err := s.kernel.CreateListener(r.Context(), callerFrom(r), kernel.CreateListenerRequest{
 		SourceUserID:   req.SourceUserID,
 		EventName:      req.EventName,
 		TargetActionID: req.TargetActionID,
@@ -965,7 +965,7 @@ func (s *server) postListener(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getListenerMeta(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	l, err := s.kernel.GetListener(r.Context(), subjectFrom(r), id)
+	l, err := s.kernel.GetListener(r.Context(), callerFrom(r), id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -975,7 +975,7 @@ func (s *server) getListenerMeta(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) pollListenerEvents(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	events, err := s.kernel.PollListener(r.Context(), subjectFrom(r), id)
+	events, err := s.kernel.PollListener(r.Context(), callerFrom(r), id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -988,7 +988,7 @@ func (s *server) pollListenerEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) deleteListener(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := s.kernel.DeleteListener(r.Context(), subjectFrom(r), id); err != nil {
+	if err := s.kernel.DeleteListener(r.Context(), callerFrom(r), id); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -1012,7 +1012,7 @@ func (s *server) postEmit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("args is required"))
 		return
 	}
-	eventIDs, err := s.kernel.EmitEvent(r.Context(), subjectFrom(r), subjectFrom(r), req.EventName, req.Args, "")
+	eventIDs, err := s.kernel.EmitEvent(r.Context(), callerFrom(r), callerFrom(r), req.EventName, req.Args, "")
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1033,7 +1033,7 @@ func (s *server) postConsumeEvent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("process_id is required"))
 		return
 	}
-	reply, err := s.kernel.ConsumeEvent(r.Context(), subjectFrom(r), eventID, req.ProcessID)
+	reply, err := s.kernel.ConsumeEvent(r.Context(), callerFrom(r), eventID, req.ProcessID)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1043,7 +1043,7 @@ func (s *server) postConsumeEvent(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) grantAll(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := s.kernel.GrantAll(r.Context(), subjectFrom(r), id); err != nil {
+	if err := s.kernel.GrantAll(r.Context(), callerFrom(r), id); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -1052,7 +1052,7 @@ func (s *server) grantAll(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) revokeAll(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := s.kernel.RevokeAll(r.Context(), subjectFrom(r), id); err != nil {
+	if err := s.kernel.RevokeAll(r.Context(), callerFrom(r), id); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -1212,7 +1212,7 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 	defer s.kernel.EndProcess(ctx, counterparty.ID, proc.ID)
 
 	reply, callErr := s.kernel.Call(ctx, kernel.CallRequest{
-		SubjectID:           counterparty.ID,
+		CallerID:            counterparty.ID,
 		ProcessID:           proc.ID,
 		TargetUserID:        owner.ID,
 		ActionName:          actionName,
@@ -1251,7 +1251,7 @@ func (s *server) getActionManifest(w http.ResponseWriter, r *http.Request) {
 // ---- me ----
 
 func (s *server) getMe(w http.ResponseWriter, r *http.Request) {
-	u, err := s.kernel.ReadUser(r.Context(), subjectFrom(r))
+	u, err := s.kernel.ReadUser(r.Context(), callerFrom(r))
 	if err != nil {
 		writeErr(w, err)
 		return

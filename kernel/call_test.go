@@ -27,7 +27,7 @@ func TestWasmTimeoutReturnsErrTimeout(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 100)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "slow", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrTimeout) {
@@ -85,13 +85,13 @@ func TestSubCostNotIncrementedOnFailedSubCall(t *testing.T) {
 	cfg.SigningKey = testSigningKey()
 	k := kernel.New(st, exec, nil, nil, nil, cfg, nil)
 
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: carol.ID, ActionID: outer.ID, Permission: kernel.PermCall})
+	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
+	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: carol.ID, ActionID: outer.ID, Permission: kernel.PermCall})
 
 	p, root, _ := k.StartProcess(ctx, carol.ID, carol.ID, 50)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: carol.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: carol.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
 	if err != nil {
@@ -127,7 +127,7 @@ func TestCallClosedProcessFails(t *testing.T) {
 	_ = k.EndProcess(ctx, owner.ID, p.ID)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     owner.ID,
+		CallerID:     owner.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  target.ID,
@@ -166,7 +166,7 @@ func TestCallInactiveActionDeniedForNonOwner(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 100)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     alice.ID,
+		CallerID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  bob.ID,
@@ -206,7 +206,7 @@ func TestOwnerCanCallInactiveAction(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     alice.ID,
+		CallerID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  alice.ID,
@@ -230,7 +230,7 @@ func TestCallACLDenied(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 100)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     alice.ID,
+		CallerID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  bob.ID,
@@ -269,7 +269,7 @@ func TestCallACLGrantAndRevoke(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     alice.ID,
+		CallerID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  bob.ID,
@@ -283,7 +283,7 @@ func TestCallACLGrantAndRevoke(t *testing.T) {
 	_ = k.RevokeACL(ctx, alice.ID, a.ID, kernel.PermCall, bob.ID)
 
 	_, err = k.Call(ctx, kernel.CallRequest{
-		SubjectID:     alice.ID,
+		CallerID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  bob.ID,
@@ -306,7 +306,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 50)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     alice.ID,
+		CallerID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  alice.ID,
@@ -343,7 +343,7 @@ func TestCallGrossEqualsNetPlusFee(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     alice.ID,
+		CallerID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  alice.ID,
@@ -389,7 +389,7 @@ func TestCallCreatesExactlyOneTransaction(t *testing.T) {
 	before := len(beforeTxs)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     alice.ID,
+		CallerID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  alice.ID,
@@ -421,7 +421,7 @@ func TestCallCreatesChildTrace(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     alice.ID,
+		CallerID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  alice.ID,
@@ -459,7 +459,7 @@ func TestCallFailureRefundsFunds(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     alice.ID,
+		CallerID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  alice.ID,
@@ -495,7 +495,7 @@ func TestWasmPanicRefundsFunds(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 300)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     alice.ID,
+		CallerID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  alice.ID,
@@ -532,21 +532,21 @@ func TestCallNestedTraceTree(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
 
 	replyA, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "a", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	replyB, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: replyA.TraceID,
+		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: replyA.TraceID,
 		TargetUserID: alice.ID, ActionName: "b", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	replyC, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: replyB.TraceID,
+		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: replyB.TraceID,
 		TargetUserID: alice.ID, ActionName: "c", Args: map[string]any{},
 	})
 	if err != nil {
@@ -606,7 +606,7 @@ func TestCallInputSchemaRejection(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 100)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "strict",
 		Args: map[string]any{"wrong_field": "value"},
 	})
@@ -646,7 +646,7 @@ func TestCallOutputSchemaRejection(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "typed", Args: map[string]any{},
 	})
 	if err == nil {
@@ -684,7 +684,7 @@ func TestFailedExecutionUpdatesTraceLatencyNotCost(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "fails", Args: map[string]any{},
 	})
 	if err == nil {
@@ -769,7 +769,7 @@ func TestWasmHostCallRespectsACL(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
 	if err == nil {
@@ -848,13 +848,13 @@ func TestProcessFundedSubCallSpendsSameProcess(t *testing.T) {
 	k := kernel.New(st, exec, nil, nil, nil, cfg, nil)
 
 	// Process owner alice needs call permission on inner.
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: alice.ID, ActionID: outer.ID, Permission: kernel.PermCall})
+	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
+	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: alice.ID, ActionID: outer.ID, Permission: kernel.PermCall})
 
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 150)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
 	if err != nil {
@@ -893,13 +893,13 @@ func TestProcessFundedSubCallInsufficientFundsFails(t *testing.T) {
 
 	exec := &subcallExec{targetUser: bob.ID, targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
+	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
 
 	// Fund only enough for outer, not inner.
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 50)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
 	if err == nil {
@@ -935,14 +935,14 @@ func TestProcessFundedSubCallTraceHasSameProcess(t *testing.T) {
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, outer)
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
+	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
 
 	exec := &subcallExec{targetUser: bob.ID, targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
 
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
 	outerReply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1054,12 +1054,12 @@ func TestCommitCallAtomicOnFailure(t *testing.T) {
 	caller := setupUser(t, base, "@caller", 1000)
 	actionOwner := setupUser(t, base, "@owner", 0)
 	a := setupAction(t, base, actionOwner.ID, "echo", 100)
-	base.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: caller.ID, ActionID: a.ID, Permission: kernel.PermCall})
+	base.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: caller.ID, ActionID: a.ID, Permission: kernel.PermCall})
 
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 500)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID,
+		CallerID: caller.ID, ProcessID: p.ID,
 		ParentTraceID: root.ID, TargetUserID: actionOwner.ID,
 		ActionName: "echo", Args: map[string]any{},
 	})
@@ -1094,12 +1094,12 @@ func TestCallInvalidParentTraceDoesNotLockFunds(t *testing.T) {
 
 	alice := setupUser(t, st, "@alice", 1000)
 	a := setupAction(t, st, alice.ID, "svc", 100)
-	st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: alice.ID, ActionID: a.ID, Permission: kernel.PermCall})
+	st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: alice.ID, ActionID: a.ID, Permission: kernel.PermCall})
 
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     alice.ID,
+		CallerID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: "nonexistent-trace-id",
 		TargetUserID:  alice.ID,
@@ -1140,7 +1140,7 @@ func TestCallCrossProcessParentTraceAllowed(t *testing.T) {
 
 	// Cross-process parent trace should succeed under the new model.
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     alice.ID,
+		CallerID:     alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: otherRoot.ID, // cross-process parent — now allowed
 		TargetUserID:  alice.ID,
@@ -1183,7 +1183,7 @@ func TestCommitFailedCallSettlementError(t *testing.T) {
 
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID,
+		CallerID: alice.ID, ProcessID: p.ID,
 		ParentTraceID: root.ID, TargetUserID: alice.ID,
 		ActionName: "risky", Args: map[string]any{},
 	})
@@ -1237,7 +1237,7 @@ func TestCallLLMChat(t *testing.T) {
 
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 0)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     owner.ID,
+		CallerID:     owner.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  owner.ID,
@@ -1283,7 +1283,7 @@ func TestCallLLMChatNoChatter(t *testing.T) {
 
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 0)
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     owner.ID,
+		CallerID:     owner.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  owner.ID,
@@ -1311,7 +1311,7 @@ func TestCallSuspendedSubjectRejected(t *testing.T) {
 	}
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:     owner.ID,
+		CallerID:     owner.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  target.ID,
@@ -1401,7 +1401,7 @@ func TestZeroPriceCallOnClosedProcessReturnsErrInvalidState(t *testing.T) {
 	}
 
 	_, err = k.Call(ctx, kernel.CallRequest{
-		SubjectID:     owner.ID,
+		CallerID:     owner.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  owner.ID,

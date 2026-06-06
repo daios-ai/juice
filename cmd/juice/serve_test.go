@@ -89,7 +89,7 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 		r.Post("/v1/actions/{id}/disable", srv.disableAction)
 		r.Delete("/v1/actions/{id}", srv.deleteAction)
 		r.Post("/v1/actions/{id}/acl", srv.grantACL)
-		r.Delete("/v1/actions/{id}/acl/{subject_id}/{permission}", srv.revokeACL)
+		r.Delete("/v1/actions/{id}/acl/{caller_id}/{permission}", srv.revokeACL)
 		r.Post("/v1/actions/{id}/grant-all", srv.grantAll)
 		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
 		r.Get("/v1/processes", srv.listProcesses)
@@ -555,7 +555,7 @@ func TestServeACL(t *testing.T) {
 	// Owner grants call permission to user2.
 	user2, _ := k.ReadUserByHandle(context.Background(), "@acl-user2")
 	gr := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/acl", map[string]any{
-		"subject_user_id": user2.ID, "permission": "call",
+		"caller_user_id": user2.ID, "permission": "call",
 	}, ownerTok)
 	gr.Body.Close()
 	if gr.StatusCode != http.StatusNoContent {
@@ -1435,7 +1435,7 @@ func TestGetActionRequiresReadPermission(t *testing.T) {
 	// Grant read permission to reader via kernel.
 	reader, _ := k.ReadUserByHandle(context.Background(), "@ra-reader")
 	gr := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/acl", map[string]any{
-		"subject_user_id": reader.ID, "permission": "read",
+		"caller_user_id": reader.ID, "permission": "read",
 	}, ownerTok)
 	gr.Body.Close()
 	if gr.StatusCode != http.StatusNoContent {

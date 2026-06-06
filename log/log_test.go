@@ -72,7 +72,7 @@ func TestContextFields(t *testing.T) {
 
 	ctx := context.Background()
 	ctx = WithRequestID(ctx, "rid-1")
-	ctx = WithSubjectUserID(ctx, "uid-2")
+	ctx = WithCallerUserID(ctx, "uid-2")
 	ctx = WithProcessID(ctx, "pid-3")
 	ctx = WithTraceID(ctx, "tid-4")
 	ctx = WithActionID(ctx, "aid-5")

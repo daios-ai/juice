@@ -483,7 +483,7 @@ func TestProcessAvailablePlusLockedInvariant(t *testing.T) {
 	checkInvariant("initial", 500)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -551,7 +551,7 @@ func TestUserLockedBalanceInvariant(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 
 	if _, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "svc", Args: map[string]any{},
 	}); err != nil {
 		t.Fatal(err)
@@ -825,7 +825,7 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 
 	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: provider.ID, ActionName: "rate-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -875,7 +875,7 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 
 	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: provider.ID, ActionName: "rerate-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -915,7 +915,7 @@ func TestRateTransactionSelfRatingRejected(t *testing.T) {
 
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: owner.ID, ActionName: "self-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -970,11 +970,11 @@ func TestReceiptCreatedWithCall(t *testing.T) {
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: caller.ID, ActionID: a.ID, Permission: kernel.PermCall, CreatedAt: time.Now().UTC()})
+	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: caller.ID, ActionID: a.ID, Permission: kernel.PermCall, CreatedAt: time.Now().UTC()})
 
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 200)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: caller.ID, ActionName: "rcpt-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1012,7 +1012,7 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 200)
 	reply, _ := k.Call(ctx, kernel.CallRequest{
-		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: owner.ID, ActionName: "fail-svc", Args: map[string]any{},
 	})
 
@@ -1068,11 +1068,11 @@ func TestReadTransactionPartyAccess(t *testing.T) {
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: caller.ID, ActionID: a.ID, Permission: kernel.PermCall, CreatedAt: time.Now().UTC()})
+	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: caller.ID, ActionID: a.ID, Permission: kernel.PermCall, CreatedAt: time.Now().UTC()})
 
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: owner.ID, ActionName: "pvd-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1122,7 +1122,7 @@ func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 50)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: owner.ID, ActionName: "no-receipt", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrInvalidState) {
@@ -1191,7 +1191,7 @@ func TestRatingRecordCreated(t *testing.T) {
 
 	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: provider.ID, ActionName: "rr-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1238,7 +1238,7 @@ func TestRatingDuplicateRejected(t *testing.T) {
 
 	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: provider.ID, ActionName: "dup-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1271,7 +1271,7 @@ func TestTransactionViewEmbeddedRating(t *testing.T) {
 
 	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: provider.ID, ActionName: "tv-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1376,7 +1376,7 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 		UpdatedAt:   time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: caller.ID, ActionID: a.ID, Permission: kernel.PermCall, CreatedAt: time.Now().UTC()})
+	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: caller.ID, ActionID: a.ID, Permission: kernel.PermCall, CreatedAt: time.Now().UTC()})
 
 	if err := k.DeleteAction(ctx, owner.ID, a.ID); err != nil {
 		t.Fatalf("DeleteAction: %v", err)
@@ -1591,7 +1591,7 @@ func TestGrantProcessAuthorityAllowsCallByDelegate(t *testing.T) {
 
 	// Without authority, delegate cannot use owner's process.
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: target.ID, ActionName: "echo", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrUnauthorized) {
@@ -1604,7 +1604,7 @@ func TestGrantProcessAuthorityAllowsCallByDelegate(t *testing.T) {
 	}
 
 	_, err = k.Call(ctx, kernel.CallRequest{
-		SubjectID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: target.ID, ActionName: "echo", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1631,7 +1631,7 @@ func TestRevokeProcessAuthorityBlocksDelegate(t *testing.T) {
 	}
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: "@pa-rev-target", ActionName: "echo", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrUnauthorized) {

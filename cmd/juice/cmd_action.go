@@ -38,7 +38,7 @@ func actionCreateCmd() *cobra.Command {
 		Use:   "create",
 		Short: "Create a new action",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				inputSchema := map[string]any{}
 				if inputSchemaStr != "" {
 					if err := json.Unmarshal([]byte(inputSchemaStr), &inputSchema); err != nil {
@@ -63,8 +63,8 @@ func actionCreateCmd() *cobra.Command {
 					}
 				}
 
-				a, err := k.CreateAction(context.Background(), subjectID, kernel.CreateActionRequest{
-					OwnerUserID:  subjectID,
+				a, err := k.CreateAction(context.Background(), callerID, kernel.CreateActionRequest{
+					OwnerUserID:  callerID,
 					Name:         name,
 					Kind:         kernel.ActionKind(kind),
 					Price:        price,
@@ -103,7 +103,7 @@ func actionUpdateCmd() *cobra.Command {
 		Use:   "update",
 		Short: "Update an action's metadata",
 		RunE: func(c *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				req := kernel.UpdateActionRequest{ID: actionID}
 				if c.Flags().Changed("description") {
 					req.Description = &description
@@ -128,7 +128,7 @@ func actionUpdateCmd() *cobra.Command {
 					}
 					req.OutputSchema = m
 				}
-				a, err := k.UpdateAction(context.Background(), subjectID, req)
+				a, err := k.UpdateAction(context.Background(), callerID, req)
 				if err != nil {
 					return err
 				}
@@ -179,8 +179,8 @@ func actionDisableCmd() *cobra.Command {
 }
 
 func setActionActive(actionID string, active bool) error {
-	return withSubject(func(k *kernel.Kernel, subjectID string) error {
-		if err := k.SetActive(context.Background(), subjectID, actionID, active); err != nil {
+	return withCaller(func(k *kernel.Kernel, callerID string) error {
+		if err := k.SetActive(context.Background(), callerID, actionID, active); err != nil {
 			return err
 		}
 		state := "disabled"
@@ -201,8 +201,8 @@ func actionListCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if all {
 				// Owner private view: authenticated, returns owner's own actions including inactive.
-				return withSubject(func(k *kernel.Kernel, subjectID string) error {
-					actions, err := k.ListOwnedActions(context.Background(), subjectID, limit, offset)
+				return withCaller(func(k *kernel.Kernel, callerID string) error {
+					actions, err := k.ListOwnedActions(context.Background(), callerID, limit, offset)
 					if err != nil {
 						return err
 					}
@@ -247,8 +247,8 @@ func actionShowCmd() *cobra.Command {
 		Use:   "show",
 		Short: "Show action details",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				a, err := k.ReadActionForSubject(context.Background(), subjectID, actionID)
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				a, err := k.ReadActionForSubject(context.Background(), callerID, actionID)
 				if err != nil {
 					return err
 				}
@@ -280,8 +280,8 @@ func actionDeleteCmd() *cobra.Command {
 		Use:   "delete",
 		Short: "Delete an action",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				if err := k.DeleteAction(context.Background(), subjectID, actionID); err != nil {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				if err := k.DeleteAction(context.Background(), callerID, actionID); err != nil {
 					return err
 				}
 				fmt.Printf("Action %s deleted.\n", actionID)
@@ -335,7 +335,7 @@ func aclRevokeCmd() *cobra.Command {
 }
 
 func modifyACL(actionID, subjectHandle string, perm kernel.Permission, grant bool) error {
-	return withSubject(func(k *kernel.Kernel, grantorID string) error {
+	return withCaller(func(k *kernel.Kernel, grantorID string) error {
 		subject, err := k.ReadUserByHandle(context.Background(), subjectHandle)
 		if err != nil {
 			return fmt.Errorf("user %s not found: %w", subjectHandle, err)
@@ -363,8 +363,8 @@ func actionGrantAllCmd() *cobra.Command {
 		Use:   "grant-all",
 		Short: "Grant public (grant-all) access to an action",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				if err := k.GrantAll(context.Background(), subjectID, actionID); err != nil {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				if err := k.GrantAll(context.Background(), callerID, actionID); err != nil {
 					return err
 				}
 				fmt.Printf("Action %s is now publicly callable.\n", actionID)
@@ -383,13 +383,13 @@ func actionImportCmd() *cobra.Command {
 		Use:   "import",
 		Short: "Import OpenAPI operations as inactive http actions (idempotent)",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				allowLocal := os.Getenv("JUICE_ALLOW_LOCAL_SOURCES") == "true"
 				specBytes, err := fetchOpenAPISpec(context.Background(), specURL, allowLocal)
 				if err != nil {
 					return err
 				}
-				result, err := k.ImportOpenAPI(context.Background(), subjectID, subjectID, specURL, specBytes)
+				result, err := k.ImportOpenAPI(context.Background(), callerID, callerID, specURL, specBytes)
 				if err != nil {
 					return err
 				}
@@ -417,8 +417,8 @@ func actionUnimportCmd() *cobra.Command {
 		Use:   "unimport",
 		Short: "Deactivate OpenAPI-imported actions without deleting history",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				actions, err := k.UnimportOpenAPI(context.Background(), subjectID, subjectID, specURL, name)
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				actions, err := k.UnimportOpenAPI(context.Background(), callerID, callerID, specURL, name)
 				if err != nil {
 					return err
 				}
@@ -473,8 +473,8 @@ func actionRevokeAllCmd() *cobra.Command {
 		Use:   "revoke-all",
 		Short: "Revoke public (grant-all) access from an action",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				if err := k.RevokeAll(context.Background(), subjectID, actionID); err != nil {
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				if err := k.RevokeAll(context.Background(), callerID, actionID); err != nil {
 					return err
 				}
 				fmt.Printf("Action %s public access revoked.\n", actionID)

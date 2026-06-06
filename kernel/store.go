@@ -78,7 +78,7 @@ type Chatter interface {
 // TxFilter narrows a ListTransactions query.
 type TxFilter struct {
 	OwnerUserID   string
-	SubjectUserID string
+	CallerUserID string
 	TargetUserID  string
 	ProcessID     string
 	// PartyUserID matches transactions where the user is a party: buyer
@@ -126,8 +126,8 @@ type Store interface {
 	// ---- ACL ----
 
 	GrantACL(ctx context.Context, e *ACLEntry) error
-	RevokeACL(ctx context.Context, subjectID, actionID string, perm Permission) error
-	CheckACL(ctx context.Context, subjectID, actionID string, perm Permission) (bool, error)
+	RevokeACL(ctx context.Context, callerID, actionID string, perm Permission) error
+	CheckACL(ctx context.Context, callerID, actionID string, perm Permission) (bool, error)
 
 	// ---- Processes ----
 
@@ -139,12 +139,12 @@ type Store interface {
 	ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error)
 	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
 
-	// GrantProcessAuthority grants explicit call authority over a process to a subject.
-	GrantProcessAuthority(ctx context.Context, subjectUserID, processID string) error
-	// RevokeProcessAuthority removes explicit call authority from a subject.
-	RevokeProcessAuthority(ctx context.Context, subjectUserID, processID string) error
-	// CheckProcessAuthority returns true if subjectUserID has explicit authority over processID.
-	CheckProcessAuthority(ctx context.Context, subjectUserID, processID string) (bool, error)
+	// GrantProcessAuthority grants explicit call authority over a process to a caller.
+	GrantProcessAuthority(ctx context.Context, callerID, processID string) error
+	// RevokeProcessAuthority removes explicit call authority from a caller.
+	RevokeProcessAuthority(ctx context.Context, callerID, processID string) error
+	// CheckProcessAuthority returns true if callerID has explicit authority over processID.
+	CheckProcessAuthority(ctx context.Context, callerID, processID string) (bool, error)
 
 	// BeginCall atomically locks price credits in the process and creates the child trace.
 	// Either both succeed or neither does. Returns ErrInsufficientFunds if the process

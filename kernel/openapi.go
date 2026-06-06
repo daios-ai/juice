@@ -645,7 +645,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 // The subject must be the owner, @sys, or hold admin ACL on every matched action.
 func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specURL, name string) ([]*Action, error) {
 	// Always require an authenticated, non-suspended subject.
-	if _, err := k.authenticatedSubject(ctx, subjectID); err != nil {
+	if _, err := k.authenticatedCaller(ctx, subjectID); err != nil {
 		return nil, err
 	}
 	actions, err := k.store.ListActionsByOwnerOpenAPISpec(ctx, ownerID, specURL)

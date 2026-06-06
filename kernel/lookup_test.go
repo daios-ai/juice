@@ -168,12 +168,12 @@ func TestLookupACLGrantedNonPublicActionVisible(t *testing.T) {
 
 	// Grant bob call permission.
 	_ = st.GrantACL(ctx, &kernel.ACLEntry{
-		SubjectUserID: granted.ID, ActionID: a.ID, Permission: kernel.PermCall,
+		CallerUserID: granted.ID, ActionID: a.ID, Permission: kernel.PermCall,
 		CreatedAt: time.Now().UTC(),
 	})
 
 	// Owner sees their own non-public action.
-	ownerResults, err := k.Lookup(ctx, kernel.LookupRequest{Query: "private service", Limit: 10, SubjectID: owner.ID})
+	ownerResults, err := k.Lookup(ctx, kernel.LookupRequest{Query: "private service", Limit: 10, CallerID: owner.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestLookupACLGrantedNonPublicActionVisible(t *testing.T) {
 	}
 
 	// Granted user sees the action.
-	grantedResults, err := k.Lookup(ctx, kernel.LookupRequest{Query: "private service", Limit: 10, SubjectID: granted.ID})
+	grantedResults, err := k.Lookup(ctx, kernel.LookupRequest{Query: "private service", Limit: 10, CallerID: granted.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestLookupACLGrantedNonPublicActionVisible(t *testing.T) {
 	}
 
 	// Ungranted user does not see it.
-	otherResults, err := k.Lookup(ctx, kernel.LookupRequest{Query: "private service", Limit: 10, SubjectID: other.ID})
+	otherResults, err := k.Lookup(ctx, kernel.LookupRequest{Query: "private service", Limit: 10, CallerID: other.ID})
 	if err != nil {
 		t.Fatal(err)
 	}

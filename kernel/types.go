@@ -77,9 +77,9 @@ type Action struct {
 	UpdatedAt      time.Time      `json:"updated_at"`
 }
 
-// ACLEntry grants a permission to a subject over an action.
+// ACLEntry grants a permission to a caller over an action.
 type ACLEntry struct {
-	SubjectUserID string     `json:"subject_user_id"`
+	CallerUserID string     `json:"caller_user_id"`
 	ActionID      string     `json:"action_id"`
 	Permission    Permission `json:"permission"`
 	CreatedAt     time.Time  `json:"created_at"`
@@ -117,7 +117,7 @@ type Transaction struct {
 	TraceID           string          `json:"trace_id"`
 	ParentTraceID     string          `json:"parent_trace_id"`
 	OwnerUserID       string          `json:"owner_user_id"`
-	SubjectUserID     string          `json:"subject_user_id"`
+	CallerUserID      string          `json:"caller_user_id"`
 	TargetUserID      string          `json:"target_user_id"`
 	ActionID          string          `json:"action_id"`
 	ActionName        string          `json:"action_name"`

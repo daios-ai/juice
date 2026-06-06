@@ -178,7 +178,7 @@ func TestMakeRejectsEmptyDescription(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 100)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{},
 	})
@@ -208,7 +208,7 @@ func TestMakeReturnsErrInvalidStateWithoutCompiler(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 100)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "test"},
 	})
@@ -230,7 +230,7 @@ func TestMakeRegistersActionOnSuccess(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 100)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{
 			"description": "An action that returns a fixed result",
@@ -283,7 +283,7 @@ func TestMakeRegisteredActionHasName(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 100)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "compute something interesting"},
 	})
@@ -323,7 +323,7 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 1000)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "always fail"},
 	})
@@ -352,7 +352,7 @@ func TestMakeInternalChatCallCreatesChildTrace(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 1000)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "test"},
 	})
@@ -379,14 +379,14 @@ func TestMakeNameCollisionReturnsFailure(t *testing.T) {
 
 	desc := map[string]any{"description": "An action that returns a fixed result"}
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: sys.ID, ActionName: "make", Args: desc,
 	})
 	if err != nil {
 		t.Fatalf("first Call: %v", err)
 	}
 	reply2, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: sys.ID, ActionName: "make", Args: desc,
 	})
 	if err != nil {
