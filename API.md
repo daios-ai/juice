@@ -168,7 +168,7 @@ Deleting a listener also purges all pending events for that listener.
 |-----------|------|-----|
 | Emit event | `POST /v1/events/emit` `{event_name, args}` → `{event_ids:[]}` | `juice event emit --event [--args]` |
 | List pending events | `GET /v1/listeners/{id}/events` → event[] | `juice event list --listener` |
-| Consume event | `POST /v1/events/{id}/consume` `{process_id[, parent_trace_id]}` → call reply | `juice event consume --id --process [--trace]` |
+| Consume event | `POST /v1/events/{id}/consume` `{process_id}` → call reply | `juice event consume --id --process` |
 
 The event source is always the authenticated caller. `source_user_id` is not an input field.
 
