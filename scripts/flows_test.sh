@@ -658,7 +658,7 @@ flow_action_lifecycle() {
         --description "for tx test" --price 0)
     tx_action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable    --id "$tx_action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$tx_action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$tx_action_id" --public >/dev/null 2>&1
 
     j "$db" "$home_bob"   auth login --handle @bob --password bobpass >/dev/null 2>&1
     local proc_out proc_id
@@ -820,46 +820,32 @@ flow_acl_public() {
     proc_out=$(jj "$db" "$home_bob" process start --funds 0)
     proc_id=$(strfield "$proc_out" "process_id")
 
-    # Without ACL: permission error
+    # Private action: @bob cannot call @alice's action
     local out
     out=$(j "$db" "$home_bob" call --process "$proc_id" --action @alice/target)
     echo "$out" | grep -qi "unauthorized\|permission\|error" \
-        && ok "acl_public.no_acl_rejected" \
-        || fail "acl_public.no_acl_rejected" "call without ACL succeeded: $out"
+        && ok "acl_public.private_denied" \
+        || fail "acl_public.private_denied" "call on private action succeeded: $out"
 
-    # Grant call ACL — now @bob passes the permission check (fails at backend instead)
-    j "$db" "$home_alice" action acl grant --id "$action_id" --user @bob --perm call >/dev/null 2>&1
-    out=$(j "$db" "$home_bob" call --process "$proc_id" --action @alice/target)
-    echo "$out" | grep -qiv "unauthorized\|permission denied" \
-        && ok "acl_public.with_acl_passes_permission" \
-        || fail "acl_public.with_acl_passes_permission" "permission check still failed after grant: $out"
-
-    # Revoke — permission check enforced again
-    j "$db" "$home_alice" action acl revoke --id "$action_id" --user @bob --perm call >/dev/null 2>&1
-    out=$(j "$db" "$home_bob" call --process "$proc_id" --action @alice/target)
-    echo "$out" | grep -qi "unauthorized\|permission\|error" \
-        && ok "acl_public.revoke_enforced" \
-        || fail "acl_public.revoke_enforced" "call after revoke was accepted: $out"
-
-    # Non-owner cannot grant-all
-    out=$(j "$db" "$home_bob" action grant-all --id "$action_id")
+    # Non-owner cannot make action public
+    out=$(j "$db" "$home_bob" action update --id "$action_id" --public)
     echo "$out" | grep -qi "unauthorized\|error" \
-        && ok "acl_public.grant_all_owner_only" \
-        || fail "acl_public.grant_all_owner_only" "non-owner grant-all succeeded: $out"
+        && ok "acl_public.update_public_owner_only" \
+        || fail "acl_public.update_public_owner_only" "non-owner made action public: $out"
 
-    # grant-all: any authenticated user passes permission check
-    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+    # Make public: @bob now passes the permission check (fails at backend, not permission)
+    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
     out=$(j "$db" "$home_bob" call --process "$proc_id" --action @alice/target)
     echo "$out" | grep -qiv "unauthorized\|permission denied" \
-        && ok "acl_public.grant_all_passes_permission" \
-        || fail "acl_public.grant_all_passes_permission" "grant-all still hit permission error: $out"
+        && ok "acl_public.public_passes" \
+        || fail "acl_public.public_passes" "public action still denied: $out"
 
-    # revoke-all: permission check enforced again
-    j "$db" "$home_alice" action revoke-all --id "$action_id" >/dev/null 2>&1
+    # Make private: permission check enforced again
+    j "$db" "$home_alice" action update --id "$action_id" --public=false >/dev/null 2>&1
     out=$(j "$db" "$home_bob" call --process "$proc_id" --action @alice/target)
     echo "$out" | grep -qi "unauthorized\|permission\|error" \
-        && ok "acl_public.revoke_all_enforced" \
-        || fail "acl_public.revoke_all_enforced" "call after revoke-all was accepted: $out"
+        && ok "acl_public.private_enforced" \
+        || fail "acl_public.private_enforced" "call after making private was accepted: $out"
 }
 
 flow_successful_paid_call() {
@@ -892,7 +878,7 @@ flow_successful_paid_call() {
         --source "http://127.0.0.1:${backend_port}/pay" --price 100 --description "paid action")
     action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
 
     # Get @sys starting balance for fee accounting
     local sys_show sys_start
@@ -985,7 +971,7 @@ flow_failed_call_refund() {
         --source "http://127.0.0.1:${backend_port}/fail" --price 100 --description "failing action")
     action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
 
     # @bob starts process with 300 funds
     local proc_out proc_id
@@ -1055,7 +1041,7 @@ flow_input_schema_failure() {
         --input-schema '{"type":"object","properties":{"x":{"type":"string","description":"the x parameter"}},"required":["x"]}')
     action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
 
     # @bob starts process with 200 funds
     local proc_out proc_id
@@ -1118,7 +1104,7 @@ flow_output_schema_failure() {
         --output-schema '{"type":"object","properties":{"id":{"type":"string","description":"the record id"}},"required":["id"]}')
     action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
 
     # @bob starts process with 200 funds
     local proc_out proc_id
@@ -1197,7 +1183,7 @@ flow_wasm_execution() {
         --source "$echo_wasm" --price 10 --description "echo wasm")
     action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
 
     # ArtifactHash is set after enable (WASM compiled on activation)
     local action_show artifact_hash
@@ -1227,7 +1213,7 @@ flow_wasm_execution() {
         --source "$loop_wasm" --price 10 --description "infinite loop")
     loop_id=$(strfield "$loop_out" "id")
     j "$db" "$home_alice" action enable   --id "$loop_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$loop_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$loop_id" --public >/dev/null 2>&1
 
     local proc2_out proc2_id timeout_out
     proc2_out=$(jj "$db" "$home_bob" process start --funds 100)
@@ -1261,8 +1247,8 @@ flow_contractor_subcall() {
     j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
     j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
     j "$db" "$home_carol" auth login --handle @carol --password carolpass >/dev/null 2>&1
-    # @alice needs 50 credits to fund sub-calls on behalf of the contractor
-    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 50 >/dev/null 2>&1
+    # @carol funds the process — her process pays for the sub-call (price=50)
+    j "$db" "$home_sys"   admin user deposit --handle @carol --amount 50 >/dev/null 2>&1
 
     start_backend "$backend_port" 200 '{"ok":true}'
     local backend_pid=$BACKEND_PID
@@ -1274,9 +1260,9 @@ flow_contractor_subcall() {
         --source "http://127.0.0.1:${backend_port}/sub" --price 50 --description "sub target")
     sub_id=$(strfield "$sub_out" "id")
     j "$db" "$home_bob" action enable   --id "$sub_id" >/dev/null 2>&1
-    j "$db" "$home_bob" action grant-all --id "$sub_id" >/dev/null 2>&1
+    j "$db" "$home_bob" action update --id "$sub_id" --public >/dev/null 2>&1
 
-    # @alice creates contractor WASM (price=0) that calls @bob/sub-target
+    # @alice creates WASM (price=0) that sub-calls @bob/sub-target
     local contractor_wasm="$dir/contractor.wasm"
     make_contractor_wasm "$contractor_wasm" "@bob/sub-target"
     local cont_out cont_id
@@ -1284,11 +1270,11 @@ flow_contractor_subcall() {
         --source "$contractor_wasm" --price 0 --description "contractor wasm")
     cont_id=$(strfield "$cont_out" "id")
     j "$db" "$home_alice" action enable   --id "$cont_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$cont_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$cont_id" --public >/dev/null 2>&1
 
-    # @carol calls contractor (price=0 → process needs 0 funds)
+    # @carol starts process with 50 funds (enough for the sub-call)
     local proc_out proc_id
-    proc_out=$(jj "$db" "$home_carol" process start --funds 0)
+    proc_out=$(jj "$db" "$home_carol" process start --funds 50)
     proc_id=$(strfield "$proc_out" "process_id")
     local call_out tx_id
     call_out=$(jj "$db" "$home_carol" call \
@@ -1298,14 +1284,14 @@ flow_contractor_subcall() {
         && ok "contractor_subcall.call_succeeds" \
         || fail "contractor_subcall.call_succeeds" "contractor call returned no tx_id: $call_out"
 
-    # @carol process.available unchanged (contractor price=0)
+    # @carol process.available = 0 (process funded the sub-call)
     local proc_show
     proc_show=$(jj "$db" "$home_carol" process show --id "$proc_id")
     [ "$(numfield "$proc_show" "available")" -eq 0 ] \
         && ok "contractor_subcall.caller_process_unchanged" \
         || fail "contractor_subcall.caller_process_unchanged" "expected 0, got: $proc_show"
 
-    # @alice.available = 0 (started 50, spent 50 on ephemeral sub-call)
+    # @alice.available = 0 (not a contractor; her balance is untouched)
     local alice_me
     alice_me=$(jj "$db" "$home_alice" user me)
     [ "$(numfield "$alice_me" "available")" -eq 0 ] \
@@ -1343,8 +1329,8 @@ flow_contractor_failure() {
     j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
     j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
     j "$db" "$home_carol" auth login --handle @carol --password carolpass >/dev/null 2>&1
-    # @alice has 0 credits (no deposit) → sub-call will fail with ErrInsufficientFunds
-    j "$db" "$home_sys" admin user deposit --handle @carol --amount 200 >/dev/null 2>&1
+    # @carol gets 30 credits — not enough for the sub-call (price=50) → insufficient funds
+    j "$db" "$home_sys" admin user deposit --handle @carol --amount 30 >/dev/null 2>&1
 
     start_backend "$backend_port" 200 '{"ok":true}'
     local backend_pid=$BACKEND_PID
@@ -1356,9 +1342,9 @@ flow_contractor_failure() {
         --source "http://127.0.0.1:${backend_port}/sub" --price 50 --description "sub target")
     sub_id=$(strfield "$sub_out" "id")
     j "$db" "$home_bob" action enable   --id "$sub_id" >/dev/null 2>&1
-    j "$db" "$home_bob" action grant-all --id "$sub_id" >/dev/null 2>&1
+    j "$db" "$home_bob" action update --id "$sub_id" --public >/dev/null 2>&1
 
-    # @alice creates contractor WASM (price=0)
+    # @alice creates WASM (price=0) that sub-calls @bob/sub-target
     local contractor_wasm="$dir/contractor.wasm"
     make_contractor_wasm "$contractor_wasm" "@bob/sub-target"
     local cont_out cont_id
@@ -1366,28 +1352,27 @@ flow_contractor_failure() {
         --source "$contractor_wasm" --price 0 --description "contractor wasm")
     cont_id=$(strfield "$cont_out" "id")
     j "$db" "$home_alice" action enable   --id "$cont_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$cont_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$cont_id" --public >/dev/null 2>&1
 
-    # @carol starts process (100 funds, contractor price=0 so nothing locked)
+    # @carol starts process with 30 funds (insufficient for the 50-price sub-call)
     local proc_out proc_id
-    j "$db" "$home_sys" admin user deposit --handle @carol --amount 0 >/dev/null 2>&1
-    proc_out=$(jj "$db" "$home_carol" process start --funds 100)
+    proc_out=$(jj "$db" "$home_carol" process start --funds 30)
     proc_id=$(strfield "$proc_out" "process_id")
 
-    # Call contractor → @alice has 0 credits → ephemeral process creation fails
+    # Call fails → process has insufficient funds for sub-call
     local call_out
     call_out=$(j "$db" "$home_carol" call \
         --process "$proc_id" --action @alice/contractor --args '{}' 2>&1)
-    echo "$call_out" | grep -qi "insufficient\|balance\|funds" \
+    echo "$call_out" | grep -qi "insufficient\|balance\|funds\|credits\|costs" \
         && ok "contractor_failure.error_returned" \
         || fail "contractor_failure.error_returned" "expected insufficient-funds error, got: $call_out"
 
-    # @carol process.available unchanged (nothing was locked for price=0 contractor)
+    # @carol process.available restored (locked funds refunded after sub-call failure)
     local proc_show
     proc_show=$(jj "$db" "$home_carol" process show --id "$proc_id")
-    [ "$(numfield "$proc_show" "available")" -eq 100 ] \
+    [ "$(numfield "$proc_show" "available")" -eq 30 ] \
         && ok "contractor_failure.caller_process_unchanged" \
-        || fail "contractor_failure.caller_process_unchanged" "expected 100, got: $proc_show"
+        || fail "contractor_failure.caller_process_unchanged" "expected 30, got: $proc_show"
 
     # @alice.available = 0 (unchanged, no deposit made)
     local alice_me
@@ -1428,7 +1413,7 @@ flow_event_queue_success() {
         --source "http://127.0.0.1:${backend_port}/handler" --price 0 --description "event handler")
     handler_id=$(strfield "$handler_out" "id")
     j "$db" "$home_alice" action enable   --id "$handler_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$handler_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$handler_id" --public >/dev/null 2>&1
 
     local listen_out listener_id
     listen_out=$(jj "$db" "$home_alice" listener create \
@@ -1516,7 +1501,7 @@ flow_event_queue_failure() {
         --source "http://127.0.0.1:${backend_port}/handler" --price 0 --description "event handler")
     handler_id=$(strfield "$handler_out" "id")
     j "$db" "$home_alice" action enable   --id "$handler_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$handler_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$handler_id" --public >/dev/null 2>&1
 
     local listen_out listener_id
     listen_out=$(jj "$db" "$home_alice" listener create \
@@ -1588,7 +1573,7 @@ flow_event_deletion_restart() {
         --source "http://127.0.0.1:${backend_port}/handler" --price 0 --description "event handler")
     handler_id=$(strfield "$handler_out" "id")
     j "$db" "$home_alice" action enable   --id "$handler_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$handler_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$handler_id" --public >/dev/null 2>&1
 
     local listen_out listener_id
     listen_out=$(jj "$db" "$home_alice" listener create \
@@ -1736,7 +1721,7 @@ flow_rating() {
         --source "http://127.0.0.1:${backend_port}/rate" --price 10 --description "rateable action")
     action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
 
     # @bob calls @alice's action → tx_id
     local proc_out proc_id call_out tx_id
@@ -1991,7 +1976,7 @@ flow_successful_receipt() {
         --source "http://127.0.0.1:${backend_port}/act" --price 10 --description "receipt test action")
     action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
 
     local proc_out proc_id
     proc_out=$(jj "$db" "$home_bob" process start --funds 50)
@@ -2044,7 +2029,7 @@ flow_failed_receipt() {
         --source "http://127.0.0.1:${backend_port}/fail" --price 10 --description "fail action")
     action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
 
     local proc_out proc_id
     proc_out=$(jj "$db" "$home_bob" process start --funds 50)
@@ -2213,7 +2198,7 @@ PYEOF
 
     # Enable + grant-all (requires x-juice-owner for public access)
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
 
     # @bob calls the imported action
     local proc_out proc_id call_out tx_id
@@ -2494,7 +2479,7 @@ _fed_setup() {
     [ -n "$action_id_r" ] || { echo "_fed_setup: action_id_r empty (port_b=$port_b)" >&2; return 1; }
     echo "$action_id_r" > "$dir/remote_action_id"
     j "$db_r" "$home_r" action enable --id "$action_id_r" >/dev/null 2>&1
-    j "$db_r" "$home_r" action grant-all --id "$action_id_r" >/dev/null 2>&1
+    j "$db_r" "$home_r" action update --id "$action_id_r" --public >/dev/null 2>&1
 
     # Start both serves
     start_serve "$db_l" "127.0.0.1:$port_l" syspass "$home_l" \
@@ -2521,7 +2506,7 @@ _fed_setup() {
     proxy_id=$(echo "$ri_out" | sed 's/.*id=\([^,)]*\).*/\1/')
     # Enable proxy and grant-all (superuser can admin remote proxy)
     j "$db_l" "$home_l" action enable --id "$proxy_id" >/dev/null 2>&1
-    j "$db_l" "$home_l" action grant-all --id "$proxy_id" >/dev/null 2>&1
+    j "$db_l" "$home_l" action update --id "$proxy_id" --public >/dev/null 2>&1
 
     echo "$proxy_id" > "$dir/proxy_id"
 }
@@ -2788,7 +2773,7 @@ flow_transaction_access() {
         --source "http://127.0.0.1:${backend_port}/pvd" --price 10 --description "tx access test")
     action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action grant-all --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
 
     # @bob (buyer) calls @alice's action 3 times.
     local proc_out proc_id i call_out a_tx_id
@@ -2935,7 +2920,7 @@ import sys,json; d=json.load(sys.stdin); assert not d.get('active'), f'still act
 
     # Re-enable and call to create a process and tx for admin list tests
     j "$db" "$home_sys" action enable --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_sys" action grant-all --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_sys" action update --id "$action_id" --public >/dev/null 2>&1
     j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
     j "$db" "$home_sys" admin user deposit --handle @alice --amount 100 >/dev/null 2>&1
     local proc_id
