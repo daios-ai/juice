@@ -602,8 +602,8 @@ func (s *DB) StartProcess(ctx context.Context, p *kernel.Process, t *kernel.Trac
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
-		t.ID, t.ProcessID, t.ParentTraceID, t.CausedByTraceID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
+		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
+		t.ID, t.ProcessID, nullStrPtr(t.ParentTraceID), t.ActionOwnerID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
 	); err != nil {
 		return dbErr(err, "start process: insert trace")
 	}
@@ -667,8 +667,8 @@ func (s *DB) BeginCall(ctx context.Context, processID string, t *kernel.Trace, p
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
-		t.ID, t.ProcessID, t.ParentTraceID, t.CausedByTraceID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
+		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
+		t.ID, t.ProcessID, nullStrPtr(t.ParentTraceID), t.ActionOwnerID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
 	); err != nil {
 		return dbErr(err, "begin call: create trace")
 	}
@@ -755,14 +755,11 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 // costDelta is 0 for failures (latency-only update).
 func (s *DB) updateAncestorTraces(ctx context.Context, tx *sql.Tx, traceID string, costDelta int64, endedAt time.Time, label string) error {
 	_, err := tx.ExecContext(ctx, `
-WITH RECURSIVE ancestors(id, parent_id, caused_by_id) AS (
-    SELECT id, parent_trace_id, caused_by_trace_id FROM traces WHERE id=?
+WITH RECURSIVE ancestors(id, parent_id) AS (
+    SELECT id, parent_trace_id FROM traces WHERE id=?
     UNION ALL
-    SELECT t.id, t.parent_trace_id, t.caused_by_trace_id FROM traces t
-    JOIN ancestors a ON t.id=a.parent_id AND a.id!=a.parent_id
-    UNION ALL
-    SELECT t.id, t.parent_trace_id, t.caused_by_trace_id FROM traces t
-    JOIN ancestors a ON t.id=a.caused_by_id AND a.id=a.parent_id AND a.caused_by_id IS NOT NULL
+    SELECT t.id, t.parent_trace_id FROM traces t
+    JOIN ancestors a ON t.id=a.parent_id AND a.parent_id IS NOT NULL AND a.id!=a.parent_id
 )
 UPDATE traces SET
     cost=cost+?,
@@ -1032,10 +1029,10 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 func (s *DB) ReadTrace(ctx context.Context, id string) (*kernel.Trace, error) {
 	var t kernel.Trace
 	var createdAt string
-	var causedBy sql.NullString
+	var parentID sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at FROM traces WHERE id=?`, id,
-	).Scan(&t.ID, &t.ProcessID, &t.ParentTraceID, &causedBy, &t.Cost, &t.LatencyMS, &createdAt)
+		`SELECT id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at FROM traces WHERE id=?`, id,
+	).Scan(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.Cost, &t.LatencyMS, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("trace not found")
 	}
@@ -1043,8 +1040,8 @@ func (s *DB) ReadTrace(ctx context.Context, id string) (*kernel.Trace, error) {
 		return nil, dbErr(err, "read trace")
 	}
 	t.CreatedAt = strToTime(createdAt)
-	if causedBy.Valid {
-		t.CausedByTraceID = &causedBy.String
+	if parentID.Valid {
+		t.ParentTraceID = &parentID.String
 	}
 	return &t, nil
 }
@@ -1052,11 +1049,11 @@ func (s *DB) ReadTrace(ctx context.Context, id string) (*kernel.Trace, error) {
 func (s *DB) ReadRootTrace(ctx context.Context, processID string) (*kernel.Trace, error) {
 	var t kernel.Trace
 	var createdAt string
-	var causedBy sql.NullString
+	var parentID sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at
-		 FROM traces WHERE process_id=? AND parent_trace_id=id LIMIT 1`, processID,
-	).Scan(&t.ID, &t.ProcessID, &t.ParentTraceID, &causedBy, &t.Cost, &t.LatencyMS, &createdAt)
+		`SELECT id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at
+		 FROM traces WHERE process_id=? AND parent_trace_id IS NULL LIMIT 1`, processID,
+	).Scan(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.Cost, &t.LatencyMS, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("root trace not found for process")
 	}
@@ -1064,8 +1061,8 @@ func (s *DB) ReadRootTrace(ctx context.Context, processID string) (*kernel.Trace
 		return nil, dbErr(err, "read root trace")
 	}
 	t.CreatedAt = strToTime(createdAt)
-	if causedBy.Valid {
-		t.CausedByTraceID = &causedBy.String
+	if parentID.Valid {
+		t.ParentTraceID = &parentID.String
 	}
 	return &t, nil
 }
@@ -1430,6 +1427,9 @@ func nullStr(s string) *string {
 	return &s
 }
 
+// nullStrPtr converts a *string to a SQL-compatible value: nil becomes nil (NULL), non-nil is passed through.
+func nullStrPtr(s *string) *string { return s }
+
 // rawJSONStr returns the string form of a json.RawMessage, defaulting to "null" when empty.
 func rawJSONStr(r json.RawMessage) string {
 	if len(r) == 0 {
@@ -1450,7 +1450,7 @@ func strToRawJSON(s string) json.RawMessage {
 
 func (s *DB) ListTraces(ctx context.Context, processID string) ([]*kernel.Trace, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,process_id,parent_trace_id,caused_by_trace_id,cost,latency_ms,created_at FROM traces WHERE process_id=?`, processID)
+		`SELECT id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at FROM traces WHERE process_id=?`, processID)
 	if err != nil {
 		return nil, dbErr(err, "list traces")
 	}
@@ -1459,13 +1459,13 @@ func (s *DB) ListTraces(ctx context.Context, processID string) ([]*kernel.Trace,
 	for rows.Next() {
 		var t kernel.Trace
 		var createdAt string
-		var causedBy sql.NullString
-		if err := rows.Scan(&t.ID, &t.ProcessID, &t.ParentTraceID, &causedBy, &t.Cost, &t.LatencyMS, &createdAt); err != nil {
+		var parentID sql.NullString
+		if err := rows.Scan(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.Cost, &t.LatencyMS, &createdAt); err != nil {
 			return nil, dbErr(err, "scan trace")
 		}
 		t.CreatedAt = strToTime(createdAt)
-		if causedBy.Valid {
-			t.CausedByTraceID = &causedBy.String
+		if parentID.Valid {
+			t.ParentTraceID = &parentID.String
 		}
 		out = append(out, &t)
 	}

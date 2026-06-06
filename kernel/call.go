@@ -19,11 +19,8 @@ type CallRequest struct {
 	ProcessID string
 	// ParentTraceID is the trace from which this call originates.
 	// For top-level calls it is the process root trace ID.
+	// For event-triggered calls it may reference a trace in another process.
 	ParentTraceID string
-	// CausedByTraceID is a FOLLOWS_FROM reference set for event-triggered calls.
-	// It references the emitting action's trace (may cross process boundaries).
-	// Leave empty for direct calls.
-	CausedByTraceID string
 	// TargetUserID is the owner of the action.
 	TargetUserID string
 	// ActionName is the action's name field.
@@ -68,11 +65,18 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInvalidState.Wrap("process is closed")
 	}
 
-	// 3. Subject is the process owner or has explicit process authority.
+	// 3. Subject may use this process: is the owner, holds explicit process authority,
+	// or owns the action currently executing in the parent trace (trace-scoped subcall authority).
 	if process.OwnerUserID != req.SubjectID {
 		authorized, authErr := k.store.CheckProcessAuthority(ctx, req.SubjectID, req.ProcessID)
 		if authErr != nil {
 			return nil, ErrInternal.Wrapf("process authority check failed: %v", authErr)
+		}
+		if !authorized && req.ParentTraceID != "" {
+			parent, parentErr := k.store.ReadTrace(ctx, req.ParentTraceID)
+			if parentErr == nil && parent.ProcessID == req.ProcessID && parent.ActionOwnerID == req.SubjectID {
+				authorized = true
+			}
 		}
 		if !authorized {
 			return nil, ErrUnauthorized.Wrap("subject is not the process owner")
@@ -94,14 +98,14 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrNotFound.Wrapf("action %s/%s not found", req.TargetUserID, req.ActionName)
 	}
 
-	// 5. Action must be active (owners may call their own inactive actions).
-	if !action.Active && action.OwnerUserID != req.SubjectID {
+	// 5. Action must be active; exception: the process owner may call their own inactive actions.
+	if !action.Active && action.OwnerUserID != process.OwnerUserID {
 		return nil, ErrInvalidState.Wrap("action is inactive")
 	}
 
-	// 6. ACL check — CanCall(subject, action).
-	if action.OwnerUserID != req.SubjectID {
-		canCall, err := k.canCall(ctx, req.SubjectID, action)
+	// 6. ACL check — CanCall(process.owner, action).
+	if action.OwnerUserID != process.OwnerUserID {
+		canCall, err := k.canCall(ctx, process.OwnerUserID, action)
 		if err != nil {
 			return nil, err
 		}
@@ -122,12 +126,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 
 	// 9. Validate or resolve parent trace — precondition check, no state change yet.
 	if req.ParentTraceID != "" {
-		parent, err := k.store.ReadTrace(ctx, req.ParentTraceID)
-		if err != nil {
+		if _, err := k.store.ReadTrace(ctx, req.ParentTraceID); err != nil {
 			return nil, ErrInvalidInput.Wrap("parent trace not found")
-		}
-		if parent.ProcessID != req.ProcessID {
-			return nil, ErrInvalidInput.Wrap("parent trace belongs to a different process")
 		}
 	} else {
 		root, err := k.store.ReadRootTrace(ctx, req.ProcessID)
@@ -135,11 +135,6 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			return nil, ErrInternal.Wrap("could not resolve root trace for process")
 		}
 		req.ParentTraceID = root.ID
-	}
-
-	// Causal trace invariants: FOLLOWS_FROM and CHILD_OF must reference distinct traces.
-	if req.CausedByTraceID != "" && req.CausedByTraceID == req.ParentTraceID {
-		return nil, ErrInvalidInput.Wrap("CausedByTraceID must differ from ParentTraceID")
 	}
 
 	// Kernel must be bootstrapped before any call can be committed.
@@ -150,11 +145,11 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// 10–11. Atomically lock funds and create child trace.
 	now := time.Now().UTC()
 	trace := &Trace{
-		ID:              uuid.New().String(),
-		ProcessID:       req.ProcessID,
-		ParentTraceID:   req.ParentTraceID,
-		CausedByTraceID: strPtr(req.CausedByTraceID),
-		CreatedAt:       now,
+		ID:            uuid.New().String(),
+		ProcessID:     req.ProcessID,
+		ParentTraceID: strPtr(req.ParentTraceID),
+		ActionOwnerID: action.OwnerUserID,
+		CreatedAt:     now,
 	}
 	if err := k.store.BeginCall(ctx, req.ProcessID, trace, action.Price); err != nil {
 		if errors.Is(err, ErrInsufficientFunds) || errors.Is(err, ErrInvalidState) {
@@ -200,7 +195,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		remoteReceiptHash string
 		execErr           error
 	)
-	reply, subCost, remoteReceiptHash, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID, req.SubjectID)
+	reply, subCost, remoteReceiptHash, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID, process.OwnerUserID)
 	if remoteReceiptHash != "" {
 		tx.RemoteReceiptHash = sha256Hex(remoteReceiptHash)
 		tx.RemoteReceiptJSON = remoteReceiptHash
@@ -290,7 +285,8 @@ func (k *Kernel) canCall(ctx context.Context, subjectID string, action *Action) 
 // execute dispatches to the correct execution backend.
 // Returns (result, subCost, remoteReceiptHash, error). remoteReceiptHash is non-empty only
 // for successful KindRemoteProxy calls and holds the raw receipt JSON from the remote kernel.
-func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, ownerUserID, subjectID string) (map[string]any, int64, string, error) {
+// callerID is the action owner (immediate caller); ownerUserID is the process owner (payer).
+func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, callerID, ownerUserID string) (map[string]any, int64, string, error) {
 	switch action.Kind {
 	case KindHTTP:
 		if k.http == nil {
@@ -299,10 +295,10 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 		res, err := k.http.Execute(ctx, action.Source, args)
 		return res, 0, "", err
 	case KindWasm:
-		res, cost, err := k.executeWasm(ctx, action, args, trace, ownerUserID)
+		res, cost, err := k.executeWasm(ctx, action, args, trace, callerID)
 		return res, cost, "", err
 	case KindNative:
-		res, err := k.executeNative(ctx, action, args, subjectID, trace.ProcessID, trace.ID)
+		res, err := k.executeNative(ctx, action, args, callerID, ownerUserID, trace.ProcessID, trace.ID)
 		return res, 0, "", err
 	case KindRemoteProxy:
 		if fe, ok := k.http.(FederationExecutor); ok {
@@ -317,12 +313,12 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 }
 
 // executeNative dispatches to a registered native action handler.
-func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any, subjectID, processID, parentTraceID string) (map[string]any, error) {
+func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any, callerID, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
 	fn, ok := k.nativeHandlers[action.Name]
 	if !ok {
 		return nil, ErrInvalidState.Wrapf("unknown native action %q", action.Name)
 	}
-	return fn(ctx, args, subjectID, processID, parentTraceID)
+	return fn(ctx, args, callerID, ownerUserID, processID, parentTraceID)
 }
 
 // executeWasm runs a compiled WASM artifact.
@@ -391,7 +387,7 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 		return nil, ErrInvalidInput.Wrap("args must be a JSON object")
 	}
 
-	// Resolve target user and action to get the price upfront.
+	// Resolve target user to get the action price upfront for VAT sub-cost tracking.
 	target, err := h.kernel.store.ReadUserByHandle(ctx, parts[0])
 	if err != nil {
 		target, err = h.kernel.store.ReadUser(ctx, parts[0])
@@ -404,44 +400,19 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 		return nil, ErrNotFound.Wrapf("action %s not found", actionName)
 	}
 
-	// Contractor model: create an ephemeral process owned by the calling action's
-	// owner. The caller's process is not charged for sub-calls.
-	now := time.Now().UTC()
-	ep := &Process{
-		ID:          uuid.New().String(),
-		OwnerUserID: h.ownerUserID,
-		Status:      ProcessOpen,
-		CreatedAt:   now,
-	}
-	epRoot := &Trace{
-		ID:        uuid.New().String(),
-		ProcessID: ep.ID,
-		CreatedAt: now,
-	}
-	epRoot.ParentTraceID = epRoot.ID
-	epRoot.CausedByTraceID = strPtr(h.traceID) // FOLLOWS_FROM: ephemeral process root explains why this process was created
-	if err := h.kernel.store.StartProcess(ctx, ep, epRoot, h.ownerUserID, action.Price); err != nil {
-		if isInsufficientFunds(err) {
-			return nil, ErrInsufficientFunds.Wrap("action owner has insufficient balance for sub-call")
-		}
-		return nil, ErrInternal.Wrap("could not create ephemeral process")
-	}
-	ep.Available = action.Price
-	// Always close the ephemeral process on return; any unused funds go back to owner.
-	// Use context.Background() so a cancelled request context does not prevent cleanup.
-	defer func() { _ = h.kernel.store.EndProcess(context.Background(), ep.ID) }()
-
+	// Process-funded model: subcall uses the same process; caller is the calling action's owner.
 	reply, err := h.kernel.Call(ctx, CallRequest{
-		SubjectID:    h.ownerUserID,
-		ProcessID:    ep.ID,
-		TargetUserID: target.ID,
-		ActionName:   subActionName,
-		Args:         args,
+		SubjectID:     h.ownerUserID,
+		ProcessID:     h.processID,
+		ParentTraceID: h.traceID,
+		TargetUserID:  target.ID,
+		ActionName:    subActionName,
+		Args:          args,
 	})
 	if err != nil {
 		return nil, err
 	}
-	h.subCost += action.Price // only count gross for successful sub-calls (VAT model)
+	h.subCost += action.Price // count gross for successful sub-calls (VAT model)
 	return json.Marshal(reply.Result)
 }
 

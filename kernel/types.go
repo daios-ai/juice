@@ -97,17 +97,17 @@ type Process struct {
 }
 
 // Trace records causal structure for one step in a call tree.
-// Root traces have ParentTraceID == ID.
-// CausedByTraceID is a FOLLOWS_FROM reference set for event-triggered calls;
-// it references the emitting action's trace and may cross process boundaries.
+// Root traces have ParentTraceID == nil.
+// Event-triggered traces may have a ParentTraceID that crosses process boundaries
+// (the emitting action's trace ID).
 type Trace struct {
-	ID              string    `json:"id"`
-	ProcessID       string    `json:"process_id"`
-	ParentTraceID   string    `json:"parent_trace_id"`
-	CausedByTraceID *string   `json:"caused_by_trace_id,omitempty"`
-	Cost            int64     `json:"cost"`
-	LatencyMS       int64     `json:"latency_ms"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	ProcessID      string    `json:"process_id"`
+	ParentTraceID  *string   `json:"parent_trace_id,omitempty"`
+	ActionOwnerID  string    `json:"action_owner_id"`
+	Cost           int64     `json:"cost"`
+	LatencyMS      int64     `json:"latency_ms"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // Transaction records one attempted call. Immutable after creation.

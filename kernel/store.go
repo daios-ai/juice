@@ -175,7 +175,7 @@ type Store interface {
 	// ---- Traces ----
 
 	ReadTrace(ctx context.Context, id string) (*Trace, error)
-	// ReadRootTrace returns the root trace (ParentTraceID == ID) for the given process.
+	// ReadRootTrace returns the root trace (ParentTraceID IS NULL) for the given process.
 	ReadRootTrace(ctx context.Context, processID string) (*Trace, error)
 
 	// ---- Transactions ----

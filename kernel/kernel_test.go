@@ -397,8 +397,8 @@ func TestStartAndEndProcess(t *testing.T) {
 	if p.Available != 500 {
 		t.Errorf("process.available: got %d, want 500", p.Available)
 	}
-	if root.ParentTraceID != root.ID {
-		t.Error("root trace must have ParentTraceID == ID")
+	if root.ParentTraceID != nil {
+		t.Error("root trace must have nil ParentTraceID")
 	}
 
 	u, _ := st.ReadUser(ctx, owner.ID)
@@ -704,7 +704,7 @@ func TestConsumeEventSettlesAtomically(t *testing.T) {
 
 	p, _, _ := k.StartProcess(ctx, owner.ID, owner.ID, 500)
 
-	reply, err := k.ConsumeEvent(ctx, owner.ID, e.ID, p.ID, "")
+	reply, err := k.ConsumeEvent(ctx, owner.ID, e.ID, p.ID)
 	if err != nil {
 		t.Fatalf("ConsumeEvent: %v", err)
 	}
@@ -719,14 +719,14 @@ func TestConsumeEventSettlesAtomically(t *testing.T) {
 	}
 }
 
-func TestConsumeEventRespectsParentTraceID(t *testing.T) {
+func TestConsumeEventNoCausingTrace(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@parent-trace-owner", 1000)
+	owner := setupUser(t, st, "@no-cause-owner", 1000)
 	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pt-svc",
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "nc-svc",
 		Kind: kernel.KindWasm, Active: true, Price: 0, Source: "wat",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -734,7 +734,7 @@ func TestConsumeEventRespectsParentTraceID(t *testing.T) {
 
 	l := &kernel.Listener{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, SourceUserID: owner.ID,
-		EventName: "pt-ev", TargetActionID: a.ID, Active: true,
+		EventName: "nc-ev", TargetActionID: a.ID, Active: true,
 		CreatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateListener(ctx, l)
@@ -744,11 +744,11 @@ func TestConsumeEventRespectsParentTraceID(t *testing.T) {
 	}
 	_ = st.CreateEvents(ctx, []*kernel.Event{e})
 
-	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 500)
+	p, _, _ := k.StartProcess(ctx, owner.ID, owner.ID, 500)
 
-	reply, err := k.ConsumeEvent(ctx, owner.ID, e.ID, p.ID, root.ID)
+	reply, err := k.ConsumeEvent(ctx, owner.ID, e.ID, p.ID)
 	if err != nil {
-		t.Fatalf("ConsumeEvent with parentTraceID: %v", err)
+		t.Fatalf("ConsumeEvent: %v", err)
 	}
 	if reply.TxID == "" {
 		t.Error("expected tx_id in reply")

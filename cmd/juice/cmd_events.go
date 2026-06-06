@@ -227,13 +227,13 @@ func eventListCmd() *cobra.Command {
 }
 
 func eventConsumeCmd() *cobra.Command {
-	var eventID, processID, parentTraceID string
+	var eventID, processID string
 	cmd := &cobra.Command{
 		Use:   "consume",
 		Short: "Consume a pending event, calling its listener's target action",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSubject(func(k *kernel.Kernel, subjectID string) error {
-				reply, err := k.ConsumeEvent(context.Background(), subjectID, eventID, processID, parentTraceID)
+				reply, err := k.ConsumeEvent(context.Background(), subjectID, eventID, processID)
 				if err != nil {
 					return err
 				}
@@ -251,7 +251,6 @@ func eventConsumeCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&eventID, "id", "", "Event ID (required)")
 	cmd.Flags().StringVar(&processID, "process", "", "Process ID to fund the action call (required)")
-	cmd.Flags().StringVar(&parentTraceID, "trace", "", "Parent trace ID (defaults to process root)")
 	_ = cmd.MarkFlagRequired("id")
 	_ = cmd.MarkFlagRequired("process")
 	return cmd

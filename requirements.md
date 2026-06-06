@@ -50,8 +50,8 @@ All IDs are stable opaque identifiers; action IDs are globally unique. Credit ba
 | `Action`            | `id`, `owner_user_id`, `name`, `kind`, `active`, `public`, `price`, `description`, `input_schema`, `output_schema`, `source`, `artifact_hash`, `remote_action_id`, `created_at`, `updated_at`                                               | `kind ∈ {http, wasm, native, remote_proxy}`. `(owner_user_id, name)` is unique. `name` follows URL-path conventions: `/` is a hierarchy separator, not a forbidden character (e.g., `llm/chat`). The full `@owner/name` reference is structurally analogous to `host/path` in a URL — unambiguous because handles (like hostnames) cannot contain `/`. An `active=false` action is not callable by non-owners. Public discovery returns active actions only unless an owner requests private state. Authorized users may inspect script source. Compiled artifacts are content-addressed by `artifact_hash`. |
 | `ACLEntry`          | `subject_user_id`, `action_id`, `permission`, `created_at`                                                                                                                                                                                  | `permission ∈ {read, call, admin}`. ACLs are direct user-to-action grants. `read` permits inspection; `call` permits execution; `admin` permits ACL and lifecycle changes. Owners implicitly have `admin`.                                                                                                              |
 | `Process`           | `id`, `owner_user_id`, `available`, `locked`, `status`, `created_at`, `ended_at`                                                                                                                                                            | `status ∈ {open, closed}`. A process starts with user-provided funds and may start with zero credits (`available = 0`). Closing it returns all remaining funds to its owner. Closed processes cannot execute calls.                                                                                                     |
-| `Trace`             | `id`, `process_id`, `parent_trace_id`, `caused_by_trace_id`, `cost`, `latency_ms`, `created_at`                                                                                                                                             | Every process has one root trace. Choose one root convention consistently: `parent_trace_id = id` or `parent_trace_id = null`. Every direct `Call()` creates exactly one child trace.                                                                                                                                   |
-| `Transaction`       | `id`, `process_id`, `trace_id`, `parent_trace_id`, `owner_user_id`, `subject_user_id`, `target_user_id`, `action_id`, `action_name`, `args_json`, `reply_json`, `status`, `gross`, `net`, `fee`, `reason`, `remote_receipt_hash`, `remote_receipt_json`, `started_at`, `ended_at` | `status ∈ {success, failure}`. Every attempted call creates one immutable transaction. `action_name` is the action's name at call time, captured at `CreateTransaction` so the record remains self-contained after the action is deleted. `remote_receipt_hash` and `remote_receipt_json` are null for local calls. For cross-kernel calls, `remote_receipt_hash` stores `SHA-256(remote_receipt_json)` and `remote_receipt_json` stores the full receipt JSON returned by the remote kernel; both are set atomically with the transaction at `CommitCall` time. |
+| `Trace`             | `id`, `process_id`, `parent_trace_id`, `action_owner_id`, `cost`, `latency_ms`, `created_at`                                                                                                                                                | Root traces have `parent_trace_id = null`. Every `Call()` creates exactly one child trace. `action_owner_id` is the owner of the action executing in this trace; used for trace-scoped process authority.                                                                                                               |
+| `Transaction`       | `id`, `process_id`, `trace_id`, `parent_trace_id`, `owner_user_id`, `subject_user_id`, `target_user_id`, `action_id`, `action_name`, `args_json`, `reply_json`, `status`, `gross`, `net`, `fee`, `reason`, `remote_receipt_hash`, `remote_receipt_json`, `started_at`, `ended_at` | `status ∈ {success, failure}`. Every attempted call creates one immutable transaction. `owner_user_id` is the process owner (payer); `subject_user_id` is the immediate caller; `target_user_id` is the called action's owner. `action_name` is the action's name at call time, captured at `CreateTransaction` so the record remains self-contained after the action is deleted. `remote_receipt_hash` and `remote_receipt_json` are null for local calls. For cross-kernel calls, `remote_receipt_hash` stores `SHA-256(remote_receipt_json)` and `remote_receipt_json` stores the full receipt JSON returned by the remote kernel; both are set atomically with the transaction at `CommitCall` time. |
 | `Stats`             | `uses`, `successes`, `failures`, `rating_count`, `price_mean`, `latency_mean`, `rating_mean`, `last_used_at`                                                                                                                                | Missing stats have defined defaults. `uses = successes + failures`.                                                                                                                                                                                                                                                     |
 | `StatTag`           | `action_id`, `key`, `value`, `source`, `updated_at`                                                                                                                                                                                         | Optional, queryable for lookup experiments, and never required for kernel execution. Experimental tags are namespaced by source and never alter fixed-stat semantics.                                                                                                                                                   |
 | `Listener`          | `id`, `owner_user_id`, `source_user_id`, `event_name`, `target_action_id`, `active`, `created_at`                                                                                                                                           | A listener subscribes its owner to an exact `(source_user_id, event_name)` pair.                                                                                                                                                                                                                                        |
@@ -63,10 +63,10 @@ All IDs are stable opaque identifiers; action IDs are globally unique. Credit ba
 
 ### 3.1 ACL rule
 
-ACL checks must occur inside the kernel path, not only at CLI or HTTP boundaries:
+ACL checks must occur inside the kernel path, not only at CLI or HTTP boundaries. Authorization is always against the process owner:
 
 ```text
-CanCall(u, a) := Active(a) ∧ (Owner(u, a) ∨ Public(a) ∨ ACL(u, a, call) ∨ ACL(u, a, admin))
+CanCall(process.owner_user_id, a) := Active(a) ∧ (Owner(process.owner_user_id, a) ∨ Public(a) ∨ ACL(process.owner_user_id, a, call) ∨ ACL(process.owner_user_id, a, admin))
 ```
 
 `public` is stored directly on the action. Grant-all and revoke-all toggle this flag without replacing direct ACL entries; only the owner or an action admin may invoke them.
@@ -79,24 +79,20 @@ Every active action must have a non-empty natural-language `description`, a vali
 
 ### 3.2 Trace relationships
 
-| Field                | Relation       | Scope             | Use                                            |
-| -------------------- | -------------- | ----------------- | ---------------------------------------------- |
-| `parent_trace_id`    | `CHILD_OF`     | Same process only | Direct calls within a process                  |
-| `caused_by_trace_id` | `FOLLOWS_FROM` | Cross-process     | Contractor sub-calls and event-triggered calls |
+`parent_trace_id` is the single causal parent relation.
+
+| Case                  | `parent_trace_id`           | `process_id`               |
+| --------------------- | --------------------------- | -------------------------- |
+| Root trace            | null                        | owning process             |
+| Subcall trace         | calling action's trace      | same as parent             |
+| Event-triggered trace | emitting action's trace     | supplied consuming process |
 
 Rules:
 
-* A child inherits its parent's `process_id`; trace trees are rooted per process. Every transaction references a trace. Trace lookup by process returns the execution tree; trace deletion never deletes transaction history.
-* The kernel must reject a missing or cross-process supplied `parent_trace_id` with `ErrInvalidInput`.
-* Direct calls have null `caused_by_trace_id`.
-* Contractor ephemeral-process roots set `caused_by_trace_id` to the calling action trace.
-* Event-triggered calls set `caused_by_trace_id` to the emitter trace stored at emit time.
-* `caused_by_trace_id` must never be treated as `parent_trace_id`.
-* Each completed descendant transaction updates ancestor `cost` and `latency_ms` automatically. The originating trace of a `FOLLOWS_FROM` relationship may already be closed; the referenced trace belongs to a different process.
-
-```text
-∀ child. child.process_id = parent(child).process_id
-```
+* Every `Call()` creates exactly one child trace. `parent_trace_id` may cross process boundaries; subcall traces share their parent's `process_id`, event-triggered traces carry the consuming process.
+* `process_id` determines payment; `parent_trace_id` records causal ancestry only.
+* A supplied `parent_trace_id` must reference an existing trace. Cross-process references are valid for event-triggered calls.
+* Each completed descendant transaction updates ancestor `cost` and `latency_ms` automatically.
 
 ## 4. Persistence and atomicity
 
@@ -142,15 +138,15 @@ A committed monetary transition must never exist without its audit record, or vi
 Check, in order:
 
 ```text
-1. authenticated, non-suspended subject
+1. authenticated, non-suspended caller
 2. existing open process
-3. subject owns the process or has explicit process authority
+3. caller may use the process: is the owner, holds explicit process authority, or owns the action in the parent trace (trace-scoped subcall authority)
 4. existing action
-5. active action
-6. CanCall(subject, action)
+5. active action; exception: process owner may call their own inactive actions
+6. CanCall(process.owner_user_id, action)
 7. valid input schema
 8. process.available >= action.price
-9. valid same-process parent trace, if supplied
+9. parent_trace_id, if supplied, references an existing trace
 ```
 
 Return the matching typed error for the first failed precondition.
@@ -203,31 +199,28 @@ Any failure before or after target execution starts charges zero, refunds the fu
 
 Every action has input and output schemas. The first implementation may support a strict JSON Schema subset, but unsupported forms must fail action creation or update. A schema node without a `type` key is treated as unconstrained (accepts any value); this is intentional and not an error. Validate input before locking funds and output before successful settlement.
 
-### 5.5 Contractor sub-calls
+### 5.5 Subcalls
 
-When a running action invokes WASM host function `juice.call(target, args)`:
+When a running action invokes `juice.call(target, args)` the kernel performs:
 
 ```text
-owner := calling action owner
-create ephemeral process owned by owner
-fund it from owner.available with exactly target.price
-create ephemeral root trace with caused_by_trace_id = calling trace id
-invoke normal Call(owner, ephemeral process, target, args)
-close ephemeral process and return unused funds
+Call(
+  caller          = current action owner
+  process         = current process
+  action          = target action
+  args            = args
+  parent_trace_id = current trace
+)
 ```
+
+No ephemeral process is created. All subcalls spend from the same process.
 
 Rules:
 
-* The caller's process pays only the top-level action price.
-* Each recursive action owner pays for its own direct sub-calls.
-* The ephemeral root's causal link is `FOLLOWS_FROM`, not `CHILD_OF`.
-* Insufficient owner funds fail the sub-call and propagate failure to the top-level call; the original caller is fully refunded.
-* Previously settled descendant costs are not reversed.
-* Ephemeral processes are always closed after completion.
-
-```text
-caller.process.available decreases by at most action.price per call, regardless of sub-call depth or cost
-```
+* The caller for a subcall is the calling action's owner; the owner (process owner) is unchanged.
+* Trace-scoped process authority: the parent trace's `action_owner_id` must equal the caller.
+* Previously settled subcall costs are not reversed if an ancestor call later fails.
+* If the process has insufficient funds, the subcall fails and the parent call propagates the failure; the caller is fully refunded.
 
 ## 6. Action lifecycle
 
@@ -328,7 +321,7 @@ Use wazero. Scripts receive no ambient filesystem, network, environment, or proc
 Initial host surface:
 
 ```text
-juice.call   normal contractor sub-call (§5.5)
+juice.call   subcall using the current process (§5.5)
 juice.emit   emit through the kernel event path with the current trace id
 juice.log    structured log associated with the current trace id
 ```
@@ -356,7 +349,7 @@ Tests use fake embedding and chat implementations.
 | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `@sys/lookup`   | Public, grant-all, and callable only through `Call()`. Rank active actions for a natural-language query using an explicit tested formula combining semantic similarity and action statistics. Ranking storage is replaceable; brute-force cosine similarity over stored embeddings is acceptable. Input: required string `query`, optional integer `limit` defaulting to `10`. Output: `results[]` with `action_id`, `name`, `owner_handle`, `description`, and numeric `score`. Direct lookup exists only for platform diagnostics and is not exposed through user-facing APIs or WASM hosts. |
 | `@sys/llm/chat` | Public, grant-all, and callable through `Call()`. Input: required `messages[]` of `{role, content}` plus optional prepended string `system`. Output: `message` object with `role` and `content`. Return `ErrInvalidState` if chat is unconfigured.                                                                                                                                                                                                                                                                                                                                             |
-| `@sys/make`     | Public, grant-all, price 20 credits, callable through `Call()`. Synthesizes a WASM action from a natural-language description using the platform LLM and TinyGo compiler. Input: required string `description`. Runs a repair loop of up to `maxSteps` (default 5) iterations: derive contract, search catalog for composable actions, generate TinyGo source, compile, validate WASM imports/exports, smoke-test with stub host. On success, registers and activates the action under the caller's account; output includes `status="success"`, `action_id`, `action_name`, `diagnostics`, and `tests`. A name collision returns `status="failure"` — the loop does not retry with a different name. Returns `ErrInvalidState` if the LLM or compiler is unavailable; returns `ErrInvalidInput` for an empty description. Synthesis failures use `status="failure"`, not kernel errors. |
+| `@sys/make`     | Public, grant-all, price 20 credits, callable through `Call()`. Synthesizes a WASM action from a natural-language description using the platform LLM and TinyGo compiler. Input: required string `description`. Runs a repair loop of up to `maxSteps` (default 5) iterations: derive contract, search catalog for composable actions, generate TinyGo source, compile, validate WASM imports/exports, smoke-test with stub host. On success, registers and activates the action under the caller's account; output includes `status="success"`, `action_id`, `action_name`, `diagnostics`, and `tests`. A name collision returns `status="failure"` — the loop does not retry with a different name. Returns `ErrInvalidState` if the LLM or compiler is unavailable; returns `ErrInvalidInput` for an empty description. Synthesis failures use `status="failure"`, not kernel errors. Runs inside the requester's funded process; all worker subcalls have `caller = @sys` and are authorized against the process owner (requester). |
 
 ### 7.4 Statistics
 
@@ -388,7 +381,7 @@ Creating a listener requires authenticated owner authority, an existing source u
 | In-flight | `consumed_at != null ∧ tx_id = null`  |
 | Consumed  | `consumed_at != null ∧ tx_id != null` |
 
-Only the listener owner may consume; the source user may not consume unless also the owner. Consumption atomically locks a pending event, then invokes the normal call path using the supplied `process_id`, stored `args_json`, and stored `causing_trace_id` as `FOLLOWS_FROM`. Success stores the resulting `tx_id`; failure resets the event to pending. Reject inactive listeners and already-consumed events with `ErrInvalidState`. Delivery is at-least-once; the lock prevents concurrent double-processing. Startup resets in-flight events to pending.
+Only the listener owner may consume; the source user may not consume unless also the owner. Consumption atomically locks a pending event, then invokes the normal call path using the supplied `process_id`, stored `args_json`, and stored `causing_trace_id` as `parent_trace_id` for the new trace (a cross-process causal link). Success stores the resulting `tx_id`; failure resets the event to pending. Reject inactive listeners and already-consumed events with `ErrInvalidState`. Delivery is at-least-once; the lock prevents concurrent double-processing. Startup resets in-flight events to pending.
 
 Polling returns pending events with `id`, `args_json`, `causing_trace_id`, and `created_at`. The listener owner or source user may poll.
 
@@ -689,21 +682,22 @@ superuser first-boot prompt and config storage
 suspended user rejected at authentication
 direct buyer can rate transaction
 non-buyer cannot rate transaction
-contractor sub-call taxed on value added only (VAT model)
+subcall VAT: taxed on value added only
 trace cost and latency updated on transaction completion
 native action callable through Call()
 non-superuser rejected from admin CLI commands
 grant-all allows any authenticated user to call action
 revoke-all removes open grant
 bootstrap is idempotent
-sub-calls charged to action owner's ephemeral process, not caller's process
-caller process balance debited only by action.price
-ephemeral process closed after sub-call completes
-caller fully refunded when action owner has insufficient balance for sub-call
-recursive sub-calls: each level charged to correct owner
-event-triggered trace carries caused_by_trace_id of emitting action
-direct call trace has null caused_by_trace_id
-caused_by_trace_id references a trace in a different process
+subcall uses parent process, not an ephemeral process
+subcall caller is calling action owner and owner is original process owner
+subcall authorizes against process owner
+subcall spends from same process
+failed subcall refunds same process
+successful subcall remains settled if parent later fails
+subcall trace has same process_id and parent_trace_id pointing to caller trace
+event-triggered trace has parent_trace_id referencing emitting action trace in another process
+root trace has null parent_trace_id
 pending events absent from poll after successful consume
 emit does not alter emitter balance or process balance
 second ConsumeEvent on same event returns ErrInvalidState
@@ -757,12 +751,11 @@ suspended users cannot authenticate
 native actions are always owned by the superuser
 ratings do not cascade; each rating applies only to the rated transaction
 trace.cost equals sum of descendant transaction gross amounts
-caller.process.available decreases by at most action.price per call
-ephemeral processes are always closed after sub-call completion
-sub-call cost reversal does not occur on top-level failure
-direct calls always have caused_by_trace_id = null
-event-triggered calls always have caused_by_trace_id set
-caused_by_trace_id never equals parent_trace_id (FOLLOWS_FROM ≠ CHILD_OF)
+all subcalls spend from the original funded process
+successful subcall settlements persist if ancestor call later fails
+root traces have parent_trace_id = null
+subcall traces share their parent's process_id
+event-triggered traces have parent_trace_id referencing a trace in another process
 emitter balance is unchanged by EmitEvent regardless of how many listeners match
 consumed events never appear in ListPendingEvents
 pending events are absent after listener deletion
@@ -786,6 +779,7 @@ remote proxy is unimported; the local proxy is deactivated and the remote kernel
 caller executes a paid action multiple times; the action owner lists transactions for their action and the sum of transaction net amounts equals the total credits received by the owner
 caller rates a transaction with a note; the note and rating value appear in the transaction detail and list responses for both buyer and seller; an unrated transaction returns null for the rating field
 caller executes a remote proxy action; buyer and seller both call verify-receipt; all checks pass and valid is true
+caller executes @sys/make; worker subcalls (lookup, llm/chat) record owner=caller and caller=@sys; registered action is owned by the caller
 ```
 
 ## 16. Design rationale

@@ -53,7 +53,6 @@ func TestMigrationsAreFileBackedAndRecorded(t *testing.T) {
 		{"events", "causing_trace_id"},
 		{"actions", "embed_vec"},
 		{"action_stats", "rating_count"},
-		{"traces", "caused_by_trace_id"},
 	} {
 		if !db.columnExists(tc.table, tc.column) {
 			t.Fatalf("expected %s.%s to exist after migrations", tc.table, tc.column)
@@ -371,7 +370,7 @@ func TestLockAndRefundFunds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: nullStr(root.ID), CreatedAt: time.Now().UTC()}
 	if err := db.BeginCall(ctx, p.ID, tr, 200); err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +380,7 @@ func TestLockAndRefundFunds(t *testing.T) {
 	}
 
 	// BeginCall for more than available should fail.
-	tr2 := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	tr2 := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: nullStr(root.ID), CreatedAt: time.Now().UTC()}
 	if err := db.BeginCall(ctx, p.ID, tr2, 400); err == nil {
 		t.Error("expected error locking more than available")
 	}
@@ -415,7 +414,7 @@ func TestCommitCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: nullStr(root.ID), CreatedAt: time.Now().UTC()}
 	if err := db.BeginCall(ctx, p.ID, tr, 100); err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +502,7 @@ func TestEndProcessWithLockedFunds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: nullStr(root.ID), CreatedAt: time.Now().UTC()}
 	if bErr := db.BeginCall(ctx, p.ID, tr, 200); bErr != nil {
 		t.Fatal(bErr)
 	}
@@ -531,7 +530,7 @@ func TestResetInFlightCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: nullStr(root.ID), CreatedAt: time.Now().UTC()}
 	if err := db.BeginCall(ctx, p.ID, tr, 100); err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +618,7 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	beginTrace := func(price int64) *kernel.Trace {
-		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: nullStr(root.ID), CreatedAt: time.Now().UTC()}
 		if err := db.BeginCall(ctx, p.ID, tr, price); err != nil {
 			t.Fatalf("BeginCall: %v", err)
 		}
@@ -698,7 +697,7 @@ func TestListTraces(t *testing.T) {
 	child := &kernel.Trace{
 		ID:            uuid.New().String(),
 		ProcessID:     p.ID,
-		ParentTraceID: root.ID,
+		ParentTraceID: nullStr(root.ID),
 		CreatedAt:     time.Now().UTC(),
 	}
 	if err := db.BeginCall(ctx, p.ID, child, 200); err != nil {
@@ -827,7 +826,7 @@ func TestTransactionCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: nullStr(root.ID), CreatedAt: time.Now().UTC()}
 	if err := db.BeginCall(ctx, p.ID, tr, 100); err != nil {
 		t.Fatal(err)
 	}
@@ -901,10 +900,9 @@ func TestListProcesses(t *testing.T) {
 			CreatedAt:   time.Now().UTC(),
 		}
 		tr := &kernel.Trace{
-			ID:            uuid.New().String(),
-			ProcessID:     p.ID,
-			ParentTraceID: p.ID,
-			CreatedAt:     time.Now().UTC(),
+			ID:        uuid.New().String(),
+			ProcessID: p.ID,
+			CreatedAt: time.Now().UTC(),
 		}
 		_ = i
 		if err := db.StartProcess(ctx, p, tr, ownerID, 0); err != nil {
@@ -1564,7 +1562,7 @@ func TestCommitCallFeeDestructionRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: nullStr(root.ID), CreatedAt: time.Now().UTC()}
 	if err := db.BeginCall(ctx, p.ID, tr, 100); err != nil {
 		t.Fatal(err)
 	}
@@ -1622,7 +1620,7 @@ func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: nullStr(root.ID), CreatedAt: time.Now().UTC()}
 	if err := db.BeginCall(ctx, p.ID, tr, 100); err != nil {
 		t.Fatal(err)
 	}
@@ -1682,7 +1680,7 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: nullStr(root.ID), CreatedAt: time.Now().UTC()}
 	if err := db.BeginCall(ctx, p.ID, tr, 100); err != nil {
 		t.Fatal(err)
 	}
@@ -1865,8 +1863,7 @@ func (s *DB) createTransaction(ctx context.Context, tx *kernel.Transaction) erro
 
 func startProc(t *testing.T, db *DB, ctx context.Context, p *kernel.Process) {
 	t.Helper()
-	trID := uuid.New().String()
-	tr := &kernel.Trace{ID: trID, ProcessID: p.ID, ParentTraceID: trID, CreatedAt: time.Now().UTC()}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
 	if err := db.StartProcess(ctx, p, tr, p.OwnerUserID, 0); err != nil {
 		t.Fatalf("startProc: %v", err)
 	}

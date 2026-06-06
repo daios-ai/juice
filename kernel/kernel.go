@@ -47,8 +47,9 @@ func DefaultConfig() Config {
 func (k *Kernel) AllowsLocalSources() bool { return k.cfg.AllowLocalSources }
 
 // NativeFunc is the signature for a registered native action handler.
-// subjectID, processID, and parentTraceID are the calling context from Call().
-type NativeFunc func(ctx context.Context, args map[string]any, subjectID, processID, parentTraceID string) (map[string]any, error)
+// callerID is the owner of the action currently executing (the action's OwnerUserID).
+// ownerUserID is the process owner (the payer / act-on-behalf principal).
+type NativeFunc func(ctx context.Context, args map[string]any, callerID, ownerUserID, processID, parentTraceID string) (map[string]any, error)
 
 // Kernel is the central service object.
 // It holds all dependencies and exposes operations to both the CLI and HTTP server.
@@ -953,13 +954,12 @@ func (k *Kernel) StartProcess(ctx context.Context, subjectID, ownerID string, fu
 		Status:      ProcessOpen,
 		CreatedAt:   now,
 	}
-	// Root trace: ParentTraceID == ID.
+	// Root trace: ParentTraceID == nil.
 	t := &Trace{
 		ID:        uuid.New().String(),
 		ProcessID: p.ID,
 		CreatedAt: now,
 	}
-	t.ParentTraceID = t.ID
 
 	if err := k.store.StartProcess(ctx, p, t, ownerID, funds); err != nil {
 		logger.Warn("process.start.failed", "owner", ownerID, "error", err, "duration_ms", time.Since(start).Milliseconds())
@@ -1580,9 +1580,9 @@ func (k *Kernel) EmitEvent(ctx context.Context, subjectID, sourceUserID, eventNa
 
 // ConsumeEvent atomically locks an event and executes its listener's target action.
 // At-least-once delivery: if the action call fails, the event is reset to pending.
-// processID is the caller's open process; parentTraceID optionally sets the CHILD_OF
-// parent within that process (defaults to the process root when empty).
-func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID, parentTraceID string) (*CallReply, error) {
+// processID is the caller's open process; the parent trace is set to the emitting action's
+// trace (e.CausingTraceID), providing a cross-process causal link.
+func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID string) (*CallReply, error) {
 	e, err := k.store.ReadEvent(ctx, eventID)
 	if err != nil {
 		return nil, err
@@ -1615,17 +1615,17 @@ func (k *Kernel) ConsumeEvent(ctx context.Context, subjectID, eventID, processID
 	// Decode event args.
 	var args map[string]any
 	_ = json.Unmarshal(e.ArgsJSON, &args)
-	// Call the action using the supplied process. EventID causes CommitCall to settle
-	// the event atomically in the same transaction, eliminating the double-charge window.
+	// Call the action using the supplied process. ParentTraceID is the emitting trace
+	// (may cross process boundaries). EventID causes CommitCall to settle the event
+	// atomically in the same transaction, eliminating the double-charge window.
 	reply, err := k.Call(ctx, CallRequest{
-		SubjectID:       subjectID,
-		ProcessID:       processID,
-		ParentTraceID:   parentTraceID,
-		CausedByTraceID: e.CausingTraceID,
-		TargetUserID:    owner.ID,
-		ActionName:      action.Name,
-		Args:            args,
-		EventID:         eventID,
+		SubjectID:     subjectID,
+		ProcessID:     processID,
+		ParentTraceID: e.CausingTraceID,
+		TargetUserID:  owner.ID,
+		ActionName:    action.Name,
+		Args:          args,
+		EventID:       eventID,
 	})
 	if err != nil {
 		_ = k.store.UnlockEvent(ctx, eventID)

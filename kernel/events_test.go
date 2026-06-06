@@ -163,7 +163,7 @@ func TestConsumeEventSuccess(t *testing.T) {
 		t.Fatal("emit failed")
 	}
 
-	reply, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID, "")
+	reply, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID)
 	if err != nil {
 		t.Fatalf("ConsumeEvent: %v", err)
 	}
@@ -206,11 +206,11 @@ func TestConsumeEventAlreadyConsumed(t *testing.T) {
 	})
 
 	eventIDs, _ := k.EmitEvent(ctx, bob.ID, bob.ID, "x", nil, "")
-	_, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID, "")
+	_, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID)
 	if err != nil {
 		t.Fatalf("first consume: %v", err)
 	}
-	_, err = k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID, "")
+	_, err = k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID)
 	if err == nil {
 		t.Error("expected ErrInvalidState on second consume, got nil")
 	}
@@ -232,7 +232,7 @@ func TestConsumeEventUnauthorized(t *testing.T) {
 	})
 
 	eventIDs, _ := k.EmitEvent(ctx, bob.ID, bob.ID, "x", nil, "")
-	_, err := k.ConsumeEvent(ctx, bob.ID, eventIDs[0], p.ID, "")
+	_, err := k.ConsumeEvent(ctx, bob.ID, eventIDs[0], p.ID)
 	if err == nil {
 		t.Error("expected unauthorized error, got nil")
 	}
@@ -324,7 +324,8 @@ func TestResetInFlightEvents(t *testing.T) {
 	}
 }
 
-// TestEmitEventCausalTraceID verifies the causing_trace_id is stored on the event.
+// TestEmitEventCausalTraceID verifies the causing_trace_id is stored on the event
+// and becomes the parent_trace_id of the resulting trace.
 func TestEmitEventCausalTraceID(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"fired":true}`})
@@ -333,6 +334,12 @@ func TestEmitEventCausalTraceID(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 1000)
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
+
+	// Create a process for alice; its root trace is a real trace to use as causing trace.
+	emitterProc, emitterRoot, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
+	_ = emitterProc
+	causingTraceID := emitterRoot.ID
+
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 
 	_, _ = k.CreateListener(ctx, alice.ID, kernel.CreateListenerRequest{
@@ -340,7 +347,6 @@ func TestEmitEventCausalTraceID(t *testing.T) {
 		TargetActionID: a.ID,
 	})
 
-	causingTraceID := "some-emitting-trace-id"
 	eventIDs, err := k.EmitEvent(ctx, bob.ID, bob.ID, "ping", nil, causingTraceID)
 	if err != nil {
 		t.Fatal(err)
@@ -358,8 +364,8 @@ func TestEmitEventCausalTraceID(t *testing.T) {
 		t.Errorf("event.causing_trace_id: got %q, want %q", e.CausingTraceID, causingTraceID)
 	}
 
-	// After ConsumeEvent, the resulting trace must carry the FOLLOWS_FROM link.
-	reply, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID, "")
+	// After ConsumeEvent, the resulting trace's parent_trace_id equals the causing trace.
+	reply, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID)
 	if err != nil {
 		t.Fatalf("ConsumeEvent: %v", err)
 	}
@@ -371,21 +377,18 @@ func TestEmitEventCausalTraceID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tr.CausedByTraceID == nil || *tr.CausedByTraceID != causingTraceID {
+	if tr.ParentTraceID == nil || *tr.ParentTraceID != causingTraceID {
 		got := "<nil>"
-		if tr.CausedByTraceID != nil {
-			got = *tr.CausedByTraceID
+		if tr.ParentTraceID != nil {
+			got = *tr.ParentTraceID
 		}
-		t.Errorf("trace.CausedByTraceID: got %q, want %q", got, causingTraceID)
-	}
-	if tr.CausedByTraceID != nil && *tr.CausedByTraceID == tr.ParentTraceID {
-		t.Error("CausedByTraceID must not equal ParentTraceID")
+		t.Errorf("trace.ParentTraceID: got %q, want %q", got, causingTraceID)
 	}
 }
 
-// TestEmitDirectCallHasNilCausalID verifies that a direct emit (no causing trace)
-// results in a nil CausedByTraceID on the event and resulting trace.
-func TestEmitDirectCallHasNilCausalID(t *testing.T) {
+// TestEmitDirectCallHasRootParentTrace verifies that a direct emit (no causing trace)
+// results in the process root trace as parent_trace_id on the resulting trace.
+func TestEmitDirectCallHasRootParentTrace(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"fired":true}`})
 	ctx := context.Background()
@@ -393,7 +396,7 @@ func TestEmitDirectCallHasNilCausalID(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 1000)
 	bob := setupUser(t, st, "@bob", 0)
 	a := setupActiveWasmAction(t, st, alice.ID, "/handler")
-	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
+	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 	_, _ = k.CreateListener(ctx, alice.ID, kernel.CreateListenerRequest{
 		SourceUserID: bob.ID, EventName: "ping",
 		TargetActionID: a.ID,
@@ -412,14 +415,19 @@ func TestEmitDirectCallHasNilCausalID(t *testing.T) {
 		t.Errorf("direct emit event.causing_trace_id should be empty, got %q", e.CausingTraceID)
 	}
 
-	reply, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID, "")
+	reply, err := k.ConsumeEvent(ctx, alice.ID, eventIDs[0], p.ID)
 	if err != nil {
 		t.Fatalf("ConsumeEvent: %v", err)
 	}
 	tx, _ := st.ReadTransaction(ctx, reply.TxID)
 	tr, _ := st.ReadTrace(ctx, tx.TraceID)
-	if tr.CausedByTraceID != nil {
-		t.Errorf("direct emit trace.CausedByTraceID should be nil, got %q", *tr.CausedByTraceID)
+	// Without a causing trace, the consumed trace parent is the process root.
+	if tr.ParentTraceID == nil || *tr.ParentTraceID != root.ID {
+		got := "<nil>"
+		if tr.ParentTraceID != nil {
+			got = *tr.ParentTraceID
+		}
+		t.Errorf("direct emit trace.ParentTraceID: got %q, want root %q", got, root.ID)
 	}
 }
 

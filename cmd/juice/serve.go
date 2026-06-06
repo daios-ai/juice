@@ -1023,8 +1023,7 @@ func (s *server) postEmit(w http.ResponseWriter, r *http.Request) {
 func (s *server) postConsumeEvent(w http.ResponseWriter, r *http.Request) {
 	eventID := chi.URLParam(r, "id")
 	var req struct {
-		ProcessID     string `json:"process_id"`
-		ParentTraceID string `json:"parent_trace_id"`
+		ProcessID string `json:"process_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
@@ -1034,7 +1033,7 @@ func (s *server) postConsumeEvent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("process_id is required"))
 		return
 	}
-	reply, err := s.kernel.ConsumeEvent(r.Context(), subjectFrom(r), eventID, req.ProcessID, req.ParentTraceID)
+	reply, err := s.kernel.ConsumeEvent(r.Context(), subjectFrom(r), eventID, req.ProcessID)
 	if err != nil {
 		writeErr(w, err)
 		return

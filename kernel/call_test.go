@@ -438,8 +438,8 @@ func TestCallCreatesChildTrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if childTrace.ParentTraceID != root.ID {
-		t.Errorf("child trace ParentTraceID: got %q, want %q", childTrace.ParentTraceID, root.ID)
+	if childTrace.ParentTraceID == nil || *childTrace.ParentTraceID != root.ID {
+		t.Errorf("child trace ParentTraceID: got %v, want %q", childTrace.ParentTraceID, root.ID)
 	}
 }
 
@@ -557,14 +557,14 @@ func TestCallNestedTraceTree(t *testing.T) {
 	traceB, _ := st.ReadTrace(ctx, replyB.TraceID)
 	traceC, _ := st.ReadTrace(ctx, replyC.TraceID)
 
-	if traceA.ParentTraceID != root.ID {
-		t.Errorf("traceA.ParentTraceID: got %q, want %q", traceA.ParentTraceID, root.ID)
+	if traceA.ParentTraceID == nil || *traceA.ParentTraceID != root.ID {
+		t.Errorf("traceA.ParentTraceID: got %v, want %q", traceA.ParentTraceID, root.ID)
 	}
-	if traceB.ParentTraceID != replyA.TraceID {
-		t.Errorf("traceB.ParentTraceID: got %q, want %q", traceB.ParentTraceID, replyA.TraceID)
+	if traceB.ParentTraceID == nil || *traceB.ParentTraceID != replyA.TraceID {
+		t.Errorf("traceB.ParentTraceID: got %v, want %q", traceB.ParentTraceID, replyA.TraceID)
 	}
-	if traceC.ParentTraceID != replyB.TraceID {
-		t.Errorf("traceC.ParentTraceID: got %q, want %q", traceC.ParentTraceID, replyB.TraceID)
+	if traceC.ParentTraceID == nil || *traceC.ParentTraceID != replyB.TraceID {
+		t.Errorf("traceC.ParentTraceID: got %v, want %q", traceC.ParentTraceID, replyB.TraceID)
 	}
 	if traceA.ProcessID != p.ID || traceB.ProcessID != p.ID || traceC.ProcessID != p.ID {
 		t.Error("all child traces must belong to the same process")
@@ -794,19 +794,19 @@ func (h *hostCallExec) Execute(ctx context.Context, _ []byte, _ []byte, host ker
 	return result, nil
 }
 
-// ---- Contractor execution model ----
+// ---- Process-funded subcall execution model ----
 
-// contractorExec dispatches based on source: "outer" makes a sub-call, anything else returns {"ok":true}.
-type contractorExec struct {
+// subcallExec dispatches based on source: "outer" makes a sub-call, anything else returns {"ok":true}.
+type subcallExec struct {
 	targetUser   string
 	targetAction string
 }
 
-func (c *contractorExec) Compile(_ context.Context, src []byte) ([]byte, string, error) {
+func (c *subcallExec) Compile(_ context.Context, src []byte) ([]byte, string, error) {
 	return src, "fakehash", nil
 }
 
-func (c *contractorExec) Execute(ctx context.Context, src []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
+func (c *subcallExec) Execute(ctx context.Context, src []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
 	if string(src) == "outer" {
 		result, err := host.Call(ctx, c.targetUser+"/"+c.targetAction, []byte(`{}`))
 		if err != nil {
@@ -817,11 +817,10 @@ func (c *contractorExec) Execute(ctx context.Context, src []byte, _ []byte, host
 	return []byte(`{"ok":true}`), nil
 }
 
-func TestContractorSubCallChargedToActionOwner(t *testing.T) {
+func TestProcessFundedSubCallSpendsSameProcess(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	// alice owns the outer action (contractor); bob owns the inner action.
 	alice := setupUser(t, st, "@alice", 1000)
 	bob := setupUser(t, st, "@bob", 500)
 	feeUser := setupUser(t, st, "@fee-recipient", 0)
@@ -839,7 +838,7 @@ func TestContractorSubCallChargedToActionOwner(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, outer)
 
-	exec := &contractorExec{targetUser: bob.ID, targetAction: "inner"}
+	exec := &subcallExec{targetUser: bob.ID, targetAction: "inner"}
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = testIssuerUserID
@@ -848,46 +847,35 @@ func TestContractorSubCallChargedToActionOwner(t *testing.T) {
 	cfg.SigningKey = testSigningKey()
 	k := kernel.New(st, exec, nil, nil, nil, cfg, nil)
 
-	// Grant alice call permission on inner so contractor sub-call passes ACL.
+	// Process owner alice needs call permission on inner.
 	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
-	// Grant carol call permission on outer.
-	carol := setupUser(t, st, "@carol", 50)
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: carol.ID, ActionID: outer.ID, Permission: kernel.PermCall})
+	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: alice.ID, ActionID: outer.ID, Permission: kernel.PermCall})
 
-	p, root, _ := k.StartProcess(ctx, carol.ID, carol.ID, 50)
+	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 150)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: carol.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call failed: %v", err)
 	}
 
-	// Carol's process should be debited only 50 (outer price), not 150.
+	// Process funded outer (50) + inner (100) = 150 total; available = 0.
 	proc, _ := st.ReadProcess(ctx, p.ID)
 	if proc.Available != 0 {
-		t.Errorf("caller process.available: got %d, want 0 (outer price only)", proc.Available)
+		t.Errorf("process.available: got %d, want 0", proc.Available)
 	}
-
-	// VAT model: inner taxable=100, fee=20, net=80. Bob: 500+80=580.
-	bobUser, _ := st.ReadUser(ctx, bob.ID)
-	if bobUser.Available != 580 {
-		t.Errorf("inner action owner available: got %d, want 580", bobUser.Available)
-	}
-
-	// VAT model: outer gross=50, sub_cost=100 → taxable=0, fee=0, net=50. Alice: 1000-100+50=950.
-	aliceUser, _ := st.ReadUser(ctx, alice.ID)
-	if aliceUser.Available != 950 {
-		t.Errorf("outer action owner available: got %d, want 950", aliceUser.Available)
+	if proc.Locked != 0 {
+		t.Errorf("process.locked: got %d, want 0", proc.Locked)
 	}
 }
 
-func TestContractorOwnerInsufficientBalanceFails(t *testing.T) {
+func TestProcessFundedSubCallInsufficientFundsFails(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	alice := setupUser(t, st, "@alice", 0) // Alice has no balance for sub-calls.
+	alice := setupUser(t, st, "@alice", 50) // enough for outer only, not inner
 	bob := setupUser(t, st, "@bob", 0)
 
 	inner := &kernel.Action{
@@ -903,87 +891,57 @@ func TestContractorOwnerInsufficientBalanceFails(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, outer)
 
-	exec := &contractorExec{targetUser: bob.ID, targetAction: "inner"}
+	exec := &subcallExec{targetUser: bob.ID, targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
 	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
 
-	carol := setupUser(t, st, "@carol", 50)
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: carol.ID, ActionID: outer.ID, Permission: kernel.PermCall})
-	p, root, _ := k.StartProcess(ctx, carol.ID, carol.ID, 50)
+	// Fund only enough for outer, not inner.
+	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 50)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: carol.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
 	if err == nil {
-		t.Fatal("expected error when action owner has insufficient balance")
+		t.Fatal("expected error when process has insufficient funds for subcall")
 	}
 
-	// Carol must be fully refunded.
+	// Process must be fully refunded.
 	proc, _ := st.ReadProcess(ctx, p.ID)
 	if proc.Available != 50 {
-		t.Errorf("caller process.available after failure: got %d, want 50 (full refund)", proc.Available)
+		t.Errorf("process.available after failure: got %d, want 50", proc.Available)
 	}
 	if proc.Locked != 0 {
-		t.Errorf("caller process.locked after failure: got %d, want 0", proc.Locked)
+		t.Errorf("process.locked after failure: got %d, want 0", proc.Locked)
 	}
 }
 
-func TestDirectCallHasNilCausedByTraceID(t *testing.T) {
+func TestProcessFundedSubCallTraceHasSameProcess(t *testing.T) {
 	st := newTestStore(t)
-	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
 	alice := setupUser(t, st, "@alice", 0)
-	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "svc",
-		Kind: kernel.KindWasm, Active: true, Price: 0,
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	_ = st.CreateAction(ctx, a)
-	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
-
-	reply, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: alice.ID, ActionName: "svc", Args: map[string]any{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tr, _ := st.ReadTrace(ctx, reply.TraceID)
-	if tr.CausedByTraceID != nil {
-		t.Errorf("direct call trace.CausedByTraceID should be nil, got %q", *tr.CausedByTraceID)
-	}
-}
-
-func TestContractorEphemeralRootHasCausedByTraceID(t *testing.T) {
-	st := newTestStore(t)
-	ctx := context.Background()
-
-	alice := setupUser(t, st, "@alice", 500)
 	bob := setupUser(t, st, "@bob", 0)
 
 	inner := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
 		Kind: kernel.KindWasm, Source: "inner", Active: true, Price: 0,
-		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, inner)
 	outer := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "outer",
 		Kind: kernel.KindWasm, Source: "outer", Active: true, Price: 0,
-		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, outer)
 	_ = st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
 
-	exec := &contractorExec{targetUser: bob.ID, targetAction: "inner"}
+	exec := &subcallExec{targetUser: bob.ID, targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
 
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
-	reply, err := k.Call(ctx, kernel.CallRequest{
+	outerReply, err := k.Call(ctx, kernel.CallRequest{
 		SubjectID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
@@ -991,107 +949,41 @@ func TestContractorEphemeralRootHasCausedByTraceID(t *testing.T) {
 		t.Fatalf("Call failed: %v", err)
 	}
 
-	outerCallTraceID := reply.TraceID
-
-	// Find all traces — locate the ephemeral process root (parent == self, not in alice's original process).
-	allProcs, _ := st.ListAllProcesses(ctx, 10, 0)
-	var epID string
-	for _, proc := range allProcs {
-		if proc.ID != p.ID {
-			epID = proc.ID
-			break
+	traces, _ := st.ListTraces(ctx, p.ID)
+	// Expect root + outer trace + inner subcall trace = 3 traces total, all in same process.
+	if len(traces) < 3 {
+		t.Fatalf("expected at least 3 traces, got %d", len(traces))
+	}
+	for _, tr := range traces {
+		if tr.ProcessID != p.ID {
+			t.Errorf("trace %s has process %s, want %s", tr.ID, tr.ProcessID, p.ID)
 		}
 	}
-	if epID == "" {
-		t.Fatal("ephemeral process not found")
-	}
 
-	traces, _ := st.ListTraces(ctx, epID)
-	var epRoot *kernel.Trace
+	// Subcall trace parent must be the outer call trace.
+	outerTrace, _ := st.ReadTrace(ctx, outerReply.TraceID)
 	for _, tr := range traces {
-		if tr.ParentTraceID == tr.ID { // self-referential root
-			epRoot = tr
-			break
-		}
-	}
-	if epRoot == nil {
-		t.Fatal("ephemeral root trace not found")
-	}
-
-	// Ephemeral root must carry FOLLOWS_FROM to the outer call trace.
-	if epRoot.CausedByTraceID == nil {
-		t.Fatal("ephemeral root trace.CausedByTraceID should not be nil")
-	}
-	if *epRoot.CausedByTraceID != outerCallTraceID {
-		t.Errorf("ephemeral root caused_by: got %q, want %q", *epRoot.CausedByTraceID, outerCallTraceID)
-	}
-
-	// The child call trace within the ephemeral process must NOT have CausedByTraceID.
-	for _, tr := range traces {
-		if tr.ID == epRoot.ID {
+		if tr.ID == outerReply.TraceID || tr.ID == root.ID {
 			continue
 		}
-		if tr.CausedByTraceID != nil {
-			t.Errorf("child call trace.CausedByTraceID should be nil, got %q", *tr.CausedByTraceID)
+		// Must be the inner subcall trace.
+		if tr.ParentTraceID == nil || *tr.ParentTraceID != outerTrace.ID {
+			t.Errorf("subcall trace parent: got %v, want %q", tr.ParentTraceID, outerTrace.ID)
 		}
 	}
 }
 
-func TestDirectCallWithCausedByTraceIDAccepted(t *testing.T) {
-	// After relaxing the restriction: a CallRequest may carry CausedByTraceID as long as it
-	// differs from ParentTraceID. The only remaining invariant is caused_by ≠ parent.
+func TestRootTraceHasNilParent(t *testing.T) {
 	st := newTestStore(t)
-	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	k := newTestKernel(st)
 	ctx := context.Background()
 
 	alice := setupUser(t, st, "@alice", 0)
-	a := setupAction(t, st, alice.ID, "svc", 0)
-	a.Kind = kernel.KindWasm
-	a.Active = true
-	_ = st.UpdateAction(ctx, a)
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
+	_ = p
 
-	// Use a distinct trace ID (e.g. from a second process) as the causal reference.
-	p2, root2, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
-	_ = p2
-
-	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:       alice.ID,
-		ProcessID:       p.ID,
-		ParentTraceID:   root.ID,
-		CausedByTraceID: root2.ID, // valid: differs from ParentTraceID
-		TargetUserID:    alice.ID,
-		ActionName:      "svc",
-		Args:            map[string]any{},
-	})
-	if err != nil {
-		t.Fatalf("expected success when CausedByTraceID differs from ParentTraceID; got %v", err)
-	}
-}
-
-func TestCausedByEqualsParentRejected(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
-	ctx := context.Background()
-
-	alice := setupUser(t, st, "@alice", 0)
-	a := setupAction(t, st, alice.ID, "svc", 0)
-	a.Kind = kernel.KindWasm
-	a.Active = true
-	_ = st.UpdateAction(ctx, a)
-	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
-
-	_, err := k.Call(ctx, kernel.CallRequest{
-		SubjectID:       alice.ID,
-		ProcessID:       p.ID,
-		ParentTraceID:   root.ID,
-		CausedByTraceID: root.ID, // same as parent — FOLLOWS_FROM must differ from CHILD_OF
-		TargetUserID:    alice.ID,
-		ActionName:      "svc",
-		Args:            map[string]any{},
-	})
-	if err == nil {
-		t.Fatal("expected error when CausedByTraceID equals ParentTraceID")
+	if root.ParentTraceID != nil {
+		t.Errorf("root trace ParentTraceID should be nil, got %v", root.ParentTraceID)
 	}
 }
 
@@ -1228,37 +1120,38 @@ func TestCallInvalidParentTraceDoesNotLockFunds(t *testing.T) {
 	}
 }
 
-func TestCallCrossProcessParentTraceDoesNotLockFunds(t *testing.T) {
+func TestCallCrossProcessParentTraceAllowed(t *testing.T) {
+	// Under process-funded model, cross-process parent traces are allowed
+	// (e.g. event-triggered calls reference the emitting trace from another process).
 	st := newTestStore(t)
-	k := newTestKernel(st)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	alice := setupUser(t, st, "@alice", 1000)
-	a := setupAction(t, st, alice.ID, "svc", 100)
-	st.GrantACL(ctx, &kernel.ACLEntry{SubjectUserID: alice.ID, ActionID: a.ID, Permission: kernel.PermCall})
+	alice := setupUser(t, st, "@alice", 0)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "svc",
+		Kind: kernel.KindWasm, Active: true, Price: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
 
-	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
-	other, otherRoot, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
-	_ = other
+	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
+	_, otherRoot, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	// Cross-process parent trace should succeed under the new model.
+	reply, err := k.Call(ctx, kernel.CallRequest{
 		SubjectID:     alice.ID,
 		ProcessID:     p.ID,
-		ParentTraceID: otherRoot.ID, // belongs to a different process
+		ParentTraceID: otherRoot.ID, // cross-process parent — now allowed
 		TargetUserID:  alice.ID,
-		ActionName:    "svc",
+		ActionName:    a.Name,
 		Args:          map[string]any{},
 	})
-	if !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Fatalf("expected ErrInvalidInput for cross-process trace, got %v", err)
+	if err != nil {
+		t.Fatalf("cross-process parent trace should succeed, got %v", err)
 	}
-
-	proc, _ := st.ReadProcess(ctx, p.ID)
-	if proc.Available != 500 {
-		t.Errorf("process.available: got %d, want 500", proc.Available)
-	}
-	if proc.Locked != 0 {
-		t.Errorf("process.locked: got %d, want 0", proc.Locked)
+	if reply == nil {
+		t.Fatal("expected reply")
 	}
 }
 

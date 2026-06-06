@@ -31,8 +31,8 @@ func TestProcessStartFundEnd(t *testing.T) {
 	if p.Available != 500 {
 		t.Errorf("process.available: got %d, want 500", p.Available)
 	}
-	if root.ParentTraceID != root.ID {
-		t.Error("root trace ParentTraceID should equal ID")
+	if root.ParentTraceID != nil {
+		t.Error("root trace ParentTraceID should be nil")
 	}
 
 	if err := env.k.FundProcess(ctx, owner.ID, p.ID, 200); err != nil {
