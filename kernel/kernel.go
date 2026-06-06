@@ -47,9 +47,8 @@ func DefaultConfig() Config {
 func (k *Kernel) AllowsLocalSources() bool { return k.cfg.AllowLocalSources }
 
 // NativeFunc is the signature for a registered native action handler.
-// callerID is the owner of the action currently executing (the action's OwnerUserID).
 // ownerUserID is the process owner (the payer / act-on-behalf principal).
-type NativeFunc func(ctx context.Context, args map[string]any, callerID, ownerUserID, processID, parentTraceID string) (map[string]any, error)
+type NativeFunc func(ctx context.Context, args map[string]any, ownerUserID, processID, parentTraceID string) (map[string]any, error)
 
 // Kernel is the central service object.
 // It holds all dependencies and exposes operations to both the CLI and HTTP server.

@@ -817,20 +817,13 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 
 	gross := net + fee
 	if gross > 0 {
-		// Debit process.locked and owner.locked.
-		var ownerID string
-		row := tx.QueryRowContext(ctx, `SELECT owner_user_id FROM processes WHERE id=?`, processID)
-		_ = row.Scan(&ownerID)
-
 		if _, err = tx.ExecContext(ctx,
 			`UPDATE processes SET locked=locked-? WHERE id=?`, gross, processID); err != nil {
 			return dbErr(err, "commit call: debit process locked")
 		}
-		if ownerID != "" {
-			if _, err = tx.ExecContext(ctx,
-				`UPDATE users SET locked=locked-? WHERE id=?`, gross, ownerID); err != nil {
-				return dbErr(err, "commit call: debit owner locked")
-			}
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE users SET locked=locked-? WHERE id=?`, gross, ktx.OwnerUserID); err != nil {
+			return dbErr(err, "commit call: debit owner locked")
 		}
 	}
 

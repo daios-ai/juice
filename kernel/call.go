@@ -41,6 +41,7 @@ type CallReply struct {
 	TxID      string         `json:"tx_id"`
 	TraceID   string         `json:"trace_id"`
 	ReceiptID string         `json:"receipt_id"`
+	Gross     int64          `json:"gross"`
 }
 
 // Call executes the central kernel transition.
@@ -260,6 +261,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		TxID:      txID,
 		TraceID:   trace.ID,
 		ReceiptID: receipt.ID,
+		Gross:     action.Price,
 	}, nil
 }
 
@@ -298,7 +300,7 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 		res, cost, err := k.executeWasm(ctx, action, args, trace, callerID)
 		return res, cost, "", err
 	case KindNative:
-		res, err := k.executeNative(ctx, action, args, callerID, ownerUserID, trace.ProcessID, trace.ID)
+		res, err := k.executeNative(ctx, action, args, ownerUserID, trace.ProcessID, trace.ID)
 		return res, 0, "", err
 	case KindRemoteProxy:
 		if fe, ok := k.http.(FederationExecutor); ok {
@@ -313,12 +315,12 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 }
 
 // executeNative dispatches to a registered native action handler.
-func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any, callerID, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
+func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
 	fn, ok := k.nativeHandlers[action.Name]
 	if !ok {
 		return nil, ErrInvalidState.Wrapf("unknown native action %q", action.Name)
 	}
-	return fn(ctx, args, callerID, ownerUserID, processID, parentTraceID)
+	return fn(ctx, args, ownerUserID, processID, parentTraceID)
 }
 
 // executeWasm runs a compiled WASM artifact.
@@ -375,44 +377,26 @@ type kernelHostFunctions struct {
 }
 
 func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJSON []byte) ([]byte, error) {
-	// Parse "handle/action-name" form.
 	parts := strings.SplitN(actionName, "/", 2)
 	if len(parts) != 2 {
 		return nil, ErrInvalidInput.Wrap("actionName must be handle/name")
 	}
-	subActionName := parts[1]
-
 	var args map[string]any
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
 		return nil, ErrInvalidInput.Wrap("args must be a JSON object")
 	}
-
-	// Resolve target user to get the action price upfront for VAT sub-cost tracking.
-	target, err := h.kernel.store.ReadUserByHandle(ctx, parts[0])
-	if err != nil {
-		target, err = h.kernel.store.ReadUser(ctx, parts[0])
-		if err != nil {
-			return nil, ErrNotFound.Wrap("target user not found")
-		}
-	}
-	action, err := h.kernel.store.ReadActionByOwnerName(ctx, target.ID, subActionName)
-	if err != nil || action == nil {
-		return nil, ErrNotFound.Wrapf("action %s not found", actionName)
-	}
-
-	// Process-funded model: subcall uses the same process; caller is the calling action's owner.
 	reply, err := h.kernel.Call(ctx, CallRequest{
 		SubjectID:     h.ownerUserID,
 		ProcessID:     h.processID,
 		ParentTraceID: h.traceID,
-		TargetUserID:  target.ID,
-		ActionName:    subActionName,
+		TargetUserID:  parts[0],
+		ActionName:    parts[1],
 		Args:          args,
 	})
 	if err != nil {
 		return nil, err
 	}
-	h.subCost += action.Price // count gross for successful sub-calls (VAT model)
+	h.subCost += reply.Gross
 	return json.Marshal(reply.Result)
 }
 

@@ -10,7 +10,7 @@ import (
 
 // RegisterChatHandler registers the @sys/llm/chat native action handler on k.
 func RegisterChatHandler(k *kernel.Kernel, chatter kernel.Chatter) {
-	k.RegisterNativeHandler("llm/chat", func(ctx context.Context, args map[string]any, _, _, _, _ string) (map[string]any, error) {
+	k.RegisterNativeHandler("llm/chat", func(ctx context.Context, args map[string]any, _, _, _ string) (map[string]any, error) {
 		return executeChat(ctx, args, chatter)
 	})
 }
