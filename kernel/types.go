@@ -75,7 +75,6 @@ type Action struct {
 	RemoteActionID string         `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
-	DeletedAt      *time.Time     `json:"deleted_at,omitempty"` // nil unless soft-deleted
 }
 
 // ACLEntry grants a permission to a subject over an action.
@@ -121,6 +120,7 @@ type Transaction struct {
 	SubjectUserID     string          `json:"subject_user_id"`
 	TargetUserID      string          `json:"target_user_id"`
 	ActionID          string          `json:"action_id"`
+	ActionName        string          `json:"action_name"`
 	ArgsJSON          json.RawMessage `json:"args"`
 	ReplyJSON         json.RawMessage `json:"result"`
 	Status            TxStatus        `json:"status"`

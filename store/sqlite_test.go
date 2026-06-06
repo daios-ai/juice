@@ -171,16 +171,16 @@ func TestActionCRUD(t *testing.T) {
 	}
 }
 
-func TestDeleteActionSoftDelete(t *testing.T) {
+func TestDeleteActionHardDelete(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@sd-owner", 0)
-	caller := newUser("@sd-caller", 0)
+	owner := newUser("@hd-owner", 0)
+	caller := newUser("@hd-caller", 0)
 	_ = db.CreateUser(ctx, owner)
 	_ = db.CreateUser(ctx, caller)
 
-	a := newAction(owner.ID, "/sd-svc", 0, true)
+	a := newAction(owner.ID, "/hd-svc", 0, true)
 	if err := db.CreateAction(ctx, a); err != nil {
 		t.Fatal(err)
 	}
@@ -197,33 +197,30 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 		t.Fatalf("DeleteAction: %v", err)
 	}
 
-	// Row still exists in the database (soft delete preserves it).
+	// Row is physically gone.
 	var count int
 	if err := db.db.QueryRow("SELECT COUNT(*) FROM actions WHERE id=?", a.ID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Errorf("action row count after soft delete: got %d, want 1", count)
+	if count != 0 {
+		t.Errorf("action row count after hard delete: got %d, want 0", count)
 	}
 
-	// ReadAction returns not found (filtered by deleted_at IS NULL).
-	_, err := db.ReadAction(ctx, a.ID)
-	if err == nil {
-		t.Error("expected error reading soft-deleted action, got nil")
+	// ReadAction returns not found.
+	if _, err := db.ReadAction(ctx, a.ID); err == nil {
+		t.Error("expected error reading deleted action, got nil")
 	}
 
-	// ListAllActions excludes the deleted action.
-	all, _ := db.ListAllActions(ctx, 100, 0)
-	for _, listed := range all {
-		if listed.ID == a.ID {
-			t.Error("soft-deleted action should not appear in ListAllActions")
-		}
+	// The same name can now be reused by the same owner.
+	a2 := newAction(owner.ID, "/hd-svc", 0, true)
+	if err := db.CreateAction(ctx, a2); err != nil {
+		t.Errorf("name reuse after hard delete should succeed: %v", err)
 	}
 
-	// ACL entries are purged.
+	// ACL entries are cascaded away.
 	ok, _ := db.CheckACL(ctx, caller.ID, a.ID, kernel.PermCall)
 	if ok {
-		t.Error("ACL entry should be removed after soft delete")
+		t.Error("ACL entry should be removed after hard delete")
 	}
 }
 

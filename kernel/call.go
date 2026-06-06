@@ -180,6 +180,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		SubjectUserID: req.SubjectID,
 		TargetUserID:  target.ID,
 		ActionID:      action.ID,
+		ActionName:    action.Name,
 		Status:        TxFailure,
 		Gross:         0, // will be set on success
 		Net:           0,

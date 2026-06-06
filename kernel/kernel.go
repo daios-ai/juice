@@ -511,17 +511,9 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 }
 
 // ReadAction returns the action with the given ID (no ACL check).
-// Returns ErrNotFound for soft-deleted actions.
 // Used internally; external callers should use ReadActionForSubject.
 func (k *Kernel) ReadAction(ctx context.Context, id string) (*Action, error) {
-	a, err := k.store.ReadAction(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if a.DeletedAt != nil {
-		return nil, ErrNotFound.Wrap("action not found")
-	}
-	return a, nil
+	return k.store.ReadAction(ctx, id)
 }
 
 // ReadActionForSubject returns an action only if the subject has read access.

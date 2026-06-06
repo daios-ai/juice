@@ -372,16 +372,16 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 
 // actionCols is the canonical column list for action SELECT statements.
 // Must stay in sync with scanAction/scanActionRow/finishAction.
-const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at`
+const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at`
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.id=? AND a.deleted_at IS NULL`, id))
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.id=?`, id))
 }
 
 func (s *DB) ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.name=? AND a.deleted_at IS NULL`, ownerID, name))
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.name=?`, ownerID, name))
 }
 
 func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
@@ -398,27 +398,14 @@ func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
 }
 
 func (s *DB) DeleteAction(ctx context.Context, id string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin delete action")
-	}
-	defer tx.Rollback()
-	now := timeToStr(time.Now().UTC())
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE actions SET active=0, deleted_at=? WHERE id=?`, now, id); err != nil {
-		return dbErr(err, "delete action: soft delete")
-	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM acl_entries WHERE action_id=?`, id); err != nil {
-		return dbErr(err, "delete action: purge acl")
-	}
-	return dbErr(tx.Commit(), "delete action: commit")
+	_, err := s.db.ExecContext(ctx, `DELETE FROM actions WHERE id=?`, id)
+	return dbErr(err, "delete action")
 }
 
 func (s *DB) ListPublicActions(ctx context.Context, limit, offset int) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
-		 WHERE a.deleted_at IS NULL AND a.active=1 AND a.public=1
+		 WHERE a.active=1 AND a.public=1
 		 ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list public actions")
@@ -439,7 +426,7 @@ func (s *DB) ListPublicActions(ctx context.Context, limit, offset int) ([]*kerne
 func (s *DB) ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
-		 WHERE a.deleted_at IS NULL AND a.owner_user_id=?
+		 WHERE a.owner_user_id=?
 		 ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, ownerID, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list actions by owner")
@@ -461,7 +448,7 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.deleted_at IS NULL ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list all actions")
 	}
@@ -480,7 +467,7 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 func (s *DB) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL string) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
-		 WHERE a.owner_user_id=? AND a.deleted_at IS NULL
+		 WHERE a.owner_user_id=?
 		   AND json_valid(a.source)=1
 		   AND json_extract(a.source,'$.type')='openapi'
 		   AND json_extract(a.source,'$.spec_url')=?`,
@@ -504,49 +491,43 @@ func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
 	var a kernel.Action
 	var kind, inJSON, outJSON, createdAt, updatedAt string
 	var active, public int
-	var deletedAt *string
 	err := row.Scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &a.Name, &kind, &active, &public, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.RemoteActionID,
-		&createdAt, &updatedAt, &deletedAt)
+		&createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("action not found")
 	}
 	if err != nil {
 		return nil, dbErr(err, "read action")
 	}
-	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt, deletedAt)
+	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt)
 }
 
 func (s *DB) scanActionRow(rows *sql.Rows) (*kernel.Action, error) {
 	var a kernel.Action
 	var kind, inJSON, outJSON, createdAt, updatedAt string
 	var active, public int
-	var deletedAt *string
 	err := rows.Scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &a.Name, &kind, &active, &public, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.RemoteActionID,
-		&createdAt, &updatedAt, &deletedAt)
+		&createdAt, &updatedAt)
 	if err != nil {
 		return nil, dbErr(err, "scan action")
 	}
-	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt, deletedAt)
+	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt)
 }
 
 func (s *DB) ReadActionByOwnerRemoteID(ctx context.Context, ownerID, remoteActionID string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.remote_action_id=? AND a.remote_action_id!='' AND a.deleted_at IS NULL`,
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.remote_action_id=? AND a.remote_action_id!=''`,
 		ownerID, remoteActionID))
 }
 
-func finishAction(a *kernel.Action, kind string, active, public int, inJSON, outJSON, createdAt, updatedAt string, deletedAt *string) (*kernel.Action, error) {
+func finishAction(a *kernel.Action, kind string, active, public int, inJSON, outJSON, createdAt, updatedAt string) (*kernel.Action, error) {
 	a.Kind = kernel.ActionKind(kind)
 	a.Active = active != 0
 	a.Public = public != 0
 	a.CreatedAt = strToTime(createdAt)
 	a.UpdatedAt = strToTime(updatedAt)
-	if deletedAt != nil {
-		t := strToTime(*deletedAt)
-		a.DeletedAt = &t
-	}
 	if err := json.Unmarshal([]byte(inJSON), &a.InputSchema); err != nil {
 		a.InputSchema = map[string]any{}
 	}
@@ -743,10 +724,10 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,
-		  action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		  action_id,action_name,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
-		ktx.OwnerUserID, ktx.SubjectUserID, ktx.TargetUserID, ktx.ActionID,
+		ktx.OwnerUserID, ktx.SubjectUserID, ktx.TargetUserID, ktx.ActionID, ktx.ActionName,
 		rawJSONStr(ktx.ArgsJSON), rawJSONStr(ktx.ReplyJSON), string(ktx.Status),
 		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason, nullStr(ktx.RemoteReceiptHash), ktx.RemoteReceiptJSON,
 		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
@@ -1093,7 +1074,7 @@ func (s *DB) ReadRootTrace(ctx context.Context, processID string) (*kernel.Trace
 // ---- Transactions ----
 
 const txColumns = `id,process_id,trace_id,parent_trace_id,owner_user_id,subject_user_id,target_user_id,` +
-	`action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at`
+	`action_id,action_name,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at`
 
 // scanTx scans one transaction row using the provided scan function.
 // scan must be called with exactly the destinations expected by txColumns.
@@ -1102,7 +1083,7 @@ func scanTx(scan func(...any) error) (kernel.Transaction, error) {
 	var status, startedAt, endedAt, argsJSON, replyJSON string
 	var remoteReceiptHash *string
 	if err := scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
-		&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID,
+		&tx.OwnerUserID, &tx.SubjectUserID, &tx.TargetUserID, &tx.ActionID, &tx.ActionName,
 		&argsJSON, &replyJSON, &status,
 		&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON,
 		&startedAt, &endedAt); err != nil {
@@ -1689,7 +1670,7 @@ func (s *DB) UpsertEmbedding(ctx context.Context, actionID string, vec []float32
 func (s *DB) ListEmbeddings(ctx context.Context) (map[string][]float32, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, embed_vec FROM actions
-		 WHERE active=1 AND deleted_at IS NULL AND embed_vec IS NOT NULL`)
+		 WHERE active=1 AND embed_vec IS NOT NULL`)
 	if err != nil {
 		return nil, dbErr(err, "list embeddings")
 	}
@@ -1713,7 +1694,7 @@ func (s *DB) ListEmbeddings(ctx context.Context) (map[string][]float32, error) {
 
 func (s *DB) UpdateRemoteProxySourceURLs(ctx context.Context, ownerUserID, oldBase, newBase string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE actions SET source=REPLACE(source,?,?) WHERE owner_user_id=? AND kind='remote_proxy' AND deleted_at IS NULL`,
+		`UPDATE actions SET source=REPLACE(source,?,?) WHERE owner_user_id=? AND kind='remote_proxy'`,
 		oldBase, newBase, ownerUserID,
 	)
 	return dbErr(err, "update remote proxy source urls")

@@ -384,9 +384,6 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 	if err != nil {
 		return nil, err
 	}
-	if a.DeletedAt != nil {
-		return nil, ErrNotFound.Wrap("action not found")
-	}
 	if !a.Active || !a.Public {
 		return nil, ErrUnauthorized.Wrap("manifest only available for public active actions")
 	}
