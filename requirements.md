@@ -475,6 +475,7 @@ verify both signing keys exist; abort if either is missing
 register and enable @sys/lookup, @sys/llm/chat, and @sys/make if absent
 apply grant-all to all three native actions
 reset in-flight events to pending (`consumed_at = NULL` where `consumed_at IS NOT NULL AND tx_id IS NULL`)
+reset in-flight calls: restore locked process funds to available (`available += locked, locked = 0` for all open processes where `locked > 0`)
 ```
 
 Bootstrap is idempotent. Native actions are owned by `@sys`, registered programmatically, and execute through `Call()`. Supervision operations must not be registered as native actions.
@@ -710,6 +711,7 @@ ConsumeEvent against inactive listener returns ErrInvalidState
 DeleteListener purges all pending events for that listener
 ConsumeEvent fails and resets event to pending when process has insufficient funds
 bootstrap resets in-flight events (consumed_at set, tx_id null) to pending
+bootstrap resets in-flight calls: restores locked process funds to available for all open processes with locked > 0
 second rating on same transaction rejected with ErrInvalidInput
 rating record created in ratings table, transaction row unchanged
 ratings do not cascade
