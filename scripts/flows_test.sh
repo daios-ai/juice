@@ -1645,6 +1645,67 @@ PYEOF
     stop_backend "$backend_pid"
 }
 
+flow_locked_funds_recovery() {
+    echo "=== FLOW locked_funds_recovery ==="
+    local dir db home_sys port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys"; mkdir -p "$home_sys/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "locked_funds.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys" auth login --handle @sys --password syspass >/dev/null 2>&1
+    j "$db" "$home_sys" admin user deposit --handle @sys --amount 200 >/dev/null 2>&1
+
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_sys" process start --funds 100)
+    proc_id=$(strfield "$proc_out" "process_id")
+    [ -n "$proc_id" ] || { fail "locked_funds.start_process" "no process_id"; return; }
+    ok "locked_funds.start_process"
+
+    # Inject crash state: simulate a call that locked 50 credits but never settled.
+    # Direct DB write is intentional — this simulates a kernel crash mid-call,
+    # a state that cannot be produced via the public API surface.
+    python3 - "$db" "$proc_id" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("UPDATE processes SET locked=50, available=50 WHERE id=?", [sys.argv[2]])
+conn.commit()
+conn.close()
+PYEOF
+
+    # Verify the injected state before restart
+    local pre_show
+    pre_show=$(jj "$db" "$home_sys" process show --id "$proc_id")
+    [ "$(numfield "$pre_show" "locked")" -eq 50 ] \
+        && ok "locked_funds.injected" \
+        || fail "locked_funds.injected" "injection failed: $pre_show"
+
+    # Restart: bootstrap resets in-flight calls
+    alloc_port; local port2=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port2" >/dev/null 2>&1
+
+    j "$db" "$home_sys" auth login --handle @sys --password syspass >/dev/null 2>&1
+
+    # After restart locked=0, available=100 restored
+    local post_show
+    post_show=$(jj "$db" "$home_sys" process show --id "$proc_id")
+    [ "$(numfield "$post_show" "locked")" -eq 0 ] \
+        && ok "locked_funds.locked_cleared" \
+        || fail "locked_funds.locked_cleared" "expected locked=0: $post_show"
+    [ "$(numfield "$post_show" "available")" -eq 100 ] \
+        && ok "locked_funds.available_restored" \
+        || fail "locked_funds.available_restored" "expected available=100: $post_show"
+
+    # Process can now be ended cleanly
+    local end_out
+    end_out=$(j "$db" "$home_sys" process end --id "$proc_id" 2>&1)
+    echo "$end_out" | grep -qi "ended" \
+        && ok "locked_funds.process_endable" \
+        || fail "locked_funds.process_endable" "process end failed: $end_out"
+}
+
 flow_rating() {
     echo "=== FLOW rating ==="
     local dir db home_sys home_alice home_bob port backend_port
@@ -3027,6 +3088,7 @@ main() {
     flow_event_queue_success
     flow_event_queue_failure
     flow_event_deletion_restart
+    flow_locked_funds_recovery
     flow_rating
     flow_pkce_auth
     flow_refresh_rotation

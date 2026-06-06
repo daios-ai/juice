@@ -517,6 +517,45 @@ func TestEndProcessWithLockedFunds(t *testing.T) {
 	}
 }
 
+func TestResetInFlightCalls(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@alice-reset", 500)
+	_ = db.CreateUser(ctx, user)
+	p := newProcess(user.ID)
+	startProc(t, db, ctx, p)
+	_ = db.FundProcess(ctx, user.ID, p.ID, 200)
+
+	root, err := db.ReadRootTrace(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: root.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginCall(ctx, p.ID, tr, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	proc, _ := db.ReadProcess(ctx, p.ID)
+	if proc.Locked != 100 || proc.Available != 100 {
+		t.Fatalf("after BeginCall: want locked=100 available=100, got locked=%d available=%d", proc.Locked, proc.Available)
+	}
+
+	if err := db.ResetInFlightCalls(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	proc, _ = db.ReadProcess(ctx, p.ID)
+	if proc.Locked != 0 || proc.Available != 200 {
+		t.Fatalf("after reset: want locked=0 available=200, got locked=%d available=%d", proc.Locked, proc.Available)
+	}
+
+	// Process can now be ended cleanly.
+	if err := db.EndProcess(ctx, p.ID); err != nil {
+		t.Fatalf("EndProcess after reset: %v", err)
+	}
+}
+
 // ---- Stats ----
 
 func TestStats(t *testing.T) {

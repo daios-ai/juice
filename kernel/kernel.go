@@ -440,6 +440,11 @@ func (k *Kernel) ResetInFlightEvents(ctx context.Context) error {
 	return k.store.ResetInFlightEvents(ctx)
 }
 
+// ResetInFlightCalls restores locked process funds to available. Called at startup.
+func (k *Kernel) ResetInFlightCalls(ctx context.Context) error {
+	return k.store.ResetInFlightCalls(ctx)
+}
+
 // RegisterNativeAction creates a native action for bootstrap use.
 // Unlike CreateAction, it does not reject KindNative. Call only from bootstrap.
 func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionRequest) (*Action, error) {

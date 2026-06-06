@@ -1417,6 +1417,12 @@ func (s *DB) ResetInFlightEvents(ctx context.Context) error {
 	return dbErr(err, "reset in-flight events")
 }
 
+func (s *DB) ResetInFlightCalls(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE processes SET available=available+locked, locked=0 WHERE status='open' AND locked>0`)
+	return dbErr(err, "reset in-flight calls")
+}
+
 // nullStr converts an empty string to nil for nullable TEXT columns.
 func nullStr(s string) *string {
 	if s == "" {

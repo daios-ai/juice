@@ -28,6 +28,10 @@ func bootstrap(k *kernel.Kernel) error {
 	if err := k.ResetInFlightEvents(ctx); err != nil {
 		return fmt.Errorf("reset in-flight events: %w", err)
 	}
+	// Restore any process funds locked by calls that crashed before settlement.
+	if err := k.ResetInFlightCalls(ctx); err != nil {
+		return fmt.Errorf("reset in-flight calls: %w", err)
+	}
 
 	handle, err := k.GetConfig(ctx, configKeySuperuser)
 	if err != nil || handle == "" {

@@ -236,6 +236,9 @@ type Store interface {
 	// ResetInFlightEvents resets all in-flight events (consumed_at set, tx_id null)
 	// back to pending. Called at startup to recover from crashed consume calls.
 	ResetInFlightEvents(ctx context.Context) error
+	// ResetInFlightCalls restores locked process funds to available.
+	// Called at startup to recover from calls that crashed before settlement.
+	ResetInFlightCalls(ctx context.Context) error
 
 	// ---- Traces (by process) ----
 
