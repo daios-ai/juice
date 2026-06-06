@@ -102,7 +102,7 @@ type Store interface {
 	ReadUser(ctx context.Context, id string) (*User, error)
 	ReadUserByHandle(ctx context.Context, handle string) (*User, error)
 	ReadUserByPublicKey(ctx context.Context, publicKey string) (*User, error)
-	UpdateUser(ctx context.Context, u *User) error
+	UpdateRemoteBaseURL(ctx context.Context, userID, baseURL string) error
 	ListUsers(ctx context.Context, limit, offset int) ([]*User, error)
 	SuspendUser(ctx context.Context, id string) error
 	UnsuspendUser(ctx context.Context, id string) error

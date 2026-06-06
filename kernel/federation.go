@@ -142,11 +142,10 @@ func (k *Kernel) RegisterRemoteKernel(ctx context.Context, subjectID, handle, pu
 	existing, err := k.store.ReadUserByPublicKey(ctx, publicKey)
 	if err == nil && existing != nil {
 		oldBase := existing.RemoteBaseURL
-		existing.RemoteBaseURL = baseURL
-		existing.UpdatedAt = time.Now().UTC()
-		if err := k.store.UpdateUser(ctx, existing); err != nil {
+		if err := k.store.UpdateRemoteBaseURL(ctx, existing.ID, baseURL); err != nil {
 			return nil, err
 		}
+		existing.RemoteBaseURL = baseURL
 		if oldBase != baseURL {
 			if err := k.store.UpdateRemoteProxySourceURLs(ctx, existing.ID, oldBase, baseURL); err != nil {
 				return nil, err

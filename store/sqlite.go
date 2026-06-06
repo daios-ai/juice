@@ -283,13 +283,12 @@ func (s *DB) ReadUserByPublicKey(ctx context.Context, publicKey string) (*kernel
 		 FROM users WHERE public_key=?`, publicKey))
 }
 
-func (s *DB) UpdateUser(ctx context.Context, u *kernel.User) error {
+func (s *DB) UpdateRemoteBaseURL(ctx context.Context, userID, baseURL string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE users SET handle=?,email=?,public_key=?,remote_base_url=?,updated_at=? WHERE id=?`,
-		u.Handle, u.Email, nullStr(u.PublicKey), nullStr(u.RemoteBaseURL),
-		timeToStr(u.UpdatedAt), u.ID,
+		`UPDATE users SET remote_base_url=?, updated_at=? WHERE id=?`,
+		nullStr(baseURL), timeToStr(time.Now().UTC()), userID,
 	)
-	return dbErr(err, "update user")
+	return dbErr(err, "update remote base url")
 }
 
 func (s *DB) scanUser(row *sql.Row) (*kernel.User, error) {
