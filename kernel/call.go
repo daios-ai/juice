@@ -99,20 +99,12 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrNotFound.Wrapf("action %s/%s not found", req.TargetUserID, req.ActionName)
 	}
 
-	// 5. Action must be active; exception: the process owner may call their own inactive actions.
-	if !action.Active && action.OwnerUserID != process.OwnerUserID {
-		return nil, ErrInvalidState.Wrap("action is inactive")
-	}
-
-	// 6. ACL check — CanCall(process.owner, action).
-	if action.OwnerUserID != process.OwnerUserID {
-		canCall, err := k.canCall(ctx, process.OwnerUserID, action)
-		if err != nil {
-			return nil, err
+	// 5. CanCall(process.owner, action) — active(a) ∧ (public(a) ∨ owner = action.owner)
+	if !canCall(process.OwnerUserID, action) {
+		if !action.Active {
+			return nil, ErrInvalidState.Wrap("action is inactive")
 		}
-		if !canCall {
-			return nil, ErrUnauthorized.Wrap("call permission denied")
-		}
+		return nil, ErrUnauthorized.Wrap("call permission denied")
 	}
 
 	// 7. Validate input schema before locking funds.
@@ -265,23 +257,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}, nil
 }
 
-// canCall checks public flag, ACL(owner, action, call), or ACL(owner, action, admin).
-func (k *Kernel) canCall(ctx context.Context, ownerID string, action *Action) (bool, error) {
-	if action.Public {
-		return true, nil
-	}
-	ok, err := k.store.CheckACL(ctx, ownerID, action.ID, PermCall)
-	if err != nil {
-		return false, ErrInternal.Wrapf("acl check: %v", err)
-	}
-	if ok {
-		return true, nil
-	}
-	ok, err = k.store.CheckACL(ctx, ownerID, action.ID, PermAdmin)
-	if err != nil {
-		return false, ErrInternal.Wrapf("acl check: %v", err)
-	}
-	return ok, nil
+// canCall returns true iff the action is callable by a process owned by ownerID.
+// CanCall(ownerID, a) := active(a) ∧ (public(a) ∨ ownerID = a.OwnerUserID)
+func canCall(ownerID string, action *Action) bool {
+	return action.Active && (action.Public || ownerID == action.OwnerUserID)
 }
 
 // execute dispatches to the correct execution backend.

@@ -20,9 +20,6 @@ func init() {
 		actionListCmd(),
 		actionShowCmd(),
 		actionDeleteCmd(),
-		actionACLCmd(),
-		actionGrantAllCmd(),
-		actionRevokeAllCmd(),
 		actionImportCmd(),
 		actionUnimportCmd(),
 		actionStatsCmd(),
@@ -98,6 +95,7 @@ func actionCreateCmd() *cobra.Command {
 func actionUpdateCmd() *cobra.Command {
 	var actionID, description, source string
 	var price int64
+	var public bool
 	var inputSchemaStr, outputSchemaStr string
 	cmd := &cobra.Command{
 		Use:   "update",
@@ -113,6 +111,9 @@ func actionUpdateCmd() *cobra.Command {
 				}
 				if c.Flags().Changed("price") {
 					req.Price = &price
+				}
+				if c.Flags().Changed("public") {
+					req.Public = &public
 				}
 				if inputSchemaStr != "" {
 					m := map[string]any{}
@@ -135,7 +136,7 @@ func actionUpdateCmd() *cobra.Command {
 				if flagOutput == "json" {
 					return printJSON(a)
 				}
-				fmt.Printf("Action %s updated (active=%v).\n", a.Name, a.Active)
+				fmt.Printf("Action %s updated (active=%v, public=%v).\n", a.Name, a.Active, a.Public)
 				return nil
 			})
 		},
@@ -144,6 +145,7 @@ func actionUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&description, "description", "", "New description")
 	cmd.Flags().StringVar(&source, "source", "", "New source URL or file path")
 	cmd.Flags().Int64Var(&price, "price", 0, "New price in credits")
+	cmd.Flags().BoolVar(&public, "public", false, "Make action public (true) or private (false)")
 	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "New JSON Schema for inputs")
 	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "New JSON Schema for outputs")
 	_ = cmd.MarkFlagRequired("id")
@@ -294,89 +296,6 @@ func actionDeleteCmd() *cobra.Command {
 	return cmd
 }
 
-func actionACLCmd() *cobra.Command {
-	aclCmd := &cobra.Command{Use: "acl", Short: "ACL management"}
-	aclCmd.AddCommand(aclGrantCmd(), aclRevokeCmd())
-	return aclCmd
-}
-
-func aclGrantCmd() *cobra.Command {
-	var actionID, subjectHandle, perm string
-	cmd := &cobra.Command{
-		Use:   "grant",
-		Short: "Grant a permission on an action",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return modifyACL(actionID, subjectHandle, kernel.Permission(perm), true)
-		},
-	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
-	cmd.Flags().StringVar(&subjectHandle, "user", "", "Subject user handle (required)")
-	cmd.Flags().StringVar(&perm, "perm", "call", "Permission: read, call, admin")
-	_ = cmd.MarkFlagRequired("id")
-	_ = cmd.MarkFlagRequired("user")
-	return cmd
-}
-
-func aclRevokeCmd() *cobra.Command {
-	var actionID, subjectHandle, perm string
-	cmd := &cobra.Command{
-		Use:   "revoke",
-		Short: "Revoke a permission on an action",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return modifyACL(actionID, subjectHandle, kernel.Permission(perm), false)
-		},
-	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
-	cmd.Flags().StringVar(&subjectHandle, "user", "", "Subject user handle (required)")
-	cmd.Flags().StringVar(&perm, "perm", "call", "Permission to revoke")
-	_ = cmd.MarkFlagRequired("id")
-	_ = cmd.MarkFlagRequired("user")
-	return cmd
-}
-
-func modifyACL(actionID, subjectHandle string, perm kernel.Permission, grant bool) error {
-	return withCaller(func(k *kernel.Kernel, grantorID string) error {
-		subject, err := k.ReadUserByHandle(context.Background(), subjectHandle)
-		if err != nil {
-			return fmt.Errorf("user %s not found: %w", subjectHandle, err)
-		}
-		if grant {
-			err = k.GrantACL(context.Background(), subject.ID, actionID, perm, grantorID)
-		} else {
-			err = k.RevokeACL(context.Background(), subject.ID, actionID, perm, grantorID)
-		}
-		if err != nil {
-			return err
-		}
-		op := "revoked"
-		if grant {
-			op = "granted"
-		}
-		fmt.Printf("Permission %s %s on %s for %s.\n", perm, op, actionID, subjectHandle)
-		return nil
-	})
-}
-
-func actionGrantAllCmd() *cobra.Command {
-	var actionID string
-	cmd := &cobra.Command{
-		Use:   "grant-all",
-		Short: "Grant public (grant-all) access to an action",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				if err := k.GrantAll(context.Background(), callerID, actionID); err != nil {
-					return err
-				}
-				fmt.Printf("Action %s is now publicly callable.\n", actionID)
-				return nil
-			})
-		},
-	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
-	_ = cmd.MarkFlagRequired("id")
-	return cmd
-}
-
 func actionImportCmd() *cobra.Command {
 	var specURL string
 	cmd := &cobra.Command{
@@ -467,22 +386,3 @@ func actionStatsCmd() *cobra.Command {
 	return cmd
 }
 
-func actionRevokeAllCmd() *cobra.Command {
-	var actionID string
-	cmd := &cobra.Command{
-		Use:   "revoke-all",
-		Short: "Revoke public (grant-all) access from an action",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				if err := k.RevokeAll(context.Background(), callerID, actionID); err != nil {
-					return err
-				}
-				fmt.Printf("Action %s public access revoked.\n", actionID)
-				return nil
-			})
-		},
-	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
-	_ = cmd.MarkFlagRequired("id")
-	return cmd
-}

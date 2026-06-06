@@ -16,15 +16,6 @@ const (
 	KindRemoteProxy ActionKind = "remote_proxy"
 )
 
-// Permission names an ACL right.
-type Permission string
-
-const (
-	PermRead  Permission = "read"
-	PermCall  Permission = "call"
-	PermAdmin Permission = "admin"
-)
-
 // ProcessStatus is the lifecycle state of a process.
 type ProcessStatus string
 
@@ -75,14 +66,6 @@ type Action struct {
 	RemoteActionID string         `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
-}
-
-// ACLEntry grants a permission to a caller over an action.
-type ACLEntry struct {
-	CallerUserID string     `json:"caller_user_id"`
-	ActionID      string     `json:"action_id"`
-	Permission    Permission `json:"permission"`
-	CreatedAt     time.Time  `json:"created_at"`
 }
 
 // Process is a budgeted execution context.

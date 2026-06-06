@@ -175,23 +175,12 @@ func TestDeleteActionHardDelete(t *testing.T) {
 	ctx := context.Background()
 
 	owner := newUser("@hd-owner", 0)
-	caller := newUser("@hd-caller", 0)
 	_ = db.CreateUser(ctx, owner)
-	_ = db.CreateUser(ctx, caller)
 
 	a := newAction(owner.ID, "/hd-svc", 0, true)
 	if err := db.CreateAction(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.GrantACL(ctx, &kernel.ACLEntry{
-		CallerUserID: caller.ID,
-		ActionID:      a.ID,
-		Permission:    kernel.PermCall,
-		CreatedAt:     time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
 	if err := db.DeleteAction(ctx, a.ID); err != nil {
 		t.Fatalf("DeleteAction: %v", err)
 	}
@@ -214,12 +203,6 @@ func TestDeleteActionHardDelete(t *testing.T) {
 	a2 := newAction(owner.ID, "/hd-svc", 0, true)
 	if err := db.CreateAction(ctx, a2); err != nil {
 		t.Errorf("name reuse after hard delete should succeed: %v", err)
-	}
-
-	// ACL entries are cascaded away.
-	ok, _ := db.CheckACL(ctx, caller.ID, a.ID, kernel.PermCall)
-	if ok {
-		t.Error("ACL entry should be removed after hard delete")
 	}
 }
 
@@ -253,48 +236,6 @@ func TestListActions(t *testing.T) {
 	}
 	if len(publicActive) != 1 || publicActive[0].Name != "/active" {
 		t.Errorf("ListPublicActions: unexpected result")
-	}
-}
-
-// ---- ACL ----
-
-func TestACL(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	owner := newUser("@owner", 0)
-	caller := newUser("@caller", 0)
-	_ = db.CreateUser(ctx, owner)
-	_ = db.CreateUser(ctx, caller)
-
-	a := newAction(owner.ID, "/svc", 0, true)
-	_ = db.CreateAction(ctx, a)
-
-	ok, err := db.CheckACL(ctx, caller.ID, a.ID, kernel.PermCall)
-	if err != nil || ok {
-		t.Error("expected no ACL before grant")
-	}
-
-	if err := db.GrantACL(ctx, &kernel.ACLEntry{
-		CallerUserID: caller.ID,
-		ActionID:      a.ID,
-		Permission:    kernel.PermCall,
-		CreatedAt:     time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	ok, err = db.CheckACL(ctx, caller.ID, a.ID, kernel.PermCall)
-	if err != nil || !ok {
-		t.Error("expected ACL after grant")
-	}
-
-	if err := db.RevokeACL(ctx, caller.ID, a.ID, kernel.PermCall); err != nil {
-		t.Fatal(err)
-	}
-	ok, err = db.CheckACL(ctx, caller.ID, a.ID, kernel.PermCall)
-	if err != nil || ok {
-		t.Error("expected no ACL after revoke")
 	}
 }
 

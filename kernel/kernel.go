@@ -502,6 +502,7 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 	a.Description = description
 	a.InputSchema = inputSchema
 	a.OutputSchema = outputSchema
+	a.Public = true
 	if err := k.validateAndInitActivation(ctx, a); err != nil {
 		return err
 	}
@@ -522,7 +523,7 @@ func (k *Kernel) ReadAction(ctx context.Context, id string) (*Action, error) {
 }
 
 // ReadActionForSubject returns an action only if the subject has read access.
-// Public actions are readable by anyone. Otherwise Owner ∨ ACL(read) ∨ ACL(admin) is required.
+// Public actions are readable by anyone; private actions only by their owner or the superuser.
 func (k *Kernel) ReadActionForSubject(ctx context.Context, callerID, actionID string) (*Action, error) {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
@@ -531,32 +532,10 @@ func (k *Kernel) ReadActionForSubject(ctx context.Context, callerID, actionID st
 	if a.Public || a.OwnerUserID == callerID {
 		return a, nil
 	}
-	ok, err := k.canRead(ctx, callerID, a)
-	if err != nil {
-		return nil, err
+	if u, err := k.store.ReadUser(ctx, callerID); err == nil && k.isUserSuperuser(ctx, u) {
+		return a, nil
 	}
-	if !ok {
-		return nil, ErrUnauthorized.Wrap("read permission denied")
-	}
-	return a, nil
-}
-
-// canRead returns true if callerID may read action a.
-// CanRead(u,a) := Owner(u,a) ∨ Public(a) ∨ ACL(u,a,read) ∨ ACL(u,a,admin)
-func (k *Kernel) canRead(ctx context.Context, callerID string, a *Action) (bool, error) {
-	if a.OwnerUserID == callerID || a.Public {
-		return true, nil
-	}
-	if ok, err := k.store.CheckACL(ctx, callerID, a.ID, PermRead); err != nil {
-		return false, ErrInternal.Wrapf("acl check: %v", err)
-	} else if ok {
-		return true, nil
-	}
-	ok, err := k.store.CheckACL(ctx, callerID, a.ID, PermAdmin)
-	if err != nil {
-		return false, ErrInternal.Wrapf("acl check: %v", err)
-	}
-	return ok, nil
+	return nil, ErrUnauthorized.Wrap("read permission denied")
 }
 
 // ReadActionByOwnerName returns an action by (ownerID, name).
@@ -594,49 +573,6 @@ func (k *Kernel) ListAllTransactions(ctx context.Context, limit, offset int) ([]
 	return k.store.ListAllTransactions(ctx, limit, offset)
 }
 
-// GrantAll sets the public flag on an action, allowing anyone to call it.
-func (k *Kernel) GrantAll(ctx context.Context, callerID, actionID string) error {
-	a, err := k.store.ReadAction(ctx, actionID)
-	if err != nil {
-		return err
-	}
-	if err := k.requireAdmin(ctx, callerID, a); err != nil {
-		return err
-	}
-	if strings.HasPrefix(strings.TrimSpace(a.Source), "{") {
-		var osrc OpenAPISource
-		if jsonErr := json.Unmarshal([]byte(a.Source), &osrc); jsonErr == nil && osrc.Type == "openapi" {
-			if !osrc.OwnershipVerified {
-				return ErrUnauthorized.Wrap("ownership not verified: add x-juice-owner to spec")
-			}
-		}
-	}
-	a.Public = true
-	a.UpdatedAt = time.Now().UTC()
-	if err := k.store.UpdateAction(ctx, a); err != nil {
-		return err
-	}
-	k.log.With(ctx).Info("action.grant_all", "action_id", actionID, "subject", callerID)
-	return nil
-}
-
-// RevokeAll clears the public flag on an action.
-func (k *Kernel) RevokeAll(ctx context.Context, callerID, actionID string) error {
-	a, err := k.store.ReadAction(ctx, actionID)
-	if err != nil {
-		return err
-	}
-	if err := k.requireAdmin(ctx, callerID, a); err != nil {
-		return err
-	}
-	a.Public = false
-	a.UpdatedAt = time.Now().UTC()
-	if err := k.store.UpdateAction(ctx, a); err != nil {
-		return err
-	}
-	k.log.With(ctx).Info("action.revoke_all", "action_id", actionID, "subject", callerID)
-	return nil
-}
 
 // GetConfig returns a persistent config value by key.
 func (k *Kernel) GetConfig(ctx context.Context, key string) (string, error) {
@@ -723,6 +659,7 @@ type UpdateActionRequest struct {
 	InputSchema  map[string]any
 	OutputSchema map[string]any
 	Source       *string
+	Public       *bool
 }
 
 // UpdateAction modifies an action and deactivates it (schema/source changes require re-activation).
@@ -780,6 +717,17 @@ func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateAc
 			}
 			a.ArtifactHash = hash
 		}
+	}
+	if req.Public != nil {
+		if *req.Public && strings.HasPrefix(strings.TrimSpace(a.Source), "{") {
+			var osrc OpenAPISource
+			if jsonErr := json.Unmarshal([]byte(a.Source), &osrc); jsonErr == nil && osrc.Type == "openapi" {
+				if !osrc.OwnershipVerified {
+					return nil, ErrUnauthorized.Wrap("ownership not verified: add x-juice-owner to spec")
+				}
+			}
+		}
+		a.Public = *req.Public
 	}
 	a.UpdatedAt = time.Now().UTC()
 
@@ -885,48 +833,6 @@ func (k *Kernel) DeleteAction(ctx context.Context, callerID, actionID string) er
 		return err
 	}
 	k.log.With(ctx).Info("action.deleted", "action_id", actionID, "status", "success")
-	return nil
-}
-
-// ---- ACL operations ----
-
-// GrantACL grants a permission to a subject on an action.
-func (k *Kernel) GrantACL(ctx context.Context, callerID, actionID string, perm Permission, grantorID string) error {
-	a, err := k.store.ReadAction(ctx, actionID)
-	if err != nil {
-		return err
-	}
-	if err := k.requireAdmin(ctx, grantorID, a); err != nil {
-		return err
-	}
-	if perm != PermRead && perm != PermCall && perm != PermAdmin {
-		return ErrInvalidInput.Wrapf("unknown permission %q", perm)
-	}
-	if err := k.store.GrantACL(ctx, &ACLEntry{
-		CallerUserID: callerID,
-		ActionID:      actionID,
-		Permission:    perm,
-		CreatedAt:     time.Now().UTC(),
-	}); err != nil {
-		return err
-	}
-	k.log.With(ctx).Info("acl.granted", "action_id", actionID, "subject", callerID, "perm", perm)
-	return nil
-}
-
-// RevokeACL removes a permission.
-func (k *Kernel) RevokeACL(ctx context.Context, callerID, actionID string, perm Permission, revokerID string) error {
-	a, err := k.store.ReadAction(ctx, actionID)
-	if err != nil {
-		return err
-	}
-	if err := k.requireAdmin(ctx, revokerID, a); err != nil {
-		return err
-	}
-	if err := k.store.RevokeACL(ctx, callerID, actionID, perm); err != nil {
-		return err
-	}
-	k.log.With(ctx).Info("acl.revoked", "action_id", actionID, "subject", callerID, "perm", perm)
 	return nil
 }
 
@@ -1271,13 +1177,8 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 			continue
 		}
 		// Only include actions the subject can call per CanCall rule.
-		if !a.Public {
-			if req.CallerID == "" || (a.OwnerUserID != req.CallerID) {
-				ok, _ := k.canCall(ctx, req.CallerID, a)
-				if !ok {
-					continue
-				}
-			}
+		if !canCall(req.CallerID, a) {
+			continue
 		}
 		if _, cached := ownerHandles[a.OwnerUserID]; !cached {
 			if u, err := k.store.ReadUser(ctx, a.OwnerUserID); err == nil {
@@ -1341,7 +1242,7 @@ func (k *Kernel) isUserSuperuser(_ context.Context, u *User) bool {
 }
 
 // requireAdmin returns nil if callerID is authenticated, non-suspended, and is the owner
-// of a, the platform superuser, or holds admin ACL on a.
+// of a or the platform superuser.
 func (k *Kernel) requireAdmin(ctx context.Context, callerID string, a *Action) error {
 	u, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
@@ -1350,14 +1251,7 @@ func (k *Kernel) requireAdmin(ctx context.Context, callerID string, a *Action) e
 	if a.OwnerUserID == callerID || k.isUserSuperuser(ctx, u) {
 		return nil
 	}
-	ok, err := k.store.CheckACL(ctx, callerID, a.ID, PermAdmin)
-	if err != nil {
-		return ErrInternal.Wrapf("acl check failed: %v", err)
-	}
-	if !ok {
-		return ErrUnauthorized.Wrap("admin permission required")
-	}
-	return nil
+	return ErrUnauthorized.Wrap("owner or superuser required")
 }
 
 // requireSelf returns nil if callerID is authenticated, non-suspended, and equals ownerID
@@ -1427,14 +1321,8 @@ func (k *Kernel) CreateListener(ctx context.Context, callerID string, req Create
 	if err != nil {
 		return nil, err
 	}
-	if a.OwnerUserID != callerID {
-		ok, err := k.canCall(ctx, callerID, a)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			return nil, ErrUnauthorized.Wrap("call permission required to register listener")
-		}
+	if !canCall(callerID, a) {
+		return nil, ErrUnauthorized.Wrap("call permission required to register listener")
 	}
 	l := &Listener{
 		ID:             uuid.New().String(),

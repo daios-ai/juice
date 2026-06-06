@@ -422,8 +422,9 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
-	if err := k.GrantAll(ctx, sys.ID, a.ID); err != nil {
-		t.Fatalf("GrantAll: %v", err)
+	pubFed := true
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubFed}); err != nil {
+		t.Fatalf("UpdateAction public: %v", err)
 	}
 
 	caller := setupUser(t, st, "@proxy-caller", 0)
@@ -591,7 +592,8 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := k.GrantAll(ctx, sys.ID, a.ID); err != nil {
+	pubFed2 := true
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubFed2}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -667,7 +669,8 @@ func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := k.GrantAll(ctx, sys.ID, a.ID); err != nil {
+	pubFed3 := true
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubFed3}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -712,7 +715,8 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	result, _ := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
 	a := result.Created[0]
 	_ = k.SetActive(ctx, sys.ID, a.ID, true)
-	_ = k.GrantAll(ctx, sys.ID, a.ID)
+	pubFed4 := true
+	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubFed4})
 
 	remoteReceipt := &kernel.Receipt{
 		ID: uuid.New().String(), IssuerUserID: "rs",

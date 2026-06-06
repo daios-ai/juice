@@ -65,13 +65,13 @@ func TestSubCostNotIncrementedOnFailedSubCall(t *testing.T) {
 
 	inner := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
-		Kind: kernel.KindWasm, Source: "inner", Active: true, Price: 100,
+		Kind: kernel.KindWasm, Source: "inner", Active: true, Public: true, Price: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, inner)
 	outer := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "outer",
-		Kind: kernel.KindWasm, Source: "outer", Active: true, Price: 50,
+		Kind: kernel.KindWasm, Source: "outer", Active: true, Public: true, Price: 50,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, outer)
@@ -84,9 +84,6 @@ func TestSubCostNotIncrementedOnFailedSubCall(t *testing.T) {
 	cfg.FeeRecipientID = feeUser.ID
 	cfg.SigningKey = testSigningKey()
 	k := kernel.New(st, exec, nil, nil, nil, cfg, nil)
-
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: carol.ID, ActionID: outer.ID, Permission: kernel.PermCall})
 
 	p, root, _ := k.StartProcess(ctx, carol.ID, carol.ID, 50)
 
@@ -182,43 +179,8 @@ func TestCallInactiveActionDeniedForNonOwner(t *testing.T) {
 	}
 }
 
-func TestOwnerCanCallInactiveAction(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
-	ctx := context.Background()
 
-	alice := setupUser(t, st, "@alice", 0)
-	a := &kernel.Action{
-		ID:          uuid.New().String(),
-		OwnerUserID: alice.ID,
-		Name:        "svc",
-		Kind:        kernel.KindWasm,
-		Active:      false, // inactive
-		Price:       0,
-		Source:      "fake-wasm",
-		InputSchema: map[string]any{},
-		OutputSchema: map[string]any{},
-		CreatedAt:   time.Now().UTC(),
-		UpdatedAt:   time.Now().UTC(),
-	}
-	_ = st.CreateAction(ctx, a)
-
-	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
-
-	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:     alice.ID,
-		ProcessID:     p.ID,
-		ParentTraceID: root.ID,
-		TargetUserID:  alice.ID,
-		ActionName:    "svc",
-		Args:          map[string]any{},
-	})
-	if err != nil {
-		t.Errorf("owner should be able to call their own inactive action; got %v", err)
-	}
-}
-
-func TestCallACLDenied(t *testing.T) {
+func TestCallPrivateDenied(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -230,7 +192,7 @@ func TestCallACLDenied(t *testing.T) {
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 100)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:     alice.ID,
+		CallerID:      alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  bob.ID,
@@ -238,7 +200,7 @@ func TestCallACLDenied(t *testing.T) {
 		Args:          map[string]any{},
 	})
 	if err == nil {
-		t.Error("expected ACL denial error")
+		t.Error("expected call denial for private action owned by another user")
 	}
 	var ke *kernel.KernelError
 	if !errors.As(err, &ke) || ke.Code != "unauthorized" {
@@ -246,7 +208,7 @@ func TestCallACLDenied(t *testing.T) {
 	}
 }
 
-func TestCallACLGrantAndRevoke(t *testing.T) {
+func TestCallPublicActionAnyOwner(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -259,17 +221,16 @@ func TestCallACLGrantAndRevoke(t *testing.T) {
 		Name:        "svc",
 		Kind:        kernel.KindWasm,
 		Active:      true,
+		Public:      true,
 		Price:       0,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 
-	_ = k.GrantACL(ctx, alice.ID, a.ID, kernel.PermCall, bob.ID)
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
-
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:     alice.ID,
+		CallerID:      alice.ID,
 		ProcessID:     p.ID,
 		ParentTraceID: root.ID,
 		TargetUserID:  bob.ID,
@@ -277,21 +238,89 @@ func TestCallACLGrantAndRevoke(t *testing.T) {
 		Args:          map[string]any{},
 	})
 	if err != nil {
-		t.Fatalf("expected success with ACL, got: %v", err)
+		t.Fatalf("public action should be callable by any process owner: %v", err)
+	}
+}
+
+func TestCallPrivateActionOwnerOnly(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 1000)
+	bob := setupUser(t, st, "@bob", 1000)
+	a := &kernel.Action{
+		ID:          uuid.New().String(),
+		OwnerUserID: bob.ID,
+		Name:        "priv",
+		Kind:        kernel.KindWasm,
+		Active:      true,
+		Public:      false,
+		Price:       0,
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	// Bob (the owner) can call his own private action.
+	pBob, rootBob, _ := k.StartProcess(ctx, bob.ID, bob.ID, 0)
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID:      bob.ID,
+		ProcessID:     pBob.ID,
+		ParentTraceID: rootBob.ID,
+		TargetUserID:  bob.ID,
+		ActionName:    "priv",
+		Args:          map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("owner should call their own private action: %v", err)
 	}
 
-	_ = k.RevokeACL(ctx, alice.ID, a.ID, kernel.PermCall, bob.ID)
-
+	// Alice (not the owner) cannot call bob's private action.
+	pAlice, rootAlice, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
 	_, err = k.Call(ctx, kernel.CallRequest{
-		CallerID:     alice.ID,
-		ProcessID:     p.ID,
-		ParentTraceID: root.ID,
+		CallerID:      alice.ID,
+		ProcessID:     pAlice.ID,
+		ParentTraceID: rootAlice.ID,
 		TargetUserID:  bob.ID,
-		ActionName:    "svc",
+		ActionName:    "priv",
 		Args:          map[string]any{},
 	})
 	if err == nil {
-		t.Error("expected ACL denial after revoke")
+		t.Error("non-owner should not be able to call private action")
+	}
+}
+
+func TestCallInactiveActionBlocked(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 1000)
+	a := &kernel.Action{
+		ID:          uuid.New().String(),
+		OwnerUserID: alice.ID,
+		Name:        "inactive",
+		Kind:        kernel.KindWasm,
+		Active:      false,
+		Public:      true,
+		Price:       0,
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID:      alice.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: root.ID,
+		TargetUserID:  alice.ID,
+		ActionName:    "inactive",
+		Args:          map[string]any{},
+	})
+	if err == nil {
+		t.Error("inactive action should be blocked regardless of public flag")
 	}
 }
 
@@ -743,7 +772,7 @@ func (s *sleepingFailExec) Execute(_ context.Context, _ []byte, _ []byte, _ kern
 	return nil, s.err
 }
 
-func TestWasmHostCallRespectsACL(t *testing.T) {
+func TestWasmHostCallPrivateActionDenied(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -773,7 +802,7 @@ func TestWasmHostCallRespectsACL(t *testing.T) {
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
 	if err == nil {
-		t.Error("expected ACL denial when script calls action without permission")
+		t.Error("expected denial when script subcalls a private action not owned by the process owner")
 	}
 }
 
@@ -827,7 +856,7 @@ func TestProcessFundedSubCallSpendsSameProcess(t *testing.T) {
 
 	inner := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
-		Kind: kernel.KindWasm, Source: "inner", Active: true, Price: 100,
+		Kind: kernel.KindWasm, Source: "inner", Active: true, Public: true, Price: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, inner)
@@ -846,10 +875,6 @@ func TestProcessFundedSubCallSpendsSameProcess(t *testing.T) {
 	cfg.FeeRecipientID = feeUser.ID
 	cfg.SigningKey = testSigningKey()
 	k := kernel.New(st, exec, nil, nil, nil, cfg, nil)
-
-	// Process owner alice needs call permission on inner.
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: alice.ID, ActionID: outer.ID, Permission: kernel.PermCall})
 
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 150)
 
@@ -880,7 +905,7 @@ func TestProcessFundedSubCallInsufficientFundsFails(t *testing.T) {
 
 	inner := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
-		Kind: kernel.KindWasm, Source: "inner", Active: true, Price: 100,
+		Kind: kernel.KindWasm, Source: "inner", Active: true, Public: true, Price: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, inner)
@@ -893,7 +918,6 @@ func TestProcessFundedSubCallInsufficientFundsFails(t *testing.T) {
 
 	exec := &subcallExec{targetUser: bob.ID, targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
 
 	// Fund only enough for outer, not inner.
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 50)
@@ -925,7 +949,7 @@ func TestProcessFundedSubCallTraceHasSameProcess(t *testing.T) {
 
 	inner := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
-		Kind: kernel.KindWasm, Source: "inner", Active: true, Price: 0,
+		Kind: kernel.KindWasm, Source: "inner", Active: true, Public: true, Price: 0,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, inner)
@@ -935,7 +959,6 @@ func TestProcessFundedSubCallTraceHasSameProcess(t *testing.T) {
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, outer)
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: alice.ID, ActionID: inner.ID, Permission: kernel.PermCall})
 
 	exec := &subcallExec{targetUser: bob.ID, targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
@@ -1054,7 +1077,8 @@ func TestCommitCallAtomicOnFailure(t *testing.T) {
 	caller := setupUser(t, base, "@caller", 1000)
 	actionOwner := setupUser(t, base, "@owner", 0)
 	a := setupAction(t, base, actionOwner.ID, "echo", 100)
-	base.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: caller.ID, ActionID: a.ID, Permission: kernel.PermCall})
+	a.Public = true
+	_ = base.UpdateAction(ctx, a)
 
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 500)
 
@@ -1094,7 +1118,7 @@ func TestCallInvalidParentTraceDoesNotLockFunds(t *testing.T) {
 
 	alice := setupUser(t, st, "@alice", 1000)
 	a := setupAction(t, st, alice.ID, "svc", 100)
-	st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: alice.ID, ActionID: a.ID, Permission: kernel.PermCall})
+	_ = a
 
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
 

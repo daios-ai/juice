@@ -176,7 +176,7 @@ func TestImportOpenAPISetsOwnershipVerified(t *testing.T) {
 	}
 }
 
-func TestGrantAllOpenAPIRequiresOwnershipVerified(t *testing.T) {
+func TestMakePublicOpenAPIRequiresOwnershipVerified(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -193,16 +193,17 @@ func TestGrantAllOpenAPIRequiresOwnershipVerified(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := k.GrantAll(ctx, owner.ID, a.ID)
+	pub := true
+	_, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pub})
 	if err == nil {
-		t.Fatal("expected error from GrantAll without ownership verification, got nil")
+		t.Fatal("expected error making OpenAPI action public without ownership verification, got nil")
 	}
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized, got %v", err)
 	}
 }
 
-func TestGrantAllOpenAPIWithOwnershipVerified(t *testing.T) {
+func TestMakePublicOpenAPIWithOwnershipVerified(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -219,8 +220,9 @@ func TestGrantAllOpenAPIWithOwnershipVerified(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := k.GrantAll(ctx, owner.ID, a.ID); err != nil {
-		t.Errorf("GrantAll with OwnershipVerified=true: unexpected error: %v", err)
+	pub := true
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pub}); err != nil {
+		t.Errorf("UpdateAction with OwnershipVerified=true: unexpected error: %v", err)
 	}
 }
 
@@ -341,15 +343,14 @@ func TestImportOpenAPIOwnershipStalenessFixed(t *testing.T) {
 	}
 }
 
-// ---- UnimportOpenAPI action admin test ----
+// ---- UnimportOpenAPI owner-only test ----
 
-func TestUnimportOpenAPIActionAdmin(t *testing.T) {
+func TestUnimportOpenAPIOwnerOnly(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@openapi-owner", 0)
-	admin := setupUser(t, st, "@openapi-admin", 0)
 
 	specURL := "https://spec.example.com/admin-test.json"
 	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"adminHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
@@ -361,23 +362,17 @@ func TestUnimportOpenAPIActionAdmin(t *testing.T) {
 	if len(result.Created) != 1 {
 		t.Fatalf("expected 1 created action, got %d", len(result.Created))
 	}
-	a := result.Created[0]
 
-	// Grant admin ACL to the admin user.
-	if err := k.GrantACL(ctx, admin.ID, a.ID, kernel.PermAdmin, owner.ID); err != nil {
-		t.Fatalf("GrantACL: %v", err)
-	}
-
-	// Admin (not owner) should be able to unimport with owner_handle passed as ownerID.
-	deactivated, err := k.UnimportOpenAPI(ctx, admin.ID, owner.ID, specURL, "")
+	// Owner can unimport their own actions.
+	deactivated, err := k.UnimportOpenAPI(ctx, owner.ID, owner.ID, specURL, "")
 	if err != nil {
-		t.Fatalf("UnimportOpenAPI as action admin: %v", err)
+		t.Fatalf("UnimportOpenAPI as owner: %v", err)
 	}
 	if len(deactivated) != 1 {
 		t.Errorf("expected 1 deactivated action, got %d", len(deactivated))
 	}
 
-	// Non-admin (unrelated user) should be rejected.
+	// Unrelated user should be rejected.
 	other := setupUser(t, st, "@openapi-other", 0)
 	// Re-import to have an action to unimport.
 	result2, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
@@ -386,6 +381,6 @@ func TestUnimportOpenAPIActionAdmin(t *testing.T) {
 	}
 	_ = result2
 	if _, err := k.UnimportOpenAPI(ctx, other.ID, owner.ID, specURL, ""); !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("expected ErrUnauthorized for non-admin, got %v", err)
+		t.Errorf("expected ErrUnauthorized for non-owner, got %v", err)
 	}
 }

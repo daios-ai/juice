@@ -16,7 +16,7 @@ Fields that contain structured data use `json.RawMessage`, never `string`. `Tran
 Wherever a request identifies a callable action, a single `action` field carries the combined `@owner/name` notation. The server resolves it. Split fields (`target` + `action_name`) are forbidden. Owner handles must not contain `/`; action names must not contain `/`. Parsing is unambiguous: split on the first `/` after `@`. When `@owner/name` appears in a URL query string, `/` must be percent-encoded.
 
 **R4 — DELETE never carries a request body.**  
-Sub-resource removal uses path parameters: `DELETE /v1/actions/{id}/acl/{caller_id}/{permission}`. Request bodies on DELETE are rejected by many proxies and clients.
+Sub-resource removal uses path parameters. Request bodies on DELETE are rejected by many proxies and clients.
 
 **R5 — State mutations return the updated resource.**  
 Any operation that changes resource state returns the new state as the response body. `POST /v1/processes/{id}/fund` returns the updated process. Purely destructive operations (`DELETE`, `POST .../end`) return 204.
@@ -25,7 +25,7 @@ Any operation that changes resource state returns the new state as the response 
 No envelope objects. `GET /v1/listeners/{id}/events` returns `[…]` directly. Metadata such as pagination belongs in response headers, not the body.
 
 **R7 — Input validated at the HTTP boundary.**  
-The handler rejects invalid inputs before calling the kernel. `rating` must be 0 or 1. `permission` must be `read`, `call`, or `admin`. Both return `ErrInvalidInput` when violated.
+The handler rejects invalid inputs before calling the kernel. `rating` must be 0 or 1; returns `ErrInvalidInput` when violated.
 
 **R8 — Action responses include both `id` and `action`.**  
 Every read or list response for an action resource includes both `id` (UUID, for management operations) and a computed `action` field containing `@owner/name` (for calling). Clients can copy the `action` value directly into call requests without a separate lookup.
@@ -106,14 +106,10 @@ Log lines, progress messages, and error text go to stderr. The only content writ
 | Create action | `POST /v1/actions` `{name, kind, [source, description, price, input_schema, output_schema]}` → 201 action | `juice action create --name --kind [--source --description --price --input-schema --output-schema]` |
 | List public actions | `GET /v1/actions[?owner=&name=]` → action[] | `juice action list [--all --limit --offset]` |
 | Show action | `GET /v1/actions/{id}` → action | `juice action show --id` |
-| Update action | `PUT /v1/actions/{id}` `{[price, description, source, input_schema, output_schema]}` → action | `juice action update --id [--price --description --source --input-schema --output-schema]` |
+| Update action | `PUT /v1/actions/{id}` `{[price, description, source, input_schema, output_schema, public]}` → action | `juice action update --id [--price --description --source --input-schema --output-schema --public]` |
 | Enable action | `POST /v1/actions/{id}/enable` → `{active:true}` | `juice action enable --id` |
 | Disable action | `POST /v1/actions/{id}/disable` → `{active:false}` | `juice action disable --id` |
 | Delete action | `DELETE /v1/actions/{id}` → 204 | `juice action delete --id` |
-| Grant ACL | `POST /v1/actions/{id}/acl` `{caller_user_id, permission}` → 204 | `juice action acl grant --id --user --perm` |
-| Revoke ACL | `DELETE /v1/actions/{id}/acl/{caller_id}/{permission}` → 204 | `juice action acl revoke --id --user --perm` |
-| Make public | `POST /v1/actions/{id}/grant-all` → 204 | `juice action grant-all --id` |
-| Make private | `POST /v1/actions/{id}/revoke-all` → 204 | `juice action revoke-all --id` |
 | Import OpenAPI | `POST /v1/actions/import` `{spec_url}` → import result | `juice action import --openapi <url>` |
 | Unimport OpenAPI | `POST /v1/actions/unimport` `{spec_url[, name]}` → action[] | `juice action unimport --openapi <url> [--name]` |
 | Get manifest | `GET /v1/actions/{id}/manifest` → signed manifest | — (used internally by `remote import`) |

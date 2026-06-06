@@ -536,37 +536,6 @@ func finishAction(a *kernel.Action, kind string, active, public int, inJSON, out
 	return a, nil
 }
 
-// ---- ACL ----
-
-func (s *DB) GrantACL(ctx context.Context, e *kernel.ACLEntry) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO acl_entries (caller_user_id,action_id,permission,created_at)
-		 VALUES (?,?,?,?)`,
-		e.CallerUserID, e.ActionID, string(e.Permission), timeToStr(e.CreatedAt),
-	)
-	return dbErr(err, "grant acl")
-}
-
-func (s *DB) RevokeACL(ctx context.Context, callerID, actionID string, perm kernel.Permission) error {
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM acl_entries WHERE caller_user_id=? AND action_id=? AND permission=?`,
-		callerID, actionID, string(perm),
-	)
-	return dbErr(err, "revoke acl")
-}
-
-func (s *DB) CheckACL(ctx context.Context, callerID, actionID string, perm kernel.Permission) (bool, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM acl_entries WHERE caller_user_id=? AND action_id=? AND permission=?`,
-		callerID, actionID, string(perm),
-	).Scan(&count)
-	if err != nil {
-		return false, dbErr(err, "check acl")
-	}
-	return count > 0, nil
-}
-
 // ---- Processes ----
 
 func (s *DB) StartProcess(ctx context.Context, p *kernel.Process, t *kernel.Trace, ownerID string, funds int64) error {

@@ -14,17 +14,6 @@ func TestActionKindConstants(t *testing.T) {
 	}
 }
 
-func TestPermissionConstants(t *testing.T) {
-	if PermRead != "read" {
-		t.Errorf("PermRead: got %q", PermRead)
-	}
-	if PermCall != "call" {
-		t.Errorf("PermCall: got %q", PermCall)
-	}
-	if PermAdmin != "admin" {
-		t.Errorf("PermAdmin: got %q", PermAdmin)
-	}
-}
 
 func TestProcessStatusConstants(t *testing.T) {
 	if ProcessOpen != "open" {

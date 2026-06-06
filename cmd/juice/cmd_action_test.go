@@ -56,29 +56,6 @@ func TestActionCreateAndToggle(t *testing.T) {
 	}
 }
 
-func TestActionACLGrantRevoke(t *testing.T) {
-	env := newTestEnv(t)
-	ctx := context.Background()
-
-	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@owner2", Email: "o2@example.com", Password: "pass",
-	})
-	other, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@other", Email: "other@example.com", Password: "pass",
-	})
-
-	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "acl-test",
-		Kind: kernel.KindHTTP, Source: "http://example.com",
-	})
-
-	if err := env.k.GrantACL(ctx, other.ID, a.ID, kernel.PermCall, owner.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := env.k.RevokeACL(ctx, other.ID, a.ID, kernel.PermCall, owner.ID); err != nil {
-		t.Fatal(err)
-	}
-}
 
 func TestActionPriceUpdateDeactivates(t *testing.T) {
 	env := newTestEnv(t)
@@ -142,26 +119,24 @@ func TestActionDelete(t *testing.T) {
 	}
 }
 
-func TestActionShowACL(t *testing.T) {
+func TestActionShowPrivate(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@show-owner", Email: "show-owner@example.com", Password: "pass",
 	})
-	reader, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@show-reader", Email: "show-reader@example.com", Password: "pass",
-	})
 	stranger, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@show-stranger", Email: "show-stranger@example.com", Password: "pass",
 	})
+	_ = stranger
 
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "show-svc",
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
 
-	// Owner can read their own action.
+	// Owner can read their own private action.
 	ownerTok, _ := env.k.Login(ctx, "@show-owner", "pass")
 	if err := saveToken(ownerTok); err != nil {
 		t.Fatal(err)
@@ -170,7 +145,7 @@ func TestActionShowACL(t *testing.T) {
 		t.Errorf("owner: unexpected error: %v", err)
 	}
 
-	// Stranger gets ErrUnauthorized.
+	// Stranger gets ErrUnauthorized on a private action.
 	strangerTok, _ := env.k.Login(ctx, "@show-stranger", "pass")
 	if err := saveToken(strangerTok); err != nil {
 		t.Fatal(err)
@@ -178,19 +153,6 @@ func TestActionShowACL(t *testing.T) {
 	if _, err := runCmd(t, actionShowCmd(), "--id", a.ID); err == nil {
 		t.Error("stranger: expected error, got nil")
 	}
-
-	// Grant read to reader — they can now read.
-	if err := env.k.GrantACL(ctx, reader.ID, a.ID, kernel.PermRead, owner.ID); err != nil {
-		t.Fatal(err)
-	}
-	readerTok, _ := env.k.Login(ctx, "@show-reader", "pass")
-	if err := saveToken(readerTok); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runCmd(t, actionShowCmd(), "--id", a.ID); err != nil {
-		t.Errorf("reader with ACL: unexpected error: %v", err)
-	}
-	_ = stranger
 }
 
 func TestActionImportOpenAPI(t *testing.T) {
@@ -282,7 +244,8 @@ func TestActionListActive(t *testing.T) {
 		OutputSchema: minSchema,
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
-	_ = env.k.GrantAll(ctx, owner.ID, a.ID)
+	pub := true
+	_, _ = env.k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pub})
 
 	actions, err := env.k.ListPublicActions(ctx, 10, 0)
 	if err != nil {

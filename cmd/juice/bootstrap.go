@@ -136,9 +136,6 @@ func ensureSysNative(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 	if err := k.ActivateNativeAction(ctx, a.ID, spec.description, spec.inputSchema, spec.outputSchema); err != nil {
 		return fmt.Errorf("activate @sys/%s: %w", spec.name, err)
 	}
-	if err := k.GrantAll(ctx, su.ID, a.ID); err != nil {
-		return fmt.Errorf("grant-all @sys/%s: %w", spec.name, err)
-	}
 	return nil
 }
 

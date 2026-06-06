@@ -103,10 +103,6 @@ func runServer(addr string) error {
 		r.Post("/v1/actions/{id}/enable", srv.enableAction)
 		r.Post("/v1/actions/{id}/disable", srv.disableAction)
 		r.Delete("/v1/actions/{id}", srv.deleteAction)
-		r.Post("/v1/actions/{id}/acl", srv.grantACL)
-		r.Delete("/v1/actions/{id}/acl/{caller_id}/{permission}", srv.revokeACL)
-		r.Post("/v1/actions/{id}/grant-all", srv.grantAll)
-		r.Post("/v1/actions/{id}/revoke-all", srv.revokeAll)
 
 		// Processes.
 		r.Get("/v1/processes", srv.listProcesses)
@@ -546,6 +542,7 @@ func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 		Source       *string        `json:"source"`
 		InputSchema  map[string]any `json:"input_schema"`
 		OutputSchema map[string]any `json:"output_schema"`
+		Public       *bool          `json:"public"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
@@ -558,6 +555,7 @@ func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 		Source:       body.Source,
 		InputSchema:  body.InputSchema,
 		OutputSchema: body.OutputSchema,
+		Public:       body.Public,
 	})
 	if err != nil {
 		writeErr(w, err)
@@ -587,50 +585,6 @@ func (s *server) disableAction(w http.ResponseWriter, r *http.Request) {
 func (s *server) deleteAction(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := s.kernel.DeleteAction(r.Context(), callerFrom(r), id); err != nil {
-		writeErr(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *server) grantACL(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	var req struct {
-		CallerUserID string `json:"caller_user_id"`
-		Permission   string `json:"permission"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
-		return
-	}
-	if req.CallerUserID == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("caller_user_id is required"))
-		return
-	}
-	switch kernel.Permission(req.Permission) {
-	case kernel.PermRead, kernel.PermCall, kernel.PermAdmin:
-	default:
-		writeErr(w, kernel.ErrInvalidInput.Wrap("permission must be read, call, or admin"))
-		return
-	}
-	if err := s.kernel.GrantACL(r.Context(), req.CallerUserID, id,
-		kernel.Permission(req.Permission), callerFrom(r)); err != nil {
-		writeErr(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *server) revokeACL(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	callerID := chi.URLParam(r, "caller_id")
-	permission := chi.URLParam(r, "permission")
-	if callerID == "" || permission == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("caller_id and permission are required"))
-		return
-	}
-	if err := s.kernel.RevokeACL(r.Context(), callerID, id,
-		kernel.Permission(permission), callerFrom(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -1039,24 +993,6 @@ func (s *server) postConsumeEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, reply)
-}
-
-func (s *server) grantAll(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if err := s.kernel.GrantAll(r.Context(), callerFrom(r), id); err != nil {
-		writeErr(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *server) revokeAll(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if err := s.kernel.RevokeAll(r.Context(), callerFrom(r), id); err != nil {
-		writeErr(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---- well-known / federation ----

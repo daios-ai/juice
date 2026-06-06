@@ -123,12 +123,6 @@ type Store interface {
 	ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Action, error)
 	ListAllActions(ctx context.Context, limit, offset int) ([]*Action, error)
 
-	// ---- ACL ----
-
-	GrantACL(ctx context.Context, e *ACLEntry) error
-	RevokeACL(ctx context.Context, callerID, actionID string, perm Permission) error
-	CheckACL(ctx context.Context, callerID, actionID string, perm Permission) (bool, error)
-
 	// ---- Processes ----
 
 	// StartProcess atomically creates the process, debits owner funds, and creates the root trace.

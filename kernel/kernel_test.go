@@ -970,7 +970,6 @@ func TestReceiptCreatedWithCall(t *testing.T) {
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: caller.ID, ActionID: a.ID, Permission: kernel.PermCall, CreatedAt: time.Now().UTC()})
 
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 200)
 	reply, err := k.Call(ctx, kernel.CallRequest{
@@ -1062,13 +1061,12 @@ func TestReadTransactionPartyAccess(t *testing.T) {
 	other := setupUser(t, st, "@other", 500)    // non-party
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pvd-svc",
-		Kind: kernel.KindWasm, Active: true, Price: 10, Source: "wat",
+		Kind: kernel.KindWasm, Active: true, Public: true, Price: 10, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: caller.ID, ActionID: a.ID, Permission: kernel.PermCall, CreatedAt: time.Now().UTC()})
 
 	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
@@ -1362,7 +1360,6 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@sd-owner", 0)
-	caller := setupUser(t, st, "@sd-caller", 0)
 
 	a := &kernel.Action{
 		ID:          uuid.New().String(),
@@ -1376,7 +1373,6 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 		UpdatedAt:   time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
-	_ = st.GrantACL(ctx, &kernel.ACLEntry{CallerUserID: caller.ID, ActionID: a.ID, Permission: kernel.PermCall, CreatedAt: time.Now().UTC()})
 
 	if err := k.DeleteAction(ctx, owner.ID, a.ID); err != nil {
 		t.Fatalf("DeleteAction: %v", err)
@@ -1394,12 +1390,6 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 		if listed.ID == a.ID {
 			t.Error("deleted action should not appear in ListAllActions")
 		}
-	}
-
-	// ACL entries should be purged.
-	ok, _ := st.CheckACL(ctx, caller.ID, a.ID, kernel.PermCall)
-	if ok {
-		t.Error("ACL entry should be removed after action delete")
 	}
 }
 
