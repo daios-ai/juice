@@ -48,6 +48,19 @@ type CallReply struct {
 	Gross     int64          `json:"gross"`
 }
 
+// ParseActionRef splits an "@owner/name" action reference into owner handle and action name.
+// Returns ErrInvalidInput if the format is invalid.
+func ParseActionRef(ref string) (ownerHandle, actionName string, err error) {
+	if !strings.HasPrefix(ref, "@") {
+		return "", "", ErrInvalidInput.Wrap("action ref must be @owner/name")
+	}
+	idx := strings.Index(ref[1:], "/")
+	if idx < 0 || ref[1:idx+1] == "" || ref[idx+2:] == "" {
+		return "", "", ErrInvalidInput.Wrap("action ref must be @owner/name")
+	}
+	return ref[:idx+1], ref[idx+2:], nil
+}
+
 // Call executes the central kernel transition.
 // Preconditions are checked in order per Section 5.1 of the requirements.
 func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) {
@@ -87,16 +100,11 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// 4. Resolve action.
 	// If ActionRef is set ("@owner/name"), parse it into TargetUserID and ActionName.
 	if req.ActionRef != "" {
-		ref := req.ActionRef
-		if !strings.HasPrefix(ref, "@") {
-			return nil, ErrInvalidInput.Wrap("action ref must be @owner/name")
+		var parseErr error
+		req.TargetUserID, req.ActionName, parseErr = ParseActionRef(req.ActionRef)
+		if parseErr != nil {
+			return nil, parseErr
 		}
-		idx := strings.Index(ref[1:], "/")
-		if idx < 0 || ref[1:idx+1] == "" || ref[idx+2:] == "" {
-			return nil, ErrInvalidInput.Wrap("action ref must be @owner/name")
-		}
-		req.TargetUserID = ref[:idx+1] // handle including @
-		req.ActionName = ref[idx+2:]
 	}
 	target, err := k.store.ReadUserByHandle(ctx, req.TargetUserID)
 	if err != nil || target == nil {
@@ -181,9 +189,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		OwnerUserID:   process.OwnerUserID,
 		CallerUserID: req.CallerID,
 		TargetUserID:  target.ID,
-		ActionID:      action.ID,
-		ActionName:    action.Name,
-		Status:        TxFailure,
+		ActionID:       action.ID,
+		ActionName:     action.Name,
+		RemoteActionID: action.RemoteActionID,
+		Status:         TxFailure,
 		Gross:         0, // will be set on success
 		Net:           0,
 		Fee:           0,
@@ -286,7 +295,7 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 		if k.http == nil {
 			return nil, 0, "", ErrInvalidState.Wrap("HTTP executor not configured")
 		}
-		res, err := k.http.Execute(ctx, action.Source, args)
+		res, err := k.http.Execute(ctx, action, args)
 		return res, 0, "", err
 	case KindWasm:
 		res, cost, err := k.executeWasm(ctx, action, args, trace, targetID)

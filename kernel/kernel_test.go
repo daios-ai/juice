@@ -1569,7 +1569,7 @@ type fakeURLFetcher struct {
 	wellKnown map[string]string // URL -> response body
 }
 
-func (f *fakeURLFetcher) Execute(_ context.Context, _ string, _ map[string]any) (map[string]any, error) {
+func (f *fakeURLFetcher) Execute(_ context.Context, _ *kernel.Action, _ map[string]any) (map[string]any, error) {
 	return nil, kernel.ErrInvalidState.Wrap("not used in tests")
 }
 
@@ -1595,7 +1595,7 @@ func newTestKernelWithHTTP(st kernel.Store, http kernel.HTTPExecutor) *kernel.Ke
 // fakeSuccessHTTP is a minimal HTTPExecutor that returns an empty result for any Execute call.
 type fakeSuccessHTTP struct{}
 
-func (f *fakeSuccessHTTP) Execute(_ context.Context, _ string, _ map[string]any) (map[string]any, error) {
+func (f *fakeSuccessHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any) (map[string]any, error) {
 	return map[string]any{}, nil
 }
 
@@ -1604,7 +1604,7 @@ type fakeFederationHTTP struct {
 	receiptJSON string
 }
 
-func (f *fakeFederationHTTP) Execute(_ context.Context, _ string, _ map[string]any) (map[string]any, error) {
+func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any) (map[string]any, error) {
 	return nil, kernel.ErrInvalidState.Wrap("not used in federation tests")
 }
 
@@ -1655,6 +1655,54 @@ func signReceiptForTest(t *testing.T, key ed25519.PrivateKey, r *kernel.Receipt)
 		t.Fatal(err)
 	}
 	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload))
+}
+
+// TestSuperuserListTransactions verifies that @sys can list transactions where it is not a party.
+func TestSuperuserListTransactions(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	sys := setupSys(t, k, st)
+	buyer := setupUser(t, st, "@su-buyer", 500)
+	provider := setupUser(t, st, "@su-provider", 0)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "su-svc",
+		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0, Source: "wat",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatalf("CreateAction: %v", err)
+	}
+	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: provider.ID, ActionName: "su-svc", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	// @sys is not buyer, provider, or process owner — confirm it is not a party.
+	if sys.ID == buyer.ID || sys.ID == provider.ID {
+		t.Fatal("test invariant broken: @sys must not be a party to this transaction")
+	}
+	// ListTransactions as @sys must include the transaction.
+	views, err := k.ListTransactions(ctx, sys.ID, kernel.TxFilter{Limit: 20})
+	if err != nil {
+		t.Fatalf("ListTransactions as @sys: %v", err)
+	}
+	found := false
+	for _, v := range views {
+		if v.ID == reply.TxID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("@sys ListTransactions did not return transaction %s", reply.TxID)
+	}
 }
 
 // Ensure fmt is used.

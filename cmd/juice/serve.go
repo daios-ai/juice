@@ -66,6 +66,55 @@ func runServer(addr string) error {
 
 	srv := &server{kernel: k, log: logger}
 
+	// Auth — rate limited: 5 requests/minute per IP, burst of 10.
+	authLimiter := ipRateLimiter(5.0/60, 10)
+	r.With(authLimiter).Post("/v1/auth/token", srv.postTokenMulti)
+	r.With(authLimiter).Post("/v1/auth/authorize", srv.postAuthorize)
+	r.With(authLimiter).Post("/v1/auth/refresh", srv.postRefresh)
+	r.With(authLimiter).Post("/v1/auth/logout", srv.postLogout)
+
+	// Users — rate limited: 3 requests/minute per IP, burst of 5.
+	r.With(ipRateLimiter(3.0/60, 5)).Post("/v1/users", srv.postUser)
+
+	registerRoutes(r, srv)
+
+	logger.Info("server.start", "addr", addr)
+
+	httpSrv := &http.Server{Addr: addr, Handler: r}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		if err := httpSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
+		}
+		close(serveErr)
+	}()
+
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	select {
+	case err := <-serveErr:
+		return err
+	case <-sigCtx.Done():
+		stop()
+		logger.Info("server.shutdown")
+		shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return httpSrv.Shutdown(shutCtx)
+	}
+}
+
+// ---- server ----
+
+type server struct {
+	kernel *kernel.Kernel
+	log    *log.Logger
+}
+
+// registerRoutes mounts all application routes onto r for the given server.
+// Rate-limited routes (auth, user creation) are registered by the caller before this call.
+func registerRoutes(r chi.Router, srv *server) {
 	// Health (unauthenticated).
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -76,16 +125,6 @@ func runServer(addr string) error {
 
 	// Federation call endpoint (unauthenticated; action must be public).
 	r.Post("/v1/federation/call", srv.postFederationCall)
-
-	// Auth — rate limited: 5 requests/minute per IP, burst of 10.
-	authLimiter := ipRateLimiter(5.0/60, 10)
-	r.With(authLimiter).Post("/v1/auth/token", srv.postTokenMulti)
-	r.With(authLimiter).Post("/v1/auth/authorize", srv.postAuthorize)
-	r.With(authLimiter).Post("/v1/auth/refresh", srv.postRefresh)
-	r.With(authLimiter).Post("/v1/auth/logout", srv.postLogout)
-
-	// Users — rate limited: 3 requests/minute per IP, burst of 5.
-	r.With(ipRateLimiter(3.0/60, 5)).Post("/v1/users", srv.postUser)
 
 	// Public action routes — no auth required.
 	r.Get("/v1/actions", srv.getActions)
@@ -135,39 +174,6 @@ func runServer(addr string) error {
 		// Current user.
 		r.Get("/v1/me", srv.getMe)
 	})
-
-	logger.Info("server.start", "addr", addr)
-
-	httpSrv := &http.Server{Addr: addr, Handler: r}
-
-	serveErr := make(chan error, 1)
-	go func() {
-		if err := httpSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-			serveErr <- err
-		}
-		close(serveErr)
-	}()
-
-	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	select {
-	case err := <-serveErr:
-		return err
-	case <-sigCtx.Done():
-		stop()
-		logger.Info("server.shutdown")
-		shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		return httpSrv.Shutdown(shutCtx)
-	}
-}
-
-// ---- server ----
-
-type server struct {
-	kernel *kernel.Kernel
-	log    *log.Logger
 }
 
 // ---- middleware ----
@@ -689,22 +695,6 @@ func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, txs)
 }
 
-// parseActionRef parses "@owner/name" into ownerHandle and actionName.
-func parseActionRef(ref string) (string, string, error) {
-	if !strings.HasPrefix(ref, "@") {
-		return "", "", fmt.Errorf("action must be @owner/name")
-	}
-	idx := strings.Index(ref[1:], "/")
-	if idx < 0 {
-		return "", "", fmt.Errorf("action must be @owner/name")
-	}
-	ownerHandle := ref[:idx+1]
-	actionName := ref[idx+2:]
-	if ownerHandle == "" || actionName == "" {
-		return "", "", fmt.Errorf("action must be @owner/name")
-	}
-	return ownerHandle, actionName, nil
-}
 
 func (s *server) getTransaction(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -1043,9 +1033,9 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ownerHandle, actionName, err := parseActionRef(actionParam)
+	ownerHandle, actionName, err := kernel.ParseActionRef(actionParam)
 	if err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap(err.Error()))
+		writeErr(w, err)
 		return
 	}
 

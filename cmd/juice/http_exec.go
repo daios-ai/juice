@@ -173,16 +173,17 @@ func (e *httpActionExecutor) FetchURL(ctx context.Context, rawURL string) ([]byt
 	return body, nil
 }
 
-func (e *httpActionExecutor) Execute(ctx context.Context, source string, args map[string]any) (map[string]any, error) {
-	if strings.HasPrefix(strings.TrimSpace(source), "{") {
-		return e.executeOpenAPI(ctx, source, args)
+func (e *httpActionExecutor) Execute(ctx context.Context, action *kernel.Action, args map[string]any) (map[string]any, error) {
+	var src kernel.OpenAPISource
+	if json.Unmarshal([]byte(action.Source), &src) == nil && src.Type == "openapi" {
+		return e.executeOpenAPI(ctx, &src, args)
 	}
 	body, err := json.Marshal(args)
 	if err != nil {
 		return nil, kernel.ErrInvalidInput.Wrap("could not serialize args")
 	}
 	headers := map[string]string{"Content-Type": "application/json"}
-	respBody, status, err := doHTTP(ctx, http.MethodPost, source, headers, strings.NewReader(string(body)), e.timeout, e.allowLocal)
+	respBody, status, err := doHTTP(ctx, http.MethodPost, action.Source, headers, strings.NewReader(string(body)), e.timeout, e.allowLocal)
 	if err != nil {
 		return nil, err
 	}
@@ -196,12 +197,7 @@ func (e *httpActionExecutor) Execute(ctx context.Context, source string, args ma
 	return result, nil
 }
 
-func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, source string, args map[string]any) (map[string]any, error) {
-	var src kernel.OpenAPISource
-	if err := json.Unmarshal([]byte(source), &src); err != nil {
-		return nil, kernel.ErrInvalidInput.Wrap("invalid OpenAPI source")
-	}
-
+func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, src *kernel.OpenAPISource, args map[string]any) (map[string]any, error) {
 	path := src.Path
 	queryVals := url.Values{}
 	bodyArgs := map[string]any{}

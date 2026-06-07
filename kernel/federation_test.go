@@ -754,3 +754,92 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 		t.Error("expected Valid=false for tampered receipt")
 	}
 }
+
+// TestVerifyRemoteReceiptAfterProxyDeleted verifies that VerifyRemoteReceipt still
+// returns valid:true after the local remote_proxy action has been soft-deleted.
+func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sys := setupSys(t, nil, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	fake := &fakeFederationHTTP{}
+	k := newTestKernelWithHTTP(st, fake)
+
+	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@del-peer", base64.RawURLEncoding.EncodeToString(pub), "https://del.example.com")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	m := kernel.ActionManifest{
+		ActionID: "del-action-1", OwnerHandle: "@del-peer", Name: "dact",
+		Kind: kernel.KindHTTP, Price: 0, Description: "d",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+	}
+	msig, _ := kernel.SignManifest(priv, &m)
+	m.Signature = msig
+	result, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	a := result.Created[0]
+	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	pubFed := true
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubFed}); err != nil {
+		t.Fatal(err)
+	}
+
+	caller := setupUser(t, st, "@del-caller", 0)
+	p, _ := setupProcess(t, k, caller.ID, 0)
+
+	remoteReceipt := &kernel.Receipt{
+		ID: uuid.New().String(), IssuerUserID: "rs",
+		TxID: "del-tx-1", TraceID: "t1", ActionID: m.ActionID,
+		CallerUserID: "c1", ProcessID: "p1",
+		ArgsHash:  jcsHashForTest(t, `{}`),
+		ReplyHash: jcsHashForTest(t, `{}`),
+		Status: kernel.TxSuccess, Gross: 0, Net: 0, Fee: 0,
+		StartedAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
+	}
+	remoteReceipt.Signature = signReceiptForTest(t, priv, remoteReceipt)
+	receiptBytes, _ := json.Marshal(remoteReceipt)
+	fake.receiptJSON = string(receiptBytes)
+
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: caller.ID, ProcessID: p.ID,
+		TargetUserID: "@del-peer", ActionName: "dact", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	_ = reply
+
+	// Soft-delete the proxy action.
+	if err := k.DeleteAction(ctx, sys.ID, a.ID); err != nil {
+		t.Fatalf("DeleteAction: %v", err)
+	}
+
+	// VerifyRemoteReceipt must still work after deletion.
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID})
+	if len(txs) == 0 {
+		t.Fatal("no transactions found")
+	}
+	v, err := k.VerifyRemoteReceipt(ctx, caller.ID, txs[0].ID)
+	if err != nil {
+		t.Fatalf("VerifyRemoteReceipt after deletion: %v", err)
+	}
+	if !v.Checks.ReceiptHash {
+		t.Error("expected ReceiptHash check=true after proxy deletion")
+	}
+	if !v.Checks.Signature {
+		t.Error("expected Signature check=true after proxy deletion")
+	}
+	if !v.Checks.ActionID {
+		t.Error("expected ActionID check=true after proxy deletion")
+	}
+	if !v.Valid {
+		t.Error("expected Valid=true after proxy deletion")
+	}
+}

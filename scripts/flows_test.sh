@@ -2162,6 +2162,13 @@ spec = {
                 "operationId": "greet",
                 "description": "Say hello",
                 "x-juice-price": 5,
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {"type": "object", "properties": {"name": {"type": "string", "description": "the name to greet"}}}
+                        }
+                    }
+                },
                 "responses": {
                     "200": {
                         "content": {
@@ -2251,6 +2258,13 @@ spec = {
                 "operationId": "greet",
                 "description": desc,
                 "x-juice-price": 5,
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {"type": "object", "properties": {"name": {"type": "string", "description": "the name to greet"}}}
+                        }
+                    }
+                },
                 "responses": {
                     "200": {
                         "content": {
@@ -2292,6 +2306,13 @@ spec = {
                 "operationId": "greet",
                 "description": desc,
                 "x-juice-price": 5,
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {"type": "object", "properties": {"name": {"type": "string", "description": "the name to greet"}}}
+                        }
+                    }
+                },
                 "responses": {
                     "200": {
                         "content": {
@@ -2368,6 +2389,13 @@ spec = {
             "post": {
                 "operationId": "greet",
                 "description": "Say hello",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {"type": "object", "properties": {"name": {"type": "string", "description": "the name to greet"}}}
+                        }
+                    }
+                },
                 "responses": {
                     "200": {
                         "content": {
@@ -2381,6 +2409,13 @@ spec = {
             "post": {
                 "operationId": "farewell",
                 "description": "Say goodbye",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {"type": "object", "properties": {"name": {"type": "string", "description": "the name to say goodbye to"}}}
+                        }
+                    }
+                },
                 "responses": {
                     "200": {
                         "content": {

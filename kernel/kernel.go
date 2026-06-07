@@ -955,9 +955,15 @@ func (k *Kernel) canReadTransaction(ctx context.Context, callerID string, tx *Tr
 }
 
 // ListTransactions returns transactions visible to callerID, matching the filter, each with an embedded rating.
-// callerID is always applied as PartyUserID — the kernel enforces CanReadTransaction at the list boundary.
+// Superusers see all transactions; ordinary callers are restricted to transactions where they are a party.
 func (k *Kernel) ListTransactions(ctx context.Context, callerID string, filter TxFilter) ([]*TransactionView, error) {
-	filter.PartyUserID = callerID
+	u, err := k.requireActiveUser(ctx, callerID)
+	if err != nil {
+		return nil, err
+	}
+	if !k.isUserSuperuser(ctx, u) {
+		filter.PartyUserID = callerID
+	}
 	txs, err := k.store.ListTransactions(ctx, filter)
 	if err != nil {
 		return nil, err

@@ -260,12 +260,10 @@ func resolveActionRefs(ctx context.Context, description string, store kernel.Sto
 			continue
 		}
 		seen[ref] = true
-		idx := strings.Index(ref[1:], "/")
-		if idx < 0 {
+		ownerHandle, actionName, parseErr := kernel.ParseActionRef(ref)
+		if parseErr != nil {
 			continue
 		}
-		ownerHandle := ref[:idx+1]
-		actionName := ref[idx+2:]
 		owner, err := store.ReadUserByHandle(ctx, ownerHandle)
 		if err != nil {
 			continue

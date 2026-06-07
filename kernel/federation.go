@@ -39,12 +39,10 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 		return nil, ErrInternal.Wrapf("decode remote receipt: %v", err)
 	}
 
-	// Resolve the remote kernel's public key via the action's owner.
-	action, err := k.store.ReadAction(ctx, tx.ActionID)
-	if err != nil {
-		return nil, err
-	}
-	owner, err := k.store.ReadUser(ctx, action.OwnerUserID)
+	// Resolve the remote kernel's public key from the transaction's target user (the remote peer).
+	// Use tx.TargetUserID and tx.RemoteActionID directly so verification works even after the
+	// local proxy action is soft-deleted.
+	owner, err := k.store.ReadUser(ctx, tx.TargetUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -69,10 +67,10 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	}
 
 	// 3–9. Field equality checks.
-	// For remote_proxy actions, the receipt carries the remote action's ID, not the local proxy ID.
-	// Match against RemoteActionID when present, falling back to the local action ID.
-	if action.RemoteActionID != "" {
-		checks.ActionID = r.ActionID == action.RemoteActionID
+	// The receipt carries the remote action's ID, not the local proxy ID.
+	// Use the remote_action_id captured in the transaction at commit time.
+	if tx.RemoteActionID != "" {
+		checks.ActionID = r.ActionID == tx.RemoteActionID
 	} else {
 		checks.ActionID = r.ActionID == tx.ActionID
 	}

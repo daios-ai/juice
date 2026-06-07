@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/daios-ai/juice/kernel"
 )
 
 func TestValidateResolvedIPBlocked(t *testing.T) {
@@ -95,7 +97,7 @@ func TestHTTPActionExecutorSuccess(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), srv.URL, map[string]any{"msg": "hello"})
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: srv.URL}, map[string]any{"msg": "hello"})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -111,7 +113,7 @@ func TestHTTPActionExecutorNon200(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	_, err := exec.Execute(context.Background(), srv.URL, map[string]any{})
+	_, err := exec.Execute(context.Background(), &kernel.Action{Source: srv.URL}, map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for non-200 response")
 	}
@@ -124,7 +126,7 @@ func TestHTTPActionExecutorInvalidJSON(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	_, err := exec.Execute(context.Background(), srv.URL, map[string]any{})
+	_, err := exec.Execute(context.Background(), &kernel.Action{Source: srv.URL}, map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for non-JSON response")
 	}
@@ -142,15 +144,15 @@ func TestExecuteOpenAPIGet(t *testing.T) {
 	defer srv.Close()
 
 	src := map[string]any{
-		"type":    "openapi",
+		"type":     "openapi",
 		"base_url": srv.URL,
-		"method":  "GET",
-		"path":    "/greet",
+		"method":   "GET",
+		"path":     "/greet",
 	}
 	srcJSON, _ := json.Marshal(src)
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), string(srcJSON), map[string]any{"name": "world"})
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"name": "world"})
 	if err != nil {
 		t.Fatalf("Execute OpenAPI GET: %v", err)
 	}
@@ -172,15 +174,15 @@ func TestExecuteOpenAPIPost(t *testing.T) {
 	defer srv.Close()
 
 	src := map[string]any{
-		"type":    "openapi",
+		"type":     "openapi",
 		"base_url": srv.URL,
-		"method":  "POST",
-		"path":    "/send",
+		"method":   "POST",
+		"path":     "/send",
 	}
 	srcJSON, _ := json.Marshal(src)
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), string(srcJSON), map[string]any{"msg": "hello"})
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"msg": "hello"})
 	if err != nil {
 		t.Fatalf("Execute OpenAPI POST: %v", err)
 	}
@@ -207,7 +209,7 @@ func TestExecuteOpenAPIPathParam(t *testing.T) {
 	srcJSON, _ := json.Marshal(src)
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), string(srcJSON), map[string]any{"id": "42", "filter": "active"})
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"id": "42", "filter": "active"})
 	if err != nil {
 		t.Fatalf("Execute OpenAPI path param: %v", err)
 	}
@@ -250,7 +252,7 @@ func TestExecuteOpenAPIPostQueryParam(t *testing.T) {
 	srcJSON, _ := json.Marshal(src)
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), string(srcJSON), map[string]any{
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{
 		"format": "json",
 		"data":   "hello",
 	})

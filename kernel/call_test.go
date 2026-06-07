@@ -1437,3 +1437,36 @@ func TestZeroPriceCallOnClosedProcessReturnsErrInvalidState(t *testing.T) {
 		t.Errorf("zero-price call on closed process: want ErrInvalidState, got %v", err)
 	}
 }
+
+func TestParseActionRef(t *testing.T) {
+	cases := []struct {
+		input       string
+		wantOwner   string
+		wantName    string
+		wantErr     bool
+	}{
+		{"@alice/greet", "@alice", "greet", false},
+		{"@alice/greet/subname", "@alice", "greet/subname", false}, // names may contain /
+		{"@bob/", "", "", true},                                     // empty name
+		{"alice/greet", "", "", true},                               // missing @
+		{"@alice", "", "", true},                                    // missing /
+		{"@/greet", "", "", true},                                   // empty owner
+		{"", "", "", true},                                          // empty string
+	}
+	for _, c := range cases {
+		owner, name, err := kernel.ParseActionRef(c.input)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("ParseActionRef(%q): expected error, got owner=%q name=%q", c.input, owner, name)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("ParseActionRef(%q): unexpected error: %v", c.input, err)
+			continue
+		}
+		if owner != c.wantOwner || name != c.wantName {
+			t.Errorf("ParseActionRef(%q): got (%q, %q), want (%q, %q)", c.input, owner, name, c.wantOwner, c.wantName)
+		}
+	}
+}

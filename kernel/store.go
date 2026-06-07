@@ -33,7 +33,7 @@ type ScriptExecutor interface {
 // HTTPExecutor calls an external HTTP action endpoint.
 // kernel/ defines this interface; cmd/juice provides the concrete implementation.
 type HTTPExecutor interface {
-	Execute(ctx context.Context, source string, args map[string]any) (map[string]any, error)
+	Execute(ctx context.Context, action *Action, args map[string]any) (map[string]any, error)
 }
 
 // URLFetcher retrieves the body of a URL. Used for OpenAPI ownership proof (well-known challenge).

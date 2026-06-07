@@ -105,6 +105,7 @@ type Transaction struct {
 	TargetUserID      string          `json:"target_user_id"`
 	ActionID          string          `json:"action_id"`
 	ActionName        string          `json:"action_name"`
+	RemoteActionID    string          `json:"remote_action_id,omitempty"` // remote action ID on the far kernel; empty for local calls
 	ArgsJSON          json.RawMessage `json:"args"`
 	ReplyJSON         json.RawMessage `json:"result"`
 	Status            TxStatus        `json:"status"`
@@ -112,7 +113,7 @@ type Transaction struct {
 	Net               int64           `json:"net"`
 	Fee               int64           `json:"fee"`
 	Reason            string          `json:"reason"`
-	RemoteReceiptHash string          `json:"remote_receipt_hash,omitempty"` // SHA-256 of the remote receipt JSON for cross-kernel calls; empty for local
+	RemoteReceiptHash string          `json:"remote_receipt_hash,omitempty"` // SHA-256 of the remote receipt JSON; empty for local calls
 	RemoteReceiptJSON string          `json:"remote_receipt_json,omitempty"` // full receipt JSON from the remote kernel; empty for local calls
 	StartedAt         time.Time       `json:"started_at"`
 	EndedAt           time.Time       `json:"ended_at"`
