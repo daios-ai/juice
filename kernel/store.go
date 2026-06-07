@@ -81,8 +81,8 @@ type TxFilter struct {
 	CallerUserID string
 	TargetUserID  string
 	ProcessID     string
-	// PartyUserID matches transactions where the user is a party: buyer
-	// (owner_user_id) or seller (owner of the called action). See §9.4.
+	// PartyUserID matches transactions where the user is any party:
+	// process owner (owner_user_id), call caller (caller_user_id), or action owner (target_user_id).
 	PartyUserID string
 	Limit       int
 	Offset      int
@@ -132,13 +132,6 @@ type Store interface {
 	ReadProcess(ctx context.Context, id string) (*Process, error)
 	ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error)
 	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
-
-	// GrantProcessAuthority grants explicit call authority over a process to a caller.
-	GrantProcessAuthority(ctx context.Context, callerID, processID string) error
-	// RevokeProcessAuthority removes explicit call authority from a caller.
-	RevokeProcessAuthority(ctx context.Context, callerID, processID string) error
-	// CheckProcessAuthority returns true if callerID has explicit authority over processID.
-	CheckProcessAuthority(ctx context.Context, callerID, processID string) (bool, error)
 
 	// BeginCall atomically locks price credits in the process and creates the child trace.
 	// Either both succeed or neither does. Returns ErrInsufficientFunds if the process

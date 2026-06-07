@@ -97,7 +97,6 @@ Check call preconditions in this exact order and return the typed error for the 
 2. process exists and is open
 3. C may use process:
    C = P, or
-   explicit process authority, or
    supplied parent trace has action_owner_id = C
 4. action exists
 5. CanCall(P, action)
@@ -107,8 +106,6 @@ Check call preconditions in this exact order and return the typed error for the 
 ```
 
 Precondition 3 controls spending authority over the process. Precondition 5 controls action access by the process owner.
-
-Explicit process authority is a reserved kernel relation. Version 0.2 defines no durable grant object for it. Until such an object is specified, implementations must treat explicit process authority as false except where trace-scoped authority applies.
 
 Trace relation:
 
@@ -392,10 +389,10 @@ Transaction access uses historical transaction fields:
 
 ```text
 CanReadTransaction(u,t) :=
-  u = t.owner_user_id ∨ u = t.target_user_id ∨ IsSuperuser(u)
+  u = t.owner_user_id ∨ u = t.caller_user_id ∨ u = t.target_user_id ∨ IsSuperuser(u)
 ```
 
-Buyer is `t.owner_user_id`. Seller is `t.target_user_id`. This remains valid after action deletion because the seller was captured at transaction creation. Receipts remain internal settlement/federation artifacts; there is no provider-receipt endpoint. Every credit to an action owner must be reconstructible from transactions readable by that action owner.
+All three transaction parties are identified by captured fields: `owner_user_id` (payer), `caller_user_id` (call caller), `target_user_id` (payee). These remain valid after action deletion because all parties were captured at transaction creation. Receipts remain internal settlement/federation artifacts; there is no provider-receipt endpoint. Every credit to an action owner must be reconstructible from transactions readable by that action owner.
 
 ## 12. Authentication, bootstrap, deposits
 
@@ -543,11 +540,11 @@ Endpoint rules:
 | `POST /v1/call`                                  | requires `args`; `{}` valid; absent gives `ErrInvalidInput`; action is `@owner/name`                            |
 | `POST /v1/events/emit`                           | source user is request user; rejects `source_user_id`; requires `args`; returns created event IDs or empty list |
 | `POST /v1/auth/logout`                           | refresh token body; missing/revoked gives `ErrUnauthenticated`                                                  |
-| `GET /v1/transactions`                           | buyer/seller transactions under `CanReadTransaction`                                                            |
+| `GET /v1/transactions`                           | transactions visible to the authenticated user under `CanReadTransaction`                                       |
 | `GET /v1/transactions/{id}`                      | full detail to parties; `ErrNotFound` to non-parties                                                            |
 | `GET /v1/transactions/{id}/receipt-verification` | parties; remote verification; local tx gives `ErrInvalidState`                                                  |
 
-Transaction list/detail include `rating: {"value":0|1,"note":string|null}` or `null`, visible to buyer and seller.
+Transaction list/detail include `rating: {"value":0|1,"note":string|null}` or `null`, visible to all transaction parties.
 
 Admin commands require configured `@sys`, reject non-superusers with `ErrUnauthorized`, stay outside `Call()`, and register no `/v1/admin/*` routes.
 
@@ -712,8 +709,8 @@ API owner unimports an OpenAPI document; matching actions are deactivated and hi
 remote kernel is added, a signed manifest is imported, a caller executes the proxy through Call(), and local stats remain separate from manifest stats
 remote proxy is unimported; the local proxy is deactivated and the remote kernel is unaffected
 caller executes a paid action multiple times; the action owner lists transactions for their action and the sum of transaction net amounts equals the total credits received by the owner
-caller rates a transaction with a note; the note and rating value appear in the transaction detail and list responses for both buyer and seller; an unrated transaction returns null for the rating field
-caller executes a remote proxy action; buyer and seller both call verify-receipt; all checks pass and valid is true
+caller rates a transaction with a note; the note and rating value appear in the transaction detail and list responses for all transaction parties; an unrated transaction returns null for the rating field
+caller executes a remote proxy action; all transaction parties call verify-receipt; all checks pass and valid is true
 caller executes @sys/make; worker subcalls record owner_user_id = requester process owner, caller_user_id = @sys, and target_user_id = worker action owner; registered action is owned by the caller of the @sys/make call
 ```
 

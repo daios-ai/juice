@@ -26,8 +26,8 @@ func RegisterMakeHandler(k *kernel.Kernel, deps MakeDeps, sdk string, maxSteps i
 	if maxSteps <= 0 {
 		maxSteps = 5
 	}
-	k.RegisterNativeHandler("make", func(ctx context.Context, args map[string]any, targetID, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
-		return executeMake(ctx, args, targetID, ownerUserID, processID, parentTraceID, k, deps, sdk, maxSteps)
+	k.RegisterNativeHandler("make", func(ctx context.Context, args map[string]any, targetID, callerID, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
+		return executeMake(ctx, args, targetID, callerID, ownerUserID, processID, parentTraceID, k, deps, sdk, maxSteps)
 	})
 }
 
@@ -74,8 +74,9 @@ func (h *makeTestHost) Emit(_ context.Context, _ string, _ []byte) error { retur
 func (h *makeTestHost) Log(_ context.Context, _, _ string) error         { return nil }
 
 // executeMake implements the full @sys/make 10-step pipeline.
-// targetID is make's action owner (@sys); ownerUserID is the process owner (requester).
-func executeMake(ctx context.Context, args map[string]any, targetID, ownerUserID, processID, parentTraceID string, k *kernel.Kernel, deps MakeDeps, sdk string, maxSteps int) (map[string]any, error) {
+// targetID is make's action owner (@sys); callerID is the call caller who will own the synthesized action;
+// ownerUserID is the process owner (payer).
+func executeMake(ctx context.Context, args map[string]any, targetID, callerID, ownerUserID, processID, parentTraceID string, k *kernel.Kernel, deps MakeDeps, sdk string, maxSteps int) (map[string]any, error) {
 	if deps.Compiler == nil {
 		return nil, kernel.ErrInvalidState.Wrap("source compiler not configured")
 	}
@@ -147,12 +148,12 @@ func executeMake(ctx context.Context, args map[string]any, targetID, ownerUserID
 			}
 		}
 
-		// Step 10: register and activate the action under the process owner's account.
+		// Step 10: register and activate the action under the call caller's account.
 		if allPassed {
 			inSchema := sanitizeSchemaForRegistration(contract.InputSchema)
 			outSchema := sanitizeSchemaForRegistration(contract.OutputSchema)
-			action, createErr := k.CreateAction(ctx, ownerUserID, kernel.CreateActionRequest{
-				OwnerUserID:  ownerUserID,
+			action, createErr := k.CreateAction(ctx, callerID, kernel.CreateActionRequest{
+				OwnerUserID:  callerID,
 				Name:         contract.Name,
 				Kind:         kernel.KindWasm,
 				Price:        0,
@@ -168,7 +169,7 @@ func executeMake(ctx context.Context, args map[string]any, targetID, ownerUserID
 					Tests:       tests,
 				})
 			}
-			if activateErr := k.SetActive(ctx, ownerUserID, action.ID, true); activateErr != nil {
+			if activateErr := k.SetActive(ctx, callerID, action.ID, true); activateErr != nil {
 				return marshalMakeResult(&MakeResult{
 					Status:      "failure",
 					Diagnostics: append(diagnostics, "activation failed: "+activateErr.Error()),

@@ -417,8 +417,6 @@ func TestSuspendedSubjectRejectedByProcessAndListenerOps(t *testing.T) {
 
 	check("FundProcess", k.FundProcess(ctx, victim.ID, p.ID, 10))
 	check("EndProcess", k.EndProcess(ctx, victim.ID, p.ID))
-	check("GrantProcessAuthority", k.GrantProcessAuthority(ctx, victim.ID, other.ID, p.ID))
-	check("RevokeProcessAuthority", k.RevokeProcessAuthority(ctx, victim.ID, other.ID, p.ID))
 
 	// Create a listener owned by @other2 to test listener ops.
 	target := setupAction(t, st, other.ID, "tgt", 0)

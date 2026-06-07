@@ -47,8 +47,8 @@ func DefaultConfig() Config {
 func (k *Kernel) AllowsLocalSources() bool { return k.cfg.AllowLocalSources }
 
 // NativeFunc is the signature for a registered native action handler.
-// targetID is the action's owner; ownerUserID is the process owner.
-type NativeFunc func(ctx context.Context, args map[string]any, targetID, ownerUserID, processID, parentTraceID string) (map[string]any, error)
+// targetID is the action's owner; callerID is the call caller; ownerUserID is the process owner.
+type NativeFunc func(ctx context.Context, args map[string]any, targetID, callerID, ownerUserID, processID, parentTraceID string) (map[string]any, error)
 
 // Kernel is the central service object.
 // It holds all dependencies and exposes operations to both the CLI and HTTP server.
@@ -923,46 +923,6 @@ func (k *Kernel) EndProcess(ctx context.Context, callerID, processID string) err
 	return nil
 }
 
-// GrantProcessAuthority grants another user explicit authority to use a process.
-// Only the process owner may grant this right.
-func (k *Kernel) GrantProcessAuthority(ctx context.Context, operatorID, callerID, processID string) error {
-	if _, err := k.requireActiveUser(ctx, operatorID); err != nil {
-		return err
-	}
-	p, err := k.store.ReadProcess(ctx, processID)
-	if err != nil {
-		return err
-	}
-	if p.OwnerUserID != operatorID {
-		return ErrUnauthorized.Wrap("only the process owner may grant process authority")
-	}
-	if err := k.store.GrantProcessAuthority(ctx, callerID, processID); err != nil {
-		return err
-	}
-	k.log.With(ctx).Info("process.authority_granted", "process_id", processID, "subject_id", callerID)
-	return nil
-}
-
-// RevokeProcessAuthority removes explicit call authority over a process from a user.
-// Only the process owner may revoke.
-func (k *Kernel) RevokeProcessAuthority(ctx context.Context, operatorID, callerID, processID string) error {
-	if _, err := k.requireActiveUser(ctx, operatorID); err != nil {
-		return err
-	}
-	p, err := k.store.ReadProcess(ctx, processID)
-	if err != nil {
-		return err
-	}
-	if p.OwnerUserID != operatorID {
-		return ErrUnauthorized.Wrap("only the process owner may revoke process authority")
-	}
-	if err := k.store.RevokeProcessAuthority(ctx, callerID, processID); err != nil {
-		return err
-	}
-	k.log.With(ctx).Info("process.authority_revoked", "process_id", processID, "subject_id", callerID)
-	return nil
-}
-
 // ReadProcess returns a process by ID, requiring the caller to be its owner.
 func (k *Kernel) ReadProcess(ctx context.Context, callerID, id string) (*Process, error) {
 	p, err := k.store.ReadProcess(ctx, id)
@@ -992,13 +952,10 @@ func (k *Kernel) ReadTransaction(ctx context.Context, callerID, txID string) (*T
 	return k.toTransactionView(ctx, tx), nil
 }
 
-// canReadTransaction reports whether callerID is a party to tx — the buyer
-// (owner_user_id) or the seller (owner of the called action) — or a superuser. See §9.4.
+// canReadTransaction reports whether callerID is a party to tx — process owner, call caller,
+// or action owner — or a superuser. All checks use immutable transaction fields.
 func (k *Kernel) canReadTransaction(ctx context.Context, callerID string, tx *Transaction) bool {
-	if tx.OwnerUserID == callerID {
-		return true
-	}
-	if a, err := k.store.ReadAction(ctx, tx.ActionID); err == nil && a != nil && a.OwnerUserID == callerID {
+	if tx.OwnerUserID == callerID || tx.CallerUserID == callerID || tx.TargetUserID == callerID {
 		return true
 	}
 	if u, err := k.store.ReadUser(ctx, callerID); err == nil && u != nil && k.isUserSuperuser(ctx, u) {

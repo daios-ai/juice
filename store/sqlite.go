@@ -1089,8 +1089,8 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 		args = append(args, f.ProcessID)
 	}
 	if f.PartyUserID != "" {
-		q += ` AND (owner_user_id=? OR action_id IN (SELECT id FROM actions WHERE owner_user_id=?))`
-		args = append(args, f.PartyUserID, f.PartyUserID)
+		q += ` AND (owner_user_id=? OR caller_user_id=? OR target_user_id=?)`
+		args = append(args, f.PartyUserID, f.PartyUserID, f.PartyUserID)
 	}
 	q += ` ORDER BY started_at DESC`
 	limit := f.Limit
@@ -1814,33 +1814,6 @@ func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating,
 	r.RatedReceiptID = ratedReceiptID
 	r.CreatedAt = strToTime(createdAt)
 	return &r, nil
-}
-
-// ---- Process authority ----
-
-func (s *DB) GrantProcessAuthority(ctx context.Context, callerUserID, processID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO process_authorities (process_id, caller_user_id, created_at) VALUES (?,?,?)`,
-		processID, callerUserID, timeToStr(time.Now().UTC()),
-	)
-	return dbErr(err, "grant process authority")
-}
-
-func (s *DB) RevokeProcessAuthority(ctx context.Context, callerUserID, processID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM process_authorities WHERE process_id=? AND caller_user_id=?`,
-		processID, callerUserID,
-	)
-	return dbErr(err, "revoke process authority")
-}
-
-func (s *DB) CheckProcessAuthority(ctx context.Context, callerUserID, processID string) (bool, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM process_authorities WHERE process_id=? AND caller_user_id=?`,
-		processID, callerUserID,
-	).Scan(&n)
-	return n > 0, dbErr(err, "check process authority")
 }
 
 // ---- Idempotency ----

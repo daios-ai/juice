@@ -1284,6 +1284,28 @@ func TestListTransactionsByParty(t *testing.T) {
 	if len(none) != 0 {
 		t.Errorf("non-party should see 0 txs, got %d", len(none))
 	}
+
+	// Caller distinct from process owner: caller_user_id should also grant access.
+	distinctCaller := newUser("@tx-party-distinct-caller", 0)
+	_ = db.CreateUser(ctx, distinctCaller)
+	txDistinct := &kernel.Transaction{
+		ID:            "party-tx-distinct",
+		ProcessID:     p.ID,
+		TraceID:       "party-tx-distinct-tr",
+		ParentTraceID: "party-tx-distinct-tr",
+		OwnerUserID:   caller.ID,    // process owner
+		CallerUserID: distinctCaller.ID, // distinct call caller
+		TargetUserID:  owner.ID,
+		ActionID:      action.ID,
+		Status:        kernel.TxSuccess,
+		StartedAt:     time.Now().UTC(),
+		EndedAt:       time.Now().UTC(),
+	}
+	_ = db.createTransaction(ctx, txDistinct)
+	asDistinctCaller, _ := db.ListTransactions(ctx, kernel.TxFilter{PartyUserID: distinctCaller.ID, Limit: 10})
+	if len(asDistinctCaller) != 1 || asDistinctCaller[0].ID != "party-tx-distinct" {
+		t.Errorf("distinct caller should see their transaction, got %d txs", len(asDistinctCaller))
+	}
 }
 
 // ---- ReadUserByPublicKey tests ----

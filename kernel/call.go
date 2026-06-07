@@ -66,21 +66,17 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInvalidState.Wrap("process is closed")
 	}
 
-	// 3. Subject may use this process: is the owner, holds explicit process authority,
-	// or owns the action currently executing in the parent trace (trace-scoped subcall authority).
+	// 3. Subject may use this process: is the owner, or owns the action executing in the parent trace.
 	if process.OwnerUserID != req.CallerID {
-		authorized, authErr := k.store.CheckProcessAuthority(ctx, req.CallerID, req.ProcessID)
-		if authErr != nil {
-			return nil, ErrInternal.Wrapf("process authority check failed: %v", authErr)
-		}
-		if !authorized && req.ParentTraceID != "" {
+		authorized := false
+		if req.ParentTraceID != "" {
 			parent, parentErr := k.store.ReadTrace(ctx, req.ParentTraceID)
-			if parentErr == nil && parent.ProcessID == req.ProcessID && parent.ActionOwnerID == req.CallerID {
+			if parentErr == nil && parent.ActionOwnerID == req.CallerID {
 				authorized = true
 			}
 		}
 		if !authorized {
-			return nil, ErrUnauthorized.Wrap("subject is not the process owner")
+			return nil, ErrUnauthorized.Wrap("caller is not the process owner")
 		}
 	}
 
@@ -188,7 +184,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		remoteReceiptHash string
 		execErr           error
 	)
-	reply, subCost, remoteReceiptHash, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID, process.OwnerUserID)
+	reply, subCost, remoteReceiptHash, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID, req.CallerID, process.OwnerUserID)
 	if remoteReceiptHash != "" {
 		tx.RemoteReceiptHash = sha256Hex(remoteReceiptHash)
 		tx.RemoteReceiptJSON = remoteReceiptHash
@@ -266,8 +262,8 @@ func canCall(ownerID string, action *Action) bool {
 // execute dispatches to the correct execution backend.
 // Returns (result, subCost, remoteReceiptHash, error). remoteReceiptHash is non-empty only
 // for successful KindRemoteProxy calls and holds the raw receipt JSON from the remote kernel.
-// targetID is the action's owner; ownerUserID is the process owner.
-func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID, ownerUserID string) (map[string]any, int64, string, error) {
+// targetID is the action's owner; callerID is the call caller; ownerUserID is the process owner.
+func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID, callerID, ownerUserID string) (map[string]any, int64, string, error) {
 	switch action.Kind {
 	case KindHTTP:
 		if k.http == nil {
@@ -279,7 +275,7 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 		res, cost, err := k.executeWasm(ctx, action, args, trace, targetID)
 		return res, cost, "", err
 	case KindNative:
-		res, err := k.executeNative(ctx, action, args, targetID, ownerUserID, trace.ProcessID, trace.ID)
+		res, err := k.executeNative(ctx, action, args, targetID, callerID, ownerUserID, trace.ProcessID, trace.ID)
 		return res, 0, "", err
 	case KindRemoteProxy:
 		if fe, ok := k.http.(FederationExecutor); ok {
@@ -294,12 +290,12 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 }
 
 // executeNative dispatches to a registered native action handler.
-func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any, targetID, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
+func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any, targetID, callerID, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
 	fn, ok := k.nativeHandlers[action.Name]
 	if !ok {
 		return nil, ErrInvalidState.Wrapf("unknown native action %q", action.Name)
 	}
-	return fn(ctx, args, targetID, ownerUserID, processID, parentTraceID)
+	return fn(ctx, args, targetID, callerID, ownerUserID, processID, parentTraceID)
 }
 
 // executeWasm runs a compiled WASM artifact.

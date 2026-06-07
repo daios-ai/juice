@@ -1077,12 +1077,12 @@ func TestReadTransactionPartyAccess(t *testing.T) {
 		t.Fatalf("Call: %v", err)
 	}
 
-	// Buyer (process owner) and seller (action owner) may both read the full transaction.
+	// Process owner, call caller (same here), and action owner may all read the full transaction.
 	if _, err := k.ReadTransaction(ctx, caller.ID, reply.TxID); err != nil {
-		t.Errorf("buyer ReadTransaction: %v", err)
+		t.Errorf("process owner ReadTransaction: %v", err)
 	}
 	if _, err := k.ReadTransaction(ctx, owner.ID, reply.TxID); err != nil {
-		t.Errorf("seller ReadTransaction: %v", err)
+		t.Errorf("action owner ReadTransaction: %v", err)
 	}
 	if _, err := k.ReadTransaction(ctx, su.ID, reply.TxID); err != nil {
 		t.Errorf("superuser ReadTransaction: %v", err)
@@ -1556,92 +1556,6 @@ func TestEmitEventSubjectMismatchRejected(t *testing.T) {
 	_, err := k.EmitEvent(ctx, userA.ID, userB.ID, "test-event", nil, "")
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized when subject != sourceUser, got %v", err)
-	}
-}
-
-// ---- Process authority tests ----
-
-func TestGrantProcessAuthorityAllowsCallByDelegate(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "@pa-owner", 100)
-	delegate := setupUser(t, st, "@pa-delegate", 0)
-	target := setupUser(t, st, "@pa-target", 0)
-	// Public wasm action so delegate passes CanCall check (precondition #6).
-	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: target.ID, Name: "echo",
-		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0,
-		Source: "wat", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	_ = st.CreateAction(ctx, a)
-
-	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 50)
-
-	// Without authority, delegate cannot use owner's process.
-	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: target.ID, ActionName: "echo", Args: map[string]any{},
-	})
-	if !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("expected ErrUnauthorized before grant, got %v", err)
-	}
-
-	// Grant authority.
-	if err := k.GrantProcessAuthority(ctx, owner.ID, delegate.ID, p.ID); err != nil {
-		t.Fatalf("GrantProcessAuthority: %v", err)
-	}
-
-	_, err = k.Call(ctx, kernel.CallRequest{
-		CallerID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: target.ID, ActionName: "echo", Args: map[string]any{},
-	})
-	if err != nil {
-		t.Errorf("Call with granted process authority: unexpected error: %v", err)
-	}
-}
-
-func TestRevokeProcessAuthorityBlocksDelegate(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "@pa-rev-owner", 100)
-	delegate := setupUser(t, st, "@pa-rev-delegate", 0)
-	target := setupUser(t, st, "@pa-rev-target", 0)
-	setupAction(t, st, target.ID, "echo", 0)
-
-	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 50)
-	if err := k.GrantProcessAuthority(ctx, owner.ID, delegate.ID, p.ID); err != nil {
-		t.Fatalf("GrantProcessAuthority: %v", err)
-	}
-	if err := k.RevokeProcessAuthority(ctx, owner.ID, delegate.ID, p.ID); err != nil {
-		t.Fatalf("RevokeProcessAuthority: %v", err)
-	}
-
-	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: delegate.ID, ProcessID: p.ID, ParentTraceID: root.ID,
-		TargetUserID: "@pa-rev-target", ActionName: "echo", Args: map[string]any{},
-	})
-	if !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("expected ErrUnauthorized after revoke, got %v", err)
-	}
-}
-
-func TestGrantProcessAuthorityRequiresOwner(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "@pa-nonowner", 100)
-	other := setupUser(t, st, "@pa-other", 0)
-
-	p, _, _ := k.StartProcess(ctx, owner.ID, owner.ID, 10)
-
-	err := k.GrantProcessAuthority(ctx, other.ID, other.ID, p.ID)
-	if !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("expected ErrUnauthorized for non-owner grant attempt, got %v", err)
 	}
 }
 
