@@ -53,15 +53,23 @@ func init() {
 	cobra.OnInitialize(initConfig)
 }
 
-// initConfig loads the JSON config file. The path defaults to juice.json
-// in the same directory as --db so that both files stay co-located.
+// initConfig loads the JSON config file and applies JUICE_* environment overrides.
+// The path defaults to juice.json in the same directory as --db so that both
+// files stay co-located. JUICE_DB_PATH overrides the --db flag default.
 func initConfig() {
+	if v := os.Getenv("JUICE_DB_PATH"); v != "" && flagDB == "juice.db" {
+		flagDB = v
+	}
 	path := flagConfig
 	if path == "" {
 		path = filepath.Join(filepath.Dir(flagDB), "juice.json")
 	}
 	cfg, err := LoadOrCreateConfig(path)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		os.Exit(1)
+	}
+	if err := applyEnvOverrides(&cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
 	}

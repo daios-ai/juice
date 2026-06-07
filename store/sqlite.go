@@ -191,11 +191,7 @@ func isDuplicateColumn(err error) bool {
 }
 
 func ignorableMigrationError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return isDuplicateColumn(err) || strings.Contains(msg, "no such column")
+	return isDuplicateColumn(err)
 }
 
 func (s *DB) columnExists(table, column string) bool {
@@ -371,16 +367,16 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 
 // actionCols is the canonical column list for action SELECT statements.
 // Must stay in sync with scanAction/scanActionRow/finishAction.
-const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at`
+const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at`
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.id=?`, id))
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.id=? AND a.deleted_at IS NULL`, id))
 }
 
 func (s *DB) ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.name=?`, ownerID, name))
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.name=? AND a.deleted_at IS NULL`, ownerID, name))
 }
 
 func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
@@ -397,14 +393,15 @@ func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
 }
 
 func (s *DB) DeleteAction(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM actions WHERE id=?`, id)
+	_, err := s.db.ExecContext(ctx, `UPDATE actions SET deleted_at=? WHERE id=? AND deleted_at IS NULL`,
+		timeToStr(time.Now().UTC()), id)
 	return dbErr(err, "delete action")
 }
 
 func (s *DB) ListPublicActions(ctx context.Context, limit, offset int) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
-		 WHERE a.active=1 AND a.public=1
+		 WHERE a.active=1 AND a.public=1 AND a.deleted_at IS NULL
 		 ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list public actions")
@@ -425,7 +422,7 @@ func (s *DB) ListPublicActions(ctx context.Context, limit, offset int) ([]*kerne
 func (s *DB) ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
-		 WHERE a.owner_user_id=?
+		 WHERE a.owner_user_id=? AND a.deleted_at IS NULL
 		 ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, ownerID, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list actions by owner")
@@ -447,7 +444,7 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.deleted_at IS NULL ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list all actions")
 	}
@@ -467,6 +464,7 @@ func (s *DB) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
 		 WHERE a.owner_user_id=?
+		   AND a.deleted_at IS NULL
 		   AND json_valid(a.source)=1
 		   AND json_extract(a.source,'$.type')='openapi'
 		   AND json_extract(a.source,'$.spec_url')=?`,
@@ -489,44 +487,50 @@ func (s *DB) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL
 func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
 	var a kernel.Action
 	var kind, inJSON, outJSON, createdAt, updatedAt string
+	var deletedAt sql.NullString
 	var active, public int
 	err := row.Scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &a.Name, &kind, &active, &public, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.RemoteActionID,
-		&createdAt, &updatedAt)
+		&createdAt, &updatedAt, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("action not found")
 	}
 	if err != nil {
 		return nil, dbErr(err, "read action")
 	}
-	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt)
+	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt, deletedAt)
 }
 
 func (s *DB) scanActionRow(rows *sql.Rows) (*kernel.Action, error) {
 	var a kernel.Action
 	var kind, inJSON, outJSON, createdAt, updatedAt string
+	var deletedAt sql.NullString
 	var active, public int
 	err := rows.Scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &a.Name, &kind, &active, &public, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.RemoteActionID,
-		&createdAt, &updatedAt)
+		&createdAt, &updatedAt, &deletedAt)
 	if err != nil {
 		return nil, dbErr(err, "scan action")
 	}
-	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt)
+	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt, deletedAt)
 }
 
 func (s *DB) ReadActionByOwnerRemoteID(ctx context.Context, ownerID, remoteActionID string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.remote_action_id=? AND a.remote_action_id!=''`,
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.remote_action_id=? AND a.remote_action_id!='' AND a.deleted_at IS NULL`,
 		ownerID, remoteActionID))
 }
 
-func finishAction(a *kernel.Action, kind string, active, public int, inJSON, outJSON, createdAt, updatedAt string) (*kernel.Action, error) {
+func finishAction(a *kernel.Action, kind string, active, public int, inJSON, outJSON, createdAt, updatedAt string, deletedAt sql.NullString) (*kernel.Action, error) {
 	a.Kind = kernel.ActionKind(kind)
 	a.Active = active != 0
 	a.Public = public != 0
 	a.CreatedAt = strToTime(createdAt)
 	a.UpdatedAt = strToTime(updatedAt)
+	if deletedAt.Valid {
+		t := strToTime(deletedAt.String)
+		a.DeletedAt = &t
+	}
 	if err := json.Unmarshal([]byte(inJSON), &a.InputSchema); err != nil {
 		a.InputSchema = map[string]any{}
 	}
@@ -1637,7 +1641,7 @@ func (s *DB) UpsertEmbedding(ctx context.Context, actionID string, vec []float32
 func (s *DB) ListEmbeddings(ctx context.Context) (map[string][]float32, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, embed_vec FROM actions
-		 WHERE active=1 AND embed_vec IS NOT NULL`)
+		 WHERE active=1 AND embed_vec IS NOT NULL AND deleted_at IS NULL`)
 	if err != nil {
 		return nil, dbErr(err, "list embeddings")
 	}

@@ -405,7 +405,8 @@ func TestServeListActions(t *testing.T) {
 	decodeResponse(t, cr, &action)
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok).Body.Close()
 
-	// Authenticated owner sees their own inactive private action.
+	// Public endpoint returns only active+public actions; private actions are not shown
+	// regardless of whether a bearer token is supplied.
 	resp := httpDo(t, srv, "GET", "/v1/actions", nil, tok)
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
@@ -413,11 +414,11 @@ func TestServeListActions(t *testing.T) {
 	}
 	var actions []kernel.Action
 	decodeResponse(t, resp, &actions)
-	if len(actions) != 1 {
-		t.Fatalf("owner should see their own inactive action, got %d actions", len(actions))
+	if len(actions) != 0 {
+		t.Fatalf("private action should not appear in public list even with owner token, got %d", len(actions))
 	}
 
-	// Unauthenticated caller does not see the private action.
+	// Unauthenticated caller also does not see the private action.
 	resp2 := httpDo(t, srv, "GET", "/v1/actions", nil, "")
 	if resp2.StatusCode != http.StatusOK {
 		resp2.Body.Close()
@@ -1655,7 +1656,7 @@ func TestHealthCmd(t *testing.T) {
 }
 
 func TestServeImportOpenAPI(t *testing.T) {
-	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(spec))
@@ -1687,7 +1688,7 @@ func TestServeImportOpenAPI(t *testing.T) {
 }
 
 func TestServeUnimportOpenAPI(t *testing.T) {
-	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(spec))

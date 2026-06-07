@@ -66,6 +66,7 @@ type Action struct {
 	RemoteActionID string         `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
+	DeletedAt      *time.Time     `json:"deleted_at,omitempty"`
 }
 
 // Process is a budgeted execution context.

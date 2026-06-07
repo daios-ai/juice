@@ -516,7 +516,7 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 	return nil
 }
 
-// ReadAction returns the action with the given ID (no ACL check).
+// ReadAction returns the action with the given ID (no authorization check).
 // Used internally; external callers should use ReadActionForSubject.
 func (k *Kernel) ReadAction(ctx context.Context, id string) (*Action, error) {
 	return k.store.ReadAction(ctx, id)
@@ -719,15 +719,10 @@ func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateAc
 		}
 	}
 	if req.Public != nil {
-		if *req.Public && strings.HasPrefix(strings.TrimSpace(a.Source), "{") {
-			var osrc OpenAPISource
-			if jsonErr := json.Unmarshal([]byte(a.Source), &osrc); jsonErr == nil && osrc.Type == "openapi" {
-				if !osrc.OwnershipVerified {
-					return nil, ErrUnauthorized.Wrap("ownership not verified: add x-juice-owner to spec")
-				}
-			}
-		}
 		a.Public = *req.Public
+		if err := requireOpenAPIOwnershipIfPublic(a); err != nil {
+			return nil, err
+		}
 	}
 	a.UpdatedAt = time.Now().UTC()
 
@@ -792,13 +787,8 @@ func (k *Kernel) SetActive(ctx context.Context, callerID, actionID string, activ
 			}
 			a.ArtifactHash = hash
 		}
-		if a.Public && strings.HasPrefix(strings.TrimSpace(a.Source), "{") {
-			var osrc OpenAPISource
-			if jsonErr := json.Unmarshal([]byte(a.Source), &osrc); jsonErr == nil && osrc.Type == "openapi" {
-				if !osrc.OwnershipVerified {
-					return ErrUnauthorized.Wrap("ownership not verified: add x-juice-owner to spec")
-				}
-			}
+		if err := requireOpenAPIOwnershipIfPublic(a); err != nil {
+			return err
 		}
 	}
 	a.Active = active
@@ -1065,7 +1055,7 @@ type LookupRequest struct {
 	Query     string
 	Limit     int
 	Offset    int
-	CallerID string // authenticated caller; used to include owned and ACL-granted actions
+	CallerID string // authenticated caller
 }
 
 // LookupResult is a ranked action for a lookup query.
@@ -1224,6 +1214,25 @@ func (k *Kernel) requireSelf(ctx context.Context, callerID, ownerID string) erro
 		return nil
 	}
 	return ErrUnauthorized.Wrap("cannot act on behalf of another user")
+}
+
+// requireOpenAPIOwnershipIfPublic returns ErrUnauthorized if a is a public OpenAPI action
+// whose ownership has not been verified. This prevents making unverified API imports public.
+func requireOpenAPIOwnershipIfPublic(a *Action) error {
+	if !a.Public {
+		return nil
+	}
+	if !strings.HasPrefix(strings.TrimSpace(a.Source), "{") {
+		return nil
+	}
+	var osrc OpenAPISource
+	if jsonErr := json.Unmarshal([]byte(a.Source), &osrc); jsonErr != nil || osrc.Type != "openapi" {
+		return nil
+	}
+	if !osrc.OwnershipVerified {
+		return ErrUnauthorized.Wrap("ownership not verified: add x-juice-owner to spec")
+	}
+	return nil
 }
 
 // ---- Stats helpers ----

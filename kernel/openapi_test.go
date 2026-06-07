@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,7 +159,7 @@ func TestImportOpenAPISetsOwnershipVerified(t *testing.T) {
 
 	owner := setupUser(t, st, "@oapi-owner-verified", 0)
 	specURL := "https://spec.example.com/api.json"
-	specWithOwner := `{"openapi":"3.0.0","x-juice-owner":"@oapi-owner-verified","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	specWithOwner := `{"openapi":"3.0.0","x-juice-owner":"@oapi-owner-verified","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
 	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(specWithOwner))
 	if err != nil {
@@ -281,7 +282,7 @@ func TestImportOpenAPIWellKnownSetsOwnershipVerified(t *testing.T) {
 	k := newTestKernelWithHTTP(st, fetcher)
 
 	specURL := "https://spec.example.com/api.json"
-	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
 
 	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
 	if err != nil {
@@ -311,7 +312,7 @@ func TestImportOpenAPIOwnershipStalenessFixed(t *testing.T) {
 	k := newTestKernelWithHTTP(st, fetcher)
 
 	specURL := "https://spec.example.com/api.json"
-	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
 
 	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
 	if err != nil || len(result.Created) != 1 {
@@ -353,7 +354,7 @@ func TestUnimportOpenAPIOwnerOnly(t *testing.T) {
 	owner := setupUser(t, st, "@openapi-owner", 0)
 
 	specURL := "https://spec.example.com/admin-test.json"
-	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"adminHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"adminHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
 
 	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
 	if err != nil {
@@ -382,5 +383,69 @@ func TestUnimportOpenAPIOwnerOnly(t *testing.T) {
 	_ = result2
 	if _, err := k.UnimportOpenAPI(ctx, other.ID, owner.ID, specURL, ""); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized for non-owner, got %v", err)
+	}
+}
+
+func TestOpenAPIRejectMissingName(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@oapi-no-name", 0)
+	specURL := "https://spec.example.com/api.json"
+
+	// Operation has neither operationId nor x-juice-name.
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"description":"says hello","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	if err != nil {
+		t.Fatalf("ImportOpenAPI returned error: %v", err)
+	}
+	if len(result.Created) != 0 {
+		t.Errorf("expected 0 created, got %d", len(result.Created))
+	}
+	if len(result.Rejected) == 0 {
+		t.Error("expected at least 1 rejection for missing operationId/x-juice-name")
+	}
+	found := false
+	for _, r := range result.Rejected {
+		if strings.Contains(r.Reason, "operationId") || strings.Contains(r.Reason, "x-juice-name") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("rejection reason did not mention operationId or x-juice-name: %+v", result.Rejected)
+	}
+}
+
+func TestOpenAPIRejectMissingInputContract(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@oapi-no-input", 0)
+	specURL := "https://spec.example.com/api.json"
+
+	// Operation has operationId and description but no parameters and no requestBody.
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/ping":{"get":{"operationId":"ping","description":"ping the server","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	if err != nil {
+		t.Fatalf("ImportOpenAPI returned error: %v", err)
+	}
+	if len(result.Created) != 0 {
+		t.Errorf("expected 0 created, got %d", len(result.Created))
+	}
+	if len(result.Rejected) == 0 {
+		t.Error("expected at least 1 rejection for missing input contract")
+	}
+	found := false
+	for _, r := range result.Rejected {
+		if strings.Contains(r.Reason, "parameters") || strings.Contains(r.Reason, "requestBody") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("rejection reason did not mention parameters/requestBody: %+v", result.Rejected)
 	}
 }

@@ -185,6 +185,15 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 			}
 
 			key := openAPIOperationKey(op, method, path)
+
+			// Require an explicit name field; slug fallback is not a valid match key.
+			_, hasJuiceName := op["x-juice-name"].(string)
+			_, hasOpID := op["operationId"].(string)
+			if !hasJuiceName && !hasOpID {
+				rejected = append(rejected, ImportRejection{Key: key, Reason: "missing operationId or x-juice-name"})
+				continue
+			}
+
 			desc := openAPIDescription(op)
 			if desc == "" {
 				rejected = append(rejected, ImportRejection{Key: key, Reason: "missing description and summary"})
@@ -204,7 +213,9 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 				}
 			}
 
-			if rb, ok := op["requestBody"].(map[string]any); ok {
+			_, hasBody := op["requestBody"].(map[string]any)
+			if hasBody {
+				rb := op["requestBody"].(map[string]any)
 				if content, ok := rb["content"].(map[string]any); ok && len(content) > 0 {
 					if _, hasJSON := content["application/json"]; !hasJSON {
 						rejected = append(rejected, ImportRejection{Key: key, Reason: "requestBody has no application/json content"})
@@ -230,6 +241,13 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 			}
 
 			params := openAPIParams(op, pathItem)
+
+			// Require at least one input parameter or a requestBody schema.
+			if len(params) == 0 && !hasBody {
+				rejected = append(rejected, ImportRejection{Key: key, Reason: "missing parameters and requestBody schema"})
+				continue
+			}
+
 			inputSchema := openAPIInputSchema(op, pathItem, spec)
 			hash := openAPIOperationHash(baseURL, desc, method, path, inputSchema, outputSchema, price, params)
 
@@ -642,7 +660,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 
 // UnimportOpenAPI deactivates all OpenAPI-imported actions with matching owner + spec_url.
 // If name is non-empty, only actions whose name or operation_key matches are deactivated.
-// The subject must be the owner, @sys, or hold admin ACL on every matched action.
+// The subject must be the owner or the platform superuser.
 func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specURL, name string) ([]*Action, error) {
 	// Always require an authenticated, non-suspended subject.
 	if _, err := k.requireActiveUser(ctx, subjectID); err != nil {
@@ -668,7 +686,7 @@ func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specUR
 	if len(actions) == 0 {
 		return nil, k.requireSelf(ctx, subjectID, ownerID)
 	}
-	// For each matched action, require owner, @sys, or action admin ACL.
+	// For each matched action, require owner or superuser.
 	for _, a := range actions {
 		if err := k.requireAdmin(ctx, subjectID, a); err != nil {
 			return nil, err

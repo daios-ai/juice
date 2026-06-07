@@ -98,3 +98,96 @@ func TestLoadOrCreateConfig_BadJSON(t *testing.T) {
 		t.Error("expected error for bad JSON")
 	}
 }
+
+func TestApplyEnvOverrides(t *testing.T) {
+	t.Run("overrides file values", func(t *testing.T) {
+		t.Setenv("JUICE_LOG_LEVEL", "debug")
+		t.Setenv("JUICE_FEE_BPS", "500")
+		t.Setenv("JUICE_OLLAMA_URL", "http://custom:11434")
+		t.Setenv("JUICE_SCRIPT_TIMEOUT_MS", "5000")
+		t.Setenv("JUICE_SCRIPT_MEMORY_BYTES", "33554432")
+		t.Setenv("JUICE_TOKEN_TTL", "30m")
+		t.Setenv("JUICE_AUTH_ISSUER", "https://issuer.example")
+		t.Setenv("JUICE_AUTH_AUDIENCE", "juice")
+		t.Setenv("JUICE_OLLAMA_CHAT_MODEL", "llama3")
+		t.Setenv("JUICE_OLLAMA_EMBED_MODEL", "all-minilm")
+		t.Setenv("JUICE_LOG_FILE", "/tmp/juice.log")
+
+		cfg := DefaultServerConfig()
+		if err := applyEnvOverrides(&cfg); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.LogLevel != "debug" {
+			t.Errorf("LogLevel: got %q", cfg.LogLevel)
+		}
+		if cfg.FeeBPS != 500 {
+			t.Errorf("FeeBPS: got %d", cfg.FeeBPS)
+		}
+		if cfg.OllamaURL != "http://custom:11434" {
+			t.Errorf("OllamaURL: got %q", cfg.OllamaURL)
+		}
+		if cfg.ScriptTimeoutMS != 5000 {
+			t.Errorf("ScriptTimeoutMS: got %d", cfg.ScriptTimeoutMS)
+		}
+		if cfg.ScriptMemoryBytes != 33554432 {
+			t.Errorf("ScriptMemoryBytes: got %d", cfg.ScriptMemoryBytes)
+		}
+		if cfg.TokenTTL != "30m" {
+			t.Errorf("TokenTTL: got %q", cfg.TokenTTL)
+		}
+		if cfg.AuthIssuer != "https://issuer.example" {
+			t.Errorf("AuthIssuer: got %q", cfg.AuthIssuer)
+		}
+		if cfg.AuthAudience != "juice" {
+			t.Errorf("AuthAudience: got %q", cfg.AuthAudience)
+		}
+		if cfg.OllamaChatModel != "llama3" {
+			t.Errorf("OllamaChatModel: got %q", cfg.OllamaChatModel)
+		}
+		if cfg.OllamaEmbedModel != "all-minilm" {
+			t.Errorf("OllamaEmbedModel: got %q", cfg.OllamaEmbedModel)
+		}
+		if cfg.LogFile != "/tmp/juice.log" {
+			t.Errorf("LogFile: got %q", cfg.LogFile)
+		}
+	})
+
+	t.Run("absent env leaves file value", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.OllamaURL = "http://from-file:11434"
+		cfg.FeeBPS = 1234
+		if err := applyEnvOverrides(&cfg); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.OllamaURL != "http://from-file:11434" {
+			t.Errorf("OllamaURL should not be overridden, got %q", cfg.OllamaURL)
+		}
+		if cfg.FeeBPS != 1234 {
+			t.Errorf("FeeBPS should not be overridden, got %d", cfg.FeeBPS)
+		}
+	})
+
+	t.Run("bad JUICE_FEE_BPS returns error", func(t *testing.T) {
+		t.Setenv("JUICE_FEE_BPS", "notanumber")
+		cfg := DefaultServerConfig()
+		if err := applyEnvOverrides(&cfg); err == nil {
+			t.Error("expected error for bad JUICE_FEE_BPS")
+		}
+	})
+
+	t.Run("bad JUICE_SCRIPT_TIMEOUT_MS returns error", func(t *testing.T) {
+		t.Setenv("JUICE_SCRIPT_TIMEOUT_MS", "bad")
+		cfg := DefaultServerConfig()
+		if err := applyEnvOverrides(&cfg); err == nil {
+			t.Error("expected error for bad JUICE_SCRIPT_TIMEOUT_MS")
+		}
+	})
+
+	t.Run("bad JUICE_SCRIPT_MEMORY_BYTES returns error", func(t *testing.T) {
+		t.Setenv("JUICE_SCRIPT_MEMORY_BYTES", "bad")
+		cfg := DefaultServerConfig()
+		if err := applyEnvOverrides(&cfg); err == nil {
+			t.Error("expected error for bad JUICE_SCRIPT_MEMORY_BYTES")
+		}
+	})
+}

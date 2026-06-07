@@ -1510,7 +1510,8 @@ func TestSetActiveValidatesSchemas(t *testing.T) {
 
 // minOpenAPISpec is a valid minimal OpenAPI 3.x spec with one GET /hello operation.
 // servers[0].url is a public hostname so activation SSRF checks pass without AllowLocalSources.
-const minOpenAPISpec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+// The operation includes a query parameter to satisfy the input-contract requirement.
+const minOpenAPISpec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
 // ---- #12 supervision authority tests ----
 

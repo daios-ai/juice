@@ -170,7 +170,7 @@ func TestActionCRUD(t *testing.T) {
 	}
 }
 
-func TestDeleteActionHardDelete(t *testing.T) {
+func TestDeleteActionSoftDelete(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -185,24 +185,29 @@ func TestDeleteActionHardDelete(t *testing.T) {
 		t.Fatalf("DeleteAction: %v", err)
 	}
 
-	// Row is physically gone.
-	var count int
-	if err := db.db.QueryRow("SELECT COUNT(*) FROM actions WHERE id=?", a.ID).Scan(&count); err != nil {
+	// Row is preserved (soft delete: deleted_at is set, not physically removed).
+	var deletedAt *string
+	if err := db.db.QueryRow("SELECT deleted_at FROM actions WHERE id=?", a.ID).Scan(&deletedAt); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 {
-		t.Errorf("action row count after hard delete: got %d, want 0", count)
+	if deletedAt == nil {
+		t.Error("expected deleted_at to be set after soft delete")
 	}
 
-	// ReadAction returns not found.
+	// ReadAction returns not found (deleted action is hidden from lookup).
 	if _, err := db.ReadAction(ctx, a.ID); err == nil {
 		t.Error("expected error reading deleted action, got nil")
 	}
 
-	// The same name can now be reused by the same owner.
-	a2 := newAction(owner.ID, "/hd-svc", 0, true)
-	if err := db.CreateAction(ctx, a2); err != nil {
-		t.Errorf("name reuse after hard delete should succeed: %v", err)
+	// Deleted action is absent from owner listing.
+	actions, err := db.ListActionsByOwner(ctx, owner.ID, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, listed := range actions {
+		if listed.ID == a.ID {
+			t.Error("deleted action should not appear in ListActionsByOwner")
+		}
 	}
 }
 

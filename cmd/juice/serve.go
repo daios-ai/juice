@@ -364,24 +364,6 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Optionally enrich with the caller's own actions (active or not).
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		tok := strings.TrimPrefix(auth, "Bearer ")
-		if subjectID, verr := s.kernel.VerifyToken(tok); verr == nil {
-			if owned, oerr := s.kernel.ListOwnedActions(r.Context(), subjectID, 200, 0); oerr == nil {
-				seen := make(map[string]bool, len(actions))
-				for _, a := range actions {
-					seen[a.ID] = true
-				}
-				for _, a := range owned {
-					if !seen[a.ID] {
-						actions = append(actions, a)
-					}
-				}
-			}
-		}
-	}
-
 	if owner := r.URL.Query().Get("owner"); owner != "" {
 		u, err := s.kernel.ReadUserByHandle(r.Context(), owner)
 		if err != nil {

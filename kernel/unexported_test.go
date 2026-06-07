@@ -171,6 +171,12 @@ paths:
     get:
       operationId: sayHello
       description: says hello
+      parameters:
+        - name: name
+          in: query
+          description: who to greet
+          schema:
+            type: string
       responses:
         "200":
           description: ok
@@ -199,6 +205,7 @@ func TestParseOpenAPISpecResolvesRefInResponseSchema(t *testing.T) {
 		"paths":{"/op":{"post":{
 			"operationId":"doOp",
 			"description":"does op",
+			"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"q":{"type":"string","description":"query"}}}}}},
 			"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Reply"}}}}}
 		}}}
 	}`

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 )
 
 // ServerConfig holds all non-secret runtime configuration.
@@ -67,6 +68,58 @@ func LoadOrCreateConfig(path string) (ServerConfig, error) {
 		return cfg, fmt.Errorf("parse config %q: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// applyEnvOverrides reads JUICE_* environment variables and overrides the matching
+// config fields. An unparseable numeric or duration value is a fatal startup error.
+// Returns a non-nil error only on parse failures; missing env vars are silently skipped.
+func applyEnvOverrides(cfg *ServerConfig) error {
+	if v := os.Getenv("JUICE_LOG_LEVEL"); v != "" {
+		cfg.LogLevel = v
+	}
+	if v := os.Getenv("JUICE_LOG_FILE"); v != "" {
+		cfg.LogFile = v
+	}
+	if v := os.Getenv("JUICE_FEE_BPS"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fmt.Errorf("JUICE_FEE_BPS: %w", err)
+		}
+		cfg.FeeBPS = n
+	}
+	if v := os.Getenv("JUICE_AUTH_ISSUER"); v != "" {
+		cfg.AuthIssuer = v
+	}
+	if v := os.Getenv("JUICE_AUTH_AUDIENCE"); v != "" {
+		cfg.AuthAudience = v
+	}
+	if v := os.Getenv("JUICE_TOKEN_TTL"); v != "" {
+		cfg.TokenTTL = v
+	}
+	if v := os.Getenv("JUICE_OLLAMA_URL"); v != "" {
+		cfg.OllamaURL = v
+	}
+	if v := os.Getenv("JUICE_OLLAMA_CHAT_MODEL"); v != "" {
+		cfg.OllamaChatModel = v
+	}
+	if v := os.Getenv("JUICE_OLLAMA_EMBED_MODEL"); v != "" {
+		cfg.OllamaEmbedModel = v
+	}
+	if v := os.Getenv("JUICE_SCRIPT_TIMEOUT_MS"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fmt.Errorf("JUICE_SCRIPT_TIMEOUT_MS: %w", err)
+		}
+		cfg.ScriptTimeoutMS = n
+	}
+	if v := os.Getenv("JUICE_SCRIPT_MEMORY_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fmt.Errorf("JUICE_SCRIPT_MEMORY_BYTES: %w", err)
+		}
+		cfg.ScriptMemoryBytes = n
+	}
+	return nil
 }
 
 func writeConfig(path string, cfg ServerConfig) error {
