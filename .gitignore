@@ -26,6 +26,9 @@ juice.json
 # Scratch / archive
 /.old/
 
+# Claude Code
+.claude/
+
 # Editor and OS clutter
 .DS_Store
 Thumbs.db
