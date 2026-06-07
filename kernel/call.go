@@ -21,7 +21,11 @@ type CallRequest struct {
 	// For top-level calls it is the process root trace ID.
 	// For event-triggered calls it may reference a trace in another process.
 	ParentTraceID string
-	// TargetUserID is the owner of the action.
+	// ActionRef is the action reference in "@owner/name" format.
+	// When set, it is parsed into TargetUserID and ActionName inside Call.
+	// Set either ActionRef or (TargetUserID + ActionName), not both.
+	ActionRef string
+	// TargetUserID is the owner of the action (handle or ID).
 	TargetUserID string
 	// ActionName is the action's name field.
 	ActionName string
@@ -81,6 +85,19 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	// 4. Resolve action.
+	// If ActionRef is set ("@owner/name"), parse it into TargetUserID and ActionName.
+	if req.ActionRef != "" {
+		ref := req.ActionRef
+		if !strings.HasPrefix(ref, "@") {
+			return nil, ErrInvalidInput.Wrap("action ref must be @owner/name")
+		}
+		idx := strings.Index(ref[1:], "/")
+		if idx < 0 || ref[1:idx+1] == "" || ref[idx+2:] == "" {
+			return nil, ErrInvalidInput.Wrap("action ref must be @owner/name")
+		}
+		req.TargetUserID = ref[:idx+1] // handle including @
+		req.ActionName = ref[idx+2:]
+	}
 	target, err := k.store.ReadUserByHandle(ctx, req.TargetUserID)
 	if err != nil || target == nil {
 		// Also try reading by ID.

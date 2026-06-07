@@ -616,7 +616,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 		})
 	}
 
-	result, err := k.reconcileImport(ctx, existingByKey, hashOf, incoming)
+	result, err := k.reconcileImport(ctx, existingByKey, hashOf, incoming, true)
 	if err != nil {
 		return nil, err
 	}

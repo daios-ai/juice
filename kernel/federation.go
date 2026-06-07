@@ -314,7 +314,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 		},
 	}}
 
-	result, err := k.reconcileImport(ctx, existingByKey, func(a *Action) string { return a.ArtifactHash }, incoming)
+	result, err := k.reconcileImport(ctx, existingByKey, func(a *Action) string { return a.ArtifactHash }, incoming, false)
 	if err != nil {
 		return nil, err
 	}

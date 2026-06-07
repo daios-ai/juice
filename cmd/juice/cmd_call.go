@@ -19,14 +19,6 @@ func callCmd() *cobra.Command {
 		Short: "Call an action within a process",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				ownerHandle, actionName, err := parseActionRef(actionRef)
-				if err != nil {
-					return err
-				}
-				owner, err := k.ReadUserByHandle(context.Background(), ownerHandle)
-				if err != nil {
-					return fmt.Errorf("owner %s not found: %w", ownerHandle, err)
-				}
 				args, err := readJSONArg(argsStr)
 				if err != nil {
 					return fmt.Errorf("invalid --args: %w", err)
@@ -35,8 +27,7 @@ func callCmd() *cobra.Command {
 					CallerID:      callerID,
 					ProcessID:     processID,
 					ParentTraceID: parentTraceID,
-					TargetUserID:  owner.ID,
-					ActionName:    actionName,
+					ActionRef:     actionRef,
 					Args:          args,
 				})
 				if err != nil {

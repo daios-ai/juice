@@ -22,11 +22,10 @@ func txListCmd() *cobra.Command {
 		Short: "List transactions",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				txs, err := k.ListTransactions(context.Background(), kernel.TxFilter{
-					PartyUserID: callerID,
-					ProcessID:   processID,
-					Limit:       limit,
-					Offset:      offset,
+				txs, err := k.ListTransactions(context.Background(), callerID, kernel.TxFilter{
+					ProcessID: processID,
+					Limit:     limit,
+					Offset:    offset,
 				})
 				if err != nil {
 					return err

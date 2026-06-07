@@ -1232,6 +1232,7 @@ func newTestKernelWithChatter(st kernel.Store, c kernel.Chatter) *kernel.Kernel 
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
 	k := kernel.New(st, nil, nil, nil, c, cfg, nil)
 	native.RegisterChatHandler(k, c)

@@ -679,23 +679,11 @@ func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("args is required"))
 		return
 	}
-	// Parse @owner/name format.
-	ownerHandle, actionName, err := parseActionRef(req.Action)
-	if err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap(err.Error()))
-		return
-	}
-	owner, err := s.kernel.ReadUserByHandle(r.Context(), ownerHandle)
-	if err != nil {
-		writeErr(w, kernel.ErrNotFound.Wrap("action owner not found"))
-		return
-	}
 	reply, err := s.kernel.Call(r.Context(), kernel.CallRequest{
 		CallerID:      callerFrom(r),
 		ProcessID:     req.ProcessID,
 		ParentTraceID: req.ParentTraceID,
-		TargetUserID:  owner.ID,
-		ActionName:    actionName,
+		ActionRef:     req.Action,
 		Args:          req.Args,
 	})
 	if err != nil {
@@ -703,6 +691,20 @@ func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, reply)
+}
+
+
+func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
+	callerID := callerFrom(r)
+	txs, err := s.kernel.ListTransactions(r.Context(), callerID, kernel.TxFilter{
+		ProcessID: r.URL.Query().Get("process_id"),
+		Limit:     50,
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, txs)
 }
 
 // parseActionRef parses "@owner/name" into ownerHandle and actionName.
@@ -720,20 +722,6 @@ func parseActionRef(ref string) (string, string, error) {
 		return "", "", fmt.Errorf("action must be @owner/name")
 	}
 	return ownerHandle, actionName, nil
-}
-
-func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
-	callerID := callerFrom(r)
-	txs, err := s.kernel.ListTransactions(r.Context(), kernel.TxFilter{
-		PartyUserID: callerID,
-		ProcessID:   r.URL.Query().Get("process_id"),
-		Limit:       50,
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, txs)
 }
 
 func (s *server) getTransaction(w http.ResponseWriter, r *http.Request) {

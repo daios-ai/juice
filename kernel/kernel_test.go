@@ -53,6 +53,7 @@ func newTestKernel(st kernel.Store) *kernel.Kernel {
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
 	return kernel.New(st, nil, nil, nil, nil, cfg, log.Default())
 }
@@ -61,6 +62,7 @@ func newTestKernelWithScripts(st kernel.Store, exec kernel.ScriptExecutor) *kern
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
 	return kernel.New(st, exec, nil, nil, nil, cfg, log.Default())
 }
@@ -1306,7 +1308,7 @@ func TestTransactionViewEmbeddedRating(t *testing.T) {
 	}
 
 	// ListTransactions also returns the embedded rating.
-	views, err := k.ListTransactions(ctx, kernel.TxFilter{PartyUserID: buyer.ID, Limit: 10})
+	views, err := k.ListTransactions(ctx, buyer.ID, kernel.TxFilter{Limit: 10})
 	if err != nil {
 		t.Fatalf("ListTransactions: %v", err)
 	}
@@ -1581,6 +1583,7 @@ func newTestKernelWithHTTP(st kernel.Store, http kernel.HTTPExecutor) *kernel.Ke
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
 	return kernel.New(st, nil, http, nil, nil, cfg, log.Default())
 }

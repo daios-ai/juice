@@ -36,7 +36,7 @@ type Config struct {
 // DefaultConfig returns safe local defaults.
 func DefaultConfig() Config {
 	return Config{
-		FeeBPS:        0,
+		FeeBPS:        2000,
 		TokenTTL:      15 * time.Minute,
 		ScriptTimeout: 10 * time.Second,
 		ScriptMemory:  64 * 1024 * 1024, // 64 MiB
@@ -964,8 +964,10 @@ func (k *Kernel) canReadTransaction(ctx context.Context, callerID string, tx *Tr
 	return false
 }
 
-// ListTransactions returns transactions matching the filter, each with an embedded rating.
-func (k *Kernel) ListTransactions(ctx context.Context, filter TxFilter) ([]*TransactionView, error) {
+// ListTransactions returns transactions visible to callerID, matching the filter, each with an embedded rating.
+// callerID is always applied as PartyUserID — the kernel enforces CanReadTransaction at the list boundary.
+func (k *Kernel) ListTransactions(ctx context.Context, callerID string, filter TxFilter) ([]*TransactionView, error) {
+	filter.PartyUserID = callerID
 	txs, err := k.store.ListTransactions(ctx, filter)
 	if err != nil {
 		return nil, err
@@ -1566,8 +1568,10 @@ type incomingOp struct {
 
 // reconcileImport applies create/update/deactivate logic given existing actions (keyed by op key)
 // and incoming operations. hashOf extracts the stored content hash from an existing action.
+// resetStats controls whether changed or stale actions have their stats row zeroed:
+// true for OpenAPI (contract change invalidates prior stats), false for remote (local usage stats are preserved).
 // Used by both ImportOpenAPI and ImportRemoteAction.
-func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*Action, hashOf func(*Action) string, incoming []incomingOp) (*ImportResult, error) {
+func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*Action, hashOf func(*Action) string, incoming []incomingOp, resetStats bool) (*ImportResult, error) {
 	incomingKeys := make(map[string]struct{}, len(incoming))
 	for _, op := range incoming {
 		incomingKeys[op.key] = struct{}{}
@@ -1583,7 +1587,7 @@ func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*
 		}
 		stale = append(stale, a)
 	}
-	if err := k.deactivateImported(ctx, stale, true); err != nil {
+	if err := k.deactivateImported(ctx, stale, resetStats); err != nil {
 		return nil, err
 	}
 	result.Deactivated = append(result.Deactivated, stale...)
@@ -1600,8 +1604,10 @@ func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*
 				if err := k.store.UpdateAction(ctx, ex); err != nil {
 					return nil, err
 				}
-				if err := k.store.UpsertStats(ctx, &Stats{ActionID: ex.ID}); err != nil {
-					return nil, err
+				if resetStats {
+					if err := k.store.UpsertStats(ctx, &Stats{ActionID: ex.ID}); err != nil {
+						return nil, err
+					}
 				}
 				result.Updated = append(result.Updated, ex)
 			}

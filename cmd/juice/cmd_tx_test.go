@@ -15,7 +15,7 @@ func TestTransactionListEmpty(t *testing.T) {
 		Handle: "@txowner", Email: "tx@e.com", Password: "p",
 	})
 
-	txs, err := env.k.ListTransactions(ctx, kernel.TxFilter{OwnerUserID: owner.ID, Limit: 10})
+	txs, err := env.k.ListTransactions(ctx, owner.ID, kernel.TxFilter{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestTransactionRating(t *testing.T) {
 	_ = root
 
 	// List — should still be 0 since no calls made.
-	txs, _ := env.k.ListTransactions(ctx, kernel.TxFilter{OwnerUserID: owner.ID, Limit: 10})
+	txs, _ := env.k.ListTransactions(ctx, owner.ID, kernel.TxFilter{Limit: 10})
 	if len(txs) != 0 {
 		t.Errorf("expected 0 txs before any call, got %d", len(txs))
 	}

@@ -82,6 +82,7 @@ func newMakeKernel(t *testing.T, chatter kernel.Chatter) (*kernel.Kernel, kernel
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
 	exec := script.New(script.Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
 	k := kernel.New(st, exec, nil, nil, chatter, cfg, log.Default())
@@ -309,6 +310,7 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
 	exec := script.New(script.Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
 	k := kernel.New(st, exec, nil, nil, fakeChat, cfg, log.Default())
@@ -360,7 +362,7 @@ func TestMakeInternalChatCallCreatesChildTrace(t *testing.T) {
 		t.Fatalf("Call: %v", err)
 	}
 
-	txs, err := k.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID, Limit: 100})
+	txs, err := k.ListTransactions(ctx, caller.ID, kernel.TxFilter{ProcessID: p.ID, Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
