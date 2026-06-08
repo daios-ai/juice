@@ -19,7 +19,7 @@ type CallRequest struct {
 	ProcessID string
 	// ParentTraceID is the trace from which this call originates.
 	// For top-level calls it is the process root trace ID.
-	// For event-triggered calls it may reference a trace in another process.
+	// For step-completion calls it may reference a trace in another process.
 	ParentTraceID string
 	// ActionRef is the action reference in "@owner/name" format.
 	// When set, it is parsed into TargetUserID and ActionName inside Call.
@@ -31,9 +31,9 @@ type CallRequest struct {
 	ActionName string
 	// Args is the JSON-decoded input arguments.
 	Args map[string]any
-	// EventID, if non-empty, causes CommitCall to settle the event atomically.
-	// Set only by ConsumeEvent; leave empty for all direct calls.
-	EventID string
+	// StepCompletion, when true, bypasses the process-owner precondition check (precondition 3).
+	// Set only by CompleteStep; the step already verified required_caller_user_id matches.
+	StepCompletion bool
 	// IdempotencyRecordID, if non-empty, causes CommitCall/CommitFailedCall to atomically
 	// mark the pending idempotency record as complete. Set only by federation handlers.
 	IdempotencyRecordID string
@@ -84,7 +84,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	// 3. Subject may use this process: is the owner, or owns the action executing in the parent trace.
-	if process.OwnerUserID != req.CallerID {
+	// StepCompletion bypasses this check — CompleteStep already verified required_caller_user_id.
+	if !req.StepCompletion && process.OwnerUserID != req.CallerID {
 		authorized := false
 		if req.ParentTraceID != "" {
 			parent, parentErr := k.store.ReadTrace(ctx, req.ParentTraceID)
@@ -260,7 +261,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
-	if err := k.store.CommitCall(ctx, tx, receipt, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.EventID, req.IdempotencyRecordID); err != nil {
+	if err := k.store.CommitCall(ctx, tx, receipt, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID); err != nil {
 		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
 			logger.Error("call.refund_failed", "action", action.Name, "commit_error", err, "refund_error", refundErr)
 			return nil, ErrInternal.Wrap("could not refund funds after failed commit")
@@ -401,16 +402,21 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	return json.Marshal(reply.Result)
 }
 
-func (h *kernelHostFunctions) Emit(ctx context.Context, event string, argsJSON []byte) error {
-	var args map[string]any
-	if len(argsJSON) > 0 {
-		if err := json.Unmarshal(argsJSON, &args); err != nil {
-			return ErrInvalidInput.Wrap("emit args must be a JSON object")
-		}
+func (h *kernelHostFunctions) StepCreate(ctx context.Context, partialArgs, inputSchema []byte, requiredCallerUserID, nextActionID string) (string, error) {
+	step, err := h.kernel.CreateStep(ctx, h.targetID, h.processID, &h.traceID,
+		nextActionID, json.RawMessage(partialArgs), json.RawMessage(inputSchema), requiredCallerUserID)
+	if err != nil {
+		return "", err
 	}
-	// Pass current trace ID as causal context (FOLLOWS_FROM) for listener-triggered traces.
-	_, err := h.kernel.EmitEvent(ctx, h.targetID, h.targetID, event, args, h.traceID)
-	return err
+	return step.ID, nil
+}
+
+func (h *kernelHostFunctions) StepComplete(ctx context.Context, stepID string, input []byte) ([]byte, error) {
+	reply, err := h.kernel.CompleteStep(ctx, h.targetID, stepID, json.RawMessage(input))
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(reply)
 }
 
 func (h *kernelHostFunctions) Log(ctx context.Context, level, msg string) error {

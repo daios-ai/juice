@@ -99,10 +99,13 @@ func TestMemoryPages(t *testing.T) {
 type nilHost struct{}
 
 func (nilHost) Call(_ context.Context, _ string, _ []byte) ([]byte, error) { return nil, nil }
-func (nilHost) Emit(_ context.Context, _ string, _ []byte) error           { return nil }
-func (nilHost) Log(_ context.Context, _, _ string) error                   { return nil }
-func (nilHost) Get(_ context.Context, _ string) ([]byte, error)            { return nil, nil }
-func (nilHost) Put(_ context.Context, _ string, _ []byte) error            { return nil }
+func (nilHost) StepCreate(_ context.Context, _, _ []byte, _, _ string) (string, error) {
+	return "", nil
+}
+func (nilHost) StepComplete(_ context.Context, _ string, _ []byte) ([]byte, error) {
+	return []byte("{}"), nil
+}
+func (nilHost) Log(_ context.Context, _, _ string) error { return nil }
 
 var _ kernel.HostFunctions = nilHost{}
 
@@ -222,72 +225,7 @@ func TestExecutorConfiguredTimeout(t *testing.T) {
 	}
 }
 
-// emitCallerWASM is a precompiled WASM module whose run() calls juice.emit once with empty
-// event name and args, then returns empty output. Used to test emit error propagation.
-//
-// Equivalent WAT:
-//
-//	(module
-//	  (import "juice" "emit" (func $emit (param i32 i32 i32 i32)))
-//	  (memory (export "memory") 1)
-//	  (func (export "alloc") (param i32) (result i32) i32.const 0)
-//	  (func (export "run") (param i32 i32) (result i32 i32)
-//	    i32.const 0 i32.const 0 i32.const 0 i32.const 0 call $emit
-//	    i32.const 0 i32.const 0))
-var emitCallerWASM = []byte{
-	// magic + version
-	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-	// type section: (i32,i32,i32,i32)->(), (i32)->(i32), (i32,i32)->(i32,i32)
-	0x01, 0x14, 0x03,
-	0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x00,
-	0x60, 0x01, 0x7f, 0x01, 0x7f,
-	0x60, 0x02, 0x7f, 0x7f, 0x02, 0x7f, 0x7f,
-	// import section: juice.emit type 0
-	0x02, 0x0e, 0x01,
-	0x05, 0x6a, 0x75, 0x69, 0x63, 0x65,
-	0x04, 0x65, 0x6d, 0x69, 0x74,
-	0x00, 0x00,
-	// function section: alloc=type1, run=type2
-	0x03, 0x03, 0x02, 0x01, 0x02,
-	// memory section: 1 page
-	0x05, 0x03, 0x01, 0x00, 0x01,
-	// export section: memory, alloc(func1), run(func2)
-	0x07, 0x18, 0x03,
-	0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00,
-	0x05, 0x61, 0x6c, 0x6c, 0x6f, 0x63, 0x00, 0x01,
-	0x03, 0x72, 0x75, 0x6e, 0x00, 0x02,
-	// code section: alloc returns 0; run calls emit(0,0,0,0) then returns (0,0)
-	// body size 0x17=23: count(1) + alloc-entry(5) + run-entry(17)
-	// run body size 0x10=16: locals(1)+8×i32.const(16)+call(2)+2×i32.const(4)+end(1)
-	0x0a, 0x17, 0x02,
-	0x04, 0x00, 0x41, 0x00, 0x0b,
-	0x10, 0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0x10, 0x00, 0x41, 0x00, 0x41, 0x00, 0x0b,
-}
-
-// errEmitHost is a HostFunctions implementation that always returns an error from Emit.
-type errEmitHost struct{ err error }
-
-func (h errEmitHost) Call(_ context.Context, _ string, _ []byte) ([]byte, error) { return nil, nil }
-func (h errEmitHost) Emit(_ context.Context, _ string, _ []byte) error           { return h.err }
-func (h errEmitHost) Log(_ context.Context, _, _ string) error                   { return nil }
-
-func TestEmitErrorPropagated(t *testing.T) {
-	e := New(Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
-	ctx := context.Background()
-
-	artifact, _, err := e.Compile(ctx, emitCallerWASM)
-	if err != nil {
-		t.Fatalf("Compile: %v", err)
-	}
-
-	host := errEmitHost{err: fmt.Errorf("emit failed intentionally")}
-	_, err = e.Execute(ctx, artifact, []byte(`{}`), host)
-	if err == nil {
-		t.Fatal("expected Execute to fail when juice.emit returns an error, got nil")
-	}
-}
-
-func TestHostModuleExportsEmit(t *testing.T) {
+func TestHostModuleExportsStepCreate(t *testing.T) {
 	e := New(Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
 	builder := e.runtime.NewHostModuleBuilder("juice-test")
 	registerHostFunctions(builder, nilHost{})
@@ -297,7 +235,22 @@ func TestHostModuleExportsEmit(t *testing.T) {
 	}
 	defer mod.Close(context.Background())
 
-	if mod.ExportedFunctionDefinitions()["emit"] == nil {
-		t.Fatal("expected host module to export emit")
+	if mod.ExportedFunctionDefinitions()["step_create"] == nil {
+		t.Fatal("expected host module to export step_create")
+	}
+}
+
+func TestHostModuleExportsStepComplete(t *testing.T) {
+	e := New(Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
+	builder := e.runtime.NewHostModuleBuilder("juice-test2")
+	registerHostFunctions(builder, nilHost{})
+	mod, err := builder.Instantiate(context.Background())
+	if err != nil {
+		t.Fatalf("Instantiate host module: %v", err)
+	}
+	defer mod.Close(context.Background())
+
+	if mod.ExportedFunctionDefinitions()["step_complete"] == nil {
+		t.Fatal("expected host module to export step_complete")
 	}
 }

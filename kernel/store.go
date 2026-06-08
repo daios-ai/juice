@@ -51,7 +51,8 @@ type FederationExecutor interface {
 // HostFunctions are the callbacks available to a running script.
 type HostFunctions interface {
 	Call(ctx context.Context, actionName string, args []byte) ([]byte, error)
-	Emit(ctx context.Context, event string, args []byte) error
+	StepCreate(ctx context.Context, partialArgs, inputSchema []byte, requiredCallerUserID, nextActionID string) (string, error)
+	StepComplete(ctx context.Context, stepID string, input []byte) ([]byte, error)
 	Log(ctx context.Context, level, msg string) error
 }
 
@@ -146,10 +147,9 @@ type Store interface {
 	FundProcess(ctx context.Context, userID, processID string, amount int64) error
 
 	// CommitCall atomically records a successful transaction, creates its receipt, settles funds,
-	// updates trace cost/latency for all ancestor traces, upserts action stats, settles the event
-	// (if eventID is non-empty), and completes the idempotency record (if idempotencyRecordID is
-	// non-empty) — all in one SQLite transaction.
-	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, eventID, idempotencyRecordID string) error
+	// updates trace cost/latency for all ancestor traces, upserts action stats, and completes
+	// the idempotency record (if idempotencyRecordID is non-empty) — all in one SQLite transaction.
+	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, idempotencyRecordID string) error
 
 	// CommitFailedCall atomically refunds locked funds, records a failure transaction, creates its receipt,
 	// updates trace latency, upserts action stats, and completes the idempotency record (if
@@ -202,27 +202,20 @@ type Store interface {
 	ReadStats(ctx context.Context, actionID string) (*Stats, error)
 	UpsertStats(ctx context.Context, s *Stats) error
 
-	// ---- Listeners & Events ----
+	// ---- Steps ----
 
-	CreateListener(ctx context.Context, l *Listener) error
-	ReadListener(ctx context.Context, id string) (*Listener, error)
-	ListListeners(ctx context.Context, sourceUserID, eventName string) ([]*Listener, error)
-	ListListenersByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Listener, error)
-	// CreateEvents inserts all events in a single atomic transaction.
-	// Either all events are created or none are.
-	CreateEvents(ctx context.Context, events []*Event) error
-	ReadEvent(ctx context.Context, id string) (*Event, error)
-	ListPendingEvents(ctx context.Context, listenerID string) ([]*Event, error)
-	// LockEvent atomically marks an event as in-flight (sets consumed_at).
-	// Returns ErrInvalidState if the event is already consumed or in-flight.
-	LockEvent(ctx context.Context, eventID string) error
-	// UnlockEvent resets an in-flight event back to pending on consume failure.
-	UnlockEvent(ctx context.Context, eventID string) error
-	// DeleteListenerWithEvents atomically deactivates a listener and purges its pending events.
-	DeleteListenerWithEvents(ctx context.Context, listenerID string) error
-	// ResetInFlightEvents resets all in-flight events (consumed_at set, tx_id null)
-	// back to pending. Called at startup to recover from crashed consume calls.
-	ResetInFlightEvents(ctx context.Context) error
+	CreateStep(ctx context.Context, s *Step) error
+	ReadStep(ctx context.Context, id string) (*Step, error)
+	// ListSteps returns steps visible to caller. processID and status are optional filters ("" = no filter).
+	ListSteps(ctx context.Context, callerUserID, processID, status string, isSuperuser bool) ([]*Step, error)
+	// ClaimStep atomically transitions status waiting→running. Returns ErrInvalidState if not waiting.
+	ClaimStep(ctx context.Context, stepID string) error
+	// CompleteStep atomically sets status=done and tx_id. Returns ErrInvalidState if not running.
+	CompleteStep(ctx context.Context, stepID, txID string) error
+	// ResetStep resets a single running step (tx_id IS NULL) back to waiting. Used when CompleteStep fails before the call creates a tx.
+	ResetStep(ctx context.Context, stepID string) error
+	// ResetRunningSteps sets status=waiting where status=running AND tx_id IS NULL.
+	ResetRunningSteps(ctx context.Context) error
 	// ResetInFlightCalls restores locked process funds to available.
 	// Called at startup to recover from calls that crashed before settlement.
 	ResetInFlightCalls(ctx context.Context) error

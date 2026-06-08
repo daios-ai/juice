@@ -24,9 +24,9 @@ const (
 func bootstrap(k *kernel.Kernel) error {
 	ctx := context.Background()
 
-	// Reset any events that were left in-flight by a prior crash.
-	if err := k.ResetInFlightEvents(ctx); err != nil {
-		return fmt.Errorf("reset in-flight events: %w", err)
+	// Reset any steps that were left running by a prior crash.
+	if err := k.ResetRunningSteps(ctx); err != nil {
+		return fmt.Errorf("reset running steps: %w", err)
 	}
 	// Restore any process funds locked by calls that crashed before settlement.
 	if err := k.ResetInFlightCalls(ctx); err != nil {

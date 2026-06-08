@@ -162,14 +162,11 @@ func registerRoutes(r chi.Router, srv *server) {
 		// Stats.
 		r.Get("/v1/stats/{action_id}", srv.getStats)
 
-		// Listeners & Events.
-		r.Get("/v1/listeners", srv.listListeners)
-		r.Post("/v1/listeners", srv.postListener)
-		r.Get("/v1/listeners/{id}", srv.getListenerMeta)
-		r.Get("/v1/listeners/{id}/events", srv.pollListenerEvents)
-		r.Delete("/v1/listeners/{id}", srv.deleteListener)
-		r.Post("/v1/events/emit", srv.postEmit)
-		r.Post("/v1/events/{id}/consume", srv.postConsumeEvent)
+		// Steps.
+		r.Get("/v1/steps", srv.listSteps)
+		r.Post("/v1/steps", srv.postStep)
+		r.Get("/v1/steps/{id}", srv.getStep)
+		r.Post("/v1/steps/{id}/complete", srv.postCompleteStep)
 
 		// Current user.
 		r.Get("/v1/me", srv.getMe)
@@ -844,100 +841,30 @@ func (s *server) postTokenMulti(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"token": tok})
 }
 
-// ---- Listener / Event handlers ----
+// ---- Step handlers ----
 
-func (s *server) listListeners(w http.ResponseWriter, r *http.Request) {
-	listeners, err := s.kernel.ListListeners(r.Context(), callerFrom(r), 100, 0)
+func (s *server) listSteps(w http.ResponseWriter, r *http.Request) {
+	processID := r.URL.Query().Get("process_id")
+	status := r.URL.Query().Get("status")
+	steps, err := s.kernel.ListSteps(r.Context(), callerFrom(r), processID, status)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, listeners)
+	if steps == nil {
+		steps = []*kernel.Step{}
+	}
+	writeJSON(w, http.StatusOK, steps)
 }
 
-func (s *server) postListener(w http.ResponseWriter, r *http.Request) {
+func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SourceUserID   string `json:"source_user_id"`
-		EventName      string `json:"event_name"`
-		TargetActionID string `json:"target_action_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
-		return
-	}
-	l, err := s.kernel.CreateListener(r.Context(), callerFrom(r), kernel.CreateListenerRequest{
-		SourceUserID:   req.SourceUserID,
-		EventName:      req.EventName,
-		TargetActionID: req.TargetActionID,
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, l)
-}
-
-func (s *server) getListenerMeta(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	l, err := s.kernel.GetListener(r.Context(), callerFrom(r), id)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, l)
-}
-
-func (s *server) pollListenerEvents(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	events, err := s.kernel.PollListener(r.Context(), callerFrom(r), id)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if events == nil {
-		events = []*kernel.Event{}
-	}
-	writeJSON(w, http.StatusOK, events)
-}
-
-func (s *server) deleteListener(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if err := s.kernel.DeleteListener(r.Context(), callerFrom(r), id); err != nil {
-		writeErr(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *server) postEmit(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		EventName string         `json:"event_name"`
-		Args      map[string]any `json:"args"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
-		return
-	}
-	if req.EventName == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("event_name is required"))
-		return
-	}
-	if req.Args == nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("args is required"))
-		return
-	}
-	eventIDs, err := s.kernel.EmitEvent(r.Context(), callerFrom(r), callerFrom(r), req.EventName, req.Args, "")
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"event_ids": eventIDs})
-}
-
-func (s *server) postConsumeEvent(w http.ResponseWriter, r *http.Request) {
-	eventID := chi.URLParam(r, "id")
-	var req struct {
-		ProcessID string `json:"process_id"`
+		ProcessID       string          `json:"process_id"`
+		Action          string          `json:"action"`
+		PartialArgs     json.RawMessage `json:"partial_args"`
+		InputSchema     json.RawMessage `json:"input_schema"`
+		RequiredCaller  string          `json:"required_caller"`
+		ParentTraceID   string          `json:"parent_trace_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
@@ -947,12 +874,98 @@ func (s *server) postConsumeEvent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("process_id is required"))
 		return
 	}
-	reply, err := s.kernel.ConsumeEvent(r.Context(), callerFrom(r), eventID, req.ProcessID)
+	if req.Action == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("action is required"))
+		return
+	}
+	if req.RequiredCaller == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("required_caller is required"))
+		return
+	}
+	// Resolve @owner/name → actionID.
+	ownerHandle, actionName, err := kernel.ParseActionRef(req.Action)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	owner, err := s.kernel.ReadUserByHandle(r.Context(), ownerHandle)
+	if err != nil {
+		writeErr(w, kernel.ErrNotFound.Wrap("action owner not found"))
+		return
+	}
+	action, err := s.kernel.ReadActionByOwnerName(r.Context(), owner.ID, actionName)
+	if err != nil {
+		writeErr(w, kernel.ErrNotFound.Wrap("action not found"))
+		return
+	}
+	// Resolve @handle → userID for required_caller.
+	requiredCallerHandle := req.RequiredCaller
+	if !strings.HasPrefix(requiredCallerHandle, "@") {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("required_caller must be @handle"))
+		return
+	}
+	requiredCallerUser, err := s.kernel.ReadUserByHandle(r.Context(), requiredCallerHandle)
+	if err != nil {
+		writeErr(w, kernel.ErrNotFound.Wrap("required_caller not found"))
+		return
+	}
+	var parentTraceID *string
+	if req.ParentTraceID != "" {
+		parentTraceID = &req.ParentTraceID
+	}
+	step, err := s.kernel.CreateStep(r.Context(), callerFrom(r), req.ProcessID, parentTraceID,
+		action.ID, req.PartialArgs, req.InputSchema, requiredCallerUser.ID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, stepView(step, action))
+}
+
+func (s *server) getStep(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	step, err := s.kernel.ReadStep(r.Context(), callerFrom(r), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	action, _ := s.kernel.ReadAction(r.Context(), step.NextActionID)
+	writeJSON(w, http.StatusOK, stepView(step, action))
+}
+
+func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Args *json.RawMessage `json:"args"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+		return
+	}
+	if req.Args == nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("args is required"))
+		return
+	}
+	reply, err := s.kernel.CompleteStep(r.Context(), callerFrom(r), id, *req.Args)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, reply)
+}
+
+// stepView adds a computed action field to a step response.
+type stepWithAction struct {
+	*kernel.Step
+	Action string `json:"action,omitempty"`
+}
+
+func stepView(step *kernel.Step, action *kernel.Action) *stepWithAction {
+	v := &stepWithAction{Step: step}
+	if action != nil {
+		v.Action = "@" + action.OwnerHandle + "/" + action.Name
+	}
+	return v
 }
 
 // ---- well-known / federation ----

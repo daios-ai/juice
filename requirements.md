@@ -34,11 +34,11 @@ These meanings are fixed. In a transaction, `owner_user_id` is the process owner
 | -------------------------- | ------------------------- | ----------------------- | ----------------------------------- |
 | Root call                  | process owner             | authenticated requester | called action owner                 |
 | WASM subcall               | parent process owner      | parent action owner     | subcalled action owner              |
-| Event consumption          | supplied process owner    | listener owner          | listener target action owner        |
+| Step completion            | step's process owner      | required_caller_user_id | step's next action owner            |
 | Remote proxy call          | local process owner       | local call caller       | local remote-peer user owning proxy |
 | `@sys/make` worker subcall | requester’s process owner | `@sys`                  | worker action owner                 |
 
-All execution paths use `Call()`: root calls, native actions, WASM `juice.call`, event consumption, OpenAPI-imported HTTP actions, and remote proxies. `Call()` dispatches by `action.kind`, not by action-owner identity.
+All execution paths use `Call()`: root calls, native actions, WASM `juice.call`, step completion, OpenAPI-imported HTTP actions, and remote proxies. `Call()` dispatches by `action.kind`, not by action-owner identity.
 
 Supervision operations never route through `Call()`; they manage users, actions, processes, ratings, deposits, OpenAPI imports, and remote imports. Execution code must not rate outputs or propagate ratings.
 
@@ -73,8 +73,7 @@ All IDs are stable opaque identifiers. Action IDs are globally unique. Credit ba
 | `Transaction`       | `id`, `process_id`, `trace_id`, `parent_trace_id`, `owner_user_id`, `caller_user_id`, `target_user_id`, `action_id`, `action_name`, `args_json`, `reply_json`, `status`, `gross`, `net`, `fee`, `reason`, `remote_receipt_hash`, `remote_receipt_json`, `started_at`, `ended_at` | `status ∈ {success,failure}`. Every attempted call creates one immutable transaction. Fields obey the role law. `action_name` is captured at creation so history remains self-contained after action deletion. Local calls have null remote receipt fields. Remote-proxy commits atomically store full remote receipt JSON and `SHA-256(remote_receipt_json)`.                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `Stats`             | `uses`, `successes`, `failures`, `rating_count`, `price_mean`, `latency_mean`, `rating_mean`, `last_used_at`                                                                                                                                                                     | Missing stats have defined defaults. `uses = successes + failures`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `StatTag`           | `action_id`, `key`, `value`, `source`, `updated_at`                                                                                                                                                                                                                              | Optional lookup-experiment data, namespaced by source, never execution semantics.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `Listener`          | `id`, `owner_user_id`, `source_user_id`, `event_name`, `target_action_id`, `active`, `created_at`                                                                                                                                                                                | `owner_user_id` is the listener owner. Exact subscription to `(source_user_id,event_name)`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `Event`             | `id`, `listener_id`, `args_json`, `causing_trace_id`, `consumed_at`, `tx_id`, `created_at`                                                                                                                                                                                       | Persistent queued work item. `causing_trace_id` is nullable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `Step`              | `id`, `process_id`, `parent_trace_id`, `required_caller_user_id`, `next_action_id`, `partial_args`, `input_schema`, `status`, `tx_id`, `created_at`                                                                                                                               | `status ∈ {waiting, running, done}`. `required_caller_user_id` is mandatory; open completion is not supported. `partial_args` is pre-bound input merged with the caller-supplied input at completion (`input` overwrites `partial_args` on key collision). `input_schema` constrains what the completer may supply. `tx_id` is recorded atomically when status transitions to `done`. A step's executable lifetime is bounded by its process: closed processes make waiting steps non-completable.                                                                                                                                                                                                                                                                                                                        |
 | `Deposit`           | `id`, `operator_user_id`, `target_user_id`, `amount`, `reason`, `created_at`                                                                                                                                                                                                     | Immutable audit record for a positive out-of-band superuser credit grant.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `Receipt`           | `id`, `issuer_user_id`, `tx_id`, `trace_id`, `action_id`, `caller_user_id`, `process_id`, `args_hash`, `reply_hash`, `status`, `gross`, `net`, `fee`, `reason`, `started_at`, `created_at`, `signature`                                                                          | Immutable signed record for exactly one committed call. `caller_user_id` is the call caller. `started_at` is call start; `created_at` is settlement.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `Rating`            | `id`, `rated_tx_id`, `rated_receipt_id`, `rater_user_id`, `rating`, `note`, `created_at`, `signature`                                                                                                                                                                            | Immutable signed feedback record. `rating ∈ {0,1}`. At most one rating exists per transaction. `rated_receipt_id` may be null only for pre-receipt transactions. `note` is optional, nullable, human-readable, and included in the single Ed25519 rating signature payload.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
@@ -113,9 +112,9 @@ Trace relation:
 | --------------------- | ---------------------- | -------------------------- |
 | Root trace            | null                   | owning process             |
 | Subcall trace         | executing action trace | same as parent             |
-| Event-triggered trace | emitting action trace  | supplied consuming process |
+| Step-completion trace | step.parent_trace_id   | step.process_id            |
 
-`process_id` determines payment. `parent_trace_id` records causality only. Cross-process parent references are valid for event-triggered calls. Each completed descendant transaction updates ancestor `cost` and `latency_ms`.
+`process_id` determines payment. `parent_trace_id` records causality only. Cross-process parent references are valid for step-completion calls. Each completed descendant transaction updates ancestor `cost` and `latency_ms`.
 
 ## 5. Persistence and atomicity
 
@@ -129,8 +128,7 @@ CreateAction ReadAction UpdateAction DeleteAction ListAllActions
 CreateProcess ReadProcess EndProcess ListAllProcesses
 CreateTrace CreateTransaction ListTransactions ListAllTransactions
 ReadStats UpdateStats
-CreateListener ReadListener ListListeners DeleteListener
-CreateEvent ListPendingEvents ConsumeEvent PurgeListenerEvents
+CreateStep ReadStep ListSteps ClaimStep CompleteStep ResetRunningSteps
 GetConfig SetConfig CreateDeposit
 CreateReceipt ReadReceipt
 CreateRating ReadRating ListRatings
@@ -150,6 +148,7 @@ Atomic write sets:
 | End process     | process closure, return of remaining funds to process owner                                      |
 | Deposit         | user credit, deposit record                                                                      |
 | Rating          | rating record                                                                                    |
+| Step completion | step status→done, tx_id recorded, call transaction, receipt, fund settlement, trace metrics, stats |
 
 A monetary transition and its audit record must commit or fail together.
 
@@ -268,7 +267,7 @@ action.owner_user_id + source.type + source.spec_url + source.operation_key
 
 Contract fields: description, method, path, parameter bindings, input schema, output schema, selected response, price, execution source. `operation_hash` excludes stats, ratings, timestamps, and formatting. Manual name collision rejects import. OpenAPI unimport matches `owner_user_id + source.type=openapi + source.spec_url`, and optionally `Action.name` or `source.operation_key`.
 
-OpenAPI webhooks are event ingress, not actions. They must validate incoming payloads and enter through `EmitEvent`; they must not bypass the normal listener and consume flow.
+Inbound webhook payloads enter through the standard authenticated call path: external systems authenticate as registered users with bearer tokens and call `POST /v1/call` directly, or complete a pre-created step via `POST /v1/steps/{id}/complete`. No special webhook-registration endpoint exists in the kernel.
 
 ### Remote
 
@@ -302,9 +301,10 @@ WASM uses wazero. Scripts receive no ambient filesystem, network, environment, p
 Host surface:
 
 ```text
-juice.call   subcall under §6
-juice.emit   emit under §10 with current trace id
-juice.log    structured trace log
+juice.call          subcall under §6
+juice.step_create   create a waiting step under §10; returns step_id
+juice.step_complete complete a waiting step under §10; returns {result, tx_id, trace_id}
+juice.log           structured trace log
 ```
 
 Script authority:
@@ -333,36 +333,117 @@ mean_(n+1) = mean_n + (x_(n+1)-mean_n)/(n+1)
 `latency_mean` uses completed calls, with denominator `uses`.
 `rating_mean` uses rated calls only, with denominator `rating_count`, never `uses`.
 
-## 10. Events
+## 10. Steps
 
-Listener creation requires listener-owner authority, existing source user, exact event-name match, existing target action, and `CanCall(listener.owner_user_id,target_action)`. A listener stores no process or trace. Inactive listeners never fire. Deleting a listener requires listener-owner authority and atomically deactivates it and purges pending events.
-
-`EmitEvent(source_user_id,event_name,args,causing_trace_id)` creates one queued event per active exact-match listener. It stores raw args, performs no call, changes no balance, needs no emitter process, and creates no transaction. It returns created event IDs, or an empty list when no listeners match. Authenticated HTTP/CLI emission sets `source_user_id` to request user and rejects supplied `source_user_id`. WASM `juice.emit` sets `source_user_id` to executing action owner and `causing_trace_id` to current trace.
-
-Event states:
+A Step is a partially applied future Call: a suspended computation boundary that records enough context to resume when a caller later supplies the remaining input.
 
 ```text
-Pending   consumed_at = null
-In-flight consumed_at != null ∧ tx_id = null
-Consumed  consumed_at != null ∧ tx_id != null
+Step {
+  id
+  process_id
+  parent_trace_id
+  required_caller_user_id
+  next_action_id
+  partial_args
+  input_schema
+  status           // waiting | running | done
+  tx_id
+  created_at
+}
 ```
 
-Only the listener owner may consume, unless the source user is also the listener owner. Consumption atomically locks a pending event, then performs:
+Core invariant:
 
 ```text
-Call(listener.owner_user_id, supplied_process, target_action, event.args_json)
-with parent_trace_id = event.causing_trace_id
+CompleteStep(caller, id, input) = Call(caller, process_id, next_action_id, partial_args ⊕ input)
 ```
 
-Consumption transaction:
+`partial_args ⊕ input` is a shallow object merge. Keys in `input` overwrite keys in `partial_args`. Only keys allowed by `input_schema` may appear in `input`. Final arguments are validated against `next_action.input_schema` by the underlying `Call`.
+
+`required_caller_user_id` is mandatory. Open completion is not supported.
+
+Status states:
+
+| State     | Meaning                                                                                            |
+| --------- | -------------------------------------------------------------------------------------------------- |
+| `waiting` | Completable if its process is open. The only state from which `CompleteStep` may begin.            |
+| `running` | Claimed; the resumed `Call` is executing. Prevents concurrent double-execution.                    |
+| `done`    | The resumed `Call` finished. Success, failure, receipts, and settlement belong to the transaction. |
+
+A step does not duplicate transaction state. Completion timing, result, and failure reason are obtained from the transaction referenced by `tx_id`.
+
+`EndProcess` does not mutate steps. A closed process makes all waiting steps tied to it non-completable.
+
+Startup recovery: `ResetRunningSteps` sets all steps with `status=running` and `tx_id=null` back to `status=waiting`.
+
+### Operations
+
+`CreateStep(caller, process_id, parent_trace_id, next_action_id, partial_args, input_schema, required_caller_user_id)`: caller must be authenticated and non-suspended. Process must exist and be open. Caller must be permitted to use the process (precondition 3 of §4). `next_action_id` must exist. `CanCall(process.owner_user_id, next_action)` must hold. Returns a `waiting` step.
+
+`ReadStep(caller, id)`: requires `CanReadStep`.
+
+`ListSteps(caller)`: returns steps visible to the caller per `CanListStep`, ordered by `created_at` descending. Optional filters: `process_id`, `status`.
+
+`CompleteStep(caller, id, input)`:
 
 ```text
-owner_user_id  = supplied_process.owner_user_id
-caller_user_id = listener.owner_user_id
-target_user_id = target_action.owner_user_id
+1. step exists
+2. status = waiting
+3. process exists and is open
+4. caller = required_caller_user_id  (no superuser exception; IsSuperuser does not permit completing another user's step)
+5. input satisfies input_schema
 ```
 
-Normal call preconditions apply. The listener owner must be allowed to use the supplied process; `CanCall(supplied_process.owner_user_id,target_action)` must hold. `causing_trace_id` records causality, not payment. Success stores `tx_id`; failure resets pending. Inactive listeners and already-consumed events return `ErrInvalidState`. Delivery is at-least-once; the lock prevents concurrent double-processing. Startup resets in-flight events. Polling pending events is allowed to listener owner or source user and returns `id`, `args_json`, `causing_trace_id`, and `created_at`.
+`ClaimStep` atomically transitions `waiting→running`. Then executes:
+
+```text
+Call(caller, process_id, next_action_id, partial_args ⊕ input)
+with parent_trace_id = step.parent_trace_id
+```
+
+On `Call` completion (success or failure), atomically records `status=done` and `tx_id`. If `Call` rejects before creating a transaction (action deactivated, `CanCall` lost, funds exhausted), the step is reset to `waiting`.
+
+Completion transaction role law:
+
+```text
+owner_user_id  = step's process owner
+caller_user_id = required_caller_user_id
+target_user_id = next_action.owner_user_id
+```
+
+### Access rules
+
+```text
+CanListStep(u, k) :=
+  u = Process(k.process_id).owner_user_id
+  ∨ u = k.required_caller_user_id
+  ∨ IsSuperuser(u)
+
+CanReadStep(u, k) := CanListStep(u, k)
+```
+
+### WASM host functions
+
+```text
+juice.step_create(partial_args, input_schema, required_caller_user_id, next_action_id) -> step_id
+```
+
+Creates a waiting step bound to the current process and current trace (as `parent_trace_id`). Arguments are JSON-encoded strings.
+
+```text
+juice.step_complete(step_id, input) -> {result, tx_id, trace_id}
+```
+
+Completes a waiting step. The executing action owner is used as the caller, matching `juice.call` subcall semantics. `input` is a JSON-encoded object.
+
+### Webhook integration
+
+External systems deliver inbound payloads through the standard authenticated call path. They register as users, obtain bearer tokens, and either:
+
+- Call `POST /v1/call` directly with the webhook payload as `args`.
+- Complete a pre-created step via `POST /v1/steps/{id}/complete` with the payload as `input`.
+
+No special webhook-registration endpoint exists in the kernel.
 
 ## 11. Receipts, ratings, signatures, transaction access
 
@@ -421,7 +502,7 @@ config.jwt_secret          = 32 random bytes, hex
 
 Private signing key and JWT secret are never logged or returned. Partial first boot is rerunnable. `JUICE_SECRET_KEY` overrides stored JWT secret at runtime only.
 
-Every startup reads `config.superuser_handle` to confirm first boot and identify `@sys`; it verifies signing keys and aborts if either is absent. It then registers, enables, and makes public `@sys/lookup`, `@sys/llm/chat`, and `@sys/make` if absent. It resets in-flight events by setting `consumed_at = NULL` where `consumed_at IS NOT NULL AND tx_id IS NULL`. It resets in-flight calls by restoring locked process funds for all open processes with `locked > 0`:
+Every startup reads `config.superuser_handle` to confirm first boot and identify `@sys`; it verifies signing keys and aborts if either is absent. It then registers, enables, and makes public `@sys/lookup`, `@sys/llm/chat`, and `@sys/make` if absent. It resets running steps by setting `status = waiting` where `status = running AND tx_id IS NULL`. It resets in-flight calls by restoring locked process funds for all open processes with `locked > 0`:
 
 ```text
 available += locked
@@ -496,10 +577,8 @@ juice action stats
 juice process start                       juice process list
 juice process show                        juice process fund
 juice process end                         juice call
-juice listener create                     juice listener list
-juice listener show                       juice listener delete
-juice event emit                          juice event list
-juice event consume
+juice step create                         juice step list
+juice step show                           juice step complete
 juice tx list                             juice tx show
 juice tx rate                             juice tx verify-receipt
 juice health
@@ -507,7 +586,7 @@ juice admin user list                     juice admin user show
 juice admin user suspend                  juice admin user unsuspend
 juice admin user deposit                  juice admin action list
 juice admin action disable                juice admin process list
-juice admin tx list
+juice admin tx list                       juice admin step list
 juice remote add                          juice remote list
 juice remote import                       juice remote unimport
 ```
@@ -535,10 +614,11 @@ Endpoint rules:
 | `POST /v1/actions/import`                        | authenticated OpenAPI supervision import                                                                        |
 | `POST /v1/actions/unimport`                      | action-owner import-provenance deactivation                                                                     |
 | `GET /v1/processes`                              | process owner’s processes, descending `created_at`                                                              |
-| `GET /v1/listeners`                              | listener owner’s listeners                                                                                      |
-| `GET /v1/listeners/{id}/events`                  | listener owner or source user; returns pending `id`, `args_json`, `causing_trace_id`, `created_at`              |
+| `GET /v1/steps`                                  | authenticated; returns steps visible to caller per `CanListStep`; optional `?process_id=` and `?status=` filters |
+| `POST /v1/steps`                                 | authenticated; creates a waiting step; requires `process_id`, `next_action_id`, `required_caller`, `partial_args`, `input_schema` |
+| `GET /v1/steps/{id}`                             | `CanReadStep`; returns step fields                                                                              |
+| `POST /v1/steps/{id}/complete`                   | `CanReadStep`; `args` required (`{}` valid); absent gives `ErrInvalidInput`; returns `result`, `tx_id`, `trace_id`, `step_id` |
 | `POST /v1/call`                                  | requires `args`; `{}` valid; absent gives `ErrInvalidInput`; action is `@owner/name`                            |
-| `POST /v1/events/emit`                           | source user is request user; rejects `source_user_id`; requires `args`; returns created event IDs or empty list |
 | `POST /v1/auth/logout`                           | refresh token body; missing/revoked gives `ErrUnauthenticated`                                                  |
 | `GET /v1/transactions`                           | transactions visible to the authenticated user under `CanReadTransaction`                                       |
 | `GET /v1/transactions/{id}`                      | full detail to parties; `ErrNotFound` to non-parties                                                            |
@@ -588,9 +668,9 @@ trace root and child creation
 nested call trace tree
 transaction creation
 payment split
-event listen/emit/poll/consume/unlisten
+step create/read/list/complete
 wasm script execution
-wasm host function call
+wasm host function call (juice.call, juice.step_create, juice.step_complete)
 script timeout
 script memory limit
 lookup ranking with fake embeddings
@@ -620,20 +700,32 @@ subcall spends from same process
 failed subcall refunds same process
 successful subcall remains settled if parent later fails
 subcall trace has same process_id and parent_trace_id pointing to caller trace
-event-triggered trace has parent_trace_id referencing emitting action trace in another process
-event consumption transaction has owner_user_id = supplied process owner
-event consumption transaction has caller_user_id = listener owner
-event consumption transaction has target_user_id = listener target action owner
 root trace has null parent_trace_id
-pending events absent from poll after successful consume
-emit does not alter emitter balance or process balance
-EmitEvent returns created event IDs or an empty list when no listeners match
-polling returns pending event id, args_json, causing_trace_id, created_at
-second ConsumeEvent on same event returns ErrInvalidState
-ConsumeEvent against inactive listener returns ErrInvalidState
-DeleteListener purges all pending events for that listener
-ConsumeEvent fails and resets event to pending when process has insufficient funds
-bootstrap resets in-flight events (consumed_at set, tx_id null) to pending
+step create returns waiting step with correct fields
+step complete merges partial_args with caller input (input keys overwrite partial_args keys)
+step complete input validated against input_schema before merge
+step complete final args validated against next_action.input_schema by Call
+step complete with wrong caller returns ErrUnauthorized
+step complete against running or done step returns ErrInvalidState
+step complete resets to waiting when Call rejects before creating a transaction
+step complete with insufficient funds resets step to waiting
+step complete with deactivated action resets step to waiting
+step complete with private action (CanCall lost) resets step to waiting
+step tx_id recorded atomically with status=done
+step-completion trace has parent_trace_id equal to step.parent_trace_id
+step-completion trace has process_id equal to step.process_id
+step-completion transaction has owner_user_id = step process owner
+step-completion transaction has caller_user_id = required_caller_user_id
+step-completion transaction has target_user_id = next_action owner
+CanListStep: process owner sees own step
+CanListStep: required_caller_user_id user sees step
+CanListStep: unrelated user denied
+CanReadStep: same rules as CanListStep
+wasm juice.step_create returns step_id bound to current process and trace
+wasm juice.step_complete executes next action and returns result, tx_id, trace_id
+webhook caller authenticates as registered user and calls POST /v1/call directly
+webhook caller completes a pre-created step via POST /v1/steps/{id}/complete
+bootstrap resets running steps (status=running, tx_id=null) to waiting
 bootstrap resets in-flight calls: restores locked process funds to available for all open processes with locked > 0
 startup reads config.superuser_handle to confirm first boot and identify @sys
 second rating on same transaction rejected with ErrInvalidInput
@@ -653,7 +745,6 @@ OpenAPI activation rejects incomplete schemas or missing descriptions
 OpenAPI public activation requires ownership proof
 OpenAPI import affects only matching OpenAPI-provenance actions
 OpenAPI import preserves Action.id, deactivates on contract change, and resets current stats
-OpenAPI webhooks enter through event ingress, not actions
 remote import/unimport flow for signed manifests
 remote import preserves Action.id, deactivates on manifest contract change, and does not overwrite local Stats
 remote manifest signature is Ed25519 over canonical JSON excluding signature
@@ -686,10 +777,10 @@ all subcalls spend from the original funded process
 successful subcall settlements persist if ancestor call later fails
 root traces have parent_trace_id = null
 subcall traces share their parent's process_id
-event-triggered traces have parent_trace_id referencing a trace in another process
-emitter balance is unchanged by EmitEvent regardless of how many listeners match
-consumed events never appear in ListPendingEvents
-pending events are absent after listener deletion
+step-completion traces have parent_trace_id equal to step.parent_trace_id (cross-process references valid)
+step-completion traces have process_id equal to step.process_id
+a step without tx_id is never done; tx_id is set atomically with status=done
+waiting steps tied to a closed process are non-completable without mutating the step
 transaction row is immutable after commit
 rating records reference valid tx_id and receipt_id
 every transaction obeys owner_user_id = process owner, caller_user_id = call caller, target_user_id = action owner
@@ -712,6 +803,7 @@ caller executes a paid action multiple times; the action owner lists transaction
 caller rates a transaction with a note; the note and rating value appear in the transaction detail and list responses for all transaction parties; an unrated transaction returns null for the rating field
 caller executes a remote proxy action; all transaction parties call verify-receipt; all checks pass and valid is true
 caller executes @sys/make; worker subcalls record owner_user_id = requester process owner, caller_user_id = @sys, and target_user_id = worker action owner; registered action is owned by the caller of the @sys/make call
+external system authenticates as a registered user, pre-creates a step, receives step_id, then completes it via POST /v1/steps/{id}/complete; resulting transaction obeys role law and step transitions to done with tx_id set
 ```
 
 ## 16. Design rationale

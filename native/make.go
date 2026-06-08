@@ -70,8 +70,13 @@ type makeTestHost struct{}
 func (h *makeTestHost) Call(_ context.Context, _ string, _ []byte) ([]byte, error) {
 	return []byte("{}"), nil
 }
-func (h *makeTestHost) Emit(_ context.Context, _ string, _ []byte) error { return nil }
-func (h *makeTestHost) Log(_ context.Context, _, _ string) error         { return nil }
+func (h *makeTestHost) StepCreate(_ context.Context, _, _ []byte, _, _ string) (string, error) {
+	return "", nil
+}
+func (h *makeTestHost) StepComplete(_ context.Context, _ string, _ []byte) ([]byte, error) {
+	return []byte("{}"), nil
+}
+func (h *makeTestHost) Log(_ context.Context, _, _ string) error { return nil }
 
 // executeMake implements the full @sys/make 10-step pipeline.
 // targetID is make's action owner (@sys); callerID is the call caller who will own the synthesized action;

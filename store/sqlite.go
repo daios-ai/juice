@@ -777,7 +777,7 @@ func (s *DB) upsertActionStats(ctx context.Context, tx *sql.Tx, stats *kernel.St
 	return dbErr(err, label+": upsert stats")
 }
 
-func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, eventID, idempotencyRecordID string) error {
+func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return dbErr(err, "begin commit call")
@@ -828,13 +828,6 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 	}
 	if err := s.upsertActionStats(ctx, tx, stats, true, "commit call"); err != nil {
 		return err
-	}
-
-	if eventID != "" {
-		if _, err = tx.ExecContext(ctx,
-			`UPDATE events SET tx_id=? WHERE id=?`, ktx.ID, eventID); err != nil {
-			return dbErr(err, "commit call: settle event")
-		}
 	}
 
 	if idempotencyRecordID != "" {
@@ -1178,205 +1171,124 @@ func (s *DB) UpsertStats(ctx context.Context, st *kernel.Stats) error {
 	return dbErr(err, "upsert stats")
 }
 
-// ---- Listeners & Events ----
+// ---- Steps ----
 
-func (s *DB) CreateListener(ctx context.Context, l *kernel.Listener) error {
+func (s *DB) CreateStep(ctx context.Context, step *kernel.Step) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO listeners (id,owner_user_id,source_user_id,event_name,target_action_id,active,created_at)
-		 VALUES (?,?,?,?,?,?,?)`,
-		l.ID, l.OwnerUserID, l.SourceUserID, l.EventName,
-		l.TargetActionID, boolInt(l.Active), timeToStr(l.CreatedAt),
+		`INSERT INTO steps (id,process_id,parent_trace_id,required_caller_user_id,next_action_id,
+		                    partial_args,input_schema,status,created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		step.ID, step.ProcessID, nullStrPtr(step.ParentTraceID), step.RequiredCallerUserID,
+		step.NextActionID, rawJSONStr(step.PartialArgs), rawJSONStr(step.InputSchema),
+		string(step.Status), timeToStr(step.CreatedAt),
 	)
-	return dbErr(err, "create listener")
+	return dbErr(err, "create step")
 }
 
-func (s *DB) ReadListener(ctx context.Context, id string) (*kernel.Listener, error) {
-	var l kernel.Listener
-	var active int
-	var createdAt string
+func (s *DB) ReadStep(ctx context.Context, id string) (*kernel.Step, error) {
+	var step kernel.Step
+	var parentTraceID, txID *string
+	var createdAt, partialArgs, inputSchema, status string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,owner_user_id,source_user_id,event_name,target_action_id,active,created_at
-		 FROM listeners WHERE id=?`, id,
-	).Scan(&l.ID, &l.OwnerUserID, &l.SourceUserID, &l.EventName,
-		&l.TargetActionID, &active, &createdAt)
+		`SELECT id,process_id,parent_trace_id,required_caller_user_id,next_action_id,
+		        partial_args,input_schema,status,tx_id,created_at
+		 FROM steps WHERE id=?`, id,
+	).Scan(&step.ID, &step.ProcessID, &parentTraceID, &step.RequiredCallerUserID,
+		&step.NextActionID, &partialArgs, &inputSchema, &status, &txID, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, kernel.ErrNotFound.Wrap("listener not found")
+		return nil, kernel.ErrNotFound.Wrap("step not found")
 	}
 	if err != nil {
-		return nil, dbErr(err, "read listener")
+		return nil, dbErr(err, "read step")
 	}
-	l.Active = active != 0
-	l.CreatedAt = strToTime(createdAt)
-	return &l, nil
+	step.ParentTraceID = parentTraceID
+	step.PartialArgs = strToRawJSON(partialArgs)
+	step.InputSchema = strToRawJSON(inputSchema)
+	step.Status = kernel.StepStatus(status)
+	step.TxID = txID
+	step.CreatedAt = strToTime(createdAt)
+	return &step, nil
 }
 
-func (s *DB) ListListeners(ctx context.Context, sourceUserID, eventName string) ([]*kernel.Listener, error) {
+func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status string, isSuperuser bool) ([]*kernel.Step, error) {
+	superInt := 0
+	if isSuperuser {
+		superInt = 1
+	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,owner_user_id,source_user_id,event_name,target_action_id,active,created_at
-		 FROM listeners WHERE source_user_id=? AND event_name=? AND active=1`,
-		sourceUserID, eventName,
+		`SELECT id,process_id,parent_trace_id,required_caller_user_id,next_action_id,
+		        partial_args,input_schema,status,tx_id,created_at
+		 FROM steps
+		 WHERE (process_id IN (SELECT id FROM processes WHERE owner_user_id=?)
+		        OR required_caller_user_id=?
+		        OR ?)
+		   AND (?='' OR process_id=?)
+		   AND (?='' OR status=?)
+		 ORDER BY created_at DESC`,
+		callerUserID, callerUserID, superInt,
+		processID, processID,
+		status, status,
 	)
 	if err != nil {
-		return nil, dbErr(err, "list listeners")
+		return nil, dbErr(err, "list steps")
 	}
 	defer rows.Close()
-
-	var out []*kernel.Listener
+	var out []*kernel.Step
 	for rows.Next() {
-		var l kernel.Listener
-		var active int
-		var createdAt string
-		if err := rows.Scan(&l.ID, &l.OwnerUserID, &l.SourceUserID, &l.EventName,
-			&l.TargetActionID, &active, &createdAt); err != nil {
-			return nil, dbErr(err, "scan listener")
+		var step kernel.Step
+		var parentTraceID, txID *string
+		var createdAt, partialArgs, inputSchema, stepStatus string
+		if err := rows.Scan(&step.ID, &step.ProcessID, &parentTraceID, &step.RequiredCallerUserID,
+			&step.NextActionID, &partialArgs, &inputSchema, &stepStatus, &txID, &createdAt); err != nil {
+			return nil, dbErr(err, "scan step")
 		}
-		l.Active = active != 0
-		l.CreatedAt = strToTime(createdAt)
-		out = append(out, &l)
+		step.ParentTraceID = parentTraceID
+		step.PartialArgs = strToRawJSON(partialArgs)
+		step.InputSchema = strToRawJSON(inputSchema)
+		step.Status = kernel.StepStatus(stepStatus)
+		step.TxID = txID
+		step.CreatedAt = strToTime(createdAt)
+		out = append(out, &step)
 	}
 	return out, rows.Err()
 }
 
-func (s *DB) ListListenersByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Listener, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,owner_user_id,source_user_id,event_name,target_action_id,active,created_at
-		 FROM listeners WHERE owner_user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-		ownerID, limit, offset,
-	)
-	if err != nil {
-		return nil, dbErr(err, "list listeners by owner")
-	}
-	defer rows.Close()
-	var out []*kernel.Listener
-	for rows.Next() {
-		var l kernel.Listener
-		var active int
-		var createdAt string
-		if err := rows.Scan(&l.ID, &l.OwnerUserID, &l.SourceUserID, &l.EventName,
-			&l.TargetActionID, &active, &createdAt); err != nil {
-			return nil, dbErr(err, "scan listener")
-		}
-		l.Active = active != 0
-		l.CreatedAt = strToTime(createdAt)
-		out = append(out, &l)
-	}
-	return out, rows.Err()
-}
-
-func (s *DB) CreateEvents(ctx context.Context, events []*kernel.Event) error {
-	if len(events) == 0 {
-		return nil
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "create events: begin")
-	}
-	for _, e := range events {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO events (id,listener_id,args_json,causing_trace_id,created_at)
-			 VALUES (?,?,?,?,?)`,
-			e.ID, e.ListenerID, string(e.ArgsJSON), nullStr(e.CausingTraceID), timeToStr(e.CreatedAt),
-		); err != nil {
-			_ = tx.Rollback()
-			return dbErr(err, "create events: insert")
-		}
-	}
-	return dbErr(tx.Commit(), "create events: commit")
-}
-
-func (s *DB) ReadEvent(ctx context.Context, id string) (*kernel.Event, error) {
-	var e kernel.Event
-	var causingTraceID, consumedAt, txID *string
-	var createdAt, argsJSON string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id,listener_id,args_json,causing_trace_id,consumed_at,tx_id,created_at
-		 FROM events WHERE id=?`, id,
-	).Scan(&e.ID, &e.ListenerID, &argsJSON, &causingTraceID, &consumedAt, &txID, &createdAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, kernel.ErrNotFound.Wrap("event not found")
-	}
-	if err != nil {
-		return nil, dbErr(err, "read event")
-	}
-	e.ArgsJSON = strToRawJSON(argsJSON)
-	if causingTraceID != nil {
-		e.CausingTraceID = *causingTraceID
-	}
-	e.ConsumedAt = strToNullTime(consumedAt)
-	e.TxID = txID
-	e.CreatedAt = strToTime(createdAt)
-	return &e, nil
-}
-
-func (s *DB) ListPendingEvents(ctx context.Context, listenerID string) ([]*kernel.Event, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,listener_id,args_json,causing_trace_id,created_at
-		 FROM events WHERE listener_id=? AND consumed_at IS NULL ORDER BY created_at`, listenerID)
-	if err != nil {
-		return nil, dbErr(err, "list pending events")
-	}
-	defer rows.Close()
-	var out []*kernel.Event
-	for rows.Next() {
-		var e kernel.Event
-		var causingTraceID *string
-		var createdAt, argsJSON string
-		if err := rows.Scan(&e.ID, &e.ListenerID, &argsJSON, &causingTraceID, &createdAt); err != nil {
-			return nil, dbErr(err, "scan event")
-		}
-		e.ArgsJSON = strToRawJSON(argsJSON)
-		if causingTraceID != nil {
-			e.CausingTraceID = *causingTraceID
-		}
-		e.CreatedAt = strToTime(createdAt)
-		out = append(out, &e)
-	}
-	return out, rows.Err()
-}
-
-func (s *DB) LockEvent(ctx context.Context, eventID string) error {
+func (s *DB) ClaimStep(ctx context.Context, stepID string) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE events SET consumed_at=datetime('now') WHERE id=? AND consumed_at IS NULL`, eventID)
+		`UPDATE steps SET status='running' WHERE id=? AND status='waiting'`, stepID)
 	if err != nil {
-		return dbErr(err, "lock event")
+		return dbErr(err, "claim step")
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return kernel.ErrInvalidState.Wrap("event already consumed or in-flight")
+		return kernel.ErrInvalidState.Wrap("step is not waiting")
 	}
 	return nil
 }
 
-func (s *DB) UnlockEvent(ctx context.Context, eventID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE events SET consumed_at=NULL WHERE id=? AND tx_id IS NULL`, eventID)
-	return dbErr(err, "unlock event")
-}
-
-func (s *DB) DeleteListenerWithEvents(ctx context.Context, listenerID string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+func (s *DB) CompleteStep(ctx context.Context, stepID, txID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE steps SET status='done', tx_id=? WHERE id=? AND status='running'`, txID, stepID)
 	if err != nil {
-		return dbErr(err, "begin delete listener")
+		return dbErr(err, "complete step")
 	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE listeners SET active=0 WHERE id=?`, listenerID); err != nil {
-		return dbErr(err, "delete listener: deactivate")
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return kernel.ErrInvalidState.Wrap("step is not running")
 	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM events WHERE listener_id=? AND consumed_at IS NULL`, listenerID); err != nil {
-		return dbErr(err, "delete listener: purge events")
-	}
-	return dbErr(tx.Commit(), "delete listener: commit")
+	return nil
 }
 
-func (s *DB) ResetInFlightEvents(ctx context.Context) error {
+func (s *DB) ResetStep(ctx context.Context, stepID string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE events SET consumed_at=NULL WHERE consumed_at IS NOT NULL AND tx_id IS NULL`)
-	return dbErr(err, "reset in-flight events")
+		`UPDATE steps SET status='waiting' WHERE id=? AND status='running' AND tx_id IS NULL`, stepID)
+	return dbErr(err, "reset step")
+}
+
+func (s *DB) ResetRunningSteps(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE steps SET status='waiting' WHERE status='running' AND tx_id IS NULL`)
+	return dbErr(err, "reset running steps")
 }
 
 func (s *DB) ResetInFlightCalls(ctx context.Context) error {

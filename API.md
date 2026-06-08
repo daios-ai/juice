@@ -22,7 +22,7 @@ Sub-resource removal uses path parameters. Request bodies on DELETE are rejected
 Any operation that changes resource state returns the new state as the response body. `POST /v1/processes/{id}/fund` returns the updated process. Purely destructive operations (`DELETE`, `POST .../end`) return 204.
 
 **R6 — List responses are plain arrays.**  
-No envelope objects. `GET /v1/listeners/{id}/events` returns `[…]` directly. Metadata such as pagination belongs in response headers, not the body.
+No envelope objects. `GET /v1/steps` returns `[…]` directly. Metadata such as pagination belongs in response headers, not the body.
 
 **R7 — Input validated at the HTTP boundary.**  
 The handler rejects invalid inputs before calling the kernel. `rating` must be 0 or 1; returns `ErrInvalidInput` when violated.
@@ -38,17 +38,17 @@ No positional arguments anywhere. `remote add --url <url>`, `remote import --rem
 **C2 — `--action` always carries `@owner/name`; `--id` always carries a UUID.**  
 `--action` is never a UUID. `--id` is never a name. Operations that manage a resource the caller owns use `--id`. Operations that reference a callable action use `--action @owner/name`.
 
-**C3 — `--source-user` for user-handle inputs, never `--source`.**  
-`--source` is reserved for URLs and file paths (`action create --source`). The source-user argument in `listener create` uses `--source-user`.
+**C3 — `--source` is reserved for URLs and file paths.**  
+`--source` is used for action source URLs and script paths (`action create --source`). User-handle inputs use descriptively named flags: `--required-caller @handle` in `step create`.
 
 **C4 — Creation uses `create`.**  
-All resource-creation commands use `create`: `user create`, `action create`, `listener create`, `process start`.
+All resource-creation commands use `create`: `user create`, `action create`, `step create`, `process start`.
 
 **C5 — Deletion uses `delete`.**  
-Deletion commands use `delete`. `listener delete` purges pending events as a side effect, documented in the command description.
+Deletion commands use `delete`. Side effects of deletion are documented in the command description.
 
 **C6 — A command group's `list` subcommand lists that group's primary noun.**  
-`juice listener list` lists listeners. `juice event list --listener <id>` lists pending events for a listener. Subscriptions and queued work items are separate groups.
+`juice step list` lists steps. Optional filters (`--process`, `--status`) narrow the result without changing the command group.
 
 **C7 — Zero-cost native actions do not require process provisioning.**  
 `juice lookup` calls `@sys/lookup` at price 0. The CLI creates a zero-funded ephemeral process internally and ends it after the call. No `--process` flag is needed.
@@ -63,10 +63,10 @@ Default output is human-readable text. `--output json` returns the JSON matching
 Any CLI flag that accepts a JSON value also accepts `@path/to/file.json`. The `@` prefix signals that the value is read from the named file. Applies to `--args`, `--input-schema`, `--output-schema`.
 
 **C11 — `args` is always present; empty input is `{}`.**  
-`POST /v1/call` and `POST /v1/events/emit` require `args` in the request body. `{}` is the canonical representation of an empty argument set. Omitting `args` is normalized to `{}` rather than rejected, for ergonomics.
+`POST /v1/call` and `POST /v1/steps/{id}/complete` require an `args` field in the request body. `{}` is the canonical representation of an empty argument set. The CLI passes `{}` when `--args` is omitted; the HTTP layer rejects a missing field with `ErrInvalidInput`.
 
-**C12 — Emit source is always the request user.**  
-`POST /v1/events/emit` does not accept a `source_user_id` field. The event source is set from the request user. The server ignores any `source_user_id` in the request body.
+**C12 — `--required-caller` always carries `@handle`.**  
+The step completer is identified by a user handle at creation time. The server resolves the handle to a user ID stored as `required_caller_user_id`. Completion is rejected if the authenticated caller does not match.
 
 **C13 — Diagnostic output goes to stderr; resource data goes to stdout.**  
 Log lines, progress messages, and error text go to stderr. The only content written to stdout is the resource payload: human-readable summaries, `--output json` bodies, and `--quiet` IDs. This makes every command pipeable and keeps `$(juice ... --quiet)` capture reliable.
@@ -147,26 +147,16 @@ Action responses include a computed `action` field (`@owner/name`) alongside `id
 
 A caller reads transactions where it is buyer (`owner_user_id`) or seller (the action's owner). `rating` must be 0 (bad) or 1 (good); `note` is an optional string. Transaction and list responses include a `rating` field — `{"value": 0|1, "note": string|null}` when rated, `null` when unrated. Transaction `args` and `result` fields are inline JSON objects. Remote-proxy transactions include `remote_receipt_hash` and `remote_receipt_json`; `receipt-verification` checks the stored receipt signature and fields against the remote peer's public key entirely from local data. Returns `ErrInvalidState` for non-remote-proxy transactions.
 
-### Listeners
+### Steps
 
 | Operation | HTTP | CLI |
 |-----------|------|-----|
-| Create listener | `POST /v1/listeners` `{source_user_id, event_name, target_action_id}` → 201 listener | `juice listener create --source-user @handle --event --action @owner/name` |
-| List listeners | `GET /v1/listeners` → listener[] | `juice listener list` |
-| Show listener | `GET /v1/listeners/{id}` → listener | `juice listener show --id` |
-| Delete listener | `DELETE /v1/listeners/{id}` → 204 | `juice listener delete --id` |
+| Create step | `POST /v1/steps` `{process_id, action, partial_args, input_schema, required_caller[, parent_trace_id]}` → 201 step | `juice step create --process --action @owner/name --partial-args --input-schema --required-caller @handle [--parent-trace]` |
+| List steps | `GET /v1/steps[?process_id=&status=]` → step[] | `juice step list [--process --status]` |
+| Show step | `GET /v1/steps/{id}` → step | `juice step show --id` |
+| Complete step | `POST /v1/steps/{id}/complete` `{args}` → `{result, tx_id, trace_id, step_id}` | `juice step complete --id --args` |
 
-Deleting a listener also purges all pending events for that listener.
-
-### Events
-
-| Operation | HTTP | CLI |
-|-----------|------|-----|
-| Emit event | `POST /v1/events/emit` `{event_name, args}` → `{event_ids:[]}` | `juice event emit --event [--args]` |
-| List pending events | `GET /v1/listeners/{id}/events` → event[] | `juice event list --listener` |
-| Consume event | `POST /v1/events/{id}/consume` `{process_id}` → call reply | `juice event consume --id --process` |
-
-The event source is always the request user. `source_user_id` is not an input field.
+`required_caller` is a `@handle`; the server resolves it to `required_caller_user_id`. `action` is `@owner/name` identifying the next action to call on completion. `partial_args` and `input_schema` are JSON objects. `status` filter accepts `waiting`, `running`, or `done`. The `args` field in the complete request is the caller-supplied completion input; it is merged with the step's `partial_args` (completion `args` overwrites on key collision). The complete response includes the full call reply plus `step_id`. Step read and list responses include a computed `action` field (`@owner/name`) alongside `next_action_id`.
 
 ### System Actions
 
@@ -200,3 +190,4 @@ The event source is always the request user. `source_user_id` is not an input fi
 | Disable action | `juice admin action disable --id` |
 | List all processes | `juice admin process list [--limit --offset]` |
 | List all transactions | `juice admin tx list [--limit --offset]` |
+| List all steps | `juice admin step list [--limit --offset]` |

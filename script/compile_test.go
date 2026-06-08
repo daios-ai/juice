@@ -33,21 +33,6 @@ func TestInspectModuleEchoWASM(t *testing.T) {
 	}
 }
 
-func TestInspectModuleEmitCallerWASM(t *testing.T) {
-	imports, _, err := InspectModule(emitCallerWASM)
-	if err != nil {
-		t.Fatalf("InspectModule: %v", err)
-	}
-	found := false
-	for _, imp := range imports {
-		if imp.Module == "juice" && imp.Name == "emit" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("emitCallerWASM should import juice.emit, got %+v", imports)
-	}
-}
 
 func TestInspectModuleInvalidBytes(t *testing.T) {
 	_, _, err := InspectModule([]byte("not wasm"))

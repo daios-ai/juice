@@ -80,10 +80,41 @@ type Process struct {
 	EndedAt     *time.Time    `json:"ended_at,omitempty"`
 }
 
+// StepStatus is the lifecycle state of a step.
+type StepStatus string
+
+const (
+	StepWaiting StepStatus = "waiting"
+	StepRunning StepStatus = "running"
+	StepDone    StepStatus = "done"
+)
+
+// Step is a partially applied future Call — a suspended computation boundary that
+// records enough context to resume when a caller later supplies the remaining input.
+// Core invariant: CompleteStep(caller, id, input) = Call(caller, process_id, next_action_id, partial_args ⊕ input)
+type Step struct {
+	ID                   string          `json:"id"`
+	ProcessID            string          `json:"process_id"`
+	ParentTraceID        *string         `json:"parent_trace_id,omitempty"`
+	RequiredCallerUserID string          `json:"required_caller_user_id"`
+	NextActionID         string          `json:"next_action_id"`
+	PartialArgs          json.RawMessage `json:"partial_args"`
+	InputSchema          json.RawMessage `json:"input_schema"`
+	Status               StepStatus      `json:"status"`
+	TxID                 *string         `json:"tx_id,omitempty"`
+	CreatedAt            time.Time       `json:"created_at"`
+}
+
+// StepReply is the response from a successful CompleteStep.
+type StepReply struct {
+	*CallReply
+	StepID string `json:"step_id"`
+}
+
 // Trace records causal structure for one step in a call tree.
 // Root traces have ParentTraceID == nil.
-// Event-triggered traces may have a ParentTraceID that crosses process boundaries
-// (the emitting action's trace ID).
+// Step-completion traces may have a ParentTraceID that crosses process boundaries
+// (the step's parent_trace_id).
 type Trace struct {
 	ID             string    `json:"id"`
 	ProcessID      string    `json:"process_id"`
@@ -139,30 +170,6 @@ type StatTag struct {
 	Value     string    `json:"value"`
 	Source    string    `json:"source"`
 	UpdatedAt time.Time `json:"updated_at"`
-}
-
-// Listener binds a named event to a kernel call.
-type Listener struct {
-	ID             string    `json:"id"`
-	OwnerUserID    string    `json:"owner_user_id"`
-	SourceUserID   string    `json:"source_user_id"`
-	EventName      string    `json:"event_name"`
-	TargetActionID string    `json:"target_action_id"`
-	Active         bool      `json:"active"`
-	CreatedAt      time.Time `json:"created_at"`
-}
-
-// Event is a queued occurrence of a named event for a specific listener.
-// States: pending (ConsumedAt=nil, TxID=nil), in-flight (ConsumedAt set, TxID=nil),
-// consumed (both set). In-flight events are reset to pending on bootstrap restart.
-type Event struct {
-	ID             string          `json:"id"`
-	ListenerID     string          `json:"listener_id"`
-	ArgsJSON       json.RawMessage `json:"args"`
-	CausingTraceID string          `json:"causing_trace_id,omitempty"`
-	ConsumedAt     *time.Time      `json:"consumed_at,omitempty"`
-	TxID           *string         `json:"tx_id,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
 }
 
 // Deposit is an admin credit grant to a user's available balance.

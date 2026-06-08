@@ -383,9 +383,9 @@ func TestExchangeAuthCodeRedirectURIMismatch(t *testing.T) {
 	}
 }
 
-// TestSuspendedSubjectRejectedByProcessAndListenerOps verifies that the nine
-// supervision methods added in fix 3 enforce the kernel-level suspension check.
-func TestSuspendedSubjectRejectedByProcessAndListenerOps(t *testing.T) {
+// TestSuspendedSubjectRejectedByProcessOps verifies that process operations
+// enforce the kernel-level suspension check.
+func TestSuspendedSubjectRejectedByProcessOps(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -417,31 +417,6 @@ func TestSuspendedSubjectRejectedByProcessAndListenerOps(t *testing.T) {
 
 	check("FundProcess", k.FundProcess(ctx, victim.ID, p.ID, 10))
 	check("EndProcess", k.EndProcess(ctx, victim.ID, p.ID))
-
-	// Create a listener owned by @other2 to test listener ops.
-	target := setupAction(t, st, other.ID, "tgt", 0)
-	target.Public = true
-	_ = st.UpdateAction(ctx, target)
-	l, err := k.CreateListener(ctx, other.ID, kernel.CreateListenerRequest{
-		SourceUserID:   other.ID,
-		EventName:      "evt",
-		TargetActionID: target.ID,
-	})
-	if err != nil {
-		t.Fatalf("CreateListener setup: %v", err)
-	}
-
-	check("CreateListener (suspended)", func() error {
-		_, err := k.CreateListener(ctx, victim.ID, kernel.CreateListenerRequest{
-			SourceUserID:   other.ID,
-			EventName:      "evt",
-			TargetActionID: target.ID,
-		})
-		return err
-	}())
-	check("PollListener", func() error { _, err := k.PollListener(ctx, victim.ID, l.ID); return err }())
-	check("DeleteListener", k.DeleteListener(ctx, victim.ID, l.ID))
-	check("GetListener", func() error { _, err := k.GetListener(ctx, victim.ID, l.ID); return err }())
 }
 
 // TestRegisterRemoteKernelRequiresSuperuser verifies that non-superusers cannot

@@ -435,9 +435,9 @@ func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateAc
 	return a, nil
 }
 
-// ResetInFlightEvents resets in-flight events to pending. Called at startup.
-func (k *Kernel) ResetInFlightEvents(ctx context.Context) error {
-	return k.store.ResetInFlightEvents(ctx)
+// ResetRunningSteps resets running steps (status=running, tx_id=null) back to waiting. Called at startup.
+func (k *Kernel) ResetRunningSteps(ctx context.Context) error {
+	return k.store.ResetRunningSteps(ctx)
 }
 
 // ResetInFlightCalls restores locked process funds to available. Called at startup.
@@ -1268,101 +1268,213 @@ func DefaultStats(actionID string) *Stats {
 	return &Stats{ActionID: actionID, LastUsedAt: time.Now().UTC()}
 }
 
-// ---- Events ----
+// ---- Steps ----
 
-// CreateListenerRequest holds input for registering a listener.
-type CreateListenerRequest struct {
-	SourceUserID   string
-	EventName      string
-	TargetActionID string
-}
-
-// CreateListener registers a new listener owned by callerID and returns it.
-func (k *Kernel) CreateListener(ctx context.Context, callerID string, req CreateListenerRequest) (*Listener, error) {
+// CreateStep creates a new waiting step. The step records a future Call that a designated caller can resume.
+func (k *Kernel) CreateStep(ctx context.Context, callerID, processID string, parentTraceID *string, nextActionID string, partialArgs, inputSchema json.RawMessage, requiredCallerID string) (*Step, error) {
 	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return nil, err
 	}
-	if req.EventName == "" {
-		return nil, ErrInvalidInput.Wrap("event_name is required")
+	process, err := k.store.ReadProcess(ctx, processID)
+	if err != nil {
+		return nil, ErrNotFound.Wrap("process not found")
 	}
-	if req.SourceUserID == "" {
-		return nil, ErrInvalidInput.Wrap("source_user_id is required")
+	if process.Status != ProcessOpen {
+		return nil, ErrInvalidState.Wrap("process is closed")
 	}
-	if _, err := k.store.ReadUser(ctx, req.SourceUserID); err != nil {
-		return nil, ErrNotFound.Wrap("source_user_id not found")
+	u, err := k.store.ReadUser(ctx, callerID)
+	if err != nil {
+		return nil, ErrUnauthenticated.Wrap("user not found")
 	}
-	a, err := k.store.ReadAction(ctx, req.TargetActionID)
+	if process.OwnerUserID != callerID && !k.isUserSuperuser(ctx, u) {
+		return nil, ErrUnauthorized.Wrap("caller is not the process owner")
+	}
+	action, err := k.store.ReadAction(ctx, nextActionID)
+	if err != nil {
+		return nil, ErrNotFound.Wrap("next action not found")
+	}
+	if !canCall(process.OwnerUserID, action) {
+		if !action.Active {
+			return nil, ErrInvalidState.Wrap("next action is inactive")
+		}
+		return nil, ErrUnauthorized.Wrap("process owner cannot call next action")
+	}
+	if _, err := k.store.ReadUser(ctx, requiredCallerID); err != nil {
+		return nil, ErrNotFound.Wrap("required_caller_user_id not found")
+	}
+	if len(partialArgs) == 0 {
+		partialArgs = json.RawMessage("{}")
+	}
+	if len(inputSchema) == 0 {
+		inputSchema = json.RawMessage("{}")
+	}
+	now := time.Now().UTC()
+	step := &Step{
+		ID:                   uuid.New().String(),
+		ProcessID:            processID,
+		ParentTraceID:        parentTraceID,
+		RequiredCallerUserID: requiredCallerID,
+		NextActionID:         nextActionID,
+		PartialArgs:          partialArgs,
+		InputSchema:          inputSchema,
+		Status:               StepWaiting,
+		CreatedAt:            now,
+	}
+	if err := k.store.CreateStep(ctx, step); err != nil {
+		return nil, err
+	}
+	k.log.With(ctx).Info("step.created", "step_id", step.ID, "process_id", processID, "status", "success")
+	return step, nil
+}
+
+// ReadStep returns a step if the caller has read access.
+func (k *Kernel) ReadStep(ctx context.Context, callerID, stepID string) (*Step, error) {
+	step, err := k.store.ReadStep(ctx, stepID)
 	if err != nil {
 		return nil, err
 	}
-	if !canCall(callerID, a) {
-		return nil, ErrUnauthorized.Wrap("call permission required to register listener")
+	if !k.canReadStep(ctx, callerID, step) {
+		return nil, ErrUnauthorized.Wrap("read permission denied")
 	}
-	l := &Listener{
-		ID:             uuid.New().String(),
-		OwnerUserID:    callerID,
-		SourceUserID:   req.SourceUserID,
-		EventName:      req.EventName,
-		TargetActionID: req.TargetActionID,
-		Active:         true,
-		CreatedAt:      time.Now().UTC(),
-	}
-	if err := k.store.CreateListener(ctx, l); err != nil {
-		return nil, err
-	}
-	k.log.With(ctx).Info("listener.created", "listener_id", l.ID, "event", req.EventName, "status", "success")
-	return l, nil
+	return step, nil
 }
 
-// PollListener returns the pending (unconsumed) events for a listener.
-func (k *Kernel) PollListener(ctx context.Context, callerID, listenerID string) ([]*Event, error) {
+// ListSteps returns steps visible to the caller.
+func (k *Kernel) ListSteps(ctx context.Context, callerID, processID, status string) ([]*Step, error) {
 	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return nil, err
 	}
-	l, err := k.store.ReadListener(ctx, listenerID)
+	u, err := k.store.ReadUser(ctx, callerID)
+	if err != nil {
+		return nil, ErrUnauthenticated.Wrap("user not found")
+	}
+	return k.store.ListSteps(ctx, callerID, processID, status, k.isUserSuperuser(ctx, u))
+}
+
+// CompleteStep resumes a waiting step by merging caller input with partial_args and executing the next call.
+// No superuser exception: only required_caller_user_id may complete the step.
+func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, input json.RawMessage) (*StepReply, error) {
+	step, err := k.store.ReadStep(ctx, stepID)
 	if err != nil {
 		return nil, err
 	}
-	if l.OwnerUserID != callerID && l.SourceUserID != callerID {
-		return nil, ErrUnauthorized.Wrap("not authorized to poll this listener")
+	if step.Status != StepWaiting {
+		return nil, ErrInvalidState.Wrap("step is not waiting")
 	}
-	return k.store.ListPendingEvents(ctx, listenerID)
-}
-
-// DeleteListener atomically deactivates a listener and purges its pending events.
-func (k *Kernel) DeleteListener(ctx context.Context, callerID, listenerID string) error {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
-		return err
-	}
-	l, err := k.store.ReadListener(ctx, listenerID)
+	process, err := k.store.ReadProcess(ctx, step.ProcessID)
 	if err != nil {
-		return err
+		return nil, ErrNotFound.Wrap("process not found")
 	}
-	if l.OwnerUserID != callerID {
-		return ErrUnauthorized.Wrap("only the listener owner may remove it")
+	if process.Status != ProcessOpen {
+		return nil, ErrInvalidState.Wrap("process is closed")
 	}
-	return k.store.DeleteListenerWithEvents(ctx, listenerID)
-}
+	if callerID != step.RequiredCallerUserID {
+		return nil, ErrUnauthorized.Wrap("only required_caller_user_id may complete this step")
+	}
+	// Parse and validate input.
+	if len(input) == 0 {
+		input = json.RawMessage("{}")
+	}
+	var inputArgs map[string]any
+	if err := json.Unmarshal(input, &inputArgs); err != nil {
+		return nil, ErrInvalidInput.Wrap("input must be a JSON object")
+	}
+	if len(step.InputSchema) > 0 {
+		var schema map[string]any
+		if err := json.Unmarshal(step.InputSchema, &schema); err == nil && len(schema) > 0 {
+			if err := ValidateInput(schema, inputArgs); err != nil {
+				return nil, err
+			}
+		}
+	}
+	mergedArgs, err := mergeArgs(step.PartialArgs, input)
+	if err != nil {
+		return nil, ErrInvalidInput.Wrap("could not merge args")
+	}
+	var args map[string]any
+	if err := json.Unmarshal(mergedArgs, &args); err != nil {
+		return nil, ErrInvalidInput.Wrap("merged args are not a valid JSON object")
+	}
 
-// ListListeners returns all listeners owned by ownerID.
-func (k *Kernel) ListListeners(ctx context.Context, ownerID string, limit, offset int) ([]*Listener, error) {
-	return k.store.ListListenersByOwner(ctx, ownerID, limit, offset)
-}
+	// Look up next action to get owner+name for Call dispatch.
+	action, err := k.store.ReadAction(ctx, step.NextActionID)
+	if err != nil {
+		return nil, ErrNotFound.Wrap("next action not found")
+	}
+	owner, err := k.store.ReadUser(ctx, action.OwnerUserID)
+	if err != nil {
+		return nil, ErrNotFound.Wrap("next action owner not found")
+	}
 
-// GetListener returns listener metadata. Subject must be the owner or source user.
-func (k *Kernel) GetListener(ctx context.Context, callerID, listenerID string) (*Listener, error) {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+	parentTraceID := ""
+	if step.ParentTraceID != nil {
+		parentTraceID = *step.ParentTraceID
+	}
+
+	if err := k.store.ClaimStep(ctx, stepID); err != nil {
 		return nil, err
 	}
-	l, err := k.store.ReadListener(ctx, listenerID)
-	if err != nil {
+
+	reply, callErr := k.Call(ctx, CallRequest{
+		CallerID:       callerID,
+		ProcessID:      step.ProcessID,
+		ParentTraceID:  parentTraceID,
+		TargetUserID:   owner.ID,
+		ActionName:     action.Name,
+		Args:           args,
+		StepCompletion: true,
+	})
+	if callErr != nil {
+		// Reset to waiting so the step can be retried.
+		_ = k.store.ResetStep(ctx, stepID)
+		return nil, callErr
+	}
+
+	if err := k.store.CompleteStep(ctx, stepID, reply.TxID); err != nil {
+		k.log.With(ctx).Error("step.complete_record_failed", "step_id", stepID, "tx_id", reply.TxID, "error", err)
+	}
+	k.log.With(ctx).Info("step.completed", "step_id", stepID, "tx_id", reply.TxID, "status", "success")
+	return &StepReply{CallReply: reply, StepID: stepID}, nil
+}
+
+// canReadStep returns true if the caller may read the step.
+func (k *Kernel) canReadStep(ctx context.Context, callerID string, step *Step) bool {
+	if callerID == step.RequiredCallerUserID {
+		return true
+	}
+	process, err := k.store.ReadProcess(ctx, step.ProcessID)
+	if err == nil && process.OwnerUserID == callerID {
+		return true
+	}
+	if u, err := k.store.ReadUser(ctx, callerID); err == nil && k.isUserSuperuser(ctx, u) {
+		return true
+	}
+	return false
+}
+
+// mergeArgs performs a shallow merge of base and override JSON objects.
+// Keys in override overwrite keys in base.
+func mergeArgs(base, override json.RawMessage) (json.RawMessage, error) {
+	if len(base) == 0 {
+		base = json.RawMessage("{}")
+	}
+	if len(override) == 0 {
+		override = json.RawMessage("{}")
+	}
+	var b, o map[string]any
+	if err := json.Unmarshal(base, &b); err != nil {
 		return nil, err
 	}
-	if l.OwnerUserID != callerID && l.SourceUserID != callerID {
-		return nil, ErrUnauthorized.Wrap("not authorized to view this listener")
+	if err := json.Unmarshal(override, &o); err != nil {
+		return nil, err
 	}
-	return l, nil
+	for k, v := range o {
+		b[k] = v
+	}
+	return json.Marshal(b)
 }
+
+// ---- Receipts ----
 
 // GetReceiptByTxID returns the receipt for a transaction.
 func (k *Kernel) GetReceiptByTxID(ctx context.Context, txID string) (*Receipt, error) {
@@ -1393,105 +1505,6 @@ func (k *Kernel) DeleteIdempotencyRecord(ctx context.Context, id string) error {
 // If the record is already complete (CommitFailedCall already ran), this is a no-op.
 func (k *Kernel) CompleteIdempotencyRecordIfPending(ctx context.Context, id, resultJSON, receiptJSON string) error {
 	return k.store.CompleteIdempotencyRecordIfPending(ctx, id, resultJSON, receiptJSON)
-}
-
-// EmitEvent queues an event for all active listeners matching (sourceUserID, eventName).
-// It does NOT call the target action — the listener owner must call ConsumeEvent explicitly.
-// causingTraceID is stored as a FOLLOWS_FROM reference on each event record.
-// All events are inserted atomically: either every active listener receives its event or none do.
-func (k *Kernel) EmitEvent(ctx context.Context, callerID, sourceUserID, eventName string, args map[string]any, causingTraceID string) ([]string, error) {
-	if err := k.requireSelf(ctx, callerID, sourceUserID); err != nil {
-		return nil, err
-	}
-	listeners, err := k.store.ListListeners(ctx, sourceUserID, eventName)
-	if err != nil {
-		return nil, err
-	}
-	argsJSON, _ := json.Marshal(args)
-	now := time.Now().UTC()
-	var events []*Event
-	for _, l := range listeners {
-		if !l.Active {
-			continue
-		}
-		events = append(events, &Event{
-			ID:             uuid.New().String(),
-			ListenerID:     l.ID,
-			ArgsJSON:       json.RawMessage(argsJSON),
-			CausingTraceID: causingTraceID,
-			CreatedAt:      now,
-		})
-	}
-	if len(events) == 0 {
-		k.log.With(ctx).Info("event.emitted", "source", sourceUserID, "event", eventName, "queued", 0)
-		return nil, nil
-	}
-	if err := k.store.CreateEvents(ctx, events); err != nil {
-		return nil, err
-	}
-	eventIDs := make([]string, len(events))
-	for i, e := range events {
-		eventIDs[i] = e.ID
-	}
-	k.log.With(ctx).Info("event.emitted", "source", sourceUserID, "event", eventName, "queued", len(eventIDs))
-	return eventIDs, nil
-}
-
-// ConsumeEvent atomically locks an event and executes its listener's target action.
-// At-least-once delivery: if the action call fails, the event is reset to pending.
-// processID is the caller's open process; the parent trace is set to the emitting action's
-// trace (e.CausingTraceID), providing a cross-process causal link.
-func (k *Kernel) ConsumeEvent(ctx context.Context, callerID, eventID, processID string) (*CallReply, error) {
-	e, err := k.store.ReadEvent(ctx, eventID)
-	if err != nil {
-		return nil, err
-	}
-	l, err := k.store.ReadListener(ctx, e.ListenerID)
-	if err != nil {
-		return nil, err
-	}
-	if l.OwnerUserID != callerID {
-		return nil, ErrUnauthorized.Wrap("only the listener owner may consume events")
-	}
-	if !l.Active {
-		return nil, ErrInvalidState.Wrap("listener is inactive")
-	}
-	// Atomic lock — ErrInvalidState if already consumed or in-flight.
-	if err := k.store.LockEvent(ctx, eventID); err != nil {
-		return nil, err
-	}
-	// Resolve action target.
-	action, err := k.store.ReadAction(ctx, l.TargetActionID)
-	if err != nil {
-		_ = k.store.UnlockEvent(ctx, eventID)
-		return nil, err
-	}
-	owner, err := k.store.ReadUser(ctx, action.OwnerUserID)
-	if err != nil {
-		_ = k.store.UnlockEvent(ctx, eventID)
-		return nil, err
-	}
-	// Decode event args.
-	var args map[string]any
-	_ = json.Unmarshal(e.ArgsJSON, &args)
-	// Call the action using the supplied process. ParentTraceID is the emitting trace
-	// (may cross process boundaries). EventID causes CommitCall to settle the event
-	// atomically in the same transaction, eliminating the double-charge window.
-	reply, err := k.Call(ctx, CallRequest{
-		CallerID:      callerID,
-		ProcessID:     processID,
-		ParentTraceID: e.CausingTraceID,
-		TargetUserID:  owner.ID,
-		ActionName:    action.Name,
-		Args:          args,
-		EventID:       eventID,
-	})
-	if err != nil {
-		_ = k.store.UnlockEvent(ctx, eventID)
-		return nil, err
-	}
-	k.log.With(ctx).Info("event.consumed", "event_id", eventID, "tx_id", reply.TxID, "status", "success")
-	return reply, nil
 }
 
 // ---- Receipt helpers ----

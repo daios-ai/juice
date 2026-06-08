@@ -202,22 +202,45 @@ func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions
 			[]api.ValueType{},
 		).Export("log")
 
-	// juice.emit(eventPtr, eventLen, argsPtr, argsLen)
+	// juice.step_create(partialArgsPtr, partialArgsLen, inputSchemaPtr, inputSchemaLen,
+	//                   requiredCallerPtr, requiredCallerLen, nextActionPtr, nextActionLen) -> packedI64
 	b.NewFunctionBuilder().
 		WithGoModuleFunction(
 			api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
-				eventPtr, eventLen := uint32(stack[0]), uint32(stack[1])
-				argsPtr, argsLen := uint32(stack[2]), uint32(stack[3])
 				mem := mod.Memory()
-				event, _ := mem.Read(eventPtr, eventLen)
-				args, _ := mem.Read(argsPtr, argsLen)
-				if err := host.Emit(ctx, string(event), args); err != nil {
+				partialArgs, _ := mem.Read(uint32(stack[0]), uint32(stack[1]))
+				inputSchema, _ := mem.Read(uint32(stack[2]), uint32(stack[3]))
+				requiredCaller, _ := mem.Read(uint32(stack[4]), uint32(stack[5]))
+				nextAction, _ := mem.Read(uint32(stack[6]), uint32(stack[7]))
+				stepID, err := host.StepCreate(ctx, partialArgs, inputSchema, string(requiredCaller), string(nextAction))
+				if err != nil {
 					panic(err.Error())
 				}
+				ptrs := writeToMem(ctx, mod, []byte(`"`+stepID+`"`))
+				stack[0] = ptrs[0]<<32 | ptrs[1]
+			}),
+			[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32,
+				api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32},
+			[]api.ValueType{api.ValueTypeI64},
+		).Export("step_create")
+
+	// juice.step_complete(stepIDPtr, stepIDLen, inputPtr, inputLen) -> packedI64
+	b.NewFunctionBuilder().
+		WithGoModuleFunction(
+			api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+				mem := mod.Memory()
+				stepID, _ := mem.Read(uint32(stack[0]), uint32(stack[1]))
+				input, _ := mem.Read(uint32(stack[2]), uint32(stack[3]))
+				result, err := host.StepComplete(ctx, string(stepID), input)
+				if err != nil {
+					panic(err.Error())
+				}
+				ptrs := writeToMem(ctx, mod, result)
+				stack[0] = ptrs[0]<<32 | ptrs[1]
 			}),
 			[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32},
-			[]api.ValueType{},
-		).Export("emit")
+			[]api.ValueType{api.ValueTypeI64},
+		).Export("step_complete")
 }
 
 // writeToMem writes data into the module's memory via `alloc` and returns (ptr, len).

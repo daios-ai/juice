@@ -1384,8 +1384,8 @@ flow_contractor_failure() {
     stop_backend "$backend_pid"
 }
 
-flow_event_queue_success() {
-    echo "=== FLOW event_queue_success ==="
+flow_step_success() {
+    echo "=== FLOW step_success ==="
     local dir db home_sys home_alice home_bob port backend_port
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
@@ -1395,7 +1395,7 @@ flow_event_queue_success() {
     alloc_port; port=$_ALLOC_PORT
     alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
-        || { fail "event_queue_success.boot" "bootstrap failed"; return; }
+        || { fail "step_success.boot" "bootstrap failed"; return; }
 
     j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
     j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
@@ -1407,69 +1407,75 @@ flow_event_queue_success() {
     local backend_pid=$BACKEND_PID
     trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
 
-    # @alice creates handler action (price=0) and a listener (source=@bob, event=test.evt)
+    # @alice creates action and process.
     local handler_out handler_id
     handler_out=$(jj "$db" "$home_alice" action create --name handler --kind http \
-        --source "http://127.0.0.1:${backend_port}/handler" --price 0 --description "event handler")
+        --source "http://127.0.0.1:${backend_port}/handler" --price 0 --description "step handler")
     handler_id=$(strfield "$handler_out" "id")
-    j "$db" "$home_alice" action enable   --id "$handler_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action enable --id "$handler_id" >/dev/null 2>&1
     j "$db" "$home_alice" action update --id "$handler_id" --public >/dev/null 2>&1
 
-    local listen_out listener_id
-    listen_out=$(jj "$db" "$home_alice" listener create \
-        --source-user @bob --event test.evt --action @alice/handler)
-    listener_id=$(strfield "$listen_out" "id")
-
-    # @bob emits the event
-    local emit_out event_id
-    emit_out=$(jj "$db" "$home_bob" event emit --event test.evt --args '{}')
-    event_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['event_ids'][0])" \
-        "$emit_out" 2>/dev/null)
-    [ -n "$event_id" ] \
-        && ok "event_queue_success.emit_returns_id" \
-        || fail "event_queue_success.emit_returns_id" "emit returned no event_id: $emit_out"
-
-    # @alice polls → 1 pending event
-    local poll_out event_count
-    poll_out=$(jj "$db" "$home_alice" event list --listener "$listener_id")
-    event_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" \
-        "$poll_out" 2>/dev/null || echo 0)
-    [ "$event_count" -eq 1 ] \
-        && ok "event_queue_success.poll_returns_event" \
-        || fail "event_queue_success.poll_returns_event" "expected 1, got: $poll_out"
-
-    # @alice consumes the event (action price=0, no funds needed)
     local proc_out proc_id
     proc_out=$(jj "$db" "$home_alice" process start --funds 0)
     proc_id=$(strfield "$proc_out" "process_id")
-    local consume_out consume_tx
-    consume_out=$(jj "$db" "$home_alice" event consume --id "$event_id" --process "$proc_id")
-    consume_tx=$(strfield "$consume_out" "tx_id")
-    [ -n "$consume_tx" ] \
-        && ok "event_queue_success.consume_returns_tx" \
-        || fail "event_queue_success.consume_returns_tx" "consume returned no tx_id: $consume_out"
 
-    # @alice polls again → 0 pending events
-    local poll2_out event_count2
-    poll2_out=$(jj "$db" "$home_alice" event list --listener "$listener_id")
-    event_count2=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" \
-        "$poll2_out" 2>/dev/null || echo 0)
-    [ "$event_count2" -eq 0 ] \
-        && ok "event_queue_success.poll_empty_after_consume" \
-        || fail "event_queue_success.poll_empty_after_consume" "expected 0, got: $poll2_out"
+    # @alice creates a step (required_caller=@bob).
+    local step_out step_id step_status
+    step_out=$(jj "$db" "$home_alice" step create \
+        --process "$proc_id" --action @alice/handler --required-caller @bob \
+        --partial-args '{"from_alice":"preset"}')
+    step_id=$(strfield "$step_out" "id")
+    step_status=$(strfield "$step_out" "status")
+    [ -n "$step_id" ] \
+        && ok "step_success.create_returns_id" \
+        || fail "step_success.create_returns_id" "step create returned no id: $step_out"
+    [ "$step_status" = "waiting" ] \
+        && ok "step_success.create_status_waiting" \
+        || fail "step_success.create_status_waiting" "expected waiting, got: $step_status"
 
-    # @alice deletes the listener
-    local unlisten_out
-    unlisten_out=$(j "$db" "$home_alice" listener delete --id "$listener_id")
-    echo "$unlisten_out" | grep -q "deleted" \
-        && ok "event_queue_success.unlisten" \
-        || fail "event_queue_success.unlisten" "unexpected unlisten output: $unlisten_out"
+    # @alice can list the step (process owner visibility).
+    local list_out list_count
+    list_out=$(jj "$db" "$home_alice" step list)
+    list_count=$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(len([s for s in (d or []) if s.get('id')=='${step_id}']))" \
+        "$list_out" 2>/dev/null || echo 0)
+    [ "$list_count" -eq 1 ] \
+        && ok "step_success.owner_sees_step" \
+        || fail "step_success.owner_sees_step" "expected owner to see step, got: $list_out"
+
+    # @bob can list the step (required_caller visibility).
+    local bob_list_out bob_list_count
+    bob_list_out=$(jj "$db" "$home_bob" step list)
+    bob_list_count=$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(len([s for s in (d or []) if s.get('id')=='${step_id}']))" \
+        "$bob_list_out" 2>/dev/null || echo 0)
+    [ "$bob_list_count" -eq 1 ] \
+        && ok "step_success.caller_sees_step" \
+        || fail "step_success.caller_sees_step" "expected caller to see step, got: $bob_list_out"
+
+    # @bob completes the step.
+    local complete_out complete_tx complete_step_id
+    complete_out=$(jj "$db" "$home_bob" step complete --id "$step_id" --args '{"from_bob":"input"}')
+    complete_tx=$(strfield "$complete_out" "tx_id")
+    complete_step_id=$(strfield "$complete_out" "step_id")
+    [ -n "$complete_tx" ] \
+        && ok "step_success.complete_returns_tx" \
+        || fail "step_success.complete_returns_tx" "complete returned no tx_id: $complete_out"
+    [ "$complete_step_id" = "$step_id" ] \
+        && ok "step_success.complete_returns_step_id" \
+        || fail "step_success.complete_returns_step_id" "step_id mismatch: got $complete_step_id"
+
+    # Step status is now done.
+    local show_out show_status
+    show_out=$(jj "$db" "$home_alice" step show --id "$step_id")
+    show_status=$(strfield "$show_out" "status")
+    [ "$show_status" = "done" ] \
+        && ok "step_success.status_done_after_complete" \
+        || fail "step_success.status_done_after_complete" "expected done, got: $show_status"
 
     stop_backend "$backend_pid"
 }
 
-flow_event_queue_failure() {
-    echo "=== FLOW event_queue_failure ==="
+flow_step_failure() {
+    echo "=== FLOW step_failure ==="
     local dir db home_sys home_alice home_bob home_carol port backend_port
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
@@ -1480,7 +1486,7 @@ flow_event_queue_failure() {
     alloc_port; port=$_ALLOC_PORT
     alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
-        || { fail "event_queue_failure.boot" "bootstrap failed"; return; }
+        || { fail "step_failure.boot" "bootstrap failed"; return; }
 
     j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
     j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
@@ -1489,63 +1495,53 @@ flow_event_queue_failure() {
     j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
     j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
     j "$db" "$home_carol" auth login --handle @carol --password carolpass >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @carol --amount 10 >/dev/null 2>&1
 
     start_backend "$backend_port" 200 '{"ok":true}'
     local backend_pid=$BACKEND_PID
     trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
 
-    # @alice creates handler action and listener (source=@bob)
+    # @alice creates action and process.
     local handler_out handler_id
     handler_out=$(jj "$db" "$home_alice" action create --name handler --kind http \
-        --source "http://127.0.0.1:${backend_port}/handler" --price 0 --description "event handler")
+        --source "http://127.0.0.1:${backend_port}/handler" --price 0 --description "step handler")
     handler_id=$(strfield "$handler_out" "id")
-    j "$db" "$home_alice" action enable   --id "$handler_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action enable --id "$handler_id" >/dev/null 2>&1
     j "$db" "$home_alice" action update --id "$handler_id" --public >/dev/null 2>&1
 
-    local listen_out listener_id
-    listen_out=$(jj "$db" "$home_alice" listener create \
-        --source-user @bob --event fail.evt --action @alice/handler)
-    listener_id=$(strfield "$listen_out" "id")
-
-    # @bob emits event_1; @alice consumes it
-    local emit1_out event1_id
-    emit1_out=$(jj "$db" "$home_bob" event emit --event fail.evt --args '{}')
-    event1_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['event_ids'][0])" \
-        "$emit1_out" 2>/dev/null)
     local proc_out proc_id
     proc_out=$(jj "$db" "$home_alice" process start --funds 0)
     proc_id=$(strfield "$proc_out" "process_id")
-    jj "$db" "$home_alice" event consume --id "$event1_id" --process "$proc_id" >/dev/null 2>&1
 
-    # Consume event_1 again → ErrInvalidState (already consumed)
-    local consume2_out
-    consume2_out=$(j "$db" "$home_alice" event consume --id "$event1_id" --process "$proc_id" 2>&1)
-    echo "$consume2_out" | grep -qi "invalid.state\|already.consumed\|in-flight" \
-        && ok "event_queue_failure.double_consume_rejected" \
-        || fail "event_queue_failure.double_consume_rejected" "expected invalid state, got: $consume2_out"
+    # @alice creates a step (required_caller=@bob); @bob completes it.
+    local step_out step_id
+    step_out=$(jj "$db" "$home_alice" step create \
+        --process "$proc_id" --action @alice/handler --required-caller @bob)
+    step_id=$(strfield "$step_out" "id")
+    jj "$db" "$home_bob" step complete --id "$step_id" --args '{}' >/dev/null 2>&1
 
-    # @bob emits event_2; @alice polls to get id
-    local emit2_out event2_id
-    emit2_out=$(jj "$db" "$home_bob" event emit --event fail.evt --args '{}')
-    event2_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['event_ids'][0])" \
-        "$emit2_out" 2>/dev/null)
+    # Completing the step again (status=done) → ErrInvalidState
+    local complete2_out
+    complete2_out=$(j "$db" "$home_bob" step complete --id "$step_id" --args '{}' 2>&1)
+    echo "$complete2_out" | grep -qi "invalid.state\|already.*done\|not.*waiting" \
+        && ok "step_failure.double_complete_rejected" \
+        || fail "step_failure.double_complete_rejected" "expected invalid state, got: $complete2_out"
 
-    # @carol (non-owner) tries to consume event_2 → ErrUnauthorized
-    local carol_proc_out carol_proc_id
-    carol_proc_out=$(jj "$db" "$home_carol" process start --funds 0)
-    carol_proc_id=$(strfield "$carol_proc_out" "process_id")
-    local consume3_out
-    consume3_out=$(j "$db" "$home_carol" event consume --id "$event2_id" --process "$carol_proc_id" 2>&1)
-    echo "$consume3_out" | grep -qi "unauthorized\|permission\|owner" \
-        && ok "event_queue_failure.non_owner_rejected" \
-        || fail "event_queue_failure.non_owner_rejected" "expected unauthorized, got: $consume3_out"
+    # @alice creates a second step (required_caller=@bob); @carol tries to complete → ErrUnauthorized
+    local step2_out step2_id
+    step2_out=$(jj "$db" "$home_alice" step create \
+        --process "$proc_id" --action @alice/handler --required-caller @bob)
+    step2_id=$(strfield "$step2_out" "id")
+    local carol_complete_out
+    carol_complete_out=$(j "$db" "$home_carol" step complete --id "$step2_id" --args '{}' 2>&1)
+    echo "$carol_complete_out" | grep -qi "unauthorized\|permission\|caller" \
+        && ok "step_failure.wrong_caller_rejected" \
+        || fail "step_failure.wrong_caller_rejected" "expected unauthorized, got: $carol_complete_out"
 
     stop_backend "$backend_pid"
 }
 
-flow_event_deletion_restart() {
-    echo "=== FLOW event_deletion_restart ==="
+flow_step_restart() {
+    echo "=== FLOW step_restart ==="
     local dir db home_sys home_alice home_bob port backend_port
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
@@ -1555,7 +1551,7 @@ flow_event_deletion_restart() {
     alloc_port; port=$_ALLOC_PORT
     alloc_port; backend_port=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
-        || { fail "event_deletion_restart.boot" "bootstrap failed"; return; }
+        || { fail "step_restart.boot" "bootstrap failed"; return; }
 
     j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
     j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
@@ -1567,65 +1563,65 @@ flow_event_deletion_restart() {
     local backend_pid=$BACKEND_PID
     trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
 
-    # @alice creates handler + listener (source=@bob)
+    # @alice creates action and process.
     local handler_out handler_id
     handler_out=$(jj "$db" "$home_alice" action create --name handler --kind http \
-        --source "http://127.0.0.1:${backend_port}/handler" --price 0 --description "event handler")
+        --source "http://127.0.0.1:${backend_port}/handler" --price 0 --description "step handler")
     handler_id=$(strfield "$handler_out" "id")
-    j "$db" "$home_alice" action enable   --id "$handler_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action enable --id "$handler_id" >/dev/null 2>&1
     j "$db" "$home_alice" action update --id "$handler_id" --public >/dev/null 2>&1
 
-    local listen_out listener_id
-    listen_out=$(jj "$db" "$home_alice" listener create \
-        --source-user @bob --event restart.evt --action @alice/handler)
-    listener_id=$(strfield "$listen_out" "id")
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_alice" process start --funds 0)
+    proc_id=$(strfield "$proc_out" "process_id")
 
-    # @bob emits; @alice polls → 1 event
-    jj "$db" "$home_bob" event emit --event restart.evt --args '{}' >/dev/null 2>&1
-    local poll_out event_id event_count
-    poll_out=$(jj "$db" "$home_alice" event list --listener "$listener_id")
-    event_id=$(python3 -c "import sys,json; evs=json.loads(sys.argv[1]); print(evs[0]['id'] if evs else '')" \
-        "$poll_out" 2>/dev/null)
-    event_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" \
-        "$poll_out" 2>/dev/null || echo 0)
-    [ "$event_count" -eq 1 ] \
-        && ok "event_deletion_restart.initial_poll" \
-        || fail "event_deletion_restart.initial_poll" "expected 1, got: $poll_out"
+    # @alice creates a step (required_caller=@bob); verify it is waiting.
+    local step_out step_id step_status
+    step_out=$(jj "$db" "$home_alice" step create \
+        --process "$proc_id" --action @alice/handler --required-caller @bob)
+    step_id=$(strfield "$step_out" "id")
+    step_status=$(strfield "$step_out" "status")
+    [ "$step_status" = "waiting" ] \
+        && ok "step_restart.initial_waiting" \
+        || fail "step_restart.initial_waiting" "expected waiting, got: $step_status"
 
-    # Inject in-flight state: set consumed_at (but leave tx_id=NULL).
-    # Direct DB write is intentional here — this simulates a kernel crash mid-consumption,
-    # a state that cannot be produced via the public API surface.
-    python3 - "$db" "$event_id" <<'PYEOF'
+    # Inject running state via direct DB write — simulates a kernel crash after ClaimStep but
+    # before CompleteStep; this state cannot be produced through the public API surface.
+    python3 - "$db" "$step_id" <<'PYEOF'
 import sqlite3, sys
 conn = sqlite3.connect(sys.argv[1])
-conn.execute("UPDATE events SET consumed_at = datetime('now') WHERE id = ?", [sys.argv[2]])
+conn.execute("UPDATE steps SET status='running' WHERE id=?", [sys.argv[2]])
 conn.commit()
 conn.close()
 PYEOF
 
-    # bootstrap_kernel on same DB → bootstrap() calls ResetInFlightEvents → consumed_at=NULL
+    # Verify the injected running state is visible.
+    local show_running_out running_status
+    show_running_out=$(jj "$db" "$home_alice" step show --id "$step_id")
+    running_status=$(strfield "$show_running_out" "status")
+    [ "$running_status" = "running" ] \
+        && ok "step_restart.injected_running" \
+        || fail "step_restart.injected_running" "expected running after injection, got: $running_status"
+
+    # bootstrap_kernel on the same DB → ResetRunningSteps → status=waiting, tx_id=NULL
     local port2
     alloc_port; port2=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port2" >/dev/null 2>&1
 
-    # @alice polls again → event restored
-    local poll2_out event_count2
-    poll2_out=$(jj "$db" "$home_alice" event list --listener "$listener_id")
-    event_count2=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" \
-        "$poll2_out" 2>/dev/null || echo 0)
-    [ "$event_count2" -eq 1 ] \
-        && ok "event_deletion_restart.inflight_reset" \
-        || fail "event_deletion_restart.inflight_reset" "expected 1 after reset, got: $poll2_out"
+    # Step must be waiting again and completable by @bob.
+    local show_reset_out reset_status
+    show_reset_out=$(jj "$db" "$home_alice" step show --id "$step_id")
+    reset_status=$(strfield "$show_reset_out" "status")
+    [ "$reset_status" = "waiting" ] \
+        && ok "step_restart.reset_to_waiting" \
+        || fail "step_restart.reset_to_waiting" "expected waiting after bootstrap, got: $reset_status"
 
-    # Delete listener → pending events purged; poll returns empty
-    j "$db" "$home_alice" listener delete --id "$listener_id" >/dev/null 2>&1
-    local poll3_out event_count3
-    poll3_out=$(jj "$db" "$home_alice" event list --listener "$listener_id")
-    event_count3=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" \
-        "$poll3_out" 2>/dev/null || echo 0)
-    [ "$event_count3" -eq 0 ] \
-        && ok "event_deletion_restart.unlisten_purges_events" \
-        || fail "event_deletion_restart.unlisten_purges_events" "expected 0 after unlisten, got: $poll3_out"
+    local complete_out complete_tx
+    complete_out=$(jj "$db" "$home_bob" step complete --id "$step_id" --args '{}')
+    complete_tx=$(strfield "$complete_out" "tx_id")
+    [ -n "$complete_tx" ] \
+        && ok "step_restart.completable_after_reset" \
+        || fail "step_restart.completable_after_reset" "expected tx_id after complete, got: $complete_out"
 
     stop_backend "$backend_pid"
 }
@@ -3105,9 +3101,9 @@ main() {
     flow_wasm_execution
     flow_contractor_subcall
     flow_contractor_failure
-    flow_event_queue_success
-    flow_event_queue_failure
-    flow_event_deletion_restart
+    flow_step_success
+    flow_step_failure
+    flow_step_restart
     flow_locked_funds_recovery
     flow_rating
     flow_pkce_auth
