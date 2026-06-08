@@ -449,3 +449,74 @@ func TestOpenAPIRejectMissingInputContract(t *testing.T) {
 		t.Errorf("rejection reason did not mention parameters/requestBody: %+v", result.Rejected)
 	}
 }
+
+func TestOpenAPIBodyRefParamsIncluded(t *testing.T) {
+	// Verify that a requestBody whose schema is a $ref produces Params entries for the
+	// body fields, so the executor routes them correctly at call time.
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@oapi-ref-body", 0)
+	specURL := "https://spec.example.com/api.json"
+
+	spec := `{
+		"openapi": "3.0.0",
+		"info": {"title": "T", "version": "1"},
+		"servers": [{"url": "http://api.example.com"}],
+		"components": {
+			"schemas": {
+				"CreateReq": {
+					"type": "object",
+					"properties": {
+						"title": {"type": "string", "description": "item title"},
+						"count": {"type": "integer", "description": "quantity"}
+					},
+					"required": ["title"]
+				}
+			}
+		},
+		"paths": {
+			"/items/{id}": {
+				"post": {
+					"operationId": "createItem",
+					"description": "Create an item",
+					"parameters": [{"name": "id", "in": "path", "required": true, "description": "item id", "schema": {"type": "string"}}],
+					"requestBody": {
+						"required": true,
+						"content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateReq"}}}
+					},
+					"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"type": "object", "properties": {"ok": {"type": "boolean", "description": "success"}}}}}}}
+				}
+			}
+		}
+	}`
+
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	if err != nil {
+		t.Fatalf("ImportOpenAPI error: %v", err)
+	}
+	if len(result.Created) != 1 {
+		t.Fatalf("expected 1 created action, got %d (rejected: %+v)", len(result.Created), result.Rejected)
+	}
+
+	a := result.Created[0]
+	var src kernel.OpenAPISource
+	if err := json.Unmarshal([]byte(a.Source), &src); err != nil {
+		t.Fatalf("unmarshal source: %v", err)
+	}
+
+	paramsByName := make(map[string]string)
+	for _, p := range src.Params {
+		paramsByName[p.Name] = p.In
+	}
+	if paramsByName["id"] != "path" {
+		t.Errorf("expected id param in=path, got %q", paramsByName["id"])
+	}
+	if paramsByName["title"] != "body" {
+		t.Errorf("expected title param in=body, got %q (params: %+v)", paramsByName["title"], src.Params)
+	}
+	if paramsByName["count"] != "body" {
+		t.Errorf("expected count param in=body, got %q", paramsByName["count"])
+	}
+}

@@ -1752,6 +1752,59 @@ func TestReadRemoteKernelByBaseURL(t *testing.T) {
 	}
 }
 
+func TestUpdateActionAndResetStats(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@stats-owner", 0)
+	if err := db.CreateUser(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	a := newAction(owner.ID, "my-action", 5, true)
+	if err := db.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	// Seed non-zero stats.
+	if err := db.UpsertStats(ctx, &kernel.Stats{
+		ActionID:  a.ID,
+		Uses:      10,
+		Successes: 8,
+		Failures:  2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Deactivate and reset stats atomically.
+	a.Active = false
+	a.Description = "updated description"
+	a.UpdatedAt = a.UpdatedAt.Add(1)
+	if err := db.UpdateActionAndResetStats(ctx, a); err != nil {
+		t.Fatalf("UpdateActionAndResetStats: %v", err)
+	}
+
+	// Action must reflect the update.
+	got, err := db.ReadAction(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("ReadAction: %v", err)
+	}
+	if got.Active {
+		t.Error("expected action to be inactive after update")
+	}
+	if got.Description != "updated description" {
+		t.Errorf("unexpected description: %q", got.Description)
+	}
+
+	// Stats must be zeroed.
+	stats, err := db.ReadStats(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("ReadStats: %v", err)
+	}
+	if stats.Uses != 0 || stats.Successes != 0 || stats.Failures != 0 {
+		t.Errorf("expected zeroed stats after reset, got uses=%d successes=%d failures=%d",
+			stats.Uses, stats.Successes, stats.Failures)
+	}
+}
+
 // ---- Test-only store helpers ----
 // These low-level helpers exist only in test builds to keep test setup simple.
 // Production code uses the higher-level atomic methods (CommitCall, CommitFailedCall, etc.).

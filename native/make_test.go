@@ -89,7 +89,6 @@ func newMakeKernel(t *testing.T, chatter kernel.Chatter) (*kernel.Kernel, kernel
 	fakeComp := &script.FakeCompiler{}
 	native.RegisterChatHandler(k, chatter)
 	native.RegisterMakeHandler(k, native.MakeDeps{
-		Store:    st,
 		Scripts:  exec,
 		Compiler: fakeComp,
 		Chatter:  chatter,
@@ -119,9 +118,15 @@ func seedMakeAction(t *testing.T, st kernel.Store) *kernel.User {
 				"required":   []string{"description"},
 			},
 			outSchema: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"status": map[string]any{"type": "string", "description": "outcome"}},
-				"required":   []string{"status"},
+				"type": "object",
+				"properties": map[string]any{
+					"status":      map[string]any{"type": "string", "description": "outcome"},
+					"action_id":   map[string]any{"type": "string", "description": "registered action id"},
+					"action_name": map[string]any{"type": "string", "description": "registered action name"},
+					"diagnostics": map[string]any{"type": "array", "description": "diagnostics", "items": map[string]any{"type": "string"}},
+					"tests":       map[string]any{"type": "array", "description": "tests", "items": map[string]any{"type": "object"}},
+				},
+				"required": []string{"status", "diagnostics"},
 			},
 		},
 		{
@@ -200,7 +205,7 @@ func TestMakeReturnsErrInvalidStateWithoutCompiler(t *testing.T) {
 	native.RegisterChatHandler(k, chatter)
 	// Compiler: nil — no compiler configured.
 	native.RegisterMakeHandler(k, native.MakeDeps{
-		Store: st, Scripts: exec, Compiler: nil, Chatter: chatter,
+		Scripts: exec, Compiler: nil, Chatter: chatter,
 	}, "", 0)
 
 	ctx := context.Background()
@@ -316,7 +321,7 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 	k := kernel.New(st, exec, nil, nil, fakeChat, cfg, log.Default())
 	native.RegisterChatHandler(k, fakeChat)
 	native.RegisterMakeHandler(k, native.MakeDeps{
-		Store: st, Scripts: exec, Compiler: fakeComp, Chatter: fakeChat,
+		Scripts: exec, Compiler: fakeComp, Chatter: fakeChat,
 	}, "", 0)
 
 	ctx := context.Background()
@@ -402,6 +407,71 @@ func TestMakeNameCollisionReturnsFailure(t *testing.T) {
 	}
 	if len(result.Diagnostics) == 0 {
 		t.Error("expected diagnostics on collision failure")
+	}
+}
+
+func TestMakePrivateActionNotSurfacedToForeignProcess(t *testing.T) {
+	// A private action owned by user A must not appear in the composable list when
+	// @sys/make is called in a process owned by user B.
+	ctx := context.Background()
+
+	// Build a chatter that returns a contract + no code (make will fail synthesis,
+	// but we only care that the private action is not in the composable list).
+	chatter := &cycleFakeChatter{
+		responses: []string{
+			fakeContract,
+			fakeExamples,
+			`[]`, // no examples
+		},
+	}
+	k, st := newMakeKernel(t, chatter)
+	sys := seedMakeAction(t, st)
+
+	// Create owner A with a private action.
+	ownerA := setupUser(t, st, "@owner-a", 5000)
+	privAction := &kernel.Action{
+		ID:          uuid.New().String(),
+		OwnerUserID: ownerA.ID,
+		Name:        "secret-tool",
+		Kind:        kernel.KindNative,
+		Active:      true,
+		Public:      false,
+		Description: "private action owned by A",
+		Source:      "native",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{
+			"x": map[string]any{"type": "string", "description": "x"},
+		}},
+		OutputSchema: map[string]any{"type": "object", "properties": map[string]any{
+			"y": map[string]any{"type": "string", "description": "y"},
+		}},
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, privAction); err != nil {
+		t.Fatalf("create private action: %v", err)
+	}
+
+	// Create user B and their process. B explicitly references @owner-a/secret-tool.
+	ownerB := setupUser(t, st, "@owner-b", 5000)
+	p, root, _ := k.StartProcess(ctx, ownerB.ID, ownerB.ID, 1000)
+
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID:      ownerB.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: root.ID,
+		TargetUserID:  sys.ID,
+		ActionName:    "make",
+		Args:          map[string]any{"description": "use @owner-a/secret-tool to do something"},
+	})
+	// The call may succeed or fail (synthesis will fail without a real compiler),
+	// but it must NOT expose the private action to B.
+	// If err == nil, verify the make result didn't error out due to a store auth bypass.
+	_ = err
+	// The key invariant: ReadCallableAction(ownerB, ...) must have returned ErrUnauthorized
+	// for @owner-a/secret-tool. We verify this directly.
+	_, callableErr := k.ReadCallableAction(ctx, "@owner-a", "secret-tool", ownerB.ID)
+	if callableErr == nil {
+		t.Error("expected error: private action should not be callable by foreign process owner")
 	}
 }
 

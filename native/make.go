@@ -12,7 +12,6 @@ import (
 
 // MakeDeps holds the external dependencies injected into the @sys/make handler at registration.
 type MakeDeps struct {
-	Store    kernel.Store
 	Scripts  kernel.ScriptExecutor
 	Compiler kernel.SourceCompiler
 	Chatter  kernel.Chatter
@@ -115,7 +114,7 @@ func executeMake(ctx context.Context, args map[string]any, targetID, callerID, o
 	}
 
 	// Step 3: resolve explicit @owner/name references in the description.
-	refs := resolveActionRefs(ctx, in.Description, deps.Store)
+	refs := resolveActionRefs(ctx, in.Description, k, ownerUserID)
 
 	// Step 4: search catalog based on capabilities identified in the plan.
 	found := searchCatalog(ctx, contract, targetID, processID, parentTraceID, k, deps)
@@ -263,9 +262,10 @@ Description: %s`, description)
 
 var actionRefRe = regexp.MustCompile(`@[\w-]+/[\w./-]+`)
 
-// resolveActionRefs extracts explicit @owner/name references from the description
-// and looks them up in the store.
-func resolveActionRefs(ctx context.Context, description string, store kernel.Store) []discoveredAction {
+// resolveActionRefs extracts explicit @owner/name references from the description and
+// returns those callable by the process owner. Access is checked via ReadCallableAction,
+// which enforces canCall(processOwnerID, action) without direct store access.
+func resolveActionRefs(ctx context.Context, description string, k *kernel.Kernel, processOwnerID string) []discoveredAction {
 	matches := actionRefRe.FindAllString(description, -1)
 	seen := map[string]bool{}
 	var result []discoveredAction
@@ -278,12 +278,8 @@ func resolveActionRefs(ctx context.Context, description string, store kernel.Sto
 		if parseErr != nil {
 			continue
 		}
-		owner, err := store.ReadUserByHandle(ctx, ownerHandle)
+		a, err := k.ReadCallableAction(ctx, ownerHandle, actionName, processOwnerID)
 		if err != nil {
-			continue
-		}
-		a, err := store.ReadActionByOwnerName(ctx, owner.ID, actionName)
-		if err != nil || a == nil || !a.Active {
 			continue
 		}
 		result = append(result, discoveredAction{

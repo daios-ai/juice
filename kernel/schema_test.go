@@ -171,6 +171,26 @@ func TestValidateInput(t *testing.T) {
 		}
 	})
 
+	t.Run("undeclared key rejected when properties declared", func(t *testing.T) {
+		s := map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"x": map[string]any{"type": "string"}},
+		}
+		if err := ValidateInput(s, map[string]any{"x": "a", "y": float64(1)}); err == nil {
+			t.Error("expected error for undeclared key y")
+		}
+		if err := ValidateInput(s, map[string]any{"x": "a"}); err != nil {
+			t.Errorf("declared key should be accepted: %v", err)
+		}
+	})
+
+	t.Run("no properties clause accepts any keys", func(t *testing.T) {
+		s := map[string]any{"type": "object"}
+		if err := ValidateInput(s, map[string]any{"anything": true, "extra": 42}); err != nil {
+			t.Errorf("object without properties should accept any keys: %v", err)
+		}
+	})
+
 	t.Run("required field absent from properties is still enforced", func(t *testing.T) {
 		// JSON Schema: required is independent of properties — a required name not in
 		// properties must still be present in the input object.

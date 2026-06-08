@@ -1551,5 +1551,73 @@ func TestSuperuserListTransactions(t *testing.T) {
 	}
 }
 
+func TestReadCallableAction(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@owner", 0)
+	other := setupUser(t, st, "@other", 0)
+
+	baseSchema := map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"x": map[string]any{"type": "string", "description": "x"}},
+	}
+
+	pubAction := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pub-action",
+		Kind: kernel.KindNative, Active: true, Public: true,
+		Description: "public", Source: "native",
+		InputSchema: baseSchema, OutputSchema: baseSchema,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	privAction := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "priv-action",
+		Kind: kernel.KindNative, Active: true, Public: false,
+		Description: "private", Source: "native",
+		InputSchema: baseSchema, OutputSchema: baseSchema,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	for _, a := range []*kernel.Action{pubAction, privAction} {
+		if err := st.CreateAction(ctx, a); err != nil {
+			t.Fatalf("create action %s: %v", a.Name, err)
+		}
+	}
+
+	t.Run("public action visible to any process owner", func(t *testing.T) {
+		a, err := k.ReadCallableAction(ctx, "@owner", "pub-action", other.ID)
+		if err != nil {
+			t.Fatalf("expected public action to be callable by other: %v", err)
+		}
+		if a.ID != pubAction.ID {
+			t.Errorf("wrong action returned")
+		}
+	})
+
+	t.Run("private action visible only to its owner process", func(t *testing.T) {
+		a, err := k.ReadCallableAction(ctx, "@owner", "priv-action", owner.ID)
+		if err != nil {
+			t.Fatalf("expected private action callable by own process: %v", err)
+		}
+		if a.ID != privAction.ID {
+			t.Errorf("wrong action returned")
+		}
+	})
+
+	t.Run("private action not callable by foreign process", func(t *testing.T) {
+		_, err := k.ReadCallableAction(ctx, "@owner", "priv-action", other.ID)
+		if err == nil {
+			t.Error("expected error: private action should not be callable by other process")
+		}
+	})
+
+	t.Run("unknown action returns not-found error", func(t *testing.T) {
+		_, err := k.ReadCallableAction(ctx, "@owner", "no-such-action", owner.ID)
+		if err == nil {
+			t.Error("expected error for missing action")
+		}
+	})
+}
+
 // Ensure fmt is used.
 var _ = fmt.Sprintf

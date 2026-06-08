@@ -190,6 +190,16 @@ func validateValue(schema map[string]any, data any, path string) error {
 				return err
 			}
 		}
+		// Reject keys not declared in properties or required.
+		// Guard: only when properties has at least one explicit declaration so that
+		// {type:object, properties:{}} continues to accept any keys.
+		if len(props) > 0 {
+			for k := range obj {
+				if _, declared := props[k]; !declared && !reqSet[k] {
+					return ErrSchemaViolation.Wrapf("field %s: undeclared key %q", path, k)
+				}
+			}
+		}
 		// Check required fields that are not declared in properties.
 		for _, r := range required {
 			if _, inProps := props[r]; !inProps {
@@ -226,6 +236,8 @@ func validateValue(schema map[string]any, data any, path string) error {
 			if _, err := v.Int64(); err != nil {
 				return ErrSchemaViolation.Wrapf("field %s: expected integer: %v", path, err)
 			}
+		case int64, int32, int16, int8, int, uint64, uint32, uint16, uint8, uint:
+			// native Go integer types are always whole numbers
 		default:
 			return ErrSchemaViolation.Wrapf("field %s: expected integer, got %T", path, data)
 		}

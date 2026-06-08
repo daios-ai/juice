@@ -392,6 +392,40 @@ func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
 	return dbErr(err, "update action")
 }
 
+func (s *DB) UpdateActionAndResetStats(ctx context.Context, a *kernel.Action) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin update action and reset stats")
+	}
+	defer tx.Rollback()
+
+	inJSON, _ := json.Marshal(a.InputSchema)
+	outJSON, _ := json.Marshal(a.OutputSchema)
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE actions SET kind=?,active=?,public=?,price=?,description=?,input_schema=?,output_schema=?,
+		 source=?,artifact_hash=?,updated_at=? WHERE id=?`,
+		string(a.Kind), boolInt(a.Active), boolInt(a.Public), a.Price, a.Description,
+		string(inJSON), string(outJSON), a.Source, a.ArtifactHash,
+		timeToStr(a.UpdatedAt), a.ID,
+	); err != nil {
+		return dbErr(err, "update action and reset stats: update action")
+	}
+
+	zeroTime := timeToStr(time.Time{})
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
+		 VALUES (?,0,0,0,0,0,0,0,?)
+		 ON CONFLICT(action_id) DO UPDATE SET
+		   uses=0,successes=0,failures=0,rating_count=0,
+		   price_mean=0,latency_mean=0,rating_mean=0,last_used_at=excluded.last_used_at`,
+		a.ID, zeroTime,
+	); err != nil {
+		return dbErr(err, "update action and reset stats: reset stats")
+	}
+
+	return dbErr(tx.Commit(), "update action and reset stats: commit")
+}
+
 func (s *DB) DeleteAction(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE actions SET deleted_at=? WHERE id=? AND deleted_at IS NULL`,
 		timeToStr(time.Now().UTC()), id)

@@ -117,6 +117,9 @@ type Store interface {
 	// ListActionsByOwnerOpenAPISpec returns all non-deleted actions with matching owner + OpenAPI spec_url.
 	ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL string) ([]*Action, error)
 	UpdateAction(ctx context.Context, a *Action) error
+	// UpdateActionAndResetStats atomically updates the action record and zeros its stats row.
+	// Used during import reconciliation to ensure contract changes and stat resets are coherent.
+	UpdateActionAndResetStats(ctx context.Context, a *Action) error
 	DeleteAction(ctx context.Context, id string) error
 	ListPublicActions(ctx context.Context, limit, offset int) ([]*Action, error)
 	// ListActionsByOwner returns all non-deleted actions owned by ownerID, including

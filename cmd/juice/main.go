@@ -146,7 +146,6 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	native.RegisterLookupHandler(k)
 	native.RegisterChatHandler(k, chatter)
 	native.RegisterMakeHandler(k, native.MakeDeps{
-		Store:    db,
 		Scripts:  exec,
 		Compiler: compiler,
 		Chatter:  chatter,

@@ -538,6 +538,24 @@ func (k *Kernel) ReadActionByOwnerName(ctx context.Context, ownerID, name string
 	return k.store.ReadActionByOwnerName(ctx, ownerID, name)
 }
 
+// ReadCallableAction resolves an @owner/name reference and returns the action only if
+// canCall(processOwnerID, action) is satisfied. Used by native actions to discover
+// composable actions without bypassing the kernel's access-control layer.
+func (k *Kernel) ReadCallableAction(ctx context.Context, ownerHandle, actionName, processOwnerID string) (*Action, error) {
+	owner, err := k.store.ReadUserByHandle(ctx, ownerHandle)
+	if err != nil {
+		return nil, ErrNotFound.Wrap("action owner not found")
+	}
+	a, err := k.store.ReadActionByOwnerName(ctx, owner.ID, actionName)
+	if err != nil {
+		return nil, ErrNotFound.Wrap("action not found")
+	}
+	if !canCall(processOwnerID, a) {
+		return nil, ErrUnauthorized.Wrap("action not callable by this process")
+	}
+	return a, nil
+}
+
 // ListPublicActions returns public active actions.
 func (k *Kernel) ListPublicActions(ctx context.Context, limit, offset int) ([]*Action, error) {
 	return k.store.ListPublicActions(ctx, limit, offset)
@@ -1418,11 +1436,12 @@ func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*
 				ex.Active = false
 				ex.UpdatedAt = time.Now().UTC()
 				op.apply(ex)
-				if err := k.store.UpdateAction(ctx, ex); err != nil {
-					return nil, err
-				}
 				if resetStats {
-					if err := k.store.UpsertStats(ctx, &Stats{ActionID: ex.ID}); err != nil {
+					if err := k.store.UpdateActionAndResetStats(ctx, ex); err != nil {
+						return nil, err
+					}
+				} else {
+					if err := k.store.UpdateAction(ctx, ex); err != nil {
 						return nil, err
 					}
 				}
@@ -1446,11 +1465,12 @@ func (k *Kernel) deactivateImported(ctx context.Context, actions []*Action, rese
 	for _, a := range actions {
 		a.Active = false
 		a.UpdatedAt = time.Now().UTC()
-		if err := k.store.UpdateAction(ctx, a); err != nil {
-			return err
-		}
 		if resetStats {
-			if err := k.store.UpsertStats(ctx, &Stats{ActionID: a.ID}); err != nil {
+			if err := k.store.UpdateActionAndResetStats(ctx, a); err != nil {
+				return err
+			}
+		} else {
+			if err := k.store.UpdateAction(ctx, a); err != nil {
 				return err
 			}
 		}

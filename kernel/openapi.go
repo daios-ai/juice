@@ -240,7 +240,7 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 				}
 			}
 
-			params := openAPIParams(op, pathItem)
+			inputSchema, params := openAPICompileOperation(op, pathItem, spec)
 
 			// Require at least one input parameter or a requestBody schema.
 			if len(params) == 0 && !hasBody {
@@ -248,7 +248,6 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 				continue
 			}
 
-			inputSchema := openAPIInputSchema(op, pathItem, spec)
 			hash := openAPIOperationHash(baseURL, desc, method, path, inputSchema, outputSchema, price, params)
 
 			src := OpenAPISource{
@@ -361,73 +360,14 @@ func openAPIAmbiguous2xxSchema(op, doc map[string]any) (bool, string) {
 	return false, ""
 }
 
-func openAPIInputSchema(op, pathItem, doc map[string]any) map[string]any {
+// openAPICompileOperation builds both the validation input schema and the HTTP parameter
+// binding list for one operation in a single pass, resolving local $ref values throughout.
+// This is the single source of truth for what fields an operation accepts and where they go.
+func openAPICompileOperation(op, pathItem, doc map[string]any) (inputSchema map[string]any, params []OpenAPIParam) {
 	properties := map[string]any{}
 	var required []string
-
-	for _, source := range []map[string]any{pathItem, op} {
-		params, _ := source["parameters"].([]any)
-		for _, pRaw := range params {
-			p, ok := pRaw.(map[string]any)
-			if !ok {
-				continue
-			}
-			in, _ := p["in"].(string)
-			if in != "path" && in != "query" {
-				continue
-			}
-			name, _ := p["name"].(string)
-			if name == "" {
-				continue
-			}
-			schema, _ := p["schema"].(map[string]any)
-			if schema == nil {
-				schema = map[string]any{"type": "string"}
-			} else {
-				schema = resolveRefsMap(doc, schema)
-			}
-			if desc, ok := p["description"].(string); ok && desc != "" {
-				schema["description"] = desc
-			}
-			properties[name] = schema
-			if req, _ := p["required"].(bool); req || in == "path" {
-				required = append(required, name)
-			}
-		}
-	}
-
-	if rb, ok := op["requestBody"].(map[string]any); ok {
-		content, _ := rb["content"].(map[string]any)
-		jc, _ := content["application/json"].(map[string]any)
-		if rawSchema, ok := jc["schema"].(map[string]any); ok {
-			bodySchema := resolveRefsMap(doc, rawSchema)
-			if props, ok := bodySchema["properties"].(map[string]any); ok {
-				for k, v := range props {
-					properties[k] = v
-				}
-			}
-			if reqs, ok := bodySchema["required"].([]any); ok {
-				for _, r := range reqs {
-					if s, ok := r.(string); ok {
-						required = append(required, s)
-					}
-				}
-			}
-		}
-	}
-
-	result := map[string]any{"type": "object", "properties": properties}
-	if len(required) > 0 {
-		result["required"] = required
-	}
-	return result
-}
-
-// openAPIParams records the binding location for each input field so the executor
-// can route path params, query params, and body fields correctly regardless of HTTP method.
-func openAPIParams(op, pathItem map[string]any) []OpenAPIParam {
-	var params []OpenAPIParam
 	seen := map[string]struct{}{}
+
 	for _, source := range []map[string]any{pathItem, op} {
 		ps, _ := source["parameters"].([]any)
 		for _, pRaw := range ps {
@@ -447,24 +387,52 @@ func openAPIParams(op, pathItem map[string]any) []OpenAPIParam {
 				continue
 			}
 			seen[name] = struct{}{}
+			schema, _ := p["schema"].(map[string]any)
+			if schema == nil {
+				schema = map[string]any{"type": "string"}
+			} else {
+				schema = resolveRefsMap(doc, schema)
+			}
+			if desc, ok := p["description"].(string); ok && desc != "" {
+				schema["description"] = desc
+			}
+			properties[name] = schema
 			params = append(params, OpenAPIParam{Name: name, In: in})
+			if req, _ := p["required"].(bool); req || in == "path" {
+				required = append(required, name)
+			}
 		}
 	}
+
 	if rb, ok := op["requestBody"].(map[string]any); ok {
 		content, _ := rb["content"].(map[string]any)
 		jc, _ := content["application/json"].(map[string]any)
-		if bodySchema, ok := jc["schema"].(map[string]any); ok {
+		if rawSchema, ok := jc["schema"].(map[string]any); ok {
+			bodySchema := resolveRefsMap(doc, rawSchema)
 			if props, ok := bodySchema["properties"].(map[string]any); ok {
-				for name := range props {
+				for name, v := range props {
 					if _, dup := seen[name]; !dup {
 						seen[name] = struct{}{}
+						properties[name] = v
 						params = append(params, OpenAPIParam{Name: name, In: "body"})
+					}
+				}
+			}
+			if reqs, ok := bodySchema["required"].([]any); ok {
+				for _, r := range reqs {
+					if s, ok := r.(string); ok {
+						required = append(required, s)
 					}
 				}
 			}
 		}
 	}
-	return params
+
+	result := map[string]any{"type": "object", "properties": properties}
+	if len(required) > 0 {
+		result["required"] = required
+	}
+	return result, params
 }
 
 func openAPIOperationHash(baseURL, description, method, path string, inputSchema, outputSchema map[string]any, price int64, params []OpenAPIParam) string {
