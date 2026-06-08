@@ -159,10 +159,15 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 
 	// 10–11. Atomically lock funds and create child trace.
 	now := time.Now().UTC()
+	var parentTraceID *string
+	if req.ParentTraceID != "" {
+		s := req.ParentTraceID
+		parentTraceID = &s
+	}
 	trace := &Trace{
 		ID:            uuid.New().String(),
 		ProcessID:     req.ProcessID,
-		ParentTraceID: strPtr(req.ParentTraceID),
+		ParentTraceID: parentTraceID,
 		ActionOwnerID: action.OwnerUserID,
 		CreatedAt:     now,
 	}
@@ -231,7 +236,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	// 13. Validate output schema.
-	if schemaErr := ValidateInput(action.OutputSchema, anyOf(reply)); schemaErr != nil {
+	if schemaErr := ValidateInput(action.OutputSchema, any(reply)); schemaErr != nil {
 		tx.Status = TxFailure
 		tx.Reason = "output schema violation: " + schemaErr.Error()
 		if err := k.settleFailedCall(ctx, logger, tx, req, action, latency, schemaErr); err != nil {
@@ -462,26 +467,6 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 	return nil
 }
 
-// anyOf converts a map[string]any to any for schema validation.
-func anyOf(m map[string]any) any {
-	if m == nil {
-		return nil
-	}
-	return m
-}
-
-// isInsufficientFunds reports whether err wraps ErrInsufficientFunds.
-func isInsufficientFunds(err error) bool {
-	return errors.Is(err, ErrInsufficientFunds)
-}
-
-// strPtr returns nil for an empty string, otherwise a pointer to s.
-func strPtr(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
-}
 
 // ComputeFee computes (net, fee) for a gross amount using VAT-style basis points.
 // Only the taxable portion (gross minus direct sub-call cost) is subject to the fee.

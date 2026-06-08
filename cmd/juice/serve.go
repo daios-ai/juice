@@ -139,8 +139,8 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Get("/v1/actions/{id}", srv.getAction)
 		r.Get("/v1/actions/{id}/ratings", srv.listActionRatings)
 		r.Put("/v1/actions/{id}", srv.updateAction)
-		r.Post("/v1/actions/{id}/enable", srv.enableAction)
-		r.Post("/v1/actions/{id}/disable", srv.disableAction)
+		r.Post("/v1/actions/{id}/enable", srv.setActionActive(true))
+		r.Post("/v1/actions/{id}/disable", srv.setActionActive(false))
 		r.Delete("/v1/actions/{id}", srv.deleteAction)
 
 		// Processes.
@@ -324,8 +324,7 @@ func (s *server) postUser(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	u, err := s.kernel.CreateUser(r.Context(), kernel.CreateUserRequest{
@@ -409,8 +408,7 @@ func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SpecURL string `json:"spec_url"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	if req.SpecURL == "" {
@@ -436,8 +434,7 @@ func (s *server) unimportOpenAPI(w http.ResponseWriter, r *http.Request) {
 		Name        string `json:"name"`
 		OwnerHandle string `json:"owner_handle"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	if req.SpecURL == "" {
@@ -472,8 +469,7 @@ func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 		OutputSchema map[string]any `json:"output_schema"`
 		Source       string         `json:"source"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	a, err := s.kernel.CreateAction(r.Context(), callerFrom(r), kernel.CreateActionRequest{
@@ -529,8 +525,7 @@ func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 		OutputSchema map[string]any `json:"output_schema"`
 		Public       *bool          `json:"public"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &body) {
 		return
 	}
 	a, err := s.kernel.UpdateAction(r.Context(), callerFrom(r), kernel.UpdateActionRequest{
@@ -549,22 +544,15 @@ func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, withActionRef(a))
 }
 
-func (s *server) enableAction(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if err := s.kernel.SetActive(r.Context(), callerFrom(r), id, true); err != nil {
-		writeErr(w, err)
-		return
+func (s *server) setActionActive(active bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if err := s.kernel.SetActive(r.Context(), callerFrom(r), id, active); err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"active": active})
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"active": true})
-}
-
-func (s *server) disableAction(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if err := s.kernel.SetActive(r.Context(), callerFrom(r), id, false); err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"active": false})
 }
 
 func (s *server) deleteAction(w http.ResponseWriter, r *http.Request) {
@@ -589,8 +577,7 @@ func (s *server) postProcess(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Funds int64 `json:"funds"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	p, t, err := s.kernel.StartProcess(r.Context(), callerFrom(r), callerFrom(r), req.Funds)
@@ -620,8 +607,7 @@ func (s *server) fundProcess(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Funds int64 `json:"funds"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	if err := s.kernel.FundProcess(r.Context(), callerFrom(r), id, req.Funds); err != nil {
@@ -652,8 +638,7 @@ func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
 		Action        string         `json:"action"`
 		Args          map[string]any `json:"args"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	if req.Action == "" {
@@ -709,8 +694,7 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 		Rating float64 `json:"rating"`
 		Note   *string `json:"note"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	if req.Rating != 0 && req.Rating != 1 {
@@ -754,8 +738,7 @@ func (s *server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 		CodeChallenge string `json:"code_challenge"`
 		RedirectURI   string `json:"redirect_uri"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	if req.Handle == "" || req.Password == "" || req.CodeChallenge == "" {
@@ -778,8 +761,7 @@ func (s *server) postRefresh(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RefreshToken string `json:"refresh_token"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	access, newRT, err := s.kernel.RefreshAccessToken(r.Context(), req.RefreshToken)
@@ -797,8 +779,7 @@ func (s *server) postLogout(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RefreshToken string `json:"refresh_token"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	if err := s.kernel.RevokeRefreshToken(r.Context(), req.RefreshToken); err != nil {
@@ -820,8 +801,7 @@ func (s *server) postTokenMulti(w http.ResponseWriter, r *http.Request) {
 		CodeVerifier string `json:"code_verifier"`
 		RedirectURI  string `json:"redirect_uri"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	if req.GrantType == "authorization_code" {
@@ -866,8 +846,7 @@ func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 		RequiredCaller  string          `json:"required_caller"`
 		ParentTraceID   string          `json:"parent_trace_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	if req.ProcessID == "" {
@@ -938,8 +917,7 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Args *json.RawMessage `json:"args"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	if req.Args == nil {
@@ -1204,6 +1182,14 @@ func healthCmd() *cobra.Command {
 }
 
 // ---- response helpers ----
+
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := decodeJSON(r.Body, v); err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
+		return false
+	}
+	return true
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

@@ -337,9 +337,6 @@ type ReceiptChecks struct {
 	ReplyHash   bool `json:"reply_hash"`
 }
 
-// Ed25519 key type aliases for clarity at call sites.
-type (
-	Ed25519PrivateKey = ed25519.PrivateKey
-	Ed25519PublicKey  = ed25519.PublicKey
-)
+// Ed25519PrivateKey is a type alias for clarity at call sites.
+type Ed25519PrivateKey = ed25519.PrivateKey
 

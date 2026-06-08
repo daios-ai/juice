@@ -84,12 +84,9 @@ func (k *Kernel) ReadStep(ctx context.Context, callerID, stepID string) (*Step, 
 
 // ListSteps returns steps visible to the caller.
 func (k *Kernel) ListSteps(ctx context.Context, callerID, processID, status string) ([]*Step, error) {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
-		return nil, err
-	}
-	u, err := k.store.ReadUser(ctx, callerID)
+	u, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
-		return nil, ErrUnauthenticated.Wrap("user not found")
+		return nil, err
 	}
 	return k.store.ListSteps(ctx, callerID, processID, status, k.isUserSuperuser(ctx, u))
 }
