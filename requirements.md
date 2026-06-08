@@ -42,6 +42,8 @@ All execution paths use `Call()`: root calls, native actions, WASM `juice.call`,
 
 Supervision operations never route through `Call()`; they manage users, actions, processes, ratings, deposits, OpenAPI imports, and remote imports. Execution code must not rate outputs or propagate ratings.
 
+Juice is meant to be a kernel like an OS kernel: only minimal but general and robust primitives, the rest lives on the application layer (actions).
+
 ## 2. Packages and implementation constraints
 
 Use Go. `go build ./...` and `go test ./...` must pass. Replaceable modules use ordinary Go interfaces. `kernel` must not import CLI, HTTP, SQLite, wazero, or Ollama implementations.

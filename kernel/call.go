@@ -37,6 +37,9 @@ type CallRequest struct {
 	// IdempotencyRecordID, if non-empty, causes CommitCall/CommitFailedCall to atomically
 	// mark the pending idempotency record as complete. Set only by federation handlers.
 	IdempotencyRecordID string
+	// StepID, if non-empty, causes CommitCall/CommitFailedCall to atomically mark the step done.
+	// Set only by CompleteStep.
+	StepID string
 }
 
 // CallReply is the response from a successful Call().
@@ -89,7 +92,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		authorized := false
 		if req.ParentTraceID != "" {
 			parent, parentErr := k.store.ReadTrace(ctx, req.ParentTraceID)
-			if parentErr == nil && parent.ActionOwnerID == req.CallerID {
+			if parentErr == nil && parent.ActionOwnerID == req.CallerID && parent.ProcessID == req.ProcessID {
 				authorized = true
 			}
 		}
@@ -266,7 +269,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
-	if err := k.store.CommitCall(ctx, tx, receipt, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID); err != nil {
+	if err := k.store.CommitCall(ctx, tx, receipt, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.StepID); err != nil {
 		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
 			logger.Error("call.refund_failed", "action", action.Name, "commit_error", err, "refund_error", refundErr)
 			return nil, ErrInternal.Wrap("could not refund funds after failed commit")
@@ -460,7 +463,7 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 		}
 		return ErrInternal.Wrap("could not build receipt")
 	}
-	if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats, req.IdempotencyRecordID, KernelErrorCode(callErr)); settlErr != nil {
+	if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats, req.IdempotencyRecordID, KernelErrorCode(callErr), req.StepID); settlErr != nil {
 		logger.Error("call.settlement_failed", "action", action.Name, "error", callErr, "settlement_error", settlErr)
 		return ErrInternal.Wrap("could not record failure transaction")
 	}

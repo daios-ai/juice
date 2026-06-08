@@ -190,6 +190,14 @@ func validateValue(schema map[string]any, data any, path string) error {
 				return err
 			}
 		}
+		// Check required fields that are not declared in properties.
+		for _, r := range required {
+			if _, inProps := props[r]; !inProps {
+				if _, present := obj[r]; !present {
+					return ErrSchemaViolation.Wrapf("field %s.%s: required field missing", path, r)
+				}
+			}
+		}
 
 	case "array":
 		arr, ok := data.([]any)

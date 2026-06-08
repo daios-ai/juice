@@ -190,16 +190,15 @@ func TestStepCompleteRunningOrDoneReturnsErrInvalidState(t *testing.T) {
 	}
 }
 
-func TestStepCompleteResetsToWaitingOnCallReject(t *testing.T) {
+func TestStepCompleteSetsDoneOnExecutionFailure(t *testing.T) {
 	st := newTestStore(t)
-	// Action is active but WASM always fails
+	// Action runs but always fails at execution time — CommitFailedCall fires, creating a failure tx.
 	k := newTestKernelWithScripts(st, &fakeScriptExec{err: kernel.ErrExecutionFailed.Wrap("simulated failure")})
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@reset-owner", 500)
 	caller := setupUser(t, st, "@reset-caller", 0)
 	action := setupAction(t, st, owner.ID, "reset-action", 0)
-	// Make it a WASM action with real source
 	action.Kind = kernel.KindWasm
 	_ = st.UpdateAction(ctx, action)
 	p, _, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
@@ -211,13 +210,48 @@ func TestStepCompleteResetsToWaitingOnCallReject(t *testing.T) {
 
 	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
 	if err == nil {
-		t.Fatal("expected CompleteStep to fail when Call fails")
+		t.Fatal("expected CompleteStep to return error on action failure")
 	}
 
-	// Step must be back to waiting
+	// Requirements: Call completion (success or failure) atomically records status=done + tx_id.
+	got, _ := st.ReadStep(ctx, step.ID)
+	if got.Status != kernel.StepDone {
+		t.Errorf("expected step.status=done after execution failure, got %s", got.Status)
+	}
+	if got.TxID == nil {
+		t.Error("expected tx_id to be set after execution failure")
+	}
+}
+
+func TestStepCompleteResetsToWaitingOnPreTransactionReject(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@prereject-owner", 0) // zero funds
+	caller := setupUser(t, st, "@prereject-caller", 0)
+	action := setupAction(t, st, owner.ID, "prereject-action", 100) // costs 100, owner has 0
+	action.Kind = kernel.KindWasm
+	_ = st.UpdateAction(ctx, action)
+	p, _, _ := k.StartProcess(ctx, owner.ID, owner.ID, 0) // no funds in process either
+
+	step, err := k.CreateStep(ctx, owner.ID, p.ID, nil, action.ID, nil, nil, caller.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+
+	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected CompleteStep to fail when process has insufficient funds")
+	}
+
+	// Call rejected before creating a transaction: step must be reset to waiting for retry.
 	got, _ := st.ReadStep(ctx, step.ID)
 	if got.Status != kernel.StepWaiting {
-		t.Errorf("expected step.status=waiting after failed CompleteStep, got %s", got.Status)
+		t.Errorf("expected step.status=waiting after pre-transaction reject, got %s", got.Status)
+	}
+	if got.TxID != nil {
+		t.Error("expected tx_id to be nil after pre-transaction reject")
 	}
 }
 
@@ -563,5 +597,84 @@ func TestMergeArgsInputKeysOverwritePartialArgs(t *testing.T) {
 	got, _ := st.ReadStep(ctx, step.ID)
 	if got.Status != kernel.StepDone {
 		t.Errorf("step should be done, got %s", got.Status)
+	}
+}
+
+// TestCreateStepTraceAuthority verifies that an action owner who is not the process owner
+// can create a step when they own the executing action in the parent trace (F3 fix).
+func TestCreateStepTraceAuthority(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	processOwner := setupUser(t, st, "@trace-proc-owner", 500)
+	actionOwner := setupUser(t, st, "@trace-act-owner", 0)
+	nextUser := setupUser(t, st, "@trace-next-user", 0)
+
+	// Action owned by actionOwner, public so processOwner can call it.
+	action := setupWasmAction(t, st, actionOwner.ID, "trace-action", "", 0)
+
+	// Next action the step will invoke.
+	nextAction := setupAction(t, st, processOwner.ID, "trace-next-action", 0)
+
+	p, _, _ := k.StartProcess(ctx, processOwner.ID, processOwner.ID, 100)
+
+	// Call the action to create a trace where action_owner_id = actionOwner.ID
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		CallerID:     processOwner.ID,
+		ProcessID:    p.ID,
+		TargetUserID: actionOwner.ID,
+		ActionName:   action.Name,
+		Args:         map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call to create parent trace: %v", err)
+	}
+	parentTraceID := reply.TraceID
+
+	// actionOwner (not process owner) can create a step using the parent trace for authority.
+	step, err := k.CreateStep(ctx, actionOwner.ID, p.ID, &parentTraceID, nextAction.ID, nil, nil, nextUser.ID)
+	if err != nil {
+		t.Fatalf("CreateStep with trace authority: %v", err)
+	}
+	if step == nil || step.Status != kernel.StepWaiting {
+		t.Fatal("expected a waiting step")
+	}
+}
+
+// TestCreateStepTraceAuthorityWrongProcess verifies that trace-scoped authority does not
+// grant cross-process step creation (parent trace must be in the same process).
+func TestCreateStepTraceAuthorityWrongProcess(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	procOwner := setupUser(t, st, "@xproc-step-owner", 500)
+	actionOwner := setupUser(t, st, "@xproc-step-actowner", 0)
+	nextUser := setupUser(t, st, "@xproc-step-next", 0)
+
+	action := setupWasmAction(t, st, actionOwner.ID, "xproc-step-action", "", 0)
+	nextAction := setupAction(t, st, procOwner.ID, "xproc-step-next-action", 0)
+
+	p1, _, _ := k.StartProcess(ctx, procOwner.ID, procOwner.ID, 100)
+	p2, _, _ := k.StartProcess(ctx, procOwner.ID, procOwner.ID, 100)
+
+	// Create a trace in p1 owned by actionOwner.
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		CallerID:     procOwner.ID,
+		ProcessID:    p1.ID,
+		TargetUserID: actionOwner.ID,
+		ActionName:   action.Name,
+		Args:         map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	p1TraceID := reply.TraceID
+
+	// actionOwner tries to create a step in p2 using the p1 trace — must fail.
+	_, err = k.CreateStep(ctx, actionOwner.ID, p2.ID, &p1TraceID, nextAction.ID, nil, nil, nextUser.ID)
+	if !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized for cross-process trace authority, got %v", err)
 	}
 }

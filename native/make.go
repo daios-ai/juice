@@ -48,6 +48,15 @@ type MakeTest struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// discoveredAction holds the minimal fields needed to describe a composable action to the LLM.
+// It avoids direct store reads by using data already returned from @sys/lookup or resolved from explicit refs.
+type discoveredAction struct {
+	ID          string
+	Name        string
+	OwnerHandle string
+	Description string
+}
+
 // MakeResult is the output schema of the @sys/make native action.
 type MakeResult struct {
 	Status      string     `json:"status"`                // "success" | "failure"
@@ -119,7 +128,7 @@ func executeMake(ctx context.Context, args map[string]any, targetID, callerID, o
 
 	for step := 0; step < maxSteps; step++ {
 		// Step 5: generate TinyGo source.
-		runFunc, genDiag := generateSource(ctx, in, contract, composable, sdk, diagnostics, targetID, processID, parentTraceID, k, deps.Store)
+		runFunc, genDiag := generateSource(ctx, in, contract, composable, sdk, diagnostics, targetID, processID, parentTraceID, k)
 		if genDiag != "" {
 			diagnostics = append(diagnostics, fmt.Sprintf("step %d: LLM generation failed: %s", step+1, genDiag))
 			continue
@@ -256,10 +265,10 @@ var actionRefRe = regexp.MustCompile(`@[\w-]+/[\w./-]+`)
 
 // resolveActionRefs extracts explicit @owner/name references from the description
 // and looks them up in the store.
-func resolveActionRefs(ctx context.Context, description string, store kernel.Store) []*kernel.Action {
+func resolveActionRefs(ctx context.Context, description string, store kernel.Store) []discoveredAction {
 	matches := actionRefRe.FindAllString(description, -1)
 	seen := map[string]bool{}
-	var result []*kernel.Action
+	var result []discoveredAction
 	for _, ref := range matches {
 		if seen[ref] {
 			continue
@@ -277,14 +286,20 @@ func resolveActionRefs(ctx context.Context, description string, store kernel.Sto
 		if err != nil || a == nil || !a.Active {
 			continue
 		}
-		result = append(result, a)
+		result = append(result, discoveredAction{
+			ID:          a.ID,
+			Name:        a.Name,
+			OwnerHandle: ownerHandle,
+			Description: a.Description,
+		})
 	}
 	return result
 }
 
 // searchCatalog calls @sys/lookup for each capability identified in the contract plan.
-// Actions with a failure rate above 50% (over at least 5 uses) are excluded.
-func searchCatalog(ctx context.Context, contract *actionContract, targetID, processID, parentTraceID string, k *kernel.Kernel, deps MakeDeps) []*kernel.Action {
+// Actions with a failure rate above 50% (over at least 5 uses) are excluded using the
+// uses/failures fields returned by @sys/lookup — no separate store reads needed.
+func searchCatalog(ctx context.Context, contract *actionContract, targetID, processID, parentTraceID string, k *kernel.Kernel, deps MakeDeps) []discoveredAction {
 	if contract.Plan == "" || deps.Embedder == nil {
 		return nil
 	}
@@ -292,7 +307,7 @@ func searchCatalog(ctx context.Context, contract *actionContract, targetID, proc
 	queries := extractCapabilityQueries(contract.Plan)
 
 	seen := map[string]bool{}
-	var result []*kernel.Action
+	var result []discoveredAction
 
 	for _, q := range queries {
 		if q == "" {
@@ -320,29 +335,34 @@ func searchCatalog(ctx context.Context, contract *actionContract, targetID, proc
 				continue
 			}
 			seen[actionID] = true
-			a, err := deps.Store.ReadAction(ctx, actionID)
-			if err != nil || a == nil || !a.Active {
+			uses, _ := m["uses"].(int64)
+			failures, _ := m["failures"].(int64)
+			if isUnreliable(uses, failures) {
 				continue
 			}
-			if isUnreliableAction(deps.Store.ReadStats(ctx, a.ID)) {
-				continue
-			}
-			result = append(result, a)
+			result = append(result, discoveredAction{
+				ID:          actionID,
+				Name:        toString(m["name"]),
+				OwnerHandle: toString(m["owner_handle"]),
+				Description: toString(m["description"]),
+			})
 		}
 	}
 	return result
 }
 
-// isUnreliableAction returns true when stats show a failure rate above 50% over at least 5 uses.
-func isUnreliableAction(stats *kernel.Stats, _ error) bool {
-	if stats == nil {
+// isUnreliable returns true when stats show a failure rate above 50% over at least 5 uses.
+func isUnreliable(uses, failures int64) bool {
+	if uses < 5 {
 		return false
 	}
-	total := stats.Successes + stats.Failures
-	if total < 5 {
-		return false
-	}
-	return stats.Failures > stats.Successes
+	return failures*2 > uses
+}
+
+// toString casts an any value to string.
+func toString(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 // extractCapabilityQueries splits a plan string into focused search queries.
@@ -362,10 +382,10 @@ func extractCapabilityQueries(plan string) []string {
 }
 
 // mergeActions combines two action lists, deduplicating by action ID.
-func mergeActions(a, b []*kernel.Action) []*kernel.Action {
+func mergeActions(a, b []discoveredAction) []discoveredAction {
 	seen := map[string]bool{}
-	var result []*kernel.Action
-	for _, list := range [][]*kernel.Action{a, b} {
+	var result []discoveredAction
+	for _, list := range [][]discoveredAction{a, b} {
 		for _, act := range list {
 			if !seen[act.ID] {
 				seen[act.ID] = true
@@ -377,7 +397,7 @@ func mergeActions(a, b []*kernel.Action) []*kernel.Action {
 }
 
 // generateSource calls @sys/llm/chat to produce the TinyGo run function.
-func generateSource(ctx context.Context, in *makeInput, contract *actionContract, composable []*kernel.Action, sdk string, prevDiagnostics []string, targetID, processID, parentTraceID string, k *kernel.Kernel, store kernel.Store) (source, diag string) {
+func generateSource(ctx context.Context, in *makeInput, contract *actionContract, composable []discoveredAction, sdk string, prevDiagnostics []string, targetID, processID, parentTraceID string, k *kernel.Kernel) (source, diag string) {
 	var sb strings.Builder
 	sb.WriteString("You are a TinyGo programmer generating a WASM action for the Juice platform.\n\n")
 
@@ -397,12 +417,7 @@ func generateSource(ctx context.Context, in *makeInput, contract *actionContract
 	if len(composable) > 0 {
 		sb.WriteString("Composable actions available via JuiceCall(\"@owner/name\", argsJSON):\n")
 		for _, a := range composable {
-			ownerHandle := a.OwnerUserID
-			u, err := store.ReadUser(ctx, a.OwnerUserID)
-			if err == nil && u != nil {
-				ownerHandle = u.Handle
-			}
-			ref := fmt.Sprintf("@%s/%s", strings.TrimPrefix(ownerHandle, "@"), a.Name)
+			ref := fmt.Sprintf("@%s/%s", strings.TrimPrefix(a.OwnerHandle, "@"), a.Name)
 			sb.WriteString(fmt.Sprintf("  %s — %s\n", ref, a.Description))
 		}
 		sb.WriteString("\n")

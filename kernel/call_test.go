@@ -1060,12 +1060,12 @@ type failingCommitStore struct {
 	calls int
 }
 
-func (f *failingCommitStore) CommitCall(ctx context.Context, tx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID string) error {
+func (f *failingCommitStore) CommitCall(ctx context.Context, tx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
 	f.calls++
 	if f.calls > 0 {
 		return kernel.ErrInternal.Wrap("injected commit failure")
 	}
-	return f.Store.CommitCall(ctx, tx, receipt, processID, targetUserID, feeRecipientID, net, fee, stats, idempotencyRecordID)
+	return f.Store.CommitCall(ctx, tx, receipt, processID, targetUserID, feeRecipientID, net, fee, stats, idempotencyRecordID, stepID)
 }
 
 func TestCommitCallAtomicOnFailure(t *testing.T) {
@@ -1144,9 +1144,9 @@ func TestCallInvalidParentTraceDoesNotLockFunds(t *testing.T) {
 	}
 }
 
-func TestCallCrossProcessParentTraceAllowed(t *testing.T) {
-	// Under process-funded model, cross-process parent traces are allowed
-	// (e.g. event-triggered calls reference the emitting trace from another process).
+func TestCallCrossProcessParentTraceAllowedForOwner(t *testing.T) {
+	// Process owner supplying a cross-process parent trace is allowed — the owner
+	// check passes before the parent trace is even inspected.
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -1162,20 +1162,97 @@ func TestCallCrossProcessParentTraceAllowed(t *testing.T) {
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
 	_, otherRoot, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
 
-	// Cross-process parent trace should succeed under the new model.
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:     alice.ID,
+		CallerID:      alice.ID,
 		ProcessID:     p.ID,
-		ParentTraceID: otherRoot.ID, // cross-process parent — now allowed
+		ParentTraceID: otherRoot.ID, // cross-process, but alice is the process owner
 		TargetUserID:  alice.ID,
 		ActionName:    a.Name,
 		Args:          map[string]any{},
 	})
 	if err != nil {
-		t.Fatalf("cross-process parent trace should succeed, got %v", err)
+		t.Fatalf("process owner with cross-process parent trace should succeed, got %v", err)
 	}
 	if reply == nil {
 		t.Fatal("expected reply")
+	}
+}
+
+func TestCallCrossProcessParentTraceRejectedForNonOwner(t *testing.T) {
+	// A non-owner caller whose action appears in a different process's trace must not
+	// gain authority over the target process via that foreign trace (F2 fix).
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	procOwner := setupUser(t, st, "@f2-proc-owner", 500)
+	actionOwner := setupUser(t, st, "@f2-action-owner", 0)
+	targetAction := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: procOwner.ID, Name: "f2-target",
+		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	callerAction := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: actionOwner.ID, Name: "f2-caller",
+		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, targetAction)
+	_ = st.CreateAction(ctx, callerAction)
+
+	// p1 and p2 are both owned by procOwner.
+	p1, _, _ := k.StartProcess(ctx, procOwner.ID, procOwner.ID, 100)
+	p2, _, _ := k.StartProcess(ctx, procOwner.ID, procOwner.ID, 100)
+
+	// Create a trace in p1 owned by actionOwner (by calling callerAction in p1).
+	reply1, err := k.Call(ctx, kernel.CallRequest{
+		CallerID:     procOwner.ID,
+		ProcessID:    p1.ID,
+		TargetUserID: actionOwner.ID,
+		ActionName:   "f2-caller",
+		Args:         map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("setup call in p1: %v", err)
+	}
+	p1TraceID := reply1.TraceID
+
+	// actionOwner tries to call in p2 using the p1 trace for authority — must fail.
+	_, err = k.Call(ctx, kernel.CallRequest{
+		CallerID:      actionOwner.ID,
+		ProcessID:     p2.ID,
+		ParentTraceID: p1TraceID, // trace is in p1, not p2
+		TargetUserID:  procOwner.ID,
+		ActionName:    "f2-target",
+		Args:          map[string]any{},
+	})
+	if !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized for cross-process trace authority, got %v", err)
+	}
+
+	// But using a trace in p2 should succeed.
+	reply2, err := k.Call(ctx, kernel.CallRequest{
+		CallerID:     procOwner.ID,
+		ProcessID:    p2.ID,
+		TargetUserID: actionOwner.ID,
+		ActionName:   "f2-caller",
+		Args:         map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("setup call in p2: %v", err)
+	}
+	p2TraceID := reply2.TraceID
+
+	_, err = k.Call(ctx, kernel.CallRequest{
+		CallerID:      actionOwner.ID,
+		ProcessID:     p2.ID,
+		ParentTraceID: p2TraceID, // same process trace → allowed
+		TargetUserID:  procOwner.ID,
+		ActionName:    "f2-target",
+		Args:          map[string]any{},
+	})
+	if err != nil {
+		t.Errorf("same-process trace authority should succeed, got %v", err)
 	}
 }
 
@@ -1185,7 +1262,7 @@ type failingCommitFailedCallStore struct {
 	kernel.Store
 }
 
-func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *kernel.Transaction, _ *kernel.Receipt, _ string, _ int64, _ *kernel.Stats, _, _ string) error {
+func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *kernel.Transaction, _ *kernel.Receipt, _ string, _ int64, _ *kernel.Stats, _, _, _ string) error {
 	return kernel.ErrInternal.Wrap("injected CommitFailedCall failure")
 }
 

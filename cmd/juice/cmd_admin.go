@@ -29,7 +29,10 @@ func init() {
 	txCmd := &cobra.Command{Use: "tx", Short: "Transaction admin commands"}
 	txCmd.AddCommand(adminTxListCmd())
 
-	adminCmd.AddCommand(userCmd, actionCmd, processCmd, txCmd)
+	stepCmd := &cobra.Command{Use: "step", Short: "Step admin commands"}
+	stepCmd.AddCommand(adminStepListCmd())
+
+	adminCmd.AddCommand(userCmd, actionCmd, processCmd, txCmd, stepCmd)
 	rootCmd.AddCommand(adminCmd)
 }
 
@@ -302,5 +305,36 @@ func adminTxListCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
 	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	return cmd
+}
+
+func adminStepListCmd() *cobra.Command {
+	var processID, status string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all steps",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return withSuperuser(func(k *kernel.Kernel, superuserID string) error {
+				steps, err := k.ListSteps(context.Background(), superuserID, processID, status)
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(steps)
+				}
+				for _, s := range steps {
+					txID := "-"
+					if s.TxID != nil {
+						txID = (*s.TxID)[:8]
+					}
+					fmt.Printf("%s  process=%-8s  status=%-7s  tx=%s\n",
+						s.ID[:8], s.ProcessID[:8], s.Status, txID)
+				}
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
+	cmd.Flags().StringVar(&status, "status", "", "Filter by status (waiting, running, done)")
 	return cmd
 }

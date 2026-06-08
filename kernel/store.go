@@ -147,14 +147,16 @@ type Store interface {
 	FundProcess(ctx context.Context, userID, processID string, amount int64) error
 
 	// CommitCall atomically records a successful transaction, creates its receipt, settles funds,
-	// updates trace cost/latency for all ancestor traces, upserts action stats, and completes
-	// the idempotency record (if idempotencyRecordID is non-empty) — all in one SQLite transaction.
-	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, idempotencyRecordID string) error
+	// updates trace cost/latency for all ancestor traces, upserts action stats, completes
+	// the idempotency record (if idempotencyRecordID is non-empty), and — when stepID is non-empty —
+	// marks the step done with the committed tx_id. All in one SQLite transaction.
+	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, idempotencyRecordID, stepID string) error
 
 	// CommitFailedCall atomically refunds locked funds, records a failure transaction, creates its receipt,
-	// updates trace latency, upserts action stats, and completes the idempotency record (if
-	// idempotencyRecordID is non-empty) — all in one SQLite transaction.
-	CommitFailedCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID string, gross int64, stats *Stats, idempotencyRecordID, errorCode string) error
+	// updates trace latency, upserts action stats, completes the idempotency record (if
+	// idempotencyRecordID is non-empty), and — when stepID is non-empty — marks the step done with
+	// the failure tx_id. All in one SQLite transaction.
+	CommitFailedCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID string, gross int64, stats *Stats, idempotencyRecordID, errorCode, stepID string) error
 
 	// EndProcess closes the process and returns all remaining funds to the owner.
 	EndProcess(ctx context.Context, processID string) error
@@ -210,9 +212,8 @@ type Store interface {
 	ListSteps(ctx context.Context, callerUserID, processID, status string, isSuperuser bool) ([]*Step, error)
 	// ClaimStep atomically transitions status waiting→running. Returns ErrInvalidState if not waiting.
 	ClaimStep(ctx context.Context, stepID string) error
-	// CompleteStep atomically sets status=done and tx_id. Returns ErrInvalidState if not running.
-	CompleteStep(ctx context.Context, stepID, txID string) error
-	// ResetStep resets a single running step (tx_id IS NULL) back to waiting. Used when CompleteStep fails before the call creates a tx.
+	// ResetStep resets a single running step (tx_id IS NULL) back to waiting. Called when Call
+	// fails before creating a transaction — the step can be retried.
 	ResetStep(ctx context.Context, stepID string) error
 	// ResetRunningSteps sets status=waiting where status=running AND tx_id IS NULL.
 	ResetRunningSteps(ctx context.Context) error

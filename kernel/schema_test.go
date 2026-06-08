@@ -170,4 +170,20 @@ func TestValidateInput(t *testing.T) {
 			t.Errorf("schema without type should accept any value: %v", err)
 		}
 	})
+
+	t.Run("required field absent from properties is still enforced", func(t *testing.T) {
+		// JSON Schema: required is independent of properties — a required name not in
+		// properties must still be present in the input object.
+		s := map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"x": map[string]any{"type": "string"}},
+			"required":   []any{"x", "y"}, // "y" is not in properties
+		}
+		if err := ValidateInput(s, map[string]any{"x": "val"}); err == nil {
+			t.Error("expected error: required field 'y' missing from object and not in properties")
+		}
+		if err := ValidateInput(s, map[string]any{"x": "val", "y": "present"}); err != nil {
+			t.Errorf("unexpected error when all required fields present: %v", err)
+		}
+	})
 }

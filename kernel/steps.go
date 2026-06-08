@@ -30,7 +30,14 @@ func (k *Kernel) CreateStep(ctx context.Context, callerID, processID string, par
 		return nil, ErrUnauthenticated.Wrap("user not found")
 	}
 	if process.OwnerUserID != callerID && !k.isUserSuperuser(ctx, u) {
-		return nil, ErrUnauthorized.Wrap("caller is not the process owner")
+		// Also permit via trace-scoped authority (same rule as Call precondition 3).
+		if parentTraceID == nil {
+			return nil, ErrUnauthorized.Wrap("caller is not the process owner")
+		}
+		parent, err := k.store.ReadTrace(ctx, *parentTraceID)
+		if err != nil || parent.ActionOwnerID != callerID || parent.ProcessID != processID {
+			return nil, ErrUnauthorized.Wrap("caller is not the process owner")
+		}
 	}
 	action, err := k.store.ReadAction(ctx, nextActionID)
 	if err != nil {
@@ -163,15 +170,13 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 		ActionName:     action.Name,
 		Args:           args,
 		StepCompletion: true,
+		StepID:         stepID,
 	})
 	if callErr != nil {
-		// Reset to waiting so the step can be retried.
+		// If Call failed before creating a transaction, reset to waiting so the step can be retried.
+		// If CommitFailedCall already ran with StepID, the step is already done and ResetStep is a no-op.
 		_ = k.store.ResetStep(ctx, stepID)
 		return nil, callErr
-	}
-
-	if err := k.store.CompleteStep(ctx, stepID, reply.TxID); err != nil {
-		k.log.With(ctx).Error("step.complete_record_failed", "step_id", stepID, "tx_id", reply.TxID, "error", err)
 	}
 	k.log.With(ctx).Info("step.completed", "step_id", stepID, "tx_id", reply.TxID, "status", "success")
 	return &StepReply{CallReply: reply, StepID: stepID}, nil

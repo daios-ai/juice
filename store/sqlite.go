@@ -777,7 +777,7 @@ func (s *DB) upsertActionStats(ctx context.Context, tx *sql.Tx, stats *kernel.St
 	return dbErr(err, label+": upsert stats")
 }
 
-func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID string) error {
+func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return dbErr(err, "begin commit call")
@@ -840,10 +840,19 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		}
 	}
 
+	if stepID != "" {
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE steps SET status='done', tx_id=? WHERE id=? AND status='running'`,
+			ktx.ID, stepID,
+		); err != nil {
+			return dbErr(err, "commit call: complete step")
+		}
+	}
+
 	return dbErr(tx.Commit(), "commit call: commit")
 }
 
-func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID string, gross int64, stats *kernel.Stats, idempotencyRecordID, errorCode string) error {
+func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID string, gross int64, stats *kernel.Stats, idempotencyRecordID, errorCode, stepID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return dbErr(err, "begin commit failed call")
@@ -877,6 +886,15 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, rece
 			string(errResult), string(receiptBytes), idempotencyRecordID,
 		); err != nil {
 			return dbErr(err, "commit failed call: complete idempotency record")
+		}
+	}
+
+	if stepID != "" {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE steps SET status='done', tx_id=? WHERE id=? AND status='running'`,
+			ktx.ID, stepID,
+		); err != nil {
+			return dbErr(err, "commit failed call: complete step")
 		}
 	}
 
@@ -1262,19 +1280,6 @@ func (s *DB) ClaimStep(ctx context.Context, stepID string) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return kernel.ErrInvalidState.Wrap("step is not waiting")
-	}
-	return nil
-}
-
-func (s *DB) CompleteStep(ctx context.Context, stepID, txID string) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE steps SET status='done', tx_id=? WHERE id=? AND status='running'`, txID, stepID)
-	if err != nil {
-		return dbErr(err, "complete step")
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return kernel.ErrInvalidState.Wrap("step is not running")
 	}
 	return nil
 }
