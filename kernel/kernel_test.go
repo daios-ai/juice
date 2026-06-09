@@ -616,37 +616,13 @@ func TestUpdateStats(t *testing.T) {
 	if s.Successes != 1 || s.Failures != 0 {
 		t.Errorf("successes=%d failures=%d, want 1/0", s.Successes, s.Failures)
 	}
-	if math.Abs(float64(s.PriceMean)-100) > 1e-6 {
-		t.Errorf("price_mean: got %f, want 100", s.PriceMean)
-	}
-	if math.Abs(s.LatencyMean-0.5) > 1e-6 {
-		t.Errorf("latency_mean: got %f, want 0.5", s.LatencyMean)
+	if math.Abs(s.LatencyEstimate-0.5) > 1e-6 {
+		t.Errorf("latency_estimate: got %f, want 0.5", s.LatencyEstimate)
 	}
 
 	kernel.UpdateStats(s, &kernel.Transaction{Status: kernel.TxFailure, StartedAt: now, EndedAt: now}, 0.2)
 	if s.Uses != 2 || s.Failures != 1 {
 		t.Errorf("after failure: uses=%d failures=%d, want 2/1", s.Uses, s.Failures)
-	}
-	if math.Abs(float64(s.PriceMean)-100) > 1e-6 {
-		t.Error("price_mean should not change on failure")
-	}
-}
-
-func TestUpdateStatsZeroPrice(t *testing.T) {
-	s := kernel.DefaultStats("action-zp")
-	now := time.Now()
-
-	// First call: price=100
-	kernel.UpdateStats(s, &kernel.Transaction{Status: kernel.TxSuccess, Gross: 100, StartedAt: now, EndedAt: now}, 0.1)
-	// Second call: price=0 (zero-price)
-	kernel.UpdateStats(s, &kernel.Transaction{Status: kernel.TxSuccess, Gross: 0, StartedAt: now, EndedAt: now}, 0.1)
-
-	if s.Successes != 2 {
-		t.Fatalf("successes: got %d, want 2", s.Successes)
-	}
-	// Mean of [100, 0] = 50
-	if math.Abs(float64(s.PriceMean)-50) > 1e-6 {
-		t.Errorf("price_mean: got %f, want 50", s.PriceMean)
 	}
 }
 
@@ -715,8 +691,8 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	if stats.RatingCount != 1 {
 		t.Errorf("RatingCount: got %d, want 1", stats.RatingCount)
 	}
-	if stats.RatingMean != rating {
-		t.Errorf("RatingMean: got %f, want %f", stats.RatingMean, rating)
+	if stats.RatingEstimate != rating {
+		t.Errorf("RatingEstimate: got %f, want %f", stats.RatingEstimate, rating)
 	}
 }
 

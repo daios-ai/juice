@@ -405,11 +405,11 @@ func (s *DB) UpdateActionAndResetStats(ctx context.Context, a *kernel.Action) er
 		}
 		zeroTime := timeToStr(time.Time{})
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
+			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,cost_estimate,latency_estimate,rating_estimate,last_used_at)
 			 VALUES (?,0,0,0,0,0,0,0,?)
 			 ON CONFLICT(action_id) DO UPDATE SET
 			   uses=0,successes=0,failures=0,rating_count=0,
-			   price_mean=0,latency_mean=0,rating_mean=0,last_used_at=excluded.last_used_at`,
+			   cost_estimate=0,latency_estimate=0,rating_estimate=0,last_used_at=excluded.last_used_at`,
 			a.ID, zeroTime,
 		)
 		return dbErr(err, "update action and reset stats: reset stats")
@@ -746,34 +746,36 @@ WHERE id IN (SELECT id FROM ancestors)`,
 }
 
 // upsertActionStats updates the incremental success or failure counters for an action.
-// rating_count/rating_mean are excluded — owned by UpdateRating.
-func (s *DB) upsertActionStats(ctx context.Context, tx *sql.Tx, stats *kernel.Stats, success bool, label string) error {
+// rating_count/rating_estimate are excluded — owned by UpdateRating.
+// cost_estimate is read from the traces table via subquery; updateAncestorTraces must run first.
+func (s *DB) upsertActionStats(ctx context.Context, tx *sql.Tx, stats *kernel.Stats, success bool, traceID, label string) error {
 	if stats == nil {
 		return nil
 	}
 	var err error
 	if success {
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
-			 VALUES (?,1,1,0,0,?,?,0,?)
+			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,cost_estimate,latency_estimate,rating_estimate,last_used_at)
+			 VALUES (?,1,1,0,0,(SELECT cost FROM traces WHERE id=?),?,0,?)
 			 ON CONFLICT(action_id) DO UPDATE SET
 			   uses=uses+1,
 			   successes=successes+1,
-			   price_mean=price_mean+(excluded.price_mean-price_mean)/(successes+1),
-			   latency_mean=latency_mean+(excluded.latency_mean-latency_mean)/(uses+1),
+			   cost_estimate=cost_estimate+((SELECT cost FROM traces WHERE id=?)-cost_estimate)/(uses+1),
+			   latency_estimate=latency_estimate+(excluded.latency_estimate-latency_estimate)/(uses+1),
 			   last_used_at=excluded.last_used_at`,
-			stats.ActionID, stats.PriceMean, stats.LatencyMean, timeToStr(stats.LastUsedAt),
+			stats.ActionID, traceID, stats.LatencyEstimate, timeToStr(stats.LastUsedAt), traceID,
 		)
 	} else {
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
-			 VALUES (?,1,0,1,0,0,?,0,?)
+			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,cost_estimate,latency_estimate,rating_estimate,last_used_at)
+			 VALUES (?,1,0,1,0,(SELECT cost FROM traces WHERE id=?),?,0,?)
 			 ON CONFLICT(action_id) DO UPDATE SET
 			   uses=uses+1,
 			   failures=failures+1,
-			   latency_mean=latency_mean+(excluded.latency_mean-latency_mean)/(uses+1),
+			   cost_estimate=cost_estimate+((SELECT cost FROM traces WHERE id=?)-cost_estimate)/(uses+1),
+			   latency_estimate=latency_estimate+(excluded.latency_estimate-latency_estimate)/(uses+1),
 			   last_used_at=excluded.last_used_at`,
-			stats.ActionID, stats.LatencyMean, timeToStr(stats.LastUsedAt),
+			stats.ActionID, traceID, stats.LatencyEstimate, timeToStr(stats.LastUsedAt), traceID,
 		)
 	}
 	return dbErr(err, label+": upsert stats")
@@ -804,7 +806,7 @@ func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction
 	if err := s.updateAncestorTraces(ctx, tx, ktx.TraceID, ktx.Gross, ktx.EndedAt, label); err != nil {
 		return err
 	}
-	if err := s.upsertActionStats(ctx, tx, stats, ktx.Status == kernel.TxSuccess, label); err != nil {
+	if err := s.upsertActionStats(ctx, tx, stats, ktx.Status == kernel.TxSuccess, ktx.TraceID, label); err != nil {
 		return err
 	}
 	if idempotencyRecordID != "" {
@@ -1113,10 +1115,10 @@ func (s *DB) ReadStats(ctx context.Context, actionID string) (*kernel.Stats, err
 	var st kernel.Stats
 	var lastUsed string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at
+		`SELECT action_id,uses,successes,failures,rating_count,cost_estimate,latency_estimate,rating_estimate,last_used_at
 		 FROM action_stats WHERE action_id=?`, actionID,
 	).Scan(&st.ActionID, &st.Uses, &st.Successes, &st.Failures, &st.RatingCount,
-		&st.PriceMean, &st.LatencyMean, &st.RatingMean, &lastUsed)
+		&st.CostEstimate, &st.LatencyEstimate, &st.RatingEstimate, &lastUsed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil // no stats yet is not an error
 	}
@@ -1129,15 +1131,15 @@ func (s *DB) ReadStats(ctx context.Context, actionID string) (*kernel.Stats, err
 
 func (s *DB) UpsertStats(ctx context.Context, st *kernel.Stats) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
+		`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,cost_estimate,latency_estimate,rating_estimate,last_used_at)
 		 VALUES (?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(action_id) DO UPDATE SET
 		   uses=excluded.uses, successes=excluded.successes, failures=excluded.failures,
-		   rating_count=excluded.rating_count, price_mean=excluded.price_mean,
-		   latency_mean=excluded.latency_mean, rating_mean=excluded.rating_mean,
+		   rating_count=excluded.rating_count, cost_estimate=excluded.cost_estimate,
+		   latency_estimate=excluded.latency_estimate, rating_estimate=excluded.rating_estimate,
 		   last_used_at=excluded.last_used_at`,
 		st.ActionID, st.Uses, st.Successes, st.Failures, st.RatingCount,
-		st.PriceMean, st.LatencyMean, st.RatingMean, timeToStr(st.LastUsedAt),
+		st.CostEstimate, st.LatencyEstimate, st.RatingEstimate, timeToStr(st.LastUsedAt),
 	)
 	return dbErr(err, "upsert stats")
 }
@@ -1597,7 +1599,7 @@ func (s *DB) CreateRatingAndUpdateStats(ctx context.Context, r *kernel.Rating, a
 		_, err := tx.ExecContext(ctx,
 			`UPDATE action_stats SET
 			   rating_count = rating_count + 1,
-			   rating_mean  = rating_mean + (? - rating_mean) / (rating_count + 1)
+			   rating_estimate  = rating_estimate + (? - rating_estimate) / (rating_count + 1)
 			 WHERE action_id = ?`,
 			rating, actionID,
 		)

@@ -519,12 +519,12 @@ func TestStats(t *testing.T) {
 	}
 
 	s := &kernel.Stats{
-		ActionID:   a.ID,
-		Uses:       5,
-		Successes:  4,
-		Failures:   1,
-		PriceMean:  50,
-		LastUsedAt: time.Now().UTC(),
+		ActionID:     a.ID,
+		Uses:         5,
+		Successes:    4,
+		Failures:     1,
+		CostEstimate: 50,
+		LastUsedAt:   time.Now().UTC(),
 	}
 	if err := db.UpsertStats(ctx, s); err != nil {
 		t.Fatal(err)
@@ -587,7 +587,7 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	tr1 := beginTrace(100)
 	tx1 := makeTx(uuid.New().String(), tr1.ID, 100)
 	rc1 := makeReceipt(uuid.New().String(), tx1.ID, tr1.ID, 100)
-	stats1 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, PriceMean: 100, LatencyMean: 0.1, LastUsedAt: time.Now().UTC()}
+	stats1 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, LatencyEstimate: 0.1, LastUsedAt: time.Now().UTC()}
 	if err := db.CommitCall(ctx, tx1, rc1, p.ID, target.ID, fee.ID, tx1.Net, tx1.Fee, stats1, "", ""); err != nil {
 		t.Fatalf("CommitCall #1: %v", err)
 	}
@@ -595,7 +595,7 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	tr2 := beginTrace(50)
 	tx2 := makeTx(uuid.New().String(), tr2.ID, 50) // different gross to verify mean formula
 	rc2 := makeReceipt(uuid.New().String(), tx2.ID, tr2.ID, 50)
-	stats2 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, PriceMean: 50, LatencyMean: 0.3, LastUsedAt: time.Now().UTC()}
+	stats2 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, LatencyEstimate: 0.3, LastUsedAt: time.Now().UTC()}
 	if err := db.CommitCall(ctx, tx2, rc2, p.ID, target.ID, fee.ID, tx2.Net, tx2.Fee, stats2, "", ""); err != nil {
 		t.Fatalf("CommitCall #2: %v", err)
 	}
@@ -607,13 +607,13 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	if got.Uses != 2 || got.Successes != 2 {
 		t.Errorf("uses=%d successes=%d, want 2/2", got.Uses, got.Successes)
 	}
-	// Mean of [100, 50] = 75
-	if math.Abs(got.PriceMean-75) > 1e-6 {
-		t.Errorf("price_mean: got %f, want 75", got.PriceMean)
+	// trace.cost values: tr1=100, tr2=50; mean = 75
+	if math.Abs(got.CostEstimate-75) > 1e-6 {
+		t.Errorf("cost_estimate: got %f, want 75", got.CostEstimate)
 	}
 	// Mean of [0.1, 0.3] = 0.2
-	if math.Abs(got.LatencyMean-0.2) > 1e-6 {
-		t.Errorf("latency_mean: got %f, want 0.2", got.LatencyMean)
+	if math.Abs(got.LatencyEstimate-0.2) > 1e-6 {
+		t.Errorf("latency_estimate: got %f, want 0.2", got.LatencyEstimate)
 	}
 	// rating_count must not be reset to 0 (stays at 0 since no ratings, but must not error)
 	if got.RatingCount != 0 {
@@ -1081,8 +1081,8 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 	if stats.RatingCount != 1 {
 		t.Errorf("RatingCount: got %d, want 1", stats.RatingCount)
 	}
-	if stats.RatingMean != 1.0 {
-		t.Errorf("RatingMean: got %f, want 1.0", stats.RatingMean)
+	if stats.RatingEstimate != 1.0 {
+		t.Errorf("RatingEstimate: got %f, want 1.0", stats.RatingEstimate)
 	}
 
 	// Second rating (0) must update the running mean atomically.
@@ -1113,8 +1113,8 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 	if stats2.RatingCount != 2 {
 		t.Errorf("RatingCount after second: got %d, want 2", stats2.RatingCount)
 	}
-	if stats2.RatingMean != 0.5 {
-		t.Errorf("RatingMean after second: got %f, want 0.5", stats2.RatingMean)
+	if stats2.RatingEstimate != 0.5 {
+		t.Errorf("RatingEstimate after second: got %f, want 0.5", stats2.RatingEstimate)
 	}
 }
 

@@ -158,9 +158,9 @@ type Stats struct {
 	Successes   int64     `json:"successes"`
 	Failures    int64     `json:"failures"`
 	RatingCount int64     `json:"rating_count"`
-	PriceMean   float64   `json:"price_mean"`
-	LatencyMean float64   `json:"latency_mean"`
-	RatingMean  float64   `json:"rating_mean"`
+	CostEstimate    float64   `json:"cost_estimate"`
+	LatencyEstimate float64   `json:"latency_estimate"`
+	RatingEstimate  float64   `json:"rating_estimate"`
 	LastUsedAt  time.Time `json:"last_used_at"`
 }
 

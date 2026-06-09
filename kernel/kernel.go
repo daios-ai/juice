@@ -1285,12 +1285,11 @@ func UpdateStats(s *Stats, tx *Transaction, latencySeconds float64) {
 
 	if tx.Status == TxSuccess {
 		s.Successes++
-		s.PriceMean = IncrementalMean(s.PriceMean, s.Successes-1, float64(tx.Gross))
 	} else {
 		s.Failures++
 	}
 
-	s.LatencyMean = IncrementalMean(s.LatencyMean, s.Uses-1, latencySeconds)
+	s.LatencyEstimate = IncrementalMean(s.LatencyEstimate, s.Uses-1, latencySeconds)
 }
 
 // DefaultStats returns a zeroed Stats struct for a newly activated action.
