@@ -78,6 +78,7 @@ func TestServeCreateStep(t *testing.T) {
 		"next_action_id":  actionID,
 		"required_caller": "@cs-create-caller",
 		"partial_args":    map[string]any{"preset": "val"},
+		"input_schema":    minSchema,
 	}, ownerTok)
 	if resp.StatusCode != http.StatusCreated {
 		resp.Body.Close()
@@ -119,6 +120,8 @@ func TestServeListSteps(t *testing.T) {
 			"process_id":      pid,
 			"next_action_id":  actionID,
 			"required_caller": "@sl-steps-caller",
+			"partial_args":    map[string]any{},
+			"input_schema":    minSchema,
 		}, ownerTok)
 		if r.StatusCode != http.StatusCreated {
 			r.Body.Close()
@@ -186,6 +189,8 @@ func TestServeGetStep(t *testing.T) {
 		"process_id":      pid,
 		"next_action_id":  actionID,
 		"required_caller": "@gs-steps-caller",
+		"partial_args":    map[string]any{},
+		"input_schema":    minSchema,
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
 		stepResp.Body.Close()
@@ -249,6 +254,8 @@ func TestServeCompleteStepMissingArgs(t *testing.T) {
 		"process_id":      pid,
 		"next_action_id":  actionID,
 		"required_caller": "@csmiss-caller",
+		"partial_args":    map[string]any{},
+		"input_schema":    minSchema,
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
 		stepResp.Body.Close()
@@ -288,6 +295,7 @@ func TestServeCompleteStep(t *testing.T) {
 		"next_action_id":  actionID,
 		"required_caller": "@cs2-caller",
 		"partial_args":    map[string]any{"from_partial": "A"},
+		"input_schema":    minSchema,
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
 		stepResp.Body.Close()

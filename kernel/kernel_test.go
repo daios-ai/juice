@@ -762,7 +762,7 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	}
 }
 
-func TestRateTransactionSelfRatingRejected(t *testing.T) {
+func TestRateTransactionOwnerCallingOwnActionCanRate(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -789,13 +789,37 @@ func TestRateTransactionSelfRatingRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	_, err = k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0, nil)
-	if err == nil {
-		t.Fatal("expected error when owner rates own output, got nil")
+	rating, err := k.RateTransaction(ctx, owner.ID, reply.TxID, 1.0, nil)
+	if err != nil {
+		t.Fatalf("expected owner to be able to rate own action output, got: %v", err)
 	}
-	ke, ok := err.(*kernel.KernelError)
-	if !ok || ke.Code != "unauthorized" {
-		t.Errorf("expected unauthorized error, got %v", err)
+	if rating == nil {
+		t.Fatal("expected non-nil Rating")
+	}
+}
+
+// TestCallPreconditionOrderParentTraceAfterAction verifies §4 ordering: action
+// existence (step 4) must be checked before parent trace existence (step 8).
+// C == P, invalid ParentTraceID, non-existent action → must return ErrNotFound
+// for the action, not ErrInvalidInput for the trace.
+func TestCallPreconditionOrderParentTraceAfterAction(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@ptrace-owner", 100)
+	p, _, _ := k.StartProcess(ctx, owner.ID, owner.ID, 50)
+
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID:      owner.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: "nonexistent-trace-id",
+		TargetUserID:  owner.ID,
+		ActionName:    "no-such-action",
+		Args:          map[string]any{},
+	})
+	if !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for missing action (before trace check), got: %v", err)
 	}
 }
 

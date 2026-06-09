@@ -57,6 +57,31 @@ func TestValidateSchema(t *testing.T) {
 		}
 	})
 
+	t.Run("object with non-map properties rejected", func(t *testing.T) {
+		s := map[string]any{"type": "object", "properties": []any{}}
+		if err := ValidateSchema(s); err == nil {
+			t.Error("expected error for non-map properties")
+		}
+	})
+
+	t.Run("object with non-array required rejected", func(t *testing.T) {
+		s := map[string]any{"type": "object", "required": "x"}
+		if err := ValidateSchema(s); err == nil {
+			t.Error("expected error for non-array required")
+		}
+	})
+
+	t.Run("object with array required valid", func(t *testing.T) {
+		s := map[string]any{
+			"type":       "object",
+			"required":   []any{"x"},
+			"properties": map[string]any{"x": map[string]any{"type": "string", "description": "x"}},
+		}
+		if err := ValidateSchema(s); err != nil {
+			t.Errorf("expected valid schema, got: %v", err)
+		}
+	})
+
 	t.Run("description allowed on all types", func(t *testing.T) {
 		schemas := []map[string]any{
 			{"type": "string", "description": "a string field"},

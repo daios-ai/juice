@@ -257,6 +257,30 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 	if err := VerifyManifestSignature(remoteUser.PublicKey, &m); err != nil {
 		return nil, err
 	}
+	switch {
+	case m.Name == "":
+		return nil, ErrInvalidInput.Wrap("manifest missing name")
+	case m.OwnerHandle == "":
+		return nil, ErrInvalidInput.Wrap("manifest missing owner_handle")
+	case m.Description == "":
+		return nil, ErrInvalidInput.Wrap("manifest missing description")
+	case m.InputSchema == nil:
+		return nil, ErrInvalidInput.Wrap("manifest missing input_schema")
+	case m.OutputSchema == nil:
+		return nil, ErrInvalidInput.Wrap("manifest missing output_schema")
+	case string(m.Kind) == "":
+		return nil, ErrInvalidInput.Wrap("manifest missing kind")
+	case m.Stats == nil:
+		return nil, ErrInvalidInput.Wrap("manifest missing stats")
+	case m.UpdatedAt.IsZero():
+		return nil, ErrInvalidInput.Wrap("manifest missing updated_at")
+	}
+	if err := ValidateSchema(m.InputSchema); err != nil {
+		return nil, ErrInvalidInput.Wrapf("manifest input_schema invalid: %v", err)
+	}
+	if err := ValidateSchema(m.OutputSchema); err != nil {
+		return nil, ErrInvalidInput.Wrapf("manifest output_schema invalid: %v", err)
+	}
 	if m.Price < 0 {
 		return nil, ErrInvalidInput.Wrap("price must be non-negative")
 	}
@@ -389,6 +413,9 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 		return nil, err
 	}
 	stats, _ := k.store.ReadStats(ctx, a.ID)
+	if stats == nil {
+		stats = &Stats{ActionID: a.ID}
+	}
 	m := &ActionManifest{
 		ActionID:     a.ID,
 		OwnerHandle:  owner.Handle,

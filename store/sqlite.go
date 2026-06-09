@@ -393,41 +393,27 @@ func (s *DB) updateActionTx(ctx context.Context, tx *sql.Tx, a *kernel.Action) e
 }
 
 func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin update action")
-	}
-	defer tx.Rollback()
-	if err := s.updateActionTx(ctx, tx, a); err != nil {
-		return err
-	}
-	return dbErr(tx.Commit(), "update action: commit")
+	return s.withTx(ctx, "update action", func(tx *sql.Tx) error {
+		return s.updateActionTx(ctx, tx, a)
+	})
 }
 
 func (s *DB) UpdateActionAndResetStats(ctx context.Context, a *kernel.Action) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin update action and reset stats")
-	}
-	defer tx.Rollback()
-
-	if err := s.updateActionTx(ctx, tx, a); err != nil {
-		return err
-	}
-
-	zeroTime := timeToStr(time.Time{})
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
-		 VALUES (?,0,0,0,0,0,0,0,?)
-		 ON CONFLICT(action_id) DO UPDATE SET
-		   uses=0,successes=0,failures=0,rating_count=0,
-		   price_mean=0,latency_mean=0,rating_mean=0,last_used_at=excluded.last_used_at`,
-		a.ID, zeroTime,
-	); err != nil {
+	return s.withTx(ctx, "update action and reset stats", func(tx *sql.Tx) error {
+		if err := s.updateActionTx(ctx, tx, a); err != nil {
+			return err
+		}
+		zeroTime := timeToStr(time.Time{})
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,price_mean,latency_mean,rating_mean,last_used_at)
+			 VALUES (?,0,0,0,0,0,0,0,?)
+			 ON CONFLICT(action_id) DO UPDATE SET
+			   uses=0,successes=0,failures=0,rating_count=0,
+			   price_mean=0,latency_mean=0,rating_mean=0,last_used_at=excluded.last_used_at`,
+			a.ID, zeroTime,
+		)
 		return dbErr(err, "update action and reset stats: reset stats")
-	}
-
-	return dbErr(tx.Commit(), "update action and reset stats: commit")
+	})
 }
 
 func (s *DB) DeleteAction(ctx context.Context, id string) error {
@@ -581,45 +567,36 @@ func finishAction(a *kernel.Action, kind string, active, public int, inJSON, out
 // ---- Processes ----
 
 func (s *DB) StartProcess(ctx context.Context, p *kernel.Process, t *kernel.Trace, ownerID string, funds int64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin start process")
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at) VALUES (?,?,?,?,?,?,?)`,
-		p.ID, p.OwnerUserID, 0, 0, string(p.Status), timeToStr(p.CreatedAt), nullTimeToStr(p.EndedAt),
-	); err != nil {
-		return dbErr(err, "start process: insert process")
-	}
-
-	if funds > 0 {
-		res, err := tx.ExecContext(ctx,
-			`UPDATE users SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
-			funds, funds, ownerID, funds,
-		)
-		if err != nil {
-			return dbErr(err, "start process: deduct user")
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return kernel.ErrInsufficientFunds.Wrap("insufficient user balance")
-		}
+	return s.withTx(ctx, "start process", func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE processes SET available=? WHERE id=?`, funds, p.ID,
+			`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at) VALUES (?,?,?,?,?,?,?)`,
+			p.ID, p.OwnerUserID, 0, 0, string(p.Status), timeToStr(p.CreatedAt), nullTimeToStr(p.EndedAt),
 		); err != nil {
-			return dbErr(err, "start process: credit process")
+			return dbErr(err, "start process: insert process")
 		}
-	}
-
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
-		t.ID, t.ProcessID, nullStrPtr(t.ParentTraceID), t.ActionOwnerID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
-	); err != nil {
+		if funds > 0 {
+			res, err := tx.ExecContext(ctx,
+				`UPDATE users SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
+				funds, funds, ownerID, funds,
+			)
+			if err != nil {
+				return dbErr(err, "start process: deduct user")
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return kernel.ErrInsufficientFunds.Wrap("insufficient user balance")
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE processes SET available=? WHERE id=?`, funds, p.ID,
+			); err != nil {
+				return dbErr(err, "start process: credit process")
+			}
+		}
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
+			t.ID, t.ProcessID, nullStrPtr(t.ParentTraceID), t.ActionOwnerID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
+		)
 		return dbErr(err, "start process: insert trace")
-	}
-
-	return dbErr(tx.Commit(), "start process: commit")
+	})
 }
 
 func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error) {
@@ -644,47 +621,39 @@ func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error
 // BeginCall atomically locks price credits in the process and inserts the child trace.
 // Either both succeed or neither does, preserving the transition invariant.
 func (s *DB) BeginCall(ctx context.Context, processID string, t *kernel.Trace, price int64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin call: begin tx")
-	}
-	defer tx.Rollback()
-
-	if price > 0 {
-		res, err := tx.ExecContext(ctx,
-			`UPDATE processes SET available=available-?, locked=locked+?
-			 WHERE id=? AND available>=? AND status='open'`,
-			price, price, processID, price,
+	return s.withTx(ctx, "begin call", func(tx *sql.Tx) error {
+		if price > 0 {
+			res, err := tx.ExecContext(ctx,
+				`UPDATE processes SET available=available-?, locked=locked+?
+				 WHERE id=? AND available>=? AND status='open'`,
+				price, price, processID, price,
+			)
+			if err != nil {
+				return dbErr(err, "begin call: lock funds")
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return kernel.ErrInsufficientFunds.Wrap("not enough process funds or process closed")
+			}
+		} else {
+			// price == 0: atomically verify the process is still open to close the
+			// TOCTOU window between the precondition read in Call() and this transition.
+			res, err := tx.ExecContext(ctx,
+				`UPDATE processes SET available=available WHERE id=? AND status='open'`,
+				processID,
+			)
+			if err != nil {
+				return dbErr(err, "begin call: verify process open")
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return kernel.ErrInvalidState.Wrap("process is closed")
+			}
+		}
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
+			t.ID, t.ProcessID, nullStrPtr(t.ParentTraceID), t.ActionOwnerID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
 		)
-		if err != nil {
-			return dbErr(err, "begin call: lock funds")
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return kernel.ErrInsufficientFunds.Wrap("not enough process funds or process closed")
-		}
-	} else {
-		// price == 0: atomically verify the process is still open to close the
-		// TOCTOU window between the precondition read in Call() and this transition.
-		res, err := tx.ExecContext(ctx,
-			`UPDATE processes SET available=available WHERE id=? AND status='open'`,
-			processID,
-		)
-		if err != nil {
-			return dbErr(err, "begin call: verify process open")
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return kernel.ErrInvalidState.Wrap("process is closed")
-		}
-	}
-
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
-		t.ID, t.ProcessID, nullStrPtr(t.ParentTraceID), t.ActionOwnerID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
-	); err != nil {
 		return dbErr(err, "begin call: create trace")
-	}
-
-	return dbErr(tx.Commit(), "begin call: commit")
+	})
 }
 
 func (s *DB) RefundFunds(ctx context.Context, processID string, amount int64) error {
@@ -699,34 +668,29 @@ func (s *DB) RefundFunds(ctx context.Context, processID string, amount int64) er
 }
 
 func (s *DB) FundProcess(ctx context.Context, userID, processID string, amount int64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin fund process")
-	}
-	defer tx.Rollback()
-
-	res, err := tx.ExecContext(ctx,
-		`UPDATE users SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
-		amount, amount, userID, amount,
-	)
-	if err != nil {
-		return dbErr(err, "fund process: deduct user")
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return kernel.ErrInsufficientFunds.Wrap("insufficient user balance")
-	}
-
-	res, err = tx.ExecContext(ctx,
-		`UPDATE processes SET available=available+? WHERE id=? AND status='open'`,
-		amount, processID,
-	)
-	if err != nil {
-		return dbErr(err, "fund process: credit process")
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return kernel.ErrInvalidState.Wrap("process is not open")
-	}
-	return dbErr(tx.Commit(), "fund process commit")
+	return s.withTx(ctx, "fund process", func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE users SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
+			amount, amount, userID, amount,
+		)
+		if err != nil {
+			return dbErr(err, "fund process: deduct user")
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return kernel.ErrInsufficientFunds.Wrap("insufficient user balance")
+		}
+		res, err = tx.ExecContext(ctx,
+			`UPDATE processes SET available=available+? WHERE id=? AND status='open'`,
+			amount, processID,
+		)
+		if err != nil {
+			return dbErr(err, "fund process: credit process")
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return kernel.ErrInvalidState.Wrap("process is not open")
+		}
+		return nil
+	})
 }
 
 // insertAuditRows inserts the transaction record and its mandatory receipt into an open SQLite transaction.
@@ -857,69 +821,59 @@ func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction
 			return err
 		}
 	}
-	return dbErr(tx.Commit(), label+": commit")
+	return nil
 }
 
 func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin commit call")
-	}
-	defer tx.Rollback()
-
-	gross := net + fee
-	if gross > 0 {
-		if _, err = tx.ExecContext(ctx,
-			`UPDATE processes SET locked=locked-? WHERE id=?`, gross, processID); err != nil {
-			return dbErr(err, "commit call: debit process locked")
+	return s.withTx(ctx, "commit call", func(tx *sql.Tx) error {
+		gross := net + fee
+		if gross > 0 {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE processes SET locked=locked-? WHERE id=?`, gross, processID); err != nil {
+				return dbErr(err, "commit call: debit process locked")
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE users SET locked=locked-? WHERE id=?`, gross, ktx.OwnerUserID); err != nil {
+				return dbErr(err, "commit call: debit owner locked")
+			}
 		}
-		if _, err = tx.ExecContext(ctx,
-			`UPDATE users SET locked=locked-? WHERE id=?`, gross, ktx.OwnerUserID); err != nil {
-			return dbErr(err, "commit call: debit owner locked")
+		if net > 0 {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE users SET available=available+? WHERE id=?`, net, targetUserID); err != nil {
+				return dbErr(err, "commit call: credit target")
+			}
 		}
-	}
-	if net > 0 {
-		if _, err = tx.ExecContext(ctx,
-			`UPDATE users SET available=available+? WHERE id=?`, net, targetUserID); err != nil {
-			return dbErr(err, "commit call: credit target")
+		// Credit fee recipient — hard-fail if unset or nonexistent to prevent fund destruction.
+		if fee > 0 {
+			if feeRecipientID == "" {
+				return fmt.Errorf("commit call: fee %d > 0 but feeRecipientID is empty: funds would be destroyed", fee)
+			}
+			res, feeErr := tx.ExecContext(ctx,
+				`UPDATE users SET available=available+? WHERE id=?`, fee, feeRecipientID)
+			if feeErr != nil {
+				return dbErr(feeErr, "commit call: credit fee recipient")
+			}
+			if n, _ := res.RowsAffected(); n != 1 {
+				return fmt.Errorf("commit call: fee recipient %q not found: funds would be destroyed", feeRecipientID)
+			}
 		}
-	}
-	// Credit fee recipient — hard-fail if unset or nonexistent to prevent fund destruction.
-	if fee > 0 {
-		if feeRecipientID == "" {
-			return fmt.Errorf("commit call: fee %d > 0 but feeRecipientID is empty: funds would be destroyed", fee)
-		}
-		res, feeErr := tx.ExecContext(ctx,
-			`UPDATE users SET available=available+? WHERE id=?`, fee, feeRecipientID)
-		if feeErr != nil {
-			return dbErr(feeErr, "commit call: credit fee recipient")
-		}
-		if n, _ := res.RowsAffected(); n != 1 {
-			return fmt.Errorf("commit call: fee recipient %q not found: funds would be destroyed", feeRecipientID)
-		}
-	}
-
-	return s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, rawJSONStr(ktx.ReplyJSON), stepID, "commit call")
+		return s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, rawJSONStr(ktx.ReplyJSON), stepID, "commit call")
+	})
 }
 
 func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID string, gross int64, stats *kernel.Stats, idempotencyRecordID, errorCode, stepID string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin commit failed call")
-	}
-	defer tx.Rollback()
-
-	if gross > 0 {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE processes SET available=available+?, locked=locked-? WHERE id=?`,
-			gross, gross, processID,
-		); err != nil {
-			return dbErr(err, "commit failed call: refund process")
+	return s.withTx(ctx, "commit failed call", func(tx *sql.Tx) error {
+		if gross > 0 {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE processes SET available=available+?, locked=locked-? WHERE id=?`,
+				gross, gross, processID,
+			); err != nil {
+				return dbErr(err, "commit failed call: refund process")
+			}
 		}
-	}
-
-	errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
-	return s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, string(errResult), stepID, "commit failed call")
+		errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
+		return s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, string(errResult), stepID, "commit failed call")
+	})
 }
 
 func scanProcessRows(rows *sql.Rows) ([]*kernel.Process, error) {
@@ -969,48 +923,35 @@ func (s *DB) ListAllProcesses(ctx context.Context, limit, offset int) ([]*kernel
 }
 
 func (s *DB) EndProcess(ctx context.Context, processID string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin end process")
-	}
-	defer tx.Rollback()
-
-	var ownerID string
-	var available, locked int64
-	err = tx.QueryRowContext(ctx,
-		`SELECT owner_user_id, available, locked FROM processes WHERE id=? AND status='open'`,
-		processID,
-	).Scan(&ownerID, &available, &locked)
-	if errors.Is(err, sql.ErrNoRows) {
-		return kernel.ErrInvalidState.Wrap("process not open")
-	}
-	if err != nil {
-		return dbErr(err, "end process: read")
-	}
-	if locked > 0 {
-		return kernel.ErrInvalidState.Wrap("process has locked funds")
-	}
-
-	now := timeToStr(time.Now().UTC())
-
-	// Return available funds to owner (locked is 0, so user.locked decrements by available).
-	if available > 0 {
-		_, err = tx.ExecContext(ctx,
-			`UPDATE users SET available=available+?, locked=locked-? WHERE id=?`,
-			available, available, ownerID)
-		if err != nil {
-			return dbErr(err, "end process: return funds")
+	return s.withTx(ctx, "end process", func(tx *sql.Tx) error {
+		var ownerID string
+		var available, locked int64
+		err := tx.QueryRowContext(ctx,
+			`SELECT owner_user_id, available, locked FROM processes WHERE id=? AND status='open'`,
+			processID,
+		).Scan(&ownerID, &available, &locked)
+		if errors.Is(err, sql.ErrNoRows) {
+			return kernel.ErrInvalidState.Wrap("process not open")
 		}
-	}
-
-	_, err = tx.ExecContext(ctx,
-		`UPDATE processes SET status='closed', available=0, locked=0, ended_at=? WHERE id=?`,
-		now, processID)
-	if err != nil {
+		if err != nil {
+			return dbErr(err, "end process: read")
+		}
+		if locked > 0 {
+			return kernel.ErrInvalidState.Wrap("process has locked funds")
+		}
+		now := timeToStr(time.Now().UTC())
+		if available > 0 {
+			if _, err = tx.ExecContext(ctx,
+				`UPDATE users SET available=available+?, locked=locked-? WHERE id=?`,
+				available, available, ownerID); err != nil {
+				return dbErr(err, "end process: return funds")
+			}
+		}
+		_, err = tx.ExecContext(ctx,
+			`UPDATE processes SET status='closed', available=0, locked=0, ended_at=? WHERE id=?`,
+			now, processID)
 		return dbErr(err, "end process: close")
-	}
-
-	return dbErr(tx.Commit(), "end process commit")
+	})
 }
 
 // ---- Traces ----
@@ -1379,34 +1320,29 @@ func (s *DB) CreateAuthCode(ctx context.Context, c *kernel.AuthCode) error {
 }
 
 func (s *DB) ConsumeAuthCode(ctx context.Context, code string) (*kernel.AuthCode, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, dbErr(err, "begin consume auth code")
-	}
-	defer tx.Rollback()
-
 	var ac kernel.AuthCode
-	var expiresAt string
-	var used int
-	err = tx.QueryRowContext(ctx,
-		`SELECT code,user_id,code_challenge,redirect_uri,expires_at,used FROM auth_codes WHERE code=?`, code,
-	).Scan(&ac.Code, &ac.UserID, &ac.CodeChallenge, &ac.RedirectURI, &expiresAt, &used)
-	if errors.Is(err, sql.ErrNoRows) || used != 0 {
-		return nil, kernel.ErrUnauthenticated.Wrap("invalid or used auth code")
+	if err := s.withTx(ctx, "consume auth code", func(tx *sql.Tx) error {
+		var expiresAt string
+		var used int
+		err := tx.QueryRowContext(ctx,
+			`SELECT code,user_id,code_challenge,redirect_uri,expires_at,used FROM auth_codes WHERE code=?`, code,
+		).Scan(&ac.Code, &ac.UserID, &ac.CodeChallenge, &ac.RedirectURI, &expiresAt, &used)
+		if errors.Is(err, sql.ErrNoRows) || used != 0 {
+			return kernel.ErrUnauthenticated.Wrap("invalid or used auth code")
+		}
+		if err != nil {
+			return dbErr(err, "read auth code")
+		}
+		ac.ExpiresAt = strToTime(expiresAt)
+		if ac.ExpiresAt.Before(time.Now()) {
+			return kernel.ErrUnauthenticated.Wrap("auth code expired")
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE auth_codes SET used=1 WHERE code=?`, code)
+		return dbErr(err, "mark auth code used")
+	}); err != nil {
+		return nil, err
 	}
-	if err != nil {
-		return nil, dbErr(err, "read auth code")
-	}
-	ac.ExpiresAt = strToTime(expiresAt)
-	if ac.ExpiresAt.Before(time.Now()) {
-		return nil, kernel.ErrUnauthenticated.Wrap("auth code expired")
-	}
-
-	_, err = tx.ExecContext(ctx, `UPDATE auth_codes SET used=1 WHERE code=?`, code)
-	if err != nil {
-		return nil, dbErr(err, "mark auth code used")
-	}
-	return &ac, dbErr(tx.Commit(), "consume auth code commit")
+	return &ac, nil
 }
 
 // ---- Refresh tokens ----
@@ -1421,52 +1357,45 @@ func (s *DB) CreateRefreshToken(ctx context.Context, t *kernel.RefreshToken) err
 }
 
 func (s *DB) RotateRefreshToken(ctx context.Context, oldToken string) (*kernel.RefreshToken, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, dbErr(err, "begin rotate refresh token")
+	var newTok *kernel.RefreshToken
+	if err := s.withTx(ctx, "rotate refresh token", func(tx *sql.Tx) error {
+		var userID, expiresAt string
+		var revoked int
+		err := tx.QueryRowContext(ctx,
+			`SELECT user_id,expires_at,revoked FROM refresh_tokens WHERE token=?`, oldToken,
+		).Scan(&userID, &expiresAt, &revoked)
+		if errors.Is(err, sql.ErrNoRows) || revoked != 0 {
+			return kernel.ErrUnauthenticated.Wrap("invalid or revoked refresh token")
+		}
+		if err != nil {
+			return dbErr(err, "read refresh token")
+		}
+		if strToTime(expiresAt).Before(time.Now()) {
+			return kernel.ErrUnauthenticated.Wrap("refresh token expired")
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE refresh_tokens SET revoked=1 WHERE token=?`, oldToken); err != nil {
+			return dbErr(err, "revoke old refresh token")
+		}
+		raw := make([]byte, 32)
+		if _, err := rand.Read(raw); err != nil {
+			return kernel.ErrInternal.Wrap("failed to generate refresh token")
+		}
+		now := time.Now().UTC()
+		newTok = &kernel.RefreshToken{
+			Token:     base64.RawURLEncoding.EncodeToString(raw),
+			UserID:    userID,
+			ExpiresAt: now.Add(30 * 24 * time.Hour),
+			CreatedAt: now,
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO refresh_tokens (token,user_id,expires_at,revoked,created_at) VALUES (?,?,?,0,?)`,
+			newTok.Token, newTok.UserID, timeToStr(newTok.ExpiresAt), timeToStr(newTok.CreatedAt),
+		)
+		return dbErr(err, "insert new refresh token")
+	}); err != nil {
+		return nil, err
 	}
-	defer tx.Rollback()
-
-	var userID, expiresAt string
-	var revoked int
-	err = tx.QueryRowContext(ctx,
-		`SELECT user_id,expires_at,revoked FROM refresh_tokens WHERE token=?`, oldToken,
-	).Scan(&userID, &expiresAt, &revoked)
-	if errors.Is(err, sql.ErrNoRows) || revoked != 0 {
-		return nil, kernel.ErrUnauthenticated.Wrap("invalid or revoked refresh token")
-	}
-	if err != nil {
-		return nil, dbErr(err, "read refresh token")
-	}
-	if strToTime(expiresAt).Before(time.Now()) {
-		return nil, kernel.ErrUnauthenticated.Wrap("refresh token expired")
-	}
-
-	// Revoke the old token.
-	if _, err = tx.ExecContext(ctx, `UPDATE refresh_tokens SET revoked=1 WHERE token=?`, oldToken); err != nil {
-		return nil, dbErr(err, "revoke old refresh token")
-	}
-
-	// Issue a new one with a fresh random token.
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return nil, kernel.ErrInternal.Wrap("failed to generate refresh token")
-	}
-	now := time.Now().UTC()
-	newTok := &kernel.RefreshToken{
-		Token:     base64.RawURLEncoding.EncodeToString(raw),
-		UserID:    userID,
-		ExpiresAt: now.Add(30 * 24 * time.Hour),
-		CreatedAt: now,
-	}
-
-	if _, err = tx.ExecContext(ctx,
-		`INSERT INTO refresh_tokens (token,user_id,expires_at,revoked,created_at) VALUES (?,?,?,0,?)`,
-		newTok.Token, newTok.UserID, timeToStr(newTok.ExpiresAt), timeToStr(newTok.CreatedAt),
-	); err != nil {
-		return nil, dbErr(err, "insert new refresh token")
-	}
-	return newTok, dbErr(tx.Commit(), "rotate refresh token commit")
+	return newTok, nil
 }
 
 func (s *DB) RevokeRefreshToken(ctx context.Context, token string) error {
@@ -1503,57 +1432,40 @@ func (s *DB) SetConfig(ctx context.Context, key, value string) error {
 }
 
 func (s *DB) InitFirstBoot(ctx context.Context, u *kernel.User, configs map[string]string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin init first boot")
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx,
-		`INSERT OR IGNORE INTO users (id,handle,email,password_hash,available,locked,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?)`,
-		u.ID, u.Handle, u.Email, u.PasswordHash,
-		u.Available, u.Locked, timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
-	)
-	if err != nil {
-		return dbErr(err, "init first boot: insert user")
-	}
-
-	for k, v := range configs {
-		if _, err = tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO config (key,value) VALUES (?,?)`, k, v); err != nil {
-			return dbErr(err, "init first boot: set config "+k)
+	return s.withTx(ctx, "init first boot", func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO users (id,handle,email,password_hash,available,locked,created_at,updated_at)
+			 VALUES (?,?,?,?,?,?,?,?)`,
+			u.ID, u.Handle, u.Email, u.PasswordHash,
+			u.Available, u.Locked, timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
+		); err != nil {
+			return dbErr(err, "init first boot: insert user")
 		}
-	}
-
-	return dbErr(tx.Commit(), "init first boot: commit")
+		for k, v := range configs {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT OR IGNORE INTO config (key,value) VALUES (?,?)`, k, v); err != nil {
+				return dbErr(err, "init first boot: set config "+k)
+			}
+		}
+		return nil
+	})
 }
 
 // ---- Deposits ----
 
 func (s *DB) CreateDeposit(ctx context.Context, d *kernel.Deposit) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin deposit")
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx,
-		`INSERT INTO deposits (id,operator_user_id,target_user_id,amount,reason,created_at)
-		 VALUES (?,?,?,?,?,?)`,
-		d.ID, d.OperatorUserID, d.TargetUserID, d.Amount, d.Reason, timeToStr(d.CreatedAt),
-	)
-	if err != nil {
-		return dbErr(err, "insert deposit")
-	}
-
-	_, err = tx.ExecContext(ctx,
-		`UPDATE users SET available=available+? WHERE id=?`, d.Amount, d.TargetUserID)
-	if err != nil {
+	return s.withTx(ctx, "deposit", func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO deposits (id,operator_user_id,target_user_id,amount,reason,created_at)
+			 VALUES (?,?,?,?,?,?)`,
+			d.ID, d.OperatorUserID, d.TargetUserID, d.Amount, d.Reason, timeToStr(d.CreatedAt),
+		); err != nil {
+			return dbErr(err, "insert deposit")
+		}
+		_, err := tx.ExecContext(ctx,
+			`UPDATE users SET available=available+? WHERE id=?`, d.Amount, d.TargetUserID)
 		return dbErr(err, "deposit: update user balance")
-	}
-
-	return dbErr(tx.Commit(), "deposit: commit")
+	})
 }
 
 // ---- Embeddings ----
@@ -1622,6 +1534,20 @@ func dbErr(err error, op string) error {
 	return kernel.ErrInternal.Wrapf("%s: %v", op, err)
 }
 
+// withTx runs fn inside a single SQLite transaction identified by label.
+// It begins the transaction, defers rollback, calls fn, and on success commits.
+func (s *DB) withTx(ctx context.Context, label string, fn func(*sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin "+label)
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return dbErr(tx.Commit(), label+": commit")
+}
+
 // ---- Receipts ----
 
 func (s *DB) ReadReceiptByTxID(ctx context.Context, txID string) (*kernel.Receipt, error) {
@@ -1673,32 +1599,24 @@ func (s *DB) ReadReceipt(ctx context.Context, id string) (*kernel.Receipt, error
 // ---- Ratings ----
 
 func (s *DB) CreateRatingAndUpdateStats(ctx context.Context, r *kernel.Rating, actionID string, rating float64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "begin create rating")
-	}
-	defer tx.Rollback()
-
-	if _, err = tx.ExecContext(ctx,
-		`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,note,created_at,signature)
-		 VALUES (?,?,?,?,?,?,?,?)`,
-		r.ID, r.RatedTxID, r.RatedReceiptID, r.RaterUserID, r.Rating, r.Note,
-		timeToStr(r.CreatedAt), r.Signature,
-	); err != nil {
-		return dbErr(err, "create rating and update stats: insert rating")
-	}
-
-	if _, err = tx.ExecContext(ctx,
-		`UPDATE action_stats SET
-		   rating_count = rating_count + 1,
-		   rating_mean  = rating_mean + (? - rating_mean) / (rating_count + 1)
-		 WHERE action_id = ?`,
-		rating, actionID,
-	); err != nil {
+	return s.withTx(ctx, "create rating and update stats", func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,note,created_at,signature)
+			 VALUES (?,?,?,?,?,?,?,?)`,
+			r.ID, r.RatedTxID, r.RatedReceiptID, r.RaterUserID, r.Rating, r.Note,
+			timeToStr(r.CreatedAt), r.Signature,
+		); err != nil {
+			return dbErr(err, "create rating and update stats: insert rating")
+		}
+		_, err := tx.ExecContext(ctx,
+			`UPDATE action_stats SET
+			   rating_count = rating_count + 1,
+			   rating_mean  = rating_mean + (? - rating_mean) / (rating_count + 1)
+			 WHERE action_id = ?`,
+			rating, actionID,
+		)
 		return dbErr(err, "create rating and update stats: update stats")
-	}
-
-	return dbErr(tx.Commit(), "create rating and update stats: commit")
+	})
 }
 
 func (s *DB) ListRatings(ctx context.Context, actionID string, limit, offset int) ([]*kernel.Rating, error) {

@@ -89,6 +89,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 
 	// 3. Resolve parent trace and validate process-use authority. Also resolves an empty
 	// ParentTraceID to the process root trace so it is available for trace creation below.
+	// Capture the original value: a non-empty supplied trace is validated for existence in
+	// step 8 (after action resolution), not here, to preserve the required precondition order.
+	suppliedParentTraceID := req.ParentTraceID
 	if err := k.resolveAndValidateParentTrace(ctx, &req, process); err != nil {
 		return nil, err
 	}
@@ -132,6 +135,14 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// 8. Check process has sufficient available funds.
 	if process.Available < action.Price {
 		return nil, ErrInsufficientFunds.Wrapf("process has %d credits, action costs %d", process.Available, action.Price)
+	}
+
+	// 9. Validate supplied parent trace (deferred from step 3 for owner callers so that
+	// action-not-found fires before trace-not-found per the required precondition order).
+	if suppliedParentTraceID != "" && (req.StepCompletion || process.OwnerUserID == req.CallerID) {
+		if err := k.verifySuppliedParentTrace(ctx, suppliedParentTraceID, req.ProcessID, req.StepCompletion); err != nil {
+			return nil, err
+		}
 	}
 
 	// Kernel must be bootstrapped before any call can be committed.
@@ -455,33 +466,52 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 }
 
 
-// resolveAndValidateParentTrace reads the parent trace exactly once, enforcing:
-//   - process membership for non-step-completion calls (B1: prevents cross-process ancestry)
-//   - caller process-use authority when caller != process owner
+// resolveAndValidateParentTrace handles step 3 of the call precondition checks:
+//   - If ParentTraceID is empty, resolves it to the process root trace.
+//   - If caller != process owner, loads the supplied trace and checks that its
+//     action_owner_id matches the caller (trace-scoped process authority).
 //
-// If ParentTraceID is empty, the process root trace is resolved and req.ParentTraceID is set.
+// When the caller IS the process owner (or it is a step-completion call), process-use
+// authority is trivially satisfied and the supplied trace is NOT loaded here.
+// Existence of the supplied trace is verified in verifySuppliedParentTrace (step 9),
+// called after action resolution, so that action-not-found fires before trace-not-found.
 func (k *Kernel) resolveAndValidateParentTrace(ctx context.Context, req *CallRequest, process *Process) error {
-	var parent *Trace
-	var err error
 	if req.ParentTraceID == "" {
-		parent, err = k.store.ReadRootTrace(ctx, process.ID)
+		root, err := k.store.ReadRootTrace(ctx, process.ID)
 		if err != nil {
 			return ErrInternal.Wrap("could not resolve root trace for process")
 		}
-		req.ParentTraceID = parent.ID
-	} else {
-		parent, err = k.store.ReadTrace(ctx, req.ParentTraceID)
-		if err != nil {
-			return ErrInvalidInput.Wrap("parent trace not found")
-		}
-		if !req.StepCompletion && parent.ProcessID != process.ID {
-			return ErrInvalidInput.Wrap("parent trace belongs to a different process")
-		}
+		req.ParentTraceID = root.ID
+		return nil
 	}
-	if !req.StepCompletion && process.OwnerUserID != req.CallerID {
-		if parent.ActionOwnerID != req.CallerID {
-			return ErrUnauthorized.Wrap("caller is not the process owner")
-		}
+	// Owner callers and step-completion calls: authority trivially satisfied; skip trace load.
+	if process.OwnerUserID == req.CallerID || req.StepCompletion {
+		return nil
+	}
+	// Non-owner caller: load the trace to verify trace-scoped process authority.
+	parent, err := k.store.ReadTrace(ctx, req.ParentTraceID)
+	if err != nil {
+		return ErrUnauthorized.Wrap("caller is not the process owner")
+	}
+	if parent.ProcessID != process.ID {
+		return ErrInvalidInput.Wrap("parent trace belongs to a different process")
+	}
+	if parent.ActionOwnerID != req.CallerID {
+		return ErrUnauthorized.Wrap("caller is not the process owner")
+	}
+	return nil
+}
+
+// verifySuppliedParentTrace is step 9 of the call precondition checks. It validates that a
+// caller-supplied parent trace exists and, for non-step-completion calls, belongs to the process.
+// Called after action resolution and funds check (steps 4–8) to preserve precondition ordering.
+func (k *Kernel) verifySuppliedParentTrace(ctx context.Context, parentTraceID, processID string, stepCompletion bool) error {
+	parent, err := k.store.ReadTrace(ctx, parentTraceID)
+	if err != nil {
+		return ErrInvalidInput.Wrap("parent trace not found")
+	}
+	if !stepCompletion && parent.ProcessID != processID {
+		return ErrInvalidInput.Wrap("parent trace belongs to a different process")
 	}
 	return nil
 }

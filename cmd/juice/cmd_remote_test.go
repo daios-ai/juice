@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
@@ -146,6 +147,9 @@ func TestRemoteImport(t *testing.T) {
 		Kind:         kernel.KindHTTP,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-deadbeef",
+		Stats:        &kernel.Stats{},
+		UpdatedAt:    time.Now(),
 	}
 	sig, err := kernel.SignManifest(priv, &m)
 	if err != nil {
@@ -217,6 +221,9 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 		Kind:         kernel.KindHTTP,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-deadbeef",
+		Stats:        &kernel.Stats{},
+		UpdatedAt:    time.Now(),
 	}
 	sig, err := kernel.SignManifest(priv, &m)
 	if err != nil {
@@ -298,9 +305,13 @@ func TestRemoteUnimport(t *testing.T) {
 		ActionID:     "unimport-action-id",
 		OwnerHandle:  "@unimport-peer",
 		Name:         "greet",
+		Description:  "greet action",
 		Kind:         kernel.KindHTTP,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-deadbeef",
+		Stats:        &kernel.Stats{},
+		UpdatedAt:    time.Now(),
 	}
 	sig, err := kernel.SignManifest(priv, &m)
 	if err != nil {

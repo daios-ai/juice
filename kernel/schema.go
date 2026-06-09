@@ -95,14 +95,27 @@ func validateTypedNode(typ string, node map[string]any, path string, depth int) 
 	}
 	switch typ {
 	case "object":
-		props, _ := node["properties"].(map[string]any)
-		for name, raw := range props {
-			child, ok := raw.(map[string]any)
+		if rawProps, hasProps := node["properties"]; hasProps {
+			props, ok := rawProps.(map[string]any)
 			if !ok {
-				return ErrSchemaViolation.Wrapf("schema at %s.properties.%s: must be an object", path, name)
+				return ErrSchemaViolation.Wrapf("schema at %s: properties must be an object", path)
 			}
-			if err := validateSchemaNode(child, path+"."+name, depth+1); err != nil {
-				return err
+			for name, raw := range props {
+				child, ok := raw.(map[string]any)
+				if !ok {
+					return ErrSchemaViolation.Wrapf("schema at %s.properties.%s: must be an object", path, name)
+				}
+				if err := validateSchemaNode(child, path+"."+name, depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		if rawReq, hasReq := node["required"]; hasReq {
+			switch rawReq.(type) {
+			case []any, []string:
+				// valid forms
+			default:
+				return ErrSchemaViolation.Wrapf("schema at %s: required must be an array", path)
 			}
 		}
 	case "array":

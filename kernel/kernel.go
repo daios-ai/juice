@@ -1022,10 +1022,6 @@ func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rat
 	if callerID != tx.OwnerUserID {
 		return nil, ErrUnauthorized.Wrap("only the direct buyer may rate a transaction")
 	}
-	// A subject may not rate its own output.
-	if callerID == tx.TargetUserID {
-		return nil, ErrUnauthorized.Wrap("subject may not rate its own output")
-	}
 	// Check for duplicate rating (transaction already has a rating record).
 	if existing, _ := k.store.ReadRatingByTxID(ctx, txID); existing != nil {
 		return nil, ErrInvalidInput.Wrap("transaction already rated")

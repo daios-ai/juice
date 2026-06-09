@@ -66,10 +66,14 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 		ActionID:     "remote-action-id-1",
 		OwnerHandle:  "@remote-peer",
 		Name:         "sum",
+		Description:  "sum action",
 		Kind:         kernel.KindHTTP,
 		Price:        50,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-deadbeef",
+		Stats:        &kernel.Stats{},
+		UpdatedAt:    time.Now(),
 	}
 	sig, err := kernel.SignManifest(priv, &m)
 	if err != nil {
@@ -111,10 +115,14 @@ func TestImportRemoteActionReimp(t *testing.T) {
 		ActionID:     "reimp-action-id",
 		OwnerHandle:  "@reimp-peer",
 		Name:         "calc",
+		Description:  "calc action",
 		Kind:         kernel.KindHTTP,
 		Price:        10,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-deadbeef",
+		Stats:        &kernel.Stats{},
+		UpdatedAt:    time.Now(),
 	}
 	sig, err := kernel.SignManifest(priv, &m)
 	if err != nil {
@@ -175,6 +183,8 @@ func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
 		ArtifactHash: "abc123",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
+		Stats:        &kernel.Stats{},
+		UpdatedAt:    time.Now(),
 	}
 	sig, err := kernel.SignManifest(priv, &m)
 	if err != nil {
@@ -232,10 +242,14 @@ func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
 		ActionID:     "idem-action-id",
 		OwnerHandle:  "@idem-peer",
 		Name:         "svc",
+		Description:  "svc action",
 		Kind:         kernel.KindHTTP,
 		Price:        10,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-deadbeef",
+		Stats:        &kernel.Stats{},
+		UpdatedAt:    time.Now(),
 	}
 	sign := func() {
 		t.Helper()
@@ -339,6 +353,56 @@ func TestImportRemoteActionRejectsNegativePrice(t *testing.T) {
 	}
 }
 
+func TestImportRemoteActionRejectsMissingRequiredFields(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@mrf-peer", base64.RawURLEncoding.EncodeToString(pub), "https://mrf.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base := kernel.ActionManifest{
+		ActionID:     "mrf-action-1",
+		OwnerHandle:  "@mrf-peer",
+		Name:         "mrf-svc",
+		Description:  "mrf desc",
+		Kind:         kernel.KindHTTP,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-deadbeef",
+		Stats:        &kernel.Stats{},
+		UpdatedAt:    time.Now(),
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*kernel.ActionManifest)
+	}{
+		{"missing name", func(m *kernel.ActionManifest) { m.Name = "" }},
+		{"missing description", func(m *kernel.ActionManifest) { m.Description = "" }},
+		{"missing input_schema", func(m *kernel.ActionManifest) { m.InputSchema = nil }},
+		{"missing stats", func(m *kernel.ActionManifest) { m.Stats = nil }},
+		{"missing updated_at", func(m *kernel.ActionManifest) { m.UpdatedAt = time.Time{} }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := base
+			tc.mutate(&m)
+			sig, _ := kernel.SignManifest(priv, &m)
+			m.Signature = sig
+			_, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+			if !errors.Is(err, kernel.ErrInvalidInput) {
+				t.Errorf("want ErrInvalidInput, got %v", err)
+			}
+		})
+	}
+}
+
 func TestGetActionManifestIncludesActionID(t *testing.T) {
 	st := newTestStore(t)
 	su := setupUser(t, st, "@sys", 0)
@@ -403,6 +467,9 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 		Description:  "add two numbers",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-deadbeef",
+		Stats:        &kernel.Stats{},
+		UpdatedAt:    time.Now(),
 	}
 	sig, err := kernel.SignManifest(priv, &m)
 	if err != nil {
@@ -489,6 +556,7 @@ func TestRegisterRemoteKernelUpdatesSourceURLs(t *testing.T) {
 		ActionID: "url-update-action-1", OwnerHandle: "@url-update-peer", Name: "act",
 		Kind: kernel.KindHTTP, Price: 0, Description: "d",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
 	sig, _ := kernel.SignManifest(priv, &m)
 	m.Signature = sig
@@ -581,6 +649,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 		ActionID: "verify-action-1", OwnerHandle: "@verify-peer", Name: "vact",
 		Kind: kernel.KindHTTP, Price: 0, Description: "v",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
 	msig, _ := kernel.SignManifest(priv, &m)
 	m.Signature = msig
@@ -709,6 +778,7 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 		ActionID: "tamper-action-1", OwnerHandle: "@tamper-peer", Name: "tact",
 		Kind: kernel.KindHTTP, Price: 0, Description: "t",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
 	msig, _ := kernel.SignManifest(priv, &m)
 	m.Signature = msig
@@ -775,6 +845,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 		ActionID: "del-action-1", OwnerHandle: "@del-peer", Name: "dact",
 		Kind: kernel.KindHTTP, Price: 0, Description: "d",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
 	msig, _ := kernel.SignManifest(priv, &m)
 	m.Signature = msig

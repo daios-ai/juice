@@ -861,6 +861,14 @@ func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("required_caller is required"))
 		return
 	}
+	if req.PartialArgs == nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("partial_args is required"))
+		return
+	}
+	if req.InputSchema == nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("input_schema is required"))
+		return
+	}
 	action, err := s.kernel.ReadAction(r.Context(), req.NextActionID)
 	if err != nil {
 		writeErr(w, kernel.ErrNotFound.Wrap("action not found"))
