@@ -152,7 +152,7 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 		Embedder: embedder,
 	}, script.TinyGoSDK, globalCfg.MakeMaxSteps)
 	native.RegisterTimeHandler(k)
-	native.RegisterMessageHandler(k, newNotifier(globalCfg))
+	native.RegisterMessageHandler(k, nil)
 
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).
 	if privB64, _ := db.GetConfig(context.Background(), configKeySigningPrivate); privB64 != "" {

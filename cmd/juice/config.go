@@ -26,11 +26,6 @@ type ServerConfig struct {
 	MakeMaxSteps      int    `json:"make_max_steps"`
 	AllowLocalSources bool   `json:"allow_local_sources"`
 	ServerURL         string `json:"server_url"`
-	SMTPHost          string `json:"smtp_host"`
-	SMTPPort          int    `json:"smtp_port"`
-	SMTPUser          string `json:"smtp_user"`
-	SMTPPassword      string `json:"smtp_password"`
-	SMTPFrom          string `json:"smtp_from"`
 }
 
 // DefaultServerConfig returns a ServerConfig populated with safe defaults.
