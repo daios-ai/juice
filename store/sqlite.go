@@ -1550,14 +1550,13 @@ func (s *DB) withTx(ctx context.Context, label string, fn func(*sql.Tx) error) e
 
 // ---- Receipts ----
 
-func (s *DB) ReadReceiptByTxID(ctx context.Context, txID string) (*kernel.Receipt, error) {
+const receiptSelectCols = `id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
+		        args_hash,reply_hash,status,gross,net,fee,reason,started_at,created_at,signature`
+
+func scanReceipt(row *sql.Row, op string) (*kernel.Receipt, error) {
 	var r kernel.Receipt
 	var status, startedAt, createdAt string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
-		        args_hash,reply_hash,status,gross,net,fee,reason,started_at,created_at,signature
-		 FROM receipts WHERE tx_id=?`, txID,
-	).Scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
+	err := row.Scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
 		&r.CallerUserID, &r.ProcessID,
 		&r.ArgsHash, &r.ReplyHash, &status,
 		&r.Gross, &r.Net, &r.Fee, &r.Reason, &startedAt, &createdAt, &r.Signature)
@@ -1565,7 +1564,7 @@ func (s *DB) ReadReceiptByTxID(ctx context.Context, txID string) (*kernel.Receip
 		return nil, kernel.ErrNotFound.Wrap("receipt not found")
 	}
 	if err != nil {
-		return nil, dbErr(err, "read receipt by tx_id")
+		return nil, dbErr(err, op)
 	}
 	r.Status = kernel.TxStatus(status)
 	r.StartedAt = strToTime(startedAt)
@@ -1573,27 +1572,14 @@ func (s *DB) ReadReceiptByTxID(ctx context.Context, txID string) (*kernel.Receip
 	return &r, nil
 }
 
+func (s *DB) ReadReceiptByTxID(ctx context.Context, txID string) (*kernel.Receipt, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+receiptSelectCols+` FROM receipts WHERE tx_id=?`, txID)
+	return scanReceipt(row, "read receipt by tx_id")
+}
+
 func (s *DB) ReadReceipt(ctx context.Context, id string) (*kernel.Receipt, error) {
-	var r kernel.Receipt
-	var status, startedAt, createdAt string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
-		        args_hash,reply_hash,status,gross,net,fee,reason,started_at,created_at,signature
-		 FROM receipts WHERE id=?`, id,
-	).Scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
-		&r.CallerUserID, &r.ProcessID,
-		&r.ArgsHash, &r.ReplyHash, &status,
-		&r.Gross, &r.Net, &r.Fee, &r.Reason, &startedAt, &createdAt, &r.Signature)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, kernel.ErrNotFound.Wrap("receipt not found")
-	}
-	if err != nil {
-		return nil, dbErr(err, "read receipt")
-	}
-	r.Status = kernel.TxStatus(status)
-	r.StartedAt = strToTime(startedAt)
-	r.CreatedAt = strToTime(createdAt)
-	return &r, nil
+	row := s.db.QueryRowContext(ctx, `SELECT `+receiptSelectCols+` FROM receipts WHERE id=?`, id)
+	return scanReceipt(row, "read receipt")
 }
 
 // ---- Ratings ----

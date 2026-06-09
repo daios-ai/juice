@@ -3,7 +3,14 @@ package main
 import (
 	"os"
 	"testing"
+
+	"github.com/daios-ai/juice/kernel"
 )
+
+func TestMain(m *testing.M) {
+	kernel.SetBcryptCostForTesting(4)
+	os.Exit(m.Run())
+}
 
 func TestTokenRoundTrip(t *testing.T) {
 	dir := t.TempDir()

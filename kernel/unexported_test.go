@@ -46,14 +46,56 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 		"https://example.com/api",
 		"http://example.com/webhook",
 		"https://api.stripe.com/v1/charges",
-		// Hostnames that are not literal private IPs are accepted without DNS resolution (§7).
-		"http://internal.corp/api",
+		// Unresolvable hostnames are allowed through; the runtime dialer re-validates at call time.
+		"https://this-does-not-exist.invalid/api",
 		"https://api.example.com/v2",
 	}
 	for _, u := range accepted {
 		if err := validateHTTPSource(ctx, u, false); err != nil {
 			t.Errorf("validateHTTPSource(%q): unexpected error: %v", u, err)
 		}
+	}
+}
+
+func TestValidateHTTPSourceDNSResolvesToPrivate(t *testing.T) {
+	// Install a fake resolver so the test does not need real DNS.
+	orig := lookupHostFn
+	defer func() { lookupHostFn = orig }()
+	lookupHostFn = func(_ context.Context, host string) ([]string, error) {
+		m := map[string][]string{
+			"internal.corp":        {"10.0.0.1"},
+			"loopback.example":     {"127.0.0.1"},
+			"linklocal.example":    {"169.254.1.1"},
+			"public.example":       {"93.184.216.34"},
+			"unresolvable.invalid": {},
+		}
+		if addrs, ok := m[host]; ok {
+			return addrs, nil
+		}
+		return nil, fmt.Errorf("no such host")
+	}
+
+	ctx := context.Background()
+	for _, u := range []string{
+		"https://internal.corp/api",
+		"https://loopback.example/api",
+		"https://linklocal.example/api",
+	} {
+		if err := validateHTTPSource(ctx, u, false); err == nil {
+			t.Errorf("validateHTTPSource(%q): expected rejection for private-resolving hostname, got nil", u)
+		}
+	}
+	// Public-resolving hostname must be accepted.
+	if err := validateHTTPSource(ctx, "https://public.example/api", false); err != nil {
+		t.Errorf("validateHTTPSource(public.example): unexpected error: %v", err)
+	}
+	// DNS failure (empty result, no error) must be allowed through.
+	if err := validateHTTPSource(ctx, "https://unresolvable.invalid/api", false); err != nil {
+		t.Errorf("validateHTTPSource(unresolvable.invalid): DNS failure should be allowed: %v", err)
+	}
+	// allowLocal=true bypasses DNS resolution entirely.
+	if err := validateHTTPSource(ctx, "https://internal.corp/api", true); err != nil {
+		t.Errorf("validateHTTPSource(internal.corp, allowLocal=true): unexpected error: %v", err)
 	}
 }
 

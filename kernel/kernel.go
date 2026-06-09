@@ -321,11 +321,17 @@ type CreateActionRequest struct {
 	WasmArtifact string // base64-encoded pre-compiled WASM; if set, stored as-is and used for the hash
 }
 
+// lookupHostFn resolves a hostname to IP addresses. Overridable in tests.
+var lookupHostFn = func(ctx context.Context, host string) ([]string, error) {
+	return net.DefaultResolver.LookupHost(ctx, host)
+}
+
 // validateHTTPSource rejects URLs that could be used for SSRF attacks.
 // Allowed: http and https schemes with public hostnames or literal public IPs.
 // Rejected: other schemes, localhost, loopback, RFC 1918 private, and link-local addresses.
-// Only literal IP addresses are checked; hostnames are accepted as-is per §7.
-func validateHTTPSource(_ context.Context, source string, allowLocal bool) error {
+// For hostname (non-literal-IP) sources, DNS is resolved to catch SSRF via private hostnames.
+// DNS failures are allowed through; the runtime dialer re-validates at call time.
+func validateHTTPSource(ctx context.Context, source string, allowLocal bool) error {
 	u, err := url.Parse(source)
 	if err != nil {
 		return ErrInvalidInput.Wrapf("invalid URL: %v", err)
@@ -350,6 +356,17 @@ func validateHTTPSource(_ context.Context, source string, allowLocal bool) error
 		if ip := net.ParseIP(host); ip != nil {
 			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
 				return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
+			}
+		} else {
+			// Resolve the hostname and reject if any address is private/loopback/link-local.
+			if addrs, err := lookupHostFn(ctx, host); err == nil {
+				for _, a := range addrs {
+					if ip := net.ParseIP(a); ip != nil {
+						if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+							return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
+						}
+					}
+				}
 			}
 		}
 	}
