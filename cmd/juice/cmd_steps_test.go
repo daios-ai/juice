@@ -18,8 +18,9 @@ func newStepBackend(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// createStepAction creates an enabled public HTTP action for step tests. Returns the action's @owner/name ref.
-func createStepAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, handle, name string) string {
+// createStepAction creates an enabled public HTTP action for step tests.
+// Returns (actionID, "@owner/name" ref).
+func createStepAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, handle, name string) (string, string) {
 	t.Helper()
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": name, "kind": "http", "price": 0, "source": backendURL,
@@ -33,7 +34,7 @@ func createStepAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, 
 	id := act["id"].(string)
 	httpDo(t, srv, "POST", "/v1/actions/"+id+"/enable", nil, ownerTok).Body.Close()
 	httpDo(t, srv, "PUT", "/v1/actions/"+id, map[string]any{"public": true}, ownerTok).Body.Close()
-	return handle + "/" + name
+	return id, handle + "/" + name
 }
 
 func TestServeCreateStep(t *testing.T) {
@@ -44,7 +45,7 @@ func TestServeCreateStep(t *testing.T) {
 	_, ownerTok := makeUser(t, k, "@cs-create-owner")
 	makeUser(t, k, "@cs-create-caller")
 
-	actionRef := createStepAction(t, srv, backend.URL, ownerTok, "@cs-create-owner", "cs-create-svc")
+	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@cs-create-owner", "cs-create-svc")
 
 	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
 	var proc map[string]any
@@ -53,7 +54,7 @@ func TestServeCreateStep(t *testing.T) {
 
 	resp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      pid,
-		"action":          actionRef,
+		"next_action_id":  actionID,
 		"required_caller": "@cs-create-caller",
 		"partial_args":    map[string]any{"preset": "val"},
 	}, ownerTok)
@@ -83,7 +84,7 @@ func TestServeListSteps(t *testing.T) {
 	_, ownerTok := makeUser(t, k, "@sl-steps-owner")
 	makeUser(t, k, "@sl-steps-caller")
 
-	actionRef := createStepAction(t, srv, backend.URL, ownerTok, "@sl-steps-owner", "sl-steps-svc")
+	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@sl-steps-owner", "sl-steps-svc")
 
 	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
 	var proc map[string]any
@@ -94,7 +95,7 @@ func TestServeListSteps(t *testing.T) {
 	for range 2 {
 		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 			"process_id":      pid,
-			"action":          actionRef,
+			"next_action_id":  actionID,
 			"required_caller": "@sl-steps-caller",
 		}, ownerTok)
 		if r.StatusCode != http.StatusCreated {
@@ -152,7 +153,7 @@ func TestServeGetStep(t *testing.T) {
 	_, callerTok := makeUser(t, k, "@gs-steps-caller")
 	_, unrelTok := makeUser(t, k, "@gs-steps-unrelated")
 
-	actionRef := createStepAction(t, srv, backend.URL, ownerTok, "@gs-steps-owner", "gs-steps-svc")
+	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@gs-steps-owner", "gs-steps-svc")
 
 	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
 	var proc map[string]any
@@ -161,7 +162,7 @@ func TestServeGetStep(t *testing.T) {
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      pid,
-		"action":          actionRef,
+		"next_action_id":  actionID,
 		"required_caller": "@gs-steps-caller",
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -214,7 +215,7 @@ func TestServeCompleteStepMissingArgs(t *testing.T) {
 	_, ownerTok := makeUser(t, k, "@csmiss-owner")
 	_, callerTok := makeUser(t, k, "@csmiss-caller")
 
-	actionRef := createStepAction(t, srv, backend.URL, ownerTok, "@csmiss-owner", "csmiss-svc")
+	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@csmiss-owner", "csmiss-svc")
 
 	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
 	var proc map[string]any
@@ -223,7 +224,7 @@ func TestServeCompleteStepMissingArgs(t *testing.T) {
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      pid,
-		"action":          actionRef,
+		"next_action_id":  actionID,
 		"required_caller": "@csmiss-caller",
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -252,7 +253,7 @@ func TestServeCompleteStep(t *testing.T) {
 	_, ownerTok := makeUser(t, k, "@cs2-owner")
 	_, callerTok := makeUser(t, k, "@cs2-caller")
 
-	actionRef := createStepAction(t, srv, backend.URL, ownerTok, "@cs2-owner", "cs2-svc")
+	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@cs2-owner", "cs2-svc")
 
 	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
 	var proc map[string]any
@@ -261,7 +262,7 @@ func TestServeCompleteStep(t *testing.T) {
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      pid,
-		"action":          actionRef,
+		"next_action_id":  actionID,
 		"required_caller": "@cs2-caller",
 		"partial_args":    map[string]any{"from_partial": "A"},
 	}, ownerTok)

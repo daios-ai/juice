@@ -87,19 +87,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInvalidState.Wrap("process is closed")
 	}
 
-	// 3. Subject may use this process: is the owner, or owns the action executing in the parent trace.
-	// StepCompletion bypasses this check — CompleteStep already verified required_caller_user_id.
-	if !req.StepCompletion && process.OwnerUserID != req.CallerID {
-		authorized := false
-		if req.ParentTraceID != "" {
-			parent, parentErr := k.store.ReadTrace(ctx, req.ParentTraceID)
-			if parentErr == nil && parent.ActionOwnerID == req.CallerID && parent.ProcessID == req.ProcessID {
-				authorized = true
-			}
-		}
-		if !authorized {
-			return nil, ErrUnauthorized.Wrap("caller is not the process owner")
-		}
+	// 3. Resolve parent trace and validate process-use authority. Also resolves an empty
+	// ParentTraceID to the process root trace so it is available for trace creation below.
+	if err := k.resolveAndValidateParentTrace(ctx, &req, process); err != nil {
+		return nil, err
 	}
 
 	// 4. Resolve action.
@@ -143,19 +134,6 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInsufficientFunds.Wrapf("process has %d credits, action costs %d", process.Available, action.Price)
 	}
 
-	// 9. Validate or resolve parent trace — precondition check, no state change yet.
-	if req.ParentTraceID != "" {
-		if _, err := k.store.ReadTrace(ctx, req.ParentTraceID); err != nil {
-			return nil, ErrInvalidInput.Wrap("parent trace not found")
-		}
-	} else {
-		root, err := k.store.ReadRootTrace(ctx, req.ProcessID)
-		if err != nil {
-			return nil, ErrInternal.Wrap("could not resolve root trace for process")
-		}
-		req.ParentTraceID = root.ID
-	}
-
 	// Kernel must be bootstrapped before any call can be committed.
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
@@ -163,11 +141,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 
 	// 10–11. Atomically lock funds and create child trace.
 	now := time.Now().UTC()
-	var parentTraceID *string
-	if req.ParentTraceID != "" {
-		s := req.ParentTraceID
-		parentTraceID = &s
-	}
+	s := req.ParentTraceID
+	parentTraceID := &s
 	trace := &Trace{
 		ID:            uuid.New().String(),
 		ProcessID:     req.ProcessID,
@@ -479,6 +454,37 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 	return nil
 }
 
+
+// resolveAndValidateParentTrace reads the parent trace exactly once, enforcing:
+//   - process membership for non-step-completion calls (B1: prevents cross-process ancestry)
+//   - caller process-use authority when caller != process owner
+//
+// If ParentTraceID is empty, the process root trace is resolved and req.ParentTraceID is set.
+func (k *Kernel) resolveAndValidateParentTrace(ctx context.Context, req *CallRequest, process *Process) error {
+	var parent *Trace
+	var err error
+	if req.ParentTraceID == "" {
+		parent, err = k.store.ReadRootTrace(ctx, process.ID)
+		if err != nil {
+			return ErrInternal.Wrap("could not resolve root trace for process")
+		}
+		req.ParentTraceID = parent.ID
+	} else {
+		parent, err = k.store.ReadTrace(ctx, req.ParentTraceID)
+		if err != nil {
+			return ErrInvalidInput.Wrap("parent trace not found")
+		}
+		if !req.StepCompletion && parent.ProcessID != process.ID {
+			return ErrInvalidInput.Wrap("parent trace belongs to a different process")
+		}
+	}
+	if !req.StepCompletion && process.OwnerUserID != req.CallerID {
+		if parent.ActionOwnerID != req.CallerID {
+			return ErrUnauthorized.Wrap("caller is not the process owner")
+		}
+	}
+	return nil
+}
 
 // ComputeFee computes (net, fee) for a gross amount using VAT-style basis points.
 // Only the taxable portion (gross minus direct sub-call cost) is subject to the fee.

@@ -45,7 +45,11 @@ func requireSuperuser(k *kernel.Kernel) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if subject.Handle != superuserHandle {
+	expectedHandle, _ := k.GetConfig(context.Background(), configKeySuperuser)
+	if expectedHandle == "" {
+		expectedHandle = superuserHandle
+	}
+	if subject.Handle != expectedHandle {
 		return "", kernel.ErrUnauthorized.Wrap("superuser required")
 	}
 	return subjectID, nil

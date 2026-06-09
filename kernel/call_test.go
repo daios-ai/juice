@@ -1144,9 +1144,10 @@ func TestCallInvalidParentTraceDoesNotLockFunds(t *testing.T) {
 	}
 }
 
-func TestCallCrossProcessParentTraceAllowedForOwner(t *testing.T) {
-	// Process owner supplying a cross-process parent trace is allowed — the owner
-	// check passes before the parent trace is even inspected.
+func TestCallCrossProcessParentTraceRejectedForOwner(t *testing.T) {
+	// Even a process owner must not supply a parent trace from a different process
+	// on a non-step-completion call: doing so would mutate ancestor cost/latency
+	// in the foreign process (B1 fix).
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -1162,19 +1163,16 @@ func TestCallCrossProcessParentTraceAllowedForOwner(t *testing.T) {
 	p, _, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
 	_, otherRoot, _ := k.StartProcess(ctx, alice.ID, alice.ID, 0)
 
-	reply, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID:      alice.ID,
 		ProcessID:     p.ID,
-		ParentTraceID: otherRoot.ID, // cross-process, but alice is the process owner
+		ParentTraceID: otherRoot.ID, // cross-process — must be rejected
 		TargetUserID:  alice.ID,
 		ActionName:    a.Name,
 		Args:          map[string]any{},
 	})
-	if err != nil {
-		t.Fatalf("process owner with cross-process parent trace should succeed, got %v", err)
-	}
-	if reply == nil {
-		t.Fatal("expected reply")
+	if err == nil {
+		t.Fatal("process owner with cross-process parent trace should be rejected")
 	}
 }
 
@@ -1226,8 +1224,10 @@ func TestCallCrossProcessParentTraceRejectedForNonOwner(t *testing.T) {
 		ActionName:    "f2-target",
 		Args:          map[string]any{},
 	})
-	if !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("expected ErrUnauthorized for cross-process trace authority, got %v", err)
+	// The process-membership check fires before the authorization check, so the error
+	// is ErrInvalidInput (cross-process parent) rather than ErrUnauthorized.
+	if err == nil {
+		t.Error("expected error for cross-process trace authority, got nil")
 	}
 
 	// But using a trace in p2 should succeed.

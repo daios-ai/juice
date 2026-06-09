@@ -379,10 +379,10 @@ func (s *DB) ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*
 		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.name=? AND a.deleted_at IS NULL`, ownerID, name))
 }
 
-func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
+func (s *DB) updateActionTx(ctx context.Context, tx *sql.Tx, a *kernel.Action) error {
 	inJSON, _ := json.Marshal(a.InputSchema)
 	outJSON, _ := json.Marshal(a.OutputSchema)
-	_, err := s.db.ExecContext(ctx,
+	_, err := tx.ExecContext(ctx,
 		`UPDATE actions SET kind=?,active=?,public=?,price=?,description=?,input_schema=?,output_schema=?,
 		 source=?,artifact_hash=?,wasm_artifact=?,updated_at=? WHERE id=?`,
 		string(a.Kind), boolInt(a.Active), boolInt(a.Public), a.Price, a.Description,
@@ -392,6 +392,18 @@ func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
 	return dbErr(err, "update action")
 }
 
+func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "begin update action")
+	}
+	defer tx.Rollback()
+	if err := s.updateActionTx(ctx, tx, a); err != nil {
+		return err
+	}
+	return dbErr(tx.Commit(), "update action: commit")
+}
+
 func (s *DB) UpdateActionAndResetStats(ctx context.Context, a *kernel.Action) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -399,16 +411,8 @@ func (s *DB) UpdateActionAndResetStats(ctx context.Context, a *kernel.Action) er
 	}
 	defer tx.Rollback()
 
-	inJSON, _ := json.Marshal(a.InputSchema)
-	outJSON, _ := json.Marshal(a.OutputSchema)
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE actions SET kind=?,active=?,public=?,price=?,description=?,input_schema=?,output_schema=?,
-		 source=?,artifact_hash=?,wasm_artifact=?,updated_at=? WHERE id=?`,
-		string(a.Kind), boolInt(a.Active), boolInt(a.Public), a.Price, a.Description,
-		string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact,
-		timeToStr(a.UpdatedAt), a.ID,
-	); err != nil {
-		return dbErr(err, "update action and reset stats: update action")
+	if err := s.updateActionTx(ctx, tx, a); err != nil {
+		return err
 	}
 
 	zeroTime := timeToStr(time.Time{})
@@ -811,16 +815,57 @@ func (s *DB) upsertActionStats(ctx context.Context, tx *sql.Tx, stats *kernel.St
 	return dbErr(err, label+": upsert stats")
 }
 
+// completeStepTx transitions a step to done and records the tx_id atomically.
+// Requires exactly one row to be affected; returns ErrInvalidState if not (B2 fix).
+func (s *DB) completeStepTx(ctx context.Context, tx *sql.Tx, stepID, txID, label string) error {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE steps SET status='done', tx_id=? WHERE id=? AND status='running'`,
+		txID, stepID,
+	)
+	if err != nil {
+		return dbErr(err, label+": complete step")
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return kernel.ErrInvalidState.Wrap("step transition to done affected unexpected rows")
+	}
+	return nil
+}
+
+// finalizeTx executes the shared tail of both commit paths: audit rows, trace metrics,
+// stats, optional idempotency completion, optional step completion, and commit.
+func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, receipt *kernel.Receipt, stats *kernel.Stats, idempotencyRecordID, idempotencyResultJSON, stepID, label string) error {
+	if err := s.insertAuditRows(ctx, tx, ktx, receipt, label); err != nil {
+		return err
+	}
+	if err := s.updateAncestorTraces(ctx, tx, ktx.TraceID, ktx.Gross, ktx.EndedAt, label); err != nil {
+		return err
+	}
+	if err := s.upsertActionStats(ctx, tx, stats, ktx.Status == kernel.TxSuccess, label); err != nil {
+		return err
+	}
+	if idempotencyRecordID != "" {
+		receiptBytes, _ := json.Marshal(receipt)
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=?`,
+			idempotencyResultJSON, string(receiptBytes), idempotencyRecordID,
+		); err != nil {
+			return dbErr(err, label+": complete idempotency record")
+		}
+	}
+	if stepID != "" {
+		if err := s.completeStepTx(ctx, tx, stepID, ktx.ID, label); err != nil {
+			return err
+		}
+	}
+	return dbErr(tx.Commit(), label+": commit")
+}
+
 func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return dbErr(err, "begin commit call")
 	}
 	defer tx.Rollback()
-
-	if err := s.insertAuditRows(ctx, tx, ktx, receipt, "commit call"); err != nil {
-		return err
-	}
 
 	gross := net + fee
 	if gross > 0 {
@@ -833,16 +878,13 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 			return dbErr(err, "commit call: debit owner locked")
 		}
 	}
-
-	// Credit target.
 	if net > 0 {
 		if _, err = tx.ExecContext(ctx,
 			`UPDATE users SET available=available+? WHERE id=?`, net, targetUserID); err != nil {
 			return dbErr(err, "commit call: credit target")
 		}
 	}
-
-	// Credit fee recipient — hard-fail if recipient is unset or nonexistent to prevent fund destruction.
+	// Credit fee recipient — hard-fail if unset or nonexistent to prevent fund destruction.
 	if fee > 0 {
 		if feeRecipientID == "" {
 			return fmt.Errorf("commit call: fee %d > 0 but feeRecipientID is empty: funds would be destroyed", fee)
@@ -857,33 +899,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		}
 	}
 
-	if err := s.updateAncestorTraces(ctx, tx, ktx.TraceID, ktx.Gross, ktx.EndedAt, "commit call"); err != nil {
-		return err
-	}
-	if err := s.upsertActionStats(ctx, tx, stats, true, "commit call"); err != nil {
-		return err
-	}
-
-	if idempotencyRecordID != "" {
-		receiptBytes, _ := json.Marshal(receipt)
-		if _, err = tx.ExecContext(ctx,
-			`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=?`,
-			rawJSONStr(ktx.ReplyJSON), string(receiptBytes), idempotencyRecordID,
-		); err != nil {
-			return dbErr(err, "commit call: complete idempotency record")
-		}
-	}
-
-	if stepID != "" {
-		if _, err = tx.ExecContext(ctx,
-			`UPDATE steps SET status='done', tx_id=? WHERE id=? AND status='running'`,
-			ktx.ID, stepID,
-		); err != nil {
-			return dbErr(err, "commit call: complete step")
-		}
-	}
-
-	return dbErr(tx.Commit(), "commit call: commit")
+	return s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, rawJSONStr(ktx.ReplyJSON), stepID, "commit call")
 }
 
 func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID string, gross int64, stats *kernel.Stats, idempotencyRecordID, errorCode, stepID string) error {
@@ -902,37 +918,8 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, rece
 		}
 	}
 
-	if err := s.insertAuditRows(ctx, tx, ktx, receipt, "commit failed call"); err != nil {
-		return err
-	}
-	if err := s.updateAncestorTraces(ctx, tx, ktx.TraceID, 0, ktx.EndedAt, "commit failed call"); err != nil {
-		return err
-	}
-	if err := s.upsertActionStats(ctx, tx, stats, false, "commit failed call"); err != nil {
-		return err
-	}
-
-	if idempotencyRecordID != "" {
-		errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
-		receiptBytes, _ := json.Marshal(receipt)
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=?`,
-			string(errResult), string(receiptBytes), idempotencyRecordID,
-		); err != nil {
-			return dbErr(err, "commit failed call: complete idempotency record")
-		}
-	}
-
-	if stepID != "" {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE steps SET status='done', tx_id=? WHERE id=? AND status='running'`,
-			ktx.ID, stepID,
-		); err != nil {
-			return dbErr(err, "commit failed call: complete step")
-		}
-	}
-
-	return dbErr(tx.Commit(), "commit failed call: commit")
+	errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
+	return s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, string(errResult), stepID, "commit failed call")
 }
 
 func (s *DB) ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Process, error) {

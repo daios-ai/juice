@@ -839,12 +839,12 @@ func (s *server) listSteps(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProcessID       string          `json:"process_id"`
-		Action          string          `json:"action"`
-		PartialArgs     json.RawMessage `json:"partial_args"`
-		InputSchema     json.RawMessage `json:"input_schema"`
-		RequiredCaller  string          `json:"required_caller"`
-		ParentTraceID   string          `json:"parent_trace_id"`
+		ProcessID      string          `json:"process_id"`
+		NextActionID   string          `json:"next_action_id"`
+		PartialArgs    json.RawMessage `json:"partial_args"`
+		InputSchema    json.RawMessage `json:"input_schema"`
+		RequiredCaller string          `json:"required_caller"`
+		ParentTraceID  string          `json:"parent_trace_id"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -853,26 +853,15 @@ func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("process_id is required"))
 		return
 	}
-	if req.Action == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("action is required"))
+	if req.NextActionID == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("next_action_id is required"))
 		return
 	}
 	if req.RequiredCaller == "" {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("required_caller is required"))
 		return
 	}
-	// Resolve @owner/name → actionID.
-	ownerHandle, actionName, err := kernel.ParseActionRef(req.Action)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	owner, err := s.kernel.ReadUserByHandle(r.Context(), ownerHandle)
-	if err != nil {
-		writeErr(w, kernel.ErrNotFound.Wrap("action owner not found"))
-		return
-	}
-	action, err := s.kernel.ReadActionByOwnerName(r.Context(), owner.ID, actionName)
+	action, err := s.kernel.ReadAction(r.Context(), req.NextActionID)
 	if err != nil {
 		writeErr(w, kernel.ErrNotFound.Wrap("action not found"))
 		return
