@@ -83,7 +83,7 @@ func TestSubCostNotIncrementedOnFailedSubCall(t *testing.T) {
 	cfg.FeeBPS = 2000
 	cfg.FeeRecipientID = feeUser.ID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, exec, nil, nil, nil, cfg, nil)
+	k := kernel.New(st, exec, nil, nil, cfg, nil)
 
 	p, root, _ := k.StartProcess(ctx, carol.ID, carol.ID, 50)
 
@@ -874,7 +874,7 @@ func TestProcessFundedSubCallSpendsSameProcess(t *testing.T) {
 	cfg.FeeBPS = 2000
 	cfg.FeeRecipientID = feeUser.ID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, exec, nil, nil, nil, cfg, nil)
+	k := kernel.New(st, exec, nil, nil, cfg, nil)
 
 	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 150)
 
@@ -1311,7 +1311,7 @@ func newTestKernelWithChatter(st kernel.Store, c kernel.Chatter) *kernel.Kernel 
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, nil, nil, nil, c, cfg, nil)
+	k := kernel.New(st, nil, nil, nil, cfg, nil)
 	native.RegisterChatHandler(k, c)
 	return k
 }
@@ -1440,7 +1440,7 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 		st := newTestStore(t)
 		cfg := kernel.DefaultConfig()
 		cfg.FeeBPS = 2000 // 20% fee — no FeeRecipientID set
-		k := kernel.New(st, nil, nil, nil, nil, cfg, nil)
+		k := kernel.New(st, nil, nil, nil, cfg, nil)
 		if err := k.ValidateFeeRecipient(ctx); !errors.Is(err, kernel.ErrInvalidState) {
 			t.Errorf("expected ErrInvalidState for fee_bps>0 with empty recipient, got %v", err)
 		}
@@ -1451,7 +1451,7 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 		cfg := kernel.DefaultConfig()
 		cfg.FeeBPS = 2000
 		cfg.FeeRecipientID = "no-such-user"
-		k := kernel.New(st, nil, nil, nil, nil, cfg, nil)
+		k := kernel.New(st, nil, nil, nil, cfg, nil)
 		if err := k.ValidateFeeRecipient(ctx); !errors.Is(err, kernel.ErrInvalidState) {
 			t.Errorf("expected ErrInvalidState for unknown fee recipient, got %v", err)
 		}
@@ -1461,7 +1461,7 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 		st := newTestStore(t)
 		cfg := kernel.DefaultConfig()
 		cfg.FeeBPS = 0
-		k := kernel.New(st, nil, nil, nil, nil, cfg, nil)
+		k := kernel.New(st, nil, nil, nil, cfg, nil)
 		if err := k.ValidateFeeRecipient(ctx); err != nil {
 			t.Errorf("expected no error when fee_bps=0, got %v", err)
 		}

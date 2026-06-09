@@ -58,7 +58,7 @@ func newTestKernel(t *testing.T) *kernel.Kernel {
 	t.Cleanup(func() { db.Close() })
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "bootstrap-test-secret"
-	return kernel.New(db, nil, nil, nil, nil, cfg, log.Discard())
+	return kernel.New(db, nil, nil, nil, cfg, log.Discard())
 }
 
 func sysSpec(name string) sysNativeSpec {

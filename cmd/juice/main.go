@@ -139,7 +139,7 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	})
 
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
-	k := kernel.New(db, exec, httpExec, embedder, chatter, cfg, logger)
+	k := kernel.New(db, exec, httpExec, embedder, cfg, logger)
 
 	// Register native action plugins. Must happen on every kernel open, not just bootstrap.
 	compiler := script.NewTinyGoCompiler(script.CompileConfig{})

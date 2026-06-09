@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,7 +86,7 @@ func newMakeKernel(t *testing.T, chatter kernel.Chatter) (*kernel.Kernel, kernel
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
 	exec := script.New(script.Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
-	k := kernel.New(st, exec, nil, nil, chatter, cfg, log.Default())
+	k := kernel.New(st, exec, nil, nil, cfg, log.Default())
 	fakeComp := &script.FakeCompiler{}
 	native.RegisterChatHandler(k, chatter)
 	native.RegisterMakeHandler(k, native.MakeDeps{
@@ -201,7 +202,7 @@ func TestMakeReturnsErrInvalidStateWithoutCompiler(t *testing.T) {
 	cfg.SigningKey = testSigningKey()
 	exec := script.New(script.Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
 	chatter := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
-	k := kernel.New(st, exec, nil, nil, chatter, cfg, log.Default())
+	k := kernel.New(st, exec, nil, nil, cfg, log.Default())
 	native.RegisterChatHandler(k, chatter)
 	// Compiler: nil — no compiler configured.
 	native.RegisterMakeHandler(k, native.MakeDeps{
@@ -274,6 +275,14 @@ func TestMakeRegistersActionOnSuccess(t *testing.T) {
 	if action.Kind != kernel.KindWasm {
 		t.Errorf("expected kind=wasm, got %q", action.Kind)
 	}
+	// Source must be TinyGo text, not WASM binary bytes.
+	if len(action.Source) > 0 && action.Source[0] == 0x00 {
+		t.Error("action.Source must be TinyGo source text, not WASM binary")
+	}
+	// WasmArtifact must be set when an artifact was compiled.
+	if action.WasmArtifact == "" {
+		t.Error("expected WasmArtifact to be set for @sys/make registered action")
+	}
 }
 
 func TestMakeRegisteredActionHasName(t *testing.T) {
@@ -318,7 +327,7 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
 	exec := script.New(script.Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
-	k := kernel.New(st, exec, nil, nil, fakeChat, cfg, log.Default())
+	k := kernel.New(st, exec, nil, nil, cfg, log.Default())
 	native.RegisterChatHandler(k, fakeChat)
 	native.RegisterMakeHandler(k, native.MakeDeps{
 		Scripts: exec, Compiler: fakeComp, Chatter: fakeChat,
@@ -488,4 +497,113 @@ func (c *cycleFakeChatter) Chat(_ context.Context, _ []kernel.ChatMessage) (kern
 	r := c.responses[c.idx%len(c.responses)]
 	c.idx++
 	return kernel.ChatMessage{Role: "assistant", Content: r}, nil
+}
+
+// fakeInspectingScripts implements kernel.ScriptExecutor and kernel.WASMInspector
+// with a configurable import/export list. Used to test checkWASMImports behaviour
+// without invoking wazero.
+type fakeInspectingScripts struct {
+	imports []kernel.WASMImport
+	exports []string
+}
+
+func (f *fakeInspectingScripts) Compile(_ context.Context, src []byte) ([]byte, string, error) {
+	return src, "fake-hash", nil
+}
+
+func (f *fakeInspectingScripts) Execute(_ context.Context, _ []byte, _ []byte, _ kernel.HostFunctions) ([]byte, error) {
+	return []byte(`{"result":"ok"}`), nil
+}
+
+func (f *fakeInspectingScripts) InspectWASM(_ []byte) ([]kernel.WASMImport, []string, error) {
+	return f.imports, f.exports, nil
+}
+
+// newMakeKernelWithExec is like newMakeKernel but accepts a custom ScriptExecutor,
+// allowing tests to control what InspectWASM returns.
+func newMakeKernelWithExec(t *testing.T, chatter kernel.Chatter, exec kernel.ScriptExecutor) (*kernel.Kernel, kernel.Store) {
+	t.Helper()
+	st := newTestStore(t)
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	k := kernel.New(st, exec, nil, nil, cfg, log.Default())
+	native.RegisterChatHandler(k, chatter)
+	native.RegisterMakeHandler(k, native.MakeDeps{
+		Scripts:  exec,
+		Compiler: &script.FakeCompiler{},
+		Chatter:  chatter,
+	}, "", 0)
+	return k, st
+}
+
+func TestMakeRejectsDisallowedWASMImport(t *testing.T) {
+	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
+	insp := &fakeInspectingScripts{
+		imports: []kernel.WASMImport{{Module: "juice", Name: "emit"}},
+		exports: []string{"alloc", "run"},
+	}
+	k, st := newMakeKernelWithExec(t, fakeChat, insp)
+	ctx := context.Background()
+	sys := seedMakeAction(t, st)
+	caller := setupUser(t, st, "@alice", 1000)
+	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 100)
+
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: sys.ID, ActionName: "make",
+		Args: map[string]any{"description": "test action"},
+	})
+	if err != nil {
+		t.Fatalf("Call @sys/make: %v", err)
+	}
+	b, _ := json.Marshal(reply.Result)
+	var result native.MakeResult
+	_ = json.Unmarshal(b, &result)
+	if result.Status != "failure" {
+		t.Errorf("expected status=failure for disallowed juice.emit import, got %q; diagnostics: %v", result.Status, result.Diagnostics)
+	}
+	found := false
+	for _, d := range result.Diagnostics {
+		if strings.Contains(d, "emit") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected diagnostics to mention 'emit', got %v", result.Diagnostics)
+	}
+}
+
+func TestMakeAcceptsStepImports(t *testing.T) {
+	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
+	insp := &fakeInspectingScripts{
+		imports: []kernel.WASMImport{
+			{Module: "juice", Name: "step_create"},
+			{Module: "juice", Name: "step_complete"},
+		},
+		exports: []string{"alloc", "run"},
+	}
+	k, st := newMakeKernelWithExec(t, fakeChat, insp)
+	ctx := context.Background()
+	sys := seedMakeAction(t, st)
+	caller := setupUser(t, st, "@alice", 1000)
+	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 100)
+
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		TargetUserID: sys.ID, ActionName: "make",
+		Args: map[string]any{"description": "step-using action"},
+	})
+	if err != nil {
+		t.Fatalf("Call @sys/make: %v", err)
+	}
+	b, _ := json.Marshal(reply.Result)
+	var result native.MakeResult
+	_ = json.Unmarshal(b, &result)
+	if result.Status != "success" {
+		t.Errorf("expected status=success for step_create/step_complete imports, got %q; diagnostics: %v", result.Status, result.Diagnostics)
+	}
 }

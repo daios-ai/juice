@@ -28,20 +28,12 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 	}
 	items := make([]any, len(results))
 	for i, r := range results {
-		var uses, failures int64
-		if stats, _ := k.ReadStats(ctx, r.Action.ID); stats != nil {
-			uses = int64(stats.Uses)
-			failures = int64(stats.Failures)
-		}
 		items[i] = map[string]any{
 			"action_id":    r.Action.ID,
 			"name":         r.Action.Name,
 			"owner_handle": r.OwnerHandle,
 			"description":  r.Action.Description,
 			"score":        float64(r.Score),
-			"price":        r.Action.Price,
-			"uses":         uses,
-			"failures":     failures,
 		}
 	}
 	return map[string]any{"results": items}, nil

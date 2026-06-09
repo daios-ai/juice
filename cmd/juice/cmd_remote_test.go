@@ -41,7 +41,7 @@ func newRemoteTestKernel(t *testing.T) (*kernel.Kernel, *store.DB) {
 
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "remote-test-secret"
-	k := kernel.New(db, nil, nil, nil, nil, cfg, log.Discard())
+	k := kernel.New(db, nil, nil, nil, cfg, log.Discard())
 
 	if err := k.FirstBoot(t.Context(), "sys-pass"); err != nil {
 		t.Fatal(err)

@@ -2,6 +2,7 @@ package native
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -166,14 +167,15 @@ func executeMake(ctx context.Context, args map[string]any, targetID, callerID, o
 			inSchema := sanitizeSchemaForRegistration(contract.InputSchema)
 			outSchema := sanitizeSchemaForRegistration(contract.OutputSchema)
 			action, createErr := k.CreateAction(ctx, callerID, kernel.CreateActionRequest{
-				OwnerUserID:  callerID,
-				Name:         contract.Name,
-				Kind:         kernel.KindWasm,
-				Price:        0,
-				Description:  in.Description,
-				InputSchema:  inSchema,
-				OutputSchema: outSchema,
-				Source:       string(wasm),
+				OwnerUserID:   callerID,
+				Name:          contract.Name,
+				Kind:          kernel.KindWasm,
+				Price:         0,
+				Description:   in.Description,
+				InputSchema:   inSchema,
+				OutputSchema:  outSchema,
+				Source:        source,
+				WasmArtifact:  base64.StdEncoding.EncodeToString(wasm),
 			})
 			if createErr != nil {
 				return marshalMakeResult(&MakeResult{
@@ -331,11 +333,6 @@ func searchCatalog(ctx context.Context, contract *actionContract, targetID, proc
 				continue
 			}
 			seen[actionID] = true
-			uses, _ := m["uses"].(int64)
-			failures, _ := m["failures"].(int64)
-			if isUnreliable(uses, failures) {
-				continue
-			}
 			result = append(result, discoveredAction{
 				ID:          actionID,
 				Name:        toString(m["name"]),
@@ -345,14 +342,6 @@ func searchCatalog(ctx context.Context, contract *actionContract, targetID, proc
 		}
 	}
 	return result
-}
-
-// isUnreliable returns true when stats show a failure rate above 50% over at least 5 uses.
-func isUnreliable(uses, failures int64) bool {
-	if uses < 5 {
-		return false
-	}
-	return failures*2 > uses
 }
 
 // toString casts an any value to string.
@@ -574,7 +563,7 @@ func checkWASMImports(wasm []byte, scripts kernel.ScriptExecutor) string {
 	if err != nil {
 		return fmt.Sprintf("WASM inspection failed: %v", err)
 	}
-	allowedImports := map[string]bool{"call": true, "emit": true, "log": true}
+	allowedImports := map[string]bool{"call": true, "step_create": true, "step_complete": true, "log": true}
 	for _, imp := range imports {
 		if imp.Module == "wasi_snapshot_preview1" {
 			continue

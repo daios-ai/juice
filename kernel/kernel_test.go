@@ -55,7 +55,7 @@ func newTestKernel(st kernel.Store) *kernel.Kernel {
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	return kernel.New(st, nil, nil, nil, nil, cfg, log.Default())
+	return kernel.New(st, nil, nil, nil, cfg, log.Default())
 }
 
 func newTestKernelWithScripts(st kernel.Store, exec kernel.ScriptExecutor) *kernel.Kernel {
@@ -64,7 +64,7 @@ func newTestKernelWithScripts(st kernel.Store, exec kernel.ScriptExecutor) *kern
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	return kernel.New(st, exec, nil, nil, nil, cfg, log.Default())
+	return kernel.New(st, exec, nil, nil, cfg, log.Default())
 }
 
 func testSigningKey() ed25519.PrivateKey {
@@ -1432,7 +1432,7 @@ func newTestKernelWithHTTP(st kernel.Store, http kernel.HTTPExecutor) *kernel.Ke
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	return kernel.New(st, nil, http, nil, nil, cfg, log.Default())
+	return kernel.New(st, nil, http, nil, cfg, log.Default())
 }
 
 // ---- Remote proxy execution test ----

@@ -19,7 +19,7 @@ func newMinimalKernel() *Kernel {
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = "test-issuer-id"
-	return New(nil, nil, nil, nil, nil, cfg, nil)
+	return New(nil, nil, nil, nil, cfg, nil)
 }
 
 func TestValidateHTTPSourceSSRF(t *testing.T) {
@@ -46,6 +46,9 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 		"https://example.com/api",
 		"http://example.com/webhook",
 		"https://api.stripe.com/v1/charges",
+		// Hostnames that are not literal private IPs are accepted without DNS resolution (§7).
+		"http://internal.corp/api",
+		"https://api.example.com/v2",
 	}
 	for _, u := range accepted {
 		if err := validateHTTPSource(ctx, u, false); err != nil {

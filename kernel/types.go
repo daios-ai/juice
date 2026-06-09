@@ -61,8 +61,9 @@ type Action struct {
 	Description    string         `json:"description"`
 	InputSchema    map[string]any `json:"input_schema"`
 	OutputSchema   map[string]any `json:"output_schema"`
-	Source         string         `json:"source,omitempty"`           // URL for http; WAT/WASM source for wasm; federation URL for remote_proxy
+	Source         string         `json:"source,omitempty"`           // URL for http; TinyGo source for wasm; federation URL for remote_proxy
 	ArtifactHash   string         `json:"artifact_hash,omitempty"`    // content-addressed compiled WASM artifact
+	WasmArtifact   string         `json:"wasm_artifact,omitempty"`    // base64-encoded compiled WASM bytes (wasm only); Source holds the TinyGo text
 	RemoteActionID string         `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`

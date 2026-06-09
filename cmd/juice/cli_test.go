@@ -31,7 +31,7 @@ func newTestEnv(t *testing.T) *testEnv {
 
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "cli-test-secret"
-	k := kernel.New(db, nil, nil, nil, nil, cfg, log.Discard())
+	k := kernel.New(db, nil, nil, nil, cfg, log.Discard())
 	t.Setenv("JUICE_SECRET_KEY", "cli-test-secret")
 
 	t.Cleanup(func() { db.Close() })

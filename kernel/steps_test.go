@@ -600,6 +600,27 @@ func TestMergeArgsInputKeysOverwritePartialArgs(t *testing.T) {
 	}
 }
 
+// TestCreateStepSuperuserIsUnauthorizedWithoutOwnershipOrTraceAuthority confirms that
+// @sys cannot create steps on other users' processes unless it is the process owner
+// or holds trace-scoped authority. No superuser exception exists for CreateStep.
+func TestCreateStepSuperuserIsUnauthorizedWithoutOwnershipOrTraceAuthority(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	processOwner := setupUser(t, st, "@step-proc-owner", 500)
+	sys := setupSys(t, k, st)
+	nextUser := setupUser(t, st, "@step-next-user", 0)
+	action := setupAction(t, st, processOwner.ID, "step-sys-action", 0)
+	p, _, _ := k.StartProcess(ctx, processOwner.ID, processOwner.ID, 100)
+
+	// @sys is not the process owner and provides no parentTraceID — must be ErrUnauthorized.
+	_, err := k.CreateStep(ctx, sys.ID, p.ID, nil, action.ID, nil, nil, nextUser.ID)
+	if !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized for @sys without ownership or trace authority, got %v", err)
+	}
+}
+
 // TestCreateStepTraceAuthority verifies that an action owner who is not the process owner
 // can create a step when they own the executing action in the parent trace (F3 fix).
 func TestCreateStepTraceAuthority(t *testing.T) {

@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -350,7 +351,15 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 		return nil, 0, ErrInvalidInput.Wrap("could not serialize args")
 	}
 
-	artifact, _, err := k.scripts.Compile(ctx, []byte(action.Source))
+	wasmBytes := []byte(action.Source)
+	if action.WasmArtifact != "" {
+		decoded, decErr := base64.StdEncoding.DecodeString(action.WasmArtifact)
+		if decErr != nil {
+			return nil, 0, ErrExecutionFailed.Wrapf("wasm artifact decode failed: %v", decErr)
+		}
+		wasmBytes = decoded
+	}
+	artifact, _, err := k.scripts.Compile(ctx, wasmBytes)
 	if err != nil {
 		return nil, 0, ErrExecutionFailed.Wrapf("wasm compile failed: %v", err)
 	}

@@ -25,11 +25,7 @@ func (k *Kernel) CreateStep(ctx context.Context, callerID, processID string, par
 	if process.Status != ProcessOpen {
 		return nil, ErrInvalidState.Wrap("process is closed")
 	}
-	u, err := k.store.ReadUser(ctx, callerID)
-	if err != nil {
-		return nil, ErrUnauthenticated.Wrap("user not found")
-	}
-	if process.OwnerUserID != callerID && !k.isUserSuperuser(ctx, u) {
+	if process.OwnerUserID != callerID {
 		// Also permit via trace-scoped authority (same rule as Call precondition 3).
 		if parentTraceID == nil {
 			return nil, ErrUnauthorized.Wrap("caller is not the process owner")

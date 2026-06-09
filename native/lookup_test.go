@@ -56,7 +56,7 @@ func newLookupTestKernel(t *testing.T) (*kernel.Kernel, kernel.Store) {
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = issuerID
 	cfg.SigningKey = priv
-	return kernel.New(db, nil, nil, &fakeEmbedder{}, nil, cfg, nil), db
+	return kernel.New(db, nil, nil, &fakeEmbedder{}, cfg, nil), db
 }
 
 func seedOwner(t *testing.T, st kernel.Store, handle string) *kernel.User {
@@ -128,6 +128,12 @@ func TestExecuteLookup_ReturnsMatchingAction(t *testing.T) {
 	}
 	if _, ok := first["score"]; !ok {
 		t.Error("result missing score")
+	}
+	// Fields beyond the required schema must not be present.
+	for _, banned := range []string{"price", "uses", "failures"} {
+		if _, ok := first[banned]; ok {
+			t.Errorf("result must not include field %q", banned)
+		}
 	}
 }
 

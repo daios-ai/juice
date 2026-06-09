@@ -356,10 +356,10 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO actions
-		 (id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 (id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.OwnerUserID, a.Name, string(a.Kind), boolInt(a.Active), boolInt(a.Public), a.Price,
-		a.Description, string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.RemoteActionID,
+		a.Description, string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact, a.RemoteActionID,
 		timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
 	)
 	return dbErr(err, "create action")
@@ -367,7 +367,7 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 
 // actionCols is the canonical column list for action SELECT statements.
 // Must stay in sync with scanAction/scanActionRow/finishAction.
-const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at`
+const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at`
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
@@ -384,9 +384,9 @@ func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE actions SET kind=?,active=?,public=?,price=?,description=?,input_schema=?,output_schema=?,
-		 source=?,artifact_hash=?,updated_at=? WHERE id=?`,
+		 source=?,artifact_hash=?,wasm_artifact=?,updated_at=? WHERE id=?`,
 		string(a.Kind), boolInt(a.Active), boolInt(a.Public), a.Price, a.Description,
-		string(inJSON), string(outJSON), a.Source, a.ArtifactHash,
+		string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact,
 		timeToStr(a.UpdatedAt), a.ID,
 	)
 	return dbErr(err, "update action")
@@ -403,9 +403,9 @@ func (s *DB) UpdateActionAndResetStats(ctx context.Context, a *kernel.Action) er
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE actions SET kind=?,active=?,public=?,price=?,description=?,input_schema=?,output_schema=?,
-		 source=?,artifact_hash=?,updated_at=? WHERE id=?`,
+		 source=?,artifact_hash=?,wasm_artifact=?,updated_at=? WHERE id=?`,
 		string(a.Kind), boolInt(a.Active), boolInt(a.Public), a.Price, a.Description,
-		string(inJSON), string(outJSON), a.Source, a.ArtifactHash,
+		string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact,
 		timeToStr(a.UpdatedAt), a.ID,
 	); err != nil {
 		return dbErr(err, "update action and reset stats: update action")
@@ -524,7 +524,7 @@ func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
 	var deletedAt sql.NullString
 	var active, public int
 	err := row.Scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &a.Name, &kind, &active, &public, &a.Price,
-		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.RemoteActionID,
+		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.WasmArtifact, &a.RemoteActionID,
 		&createdAt, &updatedAt, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("action not found")
@@ -541,7 +541,7 @@ func (s *DB) scanActionRow(rows *sql.Rows) (*kernel.Action, error) {
 	var deletedAt sql.NullString
 	var active, public int
 	err := rows.Scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &a.Name, &kind, &active, &public, &a.Price,
-		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.RemoteActionID,
+		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.WasmArtifact, &a.RemoteActionID,
 		&createdAt, &updatedAt, &deletedAt)
 	if err != nil {
 		return nil, dbErr(err, "scan action")

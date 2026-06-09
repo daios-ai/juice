@@ -57,14 +57,13 @@ type Kernel struct {
 	scripts        ScriptExecutor
 	http           HTTPExecutor
 	llm            Embedder
-	chatter        Chatter
 	cfg            Config
 	log            *log.Logger
 	nativeHandlers map[string]NativeFunc
 }
 
-// New constructs a Kernel. scripts, http, llm, and chatter may be nil if those features are unused.
-func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, chatter Chatter, cfg Config, logger *log.Logger) *Kernel {
+// New constructs a Kernel. scripts, http, and llm may be nil if those features are unused.
+func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, cfg Config, logger *log.Logger) *Kernel {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -73,7 +72,6 @@ func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, c
 		scripts:        scripts,
 		http:           http,
 		llm:            llm,
-		chatter:        chatter,
 		cfg:            cfg,
 		log:            logger,
 		nativeHandlers: make(map[string]NativeFunc),
@@ -320,15 +318,14 @@ type CreateActionRequest struct {
 	InputSchema  map[string]any
 	OutputSchema map[string]any
 	Source       string
+	WasmArtifact string // base64-encoded pre-compiled WASM; if set, stored as-is and used for the hash
 }
 
-// CreateAction registers a new action (inactive by default).
 // validateHTTPSource rejects URLs that could be used for SSRF attacks.
-// Allowed: http and https schemes with public hostnames or IPs.
-// Rejected: other schemes, localhost, loopback, private, and link-local addresses.
-// When allowLocal is false and the host is not a literal IP, DNS is resolved and each
-// resolved address is checked against the same rules so hostname-based SSRF is also caught.
-func validateHTTPSource(ctx context.Context, source string, allowLocal bool) error {
+// Allowed: http and https schemes with public hostnames or literal public IPs.
+// Rejected: other schemes, localhost, loopback, RFC 1918 private, and link-local addresses.
+// Only literal IP addresses are checked; hostnames are accepted as-is per §7.
+func validateHTTPSource(_ context.Context, source string, allowLocal bool) error {
 	u, err := url.Parse(source)
 	if err != nil {
 		return ErrInvalidInput.Wrapf("invalid URL: %v", err)
@@ -353,19 +350,6 @@ func validateHTTPSource(ctx context.Context, source string, allowLocal bool) err
 		if ip := net.ParseIP(host); ip != nil {
 			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
 				return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
-			}
-		} else {
-			// Not a literal IP: resolve the hostname and check each result.
-			// DNS failure is treated as unknown (fail open) since the address
-			// may be legitimately unreachable at creation time.
-			if addrs, dnsErr := net.DefaultResolver.LookupHost(ctx, host); dnsErr == nil {
-				for _, addr := range addrs {
-					if ip := net.ParseIP(addr); ip != nil {
-						if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-							return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
-						}
-					}
-				}
 			}
 		}
 	}
@@ -420,12 +404,23 @@ func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateAc
 		UpdatedAt:    now,
 	}
 
-	if req.Kind == KindWasm && len(req.Source) > 0 && k.scripts != nil {
-		_, hash, err := k.scripts.Compile(ctx, []byte(req.Source))
-		if err != nil {
-			return nil, ErrInvalidInput.Wrapf("wasm compilation failed: %v", err)
+	if req.Kind == KindWasm && k.scripts != nil {
+		wasmBytes := []byte(req.Source)
+		if req.WasmArtifact != "" {
+			decoded, err := base64.StdEncoding.DecodeString(req.WasmArtifact)
+			if err != nil {
+				return nil, ErrInvalidInput.Wrapf("wasm artifact invalid: %v", err)
+			}
+			wasmBytes = decoded
+			a.WasmArtifact = req.WasmArtifact
 		}
-		a.ArtifactHash = hash
+		if len(wasmBytes) > 0 {
+			_, hash, err := k.scripts.Compile(ctx, wasmBytes)
+			if err != nil {
+				return nil, ErrInvalidInput.Wrapf("wasm compilation failed: %v", err)
+			}
+			a.ArtifactHash = hash
+		}
 	}
 
 	if err := k.store.CreateAction(ctx, a); err != nil {
@@ -794,7 +789,16 @@ func (k *Kernel) SetActive(ctx context.Context, callerID, actionID string, activ
 			if k.scripts == nil {
 				return ErrInvalidState.Wrap("cannot activate wasm action: script executor not configured")
 			}
-			_, hash, err := k.scripts.Compile(ctx, []byte(a.Source))
+			wasmBytes := []byte(a.Source)
+			if a.WasmArtifact != "" {
+				// Artifact pre-stored (e.g. by @sys/make); compile it for the hash, not the TinyGo source.
+				decoded, decErr := base64.StdEncoding.DecodeString(a.WasmArtifact)
+				if decErr != nil {
+					return ErrInvalidState.Wrapf("wasm artifact decode failed: %v", decErr)
+				}
+				wasmBytes = decoded
+			}
+			_, hash, err := k.scripts.Compile(ctx, wasmBytes)
 			if err != nil {
 				return ErrInvalidState.Wrapf("wasm compile failed: %v", err)
 			}

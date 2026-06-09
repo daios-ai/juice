@@ -36,7 +36,7 @@ func newTestKernelWithEmbedder(st kernel.Store, emb kernel.Embedder) *kernel.Ker
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
 	cfg.IssuerUserID = testIssuerUserID
-	return kernel.New(st, nil, nil, emb, nil, cfg, nil)
+	return kernel.New(st, nil, nil, emb, cfg, nil)
 }
 
 func TestLookupRanking(t *testing.T) {
