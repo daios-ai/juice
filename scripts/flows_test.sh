@@ -3181,10 +3181,10 @@ flow_message() {
     proc_out=$(jj "$db" "$home_alice" process start --funds 100)
     proc_id=$(strfield "$proc_out" "process_id")
 
-    local msg_out step_id delivered
+    local msg_out step_id
     msg_out=$(j "$db" "$home_alice" call \
         --process "$proc_id" --action @sys/message \
-        --args "{\"to\":\"@bob\",\"message\":\"Please review doc\",\"next_action\":\"@sys/time\"}" 2>&1)
+        --args "{\"to\":\"@bob\",\"message\":\"Please review doc\"}" 2>&1)
 
     step_id=$(echo "$msg_out" | python3 -c "
 import sys, json, re
@@ -3195,24 +3195,10 @@ if m:
     except: print('')
 else: print('')
 " 2>/dev/null)
-    delivered=$(echo "$msg_out" | python3 -c "
-import sys, json, re
-text = sys.stdin.read()
-m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
-if m:
-    try: print(json.loads(m.group(1)).get('delivered', ''))
-    except: print('')
-else: print('')
-" 2>/dev/null)
 
     [ -n "$step_id" ] \
         && ok "message.step_created" \
         || fail "message.step_created" "expected step_id in result, got: $msg_out"
-
-    # delivered=false is expected (no SMTP configured in test env).
-    [ "$delivered" = "False" ] || [ "$delivered" = "false" ] \
-        && ok "message.delivered_false_without_smtp" \
-        || fail "message.delivered_false_without_smtp" "expected delivered=false, got: $delivered"
 
     # @bob can see and complete the step.
     local bob_steps step_json
@@ -3238,7 +3224,7 @@ print(json.dumps(m) if m else 'null')
     local bad_out
     bad_out=$(j "$db" "$home_alice" call \
         --process "$proc_id" --action @sys/message \
-        --args '{"message":"hi","next_action":"@sys/time"}' 2>&1)
+        --args '{"message":"hi"}' 2>&1)
     echo "$bad_out" | grep -qi "to\|required\|invalid" \
         && ok "message.missing_to_rejected" \
         || fail "message.missing_to_rejected" "expected error for missing to, got: $bad_out"
@@ -3247,7 +3233,7 @@ print(json.dumps(m) if m else 'null')
     local unknown_out
     unknown_out=$(j "$db" "$home_alice" call \
         --process "$proc_id" --action @sys/message \
-        --args '{"to":"@nobody","message":"hi","next_action":"@sys/time"}' 2>&1)
+        --args '{"to":"@nobody","message":"hi"}' 2>&1)
     echo "$unknown_out" | grep -qi "not found\|invalid\|unknown" \
         && ok "message.unknown_recipient_rejected" \
         || fail "message.unknown_recipient_rejected" "expected error for unknown recipient, got: $unknown_out"

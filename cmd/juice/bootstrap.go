@@ -240,25 +240,28 @@ var sysNativeSpecs = []sysNativeSpec{
 		},
 	},
 	{
+		name:        "sink",
+		price:       0,
+		description: "Universal no-op sink; accepts any input and returns {}",
+		inputSchema:  map[string]any{"type": "object"},
+		outputSchema: map[string]any{"type": "object"},
+	},
+	{
 		name:        "message",
 		price:       0,
-		description: "Sends a message to another platform user and creates a Step they must complete",
+		description: "Sends a message to another platform user and creates a Step they must acknowledge",
 		inputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"to":           map[string]any{"type": "string", "description": "Recipient handle (@owner)"},
-				"message":      map[string]any{"type": "string", "description": "Message body"},
-				"next_action":  map[string]any{"type": "string", "description": "Action ref (@owner/name) to call when the recipient completes the step"},
-				"subject":      map[string]any{"type": "string", "description": "Optional notification subject"},
-				"partial_args": map[string]any{"type": "object", "description": "Optional pre-filled args merged at step completion"},
+				"to":      map[string]any{"type": "string", "description": "Recipient handle (@owner)"},
+				"message": map[string]any{"type": "string", "description": "Message body"},
 			},
-			"required": []string{"to", "message", "next_action"},
+			"required": []string{"to", "message"},
 		},
 		outputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"step_id":   map[string]any{"type": "string", "description": "ID of the created step"},
-				"delivered": map[string]any{"type": "boolean", "description": "Whether the notification was delivered"},
+				"step_id": map[string]any{"type": "string", "description": "ID of the created step"},
 			},
 		},
 	},
