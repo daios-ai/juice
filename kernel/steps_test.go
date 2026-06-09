@@ -699,3 +699,74 @@ func TestCreateStepTraceAuthorityWrongProcess(t *testing.T) {
 		t.Errorf("expected ErrUnauthorized for cross-process trace authority, got %v", err)
 	}
 }
+
+func TestCreateStepRejectsNonObjectPartialArgs(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@pa-owner", 500)
+	caller := setupUser(t, st, "@pa-caller", 0)
+	action := setupAction(t, st, owner.ID, "pa-action", 0)
+	p, _, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
+
+	_, err := k.CreateStep(ctx, owner.ID, p.ID, nil, action.ID, json.RawMessage(`"not-an-object"`), nil, caller.ID)
+	if !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("expected ErrInvalidInput for non-object partial_args, got %v", err)
+	}
+}
+
+func TestCreateStepRejectsNonObjectInputSchema(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@is-owner", 500)
+	caller := setupUser(t, st, "@is-caller", 0)
+	action := setupAction(t, st, owner.ID, "is-action", 0)
+	p, _, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
+
+	_, err := k.CreateStep(ctx, owner.ID, p.ID, nil, action.ID, nil, json.RawMessage(`[1,2,3]`), caller.ID)
+	if !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("expected ErrInvalidInput for non-object input_schema, got %v", err)
+	}
+}
+
+func TestCreateStepRejectsInvalidSchemaInInputSchema(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@sis-owner", 500)
+	caller := setupUser(t, st, "@sis-caller", 0)
+	action := setupAction(t, st, owner.ID, "sis-action", 0)
+	p, _, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
+
+	// A schema referencing an unsupported type should be rejected at creation.
+	_, err := k.CreateStep(ctx, owner.ID, p.ID, nil, action.ID, nil, json.RawMessage(`{"type":"unsupported"}`), caller.ID)
+	if !errors.Is(err, kernel.ErrSchemaViolation) {
+		t.Errorf("expected ErrSchemaViolation for invalid input_schema, got %v", err)
+	}
+}
+
+func TestCreateStepNilParentTraceIDNormalized(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@norm-owner", 500)
+	caller := setupUser(t, st, "@norm-caller", 0)
+	action := setupAction(t, st, owner.ID, "norm-action", 0)
+	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
+
+	step, err := k.CreateStep(ctx, owner.ID, p.ID, nil, action.ID, nil, nil, caller.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+	if step.ParentTraceID == nil {
+		t.Fatal("expected ParentTraceID to be normalized to root trace, got nil")
+	}
+	if *step.ParentTraceID != root.ID {
+		t.Errorf("expected ParentTraceID=%q, got %q", root.ID, *step.ParentTraceID)
+	}
+}

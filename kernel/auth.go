@@ -13,7 +13,10 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const bcryptCost = 12
+var bcryptCost = 12
+
+// SetBcryptCostForTesting overrides the bcrypt work factor. Call only from tests.
+func SetBcryptCostForTesting(cost int) { bcryptCost = cost }
 
 // HashPassword returns a bcrypt hash of the plain-text password.
 func HashPassword(plain string) (string, error) {

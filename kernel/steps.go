@@ -48,11 +48,29 @@ func (k *Kernel) CreateStep(ctx context.Context, callerID, processID string, par
 	if _, err := k.store.ReadUser(ctx, requiredCallerID); err != nil {
 		return nil, ErrNotFound.Wrap("required_caller_user_id not found")
 	}
-	if len(partialArgs) == 0 {
-		partialArgs = json.RawMessage("{}")
+	// Normalize parentTraceID to the process root so completion traces satisfy
+	// the invariant: trace.parent_trace_id == step.parent_trace_id.
+	if parentTraceID == nil {
+		root, err := k.store.ReadRootTrace(ctx, processID)
+		if err != nil {
+			return nil, ErrInternal.Wrap("could not resolve root trace for process")
+		}
+		parentTraceID = &root.ID
 	}
-	if len(inputSchema) == 0 {
-		inputSchema = json.RawMessage("{}")
+	var normErr error
+	partialArgs, normErr = normalizeJSONObject(partialArgs, "partial_args")
+	if normErr != nil {
+		return nil, normErr
+	}
+	inputSchema, normErr = normalizeJSONObject(inputSchema, "input_schema")
+	if normErr != nil {
+		return nil, normErr
+	}
+	var schemaMap map[string]any
+	if err := json.Unmarshal(inputSchema, &schemaMap); err == nil {
+		if err := ValidateSchema(schemaMap); err != nil {
+			return nil, err
+		}
 	}
 	now := time.Now().UTC()
 	step := &Step{
@@ -149,6 +167,7 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 		return nil, ErrNotFound.Wrap("next action owner not found")
 	}
 
+	// ParentTraceID is normalized to non-nil at CreateStep; guard for legacy rows.
 	parentTraceID := ""
 	if step.ParentTraceID != nil {
 		parentTraceID = *step.ParentTraceID
@@ -191,6 +210,18 @@ func (k *Kernel) canReadStep(ctx context.Context, callerID string, step *Step) b
 		return true
 	}
 	return false
+}
+
+// normalizeJSONObject defaults an empty value to "{}" and rejects non-object JSON.
+func normalizeJSONObject(raw json.RawMessage, field string) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		return json.RawMessage("{}"), nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, ErrInvalidInput.Wrapf("%s must be a JSON object", field)
+	}
+	return raw, nil
 }
 
 // mergeArgs performs a shallow merge of base and override JSON objects.

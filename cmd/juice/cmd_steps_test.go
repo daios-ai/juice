@@ -4,8 +4,29 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+// assertActionRef verifies an action field is a well-formed "@owner/name" reference
+// with exactly one leading "@" and exactly one "/".
+func assertActionRef(t *testing.T, v any) {
+	t.Helper()
+	s, ok := v.(string)
+	if !ok || s == "" {
+		t.Errorf("action field is not a non-empty string: %v", v)
+		return
+	}
+	if strings.HasPrefix(s, "@@") {
+		t.Errorf("action field has double @: %q", s)
+	}
+	if !strings.HasPrefix(s, "@") {
+		t.Errorf("action field must start with @, got %q", s)
+	}
+	if strings.Count(s, "/") != 1 {
+		t.Errorf("action field must contain exactly one /, got %q", s)
+	}
+}
 
 // newStepBackend creates a test HTTP server that acts as a backend for WASM-less step actions.
 func newStepBackend(t *testing.T) *httptest.Server {
@@ -70,10 +91,11 @@ func TestServeCreateStep(t *testing.T) {
 	if step["status"] != "waiting" {
 		t.Errorf("expected status=waiting, got %v", step["status"])
 	}
-	// Computed action field must be present.
+	// Computed action field must be present and well-formed.
 	if step["action"] == nil || step["action"] == "" {
 		t.Error("expected computed action field in POST /v1/steps response")
 	}
+	assertActionRef(t, step["action"])
 }
 
 func TestServeListSteps(t *testing.T) {
@@ -184,10 +206,11 @@ func TestServeGetStep(t *testing.T) {
 		if got["id"] != sid {
 			t.Error("step id mismatch in read response")
 		}
-		// Computed action field.
+		// Computed action field must be present and well-formed.
 		if got["action"] == nil || got["action"] == "" {
 			t.Error("expected computed action field in GET /v1/steps/{id} response")
 		}
+		assertActionRef(t, got["action"])
 	}
 
 	// Required caller can read.

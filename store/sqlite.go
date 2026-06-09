@@ -922,18 +922,7 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, rece
 	return s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, string(errResult), stepID, "commit failed call")
 }
 
-func (s *DB) ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Process, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,owner_user_id,available,locked,status,created_at,ended_at
-		 FROM processes WHERE owner_user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-		ownerID, limit, offset)
-	if err != nil {
-		return nil, dbErr(err, "list processes")
-	}
-	defer rows.Close()
+func scanProcessRows(rows *sql.Rows) ([]*kernel.Process, error) {
 	var out []*kernel.Process
 	for rows.Next() {
 		var p kernel.Process
@@ -950,6 +939,21 @@ func (s *DB) ListProcesses(ctx context.Context, ownerID string, limit, offset in
 	return out, rows.Err()
 }
 
+func (s *DB) ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Process, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,owner_user_id,available,locked,status,created_at,ended_at
+		 FROM processes WHERE owner_user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		ownerID, limit, offset)
+	if err != nil {
+		return nil, dbErr(err, "list processes")
+	}
+	defer rows.Close()
+	return scanProcessRows(rows)
+}
+
 func (s *DB) ListAllProcesses(ctx context.Context, limit, offset int) ([]*kernel.Process, error) {
 	if limit <= 0 {
 		limit = 100
@@ -961,20 +965,7 @@ func (s *DB) ListAllProcesses(ctx context.Context, limit, offset int) ([]*kernel
 		return nil, dbErr(err, "list all processes")
 	}
 	defer rows.Close()
-	var out []*kernel.Process
-	for rows.Next() {
-		var p kernel.Process
-		var status, createdAt string
-		var endedAt *string
-		if err := rows.Scan(&p.ID, &p.OwnerUserID, &p.Available, &p.Locked, &status, &createdAt, &endedAt); err != nil {
-			return nil, dbErr(err, "scan process")
-		}
-		p.Status = kernel.ProcessStatus(status)
-		p.CreatedAt = strToTime(createdAt)
-		p.EndedAt = strToNullTime(endedAt)
-		out = append(out, &p)
-	}
-	return out, rows.Err()
+	return scanProcessRows(rows)
 }
 
 func (s *DB) EndProcess(ctx context.Context, processID string) error {

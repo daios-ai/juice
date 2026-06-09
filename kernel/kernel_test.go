@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"testing"
 	"time"
 
@@ -18,6 +19,11 @@ import (
 	"github.com/daios-ai/juice/store"
 	"github.com/google/uuid"
 )
+
+func TestMain(m *testing.M) {
+	kernel.SetBcryptCostForTesting(4) // bcrypt.MinCost
+	os.Exit(m.Run())
+}
 
 // testIssuerUserID is a fixed sentinel user ID inserted into every test store.
 // All test kernels use this as their IssuerUserID so that receipt FK constraints pass.

@@ -930,7 +930,7 @@ type stepWithAction struct {
 func stepView(step *kernel.Step, action *kernel.Action) *stepWithAction {
 	v := &stepWithAction{Step: step}
 	if action != nil {
-		v.Action = "@" + action.OwnerHandle + "/" + action.Name
+		v.Action = action.OwnerHandle + "/" + action.Name
 	}
 	return v
 }
