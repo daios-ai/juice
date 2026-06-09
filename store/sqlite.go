@@ -949,10 +949,15 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 				return dbErr(err, "end process: return funds")
 			}
 		}
-		_, err = tx.ExecContext(ctx,
+		if _, err = tx.ExecContext(ctx,
 			`UPDATE processes SET status='closed', available=0, locked=0, ended_at=? WHERE id=?`,
-			now, processID)
-		return dbErr(err, "end process: close")
+			now, processID); err != nil {
+			return dbErr(err, "end process: close")
+		}
+		_, err = tx.ExecContext(ctx,
+			`UPDATE steps SET status='cancelled' WHERE process_id=? AND status='waiting'`,
+			processID)
+		return dbErr(err, "end process: cancel steps")
 	})
 }
 

@@ -727,7 +727,13 @@ flow_process_lifecycle() {
         && ok "process_lifecycle.status_open" \
         || fail "process_lifecycle.status_open" "expected open, got: $proc_show"
 
-    # End process — returns funds
+    # Create a waiting step before ending the process.
+    local step_out step_id
+    step_out=$(jj "$db" "$home_alice" step create \
+        --process "$proc_id" --action @sys/sink --required-caller @alice 2>/dev/null)
+    step_id=$(strfield "$step_out" "id")
+
+    # End process — returns funds and cancels waiting steps.
     j "$db" "$home_alice" process end --id "$proc_id" >/dev/null 2>&1
     local me_restored
     me_restored=$(jj "$db" "$home_alice" user me)
@@ -738,6 +744,20 @@ flow_process_lifecycle() {
     [ "$(strfield "$proc_show" "status")" = "closed" ] \
         && ok "process_lifecycle.status_closed" \
         || fail "process_lifecycle.status_closed" "expected closed, got: $proc_show"
+
+    # Waiting step must now be cancelled.
+    if [ -n "$step_id" ]; then
+        local step_status
+        step_status=$(jj "$db" "$home_alice" step list 2>/dev/null | python3 -c "
+import sys,json
+steps=json.load(sys.stdin)
+m=next((s for s in steps if s.get('id')=='$step_id'),None)
+print(m.get('status','') if m else '')
+" 2>/dev/null)
+        [ "$step_status" = "cancelled" ] \
+            && ok "process_lifecycle.step_cancelled" \
+            || fail "process_lifecycle.step_cancelled" "expected cancelled, got: $step_status"
+    fi
 }
 
 flow_process_funding() {

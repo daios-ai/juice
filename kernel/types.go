@@ -85,9 +85,10 @@ type Process struct {
 type StepStatus string
 
 const (
-	StepWaiting StepStatus = "waiting"
-	StepRunning StepStatus = "running"
-	StepDone    StepStatus = "done"
+	StepWaiting   StepStatus = "waiting"
+	StepRunning   StepStatus = "running"
+	StepDone      StepStatus = "done"
+	StepCancelled StepStatus = "cancelled"
 )
 
 // Step is a partially applied future Call — a suspended computation boundary that

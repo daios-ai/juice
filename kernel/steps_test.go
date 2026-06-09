@@ -496,14 +496,22 @@ func TestWaitingStepOnClosedProcessIsNonCompletable(t *testing.T) {
 		t.Fatalf("CreateStep: %v", err)
 	}
 
-	// Close the process
+	// Close the process — waiting step must become cancelled.
 	if err := k.EndProcess(ctx, owner.ID, p.ID); err != nil {
 		t.Fatalf("EndProcess: %v", err)
 	}
 
+	updated, err := k.ReadStep(ctx, owner.ID, step.ID)
+	if err != nil {
+		t.Fatalf("ReadStep after EndProcess: %v", err)
+	}
+	if updated.Status != kernel.StepCancelled {
+		t.Errorf("expected status cancelled, got %s", updated.Status)
+	}
+
 	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
 	if !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("expected ErrInvalidState for closed process, got %v", err)
+		t.Errorf("expected ErrInvalidState for cancelled step, got %v", err)
 	}
 }
 
