@@ -226,4 +226,40 @@ var sysNativeSpecs = []sysNativeSpec{
 		inputSchema:  map[string]any{"type": "object", "properties": map[string]any{"description": map[string]any{"type": "string", "description": "Natural-language description of the action to generate"}}, "required": []string{"description"}},
 		outputSchema: makeOutputSchema,
 	},
+	{
+		name:        "time",
+		price:       0,
+		description: "Returns the current UTC time",
+		inputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		outputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"unix": map[string]any{"type": "integer", "description": "Seconds since UTC epoch"},
+				"iso":  map[string]any{"type": "string", "description": "RFC 3339 timestamp"},
+			},
+		},
+	},
+	{
+		name:        "message",
+		price:       0,
+		description: "Sends a message to another platform user and creates a Step they must complete",
+		inputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"to":           map[string]any{"type": "string", "description": "Recipient handle (@owner)"},
+				"message":      map[string]any{"type": "string", "description": "Message body"},
+				"next_action":  map[string]any{"type": "string", "description": "Action ref (@owner/name) to call when the recipient completes the step"},
+				"subject":      map[string]any{"type": "string", "description": "Optional notification subject"},
+				"partial_args": map[string]any{"type": "object", "description": "Optional pre-filled args merged at step completion"},
+			},
+			"required": []string{"to", "message", "next_action"},
+		},
+		outputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"step_id":   map[string]any{"type": "string", "description": "ID of the created step"},
+				"delivered": map[string]any{"type": "boolean", "description": "Whether the notification was delivered"},
+			},
+		},
+	},
 }

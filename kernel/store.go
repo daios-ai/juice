@@ -74,6 +74,11 @@ type Chatter interface {
 	Chat(ctx context.Context, messages []ChatMessage) (ChatMessage, error)
 }
 
+// Notifier delivers out-of-band notifications to users.
+type Notifier interface {
+	Notify(ctx context.Context, to, subject, message string) error
+}
+
 // ---- Persistence interface ----
 
 // TxFilter narrows a ListTransactions query.

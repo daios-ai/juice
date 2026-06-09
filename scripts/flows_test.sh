@@ -3077,6 +3077,182 @@ print(sum(1 for t in txs if t.get('process_id') == sys.argv[1]))
         || fail "make.transaction_recorded" "expected >=1 tx for process, got count=$tx_count"
 }
 
+flow_time() {
+    echo "=== FLOW time ==="
+    local dir db home_sys home_alice port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "time.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+
+    # @sys/time must be registered, active, public, price=0 after bootstrap.
+    local actions_out time_json
+    actions_out=$(jj "$db" "$home_sys" action list 2>/dev/null)
+    time_json=$(echo "$actions_out" | python3 -c "
+import sys,json
+actions = json.load(sys.stdin)
+m = next((a for a in actions if a.get('name') == 'time'), None)
+print(json.dumps(m) if m else 'null')
+" 2>/dev/null)
+    [ "$time_json" != "null" ] && [ -n "$time_json" ] \
+        && ok "time.registered" \
+        || fail "time.registered" "@sys/time not found in action list"
+
+    echo "$time_json" | python3 -c "import sys,json; a=json.load(sys.stdin); assert a.get('active') and a.get('public') and a.get('price',1)==0" 2>/dev/null \
+        && ok "time.active_public_free" \
+        || fail "time.active_public_free" "@sys/time not active+public+free: $time_json"
+
+    # Call @sys/time with zero-fund process.
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_alice" process start --funds 0)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    local call_out unix_val iso_val
+    call_out=$(j "$db" "$home_alice" call \
+        --process "$proc_id" --action @sys/time \
+        --args '{}' 2>&1)
+
+    unix_val=$(echo "$call_out" | python3 -c "
+import sys, json, re
+text = sys.stdin.read()
+m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
+if m:
+    try: print(json.loads(m.group(1)).get('unix', ''))
+    except: print('')
+else: print('')
+" 2>/dev/null)
+    iso_val=$(echo "$call_out" | python3 -c "
+import sys, json, re
+text = sys.stdin.read()
+m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
+if m:
+    try: print(json.loads(m.group(1)).get('iso', ''))
+    except: print('')
+else: print('')
+" 2>/dev/null)
+
+    [ -n "$unix_val" ] && [ "$unix_val" -gt 0 ] 2>/dev/null \
+        && ok "time.returns_unix" \
+        || fail "time.returns_unix" "expected positive unix timestamp, got: $call_out"
+
+    echo "$iso_val" | python3 -c "
+import sys
+from datetime import datetime
+s = sys.stdin.read().strip()
+try:
+    datetime.fromisoformat(s.replace('Z','+00:00'))
+    print('ok')
+except Exception as e:
+    print('fail: ' + str(e))
+" 2>/dev/null | grep -q "^ok$" \
+        && ok "time.returns_iso" \
+        || fail "time.returns_iso" "expected RFC 3339 iso timestamp, got: $iso_val"
+}
+
+flow_message() {
+    echo "=== FLOW message ==="
+    local dir db home_sys home_alice home_bob port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";   mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    home_bob="$dir/bob";   mkdir -p "$home_bob/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "message.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 500 >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+
+    # @alice starts a process and calls @sys/message to involve @bob.
+    # Use @sys/time as next_action: always bootstrapped, active, public, and needs no args.
+    local proc_out proc_id
+    proc_out=$(jj "$db" "$home_alice" process start --funds 100)
+    proc_id=$(strfield "$proc_out" "process_id")
+
+    local msg_out step_id delivered
+    msg_out=$(j "$db" "$home_alice" call \
+        --process "$proc_id" --action @sys/message \
+        --args "{\"to\":\"@bob\",\"message\":\"Please review doc\",\"next_action\":\"@sys/time\"}" 2>&1)
+
+    step_id=$(echo "$msg_out" | python3 -c "
+import sys, json, re
+text = sys.stdin.read()
+m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
+if m:
+    try: print(json.loads(m.group(1)).get('step_id', ''))
+    except: print('')
+else: print('')
+" 2>/dev/null)
+    delivered=$(echo "$msg_out" | python3 -c "
+import sys, json, re
+text = sys.stdin.read()
+m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
+if m:
+    try: print(json.loads(m.group(1)).get('delivered', ''))
+    except: print('')
+else: print('')
+" 2>/dev/null)
+
+    [ -n "$step_id" ] \
+        && ok "message.step_created" \
+        || fail "message.step_created" "expected step_id in result, got: $msg_out"
+
+    # delivered=false is expected (no SMTP configured in test env).
+    [ "$delivered" = "False" ] || [ "$delivered" = "false" ] \
+        && ok "message.delivered_false_without_smtp" \
+        || fail "message.delivered_false_without_smtp" "expected delivered=false, got: $delivered"
+
+    # @bob can see and complete the step.
+    local bob_steps step_json
+    bob_steps=$(jj "$db" "$home_bob" step list 2>/dev/null)
+    step_json=$(echo "$bob_steps" | python3 -c "
+import sys,json
+steps = json.load(sys.stdin)
+m = next((s for s in steps if s.get('id') == sys.argv[1]), None)
+print(json.dumps(m) if m else 'null')
+" "$step_id" 2>/dev/null)
+    [ "$step_json" != "null" ] && [ -n "$step_json" ] \
+        && ok "message.bob_sees_step" \
+        || fail "message.bob_sees_step" "@bob cannot see step $step_id"
+
+    local complete_out
+    complete_out=$(j "$db" "$home_bob" step complete \
+        --id "$step_id" --args '{}' 2>&1)
+    echo "$complete_out" | grep -qi "tx_id\|transaction\|success\|complete" \
+        && ok "message.bob_completes_step" \
+        || fail "message.bob_completes_step" "@bob failed to complete step: $complete_out"
+
+    # Missing required 'to' → error.
+    local bad_out
+    bad_out=$(j "$db" "$home_alice" call \
+        --process "$proc_id" --action @sys/message \
+        --args '{"message":"hi","next_action":"@sys/time"}' 2>&1)
+    echo "$bad_out" | grep -qi "to\|required\|invalid" \
+        && ok "message.missing_to_rejected" \
+        || fail "message.missing_to_rejected" "expected error for missing to, got: $bad_out"
+
+    # Unknown recipient → error.
+    local unknown_out
+    unknown_out=$(j "$db" "$home_alice" call \
+        --process "$proc_id" --action @sys/message \
+        --args '{"to":"@nobody","message":"hi","next_action":"@sys/time"}' 2>&1)
+    echo "$unknown_out" | grep -qi "not found\|invalid\|unknown" \
+        && ok "message.unknown_recipient_rejected" \
+        || fail "message.unknown_recipient_rejected" "expected error for unknown recipient, got: $unknown_out"
+}
+
 # ===========================================================================
 # Main runner
 # ===========================================================================
@@ -3122,6 +3298,8 @@ main() {
     flow_transaction_access
     flow_admin_supervision
     flow_make
+    flow_time
+    flow_message
 
     echo ""
     echo "Results: ${PASS} passed, ${FAIL} failed"
