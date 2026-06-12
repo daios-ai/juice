@@ -1425,13 +1425,35 @@ func TestFlow_RatingVisibility(t *testing.T) {
 // — Federation —
 // ============================================================
 
-// newFedKernel is a test helper that builds a bootstrapped httptest.Server
-// for federation tests, returning the private signing key alongside the kernel.
+// newFedKernel builds a bootstrapped httptest.Server for federation tests.
+// It wires signerFn and allowLocal=true on the HTTP executor so outbound
+// federation calls to other in-process httptest.Servers work correctly.
 func newFedKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store.DB, ed25519.PrivateKey) {
 	t.Helper()
-	srv, k, db := newTestHTTPServerFull(t)
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "fed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "fed-test-secret"
+	cfg.AllowLocalSources = true
+	logger := log.Discard()
+
+	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
+	k := kernel.New(db, nil, httpExec, nil, cfg, logger)
 
 	ctx := context.Background()
+	if err := k.FirstBoot(ctx, "sys-pass"); err != nil {
+		t.Fatal(err)
+	}
+
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
 	privB64, err := k.GetConfig(ctx, configKeySigningPrivate)
 	if err != nil {
 		t.Fatal(err)
@@ -1440,7 +1462,27 @@ func newFedKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store.DB, ed
 	if err != nil {
 		t.Fatal(err)
 	}
-	return srv, k, db, ed25519.PrivateKey(privBytes)
+	priv := ed25519.PrivateKey(privBytes)
+	k.SetSigningKey(priv, sys.ID)
+	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wire the outbound federation signer so signed calls to peer kernels work.
+	httpExec.signerFn = k.SignFederation
+
+	srv := &server{kernel: k, log: logger}
+	r := chi.NewRouter()
+	r.Use(middleware.Recoverer)
+	r.Use(requestIDMiddleware)
+	r.Post("/v1/auth/token", srv.postTokenMulti)
+	r.Post("/v1/auth/authorize", srv.postAuthorize)
+	r.Post("/v1/auth/refresh", srv.postRefresh)
+	r.Post("/v1/auth/logout", srv.postLogout)
+	r.Post("/v1/users", srv.postUser)
+	registerRoutes(r, srv)
+
+	return httptest.NewServer(r), k, db, priv
 }
 
 // TestFlow_FederationFriendRun: two kernels friend each other; operator A deposits B's
@@ -1535,16 +1577,39 @@ func TestFlow_FederationFriendRun(t *testing.T) {
 		var body map[string]any
 		json.NewDecoder(runResp.Body).Decode(&body)
 		runResp.Body.Close()
-		t.Logf("federation run failed (expected if federation executor not wired in test): %v", body)
-		// In the test environment without a real FederationExecutor making outbound calls,
-		// this may fail. The test verifies the federation path is exercised.
-		t.Skip("federation executor not wired for outbound calls in unit test environment")
-		return
+		t.Fatalf("federation run: expected 200, got %d — %v", runResp.StatusCode, body)
 	}
 	var runReply kernel.CallReply
 	decodeResponse(t, runResp, &runReply)
 	if runReply.Result["hello"] != "from-a" {
 		t.Errorf("federation result: got %v, want hello=from-a", runReply.Result)
+	}
+
+	// Charge landed in A's proxy balance on B.
+	peerAOnBUser, err := kB.ReadUserByHandle(ctx, "@kernel-a")
+	if err != nil {
+		t.Fatalf("read peer A on B: %v", err)
+	}
+	if peerAOnBUser.Available == 0 {
+		t.Error("charge should have landed in A's proxy balance on B")
+	}
+
+	// Both sides: verify-receipt passes all checks.
+	userBTxs := getTxList(t, srvB, userBTok)
+	if len(userBTxs) == 0 {
+		t.Fatal("B's user should have at least one transaction")
+	}
+	txID := userBTxs[0]["id"].(string)
+	vrResp := httpDo(t, srvB, "GET", "/v1/transactions/"+txID+"/receipt-verification", nil, userBTok)
+	if vrResp.StatusCode != http.StatusOK {
+		vrResp.Body.Close()
+		t.Fatalf("verify-receipt on B: expected 200, got %d", vrResp.StatusCode)
+	}
+	var vr map[string]any
+	decodeResponse(t, vrResp, &vr)
+	checks, _ := vr["checks"].(map[string]any)
+	if checks["signature"] != true {
+		t.Errorf("verify-receipt B: signature check failed: %v", checks)
 	}
 }
 

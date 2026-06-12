@@ -138,7 +138,7 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idem
 			headers["X-Signature"] = sig
 		}
 	}
-	respBody, status, err := doHTTP(ctx, http.MethodPost, source, headers, strings.NewReader(string(body)), e.timeout, false)
+	respBody, status, err := doHTTP(ctx, http.MethodPost, source, headers, strings.NewReader(string(body)), e.timeout, e.allowLocal)
 	if err != nil {
 		return nil, "", err
 	}
