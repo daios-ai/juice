@@ -104,8 +104,8 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	// 4. Status consistency.
 	checks.Status = r.Status == tx.Status
 
-	// 5. Charge: local tx.net (what we paid the proxy) must equal remote receipt.gross.
-	checks.Charge = r.Gross == tx.Net
+	// 5. Charge: local tx.net (what we paid the proxy) must equal remote receipt.charge.
+	checks.Charge = r.Charge == tx.Net
 
 	// 6. Settlement arithmetic: duty rule.
 	if tx.Status == TxSuccess {
@@ -167,7 +167,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	}
 
 	// Clamp remote charge to mp (protection against overcharging).
-	charge := r.Gross
+	charge := r.Charge
 	if charge < 0 {
 		charge = 0
 	}
@@ -191,7 +191,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	ktx.RemoteReceiptJSON = fr.ReceiptJSON
 
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
-	localReceipt, receiptErr := k.buildReceipt(ktx)
+	localReceipt, receiptErr := k.buildReceipt(ktx, charge)
 	if receiptErr != nil {
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}

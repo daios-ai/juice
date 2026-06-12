@@ -255,6 +255,7 @@ type Receipt struct {
 	Gross        int64     `json:"gross"`
 	Net          int64     `json:"net"`
 	Fee          int64     `json:"fee"`
+	Charge       int64     `json:"charge"`
 	Reason       string    `json:"reason"`
 	StartedAt    time.Time `json:"started_at"`
 	CreatedAt    time.Time `json:"created_at"`

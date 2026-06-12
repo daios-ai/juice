@@ -318,7 +318,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	ktx.Net = net
 	ktx.Fee = fee
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
-	receipt, receiptErr := k.buildReceipt(ktx)
+	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross) // success: charge = gross
 	if receiptErr != nil {
 		ktx.Status = TxFailure
 		ktx.Reason = "could not build receipt"
@@ -516,8 +516,16 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 	if len(tx.ReplyJSON) == 0 {
 		tx.ReplyJSON = json.RawMessage("null")
 	}
+	// Compute charge = gross - refund before signing so it is covered by the JCS signature.
+	// refund = trace.available + Σ(waiting step prices in subtree).
+	refund, err := k.store.ReadPendingRefund(ctx, traceID)
+	if err != nil {
+		logger.Error("call.refund_read_failed", "trace", traceID, "error", err)
+		return ErrInternal.Wrap("could not read pending refund")
+	}
+	charge := tx.Gross - refund
 	stats := k.computeStats(ctx, action.ID, tx, latency)
-	receipt, receiptErr := k.buildReceipt(tx)
+	receipt, receiptErr := k.buildReceipt(tx, charge)
 	if receiptErr != nil {
 		logger.Error("call.receipt_build_failed", "action", action.Name, "error", receiptErr)
 		return ErrInternal.Wrap("could not build receipt")

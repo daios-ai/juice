@@ -1433,9 +1433,12 @@ func (k *Kernel) CompleteIdempotencyRecordIfPending(ctx context.Context, id, res
 
 // ---- Receipt helpers ----
 
-// buildReceipt constructs a Receipt from a committed transaction and signs it.
+// buildReceipt constructs a signed Receipt from a committed transaction.
+// charge is the amount actually drawn from the caller's funds (= gross on success,
+// ≤ gross on failure, 0 on rejection). It must be pre-computed by the caller so that
+// it is included in the JCS signature before the receipt is persisted.
 // Returns ErrInvalidState if the kernel has not been bootstrapped (no issuer configured).
-func (k *Kernel) buildReceipt(tx *Transaction) (*Receipt, error) {
+func (k *Kernel) buildReceipt(tx *Transaction, charge int64) (*Receipt, error) {
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
@@ -1461,6 +1464,7 @@ func (k *Kernel) buildReceipt(tx *Transaction) (*Receipt, error) {
 		Gross:        tx.Gross,
 		Net:          tx.Net,
 		Fee:          tx.Fee,
+		Charge:       charge,
 		Reason:       tx.Reason,
 		StartedAt:    tx.StartedAt,
 		CreatedAt:    time.Now().UTC().Truncate(time.Second),

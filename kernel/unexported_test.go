@@ -111,7 +111,7 @@ func TestReceiptSigningRequiresConfiguredKey(t *testing.T) {
 		ReplyJSON: json.RawMessage(`{}`),
 		Status:    TxSuccess,
 		EndedAt:   time.Now().UTC(),
-	})
+	}, 0)
 	if !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
 	}

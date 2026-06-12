@@ -243,6 +243,11 @@ type Store interface {
 	// These are in-flight remote proxy calls awaiting settlement by RetryPendingRemoteDispatches.
 	ListPendingRemoteTraces(ctx context.Context) ([]*Trace, error)
 
+	// ReadPendingRefund returns the refund that CommitFailedCall would issue for traceID:
+	// trace.available plus the sum of all waiting step prices in the trace's subtree.
+	// Used to compute charge before signing a failure receipt.
+	ReadPendingRefund(ctx context.Context, traceID string) (int64, error)
+
 	// CommitRemoteSettlement atomically settles a remote-proxy call:
 	// releases the gross lock from the caller wallet, pays charge→proxyUserID and duty→feeRecipientID,
 	// returns the refund (gross−charge−duty) to the caller wallet, decrements owner.locked by taxable,

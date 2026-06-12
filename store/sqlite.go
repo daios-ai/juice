@@ -826,12 +826,12 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
-		                       args_hash,reply_hash,status,gross,net,fee,reason,started_at,created_at,signature)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		                       args_hash,reply_hash,status,gross,net,fee,charge,reason,started_at,created_at,signature)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		receipt.ID, receipt.IssuerUserID, receipt.TxID, receipt.TraceID, receipt.ActionID,
 		receipt.CallerUserID, receipt.ProcessID,
 		receipt.ArgsHash, receipt.ReplyHash, string(receipt.Status),
-		receipt.Gross, receipt.Net, receipt.Fee, receipt.Reason,
+		receipt.Gross, receipt.Net, receipt.Fee, receipt.Charge, receipt.Reason,
 		timeToStr(receipt.StartedAt), timeToStr(receipt.CreatedAt), receipt.Signature,
 	); err != nil {
 		return dbErr(err, label+": insert receipt")
@@ -2094,7 +2094,7 @@ func (s *DB) withTx(ctx context.Context, label string, fn func(*sql.Tx) error) e
 // ---- Receipts ----
 
 const receiptSelectCols = `id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
-		        args_hash,reply_hash,status,gross,net,fee,reason,started_at,created_at,signature`
+		        args_hash,reply_hash,status,gross,net,fee,charge,reason,started_at,created_at,signature`
 
 func scanReceipt(row *sql.Row, op string) (*kernel.Receipt, error) {
 	var r kernel.Receipt
@@ -2102,7 +2102,7 @@ func scanReceipt(row *sql.Row, op string) (*kernel.Receipt, error) {
 	err := row.Scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
 		&r.CallerUserID, &r.ProcessID,
 		&r.ArgsHash, &r.ReplyHash, &status,
-		&r.Gross, &r.Net, &r.Fee, &r.Reason, &startedAt, &createdAt, &r.Signature)
+		&r.Gross, &r.Net, &r.Fee, &r.Charge, &r.Reason, &startedAt, &createdAt, &r.Signature)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("receipt not found")
 	}
@@ -2113,6 +2113,31 @@ func scanReceipt(row *sql.Row, op string) (*kernel.Receipt, error) {
 	r.StartedAt = strToTime(startedAt)
 	r.CreatedAt = strToTime(createdAt)
 	return &r, nil
+}
+
+// ReadPendingRefund returns trace.available + Σ(waiting step prices in subtree).
+// This equals the refund that CommitFailedCall would issue, and is used to compute
+// charge = gross - refund before signing the failure receipt.
+func (s *DB) ReadPendingRefund(ctx context.Context, traceID string) (int64, error) {
+	var avail int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT available FROM traces WHERE id=?`, traceID).Scan(&avail); err != nil {
+		return 0, dbErr(err, "read_pending_refund: trace")
+	}
+	var stepSum int64
+	err := s.db.QueryRowContext(ctx, `
+		WITH RECURSIVE subtree(id) AS (
+		    SELECT id FROM traces WHERE id=?
+		    UNION ALL
+		    SELECT t.id FROM traces t JOIN subtree s ON t.parent_trace_id=s.id
+		)
+		SELECT COALESCE(SUM(st.price),0)
+		FROM steps st JOIN subtree su ON st.parent_trace_id=su.id
+		WHERE st.status='waiting'`, traceID).Scan(&stepSum)
+	if err != nil {
+		return 0, dbErr(err, "read_pending_refund: steps")
+	}
+	return avail + stepSum, nil
 }
 
 func (s *DB) ReadReceiptByTxID(ctx context.Context, txID string) (*kernel.Receipt, error) {

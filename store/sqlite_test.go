@@ -1935,3 +1935,50 @@ func TestListStatsByOwner(t *testing.T) {
 		t.Errorf("expected Uses=3, got %d", results[0].Uses)
 	}
 }
+
+func TestReadPendingRefund(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@refund-user", 1000)
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	p := newProcess(user.ID)
+	if err := db.CreateProcess(ctx, p, user.ID, 500); err != nil {
+		t.Fatal(err)
+	}
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRootCall(ctx, p.ID, root, 500); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a waiting step with price=100; this parks 100 from trace.available into trace.locked.
+	act := newAction(user.ID, "refund-act", 0, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	ptID := root.ID
+	step := &kernel.Step{
+		ID:                   uuid.New().String(),
+		ProcessID:            p.ID,
+		ParentTraceID:        &ptID,
+		RequiredCallerUserID: user.ID,
+		NextActionID:         act.ID,
+		Price:                100,
+		Status:               kernel.StepWaiting,
+		CreatedAt:            time.Now().UTC(),
+	}
+	if err := db.CreateStep(ctx, step); err != nil {
+		t.Fatal(err)
+	}
+
+	// trace.available=400, waiting step price=100 → refund = 500.
+	refund, err := db.ReadPendingRefund(ctx, root.ID)
+	if err != nil {
+		t.Fatalf("ReadPendingRefund: %v", err)
+	}
+	if refund != 500 {
+		t.Errorf("ReadPendingRefund: got %d, want 500 (trace.available=400 + step.price=100)", refund)
+	}
+}
