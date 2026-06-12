@@ -2138,3 +2138,113 @@ func TestFlow_UnderfundedFriendReject(t *testing.T) {
 	_ = privA
 }
 
+// TestFlow_UpstreamAuthSecrecy: action created with bearer auth credentials; the secret
+// must never appear in any read path (action JSON, manifest, transaction, receipt).
+func TestFlow_UpstreamAuthSecrecy(t *testing.T) {
+	const secretToken = "super-secret-bearer-token-xyz"
+
+	// Backend that echoes the Authorization header for verification.
+	var receivedAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k, _ := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	ownerID, ownerTok := makeUser(t, k, "@auth-owner")
+	callerID, callerTok := makeUser(t, k, "@auth-caller")
+	giveCredits(t, k, callerID, 100)
+
+	// Create action with bearer auth credentials via HTTP API.
+	createResp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name":          "secured-action",
+		"kind":          "http",
+		"price":         0,
+		"description":   "action with upstream auth",
+		"input_schema":  map[string]any{"type": "object"},
+		"output_schema": map[string]any{"type": "object"},
+		"source":        backend.URL,
+		"auth": map[string]any{
+			"scheme":  "bearer",
+			"secrets": map[string]any{"token": secretToken},
+		},
+	}, ownerTok)
+	if createResp.StatusCode != http.StatusCreated {
+		createResp.Body.Close()
+		t.Fatalf("create action: expected 201, got %d", createResp.StatusCode)
+	}
+	var actionBody map[string]any
+	decodeResponse(t, createResp, &actionBody)
+	actionID := actionBody["id"].(string)
+
+	// Activate the action and make it public.
+	pubTrue := true
+	if _, err := k.UpdateAction(context.Background(), ownerID, kernel.UpdateActionRequest{ID: actionID, Public: &pubTrue}); err != nil {
+		t.Fatalf("make public: %v", err)
+	}
+	if err := k.SetActive(context.Background(), ownerID, actionID, true); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+
+	// GET /v1/actions/{id} must NOT contain the secret.
+	getResp := httpDo(t, srv, "GET", "/v1/actions/"+actionID, nil, ownerTok)
+	if getResp.StatusCode != http.StatusOK {
+		getResp.Body.Close()
+		t.Fatalf("get action: expected 200, got %d", getResp.StatusCode)
+	}
+	var actionRaw json.RawMessage
+	decodeResponse(t, getResp, &actionRaw)
+	if strings.Contains(string(actionRaw), secretToken) {
+		t.Error("R9 violation: secret token appears in GET /v1/actions response")
+	}
+
+	// GET /v1/actions/{id}/manifest must NOT contain the secret (public+active action).
+	manifestResp := httpDo(t, srv, "GET", "/v1/actions/"+actionID+"/manifest", nil, ownerTok)
+	if manifestResp.StatusCode != http.StatusOK {
+		manifestResp.Body.Close()
+		t.Fatalf("get manifest: expected 200, got %d", manifestResp.StatusCode)
+	}
+	var manifestRaw json.RawMessage
+	decodeResponse(t, manifestResp, &manifestRaw)
+	if strings.Contains(string(manifestRaw), secretToken) {
+		t.Error("R9 violation: secret token appears in manifest response")
+	}
+
+	// Run the action — backend should receive the Authorization header.
+	runResult := httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"action": "@auth-owner/secured-action",
+		"args":   map[string]any{},
+	}, callerTok)
+	if runResult.StatusCode != http.StatusOK {
+		var body map[string]any
+		json.NewDecoder(runResult.Body).Decode(&body)
+		runResult.Body.Close()
+		t.Fatalf("run: expected 200, got %d — %v", runResult.StatusCode, body)
+	}
+	var runBody map[string]any
+	decodeResponse(t, runResult, &runBody)
+	txID := runBody["tx_id"].(string)
+
+	// Backend must have received the bearer token.
+	if receivedAuth != "Bearer "+secretToken {
+		t.Errorf("backend did not receive correct auth header: got %q, want %q",
+			receivedAuth, "Bearer "+secretToken)
+	}
+
+	// GET /v1/transactions/{id} must NOT contain the secret.
+	txResp := httpDo(t, srv, "GET", "/v1/transactions/"+txID, nil, callerTok)
+	if txResp.StatusCode != http.StatusOK {
+		txResp.Body.Close()
+		t.Fatalf("get tx: expected 200, got %d", txResp.StatusCode)
+	}
+	var txRaw json.RawMessage
+	decodeResponse(t, txResp, &txRaw)
+	if strings.Contains(string(txRaw), secretToken) {
+		t.Error("R9 violation: secret token appears in transaction response")
+	}
+}
+

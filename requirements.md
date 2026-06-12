@@ -267,7 +267,7 @@ Never active: non-JSON responses, streaming responses, multipart uploads, ambigu
 
 Draft import needs no API ownership proof. Public activation requires proof by well-known challenge, challenge in the OpenAPI document, or verified credential.
 
-Authentication to upstream APIs is per-action: the importer stores an auth config in `Action.source` — `{scheme, config, secrets}` — applied by a replaceable authenticator adapter at HTTP dispatch (§9). Secrets are write-only: never returned by any read path, never visible to scripts, never present in args, replies, logs, receipts, hashes, or manifests, and excluded from contract comparison. Supported schemes are adapter implementations (static header or query key, Basic, bearer, OAuth2 client-credentials with token caching, HMAC request signing); adding a scheme adds an implementation, not kernel semantics. Per-caller delegated authentication (e.g. OAuth authorization-code) is out of scope. Operations requiring it remain never-active.
+Authentication to upstream APIs is per-action: the importer stores an auth config in a dedicated write-only `auth_json` column — `{scheme, config, secrets}` — stored AES-256-GCM encrypted at rest; applied by a replaceable authenticator adapter at HTTP dispatch (§9). Secrets are write-only: never returned by any read path, never visible to scripts, never present in args, replies, logs, receipts, hashes, or manifests, and excluded from contract comparison. Implemented schemes: `header` (static header), `query` (query parameter), `bearer` (Authorization: Bearer), `basic` (HTTP Basic Auth). Deferred schemes: OAuth2 client-credentials with token caching, HMAC request signing — actions requiring them are imported inactive. Per-caller delegated authentication (e.g. OAuth authorization-code) is out of scope. Operations requiring it remain never-active.
 
 OpenAPI provenance:
 
@@ -688,7 +688,7 @@ Endpoint rules:
 | `POST /v1/steps`                                 | authenticated; creates a waiting step; requires `process_id`, `next_action_id`, `required_caller`, `partial_args`, `input_schema` |
 | `GET /v1/steps/{id}`                             | `CanReadStep`; returns step fields                                                                              |
 | `POST /v1/steps/{id}/complete`                   | `CanReadStep`; `args` required (`{}` valid); absent gives `ErrInvalidInput`; returns `result`, `tx_id`, `trace_id`, `step_id` |
-| `POST /v1/call`                                  | requires `args`; `{}` valid; absent gives `ErrInvalidInput`; action is `@owner/name`                            |
+| `POST /v1/run`                                   | requires `args`; `{}` valid; absent gives `ErrInvalidInput`; action is `@owner/name`                            |
 | `POST /v1/auth/logout`                           | refresh token body; missing/revoked gives `ErrUnauthenticated`                                                  |
 | `GET /v1/transactions`                           | transactions visible to the authenticated user under `CanReadTransaction`                                       |
 | `GET /v1/transactions/{id}`                      | full detail to parties; `ErrNotFound` to non-parties                                                            |

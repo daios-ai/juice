@@ -80,13 +80,20 @@ func (b *aesGCMBox) Open(aad, ciphertext string) (string, error) {
 
 // applyUpstreamAuth reads the decrypted auth JSON from action and applies it to headers/URL.
 // headers must be non-nil; rawURL is modified in-place for "query" scheme.
+// When box is nil, auth_json is treated as plaintext (dev/test mode with no encryption).
 func applyUpstreamAuth(action *kernel.Action, headers map[string]string, rawURL *string, box kernel.SecretBox) {
-	if action.AuthJSON == "" || box == nil {
+	if action.AuthJSON == "" {
 		return
 	}
-	plaintext, err := box.Open(action.ID, action.AuthJSON)
-	if err != nil {
-		return // fail closed: no auth applied, call will proceed unauthenticated
+	var plaintext string
+	if box != nil {
+		var err error
+		plaintext, err = box.Open(action.ID, action.AuthJSON)
+		if err != nil {
+			return // fail closed: no auth applied, call will proceed unauthenticated
+		}
+	} else {
+		plaintext = action.AuthJSON // stored as plaintext when no SecretBox configured
 	}
 	var auth kernel.AuthInput
 	if err := json.Unmarshal([]byte(plaintext), &auth); err != nil {
