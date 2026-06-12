@@ -5,12 +5,90 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/daios-ai/juice/log"
 	"github.com/google/uuid"
 )
 
 // ResetRunningSteps resets running steps (status=running, tx_id=null) back to waiting. Called at startup.
 func (k *Kernel) ResetRunningSteps(ctx context.Context) error {
 	return k.store.ResetRunningSteps(ctx)
+}
+
+// Recover settles interrupted calls and re-parks crashed step completions.
+// Must be called after SetSigningKey (buildReceipt requires the platform signing key).
+func (k *Kernel) Recover(ctx context.Context) error {
+	logger := k.log.With(ctx)
+
+	// A: Re-park running step-completion traces (completion trace exists but no tx).
+	orphanStepIDs, err := k.store.ListOrphanRunningStepIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, stepID := range orphanStepIDs {
+		if err := k.store.ResetStepAndRepark(ctx, stepID); err != nil {
+			logger.Error("recover.repark_failed", "step_id", stepID, "error", err)
+		}
+	}
+
+	// B: Reset remaining running steps without completion traces.
+	if err := k.store.ResetRunningSteps(ctx); err != nil {
+		return err
+	}
+
+	// C: Settle orphan traces deepest-first (each in its own tx; idempotent).
+	traces, err := k.store.ListOrphanTraces(ctx)
+	if err != nil {
+		return err
+	}
+	for _, trace := range traces {
+		if err := k.recoverTrace(ctx, logger, trace); err != nil {
+			logger.Error("recover.trace_failed", "trace_id", trace.ID, "error", err)
+		}
+	}
+	return nil
+}
+
+// recoverTrace settles a single orphan trace as a failure with reason "interrupted".
+func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Trace) error {
+	process, err := k.store.ReadProcess(ctx, trace.ProcessID)
+	if err != nil {
+		return err
+	}
+	action, err := k.store.ReadAction(ctx, trace.ActionID)
+	if err != nil || action == nil {
+		action = &Action{ID: trace.ActionID, Name: "unknown", OwnerUserID: trace.ActionOwnerID}
+	}
+
+	callerWalletKind := CallerTrace
+	callerWalletID := ""
+	if trace.ParentTraceID == nil {
+		callerWalletKind = CallerProcess
+		callerWalletID = process.ID
+	} else {
+		callerWalletID = *trace.ParentTraceID
+	}
+
+	now := time.Now().UTC()
+	ktx := &Transaction{
+		ID:           uuid.New().String(),
+		ProcessID:    trace.ProcessID,
+		TraceID:      trace.ID,
+		OwnerUserID:  process.OwnerUserID,
+		CallerUserID: trace.CallerUserID,
+		TargetUserID: trace.ActionOwnerID,
+		ActionID:     trace.ActionID,
+		ActionName:   action.Name,
+		Status:       TxFailure,
+		Gross:        trace.Available + trace.Locked,
+		Reason:       "interrupted",
+		StartedAt:    trace.CreatedAt,
+		EndedAt:      now,
+		ReplyJSON:    json.RawMessage("null"),
+	}
+
+	recoverErr := ErrInternal.Wrap("interrupted")
+	req := CallRequest{ProcessID: trace.ProcessID}
+	return k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, recoverErr)
 }
 
 // CreateStep creates a new waiting step. The step records a future Call that a designated caller can resume.

@@ -1508,6 +1508,20 @@ func (s *DB) ResetStep(ctx context.Context, stepID string) error {
 	return dbErr(err, "reset step")
 }
 
+// ListOrphanRunningStepIDs returns IDs of running steps that have a completion trace but no tx.
+// These need ResetStepAndRepark to drain the completion trace and re-park funds before restart.
+func (s *DB) ListOrphanRunningStepIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM steps WHERE status='running' AND tx_id IS NULL AND completion_trace_id IS NOT NULL`)
+	if err != nil {
+		return nil, dbErr(err, "list orphan running step ids")
+	}
+	return queryList(rows, "list orphan running step ids", func(scan func(...any) error) (string, error) {
+		var id string
+		return id, scan(&id)
+	})
+}
+
 // ResetStepAndRepark re-parks the step: it moves the completion trace's available funds back into
 // the parent trace's locked position (the original park), deletes the empty completion trace,
 // clears completion_trace_id, and resets the step to waiting. This prevents double-completion minting.

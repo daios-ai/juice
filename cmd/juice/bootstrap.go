@@ -24,10 +24,6 @@ const (
 func bootstrap(k *kernel.Kernel) error {
 	ctx := context.Background()
 
-	// Reset any steps that were left running by a prior crash.
-	if err := k.ResetRunningSteps(ctx); err != nil {
-		return fmt.Errorf("reset running steps: %w", err)
-	}
 	handle, err := k.GetConfig(ctx, configKeySuperuser)
 	if err != nil || handle == "" {
 		handle, err = firstBoot(ctx, k)
@@ -64,6 +60,11 @@ func bootstrap(k *kernel.Kernel) error {
 		return fmt.Errorf("read superuser: %w", err)
 	}
 	k.SetSigningKey(ed25519.PrivateKey(privKeyBytes), su.ID)
+
+	// Recover interrupted calls and re-park crashed step completions (after signing key is set).
+	if err := k.Recover(ctx); err != nil {
+		return fmt.Errorf("recover: %w", err)
+	}
 
 	for _, spec := range sysNativeSpecs {
 		if err := ensureSysNative(ctx, k, handle, spec); err != nil {
