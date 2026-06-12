@@ -128,13 +128,18 @@ func setupSys(t *testing.T, _ *kernel.Kernel, st kernel.Store) *kernel.User {
 	return setupUser(t, st, "@sys", 0)
 }
 
-func setupProcess(t *testing.T, k *kernel.Kernel, ownerID string, funds int64) (*kernel.Process, *kernel.Trace) {
+func setupProcess(t *testing.T, st kernel.Store, ownerID string, funds int64) *kernel.Process {
 	t.Helper()
-	p, tr, err := k.StartProcess(context.Background(), ownerID, ownerID, funds)
-	if err != nil {
-		t.Fatalf("StartProcess: %v", err)
+	p := &kernel.Process{
+		ID:          uuid.New().String(),
+		OwnerUserID: ownerID,
+		Status:      kernel.ProcessOpen,
+		CreatedAt:   time.Now().UTC(),
 	}
-	return p, tr
+	if err := st.CreateProcess(context.Background(), p, ownerID, funds); err != nil {
+		t.Fatalf("setupProcess: %v", err)
+	}
+	return p
 }
 
 type fakeScriptExec struct {
@@ -379,7 +384,7 @@ func TestLoginRejectsRemotePeer(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	_, err := k.RegisterRemoteKernel(ctx, sys.ID, "@peer", base64.RawURLEncoding.EncodeToString(pub), "https://peer.example.com")
+	_, err := k.AddPeer(ctx, sys.ID, "@peer", base64.RawURLEncoding.EncodeToString(pub), "https://peer.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,15 +403,13 @@ func TestStartAndEndProcess(t *testing.T) {
 
 	owner := setupUser(t, st, "@owner", 1000)
 
-	p, root, err := k.StartProcess(ctx, owner.ID, owner.ID, 500)
+	p := setupProcess(t, st, owner.ID, 500)
+	proc, err := st.ReadProcess(ctx, p.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Available != 500 {
-		t.Errorf("process.available: got %d, want 500", p.Available)
-	}
-	if root.ParentTraceID != nil {
-		t.Error("root trace must have nil ParentTraceID")
+	if proc.Available != 500 {
+		t.Errorf("process.available: got %d, want 500", proc.Available)
 	}
 
 	u, _ := st.ReadUser(ctx, owner.ID)
@@ -435,10 +438,7 @@ func TestReadProcessUnauthorized(t *testing.T) {
 	alice := setupUser(t, st, "@alice-proc", 500)
 	bob := setupUser(t, st, "@bob-proc", 0)
 
-	p, _, err := k.StartProcess(ctx, alice.ID, alice.ID, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := setupProcess(t, st, alice.ID, 100)
 
 	// Owner can read.
 	if _, err := k.ReadProcess(ctx, alice.ID, p.ID); err != nil {
@@ -468,7 +468,7 @@ func TestProcessAvailablePlusLockedInvariant(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
+	p := setupProcess(t, st, alice.ID, 500)
 
 	checkInvariant := func(tag string, wantSum int64) {
 		t.Helper()
@@ -491,7 +491,7 @@ func TestProcessAvailablePlusLockedInvariant(t *testing.T) {
 	checkInvariant("initial", 500)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: alice.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: alice.ID, ActionName: "svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -500,16 +500,6 @@ func TestProcessAvailablePlusLockedInvariant(t *testing.T) {
 	proc, _ := st.ReadProcess(ctx, p.ID)
 	if proc.Locked != 0 {
 		t.Errorf("after call: locked must be 0, got %d", proc.Locked)
-	}
-
-	if err := k.FundProcess(ctx, alice.ID, p.ID, 300); err != nil {
-		t.Fatal(err)
-	}
-	checkInvariant("after fund", -1)
-
-	proc, _ = st.ReadProcess(ctx, p.ID)
-	if proc.Locked != 0 {
-		t.Errorf("after fund: locked must be 0, got %d", proc.Locked)
 	}
 
 	if err := k.EndProcess(ctx, alice.ID, p.ID); err != nil {
@@ -541,13 +531,9 @@ func TestUserLockedBalanceInvariant(t *testing.T) {
 
 	checkUser("initial", 1000, 0)
 
-	p, root, _ := k.StartProcess(ctx, alice.ID, alice.ID, 500)
-	checkUser("after StartProcess(500)", 500, 500)
-
-	if err := k.FundProcess(ctx, alice.ID, p.ID, 200); err != nil {
-		t.Fatal(err)
-	}
-	checkUser("after FundProcess(200)", 300, 700)
+	// CreateProcess: deducts 500 from user.available → user.locked.
+	p := setupProcess(t, st, alice.ID, 500)
+	checkUser("after CreateProcess(500)", 500, 500)
 
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "svc",
@@ -559,16 +545,14 @@ func TestUserLockedBalanceInvariant(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 
 	if _, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: alice.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: alice.ID, ActionName: "svc", Args: map[string]any{},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Call settles: user.locked decreases by gross (100); alice also receives net as target.
+	// Call settles: gross (100) consumed from process; alice also receives net as target.
+	// user.locked should still be 500 (process funds remain locked until EndProcess).
 	u, _ := st.ReadUser(ctx, alice.ID)
-	if u.Locked != 600 {
-		t.Errorf("after Call: user.locked got %d, want 600", u.Locked)
-	}
 	if u.Locked < 0 {
 		t.Errorf("after Call: user.locked is negative: %d", u.Locked)
 	}
@@ -576,7 +560,7 @@ func TestUserLockedBalanceInvariant(t *testing.T) {
 	if err := k.EndProcess(ctx, alice.ID, p.ID); err != nil {
 		t.Fatal(err)
 	}
-	// EndProcess returns process.available (600) to user; user.locked must reach 0.
+	// EndProcess returns process.available to user; user.locked must reach 0.
 	u, _ = st.ReadUser(ctx, alice.ID)
 	if u.Locked != 0 {
 		t.Errorf("after EndProcess: user.locked got %d, want 0", u.Locked)
@@ -667,9 +651,9 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
+	p := setupProcess(t, st, buyer.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: buyer.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: provider.ID, ActionName: "rate-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -717,9 +701,9 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
+	p := setupProcess(t, st, buyer.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: buyer.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: provider.ID, ActionName: "rerate-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -757,9 +741,9 @@ func TestRateTransactionOwnerCallingOwnActionCanRate(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 100)
+	p := setupProcess(t, st, owner.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: owner.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: owner.ID, ActionName: "self-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -784,7 +768,7 @@ func TestCallPreconditionOrderParentTraceAfterAction(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@ptrace-owner", 100)
-	p, _, _ := k.StartProcess(ctx, owner.ID, owner.ID, 50)
+	p := setupProcess(t, st, owner.ID, 50)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID:      owner.ID,
@@ -839,9 +823,9 @@ func TestReceiptCreatedWithCall(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 200)
+	p := setupProcess(t, st, caller.ID, 200)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: caller.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: caller.ID, ActionName: "rcpt-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -877,9 +861,9 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 200)
+	p := setupProcess(t, st, owner.ID, 200)
 	reply, _ := k.Call(ctx, kernel.CallRequest{
-		CallerID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: owner.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: owner.ID, ActionName: "fail-svc", Args: map[string]any{},
 	})
 
@@ -936,9 +920,9 @@ func TestReadTransactionPartyAccess(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, caller.ID, caller.ID, 100)
+	p := setupProcess(t, st, caller.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: caller.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: owner.ID, ActionName: "pvd-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -985,10 +969,10 @@ func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	if err := st.CreateAction(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	p, root, _ := k.StartProcess(ctx, owner.ID, owner.ID, 50)
+	p := setupProcess(t, st, owner.ID, 50)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: owner.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: owner.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: owner.ID, ActionName: "no-receipt", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrInvalidState) {
@@ -1055,9 +1039,9 @@ func TestRatingRecordCreated(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
+	p := setupProcess(t, st, buyer.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: buyer.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: provider.ID, ActionName: "rr-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1102,9 +1086,9 @@ func TestRatingDuplicateRejected(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
+	p := setupProcess(t, st, buyer.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: buyer.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: provider.ID, ActionName: "dup-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1135,9 +1119,9 @@ func TestTransactionViewEmbeddedRating(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
+	p := setupProcess(t, st, buyer.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: buyer.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: provider.ID, ActionName: "tv-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1201,15 +1185,11 @@ func TestTransactionViewEmbeddedRating(t *testing.T) {
 
 func TestZeroCreditProcess(t *testing.T) {
 	st := newTestStore(t)
-	k := newTestKernel(st)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@zero-owner", 100)
 
-	p, _, err := k.StartProcess(ctx, owner.ID, owner.ID, 0)
-	if err != nil {
-		t.Fatalf("StartProcess with 0 funds: %v", err)
-	}
+	p := setupProcess(t, st, owner.ID, 0)
 
 	u, _ := st.ReadUser(ctx, owner.ID)
 	if u.Available != 100 {
@@ -1400,19 +1380,6 @@ func TestCreateActionSubjectMismatchRejected(t *testing.T) {
 	}
 }
 
-func TestStartProcessSubjectMismatchRejected(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-
-	userA := setupUser(t, st, "@user-a-proc", 100)
-	userB := setupUser(t, st, "@user-b-proc", 0)
-
-	_, _, err := k.StartProcess(ctx, userA.ID, userB.ID, 0)
-	if !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("expected ErrUnauthorized when subject != owner, got %v", err)
-	}
-}
 
 // ---- OpenAPI well-known ownership proof tests ----
 
@@ -1528,9 +1495,9 @@ func TestSuperuserListTransactions(t *testing.T) {
 	if err := st.CreateAction(ctx, a); err != nil {
 		t.Fatalf("CreateAction: %v", err)
 	}
-	p, root, _ := k.StartProcess(ctx, buyer.ID, buyer.ID, 100)
+	p := setupProcess(t, st, buyer.ID, 100)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: buyer.ID, ProcessID: p.ID, ParentTraceID: root.ID,
+		CallerID: buyer.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: provider.ID, ActionName: "su-svc", Args: map[string]any{},
 	})
 	if err != nil {

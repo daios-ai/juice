@@ -9,27 +9,21 @@ import (
 )
 
 func init() {
-	rootCmd.AddCommand(callCmd())
+	rootCmd.AddCommand(runCmd())
 }
 
-func callCmd() *cobra.Command {
-	var processID, parentTraceID, actionRef, argsStr string
+func runCmd() *cobra.Command {
+	var actionRef, argsStr string
 	cmd := &cobra.Command{
-		Use:   "call",
-		Short: "Call an action within a process",
+		Use:   "run",
+		Short: "Run an action (creates a process, calls the action, closes the process)",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				args, err := readJSONArg(argsStr)
 				if err != nil {
 					return fmt.Errorf("invalid --args: %w", err)
 				}
-				reply, err := k.Call(context.Background(), kernel.CallRequest{
-					CallerID:      callerID,
-					ProcessID:     processID,
-					ParentTraceID: parentTraceID,
-					ActionRef:     actionRef,
-					Args:          args,
-				})
+				reply, err := k.Run(context.Background(), callerID, actionRef, args)
 				if err != nil {
 					return err
 				}
@@ -47,11 +41,8 @@ func callCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&processID, "process", "", "Process ID (required)")
-	cmd.Flags().StringVar(&parentTraceID, "trace", "", "Parent trace ID (defaults to process root)")
 	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference as @owner/name (required)")
 	cmd.Flags().StringVar(&argsStr, "args", "{}", "JSON-encoded arguments or @file.json")
-	_ = cmd.MarkFlagRequired("process")
 	_ = cmd.MarkFlagRequired("action")
 	return cmd
 }

@@ -107,7 +107,7 @@ func runRemoteAdd(baseURLArg string) error {
 		}
 		localHandle := "@" + parsed.Host
 
-		u, err := k.RegisterRemoteKernel(ctx, operatorID, localHandle, meta.PublicKey, meta.BaseURL)
+		u, err := k.CreateOrUpdateProxyPeer(ctx, localHandle, meta.PublicKey, meta.BaseURL)
 		if err != nil {
 			return fmt.Errorf("register remote kernel: %w", err)
 		}
@@ -118,16 +118,16 @@ func runRemoteAdd(baseURLArg string) error {
 
 func runRemoteList(_ *cobra.Command, _ []string) error {
 	return withSuperuser(func(k *kernel.Kernel, _ string) error {
-		remotes, err := k.ListRemoteKernels(context.Background())
+		peers, err := k.ListPeers(context.Background())
 		if err != nil {
 			return err
 		}
-		if len(remotes) == 0 {
+		if len(peers) == 0 {
 			fmt.Println("No remote kernels registered.")
 			return nil
 		}
 		fmt.Printf("%-20s %-36s %s\n", "HANDLE", "ID", "BASE_URL")
-		for _, u := range remotes {
+		for _, u := range peers {
 			fmt.Printf("%-20s %-36s %s\n", u.Handle, u.ID, u.RemoteBaseURL)
 		}
 		return nil

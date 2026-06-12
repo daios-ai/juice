@@ -38,8 +38,7 @@ func TestTransactionRate(t *testing.T) {
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 
-	p, root, _ := env.k.StartProcess(ctx, owner.ID, owner.ID, 0)
-	_ = root
+	p := setupProcessCmd(t, env, owner.ID, 0)
 
 	// No calls made, so no transactions to rate.
 	// Verify that rating a non-existent tx returns an error.
@@ -57,10 +56,7 @@ func TestTransactionRating(t *testing.T) {
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@rater", Email: "r@e.com", Password: "p",
 	})
-	p, root, err := env.k.StartProcess(ctx, owner.ID, owner.ID, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := setupProcessCmd(t, env, owner.ID, 0)
 
 	// Create and enable a wasm action — but since we have no script executor, use HTTP kind.
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
@@ -70,7 +66,6 @@ func TestTransactionRating(t *testing.T) {
 		Source:      "http://example.com",
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
-	_ = root
 
 	// List — should still be 0 since no calls made.
 	txs, _ := env.k.ListTransactions(ctx, owner.ID, kernel.TxFilter{Limit: 10})

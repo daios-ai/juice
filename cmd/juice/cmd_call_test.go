@@ -25,7 +25,7 @@ func TestCallClosedProcess(t *testing.T) {
 	owner.PasswordHash = hash
 	_ = env.db.CreateUser(ctx, owner)
 
-	p, root, _ := env.k.StartProcess(ctx, owner.ID, owner.ID, 100)
+	p := setupProcessCmd(t, env, owner.ID, 100)
 	_ = env.k.EndProcess(ctx, owner.ID, p.ID)
 
 	// Create an HTTP action — Call will fail before exec (closed process).
@@ -36,12 +36,12 @@ func TestCallClosedProcess(t *testing.T) {
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 
 	_, err := env.k.Call(ctx, kernel.CallRequest{
-		CallerID:     owner.ID,
-		ProcessID:     p.ID,
-		ParentTraceID: root.ID,
-		TargetUserID:  owner.ID,
-		ActionName:    "echo",
-		Args:          map[string]any{},
+		CallerID:   owner.ID,
+		ProcessID:  p.ID,
+		IsRootCall: true,
+		TargetUserID: owner.ID,
+		ActionName:   "echo",
+		Args:         map[string]any{},
 	})
 	if err == nil {
 		t.Error("expected error calling on closed process")
@@ -55,7 +55,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@poorowner", Email: "poor@example.com", Password: "p",
 	})
-	p, root, _ := env.k.StartProcess(ctx, owner.ID, owner.ID, 0)
+	p := setupProcessCmd(t, env, owner.ID, 0)
 
 	_, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "expensive",
@@ -70,11 +70,11 @@ func TestCallInsufficientFunds(t *testing.T) {
 
 	_, err = env.k.Call(ctx, kernel.CallRequest{
 		CallerID:     owner.ID,
-		ProcessID:     p.ID,
-		ParentTraceID: root.ID,
-		TargetUserID:  owner.ID,
-		ActionName:    "expensive",
-		Args:          map[string]any{},
+		ProcessID:    p.ID,
+		IsRootCall:   true,
+		TargetUserID: owner.ID,
+		ActionName:   "expensive",
+		Args:         map[string]any{},
 	})
 	if err == nil {
 		t.Error("expected insufficient funds error")

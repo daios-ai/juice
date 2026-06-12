@@ -19,8 +19,9 @@ type CallRequest struct {
 	// ProcessID is the budgeted execution context.
 	ProcessID string
 	// ParentTraceID is the trace from which this call originates.
-	// For top-level calls it is the process root trace ID.
-	// For step-completion calls it may reference a trace in another process.
+	// For root calls it is set by Run() to the process ID (no parent trace).
+	// For subcalls it is the parent trace ID.
+	// For step-completion calls it is set by BeginStepCall's trace.
 	ParentTraceID string
 	// ActionRef is the action reference in "@owner/name" format.
 	// When set, it is parsed into TargetUserID and ActionName inside Call.
@@ -32,15 +33,14 @@ type CallRequest struct {
 	ActionName string
 	// Args is the JSON-decoded input arguments.
 	Args map[string]any
-	// StepCompletion, when true, bypasses the process-owner precondition check (precondition 3).
-	// Set only by CompleteStep; the step already verified required_caller_user_id matches.
-	StepCompletion bool
+	// IsRootCall, when true, uses BeginRootCall (process wallet) instead of BeginSubcall.
+	IsRootCall bool
+	// StepID, if non-empty, causes CommitCall/CommitFailedCall to atomically mark the step done.
+	// Also signals CallerStep wallet kind (BeginStepCall was used, no lock to release).
+	StepID string
 	// IdempotencyRecordID, if non-empty, causes CommitCall/CommitFailedCall to atomically
 	// mark the pending idempotency record as complete. Set only by federation handlers.
 	IdempotencyRecordID string
-	// StepID, if non-empty, causes CommitCall/CommitFailedCall to atomically mark the step done.
-	// Set only by CompleteStep.
-	StepID string
 }
 
 // CallReply is the response from a successful Call().
@@ -66,11 +66,14 @@ func ParseActionRef(ref string) (ownerHandle, actionName string, err error) {
 }
 
 // Call executes the central kernel transition.
-// Preconditions are checked in order per Section 5.1 of the requirements.
+// Preconditions are checked in order per §5.1 of the requirements.
+// For root calls (req.IsRootCall), the process must already have been created by Run().
+// For subcalls, the parent trace must have sufficient available funds.
+// For step-completion calls, BeginStepCall must have been called before invoking Call.
 func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) {
 	logger := k.log.With(ctx)
 
-	// 1. Subject must be authenticated: non-empty, exists, and not suspended.
+	// 1. Subject must be authenticated.
 	if req.CallerID == "" {
 		return nil, ErrUnauthenticated.Wrap("subject is required")
 	}
@@ -87,17 +90,18 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInvalidState.Wrap("process is closed")
 	}
 
-	// 3. Resolve parent trace and validate process-use authority. Also resolves an empty
-	// ParentTraceID to the process root trace so it is available for trace creation below.
-	// Capture the original value: a non-empty supplied trace is validated for existence in
-	// step 8 (after action resolution), not here, to preserve the required precondition order.
-	suppliedParentTraceID := req.ParentTraceID
-	if err := k.resolveAndValidateParentTrace(ctx, &req, process); err != nil {
-		return nil, err
+	// 3. For subcalls: resolve parent trace and validate process-use authority.
+	// Root calls and step-completion calls skip this check (caller authority established earlier).
+	var parentTrace *Trace
+	if !req.IsRootCall && req.StepID == "" {
+		pt, resolveErr := k.resolveAndValidateParentTrace(ctx, &req, process)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		parentTrace = pt
 	}
 
 	// 4. Resolve action.
-	// If ActionRef is set ("@owner/name"), parse it into TargetUserID and ActionName.
 	if req.ActionRef != "" {
 		var parseErr error
 		req.TargetUserID, req.ActionName, parseErr = ParseActionRef(req.ActionRef)
@@ -107,19 +111,17 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 	target, err := k.store.ReadUserByHandle(ctx, req.TargetUserID)
 	if err != nil || target == nil {
-		// Also try reading by ID.
 		target, err = k.store.ReadUser(ctx, req.TargetUserID)
 		if err != nil || target == nil {
 			return nil, ErrNotFound.Wrap("target user not found")
 		}
 	}
-
 	action, err := k.store.ReadActionByOwnerName(ctx, target.ID, req.ActionName)
 	if err != nil || action == nil {
 		return nil, ErrNotFound.Wrapf("action %s/%s not found", req.TargetUserID, req.ActionName)
 	}
 
-	// 5. CanCall(process.owner, action) — active(a) ∧ (public(a) ∨ owner = action.owner)
+	// 5. CanCall(process.owner, action)
 	if !canCall(process.OwnerUserID, action) {
 		if !action.Active {
 			return nil, ErrInvalidState.Wrap("action is inactive")
@@ -127,45 +129,76 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrUnauthorized.Wrap("call permission denied")
 	}
 
-	// 7. Validate input schema before locking funds.
+	// 6. Validate input schema.
 	if err := ValidateInput(action.InputSchema, req.Args); err != nil {
 		return nil, err
 	}
 
-	// 8. Check process has sufficient available funds.
-	if process.Available < action.Price {
-		return nil, ErrInsufficientFunds.Wrapf("process has %d credits, action costs %d", process.Available, action.Price)
-	}
-
-	// 9. Validate supplied parent trace (deferred from step 3 for owner callers so that
-	// action-not-found fires before trace-not-found per the required precondition order).
-	if suppliedParentTraceID != "" && (req.StepCompletion || process.OwnerUserID == req.CallerID) {
-		if err := k.verifySuppliedParentTrace(ctx, suppliedParentTraceID, req.ProcessID, req.StepCompletion); err != nil {
-			return nil, err
+	// 7. Funds check (step calls pre-funded by BeginStepCall; no check needed).
+	if req.StepID == "" {
+		if req.IsRootCall {
+			if process.Available < action.Price {
+				return nil, ErrInsufficientFunds.Wrapf("process has %d credits, action costs %d", process.Available, action.Price)
+			}
+		} else {
+			// For subcalls: owner callers deferred the trace load to here (after the action check).
+			if parentTrace == nil && req.ParentTraceID != "" {
+				pt, err := k.store.ReadTrace(ctx, req.ParentTraceID)
+				if err != nil {
+					return nil, ErrInvalidInput.Wrap("parent trace not found")
+				}
+				if pt.ProcessID != process.ID {
+					return nil, ErrInvalidInput.Wrap("parent trace belongs to a different process")
+				}
+				parentTrace = pt
+			}
+			if parentTrace != nil && parentTrace.Available < action.Price {
+				return nil, ErrInsufficientFunds.Wrapf("parent trace has %d credits, action costs %d", parentTrace.Available, action.Price)
+			}
 		}
 	}
 
-	// Kernel must be bootstrapped before any call can be committed.
+	// Kernel must be bootstrapped.
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
 
-	// 10–11. Atomically lock funds and create child trace.
+	// 8. Atomically lock funds and create child trace.
 	now := time.Now().UTC()
-	s := req.ParentTraceID
-	parentTraceID := &s
+	var parentTracePtr *string
+	if req.ParentTraceID != "" {
+		s := req.ParentTraceID
+		parentTracePtr = &s
+	}
 	trace := &Trace{
 		ID:            uuid.New().String(),
 		ProcessID:     req.ProcessID,
-		ParentTraceID: parentTraceID,
+		ParentTraceID: parentTracePtr,
 		ActionOwnerID: action.OwnerUserID,
 		CreatedAt:     now,
 	}
-	if err := k.store.BeginCall(ctx, req.ProcessID, trace, action.Price); err != nil {
-		if errors.Is(err, ErrInsufficientFunds) || errors.Is(err, ErrInvalidState) {
-			return nil, err
+
+	callerWalletID, callerWalletKind := k.callerWallet(req, process, parentTrace)
+
+	switch {
+	case req.StepID != "":
+		// BeginStepCall was already called by CompleteStep; skip BeginRootCall/BeginSubcall.
+		// trace was created by BeginStepCall; use the trace ID from req.
+		trace.ID = req.ParentTraceID // for step calls, ParentTraceID IS the new trace (set by CompleteStep)
+	case req.IsRootCall:
+		if err := k.store.BeginRootCall(ctx, req.ProcessID, trace, action.Price); err != nil {
+			if errors.Is(err, ErrInsufficientFunds) || errors.Is(err, ErrInvalidState) {
+				return nil, err
+			}
+			return nil, ErrInternal.Wrap("could not begin root call")
 		}
-		return nil, ErrInternal.Wrap("could not begin call")
+	default:
+		if err := k.store.BeginSubcall(ctx, req.ParentTraceID, trace, action.Price); err != nil {
+			if errors.Is(err, ErrInsufficientFunds) {
+				return nil, err
+			}
+			return nil, ErrInternal.Wrap("could not begin subcall")
+		}
 	}
 
 	ctx = log.WithProcessID(ctx, req.ProcessID)
@@ -175,92 +208,82 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	logger = k.log.With(ctx)
 	logger.Info("call.start", "action", action.Name, "price", action.Price)
 
-	// Prepare transaction skeleton (fee computed post-execution once subCost is known).
 	txID := uuid.New().String()
-	tx := &Transaction{
-		ID:            txID,
-		ProcessID:     req.ProcessID,
-		TraceID:       trace.ID,
-		ParentTraceID: req.ParentTraceID,
-		OwnerUserID:   process.OwnerUserID,
-		CallerUserID: req.CallerID,
-		TargetUserID:  target.ID,
+	ktx := &Transaction{
+		ID:             txID,
+		ProcessID:      req.ProcessID,
+		TraceID:        trace.ID,
+		ParentTraceID:  req.ParentTraceID,
+		OwnerUserID:    process.OwnerUserID,
+		CallerUserID:   req.CallerID,
+		TargetUserID:   target.ID,
 		ActionID:       action.ID,
 		ActionName:     action.Name,
 		RemoteActionID: action.RemoteActionID,
 		Status:         TxFailure,
-		Gross:         0, // will be set on success
-		Net:           0,
-		Fee:           0,
-		StartedAt:     now,
+		Gross:          action.Price,
+		StartedAt:      now,
 	}
-
 	argsJSON, _ := json.Marshal(req.Args)
-	tx.ArgsJSON = json.RawMessage(argsJSON)
+	ktx.ArgsJSON = json.RawMessage(argsJSON)
 
-	// 12. Execute. Dispatch is based on action.Kind; KindRemoteProxy is handled inside execute().
+	// 9. Execute.
 	started := time.Now()
-	var (
-		reply             map[string]any
-		subCost           int64
-		remoteReceiptHash string
-		execErr           error
-	)
-	reply, subCost, remoteReceiptHash, execErr = k.execute(ctx, action, req.Args, trace, action.OwnerUserID, req.CallerID, process.OwnerUserID)
-	if remoteReceiptHash != "" {
-		tx.RemoteReceiptHash = sha256Hex(remoteReceiptHash)
-		tx.RemoteReceiptJSON = remoteReceiptHash
+	reply, remoteReceiptJSON, execErr := k.execute(ctx, action, req.Args, trace, action.OwnerUserID, req.CallerID, process.OwnerUserID)
+	if remoteReceiptJSON != "" {
+		ktx.RemoteReceiptHash = sha256Hex(remoteReceiptJSON)
+		ktx.RemoteReceiptJSON = remoteReceiptJSON
 	}
 	latency := time.Since(started).Seconds()
-	tx.EndedAt = time.Now().UTC()
+	ktx.EndedAt = time.Now().UTC()
 
-	// Handle execution failure: refund and record atomically.
 	if execErr != nil {
-		tx.Status = TxFailure
-		tx.Reason = execErr.Error()
-		if err := k.settleFailedCall(ctx, logger, tx, req, action, latency, execErr); err != nil {
+		ktx.Status = TxFailure
+		ktx.Reason = execErr.Error()
+		if err := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, execErr); err != nil {
 			return nil, err
 		}
 		logger.Warn("call.failed", "action", action.Name, "error", execErr)
 		return nil, execErr
 	}
 
-	// 13. Validate output schema.
+	// 10. Validate output schema.
 	if schemaErr := ValidateInput(action.OutputSchema, any(reply)); schemaErr != nil {
-		tx.Status = TxFailure
-		tx.Reason = "output schema violation: " + schemaErr.Error()
-		if err := k.settleFailedCall(ctx, logger, tx, req, action, latency, schemaErr); err != nil {
+		ktx.Status = TxFailure
+		ktx.Reason = "output schema violation: " + schemaErr.Error()
+		if err := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, schemaErr); err != nil {
 			return nil, err
 		}
 		return nil, schemaErr
 	}
 
-	// 14 & 15. Record transaction, settle payment, update trace cost/latency, and upsert stats — all atomic.
-	// VAT fee: each kernel taxes only the value it adds (gross minus direct sub-call cost).
-	taxable := action.Price - subCost
-	if taxable < 0 {
-		taxable = 0
+	// 11. Read trace.available post-execution — this is the taxable amount.
+	// trace.available decreases with each subcall (BeginSubcall) and step park (CreateStep).
+	postTrace, readErr := k.store.ReadTrace(ctx, trace.ID)
+	if readErr != nil {
+		// If we can't read the trace, settle as failure to avoid fund loss.
+		ktx.Status = TxFailure
+		ktx.Reason = "could not read trace post-execution"
+		_ = k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, readErr)
+		return nil, ErrInternal.Wrap("could not read trace")
 	}
-	net, fee := ComputeFee(taxable, action.Price, k.cfg.FeeBPS)
+	taxable := postTrace.Available
+	net, fee := ComputeFee(taxable, k.cfg.FeeBPS)
+
 	replyJSON, _ := json.Marshal(reply)
-	tx.ReplyJSON = json.RawMessage(replyJSON)
-	tx.Status = TxSuccess
-	tx.Gross = action.Price
-	tx.Net = net
-	tx.Fee = fee
-	stats := k.computeStats(ctx, action.ID, tx, latency)
-	receipt, receiptErr := k.buildReceipt(tx)
+	ktx.ReplyJSON = json.RawMessage(replyJSON)
+	ktx.Status = TxSuccess
+	ktx.Net = net
+	ktx.Fee = fee
+	stats := k.computeStats(ctx, action.ID, ktx, latency)
+	receipt, receiptErr := k.buildReceipt(ktx)
 	if receiptErr != nil {
-		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
-			logger.Error("call.refund_failed_on_receipt_error", "action", action.Name, "refund_error", refundErr)
-		}
+		ktx.Status = TxFailure
+		ktx.Reason = "could not build receipt"
+		_ = k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, receiptErr)
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
-	if err := k.store.CommitCall(ctx, tx, receipt, req.ProcessID, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.StepID); err != nil {
-		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
-			logger.Error("call.refund_failed", "action", action.Name, "commit_error", err, "refund_error", refundErr)
-			return nil, ErrInternal.Wrap("could not refund funds after failed commit")
-		}
+	if err := k.store.CommitCall(ctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.StepID); err != nil {
 		return nil, ErrInternal.Wrap("could not commit transaction")
 	}
 
@@ -275,6 +298,20 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}, nil
 }
 
+// callerWallet returns the callerWalletID and callerWalletKind for CommitCall/CommitFailedCall.
+func (k *Kernel) callerWallet(req CallRequest, process *Process, parentTrace *Trace) (id, kind string) {
+	if req.StepID != "" {
+		return "", CallerStep
+	}
+	if req.IsRootCall {
+		return process.ID, CallerProcess
+	}
+	if parentTrace != nil {
+		return parentTrace.ID, CallerTrace
+	}
+	return process.ID, CallerProcess
+}
+
 // canCall returns true iff the action is callable by a process owned by ownerID.
 // CanCall(ownerID, a) := active(a) ∧ (public(a) ∨ ownerID = a.OwnerUserID)
 func canCall(ownerID string, action *Action) bool {
@@ -282,32 +319,32 @@ func canCall(ownerID string, action *Action) bool {
 }
 
 // execute dispatches to the correct execution backend.
-// Returns (result, subCost, remoteReceiptHash, error). remoteReceiptHash is non-empty only
-// for successful KindRemoteProxy calls and holds the raw receipt JSON from the remote kernel.
-// targetID is the action's owner; callerID is the call caller; ownerUserID is the process owner.
-func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID, callerID, ownerUserID string) (map[string]any, int64, string, error) {
+// Returns (result, remoteReceiptJSON, error). remoteReceiptJSON is non-empty only
+// for KindRemoteProxy calls. subCost is no longer tracked here — trace.Available
+// decreases atomically via BeginSubcall for each child call, so taxable = trace.Available.
+func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID, callerID, ownerUserID string) (map[string]any, string, error) {
 	switch action.Kind {
 	case KindHTTP:
 		if k.http == nil {
-			return nil, 0, "", ErrInvalidState.Wrap("HTTP executor not configured")
+			return nil, "", ErrInvalidState.Wrap("HTTP executor not configured")
 		}
 		res, err := k.http.Execute(ctx, action, args)
-		return res, 0, "", err
+		return res, "", err
 	case KindWasm:
-		res, cost, err := k.executeWasm(ctx, action, args, trace, targetID)
-		return res, cost, "", err
+		res, err := k.executeWasm(ctx, action, args, trace, targetID)
+		return res, "", err
 	case KindNative:
 		res, err := k.executeNative(ctx, action, args, targetID, callerID, ownerUserID, trace.ProcessID, trace.ID)
-		return res, 0, "", err
+		return res, "", err
 	case KindRemoteProxy:
 		if fe, ok := k.http.(FederationExecutor); ok {
 			idempotencyKey := uuid.New().String()
 			res, receiptJSON, err := fe.ExecuteFederation(ctx, action.Source, idempotencyKey, args)
-			return res, 0, receiptJSON, err
+			return res, receiptJSON, err
 		}
-		return nil, 0, "", ErrInvalidState.Wrap("federation executor not configured")
+		return nil, "", ErrInvalidState.Wrap("federation executor not configured")
 	default:
-		return nil, 0, "", ErrInvalidState.Wrapf("unknown action kind %q", action.Kind)
+		return nil, "", ErrInvalidState.Wrapf("unknown action kind %q", action.Kind)
 	}
 }
 
@@ -321,33 +358,32 @@ func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[str
 }
 
 // executeWasm runs a compiled WASM artifact.
-// Returns (result, subCost, error) where subCost is the gross paid to direct sub-calls during execution.
-func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID string) (result map[string]any, subCost int64, execErr error) {
+func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID string) (result map[string]any, execErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			execErr = ErrExecutionFailed.Wrapf("wasm panic: %v", r)
 		}
 	}()
 	if k.scripts == nil {
-		return nil, 0, ErrInvalidState.Wrap("script executor not configured")
+		return nil, ErrInvalidState.Wrap("script executor not configured")
 	}
 
 	inputJSON, err := json.Marshal(args)
 	if err != nil {
-		return nil, 0, ErrInvalidInput.Wrap("could not serialize args")
+		return nil, ErrInvalidInput.Wrap("could not serialize args")
 	}
 
 	wasmBytes := []byte(action.Source)
 	if action.WasmArtifact != "" {
 		decoded, decErr := base64.StdEncoding.DecodeString(action.WasmArtifact)
 		if decErr != nil {
-			return nil, 0, ErrExecutionFailed.Wrapf("wasm artifact decode failed: %v", decErr)
+			return nil, ErrExecutionFailed.Wrapf("wasm artifact decode failed: %v", decErr)
 		}
 		wasmBytes = decoded
 	}
 	artifact, _, err := k.scripts.Compile(ctx, wasmBytes)
 	if err != nil {
-		return nil, 0, ErrExecutionFailed.Wrapf("wasm compile failed: %v", err)
+		return nil, ErrExecutionFailed.Wrapf("wasm compile failed: %v", err)
 	}
 
 	host := &kernelHostFunctions{
@@ -360,15 +396,15 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 	outputJSON, err := k.scripts.Execute(ctx, artifact, inputJSON, host)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return nil, 0, ErrTimeout.Wrapf("wasm execution timed out: %v", err)
+			return nil, ErrTimeout.Wrapf("wasm execution timed out: %v", err)
 		}
-		return nil, 0, ErrExecutionFailed.Wrapf("wasm execution failed: %v", err)
+		return nil, ErrExecutionFailed.Wrapf("wasm execution failed: %v", err)
 	}
 
 	if err := json.Unmarshal(outputJSON, &result); err != nil {
-		return nil, 0, ErrExecutionFailed.Wrap("wasm output is not valid JSON")
+		return nil, ErrExecutionFailed.Wrap("wasm output is not valid JSON")
 	}
-	return result, host.subCost, nil
+	return result, nil
 }
 
 // kernelHostFunctions implements HostFunctions using the kernel itself.
@@ -378,7 +414,6 @@ type kernelHostFunctions struct {
 	processID string
 	traceID   string
 	targetID  string // action owner; used as CallerID for subcalls
-	subCost   int64  // gross paid to direct sub-calls; used for VAT fee computation
 }
 
 func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJSON []byte) ([]byte, error) {
@@ -401,7 +436,6 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	if err != nil {
 		return nil, err
 	}
-	h.subCost += reply.Gross
 	return json.Marshal(reply.Result)
 }
 
@@ -444,21 +478,19 @@ func (k *Kernel) computeStats(_ context.Context, actionID string, tx *Transactio
 	return stats
 }
 
-// settleFailedCall builds a receipt, commits the failed transaction atomically, and upserts
-// stat tags. tx.Status and tx.Reason must be set by the caller before invoking this.
-func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, req CallRequest, action *Action, latency float64, callErr error) error {
+// settleFailedCall builds a receipt and commits the failed transaction atomically.
+// tx.Status and tx.Reason must be set by the caller before invoking this.
+func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, traceID, callerWalletID, callerWalletKind string, req CallRequest, action *Action, latency float64, callErr error) error {
 	if len(tx.ReplyJSON) == 0 {
 		tx.ReplyJSON = json.RawMessage("null")
 	}
 	stats := k.computeStats(ctx, action.ID, tx, latency)
 	receipt, receiptErr := k.buildReceipt(tx)
 	if receiptErr != nil {
-		if refundErr := k.store.RefundFunds(ctx, req.ProcessID, action.Price); refundErr != nil {
-			logger.Error("call.refund_failed_on_receipt_error", "action", action.Name, "refund_error", refundErr)
-		}
+		logger.Error("call.receipt_build_failed", "action", action.Name, "error", receiptErr)
 		return ErrInternal.Wrap("could not build receipt")
 	}
-	if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, req.ProcessID, action.Price, stats, req.IdempotencyRecordID, KernelErrorCode(callErr), req.StepID); settlErr != nil {
+	if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, traceID, callerWalletID, callerWalletKind, action.Price, stats, req.IdempotencyRecordID, KernelErrorCode(callErr), req.StepID); settlErr != nil {
 		logger.Error("call.settlement_failed", "action", action.Name, "error", callErr, "settlement_error", settlErr)
 		return ErrInternal.Wrap("could not record failure transaction")
 	}
@@ -466,64 +498,46 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 }
 
 
-// resolveAndValidateParentTrace handles step 3 of the call precondition checks:
-//   - If ParentTraceID is empty, resolves it to the process root trace.
-//   - If caller != process owner, loads the supplied trace and checks that its
-//     action_owner_id matches the caller (trace-scoped process authority).
-//
-// When the caller IS the process owner (or it is a step-completion call), process-use
-// authority is trivially satisfied and the supplied trace is NOT loaded here.
-// Existence of the supplied trace is verified in verifySuppliedParentTrace (step 9),
-// called after action resolution, so that action-not-found fires before trace-not-found.
-func (k *Kernel) resolveAndValidateParentTrace(ctx context.Context, req *CallRequest, process *Process) error {
+// resolveAndValidateParentTrace handles precondition check 3 for subcalls.
+// Returns the parent trace (loaded for non-owner callers) or nil (for owner callers).
+// Also fills req.ParentTraceID with the root trace ID when not supplied.
+func (k *Kernel) resolveAndValidateParentTrace(ctx context.Context, req *CallRequest, process *Process) (*Trace, error) {
 	if req.ParentTraceID == "" {
 		root, err := k.store.ReadRootTrace(ctx, process.ID)
 		if err != nil {
-			return ErrInternal.Wrap("could not resolve root trace for process")
+			return nil, ErrInternal.Wrap("could not resolve root trace for process")
 		}
 		req.ParentTraceID = root.ID
-		return nil
+		return root, nil
 	}
-	// Owner callers and step-completion calls: authority trivially satisfied; skip trace load.
-	if process.OwnerUserID == req.CallerID || req.StepCompletion {
-		return nil
+	// Owner callers: authority trivially satisfied.
+	// Defer the trace existence and process-membership checks to after the action check (step 4)
+	// so that ErrNotFound for a missing action fires before ErrInvalidInput for a missing trace.
+	// We return nil here; the trace will be loaded at the funds-check step or fail at BeginSubcall.
+	if process.OwnerUserID == req.CallerID {
+		return nil, nil
 	}
 	// Non-owner caller: load the trace to verify trace-scoped process authority.
 	parent, err := k.store.ReadTrace(ctx, req.ParentTraceID)
 	if err != nil {
-		return ErrUnauthorized.Wrap("caller is not the process owner")
+		return nil, ErrUnauthorized.Wrap("caller is not the process owner")
 	}
 	if parent.ProcessID != process.ID {
-		return ErrInvalidInput.Wrap("parent trace belongs to a different process")
+		return nil, ErrInvalidInput.Wrap("parent trace belongs to a different process")
 	}
 	if parent.ActionOwnerID != req.CallerID {
-		return ErrUnauthorized.Wrap("caller is not the process owner")
+		return nil, ErrUnauthorized.Wrap("caller is not the process owner")
 	}
-	return nil
+	return parent, nil
 }
 
-// verifySuppliedParentTrace is step 9 of the call precondition checks. It validates that a
-// caller-supplied parent trace exists and, for non-step-completion calls, belongs to the process.
-// Called after action resolution and funds check (steps 4–8) to preserve precondition ordering.
-func (k *Kernel) verifySuppliedParentTrace(ctx context.Context, parentTraceID, processID string, stepCompletion bool) error {
-	parent, err := k.store.ReadTrace(ctx, parentTraceID)
-	if err != nil {
-		return ErrInvalidInput.Wrap("parent trace not found")
-	}
-	if !stepCompletion && parent.ProcessID != processID {
-		return ErrInvalidInput.Wrap("parent trace belongs to a different process")
-	}
-	return nil
-}
-
-// ComputeFee computes (net, fee) for a gross amount using VAT-style basis points.
-// Only the taxable portion (gross minus direct sub-call cost) is subject to the fee.
-// fee is rounded up (ceiling division). Invariant: net + fee == gross.
-func ComputeFee(taxable, gross, feeBPS int64) (net, fee int64) {
-	if gross == 0 || feeBPS == 0 || taxable == 0 {
-		return gross, 0
+// ComputeFee computes (net, fee) from the taxable amount (= trace.available post-execution).
+// fee = ceil(taxable * feeBPS / 10000). Invariant: net + fee == taxable.
+func ComputeFee(taxable, feeBPS int64) (net, fee int64) {
+	if taxable == 0 || feeBPS == 0 {
+		return taxable, 0
 	}
 	fee = (taxable*feeBPS + 9999) / 10000
-	net = gross - fee
+	net = taxable - fee
 	return
 }

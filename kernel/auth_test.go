@@ -299,10 +299,10 @@ func TestSuspendedSubjectRejectedBySupervisionOps(t *testing.T) {
 		t.Errorf("CreateAction: got %v, want ErrUnauthenticated", err)
 	}
 
-	// StartProcess: requireSelf rejects suspended subject.
-	_, _, err = k.StartProcess(ctx, u.ID, u.ID, 0)
+	// Run: requireActiveUser rejects suspended subject.
+	_, err = k.Run(ctx, u.ID, "@any/nonexistent", nil)
 	if !errors.Is(err, kernel.ErrUnauthenticated) {
-		t.Errorf("StartProcess: got %v, want ErrUnauthenticated", err)
+		t.Errorf("Run: got %v, want ErrUnauthenticated", err)
 	}
 
 	// requireSuperuser rejects a suspended @sys.
@@ -401,12 +401,9 @@ func TestSuspendedSubjectRejectedByProcessOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create a live process owned by another user to test fund/end/authority ops.
+	// Create a live process owned by another user to test end/authority ops.
 	other := setupUser(t, st, "@other2", 500)
-	p, _, err := k.StartProcess(ctx, other.ID, other.ID, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := setupProcess(t, st, other.ID, 100)
 
 	check := func(name string, err error) {
 		t.Helper()
@@ -415,7 +412,6 @@ func TestSuspendedSubjectRejectedByProcessOps(t *testing.T) {
 		}
 	}
 
-	check("FundProcess", k.FundProcess(ctx, victim.ID, p.ID, 10))
 	check("EndProcess", k.EndProcess(ctx, victim.ID, p.ID))
 }
 
@@ -433,8 +429,8 @@ func TestRegisterRemoteKernelRequiresSuperuser(t *testing.T) {
 	pub := priv.Public().(ed25519.PublicKey)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
-	_, err := k.RegisterRemoteKernel(ctx, notSys.ID, "@peer", pubB64, "https://peer.example.com")
+	_, err := k.AddPeer(ctx, notSys.ID, "@peer", pubB64, "https://peer.example.com")
 	if !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("non-superuser RegisterRemoteKernel: want ErrUnauthorized, got %v", err)
+		t.Errorf("non-superuser AddPeer: want ErrUnauthorized, got %v", err)
 	}
 }

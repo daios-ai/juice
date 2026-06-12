@@ -101,8 +101,8 @@ func txVerifyReceiptCmd() *cobra.Command {
 				fmt.Printf("Receipt verification: %s  [%s]\n  remote: %s\n", txID[:8], status, v.RemoteKernelHandle)
 				fmt.Printf("  receipt_hash:  %v\n  signature:     %v\n  action_id:     %v\n",
 					v.Checks.ReceiptHash, v.Checks.Signature, v.Checks.ActionID)
-				fmt.Printf("  status:        %v\n  gross:         %v\n  net:           %v\n  fee:           %v\n",
-					v.Checks.Status, v.Checks.Gross, v.Checks.Net, v.Checks.Fee)
+				fmt.Printf("  status:        %v\n  charge:        %v\n  settlement_arith: %v\n",
+					v.Checks.Status, v.Checks.Charge, v.Checks.SettlementArith)
 				fmt.Printf("  args_hash:     %v\n  reply_hash:    %v\n",
 					v.Checks.ArgsHash, v.Checks.ReplyHash)
 				return nil

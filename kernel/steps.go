@@ -48,14 +48,13 @@ func (k *Kernel) CreateStep(ctx context.Context, callerID, processID string, par
 	if _, err := k.store.ReadUser(ctx, requiredCallerID); err != nil {
 		return nil, ErrNotFound.Wrap("required_caller_user_id not found")
 	}
-	// Normalize parentTraceID to the process root so completion traces satisfy
-	// the invariant: trace.parent_trace_id == step.parent_trace_id.
+	// If no parentTraceID was given, try to normalize to the process root trace.
+	// If no root trace exists yet (new wallet model), leave parentTraceID nil so
+	// the step completion creates its own root-level trace.
 	if parentTraceID == nil {
-		root, err := k.store.ReadRootTrace(ctx, processID)
-		if err != nil {
-			return nil, ErrInternal.Wrap("could not resolve root trace for process")
+		if root, err := k.store.ReadRootTrace(ctx, processID); err == nil {
+			parentTraceID = &root.ID
 		}
-		parentTraceID = &root.ID
 	}
 	var normErr error
 	partialArgs, normErr = normalizeJSONObject(partialArgs, "partial_args")
@@ -167,25 +166,28 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 		return nil, ErrNotFound.Wrap("next action owner not found")
 	}
 
-	// ParentTraceID is normalized to non-nil at CreateStep; guard for legacy rows.
-	parentTraceID := ""
-	if step.ParentTraceID != nil {
-		parentTraceID = *step.ParentTraceID
+	// BeginStepCall atomically marks the step as running, releases its parked price
+	// from parent_trace.locked, and creates a new trace with available=step.price.
+	stepTrace := &Trace{
+		ID:        uuid.New().String(),
+		ProcessID: step.ProcessID,
+		CreatedAt: time.Now().UTC(),
 	}
-
-	if err := k.store.ClaimStep(ctx, stepID); err != nil {
+	if step.ParentTraceID != nil {
+		stepTrace.ParentTraceID = step.ParentTraceID
+	}
+	if err := k.store.BeginStepCall(ctx, stepID, stepTrace); err != nil {
 		return nil, err
 	}
 
 	reply, callErr := k.Call(ctx, CallRequest{
-		CallerID:       callerID,
-		ProcessID:      step.ProcessID,
-		ParentTraceID:  parentTraceID,
-		TargetUserID:   owner.ID,
-		ActionName:     action.Name,
-		Args:           args,
-		StepCompletion: true,
-		StepID:         stepID,
+		CallerID:      callerID,
+		ProcessID:     step.ProcessID,
+		ParentTraceID: stepTrace.ID,
+		TargetUserID:  owner.ID,
+		ActionName:    action.Name,
+		Args:          args,
+		StepID:        stepID,
 	})
 	if callErr != nil {
 		// If Call failed before creating a transaction, reset to waiting so the step can be retried.

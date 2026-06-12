@@ -373,9 +373,9 @@ func actionStatsCmd() *cobra.Command {
 				if flagOutput == "json" {
 					return printJSON(stats)
 				}
-				fmt.Printf("Stats for %s:\n  uses:             %d\n  successes:        %d\n  failures:         %d\n  cost_estimate:    %.2f\n  latency_estimate: %.3fs\n  rating_estimate:  %.3f\n  last_used:        %s\n",
+				fmt.Printf("Stats for %s:\n  uses:             %d\n  successes:        %d\n  failures:         %d\n  latency_estimate: %.3fs\n  rating_estimate:  %.3f\n  last_used:        %s\n",
 					stats.ActionID, stats.Uses, stats.Successes, stats.Failures,
-					stats.CostEstimate, stats.LatencyEstimate, stats.RatingEstimate,
+					stats.LatencyEstimate, stats.RatingEstimate,
 					stats.LastUsedAt.Format("2006-01-02T15:04:05"))
 				return nil
 			})

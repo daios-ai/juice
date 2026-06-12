@@ -114,7 +114,7 @@ func TestRemoteList(t *testing.T) {
 	}
 
 	// Register a remote kernel directly via kernel API.
-	if _, err := k.RegisterRemoteKernel(t.Context(), sys.ID, "@list-remote", remoteTestPublicKey(t), "https://list.example.com"); err != nil {
+	if _, err := k.AddPeer(t.Context(), sys.ID, "@list-remote", remoteTestPublicKey(t), "https://list.example.com"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -174,7 +174,7 @@ func TestRemoteImport(t *testing.T) {
 	}
 
 	// Register the remote kernel with the real public key.
-	if _, err := k.RegisterRemoteKernel(t.Context(), sys.ID, "@import-remote", pubB64, remote.URL); err != nil {
+	if _, err := k.AddPeer(t.Context(), sys.ID, "@import-remote", pubB64, remote.URL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -251,7 +251,7 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.RegisterRemoteKernel(t.Context(), sys.ID, "@disappear-remote", pubB64, remote.URL); err != nil {
+	if _, err := k.AddPeer(t.Context(), sys.ID, "@disappear-remote", pubB64, remote.URL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -296,7 +296,7 @@ func TestRemoteUnimport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	remoteUser, err := k.RegisterRemoteKernel(t.Context(), sys.ID, "@unimport-peer", pubB64, "https://unimport.example.com")
+	remoteUser, err := k.AddPeer(t.Context(), sys.ID, "@unimport-peer", pubB64, "https://unimport.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}

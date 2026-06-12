@@ -6,7 +6,24 @@ import (
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/google/uuid"
 )
+
+// setupProcessCmd creates a process directly via the store for cmd/juice tests.
+func setupProcessCmd(t *testing.T, env *testEnv, ownerID string, funds int64) *kernel.Process {
+	t.Helper()
+	ctx := context.Background()
+	p := &kernel.Process{
+		ID:          uuid.New().String(),
+		OwnerUserID: ownerID,
+		Status:      kernel.ProcessOpen,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := env.db.CreateProcess(ctx, p, ownerID, funds); err != nil {
+		t.Fatalf("setupProcessCmd: %v", err)
+	}
+	return p
+}
 
 func TestProcessStartFundEnd(t *testing.T) {
 	env := newTestEnv(t)
@@ -24,23 +41,14 @@ func TestProcessStartFundEnd(t *testing.T) {
 	owner.PasswordHash = hash
 	_ = env.db.CreateUser(ctx, owner)
 
-	p, root, err := env.k.StartProcess(ctx, owner.ID, owner.ID, 500)
+	// CreateProcess deducts from user.available → user.locked.
+	p := setupProcessCmd(t, env, owner.ID, 500)
+	proc, err := env.db.ReadProcess(ctx, p.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Available != 500 {
-		t.Errorf("process.available: got %d, want 500", p.Available)
-	}
-	if root.ParentTraceID != nil {
-		t.Error("root trace ParentTraceID should be nil")
-	}
-
-	if err := env.k.FundProcess(ctx, owner.ID, p.ID, 200); err != nil {
-		t.Fatal(err)
-	}
-	p2, _ := env.k.ReadProcess(ctx, owner.ID, p.ID)
-	if p2.Available != 700 {
-		t.Errorf("process.available after fund: got %d, want 700", p2.Available)
+	if proc.Available != 500 {
+		t.Errorf("process.available: got %d, want 500", proc.Available)
 	}
 
 	if err := env.k.EndProcess(ctx, owner.ID, p.ID); err != nil {
@@ -51,7 +59,6 @@ func TestProcessStartFundEnd(t *testing.T) {
 		t.Error("process should be closed after end")
 	}
 }
-
 
 func TestProcessList(t *testing.T) {
 	env := newTestEnv(t)
@@ -64,9 +71,9 @@ func TestProcessList(t *testing.T) {
 		Handle: "@list-proc-other", Email: "lpo@example.com", Password: "p",
 	})
 
-	env.k.StartProcess(ctx, owner.ID, owner.ID, 0)
-	env.k.StartProcess(ctx, owner.ID, owner.ID, 0)
-	env.k.StartProcess(ctx, other.ID, other.ID, 0)
+	setupProcessCmd(t, env, owner.ID, 0)
+	setupProcessCmd(t, env, owner.ID, 0)
+	setupProcessCmd(t, env, other.ID, 0)
 
 	processes, err := env.k.ListProcesses(ctx, owner.ID, 100, 0)
 	if err != nil {
@@ -89,9 +96,16 @@ func TestProcessNegativeFundsFails(t *testing.T) {
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@negfund", Email: "nf@example.com", Password: "p",
 	})
-	_, _, err := env.k.StartProcess(ctx, owner.ID, owner.ID, -1)
+	// Try to create process with negative funds via the store — should fail.
+	p := &kernel.Process{
+		ID:          uuid.New().String(),
+		OwnerUserID: owner.ID,
+		Status:      kernel.ProcessOpen,
+		CreatedAt:   time.Now().UTC(),
+	}
+	err := env.db.CreateProcess(ctx, p, owner.ID, -1)
 	if err == nil {
-		t.Error("expected error starting process with negative funds")
+		t.Error("expected error creating process with negative funds")
 	}
 }
 
@@ -111,14 +125,11 @@ func TestProcessEndReturnsBalance(t *testing.T) {
 	owner.PasswordHash = hash
 	_ = env.db.CreateUser(ctx, owner)
 
-	p, _, err := env.k.StartProcess(ctx, owner.ID, owner.ID, 400)
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := setupProcessCmd(t, env, owner.ID, 400)
 
 	u, _ := env.db.ReadUser(ctx, owner.ID)
 	if u.Available != 600 {
-		t.Errorf("owner balance after start: got %d, want 600", u.Available)
+		t.Errorf("owner balance after CreateProcess: got %d, want 600", u.Available)
 	}
 
 	if err := env.k.EndProcess(ctx, owner.ID, p.ID); err != nil {

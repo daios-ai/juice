@@ -18,6 +18,7 @@ func init() {
 		adminUserSuspendCmd(),
 		adminUserUnsuspendCmd(),
 		adminUserDepositCmd(),
+		adminUserWithdrawCmd(),
 	)
 
 	actionCmd := &cobra.Command{Use: "action", Short: "Action admin commands"}
@@ -32,7 +33,10 @@ func init() {
 	stepCmd := &cobra.Command{Use: "step", Short: "Step admin commands"}
 	stepCmd.AddCommand(adminStepListCmd())
 
-	adminCmd.AddCommand(userCmd, actionCmd, processCmd, txCmd, stepCmd)
+	peerCmd := &cobra.Command{Use: "peer", Short: "Peer (federation) admin commands"}
+	peerCmd.AddCommand(adminPeerListCmd(), adminPeerDenyCmd(), adminPeerUndenyCmd())
+
+	adminCmd.AddCommand(userCmd, actionCmd, processCmd, txCmd, stepCmd, peerCmd)
 	rootCmd.AddCommand(adminCmd)
 }
 
@@ -201,6 +205,114 @@ func adminUserDepositCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&amount, "amount", 0, "Credits to deposit (required, > 0)")
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
 	_ = cmd.MarkFlagRequired("amount")
+	return cmd
+}
+
+func adminUserWithdrawCmd() *cobra.Command {
+	var userID, handle, reason string
+	var amount int64
+	cmd := &cobra.Command{
+		Use:   "withdraw",
+		Short: "Deduct credits from a user account",
+		RunE: func(c *cobra.Command, _ []string) error {
+			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
+				ctx := context.Background()
+				var targetID string
+				if c.Flags().Changed("handle") {
+					u, err := k.ReadUserByHandle(ctx, handle)
+					if err != nil {
+						return err
+					}
+					targetID = u.ID
+				} else if c.Flags().Changed("id") {
+					targetID = userID
+				} else {
+					return fmt.Errorf("either --id or --handle is required")
+				}
+				w, err := k.Withdraw(ctx, subjectID, targetID, amount, reason)
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(w)
+				}
+				fmt.Printf("Withdrew %d credits from %s (withdrawal id: %s)\n", w.Amount, targetID, w.ID)
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&userID, "id", "", "Target user ID")
+	cmd.Flags().StringVar(&handle, "handle", "", "Target user handle (e.g. @alice)")
+	cmd.Flags().Int64Var(&amount, "amount", 0, "Credits to withdraw (required, > 0)")
+	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
+	_ = cmd.MarkFlagRequired("amount")
+	return cmd
+}
+
+func adminPeerListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List known remote kernel peers",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return withSuperuser(func(k *kernel.Kernel, _ string) error {
+				peers, err := k.ListPeers(context.Background())
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(peers)
+				}
+				if len(peers) == 0 {
+					fmt.Println("No peers registered.")
+					return nil
+				}
+				fmt.Printf("%-20s %-36s %s\n", "HANDLE", "ID", "BASE_URL")
+				for _, p := range peers {
+					fmt.Printf("%-20s %-36s %s\n", p.Handle, p.ID, p.RemoteBaseURL)
+				}
+				return nil
+			})
+		},
+	}
+}
+
+func adminPeerDenyCmd() *cobra.Command {
+	var handle string
+	cmd := &cobra.Command{
+		Use:   "deny",
+		Short: "Deny a peer (block inbound federation)",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
+				if err := k.DenyPeer(context.Background(), subjectID, handle); err != nil {
+					return err
+				}
+				fmt.Printf("Peer %s denied.\n", handle)
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&handle, "handle", "", "Peer handle (required)")
+	_ = cmd.MarkFlagRequired("handle")
+	return cmd
+}
+
+func adminPeerUndenyCmd() *cobra.Command {
+	var handle string
+	cmd := &cobra.Command{
+		Use:   "undeny",
+		Short: "Undeny a peer (restore federation access)",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
+				if err := k.UndenyPeer(context.Background(), subjectID, handle); err != nil {
+					return err
+				}
+				fmt.Printf("Peer %s access restored.\n", handle)
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&handle, "handle", "", "Peer handle (required)")
+	_ = cmd.MarkFlagRequired("handle")
 	return cmd
 }
 

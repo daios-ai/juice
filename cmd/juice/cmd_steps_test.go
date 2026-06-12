@@ -60,18 +60,16 @@ func createStepAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, 
 
 func TestServeCreateStep(t *testing.T) {
 	backend := newStepBackend(t)
-	srv, k := newTestHTTPServer(t)
+	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@cs-create-owner")
+	ownerID, ownerTok := makeUser(t, k, "@cs-create-owner")
 	makeUser(t, k, "@cs-create-caller")
 
 	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@cs-create-owner", "cs-create-svc")
 
-	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
-	var proc map[string]any
-	decodeResponse(t, pr, &proc)
-	pid := proc["process_id"].(string)
+	p := setupProcessHTTP(t, db, ownerID, 0)
+	pid := p.ID
 
 	resp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      pid,
@@ -101,18 +99,16 @@ func TestServeCreateStep(t *testing.T) {
 
 func TestServeListSteps(t *testing.T) {
 	backend := newStepBackend(t)
-	srv, k := newTestHTTPServer(t)
+	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@sl-steps-owner")
+	ownerID, ownerTok := makeUser(t, k, "@sl-steps-owner")
 	makeUser(t, k, "@sl-steps-caller")
 
 	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@sl-steps-owner", "sl-steps-svc")
 
-	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
-	var proc map[string]any
-	decodeResponse(t, pr, &proc)
-	pid := proc["process_id"].(string)
+	p := setupProcessHTTP(t, db, ownerID, 0)
+	pid := p.ID
 
 	// Create two steps.
 	for range 2 {
@@ -171,19 +167,17 @@ func TestServeListSteps(t *testing.T) {
 
 func TestServeGetStep(t *testing.T) {
 	backend := newStepBackend(t)
-	srv, k := newTestHTTPServer(t)
+	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@gs-steps-owner")
+	ownerID, ownerTok := makeUser(t, k, "@gs-steps-owner")
 	_, callerTok := makeUser(t, k, "@gs-steps-caller")
 	_, unrelTok := makeUser(t, k, "@gs-steps-unrelated")
 
 	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@gs-steps-owner", "gs-steps-svc")
 
-	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
-	var proc map[string]any
-	decodeResponse(t, pr, &proc)
-	pid := proc["process_id"].(string)
+	p := setupProcessHTTP(t, db, ownerID, 0)
+	pid := p.ID
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      pid,
@@ -237,18 +231,16 @@ func TestServeGetStep(t *testing.T) {
 
 func TestServeCompleteStepMissingArgs(t *testing.T) {
 	backend := newStepBackend(t)
-	srv, k := newTestHTTPServer(t)
+	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@csmiss-owner")
+	ownerID, ownerTok := makeUser(t, k, "@csmiss-owner")
 	_, callerTok := makeUser(t, k, "@csmiss-caller")
 
 	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@csmiss-owner", "csmiss-svc")
 
-	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
-	var proc map[string]any
-	decodeResponse(t, pr, &proc)
-	pid := proc["process_id"].(string)
+	p := setupProcessHTTP(t, db, ownerID, 0)
+	pid := p.ID
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      pid,
@@ -277,18 +269,16 @@ func TestServeCompleteStepMissingArgs(t *testing.T) {
 
 func TestServeCompleteStep(t *testing.T) {
 	backend := newStepBackend(t)
-	srv, k := newTestHTTPServer(t)
+	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@cs2-owner")
+	ownerID, ownerTok := makeUser(t, k, "@cs2-owner")
 	_, callerTok := makeUser(t, k, "@cs2-caller")
 
 	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@cs2-owner", "cs2-svc")
 
-	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
-	var proc map[string]any
-	decodeResponse(t, pr, &proc)
-	pid := proc["process_id"].(string)
+	p := setupProcessHTTP(t, db, ownerID, 0)
+	pid := p.ID
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      pid,
