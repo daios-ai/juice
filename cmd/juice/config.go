@@ -26,6 +26,7 @@ type ServerConfig struct {
 	MakeMaxSteps      int    `json:"make_max_steps"`
 	AllowLocalSources bool   `json:"allow_local_sources"`
 	ServerURL         string `json:"server_url"`
+	PeerAutoAccept    bool   `json:"peer_auto_accept"`
 }
 
 // DefaultServerConfig returns a ServerConfig populated with safe defaults.
@@ -46,6 +47,7 @@ func DefaultServerConfig() ServerConfig {
 		MakeMaxSteps:      5,
 		AllowLocalSources: false,
 		ServerURL:         "",
+		PeerAutoAccept:    true,
 	}
 }
 

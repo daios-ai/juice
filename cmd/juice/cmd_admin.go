@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
@@ -34,7 +38,7 @@ func init() {
 	stepCmd.AddCommand(adminStepListCmd())
 
 	peerCmd := &cobra.Command{Use: "peer", Short: "Peer (federation) admin commands"}
-	peerCmd.AddCommand(adminPeerListCmd(), adminPeerDenyCmd(), adminPeerUndenyCmd())
+	peerCmd.AddCommand(adminPeerListCmd(), adminPeerFriendCmd(), adminPeerUnfriendCmd(), adminPeerGossipCmd())
 
 	adminCmd.AddCommand(userCmd, actionCmd, processCmd, txCmd, stepCmd, peerCmd)
 	rootCmd.AddCommand(adminCmd)
@@ -250,12 +254,14 @@ func adminUserWithdrawCmd() *cobra.Command {
 }
 
 func adminPeerListCmd() *cobra.Command {
-	return &cobra.Command{
+	var showGossip bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List known remote kernel peers",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSuperuser(func(k *kernel.Kernel, _ string) error {
-				peers, err := k.ListPeers(context.Background())
+				ctx := context.Background()
+				peers, err := k.ListPeers(ctx)
 				if err != nil {
 					return err
 				}
@@ -264,29 +270,103 @@ func adminPeerListCmd() *cobra.Command {
 				}
 				if len(peers) == 0 {
 					fmt.Println("No peers registered.")
-					return nil
+				} else {
+					fmt.Printf("%-20s %-36s %s\n", "HANDLE", "ID", "BASE_URL")
+					for _, p := range peers {
+						denied := ""
+						if p.DeniedAt != nil {
+							denied = " [denied]"
+						}
+						fmt.Printf("%-20s %-36s %s%s\n", p.Handle, p.ID, p.RemoteBaseURL, denied)
+					}
 				}
-				fmt.Printf("%-20s %-36s %s\n", "HANDLE", "ID", "BASE_URL")
-				for _, p := range peers {
-					fmt.Printf("%-20s %-36s %s\n", p.Handle, p.ID, p.RemoteBaseURL)
+				if showGossip {
+					discovered, err := k.ListDiscoveredKernels(ctx)
+					if err != nil {
+						return err
+					}
+					if len(discovered) > 0 {
+						fmt.Println("\nDiscovered via gossip:")
+						for _, d := range discovered {
+							fmt.Printf("  %-20s %-50s (via %s)\n", d.Handle, d.BaseURL, d.IntroducedBy[:min(len(d.IntroducedBy), 16)])
+						}
+					}
 				}
 				return nil
 			})
 		},
 	}
+	cmd.Flags().BoolVar(&showGossip, "gossip", false, "Also show gossip-discovered kernels")
+	return cmd
 }
 
-func adminPeerDenyCmd() *cobra.Command {
+func adminPeerFriendCmd() *cobra.Command {
+	var peerURL string
+	cmd := &cobra.Command{
+		Use:   "friend",
+		Short: "Friend a remote kernel (fetch well-known, register locally, send signed request)",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
+				ctx := context.Background()
+				// Fetch /.well-known/juice-kernel.json from the peer.
+				exec := &httpActionExecutor{timeout: 15 * time.Second, allowLocal: globalCfg.AllowLocalSources}
+				wkBody, err := exec.FetchURL(ctx, strings.TrimRight(peerURL, "/")+"/.well-known/juice-kernel.json")
+				if err != nil {
+					return fmt.Errorf("fetch well-known: %w", err)
+				}
+				var wk struct {
+					Handle    string `json:"handle"`
+					PublicKey string `json:"public_key"`
+					BaseURL   string `json:"base_url"`
+				}
+				if err := json.Unmarshal(wkBody, &wk); err != nil {
+					return fmt.Errorf("parse well-known: %w", err)
+				}
+				// Register peer locally (clears denial if previously denied).
+				u, err := k.CreateOrUpdateProxyPeer(ctx, wk.Handle, wk.PublicKey, wk.BaseURL)
+				if err != nil {
+					return fmt.Errorf("register peer locally: %w", err)
+				}
+				// Send signed friend request to the peer's /v1/peers.
+				localPubKey, _ := k.GetConfig(ctx, configKeySigningPublic)
+				localHandle, _ := k.GetConfig(ctx, configKeySuperuser)
+				localBaseURL := globalCfg.ServerURL
+				if localPubKey != "" && localBaseURL != "" {
+					sig, ts, serr := k.SignPeerRequestNow(localHandle, localPubKey, localBaseURL)
+					if serr == nil {
+						body, _ := json.Marshal(map[string]string{
+							"handle":     localHandle,
+							"public_key": localPubKey,
+							"base_url":   localBaseURL,
+							"timestamp":  ts,
+							"signature":  sig,
+						})
+						_, _, _ = doHTTP(ctx, http.MethodPost, strings.TrimRight(wk.BaseURL, "/")+"/v1/peers",
+							map[string]string{"Content-Type": "application/json"},
+							strings.NewReader(string(body)), exec.timeout, exec.allowLocal)
+					}
+				}
+				fmt.Printf("Friended peer %s (%s)\n", u.Handle, u.RemoteBaseURL)
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&peerURL, "url", "", "Remote kernel base URL (required)")
+	_ = cmd.MarkFlagRequired("url")
+	return cmd
+}
+
+func adminPeerUnfriendCmd() *cobra.Command {
 	var handle string
 	cmd := &cobra.Command{
-		Use:   "deny",
-		Short: "Deny a peer (block inbound federation)",
+		Use:   "unfriend",
+		Short: "Unfriend (deny) a peer: deactivate their proxy actions and cancel their steps",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
 				if err := k.DenyPeer(context.Background(), subjectID, handle); err != nil {
 					return err
 				}
-				fmt.Printf("Peer %s denied.\n", handle)
+				fmt.Printf("Peer %s unfriended.\n", handle)
 				return nil
 			})
 		},
@@ -296,23 +376,45 @@ func adminPeerDenyCmd() *cobra.Command {
 	return cmd
 }
 
-func adminPeerUndenyCmd() *cobra.Command {
-	var handle string
+func adminPeerGossipCmd() *cobra.Command {
+	var peerURL, peerHandle string
 	cmd := &cobra.Command{
-		Use:   "undeny",
-		Short: "Undeny a peer (restore federation access)",
+		Use:   "gossip",
+		Short: "Fetch gossip from a peer and accumulate discovered kernels",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
-				if err := k.UndenyPeer(context.Background(), subjectID, handle); err != nil {
-					return err
+			return withSuperuser(func(k *kernel.Kernel, _ string) error {
+				ctx := context.Background()
+				targetURL := peerURL
+				if targetURL == "" && peerHandle != "" {
+					peer, err := k.ReadUserByHandle(ctx, peerHandle)
+					if err != nil || peer == nil {
+						return fmt.Errorf("peer %q not found", peerHandle)
+					}
+					targetURL = peer.RemoteBaseURL
 				}
-				fmt.Printf("Peer %s access restored.\n", handle)
+				if targetURL == "" {
+					return fmt.Errorf("--url or --handle required")
+				}
+				exec := &httpActionExecutor{timeout: 15 * time.Second, allowLocal: globalCfg.AllowLocalSources}
+				body, err := exec.FetchURL(ctx, strings.TrimRight(targetURL, "/")+"/v1/gossip")
+				if err != nil {
+					return fmt.Errorf("fetch gossip: %w", err)
+				}
+				var gossip kernel.GossipResponse
+				if err := json.Unmarshal(body, &gossip); err != nil {
+					return fmt.Errorf("parse gossip: %w", err)
+				}
+				localPubKey, _ := k.GetConfig(ctx, configKeySigningPublic)
+				if err := k.AccumulateGossip(ctx, &gossip, localPubKey); err != nil {
+					return fmt.Errorf("accumulate gossip: %w", err)
+				}
+				fmt.Printf("Gossip from %s: %d actions, %d friends.\n", gossip.Handle, len(gossip.Actions), len(gossip.Friends))
 				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&handle, "handle", "", "Peer handle (required)")
-	_ = cmd.MarkFlagRequired("handle")
+	cmd.Flags().StringVar(&peerURL, "url", "", "Remote kernel base URL")
+	cmd.Flags().StringVar(&peerHandle, "handle", "", "Registered peer handle")
 	return cmd
 }
 

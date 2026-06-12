@@ -321,6 +321,14 @@ func (k *Kernel) SignFederation(action, counterparty, idempotencyKey, argsHash s
 	return
 }
 
+// SignPeerRequestNow signs a peer friend request with the platform key and returns
+// (signature, timestamp). Returns an error if the signing key is not configured.
+func (k *Kernel) SignPeerRequestNow(handle, publicKey, baseURL string) (sig, ts string, err error) {
+	ts = time.Now().UTC().Format(time.RFC3339)
+	sig, err = SignPeerRequest(k.cfg.SigningKey, handle, publicKey, baseURL, ts)
+	return
+}
+
 // ---- Peer / friendship operations ----
 
 // CreateOrUpdateProxyPeer creates or updates a local user record representing a remote kernel peer.
@@ -399,8 +407,8 @@ func (k *Kernel) ListPeers(ctx context.Context) ([]*User, error) {
 	return peers, nil
 }
 
-// DenyPeer sets denied_at on the proxy user for the given handle, deactivates all proxy
-// actions they own on this kernel, and cancels any waiting steps that require them as caller.
+// DenyPeer atomically denies a peer: sets denied_at, deactivates all their proxy actions,
+// and cancels+refunds any waiting steps addressed to them as caller.
 func (k *Kernel) DenyPeer(ctx context.Context, subjectID, handle string) error {
 	if err := k.requireSuperuser(ctx, subjectID); err != nil {
 		return err
@@ -409,20 +417,11 @@ func (k *Kernel) DenyPeer(ctx context.Context, subjectID, handle string) error {
 	if err != nil {
 		return ErrNotFound.Wrapf("peer %q not found", handle)
 	}
-	if err := k.store.DenyUser(ctx, u.ID); err != nil {
-		return err
-	}
-	if err := k.store.DeactivateActionsOwnedBy(ctx, u.ID); err != nil {
-		return fmt.Errorf("deactivate proxies: %w", err)
-	}
-	if err := k.store.CancelAndRefundStepsForCaller(ctx, u.ID); err != nil {
-		return fmt.Errorf("cancel steps: %w", err)
-	}
-	return nil
+	return k.store.DenyPeerCascade(ctx, u.ID)
 }
 
-// UndenyPeer clears denied_at on the proxy user for the given handle and reactivates
-// all proxy actions they own on this kernel.
+// UndenyPeer clears denied_at on the proxy user for the given handle.
+// Proxy actions are NOT automatically reactivated — use remote import to re-enable them.
 func (k *Kernel) UndenyPeer(ctx context.Context, subjectID, handle string) error {
 	if err := k.requireSuperuser(ctx, subjectID); err != nil {
 		return err
@@ -431,13 +430,12 @@ func (k *Kernel) UndenyPeer(ctx context.Context, subjectID, handle string) error
 	if err != nil {
 		return ErrNotFound.Wrapf("peer %q not found", handle)
 	}
-	if err := k.store.UndenyUser(ctx, u.ID); err != nil {
-		return err
-	}
-	if err := k.store.ActivateActionsOwnedBy(ctx, u.ID); err != nil {
-		return fmt.Errorf("reactivate proxies: %w", err)
-	}
-	return nil
+	return k.store.UndenyUser(ctx, u.ID)
+}
+
+// ListDiscoveredKernels returns all kernels learned via gossip accumulation.
+func (k *Kernel) ListDiscoveredKernels(ctx context.Context) ([]*DiscoveredKernel, error) {
+	return k.store.ListDiscoveredKernels(ctx)
 }
 
 // GetGossip returns this kernel's gossip payload: identity, public active actions, and peer list.
@@ -546,14 +544,16 @@ func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, actionParam, argsH
 	return r, nil
 }
 
-// AccumulateGossip stores a gossip response in the discovered_kernels table.
+// AccumulateGossip stores a gossip response in the discovered_kernels table and creates
+// StatTag rows (key="gossip_uses"/"gossip_rating") for any gossip actions we have locally
+// imported as proxy actions from that kernel. The source field is the introducer's public key.
 func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, introducerPublicKey string) error {
 	if gossip.PublicKey == "" {
 		return ErrInvalidInput.Wrap("gossip missing public_key")
 	}
 	statsJSON, _ := json.Marshal(gossip.Actions)
 	now := time.Now().UTC()
-	return k.store.CreateOrUpdateDiscoveredKernel(ctx, &DiscoveredKernel{
+	if err := k.store.CreateOrUpdateDiscoveredKernel(ctx, &DiscoveredKernel{
 		PublicKey:    gossip.PublicKey,
 		IntroducedBy: introducerPublicKey,
 		Handle:       gossip.Handle,
@@ -561,7 +561,28 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 		StatsJSON:    json.RawMessage(statsJSON),
 		FirstSeen:    now,
 		UpdatedAt:    now,
-	})
+	}); err != nil {
+		return err
+	}
+	// For each gossip action, find the matching local proxy (by remote_action_id) and
+	// write gossip_uses / gossip_rating stat tags so @sys/lookup can use them as a prior.
+	remoteUser, err := k.store.ReadUserByPublicKey(ctx, gossip.PublicKey)
+	if err != nil || remoteUser == nil {
+		return nil // peer not yet registered locally; skip stat tags
+	}
+	for _, ga := range gossip.Actions {
+		proxy, err := k.store.ReadActionByOwnerRemoteID(ctx, remoteUser.ID, ga.ActionID)
+		if err != nil || proxy == nil {
+			continue // not imported locally
+		}
+		source := introducerPublicKey
+		if source == "" {
+			source = gossip.PublicKey
+		}
+		_ = k.store.UpsertStatTag(ctx, &StatTag{ActionID: proxy.ID, Key: "gossip_uses", Value: fmt.Sprintf("%d", ga.Uses), Source: source, UpdatedAt: now})
+		_ = k.store.UpsertStatTag(ctx, &StatTag{ActionID: proxy.ID, Key: "gossip_rating", Value: fmt.Sprintf("%g", ga.Rating), Source: source, UpdatedAt: now})
+	}
+	return nil
 }
 
 func decodeRemotePublicKey(publicKey string) (ed25519.PublicKey, error) {
@@ -870,4 +891,30 @@ func SignFederationPayload(key ed25519.PrivateKey, action, counterparty, idempot
 		"idempotency_key": idempotencyKey,
 		"timestamp":       timestamp,
 	})
+}
+
+// SignPeerRequest creates a base64url Ed25519 signature over JCS({handle, public_key, base_url, timestamp}).
+// Used when sending a friend request to POST /v1/peers on a remote kernel.
+func SignPeerRequest(key ed25519.PrivateKey, handle, publicKey, baseURL, timestamp string) (string, error) {
+	return signJCS(key, map[string]string{
+		"base_url":   baseURL,
+		"handle":     handle,
+		"public_key": publicKey,
+		"timestamp":  timestamp,
+	})
+}
+
+// VerifyPeerRequestSignature verifies a friend-request signature: Ed25519 over
+// JCS({handle, public_key, base_url, timestamp}) by the key embedded in the request.
+func VerifyPeerRequestSignature(pubKeyB64, handle, publicKey, baseURL, timestamp, sigB64 string) error {
+	pub, err := decodeRemotePublicKey(pubKeyB64)
+	if err != nil {
+		return ErrUnauthorized.Wrap("invalid public key in peer request")
+	}
+	return verifyJCS(pub, map[string]string{
+		"base_url":   baseURL,
+		"handle":     handle,
+		"public_key": publicKey,
+		"timestamp":  timestamp,
+	}, sigB64)
 }

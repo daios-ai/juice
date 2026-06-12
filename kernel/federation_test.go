@@ -1000,13 +1000,14 @@ func TestDenyPeerDeactivatesActionsAndCancelsSteps(t *testing.T) {
 		t.Error("peer B should have denied_at set")
 	}
 
-	// UndenyPeer should reactivate owned actions.
+	// UndenyPeer clears the denial but does NOT reactivate proxy actions —
+	// proxies are re-enabled explicitly via remote import.
 	if err := k.UndenyPeer(ctx, sys.ID, "@deny-peer-b"); err != nil {
 		t.Fatalf("UndenyPeer: %v", err)
 	}
-	reactivated, _ := k.ReadAction(ctx, act.ID)
-	if !reactivated.Active {
-		t.Error("action should be active again after UndenyPeer")
+	stillInactive, _ := k.ReadAction(ctx, act.ID)
+	if stillInactive.Active {
+		t.Error("action should remain inactive after UndenyPeer (must re-import to reactivate)")
 	}
 	peerBRead, _ = k.ReadUser(ctx, peerB.ID)
 	if peerBRead.DeniedAt != nil {

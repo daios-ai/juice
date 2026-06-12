@@ -859,18 +859,80 @@ func (s *server) getGossip(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, gossip)
 }
 
+// postPeer handles inbound friend requests from remote kernels.
+// Body: {handle, public_key, base_url, timestamp, signature}
+// signature = SignPeerRequest({handle, public_key, base_url, timestamp}) by the requester.
 func (s *server) postPeer(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, req struct {
 		Handle    string `json:"handle"`
 		PublicKey string `json:"public_key"`
 		BaseURL   string `json:"base_url"`
+		Timestamp string `json:"timestamp"`
+		Signature string `json:"signature"`
 	}) (any, int, error) {
-		u, err := s.kernel.CreateOrUpdateProxyPeer(r.Context(), req.Handle, req.PublicKey, req.BaseURL)
+		ctx := r.Context()
+
+		// Verify timestamp (±5 min).
+		ts, err := time.Parse(time.RFC3339, req.Timestamp)
+		if err != nil {
+			return nil, 0, kernel.ErrInvalidInput.Wrap("timestamp must be RFC3339")
+		}
+		if diff := time.Since(ts); diff < -5*time.Minute || diff > 5*time.Minute {
+			return nil, 0, kernel.ErrUnauthenticated.Wrap("timestamp out of range")
+		}
+
+		// Verify Ed25519 signature against the public key embedded in the request.
+		if err := kernel.VerifyPeerRequestSignature(req.PublicKey, req.Handle, req.PublicKey, req.BaseURL, req.Timestamp, req.Signature); err != nil {
+			return nil, 0, kernel.ErrUnauthorized.Wrap("invalid peer request signature")
+		}
+
+		// Deny check.
+		if existing, _ := s.kernel.ReadUserByPublicKey(ctx, req.PublicKey); existing != nil && existing.DeniedAt != nil {
+			return nil, 0, kernel.ErrUnauthorized.Wrap("peer is denied")
+		}
+
+		if !globalCfg.PeerAutoAccept {
+			_ = s.kernel.AccumulateGossip(ctx, &kernel.GossipResponse{
+				PublicKey: req.PublicKey,
+				Handle:    req.Handle,
+				BaseURL:   req.BaseURL,
+			}, "friend-request")
+			return map[string]any{"status": "pending"}, http.StatusAccepted, nil
+		}
+
+		u, err := s.kernel.CreateOrUpdateProxyPeer(ctx, req.Handle, req.PublicKey, req.BaseURL)
 		if err != nil {
 			return nil, 0, err
 		}
+		go s.sendReciprocal(req.BaseURL)
 		return map[string]any{"id": u.ID, "handle": u.Handle}, http.StatusOK, nil
 	})(w, r)
+}
+
+// sendReciprocal sends a signed friend request back to peerBaseURL/v1/peers. Best-effort.
+func (s *server) sendReciprocal(peerBaseURL string) {
+	ctx := context.Background()
+	pubKeyB64, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	localHandle, _ := s.kernel.GetConfig(ctx, configKeySuperuser)
+	localBaseURL := globalCfg.ServerURL
+	if pubKeyB64 == "" || localBaseURL == "" {
+		return
+	}
+	sig, ts, err := s.kernel.SignPeerRequestNow(localHandle, pubKeyB64, localBaseURL)
+	if err != nil {
+		return
+	}
+	body, _ := json.Marshal(map[string]string{
+		"handle":     localHandle,
+		"public_key": pubKeyB64,
+		"base_url":   localBaseURL,
+		"timestamp":  ts,
+		"signature":  sig,
+	})
+	exec := &httpActionExecutor{timeout: 10 * time.Second, allowLocal: globalCfg.AllowLocalSources}
+	_, _, _ = doHTTP(ctx, http.MethodPost, strings.TrimRight(peerBaseURL, "/")+"/v1/peers",
+		map[string]string{"Content-Type": "application/json"}, strings.NewReader(string(body)),
+		exec.timeout, exec.allowLocal)
 }
 
 func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {

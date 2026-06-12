@@ -1742,17 +1742,11 @@ func TestFlow_GossipDiscovery(t *testing.T) {
 	aPubKey, _ := aFriendEntry["public_key"].(string)
 	const aHandleOnC = "@kernel-a-via-gossip"
 
-	// C registers A as a peer (learned from B's gossip).
-	peerAonCResp := httpDo(t, srvC, "POST", "/v1/peers", map[string]any{
-		"handle":     aHandleOnC,
-		"public_key": aPubKey,
-		"base_url":   aBaseURL,
-	}, "")
-	if peerAonCResp.StatusCode != http.StatusOK {
-		peerAonCResp.Body.Close()
-		t.Fatalf("C POST /v1/peers: expected 200, got %d", peerAonCResp.StatusCode)
+	// C registers A as a peer (learned from B's gossip) via direct kernel call.
+	sysC, _ := kC.ReadUserByHandle(ctx, "@sys")
+	if _, err := kC.AddPeer(ctx, sysC.ID, aHandleOnC, aPubKey, aBaseURL); err != nil {
+		t.Fatalf("C add peer A: %v", err)
 	}
-	peerAonCResp.Body.Close()
 
 	// A must also register C as a peer so A's federation handler accepts C's calls.
 	pubCB64, _ := kC.GetConfig(ctx, configKeySigningPublic)
@@ -1771,7 +1765,6 @@ func TestFlow_GossipDiscovery(t *testing.T) {
 	var manifest2 kernel.ActionManifest
 	decodeResponse(t, manifest2Resp, &manifest2)
 
-	sysC, _ := kC.ReadUserByHandle(ctx, "@sys")
 	peerAOnC, _ := kC.ReadUserByHandle(ctx, aHandleOnC)
 	importC, err := kC.ImportRemoteAction(ctx, sysC.ID, peerAOnC.ID, manifest2)
 	if err != nil {
@@ -2024,10 +2017,11 @@ func TestFlow_UnfriendReconnect(t *testing.T) {
 		t.Error("B's peer record on A should not have denied_at after re-friend")
 	}
 
-	// Verify: B's proxy action on A is active again.
+	// Per spec: UndenyPeer only clears denial; proxy actions stay inactive.
+	// Proxies are re-imported via "remote import", not auto-reactivated.
 	proxyBReactivated, _ := kA.ReadAction(ctx, proxyBActOnA.ID)
-	if !proxyBReactivated.Active {
-		t.Error("B's proxy action on A should be active after UndenyPeer")
+	if proxyBReactivated.Active {
+		t.Error("B's proxy action on A should remain inactive after UndenyPeer; re-import required")
 	}
 
 	// B runs A's action again (post-re-friend) → must succeed.

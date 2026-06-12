@@ -311,16 +311,24 @@ type Store interface {
 	// ListDiscoveredKernels returns all discovered kernel rows.
 	ListDiscoveredKernels(ctx context.Context) ([]*DiscoveredKernel, error)
 
-	// ---- Peer lifecycle (used by DenyPeer / UndenyPeer) ----
+	// ---- Peer lifecycle ----
 
+	// DenyPeerCascade atomically: sets denied_at on the user, deactivates all their proxy
+	// actions, and cancels+refunds all waiting steps addressed to them as caller.
+	DenyPeerCascade(ctx context.Context, userID string) error
 	// DeactivateActionsOwnedBy sets active=false for all non-deleted actions owned by ownerUserID.
 	DeactivateActionsOwnedBy(ctx context.Context, ownerUserID string) error
-	// ActivateActionsOwnedBy sets active=true for all non-deleted actions owned by ownerUserID.
-	ActivateActionsOwnedBy(ctx context.Context, ownerUserID string) error
 	// CancelAndRefundStepsForCaller cancels all waiting steps where required_caller_user_id=callerUserID,
 	// atomically refunding each step's parked price to its parent trace (available+=price, locked-=price).
 	CancelAndRefundStepsForCaller(ctx context.Context, callerUserID string) error
 	// ListStatsByOwner returns Stats rows for actions owned by ownerUserID that have uses > 0.
 	// Used by GetGossip to identify transacted friends.
 	ListStatsByOwner(ctx context.Context, ownerUserID string) ([]*Stats, error)
+
+	// ---- StatTags (gossip endorsements) ----
+
+	// UpsertStatTag creates or updates a stat_tag row keyed by (action_id, key, source).
+	UpsertStatTag(ctx context.Context, tag *StatTag) error
+	// ListStatTagsByAction returns all stat_tag rows for an action.
+	ListStatTagsByAction(ctx context.Context, actionID string) ([]*StatTag, error)
 }

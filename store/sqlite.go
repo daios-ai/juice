@@ -293,10 +293,51 @@ func (s *DB) DeactivateActionsOwnedBy(ctx context.Context, ownerUserID string) e
 	return dbErr(err, "deactivate actions by owner")
 }
 
-func (s *DB) ActivateActionsOwnedBy(ctx context.Context, ownerUserID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE actions SET active=TRUE WHERE owner_user_id=? AND deleted_at IS NULL`, ownerUserID)
-	return dbErr(err, "activate actions by owner")
+func (s *DB) DenyPeerCascade(ctx context.Context, userID string) error {
+	return s.withTx(ctx, "deny peer cascade", func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE users SET denied_at=datetime('now') WHERE id=?`, userID); err != nil {
+			return dbErr(err, "deny user")
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE actions SET active=FALSE WHERE owner_user_id=? AND deleted_at IS NULL`, userID); err != nil {
+			return dbErr(err, "deactivate actions")
+		}
+		rows, err := tx.QueryContext(ctx,
+			`SELECT id, price, parent_trace_id FROM steps WHERE required_caller_user_id=? AND status='waiting'`, userID)
+		if err != nil {
+			return dbErr(err, "query steps")
+		}
+		type stepRef struct {
+			id            string
+			price         int64
+			parentTraceID *string
+		}
+		var steps []stepRef
+		for rows.Next() {
+			var sr stepRef
+			if err := rows.Scan(&sr.id, &sr.price, &sr.parentTraceID); err != nil {
+				rows.Close()
+				return dbErr(err, "scan step")
+			}
+			steps = append(steps, sr)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return dbErr(err, "steps rows err")
+		}
+		for _, sr := range steps {
+			if _, err := tx.ExecContext(ctx, `UPDATE steps SET status='cancelled' WHERE id=?`, sr.id); err != nil {
+				return dbErr(err, "cancel step")
+			}
+			if sr.parentTraceID != nil && sr.price > 0 {
+				if _, err := tx.ExecContext(ctx,
+					`UPDATE traces SET available=available+?, locked=locked-? WHERE id=?`,
+					sr.price, sr.price, *sr.parentTraceID); err != nil {
+					return dbErr(err, "refund trace")
+				}
+			}
+		}
+		return nil
+	})
 }
 
 func (s *DB) CancelAndRefundStepsForCaller(ctx context.Context, callerUserID string) error {
@@ -344,6 +385,32 @@ func (s *DB) CancelAndRefundStepsForCaller(ctx context.Context, callerUserID str
 		}
 	}
 	return dbErr(tx.Commit(), "cancel steps for caller: commit")
+}
+
+func (s *DB) UpsertStatTag(ctx context.Context, tag *kernel.StatTag) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO stat_tags (action_id, key, value, source, updated_at)
+		 VALUES (?,?,?,?,?)
+		 ON CONFLICT(action_id,key,source) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+		tag.ActionID, tag.Key, tag.Value, tag.Source, timeToStr(tag.UpdatedAt))
+	return dbErr(err, "upsert stat tag")
+}
+
+func (s *DB) ListStatTagsByAction(ctx context.Context, actionID string) ([]*kernel.StatTag, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT action_id, key, value, source, updated_at FROM stat_tags WHERE action_id=?`, actionID)
+	if err != nil {
+		return nil, dbErr(err, "list stat tags")
+	}
+	return queryList(rows, "list stat tags", func(scan func(...any) error) (*kernel.StatTag, error) {
+		var t kernel.StatTag
+		var updatedAt string
+		if err := scan(&t.ActionID, &t.Key, &t.Value, &t.Source, &updatedAt); err != nil {
+			return nil, err
+		}
+		t.UpdatedAt = strToTime(updatedAt)
+		return &t, nil
+	})
 }
 
 func (s *DB) ListStatsByOwner(ctx context.Context, ownerUserID string) ([]*kernel.Stats, error) {

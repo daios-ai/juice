@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -54,78 +53,6 @@ func newRemoteTestKernel(t *testing.T) (*kernel.Kernel, *store.DB) {
 	t.Cleanup(func() { flagDB = origDB })
 
 	return k, db
-}
-
-func TestRemoteAdd(t *testing.T) {
-	k, _ := newRemoteTestKernel(t)
-
-	// Stand up a fake remote kernel that serves /.well-known/juice-kernel.json.
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/.well-known/juice-kernel.json" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"handle":     "@remote-node",
-			"public_key": remoteTestPublicKey(t),
-			"base_url":   "",
-		})
-	}))
-	defer remote.Close()
-
-	// Log in as @sys to save a token for requireSuperuser.
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	tok, err := k.Login(t.Context(), "@sys", "sys-pass")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := saveToken(tok); err != nil {
-		t.Fatal(err)
-	}
-
-	err = runRemoteAdd(remote.URL)
-	if err != nil {
-		t.Fatalf("runRemoteAdd: %v", err)
-	}
-
-	// Handle is derived from the URL host, not the remote's self-reported handle.
-	parsed, _ := url.Parse(remote.URL)
-	expectedHandle := "@" + parsed.Host
-	u, err := k.ReadUserByHandle(t.Context(), expectedHandle)
-	if err != nil {
-		t.Fatalf("ReadUserByHandle %s: %v", expectedHandle, err)
-	}
-	if u.RemoteBaseURL == "" {
-		t.Error("expected RemoteBaseURL to be set")
-	}
-	if _, err := base64.RawURLEncoding.DecodeString(u.PublicKey); err != nil {
-		t.Errorf("PublicKey should be base64url: %v", err)
-	}
-}
-
-func TestRemoteList(t *testing.T) {
-	k, _ := newRemoteTestKernel(t)
-
-	sys, err := k.ReadUserByHandle(t.Context(), "@sys")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Register a remote kernel directly via kernel API.
-	if _, err := k.AddPeer(t.Context(), sys.ID, "@list-remote", remoteTestPublicKey(t), "https://list.example.com"); err != nil {
-		t.Fatal(err)
-	}
-
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	tok, _ := k.Login(t.Context(), "@sys", "sys-pass")
-	_ = saveToken(tok)
-
-	if err := runRemoteList(nil, nil); err != nil {
-		t.Fatalf("runRemoteList: %v", err)
-	}
 }
 
 func TestRemoteImport(t *testing.T) {

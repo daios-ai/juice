@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net"
 	"net/url"
@@ -1189,11 +1190,13 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	}
 	scored = scored[:oversub]
 
-	// Apply quality factor (success rate) to the oversampled candidates.
+	// Apply quality factor: local stats dominate; gossip StatTag prior as fallback.
 	for i := range scored {
 		quality := float32(0.5)
 		if stats, _ := k.store.ReadStats(ctx, scored[i].actionID); stats != nil && stats.Uses > 0 {
 			quality = float32(0.5 + 0.5*float64(stats.Successes)/float64(stats.Uses))
+		} else if tags, _ := k.store.ListStatTagsByAction(ctx, scored[i].actionID); len(tags) > 0 {
+			quality = gossipQualityPrior(tags)
 		}
 		scored[i].score *= quality
 	}
@@ -1222,6 +1225,24 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		out = append(out, &LookupResult{Action: a, OwnerHandle: ownerHandles[a.OwnerUserID], Score: c.score})
 	}
 	return out, nil
+}
+
+// gossipQualityPrior returns a quality prior in [0.5, 0.75] derived from gossip StatTags.
+// It is dominated by local stats (only applied when uses==0 locally).
+// Formula: 0.5 + 0.25*(clamp(gossip_rating,0,1)) using the first gossip_rating tag found.
+func gossipQualityPrior(tags []*StatTag) float32 {
+	for _, t := range tags {
+		if t.Key == "gossip_rating" {
+			var r float64
+			if _, err := fmt.Sscanf(t.Value, "%f", &r); err == nil && r > 0 {
+				if r > 1 {
+					r = 1
+				}
+				return float32(0.5 + 0.25*r)
+			}
+		}
+	}
+	return 0.5
 }
 
 // storeEmbedding embeds the description and persists the vector. Best-effort: logs on failure, never returns an error.
