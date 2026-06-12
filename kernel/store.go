@@ -104,6 +104,11 @@ type Store interface {
 	ReadUserByHandle(ctx context.Context, handle string) (*User, error)
 	ReadUserByPublicKey(ctx context.Context, publicKey string) (*User, error)
 	UpdateRemoteBaseURL(ctx context.Context, userID, baseURL string) error
+	// ReadRemoteKernelByBaseURL returns the remote-kernel user with the given base URL.
+	ReadRemoteKernelByBaseURL(ctx context.Context, baseURL string) (*User, error)
+	// UpdateRemoteProxySourceURLs replaces oldBase with newBase in Action.source for all
+	// remote_proxy actions owned by ownerUserID.
+	UpdateRemoteProxySourceURLs(ctx context.Context, ownerUserID, oldBase, newBase string) error
 	ListUsers(ctx context.Context, limit, offset int) ([]*User, error)
 	SuspendUser(ctx context.Context, id string) error
 	UnsuspendUser(ctx context.Context, id string) error
@@ -129,39 +134,43 @@ type Store interface {
 
 	// ---- Processes ----
 
-	// StartProcess atomically creates the process, debits owner funds, and creates the root trace.
-	// All three writes occur in a single SQLite transaction. Either all succeed or none do.
-	StartProcess(ctx context.Context, p *Process, t *Trace, ownerID string, funds int64) error
+	// CreateProcess atomically debits price from owner.available, credits owner.locked,
+	// and creates the process with available=price. Returns ErrInsufficientFunds if
+	// owner.available < price.
+	CreateProcess(ctx context.Context, p *Process, ownerID string, price int64) error
 
 	ReadProcess(ctx context.Context, id string) (*Process, error)
 	ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error)
 	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
 
-	// BeginCall atomically locks price credits in the process and creates the child trace.
-	// Either both succeed or neither does. Returns ErrInsufficientFunds if the process
-	// has insufficient available credits; any other error is a store failure.
-	BeginCall(ctx context.Context, processID string, t *Trace, price int64) error
+	// BeginRootCall atomically deducts price from process.available into process.locked
+	// and creates the root trace with available=price.
+	BeginRootCall(ctx context.Context, processID string, t *Trace, price int64) error
 
-	// RefundFunds moves `amount` back from process.locked to process.available.
-	RefundFunds(ctx context.Context, processID string, amount int64) error
+	// BeginSubcall atomically deducts price from the parent trace's available into its locked
+	// and creates the child trace with available=price.
+	BeginSubcall(ctx context.Context, parentTraceID string, t *Trace, price int64) error
 
-	// FundProcess moves `amount` from user.available to process.available.
-	// Fails atomically if user.available < amount.
-	FundProcess(ctx context.Context, userID, processID string, amount int64) error
+	// BeginStepCall atomically moves step.price from the step's parent_trace.locked back into
+	// parent_trace.available (the step is being consumed), creates the new trace with
+	// available=step.price, and transitions the step waiting→running.
+	BeginStepCall(ctx context.Context, stepID string, t *Trace) error
 
-	// CommitCall atomically records a successful transaction, creates its receipt, settles funds,
-	// updates trace cost/latency for all ancestor traces, upserts action stats, completes
-	// the idempotency record (if idempotencyRecordID is non-empty), and — when stepID is non-empty —
-	// marks the step done with the committed tx_id. All in one SQLite transaction.
-	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, idempotencyRecordID, stepID string) error
+	// CommitCall atomically records a successful transaction, creates its receipt,
+	// settles funds (trace.available→target/sys; caller wallet locked released;
+	// owner.locked decremented by taxable), updates trace latency, upserts action stats,
+	// completes the idempotency record (if non-empty), and marks the step done (if non-empty).
+	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, idempotencyRecordID, stepID string) error
 
-	// CommitFailedCall atomically refunds locked funds, records a failure transaction, creates its receipt,
+	// CommitFailedCall atomically cancels all outstanding steps in the trace's subtree
+	// (collecting their parked prices), refunds trace.available + step prices to the caller
+	// wallet, decrements owner.locked, records a failure transaction, creates its receipt,
 	// updates trace latency, upserts action stats, completes the idempotency record (if
-	// idempotencyRecordID is non-empty), and — when stepID is non-empty — marks the step done with
-	// the failure tx_id. All in one SQLite transaction.
-	CommitFailedCall(ctx context.Context, tx *Transaction, receipt *Receipt, processID string, gross int64, stats *Stats, idempotencyRecordID, errorCode, stepID string) error
+	// non-empty), and marks the step done (if non-empty).
+	CommitFailedCall(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind string, gross int64, stats *Stats, idempotencyRecordID, errorCode, stepID string) error
 
-	// EndProcess closes the process and returns all remaining funds to the owner.
+	// EndProcess cancels all waiting steps (returning parked prices to the process owner's
+	// available balance), then returns process.available to the owner, and closes the process.
 	EndProcess(ctx context.Context, processID string) error
 
 	// ---- Traces ----
@@ -209,20 +218,20 @@ type Store interface {
 
 	// ---- Steps ----
 
+	// CreateStep atomically inserts the step and parks step.price from the parent trace's
+	// available into its locked. Returns ErrInsufficientFunds if parent_trace.available < price.
 	CreateStep(ctx context.Context, s *Step) error
 	ReadStep(ctx context.Context, id string) (*Step, error)
 	// ListSteps returns steps visible to caller. processID and status are optional filters ("" = no filter).
 	ListSteps(ctx context.Context, callerUserID, processID, status string, isSuperuser bool) ([]*Step, error)
-	// ClaimStep atomically transitions status waiting→running. Returns ErrInvalidState if not waiting.
-	ClaimStep(ctx context.Context, stepID string) error
 	// ResetStep resets a single running step (tx_id IS NULL) back to waiting. Called when Call
 	// fails before creating a transaction — the step can be retried.
 	ResetStep(ctx context.Context, stepID string) error
 	// ResetRunningSteps sets status=waiting where status=running AND tx_id IS NULL.
 	ResetRunningSteps(ctx context.Context) error
-	// ResetInFlightCalls restores locked process funds to available.
-	// Called at startup to recover from calls that crashed before settlement.
-	ResetInFlightCalls(ctx context.Context) error
+	// ListOrphanTraces returns traces that have no associated transaction, ordered deepest-first
+	// (longest parent chain first). Used by recovery to settle interrupted calls.
+	ListOrphanTraces(ctx context.Context) ([]*Trace, error)
 
 	// ---- Traces (by process) ----
 
@@ -253,9 +262,12 @@ type Store interface {
 	// ReadReceipt returns the receipt with the given ID.
 	ReadReceipt(ctx context.Context, id string) (*Receipt, error)
 
-	// ---- Deposits ----
+	// ---- Deposits / Withdrawals ----
 
 	CreateDeposit(ctx context.Context, d *Deposit) error
+	// CreateWithdrawal atomically debits amount from target.available and records the withdrawal.
+	// Returns ErrInsufficientFunds if target.available < amount.
+	CreateWithdrawal(ctx context.Context, w *Withdrawal) error
 
 	// ---- Embeddings ----
 
@@ -265,13 +277,33 @@ type Store interface {
 	// filtered to active, public, non-deleted actions only.
 	ListEmbeddings(ctx context.Context) (map[string][]float32, error)
 
-	// ---- Federation ----
+	// ---- Users (extended) ----
 
-	// UpdateRemoteProxySourceURLs replaces oldBase with newBase in Action.source for all
-	// remote_proxy actions owned by ownerUserID. Used when a remote peer's base URL changes.
-	UpdateRemoteProxySourceURLs(ctx context.Context, ownerUserID, oldBase, newBase string) error
+	// DenyUser sets denied_at on the user (unfriend operation).
+	DenyUser(ctx context.Context, id string) error
+	// UndenyUser clears denied_at on the user.
+	UndenyUser(ctx context.Context, id string) error
+	// CreateProxyUser creates a proxy user record (Kind is inferred from empty PasswordHash +
+	// non-empty PublicKey + non-empty RemoteBaseURL). Does not create a password.
+	CreateProxyUser(ctx context.Context, u *User) error
 
-	// ReadRemoteKernelByBaseURL returns the remote-kernel user with the given base URL,
-	// or ErrNotFound if no such user exists.
-	ReadRemoteKernelByBaseURL(ctx context.Context, baseURL string) (*User, error)
+	// ---- Gossip / Federation ----
+
+	// CreateOrUpdateDiscoveredKernel upserts a DiscoveredKernel row keyed by (public_key, introduced_by).
+	CreateOrUpdateDiscoveredKernel(ctx context.Context, k *DiscoveredKernel) error
+	// ListDiscoveredKernels returns all discovered kernel rows.
+	ListDiscoveredKernels(ctx context.Context) ([]*DiscoveredKernel, error)
+
+	// ---- Peer lifecycle (used by DenyPeer / UndenyPeer) ----
+
+	// DeactivateActionsOwnedBy sets active=false for all non-deleted actions owned by ownerUserID.
+	DeactivateActionsOwnedBy(ctx context.Context, ownerUserID string) error
+	// ActivateActionsOwnedBy sets active=true for all non-deleted actions owned by ownerUserID.
+	ActivateActionsOwnedBy(ctx context.Context, ownerUserID string) error
+	// CancelAndRefundStepsForCaller cancels all waiting steps where required_caller_user_id=callerUserID,
+	// atomically refunding each step's parked price to its parent trace (available+=price, locked-=price).
+	CancelAndRefundStepsForCaller(ctx context.Context, callerUserID string) error
+	// ListStatsByOwner returns Stats rows for actions owned by ownerUserID that have uses > 0.
+	// Used by GetGossip to identify transacted friends.
+	ListStatsByOwner(ctx context.Context, ownerUserID string) ([]*Stats, error)
 }

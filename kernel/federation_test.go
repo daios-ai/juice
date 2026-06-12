@@ -22,16 +22,16 @@ func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
 	ctx := context.Background()
 	sys := setupSys(t, k, st)
 
-	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@bad/handle", "not-base64url", "https://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.AddPeer(ctx, sys.ID, "@bad/handle", "not-base64url", "https://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for handle containing /, got %v", err)
 	}
 
-	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@bad-key", "not-base64url", "https://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.AddPeer(ctx, sys.ID, "@bad-key", "not-base64url", "https://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for malformed public key, got %v", err)
 	}
 
 	shortKey := base64.RawURLEncoding.EncodeToString([]byte("short"))
-	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@short-key", shortKey, "https://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.AddPeer(ctx, sys.ID, "@short-key", shortKey, "https://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for short public key, got %v", err)
 	}
 
@@ -40,10 +40,10 @@ func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	validKey := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@bad-url", validKey, "ftp://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.AddPeer(ctx, sys.ID, "@bad-url", validKey, "ftp://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for unsupported URL scheme, got %v", err)
 	}
-	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@remote", validKey, "https://remote.example.com"); err != nil {
+	if _, err := k.AddPeer(ctx, sys.ID, "@remote", validKey, "https://remote.example.com"); err != nil {
 		t.Fatalf("valid remote kernel should register: %v", err)
 	}
 }
@@ -57,7 +57,7 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@remote-peer", base64.RawURLEncoding.EncodeToString(pub), "https://remote.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@remote-peer", base64.RawURLEncoding.EncodeToString(pub), "https://remote.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestImportRemoteActionReimp(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@reimp-peer", base64.RawURLEncoding.EncodeToString(pub), "https://reimp.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@reimp-peer", base64.RawURLEncoding.EncodeToString(pub), "https://reimp.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@stable-peer", base64.RawURLEncoding.EncodeToString(pub), "https://stable.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@stable-peer", base64.RawURLEncoding.EncodeToString(pub), "https://stable.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@idem-peer", base64.RawURLEncoding.EncodeToString(pub), "https://idem.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@idem-peer", base64.RawURLEncoding.EncodeToString(pub), "https://idem.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@bad-sig-peer", base64.RawURLEncoding.EncodeToString(pub), "https://badsig.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@bad-sig-peer", base64.RawURLEncoding.EncodeToString(pub), "https://badsig.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestImportRemoteActionRejectsNegativePrice(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@neg-price-peer", base64.RawURLEncoding.EncodeToString(pub), "https://neg.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@neg-price-peer", base64.RawURLEncoding.EncodeToString(pub), "https://neg.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestImportRemoteActionRejectsMissingRequiredFields(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@mrf-peer", base64.RawURLEncoding.EncodeToString(pub), "https://mrf.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@mrf-peer", base64.RawURLEncoding.EncodeToString(pub), "https://mrf.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +453,7 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	fake := &fakeFederationHTTP{receiptJSON: fakeReceiptJSON}
 	k := newTestKernelWithHTTP(st, fake)
 
-	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@proxy-peer", base64.RawURLEncoding.EncodeToString(pub), "https://proxy.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@proxy-peer", base64.RawURLEncoding.EncodeToString(pub), "https://proxy.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,11 +495,12 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	}
 
 	caller := setupUser(t, st, "@proxy-caller", 0)
-	p, _ := setupProcess(t, k, caller.ID, 0)
+	p := setupProcess(t, st, caller.ID, 0)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:    caller.ID,
+		CallerID:     caller.ID,
 		ProcessID:    p.ID,
+		IsRootCall:   true,
 		TargetUserID: "@proxy-peer",
 		ActionName:   "add",
 		Args:         map[string]any{},
@@ -546,7 +547,7 @@ func TestRegisterRemoteKernelUpdatesSourceURLs(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
-	peer, err := k.RegisterRemoteKernel(ctx, sys.ID, "@url-update-peer", pubB64, "https://old.example.com")
+	peer, err := k.AddPeer(ctx, sys.ID, "@url-update-peer", pubB64, "https://old.example.com")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -570,7 +571,7 @@ func TestRegisterRemoteKernelUpdatesSourceURLs(t *testing.T) {
 	}
 
 	// Re-register with new base URL using the same public key.
-	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@url-update-peer", pubB64, "https://new.example.com"); err != nil {
+	if _, err := k.AddPeer(ctx, sys.ID, "@url-update-peer", pubB64, "https://new.example.com"); err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
 
@@ -600,11 +601,11 @@ func TestRegisterRemoteKernelRejectsDuplicateHandle(t *testing.T) {
 	pub1B64 := base64.RawURLEncoding.EncodeToString(pub1)
 	pub2B64 := base64.RawURLEncoding.EncodeToString(pub2)
 
-	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@dup-handle", pub1B64, "https://a.example.com"); err != nil {
+	if _, err := k.AddPeer(ctx, sys.ID, "@dup-handle", pub1B64, "https://a.example.com"); err != nil {
 		t.Fatalf("first register: %v", err)
 	}
 	// Same handle, different public key → must fail.
-	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@dup-handle", pub2B64, "https://b.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.AddPeer(ctx, sys.ID, "@dup-handle", pub2B64, "https://b.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for duplicate handle, got %v", err)
 	}
 }
@@ -620,11 +621,11 @@ func TestRegisterRemoteKernelRejectsDuplicateBaseURL(t *testing.T) {
 	pub1B64 := base64.RawURLEncoding.EncodeToString(pub1)
 	pub2B64 := base64.RawURLEncoding.EncodeToString(pub2)
 
-	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@dup-url-a", pub1B64, "https://shared.example.com"); err != nil {
+	if _, err := k.AddPeer(ctx, sys.ID, "@dup-url-a", pub1B64, "https://shared.example.com"); err != nil {
 		t.Fatalf("first register: %v", err)
 	}
 	// Same base URL, different public key → must fail.
-	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@dup-url-b", pub2B64, "https://shared.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.AddPeer(ctx, sys.ID, "@dup-url-b", pub2B64, "https://shared.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for duplicate base URL, got %v", err)
 	}
 }
@@ -640,7 +641,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	fake := &fakeFederationHTTP{}
 	k := newTestKernelWithHTTP(st, fake)
 
-	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@verify-peer", base64.RawURLEncoding.EncodeToString(pub), "https://verify.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@verify-peer", base64.RawURLEncoding.EncodeToString(pub), "https://verify.example.com")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -667,7 +668,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	}
 
 	caller := setupUser(t, st, "@verify-caller", 0)
-	p, _ := setupProcess(t, k, caller.ID, 0)
+	p := setupProcess(t, st, caller.ID, 0)
 
 	// Build a receipt whose fields match what Call() will record in the transaction.
 	// ActionID must be the remote action's ID (manifest ActionID), not the local proxy ID.
@@ -687,7 +688,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	fake.receiptJSON = string(receiptBytes)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID,
+		CallerID: caller.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: "@verify-peer", ActionName: "vact", Args: map[string]any{},
 	})
 	if err != nil {
@@ -720,7 +721,7 @@ func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
 	// Use a fake HTTP executor so we can call a KindHTTP action and get a local tx.
 	fakeHTTP := &fakeSuccessHTTP{}
 	k := newTestKernelWithHTTP(st, fakeHTTP)
-	p, _ := setupProcess(t, k, caller.ID, 10)
+	p := setupProcess(t, st, caller.ID, 10)
 
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
@@ -744,7 +745,7 @@ func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
 	}
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID,
+		CallerID: caller.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: sys.ID, ActionName: "vrr-local", Args: map[string]any{},
 	})
 	if err != nil {
@@ -773,7 +774,7 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	fake := &fakeFederationHTTP{}
 	k := newTestKernelWithHTTP(st, fake)
 
-	remoteUser, _ := k.RegisterRemoteKernel(ctx, sys.ID, "@tamper-peer", base64.RawURLEncoding.EncodeToString(pub), "https://tamper.example.com")
+	remoteUser, _ := k.AddPeer(ctx, sys.ID, "@tamper-peer", base64.RawURLEncoding.EncodeToString(pub), "https://tamper.example.com")
 	m := kernel.ActionManifest{
 		ActionID: "tamper-action-1", OwnerHandle: "@tamper-peer", Name: "tact",
 		Kind: kernel.KindHTTP, Price: 0, Description: "t",
@@ -802,9 +803,9 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	fake.receiptJSON = string(receiptBytes)
 
 	caller := setupUser(t, st, "@tamper-caller", 0)
-	p, _ := setupProcess(t, k, caller.ID, 0)
+	p := setupProcess(t, st, caller.ID, 0)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID,
+		CallerID: caller.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: "@tamper-peer", ActionName: "tact", Args: map[string]any{},
 	})
 	if err != nil {
@@ -836,7 +837,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	fake := &fakeFederationHTTP{}
 	k := newTestKernelWithHTTP(st, fake)
 
-	remoteUser, err := k.RegisterRemoteKernel(ctx, sys.ID, "@del-peer", base64.RawURLEncoding.EncodeToString(pub), "https://del.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@del-peer", base64.RawURLEncoding.EncodeToString(pub), "https://del.example.com")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -863,7 +864,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	}
 
 	caller := setupUser(t, st, "@del-caller", 0)
-	p, _ := setupProcess(t, k, caller.ID, 0)
+	p := setupProcess(t, st, caller.ID, 0)
 
 	remoteReceipt := &kernel.Receipt{
 		ID: uuid.New().String(), IssuerUserID: "rs",
@@ -879,7 +880,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	fake.receiptJSON = string(receiptBytes)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID,
+		CallerID: caller.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: "@del-peer", ActionName: "dact", Args: map[string]any{},
 	})
 	if err != nil {
@@ -912,5 +913,161 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	}
 	if !v.Valid {
 		t.Error("expected Valid=true after proxy deletion")
+	}
+}
+
+func TestCreateSignedRejectionReceipt(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	// Register a peer so we have a counterpartyID.
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub := priv.Public().(ed25519.PublicKey)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	peer, err := k.AddPeer(ctx, sys.ID, "@rejection-peer", pubB64, "https://rejection.example.com")
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+
+	r, err := k.CreateSignedRejectionReceipt(peer.ID, "@owner/some-action", "argsHash123", "idem-key-456")
+	if err != nil {
+		t.Fatalf("CreateSignedRejectionReceipt: %v", err)
+	}
+
+	if r.Status != kernel.TxFailure {
+		t.Errorf("expected status failure, got %s", r.Status)
+	}
+	if r.Gross != 0 || r.Net != 0 || r.Fee != 0 {
+		t.Errorf("expected zero charge, got gross=%d net=%d fee=%d", r.Gross, r.Net, r.Fee)
+	}
+	if r.Reason != "denied" {
+		t.Errorf("expected reason=denied, got %q", r.Reason)
+	}
+	if r.Signature == "" {
+		t.Error("rejection receipt must be signed")
+	}
+	if r.CallerUserID != peer.ID {
+		t.Errorf("expected CallerUserID=%s, got %s", peer.ID, r.CallerUserID)
+	}
+}
+
+func TestDenyPeerDeactivatesActionsAndCancelsSteps(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	// Register peer B.
+	_, privB, _ := ed25519.GenerateKey(rand.Reader)
+	pubB := privB.Public().(ed25519.PublicKey)
+	pubBB64 := base64.RawURLEncoding.EncodeToString(pubB)
+	peerB, err := k.AddPeer(ctx, sys.ID, "@deny-peer-b", pubBB64, "https://deny-b.example.com")
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+
+	// Create an action owned by B's proxy user (simulates B sharing an action with A).
+	act := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: peerB.ID, Name: "b-act",
+		Kind: kernel.KindRemoteProxy, Active: true, Price: 0,
+		Source: "https://deny-b.example.com/v1/federation/call?action=@b/b-act&counterparty=x",
+		InputSchema:  map[string]any{}, OutputSchema: map[string]any{},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, act); err != nil {
+		t.Fatalf("create action: %v", err)
+	}
+	// Verify it starts active.
+	before, _ := k.ReadAction(ctx, act.ID)
+	if !before.Active {
+		t.Fatal("action should be active before deny")
+	}
+
+	// DenyPeer should deactivate owned actions.
+	if err := k.DenyPeer(ctx, sys.ID, "@deny-peer-b"); err != nil {
+		t.Fatalf("DenyPeer: %v", err)
+	}
+	after, _ := k.ReadAction(ctx, act.ID)
+	if after.Active {
+		t.Error("action should be inactive after DenyPeer")
+	}
+	peerBRead, _ := k.ReadUser(ctx, peerB.ID)
+	if peerBRead.DeniedAt == nil {
+		t.Error("peer B should have denied_at set")
+	}
+
+	// UndenyPeer should reactivate owned actions.
+	if err := k.UndenyPeer(ctx, sys.ID, "@deny-peer-b"); err != nil {
+		t.Fatalf("UndenyPeer: %v", err)
+	}
+	reactivated, _ := k.ReadAction(ctx, act.ID)
+	if !reactivated.Active {
+		t.Error("action should be active again after UndenyPeer")
+	}
+	peerBRead, _ = k.ReadUser(ctx, peerB.ID)
+	if peerBRead.DeniedAt != nil {
+		t.Error("peer B should have denied_at cleared after UndenyPeer")
+	}
+}
+
+func TestGetGossipOnlyIncludesTransactedFriends(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	// Register two peers: one transacted, one not.
+	_, privA, _ := ed25519.GenerateKey(rand.Reader)
+	pubA := privA.Public().(ed25519.PublicKey)
+	pubAB64 := base64.RawURLEncoding.EncodeToString(pubA)
+	peerA, err := k.AddPeer(ctx, sys.ID, "@gossip-transacted", pubAB64, "https://gossip-a.example.com")
+	if err != nil {
+		t.Fatalf("AddPeer A: %v", err)
+	}
+	_, privB, _ := ed25519.GenerateKey(rand.Reader)
+	pubB := privB.Public().(ed25519.PublicKey)
+	pubBB64 := base64.RawURLEncoding.EncodeToString(pubB)
+	_, err = k.AddPeer(ctx, sys.ID, "@gossip-untransacted", pubBB64, "https://gossip-b.example.com")
+	if err != nil {
+		t.Fatalf("AddPeer B: %v", err)
+	}
+
+	// Create a proxy action owned by peer A with uses > 0.
+	actA := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: peerA.ID, Name: "a-act",
+		Kind: kernel.KindRemoteProxy, Active: true, Price: 10,
+		Source: "https://gossip-a.example.com/v1/federation/call?action=@gossip-transacted/a-act&counterparty=x",
+		InputSchema:  map[string]any{}, OutputSchema: map[string]any{},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, actA); err != nil {
+		t.Fatalf("create actA: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := st.UpsertStats(ctx, &kernel.Stats{
+		ActionID: actA.ID, Uses: 2, Successes: 2, LastUsedAt: now,
+	}); err != nil {
+		t.Fatalf("UpsertStats: %v", err)
+	}
+
+	gossip, err := k.GetGossip(ctx)
+	if err != nil {
+		t.Fatalf("GetGossip: %v", err)
+	}
+
+	// Only peer A (transacted) should appear in Friends.
+	if len(gossip.Friends) != 1 {
+		t.Fatalf("expected 1 transacted friend, got %d", len(gossip.Friends))
+	}
+	if gossip.Friends[0].Handle != "@gossip-transacted" {
+		t.Errorf("expected @gossip-transacted, got %s", gossip.Friends[0].Handle)
+	}
+	if len(gossip.Friends[0].Actions) != 1 {
+		t.Fatalf("expected 1 action in friend view, got %d", len(gossip.Friends[0].Actions))
+	}
+	if gossip.Friends[0].Actions[0].Uses != 2 {
+		t.Errorf("expected Uses=2, got %d", gossip.Friends[0].Actions[0].Uses)
 	}
 }

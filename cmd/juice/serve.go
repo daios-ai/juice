@@ -123,8 +123,10 @@ func registerRoutes(r chi.Router, srv *server) {
 	// Well-known kernel metadata (unauthenticated).
 	r.Get("/.well-known/juice-kernel.json", srv.getWellKnown)
 
-	// Federation call endpoint (unauthenticated; action must be public).
+	// Federation endpoints (unauthenticated).
 	r.Post("/v1/federation/call", srv.postFederationCall)
+	r.Get("/v1/gossip", srv.getGossip)
+	r.Post("/v1/peers", srv.postPeer)
 
 	// Public action routes — no auth required.
 	r.Get("/v1/actions", srv.getActions)
@@ -145,13 +147,11 @@ func registerRoutes(r chi.Router, srv *server) {
 
 		// Processes.
 		r.Get("/v1/processes", srv.listProcesses)
-		r.Post("/v1/processes", srv.postProcess)
 		r.Get("/v1/processes/{id}", srv.getProcess)
-		r.Post("/v1/processes/{id}/fund", srv.fundProcess)
 		r.Post("/v1/processes/{id}/end", srv.endProcess)
 
-		// Calls.
-		r.Post("/v1/call", srv.postCall)
+		// Run.
+		r.Post("/v1/run", srv.postRun)
 
 		// Transactions.
 		r.Get("/v1/transactions", srv.listTransactions)
@@ -573,47 +573,8 @@ func (s *server) listProcesses(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, processes)
 }
 
-func (s *server) postProcess(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Funds int64 `json:"funds"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	p, t, err := s.kernel.StartProcess(r.Context(), callerFrom(r), callerFrom(r), req.Funds)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"process_id": p.ID,
-		"trace_id":   t.ID,
-		"available":  p.Available,
-	})
-}
-
 func (s *server) getProcess(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	p, err := s.kernel.ReadProcess(r.Context(), callerFrom(r), id)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, p)
-}
-
-func (s *server) fundProcess(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	var req struct {
-		Funds int64 `json:"funds"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	if err := s.kernel.FundProcess(r.Context(), callerFrom(r), id, req.Funds); err != nil {
-		writeErr(w, err)
-		return
-	}
 	p, err := s.kernel.ReadProcess(r.Context(), callerFrom(r), id)
 	if err != nil {
 		writeErr(w, err)
@@ -631,12 +592,10 @@ func (s *server) endProcess(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
+func (s *server) postRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProcessID     string         `json:"process_id"`
-		ParentTraceID string         `json:"parent_trace_id"`
-		Action        string         `json:"action"`
-		Args          map[string]any `json:"args"`
+		Action string         `json:"action"`
+		Args   map[string]any `json:"args"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -646,16 +605,9 @@ func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Args == nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("args is required"))
-		return
+		req.Args = map[string]any{}
 	}
-	reply, err := s.kernel.Call(r.Context(), kernel.CallRequest{
-		CallerID:      callerFrom(r),
-		ProcessID:     req.ProcessID,
-		ParentTraceID: req.ParentTraceID,
-		ActionRef:     req.Action,
-		Args:          req.Args,
-	})
+	reply, err := s.kernel.Run(r.Context(), callerFrom(r), req.Action, req.Args)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -960,6 +912,32 @@ func (s *server) getWellKnown(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *server) getGossip(w http.ResponseWriter, r *http.Request) {
+	gossip, err := s.kernel.GetGossip(r.Context())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, gossip)
+}
+
+func (s *server) postPeer(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Handle    string `json:"handle"`
+		PublicKey string `json:"public_key"`
+		BaseURL   string `json:"base_url"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	u, err := s.kernel.CreateOrUpdateProxyPeer(r.Context(), req.Handle, req.PublicKey, req.BaseURL)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": u.ID, "handle": u.Handle})
+}
+
 func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -1018,6 +996,20 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 	sigStr := r.Header.Get("X-Signature")
 	if verifyErr := kernel.VerifyFederationSignature(counterparty.PublicKey, actionParam, cpPubKey, idempotencyKey, tsStr, argsHash, sigStr); verifyErr != nil {
 		writeErr(w, verifyErr)
+		return
+	}
+
+	// §13.2: denied keys are rejected with a signed rejection receipt so the caller can settle.
+	if counterparty.DeniedAt != nil {
+		receipt, signErr := s.kernel.CreateSignedRejectionReceipt(counterparty.ID, actionParam, argsHash, idempotencyKey)
+		if signErr != nil {
+			writeErr(w, kernel.ErrUnauthenticated.Wrap("counterparty is denied"))
+			return
+		}
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error":   "counterparty denied",
+			"receipt": receipt,
+		})
 		return
 	}
 
@@ -1086,23 +1078,11 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Execute.
-	proc, _, err := s.kernel.StartProcess(ctx, counterparty.ID, counterparty.ID, action.Price)
-	if err != nil {
+	reply, callErr := s.kernel.RunFederated(ctx, counterparty.ID, owner.ID, actionName, args, action.Price, rec.ID)
+	if callErr != nil && reply == nil {
 		// No call was attempted; safe to delete the pending record.
 		_ = s.kernel.DeleteIdempotencyRecord(ctx, rec.ID)
-		writeErr(w, err)
-		return
 	}
-	defer s.kernel.EndProcess(ctx, counterparty.ID, proc.ID)
-
-	reply, callErr := s.kernel.Call(ctx, kernel.CallRequest{
-		CallerID:            counterparty.ID,
-		ProcessID:           proc.ID,
-		TargetUserID:        owner.ID,
-		ActionName:          actionName,
-		Args:                args,
-		IdempotencyRecordID: rec.ID,
-	})
 	if callErr != nil {
 		// Complete the pending record so replays return the error instead of 409.
 		// If CommitFailedCall already completed it, this is a no-op (AND status='pending' guard).

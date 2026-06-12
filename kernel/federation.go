@@ -66,18 +66,18 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 		}
 	}
 
-	// 3–9. Field equality checks.
+	// 3–8. Field equality checks.
 	// The receipt carries the remote action's ID, not the local proxy ID.
-	// Use the remote_action_id captured in the transaction at commit time.
 	if tx.RemoteActionID != "" {
 		checks.ActionID = r.ActionID == tx.RemoteActionID
 	} else {
 		checks.ActionID = r.ActionID == tx.ActionID
 	}
 	checks.Status = r.Status == tx.Status
-	checks.Gross = r.Gross == tx.Gross
-	checks.Net = r.Net == tx.Net
-	checks.Fee = r.Fee == tx.Fee
+	// Charge: the amount paid to the remote proxy == receipt.gross.
+	checks.Charge = r.Gross == tx.Gross
+	// SettlementArith: net + fee == gross in the remote receipt.
+	checks.SettlementArith = (r.Net + r.Fee) == r.Gross
 
 	if h, hashErr := jcsHashStr(string(tx.ArgsJSON)); hashErr == nil {
 		checks.ArgsHash = r.ArgsHash == h
@@ -87,7 +87,7 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	}
 
 	valid := checks.ReceiptHash && checks.Signature && checks.ActionID &&
-		checks.Status && checks.Gross && checks.Net && checks.Fee &&
+		checks.Status && checks.Charge && checks.SettlementArith &&
 		checks.ArgsHash && checks.ReplyHash
 
 	return &ReceiptVerification{
@@ -108,14 +108,11 @@ func (k *Kernel) SignFederation(action, counterparty, idempotencyKey, argsHash s
 	return
 }
 
-// ---- Federation operations ----
+// ---- Peer / friendship operations ----
 
-// RegisterRemoteKernel creates or updates a local user record representing a remote kernel peer.
-// Only the superuser may register remote peers.
-func (k *Kernel) RegisterRemoteKernel(ctx context.Context, subjectID, handle, publicKey, baseURL string) (*User, error) {
-	if err := k.requireSuperuser(ctx, subjectID); err != nil {
-		return nil, err
-	}
+// CreateOrUpdateProxyPeer creates or updates a local user record representing a remote kernel peer.
+// Used both by the friendship acceptance path and by federation admins.
+func (k *Kernel) CreateOrUpdateProxyPeer(ctx context.Context, handle, publicKey, baseURL string) (*User, error) {
 	if publicKey == "" || baseURL == "" {
 		return nil, ErrInvalidInput.Wrap("handle, public_key, and base_url are required")
 	}
@@ -129,7 +126,6 @@ func (k *Kernel) RegisterRemoteKernel(ctx context.Context, subjectID, handle, pu
 		return nil, err
 	}
 	// Reject if the handle or base URL is already claimed by a different public key.
-	// This invariant holds for both new registrations and base-URL updates.
 	if byHandle, err := k.store.ReadUserByHandle(ctx, handle); err == nil && byHandle != nil && byHandle.PublicKey != publicKey {
 		return nil, ErrInvalidInput.Wrap("handle already registered with a different public key")
 	}
@@ -155,18 +151,204 @@ func (k *Kernel) RegisterRemoteKernel(ctx context.Context, subjectID, handle, pu
 	u := &User{
 		ID:            uuid.New().String(),
 		Handle:        handle,
-		Email:         handle + "@remote",
-		PasswordHash:  "remote",
 		PublicKey:     publicKey,
 		RemoteBaseURL: baseURL,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
-	if err := k.store.CreateUser(ctx, u); err != nil {
+	if err := k.store.CreateProxyUser(ctx, u); err != nil {
 		return nil, err
 	}
-	k.log.With(ctx).Info("remote_kernel.registered", "handle", handle, "base_url", baseURL)
+	k.log.With(ctx).Info("peer.created", "handle", handle, "base_url", baseURL)
 	return u, nil
+}
+
+// AddPeer requires superuser and creates/updates a proxy peer record.
+func (k *Kernel) AddPeer(ctx context.Context, subjectID, handle, publicKey, baseURL string) (*User, error) {
+	if err := k.requireSuperuser(ctx, subjectID); err != nil {
+		return nil, err
+	}
+	return k.CreateOrUpdateProxyPeer(ctx, handle, publicKey, baseURL)
+}
+
+// ListPeers returns all remote kernel peers (proxy users with a RemoteBaseURL).
+func (k *Kernel) ListPeers(ctx context.Context) ([]*User, error) {
+	all, err := k.store.ListUsers(ctx, 1000, 0)
+	if err != nil {
+		return nil, err
+	}
+	var peers []*User
+	for _, u := range all {
+		if u.RemoteBaseURL != "" {
+			peers = append(peers, u)
+		}
+	}
+	return peers, nil
+}
+
+// DenyPeer sets denied_at on the proxy user for the given handle, deactivates all proxy
+// actions they own on this kernel, and cancels any waiting steps that require them as caller.
+func (k *Kernel) DenyPeer(ctx context.Context, subjectID, handle string) error {
+	if err := k.requireSuperuser(ctx, subjectID); err != nil {
+		return err
+	}
+	u, err := k.store.ReadUserByHandle(ctx, handle)
+	if err != nil {
+		return ErrNotFound.Wrapf("peer %q not found", handle)
+	}
+	if err := k.store.DenyUser(ctx, u.ID); err != nil {
+		return err
+	}
+	if err := k.store.DeactivateActionsOwnedBy(ctx, u.ID); err != nil {
+		return fmt.Errorf("deactivate proxies: %w", err)
+	}
+	if err := k.store.CancelAndRefundStepsForCaller(ctx, u.ID); err != nil {
+		return fmt.Errorf("cancel steps: %w", err)
+	}
+	return nil
+}
+
+// UndenyPeer clears denied_at on the proxy user for the given handle and reactivates
+// all proxy actions they own on this kernel.
+func (k *Kernel) UndenyPeer(ctx context.Context, subjectID, handle string) error {
+	if err := k.requireSuperuser(ctx, subjectID); err != nil {
+		return err
+	}
+	u, err := k.store.ReadUserByHandle(ctx, handle)
+	if err != nil {
+		return ErrNotFound.Wrapf("peer %q not found", handle)
+	}
+	if err := k.store.UndenyUser(ctx, u.ID); err != nil {
+		return err
+	}
+	if err := k.store.ActivateActionsOwnedBy(ctx, u.ID); err != nil {
+		return fmt.Errorf("reactivate proxies: %w", err)
+	}
+	return nil
+}
+
+// GetGossip returns this kernel's gossip payload: identity, public active actions, and peer list.
+func (k *Kernel) GetGossip(ctx context.Context) (*GossipResponse, error) {
+	var pubKeyB64 string
+	if len(k.cfg.SigningKey) == ed25519.PrivateKeySize {
+		pub := k.cfg.SigningKey.Public().(ed25519.PublicKey)
+		pubKeyB64 = base64.RawURLEncoding.EncodeToString(pub)
+	}
+	handle, _ := k.store.GetConfig(ctx, "kernel_handle")
+	baseURL, _ := k.store.GetConfig(ctx, "kernel_base_url")
+
+	actions, err := k.store.ListPublicActions(ctx, 100, 0)
+	if err != nil {
+		return nil, err
+	}
+	var gossipActions []GossipAction
+	for _, a := range actions {
+		if !a.Active {
+			continue
+		}
+		stats, _ := k.store.ReadStats(ctx, a.ID)
+		ga := GossipAction{
+			ActionID:    a.ID,
+			Name:        a.Name,
+			Description: a.Description,
+			Price:       a.Price,
+		}
+		if stats != nil {
+			ga.Uses = stats.Uses
+			ga.Rating = stats.RatingEstimate
+		}
+		gossipActions = append(gossipActions, ga)
+	}
+
+	peers, _ := k.ListPeers(ctx)
+	var friendViews []GossipFriendView
+	for _, p := range peers {
+		if p.DeniedAt != nil {
+			continue
+		}
+		peerStats, _ := k.store.ListStatsByOwner(ctx, p.ID)
+		if len(peerStats) == 0 {
+			continue // not transacted; endorsement is earned by trade, not by friending
+		}
+		var fActions []GossipAction
+		for _, s := range peerStats {
+			act, err := k.store.ReadAction(ctx, s.ActionID)
+			if err != nil || act == nil {
+				continue
+			}
+			fActions = append(fActions, GossipAction{
+				ActionID:    s.ActionID,
+				Name:        act.Name,
+				Description: act.Description,
+				Price:       act.Price,
+				Uses:        s.Uses,
+				Rating:      s.RatingEstimate,
+			})
+		}
+		friendViews = append(friendViews, GossipFriendView{
+			Handle:    p.Handle,
+			BaseURL:   p.RemoteBaseURL,
+			PublicKey: p.PublicKey,
+			Actions:   fActions,
+		})
+	}
+
+	return &GossipResponse{
+		PublicKey: pubKeyB64,
+		Handle:    handle,
+		BaseURL:   baseURL,
+		Actions:   gossipActions,
+		Friends:   friendViews,
+	}, nil
+}
+
+// CreateSignedRejectionReceipt produces a signed Receipt (status=failure, gross=0) for a
+// denied inbound federation call. No transaction is created; the receipt is signed with
+// the kernel's Ed25519 key so the caller can verify the rejection was authentic.
+func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, actionParam, argsHash, idempotencyKey string) (*Receipt, error) {
+	if err := k.requireReceiptSigningReady(); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	r := &Receipt{
+		ID:           uuid.New().String(),
+		IssuerUserID: k.cfg.IssuerUserID,
+		TxID:         idempotencyKey, // no real TxID; idempotency key identifies this rejection
+		ActionID:     actionParam,    // action ref string (no UUID; no call was executed)
+		CallerUserID: counterpartyID,
+		ArgsHash:     argsHash,
+		Status:       TxFailure,
+		Gross:        0,
+		Net:          0,
+		Fee:          0,
+		Reason:       "denied",
+		StartedAt:    now,
+		CreatedAt:    now,
+	}
+	sig, err := signReceipt(k.cfg.SigningKey, r)
+	if err != nil {
+		return nil, err
+	}
+	r.Signature = sig
+	return r, nil
+}
+
+// AccumulateGossip stores a gossip response in the discovered_kernels table.
+func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, introducerPublicKey string) error {
+	if gossip.PublicKey == "" {
+		return ErrInvalidInput.Wrap("gossip missing public_key")
+	}
+	statsJSON, _ := json.Marshal(gossip.Actions)
+	now := time.Now().UTC()
+	return k.store.CreateOrUpdateDiscoveredKernel(ctx, &DiscoveredKernel{
+		PublicKey:    gossip.PublicKey,
+		IntroducedBy: introducerPublicKey,
+		Handle:       gossip.Handle,
+		BaseURL:      gossip.BaseURL,
+		StatsJSON:    json.RawMessage(statsJSON),
+		FirstSeen:    now,
+		UpdatedAt:    now,
+	})
 }
 
 func decodeRemotePublicKey(publicKey string) (ed25519.PublicKey, error) {
@@ -192,21 +374,6 @@ func validateRemoteBaseURL(baseURL string) error {
 		return ErrInvalidInput.Wrap("remote_base_url must not include userinfo, query, or fragment")
 	}
 	return nil
-}
-
-// ListRemoteKernels returns all local user records that represent remote kernel peers.
-func (k *Kernel) ListRemoteKernels(ctx context.Context) ([]*User, error) {
-	all, err := k.store.ListUsers(ctx, 1000, 0)
-	if err != nil {
-		return nil, err
-	}
-	var remote []*User
-	for _, u := range all {
-		if u.RemoteBaseURL != "" {
-			remote = append(remote, u)
-		}
-	}
-	return remote, nil
 }
 
 // ---- Federation import (uses reconcileImport from kernel.go) ----

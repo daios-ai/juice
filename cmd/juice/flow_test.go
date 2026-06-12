@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1614,7 +1615,9 @@ func TestFlow_FederationFriendRun(t *testing.T) {
 }
 
 // TestFlow_GossipDiscovery: kernel gossips a transacted peer; a third kernel reads the
-// gossip, sees earned stats, friends the subject, imports, and runs.
+// gossip, sees earned stats, friends the subject directly, imports, runs — its own Stats
+// start at defaults and accumulate. Uses 3 servers: A (provider), B (intermediary who calls
+// A first), C (discoverer who reads B's gossip about A).
 func TestFlow_GossipDiscovery(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1622,90 +1625,197 @@ func TestFlow_GossipDiscovery(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	srvA, kA, _, _ := newFedKernel(t)
+	srvA, kA, _, privA := newFedKernel(t)
 	defer srvA.Close()
-
-	ctx := context.Background()
-	sysA, _ := kA.ReadUserByHandle(ctx, "@sys")
-
-	// A creates and activates a public action so it appears in gossip.
-	_, ownerATok := makeUser(t, kA, "@gossip-provider")
-	createPublicAction(t, srvA, backend.URL, ownerATok, "gossip-svc", 0)
-
-	// GET /v1/gossip on A.
-	gossipResp := httpDo(t, srvA, "GET", "/v1/gossip", nil, "")
-	if gossipResp.StatusCode != http.StatusOK {
-		gossipResp.Body.Close()
-		t.Fatalf("GET /v1/gossip: expected 200, got %d", gossipResp.StatusCode)
-	}
-	var gossip map[string]any
-	decodeResponse(t, gossipResp, &gossip)
-
-	// Gossip must include public_key and handle.
-	if gossip["public_key"] == "" || gossip["public_key"] == nil {
-		t.Error("gossip missing public_key")
-	}
-
-	// Gossip actions list includes our public action.
-	actions, _ := gossip["actions"].([]any)
-	foundGossipAction := false
-	for _, a := range actions {
-		am, _ := a.(map[string]any)
-		if am["name"] == "gossip-svc" {
-			foundGossipAction = true
-			break
-		}
-	}
-	if !foundGossipAction {
-		t.Errorf("gossip should include gossip-svc action (got %d actions)", len(actions))
-	}
-
-	// A third kernel would POST /v1/peers to friend A and then import.
-	// Here we verify the gossip payload is well-formed and the discovered kernel can be stored.
+	srvB, kB, dbB, privB := newFedKernel(t)
+	defer srvB.Close()
 	srvC, kC, dbC, _ := newFedKernel(t)
 	defer srvC.Close()
+	_ = dbB
+
+	ctx := context.Background()
+
+	pubA := privA.Public().(ed25519.PublicKey)
+	pubB := privB.Public().(ed25519.PublicKey)
+	pubAB64 := base64.RawURLEncoding.EncodeToString(pubA)
+	pubBB64 := base64.RawURLEncoding.EncodeToString(pubB)
+
+	sysA, _ := kA.ReadUserByHandle(ctx, "@sys")
+	sysB, _ := kB.ReadUserByHandle(ctx, "@sys")
+
+	// A creates and activates a public action.
+	_, ownerATok := makeUser(t, kA, "@gossip-provider")
+	const gossipPrice int64 = 50
+	actAID := createPublicAction(t, srvA, backend.URL, ownerATok, "gossip-svc", gossipPrice)
+
+	// A and B friend each other.
+	peerBOnA, err := kA.AddPeer(ctx, sysA.ID, "@kernel-b", pubBB64, srvB.URL)
+	if err != nil {
+		t.Fatalf("A add peer B: %v", err)
+	}
+	_, err = kB.AddPeer(ctx, sysB.ID, "@kernel-a", pubAB64, srvA.URL)
+	if err != nil {
+		t.Fatalf("B add peer A: %v", err)
+	}
+	// Deposit into B's proxy on A so B can call A.
+	giveCredits(t, kA, peerBOnA.ID, 500)
+
+	// B gets A's manifest and imports it.
+	manifestResp := httpDo(t, srvA, "GET", "/v1/actions/"+actAID+"/manifest", nil, "")
+	if manifestResp.StatusCode != http.StatusOK {
+		manifestResp.Body.Close()
+		t.Fatalf("B get A manifest: expected 200, got %d", manifestResp.StatusCode)
+	}
+	var manifest kernel.ActionManifest
+	decodeResponse(t, manifestResp, &manifest)
+
+	peerAOnB, _ := kB.ReadUserByHandle(ctx, "@kernel-a")
+	importB, err := kB.ImportRemoteAction(ctx, sysB.ID, peerAOnB.ID, manifest)
+	if err != nil {
+		t.Fatalf("B import A action: %v", err)
+	}
+	if len(importB.Created) == 0 {
+		t.Fatal("expected created proxy action on B")
+	}
+	proxyOnB := importB.Created[0]
+	if err := kB.SetActive(ctx, sysB.ID, proxyOnB.ID, true); err != nil {
+		t.Fatalf("B activate proxy: %v", err)
+	}
+	pubTrue := true
+	if _, err := kB.UpdateAction(ctx, sysB.ID, kernel.UpdateActionRequest{ID: proxyOnB.ID, Public: &pubTrue}); err != nil {
+		t.Fatalf("B make proxy public: %v", err)
+	}
+
+	// B's user runs A's action via B (real federation call).
+	userBID, userBTok := makeUser(t, kB, "@b-caller")
+	giveCredits(t, kB, userBID, 500)
+	ownerOnB, _ := kB.ReadUser(ctx, proxyOnB.OwnerUserID)
+	runBResp := httpDo(t, srvB, "POST", "/v1/run", map[string]any{
+		"action": ownerOnB.Handle + "/" + proxyOnB.Name,
+		"args":   map[string]any{},
+	}, userBTok)
+	if runBResp.StatusCode != http.StatusOK {
+		var body map[string]any
+		json.NewDecoder(runBResp.Body).Decode(&body)
+		runBResp.Body.Close()
+		t.Fatalf("B federation run: expected 200, got %d — %v", runBResp.StatusCode, body)
+	}
+	runBResp.Body.Close()
+
+	// B's gossip now includes A as a transacted friend (uses >= 1).
+	bGossipResp := httpDo(t, srvB, "GET", "/v1/gossip", nil, "")
+	if bGossipResp.StatusCode != http.StatusOK {
+		bGossipResp.Body.Close()
+		t.Fatalf("GET /v1/gossip on B: expected 200, got %d", bGossipResp.StatusCode)
+	}
+	var bGossip map[string]any
+	decodeResponse(t, bGossipResp, &bGossip)
+
+	bFriends, _ := bGossip["friends"].([]any)
+	if len(bFriends) == 0 {
+		t.Fatal("B's gossip should include A as a transacted friend after the call")
+	}
+	aFriendEntry, _ := bFriends[0].(map[string]any)
+	if aFriendEntry["public_key"] != pubAB64 {
+		t.Errorf("B's gossip friend should be A (pubkey=%s), got public_key=%v", pubAB64, aFriendEntry["public_key"])
+	}
+	friendActions, _ := aFriendEntry["actions"].([]any)
+	if len(friendActions) == 0 {
+		t.Fatal("B's gossip friend A must have earned stats")
+	}
+	firstAct, _ := friendActions[0].(map[string]any)
+	usesRaw, _ := firstAct["uses"].(float64)
+	if usesRaw < 1 {
+		t.Errorf("B's gossip: A's action should have uses>=1, got %.0f", usesRaw)
+	}
+
+	// C reads B's gossip and discovers A via B's transacted friends list.
+	aBaseURL, _ := aFriendEntry["base_url"].(string)
+	aPubKey, _ := aFriendEntry["public_key"].(string)
+	const aHandleOnC = "@kernel-a-via-gossip"
+
+	// C registers A as a peer (learned from B's gossip).
+	peerAonCResp := httpDo(t, srvC, "POST", "/v1/peers", map[string]any{
+		"handle":     aHandleOnC,
+		"public_key": aPubKey,
+		"base_url":   aBaseURL,
+	}, "")
+	if peerAonCResp.StatusCode != http.StatusOK {
+		peerAonCResp.Body.Close()
+		t.Fatalf("C POST /v1/peers: expected 200, got %d", peerAonCResp.StatusCode)
+	}
+	peerAonCResp.Body.Close()
+
+	// A must also register C as a peer so A's federation handler accepts C's calls.
+	pubCB64, _ := kC.GetConfig(ctx, configKeySigningPublic)
+	peerCOnA, err := kA.AddPeer(ctx, sysA.ID, "@kernel-c", pubCB64, srvC.URL)
+	if err != nil {
+		t.Fatalf("A add peer C: %v", err)
+	}
+	giveCredits(t, kA, peerCOnA.ID, 500)
+
+	// C gets A's manifest directly from A.
+	manifest2Resp := httpDo(t, srvA, "GET", "/v1/actions/"+actAID+"/manifest", nil, "")
+	if manifest2Resp.StatusCode != http.StatusOK {
+		manifest2Resp.Body.Close()
+		t.Fatalf("C get A manifest: expected 200, got %d", manifest2Resp.StatusCode)
+	}
+	var manifest2 kernel.ActionManifest
+	decodeResponse(t, manifest2Resp, &manifest2)
 
 	sysC, _ := kC.ReadUserByHandle(ctx, "@sys")
-
-	// C posts A as a peer.
-	pubKeyA := gossip["public_key"].(string)
-	peerResp := httpDo(t, srvC, "POST", "/v1/peers", map[string]any{
-		"handle":     "@kernel-a-disc",
-		"public_key": pubKeyA,
-		"base_url":   srvA.URL,
-	}, "")
-	if peerResp.StatusCode != http.StatusOK {
-		peerResp.Body.Close()
-		t.Fatalf("POST /v1/peers: expected 200, got %d", peerResp.StatusCode)
+	peerAOnC, _ := kC.ReadUserByHandle(ctx, aHandleOnC)
+	importC, err := kC.ImportRemoteAction(ctx, sysC.ID, peerAOnC.ID, manifest2)
+	if err != nil {
+		t.Fatalf("C import A action: %v", err)
 	}
-	peerResp.Body.Close()
+	if len(importC.Created) == 0 {
+		t.Fatal("expected created proxy action on C")
+	}
+	proxyOnC := importC.Created[0]
 
-	// C stores the gossip in discovered_kernels via AccumulateGossip.
-	var gossipResponse kernel.GossipResponse
-	gossipJSON, _ := json.Marshal(gossip)
-	json.Unmarshal(gossipJSON, &gossipResponse)
-	pubKeyC, _ := kC.GetConfig(ctx, configKeySigningPublic)
-	if err := kC.AccumulateGossip(ctx, &gossipResponse, pubKeyC); err != nil {
-		t.Fatalf("AccumulateGossip: %v", err)
+	// Stats start at defaults (uses=0) before C has run anything.
+	statsBeforeRun, readErr := dbC.ReadStats(ctx, proxyOnC.ID)
+	if readErr == nil && statsBeforeRun != nil && statsBeforeRun.Uses > 0 {
+		t.Errorf("stats should start at 0 before running, got Uses=%d", statsBeforeRun.Uses)
 	}
 
-	// C friends A (adds peer) via kernel.
-	peerAOnC, _ := kC.ReadUserByHandle(ctx, "@kernel-a-disc")
-	if peerAOnC == nil {
-		t.Fatal("peer A not found on C after POST /v1/peers")
+	// Activate and make public the proxy on C.
+	if err := kC.SetActive(ctx, sysC.ID, proxyOnC.ID, true); err != nil {
+		t.Fatalf("C activate proxy: %v", err)
+	}
+	if _, err := kC.UpdateAction(ctx, sysC.ID, kernel.UpdateActionRequest{ID: proxyOnC.ID, Public: &pubTrue}); err != nil {
+		t.Fatalf("C make proxy public: %v", err)
 	}
 
-	// Verify: A's gossip action list was received by C (via store directly).
-	discovered, err2 := dbC.ListDiscoveredKernels(ctx)
-	if err2 != nil {
-		t.Fatalf("ListDiscoveredKernels: %v", err2)
+	// C's user runs A's action via C (real federation call A←C).
+	userCID, userCTok := makeUser(t, kC, "@c-caller")
+	giveCredits(t, kC, userCID, 500)
+	ownerOnC, _ := kC.ReadUser(ctx, proxyOnC.OwnerUserID)
+	runCResp := httpDo(t, srvC, "POST", "/v1/run", map[string]any{
+		"action": ownerOnC.Handle + "/" + proxyOnC.Name,
+		"args":   map[string]any{},
+	}, userCTok)
+	if runCResp.StatusCode != http.StatusOK {
+		var body map[string]any
+		json.NewDecoder(runCResp.Body).Decode(&body)
+		runCResp.Body.Close()
+		t.Fatalf("C federation run: expected 200, got %d — %v", runCResp.StatusCode, body)
 	}
-	if len(discovered) == 0 {
-		t.Error("expected at least one discovered kernel on C")
+	var runCReply kernel.CallReply
+	decodeResponse(t, runCResp, &runCReply)
+	if runCReply.Result["gossip_result"] != true {
+		t.Errorf("C federation run result: expected gossip_result=true, got %v", runCReply.Result)
 	}
 
-	_ = sysA
-	_ = sysC
+	// C's stats accumulated (uses=1) from its own settled call.
+	statsAfterRun, err := dbC.ReadStats(ctx, proxyOnC.ID)
+	if err != nil {
+		t.Fatalf("ReadStats after C run: %v", err)
+	}
+	if statsAfterRun.Uses != 1 {
+		t.Errorf("C's stats should have Uses=1 after one run, got %d", statsAfterRun.Uses)
+	}
 }
 
 // TestFlow_UnfriendReconnect: A unfriends B; B's proxies deactivate; B's next inbound
@@ -1718,7 +1828,7 @@ func TestFlow_UnfriendReconnect(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	srvA, kA, _, privA := newFedKernel(t)
+	srvA, kA, dbA, privA := newFedKernel(t)
 	defer srvA.Close()
 	srvB, kB, _, privB := newFedKernel(t)
 	defer srvB.Close()
@@ -1737,56 +1847,163 @@ func TestFlow_UnfriendReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("A add peer B: %v", err)
 	}
-	_, err = kB.AddPeer(ctx, sysB.ID, "@a-peer", pubAB64, srvA.URL)
+	peerAOnB, err := kB.AddPeer(ctx, sysB.ID, "@a-peer", pubAB64, srvA.URL)
 	if err != nil {
 		t.Fatalf("B add peer A: %v", err)
 	}
 
-	// A creates an action and activates it.
+	// A creates an action and activates it (price=0 for simplicity).
 	_, ownerATok := makeUser(t, kA, "@unfriend-owner")
 	actAID := createPublicAction(t, srvA, backend.URL, ownerATok, "unfriend-svc", 0)
 
-	// Get manifest and B imports it.
-	manifestResp := httpDo(t, srvA, "GET", "/v1/actions/"+actAID+"/manifest", nil, "")
-	if manifestResp.StatusCode != http.StatusOK {
-		manifestResp.Body.Close()
-		t.Fatalf("get manifest: expected 200, got %d", manifestResp.StatusCode)
-	}
-	var manifest kernel.ActionManifest
-	decodeResponse(t, manifestResp, &manifest)
+	// B also creates an action so A can import a proxy for B → tests proxy deactivation on A.
+	_, ownerBTok := makeUser(t, kB, "@unfriend-b-owner")
+	actBID := createPublicAction(t, srvB, backend.URL, ownerBTok, "b-side-svc", 0)
 
-	peerAOnB, _ := kB.ReadUserByHandle(ctx, "@a-peer")
-	importResult, err := kB.ImportRemoteAction(ctx, sysB.ID, peerAOnB.ID, manifest)
+	// A imports B's action (creates proxy on A owned by @b-peer).
+	bManifestResp := httpDo(t, srvB, "GET", "/v1/actions/"+actBID+"/manifest", nil, "")
+	if bManifestResp.StatusCode != http.StatusOK {
+		bManifestResp.Body.Close()
+		t.Fatalf("get B manifest: expected 200, got %d", bManifestResp.StatusCode)
+	}
+	var bManifest kernel.ActionManifest
+	decodeResponse(t, bManifestResp, &bManifest)
+
+	importBOnA, err := kA.ImportRemoteAction(ctx, sysA.ID, peerBOnA.ID, bManifest)
+	if err != nil {
+		t.Fatalf("A import B action: %v", err)
+	}
+	if len(importBOnA.Created) == 0 {
+		t.Fatal("expected created proxy action for B on A")
+	}
+	proxyBActOnA := importBOnA.Created[0]
+	// Activate B's proxy on A so we can verify it gets deactivated on DenyPeer.
+	if err := kA.SetActive(ctx, sysA.ID, proxyBActOnA.ID, true); err != nil {
+		t.Fatalf("A activate B proxy: %v", err)
+	}
+	proxyBBefore, _ := kA.ReadAction(ctx, proxyBActOnA.ID)
+	if !proxyBBefore.Active {
+		t.Fatal("B's proxy on A should be active after activation")
+	}
+
+	// Deposit into B's proxy on A (so B can call A's actions).
+	giveCredits(t, kA, peerBOnA.ID, 500)
+
+	// B imports A's action.
+	aManifestResp := httpDo(t, srvA, "GET", "/v1/actions/"+actAID+"/manifest", nil, "")
+	if aManifestResp.StatusCode != http.StatusOK {
+		aManifestResp.Body.Close()
+		t.Fatalf("get A manifest: expected 200, got %d", aManifestResp.StatusCode)
+	}
+	var aManifest kernel.ActionManifest
+	decodeResponse(t, aManifestResp, &aManifest)
+
+	importAOnB, err := kB.ImportRemoteAction(ctx, sysB.ID, peerAOnB.ID, aManifest)
 	if err != nil {
 		t.Fatalf("B import A action: %v", err)
 	}
-	if len(importResult.Created) == 0 {
-		t.Fatal("expected created proxy action")
+	if len(importAOnB.Created) == 0 {
+		t.Fatal("expected created proxy action for A on B")
 	}
-	proxyActID := importResult.Created[0].ID
-	kB.SetActive(ctx, sysB.ID, proxyActID, true) //nolint
-
-	// Verify proxy is active before unfriend.
-	proxyBefore, _ := kB.ReadAction(ctx, proxyActID)
-	if !proxyBefore.Active {
-		t.Log("proxy action was already inactive before unfriend")
+	proxyAActOnB := importAOnB.Created[0]
+	if err := kB.SetActive(ctx, sysB.ID, proxyAActOnB.ID, true); err != nil {
+		t.Fatalf("B activate A proxy: %v", err)
+	}
+	pubTrue := true
+	if _, err := kB.UpdateAction(ctx, sysB.ID, kernel.UpdateActionRequest{ID: proxyAActOnB.ID, Public: &pubTrue}); err != nil {
+		t.Fatalf("B make A proxy public: %v", err)
 	}
 
-	// A unfriends B (deny the peer).
+	// B's user runs A's action (pre-unfriend) → must succeed.
+	userBID, userBTok := makeUser(t, kB, "@b-user")
+	giveCredits(t, kB, userBID, 500)
+	ownerOnB, _ := kB.ReadUser(ctx, proxyAActOnB.OwnerUserID)
+	preRunResp := httpDo(t, srvB, "POST", "/v1/run", map[string]any{
+		"action": ownerOnB.Handle + "/" + proxyAActOnB.Name,
+		"args":   map[string]any{},
+	}, userBTok)
+	if preRunResp.StatusCode != http.StatusOK {
+		var body map[string]any
+		json.NewDecoder(preRunResp.Body).Decode(&body)
+		preRunResp.Body.Close()
+		t.Fatalf("pre-unfriend B run: expected 200, got %d — %v", preRunResp.StatusCode, body)
+	}
+	preRunResp.Body.Close()
+
+	// Create a waiting step on A with required_caller=@b-peer to test cancellation.
+	ownerAID, ownerATok2 := makeUser(t, kA, "@unfriend-step-owner")
+	giveCredits(t, kA, ownerAID, 200)
+	pA := setupProcessHTTP(t, dbA, ownerAID, 100)
+	stepResp := httpDo(t, srvA, "POST", "/v1/steps", map[string]any{
+		"process_id":      pA.ID,
+		"next_action_id":  actAID,
+		"required_caller": "@b-peer",
+		"partial_args":    map[string]any{},
+		"input_schema":    minSchema,
+	}, ownerATok2)
+	if stepResp.StatusCode != http.StatusCreated {
+		stepResp.Body.Close()
+		t.Fatalf("create step: expected 201, got %d", stepResp.StatusCode)
+	}
+	var stepBody map[string]any
+	decodeResponse(t, stepResp, &stepBody)
+	stepID := stepBody["id"].(string)
+	if stepBody["status"] != "waiting" {
+		t.Errorf("step should start as waiting, got %v", stepBody["status"])
+	}
+
+	// A unfriends B.
 	if err := kA.DenyPeer(ctx, sysA.ID, "@b-peer"); err != nil {
 		t.Fatalf("A deny peer B: %v", err)
 	}
 
-	// B's inbound federation call to A should now be rejected.
-	// We verify by checking the peer status on A.
+	// Verify: denied_at is set on B's proxy user on A.
 	peerBOnARefreshed, _ := kA.ReadUser(ctx, peerBOnA.ID)
 	if peerBOnARefreshed.DeniedAt == nil {
 		t.Error("B's peer record on A should have denied_at set after unfriend")
 	}
 
-	// Balance check: A's balance is intact.
-	peerBAfter, _ := kA.ReadUser(ctx, peerBOnA.ID)
-	_ = peerBAfter // balance preserved
+	// Verify: B's proxy action on A (imported from B) is now inactive.
+	proxyBAfter, _ := kA.ReadAction(ctx, proxyBActOnA.ID)
+	if proxyBAfter.Active {
+		t.Error("B's proxy action on A should be inactive after DenyPeer")
+	}
+
+	// Verify: waiting step addressed to @b-peer is now cancelled.
+	stepCheckResp := httpDo(t, srvA, "GET", "/v1/steps/"+stepID, nil, ownerATok2)
+	if stepCheckResp.StatusCode != http.StatusOK {
+		stepCheckResp.Body.Close()
+		t.Fatalf("GET /v1/steps/%s: expected 200, got %d", stepID, stepCheckResp.StatusCode)
+	}
+	var stepAfter map[string]any
+	decodeResponse(t, stepCheckResp, &stepAfter)
+	if stepAfter["status"] != "cancelled" {
+		t.Errorf("step should be cancelled after DenyPeer, got %v", stepAfter["status"])
+	}
+
+	// B tries to run A's action (post-unfriend) → must fail.
+	// A returns 403 with a signed rejection receipt; B's kernel converts this to a local
+	// failure (ExecuteFederation treats non-200 as ErrExecutionFailed → B returns 500).
+	rejectResp := httpDo(t, srvB, "POST", "/v1/run", map[string]any{
+		"action": ownerOnB.Handle + "/" + proxyAActOnB.Name,
+		"args":   map[string]any{},
+	}, userBTok)
+	if rejectResp.StatusCode == http.StatusOK {
+		rejectResp.Body.Close()
+		t.Fatal("post-unfriend B run: expected failure, got 200")
+	}
+	var rejectBody map[string]any
+	json.NewDecoder(rejectResp.Body).Decode(&rejectBody)
+	rejectResp.Body.Close()
+	// Error message from B must include A's rejection receipt (signed, denied).
+	errMsg, _ := rejectBody["error"].(string)
+	if !strings.Contains(errMsg, "denied") && !strings.Contains(errMsg, "403") {
+		t.Errorf("post-unfriend B run error should mention denial/403, got: %v", errMsg)
+	}
+
+	// Balance on A is intact (B's proxy user balance preserved).
+	peerBBalAfter, _ := kA.ReadUser(ctx, peerBOnA.ID)
+	_ = peerBBalAfter // balance preserved as per spec
 
 	// A re-friends B (undeny).
 	if err := kA.UndenyPeer(ctx, sysA.ID, "@b-peer"); err != nil {
@@ -1796,6 +2013,26 @@ func TestFlow_UnfriendReconnect(t *testing.T) {
 	if peerBReconnected.DeniedAt != nil {
 		t.Error("B's peer record on A should not have denied_at after re-friend")
 	}
+
+	// Verify: B's proxy action on A is active again.
+	proxyBReactivated, _ := kA.ReadAction(ctx, proxyBActOnA.ID)
+	if !proxyBReactivated.Active {
+		t.Error("B's proxy action on A should be active after UndenyPeer")
+	}
+
+	// B runs A's action again (post-re-friend) → must succeed.
+	giveCredits(t, kB, userBID, 500) // top up B's user budget
+	postRunResp := httpDo(t, srvB, "POST", "/v1/run", map[string]any{
+		"action": ownerOnB.Handle + "/" + proxyAActOnB.Name,
+		"args":   map[string]any{},
+	}, userBTok)
+	if postRunResp.StatusCode != http.StatusOK {
+		var body map[string]any
+		json.NewDecoder(postRunResp.Body).Decode(&body)
+		postRunResp.Body.Close()
+		t.Fatalf("post-re-friend B run: expected 200, got %d — %v", postRunResp.StatusCode, body)
+	}
+	postRunResp.Body.Close()
 }
 
 // TestFlow_UnderfundedFriendReject: inbound call from an underfunded friend yields a

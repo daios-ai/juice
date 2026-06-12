@@ -42,6 +42,7 @@ type User struct {
 	Available     int64      `json:"available"`
 	Locked        int64      `json:"locked"`
 	SuspendedAt   *time.Time `json:"suspended_at,omitempty"`
+	DeniedAt      *time.Time `json:"denied_at,omitempty"`
 	PublicKey     string     `json:"public_key,omitempty"`      // Ed25519 public key, base64url; empty for local users
 	RemoteBaseURL string     `json:"remote_base_url,omitempty"` // HTTP API base URL of the remote kernel; empty for local users
 	CreatedAt     time.Time  `json:"created_at"`
@@ -102,6 +103,7 @@ type Step struct {
 	NextActionID         string          `json:"next_action_id"`
 	PartialArgs          json.RawMessage `json:"partial_args"`
 	InputSchema          json.RawMessage `json:"input_schema"`
+	Price                int64           `json:"price"`
 	Status               StepStatus      `json:"status"`
 	TxID                 *string         `json:"tx_id,omitempty"`
 	CreatedAt            time.Time       `json:"created_at"`
@@ -113,18 +115,19 @@ type StepReply struct {
 	StepID string `json:"step_id"`
 }
 
-// Trace records causal structure for one step in a call tree.
+// Trace records causal structure and wallet state for one call in a call tree.
 // Root traces have ParentTraceID == nil.
-// Step-completion traces may have a ParentTraceID that crosses process boundaries
-// (the step's parent_trace_id).
+// Step-completion traces may have a ParentTraceID that crosses process boundaries.
+// Available tracks funds remaining after subcalls and step parks; zeroed at settlement.
 type Trace struct {
-	ID             string    `json:"id"`
-	ProcessID      string    `json:"process_id"`
-	ParentTraceID  *string   `json:"parent_trace_id,omitempty"`
-	ActionOwnerID  string    `json:"action_owner_id"`
-	Cost           int64     `json:"cost"`
-	LatencyMS      int64     `json:"latency_ms"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID            string    `json:"id"`
+	ProcessID     string    `json:"process_id"`
+	ParentTraceID *string   `json:"parent_trace_id,omitempty"`
+	ActionOwnerID string    `json:"action_owner_id"`
+	Available     int64     `json:"available"`
+	Locked        int64     `json:"locked"`
+	LatencyMS     int64     `json:"latency_ms"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // Transaction records one attempted call. Immutable after creation.
@@ -154,15 +157,14 @@ type Transaction struct {
 
 // Stats tracks fixed performance and usage statistics for an action.
 type Stats struct {
-	ActionID    string    `json:"action_id"`
-	Uses        int64     `json:"uses"`
-	Successes   int64     `json:"successes"`
-	Failures    int64     `json:"failures"`
-	RatingCount int64     `json:"rating_count"`
-	CostEstimate    float64   `json:"cost_estimate"`
+	ActionID        string    `json:"action_id"`
+	Uses            int64     `json:"uses"`
+	Successes       int64     `json:"successes"`
+	Failures        int64     `json:"failures"`
+	RatingCount     int64     `json:"rating_count"`
 	LatencyEstimate float64   `json:"latency_estimate"`
 	RatingEstimate  float64   `json:"rating_estimate"`
-	LastUsedAt  time.Time `json:"last_used_at"`
+	LastUsedAt      time.Time `json:"last_used_at"`
 }
 
 // StatTag is an extensible key/value annotation on an action's stats.
@@ -182,6 +184,27 @@ type Deposit struct {
 	Amount         int64     `json:"amount"`
 	Reason         string    `json:"reason"`
 	CreatedAt      time.Time `json:"created_at"`
+}
+
+// Withdrawal is an admin debit from a user's available balance.
+type Withdrawal struct {
+	ID             string    `json:"id"`
+	OperatorUserID string    `json:"operator_user_id"`
+	TargetUserID   string    `json:"target_user_id"`
+	Amount         int64     `json:"amount"`
+	Reason         string    `json:"reason"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// DiscoveredKernel is a remote kernel learned via gossip.
+type DiscoveredKernel struct {
+	PublicKey    string          `json:"public_key"`
+	IntroducedBy string          `json:"introduced_by"`
+	Handle       string          `json:"handle"`
+	BaseURL      string          `json:"base_url"`
+	StatsJSON    json.RawMessage `json:"stats_json"`
+	FirstSeen    time.Time       `json:"first_seen"`
+	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
 // AuthCode is a short-lived PKCE authorization code.
@@ -328,15 +351,59 @@ type ReceiptVerification struct {
 
 // ReceiptChecks holds the per-field results of a remote receipt verification.
 type ReceiptChecks struct {
-	ReceiptHash bool `json:"receipt_hash"`
-	Signature   bool `json:"signature"`
-	ActionID    bool `json:"action_id"`
-	Status      bool `json:"status"`
-	Gross       bool `json:"gross"`
-	Net         bool `json:"net"`
-	Fee         bool `json:"fee"`
-	ArgsHash    bool `json:"args_hash"`
-	ReplyHash   bool `json:"reply_hash"`
+	ReceiptHash        bool `json:"receipt_hash"`
+	Signature          bool `json:"signature"`
+	ActionID           bool `json:"action_id"`
+	Status             bool `json:"status"`
+	Charge             bool `json:"charge"`              // amount paid to proxy == receipt.gross
+	SettlementArith    bool `json:"settlement_arith"`    // net + fee == gross (internal receipt math)
+	ArgsHash           bool `json:"args_hash"`
+	ReplyHash          bool `json:"reply_hash"`
+}
+
+// CallerWalletKind identifies the funding source for CommitCall/CommitFailedCall.
+const (
+	CallerProcess = "process" // root call — lock is in process.locked
+	CallerTrace   = "trace"   // subcall — lock is in parent trace.locked
+	// CallerStep means the call was a step-completion: BeginStepCall already released
+	// the parent trace lock. On failure the refund returns to the process.
+	CallerStep = "step"
+)
+
+// PeerView is a peer kernel in the friendship list.
+type PeerView struct {
+	Handle    string     `json:"handle"`
+	BaseURL   string     `json:"base_url"`
+	PublicKey string     `json:"public_key"`
+	DeniedAt  *time.Time `json:"denied_at,omitempty"`
+}
+
+// GossipAction is an action entry in a gossip response.
+type GossipAction struct {
+	ActionID    string  `json:"action_id"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Price       int64   `json:"price"`
+	Uses        int64   `json:"uses"`
+	Rating      float64 `json:"rating"`
+}
+
+// GossipFriendView is a transacted friend in a gossip response: a peer kernel this kernel
+// has settled calls with, including this kernel's locally earned stats for their actions.
+type GossipFriendView struct {
+	Handle    string         `json:"handle"`
+	BaseURL   string         `json:"base_url"`
+	PublicKey string         `json:"public_key"`
+	Actions   []GossipAction `json:"actions"`
+}
+
+// GossipResponse is the payload returned by GET /v1/gossip.
+type GossipResponse struct {
+	PublicKey string             `json:"public_key"`
+	Handle    string             `json:"handle"`
+	BaseURL   string             `json:"base_url"`
+	Actions   []GossipAction     `json:"actions"`
+	Friends   []GossipFriendView `json:"friends"`
 }
 
 // Ed25519PrivateKey is a type alias for clarity at call sites.

@@ -312,6 +312,91 @@ func (s *DB) UndenyUser(ctx context.Context, id string) error {
 	return dbErr(err, "undeny user")
 }
 
+func (s *DB) DeactivateActionsOwnedBy(ctx context.Context, ownerUserID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE actions SET active=FALSE WHERE owner_user_id=? AND deleted_at IS NULL`, ownerUserID)
+	return dbErr(err, "deactivate actions by owner")
+}
+
+func (s *DB) ActivateActionsOwnedBy(ctx context.Context, ownerUserID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE actions SET active=TRUE WHERE owner_user_id=? AND deleted_at IS NULL`, ownerUserID)
+	return dbErr(err, "activate actions by owner")
+}
+
+func (s *DB) CancelAndRefundStepsForCaller(ctx context.Context, callerUserID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "cancel steps for caller: begin tx")
+	}
+	defer tx.Rollback() //nolint
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id, price, parent_trace_id FROM steps WHERE required_caller_user_id=? AND status='waiting'`,
+		callerUserID)
+	if err != nil {
+		return dbErr(err, "cancel steps for caller: query")
+	}
+	type stepRef struct {
+		id            string
+		price         int64
+		parentTraceID *string
+	}
+	var steps []stepRef
+	for rows.Next() {
+		var sr stepRef
+		if err := rows.Scan(&sr.id, &sr.price, &sr.parentTraceID); err != nil {
+			rows.Close()
+			return dbErr(err, "cancel steps for caller: scan")
+		}
+		steps = append(steps, sr)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return dbErr(err, "cancel steps for caller: rows err")
+	}
+
+	for _, sr := range steps {
+		if _, err := tx.ExecContext(ctx, `UPDATE steps SET status='cancelled' WHERE id=?`, sr.id); err != nil {
+			return dbErr(err, "cancel steps for caller: cancel step")
+		}
+		if sr.parentTraceID != nil && sr.price > 0 {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE traces SET available=available+?, locked=locked-? WHERE id=?`,
+				sr.price, sr.price, *sr.parentTraceID); err != nil {
+				return dbErr(err, "cancel steps for caller: refund trace")
+			}
+		}
+	}
+	return dbErr(tx.Commit(), "cancel steps for caller: commit")
+}
+
+func (s *DB) ListStatsByOwner(ctx context.Context, ownerUserID string) ([]*kernel.Stats, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT s.action_id, s.uses, s.successes, s.failures, s.rating_count,
+		        s.latency_estimate, s.rating_estimate, s.last_used_at
+		 FROM action_stats s
+		 JOIN actions a ON a.id = s.action_id
+		 WHERE a.owner_user_id = ? AND s.uses > 0 AND a.deleted_at IS NULL`,
+		ownerUserID)
+	if err != nil {
+		return nil, dbErr(err, "list stats by owner")
+	}
+	defer rows.Close()
+	var out []*kernel.Stats
+	for rows.Next() {
+		var st kernel.Stats
+		var lastUsedAt string
+		if err := rows.Scan(&st.ActionID, &st.Uses, &st.Successes, &st.Failures,
+			&st.RatingCount, &st.LatencyEstimate, &st.RatingEstimate, &lastUsedAt); err != nil {
+			return nil, dbErr(err, "list stats by owner: scan")
+		}
+		st.LastUsedAt = strToTime(lastUsedAt)
+		out = append(out, &st)
+	}
+	return out, dbErr(rows.Err(), "list stats by owner: rows err")
+}
+
 func (s *DB) CreateProxyUser(ctx context.Context, u *kernel.User) error {
 	// Use handle+"@remote" as a unique placeholder email for proxy users.
 	proxyEmail := u.Handle + "@remote"
