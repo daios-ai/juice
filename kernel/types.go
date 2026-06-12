@@ -411,3 +411,14 @@ type GossipResponse struct {
 	Friends   []GossipFriendView `json:"friends"`
 }
 
+// FederationResult is the return value of ExecuteFederation.
+// ReceiptJSON is non-empty when the remote kernel included a receipt in its response
+// (at any HTTP status — rejection and failure receipts arrive on non-200).
+// A zero FederationResult (empty ReceiptJSON) means the call is pending: the caller
+// should retain the trace for retry.
+type FederationResult struct {
+	Result      map[string]any
+	ReceiptJSON string
+	HTTPStatus  int
+}
+

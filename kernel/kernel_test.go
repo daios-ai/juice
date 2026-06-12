@@ -1429,12 +1429,12 @@ func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[
 	return nil, kernel.ErrInvalidState.Wrap("not used in federation tests")
 }
 
-func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, _ string, _ map[string]any) (map[string]any, string, error) {
+func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, _ string, _ map[string]any) (kernel.FederationResult, error) {
 	result := f.result
 	if result == nil {
 		result = map[string]any{}
 	}
-	return result, f.receiptJSON, nil
+	return kernel.FederationResult{Result: result, ReceiptJSON: f.receiptJSON, HTTPStatus: 200}, nil
 }
 
 func contains(s, substr string) bool {

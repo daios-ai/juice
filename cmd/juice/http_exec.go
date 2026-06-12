@@ -115,12 +115,15 @@ func doHTTP(ctx context.Context, method, rawURL string, headers map[string]strin
 }
 
 // ExecuteFederation calls a remote kernel's federation endpoint with an idempotency key.
-// The response must be {"result": {...}, "receipt": <receipt-object>}.
-// Returns (result, receiptJSONString, error).
-func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idempotencyKey string, args map[string]any) (map[string]any, string, error) {
+// Parses the {"result": {...}, "receipt": <receipt-object>} envelope at any HTTP status.
+// A non-200 response with a valid receipt envelope is returned as a FederationResult so
+// the kernel can settle the remote call locally (failure with charge from receipt.gross).
+// Transport errors or responses without a parseable receipt return a zero FederationResult,
+// causing the kernel to treat the call as pending for retry.
+func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idempotencyKey string, args map[string]any) (kernel.FederationResult, error) {
 	body, err := json.Marshal(args)
 	if err != nil {
-		return nil, "", kernel.ErrInvalidInput.Wrap("could not serialize args")
+		return kernel.FederationResult{}, kernel.ErrInvalidInput.Wrap("could not serialize args")
 	}
 	argsHash := sha256HexBytes(body)
 	headers := map[string]string{"Content-Type": "application/json"}
@@ -140,19 +143,23 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idem
 	}
 	respBody, status, err := doHTTP(ctx, http.MethodPost, source, headers, strings.NewReader(string(body)), e.timeout, e.allowLocal)
 	if err != nil {
-		return nil, "", err
+		// Transport error: no receipt → caller treats as pending.
+		return kernel.FederationResult{HTTPStatus: 0}, nil
 	}
-	if status != http.StatusOK {
-		return nil, "", kernel.ErrExecutionFailed.Wrapf("action returned status %d: %s", status, string(respBody))
-	}
+	// Parse envelope at any status. Rejection/failure receipts arrive on non-200.
 	var envelope struct {
 		Result  map[string]any  `json:"result"`
 		Receipt json.RawMessage `json:"receipt"`
 	}
-	if err := json.Unmarshal(respBody, &envelope); err != nil {
-		return nil, "", kernel.ErrExecutionFailed.Wrap("federation response is not valid JSON")
+	var receiptJSON string
+	if json.Unmarshal(respBody, &envelope) == nil && len(envelope.Receipt) > 0 && string(envelope.Receipt) != "null" {
+		receiptJSON = string(envelope.Receipt)
 	}
-	return envelope.Result, string(envelope.Receipt), nil
+	return kernel.FederationResult{
+		Result:      envelope.Result,
+		ReceiptJSON: receiptJSON,
+		HTTPStatus:  status,
+	}, nil
 }
 
 type httpActionExecutor struct {

@@ -60,14 +60,14 @@ func TestExecuteFederationSuccess(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	result, receiptJSON, err := exec.ExecuteFederation(context.Background(), srv.URL, "key-123", map[string]any{})
+	fr, err := exec.ExecuteFederation(context.Background(), srv.URL, "key-123", map[string]any{})
 	if err != nil {
 		t.Fatalf("ExecuteFederation: %v", err)
 	}
-	if result["ok"] != true {
-		t.Errorf("result: got %v, want ok:true", result)
+	if fr.Result["ok"] != true {
+		t.Errorf("result: got %v, want ok:true", fr.Result)
 	}
-	if receiptJSON == "" {
+	if fr.ReceiptJSON == "" {
 		t.Error("expected non-empty receiptJSON")
 	}
 }
@@ -79,9 +79,15 @@ func TestExecuteFederationNon200(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	_, _, err := exec.ExecuteFederation(context.Background(), srv.URL, "key-x", map[string]any{})
-	if err == nil {
-		t.Fatal("expected error for non-200 response")
+	fr, err := exec.ExecuteFederation(context.Background(), srv.URL, "key-x", map[string]any{})
+	if err != nil {
+		t.Fatalf("ExecuteFederation: unexpected error: %v", err)
+	}
+	if fr.ReceiptJSON != "" {
+		t.Error("expected empty receiptJSON for non-JSON non-200 response")
+	}
+	if fr.HTTPStatus != 500 {
+		t.Errorf("expected HTTPStatus=500, got %d", fr.HTTPStatus)
 	}
 }
 

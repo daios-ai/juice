@@ -94,8 +94,9 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 	if a.RemoteActionID != m.ActionID {
 		t.Errorf("remote_action_id: got %q, want %q", a.RemoteActionID, m.ActionID)
 	}
-	if a.Price != 50 {
-		t.Errorf("price: got %d, want 50", a.Price)
+	// proxyPrice = mp + ceil(mp*ImportBPS/10000) = 50 + ceil(50*500/10000) = 50+3 = 53
+	if a.Price != 53 {
+		t.Errorf("price: got %d, want 53 (proxyPrice = mp + import duty)", a.Price)
 	}
 }
 
@@ -156,8 +157,9 @@ func TestImportRemoteActionReimp(t *testing.T) {
 	if second.ID != firstID {
 		t.Error("reimport must preserve the same action ID")
 	}
-	if second.Price != 99 {
-		t.Errorf("reimport price: got %d, want 99", second.Price)
+	// proxyPrice = mp + ceil(mp*ImportBPS/10000) = 99 + ceil(99*500/10000) = 99+5 = 104
+	if second.Price != 104 {
+		t.Errorf("reimport price: got %d, want 104 (proxyPrice = mp + import duty)", second.Price)
 	}
 }
 

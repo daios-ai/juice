@@ -653,9 +653,9 @@ func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error
 // and creates the root trace with available=price.
 func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTraceID *string, price int64) error {
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,latency_ms,created_at)
-		 VALUES (?,?,?,?,?,?,?,0,?,?)`,
-		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.LatencyMS, timeToStr(t.CreatedAt),
+		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,latency_ms,idempotency_key,dispatch_json,created_at)
+		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?)`,
+		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.LatencyMS, t.IdempotencyKey, t.DispatchJSON, timeToStr(t.CreatedAt),
 	)
 	return dbErr(err, "insert trace")
 }
@@ -1079,6 +1079,74 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, rece
 		// user.locked will be decremented then. Touching it here would double-count.
 		errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
 		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, string(errResult), stepID, "commit failed call"); err != nil {
+			return err
+		}
+		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
+	})
+}
+
+// CommitRemoteSettlement settles a remote-proxy call with economics distinct from local calls:
+// the gross (= mp + maxduty) was locked; charge flows to the proxy, duty to @sys, and the
+// remainder (refund = gross−charge−duty) is returned to the caller wallet.
+// Unlike CommitCall, taxable = charge+duty (not gross), so the refund must be explicit.
+func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, proxyUserID, feeRecipientID string, charge, duty int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
+	return s.withTx(ctx, "commit remote settlement", func(tx *sql.Tx) error {
+		q := ktx.Gross // full locked amount (mp + maxduty)
+		taxable := charge + duty
+		refund := q - charge - duty
+		// Zero trace.available.
+		if _, err := tx.ExecContext(ctx, `UPDATE traces SET available=0 WHERE id=?`, traceID); err != nil {
+			return dbErr(err, "commit remote settlement: zero trace available")
+		}
+		// Release caller wallet lock and return refund.
+		switch callerWalletKind {
+		case kernel.CallerProcess:
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE processes SET locked=locked-?, available=available+? WHERE id=?`,
+				q, refund, callerWalletID); err != nil {
+				return dbErr(err, "commit remote settlement: release process lock")
+			}
+		case kernel.CallerTrace:
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE traces SET locked=locked-?, available=available+? WHERE id=?`,
+				q, refund, callerWalletID); err != nil {
+				return dbErr(err, "commit remote settlement: release parent trace lock")
+			}
+		case kernel.CallerStep:
+			// BeginStepCall already released the parent trace lock.
+			if refund > 0 {
+				if _, err := tx.ExecContext(ctx,
+					`UPDATE processes SET available=available+? WHERE id=?`,
+					refund, ktx.ProcessID); err != nil {
+					return dbErr(err, "commit remote settlement: refund step to process")
+				}
+			}
+		}
+		// Decrement owner.locked by taxable (permanently committed portion).
+		if taxable > 0 {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE users SET locked=locked-? WHERE id=?`, taxable, ktx.OwnerUserID); err != nil {
+				return dbErr(err, "commit remote settlement: debit owner locked")
+			}
+		}
+		// Pay charge to proxy user.
+		if charge > 0 {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE users SET available=available+? WHERE id=?`, charge, proxyUserID); err != nil {
+				return dbErr(err, "commit remote settlement: credit proxy user")
+			}
+		}
+		// Pay duty to fee recipient.
+		if duty > 0 {
+			if feeRecipientID == "" {
+				return fmt.Errorf("commit remote settlement: duty %d > 0 but feeRecipientID is empty", duty)
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE users SET available=available+? WHERE id=?`, duty, feeRecipientID); err != nil {
+				return dbErr(err, "commit remote settlement: credit fee recipient")
+			}
+		}
+		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, rawJSONStr(ktx.ReplyJSON), stepID, "commit remote settlement"); err != nil {
 			return err
 		}
 		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
@@ -1611,7 +1679,8 @@ func (s *DB) ListTraces(ctx context.Context, processID string) ([]*kernel.Trace,
 func (s *DB) ListOrphanTraces(ctx context.Context) ([]*kernel.Trace, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+traceCols+` FROM traces t
-		 WHERE NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)
+		 WHERE idempotency_key IS NULL
+		 AND NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)
 		 ORDER BY (
 		   WITH RECURSIVE depth(id, d) AS (
 		     SELECT t.id, 0
@@ -1624,13 +1693,31 @@ func (s *DB) ListOrphanTraces(ctx context.Context) ([]*kernel.Trace, error) {
 		// Fallback: simpler ordering without depth CTE for SQLite versions that struggle.
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT `+traceCols+` FROM traces t
-			 WHERE NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)
+			 WHERE idempotency_key IS NULL
+			 AND NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)
 			 ORDER BY created_at DESC`)
 		if err != nil {
 			return nil, dbErr(err, "list orphan traces")
 		}
 	}
 	return queryList(rows, "list orphan traces", func(scan func(...any) error) (*kernel.Trace, error) {
+		var t kernel.Trace
+		if err := scanTrace(&t, scan); err != nil {
+			return nil, err
+		}
+		return &t, nil
+	})
+}
+
+func (s *DB) ListPendingRemoteTraces(ctx context.Context) ([]*kernel.Trace, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+traceCols+` FROM traces
+		 WHERE idempotency_key IS NOT NULL
+		 AND NOT EXISTS (SELECT 1 FROM transactions WHERE trace_id=id)`)
+	if err != nil {
+		return nil, dbErr(err, "list pending remote traces")
+	}
+	return queryList(rows, "list pending remote traces", func(scan func(...any) error) (*kernel.Trace, error) {
 		var t kernel.Trace
 		if err := scanTrace(&t, scan); err != nil {
 			return nil, err

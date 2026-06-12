@@ -21,6 +21,7 @@ import (
 // Config holds kernel-level configuration.
 type Config struct {
 	FeeBPS            int64         // basis points, e.g. 2000 = 20%
+	ImportBPS         int64         // basis points import duty on remote-proxy calls, default 500
 	FeeRecipientID    string        // user ID that receives fees
 	TokenSecret       string        // HMAC secret for JWT signing
 	TokenTTL          time.Duration // token validity window
@@ -37,10 +38,19 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		FeeBPS:        2000,
+		ImportBPS:     500,
 		TokenTTL:      15 * time.Minute,
 		ScriptTimeout: 10 * time.Second,
 		ScriptMemory:  64 * 1024 * 1024, // 64 MiB
 	}
+}
+
+// ceilDiv returns ceil(a/b) using integer arithmetic.
+func ceilDiv(a, b int64) int64 {
+	if b == 0 {
+		return 0
+	}
+	return (a + b - 1) / b
 }
 
 // AllowsLocalSources reports whether the kernel is configured to permit loopback/private source URLs.

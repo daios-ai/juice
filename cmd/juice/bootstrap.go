@@ -66,6 +66,9 @@ func bootstrap(k *kernel.Kernel) error {
 		return fmt.Errorf("recover: %w", err)
 	}
 
+	// Retry any remote proxy calls that were pending at last shutdown.
+	k.RetryPendingRemoteDispatches(ctx)
+
 	for _, spec := range sysNativeSpecs {
 		if err := ensureSysNative(ctx, k, handle, spec); err != nil {
 			return err

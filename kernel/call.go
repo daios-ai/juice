@@ -179,6 +179,25 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		CreatedAt:     now,
 	}
 
+	// For remote_proxy: action.Price = q = proxyPrice (mp + import duty), set at ImportRemoteAction.
+	// Derive the original remote manifest price (mp) from q for clamping and receipt audit.
+	// lockPrice = q (already correct; no re-addition of duty).
+	lockPrice := action.Price
+	var mp int64 = action.Price // for non-remote-proxy: mp unused; for remote-proxy: corrected below
+	if action.Kind == KindRemoteProxy {
+		// mp_original = floor(q * 10000 / (10000 + ImportBPS))
+		mp = action.Price * 10000 / (10000 + k.cfg.ImportBPS)
+		key := uuid.New().String()
+		trace.IdempotencyKey = &key
+		djsonBytes, _ := json.Marshal(map[string]any{
+			"args":         req.Args,
+			"step_id":      req.StepID,
+			"remote_price": mp,
+		})
+		djson := string(djsonBytes)
+		trace.DispatchJSON = &djson
+	}
+
 	callerWalletID, callerWalletKind := k.callerWallet(req, process, parentTrace)
 
 	switch {
@@ -189,16 +208,18 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		// Fetch the real parent_trace_id from DB so the tx records it correctly (not a self-reference).
 		if dbTrace, err := k.store.ReadTrace(ctx, trace.ID); err == nil {
 			trace.ParentTraceID = dbTrace.ParentTraceID
+			trace.IdempotencyKey = dbTrace.IdempotencyKey
+			trace.DispatchJSON = dbTrace.DispatchJSON
 		}
 	case req.IsRootCall:
-		if err := k.store.BeginRootCall(ctx, req.ProcessID, trace, action.Price); err != nil {
+		if err := k.store.BeginRootCall(ctx, req.ProcessID, trace, lockPrice); err != nil {
 			if errors.Is(err, ErrInsufficientFunds) || errors.Is(err, ErrInvalidState) {
 				return nil, err
 			}
 			return nil, ErrInternal.Wrap("could not begin root call")
 		}
 	default:
-		if err := k.store.BeginSubcall(ctx, req.ParentTraceID, trace, action.Price); err != nil {
+		if err := k.store.BeginSubcall(ctx, req.ParentTraceID, trace, lockPrice); err != nil {
 			if errors.Is(err, ErrInsufficientFunds) {
 				return nil, err
 			}
@@ -211,7 +232,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	ctx = log.WithTraceID(ctx, trace.ID)
 	ctx = log.WithActionID(ctx, action.ID)
 	logger = k.log.With(ctx)
-	logger.Info("call.start", "action", action.Name, "price", action.Price)
+	logger.Info("call.start", "action", action.Name, "price", lockPrice)
 
 	txID := uuid.New().String()
 	var parentTraceIDStr string
@@ -230,19 +251,31 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		ActionName:     action.Name,
 		RemoteActionID: action.RemoteActionID,
 		Status:         TxFailure,
-		Gross:          action.Price,
+		Gross:          lockPrice,
 		StartedAt:      now,
 	}
 	argsJSON, _ := json.Marshal(req.Args)
 	ktx.ArgsJSON = json.RawMessage(argsJSON)
 
-	// 9. Execute.
+	// 9. Execute. Remote proxy calls use ExecuteFederation directly with the stored idempotency key.
 	started := time.Now()
-	reply, remoteReceiptJSON, execErr := k.execute(ctx, action, req.Args, trace, action.OwnerUserID, req.CallerID, process.OwnerUserID)
-	if remoteReceiptJSON != "" {
-		ktx.RemoteReceiptHash = sha256Hex(remoteReceiptJSON)
-		ktx.RemoteReceiptJSON = remoteReceiptJSON
+
+	if action.Kind == KindRemoteProxy {
+		fe, ok := k.http.(FederationExecutor)
+		if !ok {
+			return nil, ErrInvalidState.Wrap("federation executor not configured")
+		}
+		ikey := ""
+		if trace.IdempotencyKey != nil {
+			ikey = *trace.IdempotencyKey
+		}
+		fr, _ := fe.ExecuteFederation(ctx, action.Source, ikey, req.Args)
+		latency := time.Since(started).Seconds()
+		ktx.EndedAt = time.Now().UTC()
+		return k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, latency)
 	}
+
+	reply, _, execErr := k.execute(ctx, action, req.Args, trace, action.OwnerUserID, req.CallerID, process.OwnerUserID)
 	latency := time.Since(started).Seconds()
 	ktx.EndedAt = time.Now().UTC()
 
@@ -326,10 +359,8 @@ func canCall(ownerID string, action *Action) bool {
 	return action.Active && (action.Public || ownerID == action.OwnerUserID)
 }
 
-// execute dispatches to the correct execution backend.
-// Returns (result, remoteReceiptJSON, error). remoteReceiptJSON is non-empty only
-// for KindRemoteProxy calls. subCost is no longer tracked here — trace.Available
-// decreases atomically via BeginSubcall for each child call, so taxable = trace.Available.
+// execute dispatches to the correct execution backend for HTTP, WASM, and native actions.
+// KindRemoteProxy is handled separately in Call() via ExecuteFederation.
 func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID, callerID, ownerUserID string) (map[string]any, string, error) {
 	switch action.Kind {
 	case KindHTTP:
@@ -344,13 +375,6 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 	case KindNative:
 		res, err := k.executeNative(ctx, action, args, targetID, callerID, ownerUserID, trace.ProcessID, trace.ID)
 		return res, "", err
-	case KindRemoteProxy:
-		if fe, ok := k.http.(FederationExecutor); ok {
-			idempotencyKey := uuid.New().String()
-			res, receiptJSON, err := fe.ExecuteFederation(ctx, action.Source, idempotencyKey, args)
-			return res, receiptJSON, err
-		}
-		return nil, "", ErrInvalidState.Wrap("federation executor not configured")
 	default:
 		return nil, "", ErrInvalidState.Wrapf("unknown action kind %q", action.Kind)
 	}

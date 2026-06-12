@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daios-ai/juice/log"
 	"github.com/google/uuid"
 )
 
@@ -48,6 +49,16 @@ func verifyJCS(pub ed25519.PublicKey, v any, sigB64 string) error {
 // VerifyRemoteReceipt verifies the stored remote receipt for a remote-proxy transaction.
 // Available to any party satisfying CanReadTransaction. Returns ErrInvalidState for
 // non-remote-proxy transactions (no remote receipt stored).
+//
+// Checks:
+//   - ReceiptHash: SHA-256(remote_receipt_json) == stored hash
+//   - Signature: Ed25519 over JCS(receipt with Signature="") by peer key
+//   - ActionID: receipt.action_id == tx.remote_action_id (or tx.action_id if no remote ID)
+//   - Status: receipt.status == tx.status
+//   - Charge: tx.net == receipt.gross (local charge paid to proxy == what remote reported)
+//   - SettlementArith: duty rule — tx.fee == ceil(tx.net*import_bps/10000) for success, 0 for failure
+//   - ArgsHash: receipt.args_hash == SHA-256(JCS(tx.args))
+//   - ReplyHash: receipt.reply_hash == SHA-256(JCS(tx.result)) on success
 func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string) (*ReceiptVerification, error) {
 	tv, err := k.ReadTransaction(ctx, subjectID, txID)
 	if err != nil {
@@ -58,15 +69,12 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 		return nil, ErrInvalidState.Wrap("transaction has no remote receipt")
 	}
 
-	// Decode the stored receipt.
 	var r Receipt
 	if err := json.Unmarshal([]byte(tx.RemoteReceiptJSON), &r); err != nil {
 		return nil, ErrInternal.Wrapf("decode remote receipt: %v", err)
 	}
 
-	// Resolve the remote kernel's public key from the transaction's target user (the remote peer).
-	// Use tx.TargetUserID and tx.RemoteActionID directly so verification works even after the
-	// local proxy action is soft-deleted.
+	// Resolve the remote kernel's public key. tx.TargetUserID is the proxy user (remote peer).
 	owner, err := k.store.ReadUser(ctx, tx.TargetUserID)
 	if err != nil {
 		return nil, err
@@ -74,10 +82,10 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 
 	var checks ReceiptChecks
 
-	// 1. Hash: SHA-256(receipt JSON) must equal stored hash.
+	// 1. Hash integrity.
 	checks.ReceiptHash = sha256Hex(tx.RemoteReceiptJSON) == tx.RemoteReceiptHash
 
-	// 2. Signature: verify Ed25519 over CanonicalJSON of receipt with Signature cleared.
+	// 2. Signature.
 	if owner.PublicKey != "" {
 		if pub, pubErr := decodeRemotePublicKey(owner.PublicKey); pubErr == nil {
 			cp := r
@@ -86,24 +94,39 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 		}
 	}
 
-	// 3–8. Field equality checks.
-	// The receipt carries the remote action's ID, not the local proxy ID.
+	// 3. ActionID: receipt carries the remote action's ID.
 	if tx.RemoteActionID != "" {
 		checks.ActionID = r.ActionID == tx.RemoteActionID
 	} else {
 		checks.ActionID = r.ActionID == tx.ActionID
 	}
-	checks.Status = r.Status == tx.Status
-	// Charge: the amount paid to the remote proxy == receipt.gross.
-	checks.Charge = r.Gross == tx.Gross
-	// SettlementArith: net + fee == gross in the remote receipt.
-	checks.SettlementArith = (r.Net + r.Fee) == r.Gross
 
+	// 4. Status consistency.
+	checks.Status = r.Status == tx.Status
+
+	// 5. Charge: local tx.net (what we paid the proxy) must equal remote receipt.gross.
+	checks.Charge = r.Gross == tx.Net
+
+	// 6. Settlement arithmetic: duty rule.
+	if tx.Status == TxSuccess {
+		expectedDuty := ceilDiv(tx.Net*k.cfg.ImportBPS, 10000)
+		checks.SettlementArith = tx.Fee == expectedDuty
+	} else {
+		checks.SettlementArith = tx.Fee == 0
+	}
+
+	// 7. Args hash.
 	if h, hashErr := jcsHashStr(string(tx.ArgsJSON)); hashErr == nil {
 		checks.ArgsHash = r.ArgsHash == h
 	}
-	if h, hashErr := jcsHashStr(string(tx.ReplyJSON)); hashErr == nil {
-		checks.ReplyHash = r.ReplyHash == h
+
+	// 8. Reply hash (only meaningful on success).
+	if tx.Status == TxSuccess {
+		if h, hashErr := jcsHashStr(string(tx.ReplyJSON)); hashErr == nil {
+			checks.ReplyHash = r.ReplyHash == h
+		}
+	} else {
+		checks.ReplyHash = true // not applicable on failure
 	}
 
 	valid := checks.ReceiptHash && checks.Signature && checks.ActionID &&
@@ -118,6 +141,176 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 		Checks:                checks,
 		Receipt:               &r,
 	}, nil
+}
+
+// settleRemoteCall settles a remote-proxy call after ExecuteFederation returns.
+// If the receipt is absent or has an invalid signature, the trace stays open for retry (ErrTimeout).
+// Otherwise it commits CommitRemoteSettlement with the correct charge/duty/refund split.
+func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, action *Action, ktx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req CallRequest, target *User, mp int64, fr FederationResult, latency float64) (*CallReply, error) {
+	var r Receipt
+	hasParsedReceipt := fr.ReceiptJSON != "" && json.Unmarshal([]byte(fr.ReceiptJSON), &r) == nil
+
+	// Log but do not block on invalid signature — the receipt is stored for audit via VerifyRemoteReceipt.
+	if hasParsedReceipt && target.PublicKey != "" {
+		if pub, err := decodeRemotePublicKey(target.PublicKey); err == nil {
+			cp := r
+			cp.Signature = ""
+			if err := verifyJCS(pub, cp, r.Signature); err != nil {
+				logger.Warn("remote.bad_signature", "action", action.Name, "error", err)
+			}
+		}
+	}
+
+	// No parseable receipt → trace stays open, retrier owns it.
+	if !hasParsedReceipt {
+		return nil, ErrTimeout.Wrap("remote receipt pending")
+	}
+
+	// Clamp remote charge to mp (protection against overcharging).
+	charge := r.Gross
+	if charge < 0 {
+		charge = 0
+	}
+	if charge > mp {
+		charge = mp
+	}
+	var duty int64
+	if r.Status == TxSuccess {
+		duty = ceilDiv(charge*k.cfg.ImportBPS, 10000)
+	}
+
+	if r.Status == TxSuccess && fr.Result != nil {
+		replyJSON, _ := json.Marshal(fr.Result)
+		ktx.ReplyJSON = json.RawMessage(replyJSON)
+	}
+	ktx.Status = r.Status
+	ktx.Net = charge
+	ktx.Fee = duty
+	ktx.Reason = r.Reason
+	ktx.RemoteReceiptHash = sha256Hex(fr.ReceiptJSON)
+	ktx.RemoteReceiptJSON = fr.ReceiptJSON
+
+	stats := k.computeStats(ctx, action.ID, ktx, latency)
+	localReceipt, receiptErr := k.buildReceipt(ktx)
+	if receiptErr != nil {
+		return nil, ErrInternal.Wrap("could not build receipt")
+	}
+	if err := k.store.CommitRemoteSettlement(ctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, charge, duty, stats, req.IdempotencyRecordID, req.StepID); err != nil {
+		return nil, ErrInternal.Wrap("could not commit remote settlement")
+	}
+
+	logger.Info("remote.settled", "action", action.Name, "status", r.Status, "charge", charge, "duty", duty)
+
+	if r.Status == TxSuccess {
+		return &CallReply{Result: fr.Result, TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID}, nil
+	}
+	reason := ktx.Reason
+	if reason == "" {
+		reason = "remote call failed"
+	}
+	return nil, ErrExecutionFailed.Wrap(reason)
+}
+
+// RetryPendingRemoteDispatches retries all in-flight remote proxy traces that have an
+// idempotency key but no settled transaction. Called once at startup (after Recover) and
+// periodically by the server ticker. Errors for individual traces are logged and skipped.
+func (k *Kernel) RetryPendingRemoteDispatches(ctx context.Context) {
+	logger := k.log.With(ctx)
+	traces, err := k.store.ListPendingRemoteTraces(ctx)
+	if err != nil {
+		logger.Error("remote.retry.list_failed", "error", err)
+		return
+	}
+	for _, trace := range traces {
+		if err := k.retryRemoteTrace(ctx, logger, trace); err != nil {
+			logger.Error("remote.retry.trace_failed", "trace_id", trace.ID, "error", err)
+		}
+	}
+}
+
+// retryRemoteTrace re-issues one pending remote dispatch and settles it if a receipt arrives.
+func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace *Trace) error {
+	if trace.IdempotencyKey == nil || trace.DispatchJSON == nil {
+		return nil
+	}
+	var dispatch struct {
+		Args        map[string]any `json:"args"`
+		StepID      string         `json:"step_id"`
+		RemotePrice int64          `json:"remote_price"`
+	}
+	if err := json.Unmarshal([]byte(*trace.DispatchJSON), &dispatch); err != nil {
+		return ErrInternal.Wrapf("parse dispatch_json: %v", err)
+	}
+	action, err := k.store.ReadAction(ctx, trace.ActionID)
+	if err != nil || action == nil {
+		return ErrNotFound.Wrap("action not found for retry")
+	}
+	target, err := k.store.ReadUser(ctx, trace.ActionOwnerID)
+	if err != nil {
+		return ErrNotFound.Wrap("target not found for retry")
+	}
+	process, err := k.store.ReadProcess(ctx, trace.ProcessID)
+	if err != nil {
+		return ErrNotFound.Wrap("process not found for retry")
+	}
+	fe, ok := k.http.(FederationExecutor)
+	if !ok {
+		return ErrInvalidState.Wrap("federation executor not configured")
+	}
+	fr, _ := fe.ExecuteFederation(ctx, action.Source, *trace.IdempotencyKey, dispatch.Args)
+	if fr.ReceiptJSON == "" {
+		// Still pending.
+		return nil
+	}
+	mp := dispatch.RemotePrice
+	if mp == 0 {
+		// Fallback: derive from action.Price and ImportBPS.
+		mp = action.Price * 10000 / (10000 + k.cfg.ImportBPS)
+	}
+	maxDuty := ceilDiv(mp*k.cfg.ImportBPS, 10000)
+	q := mp + maxDuty
+
+	callerWalletKind := CallerProcess
+	callerWalletID := process.ID
+	if dispatch.StepID != "" {
+		callerWalletKind = CallerStep
+		callerWalletID = ""
+	} else if trace.ParentTraceID != nil {
+		callerWalletKind = CallerTrace
+		callerWalletID = *trace.ParentTraceID
+	}
+
+	now := time.Now().UTC()
+	ktx := &Transaction{
+		ID:             uuid.New().String(),
+		ProcessID:      trace.ProcessID,
+		TraceID:        trace.ID,
+		ParentTraceID:  func() string {
+			if trace.ParentTraceID != nil {
+				return *trace.ParentTraceID
+			}
+			return ""
+		}(),
+		OwnerUserID:    process.OwnerUserID,
+		CallerUserID:   trace.CallerUserID,
+		TargetUserID:   trace.ActionOwnerID,
+		ActionID:       trace.ActionID,
+		ActionName:     action.Name,
+		RemoteActionID: action.RemoteActionID,
+		Status:         TxFailure,
+		Gross:          q,
+		StartedAt:      trace.CreatedAt,
+		EndedAt:        now,
+	}
+	argsJSON, _ := json.Marshal(dispatch.Args)
+	ktx.ArgsJSON = json.RawMessage(argsJSON)
+
+	req := CallRequest{ProcessID: trace.ProcessID, StepID: dispatch.StepID}
+	_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, 0)
+	if err != nil && err.Error() == ErrTimeout.Wrap("remote receipt pending").Error() {
+		return nil // still pending, not an error
+	}
+	return err
 }
 
 // SignFederation signs a federation payload with the platform key and returns
@@ -490,13 +683,16 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 
 	contentHash := remoteManifestHash(m)
 	name := m.Name
+	// Proxy price = mp + ceil(mp * import_bps / 10000): the caller pays the remote price
+	// plus the local import duty, all locked atomically at dispatch time.
+	proxyPrice := m.Price + ceilDiv(m.Price*k.cfg.ImportBPS, 10000)
 	incoming := []incomingOp{{
 		key:  m.ActionID,
 		hash: contentHash,
 		apply: func(a *Action) {
 			a.Name         = name
 			a.Source       = source
-			a.Price        = m.Price
+			a.Price        = proxyPrice
 			a.Description  = m.Description
 			a.InputSchema  = m.InputSchema
 			a.OutputSchema = m.OutputSchema
@@ -510,12 +706,12 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 				Name:           name,
 				Kind:           KindRemoteProxy,
 				Active:         false,
-				Price:          m.Price,
+				Price:          proxyPrice,
 				Description:    m.Description,
 				InputSchema:    m.InputSchema,
 				OutputSchema:   m.OutputSchema,
 				Source:         source,
-				ArtifactHash:   contentHash, // store content hash so reconcileImport can compare on re-import
+				ArtifactHash:   contentHash,
 				RemoteActionID: m.ActionID,
 				CreatedAt:      now,
 				UpdatedAt:      now,

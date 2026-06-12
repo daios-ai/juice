@@ -45,7 +45,7 @@ type URLFetcher interface {
 // FederationExecutor sends a cross-kernel call to a remote proxy target.
 // HTTPExecutor implementations may optionally implement this interface; kernel checks via type assertion.
 type FederationExecutor interface {
-	ExecuteFederation(ctx context.Context, source, idempotencyKey string, args map[string]any) (result map[string]any, receiptJSON string, err error)
+	ExecuteFederation(ctx context.Context, source, idempotencyKey string, args map[string]any) (FederationResult, error)
 }
 
 // HostFunctions are the callbacks available to a running script.
@@ -234,9 +234,21 @@ type Store interface {
 	ListOrphanRunningStepIDs(ctx context.Context) ([]string, error)
 	// ResetRunningSteps sets status=waiting where status=running AND tx_id IS NULL.
 	ResetRunningSteps(ctx context.Context) error
-	// ListOrphanTraces returns traces that have no associated transaction, ordered deepest-first
-	// (longest parent chain first). Used by recovery to settle interrupted calls.
+	// ListOrphanTraces returns traces that have no associated transaction and no idempotency_key,
+	// ordered deepest-first (longest parent chain first). Used by recovery to settle interrupted calls.
+	// Traces with idempotency_key are pending remote dispatches handled by RetryPendingRemoteDispatches.
 	ListOrphanTraces(ctx context.Context) ([]*Trace, error)
+
+	// ListPendingRemoteTraces returns traces with an idempotency_key but no committed transaction.
+	// These are in-flight remote proxy calls awaiting settlement by RetryPendingRemoteDispatches.
+	ListPendingRemoteTraces(ctx context.Context) ([]*Trace, error)
+
+	// CommitRemoteSettlement atomically settles a remote-proxy call:
+	// releases the gross lock from the caller wallet, pays charge→proxyUserID and duty→feeRecipientID,
+	// returns the refund (gross−charge−duty) to the caller wallet, decrements owner.locked by taxable,
+	// records the transaction+receipt, updates stats, marks step done (if stepID non-empty),
+	// completes the idempotency record (if idempotencyRecordID non-empty), and closes the process if quiescent.
+	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, proxyUserID, feeRecipientID string, charge, duty int64, stats *Stats, idempotencyRecordID, stepID string) error
 
 	// ---- Traces (by process) ----
 
