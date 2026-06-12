@@ -27,6 +27,7 @@ type ServerConfig struct {
 	AllowLocalSources bool   `json:"allow_local_sources"`
 	ServerURL         string `json:"server_url"`
 	PeerAutoAccept    bool   `json:"peer_auto_accept"`
+	CredentialsKey    string `json:"credentials_key,omitempty"` // base64url AES-256 key; generated on first boot
 }
 
 // DefaultServerConfig returns a ServerConfig populated with safe defaults.
@@ -120,6 +121,10 @@ func applyEnvOverrides(cfg *ServerConfig) error {
 			return fmt.Errorf("JUICE_SCRIPT_MEMORY_BYTES: %w", err)
 		}
 		cfg.ScriptMemoryBytes = n
+	}
+	// JUICE_CREDENTIALS_KEY is a runtime-only override; it never overwrites the config file.
+	if v := os.Getenv("JUICE_CREDENTIALS_KEY"); v != "" {
+		cfg.CredentialsKey = v
 	}
 	return nil
 }

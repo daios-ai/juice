@@ -71,7 +71,12 @@ type Kernel struct {
 	cfg            Config
 	log            *log.Logger
 	nativeHandlers map[string]NativeFunc
+	secretBox      SecretBox
 }
+
+// SetSecretBox installs the credential encryption adapter. Must be called before any
+// CreateAction/UpdateAction calls that include an Auth payload.
+func (k *Kernel) SetSecretBox(box SecretBox) { k.secretBox = box }
 
 // New constructs a Kernel. scripts, http, and llm may be nil if those features are unused.
 func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, cfg Config, logger *log.Logger) *Kernel {
@@ -93,6 +98,25 @@ func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, c
 // Call from bootstrap to wire each native action without touching call.go.
 func (k *Kernel) RegisterNativeHandler(name string, fn NativeFunc) {
 	k.nativeHandlers[name] = fn
+}
+
+// sealAuthJSON marshals auth to JSON and, if a SecretBox is configured, encrypts it before
+// storing in a.AuthJSON. Without a SecretBox the plaintext JSON is stored (dev/test only).
+func (k *Kernel) sealAuthJSON(a *Action, auth *AuthInput) error {
+	b, err := json.Marshal(auth)
+	if err != nil {
+		return ErrInvalidInput.Wrapf("marshal auth: %v", err)
+	}
+	if k.secretBox != nil {
+		ciphertext, err := k.secretBox.Seal(a.ID, string(b))
+		if err != nil {
+			return ErrInternal.Wrapf("seal auth: %v", err)
+		}
+		a.AuthJSON = ciphertext
+	} else {
+		a.AuthJSON = string(b)
+	}
+	return nil
 }
 
 // SetSigningKey stores the Ed25519 signing key and issuer user ID after bootstrap completes.
@@ -344,7 +368,8 @@ type CreateActionRequest struct {
 	InputSchema  map[string]any
 	OutputSchema map[string]any
 	Source       string
-	WasmArtifact string // base64-encoded pre-compiled WASM; if set, stored as-is and used for the hash
+	WasmArtifact string    // base64-encoded pre-compiled WASM; if set, stored as-is and used for the hash
+	Auth         *AuthInput // upstream credentials; sealed into auth_json at rest; write-only
 }
 
 // lookupHostFn resolves a hostname to IP addresses. Overridable in tests.
@@ -466,6 +491,11 @@ func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateAc
 		}
 	}
 
+	if req.Auth != nil {
+		if err := k.sealAuthJSON(a, req.Auth); err != nil {
+			return nil, err
+		}
+	}
 	if err := k.store.CreateAction(ctx, a); err != nil {
 		return nil, err
 	}
@@ -707,6 +737,7 @@ type UpdateActionRequest struct {
 	OutputSchema map[string]any
 	Source       *string
 	Public       *bool
+	Auth         *AuthInput // upstream credentials; sealed into auth_json at rest; write-only
 }
 
 // UpdateAction modifies an action and deactivates it (schema/source changes require re-activation).
@@ -768,6 +799,11 @@ func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateAc
 	if req.Public != nil {
 		a.Public = *req.Public
 		if err := requireOpenAPIOwnershipIfPublic(a); err != nil {
+			return nil, err
+		}
+	}
+	if req.Auth != nil {
+		if err := k.sealAuthJSON(a, req.Auth); err != nil {
 			return nil, err
 		}
 	}

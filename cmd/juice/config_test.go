@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -190,4 +192,71 @@ func TestApplyEnvOverrides(t *testing.T) {
 			t.Error("expected error for bad JUICE_SCRIPT_MEMORY_BYTES")
 		}
 	})
+
+	t.Run("JUICE_CREDENTIALS_KEY overrides config", func(t *testing.T) {
+		key := make([]byte, 32)
+		for i := range key {
+			key[i] = byte(i + 1)
+		}
+		t.Setenv("JUICE_CREDENTIALS_KEY", base64.RawURLEncoding.EncodeToString(key))
+		cfg := DefaultServerConfig()
+		if err := applyEnvOverrides(&cfg); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.CredentialsKey != base64.RawURLEncoding.EncodeToString(key) {
+			t.Errorf("CredentialsKey not overridden, got %q", cfg.CredentialsKey)
+		}
+	})
+}
+
+func TestAESGCMBox(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 7)
+	}
+	box, err := newAESGCMBox(key)
+	if err != nil {
+		t.Fatalf("newAESGCMBox: %v", err)
+	}
+
+	plaintext := `{"scheme":"bearer","secrets":{"token":"secret-token"}}`
+	aad := "action-id-123"
+
+	ct, err := box.Seal(aad, plaintext)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+
+	// Ciphertext must not contain the plaintext token.
+	raw, _ := base64.RawURLEncoding.DecodeString(ct)
+	if strings.Contains(string(raw), "secret-token") {
+		t.Error("ciphertext must not contain plaintext secret")
+	}
+
+	// Round-trip succeeds.
+	recovered, err := box.Open(aad, ct)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if recovered != plaintext {
+		t.Errorf("round-trip mismatch: got %q, want %q", recovered, plaintext)
+	}
+
+	// Wrong AAD fails.
+	if _, err := box.Open("wrong-action-id", ct); err == nil {
+		t.Error("expected error with wrong AAD")
+	}
+
+	// Tampered ciphertext fails.
+	tampered := make([]byte, len(raw))
+	copy(tampered, raw)
+	tampered[len(tampered)-1] ^= 0xFF
+	if _, err := box.Open(aad, base64.RawURLEncoding.EncodeToString(tampered)); err == nil {
+		t.Error("expected error with tampered ciphertext")
+	}
+
+	// Wrong key size rejected.
+	if _, err := newAESGCMBox([]byte("tooshort")); err == nil {
+		t.Error("expected error for wrong key size")
+	}
 }

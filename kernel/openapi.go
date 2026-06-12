@@ -206,12 +206,8 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 				continue
 			}
 
-			if secRaw, ok := op["security"]; ok {
-				if secs, ok := secRaw.([]any); ok && len(secs) > 0 {
-					rejected = append(rejected, ImportRejection{Key: key, Reason: "operation has security requirements"})
-					continue
-				}
-			}
+			// Operations with security requirements are imported inactive.
+			// Configure upstream auth via POST/PUT /v1/actions and activate once ready.
 
 			_, hasBody := op["requestBody"].(map[string]any)
 			if hasBody {

@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +18,108 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 )
+
+// ---- AES-256-GCM SecretBox ----
+
+// aesGCMBox implements kernel.SecretBox using AES-256-GCM.
+// Each Seal call writes a fresh 12-byte random nonce prepended to the ciphertext, base64url-encoded.
+// aad (action ID) is used as GCM additional data so ciphertexts can't be swapped between rows.
+type aesGCMBox struct{ key [32]byte }
+
+func newAESGCMBox(key []byte) (*aesGCMBox, error) {
+	if len(key) != 32 {
+		return nil, fmt.Errorf("credentials key must be 32 bytes, got %d", len(key))
+	}
+	b := &aesGCMBox{}
+	copy(b.key[:], key)
+	return b, nil
+}
+
+func (b *aesGCMBox) gcm() (cipher.AEAD, error) {
+	block, err := aes.NewCipher(b.key[:])
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func (b *aesGCMBox) Seal(aad, plaintext string) (string, error) {
+	gcm, err := b.gcm()
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	ct := gcm.Seal(nonce, nonce, []byte(plaintext), []byte(aad))
+	return base64.RawURLEncoding.EncodeToString(ct), nil
+}
+
+func (b *aesGCMBox) Open(aad, ciphertext string) (string, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(ciphertext)
+	if err != nil {
+		return "", fmt.Errorf("decode ciphertext: %w", err)
+	}
+	gcm, err := b.gcm()
+	if err != nil {
+		return "", err
+	}
+	ns := gcm.NonceSize()
+	if len(raw) < ns {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	pt, err := gcm.Open(nil, raw[:ns], raw[ns:], []byte(aad))
+	if err != nil {
+		return "", fmt.Errorf("decrypt: %w", err)
+	}
+	return string(pt), nil
+}
+
+// ---- upstream auth application ----
+
+// applyUpstreamAuth reads the decrypted auth JSON from action and applies it to headers/URL.
+// headers must be non-nil; rawURL is modified in-place for "query" scheme.
+func applyUpstreamAuth(action *kernel.Action, headers map[string]string, rawURL *string, box kernel.SecretBox) {
+	if action.AuthJSON == "" || box == nil {
+		return
+	}
+	plaintext, err := box.Open(action.ID, action.AuthJSON)
+	if err != nil {
+		return // fail closed: no auth applied, call will proceed unauthenticated
+	}
+	var auth kernel.AuthInput
+	if err := json.Unmarshal([]byte(plaintext), &auth); err != nil {
+		return
+	}
+	switch auth.Scheme {
+	case "header":
+		name, _ := auth.Config["name"].(string)
+		value, _ := auth.Secrets["value"].(string)
+		if name != "" {
+			headers[name] = value
+		}
+	case "query":
+		name, _ := auth.Config["name"].(string)
+		value, _ := auth.Secrets["value"].(string)
+		if name != "" && rawURL != nil {
+			u, err := url.Parse(*rawURL)
+			if err == nil {
+				q := u.Query()
+				q.Set(name, value)
+				u.RawQuery = q.Encode()
+				*rawURL = u.String()
+			}
+		}
+	case "bearer":
+		token, _ := auth.Secrets["token"].(string)
+		headers["Authorization"] = "Bearer " + token
+	case "basic":
+		user, _ := auth.Secrets["username"].(string)
+		pass, _ := auth.Secrets["password"].(string)
+		headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
+	}
+}
 
 func sha256HexBytes(b []byte) string {
 	h := sha256.Sum256(b)
@@ -165,6 +271,7 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, source, idem
 type httpActionExecutor struct {
 	timeout    time.Duration
 	allowLocal bool
+	secretBox  kernel.SecretBox
 	signerFn   func(action, counterparty, idempotencyKey, argsHash string) (sig, ts string, err error) // wired after bootstrap
 }
 
@@ -183,14 +290,16 @@ func (e *httpActionExecutor) FetchURL(ctx context.Context, rawURL string) ([]byt
 func (e *httpActionExecutor) Execute(ctx context.Context, action *kernel.Action, args map[string]any) (map[string]any, error) {
 	var src kernel.OpenAPISource
 	if json.Unmarshal([]byte(action.Source), &src) == nil && src.Type == "openapi" {
-		return e.executeOpenAPI(ctx, &src, args)
+		return e.executeOpenAPI(ctx, action, &src, args)
 	}
 	body, err := json.Marshal(args)
 	if err != nil {
 		return nil, kernel.ErrInvalidInput.Wrap("could not serialize args")
 	}
+	rawURL := action.Source
 	headers := map[string]string{"Content-Type": "application/json"}
-	respBody, status, err := doHTTP(ctx, http.MethodPost, action.Source, headers, strings.NewReader(string(body)), e.timeout, e.allowLocal)
+	applyUpstreamAuth(action, headers, &rawURL, e.secretBox)
+	respBody, status, err := doHTTP(ctx, http.MethodPost, rawURL, headers, strings.NewReader(string(body)), e.timeout, e.allowLocal)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +313,7 @@ func (e *httpActionExecutor) Execute(ctx context.Context, action *kernel.Action,
 	return result, nil
 }
 
-func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, src *kernel.OpenAPISource, args map[string]any) (map[string]any, error) {
+func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, action *kernel.Action, src *kernel.OpenAPISource, args map[string]any) (map[string]any, error) {
 	path := src.Path
 	queryVals := url.Values{}
 	bodyArgs := map[string]any{}
@@ -275,15 +384,16 @@ func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, src *kernel.Ope
 	}
 
 	var reqBody io.Reader
-	var headers map[string]string
+	headers := map[string]string{}
 	if len(bodyArgs) > 0 || (method != http.MethodGet && len(src.Params) > 0) {
 		b, err := json.Marshal(bodyArgs)
 		if err != nil {
 			return nil, kernel.ErrInvalidInput.Wrap("could not serialize args")
 		}
 		reqBody = strings.NewReader(string(b))
-		headers = map[string]string{"Content-Type": "application/json"}
+		headers["Content-Type"] = "application/json"
 	}
+	applyUpstreamAuth(action, headers, &rawURL, e.secretBox)
 
 	respBody, status, err := doHTTP(ctx, method, rawURL, headers, reqBody, e.timeout, e.allowLocal)
 	if err != nil {

@@ -71,6 +71,14 @@ type Action struct {
 	DeletedAt      *time.Time     `json:"deleted_at,omitempty"`
 }
 
+// AuthInput is a write-only upstream auth payload for action create/update.
+// It is marshaled to JSON and stored encrypted in auth_json. Never returned by any API.
+type AuthInput struct {
+	Scheme  string         `json:"scheme"`           // "header", "query", "bearer", "basic"
+	Config  map[string]any `json:"config,omitempty"` // scheme-specific config (e.g. header name)
+	Secrets map[string]any `json:"secrets"`          // credentials (never logged or returned)
+}
+
 // Process is a budgeted execution context.
 type Process struct {
 	ID          string        `json:"id"`

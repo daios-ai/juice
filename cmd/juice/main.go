@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -45,6 +46,9 @@ var (
 // globalCfg is populated from the config file before any command runs.
 var globalCfg ServerConfig
 
+// resolvedConfigPath is the config file path resolved during initConfig.
+var resolvedConfigPath string
+
 func init() {
 	rootCmd.PersistentFlags().StringVar(&flagDB, "db", "juice.db", "SQLite database path")
 	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", "", "JSON config file (default: juice.json in --db directory)")
@@ -64,6 +68,7 @@ func initConfig() {
 	if path == "" {
 		path = filepath.Join(filepath.Dir(flagDB), "juice.json")
 	}
+	resolvedConfigPath = path
 	cfg, err := LoadOrCreateConfig(path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
@@ -140,6 +145,23 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
 	k := kernel.New(db, exec, httpExec, embedder, cfg, logger)
+
+	// Wire credential encryption. Generate a key on first use (stored in config file).
+	if globalCfg.CredentialsKey == "" {
+		raw := make([]byte, 32)
+		if _, err := rand.Read(raw); err == nil {
+			globalCfg.CredentialsKey = base64.RawURLEncoding.EncodeToString(raw)
+			_ = writeConfig(resolvedConfigPath, globalCfg) // best-effort persist
+		}
+	}
+	if globalCfg.CredentialsKey != "" {
+		if keyBytes, err := base64.RawURLEncoding.DecodeString(globalCfg.CredentialsKey); err == nil {
+			if box, err := newAESGCMBox(keyBytes); err == nil {
+				k.SetSecretBox(box)
+				httpExec.secretBox = box
+			}
+		}
+	}
 
 	// Register native action plugins. Must happen on every kernel open, not just bootstrap.
 	compiler := script.NewTinyGoCompiler(script.CompileConfig{})

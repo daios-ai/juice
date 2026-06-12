@@ -332,3 +332,11 @@ type Store interface {
 	// ListStatTagsByAction returns all stat_tag rows for an action.
 	ListStatTagsByAction(ctx context.Context, actionID string) ([]*StatTag, error)
 }
+
+// SecretBox provides authenticated encryption for upstream action credentials.
+// Seal encrypts plaintext authenticated with aad (the action ID).
+// Open decrypts ciphertext, returning an error if the AAD or ciphertext are invalid.
+type SecretBox interface {
+	Seal(aad, plaintext string) (string, error)
+	Open(aad, ciphertext string) (string, error)
+}

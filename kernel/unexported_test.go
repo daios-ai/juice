@@ -298,14 +298,20 @@ func TestParseOpenAPISpecResolvesRefInRequestBodySchema(t *testing.T) {
 	}
 }
 
-func TestParseOpenAPISpecRejectsSecurityRequirement(t *testing.T) {
-	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","security":[{"apiKey":[]}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
-	_, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
+func TestParseOpenAPISpecAllowsSecurityRequirement(t *testing.T) {
+	// Operations with security requirements are imported inactive (not rejected).
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"post":{"operationId":"sayHello","description":"says hello","security":[{"apiKey":[]}],"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"name":{"type":"string"}}}}}},"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	ops, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
 	if err != nil {
 		t.Fatalf("parseOpenAPISpec: %v", err)
 	}
-	if len(rejected) != 1 || rejected[0].Reason != "operation has security requirements" {
-		t.Errorf("expected security rejection, got %+v", rejected)
+	for _, r := range rejected {
+		if r.Reason == "operation has security requirements" {
+			t.Errorf("security operations should not be rejected; got rejection: %+v", r)
+		}
+	}
+	if len(ops) == 0 {
+		t.Error("expected operation to be parsed, got none")
 	}
 }
 
