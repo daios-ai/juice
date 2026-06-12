@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -86,13 +87,7 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	checks.ReceiptHash = sha256Hex(tx.RemoteReceiptJSON) == tx.RemoteReceiptHash
 
 	// 2. Signature.
-	if owner.PublicKey != "" {
-		if pub, pubErr := decodeRemotePublicKey(owner.PublicKey); pubErr == nil {
-			cp := r
-			cp.Signature = ""
-			checks.Signature = verifyJCS(pub, cp, r.Signature) == nil
-		}
-	}
+	checks.Signature = verifyRemoteReceiptSignature(&r, owner.PublicKey) == nil
 
 	// 3. ActionID: receipt carries the remote action's ID.
 	if tx.RemoteActionID != "" {
@@ -143,28 +138,48 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	}, nil
 }
 
+// verifyRemoteReceiptSignature returns nil if the receipt's Ed25519 signature is valid
+// against pubKeyB64. When pubKeyB64 is empty the check is skipped (no key configured).
+func verifyRemoteReceiptSignature(r *Receipt, pubKeyB64 string) error {
+	if pubKeyB64 == "" {
+		return nil
+	}
+	pub, err := decodeRemotePublicKey(pubKeyB64)
+	if err != nil {
+		return err
+	}
+	cp := *r
+	cp.Signature = ""
+	return verifyJCS(pub, cp, r.Signature)
+}
+
+// parseAndVerifyRemoteReceipt parses receiptJSON and verifies the Ed25519 signature.
+// Returns ErrTimeout (keep-trace-open) on absent, unparseable, or invalidly signed receipts.
+// Settlement must only proceed when this function returns without error.
+func parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64 string) (*Receipt, error) {
+	if receiptJSON == "" {
+		return nil, ErrTimeout.Wrap("remote receipt pending")
+	}
+	var r Receipt
+	if err := json.Unmarshal([]byte(receiptJSON), &r); err != nil {
+		return nil, ErrTimeout.Wrap("remote receipt pending")
+	}
+	if err := verifyRemoteReceiptSignature(&r, pubKeyB64); err != nil {
+		return nil, ErrTimeout.Wrap("remote receipt: invalid signature")
+	}
+	return &r, nil
+}
+
 // settleRemoteCall settles a remote-proxy call after ExecuteFederation returns.
 // If the receipt is absent or has an invalid signature, the trace stays open for retry (ErrTimeout).
 // Otherwise it commits CommitRemoteSettlement with the correct charge/duty/refund split.
 func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, action *Action, ktx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req CallRequest, target *User, mp int64, fr FederationResult, latency float64) (*CallReply, error) {
-	var r Receipt
-	hasParsedReceipt := fr.ReceiptJSON != "" && json.Unmarshal([]byte(fr.ReceiptJSON), &r) == nil
-
-	// Log but do not block on invalid signature — the receipt is stored for audit via VerifyRemoteReceipt.
-	if hasParsedReceipt && target.PublicKey != "" {
-		if pub, err := decodeRemotePublicKey(target.PublicKey); err == nil {
-			cp := r
-			cp.Signature = ""
-			if err := verifyJCS(pub, cp, r.Signature); err != nil {
-				logger.Warn("remote.bad_signature", "action", action.Name, "error", err)
-			}
-		}
+	// A missing, unparseable, or unsigned receipt keeps the trace open for retry.
+	rp, err := parseAndVerifyRemoteReceipt(fr.ReceiptJSON, target.PublicKey)
+	if err != nil {
+		return nil, err
 	}
-
-	// No parseable receipt → trace stays open, retrier owns it.
-	if !hasParsedReceipt {
-		return nil, ErrTimeout.Wrap("remote receipt pending")
-	}
+	r := *rp
 
 	// Clamp remote charge to mp (protection against overcharging).
 	charge := r.Charge
@@ -307,8 +322,8 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 
 	req := CallRequest{ProcessID: trace.ProcessID, StepID: dispatch.StepID}
 	_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, 0)
-	if err != nil && err.Error() == ErrTimeout.Wrap("remote receipt pending").Error() {
-		return nil // still pending, not an error
+	if errors.Is(err, ErrTimeout) {
+		return nil // still pending (no receipt or invalid signature); retrier will try again
 	}
 	return err
 }

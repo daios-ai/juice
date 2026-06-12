@@ -243,6 +243,11 @@ type Store interface {
 	// These are in-flight remote proxy calls awaiting settlement by RetryPendingRemoteDispatches.
 	ListPendingRemoteTraces(ctx context.Context) ([]*Trace, error)
 
+	// ListUnsettledTracesForProcess returns all traces for a process that have no committed
+	// transaction, ordered deepest-first. Includes both orphan and pending-remote traces.
+	// Used by EndProcess to fail in-flight calls before closure.
+	ListUnsettledTracesForProcess(ctx context.Context, processID string) ([]*Trace, error)
+
 	// ReadPendingRefund returns the refund that CommitFailedCall would issue for traceID:
 	// trace.available plus the sum of all waiting step prices in the trace's subtree.
 	// Used to compute charge before signing a failure receipt.

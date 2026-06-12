@@ -41,15 +41,15 @@ func (k *Kernel) Recover(ctx context.Context) error {
 		return err
 	}
 	for _, trace := range traces {
-		if err := k.recoverTrace(ctx, logger, trace); err != nil {
+		if err := k.recoverTrace(ctx, logger, trace, "interrupted"); err != nil {
 			logger.Error("recover.trace_failed", "trace_id", trace.ID, "error", err)
 		}
 	}
 	return nil
 }
 
-// recoverTrace settles a single orphan trace as a failure with reason "interrupted".
-func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Trace) error {
+// recoverTrace settles a single orphan trace as a failure with the given reason.
+func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Trace, reason string) error {
 	process, err := k.store.ReadProcess(ctx, trace.ProcessID)
 	if err != nil {
 		return err
@@ -80,13 +80,13 @@ func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Tr
 		ActionName:   action.Name,
 		Status:       TxFailure,
 		Gross:        trace.Available + trace.Locked,
-		Reason:       "interrupted",
+		Reason:       reason,
 		StartedAt:    trace.CreatedAt,
 		EndedAt:      now,
 		ReplyJSON:    json.RawMessage("null"),
 	}
 
-	recoverErr := ErrInternal.Wrap("interrupted")
+	recoverErr := ErrInternal.Wrap(reason)
 	req := CallRequest{ProcessID: trace.ProcessID}
 	return k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, recoverErr)
 }
@@ -103,15 +103,21 @@ func (k *Kernel) CreateStep(ctx context.Context, callerID, processID string, par
 	if process.Status != ProcessOpen {
 		return nil, ErrInvalidState.Wrap("process is closed")
 	}
-	if process.OwnerUserID != callerID {
-		// Also permit via trace-scoped authority (same rule as Call precondition 3).
-		if parentTraceID == nil {
-			return nil, ErrUnauthorized.Wrap("caller is not the process owner")
-		}
-		parent, err := k.store.ReadTrace(ctx, *parentTraceID)
-		if err != nil || parent.ActionOwnerID != callerID || parent.ProcessID != processID {
-			return nil, ErrUnauthorized.Wrap("caller is not the process owner")
-		}
+	// §10: parent_trace_id is always required; it is the funding source for the parked price.
+	if parentTraceID == nil {
+		return nil, ErrInvalidInput.Wrap("parent_trace_id is required")
+	}
+	parent, err := k.store.ReadTrace(ctx, *parentTraceID)
+	if err != nil {
+		return nil, ErrNotFound.Wrap("parent trace not found")
+	}
+	// §4 precondition: parent trace must belong to the same process.
+	if parent.ProcessID != processID {
+		return nil, ErrUnauthorized.Wrap("parent trace belongs to a different process")
+	}
+	// Process-use authority: C = P, or trace-scoped (parent trace's action_owner_id = C).
+	if process.OwnerUserID != callerID && parent.ActionOwnerID != callerID {
+		return nil, ErrUnauthorized.Wrap("caller is not authorized to use this process")
 	}
 	action, err := k.store.ReadAction(ctx, nextActionID)
 	if err != nil {
@@ -262,9 +268,11 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 		StepID:        stepID,
 	})
 	if callErr != nil {
-		// If Call failed before creating a transaction, reset to waiting so the step can be retried.
-		// If CommitFailedCall already ran with StepID, the step is already done and ResetStep is a no-op.
-		_ = k.store.ResetStep(ctx, stepID)
+		// If Call failed before creating a transaction, re-park the price and reset to waiting
+		// so the step can be retried. BeginStepCall already released the parent trace lock and
+		// created the completion trace; ResetStepAndRepark undoes that accounting.
+		// If CommitFailedCall already ran (step is done), this is a no-op.
+		_ = k.store.ResetStepAndRepark(ctx, stepID)
 		return nil, callErr
 	}
 	k.log.With(ctx).Info("step.completed", "step_id", stepID, "tx_id", reply.TxID, "status", "success")

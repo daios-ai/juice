@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"math"
 
 	"github.com/daios-ai/juice/kernel"
 )
@@ -39,12 +40,9 @@ func (f *FakeEmbedder) Embed(_ context.Context, text string) ([]float32, error) 
 		norm += v * v
 	}
 	if norm > 0 {
-		x := norm
-		for i := 0; i < 10; i++ {
-			x = (x + norm/x) / 2
-		}
+		sqrtNorm := float32(math.Sqrt(float64(norm)))
 		for i := range vec {
-			vec[i] /= x
+			vec[i] /= sqrtNorm
 		}
 	}
 	return vec, nil

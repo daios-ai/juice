@@ -921,17 +921,36 @@ func (k *Kernel) DeleteAction(ctx context.Context, callerID, actionID string) er
 
 // ---- Process / Run operations ----
 
-// Run atomically creates a process funded with action.Price, then executes the root call.
-// This replaces the old StartProcess + FundProcess + Call sequence.
-func (k *Kernel) Run(ctx context.Context, callerID, actionRef string, args map[string]any) (*CallReply, error) {
-	logger := k.log.With(ctx)
+// runResolved creates a funded process and executes the root call. Shared by Run and RunFederated.
+func (k *Kernel) runResolved(ctx context.Context, callerID, targetUserID, actionName string, args map[string]any, price int64, idempotencyRecordID string) (*CallReply, error) {
+	now := time.Now().UTC()
+	p := &Process{
+		ID:          uuid.New().String(),
+		OwnerUserID: callerID,
+		Status:      ProcessOpen,
+		CreatedAt:   now,
+	}
+	if err := k.store.CreateProcess(ctx, p, callerID, price); err != nil {
+		return nil, err
+	}
+	k.log.With(ctx).Info("process.created", "process_id", p.ID, "owner", callerID, "price", price)
+	return k.Call(ctx, CallRequest{
+		CallerID:            callerID,
+		ProcessID:           p.ID,
+		TargetUserID:        targetUserID,
+		ActionName:          actionName,
+		Args:                args,
+		IsRootCall:          true,
+		IdempotencyRecordID: idempotencyRecordID,
+	})
+}
 
+// Run atomically creates a process funded with action.Price, then executes the root call.
+func (k *Kernel) Run(ctx context.Context, callerID, actionRef string, args map[string]any) (*CallReply, error) {
 	caller, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
 	}
-
-	// Resolve action.
 	ownerHandle, actionName, err := ParseActionRef(actionRef)
 	if err != nil {
 		return nil, err
@@ -956,34 +975,12 @@ func (k *Kernel) Run(ctx context.Context, callerID, actionRef string, args map[s
 	if caller.Available < action.Price {
 		return nil, ErrInsufficientFunds.Wrapf("user has %d credits, action costs %d", caller.Available, action.Price)
 	}
-
-	now := time.Now().UTC()
-	p := &Process{
-		ID:          uuid.New().String(),
-		OwnerUserID: callerID,
-		Status:      ProcessOpen,
-		CreatedAt:   now,
-	}
-	if err := k.store.CreateProcess(ctx, p, callerID, action.Price); err != nil {
-		return nil, err
-	}
-	logger.Info("process.created", "process_id", p.ID, "owner", callerID, "price", action.Price)
-
-	reply, callErr := k.Call(ctx, CallRequest{
-		CallerID:     callerID,
-		ProcessID:    p.ID,
-		TargetUserID: target.ID,
-		ActionName:   action.Name,
-		Args:         args,
-		IsRootCall:   true,
-	})
-	return reply, callErr
+	return k.runResolved(ctx, callerID, target.ID, action.Name, args, action.Price, "")
 }
 
 // RunFederated is like Run but accepts an idempotencyRecordID for federation calls.
 // Used by the federation handler to atomically settle the idempotency record.
 func (k *Kernel) RunFederated(ctx context.Context, callerID, targetUserID, actionName string, args map[string]any, price int64, idempotencyRecordID string) (*CallReply, error) {
-	logger := k.log.With(ctx)
 	caller, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
@@ -991,29 +988,12 @@ func (k *Kernel) RunFederated(ctx context.Context, callerID, targetUserID, actio
 	if caller.Available < price {
 		return nil, ErrInsufficientFunds.Wrapf("user has %d credits, action costs %d", caller.Available, price)
 	}
-	now := time.Now().UTC()
-	p := &Process{
-		ID:          uuid.New().String(),
-		OwnerUserID: callerID,
-		Status:      ProcessOpen,
-		CreatedAt:   now,
-	}
-	if err := k.store.CreateProcess(ctx, p, callerID, price); err != nil {
-		return nil, err
-	}
-	logger.Info("federation.process.created", "process_id", p.ID, "owner", callerID, "price", price)
-	return k.Call(ctx, CallRequest{
-		CallerID:            callerID,
-		ProcessID:           p.ID,
-		TargetUserID:        targetUserID,
-		ActionName:          actionName,
-		Args:                args,
-		IsRootCall:          true,
-		IdempotencyRecordID: idempotencyRecordID,
-	})
+	return k.runResolved(ctx, callerID, targetUserID, actionName, args, price, idempotencyRecordID)
 }
 
 // EndProcess closes a process and returns all remaining funds to the owner.
+// Any unsettled in-flight traces (e.g. remote-proxy calls awaiting a receipt) are failed
+// and refunded before the process is closed.
 func (k *Kernel) EndProcess(ctx context.Context, callerID, processID string) error {
 	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return err
@@ -1027,6 +1007,15 @@ func (k *Kernel) EndProcess(ctx context.Context, callerID, processID string) err
 	}
 	if p.Status != ProcessOpen {
 		return ErrInvalidState.Wrap("process is already closed")
+	}
+	// Settle any unsettled traces (e.g. stalled remote-proxy calls holding locked funds).
+	logger := k.log.With(ctx)
+	if unsettled, listErr := k.store.ListUnsettledTracesForProcess(ctx, processID); listErr == nil {
+		for _, trace := range unsettled {
+			if err := k.recoverTrace(ctx, logger, trace, "process force-closed"); err != nil {
+				logger.Error("process.end.settle_failed", "trace_id", trace.ID, "error", err)
+			}
+		}
 	}
 	if err := k.store.EndProcess(ctx, processID); err != nil {
 		return err

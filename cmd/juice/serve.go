@@ -1084,17 +1084,29 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 
 	// Execute.
 	reply, callErr := s.kernel.RunFederated(ctx, counterparty.ID, owner.ID, actionName, args, action.Price, rec.ID)
-	if callErr != nil && reply == nil {
-		// No call was attempted; safe to delete the pending record.
-		_ = s.kernel.DeleteIdempotencyRecord(ctx, rec.ID)
-	}
 	if callErr != nil {
-		// Complete the pending record so replays return the error instead of 409.
-		// If CommitFailedCall already completed it, this is a no-op (AND status='pending' guard).
 		errJSON, _ := json.Marshal(map[string]string{
 			"error": callErr.Error(),
 			"code":  kernel.KernelErrorCode(callErr),
 		})
+		// §13: insufficient balance returns a signed rejection receipt so the caller can settle.
+		if errors.Is(callErr, kernel.ErrInsufficientFunds) {
+			if receipt, signErr := s.kernel.CreateSignedRejectionReceipt(counterparty.ID, actionParam, argsHash, idempotencyKey); signErr == nil {
+				receiptJSON, _ := json.Marshal(receipt)
+				_ = s.kernel.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), string(receiptJSON))
+				writeJSON(w, http.StatusPaymentRequired, map[string]any{
+					"error":   "insufficient balance",
+					"receipt": receipt,
+				})
+				return
+			}
+		}
+		// No call was attempted or signing failed; delete the pending record so the caller can retry.
+		if reply == nil {
+			_ = s.kernel.DeleteIdempotencyRecord(ctx, rec.ID)
+		}
+		// Complete the pending record so replays return the error instead of 409.
+		// If CommitFailedCall already completed it, this is a no-op (AND status='pending' guard).
 		_ = s.kernel.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), "")
 		writeErr(w, callErr)
 		return

@@ -1280,10 +1280,8 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 		if err != nil {
 			return dbErr(err, "end process: read")
 		}
-		// Reject if process has in-flight calls (locked funds).
-		if locked > 0 {
-			return kernel.ErrInvalidState.Wrap("process has in-flight calls; end not allowed")
-		}
+		// In-flight calls (locked > 0) are settled by the kernel before calling EndProcess;
+		// see Kernel.EndProcess which calls recoverTrace for each unsettled trace first.
 		// Cancel all waiting steps and collect parked prices to return to owner.
 		var parkedTotal int64
 		if err = tx.QueryRowContext(ctx,
@@ -1785,6 +1783,39 @@ func (s *DB) ListPendingRemoteTraces(ctx context.Context) ([]*kernel.Trace, erro
 		return nil, dbErr(err, "list pending remote traces")
 	}
 	return queryList(rows, "list pending remote traces", func(scan func(...any) error) (*kernel.Trace, error) {
+		var t kernel.Trace
+		if err := scanTrace(&t, scan); err != nil {
+			return nil, err
+		}
+		return &t, nil
+	})
+}
+
+func (s *DB) ListUnsettledTracesForProcess(ctx context.Context, processID string) ([]*kernel.Trace, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+traceCols+` FROM traces t
+		 WHERE t.process_id=?
+		 AND NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)
+		 ORDER BY (
+		   WITH RECURSIVE depth(id, d) AS (
+		     SELECT t.id, 0
+		     UNION ALL
+		     SELECT p.id, d+1 FROM traces p JOIN depth ON depth.id=p.parent_trace_id
+		   )
+		   SELECT MAX(d) FROM depth
+		 ) DESC`, processID)
+	if err != nil {
+		// Fallback: simpler ordering without depth CTE.
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT `+traceCols+` FROM traces t
+			 WHERE t.process_id=?
+			 AND NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)
+			 ORDER BY created_at DESC`, processID)
+		if err != nil {
+			return nil, dbErr(err, "list unsettled traces for process")
+		}
+	}
+	return queryList(rows, "list unsettled traces for process", func(scan func(...any) error) (*kernel.Trace, error) {
 		var t kernel.Trace
 		if err := scanTrace(&t, scan); err != nil {
 			return nil, err

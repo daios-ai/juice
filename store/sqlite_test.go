@@ -414,7 +414,7 @@ func TestEndProcess(t *testing.T) {
 	}
 }
 
-func TestEndProcessWithLockedFunds(t *testing.T) {
+func TestEndProcessWithLockedFundsForceCloseSucceeds(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -430,12 +430,10 @@ func TestEndProcessWithLockedFunds(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// store.EndProcess no longer guards on locked > 0; the kernel settles traces before calling it.
 	err := db.EndProcess(ctx, p.ID)
-	if err == nil {
-		t.Fatal("expected error ending process with locked funds, got nil")
-	}
-	if !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("expected ErrInvalidState, got %v", err)
+	if err != nil {
+		t.Fatalf("EndProcess should succeed even with locked funds; got: %v", err)
 	}
 }
 

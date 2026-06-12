@@ -451,7 +451,14 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 
-	fakeReceiptJSON := `{"tx_id":"remote-tx-1","status":"success"}`
+	now := time.Now().UTC()
+	r := &kernel.Receipt{
+		ID: uuid.New().String(), TxID: "remote-tx-1",
+		Status: kernel.TxSuccess, StartedAt: now, CreatedAt: now,
+	}
+	r.Signature = signReceiptForTest(t, priv, r)
+	receiptBytes, _ := json.Marshal(r)
+	fakeReceiptJSON := string(receiptBytes)
 	fake := &fakeFederationHTTP{receiptJSON: fakeReceiptJSON}
 	k := newTestKernelWithHTTP(st, fake)
 
@@ -806,25 +813,18 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 
 	caller := setupUser(t, st, "@tamper-caller", 0)
 	p := setupProcess(t, st, caller.ID, 0)
-	reply, err := k.Call(ctx, kernel.CallRequest{
+	// A receipt signed with the wrong key must be rejected: no settlement, trace stays open.
+	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ProcessID: p.ID, IsRootCall: true,
 		TargetUserID: "@tamper-peer", ActionName: "tact", Args: map[string]any{},
 	})
-	if err != nil {
-		t.Fatalf("Call: %v", err)
+	if !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("expected ErrTimeout for invalid signature, got %v", err)
 	}
-	_ = reply
-
+	// No transaction should be stored: the bad receipt must never settle.
 	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID})
-	v, err := k.VerifyRemoteReceipt(ctx, caller.ID, txs[0].ID)
-	if err != nil {
-		t.Fatalf("VerifyRemoteReceipt: %v", err)
-	}
-	if v.Checks.Signature {
-		t.Error("expected Signature check=false for receipt signed with wrong key")
-	}
-	if v.Valid {
-		t.Error("expected Valid=false for tampered receipt")
+	if len(txs) != 0 {
+		t.Errorf("expected no transactions after invalid-signature rejection, got %d", len(txs))
 	}
 }
 
