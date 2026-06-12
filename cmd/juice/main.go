@@ -289,11 +289,6 @@ func promptPassword(prompt string) (string, error) {
 	return string(b), err
 }
 
-// printQuiet prints only the resource ID, used when --quiet is set.
-func printQuiet(id string) {
-	fmt.Println(id)
-}
-
 // readJSONArg parses a JSON argument string, supporting @file.json to read from a file.
 func readJSONArg(s string) (map[string]any, error) {
 	if s == "" || s == "{}" {
@@ -317,7 +312,3 @@ func readJSONArg(s string) (map[string]any, error) {
 	return m, nil
 }
 
-// jsonMarshalIndent is a helper for pretty-printing JSON.
-func jsonMarshalIndent(v any) ([]byte, error) {
-	return json.MarshalIndent(v, "", "  ")
-}

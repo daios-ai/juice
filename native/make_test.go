@@ -416,8 +416,10 @@ func TestMakeNameCollisionReturnsFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Call: %v", err)
 	}
+	// Use a fresh process for the second call — the first call auto-closes p when quiescent.
+	p2 := setupNativeProcess(t, st, caller.ID, 200)
 	reply2, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall:   true,
+		CallerID: caller.ID, ProcessID: p2.ID, IsRootCall:   true,
 		TargetUserID: sys.ID, ActionName: "make", Args: desc,
 	})
 	if err != nil {

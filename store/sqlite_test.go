@@ -51,6 +51,12 @@ func TestMigrationsAreFileBackedAndRecorded(t *testing.T) {
 	}{
 		{"actions", "embed_vec"},
 		{"action_stats", "rating_count"},
+		{"traces", "action_id"},
+		{"traces", "caller_user_id"},
+		{"traces", "idempotency_key"},
+		{"traces", "dispatch_json"},
+		{"steps", "completion_trace_id"},
+		{"actions", "auth_json"},
 	} {
 		if !db.columnExists(tc.table, tc.column) {
 			t.Fatalf("expected %s.%s to exist after migrations", tc.table, tc.column)
@@ -487,22 +493,24 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	a := newAction(payer.ID, "/inc-svc", 100, true)
 	_ = db.CreateAction(ctx, a)
 
-	p := newProcess(payer.ID)
-	if err := db.CreateProcess(ctx, p, payer.ID, 1000); err != nil {
-		t.Fatal(err)
+	// Each call uses its own process so auto-close on the first doesn't block the second.
+	makeProcess := func() *kernel.Process {
+		pr := newProcess(payer.ID)
+		if err := db.CreateProcess(ctx, pr, payer.ID, 500); err != nil {
+			t.Fatalf("CreateProcess: %v", err)
+		}
+		return pr
 	}
-
-	// Each call is a fresh root call from the process.
-	beginRootTrace := func(price int64) *kernel.Trace {
-		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-		if err := db.BeginRootCall(ctx, p.ID, tr, price); err != nil {
+	beginRootTrace := func(pr *kernel.Process, price int64) *kernel.Trace {
+		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: pr.ID, CreatedAt: time.Now().UTC()}
+		if err := db.BeginRootCall(ctx, pr.ID, tr, price); err != nil {
 			t.Fatalf("BeginRootCall: %v", err)
 		}
 		return tr
 	}
-	makeTx := func(id, traceID string, gross int64) *kernel.Transaction {
+	makeTx := func(id, processID, traceID string, gross int64) *kernel.Transaction {
 		return &kernel.Transaction{
-			ID: id, ProcessID: p.ID, TraceID: traceID, ParentTraceID: "",
+			ID: id, ProcessID: processID, TraceID: traceID, ParentTraceID: "",
 			OwnerUserID: payer.ID, CallerUserID: payer.ID, TargetUserID: target.ID,
 			ActionID: a.ID, Status: kernel.TxSuccess, Gross: gross, Net: gross * 8 / 10, Fee: gross * 2 / 10,
 			StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
@@ -516,19 +524,21 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 		}
 	}
 
-	tr1 := beginRootTrace(100)
-	tx1 := makeTx(uuid.New().String(), tr1.ID, 100)
+	p1 := makeProcess()
+	tr1 := beginRootTrace(p1, 100)
+	tx1 := makeTx(uuid.New().String(), p1.ID, tr1.ID, 100)
 	rc1 := makeReceipt(uuid.New().String(), tx1.ID, tr1.ID, 100)
 	stats1 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, LatencyEstimate: 0.1, LastUsedAt: time.Now().UTC()}
-	if err := db.CommitCall(ctx, tx1, rc1, tr1.ID, p.ID, kernel.CallerProcess, target.ID, fee.ID, tx1.Net, tx1.Fee, stats1, "", ""); err != nil {
+	if err := db.CommitCall(ctx, tx1, rc1, tr1.ID, p1.ID, kernel.CallerProcess, target.ID, fee.ID, tx1.Net, tx1.Fee, stats1, "", ""); err != nil {
 		t.Fatalf("CommitCall #1: %v", err)
 	}
 
-	tr2 := beginRootTrace(50)
-	tx2 := makeTx(uuid.New().String(), tr2.ID, 50)
+	p2 := makeProcess()
+	tr2 := beginRootTrace(p2, 50)
+	tx2 := makeTx(uuid.New().String(), p2.ID, tr2.ID, 50)
 	rc2 := makeReceipt(uuid.New().String(), tx2.ID, tr2.ID, 50)
 	stats2 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, LatencyEstimate: 0.3, LastUsedAt: time.Now().UTC()}
-	if err := db.CommitCall(ctx, tx2, rc2, tr2.ID, p.ID, kernel.CallerProcess, target.ID, fee.ID, tx2.Net, tx2.Fee, stats2, "", ""); err != nil {
+	if err := db.CommitCall(ctx, tx2, rc2, tr2.ID, p2.ID, kernel.CallerProcess, target.ID, fee.ID, tx2.Net, tx2.Fee, stats2, "", ""); err != nil {
 		t.Fatalf("CommitCall #2: %v", err)
 	}
 

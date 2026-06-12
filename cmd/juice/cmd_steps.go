@@ -64,7 +64,7 @@ func stepCreateCmd() *cobra.Command {
 					return err
 				}
 				if flagQuiet {
-					printQuiet(step.ID)
+					fmt.Println(step.ID)
 					return nil
 				}
 				if flagOutput == "json" {
@@ -157,7 +157,7 @@ func stepCompleteCmd() *cobra.Command {
 					return err
 				}
 				if flagQuiet {
-					printQuiet(reply.TxID)
+					fmt.Println(reply.TxID)
 					return nil
 				}
 				if flagOutput == "json" {

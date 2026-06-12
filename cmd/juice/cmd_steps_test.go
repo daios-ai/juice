@@ -70,9 +70,11 @@ func TestServeCreateStep(t *testing.T) {
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
+	traceID := setupTraceForProcess(t, db, pid)
 
 	resp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      pid,
+		"parent_trace_id": traceID,
 		"next_action_id":  actionID,
 		"required_caller": "@cs-create-caller",
 		"partial_args":    map[string]any{"preset": "val"},
@@ -109,11 +111,13 @@ func TestServeListSteps(t *testing.T) {
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
+	traceID := setupTraceForProcess(t, db, pid)
 
 	// Create two steps.
 	for range 2 {
 		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 			"process_id":      pid,
+			"parent_trace_id": traceID,
 			"next_action_id":  actionID,
 			"required_caller": "@sl-steps-caller",
 			"partial_args":    map[string]any{},
@@ -178,9 +182,11 @@ func TestServeGetStep(t *testing.T) {
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
+	traceID := setupTraceForProcess(t, db, pid)
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      pid,
+		"parent_trace_id": traceID,
 		"next_action_id":  actionID,
 		"required_caller": "@gs-steps-caller",
 		"partial_args":    map[string]any{},
@@ -241,9 +247,11 @@ func TestServeCompleteStepMissingArgs(t *testing.T) {
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
+	traceID := setupTraceForProcess(t, db, pid)
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      pid,
+		"parent_trace_id": traceID,
 		"next_action_id":  actionID,
 		"required_caller": "@csmiss-caller",
 		"partial_args":    map[string]any{},
@@ -279,9 +287,11 @@ func TestServeCompleteStep(t *testing.T) {
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
+	traceID := setupTraceForProcess(t, db, pid)
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      pid,
+		"parent_trace_id": traceID,
 		"next_action_id":  actionID,
 		"required_caller": "@cs2-caller",
 		"partial_args":    map[string]any{"from_partial": "A"},

@@ -172,17 +172,8 @@ func (k *Kernel) ReadUserByPublicKey(ctx context.Context, publicKey string) (*Us
 
 // Login authenticates handle+password and returns a signed JWT.
 func (k *Kernel) Login(ctx context.Context, handle, password string) (string, error) {
-	u, err := k.store.ReadUserByHandle(ctx, handle)
+	u, err := k.authenticateLocal(ctx, handle, password)
 	if err != nil {
-		return "", ErrUnauthenticated.Wrap("invalid credentials")
-	}
-	if u.RemoteBaseURL != "" {
-		return "", ErrUnauthenticated.Wrap("invalid credentials")
-	}
-	if !CheckPassword(password, u.PasswordHash) {
-		return "", ErrUnauthenticated.Wrap("invalid credentials")
-	}
-	if err := rejectSuspended(u); err != nil {
 		return "", err
 	}
 	tok, err := IssueToken(u.ID, k.cfg.TokenSecret, k.cfg.AuthIssuer, k.cfg.AuthAudience, k.cfg.TokenTTL)
@@ -207,38 +198,36 @@ func (k *Kernel) ListUsers(ctx context.Context, limit, offset int) ([]*User, err
 
 // SuspendUser marks the user as suspended, preventing login.
 // Only the superuser may call this.
-func (k *Kernel) SuspendUser(ctx context.Context, operatorID, targetID string) error {
+func (k *Kernel) setSuspended(ctx context.Context, operatorID, targetID string, suspend bool) error {
+	verb, pastVerb := "unsuspend", "unsuspended"
+	storeOp := k.store.UnsuspendUser
+	if suspend {
+		verb, pastVerb = "suspend", "suspended"
+		storeOp = k.store.SuspendUser
+	}
 	start := time.Now()
 	logger := k.log.With(ctx)
-	logger.Info("user.suspend.start", "target_id", targetID)
+	logger.Info("user."+verb+".start", "target_id", targetID)
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
-		logger.Warn("user.suspend.failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
+		logger.Warn("user."+verb+".failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return err
 	}
-	if err := k.store.SuspendUser(ctx, targetID); err != nil {
-		logger.Warn("user.suspend.failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
+	if err := storeOp(ctx, targetID); err != nil {
+		logger.Warn("user."+verb+".failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return err
 	}
-	logger.Info("user.suspended", "target_id", targetID, "status", "success", "duration_ms", time.Since(start).Milliseconds())
+	logger.Info("user."+pastVerb, "target_id", targetID, "status", "success", "duration_ms", time.Since(start).Milliseconds())
 	return nil
+}
+
+func (k *Kernel) SuspendUser(ctx context.Context, operatorID, targetID string) error {
+	return k.setSuspended(ctx, operatorID, targetID, true)
 }
 
 // UnsuspendUser removes the suspension from a user.
 // Only the superuser may call this.
 func (k *Kernel) UnsuspendUser(ctx context.Context, operatorID, targetID string) error {
-	start := time.Now()
-	logger := k.log.With(ctx)
-	logger.Info("user.unsuspend.start", "target_id", targetID)
-	if err := k.requireSuperuser(ctx, operatorID); err != nil {
-		logger.Warn("user.unsuspend.failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
-		return err
-	}
-	if err := k.store.UnsuspendUser(ctx, targetID); err != nil {
-		logger.Warn("user.unsuspend.failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
-		return err
-	}
-	logger.Info("user.unsuspended", "target_id", targetID, "status", "success", "duration_ms", time.Since(start).Milliseconds())
-	return nil
+	return k.setSuspended(ctx, operatorID, targetID, false)
 }
 
 // requireSuperuser returns ErrUnauthorized if operatorID is not the configured superuser.
@@ -940,13 +929,6 @@ func (k *Kernel) Run(ctx context.Context, callerID, actionRef string, args map[s
 		Args:         args,
 		IsRootCall:   true,
 	})
-
-	// Always auto-close the process, whether the call succeeded or failed,
-	// so any remaining available balance is returned to the caller.
-	if err := k.store.EndProcess(ctx, p.ID); err != nil {
-		logger.Warn("process.end.failed", "process_id", p.ID, "error", err)
-	}
-
 	return reply, callErr
 }
 
@@ -972,7 +954,7 @@ func (k *Kernel) RunFederated(ctx context.Context, callerID, targetUserID, actio
 		return nil, err
 	}
 	logger.Info("federation.process.created", "process_id", p.ID, "owner", callerID, "price", price)
-	reply, callErr := k.Call(ctx, CallRequest{
+	return k.Call(ctx, CallRequest{
 		CallerID:            callerID,
 		ProcessID:           p.ID,
 		TargetUserID:        targetUserID,
@@ -981,10 +963,6 @@ func (k *Kernel) RunFederated(ctx context.Context, callerID, targetUserID, actio
 		IsRootCall:          true,
 		IdempotencyRecordID: idempotencyRecordID,
 	})
-	if err := k.store.EndProcess(ctx, p.ID); err != nil {
-		logger.Warn("federation.process.end.failed", "process_id", p.ID, "error", err)
-	}
-	return reply, callErr
 }
 
 // EndProcess closes a process and returns all remaining funds to the owner.
@@ -1150,9 +1128,8 @@ func (k *Kernel) ResetActionStats(ctx context.Context, actionID string) error {
 
 // LookupRequest is a natural-language query for actions.
 type LookupRequest struct {
-	Query     string
-	Limit     int
-	Offset    int
+	Query    string
+	Limit    int
 	CallerID string // authenticated caller
 }
 
@@ -1361,11 +1338,6 @@ func DefaultStats(actionID string) *Stats {
 
 // ---- Receipts ----
 
-// GetReceiptByTxID returns the receipt for a transaction.
-func (k *Kernel) GetReceiptByTxID(ctx context.Context, txID string) (*Receipt, error) {
-	return k.store.ReadReceiptByTxID(ctx, txID)
-}
-
 // GetReceiptByID returns the receipt with the given ID.
 func (k *Kernel) GetReceiptByID(ctx context.Context, id string) (*Receipt, error) {
 	return k.store.ReadReceipt(ctx, id)
@@ -1443,30 +1415,16 @@ func (k *Kernel) requireReceiptSigningReady() error {
 
 // signReceipt signs the canonical Receipt object (with Signature cleared) using JCS.
 func signReceipt(key ed25519.PrivateKey, r *Receipt) (string, error) {
-	if len(key) != ed25519.PrivateKeySize {
-		return "", ErrInvalidState.Wrap("signing key is not configured")
-	}
 	cp := *r
 	cp.Signature = ""
-	payload, err := CanonicalJSON(cp)
-	if err != nil {
-		return "", ErrInternal.Wrapf("canonicalize receipt: %v", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
+	return signJCS(key, cp)
 }
 
 // signRating signs the canonical Rating object (with Signature cleared) using JCS.
 func signRating(key ed25519.PrivateKey, r *Rating) (string, error) {
-	if len(key) != ed25519.PrivateKeySize {
-		return "", ErrInvalidState.Wrap("signing key is not configured")
-	}
 	cp := *r
 	cp.Signature = ""
-	payload, err := CanonicalJSON(cp)
-	if err != nil {
-		return "", ErrInternal.Wrapf("canonicalize rating: %v", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
+	return signJCS(key, cp)
 }
 
 // ---- Import shared logic ----

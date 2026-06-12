@@ -32,27 +32,22 @@ func CheckPassword(plain, hash string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)) == nil
 }
 
-// jwtClaims are the custom claims embedded in every token.
-type jwtClaims struct {
-	jwt.RegisteredClaims
-}
-
 // IssueToken creates a signed JWT for userID, valid for ttl.
 // When issuer or audience is non-empty the corresponding registered claim is set.
 func IssueToken(userID, secret, issuer, audience string, ttl time.Duration) (string, error) {
 	now := time.Now().UTC()
-	rc := jwt.RegisteredClaims{
+	claims := jwt.RegisteredClaims{
 		Subject:   userID,
 		IssuedAt:  jwt.NewNumericDate(now),
 		ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 	}
 	if issuer != "" {
-		rc.Issuer = issuer
+		claims.Issuer = issuer
 	}
 	if audience != "" {
-		rc.Audience = jwt.ClaimStrings{audience}
+		claims.Audience = jwt.ClaimStrings{audience}
 	}
-	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwtClaims{RegisteredClaims: rc})
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	s, err := tok.SignedString([]byte(secret))
 	if err != nil {
 		return "", ErrInternal.Wrap("failed to sign token")
@@ -63,7 +58,7 @@ func IssueToken(userID, secret, issuer, audience string, ttl time.Duration) (str
 // VerifyToken parses and validates a JWT, returning the subject (user ID).
 // When issuer or audience is non-empty the corresponding claim is validated.
 func VerifyToken(tokenStr, secret, issuer, audience string) (string, error) {
-	tok, err := jwt.ParseWithClaims(tokenStr, &jwtClaims{}, func(t *jwt.Token) (any, error) {
+	tok, err := jwt.ParseWithClaims(tokenStr, &jwt.RegisteredClaims{}, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrUnauthenticated.Wrap("unexpected signing method")
 		}
@@ -72,7 +67,7 @@ func VerifyToken(tokenStr, secret, issuer, audience string) (string, error) {
 	if err != nil || !tok.Valid {
 		return "", ErrUnauthenticated.Wrap("invalid or expired token")
 	}
-	claims, ok := tok.Claims.(*jwtClaims)
+	claims, ok := tok.Claims.(*jwt.RegisteredClaims)
 	if !ok || claims.Subject == "" {
 		return "", ErrUnauthenticated.Wrap("token has no subject")
 	}
@@ -117,6 +112,16 @@ func VerifyCodeChallenge(verifier, challenge string) bool {
 	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }
 
+// authenticateLocal verifies handle+password for a local (non-proxy) user and returns the User.
+// Returns ErrUnauthenticated for any credential failure (including proxy users).
+func (k *Kernel) authenticateLocal(ctx context.Context, handle, password string) (*User, error) {
+	u, err := k.store.ReadUserByHandle(ctx, handle)
+	if err != nil || u.RemoteBaseURL != "" || !CheckPassword(password, u.PasswordHash) {
+		return nil, ErrUnauthenticated.Wrap("invalid credentials")
+	}
+	return u, rejectSuspended(u)
+}
+
 // ---- Authorization code flow ----
 
 const authCodeTTL = 10 * time.Minute
@@ -127,17 +132,8 @@ func (k *Kernel) StartAuthCode(ctx context.Context, handle, password, codeChalle
 	if codeChallenge == "" {
 		return "", ErrInvalidInput.Wrap("code_challenge is required")
 	}
-	u, err := k.store.ReadUserByHandle(ctx, handle)
+	u, err := k.authenticateLocal(ctx, handle, password)
 	if err != nil {
-		return "", ErrUnauthenticated.Wrap("invalid credentials")
-	}
-	if u.RemoteBaseURL != "" {
-		return "", ErrUnauthenticated.Wrap("invalid credentials")
-	}
-	if !CheckPassword(password, u.PasswordHash) {
-		return "", ErrUnauthenticated.Wrap("invalid credentials")
-	}
-	if err := rejectSuspended(u); err != nil {
 		return "", err
 	}
 
@@ -244,17 +240,8 @@ func (k *Kernel) RevokeRefreshToken(ctx context.Context, token string) error {
 }
 
 func (k *Kernel) LoginWithRefresh(ctx context.Context, handle, password string) (accessToken, refreshToken string, err error) {
-	u, err := k.store.ReadUserByHandle(ctx, handle)
+	u, err := k.authenticateLocal(ctx, handle, password)
 	if err != nil {
-		return "", "", ErrUnauthenticated.Wrap("invalid credentials")
-	}
-	if u.RemoteBaseURL != "" {
-		return "", "", ErrUnauthenticated.Wrap("invalid credentials")
-	}
-	if !CheckPassword(password, u.PasswordHash) {
-		return "", "", ErrUnauthenticated.Wrap("invalid credentials")
-	}
-	if err := rejectSuspended(u); err != nil {
 		return "", "", err
 	}
 	accessToken, err = IssueToken(u.ID, k.cfg.TokenSecret, k.cfg.AuthIssuer, k.cfg.AuthAudience, k.cfg.TokenTTL)

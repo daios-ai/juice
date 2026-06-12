@@ -20,6 +20,31 @@ func sha256Hex(s string) string {
 	return fmt.Sprintf("%x", h)
 }
 
+// signJCS signs the JCS-canonical form of v with key.
+func signJCS(key ed25519.PrivateKey, v any) (string, error) {
+	if len(key) != ed25519.PrivateKeySize {
+		return "", ErrInvalidState.Wrap("signing key is not configured")
+	}
+	payload, err := CanonicalJSON(v)
+	if err != nil {
+		return "", ErrInternal.Wrapf("canonicalize: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
+}
+
+// verifyJCS checks that sigB64 is a valid Ed25519 signature over the JCS-canonical form of v.
+func verifyJCS(pub ed25519.PublicKey, v any, sigB64 string) error {
+	payload, err := CanonicalJSON(v)
+	if err != nil {
+		return ErrInternal.Wrapf("canonicalize: %v", err)
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
+	if err != nil || !ed25519.Verify(pub, payload, sig) {
+		return ErrUnauthorized.Wrap("signature is invalid")
+	}
+	return nil
+}
+
 // VerifyRemoteReceipt verifies the stored remote receipt for a remote-proxy transaction.
 // Available to any party satisfying CanReadTransaction. Returns ErrInvalidState for
 // non-remote-proxy transactions (no remote receipt stored).
@@ -54,15 +79,10 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 
 	// 2. Signature: verify Ed25519 over CanonicalJSON of receipt with Signature cleared.
 	if owner.PublicKey != "" {
-		pub, pubErr := decodeRemotePublicKey(owner.PublicKey)
-		if pubErr == nil {
+		if pub, pubErr := decodeRemotePublicKey(owner.PublicKey); pubErr == nil {
 			cp := r
 			cp.Signature = ""
-			if payload, jcsErr := CanonicalJSON(cp); jcsErr == nil {
-				if sig, decErr := base64.RawURLEncoding.DecodeString(r.Signature); decErr == nil {
-					checks.Signature = ed25519.Verify(pub, payload, sig)
-				}
-			}
+			checks.Signature = verifyJCS(pub, cp, r.Signature) == nil
 		}
 	}
 
@@ -604,23 +624,11 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 	return m, nil
 }
 
-// manifestCanonicalPayload returns the canonical JCS bytes of m with Signature cleared.
-func manifestCanonicalPayload(m *ActionManifest) ([]byte, error) {
-	cp := *m
-	cp.Signature = ""
-	return CanonicalJSON(cp)
-}
-
 // SignManifest creates a base64url Ed25519 signature over the canonical ActionManifest.
 func SignManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
-	if len(key) != ed25519.PrivateKeySize {
-		return "", ErrInvalidState.Wrap("signing key is not configured")
-	}
-	payload, err := manifestCanonicalPayload(m)
-	if err != nil {
-		return "", ErrInternal.Wrapf("canonicalize manifest: %v", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
+	cp := *m
+	cp.Signature = ""
+	return signJCS(key, cp)
 }
 
 // VerifyManifestSignature checks that m.Signature was produced by the private key
@@ -630,12 +638,9 @@ func VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
 	if err != nil {
 		return err
 	}
-	payload, err := manifestCanonicalPayload(m)
-	if err != nil {
-		return ErrInternal.Wrapf("canonicalize manifest: %v", err)
-	}
-	sig, err := base64.RawURLEncoding.DecodeString(m.Signature)
-	if err != nil || !ed25519.Verify(pub, payload, sig) {
+	cp := *m
+	cp.Signature = ""
+	if err := verifyJCS(pub, cp, m.Signature); err != nil {
 		return ErrUnauthorized.Wrap("manifest signature is invalid")
 	}
 	return nil
@@ -648,37 +653,25 @@ func VerifyFederationSignature(pubKeyB64, action, counterparty, idempotencyKey, 
 	if err != nil {
 		return ErrUnauthenticated.Wrap("invalid counterparty public key")
 	}
-	payload, err := CanonicalJSON(map[string]string{
+	if err := verifyJCS(pub, map[string]string{
 		"action":          action,
 		"args_hash":       argsHash,
 		"counterparty":    counterparty,
 		"idempotency_key": idempotencyKey,
 		"timestamp":       timestamp,
-	})
-	if err != nil {
-		return ErrInternal.Wrapf("canonicalize federation payload: %v", err)
-	}
-	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
-	if err != nil || !ed25519.Verify(pub, payload, sig) {
+	}, sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("federation signature is invalid")
 	}
 	return nil
 }
 
 // SignFederationPayload creates a base64url Ed25519 signature over the canonical federation payload.
-func SignFederationPayload(key Ed25519PrivateKey, action, counterparty, idempotencyKey, timestamp, argsHash string) (string, error) {
-	if len(key) != ed25519.PrivateKeySize {
-		return "", ErrInvalidState.Wrap("signing key is not configured")
-	}
-	payload, err := CanonicalJSON(map[string]string{
+func SignFederationPayload(key ed25519.PrivateKey, action, counterparty, idempotencyKey, timestamp, argsHash string) (string, error) {
+	return signJCS(key, map[string]string{
 		"action":          action,
 		"args_hash":       argsHash,
 		"counterparty":    counterparty,
 		"idempotency_key": idempotencyKey,
 		"timestamp":       timestamp,
 	})
-	if err != nil {
-		return "", ErrInternal.Wrapf("canonicalize federation payload: %v", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
 }

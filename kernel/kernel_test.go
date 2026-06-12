@@ -142,6 +142,24 @@ func setupProcess(t *testing.T, st kernel.Store, ownerID string, funds int64) *k
 	return p
 }
 
+// setupOrphanTrace creates an uncommitted root trace (no tx) in the process.
+// The trace keeps the process quiescent-open so CreateStep / Call can still run against it.
+// actionOwnerID is recorded as the trace's action_owner_id (used for non-owner authority checks).
+func setupOrphanTrace(t *testing.T, st kernel.Store, processID, actionOwnerID, callerID string) *kernel.Trace {
+	t.Helper()
+	tr := &kernel.Trace{
+		ID:            uuid.New().String(),
+		ProcessID:     processID,
+		ActionOwnerID: actionOwnerID,
+		CallerUserID:  callerID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := st.BeginRootCall(context.Background(), processID, tr, 0); err != nil {
+		t.Fatalf("setupOrphanTrace: %v", err)
+	}
+	return tr
+}
+
 type fakeScriptExec struct {
 	result string
 	err    error
@@ -497,15 +515,8 @@ func TestProcessAvailablePlusLockedInvariant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proc, _ := st.ReadProcess(ctx, p.ID)
-	if proc.Locked != 0 {
-		t.Errorf("after call: locked must be 0, got %d", proc.Locked)
-	}
-
-	if err := k.EndProcess(ctx, alice.ID, p.ID); err != nil {
-		t.Fatal(err)
-	}
-	checkInvariant("after end", 0)
+	// After call, process auto-closes (quiescent). proc.available=0, proc.locked=0.
+	checkInvariant("after auto-close", 0)
 }
 
 func TestUserLockedBalanceInvariant(t *testing.T) {
@@ -550,23 +561,14 @@ func TestUserLockedBalanceInvariant(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Call settles: gross (100) consumed from process; alice also receives net as target.
-	// user.locked should still be 500 (process funds remain locked until EndProcess).
+	// After call, process auto-closes (quiescent): remaining funds return to alice.
+	// user.locked must reach 0 (no open processes), user.available stays non-negative.
 	u, _ := st.ReadUser(ctx, alice.ID)
-	if u.Locked < 0 {
-		t.Errorf("after Call: user.locked is negative: %d", u.Locked)
-	}
-
-	if err := k.EndProcess(ctx, alice.ID, p.ID); err != nil {
-		t.Fatal(err)
-	}
-	// EndProcess returns process.available to user; user.locked must reach 0.
-	u, _ = st.ReadUser(ctx, alice.ID)
 	if u.Locked != 0 {
-		t.Errorf("after EndProcess: user.locked got %d, want 0", u.Locked)
+		t.Errorf("after auto-close: user.locked got %d, want 0", u.Locked)
 	}
 	if u.Available < 0 {
-		t.Errorf("after EndProcess: user.available is negative: %d", u.Available)
+		t.Errorf("after auto-close: user.available is negative: %d", u.Available)
 	}
 }
 

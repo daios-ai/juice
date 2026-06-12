@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/daios-ai/juice/kernel"
@@ -28,13 +29,13 @@ func runCmd() *cobra.Command {
 					return err
 				}
 				if flagQuiet {
-					printQuiet(reply.TxID)
+					fmt.Println(reply.TxID)
 					return nil
 				}
 				if flagOutput == "json" {
 					return printJSON(reply)
 				}
-				resultJSON, _ := jsonMarshalIndent(reply.Result)
+				resultJSON, _ := json.MarshalIndent(reply.Result, "", "  ")
 				fmt.Printf("tx_id:    %s\ntrace_id: %s\nresult:\n%s\n",
 					reply.TxID, reply.TraceID, string(resultJSON))
 				return nil

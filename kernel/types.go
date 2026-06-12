@@ -1,7 +1,6 @@
 package kernel
 
 import (
-	"crypto/ed25519"
 	"encoding/json"
 	"time"
 )
@@ -66,6 +65,7 @@ type Action struct {
 	ArtifactHash   string         `json:"artifact_hash,omitempty"`    // content-addressed compiled WASM artifact
 	WasmArtifact   string         `json:"wasm_artifact,omitempty"`    // base64-encoded compiled WASM bytes (wasm only); Source holds the TinyGo text
 	RemoteActionID string         `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
+	AuthJSON       string         `json:"-"`                          // AES-256-GCM encrypted upstream auth credentials; never serialized
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
 	DeletedAt      *time.Time     `json:"deleted_at,omitempty"`
@@ -106,6 +106,7 @@ type Step struct {
 	Price                int64           `json:"price"`
 	Status               StepStatus      `json:"status"`
 	TxID                 *string         `json:"tx_id,omitempty"`
+	CompletionTraceID    *string         `json:"completion_trace_id,omitempty"`
 	CreatedAt            time.Time       `json:"created_at"`
 }
 
@@ -120,14 +121,18 @@ type StepReply struct {
 // Step-completion traces may have a ParentTraceID that crosses process boundaries.
 // Available tracks funds remaining after subcalls and step parks; zeroed at settlement.
 type Trace struct {
-	ID            string    `json:"id"`
-	ProcessID     string    `json:"process_id"`
-	ParentTraceID *string   `json:"parent_trace_id,omitempty"`
-	ActionOwnerID string    `json:"action_owner_id"`
-	Available     int64     `json:"available"`
-	Locked        int64     `json:"locked"`
-	LatencyMS     int64     `json:"latency_ms"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	ProcessID      string    `json:"process_id"`
+	ParentTraceID  *string   `json:"parent_trace_id,omitempty"`
+	ActionOwnerID  string    `json:"action_owner_id"`
+	ActionID       string    `json:"action_id"`
+	CallerUserID   string    `json:"caller_user_id"`
+	Available      int64     `json:"available"`
+	Locked         int64     `json:"locked"`
+	LatencyMS      int64     `json:"latency_ms"`
+	IdempotencyKey *string   `json:"idempotency_key,omitempty"`
+	DispatchJSON   *string   `json:"dispatch_json,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // Transaction records one attempted call. Immutable after creation.
@@ -405,7 +410,4 @@ type GossipResponse struct {
 	Actions   []GossipAction     `json:"actions"`
 	Friends   []GossipFriendView `json:"friends"`
 }
-
-// Ed25519PrivateKey is a type alias for clarity at call sites.
-type Ed25519PrivateKey = ed25519.PrivateKey
 

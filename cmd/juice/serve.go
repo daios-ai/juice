@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"golang.org/x/time/rate"
 )
 
 func init() {
@@ -179,21 +180,17 @@ type ctxKey string
 
 const ctxCallerID ctxKey = "caller_id"
 
-// ipRateLimiter returns a middleware that limits requests from each IP address
-// using a token bucket: ratePerSec tokens refilled per second, burst maximum tokens.
+// ipRateLimiter returns a middleware that limits requests per IP using a token bucket.
 // Entries not seen for 5 minutes are evicted by a background goroutine.
 func ipRateLimiter(ratePerSec, burst float64) func(http.Handler) http.Handler {
 	type entry struct {
-		tokens   float64
-		lastFill time.Time
+		lim      *rate.Limiter
 		lastSeen time.Time
 	}
 	var mu sync.Mutex
 	entries := make(map[string]*entry)
-
-	// Background cleanup goroutine.
 	go func() {
-		ticker := time.NewTicker(time.Minute)
+		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
 			cutoff := time.Now().Add(-5 * time.Minute)
@@ -206,34 +203,22 @@ func ipRateLimiter(ratePerSec, burst float64) func(http.Handler) http.Handler {
 			mu.Unlock()
 		}
 	}()
-
-	allow := func(ip string) bool {
-		mu.Lock()
-		defer mu.Unlock()
-		now := time.Now()
-		e, ok := entries[ip]
-		if !ok {
-			entries[ip] = &entry{tokens: burst - 1, lastFill: now, lastSeen: now}
-			return true
-		}
-		elapsed := now.Sub(e.lastFill).Seconds()
-		e.tokens = min(burst, e.tokens+elapsed*ratePerSec)
-		e.lastFill = now
-		e.lastSeen = now
-		if e.tokens < 1 {
-			return false
-		}
-		e.tokens--
-		return true
-	}
-
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 			if ip == "" {
 				ip = r.RemoteAddr
 			}
-			if !allow(ip) {
+			mu.Lock()
+			e, ok := entries[ip]
+			if !ok {
+				e = &entry{lim: rate.NewLimiter(rate.Limit(ratePerSec), int(burst))}
+				entries[ip] = e
+			}
+			e.lastSeen = time.Now()
+			allow := e.lim.Allow()
+			mu.Unlock()
+			if !allow {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusTooManyRequests)
 				_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate limit exceeded"})
@@ -460,7 +445,7 @@ func (s *server) unimportOpenAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
-	var req struct {
+	handle(func(r *http.Request, req struct {
 		Name         string         `json:"name"`
 		Kind         string         `json:"kind"`
 		Price        int64          `json:"price"`
@@ -468,36 +453,31 @@ func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 		InputSchema  map[string]any `json:"input_schema"`
 		OutputSchema map[string]any `json:"output_schema"`
 		Source       string         `json:"source"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	a, err := s.kernel.CreateAction(r.Context(), callerFrom(r), kernel.CreateActionRequest{
-		OwnerUserID:  callerFrom(r),
-		Name:         req.Name,
-		Kind:         kernel.ActionKind(req.Kind),
-		Price:        req.Price,
-		Description:  req.Description,
-		InputSchema:  req.InputSchema,
-		OutputSchema: req.OutputSchema,
-		Source:       req.Source,
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	// Re-read to populate OwnerHandle via store JOIN.
-	full, err := s.kernel.ReadActionForSubject(r.Context(), callerFrom(r), a.ID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, withActionRef(full))
+	}) (any, int, error) {
+		a, err := s.kernel.CreateAction(r.Context(), callerFrom(r), kernel.CreateActionRequest{
+			OwnerUserID:  callerFrom(r),
+			Name:         req.Name,
+			Kind:         kernel.ActionKind(req.Kind),
+			Price:        req.Price,
+			Description:  req.Description,
+			InputSchema:  req.InputSchema,
+			OutputSchema: req.OutputSchema,
+			Source:       req.Source,
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		// Re-read to populate OwnerHandle via store JOIN.
+		full, err := s.kernel.ReadActionForSubject(r.Context(), callerFrom(r), a.ID)
+		if err != nil {
+			return nil, 0, err
+		}
+		return withActionRef(full), http.StatusCreated, nil
+	})(w, r)
 }
 
 func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	a, err := s.kernel.ReadActionForSubject(r.Context(), callerFrom(r), id)
+	a, err := s.kernel.ReadActionForSubject(r.Context(), callerFrom(r), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -506,8 +486,7 @@ func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
-	actionID := chi.URLParam(r, "id")
-	ratings, err := s.kernel.ListRatings(r.Context(), actionID, 50, 0)
+	ratings, err := s.kernel.ListRatings(r.Context(), pathID(r), 50, 0)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -516,38 +495,33 @@ func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	var body struct {
+	handle(func(r *http.Request, body struct {
 		Price        *int64         `json:"price"`
 		Description  *string        `json:"description"`
 		Source       *string        `json:"source"`
 		InputSchema  map[string]any `json:"input_schema"`
 		OutputSchema map[string]any `json:"output_schema"`
 		Public       *bool          `json:"public"`
-	}
-	if !decodeBody(w, r, &body) {
-		return
-	}
-	a, err := s.kernel.UpdateAction(r.Context(), callerFrom(r), kernel.UpdateActionRequest{
-		ID:           id,
-		Price:        body.Price,
-		Description:  body.Description,
-		Source:       body.Source,
-		InputSchema:  body.InputSchema,
-		OutputSchema: body.OutputSchema,
-		Public:       body.Public,
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, withActionRef(a))
+	}) (any, int, error) {
+		a, err := s.kernel.UpdateAction(r.Context(), callerFrom(r), kernel.UpdateActionRequest{
+			ID:           pathID(r),
+			Price:        body.Price,
+			Description:  body.Description,
+			Source:       body.Source,
+			InputSchema:  body.InputSchema,
+			OutputSchema: body.OutputSchema,
+			Public:       body.Public,
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		return withActionRef(a), http.StatusOK, nil
+	})(w, r)
 }
 
 func (s *server) setActionActive(active bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := chi.URLParam(r, "id")
-		if err := s.kernel.SetActive(r.Context(), callerFrom(r), id, active); err != nil {
+		if err := s.kernel.SetActive(r.Context(), callerFrom(r), pathID(r), active); err != nil {
 			writeErr(w, err)
 			return
 		}
@@ -556,8 +530,7 @@ func (s *server) setActionActive(active bool) http.HandlerFunc {
 }
 
 func (s *server) deleteAction(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if err := s.kernel.DeleteAction(r.Context(), callerFrom(r), id); err != nil {
+	if err := s.kernel.DeleteAction(r.Context(), callerFrom(r), pathID(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -574,8 +547,7 @@ func (s *server) listProcesses(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getProcess(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	p, err := s.kernel.ReadProcess(r.Context(), callerFrom(r), id)
+	p, err := s.kernel.ReadProcess(r.Context(), callerFrom(r), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -584,8 +556,7 @@ func (s *server) getProcess(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) endProcess(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if err := s.kernel.EndProcess(r.Context(), callerFrom(r), id); err != nil {
+	if err := s.kernel.EndProcess(r.Context(), callerFrom(r), pathID(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -593,26 +564,19 @@ func (s *server) endProcess(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) postRun(w http.ResponseWriter, r *http.Request) {
-	var req struct {
+	handle(func(r *http.Request, req struct {
 		Action string         `json:"action"`
 		Args   map[string]any `json:"args"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	if req.Action == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("action is required"))
-		return
-	}
-	if req.Args == nil {
-		req.Args = map[string]any{}
-	}
-	reply, err := s.kernel.Run(r.Context(), callerFrom(r), req.Action, req.Args)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, reply)
+	}) (any, int, error) {
+		if req.Action == "" {
+			return nil, 0, kernel.ErrInvalidInput.Wrap("action is required")
+		}
+		if req.Args == nil {
+			req.Args = map[string]any{}
+		}
+		reply, err := s.kernel.Run(r.Context(), callerFrom(r), req.Action, req.Args)
+		return reply, http.StatusOK, err
+	})(w, r)
 }
 
 
@@ -631,8 +595,7 @@ func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
 
 
 func (s *server) getTransaction(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	tx, err := s.kernel.ReadTransaction(r.Context(), callerFrom(r), id)
+	tx, err := s.kernel.ReadTransaction(r.Context(), callerFrom(r), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -641,29 +604,20 @@ func (s *server) getTransaction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	var req struct {
+	handle(func(r *http.Request, req struct {
 		Rating float64 `json:"rating"`
 		Note   *string `json:"note"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	if req.Rating != 0 && req.Rating != 1 {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("rating must be 0 or 1"))
-		return
-	}
-	rating, err := s.kernel.RateTransaction(r.Context(), callerFrom(r), id, req.Rating, req.Note)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, rating)
+	}) (any, int, error) {
+		if req.Rating != 0 && req.Rating != 1 {
+			return nil, 0, kernel.ErrInvalidInput.Wrap("rating must be 0 or 1")
+		}
+		rating, err := s.kernel.RateTransaction(r.Context(), callerFrom(r), pathID(r), req.Rating, req.Note)
+		return rating, http.StatusOK, err
+	})(w, r)
 }
 
 func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	v, err := s.kernel.VerifyRemoteReceipt(r.Context(), callerFrom(r), id)
+	v, err := s.kernel.VerifyRemoteReceipt(r.Context(), callerFrom(r), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -672,8 +626,7 @@ func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *server) getStats(w http.ResponseWriter, r *http.Request) {
-	actionID := chi.URLParam(r, "action_id")
-	stats, err := s.kernel.ReadStats(r.Context(), actionID)
+	stats, err := s.kernel.ReadStats(r.Context(), chi.URLParam(r, "action_id"))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -710,21 +663,15 @@ func (s *server) postAuthorize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) postRefresh(w http.ResponseWriter, r *http.Request) {
-	var req struct {
+	handle(func(r *http.Request, req struct {
 		RefreshToken string `json:"refresh_token"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	access, newRT, err := s.kernel.RefreshAccessToken(r.Context(), req.RefreshToken)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"access_token":  access,
-		"refresh_token": newRT,
-	})
+	}) (any, int, error) {
+		access, newRT, err := s.kernel.RefreshAccessToken(r.Context(), req.RefreshToken)
+		if err != nil {
+			return nil, 0, err
+		}
+		return map[string]string{"access_token": access, "refresh_token": newRT}, http.StatusOK, nil
+	})(w, r)
 }
 
 func (s *server) postLogout(w http.ResponseWriter, r *http.Request) {
@@ -851,8 +798,7 @@ func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getStep(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	step, err := s.kernel.ReadStep(r.Context(), callerFrom(r), id)
+	step, err := s.kernel.ReadStep(r.Context(), callerFrom(r), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -862,23 +808,15 @@ func (s *server) getStep(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	var req struct {
+	handle(func(r *http.Request, req struct {
 		Args *json.RawMessage `json:"args"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	if req.Args == nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("args is required"))
-		return
-	}
-	reply, err := s.kernel.CompleteStep(r.Context(), callerFrom(r), id, *req.Args)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, reply)
+	}) (any, int, error) {
+		if req.Args == nil {
+			return nil, 0, kernel.ErrInvalidInput.Wrap("args is required")
+		}
+		reply, err := s.kernel.CompleteStep(r.Context(), callerFrom(r), pathID(r), *req.Args)
+		return reply, http.StatusOK, err
+	})(w, r)
 }
 
 // stepView adds a computed action field to a step response.
@@ -922,20 +860,17 @@ func (s *server) getGossip(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) postPeer(w http.ResponseWriter, r *http.Request) {
-	var req struct {
+	handle(func(r *http.Request, req struct {
 		Handle    string `json:"handle"`
 		PublicKey string `json:"public_key"`
 		BaseURL   string `json:"base_url"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	u, err := s.kernel.CreateOrUpdateProxyPeer(r.Context(), req.Handle, req.PublicKey, req.BaseURL)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": u.ID, "handle": u.Handle})
+	}) (any, int, error) {
+		u, err := s.kernel.CreateOrUpdateProxyPeer(r.Context(), req.Handle, req.PublicKey, req.BaseURL)
+		if err != nil {
+			return nil, 0, err
+		}
+		return map[string]any{"id": u.ID, "handle": u.Handle}, http.StatusOK, nil
+	})(w, r)
 }
 
 func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
@@ -1103,8 +1038,7 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getActionManifest(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	m, err := s.kernel.GetActionManifest(r.Context(), id)
+	m, err := s.kernel.GetActionManifest(r.Context(), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1160,8 +1094,28 @@ func healthCmd() *cobra.Command {
 
 // ---- response helpers ----
 
+// pathID extracts the {id} URL parameter.
+func pathID(r *http.Request) string { return chi.URLParam(r, "id") }
+
+// handle wraps a typed request/response handler: decodes body, calls fn, writes JSON.
+// fn returns (response, httpStatus, error); status is ignored on error.
+func handle[Req, Resp any](fn func(*http.Request, Req) (Resp, int, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req Req
+		if !decodeBody(w, r, &req) {
+			return
+		}
+		resp, status, err := fn(r, req)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, status, resp)
+	}
+}
+
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := decodeJSON(r.Body, v); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
 		return false
 	}

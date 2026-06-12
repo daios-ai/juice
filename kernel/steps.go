@@ -48,14 +48,6 @@ func (k *Kernel) CreateStep(ctx context.Context, callerID, processID string, par
 	if _, err := k.store.ReadUser(ctx, requiredCallerID); err != nil {
 		return nil, ErrNotFound.Wrap("required_caller_user_id not found")
 	}
-	// If no parentTraceID was given, try to normalize to the process root trace.
-	// If no root trace exists yet (new wallet model), leave parentTraceID nil so
-	// the step completion creates its own root-level trace.
-	if parentTraceID == nil {
-		if root, err := k.store.ReadRootTrace(ctx, processID); err == nil {
-			parentTraceID = &root.ID
-		}
-	}
 	var normErr error
 	partialArgs, normErr = normalizeJSONObject(partialArgs, "partial_args")
 	if normErr != nil {
@@ -80,6 +72,7 @@ func (k *Kernel) CreateStep(ctx context.Context, callerID, processID string, par
 		NextActionID:         nextActionID,
 		PartialArgs:          partialArgs,
 		InputSchema:          inputSchema,
+		Price:                action.Price,
 		Status:               StepWaiting,
 		CreatedAt:            now,
 	}
@@ -169,12 +162,13 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 	// BeginStepCall atomically marks the step as running, releases its parked price
 	// from parent_trace.locked, and creates a new trace with available=step.price.
 	stepTrace := &Trace{
-		ID:        uuid.New().String(),
-		ProcessID: step.ProcessID,
-		CreatedAt: time.Now().UTC(),
-	}
-	if step.ParentTraceID != nil {
-		stepTrace.ParentTraceID = step.ParentTraceID
+		ID:            uuid.New().String(),
+		ProcessID:     step.ProcessID,
+		ParentTraceID: step.ParentTraceID,
+		ActionOwnerID: action.OwnerUserID,
+		ActionID:      action.ID,
+		CallerUserID:  callerID,
+		CreatedAt:     time.Now().UTC(),
 	}
 	if err := k.store.BeginStepCall(ctx, stepID, stepTrace); err != nil {
 		return nil, err

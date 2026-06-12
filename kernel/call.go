@@ -49,7 +49,6 @@ type CallReply struct {
 	TxID      string         `json:"tx_id"`
 	TraceID   string         `json:"trace_id"`
 	ReceiptID string         `json:"receipt_id"`
-	Gross     int64          `json:"gross"`
 }
 
 // ParseActionRef splits an "@owner/name" action reference into owner handle and action name.
@@ -175,6 +174,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		ProcessID:     req.ProcessID,
 		ParentTraceID: parentTracePtr,
 		ActionOwnerID: action.OwnerUserID,
+		ActionID:      action.ID,
+		CallerUserID:  req.CallerID,
 		CreatedAt:     now,
 	}
 
@@ -294,7 +295,6 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		TxID:      txID,
 		TraceID:   trace.ID,
 		ReceiptID: receipt.ID,
-		Gross:     action.Price,
 	}, nil
 }
 

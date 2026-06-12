@@ -500,12 +500,13 @@ func TestCallFailureRefundsFunds(t *testing.T) {
 		t.Fatal("expected execution failure")
 	}
 
-	proc, _ := st.ReadProcess(ctx, p.ID)
-	if proc.Available != 500 {
-		t.Errorf("process.available after failure: got %d, want 500", proc.Available)
+	// Process auto-closes after failure (quiescent). Funds return to alice.
+	alice2, _ := st.ReadUser(ctx, alice.ID)
+	if alice2.Locked != 0 {
+		t.Errorf("user.locked after failure+close: got %d, want 0", alice2.Locked)
 	}
-	if proc.Locked != 0 {
-		t.Errorf("process.locked after failure: got %d, want 0", proc.Locked)
+	if alice2.Available != 1000 {
+		t.Errorf("user.available after failure+close: got %d, want 1000", alice2.Available)
 	}
 }
 
@@ -536,76 +537,61 @@ func TestWasmPanicRefundsFunds(t *testing.T) {
 		t.Fatal("expected error from panicking WASM executor")
 	}
 
-	proc, _ := st.ReadProcess(ctx, p.ID)
-	if proc.Available != 300 {
-		t.Errorf("process.available after wasm panic: got %d, want 300", proc.Available)
+	// Process auto-closes after panic (quiescent). Funds return to alice.
+	alice2, _ := st.ReadUser(ctx, alice.ID)
+	if alice2.Locked != 0 {
+		t.Errorf("user.locked after wasm panic+close: got %d, want 0", alice2.Locked)
 	}
-	if proc.Locked != 0 {
-		t.Errorf("process.locked after wasm panic: got %d, want 0", proc.Locked)
+	if alice2.Available != 500 {
+		t.Errorf("user.available after wasm panic+close: got %d, want 500", alice2.Available)
 	}
 }
 
+// TestCallNestedTraceTree verifies that the store correctly records parent/child trace IDs
+// for a root → subcall → sub-subcall chain. Uses store-level setup to avoid auto-close
+// (which fires when a committed root trace has no open work).
 func TestCallNestedTraceTree(t *testing.T) {
 	st := newTestStore(t)
-	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	alice := setupUser(t, st, "@alice", 1000)
-	for _, name := range []string{"a", "b", "c"} {
-		_ = st.CreateAction(ctx, &kernel.Action{
-			ID: uuid.New().String(), OwnerUserID: alice.ID, Name: name,
-			Kind: kernel.KindWasm, Active: true, Price: 0, Source: "fake",
-			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-		})
-	}
-
+	alice := setupUser(t, st, "@alice", 0)
 	p := setupProcess(t, st, alice.ID, 0)
 
-	// Call A is the root call (no parent trace).
-	replyA, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: alice.ID, ProcessID: p.ID, IsRootCall: true,
-		TargetUserID: alice.ID, ActionName: "a", Args: map[string]any{},
-	})
-	if err != nil {
-		t.Fatal(err)
+	traceA := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
+		ActionOwnerID: alice.ID, CallerUserID: alice.ID, CreatedAt: time.Now().UTC()}
+	if err := st.BeginRootCall(ctx, p.ID, traceA, 0); err != nil {
+		t.Fatalf("BeginRootCall A: %v", err)
 	}
-	// Call B is a subcall of A.
-	replyB, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: replyA.TraceID,
-		TargetUserID: alice.ID, ActionName: "b", Args: map[string]any{},
-	})
-	if err != nil {
-		t.Fatal(err)
+	traceB := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
+		ActionOwnerID: alice.ID, CallerUserID: alice.ID, CreatedAt: time.Now().UTC()}
+	if err := st.BeginSubcall(ctx, traceA.ID, traceB, 0); err != nil {
+		t.Fatalf("BeginSubcall B: %v", err)
 	}
-	// Call C is a subcall of B.
-	replyC, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: alice.ID, ProcessID: p.ID, ParentTraceID: replyB.TraceID,
-		TargetUserID: alice.ID, ActionName: "c", Args: map[string]any{},
-	})
-	if err != nil {
-		t.Fatal(err)
+	traceC := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
+		ActionOwnerID: alice.ID, CallerUserID: alice.ID, CreatedAt: time.Now().UTC()}
+	if err := st.BeginSubcall(ctx, traceB.ID, traceC, 0); err != nil {
+		t.Fatalf("BeginSubcall C: %v", err)
 	}
 
-	traceA, _ := st.ReadTrace(ctx, replyA.TraceID)
-	traceB, _ := st.ReadTrace(ctx, replyB.TraceID)
-	traceC, _ := st.ReadTrace(ctx, replyC.TraceID)
+	gotA, _ := st.ReadTrace(ctx, traceA.ID)
+	gotB, _ := st.ReadTrace(ctx, traceB.ID)
+	gotC, _ := st.ReadTrace(ctx, traceC.ID)
 
-	// traceA is the root call: ParentTraceID must be nil.
-	if traceA.ParentTraceID != nil {
-		t.Errorf("traceA.ParentTraceID: got %v, want nil (root call)", traceA.ParentTraceID)
+	if gotA.ParentTraceID != nil {
+		t.Errorf("traceA.ParentTraceID: got %v, want nil (root)", gotA.ParentTraceID)
 	}
-	if traceB.ParentTraceID == nil || *traceB.ParentTraceID != replyA.TraceID {
-		t.Errorf("traceB.ParentTraceID: got %v, want %q", traceB.ParentTraceID, replyA.TraceID)
+	if gotB.ParentTraceID == nil || *gotB.ParentTraceID != traceA.ID {
+		t.Errorf("traceB.ParentTraceID: got %v, want %q", gotB.ParentTraceID, traceA.ID)
 	}
-	if traceC.ParentTraceID == nil || *traceC.ParentTraceID != replyB.TraceID {
-		t.Errorf("traceC.ParentTraceID: got %v, want %q", traceC.ParentTraceID, replyB.TraceID)
+	if gotC.ParentTraceID == nil || *gotC.ParentTraceID != traceB.ID {
+		t.Errorf("traceC.ParentTraceID: got %v, want %q", gotC.ParentTraceID, traceB.ID)
 	}
-	if traceA.ProcessID != p.ID || traceB.ProcessID != p.ID || traceC.ProcessID != p.ID {
+	if gotA.ProcessID != p.ID || gotB.ProcessID != p.ID || gotC.ProcessID != p.ID {
 		t.Error("all traces must belong to the same process")
 	}
 
 	seen := map[string]bool{}
-	for _, id := range []string{replyA.TraceID, replyB.TraceID, replyC.TraceID} {
+	for _, id := range []string{traceA.ID, traceB.ID, traceC.ID} {
 		if seen[id] {
 			t.Errorf("duplicate trace ID %q", id)
 		}
@@ -686,12 +672,13 @@ func TestCallOutputSchemaRejection(t *testing.T) {
 	if err == nil {
 		t.Error("expected schema violation error for bad output")
 	}
-	proc, _ := st.ReadProcess(ctx, p.ID)
-	if proc.Locked != 0 {
-		t.Errorf("funds should be refunded after output schema rejection: locked=%d", proc.Locked)
+	// Process auto-closes after failure (quiescent). Funds return to alice.
+	alice2, _ := st.ReadUser(ctx, alice.ID)
+	if alice2.Locked != 0 {
+		t.Errorf("user.locked after output schema rejection+close: got %d, want 0", alice2.Locked)
 	}
-	if proc.Available != 500 {
-		t.Errorf("process available should be restored: got %d, want 500", proc.Available)
+	if alice2.Available != 1000 {
+		t.Errorf("user.available after output schema rejection+close: got %d, want 1000", alice2.Available)
 	}
 }
 
@@ -928,13 +915,13 @@ func TestProcessFundedSubCallInsufficientFundsFails(t *testing.T) {
 		t.Fatal("expected error when process has insufficient funds for subcall")
 	}
 
-	// Process must be fully refunded.
-	proc, _ := st.ReadProcess(ctx, p.ID)
-	if proc.Available != 50 {
-		t.Errorf("process.available after failure: got %d, want 50", proc.Available)
+	// Process auto-closes after failure (quiescent). Funds return to alice.
+	alice2, _ := st.ReadUser(ctx, alice.ID)
+	if alice2.Locked != 0 {
+		t.Errorf("user.locked after insufficient-funds failure+close: got %d, want 0", alice2.Locked)
 	}
-	if proc.Locked != 0 {
-		t.Errorf("process.locked after failure: got %d, want 0", proc.Locked)
+	if alice2.Available != 50 {
+		t.Errorf("user.available after insufficient-funds failure+close: got %d, want 50", alice2.Available)
 	}
 }
 
@@ -1101,20 +1088,21 @@ func TestCommitCallAtomicOnFailure(t *testing.T) {
 		t.Fatal("expected error from injected commit failure")
 	}
 
-	// Caller must be fully refunded — process.available back to 500.
-	proc, _ := base.ReadProcess(ctx, p.ID)
-	if proc.Available != 500 {
-		t.Errorf("caller process.available after commit failure: got %d, want 500", proc.Available)
+	// Execution fails (no native executor) → CommitFailedCall runs → process auto-closes.
+	// Funds return to caller's user balance.
+	caller2, _ := base.ReadUser(ctx, caller.ID)
+	if caller2.Locked != 0 {
+		t.Errorf("caller user.locked after call failure+close: got %d, want 0", caller2.Locked)
 	}
-	if proc.Locked != 0 {
-		t.Errorf("caller process.locked after commit failure: got %d, want 0", proc.Locked)
+	if caller2.Available != 1000 {
+		t.Errorf("caller user.available after call failure+close: got %d, want 1000", caller2.Available)
 	}
 
-	// No transaction must exist in the store.
+	// No success transaction must exist.
 	txs, _ := base.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID})
 	for _, tx := range txs {
 		if tx.Status == kernel.TxSuccess {
-			t.Errorf("found committed success transaction despite commit failure: %s", tx.ID)
+			t.Errorf("found committed success transaction despite call failure: %s", tx.ID)
 		}
 	}
 }
@@ -1253,19 +1241,10 @@ func TestCallCrossProcessParentTraceRejectedForNonOwner(t *testing.T) {
 		t.Error("expected error for cross-process trace authority, got nil")
 	}
 
-	// But using a trace in p2 should succeed.
-	reply2, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:     procOwner.ID,
-		ProcessID:    p2.ID,
-		IsRootCall:   true,
-		TargetUserID: actionOwner.ID,
-		ActionName:   "f2-caller",
-		Args:         map[string]any{},
-	})
-	if err != nil {
-		t.Fatalf("setup call in p2: %v", err)
-	}
-	p2TraceID := reply2.TraceID
+	// But using an orphan trace in p2 (action_owner_id=actionOwner) should succeed.
+	// setupOrphanTrace keeps p2 open (no committed tx) and grants actionOwner trace authority.
+	p2Orphan := setupOrphanTrace(t, st, p2.ID, actionOwner.ID, procOwner.ID)
+	p2TraceID := p2Orphan.ID
 
 	_, err = k.Call(ctx, kernel.CallRequest{
 		CallerID:      actionOwner.ID,

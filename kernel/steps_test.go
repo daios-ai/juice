@@ -304,15 +304,9 @@ func TestStepCompletionTraceParentTraceID(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "trace-action", "", 0)
 	p := setupProcess(t, st, owner.ID, 100)
 
-	// Make a root call first to get a real trace ID.
-	rootReply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: owner.ID, ProcessID: p.ID, IsRootCall: true,
-		TargetUserID: owner.ID, ActionName: action.Name, Args: map[string]any{},
-	})
-	if err != nil {
-		t.Fatalf("root call: %v", err)
-	}
-	parentTraceID := rootReply.TraceID
+	// Create an orphan trace (no tx) so the process stays open.
+	orphan := setupOrphanTrace(t, st, p.ID, owner.ID, owner.ID)
+	parentTraceID := orphan.ID
 
 	step, err := k.CreateStep(ctx, owner.ID, p.ID, &parentTraceID, action.ID, nil, nil, caller.ID)
 	if err != nil {
@@ -582,16 +576,9 @@ func TestStepCompletionTraceCrossProcessParentRef(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "crossproc-action", "", 0)
 	p := setupProcess(t, st, owner.ID, 200)
 
-	// Make a root call to get a real trace ID to use as "foreign" parent.
-	// This simulates a step whose parent trace comes from a different call in the same system.
-	rootReply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: owner.ID, ProcessID: p.ID, IsRootCall: true,
-		TargetUserID: owner.ID, ActionName: action.Name, Args: map[string]any{},
-	})
-	if err != nil {
-		t.Fatalf("root call: %v", err)
-	}
-	foreignTraceID := rootReply.TraceID
+	// Use an orphan trace as the "foreign" parent — simulates a step parked during an active call.
+	orphan := setupOrphanTrace(t, st, p.ID, owner.ID, owner.ID)
+	foreignTraceID := orphan.ID
 
 	step, err := k.CreateStep(ctx, owner.ID, p.ID, &foreignTraceID, action.ID, nil, nil, caller.ID)
 	if err != nil {
@@ -668,27 +655,14 @@ func TestCreateStepTraceAuthority(t *testing.T) {
 	actionOwner := setupUser(t, st, "@trace-act-owner", 0)
 	nextUser := setupUser(t, st, "@trace-next-user", 0)
 
-	// Action owned by actionOwner, public so processOwner can call it.
-	action := setupWasmAction(t, st, actionOwner.ID, "trace-action", "", 0)
-
 	// Next action the step will invoke.
 	nextAction := setupAction(t, st, processOwner.ID, "trace-next-action", 0)
 
 	p := setupProcess(t, st, processOwner.ID, 100)
 
-	// Call the action to create a trace where action_owner_id = actionOwner.ID
-	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:     processOwner.ID,
-		ProcessID:    p.ID,
-		IsRootCall:   true,
-		TargetUserID: actionOwner.ID,
-		ActionName:   action.Name,
-		Args:         map[string]any{},
-	})
-	if err != nil {
-		t.Fatalf("Call to create parent trace: %v", err)
-	}
-	parentTraceID := reply.TraceID
+	// Create an orphan trace owned by actionOwner (action_owner_id = actionOwner.ID).
+	orphan := setupOrphanTrace(t, st, p.ID, actionOwner.ID, processOwner.ID)
+	parentTraceID := orphan.ID
 
 	// actionOwner (not process owner) can create a step using the parent trace for authority.
 	step, err := k.CreateStep(ctx, actionOwner.ID, p.ID, &parentTraceID, nextAction.ID, nil, nil, nextUser.ID)
@@ -787,34 +761,23 @@ func TestCreateStepRejectsInvalidSchemaInInputSchema(t *testing.T) {
 	}
 }
 
-func TestCreateStepNilParentTraceIDNormalized(t *testing.T) {
+// TestCreateStepNilParentTraceIDAllowedForOwner verifies that a nil parent_trace_id is allowed
+// at the kernel level for process owners. Enforcement is at the HTTP/CLI boundary (serve.go).
+func TestCreateStepNilParentTraceIDAllowedForOwner(t *testing.T) {
 	st := newTestStore(t)
-	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@norm-owner", 500)
-	caller := setupUser(t, st, "@norm-caller", 0)
-	action := setupWasmAction(t, st, owner.ID, "norm-action", "", 0)
+	owner := setupUser(t, st, "@nil-pt-owner", 500)
+	caller := setupUser(t, st, "@nil-pt-caller", 0)
+	action := setupAction(t, st, owner.ID, "nil-pt-action", 0)
 	p := setupProcess(t, st, owner.ID, 100)
-
-	// Make a root call first so a root trace exists for nil-parentTraceID normalization.
-	rootReply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: owner.ID, ProcessID: p.ID, IsRootCall: true,
-		TargetUserID: owner.ID, ActionName: action.Name, Args: map[string]any{},
-	})
-	if err != nil {
-		t.Fatalf("root call: %v", err)
-	}
-	rootTraceID := rootReply.TraceID
 
 	step, err := k.CreateStep(ctx, owner.ID, p.ID, nil, action.ID, nil, nil, caller.ID)
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateStep with nil parentTraceID: %v", err)
 	}
-	if step.ParentTraceID == nil {
-		t.Fatal("expected ParentTraceID to be normalized to root trace, got nil")
-	}
-	if *step.ParentTraceID != rootTraceID {
-		t.Errorf("expected ParentTraceID=%q, got %q", rootTraceID, *step.ParentTraceID)
+	if step.ParentTraceID != nil {
+		t.Errorf("expected ParentTraceID=nil for owner with nil input, got %q", *step.ParentTraceID)
 	}
 }

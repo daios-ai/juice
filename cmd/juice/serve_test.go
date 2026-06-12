@@ -101,6 +101,21 @@ func setupProcessHTTP(t *testing.T, db *store.DB, ownerID string, funds int64) *
 	return p
 }
 
+// setupTraceForProcess creates an orphan root trace for a process, as a parent for step creation in tests.
+// Uses price=0 so no funds need to be locked in the process.
+func setupTraceForProcess(t *testing.T, db *store.DB, processID string) string {
+	t.Helper()
+	tr := &kernel.Trace{
+		ID:        uuid.New().String(),
+		ProcessID: processID,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := db.BeginRootCall(context.Background(), processID, tr, 0); err != nil {
+		t.Fatalf("setupTraceForProcess: %v", err)
+	}
+	return tr.ID
+}
+
 // makeUser creates a user and returns (userID, accessToken).
 func makeUser(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	t.Helper()

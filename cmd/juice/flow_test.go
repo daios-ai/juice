@@ -500,10 +500,12 @@ func TestFlow_ApprovalStep(t *testing.T) {
 
 	// Create a process directly.
 	p := setupProcessHTTP(t, db, ownerID, 200)
+	traceID := setupTraceForProcess(t, db, p.ID)
 
 	// Owner creates a step (approval gate) addressed to the human.
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      p.ID,
+		"parent_trace_id": traceID,
 		"next_action_id":  stepActionID,
 		"required_caller": "@appr-human",
 		"partial_args":    map[string]any{"preset": "value"},
@@ -589,9 +591,11 @@ func TestFlow_WebhookCompleteStep(t *testing.T) {
 
 	// Create process and step addressed to the webhook system.
 	p := setupProcessHTTP(t, db, ownerID, 100)
+	traceID := setupTraceForProcess(t, db, p.ID)
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      p.ID,
+		"parent_trace_id": traceID,
 		"next_action_id":  actionID,
 		"required_caller": "@wh-webhook-sys",
 		"partial_args":    map[string]any{"purchase_id": "abc123"},
@@ -657,11 +661,13 @@ func TestFlow_ForceEndWithSteps(t *testing.T) {
 
 	// Create process with funds.
 	p := setupProcessHTTP(t, db, ownerID, 200)
+	traceID := setupTraceForProcess(t, db, p.ID)
 
 	// Create two steps (parks funds).
 	for i := 0; i < 2; i++ {
 		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 			"process_id":      p.ID,
+			"parent_trace_id": traceID,
 			"next_action_id":  actionID,
 			"required_caller": "@fend-caller",
 			"partial_args":    map[string]any{},
@@ -740,9 +746,11 @@ func TestFlow_RestartRecovery(t *testing.T) {
 
 	// Create a process and step.
 	p := setupProcessHTTP(t, db, ownerID, 100)
+	traceID := setupTraceForProcess(t, db, p.ID)
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"process_id":      p.ID,
+		"parent_trace_id": traceID,
 		"next_action_id":  actionID,
 		"required_caller": "@rst-caller",
 		"partial_args":    map[string]any{},
@@ -1934,8 +1942,10 @@ func TestFlow_UnfriendReconnect(t *testing.T) {
 	ownerAID, ownerATok2 := makeUser(t, kA, "@unfriend-step-owner")
 	giveCredits(t, kA, ownerAID, 200)
 	pA := setupProcessHTTP(t, dbA, ownerAID, 100)
+	traceAID := setupTraceForProcess(t, dbA, pA.ID)
 	stepResp := httpDo(t, srvA, "POST", "/v1/steps", map[string]any{
 		"process_id":      pA.ID,
+		"parent_trace_id": traceAID,
 		"next_action_id":  actAID,
 		"required_caller": "@b-peer",
 		"partial_args":    map[string]any{},

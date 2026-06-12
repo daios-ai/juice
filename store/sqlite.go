@@ -79,12 +79,6 @@ func (s *DB) migrate() error {
 		if applied {
 			continue
 		}
-		if version == "004_events_queue" && s.columnExists("events", "consumed_at") {
-			if err := s.markMigrationApplied(version); err != nil {
-				return err
-			}
-			continue
-		}
 		sqlBytes, err := migrationFS.ReadFile(file)
 		if err != nil {
 			return err
@@ -143,9 +137,6 @@ func (s *DB) applyMigration(version, sqlText string) error {
 
 	for _, stmt := range txStmts {
 		if _, err := tx.Exec(stmt); err != nil {
-			if ignorableMigrationError(err) {
-				continue
-			}
 			return fmt.Errorf("%s: %w", version, err)
 		}
 	}
@@ -153,11 +144,6 @@ func (s *DB) applyMigration(version, sqlText string) error {
 		return err
 	}
 	return tx.Commit()
-}
-
-func (s *DB) markMigrationApplied(version string) error {
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)`, version, timeToStr(time.Now().UTC()))
-	return err
 }
 
 func splitSQLStatements(sqlText string) []string {
@@ -181,19 +167,8 @@ func splitSQLStatements(sqlText string) []string {
 	return stmts
 }
 
-// isDuplicateColumn reports whether the SQLite error is a duplicate column error.
-func isDuplicateColumn(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "already exists")
-}
-
-func ignorableMigrationError(err error) bool {
-	return isDuplicateColumn(err)
-}
-
+// columnExists reports whether table has a column with the given name.
+// Used by tests to verify schema shape after migrations.
 func (s *DB) columnExists(table, column string) bool {
 	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
@@ -382,19 +357,16 @@ func (s *DB) ListStatsByOwner(ctx context.Context, ownerUserID string) ([]*kerne
 	if err != nil {
 		return nil, dbErr(err, "list stats by owner")
 	}
-	defer rows.Close()
-	var out []*kernel.Stats
-	for rows.Next() {
+	return queryList(rows, "list stats by owner", func(scan func(...any) error) (*kernel.Stats, error) {
 		var st kernel.Stats
 		var lastUsedAt string
-		if err := rows.Scan(&st.ActionID, &st.Uses, &st.Successes, &st.Failures,
+		if err := scan(&st.ActionID, &st.Uses, &st.Successes, &st.Failures,
 			&st.RatingCount, &st.LatencyEstimate, &st.RatingEstimate, &lastUsedAt); err != nil {
-			return nil, dbErr(err, "list stats by owner: scan")
+			return nil, err
 		}
 		st.LastUsedAt = strToTime(lastUsedAt)
-		out = append(out, &st)
-	}
-	return out, dbErr(rows.Err(), "list stats by owner: rows err")
+		return &st, nil
+	})
 }
 
 func (s *DB) CreateProxyUser(ctx context.Context, u *kernel.User) error {
@@ -411,17 +383,13 @@ func (s *DB) CreateProxyUser(ctx context.Context, u *kernel.User) error {
 	return dbErr(err, "create proxy user")
 }
 
-func (s *DB) scanUser(row *sql.Row) (*kernel.User, error) {
+func scanUserFn(scan func(...any) error) (*kernel.User, error) {
 	var u kernel.User
 	var createdAt, updatedAt string
 	var suspendedAt, deniedAt, publicKey, remoteBaseURL *string
-	err := row.Scan(&u.ID, &u.Handle, &u.Email, &u.PasswordHash,
-		&u.Available, &u.Locked, &suspendedAt, &deniedAt, &publicKey, &remoteBaseURL, &createdAt, &updatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, kernel.ErrNotFound.Wrap("user not found")
-	}
-	if err != nil {
-		return nil, dbErr(err, "read user")
+	if err := scan(&u.ID, &u.Handle, &u.Email, &u.PasswordHash,
+		&u.Available, &u.Locked, &suspendedAt, &deniedAt, &publicKey, &remoteBaseURL, &createdAt, &updatedAt); err != nil {
+		return nil, err
 	}
 	u.SuspendedAt = strToNullTime(suspendedAt)
 	u.DeniedAt = strToNullTime(deniedAt)
@@ -430,6 +398,17 @@ func (s *DB) scanUser(row *sql.Row) (*kernel.User, error) {
 	u.CreatedAt = strToTime(createdAt)
 	u.UpdatedAt = strToTime(updatedAt)
 	return &u, nil
+}
+
+func (s *DB) scanUser(row *sql.Row) (*kernel.User, error) {
+	u, err := scanUserFn(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("user not found")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read user")
+	}
+	return u, nil
 }
 
 func (s *DB) ListUsers(ctx context.Context, limit, offset int) ([]*kernel.User, error) {
@@ -441,25 +420,7 @@ func (s *DB) ListUsers(ctx context.Context, limit, offset int) ([]*kernel.User, 
 	if err != nil {
 		return nil, dbErr(err, "list users")
 	}
-	defer rows.Close()
-	var out []*kernel.User
-	for rows.Next() {
-		var u kernel.User
-		var createdAt, updatedAt string
-		var suspendedAt, deniedAt, publicKey, remoteBaseURL *string
-		if err := rows.Scan(&u.ID, &u.Handle, &u.Email, &u.PasswordHash,
-			&u.Available, &u.Locked, &suspendedAt, &deniedAt, &publicKey, &remoteBaseURL, &createdAt, &updatedAt); err != nil {
-			return nil, dbErr(err, "scan user")
-		}
-		u.SuspendedAt = strToNullTime(suspendedAt)
-		u.DeniedAt = strToNullTime(deniedAt)
-		u.PublicKey = strVal(publicKey)
-		u.RemoteBaseURL = strVal(remoteBaseURL)
-		u.CreatedAt = strToTime(createdAt)
-		u.UpdatedAt = strToTime(updatedAt)
-		out = append(out, &u)
-	}
-	return out, rows.Err()
+	return queryList(rows, "list users", scanUserFn)
 }
 
 func (s *DB) SuspendUser(ctx context.Context, id string) error {
@@ -481,18 +442,18 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO actions
-		 (id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 (id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,auth_json,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.OwnerUserID, a.Name, string(a.Kind), boolInt(a.Active), boolInt(a.Public), a.Price,
 		a.Description, string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact, a.RemoteActionID,
-		timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
+		a.AuthJSON, timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
 	)
 	return dbErr(err, "create action")
 }
 
 // actionCols is the canonical column list for action SELECT statements.
-// Must stay in sync with scanAction/scanActionRow/finishAction.
-const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,a.created_at,a.updated_at,a.deleted_at`
+// Must stay in sync with scanAction/scanActionFn/finishAction.
+const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,a.auth_json,a.created_at,a.updated_at,a.deleted_at`
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
@@ -509,10 +470,10 @@ func (s *DB) updateActionTx(ctx context.Context, tx *sql.Tx, a *kernel.Action) e
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := tx.ExecContext(ctx,
 		`UPDATE actions SET kind=?,active=?,public=?,price=?,description=?,input_schema=?,output_schema=?,
-		 source=?,artifact_hash=?,wasm_artifact=?,updated_at=? WHERE id=?`,
+		 source=?,artifact_hash=?,wasm_artifact=?,auth_json=?,updated_at=? WHERE id=?`,
 		string(a.Kind), boolInt(a.Active), boolInt(a.Public), a.Price, a.Description,
 		string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact,
-		timeToStr(a.UpdatedAt), a.ID,
+		a.AuthJSON, timeToStr(a.UpdatedAt), a.ID,
 	)
 	return dbErr(err, "update action")
 }
@@ -555,17 +516,7 @@ func (s *DB) ListPublicActions(ctx context.Context, limit, offset int) ([]*kerne
 	if err != nil {
 		return nil, dbErr(err, "list public actions")
 	}
-	defer rows.Close()
-
-	var out []*kernel.Action
-	for rows.Next() {
-		a, err := s.scanActionRow(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
+	return queryList(rows, "list public actions", scanActionFn)
 }
 
 func (s *DB) ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Action, error) {
@@ -576,16 +527,7 @@ func (s *DB) ListActionsByOwner(ctx context.Context, ownerID string, limit, offs
 	if err != nil {
 		return nil, dbErr(err, "list actions by owner")
 	}
-	defer rows.Close()
-	var out []*kernel.Action
-	for rows.Next() {
-		a, err := s.scanActionRow(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
+	return queryList(rows, "list actions by owner", scanActionFn)
 }
 
 func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.Action, error) {
@@ -597,16 +539,7 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 	if err != nil {
 		return nil, dbErr(err, "list all actions")
 	}
-	defer rows.Close()
-	var out []*kernel.Action
-	for rows.Next() {
-		a, err := s.scanActionRow(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
+	return queryList(rows, "list all actions", scanActionFn)
 }
 
 func (s *DB) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL string) ([]*kernel.Action, error) {
@@ -621,47 +554,31 @@ func (s *DB) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL
 	if err != nil {
 		return nil, dbErr(err, "list actions by openapi spec")
 	}
-	defer rows.Close()
-	var out []*kernel.Action
-	for rows.Next() {
-		a, err := s.scanActionRow(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
+	return queryList(rows, "list actions by openapi spec", scanActionFn)
 }
 
-func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
+func scanActionFn(scan func(...any) error) (*kernel.Action, error) {
 	var a kernel.Action
 	var kind, inJSON, outJSON, createdAt, updatedAt string
 	var deletedAt sql.NullString
 	var active, public int
-	err := row.Scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &a.Name, &kind, &active, &public, &a.Price,
+	if err := scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &a.Name, &kind, &active, &public, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.WasmArtifact, &a.RemoteActionID,
-		&createdAt, &updatedAt, &deletedAt)
+		&a.AuthJSON, &createdAt, &updatedAt, &deletedAt); err != nil {
+		return nil, err
+	}
+	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt, deletedAt)
+}
+
+func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
+	a, err := scanActionFn(row.Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("action not found")
 	}
 	if err != nil {
 		return nil, dbErr(err, "read action")
 	}
-	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt, deletedAt)
-}
-
-func (s *DB) scanActionRow(rows *sql.Rows) (*kernel.Action, error) {
-	var a kernel.Action
-	var kind, inJSON, outJSON, createdAt, updatedAt string
-	var deletedAt sql.NullString
-	var active, public int
-	err := rows.Scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &a.Name, &kind, &active, &public, &a.Price,
-		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.WasmArtifact, &a.RemoteActionID,
-		&createdAt, &updatedAt, &deletedAt)
-	if err != nil {
-		return nil, dbErr(err, "scan action")
-	}
-	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt, deletedAt)
+	return a, nil
 }
 
 func (s *DB) ReadActionByOwnerRemoteID(ctx context.Context, ownerID, remoteActionID string) (*kernel.Action, error) {
@@ -734,6 +651,15 @@ func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error
 
 // BeginRootCall atomically deducts price from process.available into process.locked
 // and creates the root trace with available=price.
+func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTraceID *string, price int64) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,latency_ms,created_at)
+		 VALUES (?,?,?,?,?,?,?,0,?,?)`,
+		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.LatencyMS, timeToStr(t.CreatedAt),
+	)
+	return dbErr(err, "insert trace")
+}
+
 func (s *DB) BeginRootCall(ctx context.Context, processID string, t *kernel.Trace, price int64) error {
 	return s.withTx(ctx, "begin root call", func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
@@ -747,12 +673,7 @@ func (s *DB) BeginRootCall(ctx context.Context, processID string, t *kernel.Trac
 		if n, _ := res.RowsAffected(); n == 0 {
 			return kernel.ErrInsufficientFunds.Wrap("not enough process funds or process closed")
 		}
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,available,locked,latency_ms,created_at)
-			 VALUES (?,?,?,?,?,0,?,?)`,
-			t.ID, t.ProcessID, nullStrPtr(t.ParentTraceID), t.ActionOwnerID, price, t.LatencyMS, timeToStr(t.CreatedAt),
-		)
-		return dbErr(err, "begin root call: create trace")
+		return insertTraceTx(ctx, tx, t, t.ParentTraceID, price)
 	})
 }
 
@@ -771,12 +692,7 @@ func (s *DB) BeginSubcall(ctx context.Context, parentTraceID string, t *kernel.T
 		if n, _ := res.RowsAffected(); n == 0 {
 			return kernel.ErrInsufficientFunds.Wrap("parent trace has insufficient available funds")
 		}
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,available,locked,latency_ms,created_at)
-			 VALUES (?,?,?,?,?,0,?,?)`,
-			t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, price, t.LatencyMS, timeToStr(t.CreatedAt),
-		)
-		return dbErr(err, "begin subcall: create trace")
+		return insertTraceTx(ctx, tx, t, &parentTraceID, price)
 	})
 }
 
@@ -818,12 +734,7 @@ func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace) 
 			return kernel.ErrInvalidState.Wrap("step already claimed")
 		}
 		// Create the trace funded by the step's price.
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,available,locked,latency_ms,created_at)
-			 VALUES (?,?,?,?,?,0,?,?)`,
-			t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, price, t.LatencyMS, timeToStr(t.CreatedAt),
-		)
-		return dbErr(err, "begin step call: create trace")
+		return insertTraceTx(ctx, tx, t, parentTraceID, price)
 	})
 }
 
@@ -955,6 +866,60 @@ func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction
 	return nil
 }
 
+// closeProcessTx closes a process within an existing transaction if it is quiescent:
+// no waiting/running steps and no traces without a committed transaction.
+// If not quiescent it is a no-op. Returns any remaining process.available to the owner.
+func (s *DB) closeProcessTx(ctx context.Context, tx *sql.Tx, processID string) error {
+	// Count open steps.
+	var openSteps int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM steps WHERE process_id=? AND status IN ('waiting','running')`,
+		processID,
+	).Scan(&openSteps); err != nil {
+		return dbErr(err, "close process: count open steps")
+	}
+	if openSteps > 0 {
+		return nil
+	}
+	// Count traces with no committed transaction (in-flight calls).
+	var orphanTraces int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM traces t
+		 WHERE t.process_id=?
+		 AND NOT EXISTS (SELECT 1 FROM transactions WHERE trace_id=t.id)`,
+		processID,
+	).Scan(&orphanTraces); err != nil {
+		return dbErr(err, "close process: count orphan traces")
+	}
+	if orphanTraces > 0 {
+		return nil
+	}
+	// Quiescent: close and return remaining available to owner.
+	var ownerID string
+	var available int64
+	err := tx.QueryRowContext(ctx,
+		`SELECT owner_user_id, available FROM processes WHERE id=? AND status='open'`,
+		processID,
+	).Scan(&ownerID, &available)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // already closed
+	}
+	if err != nil {
+		return dbErr(err, "close process: read")
+	}
+	if available > 0 {
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE users SET available=available+?, locked=locked-? WHERE id=?`,
+			available, available, ownerID); err != nil {
+			return dbErr(err, "close process: return available to owner")
+		}
+	}
+	_, err = tx.ExecContext(ctx,
+		`UPDATE processes SET status='closed', available=0, locked=0, ended_at=datetime('now') WHERE id=?`,
+		processID)
+	return dbErr(err, "close process: close")
+}
+
 // cancelStepSubtree cancels all waiting and running steps whose parent_trace_id is anywhere
 // in the subtree rooted at traceID, and returns the sum of their parked prices.
 // This must run inside an existing transaction.
@@ -1051,7 +1016,10 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 				return fmt.Errorf("commit call: fee recipient %q not found: funds would be destroyed", feeRecipientID)
 			}
 		}
-		return s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, rawJSONStr(ktx.ReplyJSON), stepID, "commit call")
+		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, rawJSONStr(ktx.ReplyJSON), stepID, "commit call"); err != nil {
+			return err
+		}
+		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
 	})
 }
 
@@ -1109,7 +1077,10 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, rece
 		// returned to user.available (via EndProcess or caller wallet propagation) and
 		// user.locked will be decremented then. Touching it here would double-count.
 		errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
-		return s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, string(errResult), stepID, "commit failed call")
+		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, string(errResult), stepID, "commit failed call"); err != nil {
+			return err
+		}
+		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
 	})
 }
 
@@ -1249,18 +1220,25 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 
 // ---- Traces ----
 
-const traceCols = `id,process_id,parent_trace_id,action_owner_id,available,locked,latency_ms,created_at`
+const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,latency_ms,idempotency_key,dispatch_json,created_at`
 
 func scanTrace(t *kernel.Trace, scanFn func(...any) error) error {
 	var createdAt string
-	var parentID sql.NullString
-	err := scanFn(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.Available, &t.Locked, &t.LatencyMS, &createdAt)
+	var parentID, idempotencyKey, dispatchJSON sql.NullString
+	err := scanFn(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.ActionID, &t.CallerUserID,
+		&t.Available, &t.Locked, &t.LatencyMS, &idempotencyKey, &dispatchJSON, &createdAt)
 	if err != nil {
 		return err
 	}
 	t.CreatedAt = strToTime(createdAt)
 	if parentID.Valid {
 		t.ParentTraceID = &parentID.String
+	}
+	if idempotencyKey.Valid {
+		t.IdempotencyKey = &idempotencyKey.String
+	}
+	if dispatchJSON.Valid {
+		t.DispatchJSON = &dispatchJSON.String
 	}
 	return nil
 }
@@ -1367,17 +1345,13 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 	if err != nil {
 		return nil, dbErr(err, "list transactions")
 	}
-	defer rows.Close()
-
-	var out []*kernel.Transaction
-	for rows.Next() {
-		tx, err := scanTx(rows.Scan)
+	return queryList(rows, "list transactions", func(scan func(...any) error) (*kernel.Transaction, error) {
+		tx, err := scanTx(scan)
 		if err != nil {
-			return nil, dbErr(err, "scan transaction")
+			return nil, err
 		}
-		out = append(out, &tx)
-	}
-	return out, rows.Err()
+		return &tx, nil
+	})
 }
 
 func (s *DB) ListAllTransactions(ctx context.Context, limit, offset int) ([]*kernel.Transaction, error) {
@@ -1390,16 +1364,13 @@ func (s *DB) ListAllTransactions(ctx context.Context, limit, offset int) ([]*ker
 	if err != nil {
 		return nil, dbErr(err, "list all transactions")
 	}
-	defer rows.Close()
-	var out []*kernel.Transaction
-	for rows.Next() {
-		tx, err := scanTx(rows.Scan)
+	return queryList(rows, "list all transactions", func(scan func(...any) error) (*kernel.Transaction, error) {
+		tx, err := scanTx(scan)
 		if err != nil {
-			return nil, dbErr(err, "scan transaction")
+			return nil, err
 		}
-		out = append(out, &tx)
-	}
-	return out, rows.Err()
+		return &tx, nil
+	})
 }
 
 // ---- Stats ----
@@ -1460,7 +1431,7 @@ func (s *DB) CreateStep(ctx context.Context, step *kernel.Step) error {
 			`INSERT INTO steps (id,process_id,parent_trace_id,required_caller_user_id,next_action_id,
 			                    partial_args,input_schema,price,status,created_at)
 			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
-			step.ID, step.ProcessID, nullStrPtr(step.ParentTraceID), step.RequiredCallerUserID,
+			step.ID, step.ProcessID, step.ParentTraceID, step.RequiredCallerUserID,
 			step.NextActionID, rawJSONStr(step.PartialArgs), rawJSONStr(step.InputSchema),
 			step.Price, string(step.Status), timeToStr(step.CreatedAt),
 		)
@@ -1468,13 +1439,13 @@ func (s *DB) CreateStep(ctx context.Context, step *kernel.Step) error {
 	})
 }
 
-const stepCols = `id,process_id,parent_trace_id,required_caller_user_id,next_action_id,partial_args,input_schema,price,status,tx_id,created_at`
+const stepCols = `id,process_id,parent_trace_id,required_caller_user_id,next_action_id,partial_args,input_schema,price,status,tx_id,completion_trace_id,created_at`
 
 func scanStep(step *kernel.Step, scanFn func(...any) error) error {
-	var parentTraceID, txID *string
+	var parentTraceID, txID, completionTraceID *string
 	var createdAt, partialArgs, inputSchema, status string
 	if err := scanFn(&step.ID, &step.ProcessID, &parentTraceID, &step.RequiredCallerUserID,
-		&step.NextActionID, &partialArgs, &inputSchema, &step.Price, &status, &txID, &createdAt); err != nil {
+		&step.NextActionID, &partialArgs, &inputSchema, &step.Price, &status, &txID, &completionTraceID, &createdAt); err != nil {
 		return err
 	}
 	step.ParentTraceID = parentTraceID
@@ -1482,6 +1453,7 @@ func scanStep(step *kernel.Step, scanFn func(...any) error) error {
 	step.InputSchema = strToRawJSON(inputSchema)
 	step.Status = kernel.StepStatus(status)
 	step.TxID = txID
+	step.CompletionTraceID = completionTraceID
 	step.CreatedAt = strToTime(createdAt)
 	return nil
 }
@@ -1520,16 +1492,13 @@ func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status stri
 	if err != nil {
 		return nil, dbErr(err, "list steps")
 	}
-	defer rows.Close()
-	var out []*kernel.Step
-	for rows.Next() {
+	return queryList(rows, "list steps", func(scan func(...any) error) (*kernel.Step, error) {
 		var step kernel.Step
-		if err := scanStep(&step, rows.Scan); err != nil {
-			return nil, dbErr(err, "scan step")
+		if err := scanStep(&step, scan); err != nil {
+			return nil, err
 		}
-		out = append(out, &step)
-	}
-	return out, rows.Err()
+		return &step, nil
+	})
 }
 
 func (s *DB) ResetStep(ctx context.Context, stepID string) error {
@@ -1552,8 +1521,6 @@ func nullStr(s string) *string {
 	return &s
 }
 
-// nullStrPtr converts a *string to a SQL-compatible value: nil becomes nil (NULL), non-nil is passed through.
-func nullStrPtr(s *string) *string { return s }
 
 // rawJSONStr returns the string form of a json.RawMessage, defaulting to "null" when empty.
 func rawJSONStr(r json.RawMessage) string {
@@ -1579,16 +1546,13 @@ func (s *DB) ListTraces(ctx context.Context, processID string) ([]*kernel.Trace,
 	if err != nil {
 		return nil, dbErr(err, "list traces")
 	}
-	defer rows.Close()
-	var out []*kernel.Trace
-	for rows.Next() {
+	return queryList(rows, "list traces", func(scan func(...any) error) (*kernel.Trace, error) {
 		var t kernel.Trace
-		if err := scanTrace(&t, rows.Scan); err != nil {
-			return nil, dbErr(err, "scan trace")
+		if err := scanTrace(&t, scan); err != nil {
+			return nil, err
 		}
-		out = append(out, &t)
-	}
-	return out, rows.Err()
+		return &t, nil
+	})
 }
 
 func (s *DB) ListOrphanTraces(ctx context.Context) ([]*kernel.Trace, error) {
@@ -1613,16 +1577,13 @@ func (s *DB) ListOrphanTraces(ctx context.Context) ([]*kernel.Trace, error) {
 			return nil, dbErr(err, "list orphan traces")
 		}
 	}
-	defer rows.Close()
-	var out []*kernel.Trace
-	for rows.Next() {
+	return queryList(rows, "list orphan traces", func(scan func(...any) error) (*kernel.Trace, error) {
 		var t kernel.Trace
-		if err := scanTrace(&t, rows.Scan); err != nil {
-			return nil, dbErr(err, "scan orphan trace")
+		if err := scanTrace(&t, scan); err != nil {
+			return nil, err
 		}
-		out = append(out, &t)
-	}
-	return out, rows.Err()
+		return &t, nil
+	})
 }
 
 // ---- Auth codes ----
@@ -1866,20 +1827,17 @@ func (s *DB) ListDiscoveredKernels(ctx context.Context) ([]*kernel.DiscoveredKer
 	if err != nil {
 		return nil, dbErr(err, "list discovered kernels")
 	}
-	defer rows.Close()
-	var out []*kernel.DiscoveredKernel
-	for rows.Next() {
+	return queryList(rows, "list discovered kernels", func(scan func(...any) error) (*kernel.DiscoveredKernel, error) {
 		var k kernel.DiscoveredKernel
 		var firstSeen, updatedAt, statsJSON string
-		if err := rows.Scan(&k.PublicKey, &k.IntroducedBy, &k.Handle, &k.BaseURL, &statsJSON, &firstSeen, &updatedAt); err != nil {
-			return nil, dbErr(err, "scan discovered kernel")
+		if err := scan(&k.PublicKey, &k.IntroducedBy, &k.Handle, &k.BaseURL, &statsJSON, &firstSeen, &updatedAt); err != nil {
+			return nil, err
 		}
 		k.StatsJSON = json.RawMessage(statsJSON)
 		k.FirstSeen = strToTime(firstSeen)
 		k.UpdatedAt = strToTime(updatedAt)
-		out = append(out, &k)
-	}
-	return out, rows.Err()
+		return &k, nil
+	})
 }
 
 // ---- helpers ----
@@ -1896,6 +1854,20 @@ func dbErr(err error, op string) error {
 		return nil
 	}
 	return kernel.ErrInternal.Wrapf("%s: %v", op, err)
+}
+
+// queryList collects rows into a slice using the provided scan function.
+func queryList[T any](rows *sql.Rows, op string, scan func(func(...any) error) (T, error)) ([]T, error) {
+	defer rows.Close()
+	var out []T
+	for rows.Next() {
+		v, err := scan(rows.Scan)
+		if err != nil {
+			return nil, dbErr(err, op)
+		}
+		out = append(out, v)
+	}
+	return out, dbErr(rows.Err(), op)
 }
 
 // withTx runs fn inside a single SQLite transaction identified by label.
@@ -1982,20 +1954,17 @@ func (s *DB) ListRatings(ctx context.Context, actionID string, limit, offset int
 	if err != nil {
 		return nil, dbErr(err, "list ratings")
 	}
-	defer rows.Close()
-	var result []*kernel.Rating
-	for rows.Next() {
+	return queryList(rows, "list ratings", func(scan func(...any) error) (*kernel.Rating, error) {
 		var r kernel.Rating
 		var ratedReceiptID *string
 		var createdAt string
-		if err := rows.Scan(&r.ID, &r.RatedTxID, &ratedReceiptID, &r.RaterUserID, &r.Rating, &r.Note, &createdAt, &r.Signature); err != nil {
-			return nil, dbErr(err, "list ratings: scan")
+		if err := scan(&r.ID, &r.RatedTxID, &ratedReceiptID, &r.RaterUserID, &r.Rating, &r.Note, &createdAt, &r.Signature); err != nil {
+			return nil, err
 		}
 		r.RatedReceiptID = ratedReceiptID
 		r.CreatedAt = strToTime(createdAt)
-		result = append(result, &r)
-	}
-	return result, dbErr(rows.Err(), "list ratings: rows")
+		return &r, nil
+	})
 }
 
 func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating, error) {
