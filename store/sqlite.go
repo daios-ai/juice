@@ -247,12 +247,15 @@ func strVal(s *string) string {
 
 // ---- Users ----
 
+const userCols = `id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,remote_base_url,created_at,updated_at`
+
 func (s *DB) CreateUser(ctx context.Context, u *kernel.User) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO users (id,handle,email,password_hash,available,locked,suspended_at,public_key,remote_base_url,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO users (id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,remote_base_url,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		u.ID, u.Handle, u.Email, u.PasswordHash, u.Available, u.Locked,
-		nullTimeToStr(u.SuspendedAt), nullStr(u.PublicKey), nullStr(u.RemoteBaseURL),
+		nullTimeToStr(u.SuspendedAt), nullTimeToStr(u.DeniedAt),
+		nullStr(u.PublicKey), nullStr(u.RemoteBaseURL),
 		timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
 	)
 	if err != nil {
@@ -263,20 +266,17 @@ func (s *DB) CreateUser(ctx context.Context, u *kernel.User) error {
 
 func (s *DB) ReadUser(ctx context.Context, id string) (*kernel.User, error) {
 	return s.scanUser(s.db.QueryRowContext(ctx,
-		`SELECT id,handle,email,password_hash,available,locked,suspended_at,public_key,remote_base_url,created_at,updated_at
-		 FROM users WHERE id=?`, id))
+		`SELECT `+userCols+` FROM users WHERE id=?`, id))
 }
 
 func (s *DB) ReadUserByHandle(ctx context.Context, handle string) (*kernel.User, error) {
 	return s.scanUser(s.db.QueryRowContext(ctx,
-		`SELECT id,handle,email,password_hash,available,locked,suspended_at,public_key,remote_base_url,created_at,updated_at
-		 FROM users WHERE handle=?`, handle))
+		`SELECT `+userCols+` FROM users WHERE handle=?`, handle))
 }
 
 func (s *DB) ReadUserByPublicKey(ctx context.Context, publicKey string) (*kernel.User, error) {
 	return s.scanUser(s.db.QueryRowContext(ctx,
-		`SELECT id,handle,email,password_hash,available,locked,suspended_at,public_key,remote_base_url,created_at,updated_at
-		 FROM users WHERE public_key=?`, publicKey))
+		`SELECT `+userCols+` FROM users WHERE public_key=?`, publicKey))
 }
 
 func (s *DB) UpdateRemoteBaseURL(ctx context.Context, userID, baseURL string) error {
@@ -287,12 +287,51 @@ func (s *DB) UpdateRemoteBaseURL(ctx context.Context, userID, baseURL string) er
 	return dbErr(err, "update remote base url")
 }
 
+func (s *DB) ReadRemoteKernelByBaseURL(ctx context.Context, baseURL string) (*kernel.User, error) {
+	return s.scanUser(s.db.QueryRowContext(ctx,
+		`SELECT `+userCols+` FROM users WHERE remote_base_url=? AND remote_base_url!=''`, baseURL))
+}
+
+func (s *DB) UpdateRemoteProxySourceURLs(ctx context.Context, ownerUserID, oldBase, newBase string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE actions SET source=REPLACE(source,?,?) WHERE owner_user_id=? AND kind='remote_proxy'`,
+		oldBase, newBase, ownerUserID,
+	)
+	return dbErr(err, "update remote proxy source urls")
+}
+
+func (s *DB) DenyUser(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET denied_at=datetime('now') WHERE id=?`, id)
+	return dbErr(err, "deny user")
+}
+
+func (s *DB) UndenyUser(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET denied_at=NULL WHERE id=?`, id)
+	return dbErr(err, "undeny user")
+}
+
+func (s *DB) CreateProxyUser(ctx context.Context, u *kernel.User) error {
+	// Use handle+"@remote" as a unique placeholder email for proxy users.
+	proxyEmail := u.Handle + "@remote"
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO users (id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,remote_base_url,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Handle, proxyEmail, "", 0, 0,
+		nil, nil,
+		nullStr(u.PublicKey), nullStr(u.RemoteBaseURL),
+		timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
+	)
+	return dbErr(err, "create proxy user")
+}
+
 func (s *DB) scanUser(row *sql.Row) (*kernel.User, error) {
 	var u kernel.User
 	var createdAt, updatedAt string
-	var suspendedAt, publicKey, remoteBaseURL *string
+	var suspendedAt, deniedAt, publicKey, remoteBaseURL *string
 	err := row.Scan(&u.ID, &u.Handle, &u.Email, &u.PasswordHash,
-		&u.Available, &u.Locked, &suspendedAt, &publicKey, &remoteBaseURL, &createdAt, &updatedAt)
+		&u.Available, &u.Locked, &suspendedAt, &deniedAt, &publicKey, &remoteBaseURL, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("user not found")
 	}
@@ -300,6 +339,7 @@ func (s *DB) scanUser(row *sql.Row) (*kernel.User, error) {
 		return nil, dbErr(err, "read user")
 	}
 	u.SuspendedAt = strToNullTime(suspendedAt)
+	u.DeniedAt = strToNullTime(deniedAt)
 	u.PublicKey = strVal(publicKey)
 	u.RemoteBaseURL = strVal(remoteBaseURL)
 	u.CreatedAt = strToTime(createdAt)
@@ -312,8 +352,7 @@ func (s *DB) ListUsers(ctx context.Context, limit, offset int) ([]*kernel.User, 
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,handle,email,password_hash,available,locked,suspended_at,public_key,remote_base_url,created_at,updated_at
-		 FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+		`SELECT `+userCols+` FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list users")
 	}
@@ -322,12 +361,13 @@ func (s *DB) ListUsers(ctx context.Context, limit, offset int) ([]*kernel.User, 
 	for rows.Next() {
 		var u kernel.User
 		var createdAt, updatedAt string
-		var suspendedAt, publicKey, remoteBaseURL *string
+		var suspendedAt, deniedAt, publicKey, remoteBaseURL *string
 		if err := rows.Scan(&u.ID, &u.Handle, &u.Email, &u.PasswordHash,
-			&u.Available, &u.Locked, &suspendedAt, &publicKey, &remoteBaseURL, &createdAt, &updatedAt); err != nil {
+			&u.Available, &u.Locked, &suspendedAt, &deniedAt, &publicKey, &remoteBaseURL, &createdAt, &updatedAt); err != nil {
 			return nil, dbErr(err, "scan user")
 		}
 		u.SuspendedAt = strToNullTime(suspendedAt)
+		u.DeniedAt = strToNullTime(deniedAt)
 		u.PublicKey = strVal(publicKey)
 		u.RemoteBaseURL = strVal(remoteBaseURL)
 		u.CreatedAt = strToTime(createdAt)
@@ -405,11 +445,11 @@ func (s *DB) UpdateActionAndResetStats(ctx context.Context, a *kernel.Action) er
 		}
 		zeroTime := timeToStr(time.Time{})
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,cost_estimate,latency_estimate,rating_estimate,last_used_at)
-			 VALUES (?,0,0,0,0,0,0,0,?)
+			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,latency_estimate,rating_estimate,last_used_at)
+			 VALUES (?,0,0,0,0,0,0,?)
 			 ON CONFLICT(action_id) DO UPDATE SET
 			   uses=0,successes=0,failures=0,rating_count=0,
-			   cost_estimate=0,latency_estimate=0,rating_estimate=0,last_used_at=excluded.last_used_at`,
+			   latency_estimate=0,rating_estimate=0,last_used_at=excluded.last_used_at`,
 			a.ID, zeroTime,
 		)
 		return dbErr(err, "update action and reset stats: reset stats")
@@ -566,36 +606,25 @@ func finishAction(a *kernel.Action, kind string, active, public int, inJSON, out
 
 // ---- Processes ----
 
-func (s *DB) StartProcess(ctx context.Context, p *kernel.Process, t *kernel.Trace, ownerID string, funds int64) error {
-	return s.withTx(ctx, "start process", func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at) VALUES (?,?,?,?,?,?,?)`,
-			p.ID, p.OwnerUserID, 0, 0, string(p.Status), timeToStr(p.CreatedAt), nullTimeToStr(p.EndedAt),
-		); err != nil {
-			return dbErr(err, "start process: insert process")
-		}
-		if funds > 0 {
-			res, err := tx.ExecContext(ctx,
-				`UPDATE users SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
-				funds, funds, ownerID, funds,
-			)
-			if err != nil {
-				return dbErr(err, "start process: deduct user")
-			}
-			if n, _ := res.RowsAffected(); n == 0 {
-				return kernel.ErrInsufficientFunds.Wrap("insufficient user balance")
-			}
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE processes SET available=? WHERE id=?`, funds, p.ID,
-			); err != nil {
-				return dbErr(err, "start process: credit process")
-			}
-		}
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
-			t.ID, t.ProcessID, nullStrPtr(t.ParentTraceID), t.ActionOwnerID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
+// CreateProcess atomically debits price from owner.available into owner.locked and creates
+// the process with available=price, locked=0. Returns ErrInsufficientFunds if balance < price.
+func (s *DB) CreateProcess(ctx context.Context, p *kernel.Process, ownerID string, price int64) error {
+	return s.withTx(ctx, "create process", func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE users SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
+			price, price, ownerID, price,
 		)
-		return dbErr(err, "start process: insert trace")
+		if err != nil {
+			return dbErr(err, "create process: deduct user")
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return kernel.ErrInsufficientFunds.Wrap("insufficient user balance")
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at) VALUES (?,?,?,?,?,?,?)`,
+			p.ID, p.OwnerUserID, price, 0, string(p.Status), timeToStr(p.CreatedAt), nullTimeToStr(p.EndedAt),
+		)
+		return dbErr(err, "create process: insert")
 	})
 }
 
@@ -618,78 +647,98 @@ func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error
 	return &p, nil
 }
 
-// BeginCall atomically locks price credits in the process and inserts the child trace.
-// Either both succeed or neither does, preserving the transition invariant.
-func (s *DB) BeginCall(ctx context.Context, processID string, t *kernel.Trace, price int64) error {
-	return s.withTx(ctx, "begin call", func(tx *sql.Tx) error {
-		if price > 0 {
-			res, err := tx.ExecContext(ctx,
-				`UPDATE processes SET available=available-?, locked=locked+?
-				 WHERE id=? AND available>=? AND status='open'`,
-				price, price, processID, price,
-			)
-			if err != nil {
-				return dbErr(err, "begin call: lock funds")
-			}
-			if n, _ := res.RowsAffected(); n == 0 {
-				return kernel.ErrInsufficientFunds.Wrap("not enough process funds or process closed")
-			}
-		} else {
-			// price == 0: atomically verify the process is still open to close the
-			// TOCTOU window between the precondition read in Call() and this transition.
-			res, err := tx.ExecContext(ctx,
-				`UPDATE processes SET available=available WHERE id=? AND status='open'`,
-				processID,
-			)
-			if err != nil {
-				return dbErr(err, "begin call: verify process open")
-			}
-			if n, _ := res.RowsAffected(); n == 0 {
-				return kernel.ErrInvalidState.Wrap("process is closed")
-			}
-		}
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)`,
-			t.ID, t.ProcessID, nullStrPtr(t.ParentTraceID), t.ActionOwnerID, t.Cost, t.LatencyMS, timeToStr(t.CreatedAt),
+// BeginRootCall atomically deducts price from process.available into process.locked
+// and creates the root trace with available=price.
+func (s *DB) BeginRootCall(ctx context.Context, processID string, t *kernel.Trace, price int64) error {
+	return s.withTx(ctx, "begin root call", func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE processes SET available=available-?, locked=locked+?
+			 WHERE id=? AND available>=? AND status='open'`,
+			price, price, processID, price,
 		)
-		return dbErr(err, "begin call: create trace")
+		if err != nil {
+			return dbErr(err, "begin root call: lock funds")
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return kernel.ErrInsufficientFunds.Wrap("not enough process funds or process closed")
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,available,locked,latency_ms,created_at)
+			 VALUES (?,?,?,?,?,0,?,?)`,
+			t.ID, t.ProcessID, nullStrPtr(t.ParentTraceID), t.ActionOwnerID, price, t.LatencyMS, timeToStr(t.CreatedAt),
+		)
+		return dbErr(err, "begin root call: create trace")
 	})
 }
 
-func (s *DB) RefundFunds(ctx context.Context, processID string, amount int64) error {
-	if amount == 0 {
-		return nil
-	}
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE processes SET available=available+?, locked=locked-? WHERE id=?`,
-		amount, amount, processID,
-	)
-	return dbErr(err, "refund funds")
+// BeginSubcall atomically deducts price from parent_trace.available into parent_trace.locked
+// and creates the child trace with available=price.
+func (s *DB) BeginSubcall(ctx context.Context, parentTraceID string, t *kernel.Trace, price int64) error {
+	return s.withTx(ctx, "begin subcall", func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE traces SET available=available-?, locked=locked+?
+			 WHERE id=? AND available>=?`,
+			price, price, parentTraceID, price,
+		)
+		if err != nil {
+			return dbErr(err, "begin subcall: lock parent trace funds")
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return kernel.ErrInsufficientFunds.Wrap("parent trace has insufficient available funds")
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,available,locked,latency_ms,created_at)
+			 VALUES (?,?,?,?,?,0,?,?)`,
+			t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, price, t.LatencyMS, timeToStr(t.CreatedAt),
+		)
+		return dbErr(err, "begin subcall: create trace")
+	})
 }
 
-func (s *DB) FundProcess(ctx context.Context, userID, processID string, amount int64) error {
-	return s.withTx(ctx, "fund process", func(tx *sql.Tx) error {
+// BeginStepCall atomically moves step.price from the step's parent_trace.locked back into
+// parent_trace.available (consuming the park), claims the step waiting→running, and creates
+// a new trace with available=step.price funded from the released lock.
+func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace) error {
+	return s.withTx(ctx, "begin step call", func(tx *sql.Tx) error {
+		// Read step to get price and parent_trace_id.
+		var price int64
+		var parentTraceID *string
+		err := tx.QueryRowContext(ctx,
+			`SELECT price, parent_trace_id FROM steps WHERE id=? AND status='waiting'`,
+			stepID,
+		).Scan(&price, &parentTraceID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return kernel.ErrInvalidState.Wrap("step not waiting")
+		}
+		if err != nil {
+			return dbErr(err, "begin step call: read step")
+		}
+		// The step's price was previously parked from parent_trace.locked;
+		// release the lock (parent keeps the park; it flows into the new trace's available).
+		if parentTraceID != nil {
+			if _, err = tx.ExecContext(ctx,
+				`UPDATE traces SET locked=locked-? WHERE id=?`,
+				price, *parentTraceID,
+			); err != nil {
+				return dbErr(err, "begin step call: release parent trace lock")
+			}
+		}
+		// Claim the step.
 		res, err := tx.ExecContext(ctx,
-			`UPDATE users SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
-			amount, amount, userID, amount,
-		)
+			`UPDATE steps SET status='running' WHERE id=? AND status='waiting'`, stepID)
 		if err != nil {
-			return dbErr(err, "fund process: deduct user")
+			return dbErr(err, "begin step call: claim step")
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			return kernel.ErrInsufficientFunds.Wrap("insufficient user balance")
+			return kernel.ErrInvalidState.Wrap("step already claimed")
 		}
-		res, err = tx.ExecContext(ctx,
-			`UPDATE processes SET available=available+? WHERE id=? AND status='open'`,
-			amount, processID,
+		// Create the trace funded by the step's price.
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,available,locked,latency_ms,created_at)
+			 VALUES (?,?,?,?,?,0,?,?)`,
+			t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, price, t.LatencyMS, timeToStr(t.CreatedAt),
 		)
-		if err != nil {
-			return dbErr(err, "fund process: credit process")
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return kernel.ErrInvalidState.Wrap("process is not open")
-		}
-		return nil
+		return dbErr(err, "begin step call: create trace")
 	})
 }
 
@@ -726,9 +775,8 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 	return nil
 }
 
-// updateAncestorTraces updates cost and latency for all ancestor traces via a recursive CTE.
-// costDelta is 0 for failures (latency-only update).
-func (s *DB) updateAncestorTraces(ctx context.Context, tx *sql.Tx, traceID string, costDelta int64, endedAt time.Time, label string) error {
+// updateAncestorTraces updates latency_ms for all ancestor traces via a recursive CTE.
+func (s *DB) updateAncestorTraces(ctx context.Context, tx *sql.Tx, traceID string, endedAt time.Time, label string) error {
 	_, err := tx.ExecContext(ctx, `
 WITH RECURSIVE ancestors(id, parent_id) AS (
     SELECT id, parent_trace_id FROM traces WHERE id=?
@@ -737,45 +785,41 @@ WITH RECURSIVE ancestors(id, parent_id) AS (
     JOIN ancestors a ON t.id=a.parent_id AND a.parent_id IS NOT NULL AND a.id!=a.parent_id
 )
 UPDATE traces SET
-    cost=cost+?,
     latency_ms=MAX(latency_ms, CAST((julianday(?)-julianday(created_at))*86400000 AS INTEGER))
 WHERE id IN (SELECT id FROM ancestors)`,
-		traceID, costDelta, timeToStr(endedAt),
+		traceID, timeToStr(endedAt),
 	)
 	return dbErr(err, label+": update trace ancestors")
 }
 
 // upsertActionStats updates the incremental success or failure counters for an action.
 // rating_count/rating_estimate are excluded — owned by UpdateRating.
-// cost_estimate is read from the traces table via subquery; updateAncestorTraces must run first.
-func (s *DB) upsertActionStats(ctx context.Context, tx *sql.Tx, stats *kernel.Stats, success bool, traceID, label string) error {
+func (s *DB) upsertActionStats(ctx context.Context, tx *sql.Tx, stats *kernel.Stats, success bool, label string) error {
 	if stats == nil {
 		return nil
 	}
 	var err error
 	if success {
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,cost_estimate,latency_estimate,rating_estimate,last_used_at)
-			 VALUES (?,1,1,0,0,(SELECT cost FROM traces WHERE id=?),?,0,?)
+			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,latency_estimate,rating_estimate,last_used_at)
+			 VALUES (?,1,1,0,0,?,0,?)
 			 ON CONFLICT(action_id) DO UPDATE SET
 			   uses=uses+1,
 			   successes=successes+1,
-			   cost_estimate=cost_estimate+((SELECT cost FROM traces WHERE id=?)-cost_estimate)/(uses+1),
 			   latency_estimate=latency_estimate+(excluded.latency_estimate-latency_estimate)/(uses+1),
 			   last_used_at=excluded.last_used_at`,
-			stats.ActionID, traceID, stats.LatencyEstimate, timeToStr(stats.LastUsedAt), traceID,
+			stats.ActionID, stats.LatencyEstimate, timeToStr(stats.LastUsedAt),
 		)
 	} else {
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,cost_estimate,latency_estimate,rating_estimate,last_used_at)
-			 VALUES (?,1,0,1,0,(SELECT cost FROM traces WHERE id=?),?,0,?)
+			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,latency_estimate,rating_estimate,last_used_at)
+			 VALUES (?,1,0,1,0,?,0,?)
 			 ON CONFLICT(action_id) DO UPDATE SET
 			   uses=uses+1,
 			   failures=failures+1,
-			   cost_estimate=cost_estimate+((SELECT cost FROM traces WHERE id=?)-cost_estimate)/(uses+1),
 			   latency_estimate=latency_estimate+(excluded.latency_estimate-latency_estimate)/(uses+1),
 			   last_used_at=excluded.last_used_at`,
-			stats.ActionID, traceID, stats.LatencyEstimate, timeToStr(stats.LastUsedAt), traceID,
+			stats.ActionID, stats.LatencyEstimate, timeToStr(stats.LastUsedAt),
 		)
 	}
 	return dbErr(err, label+": upsert stats")
@@ -797,16 +841,16 @@ func (s *DB) completeStepTx(ctx context.Context, tx *sql.Tx, stepID, txID, label
 	return nil
 }
 
-// finalizeTx executes the shared tail of both commit paths: audit rows, trace metrics,
+// finalizeTx executes the shared tail of both commit paths: audit rows, trace latency,
 // stats, optional idempotency completion, optional step completion, and commit.
 func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, receipt *kernel.Receipt, stats *kernel.Stats, idempotencyRecordID, idempotencyResultJSON, stepID, label string) error {
 	if err := s.insertAuditRows(ctx, tx, ktx, receipt, label); err != nil {
 		return err
 	}
-	if err := s.updateAncestorTraces(ctx, tx, ktx.TraceID, ktx.Gross, ktx.EndedAt, label); err != nil {
+	if err := s.updateAncestorTraces(ctx, tx, ktx.TraceID, ktx.EndedAt, label); err != nil {
 		return err
 	}
-	if err := s.upsertActionStats(ctx, tx, stats, ktx.Status == kernel.TxSuccess, ktx.TraceID, label); err != nil {
+	if err := s.upsertActionStats(ctx, tx, stats, ktx.Status == kernel.TxSuccess, label); err != nil {
 		return err
 	}
 	if idempotencyRecordID != "" {
@@ -826,16 +870,80 @@ func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction
 	return nil
 }
 
-func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
+// cancelStepSubtree cancels all waiting and running steps whose parent_trace_id is anywhere
+// in the subtree rooted at traceID, and returns the sum of their parked prices.
+// This must run inside an existing transaction.
+func (s *DB) cancelStepSubtree(ctx context.Context, tx *sql.Tx, traceID string) (int64, error) {
+	// Collect all trace IDs in the subtree (including traceID itself).
+	var total int64
+	err := tx.QueryRowContext(ctx, `
+WITH RECURSIVE sub(id) AS (
+    SELECT ? AS id
+    UNION ALL
+    SELECT t.id FROM traces t JOIN sub s ON t.parent_trace_id=s.id
+)
+SELECT COALESCE(SUM(price),0) FROM steps
+WHERE parent_trace_id IN (SELECT id FROM sub)
+  AND status IN ('waiting','running')`, traceID).Scan(&total)
+	if err != nil {
+		return 0, dbErr(err, "cancel step subtree: sum prices")
+	}
+	_, err = tx.ExecContext(ctx, `
+WITH RECURSIVE sub(id) AS (
+    SELECT ? AS id
+    UNION ALL
+    SELECT t.id FROM traces t JOIN sub s ON t.parent_trace_id=s.id
+)
+UPDATE steps SET status='cancelled'
+WHERE parent_trace_id IN (SELECT id FROM sub)
+  AND status IN ('waiting','running')`, traceID)
+	if err != nil {
+		return 0, dbErr(err, "cancel step subtree: cancel steps")
+	}
+	return total, nil
+}
+
+// CommitCall settles a successful call using trace-level wallet semantics:
+//   - zeroes trace.available
+//   - releases ktx.Gross (full allocated amount) from the caller wallet lock
+//   - decrements owner.locked by taxable (= net+fee, what actually settled)
+//   - credits net to targetUserID, fee to feeRecipientID
+//
+// callerWalletKind controls the lock release: CallerProcess (process.locked),
+// CallerTrace (parent trace.locked), or CallerStep (no lock to release; BeginStepCall
+// already consumed it — refund would go to process on failure).
+func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
 	return s.withTx(ctx, "commit call", func(tx *sql.Tx) error {
-		gross := net + fee
-		if gross > 0 {
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE processes SET locked=locked-? WHERE id=?`, gross, processID); err != nil {
-				return dbErr(err, "commit call: debit process locked")
+		taxable := net + fee
+		// Zero out trace.available (taxable flows out; the rest was consumed by subcalls/steps).
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE traces SET available=0 WHERE id=?`, traceID); err != nil {
+			return dbErr(err, "commit call: zero trace available")
+		}
+		// Release the full gross from the caller wallet lock (not just taxable).
+		// gross = ktx.Gross = action.Price = total amount locked at BeginRootCall/BeginSubcall.
+		// subcall's taxables have already been deducted from the caller wallet lock by their
+		// own CommitCall, so by the time we arrive here caller.locked == taxable.
+		// We release the full gross to leave caller.locked exactly reduced.
+		if ktx.Gross > 0 {
+			switch callerWalletKind {
+			case kernel.CallerProcess:
+				if _, err := tx.ExecContext(ctx,
+					`UPDATE processes SET locked=locked-? WHERE id=?`, ktx.Gross, callerWalletID); err != nil {
+					return dbErr(err, "commit call: release process lock")
+				}
+			case kernel.CallerTrace:
+				if _, err := tx.ExecContext(ctx,
+					`UPDATE traces SET locked=locked-? WHERE id=?`, ktx.Gross, callerWalletID); err != nil {
+					return dbErr(err, "commit call: release parent trace lock")
+				}
+			// CallerStep: BeginStepCall already released the lock; nothing to do here.
 			}
+		}
+		// Decrement owner.locked by taxable (only the portion that settles to target/sys).
+		if taxable > 0 {
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE users SET locked=locked-? WHERE id=?`, gross, ktx.OwnerUserID); err != nil {
+				`UPDATE users SET locked=locked-? WHERE id=?`, taxable, ktx.OwnerUserID); err != nil {
 				return dbErr(err, "commit call: debit owner locked")
 			}
 		}
@@ -845,7 +953,6 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 				return dbErr(err, "commit call: credit target")
 			}
 		}
-		// Credit fee recipient — hard-fail if unset or nonexistent to prevent fund destruction.
 		if fee > 0 {
 			if feeRecipientID == "" {
 				return fmt.Errorf("commit call: fee %d > 0 but feeRecipientID is empty: funds would be destroyed", fee)
@@ -863,16 +970,59 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 	})
 }
 
-func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, processID string, gross int64, stats *kernel.Stats, idempotencyRecordID, errorCode, stepID string) error {
+// CommitFailedCall settles a failed call:
+//   - cancels all outstanding steps in the trace's subtree, summing their parked prices
+//   - total refund = trace.available + step prices
+//   - refunds total to caller wallet (process or parent trace); CallerStep → process.available
+//   - decrements owner.locked by (gross - refund)
+func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind string, gross int64, stats *kernel.Stats, idempotencyRecordID, errorCode, stepID string) error {
 	return s.withTx(ctx, "commit failed call", func(tx *sql.Tx) error {
-		if gross > 0 {
-			if _, err := tx.ExecContext(ctx,
+		// Read trace.available before zeroing.
+		var traceAvailable int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT available FROM traces WHERE id=?`, traceID,
+		).Scan(&traceAvailable); err != nil {
+			return dbErr(err, "commit failed call: read trace available")
+		}
+		// Cancel subtree steps and collect their parked prices.
+		stepPrices, err := s.cancelStepSubtree(ctx, tx, traceID)
+		if err != nil {
+			return err
+		}
+		refund := traceAvailable + stepPrices
+		// Zero trace.available.
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE traces SET available=0 WHERE id=?`, traceID); err != nil {
+			return dbErr(err, "commit failed call: zero trace available")
+		}
+		// Return refund to caller wallet and release the gross lock.
+		switch callerWalletKind {
+		case kernel.CallerProcess:
+			if _, err = tx.ExecContext(ctx,
 				`UPDATE processes SET available=available+?, locked=locked-? WHERE id=?`,
-				gross, gross, processID,
-			); err != nil {
+				refund, gross, callerWalletID); err != nil {
 				return dbErr(err, "commit failed call: refund process")
 			}
+		case kernel.CallerTrace:
+			if _, err = tx.ExecContext(ctx,
+				`UPDATE traces SET available=available+?, locked=locked-? WHERE id=?`,
+				refund, gross, callerWalletID); err != nil {
+				return dbErr(err, "commit failed call: refund parent trace")
+			}
+		case kernel.CallerStep:
+			// BeginStepCall already released the parent trace lock. Return refund to process.
+			if refund > 0 {
+				if _, err = tx.ExecContext(ctx,
+					`UPDATE processes SET available=available+? WHERE id=?`,
+					refund, ktx.ProcessID); err != nil {
+					return dbErr(err, "commit failed call: refund step to process")
+				}
+			}
 		}
+		// NOTE: user.locked is NOT decremented here. Permanent outflows were already
+		// debited by CommitCall for each successful subcall. The refunded amount will be
+		// returned to user.available (via EndProcess or caller wallet propagation) and
+		// user.locked will be decremented then. Touching it here would double-count.
 		errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
 		return s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, string(errResult), stepID, "commit failed call")
 	})
@@ -938,68 +1088,121 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 		if err != nil {
 			return dbErr(err, "end process: read")
 		}
+		// Reject if process has in-flight calls (locked funds).
 		if locked > 0 {
-			return kernel.ErrInvalidState.Wrap("process has locked funds")
+			return kernel.ErrInvalidState.Wrap("process has in-flight calls; end not allowed")
 		}
-		now := timeToStr(time.Now().UTC())
-		if available > 0 {
-			if _, err = tx.ExecContext(ctx,
+		// Cancel all waiting steps and collect parked prices to return to owner.
+		var parkedTotal int64
+		if err = tx.QueryRowContext(ctx,
+			`SELECT COALESCE(SUM(price),0) FROM steps WHERE process_id=? AND status='waiting'`,
+			processID,
+		).Scan(&parkedTotal); err != nil {
+			return dbErr(err, "end process: sum parked prices")
+		}
+		if parkedTotal > 0 {
+			// Release parked prices: remove from parent trace locks, return to user.
+			// We cancel the steps in bulk; the trace.locked decrements must also happen.
+			rows, err2 := tx.QueryContext(ctx,
+				`SELECT parent_trace_id, SUM(price) FROM steps WHERE process_id=? AND status='waiting' GROUP BY parent_trace_id`,
+				processID)
+			if err2 != nil {
+				return dbErr(err2, "end process: group parked by trace")
+			}
+			var traceParks []struct {
+				traceID string
+				amount  int64
+			}
+			for rows.Next() {
+				var traceID *string
+				var amount int64
+				if err3 := rows.Scan(&traceID, &amount); err3 != nil {
+					rows.Close()
+					return dbErr(err3, "end process: scan trace park")
+				}
+				if traceID != nil {
+					traceParks = append(traceParks, struct {
+						traceID string
+						amount  int64
+					}{*traceID, amount})
+				}
+			}
+			rows.Close()
+			for _, tp := range traceParks {
+				if _, err2 = tx.ExecContext(ctx,
+					`UPDATE traces SET locked=locked-? WHERE id=?`, tp.amount, tp.traceID); err2 != nil {
+					return dbErr(err2, "end process: release trace lock")
+				}
+			}
+			// Return parked prices to owner as available.
+			if _, err2 = tx.ExecContext(ctx,
 				`UPDATE users SET available=available+?, locked=locked-? WHERE id=?`,
-				available, available, ownerID); err != nil {
-				return dbErr(err, "end process: return funds")
+				parkedTotal, parkedTotal, ownerID); err2 != nil {
+				return dbErr(err2, "end process: return parked prices to owner")
 			}
 		}
 		if _, err = tx.ExecContext(ctx,
-			`UPDATE processes SET status='closed', available=0, locked=0, ended_at=? WHERE id=?`,
-			now, processID); err != nil {
-			return dbErr(err, "end process: close")
+			`UPDATE steps SET status='cancelled' WHERE process_id=? AND status='waiting'`,
+			processID); err != nil {
+			return dbErr(err, "end process: cancel waiting steps")
+		}
+		now := timeToStr(time.Now().UTC())
+		returnAmount := available
+		if returnAmount > 0 {
+			if _, err = tx.ExecContext(ctx,
+				`UPDATE users SET available=available+?, locked=locked-? WHERE id=?`,
+				returnAmount, returnAmount, ownerID); err != nil {
+				return dbErr(err, "end process: return available to owner")
+			}
 		}
 		_, err = tx.ExecContext(ctx,
-			`UPDATE steps SET status='cancelled' WHERE process_id=? AND status='waiting'`,
-			processID)
-		return dbErr(err, "end process: cancel steps")
+			`UPDATE processes SET status='closed', available=0, locked=0, ended_at=? WHERE id=?`,
+			now, processID)
+		return dbErr(err, "end process: close")
 	})
 }
 
 // ---- Traces ----
 
-func (s *DB) ReadTrace(ctx context.Context, id string) (*kernel.Trace, error) {
-	var t kernel.Trace
+const traceCols = `id,process_id,parent_trace_id,action_owner_id,available,locked,latency_ms,created_at`
+
+func scanTrace(t *kernel.Trace, scanFn func(...any) error) error {
 	var createdAt string
 	var parentID sql.NullString
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at FROM traces WHERE id=?`, id,
-	).Scan(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.Cost, &t.LatencyMS, &createdAt)
+	err := scanFn(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.Available, &t.Locked, &t.LatencyMS, &createdAt)
+	if err != nil {
+		return err
+	}
+	t.CreatedAt = strToTime(createdAt)
+	if parentID.Valid {
+		t.ParentTraceID = &parentID.String
+	}
+	return nil
+}
+
+func (s *DB) ReadTrace(ctx context.Context, id string) (*kernel.Trace, error) {
+	var t kernel.Trace
+	err := scanTrace(&t, s.db.QueryRowContext(ctx,
+		`SELECT `+traceCols+` FROM traces WHERE id=?`, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("trace not found")
 	}
 	if err != nil {
 		return nil, dbErr(err, "read trace")
 	}
-	t.CreatedAt = strToTime(createdAt)
-	if parentID.Valid {
-		t.ParentTraceID = &parentID.String
-	}
 	return &t, nil
 }
 
 func (s *DB) ReadRootTrace(ctx context.Context, processID string) (*kernel.Trace, error) {
 	var t kernel.Trace
-	var createdAt string
-	var parentID sql.NullString
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at
-		 FROM traces WHERE process_id=? AND parent_trace_id IS NULL LIMIT 1`, processID,
-	).Scan(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.Cost, &t.LatencyMS, &createdAt)
+	err := scanTrace(&t, s.db.QueryRowContext(ctx,
+		`SELECT `+traceCols+` FROM traces WHERE process_id=? AND parent_trace_id IS NULL LIMIT 1`, processID,
+	).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("root trace not found for process")
 	}
 	if err != nil {
 		return nil, dbErr(err, "read root trace")
-	}
-	t.CreatedAt = strToTime(createdAt)
-	if parentID.Valid {
-		t.ParentTraceID = &parentID.String
 	}
 	return &t, nil
 }
@@ -1120,10 +1323,10 @@ func (s *DB) ReadStats(ctx context.Context, actionID string) (*kernel.Stats, err
 	var st kernel.Stats
 	var lastUsed string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT action_id,uses,successes,failures,rating_count,cost_estimate,latency_estimate,rating_estimate,last_used_at
+		`SELECT action_id,uses,successes,failures,rating_count,latency_estimate,rating_estimate,last_used_at
 		 FROM action_stats WHERE action_id=?`, actionID,
 	).Scan(&st.ActionID, &st.Uses, &st.Successes, &st.Failures, &st.RatingCount,
-		&st.CostEstimate, &st.LatencyEstimate, &st.RatingEstimate, &lastUsed)
+		&st.LatencyEstimate, &st.RatingEstimate, &lastUsed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil // no stats yet is not an error
 	}
@@ -1136,48 +1339,58 @@ func (s *DB) ReadStats(ctx context.Context, actionID string) (*kernel.Stats, err
 
 func (s *DB) UpsertStats(ctx context.Context, st *kernel.Stats) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,cost_estimate,latency_estimate,rating_estimate,last_used_at)
-		 VALUES (?,?,?,?,?,?,?,?,?)
+		`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,latency_estimate,rating_estimate,last_used_at)
+		 VALUES (?,?,?,?,?,?,?,?)
 		 ON CONFLICT(action_id) DO UPDATE SET
 		   uses=excluded.uses, successes=excluded.successes, failures=excluded.failures,
-		   rating_count=excluded.rating_count, cost_estimate=excluded.cost_estimate,
+		   rating_count=excluded.rating_count,
 		   latency_estimate=excluded.latency_estimate, rating_estimate=excluded.rating_estimate,
 		   last_used_at=excluded.last_used_at`,
 		st.ActionID, st.Uses, st.Successes, st.Failures, st.RatingCount,
-		st.CostEstimate, st.LatencyEstimate, st.RatingEstimate, timeToStr(st.LastUsedAt),
+		st.LatencyEstimate, st.RatingEstimate, timeToStr(st.LastUsedAt),
 	)
 	return dbErr(err, "upsert stats")
 }
 
 // ---- Steps ----
 
+// CreateStep atomically inserts the step and parks step.price from the parent trace's
+// available into its locked. Returns ErrInsufficientFunds if parent_trace.available < price.
 func (s *DB) CreateStep(ctx context.Context, step *kernel.Step) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO steps (id,process_id,parent_trace_id,required_caller_user_id,next_action_id,
-		                    partial_args,input_schema,status,created_at)
-		 VALUES (?,?,?,?,?,?,?,?,?)`,
-		step.ID, step.ProcessID, nullStrPtr(step.ParentTraceID), step.RequiredCallerUserID,
-		step.NextActionID, rawJSONStr(step.PartialArgs), rawJSONStr(step.InputSchema),
-		string(step.Status), timeToStr(step.CreatedAt),
-	)
-	return dbErr(err, "create step")
+	return s.withTx(ctx, "create step", func(tx *sql.Tx) error {
+		if step.ParentTraceID != nil && step.Price > 0 {
+			res, err := tx.ExecContext(ctx,
+				`UPDATE traces SET available=available-?, locked=locked+?
+				 WHERE id=? AND available>=?`,
+				step.Price, step.Price, *step.ParentTraceID, step.Price,
+			)
+			if err != nil {
+				return dbErr(err, "create step: park price")
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return kernel.ErrInsufficientFunds.Wrap("parent trace has insufficient available funds for step")
+			}
+		}
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO steps (id,process_id,parent_trace_id,required_caller_user_id,next_action_id,
+			                    partial_args,input_schema,price,status,created_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+			step.ID, step.ProcessID, nullStrPtr(step.ParentTraceID), step.RequiredCallerUserID,
+			step.NextActionID, rawJSONStr(step.PartialArgs), rawJSONStr(step.InputSchema),
+			step.Price, string(step.Status), timeToStr(step.CreatedAt),
+		)
+		return dbErr(err, "create step: insert")
+	})
 }
 
-func (s *DB) ReadStep(ctx context.Context, id string) (*kernel.Step, error) {
-	var step kernel.Step
+const stepCols = `id,process_id,parent_trace_id,required_caller_user_id,next_action_id,partial_args,input_schema,price,status,tx_id,created_at`
+
+func scanStep(step *kernel.Step, scanFn func(...any) error) error {
 	var parentTraceID, txID *string
 	var createdAt, partialArgs, inputSchema, status string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id,process_id,parent_trace_id,required_caller_user_id,next_action_id,
-		        partial_args,input_schema,status,tx_id,created_at
-		 FROM steps WHERE id=?`, id,
-	).Scan(&step.ID, &step.ProcessID, &parentTraceID, &step.RequiredCallerUserID,
-		&step.NextActionID, &partialArgs, &inputSchema, &status, &txID, &createdAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, kernel.ErrNotFound.Wrap("step not found")
-	}
-	if err != nil {
-		return nil, dbErr(err, "read step")
+	if err := scanFn(&step.ID, &step.ProcessID, &parentTraceID, &step.RequiredCallerUserID,
+		&step.NextActionID, &partialArgs, &inputSchema, &step.Price, &status, &txID, &createdAt); err != nil {
+		return err
 	}
 	step.ParentTraceID = parentTraceID
 	step.PartialArgs = strToRawJSON(partialArgs)
@@ -1185,6 +1398,19 @@ func (s *DB) ReadStep(ctx context.Context, id string) (*kernel.Step, error) {
 	step.Status = kernel.StepStatus(status)
 	step.TxID = txID
 	step.CreatedAt = strToTime(createdAt)
+	return nil
+}
+
+func (s *DB) ReadStep(ctx context.Context, id string) (*kernel.Step, error) {
+	var step kernel.Step
+	err := scanStep(&step, s.db.QueryRowContext(ctx,
+		`SELECT `+stepCols+` FROM steps WHERE id=?`, id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("step not found")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read step")
+	}
 	return &step, nil
 }
 
@@ -1194,8 +1420,7 @@ func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status stri
 		superInt = 1
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,process_id,parent_trace_id,required_caller_user_id,next_action_id,
-		        partial_args,input_schema,status,tx_id,created_at
+		`SELECT `+stepCols+`
 		 FROM steps
 		 WHERE (process_id IN (SELECT id FROM processes WHERE owner_user_id=?)
 		        OR required_caller_user_id=?
@@ -1214,34 +1439,12 @@ func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status stri
 	var out []*kernel.Step
 	for rows.Next() {
 		var step kernel.Step
-		var parentTraceID, txID *string
-		var createdAt, partialArgs, inputSchema, stepStatus string
-		if err := rows.Scan(&step.ID, &step.ProcessID, &parentTraceID, &step.RequiredCallerUserID,
-			&step.NextActionID, &partialArgs, &inputSchema, &stepStatus, &txID, &createdAt); err != nil {
+		if err := scanStep(&step, rows.Scan); err != nil {
 			return nil, dbErr(err, "scan step")
 		}
-		step.ParentTraceID = parentTraceID
-		step.PartialArgs = strToRawJSON(partialArgs)
-		step.InputSchema = strToRawJSON(inputSchema)
-		step.Status = kernel.StepStatus(stepStatus)
-		step.TxID = txID
-		step.CreatedAt = strToTime(createdAt)
 		out = append(out, &step)
 	}
 	return out, rows.Err()
-}
-
-func (s *DB) ClaimStep(ctx context.Context, stepID string) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE steps SET status='running' WHERE id=? AND status='waiting'`, stepID)
-	if err != nil {
-		return dbErr(err, "claim step")
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return kernel.ErrInvalidState.Wrap("step is not waiting")
-	}
-	return nil
 }
 
 func (s *DB) ResetStep(ctx context.Context, stepID string) error {
@@ -1254,12 +1457,6 @@ func (s *DB) ResetRunningSteps(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE steps SET status='waiting' WHERE status='running' AND tx_id IS NULL`)
 	return dbErr(err, "reset running steps")
-}
-
-func (s *DB) ResetInFlightCalls(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE processes SET available=available+locked, locked=0 WHERE status='open' AND locked>0`)
-	return dbErr(err, "reset in-flight calls")
 }
 
 // nullStr converts an empty string to nil for nullable TEXT columns.
@@ -1293,7 +1490,7 @@ func strToRawJSON(s string) json.RawMessage {
 
 func (s *DB) ListTraces(ctx context.Context, processID string) ([]*kernel.Trace, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,process_id,parent_trace_id,action_owner_id,cost,latency_ms,created_at FROM traces WHERE process_id=?`, processID)
+		`SELECT `+traceCols+` FROM traces WHERE process_id=?`, processID)
 	if err != nil {
 		return nil, dbErr(err, "list traces")
 	}
@@ -1301,14 +1498,42 @@ func (s *DB) ListTraces(ctx context.Context, processID string) ([]*kernel.Trace,
 	var out []*kernel.Trace
 	for rows.Next() {
 		var t kernel.Trace
-		var createdAt string
-		var parentID sql.NullString
-		if err := rows.Scan(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.Cost, &t.LatencyMS, &createdAt); err != nil {
+		if err := scanTrace(&t, rows.Scan); err != nil {
 			return nil, dbErr(err, "scan trace")
 		}
-		t.CreatedAt = strToTime(createdAt)
-		if parentID.Valid {
-			t.ParentTraceID = &parentID.String
+		out = append(out, &t)
+	}
+	return out, rows.Err()
+}
+
+func (s *DB) ListOrphanTraces(ctx context.Context) ([]*kernel.Trace, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+traceCols+` FROM traces t
+		 WHERE NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)
+		 ORDER BY (
+		   WITH RECURSIVE depth(id, d) AS (
+		     SELECT t.id, 0
+		     UNION ALL
+		     SELECT p.id, d+1 FROM traces p JOIN depth ON depth.id=p.parent_trace_id
+		   )
+		   SELECT MAX(d) FROM depth
+		 ) DESC`)
+	if err != nil {
+		// Fallback: simpler ordering without depth CTE for SQLite versions that struggle.
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT `+traceCols+` FROM traces t
+			 WHERE NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)
+			 ORDER BY created_at DESC`)
+		if err != nil {
+			return nil, dbErr(err, "list orphan traces")
+		}
+	}
+	defer rows.Close()
+	var out []*kernel.Trace
+	for rows.Next() {
+		var t kernel.Trace
+		if err := scanTrace(&t, rows.Scan); err != nil {
+			return nil, dbErr(err, "scan orphan trace")
 		}
 		out = append(out, &t)
 	}
@@ -1458,7 +1683,7 @@ func (s *DB) InitFirstBoot(ctx context.Context, u *kernel.User, configs map[stri
 	})
 }
 
-// ---- Deposits ----
+// ---- Deposits / Withdrawals ----
 
 func (s *DB) CreateDeposit(ctx context.Context, d *kernel.Deposit) error {
 	return s.withTx(ctx, "deposit", func(tx *sql.Tx) error {
@@ -1472,6 +1697,27 @@ func (s *DB) CreateDeposit(ctx context.Context, d *kernel.Deposit) error {
 		_, err := tx.ExecContext(ctx,
 			`UPDATE users SET available=available+? WHERE id=?`, d.Amount, d.TargetUserID)
 		return dbErr(err, "deposit: update user balance")
+	})
+}
+
+func (s *DB) CreateWithdrawal(ctx context.Context, w *kernel.Withdrawal) error {
+	return s.withTx(ctx, "withdrawal", func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE users SET available=available-? WHERE id=? AND available>=?`,
+			w.Amount, w.TargetUserID, w.Amount,
+		)
+		if err != nil {
+			return dbErr(err, "withdrawal: debit user")
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return kernel.ErrInsufficientFunds.Wrap("insufficient balance for withdrawal")
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO withdrawals (id,operator_user_id,target_user_id,amount,reason,created_at)
+			 VALUES (?,?,?,?,?,?)`,
+			w.ID, w.OperatorUserID, w.TargetUserID, w.Amount, w.Reason, timeToStr(w.CreatedAt),
+		)
+		return dbErr(err, "withdrawal: insert record")
 	})
 }
 
@@ -1509,20 +1755,46 @@ func (s *DB) ListEmbeddings(ctx context.Context) (map[string][]float32, error) {
 	return out, rows.Err()
 }
 
-// ---- Federation ----
+// ---- Gossip / Discovered Kernels ----
 
-func (s *DB) UpdateRemoteProxySourceURLs(ctx context.Context, ownerUserID, oldBase, newBase string) error {
+func (s *DB) CreateOrUpdateDiscoveredKernel(ctx context.Context, k *kernel.DiscoveredKernel) error {
+	statsJSON := "{}"
+	if len(k.StatsJSON) > 0 {
+		statsJSON = string(k.StatsJSON)
+	}
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE actions SET source=REPLACE(source,?,?) WHERE owner_user_id=? AND kind='remote_proxy'`,
-		oldBase, newBase, ownerUserID,
+		`INSERT INTO discovered_kernels (public_key,introduced_by,handle,base_url,stats_json,first_seen,updated_at)
+		 VALUES (?,?,?,?,?,?,?)
+		 ON CONFLICT(public_key,introduced_by) DO UPDATE SET
+		   handle=excluded.handle, base_url=excluded.base_url,
+		   stats_json=excluded.stats_json, updated_at=excluded.updated_at`,
+		k.PublicKey, k.IntroducedBy, k.Handle, k.BaseURL, statsJSON,
+		timeToStr(k.FirstSeen), timeToStr(k.UpdatedAt),
 	)
-	return dbErr(err, "update remote proxy source urls")
+	return dbErr(err, "create or update discovered kernel")
 }
 
-func (s *DB) ReadRemoteKernelByBaseURL(ctx context.Context, baseURL string) (*kernel.User, error) {
-	return s.scanUser(s.db.QueryRowContext(ctx,
-		`SELECT id,handle,email,password_hash,available,locked,suspended_at,public_key,remote_base_url,created_at,updated_at
-		 FROM users WHERE remote_base_url=? AND remote_base_url!=''`, baseURL))
+func (s *DB) ListDiscoveredKernels(ctx context.Context) ([]*kernel.DiscoveredKernel, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT public_key,introduced_by,handle,base_url,stats_json,first_seen,updated_at
+		 FROM discovered_kernels ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, dbErr(err, "list discovered kernels")
+	}
+	defer rows.Close()
+	var out []*kernel.DiscoveredKernel
+	for rows.Next() {
+		var k kernel.DiscoveredKernel
+		var firstSeen, updatedAt, statsJSON string
+		if err := rows.Scan(&k.PublicKey, &k.IntroducedBy, &k.Handle, &k.BaseURL, &statsJSON, &firstSeen, &updatedAt); err != nil {
+			return nil, dbErr(err, "scan discovered kernel")
+		}
+		k.StatsJSON = json.RawMessage(statsJSON)
+		k.FirstSeen = strToTime(firstSeen)
+		k.UpdatedAt = strToTime(updatedAt)
+		out = append(out, &k)
+	}
+	return out, rows.Err()
 }
 
 // ---- helpers ----
@@ -1672,9 +1944,12 @@ func (s *DB) InsertPendingIdempotencyRecord(ctx context.Context, r *kernel.Idemp
 	return dbErr(err, "insert pending idempotency record")
 }
 
+// DeleteIdempotencyRecord removes a pending idempotency record.
+// Records that have already been completed (by CommitFailedCall or CommitCall)
+// are left intact so that replays can return the stored result.
 func (s *DB) DeleteIdempotencyRecord(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM idempotency_records WHERE id=?`, id,
+		`DELETE FROM idempotency_records WHERE id=? AND status='pending'`, id,
 	)
 	return dbErr(err, "delete idempotency record")
 }

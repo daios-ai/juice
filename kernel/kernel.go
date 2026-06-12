@@ -301,6 +301,32 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 	return d, nil
 }
 
+// Withdraw deducts credits from a user's available balance. Superuser only.
+func (k *Kernel) Withdraw(ctx context.Context, operatorID, targetUserID string, amount int64, reason string) (*Withdrawal, error) {
+	if err := k.requireSuperuser(ctx, operatorID); err != nil {
+		return nil, err
+	}
+	if amount <= 0 {
+		return nil, ErrInvalidInput.Wrap("amount must be positive")
+	}
+	if _, err := k.store.ReadUser(ctx, targetUserID); err != nil {
+		return nil, err
+	}
+	w := &Withdrawal{
+		ID:             uuid.New().String(),
+		OperatorUserID: operatorID,
+		TargetUserID:   targetUserID,
+		Amount:         amount,
+		Reason:         reason,
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := k.store.CreateWithdrawal(ctx, w); err != nil {
+		return nil, err
+	}
+	k.log.With(ctx).Info("withdrawal.created", "withdrawal_id", w.ID, "target_user_id", targetUserID, "amount", amount)
+	return w, nil
+}
+
 // VerifyToken validates a bearer token and returns the subject user ID.
 func (k *Kernel) VerifyToken(token string) (string, error) {
 	return VerifyToken(token, k.cfg.TokenSecret, k.cfg.AuthIssuer, k.cfg.AuthAudience)
@@ -447,10 +473,6 @@ func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateAc
 	return a, nil
 }
 
-// ResetInFlightCalls restores locked process funds to available. Called at startup.
-func (k *Kernel) ResetInFlightCalls(ctx context.Context) error {
-	return k.store.ResetInFlightCalls(ctx)
-}
 
 // RegisterNativeAction creates a native action for bootstrap use.
 // Unlike CreateAction, it does not reject KindNative. Call only from bootstrap.
@@ -860,69 +882,109 @@ func (k *Kernel) DeleteAction(ctx context.Context, callerID, actionID string) er
 	return nil
 }
 
-// ---- Process operations ----
+// ---- Process / Run operations ----
 
-// StartProcess creates a new process and locks funds from the owner's account.
-// Process creation, user debit, and root trace creation are atomic.
-func (k *Kernel) StartProcess(ctx context.Context, callerID, ownerID string, funds int64) (*Process, *Trace, error) {
-	start := time.Now()
+// Run atomically creates a process funded with action.Price, then executes the root call.
+// This replaces the old StartProcess + FundProcess + Call sequence.
+func (k *Kernel) Run(ctx context.Context, callerID, actionRef string, args map[string]any) (*CallReply, error) {
 	logger := k.log.With(ctx)
-	logger.Info("process.start.start", "owner", ownerID, "funds", funds)
-	if err := k.requireSelf(ctx, callerID, ownerID); err != nil {
-		logger.Warn("process.start.failed", "owner", ownerID, "error", err, "duration_ms", time.Since(start).Milliseconds())
-		return nil, nil, err
+
+	caller, err := k.requireActiveUser(ctx, callerID)
+	if err != nil {
+		return nil, err
 	}
-	if funds < 0 {
-		return nil, nil, ErrInvalidInput.Wrap("funds must be non-negative")
+
+	// Resolve action.
+	ownerHandle, actionName, err := ParseActionRef(actionRef)
+	if err != nil {
+		return nil, err
+	}
+	target, err := k.store.ReadUserByHandle(ctx, ownerHandle)
+	if err != nil || target == nil {
+		target, err = k.store.ReadUser(ctx, ownerHandle)
+		if err != nil || target == nil {
+			return nil, ErrNotFound.Wrapf("user %s not found", ownerHandle)
+		}
+	}
+	action, err := k.store.ReadActionByOwnerName(ctx, target.ID, actionName)
+	if err != nil || action == nil {
+		return nil, ErrNotFound.Wrapf("action %s not found", actionRef)
+	}
+	if !action.Active {
+		return nil, ErrInvalidState.Wrap("action is inactive")
+	}
+	if !canCall(caller.ID, action) {
+		return nil, ErrUnauthorized.Wrap("call permission denied")
+	}
+	if caller.Available < action.Price {
+		return nil, ErrInsufficientFunds.Wrapf("user has %d credits, action costs %d", caller.Available, action.Price)
 	}
 
 	now := time.Now().UTC()
 	p := &Process{
 		ID:          uuid.New().String(),
-		OwnerUserID: ownerID,
+		OwnerUserID: callerID,
 		Status:      ProcessOpen,
 		CreatedAt:   now,
 	}
-	// Root trace: ParentTraceID == nil.
-	t := &Trace{
-		ID:        uuid.New().String(),
-		ProcessID: p.ID,
-		CreatedAt: now,
+	if err := k.store.CreateProcess(ctx, p, callerID, action.Price); err != nil {
+		return nil, err
+	}
+	logger.Info("process.created", "process_id", p.ID, "owner", callerID, "price", action.Price)
+
+	reply, callErr := k.Call(ctx, CallRequest{
+		CallerID:     callerID,
+		ProcessID:    p.ID,
+		TargetUserID: target.ID,
+		ActionName:   action.Name,
+		Args:         args,
+		IsRootCall:   true,
+	})
+
+	// Always auto-close the process, whether the call succeeded or failed,
+	// so any remaining available balance is returned to the caller.
+	if err := k.store.EndProcess(ctx, p.ID); err != nil {
+		logger.Warn("process.end.failed", "process_id", p.ID, "error", err)
 	}
 
-	if err := k.store.StartProcess(ctx, p, t, ownerID, funds); err != nil {
-		logger.Warn("process.start.failed", "owner", ownerID, "error", err, "duration_ms", time.Since(start).Milliseconds())
-		return nil, nil, err
-	}
-	p.Available = funds
-
-	logger.Info("process.started", "process_id", p.ID, "owner", ownerID, "funds", funds, "status", "success", "duration_ms", time.Since(start).Milliseconds())
-	return p, t, nil
+	return reply, callErr
 }
 
-// FundProcess adds more credits to an existing open process.
-func (k *Kernel) FundProcess(ctx context.Context, callerID, processID string, funds int64) error {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
-		return err
-	}
-	p, err := k.store.ReadProcess(ctx, processID)
+// RunFederated is like Run but accepts an idempotencyRecordID for federation calls.
+// Used by the federation handler to atomically settle the idempotency record.
+func (k *Kernel) RunFederated(ctx context.Context, callerID, targetUserID, actionName string, args map[string]any, price int64, idempotencyRecordID string) (*CallReply, error) {
+	logger := k.log.With(ctx)
+	caller, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if p.Status != ProcessOpen {
-		return ErrInvalidState.Wrap("process is closed")
+	if caller.Available < price {
+		return nil, ErrInsufficientFunds.Wrapf("user has %d credits, action costs %d", caller.Available, price)
 	}
-	if p.OwnerUserID != callerID {
-		return ErrUnauthorized.Wrap("only the process owner may add funds")
+	now := time.Now().UTC()
+	p := &Process{
+		ID:          uuid.New().String(),
+		OwnerUserID: callerID,
+		Status:      ProcessOpen,
+		CreatedAt:   now,
 	}
-	if funds <= 0 {
-		return ErrInvalidInput.Wrap("funds must be positive")
+	if err := k.store.CreateProcess(ctx, p, callerID, price); err != nil {
+		return nil, err
 	}
-	if err := k.store.FundProcess(ctx, callerID, processID, funds); err != nil {
-		return err
+	logger.Info("federation.process.created", "process_id", p.ID, "owner", callerID, "price", price)
+	reply, callErr := k.Call(ctx, CallRequest{
+		CallerID:            callerID,
+		ProcessID:           p.ID,
+		TargetUserID:        targetUserID,
+		ActionName:          actionName,
+		Args:                args,
+		IsRootCall:          true,
+		IdempotencyRecordID: idempotencyRecordID,
+	})
+	if err := k.store.EndProcess(ctx, p.ID); err != nil {
+		logger.Warn("federation.process.end.failed", "process_id", p.ID, "error", err)
 	}
-	k.log.With(ctx).Info("process.funded", "process_id", processID, "funds", funds, "status", "success")
-	return nil
+	return reply, callErr
 }
 
 // EndProcess closes a process and returns all remaining funds to the owner.

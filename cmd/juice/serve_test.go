@@ -24,7 +24,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
+func newTestHTTPServerFull(t *testing.T) (*httptest.Server, *kernel.Kernel, *store.DB) {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "serve.db"))
@@ -76,7 +76,29 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 
 	registerRoutes(r, srv)
 
-	return httptest.NewServer(r), k
+	return httptest.NewServer(r), k, db
+}
+
+func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
+	t.Helper()
+	srv, k, _ := newTestHTTPServerFull(t)
+	return srv, k
+}
+
+// setupProcessHTTP creates a process directly via the store for HTTP integration tests.
+// Used by tests that need a process_id before making HTTP calls.
+func setupProcessHTTP(t *testing.T, db *store.DB, ownerID string, funds int64) *kernel.Process {
+	t.Helper()
+	p := &kernel.Process{
+		ID:          uuid.New().String(),
+		OwnerUserID: ownerID,
+		Status:      kernel.ProcessOpen,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := db.CreateProcess(context.Background(), p, ownerID, funds); err != nil {
+		t.Fatalf("setupProcessHTTP: %v", err)
+	}
+	return p
 }
 
 // makeUser creates a user and returns (userID, accessToken).
@@ -479,22 +501,12 @@ func TestServeDeleteAction(t *testing.T) {
 
 
 func TestServeProcessLifecycle(t *testing.T) {
-	srv, k := newTestHTTPServer(t)
+	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@srv-proc")
-
-	resp := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, tok)
-	if resp.StatusCode != http.StatusCreated {
-		resp.Body.Close()
-		t.Fatalf("create process: expected 201, got %d", resp.StatusCode)
-	}
-	var proc map[string]any
-	decodeResponse(t, resp, &proc)
-	pid := proc["process_id"].(string)
-	if pid == "" {
-		t.Fatal("expected process_id")
-	}
+	userID, tok := makeUser(t, k, "@srv-proc")
+	p := setupProcessHTTP(t, db, userID, 0)
+	pid := p.ID
 
 	// Get process.
 	get := httpDo(t, srv, "GET", "/v1/processes/"+pid, nil, tok)
@@ -502,9 +514,9 @@ func TestServeProcessLifecycle(t *testing.T) {
 		get.Body.Close()
 		t.Fatalf("get process: expected 200, got %d", get.StatusCode)
 	}
-	var p kernel.Process
-	decodeResponse(t, get, &p)
-	if p.ID != pid {
+	var proc kernel.Process
+	decodeResponse(t, get, &proc)
+	if proc.ID != pid {
 		t.Errorf("get process: ID mismatch")
 	}
 
@@ -517,16 +529,15 @@ func TestServeProcessLifecycle(t *testing.T) {
 }
 
 func TestServeGetProcessUnauthorized(t *testing.T) {
-	srv, k := newTestHTTPServer(t)
+	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@proc-owner")
+	ownerID, ownerTok := makeUser(t, k, "@proc-owner")
 	_, otherTok := makeUser(t, k, "@proc-other")
+	_ = ownerTok
 
-	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, ownerTok)
-	var proc map[string]any
-	decodeResponse(t, pr, &proc)
-	pid := proc["process_id"].(string)
+	p := setupProcessHTTP(t, db, ownerID, 0)
+	pid := p.ID
 
 	// Non-owner must get 403.
 	get := httpDo(t, srv, "GET", "/v1/processes/"+pid, nil, otherTok)
@@ -537,28 +548,25 @@ func TestServeGetProcessUnauthorized(t *testing.T) {
 }
 
 func TestServeFundProcess(t *testing.T) {
-	srv, k := newTestHTTPServer(t)
+	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
 	userID, tok := makeUser(t, k, "@fund-user")
 	giveCredits(t, k, userID, 200)
 
-	// Start process with 0 initial funds.
-	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, tok)
-	var proc map[string]any
-	decodeResponse(t, pr, &proc)
-	pid := proc["process_id"].(string)
+	// Create process with initial funds via store (process creation is internal in new model).
+	p := setupProcessHTTP(t, db, userID, 100)
 
-	// Fund the process via HTTP — returns 200 with updated process body.
-	fr := httpDo(t, srv, "POST", "/v1/processes/"+pid+"/fund", map[string]any{"funds": 100}, tok)
-	defer fr.Body.Close()
-	if fr.StatusCode != http.StatusOK {
-		t.Fatalf("fund process: expected 200, got %d", fr.StatusCode)
+	// Verify via GET /v1/processes/{id} that the process has funds.
+	get := httpDo(t, srv, "GET", "/v1/processes/"+p.ID, nil, tok)
+	if get.StatusCode != http.StatusOK {
+		get.Body.Close()
+		t.Fatalf("get process: expected 200, got %d", get.StatusCode)
 	}
-	var p kernel.Process
-	decodeResponse(t, fr, &p)
-	if p.Available != 100 {
-		t.Errorf("funded process: expected 100 available, got %d", p.Available)
+	var proc kernel.Process
+	decodeResponse(t, get, &proc)
+	if proc.Available != 100 {
+		t.Errorf("funded process: expected 100 available, got %d", proc.Available)
 	}
 }
 
@@ -585,17 +593,10 @@ func TestServeCall(t *testing.T) {
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
 	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, ownerTok).Body.Close()
 
-	// Caller opens a process.
-	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, callerTok)
-	var proc map[string]any
-	decodeResponse(t, pr, &proc)
-	pid := proc["process_id"].(string)
-
-	// Make the call.
-	callResp := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": pid,
-		"action":     "@call-owner/answer",
-		"args":       map[string]any{},
+	// Make the call via /v1/run (new API — price=0, caller needs no credits).
+	callResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"action": "@call-owner/answer",
+		"args":   map[string]any{},
 	}, callerTok)
 	if callResp.StatusCode != http.StatusOK {
 		callResp.Body.Close()
@@ -633,13 +634,8 @@ func TestServeListAndGetTransaction(t *testing.T) {
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
 	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, ownerTok).Body.Close()
 
-	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, callerTok)
-	var proc map[string]any
-	decodeResponse(t, pr, &proc)
-	pid := proc["process_id"].(string)
-
-	call := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": pid, "action": "@tx-owner/tx-action", "args": map[string]any{},
+	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"action": "@tx-owner/tx-action", "args": map[string]any{},
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -695,13 +691,8 @@ func TestServeRateTransaction(t *testing.T) {
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
 	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, ownerTok).Body.Close()
 
-	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, callerTok)
-	var proc map[string]any
-	decodeResponse(t, pr, &proc)
-	pid := proc["process_id"].(string)
-
-	call := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": pid, "action": "@rate-owner/rate-action", "args": map[string]any{},
+	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"action": "@rate-owner/rate-action", "args": map[string]any{},
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -754,13 +745,8 @@ func TestServeListActionRatings(t *testing.T) {
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
 	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, ownerTok).Body.Close()
 
-	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, callerTok)
-	var proc map[string]any
-	decodeResponse(t, pr, &proc)
-	pid := proc["process_id"].(string)
-
-	call := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": pid, "action": "@list-ratings-owner/list-ratings-action", "args": map[string]any{},
+	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"action": "@list-ratings-owner/list-ratings-action", "args": map[string]any{},
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -831,11 +817,8 @@ func TestServeGetStats(t *testing.T) {
 	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, ownerTok).Body.Close()
 
 	// Make one call to generate stats.
-	pr := httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, callerTok)
-	var proc map[string]any
-	decodeResponse(t, pr, &proc)
-	httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": proc["process_id"], "action": "@stats-owner/stats-action", "args": map[string]any{},
+	httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"action": "@stats-owner/stats-action", "args": map[string]any{},
 	}, callerTok).Body.Close()
 
 	get := httpDo(t, srv, "GET", "/v1/stats/"+action.ID, nil, ownerTok)
@@ -900,14 +883,14 @@ func TestServeUpdateAction(t *testing.T) {
 }
 
 func TestServeListProcesses(t *testing.T) {
-	srv, k := newTestHTTPServer(t)
+	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@lp-user")
+	userID, tok := makeUser(t, k, "@lp-user")
 
-	// Create two processes.
-	httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, tok).Body.Close()
-	httpDo(t, srv, "POST", "/v1/processes", map[string]any{"funds": 0}, tok).Body.Close()
+	// Create two processes directly via the store (POST /v1/processes no longer exists).
+	setupProcessHTTP(t, db, userID, 0)
+	setupProcessHTTP(t, db, userID, 0)
 
 	resp := httpDo(t, srv, "GET", "/v1/processes", nil, tok)
 	if resp.StatusCode != http.StatusOK {
@@ -1118,7 +1101,7 @@ func TestFederationCall(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
 	// Register the remote peer with its real public key.
-	_, err = k.RegisterRemoteKernel(ctx, sys.ID, "@remote.example.com", pubB64, "http://remote.example.com")
+	_, err = k.AddPeer(ctx, sys.ID, "@remote.example.com", pubB64, "http://remote.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1205,7 +1188,7 @@ func TestFederationCallRejectsNonPublicAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@remote-caller", pubB64, "http://remote-caller.example.com"); err != nil {
+	if _, err := k.AddPeer(ctx, sys.ID, "@remote-caller", pubB64, "http://remote-caller.example.com"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1269,7 +1252,7 @@ func TestFederationCallAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.RegisterRemoteKernel(ctx, sys.ID, "@auth-test-remote", pubB64, "http://auth-remote.example.com"); err != nil {
+	if _, err := k.AddPeer(ctx, sys.ID, "@auth-test-remote", pubB64, "http://auth-remote.example.com"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1397,7 +1380,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.RegisterRemoteKernel(ctx, sys.ID, "@replay.example.com", pubB64, "http://replay.example.com")
+	_, _ = k.AddPeer(ctx, sys.ID, "@replay.example.com", pubB64, "http://replay.example.com")
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
@@ -1445,7 +1428,7 @@ func TestHealthCmd(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv("JUICE_URL", srv.URL)
-	_, err := runCmd(t, healthCmd(), "--url", srv.URL)
+	_, err := execTestCmd(t, healthCmd(), "--url", srv.URL)
 	if err != nil {
 		t.Fatalf("health: unexpected error: %v", err)
 	}
@@ -1554,7 +1537,7 @@ func TestFederationReplay(t *testing.T) {
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.RegisterRemoteKernel(ctx, sys.ID, "@replay-caller", pubB64, "http://localhost:0")
+	_, _ = k.AddPeer(ctx, sys.ID, "@replay-caller", pubB64, "http://localhost:0")
 
 	path := "/v1/federation/call?action=@sys/fed-greet&counterparty=" + pubB64
 
@@ -1607,7 +1590,7 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 	sys, _ := k.ReadUserByHandle(ctx, "@sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.RegisterRemoteKernel(ctx, sys.ID, "@schema-fail-peer", pubB64, "http://schema-fail.example.com")
+	_, _ = k.AddPeer(ctx, sys.ID, "@schema-fail-peer", pubB64, "http://schema-fail.example.com")
 
 	// Action requires a "name" field; empty body {} will fail schema validation.
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
@@ -1672,7 +1655,7 @@ func TestFederationIdempotencyCommittedFailureHasReceipt(t *testing.T) {
 	sys, _ := k.ReadUserByHandle(ctx, "@sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.RegisterRemoteKernel(ctx, sys.ID, "@committed-fail-peer", pubB64, "http://committed-fail.example.com")
+	_, _ = k.AddPeer(ctx, sys.ID, "@committed-fail-peer", pubB64, "http://committed-fail.example.com")
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID: sys.ID, Name: "fail-exec", Kind: kernel.KindHTTP,
@@ -1722,7 +1705,7 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	sys, _ := k.ReadUserByHandle(ctx, "@sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, err := k.RegisterRemoteKernel(ctx, sys.ID, "@args-hash-peer", pubB64, "http://argshash.example.com")
+	_, err := k.AddPeer(ctx, sys.ID, "@args-hash-peer", pubB64, "http://argshash.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1771,9 +1754,8 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 
 	userID, tok := makeUser(t, k, "@vrr-http-user")
 	giveCredits(t, k, userID, 100)
-	p, _, _ := k.StartProcess(ctx, userID, userID, 100)
 
-	// Create a local HTTP action and make a call to get a local (non-remote-proxy) transaction.
+	// Create a local HTTP action and make a call via /v1/run to get a transaction.
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID: sys.ID, Name: "vrr-http", Kind: kernel.KindHTTP,
 		Source: backend.URL, Description: "vrr-http",
@@ -1783,8 +1765,8 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 	pubAll := true
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubAll})
 
-	callResp := httpDo(t, srv, "POST", "/v1/call", map[string]any{
-		"process_id": p.ID, "action": "@sys/vrr-http", "args": map[string]any{},
+	callResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"action": "@sys/vrr-http", "args": map[string]any{},
 	}, tok)
 	if callResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(callResp.Body)

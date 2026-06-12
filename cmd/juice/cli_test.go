@@ -47,7 +47,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	return &testEnv{db: db, k: k, dir: dir}
 }
 
-func runCmd(t *testing.T, cmd *cobra.Command, args ...string) (string, error) {
+func execTestCmd(t *testing.T, cmd *cobra.Command, args ...string) (string, error) {
 	t.Helper()
 	buf := &bytes.Buffer{}
 	cmd.SetOut(buf)

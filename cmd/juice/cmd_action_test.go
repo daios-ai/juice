@@ -141,7 +141,7 @@ func TestActionShowPrivate(t *testing.T) {
 	if err := saveToken(ownerTok); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runCmd(t, actionShowCmd(), "--id", a.ID); err != nil {
+	if _, err := execTestCmd(t, actionShowCmd(), "--id", a.ID); err != nil {
 		t.Errorf("owner: unexpected error: %v", err)
 	}
 
@@ -150,7 +150,7 @@ func TestActionShowPrivate(t *testing.T) {
 	if err := saveToken(strangerTok); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runCmd(t, actionShowCmd(), "--id", a.ID); err == nil {
+	if _, err := execTestCmd(t, actionShowCmd(), "--id", a.ID); err == nil {
 		t.Error("stranger: expected error, got nil")
 	}
 }
@@ -177,7 +177,7 @@ func TestActionImportOpenAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := runCmd(t, actionImportCmd(), "--openapi", specSrv.URL+"/spec.json"); err != nil {
+	if _, err := execTestCmd(t, actionImportCmd(), "--openapi", specSrv.URL+"/spec.json"); err != nil {
 		t.Fatalf("action import: %v", err)
 	}
 
@@ -219,10 +219,10 @@ func TestActionUnimportOpenAPI(t *testing.T) {
 	}
 
 	specURL := specSrv.URL + "/spec.json"
-	if _, err := runCmd(t, actionImportCmd(), "--openapi", specURL); err != nil {
+	if _, err := execTestCmd(t, actionImportCmd(), "--openapi", specURL); err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	if _, err := runCmd(t, actionUnimportCmd(), "--openapi", specURL); err != nil {
+	if _, err := execTestCmd(t, actionUnimportCmd(), "--openapi", specURL); err != nil {
 		t.Fatalf("unimport: %v", err)
 	}
 }
