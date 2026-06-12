@@ -186,6 +186,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		// BeginStepCall was already called by CompleteStep; skip BeginRootCall/BeginSubcall.
 		// trace was created by BeginStepCall; use the trace ID from req.
 		trace.ID = req.ParentTraceID // for step calls, ParentTraceID IS the new trace (set by CompleteStep)
+		// Fetch the real parent_trace_id from DB so the tx records it correctly (not a self-reference).
+		if dbTrace, err := k.store.ReadTrace(ctx, trace.ID); err == nil {
+			trace.ParentTraceID = dbTrace.ParentTraceID
+		}
 	case req.IsRootCall:
 		if err := k.store.BeginRootCall(ctx, req.ProcessID, trace, action.Price); err != nil {
 			if errors.Is(err, ErrInsufficientFunds) || errors.Is(err, ErrInvalidState) {
@@ -210,11 +214,15 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	logger.Info("call.start", "action", action.Name, "price", action.Price)
 
 	txID := uuid.New().String()
+	var parentTraceIDStr string
+	if trace.ParentTraceID != nil {
+		parentTraceIDStr = *trace.ParentTraceID
+	}
 	ktx := &Transaction{
 		ID:             txID,
 		ProcessID:      req.ProcessID,
 		TraceID:        trace.ID,
-		ParentTraceID:  req.ParentTraceID,
+		ParentTraceID:  parentTraceIDStr,
 		OwnerUserID:    process.OwnerUserID,
 		CallerUserID:   req.CallerID,
 		TargetUserID:   target.ID,

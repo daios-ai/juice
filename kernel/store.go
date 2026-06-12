@@ -227,6 +227,9 @@ type Store interface {
 	// ResetStep resets a single running step (tx_id IS NULL) back to waiting. Called when Call
 	// fails before creating a transaction — the step can be retried.
 	ResetStep(ctx context.Context, stepID string) error
+	// ResetStepAndRepark re-parks a step's price and resets to waiting. Used when the
+	// completion trace is empty (crash during execution) to prevent double-completion minting.
+	ResetStepAndRepark(ctx context.Context, stepID string) error
 	// ResetRunningSteps sets status=waiting where status=running AND tx_id IS NULL.
 	ResetRunningSteps(ctx context.Context) error
 	// ListOrphanTraces returns traces that have no associated transaction, ordered deepest-first

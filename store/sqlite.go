@@ -724,9 +724,10 @@ func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace) 
 				return dbErr(err, "begin step call: release parent trace lock")
 			}
 		}
-		// Claim the step.
+		// Claim the step and record which trace will complete it.
 		res, err := tx.ExecContext(ctx,
-			`UPDATE steps SET status='running' WHERE id=? AND status='waiting'`, stepID)
+			`UPDATE steps SET status='running', completion_trace_id=? WHERE id=? AND status='waiting'`,
+			t.ID, stepID)
 		if err != nil {
 			return dbErr(err, "begin step call: claim step")
 		}
@@ -1505,6 +1506,44 @@ func (s *DB) ResetStep(ctx context.Context, stepID string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE steps SET status='waiting' WHERE id=? AND status='running' AND tx_id IS NULL`, stepID)
 	return dbErr(err, "reset step")
+}
+
+// ResetStepAndRepark re-parks the step: it moves the completion trace's available funds back into
+// the parent trace's locked position (the original park), deletes the empty completion trace,
+// clears completion_trace_id, and resets the step to waiting. This prevents double-completion minting.
+func (s *DB) ResetStepAndRepark(ctx context.Context, stepID string) error {
+	return s.withTx(ctx, "reset step and repark", func(tx *sql.Tx) error {
+		var price int64
+		var completionTraceID, parentTraceID *string
+		err := tx.QueryRowContext(ctx,
+			`SELECT price, completion_trace_id, parent_trace_id FROM steps WHERE id=? AND status='running' AND tx_id IS NULL`,
+			stepID,
+		).Scan(&price, &completionTraceID, &parentTraceID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // nothing to do
+		}
+		if err != nil {
+			return dbErr(err, "reset step and repark: read step")
+		}
+		if completionTraceID != nil && price > 0 && parentTraceID != nil {
+			// Move funds from completion trace's available back to parent trace's locked.
+			if _, err = tx.ExecContext(ctx,
+				`UPDATE traces SET available=available-? WHERE id=?`, price, *completionTraceID); err != nil {
+				return dbErr(err, "reset step and repark: drain completion trace")
+			}
+			if _, err = tx.ExecContext(ctx,
+				`UPDATE traces SET locked=locked+? WHERE id=?`, price, *parentTraceID); err != nil {
+				return dbErr(err, "reset step and repark: repark to parent trace")
+			}
+			// Delete the empty completion trace.
+			if _, err = tx.ExecContext(ctx, `DELETE FROM traces WHERE id=?`, *completionTraceID); err != nil {
+				return dbErr(err, "reset step and repark: delete completion trace")
+			}
+		}
+		_, err = tx.ExecContext(ctx,
+			`UPDATE steps SET status='waiting', completion_trace_id=NULL WHERE id=?`, stepID)
+		return dbErr(err, "reset step and repark: reset step")
+	})
 }
 
 func (s *DB) ResetRunningSteps(ctx context.Context) error {
