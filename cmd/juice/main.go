@@ -155,12 +155,12 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 	})
 
 	embedder := kernel.Embedder(&llm.OllamaEmbedder{
-		URL:   globalCfg.OllamaURL,
-		Model: globalCfg.OllamaEmbedModel,
+		URL:   globalCfg.Native.LLM.URL,
+		Model: globalCfg.Native.LLM.EmbedModel,
 	})
 	chatter := kernel.Chatter(&llm.OllamaChatter{
-		URL:   globalCfg.OllamaURL,
-		Model: globalCfg.OllamaChatModel,
+		URL:   globalCfg.Native.LLM.URL,
+		Model: globalCfg.Native.LLM.ChatModel,
 	})
 
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
@@ -192,7 +192,7 @@ func openKernel() (*kernel.Kernel, *store.DB, error) {
 		Compiler: compiler,
 		Chatter:  chatter,
 		Embedder: embedder,
-	}, script.TinyGoSDK, globalCfg.MakeMaxSteps)
+	}, script.TinyGoSDK, globalCfg.Native.Make.MaxSteps)
 	native.RegisterTimeHandler(k)
 	native.RegisterSinkHandler(k)
 	native.RegisterMessageHandler(k)

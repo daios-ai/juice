@@ -256,7 +256,7 @@ func TestActivateNativeActionBootstrapPath(t *testing.T) {
 	desc := "A native action"
 	in := map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string", "description": "x"}}}
 	out := map[string]any{"type": "object"}
-	if err := k.ActivateNativeAction(ctx, a.ID, desc, in, out); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, desc, in, out, 0); err != nil {
 		t.Fatal(err)
 	}
 	active, err := k.ReadAction(ctx, a.ID)
@@ -294,7 +294,7 @@ func TestActivateNativeActionReconcilesSchema(t *testing.T) {
 
 	newIn := map[string]any{"type": "object", "properties": map[string]any{"y": map[string]any{"type": "integer", "description": "y"}}}
 	newOut := map[string]any{"type": "object", "properties": map[string]any{"z": map[string]any{"type": "string", "description": "z"}}}
-	if err := k.ActivateNativeAction(ctx, a.ID, "new desc", newIn, newOut); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, "new desc", newIn, newOut, 0); err != nil {
 		t.Fatalf("ActivateNativeAction: %v", err)
 	}
 
@@ -333,8 +333,37 @@ func TestActivateNativeActionRejectsSchemaWithoutDescriptions(t *testing.T) {
 			"x": map[string]any{"type": "string"}, // missing description
 		},
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID, "desc", badIn, nil); !errors.Is(err, kernel.ErrSchemaViolation) {
+	if err := k.ActivateNativeAction(ctx, a.ID, "desc", badIn, nil, 0); !errors.Is(err, kernel.ErrSchemaViolation) {
 		t.Fatalf("ActivateNativeAction with missing schema descriptions: got %v, want ErrSchemaViolation", err)
+	}
+}
+
+func TestActivateNativeActionReconcilesPrice(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@sys", 0)
+	in := map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string", "description": "x"}}}
+	out := map[string]any{"type": "object"}
+	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID,
+		Name:        "native-price",
+		Kind:        kernel.KindNative,
+		Price:       0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.ActivateNativeAction(ctx, a.ID, "desc", in, out, 5); err != nil {
+		t.Fatalf("ActivateNativeAction: %v", err)
+	}
+	got, err := k.ReadAction(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Price != 5 {
+		t.Errorf("price = %d, want 5", got.Price)
 	}
 }
 

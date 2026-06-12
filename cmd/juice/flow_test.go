@@ -857,7 +857,7 @@ func TestFlow_SysMakeSynthesis(t *testing.T) {
 
 	// Activate the @sys/make native action (ActivateNativeAction sets Public=true automatically).
 	if err := k.ActivateNativeAction(ctx, makeAction.ID, "synthesize action",
-		makeAction.InputSchema, makeAction.OutputSchema); err != nil {
+		makeAction.InputSchema, makeAction.OutputSchema, 0); err != nil {
 		t.Fatal(err)
 	}
 

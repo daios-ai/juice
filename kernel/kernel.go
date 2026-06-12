@@ -549,8 +549,8 @@ func (k *Kernel) validateAndInitActivation(ctx context.Context, a *Action) error
 }
 
 // ActivateNativeAction reconciles spec fields and activates a native action for bootstrap use.
-// It overwrites description, inputSchema, and outputSchema so schema drift is corrected on every boot.
-func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description string, inputSchema, outputSchema map[string]any) error {
+// It overwrites price, description, inputSchema, and outputSchema so drift is corrected on every boot.
+func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description string, inputSchema, outputSchema map[string]any, price int64) error {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return err
@@ -558,6 +558,7 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 	if a.Kind != KindNative {
 		return ErrInvalidInput.Wrap("action is not native")
 	}
+	a.Price = price
 	a.Description = description
 	a.InputSchema = inputSchema
 	a.OutputSchema = outputSchema

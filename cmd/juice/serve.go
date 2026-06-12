@@ -52,7 +52,7 @@ func runServer(addr string) error {
 		Format:   globalCfg.LogFormat,
 	})
 
-	if err := bootstrap(k); err != nil {
+	if err := bootstrap(k, globalCfg.Native); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 	if err := k.ValidateFeeRecipient(context.Background()); err != nil {

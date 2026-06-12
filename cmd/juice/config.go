@@ -7,35 +7,83 @@ import (
 	"strconv"
 )
 
+// NativeLLMConfig holds configuration for the @sys/llm/chat native action.
+type NativeLLMConfig struct {
+	URL        string `json:"url"`
+	ChatModel  string `json:"chat_model"`
+	EmbedModel string `json:"embed_model"`
+	Price      int64  `json:"price"`
+}
+
+// NativeMakeConfig holds configuration for the @sys/make native action.
+type NativeMakeConfig struct {
+	Compiler string `json:"compiler"`
+	MaxSteps int    `json:"max_steps"`
+	Price    int64  `json:"price"`
+}
+
+// NativeLookupConfig holds configuration for the @sys/lookup native action.
+type NativeLookupConfig struct {
+	DefaultLimit int   `json:"default_limit"`
+	Price        int64 `json:"price"`
+}
+
+// NativeTimeConfig holds configuration for the @sys/time native action.
+type NativeTimeConfig struct {
+	Price int64 `json:"price"`
+}
+
+// NativeSinkConfig holds configuration for the @sys/sink native action.
+type NativeSinkConfig struct {
+	Price int64 `json:"price"`
+}
+
+// NativeMessageConfig holds configuration for the @sys/message native action.
+type NativeMessageConfig struct {
+	Price int64 `json:"price"`
+}
+
+// NativeConfig holds per-action configuration for all native actions.
+type NativeConfig struct {
+	LLM     NativeLLMConfig     `json:"llm"`
+	Make    NativeMakeConfig    `json:"make"`
+	Lookup  NativeLookupConfig  `json:"lookup"`
+	Time    NativeTimeConfig    `json:"time"`
+	Sink    NativeSinkConfig    `json:"sink"`
+	Message NativeMessageConfig `json:"message"`
+}
+
 // ServerConfig holds all non-secret runtime configuration.
 // Secrets (JUICE_SECRET_KEY, JUICE_BOOTSTRAP_PASSWORD) are read from environment variables.
 // All other settings come from this struct, populated from the JSON config file.
 type ServerConfig struct {
-	OllamaURL         string `json:"ollama_url"`
-	OllamaChatModel   string `json:"ollama_chat_model"`
-	OllamaEmbedModel  string `json:"ollama_embed_model"`
-	ScriptTimeoutMS   int64  `json:"script_timeout_ms"`
-	ScriptMemoryBytes int64  `json:"script_memory_bytes"`
-	FeeBPS            int64  `json:"fee_bps"`
-	TokenTTL          string `json:"token_ttl"`
-	AuthIssuer        string `json:"auth_issuer"`
-	AuthAudience      string `json:"auth_audience"`
-	LogLevel          string `json:"log_level"`
-	LogFile           string `json:"log_file"`
-	LogFormat         string `json:"log_format"`
-	MakeMaxSteps      int    `json:"make_max_steps"`
-	AllowLocalSources bool   `json:"allow_local_sources"`
-	ServerURL         string `json:"server_url"`
-	PeerAutoAccept    bool   `json:"peer_auto_accept"`
-	CredentialsKey    string `json:"credentials_key,omitempty"` // base64url AES-256 key; generated on first boot
+	Native            NativeConfig `json:"native"`
+	ScriptTimeoutMS   int64        `json:"script_timeout_ms"`
+	ScriptMemoryBytes int64        `json:"script_memory_bytes"`
+	FeeBPS            int64        `json:"fee_bps"`
+	TokenTTL          string       `json:"token_ttl"`
+	AuthIssuer        string       `json:"auth_issuer"`
+	AuthAudience      string       `json:"auth_audience"`
+	LogLevel          string       `json:"log_level"`
+	LogFile           string       `json:"log_file"`
+	LogFormat         string       `json:"log_format"`
+	AllowLocalSources bool         `json:"allow_local_sources"`
+	ServerURL         string       `json:"server_url"`
+	PeerAutoAccept    bool         `json:"peer_auto_accept"`
+	CredentialsKey    string       `json:"credentials_key,omitempty"` // base64url AES-256 key; generated on first boot
 }
 
 // DefaultServerConfig returns a ServerConfig populated with safe defaults.
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
-		OllamaURL:         "http://localhost:11434",
-		OllamaChatModel:   "gemma4:26b",
-		OllamaEmbedModel:  "nomic-embed-text",
+		Native: NativeConfig{
+			LLM:     NativeLLMConfig{URL: "http://localhost:11434", ChatModel: "gemma4:26b", EmbedModel: "nomic-embed-text", Price: 0},
+			Make:    NativeMakeConfig{Compiler: "tinygo", MaxSteps: 5, Price: 20},
+			Lookup:  NativeLookupConfig{DefaultLimit: 10, Price: 0},
+			Time:    NativeTimeConfig{Price: 0},
+			Sink:    NativeSinkConfig{Price: 0},
+			Message: NativeMessageConfig{Price: 0},
+		},
 		ScriptTimeoutMS:   10000,
 		ScriptMemoryBytes: 64 * 1024 * 1024,
 		FeeBPS:            2000,
@@ -45,7 +93,6 @@ func DefaultServerConfig() ServerConfig {
 		LogLevel:          "info",
 		LogFile:           "",
 		LogFormat:         "text",
-		MakeMaxSteps:      5,
 		AllowLocalSources: false,
 		ServerURL:         "",
 		PeerAutoAccept:    true,
@@ -100,13 +147,13 @@ func applyEnvOverrides(cfg *ServerConfig) error {
 		cfg.TokenTTL = v
 	}
 	if v := os.Getenv("JUICE_OLLAMA_URL"); v != "" {
-		cfg.OllamaURL = v
+		cfg.Native.LLM.URL = v
 	}
 	if v := os.Getenv("JUICE_OLLAMA_CHAT_MODEL"); v != "" {
-		cfg.OllamaChatModel = v
+		cfg.Native.LLM.ChatModel = v
 	}
 	if v := os.Getenv("JUICE_OLLAMA_EMBED_MODEL"); v != "" {
-		cfg.OllamaEmbedModel = v
+		cfg.Native.LLM.EmbedModel = v
 	}
 	if v := os.Getenv("JUICE_SCRIPT_TIMEOUT_MS"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)

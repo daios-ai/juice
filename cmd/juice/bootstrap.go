@@ -21,7 +21,7 @@ const (
 
 // bootstrap runs idempotent startup tasks before the server accepts requests.
 // On first boot (no superuser configured), it prompts for credentials interactively.
-func bootstrap(k *kernel.Kernel) error {
+func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 	ctx := context.Background()
 
 	handle, err := k.GetConfig(ctx, configKeySuperuser)
@@ -69,7 +69,7 @@ func bootstrap(k *kernel.Kernel) error {
 	// Retry any remote proxy calls that were pending at last shutdown.
 	k.RetryPendingRemoteDispatches(ctx)
 
-	for _, spec := range sysNativeSpecs {
+	for _, spec := range buildSysNativeSpecs(nativeCfg) {
 		if err := ensureSysNative(ctx, k, handle, spec); err != nil {
 			return err
 		}
@@ -132,7 +132,7 @@ func ensureSysNative(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 			return fmt.Errorf("create @sys/%s: %w", spec.name, err)
 		}
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID, spec.description, spec.inputSchema, spec.outputSchema); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, spec.description, spec.inputSchema, spec.outputSchema, spec.price); err != nil {
 		return fmt.Errorf("activate @sys/%s: %w", spec.name, err)
 	}
 	return nil
@@ -159,10 +159,11 @@ var msgItemSchema = map[string]any{
 	"required": []string{"role", "content"},
 }
 
-var sysNativeSpecs = []sysNativeSpec{
+func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
+	return []sysNativeSpec{
 	{
 		name:        "lookup",
-		price:       0,
+		price:       cfg.Lookup.Price,
 		description: "Semantic search over active actions",
 		inputSchema: map[string]any{
 			"type": "object",
@@ -194,7 +195,7 @@ var sysNativeSpecs = []sysNativeSpec{
 	},
 	{
 		name:        "llm/chat",
-		price:       0,
+		price:       cfg.LLM.Price,
 		description: "Chat completion via the configured language model",
 		inputSchema: map[string]any{
 			"type": "object",
@@ -220,14 +221,14 @@ var sysNativeSpecs = []sysNativeSpec{
 	},
 	{
 		name:         "make",
-		price:        20,
+		price:        cfg.Make.Price,
 		description:  "Generate a WASM action from a natural-language description",
 		inputSchema:  map[string]any{"type": "object", "properties": map[string]any{"description": map[string]any{"type": "string", "description": "Natural-language description of the action to generate"}}, "required": []string{"description"}},
 		outputSchema: makeOutputSchema,
 	},
 	{
 		name:        "time",
-		price:       0,
+		price:       cfg.Time.Price,
 		description: "Returns the current UTC time",
 		inputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		outputSchema: map[string]any{
@@ -240,14 +241,14 @@ var sysNativeSpecs = []sysNativeSpec{
 	},
 	{
 		name:        "sink",
-		price:       0,
+		price:       cfg.Sink.Price,
 		description: "Universal no-op sink; accepts any input and returns {}",
 		inputSchema:  map[string]any{"type": "object"},
 		outputSchema: map[string]any{"type": "object"},
 	},
 	{
 		name:        "message",
-		price:       0,
+		price:       cfg.Message.Price,
 		description: "Sends a message to another platform user and creates a Step they must acknowledge",
 		inputSchema: map[string]any{
 			"type": "object",
@@ -264,4 +265,5 @@ var sysNativeSpecs = []sysNativeSpec{
 			},
 		},
 	},
+	}
 }

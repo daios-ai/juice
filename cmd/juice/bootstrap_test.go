@@ -62,7 +62,7 @@ func newTestKernel(t *testing.T) *kernel.Kernel {
 }
 
 func sysSpec(name string) sysNativeSpec {
-	for _, s := range sysNativeSpecs {
+	for _, s := range buildSysNativeSpecs(DefaultServerConfig().Native) {
 		if s.name == name {
 			return s
 		}
@@ -166,7 +166,7 @@ func TestBootstrapRejectsKeyMismatch(t *testing.T) {
 	}
 
 	// bootstrap must reject the mismatch.
-	if err := bootstrap(k); err == nil {
+	if err := bootstrap(k, DefaultServerConfig().Native); err == nil {
 		t.Error("expected error for mismatched signing keys, got nil")
 	}
 }
@@ -248,7 +248,7 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID, "old description", stale, stale); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, "old description", stale, stale, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -278,7 +278,7 @@ func TestBootstrapRegistersMake(t *testing.T) {
 	if err := k.FirstBoot(ctx, "secret"); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
-	if err := bootstrap(k); err != nil {
+	if err := bootstrap(k, DefaultServerConfig().Native); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
@@ -304,5 +304,39 @@ func TestBootstrapRegistersMake(t *testing.T) {
 	}
 	if a.OwnerUserID != sys.ID {
 		t.Errorf("@sys/make owner = %q, want sys ID", a.OwnerUserID)
+	}
+}
+
+func TestEnsureSysNativeReconcilesPrice(t *testing.T) {
+	ctx := context.Background()
+	k := newTestKernel(t)
+
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@sys", Email: "sys@sys", Password: "pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetConfig(ctx, configKeySuperuser, u.Handle); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create the action with price 0.
+	spec := sysSpec("lookup")
+	spec.price = 0
+	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+		t.Fatalf("initial ensureSysNative: %v", err)
+	}
+
+	// Re-run with price 7 — must reconcile.
+	spec.price = 7
+	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+		t.Fatalf("reconcile ensureSysNative: %v", err)
+	}
+
+	a, err := k.ReadActionByOwnerName(ctx, u.ID, "lookup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Price != 7 {
+		t.Errorf("price after reconcile = %d, want 7", a.Price)
 	}
 }

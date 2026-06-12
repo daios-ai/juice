@@ -11,8 +11,8 @@ import (
 
 func TestDefaultServerConfig(t *testing.T) {
 	cfg := DefaultServerConfig()
-	if cfg.OllamaURL == "" {
-		t.Error("OllamaURL should have a default")
+	if cfg.Native.LLM.URL == "" {
+		t.Error("Native.LLM.URL should have a default")
 	}
 	if cfg.ScriptTimeoutMS <= 0 {
 		t.Error("ScriptTimeoutMS should be positive")
@@ -23,8 +23,11 @@ func TestDefaultServerConfig(t *testing.T) {
 	if cfg.TokenTTL == "" {
 		t.Error("TokenTTL should have a default")
 	}
-	if cfg.MakeMaxSteps <= 0 {
-		t.Error("MakeMaxSteps should be positive")
+	if cfg.Native.Make.MaxSteps <= 0 {
+		t.Error("Native.Make.MaxSteps should be positive")
+	}
+	if cfg.Native.Make.Price != 20 {
+		t.Errorf("Native.Make.Price default = %d, want 20", cfg.Native.Make.Price)
 	}
 }
 
@@ -36,8 +39,8 @@ func TestLoadOrCreateConfig_CreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.OllamaURL != DefaultServerConfig().OllamaURL {
-		t.Errorf("expected default OllamaURL, got %q", cfg.OllamaURL)
+	if cfg.Native.LLM.URL != DefaultServerConfig().Native.LLM.URL {
+		t.Errorf("expected default Native.LLM.URL, got %q", cfg.Native.LLM.URL)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("config file not created: %v", err)
@@ -49,8 +52,8 @@ func TestLoadOrCreateConfig_ReadsExisting(t *testing.T) {
 	path := filepath.Join(dir, "juice.json")
 
 	want := DefaultServerConfig()
-	want.OllamaURL = "http://custom:11434"
-	want.MakeMaxSteps = 3
+	want.Native.LLM.URL = "http://custom:11434"
+	want.Native.Make.MaxSteps = 3
 	b, _ := json.MarshalIndent(want, "", "  ")
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatal(err)
@@ -60,11 +63,11 @@ func TestLoadOrCreateConfig_ReadsExisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.OllamaURL != "http://custom:11434" {
-		t.Errorf("expected custom OllamaURL, got %q", cfg.OllamaURL)
+	if cfg.Native.LLM.URL != "http://custom:11434" {
+		t.Errorf("expected custom Native.LLM.URL, got %q", cfg.Native.LLM.URL)
 	}
-	if cfg.MakeMaxSteps != 3 {
-		t.Errorf("expected MakeMaxSteps=3, got %d", cfg.MakeMaxSteps)
+	if cfg.Native.Make.MaxSteps != 3 {
+		t.Errorf("expected Native.Make.MaxSteps=3, got %d", cfg.Native.Make.MaxSteps)
 	}
 }
 
@@ -72,8 +75,8 @@ func TestLoadOrCreateConfig_MissingFieldsUseDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "juice.json")
 
-	// Write partial config — only one field
-	if err := os.WriteFile(path, []byte(`{"ollama_url":"http://custom:11434"}`), 0o644); err != nil {
+	// Write partial config — only one nested field
+	if err := os.WriteFile(path, []byte(`{"native":{"llm":{"url":"http://custom:11434"}}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -81,11 +84,11 @@ func TestLoadOrCreateConfig_MissingFieldsUseDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.OllamaURL != "http://custom:11434" {
-		t.Errorf("expected custom OllamaURL, got %q", cfg.OllamaURL)
+	if cfg.Native.LLM.URL != "http://custom:11434" {
+		t.Errorf("expected custom Native.LLM.URL, got %q", cfg.Native.LLM.URL)
 	}
-	if cfg.MakeMaxSteps != DefaultServerConfig().MakeMaxSteps {
-		t.Errorf("expected default MakeMaxSteps, got %d", cfg.MakeMaxSteps)
+	if cfg.Native.Make.MaxSteps != DefaultServerConfig().Native.Make.MaxSteps {
+		t.Errorf("expected default Native.Make.MaxSteps, got %d", cfg.Native.Make.MaxSteps)
 	}
 }
 
@@ -125,8 +128,8 @@ func TestApplyEnvOverrides(t *testing.T) {
 		if cfg.FeeBPS != 500 {
 			t.Errorf("FeeBPS: got %d", cfg.FeeBPS)
 		}
-		if cfg.OllamaURL != "http://custom:11434" {
-			t.Errorf("OllamaURL: got %q", cfg.OllamaURL)
+		if cfg.Native.LLM.URL != "http://custom:11434" {
+			t.Errorf("Native.LLM.URL: got %q", cfg.Native.LLM.URL)
 		}
 		if cfg.ScriptTimeoutMS != 5000 {
 			t.Errorf("ScriptTimeoutMS: got %d", cfg.ScriptTimeoutMS)
@@ -143,11 +146,11 @@ func TestApplyEnvOverrides(t *testing.T) {
 		if cfg.AuthAudience != "juice" {
 			t.Errorf("AuthAudience: got %q", cfg.AuthAudience)
 		}
-		if cfg.OllamaChatModel != "llama3" {
-			t.Errorf("OllamaChatModel: got %q", cfg.OllamaChatModel)
+		if cfg.Native.LLM.ChatModel != "llama3" {
+			t.Errorf("Native.LLM.ChatModel: got %q", cfg.Native.LLM.ChatModel)
 		}
-		if cfg.OllamaEmbedModel != "all-minilm" {
-			t.Errorf("OllamaEmbedModel: got %q", cfg.OllamaEmbedModel)
+		if cfg.Native.LLM.EmbedModel != "all-minilm" {
+			t.Errorf("Native.LLM.EmbedModel: got %q", cfg.Native.LLM.EmbedModel)
 		}
 		if cfg.LogFile != "/tmp/juice.log" {
 			t.Errorf("LogFile: got %q", cfg.LogFile)
@@ -156,13 +159,13 @@ func TestApplyEnvOverrides(t *testing.T) {
 
 	t.Run("absent env leaves file value", func(t *testing.T) {
 		cfg := DefaultServerConfig()
-		cfg.OllamaURL = "http://from-file:11434"
+		cfg.Native.LLM.URL = "http://from-file:11434"
 		cfg.FeeBPS = 1234
 		if err := applyEnvOverrides(&cfg); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.OllamaURL != "http://from-file:11434" {
-			t.Errorf("OllamaURL should not be overridden, got %q", cfg.OllamaURL)
+		if cfg.Native.LLM.URL != "http://from-file:11434" {
+			t.Errorf("Native.LLM.URL should not be overridden, got %q", cfg.Native.LLM.URL)
 		}
 		if cfg.FeeBPS != 1234 {
 			t.Errorf("FeeBPS should not be overridden, got %d", cfg.FeeBPS)
