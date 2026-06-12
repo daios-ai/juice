@@ -20,8 +20,9 @@ type Executor struct {
 	runtime wazero.Runtime
 	cfg     Config
 
-	mu    sync.Mutex
-	cache map[string]wazero.CompiledModule // keyed by artifact hash
+	mu     sync.Mutex // guards cache
+	execMu sync.Mutex // serializes Execute: wazero host modules share a name in the runtime
+	cache  map[string]wazero.CompiledModule // keyed by artifact hash
 }
 
 // Config holds script execution limits.
@@ -91,6 +92,11 @@ func (e *Executor) Execute(ctx context.Context, artifact []byte, input []byte, h
 		e.cache[hash] = compiled
 		e.mu.Unlock()
 	}
+
+	// Serialize host module instantiation: the runtime's module namespace is shared,
+	// so concurrent Execute calls would collide on the "juice" host module name.
+	e.execMu.Lock()
+	defer e.execMu.Unlock()
 
 	// Build the host module ("juice") that exposes callbacks.
 	hostBuilder := e.runtime.NewHostModuleBuilder("juice")

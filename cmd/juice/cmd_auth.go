@@ -1,11 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -97,14 +98,14 @@ func loginPKCE(handle, password, server string) error {
 	go srv.Serve(ln)
 	defer srv.Close()
 
-	form := url.Values{}
-	form.Set("handle", handle)
-	form.Set("password", password)
-	form.Set("code_challenge", challenge)
-	form.Set("code_challenge_method", "S256")
-	form.Set("redirect_uri", redirectURI)
-
-	resp, err := http.PostForm(strings.TrimRight(server, "/")+"/v1/auth/authorize", form)
+	authBody, _ := json.Marshal(map[string]string{
+		"handle":                handle,
+		"password":              password,
+		"code_challenge":        challenge,
+		"code_challenge_method": "S256",
+		"redirect_uri":          redirectURI,
+	})
+	resp, err := http.Post(strings.TrimRight(server, "/")+"/v1/auth/authorize", "application/json", bytes.NewReader(authBody))
 	if err != nil {
 		return fmt.Errorf("authorize request failed: %w", err)
 	}
@@ -120,13 +121,13 @@ func loginPKCE(handle, password, server string) error {
 		return fmt.Errorf("timed out waiting for authorization code")
 	}
 
-	form2 := url.Values{}
-	form2.Set("grant_type", "authorization_code")
-	form2.Set("code", code)
-	form2.Set("code_verifier", verifier)
-	form2.Set("redirect_uri", redirectURI)
-
-	resp2, err := http.PostForm(strings.TrimRight(server, "/")+"/v1/auth/token", form2)
+	tokenBody, _ := json.Marshal(map[string]string{
+		"grant_type":    "authorization_code",
+		"code":          code,
+		"code_verifier": verifier,
+		"redirect_uri":  redirectURI,
+	})
+	resp2, err := http.Post(strings.TrimRight(server, "/")+"/v1/auth/token", "application/json", bytes.NewReader(tokenBody))
 	if err != nil {
 		return fmt.Errorf("token exchange failed: %w", err)
 	}

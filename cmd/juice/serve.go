@@ -685,6 +685,10 @@ func (s *server) postLogout(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
+	if req.RefreshToken == "" {
+		writeErr(w, kernel.ErrUnauthenticated.Wrap("refresh_token required"))
+		return
+	}
 	if err := s.kernel.RevokeRefreshToken(r.Context(), req.RefreshToken); err != nil {
 		writeErr(w, err)
 		return

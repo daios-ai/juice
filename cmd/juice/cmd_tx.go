@@ -98,7 +98,11 @@ func txVerifyReceiptCmd() *cobra.Command {
 				if !v.Valid {
 					status = "FAIL"
 				}
-				fmt.Printf("Receipt verification: %s  [%s]\n  remote: %s\n", txID[:8], status, v.RemoteKernelHandle)
+				shortID := txID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				fmt.Printf("Receipt verification: %s  [%s]\n  remote: %s\n", shortID, status, v.RemoteKernelHandle)
 				fmt.Printf("  receipt_hash:  %v\n  signature:     %v\n  action_id:     %v\n",
 					v.Checks.ReceiptHash, v.Checks.Signature, v.Checks.ActionID)
 				fmt.Printf("  status:        %v\n  charge:        %v\n  settlement_arith: %v\n",

@@ -84,7 +84,27 @@ func initConfig() {
 func main() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
+	}
+}
+
+// exitCodeFor maps KernelError codes to stable POSIX-friendly exit codes.
+func exitCodeFor(err error) int {
+	switch kernel.KernelErrorCode(err) {
+	case "unauthenticated":
+		return 2
+	case "unauthorized":
+		return 3
+	case "not_found":
+		return 4
+	case "invalid_input", "schema_violation":
+		return 5
+	case "insufficient_funds":
+		return 6
+	case "timeout":
+		return 7
+	default:
+		return 1
 	}
 }
 
