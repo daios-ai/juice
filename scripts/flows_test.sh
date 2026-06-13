@@ -47,12 +47,13 @@ fail() { echo "  FAIL: $1 — $2"; ((FAIL++)); ERRS="${ERRS}\n  [$1] $2"; }
 # Keys: fee_bps script_timeout_ms server_url (all others use defaults).
 write_test_config() {
     local db="$1"; shift
-    local fee_bps=0 script_timeout_ms=10000 server_url=""
+    local fee_bps=0 script_timeout_ms=10000 server_url="" peer_handle=""
     for arg in "$@"; do
         case "$arg" in
             fee_bps=*)           fee_bps="${arg#*=}" ;;
             script_timeout_ms=*) script_timeout_ms="${arg#*=}" ;;
             server_url=*)        server_url="${arg#*=}" ;;
+            peer_handle=*)       peer_handle="${arg#*=}" ;;
         esac
     done
     cat > "$(dirname "$db")/juice.json" << EOF
@@ -71,7 +72,8 @@ write_test_config() {
   "log_format": "text",
   "make_max_steps": 5,
   "allow_local_sources": true,
-  "server_url": "$server_url"
+  "server_url": "$server_url",
+  "peer_handle": "$peer_handle"
 }
 EOF
 }
@@ -2373,11 +2375,11 @@ _fed_setup() {
 
     local boot_l boot_r
     alloc_port; boot_l=$_ALLOC_PORT; alloc_port; boot_r=$_ALLOC_PORT
-    # Bootstrap each kernel with its own server_url so /.well-known returns correct base_url.
+    # Bootstrap each kernel with its own peer_handle and server_url.
     bootstrap_kernel "$db_l" syspass "$home_l" "$boot_l" \
-        "server_url=http://127.0.0.1:$port_l" || return 1
+        "server_url=http://127.0.0.1:$port_l" "peer_handle=@kernel-l" || return 1
     bootstrap_kernel "$db_r" syspass "$home_r" "$boot_r" \
-        "server_url=http://127.0.0.1:$port_r" || return 1
+        "server_url=http://127.0.0.1:$port_r" "peer_handle=@kernel-r" || return 1
 
     j "$db_l" "$home_l" auth login --handle @sys --password syspass >/dev/null 2>&1
     j "$db_r" "$home_r" auth login --handle @sys --password syspass >/dev/null 2>&1
@@ -2406,44 +2408,13 @@ _fed_setup() {
         || { echo "_fed_setup: start_serve remote ($port_r) failed" >&2; return 1; }
     echo "$SERVE_PID" > "$dir/pid_r"
 
-    # Both kernels use @sys as superuser, so admin peer friend would reject the remote
-    # peer ("handle already registered with a different public key"). Instead, fetch
-    # each kernel's signing key from /.well-known and inject proxy users directly.
-    local wk_json_r r_pub_key wk_json_l l_pub_key
-    wk_json_r=$(curl -sf "http://127.0.0.1:$port_r/.well-known/juice-kernel.json") \
-        || { echo "_fed_setup: fetch right well-known failed" >&2; return 1; }
-    r_pub_key=$(echo "$wk_json_r" | python3 -c "import sys,json; print(json.load(sys.stdin)['public_key'])" 2>/dev/null)
-    [ -n "$r_pub_key" ] || { echo "_fed_setup: empty public_key from right well-known" >&2; return 1; }
-    wk_json_l=$(curl -sf "http://127.0.0.1:$port_l/.well-known/juice-kernel.json") \
-        || { echo "_fed_setup: fetch left well-known failed" >&2; return 1; }
-    l_pub_key=$(echo "$wk_json_l" | python3 -c "import sys,json; print(json.load(sys.stdin)['public_key'])" 2>/dev/null)
-    [ -n "$l_pub_key" ] || { echo "_fed_setup: empty public_key from left well-known" >&2; return 1; }
+    # One admin peer friend call is sufficient: L registers R locally AND R registers L in
+    # its own postPeer handler (synchronous, completes before the HTTP 200 returns).
+    # The async sendReciprocal chain adds only redundant re-registrations; we don't need it.
+    j "$db_l" "$home_l" admin peer friend --url "http://127.0.0.1:$port_r" >/dev/null 2>&1 \
+        || { echo "_fed_setup: peer friend L->R failed" >&2; return 1; }
 
-    # Insert proxy peer into LEFT db (right kernel) and RIGHT db (left kernel).
-    # Use unique handles to avoid @sys conflict. The right kernel needs the left kernel
-    # registered so it can accept inbound federation calls (checks counterparty.RemoteBaseURL).
-    inject_peer() {
-        local db_path="$1" handle="$2" pub_key="$3" base_url="$4"
-        python3 - "$db_path" "$handle" "$pub_key" "$base_url" <<'PYEOF'
-import sqlite3, uuid, sys, datetime
-db_path, handle, pub_key, base_url = sys.argv[1:]
-email = handle + "@remote"
-uid = str(uuid.uuid4())
-now = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
-conn = sqlite3.connect(db_path)
-conn.execute("""
-    INSERT INTO users (id,handle,email,password_hash,available,locked,
-                       suspended_at,denied_at,public_key,remote_base_url,created_at,updated_at)
-    VALUES (?,?,?,'',0,0,NULL,NULL,?,?,?,?)
-""", [uid, handle, email, pub_key, base_url, now, now])
-conn.commit(); conn.close()
-PYEOF
-    }
     local remote_handle="@kernel-r"
-    inject_peer "$db_l" "$remote_handle" "$r_pub_key" "http://127.0.0.1:$port_r" \
-        || { echo "_fed_setup: right peer injection into left db failed" >&2; return 1; }
-    inject_peer "$db_r" "@kernel-l" "$l_pub_key" "http://127.0.0.1:$port_l" \
-        || { echo "_fed_setup: left peer injection into right db failed" >&2; return 1; }
     echo "$remote_handle" > "$dir/remote_handle"
 
     # Import /greet from REMOTE into LOCAL

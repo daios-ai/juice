@@ -48,6 +48,44 @@ func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
 	}
 }
 
+func TestCreateOrUpdateProxyPeerHandleConflict(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	setupSys(t, k, st)
+
+	pub1, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub3, _, _ := ed25519.GenerateKey(rand.Reader)
+	key1 := base64.RawURLEncoding.EncodeToString(pub1)
+	key2 := base64.RawURLEncoding.EncodeToString(pub2)
+	key3 := base64.RawURLEncoding.EncodeToString(pub3)
+
+	u1, err := k.CreateOrUpdateProxyPeer(ctx, "@remote", key1, "https://a.example.com")
+	if err != nil {
+		t.Fatalf("first peer: %v", err)
+	}
+	if u1.Handle != "@remote" {
+		t.Fatalf("want @remote, got %s", u1.Handle)
+	}
+
+	u2, err := k.CreateOrUpdateProxyPeer(ctx, "@remote", key2, "https://b.example.com")
+	if err != nil {
+		t.Fatalf("second peer: %v", err)
+	}
+	if u2.Handle != "@remote-2" {
+		t.Fatalf("want @remote-2, got %s", u2.Handle)
+	}
+
+	u3, err := k.CreateOrUpdateProxyPeer(ctx, "@remote", key3, "https://c.example.com")
+	if err != nil {
+		t.Fatalf("third peer: %v", err)
+	}
+	if u3.Handle != "@remote-3" {
+		t.Fatalf("want @remote-3, got %s", u3.Handle)
+	}
+}
+
 // ---- Remote proxy / manifest tests ----
 
 func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
@@ -599,7 +637,7 @@ func TestRegisterRemoteKernelUpdatesSourceURLs(t *testing.T) {
 
 // ---- D5: duplicate identity guard ----
 
-func TestRegisterRemoteKernelRejectsDuplicateHandle(t *testing.T) {
+func TestRegisterRemoteKernelResolvesDuplicateHandle(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -610,12 +648,20 @@ func TestRegisterRemoteKernelRejectsDuplicateHandle(t *testing.T) {
 	pub1B64 := base64.RawURLEncoding.EncodeToString(pub1)
 	pub2B64 := base64.RawURLEncoding.EncodeToString(pub2)
 
-	if _, err := k.AddPeer(ctx, sys.ID, "@dup-handle", pub1B64, "https://a.example.com"); err != nil {
+	u1, err := k.AddPeer(ctx, sys.ID, "@dup-handle", pub1B64, "https://a.example.com")
+	if err != nil {
 		t.Fatalf("first register: %v", err)
 	}
-	// Same handle, different public key → must fail.
-	if _, err := k.AddPeer(ctx, sys.ID, "@dup-handle", pub2B64, "https://b.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("expected ErrInvalidInput for duplicate handle, got %v", err)
+	if u1.Handle != "@dup-handle" {
+		t.Fatalf("want @dup-handle, got %s", u1.Handle)
+	}
+	// Same preferred handle, different public key → auto-resolved to suffix.
+	u2, err := k.AddPeer(ctx, sys.ID, "@dup-handle", pub2B64, "https://b.example.com")
+	if err != nil {
+		t.Fatalf("second register: %v", err)
+	}
+	if u2.Handle != "@dup-handle-2" {
+		t.Errorf("want @dup-handle-2, got %s", u2.Handle)
 	}
 }
 

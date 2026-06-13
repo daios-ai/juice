@@ -846,7 +846,10 @@ func stepView(step *kernel.Step, action *kernel.Action) *stepWithAction {
 func (s *server) getWellKnown(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	pubKey, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	handle, _ := s.kernel.GetConfig(ctx, configKeySuperuser)
+	handle := globalCfg.PeerHandle
+	if handle == "" {
+		handle, _ = s.kernel.GetConfig(ctx, configKeySuperuser)
+	}
 	if handle == "" {
 		handle = "@sys"
 	}
@@ -921,7 +924,10 @@ func (s *server) postPeer(w http.ResponseWriter, r *http.Request) {
 func (s *server) sendReciprocal(peerBaseURL string) {
 	ctx := context.Background()
 	pubKeyB64, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	localHandle, _ := s.kernel.GetConfig(ctx, configKeySuperuser)
+	localHandle := globalCfg.PeerHandle
+	if localHandle == "" {
+		localHandle, _ = s.kernel.GetConfig(ctx, configKeySuperuser)
+	}
 	localBaseURL := globalCfg.ServerURL
 	if pubKeyB64 == "" || localBaseURL == "" {
 		return

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -361,14 +362,7 @@ func (k *Kernel) CreateOrUpdateProxyPeer(ctx context.Context, handle, publicKey,
 	if err := validateRemoteBaseURL(baseURL); err != nil {
 		return nil, err
 	}
-	// Reject if the handle or base URL is already claimed by a different public key.
-	if byHandle, err := k.store.ReadUserByHandle(ctx, handle); err == nil && byHandle != nil && byHandle.PublicKey != publicKey {
-		return nil, ErrInvalidInput.Wrap("handle already registered with a different public key")
-	}
-	if byURL, err := k.store.ReadRemoteKernelByBaseURL(ctx, baseURL); err == nil && byURL != nil && byURL.PublicKey != publicKey {
-		return nil, ErrInvalidInput.Wrap("base URL already registered with a different public key")
-	}
-	// Same identity — update base URL and propagate to owned proxy actions if it changed.
+	// Same identity → update base URL (idempotent re-registration).
 	existing, err := k.store.ReadUserByPublicKey(ctx, publicKey)
 	if err == nil && existing != nil {
 		oldBase := existing.RemoteBaseURL
@@ -383,10 +377,30 @@ func (k *Kernel) CreateOrUpdateProxyPeer(ctx context.Context, handle, publicKey,
 		}
 		return existing, nil
 	}
+	// Base URL conflict with a different key → reject.
+	if byURL, err := k.store.ReadRemoteKernelByBaseURL(ctx, baseURL); err == nil && byURL != nil && byURL.PublicKey != publicKey {
+		return nil, ErrInvalidInput.Wrap("base URL already registered with a different public key")
+	}
+	// Find a free handle: try handle, handle-2, ..., handle-99.
+	resolvedHandle := ""
+	for i := 0; i < 99; i++ {
+		candidate := handle
+		if i > 0 {
+			candidate = handle + "-" + strconv.Itoa(i+1)
+		}
+		byHandle, _ := k.store.ReadUserByHandle(ctx, candidate)
+		if byHandle == nil {
+			resolvedHandle = candidate
+			break
+		}
+	}
+	if resolvedHandle == "" {
+		return nil, ErrInvalidInput.Wrapf("no free handle for %s (tried 99 variants)", handle)
+	}
 	now := time.Now().UTC()
 	u := &User{
 		ID:            uuid.New().String(),
-		Handle:        handle,
+		Handle:        resolvedHandle,
 		PublicKey:     publicKey,
 		RemoteBaseURL: baseURL,
 		CreatedAt:     now,
@@ -395,7 +409,7 @@ func (k *Kernel) CreateOrUpdateProxyPeer(ctx context.Context, handle, publicKey,
 	if err := k.store.CreateProxyUser(ctx, u); err != nil {
 		return nil, err
 	}
-	k.log.With(ctx).Info("peer.created", "handle", handle, "base_url", baseURL)
+	k.log.With(ctx).Info("peer.created", "handle", resolvedHandle, "base_url", baseURL)
 	return u, nil
 }
 

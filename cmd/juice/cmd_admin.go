@@ -329,7 +329,10 @@ func adminPeerFriendCmd() *cobra.Command {
 				}
 				// Send signed friend request to the peer's /v1/peers.
 				localPubKey, _ := k.GetConfig(ctx, configKeySigningPublic)
-				localHandle, _ := k.GetConfig(ctx, configKeySuperuser)
+				localHandle := globalCfg.PeerHandle
+				if localHandle == "" {
+					localHandle, _ = k.GetConfig(ctx, configKeySuperuser)
+				}
 				localBaseURL := globalCfg.ServerURL
 				if localPubKey != "" && localBaseURL != "" {
 					sig, ts, serr := k.SignPeerRequestNow(localHandle, localPubKey, localBaseURL)

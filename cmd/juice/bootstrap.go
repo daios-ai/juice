@@ -30,6 +30,19 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 		if err != nil {
 			return err
 		}
+		if globalCfg.PeerHandle == "" {
+			ph := os.Getenv("JUICE_BOOTSTRAP_PEER_HANDLE")
+			if ph == "" && term.IsTerminal(int(os.Stdin.Fd())) {
+				fmt.Fprint(os.Stderr, "Kernel peer handle (e.g. @myorg, or Enter to skip): ")
+				var line string
+				fmt.Fscanln(os.Stdin, &line)
+				ph = strings.TrimSpace(line)
+			}
+			if ph != "" {
+				globalCfg.PeerHandle = ph
+				_ = writeConfig(resolvedConfigPath, globalCfg)
+			}
+		}
 	}
 
 	// Verify both signing keys are present, valid, and consistent.

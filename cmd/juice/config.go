@@ -70,6 +70,7 @@ type ServerConfig struct {
 	AllowLocalSources bool         `json:"allow_local_sources"`
 	ServerURL         string       `json:"server_url"`
 	PeerAutoAccept    bool         `json:"peer_auto_accept"`
+	PeerHandle        string       `json:"peer_handle"`
 	CredentialsKey    string       `json:"credentials_key,omitempty"` // base64url AES-256 key; generated on first boot
 }
 
