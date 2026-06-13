@@ -270,7 +270,7 @@ type Rating struct {
 	RatedReceiptID *string   `json:"rated_receipt_id"` // nil for transactions predating the receipt requirement
 	RaterUserID    string    `json:"rater_user_id"`
 	Rating         float64   `json:"rating"`
-	Note           *string   `json:"note,omitempty"` // optional human-readable justification
+	Note           *string   `json:"note"` // optional human-readable justification
 	CreatedAt      time.Time `json:"created_at"`
 	Signature      string    `json:"signature"`
 }
