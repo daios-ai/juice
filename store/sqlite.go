@@ -705,6 +705,31 @@ func (s *DB) CreateProcess(ctx context.Context, p *kernel.Process, ownerID strin
 	})
 }
 
+// BeginRun atomically debits price from owner.available→locked, creates the process
+// with available=0/locked=price, and creates the root trace with available=price.
+// Net wallet state mirrors CreateProcess + BeginRootCall in sequence, but in one transaction.
+func (s *DB) BeginRun(ctx context.Context, p *kernel.Process, t *kernel.Trace, ownerID string, price int64) error {
+	return s.withTx(ctx, "begin run", func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE users SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
+			price, price, ownerID, price,
+		)
+		if err != nil {
+			return dbErr(err, "begin run: deduct user")
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return kernel.ErrInsufficientFunds.Wrap("insufficient user balance")
+		}
+		if _, err = tx.ExecContext(ctx,
+			`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at) VALUES (?,?,0,?,?,?,?)`,
+			p.ID, p.OwnerUserID, price, string(p.Status), timeToStr(p.CreatedAt), nullTimeToStr(p.EndedAt),
+		); err != nil {
+			return dbErr(err, "begin run: insert process")
+		}
+		return insertTraceTx(ctx, tx, t, t.ParentTraceID, price)
+	})
+}
+
 func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error) {
 	var p kernel.Process
 	var status, createdAt string
@@ -1690,17 +1715,34 @@ func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status stri
 	})
 }
 
-// ListOrphanRunningStepIDs returns IDs of running steps that have a completion trace but no tx.
-// These need ResetStepAndRepark to drain the completion trace and re-park funds before restart.
-func (s *DB) ListOrphanRunningStepIDs(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id FROM steps WHERE status='running' AND tx_id IS NULL AND completion_trace_id IS NOT NULL`)
+// ListOrphanRunningSteps returns running steps that have a completion trace but no tx,
+// with enough detail to decide between re-parking (empty trace) or settling as failed.
+// HasSettled is true when the completion trace has locked funds or committed subcall transactions.
+func (s *DB) ListOrphanRunningSteps(ctx context.Context) ([]kernel.OrphanRunningStep, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT st.id, st.completion_trace_id, st.price, st.process_id, st.parent_trace_id,
+		       t.available, t.locked,
+		       CASE WHEN t.locked > 0 OR EXISTS (
+		           WITH RECURSIVE sub(id) AS (
+		               SELECT st.completion_trace_id
+		               UNION ALL
+		               SELECT ch.id FROM traces ch JOIN sub ON ch.parent_trace_id = sub.id
+		           )
+		           SELECT 1 FROM transactions tx WHERE tx.trace_id IN (SELECT id FROM sub) AND tx.status != 'failure'
+		       ) THEN 1 ELSE 0 END AS has_settled
+		FROM steps st
+		JOIN traces t ON t.id = st.completion_trace_id
+		WHERE st.status = 'running' AND st.tx_id IS NULL AND st.completion_trace_id IS NOT NULL`)
 	if err != nil {
-		return nil, dbErr(err, "list orphan running step ids")
+		return nil, dbErr(err, "list orphan running steps")
 	}
-	return queryList(rows, "list orphan running step ids", func(scan func(...any) error) (string, error) {
-		var id string
-		return id, scan(&id)
+	return queryList(rows, "list orphan running steps", func(scan func(...any) error) (kernel.OrphanRunningStep, error) {
+		var row kernel.OrphanRunningStep
+		var hasSettled int
+		err := scan(&row.StepID, &row.CompletionTraceID, &row.Price, &row.ProcessID, &row.ParentTraceID,
+			&row.TraceAvailable, &row.TraceLocked, &hasSettled)
+		row.HasSettled = hasSettled == 1
+		return row, err
 	})
 }
 

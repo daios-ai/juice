@@ -140,6 +140,12 @@ type Store interface {
 	// owner.available < price.
 	CreateProcess(ctx context.Context, p *Process, ownerID string, price int64) error
 
+	// BeginRun atomically debits price from owner.available→locked, creates the process
+	// with available=0/locked=price, and creates the root trace with available=price.
+	// All precondition checks must happen in Go before calling BeginRun.
+	// Returns ErrInsufficientFunds if owner.available < price.
+	BeginRun(ctx context.Context, p *Process, t *Trace, ownerID string, price int64) error
+
 	ReadProcess(ctx context.Context, id string) (*Process, error)
 	ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error)
 	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
@@ -230,8 +236,10 @@ type Store interface {
 	// ResetStepAndRepark re-parks a step's price and resets to waiting. Used when the
 	// completion trace is empty (crash during execution) to prevent double-completion minting.
 	ResetStepAndRepark(ctx context.Context, stepID string) error
-	// ListOrphanRunningStepIDs returns IDs of running steps with a completion trace but no tx.
-	ListOrphanRunningStepIDs(ctx context.Context) ([]string, error)
+	// ListOrphanRunningSteps returns running steps that have a completion trace but no tx,
+	// with enough detail to decide between re-parking (empty trace) or settling as failed.
+	// HasSettled is true when the completion trace has locked funds or committed subcall transactions.
+	ListOrphanRunningSteps(ctx context.Context) ([]OrphanRunningStep, error)
 	// ResetRunningSteps sets status=waiting where status=running AND tx_id IS NULL.
 	ResetRunningSteps(ctx context.Context) error
 	// ListOrphanTraces returns traces that have no associated transaction and no idempotency_key,

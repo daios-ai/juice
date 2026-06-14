@@ -118,6 +118,20 @@ type Step struct {
 	CreatedAt            time.Time       `json:"created_at"`
 }
 
+// OrphanRunningStep is one result row from Store.ListOrphanRunningSteps.
+// HasSettled is true when the completion trace has committed subcall transactions or locked funds,
+// meaning the trace cannot safely be re-parked and must instead be settled as failed.
+type OrphanRunningStep struct {
+	StepID            string
+	CompletionTraceID string
+	Price             int64
+	ProcessID         string
+	ParentTraceID     *string
+	TraceAvailable    int64
+	TraceLocked       int64
+	HasSettled        bool
+}
+
 // StepReply is the response from a successful CompleteStep.
 type StepReply struct {
 	*CallReply

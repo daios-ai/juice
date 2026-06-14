@@ -2104,3 +2104,125 @@ func TestListStatsByOwner(t *testing.T) {
 	}
 }
 
+func TestBeginRunIsAtomic(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@beginrun-alice", 200)
+	_ = db.CreateUser(ctx, user)
+	action := newAction(user.ID, "beginrun-action", 100, true)
+	_ = db.CreateAction(ctx, action)
+
+	p := newProcess(user.ID)
+	tr := &kernel.Trace{
+		ID:            uuid.New().String(),
+		ProcessID:     p.ID,
+		ActionOwnerID: user.ID,
+		ActionID:      action.ID,
+		CallerUserID:  user.ID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := db.BeginRun(ctx, p, tr, user.ID, 100); err != nil {
+		t.Fatalf("BeginRun: %v", err)
+	}
+
+	u, _ := db.ReadUser(ctx, user.ID)
+	if u.Available != 100 {
+		t.Errorf("user.available: got %d, want 100", u.Available)
+	}
+	if u.Locked != 100 {
+		t.Errorf("user.locked: got %d, want 100", u.Locked)
+	}
+
+	proc, _ := db.ReadProcess(ctx, p.ID)
+	if proc.Available != 0 || proc.Locked != 100 {
+		t.Errorf("process: available=%d locked=%d, want 0/100", proc.Available, proc.Locked)
+	}
+
+	gotTrace, _ := db.ReadTrace(ctx, tr.ID)
+	if gotTrace.Available != 100 {
+		t.Errorf("trace.available: got %d, want 100", gotTrace.Available)
+	}
+
+	// Insufficient funds: no process or trace should be created.
+	p2 := newProcess(user.ID)
+	tr2 := &kernel.Trace{
+		ID: uuid.New().String(), ProcessID: p2.ID,
+		ActionOwnerID: user.ID, ActionID: action.ID, CallerUserID: user.ID,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := db.BeginRun(ctx, p2, tr2, user.ID, 9999); !errors.Is(err, kernel.ErrInsufficientFunds) {
+		t.Fatalf("expected ErrInsufficientFunds, got %v", err)
+	}
+	if _, readErr := db.ReadProcess(ctx, p2.ID); !errors.Is(readErr, kernel.ErrNotFound) {
+		t.Error("process should not exist after failed BeginRun")
+	}
+}
+
+func TestListOrphanRunningStepsDistinguishesSettled(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@orphan-settled", 1000)
+	_ = db.CreateUser(ctx, user)
+	act := newAction(user.ID, "orphan-settled-act", 100, true)
+	_ = db.CreateAction(ctx, act)
+
+	// mkSetup: create process → root trace → step → completion trace via BeginStepCall.
+	mkSetup := func(price int64) (*kernel.Step, *kernel.Trace) {
+		p := newProcess(user.ID)
+		_ = db.CreateProcess(ctx, p, user.ID, price)
+		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+		_ = db.BeginRootCall(ctx, p.ID, root, price)
+		ptID := root.ID
+		step := &kernel.Step{
+			ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: &ptID,
+			RequiredCallerUserID: user.ID, NextActionID: act.ID,
+			Price: price, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+		}
+		_ = db.CreateStep(ctx, step)
+		ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+		_ = db.BeginStepCall(ctx, step.ID, ct)
+		return step, ct
+	}
+
+	// ct1 is an empty completion trace (HasSettled should be false).
+	_, ct1 := mkSetup(100)
+	// ct2 has a subcall that locked funds (HasSettled should be true).
+	_, ct2 := mkSetup(200)
+	ctID2 := ct2.ID
+	child := &kernel.Trace{ID: uuid.New().String(), ProcessID: ct2.ProcessID, ParentTraceID: &ctID2, CreatedAt: time.Now().UTC()}
+	if err := db.BeginSubcall(ctx, ct2.ID, child, 50); err != nil {
+		t.Fatalf("BeginSubcall: %v", err)
+	}
+
+	rows, err := db.ListOrphanRunningSteps(ctx)
+	if err != nil {
+		t.Fatalf("ListOrphanRunningSteps: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+
+	byTrace := make(map[string]kernel.OrphanRunningStep)
+	for _, r := range rows {
+		byTrace[r.CompletionTraceID] = r
+	}
+
+	r1, ok1 := byTrace[ct1.ID]
+	if !ok1 {
+		t.Fatal("missing row for empty completion trace")
+	}
+	if r1.HasSettled {
+		t.Error("empty completion trace: HasSettled should be false")
+	}
+
+	r2, ok2 := byTrace[ct2.ID]
+	if !ok2 {
+		t.Fatal("missing row for completion trace with locked funds")
+	}
+	if !r2.HasSettled {
+		t.Error("completion trace with locked funds: HasSettled should be true")
+	}
+}
+

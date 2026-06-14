@@ -818,3 +818,124 @@ func TestCreateStepNilParentTraceIDReturnsErrInvalidInput(t *testing.T) {
 		t.Errorf("expected ErrInvalidInput for nil parentTraceID, got %v", err)
 	}
 }
+
+// setupStepWithCompletionTrace sets up the state just after a BeginStepCall (step is running,
+// completion trace exists, no tx). Simulates a crash mid-execution.
+// Returns the step and its completion trace.
+func setupStepWithCompletionTrace(t *testing.T, st kernel.Store, k *kernel.Kernel, ownerID string, price int64) (*kernel.Step, *kernel.Trace) {
+	t.Helper()
+	ctx := context.Background()
+	action := setupAction(t, st, ownerID, "recovery-action-"+uuid.New().String(), price)
+	caller := setupUser(t, st, "@recovery-caller-"+uuid.New().String(), 0)
+
+	p := &kernel.Process{
+		ID:          uuid.New().String(),
+		OwnerUserID: ownerID,
+		Status:      kernel.ProcessOpen,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := st.CreateProcess(ctx, p, ownerID, price); err != nil {
+		t.Fatalf("setupStepWithCompletionTrace: CreateProcess: %v", err)
+	}
+	root := &kernel.Trace{
+		ID:            uuid.New().String(),
+		ProcessID:     p.ID,
+		ActionOwnerID: ownerID,
+		ActionID:      action.ID,
+		CallerUserID:  ownerID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := st.BeginRootCall(ctx, p.ID, root, price); err != nil {
+		t.Fatalf("setupStepWithCompletionTrace: BeginRootCall: %v", err)
+	}
+	ptID := root.ID
+	step, err := k.CreateStep(ctx, ownerID, p.ID, &ptID, action.ID, nil, nil, caller.ID)
+	if err != nil {
+		t.Fatalf("setupStepWithCompletionTrace: CreateStep: %v", err)
+	}
+	ct := &kernel.Trace{
+		ID:            uuid.New().String(),
+		ProcessID:     p.ID,
+		ActionOwnerID: ownerID,
+		ActionID:      action.ID,
+		CallerUserID:  caller.ID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := st.BeginStepCall(ctx, step.ID, ct); err != nil {
+		t.Fatalf("setupStepWithCompletionTrace: BeginStepCall: %v", err)
+	}
+	return step, ct
+}
+
+func TestRecoverReparkEmptyStepCompletionTrace(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@repark-owner", 100)
+	step, _ := setupStepWithCompletionTrace(t, st, k, owner.ID, 100)
+
+	// Completion trace is empty (available==price, locked==0): re-park path.
+	if err := k.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	// After re-park, root trace recovery cancels the step (not done, no tx_id).
+	got, _ := st.ReadStep(ctx, step.ID)
+	if got.Status != kernel.StepCancelled {
+		t.Errorf("step.status=%s after Recover; want cancelled (re-park path)", got.Status)
+	}
+	if got.TxID != nil {
+		t.Errorf("step.TxID=%v; want nil (re-park path does not settle the step)", got.TxID)
+	}
+
+	// Wallet invariant: all 100 credits restored to owner.
+	u, _ := st.ReadUser(ctx, owner.ID)
+	if u.Available+u.Locked != 100 {
+		t.Errorf("wallet: available=%d locked=%d, want sum=100", u.Available, u.Locked)
+	}
+	if u.Available < 0 || u.Locked < 0 {
+		t.Errorf("negative user balance: available=%d locked=%d", u.Available, u.Locked)
+	}
+}
+
+func TestRecoverSettlesNonEmptyStepCompletionTrace(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@settle-owner", 200)
+	step, ct := setupStepWithCompletionTrace(t, st, k, owner.ID, 200)
+
+	// Make the completion trace non-empty: lock funds via a subcall.
+	// This causes HasSettled=true so Recover settles rather than re-parks.
+	ctID := ct.ID
+	child := &kernel.Trace{
+		ID:            uuid.New().String(),
+		ProcessID:     ct.ProcessID,
+		ParentTraceID: &ctID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := st.BeginSubcall(ctx, ct.ID, child, 50); err != nil {
+		t.Fatalf("BeginSubcall: %v", err)
+	}
+
+	if err := k.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	// Recover must settle the step (done, tx_id set), not re-park it.
+	got, _ := st.ReadStep(ctx, step.ID)
+	if got.Status != kernel.StepDone {
+		t.Errorf("step.status=%s after Recover; want done (settle path)", got.Status)
+	}
+	if got.TxID == nil {
+		t.Error("step.TxID should be non-nil after settlement")
+	}
+
+	// No negative balances.
+	u, _ := st.ReadUser(ctx, owner.ID)
+	if u.Available < 0 || u.Locked < 0 {
+		t.Errorf("negative user balance after Recover: available=%d locked=%d", u.Available, u.Locked)
+	}
+}

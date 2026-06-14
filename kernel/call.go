@@ -38,6 +38,9 @@ type CallRequest struct {
 	// StepID, if non-empty, causes CommitCall/CommitFailedCall to atomically mark the step done.
 	// Also signals CallerStep wallet kind (BeginStepCall was used, no lock to release).
 	StepID string
+	// ExistingTraceID, when non-empty, signals that the root trace was already created atomically
+	// by BeginRun. Call uses this trace instead of calling BeginRootCall.
+	ExistingTraceID string
 	// IdempotencyRecordID, if non-empty, causes CommitCall/CommitFailedCall to atomically
 	// mark the pending idempotency record as complete. Set only by federation handlers.
 	IdempotencyRecordID string
@@ -133,8 +136,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, err
 	}
 
-	// 7. Funds check (step calls pre-funded by BeginStepCall; no check needed).
-	if req.StepID == "" {
+	// 7. Funds check (step calls pre-funded by BeginStepCall; ExistingTraceID calls pre-funded by BeginRun).
+	if req.StepID == "" && req.ExistingTraceID == "" {
 		if req.IsRootCall {
 			if process.Available < action.Price {
 				return nil, ErrInsufficientFunds.Wrapf("process has %d credits, action costs %d", process.Available, action.Price)
@@ -210,6 +213,14 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			trace.ParentTraceID = dbTrace.ParentTraceID
 			trace.IdempotencyKey = dbTrace.IdempotencyKey
 			trace.DispatchJSON = dbTrace.DispatchJSON
+		}
+	case req.ExistingTraceID != "":
+		// Root trace was pre-created atomically by BeginRun; load its full state.
+		trace.ID = req.ExistingTraceID
+		if dbTrace, err := k.store.ReadTrace(ctx, req.ExistingTraceID); err == nil {
+			trace.Available      = dbTrace.Available
+			trace.IdempotencyKey = dbTrace.IdempotencyKey
+			trace.DispatchJSON   = dbTrace.DispatchJSON
 		}
 	case req.IsRootCall:
 		if err := k.store.BeginRootCall(ctx, req.ProcessID, trace, lockPrice); err != nil {
@@ -344,7 +355,7 @@ func (k *Kernel) callerWallet(req CallRequest, process *Process, parentTrace *Tr
 	if req.StepID != "" {
 		return "", CallerStep
 	}
-	if req.IsRootCall {
+	if req.IsRootCall || req.ExistingTraceID != "" {
 		return process.ID, CallerProcess
 	}
 	if parentTrace != nil {

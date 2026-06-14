@@ -1688,5 +1688,70 @@ func TestRunNoSigningKeyLeavesNoProcess(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotCreateProcessForInactiveAction(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice-run-inactive", 500)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "inactive-act",
+		Kind: kernel.KindWasm, Active: false, Price: 100,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := k.Run(ctx, alice.ID, "@alice-run-inactive/inactive-act", map[string]any{})
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("expected ErrInvalidState for inactive action, got %v", err)
+	}
+
+	got, _ := st.ReadUser(ctx, alice.ID)
+	if got.Locked != 0 {
+		t.Errorf("user.Locked=%d after inactive action rejection, want 0 (no process created)", got.Locked)
+	}
+	procs, _ := st.ListProcesses(ctx, alice.ID, 10, 0)
+	if len(procs) != 0 {
+		t.Errorf("expected no processes after inactive action rejection, got %d", len(procs))
+	}
+}
+
+func TestRunFederatedDoesNotCreateProcessOnInsufficientBalance(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
+	ctx := context.Background()
+
+	target := setupUser(t, st, "@target-fed-bal", 0)
+	caller := setupUser(t, st, "@caller-fed-bal", 50) // balance < action price
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: target.ID, Name: "fed-bal-act",
+		Kind: kernel.KindWasm, Active: true, Public: true, Price: 100,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := k.RunFederated(ctx, caller.ID, target.ID, a.Name, map[string]any{}, 100, "")
+	if !errors.Is(err, kernel.ErrInsufficientFunds) {
+		t.Fatalf("expected ErrInsufficientFunds, got %v", err)
+	}
+
+	got, _ := st.ReadUser(ctx, caller.ID)
+	if got.Locked != 0 {
+		t.Errorf("user.Locked=%d after insufficient balance, want 0 (no process created)", got.Locked)
+	}
+	procs, _ := st.ListProcesses(ctx, caller.ID, 10, 0)
+	if len(procs) != 0 {
+		t.Errorf("expected no processes after insufficient balance, got %d", len(procs))
+	}
+}
+
 // Ensure fmt is used.
 var _ = fmt.Sprintf

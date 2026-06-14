@@ -19,18 +19,19 @@ func (k *Kernel) ResetRunningSteps(ctx context.Context) error {
 func (k *Kernel) Recover(ctx context.Context) error {
 	logger := k.log.With(ctx)
 
-	// A: Re-park running step-completion traces (completion trace exists but no tx).
-	orphanStepIDs, err := k.store.ListOrphanRunningStepIDs(ctx)
+	// A: Handle orphan step-completion traces (completion trace exists but no tx).
+	// Branch on whether any work committed: re-park if empty, settle as failed if not.
+	orphanSteps, err := k.store.ListOrphanRunningSteps(ctx)
 	if err != nil {
 		return err
 	}
-	for _, stepID := range orphanStepIDs {
-		if err := k.store.ResetStepAndRepark(ctx, stepID); err != nil {
-			logger.Error("recover.repark_failed", "step_id", stepID, "error", err)
+	for _, row := range orphanSteps {
+		if err := k.recoverStepCompletion(ctx, logger, row); err != nil {
+			logger.Error("recover.step_completion_failed", "step_id", row.StepID, "error", err)
 		}
 	}
 
-	// B: Reset remaining running steps without completion traces.
+	// B: Reset remaining running steps that have no completion trace (crashed before BeginStepCall).
 	if err := k.store.ResetRunningSteps(ctx); err != nil {
 		return err
 	}
@@ -41,15 +42,33 @@ func (k *Kernel) Recover(ctx context.Context) error {
 		return err
 	}
 	for _, trace := range traces {
-		if err := k.recoverTrace(ctx, logger, trace, "interrupted"); err != nil {
+		if err := k.recoverTrace(ctx, logger, trace, "interrupted", ""); err != nil {
 			logger.Error("recover.trace_failed", "trace_id", trace.ID, "error", err)
 		}
 	}
 	return nil
 }
 
+// recoverStepCompletion handles one orphan running step with a completion trace.
+// If the completion trace is empty (no work committed), it re-parks the step.
+// Otherwise it settles the completion trace as failed with CallerStep wallet semantics
+// (BeginStepCall already released the parent trace lock; refund goes to process.available).
+func (k *Kernel) recoverStepCompletion(ctx context.Context, logger *log.Logger, row OrphanRunningStep) error {
+	isEmpty := !row.HasSettled && row.TraceLocked == 0 && row.TraceAvailable == row.Price
+	if isEmpty {
+		return k.store.ResetStepAndRepark(ctx, row.StepID)
+	}
+	trace, err := k.store.ReadTrace(ctx, row.CompletionTraceID)
+	if err != nil {
+		return err
+	}
+	return k.recoverTrace(ctx, logger, trace, "interrupted", row.StepID)
+}
+
 // recoverTrace settles a single orphan trace as a failure with the given reason.
-func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Trace, reason string) error {
+// stepID is non-empty only for step-completion traces; it causes CommitFailedCall to
+// use CallerStep wallet semantics (parent lock already released) and mark the step done.
+func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Trace, reason, stepID string) error {
 	process, err := k.store.ReadProcess(ctx, trace.ProcessID)
 	if err != nil {
 		return err
@@ -61,7 +80,10 @@ func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Tr
 
 	callerWalletKind := CallerTrace
 	callerWalletID := ""
-	if trace.ParentTraceID == nil {
+	if stepID != "" {
+		// Completion trace: BeginStepCall already released the parent lock; refund to process.
+		callerWalletKind = CallerStep
+	} else if trace.ParentTraceID == nil {
 		callerWalletKind = CallerProcess
 		callerWalletID = process.ID
 	} else {
@@ -87,7 +109,7 @@ func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Tr
 	}
 
 	recoverErr := ErrInternal.Wrap(reason)
-	req := CallRequest{ProcessID: trace.ProcessID}
+	req := CallRequest{ProcessID: trace.ProcessID, StepID: stepID}
 	return k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, recoverErr)
 }
 
