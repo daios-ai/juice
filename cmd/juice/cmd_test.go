@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,7 +20,54 @@ import (
 	"github.com/daios-ai/juice/log"
 	"github.com/daios-ai/juice/store"
 	"github.com/google/uuid"
+	"github.com/spf13/cobra"
 )
+
+// ---- CLI test helpers ----
+
+type testEnv struct {
+	db  *store.DB
+	k   *kernel.Kernel
+	dir string
+}
+
+func newTestEnv(t *testing.T) *testEnv {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "cli-test-secret"
+	k := kernel.New(db, nil, nil, nil, cfg, log.Discard())
+	t.Setenv("JUICE_SECRET_KEY", "cli-test-secret")
+
+	t.Cleanup(func() { db.Close() })
+
+	origDB := flagDB
+	flagDB = dbPath
+	t.Cleanup(func() { flagDB = origDB })
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", dir)
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	return &testEnv{db: db, k: k, dir: dir}
+}
+
+func execTestCmd(t *testing.T, cmd *cobra.Command, args ...string) (string, error) {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return buf.String(), err
+}
 
 // ---- user ----
 
