@@ -11,7 +11,7 @@ import (
 
 func init() {
 	userCmd := &cobra.Command{Use: "user", Short: "User account commands"}
-	userCmd.AddCommand(userCreateCmd(), userMeCmd())
+	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd())
 	rootCmd.AddCommand(userCmd)
 }
 
@@ -78,6 +78,55 @@ func userMeCmd() *cobra.Command {
 			})
 		},
 	}
+}
+
+func userUpdateCmd() *cobra.Command {
+	var email string
+	var changePassword bool
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Update email or password",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if email == "" && !changePassword {
+				return fmt.Errorf("at least one of --email or --password must be specified")
+			}
+			var currentPassword, newPassword string
+			if changePassword {
+				var err error
+				if currentPassword, err = promptPassword("Current password: "); err != nil {
+					return err
+				}
+				if newPassword, err = promptPassword("New password: "); err != nil {
+					return err
+				}
+			}
+			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				u, err := k.UpdateUser(context.Background(), callerID, kernel.UpdateUserRequest{
+					Email:           email,
+					CurrentPassword: currentPassword,
+					NewPassword:     newPassword,
+				})
+				if err != nil {
+					return err
+				}
+				if flagOutput == "json" {
+					return printJSON(map[string]any{
+						"id":        u.ID,
+						"handle":    u.Handle,
+						"email":     u.Email,
+						"available": u.Available,
+						"locked":    u.Locked,
+					})
+				}
+				fmt.Printf("id:        %s\nhandle:    %s\nemail:     %s\navailable: %d\nlocked:    %d\n",
+					u.ID, u.Handle, u.Email, u.Available, u.Locked)
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&email, "email", "", "New email address")
+	cmd.Flags().BoolVar(&changePassword, "password", false, "Change password (prompts for current and new)")
+	return cmd
 }
 
 func printJSON(v any) error {

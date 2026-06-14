@@ -190,6 +190,51 @@ func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*User, 
 	return u, nil
 }
 
+// UpdateUserRequest holds validated input for user self-service update.
+type UpdateUserRequest struct {
+	Email           string // empty = don't change
+	CurrentPassword string // required when NewPassword is set
+	NewPassword     string // empty = don't change
+}
+
+// UpdateUser lets an authenticated local user update their own email and/or password.
+func (k *Kernel) UpdateUser(ctx context.Context, callerID string, req UpdateUserRequest) (*User, error) {
+	start := time.Now()
+	logger := k.log.With(ctx)
+	logger.Info("user.update.start", "user_id", callerID)
+
+	u, err := k.store.ReadUser(ctx, callerID)
+	if err != nil {
+		return nil, err
+	}
+	if u.RemoteBaseURL != "" {
+		return nil, ErrInvalidState.Wrap("proxy users cannot update their account")
+	}
+	if req.Email == "" && req.NewPassword == "" {
+		return nil, ErrInvalidInput.Wrap("at least one of email or password must be provided")
+	}
+	if req.NewPassword != "" {
+		if !CheckPassword(req.CurrentPassword, u.PasswordHash) {
+			return nil, ErrUnauthenticated.Wrap("invalid current password")
+		}
+		hash, err := HashPassword(req.NewPassword)
+		if err != nil {
+			return nil, err
+		}
+		u.PasswordHash = hash
+	}
+	if req.Email != "" {
+		u.Email = req.Email
+	}
+	u.UpdatedAt = time.Now().UTC()
+	if err := k.store.UpdateUser(ctx, u); err != nil {
+		logger.Warn("user.update.failed", "user_id", callerID, "error", err, "duration_ms", time.Since(start).Milliseconds())
+		return nil, err
+	}
+	logger.Info("user.updated", "user_id", u.ID, "status", "success", "duration_ms", time.Since(start).Milliseconds())
+	return u, nil
+}
+
 // ReadUser returns the user with the given ID.
 func (k *Kernel) ReadUser(ctx context.Context, id string) (*User, error) {
 	return k.store.ReadUser(ctx, id)

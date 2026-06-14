@@ -502,6 +502,14 @@ func (s *DB) UnsuspendUser(ctx context.Context, id string) error {
 	return dbErr(err, "unsuspend user")
 }
 
+func (s *DB) UpdateUser(ctx context.Context, u *kernel.User) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET email=?, password_hash=?, updated_at=? WHERE id=?`,
+		u.Email, u.PasswordHash, timeToStr(u.UpdatedAt), u.ID,
+	)
+	return dbErr(err, "update user")
+}
+
 // ---- Actions ----
 
 func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {

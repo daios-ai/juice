@@ -1054,6 +1054,87 @@ func TestServeGetMe(t *testing.T) {
 	}
 }
 
+func TestPutMe(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@putmetest")
+
+	// Update email only.
+	resp := httpDo(t, srv, "PUT", "/v1/me", map[string]any{"email": "new@example.com"}, tok)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("update email: want 200, got %d: %s", resp.StatusCode, body)
+	}
+	var got map[string]any
+	decodeResponse(t, resp, &got)
+	if got["email"] != "new@example.com" {
+		t.Errorf("email in response: got %v, want new@example.com", got["email"])
+	}
+
+	// Confirm via GET /v1/me.
+	resp2 := httpDo(t, srv, "GET", "/v1/me", nil, tok)
+	var me map[string]any
+	decodeResponse(t, resp2, &me)
+	if me["email"] != "new@example.com" {
+		t.Errorf("GET /v1/me email: got %v, want new@example.com", me["email"])
+	}
+
+	// Change password with correct current password.
+	resp3 := httpDo(t, srv, "PUT", "/v1/me", map[string]any{
+		"current_password": "pass",
+		"password":         "newpass",
+	}, tok)
+	if resp3.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp3.Body)
+		resp3.Body.Close()
+		t.Fatalf("change password: want 200, got %d: %s", resp3.StatusCode, body)
+	}
+	resp3.Body.Close()
+
+	// Old password login must fail; new password must succeed.
+	oldLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
+		"grant_type": "password", "handle": "@putmetest", "password": "pass",
+	}, "")
+	if oldLogin.StatusCode != http.StatusUnauthorized {
+		t.Errorf("old password: want 401, got %d", oldLogin.StatusCode)
+	}
+	oldLogin.Body.Close()
+
+	newLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
+		"grant_type": "password", "handle": "@putmetest", "password": "newpass",
+	}, "")
+	if newLogin.StatusCode != http.StatusOK {
+		t.Errorf("new password: want 200, got %d", newLogin.StatusCode)
+	}
+	newLogin.Body.Close()
+
+	// Wrong current password returns 401.
+	resp4 := httpDo(t, srv, "PUT", "/v1/me", map[string]any{
+		"current_password": "wrong",
+		"password":         "other",
+	}, tok)
+	resp4.Body.Close()
+	if resp4.StatusCode != http.StatusUnauthorized {
+		t.Errorf("wrong current password: want 401, got %d", resp4.StatusCode)
+	}
+
+	// No fields returns 422.
+	resp5 := httpDo(t, srv, "PUT", "/v1/me", map[string]any{}, tok)
+	resp5.Body.Close()
+	if resp5.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("no fields: want 422, got %d", resp5.StatusCode)
+	}
+
+	// Unauthenticated returns 401.
+	resp6 := httpDo(t, srv, "PUT", "/v1/me", map[string]any{"email": "x@x.com"}, "")
+	resp6.Body.Close()
+	if resp6.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unauthenticated: want 401, got %d", resp6.StatusCode)
+	}
+}
+
 func TestGetActionReadPermission(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()

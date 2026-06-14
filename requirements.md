@@ -136,7 +136,7 @@ Use file-backed SQLite with WAL by default. Migrations are deterministic and sto
 Store interface:
 
 ```text
-CreateUser ReadUser ReadUserByPublicKey ListUsers SuspendUser UnsuspendUser
+CreateUser ReadUser ReadUserByPublicKey ListUsers SuspendUser UnsuspendUser UpdateUser
 CreateAction ReadAction UpdateAction DeleteAction ListAllActions
 CreateProcess ReadProcess EndProcess ListAllProcesses
 CreateTrace CreateTransaction ListTransactions ListAllTransactions
@@ -163,6 +163,7 @@ Atomic write sets:
 | Deposit         | user credit, deposit record                                                                      |
 | Withdrawal      | user debit, withdrawal record                                                                    |
 | Rating          | rating record                                                                                    |
+| User update     | user email and/or password hash                                                                  |
 | Step creation   | creator-trace move (available → locked), step record                                             |
 | Step completion | step status→done, tx_id recorded, price unparked, call transaction, receipt, settlement, metrics, stats |
 | Step cancellation | step status→cancelled, parked price returned                                                   |
@@ -549,6 +550,8 @@ The superuser may suspend or unsuspend users. Suspension preserves data and make
 
 `Kernel.Withdraw(operator_user_id,target_user_id,amount,reason)` is admin-CLI-only supervision: the mirror of `Deposit`. It requires configured superuser, positive amount, and `target.available ≥ amount`, then atomically debits `user.available` with an immutable withdrawal record — the user's credits are redeemed and the operator owes the out-of-band payout. No HTTP endpoint exists.
 
+`Kernel.UpdateUser(callerUserID, email, currentPassword, newPassword)` is user self-service: only the authenticated, non-suspended local user may update their own account. `email` and `newPassword` are both optional; at least one must be provided. When `newPassword` is non-empty, `currentPassword` must match the stored hash; mismatch returns `ErrUnauthenticated`. Proxy users have no stored password and cannot use this operation (`ErrInvalidState`). `handle` is immutable. The update is atomic.
+
 ## 13. Federation
 
 ### Peers and proxy users
@@ -638,6 +641,7 @@ Required commands:
 ```text
 juice serve
 juice user create                         juice user me
+juice user update
 juice auth login                          juice auth logout
 juice action create                       juice action update
 juice action delete                       juice action enable
@@ -684,6 +688,7 @@ Endpoint rules:
 | `GET /v1/gossip`                                 | unauthenticated; identity, own actions with manifests and stats, transacted friends with stats (§13)            |
 | `POST /v1/peers`                                 | signed friend request (§13); rate-limited per IP                                                                |
 | `GET /v1/me`                                     | authenticated `id`, `handle`, `email`, `available`, `locked`; suspended rejected before handler                 |
+| `PUT /v1/me`                                     | authenticated local user only; `{[email], [current_password, password]}`; `password` requires `current_password`; at least one field required; returns updated `id`, `handle`, `email`, `available`, `locked`; proxy user returns `ErrInvalidState` |
 | `PUT /v1/actions/{id}`                           | action-owner update; `public` updatable; deactivation rules apply                                               |
 | `DELETE /v1/actions/{id}`                        | action-owner delete preserving history                                                                          |
 | `POST /v1/actions/import`                        | authenticated OpenAPI supervision import                                                                        |
@@ -751,6 +756,11 @@ Required suites:
 ```text
 user creation
 authentication token validation
+user update email; change reflected in GET /v1/me
+user update password with correct current_password; old password rejected after change
+user update password with wrong current_password returns ErrUnauthenticated
+user update with neither email nor password returns ErrInvalidInput
+proxy user UpdateUser returns ErrInvalidState
 action create/update/delete
 action activation/deactivation
 public/private access control

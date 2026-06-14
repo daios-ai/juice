@@ -99,8 +99,9 @@ Log lines, progress messages, and error text go to stderr. The only content writ
 |-----------|------|-----|
 | Create user | `POST /v1/users` `{handle, email, password}` → 201 user | `juice user create --handle --email [--password]` |
 | Get self | `GET /v1/me` → user (`id`, `handle`, `email`, `available`, `locked`) | `juice user me` |
+| Update self | `PUT /v1/me` `{[email], [current_password, password]}` → user | `juice user update [--email] [--password]` |
 
-Proxy users (federation peers) cannot be created here, cannot log in, and hold no tokens; they exist only through peer acceptance and authenticate per request by federation signature.
+`handle` is immutable. `email` and `password` are updatable by the authenticated user; `password` change requires `current_password` to verify the existing credential. At least one of `email` or `password` must be provided. Proxy users (federation peers) cannot be created here, cannot log in, and hold no tokens; they exist only through peer acceptance, authenticate per request by federation signature, and cannot use `PUT /v1/me`.
 
 ### Actions
 

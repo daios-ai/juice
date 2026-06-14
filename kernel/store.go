@@ -112,6 +112,7 @@ type Store interface {
 	ListUsers(ctx context.Context, limit, offset int) ([]*User, error)
 	SuspendUser(ctx context.Context, id string) error
 	UnsuspendUser(ctx context.Context, id string) error
+	UpdateUser(ctx context.Context, u *User) error
 
 	// ---- Actions ----
 

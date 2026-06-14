@@ -171,6 +171,7 @@ func registerRoutes(r chi.Router, srv *server) {
 
 		// Current user.
 		r.Get("/v1/me", srv.getMe)
+		r.Put("/v1/me", srv.putMe)
 	})
 }
 
@@ -897,8 +898,9 @@ func (s *server) postPeer(w http.ResponseWriter, r *http.Request) {
 			return nil, 0, kernel.ErrUnauthorized.Wrap("invalid peer request signature")
 		}
 
-		// Deny check.
-		if existing, _ := s.kernel.ReadUserByPublicKey(ctx, req.PublicKey); existing != nil && existing.DeniedAt != nil {
+		// Deny check; capture existing peer so we can skip reciprocal if already known.
+		existing, _ := s.kernel.ReadUserByPublicKey(ctx, req.PublicKey)
+		if existing != nil && existing.DeniedAt != nil {
 			return nil, 0, kernel.ErrUnauthorized.Wrap("peer is denied")
 		}
 
@@ -915,7 +917,12 @@ func (s *server) postPeer(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, 0, err
 		}
-		go s.sendReciprocal(req.BaseURL)
+		// Only send a reciprocal friend request if the peer was previously unknown.
+		// This prevents mutual sendReciprocal cascades where each server keeps responding
+		// to the other's reciprocal, flooding both DBs with concurrent writes.
+		if existing == nil {
+			go s.sendReciprocal(req.BaseURL)
+		}
 		return map[string]any{"id": u.ID, "handle": u.Handle}, http.StatusOK, nil
 	})(w, r)
 }
@@ -1149,6 +1156,30 @@ func (s *server) getMe(w http.ResponseWriter, r *http.Request) {
 		"available": u.Available,
 		"locked":    u.Locked,
 	})
+}
+
+func (s *server) putMe(w http.ResponseWriter, r *http.Request) {
+	handle(func(r *http.Request, body struct {
+		Email           string `json:"email"`
+		CurrentPassword string `json:"current_password"`
+		Password        string `json:"password"`
+	}) (any, int, error) {
+		u, err := s.kernel.UpdateUser(r.Context(), callerFrom(r), kernel.UpdateUserRequest{
+			Email:           body.Email,
+			CurrentPassword: body.CurrentPassword,
+			NewPassword:     body.Password,
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		return map[string]any{
+			"id":        u.ID,
+			"handle":    u.Handle,
+			"email":     u.Email,
+			"available": u.Available,
+			"locked":    u.Locked,
+		}, http.StatusOK, nil
+	})(w, r)
 }
 
 // ---- health command ----
