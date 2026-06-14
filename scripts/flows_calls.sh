@@ -3,7 +3,7 @@
 
 flow_process_lifecycle() {
     echo "=== FLOW process_lifecycle ==="
-    local dir db home_sys home_alice port
+    local dir db home_sys home_alice port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -77,12 +77,69 @@ print(m.get('status','') if m else '')
             && ok "process_lifecycle.step_cancelled" \
             || fail "process_lifecycle.step_cancelled" "expected cancelled, got: $step_status"
     fi
+
+    # HTTP surface coverage
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp alice_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)
+    alice_tok=$(strfield "$tok_resp" "token")
+    [ -n "$alice_tok" ] && ok "process_lifecycle.http_token" \
+        || fail "process_lifecycle.http_token" "no token: $tok_resp"
+
+    local run_resp http_tx_id
+    run_resp=$(curl -sf -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $alice_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@sys/message","args":{"to":"@alice","message":"http lifecycle"}}' 2>/dev/null)
+    http_tx_id=$(strfield "$run_resp" "tx_id")
+    [ -n "$http_tx_id" ] && ok "process_lifecycle.http_run" \
+        || fail "process_lifecycle.http_run" "no tx_id: $run_resp"
+
+    local tx_resp http_proc_id
+    tx_resp=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/transactions/$http_tx_id" 2>/dev/null)
+    http_proc_id=$(strfield "$tx_resp" "process_id")
+    [ -n "$http_proc_id" ] && ok "process_lifecycle.http_proc_from_tx" \
+        || fail "process_lifecycle.http_proc_from_tx" "no proc_id: $tx_resp"
+
+    local proc_resp
+    proc_resp=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/processes/$http_proc_id" 2>/dev/null)
+    [ "$(strfield "$proc_resp" "status")" = "open" ] \
+        && ok "process_lifecycle.http_status_open" \
+        || fail "process_lifecycle.http_status_open" "expected open, got: $proc_resp"
+
+    curl -sf -X POST -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/processes/$http_proc_id/end" >/dev/null 2>&1
+    proc_resp=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/processes/$http_proc_id" 2>/dev/null)
+    [ "$(strfield "$proc_resp" "status")" = "closed" ] \
+        && ok "process_lifecycle.http_status_closed" \
+        || fail "process_lifecycle.http_status_closed" "expected closed, got: $proc_resp"
+
+    local steps_resp step_status_http
+    steps_resp=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/steps?process_id=$http_proc_id" 2>/dev/null)
+    step_status_http=$(python3 -c "
+import sys,json
+steps=json.loads(sys.argv[1]) or []
+print(steps[0]['status'] if steps else '')
+" "$steps_resp" 2>/dev/null)
+    [ "$step_status_http" = "cancelled" ] \
+        && ok "process_lifecycle.http_step_cancelled" \
+        || fail "process_lifecycle.http_step_cancelled" "expected cancelled, got: $step_status_http from $steps_resp"
 }
 
 
 flow_acl_public() {
     echo "=== FLOW acl_public ==="
-    local dir db home_sys home_alice home_bob port
+    local dir db home_sys home_alice home_bob port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -131,11 +188,67 @@ flow_acl_public() {
     echo "$out" | grep -qi "unauthorized\|permission\|error" \
         && ok "acl_public.private_enforced" \
         || fail "acl_public.private_enforced" "call after making private was accepted: $out"
+
+    # HTTP surface coverage
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local alice_tok bob_tok tok_resp
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)
+    alice_tok=$(strfield "$tok_resp" "token")
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    [ -n "$alice_tok" ] && [ -n "$bob_tok" ] \
+        && ok "acl_public.http_tokens" \
+        || fail "acl_public.http_tokens" "could not obtain tokens"
+
+    # Action is currently private — bob run must fail with permission error
+    local run_resp
+    run_resp=$(curl -s -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@alice/target","args":{}}' 2>/dev/null)
+    echo "$run_resp" | grep -qi "unauthorized\|permission\|error" \
+        && ok "acl_public.http_private_denied" \
+        || fail "acl_public.http_private_denied" "expected permission error, got: $run_resp"
+
+    # Make public via HTTP (alice)
+    curl -sf -X PUT "http://$addr/v1/actions/$action_id" \
+        -H "Authorization: Bearer $alice_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"public":true}' >/dev/null 2>&1
+    # Bob run: passes permission check (backend unreachable → connection error, not permission denied)
+    run_resp=$(curl -s -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@alice/target","args":{}}' 2>/dev/null)
+    echo "$run_resp" | grep -qiv "unauthorized\|permission denied" \
+        && ok "acl_public.http_public_passes" \
+        || fail "acl_public.http_public_passes" "public action still denied via HTTP: $run_resp"
+
+    # Make private via HTTP (alice)
+    curl -sf -X PUT "http://$addr/v1/actions/$action_id" \
+        -H "Authorization: Bearer $alice_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"public":false}' >/dev/null 2>&1
+    run_resp=$(curl -s -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@alice/target","args":{}}' 2>/dev/null)
+    echo "$run_resp" | grep -qi "unauthorized\|permission\|error" \
+        && ok "acl_public.http_private_enforced" \
+        || fail "acl_public.http_private_enforced" "private not enforced via HTTP: $run_resp"
 }
 
 flow_successful_paid_call() {
     echo "=== FLOW successful_paid_call ==="
-    local dir db home_sys home_alice home_bob port backend_port
+    local dir db home_sys home_alice home_bob port backend_port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -170,8 +283,16 @@ flow_successful_paid_call() {
     sys_show=$(jj "$db" "$home_sys" admin user show --handle @sys)
     sys_start=$(numfield "$sys_show" "available")
 
-    # Call with fee_bps=2000 → fee=20, net=80, gross=100
+    # Write config with fee_bps=2000 before starting serve so server reads it
     write_test_config "$db" "fee_bps=2000"
+
+    # Start serve AFTER write_test_config so server picks up fee_bps=2000
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    # Call with fee_bps=2000 → fee=20, net=80, gross=100
     local call_out tx_id
     call_out=$(HOME="$home_bob" \
         "$JUICE" --db "$db" --output json run --action @alice/pay --args '{}' 2>/dev/null)
@@ -217,12 +338,51 @@ flow_successful_paid_call() {
         && ok "successful_paid_call.fee_credited" \
         || fail "successful_paid_call.fee_credited" "expected +20; start=$sys_start end=$sys_end"
 
+    # HTTP surface: verify CLI-created tx and balances via HTTP GETs (no second run to avoid double-charging)
+    local alice_tok bob_tok tok_resp
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)
+    alice_tok=$(strfield "$tok_resp" "token")
+    [ -n "$bob_tok" ] && [ -n "$alice_tok" ] \
+        && ok "successful_paid_call.http_tokens" \
+        || fail "successful_paid_call.http_tokens" "could not obtain tokens"
+
+    local http_tx_show
+    http_tx_show=$(curl -sf -H "Authorization: Bearer $bob_tok" \
+        "http://$addr/v1/transactions/$tx_id" 2>/dev/null)
+    [ "$(numfield "$http_tx_show" "gross")" -eq 100 ] \
+        && ok "successful_paid_call.http_tx_gross" \
+        || fail "successful_paid_call.http_tx_gross" "expected gross=100, got: $http_tx_show"
+    [ "$(numfield "$http_tx_show" "fee")" -eq 20 ] \
+        && ok "successful_paid_call.http_tx_fee" \
+        || fail "successful_paid_call.http_tx_fee" "expected fee=20, got: $http_tx_show"
+    [ "$(strfield "$http_tx_show" "status")" = "success" ] \
+        && ok "successful_paid_call.http_tx_status" \
+        || fail "successful_paid_call.http_tx_status" "expected status=success, got: $http_tx_show"
+
+    local bob_http_me
+    bob_http_me=$(curl -sf -H "Authorization: Bearer $bob_tok" "http://$addr/v1/me" 2>/dev/null)
+    [ "$(numfield "$bob_http_me" "available")" -eq 400 ] \
+        && ok "successful_paid_call.http_bob_balance" \
+        || fail "successful_paid_call.http_bob_balance" "expected 400, got: $bob_http_me"
+
+    local alice_http_me
+    alice_http_me=$(curl -sf -H "Authorization: Bearer $alice_tok" "http://$addr/v1/me" 2>/dev/null)
+    [ "$(numfield "$alice_http_me" "available")" -eq 80 ] \
+        && ok "successful_paid_call.http_alice_balance" \
+        || fail "successful_paid_call.http_alice_balance" "expected 80, got: $alice_http_me"
+
     stop_backend "$backend_pid"
 }
 
 flow_failed_call_refund() {
     echo "=== FLOW failed_call_refund ==="
-    local dir db home_sys home_alice home_bob port backend_port
+    local dir db home_sys home_alice home_bob port backend_port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -251,6 +411,12 @@ flow_failed_call_refund() {
     action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
     j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
+
+    # Start serve alongside backend
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
 
     # Call — backend returns 500 → execution failure (run exits non-zero)
     j "$db" "$home_bob" run --action @alice/fail --args '{}' >/dev/null 2>&1 || true
@@ -285,12 +451,34 @@ flow_failed_call_refund() {
         && ok "failed_call_refund.tx_status_failure" \
         || fail "failed_call_refund.tx_status_failure" "expected failure, got: $tx_show"
 
+    # HTTP surface: verify refunded balance and failure tx via HTTP GETs
+    local bob_tok tok_resp
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    [ -n "$bob_tok" ] && ok "failed_call_refund.http_token" \
+        || fail "failed_call_refund.http_token" "no token: $tok_resp"
+
+    local http_bob_me
+    http_bob_me=$(curl -sf -H "Authorization: Bearer $bob_tok" "http://$addr/v1/me" 2>/dev/null)
+    [ "$(numfield "$http_bob_me" "available")" -eq 500 ] \
+        && ok "failed_call_refund.http_bob_refunded" \
+        || fail "failed_call_refund.http_bob_refunded" "expected 500, got: $http_bob_me"
+
+    local http_tx_show
+    http_tx_show=$(curl -sf -H "Authorization: Bearer $bob_tok" \
+        "http://$addr/v1/transactions/$tx_id" 2>/dev/null)
+    [ "$(strfield "$http_tx_show" "status")" = "failure" ] \
+        && ok "failed_call_refund.http_tx_status" \
+        || fail "failed_call_refund.http_tx_status" "expected failure, got: $http_tx_show"
+
     stop_backend "$backend_pid"
 }
 
 flow_input_schema_failure() {
     echo "=== FLOW input_schema_failure ==="
-    local dir db home_sys home_alice home_bob port
+    local dir db home_sys home_alice home_bob port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -337,11 +525,48 @@ flow_input_schema_failure() {
     [ "$tx_count" -eq 0 ] \
         && ok "input_schema_failure.no_tx_created" \
         || fail "input_schema_failure.no_tx_created" "expected 0 txs, got $tx_count: $tx_list"
+
+    # HTTP surface: schema error via POST /v1/run, balance and tx still unchanged
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local bob_tok tok_resp
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    [ -n "$bob_tok" ] && ok "input_schema_failure.http_token" \
+        || fail "input_schema_failure.http_token" "no token: $tok_resp"
+
+    local http_run_resp
+    http_run_resp=$(curl -s -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@alice/schema-in","args":{}}' 2>/dev/null)
+    echo "$http_run_resp" | grep -qi "schema\|invalid\|required\|error" \
+        && ok "input_schema_failure.http_error_returned" \
+        || fail "input_schema_failure.http_error_returned" "expected schema error via HTTP, got: $http_run_resp"
+
+    local http_bob_me
+    http_bob_me=$(curl -sf -H "Authorization: Bearer $bob_tok" "http://$addr/v1/me" 2>/dev/null)
+    [ "$(numfield "$http_bob_me" "available")" -eq 300 ] \
+        && ok "input_schema_failure.http_balance_unchanged" \
+        || fail "input_schema_failure.http_balance_unchanged" "expected 300, got: $http_bob_me"
+
+    local http_tx_list http_tx_count
+    http_tx_list=$(curl -sf -H "Authorization: Bearer $bob_tok" \
+        "http://$addr/v1/transactions" 2>/dev/null)
+    http_tx_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" "$http_tx_list" 2>/dev/null || echo 0)
+    [ "$http_tx_count" -eq 0 ] \
+        && ok "input_schema_failure.http_no_tx" \
+        || fail "input_schema_failure.http_no_tx" "expected 0 txs via HTTP, got $http_tx_count"
 }
 
 flow_output_schema_failure() {
     echo "=== FLOW output_schema_failure ==="
-    local dir db home_sys home_alice home_bob port backend_port
+    local dir db home_sys home_alice home_bob port backend_port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -372,6 +597,12 @@ flow_output_schema_failure() {
     action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
     j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
+
+    # Start serve alongside backend
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
 
     # Call — execution runs, output schema check fails → CommitFailedCall
     local call_out
@@ -409,6 +640,38 @@ flow_output_schema_failure() {
     [ "$(numfield "$alice_me" "available")" -eq 0 ] \
         && ok "output_schema_failure.target_not_credited" \
         || fail "output_schema_failure.target_not_credited" "expected 0, got: $alice_me"
+
+    # HTTP surface: do HTTP run (price=50, also refunded → bob balance stays 300)
+    local bob_tok tok_resp
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    [ -n "$bob_tok" ] && ok "output_schema_failure.http_token" \
+        || fail "output_schema_failure.http_token" "no token: $tok_resp"
+
+    local http_run_resp
+    http_run_resp=$(curl -s -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@alice/schema-out","args":{}}' 2>/dev/null)
+    echo "$http_run_resp" | grep -qi "schema\|invalid\|error" \
+        && ok "output_schema_failure.http_error_returned" \
+        || fail "output_schema_failure.http_error_returned" "expected schema error via HTTP, got: $http_run_resp"
+
+    local http_bob_me
+    http_bob_me=$(curl -sf -H "Authorization: Bearer $bob_tok" "http://$addr/v1/me" 2>/dev/null)
+    [ "$(numfield "$http_bob_me" "available")" -eq 300 ] \
+        && ok "output_schema_failure.http_balance_refunded" \
+        || fail "output_schema_failure.http_balance_refunded" "expected 300, got: $http_bob_me"
+
+    local http_tx_list http_tx_count
+    http_tx_list=$(curl -sf -H "Authorization: Bearer $bob_tok" \
+        "http://$addr/v1/transactions" 2>/dev/null)
+    http_tx_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]) or []))" "$http_tx_list" 2>/dev/null || echo 0)
+    [ "$http_tx_count" -ge 2 ] \
+        && ok "output_schema_failure.http_txs_recorded" \
+        || fail "output_schema_failure.http_txs_recorded" "expected >=2 txs (CLI+HTTP), got $http_tx_count"
 
     stop_backend "$backend_pid"
 }

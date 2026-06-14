@@ -4,7 +4,7 @@
 
 flow_wasm_execution() {
     echo "=== FLOW wasm_execution ==="
-    local dir db home_sys home_alice home_bob port
+    local dir db home_sys home_alice home_bob port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -63,11 +63,54 @@ flow_wasm_execution() {
     echo "$timeout_out" | grep -qi "timeout\|timed\|execution" \
         && ok "wasm_execution.infinite_loop_timeout" \
         || fail "wasm_execution.infinite_loop_timeout" "expected timeout error, got: $timeout_out"
+
+    # HTTP: echo action callable via HTTP; bob has 200-10(CLI echo)=190 (loop timeout refunded)
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp alice_tok bob_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)
+    alice_tok=$(strfield "$tok_resp" "token")
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    [ -n "$alice_tok" ] && [ -n "$bob_tok" ] \
+        && ok "wasm_execution.http_tokens" \
+        || fail "wasm_execution.http_tokens" "could not obtain tokens"
+
+    local http_action_show
+    http_action_show=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/actions/$action_id" 2>/dev/null)
+    [ -n "$(strfield "$http_action_show" "artifact_hash")" ] \
+        && ok "wasm_execution.http_artifact_hash" \
+        || fail "wasm_execution.http_artifact_hash" "no artifact_hash via HTTP: $http_action_show"
+
+    local http_run_resp http_tx_id
+    http_run_resp=$(curl -sf -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@alice/echo","args":{"msg":"hello"}}' 2>/dev/null)
+    http_tx_id=$(strfield "$http_run_resp" "tx_id")
+    [ -n "$http_tx_id" ] \
+        && ok "wasm_execution.http_echo_succeeds" \
+        || fail "wasm_execution.http_echo_succeeds" "echo call via HTTP returned no tx_id: $http_run_resp"
+
+    # bob: 200 - 10(CLI echo) - 10(HTTP echo) = 180; loop timeout was refunded
+    local http_bob_me
+    http_bob_me=$(curl -sf -H "Authorization: Bearer $bob_tok" "http://$addr/v1/me" 2>/dev/null)
+    [ "$(numfield "$http_bob_me" "available")" -eq 180 ] \
+        && ok "wasm_execution.http_bob_balance" \
+        || fail "wasm_execution.http_bob_balance" "expected 180, got: $http_bob_me"
 }
 
 flow_contractor_subcall() {
     echo "=== FLOW contractor_subcall ==="
-    local dir db home_sys home_alice home_bob home_carol port backend_port
+    local dir db home_sys home_alice home_bob home_carol port backend_port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -140,12 +183,51 @@ flow_contractor_subcall() {
         && ok "contractor_subcall.bob_credited" \
         || fail "contractor_subcall.bob_credited" "expected 50, got: $bob_me"
 
+    # HTTP: verify balances via GET /v1/me (backend still running)
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp alice_tok bob_tok carol_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)
+    alice_tok=$(strfield "$tok_resp" "token")
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@carol","password":"carolpass"}' 2>/dev/null)
+    carol_tok=$(strfield "$tok_resp" "token")
+    [ -n "$carol_tok" ] \
+        && ok "contractor_subcall.http_tokens" \
+        || fail "contractor_subcall.http_tokens" "could not obtain tokens"
+
+    local http_carol_me http_alice_me http_bob_me
+    http_carol_me=$(curl -sf -H "Authorization: Bearer $carol_tok" "http://$addr/v1/me" 2>/dev/null)
+    [ "$(numfield "$http_carol_me" "available")" -eq 0 ] \
+        && ok "contractor_subcall.http_carol_balance" \
+        || fail "contractor_subcall.http_carol_balance" "expected 0, got: $http_carol_me"
+
+    http_alice_me=$(curl -sf -H "Authorization: Bearer $alice_tok" "http://$addr/v1/me" 2>/dev/null)
+    [ "$(numfield "$http_alice_me" "available")" -eq 0 ] \
+        && ok "contractor_subcall.http_alice_balance" \
+        || fail "contractor_subcall.http_alice_balance" "expected 0, got: $http_alice_me"
+
+    http_bob_me=$(curl -sf -H "Authorization: Bearer $bob_tok" "http://$addr/v1/me" 2>/dev/null)
+    [ "$(numfield "$http_bob_me" "available")" -eq 50 ] \
+        && ok "contractor_subcall.http_bob_balance" \
+        || fail "contractor_subcall.http_bob_balance" "expected 50, got: $http_bob_me"
+
     stop_backend "$backend_pid"
 }
 
 flow_contractor_failure() {
     echo "=== FLOW contractor_failure ==="
-    local dir db home_sys home_alice home_bob home_carol port backend_port
+    local dir db home_sys home_alice home_bob home_carol port backend_port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -210,12 +292,42 @@ flow_contractor_failure() {
         && ok "contractor_failure.alice_unchanged" \
         || fail "contractor_failure.alice_unchanged" "expected 0, got: $alice_me"
 
+    # HTTP: carol run via HTTP → same insufficient funds error; balance unchanged
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp carol_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@carol","password":"carolpass"}' 2>/dev/null)
+    carol_tok=$(strfield "$tok_resp" "token")
+    [ -n "$carol_tok" ] \
+        && ok "contractor_failure.http_token" \
+        || fail "contractor_failure.http_token" "no token: $tok_resp"
+
+    local http_run_resp
+    http_run_resp=$(curl -s -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $carol_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@alice/contractor","args":{}}' 2>/dev/null)
+    echo "$http_run_resp" | grep -qi "insufficient\|balance\|funds\|credits\|error" \
+        && ok "contractor_failure.http_error_returned" \
+        || fail "contractor_failure.http_error_returned" "expected insufficient funds via HTTP, got: $http_run_resp"
+
+    local http_carol_me
+    http_carol_me=$(curl -sf -H "Authorization: Bearer $carol_tok" "http://$addr/v1/me" 2>/dev/null)
+    [ "$(numfield "$http_carol_me" "available")" -eq 30 ] \
+        && ok "contractor_failure.http_balance_unchanged" \
+        || fail "contractor_failure.http_balance_unchanged" "expected 30, got: $http_carol_me"
+
     stop_backend "$backend_pid"
 }
 
 flow_step_success() {
     echo "=== FLOW step_success ==="
-    local dir db home_sys home_alice home_bob port
+    local dir db home_sys home_alice home_bob port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -289,11 +401,77 @@ flow_step_success() {
     [ "$show_status" = "done" ] \
         && ok "step_success.status_done_after_complete" \
         || fail "step_success.status_done_after_complete" "expected done, got: $show_status"
+
+    # HTTP: full step lifecycle via HTTP (separate message from CLI's)
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp alice_tok bob_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)
+    alice_tok=$(strfield "$tok_resp" "token")
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    [ -n "$alice_tok" ] && [ -n "$bob_tok" ] \
+        && ok "step_success.http_tokens" \
+        || fail "step_success.http_tokens" "could not obtain tokens"
+
+    local http_run_resp http_step_id
+    http_run_resp=$(curl -sf -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $alice_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@sys/message","args":{"to":"@bob","message":"http step test"}}' 2>/dev/null)
+    http_step_id=$(python3 -c "
+import sys,json
+d=json.loads(sys.argv[1])
+print(d.get('result',{}).get('step_id',''))
+" "$http_run_resp" 2>/dev/null)
+    [ -n "$http_step_id" ] \
+        && ok "step_success.http_step_created" \
+        || fail "step_success.http_step_created" "no step_id via HTTP: $http_run_resp"
+
+    local http_step_show
+    http_step_show=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/steps/$http_step_id" 2>/dev/null)
+    [ "$(strfield "$http_step_show" "status")" = "waiting" ] \
+        && ok "step_success.http_step_waiting" \
+        || fail "step_success.http_step_waiting" "expected waiting, got: $http_step_show"
+
+    local http_steps_resp
+    http_steps_resp=$(curl -sf -H "Authorization: Bearer $bob_tok" \
+        "http://$addr/v1/steps" 2>/dev/null)
+    python3 -c "
+import sys,json
+steps=json.loads(sys.argv[1]) or []
+assert any(s.get('id')=='$http_step_id' for s in steps), 'step not found'
+" "$http_steps_resp" 2>/dev/null \
+        && ok "step_success.http_bob_sees_step" \
+        || fail "step_success.http_bob_sees_step" "bob cannot see step via HTTP"
+
+    local http_complete_resp
+    http_complete_resp=$(curl -sf -X POST "http://$addr/v1/steps/$http_step_id/complete" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"args":{}}' 2>/dev/null)
+    [ -n "$(strfield "$http_complete_resp" "tx_id")" ] \
+        && ok "step_success.http_step_completed" \
+        || fail "step_success.http_step_completed" "no tx_id from step complete via HTTP: $http_complete_resp"
+
+    http_step_show=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/steps/$http_step_id" 2>/dev/null)
+    [ "$(strfield "$http_step_show" "status")" = "done" ] \
+        && ok "step_success.http_step_done" \
+        || fail "step_success.http_step_done" "expected done, got: $http_step_show"
 }
 
 flow_step_failure() {
     echo "=== FLOW step_failure ==="
-    local dir db home_sys home_alice home_bob home_carol port
+    local dir db home_sys home_alice home_bob home_carol port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -338,11 +516,50 @@ flow_step_failure() {
     echo "$carol_complete_out" | grep -qi "unauthorized\|permission\|caller" \
         && ok "step_failure.wrong_caller_rejected" \
         || fail "step_failure.wrong_caller_rejected" "expected unauthorized, got: $carol_complete_out"
+
+    # HTTP: same failure modes via HTTP
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp bob_tok carol_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@carol","password":"carolpass"}' 2>/dev/null)
+    carol_tok=$(strfield "$tok_resp" "token")
+    [ -n "$bob_tok" ] && [ -n "$carol_tok" ] \
+        && ok "step_failure.http_tokens" \
+        || fail "step_failure.http_tokens" "could not obtain tokens"
+
+    # Double-complete already-done step1 via HTTP
+    local http_double_resp
+    http_double_resp=$(curl -s -X POST "http://$addr/v1/steps/$step_id/complete" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"args":{}}' 2>/dev/null)
+    echo "$http_double_resp" | grep -qi "invalid.state\|already\|not.*waiting\|error" \
+        && ok "step_failure.http_double_complete_rejected" \
+        || fail "step_failure.http_double_complete_rejected" "expected error, got: $http_double_resp"
+
+    # Wrong caller (carol) tries to complete step2 via HTTP
+    local http_wrong_resp
+    http_wrong_resp=$(curl -s -X POST "http://$addr/v1/steps/$step2_id/complete" \
+        -H "Authorization: Bearer $carol_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"args":{}}' 2>/dev/null)
+    echo "$http_wrong_resp" | grep -qi "unauthorized\|permission\|caller\|error" \
+        && ok "step_failure.http_wrong_caller_rejected" \
+        || fail "step_failure.http_wrong_caller_rejected" "expected unauthorized, got: $http_wrong_resp"
 }
 
 flow_step_restart() {
     echo "=== FLOW step_restart ==="
-    local dir db home_sys home_alice home_bob port
+    local dir db home_sys home_alice home_bob port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -409,11 +626,71 @@ PYEOF
     [ -n "$complete_tx" ] \
         && ok "step_restart.completable_after_reset" \
         || fail "step_restart.completable_after_reset" "expected tx_id after complete, got: $complete_out"
+
+    # HTTP: new port after second bootstrap; verify original step done, create+complete new step
+    local port3
+    alloc_port; port3=$_ALLOC_PORT
+    addr="127.0.0.1:$port3"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp alice_tok bob_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)
+    alice_tok=$(strfield "$tok_resp" "token")
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    [ -n "$alice_tok" ] && [ -n "$bob_tok" ] \
+        && ok "step_restart.http_tokens" \
+        || fail "step_restart.http_tokens" "could not obtain tokens"
+
+    # Original step (completed by CLI) shows done via HTTP
+    local http_done_show
+    http_done_show=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/steps/$step_id" 2>/dev/null)
+    [ "$(strfield "$http_done_show" "status")" = "done" ] \
+        && ok "step_restart.http_original_step_done" \
+        || fail "step_restart.http_original_step_done" "expected done, got: $http_done_show"
+
+    # Create a new message step via HTTP and complete it
+    local http_run_resp http_new_step_id
+    http_run_resp=$(curl -sf -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $alice_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@sys/message","args":{"to":"@bob","message":"post-restart http step"}}' 2>/dev/null)
+    http_new_step_id=$(python3 -c "
+import sys,json
+d=json.loads(sys.argv[1])
+print(d.get('result',{}).get('step_id',''))
+" "$http_run_resp" 2>/dev/null)
+    [ -n "$http_new_step_id" ] \
+        && ok "step_restart.http_new_step_created" \
+        || fail "step_restart.http_new_step_created" "no step_id via HTTP: $http_run_resp"
+
+    local http_new_step
+    http_new_step=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/steps/$http_new_step_id" 2>/dev/null)
+    [ "$(strfield "$http_new_step" "status")" = "waiting" ] \
+        && ok "step_restart.http_new_step_waiting" \
+        || fail "step_restart.http_new_step_waiting" "expected waiting, got: $http_new_step"
+
+    local http_complete_resp
+    http_complete_resp=$(curl -sf -X POST "http://$addr/v1/steps/$http_new_step_id/complete" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"args":{}}' 2>/dev/null)
+    [ -n "$(strfield "$http_complete_resp" "tx_id")" ] \
+        && ok "step_restart.http_step_completable" \
+        || fail "step_restart.http_step_completable" "no tx_id: $http_complete_resp"
 }
 
 flow_locked_funds_recovery() {
     echo "=== FLOW locked_funds_recovery ==="
-    local dir db home_sys port
+    local dir db home_sys port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys"; mkdir -p "$home_sys/.juice"
@@ -470,7 +747,8 @@ PYEOF
     # - process.available += 20 → 20, process.locked -= 20 → 0
     # - closeProcessTx: no open steps, no orphan traces → process closes,
     #   returns available=20 to owner (user.available+=20, user.locked-=20)
-    alloc_port; local port2=$_ALLOC_PORT
+    local port2
+    alloc_port; port2=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port2" >/dev/null 2>&1
 
     j "$db" "$home_sys" auth login --handle @sys --password syspass >/dev/null 2>&1
@@ -491,11 +769,41 @@ PYEOF
     [ "$(numfield "$me_out" "available")" -eq 200 ] \
         && ok "locked_funds.user_refunded" \
         || fail "locked_funds.user_refunded" "expected available=200: $me_out"
+
+    # HTTP: verify recovery result via HTTP (new port after second bootstrap)
+    local port3
+    alloc_port; port3=$_ALLOC_PORT
+    addr="127.0.0.1:$port3"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp sys_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@sys","password":"syspass"}' 2>/dev/null)
+    sys_tok=$(strfield "$tok_resp" "token")
+    [ -n "$sys_tok" ] \
+        && ok "locked_funds.http_token" \
+        || fail "locked_funds.http_token" "no token: $tok_resp"
+
+    local http_me
+    http_me=$(curl -sf -H "Authorization: Bearer $sys_tok" "http://$addr/v1/me" 2>/dev/null)
+    [ "$(numfield "$http_me" "available")" -eq 200 ] \
+        && ok "locked_funds.http_balance_restored" \
+        || fail "locked_funds.http_balance_restored" "expected 200 via HTTP, got: $http_me"
+
+    local http_proc
+    http_proc=$(curl -sf -H "Authorization: Bearer $sys_tok" \
+        "http://$addr/v1/processes/$proc_id" 2>/dev/null)
+    [ "$(strfield "$http_proc" "status")" = "closed" ] \
+        && ok "locked_funds.http_process_closed" \
+        || fail "locked_funds.http_process_closed" "expected closed via HTTP, got: $http_proc"
 }
 
 flow_rating() {
     echo "=== FLOW rating ==="
-    local dir db home_sys home_alice home_bob port backend_port
+    local dir db home_sys home_alice home_bob port backend_port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -524,6 +832,12 @@ flow_rating() {
     action_id=$(strfield "$create_out" "id")
     j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
     j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
+
+    # Start serve alongside backend
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
 
     # @bob calls @alice's action → tx_id
     local call_out tx_id
@@ -608,6 +922,49 @@ assert r['value'] == 1, f'value={r[\"value\"]}'
     echo "$rate3_out" | grep -qi "unauthorized\|buyer\|permission" \
         && ok "rating.non_buyer_rejected" \
         || fail "rating.non_buyer_rejected" "expected unauthorized, got: $rate3_out"
+
+    # HTTP: bob calls action via HTTP, rates the tx, stats reflect both CLI and HTTP calls
+    local tok_resp alice_tok bob_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)
+    alice_tok=$(strfield "$tok_resp" "token")
+    [ -n "$bob_tok" ] && [ -n "$alice_tok" ] \
+        && ok "rating.http_tokens" \
+        || fail "rating.http_tokens" "could not obtain tokens"
+
+    # bob calls via HTTP (bob: 200-10(CLI)=190, HTTP call costs 10 → 180)
+    local http_run_resp http_tx_id
+    http_run_resp=$(curl -sf -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@alice/rate-me","args":{}}' 2>/dev/null)
+    http_tx_id=$(strfield "$http_run_resp" "tx_id")
+    [ -n "$http_tx_id" ] \
+        && ok "rating.http_call_succeeds" \
+        || fail "rating.http_call_succeeds" "no tx_id via HTTP: $http_run_resp"
+
+    # bob rates the HTTP tx
+    local http_rate_resp
+    http_rate_resp=$(curl -sf -X POST "http://$addr/v1/transactions/$http_tx_id/rate" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"rating":1,"note":"http rating"}' 2>/dev/null)
+    [ -n "$http_rate_resp" ] \
+        && ok "rating.http_rate_succeeds" \
+        || fail "rating.http_rate_succeeds" "rate via HTTP failed: $http_rate_resp"
+
+    # stats: rating_count >= 2 (CLI call + HTTP call both rated)
+    local http_stats
+    http_stats=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/stats/$action_id" 2>/dev/null)
+    [ "$(numfield "$http_stats" "rating_count")" -ge 2 ] \
+        && ok "rating.http_stats_updated" \
+        || fail "rating.http_stats_updated" "expected >=2 ratings, got: $http_stats"
 
     stop_backend "$backend_pid"
 }

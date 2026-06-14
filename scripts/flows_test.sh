@@ -361,6 +361,7 @@ main() {
     flow_suspension
     flow_deposits
     flow_action_lifecycle
+    flow_action_owner_visibility
     flow_process_lifecycle
     flow_acl_public
     flow_successful_paid_call

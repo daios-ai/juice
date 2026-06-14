@@ -140,6 +140,30 @@ flow_federation_import_execute() {
     [ "$uses" -eq 1 ] \
         && ok "fed_import.local_stats_updated" \
         || fail "fed_import.local_stats_updated" "expected uses=1, got $uses"
+
+    # HTTP: verify via local serve (already running on port_l)
+    local tok_resp sys_tok
+    tok_resp=$(curl -sf -X POST "http://127.0.0.1:$port_l/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@sys","password":"syspass"}' 2>/dev/null)
+    sys_tok=$(strfield "$tok_resp" "token")
+    [ -n "$sys_tok" ] \
+        && ok "fed_import.http_token" \
+        || fail "fed_import.http_token" "no sys token via HTTP: $tok_resp"
+
+    local http_tx_show
+    http_tx_show=$(curl -sf -H "Authorization: Bearer $sys_tok" \
+        "http://127.0.0.1:$port_l/v1/transactions/$tx_id" 2>/dev/null)
+    [ -n "$(strfield "$http_tx_show" "remote_receipt_hash")" ] \
+        && ok "fed_import.http_remote_receipt_hash" \
+        || fail "fed_import.http_remote_receipt_hash" "no remote_receipt_hash via HTTP: $http_tx_show"
+
+    local http_stats
+    http_stats=$(curl -sf -H "Authorization: Bearer $sys_tok" \
+        "http://127.0.0.1:$port_l/v1/stats/$proxy_id" 2>/dev/null)
+    [ "$(numfield "$http_stats" "uses")" -eq 1 ] \
+        && ok "fed_import.http_stats_uses" \
+        || fail "fed_import.http_stats_uses" "expected uses=1 via HTTP, got: $http_stats"
 }
 
 flow_federation_changed_reimport() {
@@ -205,6 +229,31 @@ flow_federation_changed_reimport() {
     [ "$(strfield "$tx_check" "id")" = "$tx_id" ] \
         && ok "fed_reimport.tx_history_intact" \
         || fail "fed_reimport.tx_history_intact" "prior tx $tx_id missing from local db"
+
+    # HTTP: proxy inactive visible via HTTP (local serve still running on port_l)
+    local tok_resp sys_tok
+    tok_resp=$(curl -sf -X POST "http://127.0.0.1:$port_l/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@sys","password":"syspass"}' 2>/dev/null)
+    sys_tok=$(strfield "$tok_resp" "token")
+    [ -n "$sys_tok" ] \
+        && ok "fed_reimport.http_token" \
+        || fail "fed_reimport.http_token" "no sys token via HTTP: $tok_resp"
+
+    local http_proxy_show
+    http_proxy_show=$(curl -sf -H "Authorization: Bearer $sys_tok" \
+        "http://127.0.0.1:$port_l/v1/actions/$proxy_id" 2>/dev/null)
+    [ "$(strfield "$http_proxy_show" "active")" = "False" ] \
+        && ok "fed_reimport.http_proxy_inactive" \
+        || fail "fed_reimport.http_proxy_inactive" "expected active=False via HTTP, got: $http_proxy_show"
+
+    # Prior tx accessible via HTTP too
+    local http_tx_show
+    http_tx_show=$(curl -sf -H "Authorization: Bearer $sys_tok" \
+        "http://127.0.0.1:$port_l/v1/transactions/$tx_id" 2>/dev/null)
+    [ "$(strfield "$http_tx_show" "id")" = "$tx_id" ] \
+        && ok "fed_reimport.http_tx_history_intact" \
+        || fail "fed_reimport.http_tx_history_intact" "prior tx not accessible via HTTP: $http_tx_show"
 }
 
 flow_federation_unimport() {
@@ -246,6 +295,36 @@ flow_federation_unimport() {
     [ "$remote_active" = "1" ] \
         && ok "fed_unimport.remote_still_active" \
         || fail "fed_unimport.remote_still_active" "expected remote active=1, got $remote_active"
+
+    # HTTP: proxy inactive visible via HTTP (local serve still running on port_l)
+    local tok_resp sys_tok
+    tok_resp=$(curl -sf -X POST "http://127.0.0.1:$port_l/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@sys","password":"syspass"}' 2>/dev/null)
+    sys_tok=$(strfield "$tok_resp" "token")
+    [ -n "$sys_tok" ] \
+        && ok "fed_unimport.http_token" \
+        || fail "fed_unimport.http_token" "no sys token via HTTP: $tok_resp"
+
+    local http_proxy_show
+    http_proxy_show=$(curl -sf -H "Authorization: Bearer $sys_tok" \
+        "http://127.0.0.1:$port_l/v1/actions/$proxy_id" 2>/dev/null)
+    [ "$(strfield "$http_proxy_show" "active")" = "False" ] \
+        && ok "fed_unimport.http_proxy_inactive" \
+        || fail "fed_unimport.http_proxy_inactive" "expected active=False via HTTP, got: $http_proxy_show"
+
+    # Remote action still active via remote serve (port_r)
+    local tok_resp_r sys_tok_r
+    tok_resp_r=$(curl -sf -X POST "http://127.0.0.1:$port_r/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@sys","password":"syspass"}' 2>/dev/null)
+    sys_tok_r=$(strfield "$tok_resp_r" "token")
+    local http_remote_show
+    http_remote_show=$(curl -sf -H "Authorization: Bearer $sys_tok_r" \
+        "http://127.0.0.1:$port_r/v1/actions/$remote_action_id" 2>/dev/null)
+    [ "$(strfield "$http_remote_show" "active")" = "True" ] \
+        && ok "fed_unimport.http_remote_still_active" \
+        || fail "fed_unimport.http_remote_still_active" "expected remote active=True via HTTP, got: $http_remote_show"
 }
 
 # flow_federation_replay has been moved to TestFederationReplay in cmd/juice/cmd_remote_test.go
@@ -308,4 +387,27 @@ flow_fed_verify_receipt() {
     j "$db_l" "$home_l" tx verify-receipt --id "$local_tx_id" >/dev/null 2>&1 \
         && fail "fed_verify.local_tx_rejected" "expected error for non-remote-proxy tx, got success" \
         || ok "fed_verify.local_tx_rejected"
+
+    # HTTP: verify receipt via HTTP (local serve running on port_l)
+    local tok_resp sys_tok
+    tok_resp=$(curl -sf -X POST "http://127.0.0.1:$port_l/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@sys","password":"syspass"}' 2>/dev/null)
+    sys_tok=$(strfield "$tok_resp" "token")
+    [ -n "$sys_tok" ] \
+        && ok "fed_verify.http_token" \
+        || fail "fed_verify.http_token" "no sys token via HTTP: $tok_resp"
+
+    local http_vr_resp
+    http_vr_resp=$(curl -sf -H "Authorization: Bearer $sys_tok" \
+        "http://127.0.0.1:$port_l/v1/transactions/$tx_id/receipt-verification" 2>/dev/null)
+    python3 -c "
+import sys,json
+d=json.loads(sys.argv[1])
+assert d.get('valid') == True, f'valid={d.get(\"valid\")}'
+assert d.get('checks',{}).get('signature') == True, 'signature not True'
+assert d.get('checks',{}).get('receipt_hash') == True, 'receipt_hash not True'
+" "$http_vr_resp" 2>/dev/null \
+        && ok "fed_verify.http_receipt_valid" \
+        || fail "fed_verify.http_receipt_valid" "expected valid receipt via HTTP, got: $http_vr_resp"
 }

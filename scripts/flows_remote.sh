@@ -85,7 +85,7 @@ print(urllib.parse.parse_qs(qs)['code'][0])
 
 flow_refresh_rotation() {
     echo "=== FLOW refresh_rotation ==="
-    local dir db home_sys home_alice port
+    local dir db home_sys home_alice port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -130,11 +130,77 @@ flow_refresh_rotation() {
     echo "$after_logout" | grep -qi "invalid\|expired\|unauthenticated" \
         && ok "refresh_rotation.revoked_rt_rejected" \
         || fail "refresh_rotation.revoked_rt_rejected" "expected invalid after logout, got: $after_logout"
+
+    # HTTP: same refresh rotation story; use PKCE to get RT (password grant has no RT)
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local verifier challenge
+    verifier=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+    challenge=$(python3 -c "
+import sys, hashlib, base64
+v = sys.argv[1].encode()
+print(base64.urlsafe_b64encode(hashlib.sha256(v).digest()).rstrip(b'=').decode())
+" "$verifier")
+
+    local auth_resp code
+    auth_resp=$(curl -sf -X POST "http://$addr/v1/auth/authorize" \
+        -H "Content-Type: application/json" \
+        -d "{\"handle\":\"@alice\",\"password\":\"alicepass\",\"code_challenge\":\"$challenge\"}" 2>/dev/null)
+    code=$(python3 -c "
+import sys, urllib.parse, json
+d = json.loads(sys.argv[1])
+qs = urllib.parse.urlparse(d['redirect']).query
+print(urllib.parse.parse_qs(qs)['code'][0])
+" "$auth_resp" 2>/dev/null)
+
+    local pkce_resp rt_h1
+    pkce_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d "{\"grant_type\":\"authorization_code\",\"code\":\"$code\",\"code_verifier\":\"$verifier\"}" 2>/dev/null)
+    rt_h1=$(strfield "$pkce_resp" "refresh_token")
+    [ -n "$rt_h1" ] \
+        && ok "refresh_rotation.http_pkce_rt" \
+        || fail "refresh_rotation.http_pkce_rt" "no refresh_token from PKCE: $pkce_resp"
+
+    # Refresh RT_h1 → RT_h2
+    local refresh_h1 rt_h2
+    refresh_h1=$(curl -sf -X POST "http://$addr/v1/auth/refresh" \
+        -H "Content-Type: application/json" \
+        -d "{\"refresh_token\":\"$rt_h1\"}" 2>/dev/null)
+    rt_h2=$(strfield "$refresh_h1" "refresh_token")
+    [ -n "$rt_h2" ] && [ "$rt_h2" != "$rt_h1" ] \
+        && ok "refresh_rotation.http_rt_rotated" \
+        || fail "refresh_rotation.http_rt_rotated" "RT not rotated via HTTP: $refresh_h1"
+
+    # Old RT_h1 rejected after rotation
+    local old_reject
+    old_reject=$(curl -s -X POST "http://$addr/v1/auth/refresh" \
+        -H "Content-Type: application/json" \
+        -d "{\"refresh_token\":\"$rt_h1\"}" 2>/dev/null)
+    echo "$old_reject" | grep -qi "invalid\|expired\|unauthenticated\|error" \
+        && ok "refresh_rotation.http_old_rt_rejected" \
+        || fail "refresh_rotation.http_old_rt_rejected" "old RT not rejected: $old_reject"
+
+    # Logout → RT_h2 revoked
+    curl -sf -X POST "http://$addr/v1/auth/logout" \
+        -H "Content-Type: application/json" \
+        -d "{\"refresh_token\":\"$rt_h2\"}" >/dev/null 2>&1
+
+    local post_logout
+    post_logout=$(curl -s -X POST "http://$addr/v1/auth/refresh" \
+        -H "Content-Type: application/json" \
+        -d "{\"refresh_token\":\"$rt_h2\"}" 2>/dev/null)
+    echo "$post_logout" | grep -qi "invalid\|expired\|unauthenticated\|error" \
+        && ok "refresh_rotation.http_revoked_rt_rejected" \
+        || fail "refresh_rotation.http_revoked_rt_rejected" "revoked RT not rejected: $post_logout"
 }
 
 flow_successful_receipt() {
     echo "=== FLOW successful_receipt ==="
-    local dir db home_sys home_alice home_bob port backend_port
+    local dir db home_sys home_alice home_bob port backend_port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -177,12 +243,37 @@ flow_successful_receipt() {
         && ok "successful_receipt.receipt_created" \
         || fail "successful_receipt.receipt_created" "no receipt_id in call response: $call_out"
 
+    # HTTP: bob calls via HTTP; receipt_id present in HTTP response too
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp bob_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    [ -n "$bob_tok" ] \
+        && ok "successful_receipt.http_token" \
+        || fail "successful_receipt.http_token" "no token: $tok_resp"
+
+    local http_run_resp http_receipt_id
+    http_run_resp=$(curl -sf -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@alice/receipt-action","args":{}}' 2>/dev/null)
+    http_receipt_id=$(strfield "$http_run_resp" "receipt_id")
+    [ -n "$http_receipt_id" ] \
+        && ok "successful_receipt.http_receipt_created" \
+        || fail "successful_receipt.http_receipt_created" "no receipt_id via HTTP: $http_run_resp"
+
     stop_backend "$backend_pid"
 }
 
 flow_failed_receipt() {
     echo "=== FLOW failed_receipt ==="
-    local dir db home_sys home_alice home_bob port backend_port
+    local dir db home_sys home_alice home_bob port backend_port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -231,12 +322,49 @@ flow_failed_receipt() {
         && ok "failed_receipt.receipt_created_for_failure" \
         || fail "failed_receipt.receipt_created_for_failure" "failed tx $tx_id not accessible: $tx_show"
 
+    # HTTP: bob calls via HTTP → error; tx shows as failure via HTTP GET
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp bob_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    [ -n "$bob_tok" ] \
+        && ok "failed_receipt.http_token" \
+        || fail "failed_receipt.http_token" "no token: $tok_resp"
+
+    local http_run_resp
+    http_run_resp=$(curl -s -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@alice/fail-action","args":{}}' 2>/dev/null)
+    echo "$http_run_resp" | grep -qi "error\|failure\|backend" \
+        && ok "failed_receipt.http_run_fails" \
+        || fail "failed_receipt.http_run_fails" "expected error via HTTP: $http_run_resp"
+
+    local http_tx_list http_fail_status
+    http_tx_list=$(curl -sf -H "Authorization: Bearer $bob_tok" \
+        "http://$addr/v1/transactions" 2>/dev/null)
+    http_fail_status=$(python3 -c "
+import sys,json
+txs=json.loads(sys.argv[1]) or []
+fail_txs=[t for t in txs if t.get('status')=='failure']
+print(len(fail_txs))
+" "$http_tx_list" 2>/dev/null)
+    [ "${http_fail_status:-0}" -ge 1 ] \
+        && ok "failed_receipt.http_failure_tx_visible" \
+        || fail "failed_receipt.http_failure_tx_visible" "expected failure tx via HTTP: $http_tx_list"
+
     stop_backend "$backend_pid"
 }
 
 flow_lookup() {
     echo "=== FLOW lookup ==="
-    local dir db home_sys home_alice port
+    local dir db home_sys home_alice port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -257,11 +385,35 @@ flow_lookup() {
     echo "$schema_out" | grep -qi "query\|required\|schema" \
         && ok "lookup.missing_query_rejected" \
         || fail "lookup.missing_query_rejected" "expected schema/query error, got: $schema_out"
+
+    # HTTP: same schema error via HTTP
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp alice_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)
+    alice_tok=$(strfield "$tok_resp" "token")
+    [ -n "$alice_tok" ] \
+        && ok "lookup.http_token" \
+        || fail "lookup.http_token" "no token: $tok_resp"
+
+    local http_schema_resp
+    http_schema_resp=$(curl -s -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $alice_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@sys/lookup","args":{}}' 2>/dev/null)
+    echo "$http_schema_resp" | grep -qi "query\|required\|schema\|error" \
+        && ok "lookup.http_missing_query_rejected" \
+        || fail "lookup.http_missing_query_rejected" "expected schema error via HTTP, got: $http_schema_resp"
 }
 
 flow_chat() {
     echo "=== FLOW chat ==="
-    local dir db home_sys home_alice port
+    local dir db home_sys home_alice port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -289,11 +441,46 @@ flow_chat() {
     echo "$schema_out" | grep -qi "messages\|required\|schema" \
         && ok "chat.missing_messages_rejected" \
         || fail "chat.missing_messages_rejected" "expected schema/messages error, got: $schema_out"
+
+    # HTTP: both error cases via HTTP
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp alice_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)
+    alice_tok=$(strfield "$tok_resp" "token")
+    [ -n "$alice_tok" ] \
+        && ok "chat.http_token" \
+        || fail "chat.http_token" "no token: $tok_resp"
+
+    # No chatter → ErrInvalidState via HTTP
+    local http_no_chatter
+    http_no_chatter=$(curl -s -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $alice_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@sys/llm-chat","args":{"messages":[{"role":"user","content":"hello"}]}}' 2>/dev/null)
+    echo "$http_no_chatter" | grep -qi "chat\|invalid.state\|invalid_state\|error" \
+        && ok "chat.http_no_chatter_error" \
+        || fail "chat.http_no_chatter_error" "expected ErrInvalidState via HTTP, got: $http_no_chatter"
+
+    # Missing messages → schema error via HTTP
+    local http_schema
+    http_schema=$(curl -s -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $alice_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@sys/llm-chat","args":{}}' 2>/dev/null)
+    echo "$http_schema" | grep -qi "messages\|required\|schema\|error" \
+        && ok "chat.http_missing_messages_rejected" \
+        || fail "chat.http_missing_messages_rejected" "expected schema error via HTTP, got: $http_schema"
 }
 
 flow_openapi_import_execute() {
     echo "=== FLOW openapi_import_execute ==="
-    local dir db home_sys home_alice home_bob port api_port
+    local dir db home_sys home_alice home_bob port api_port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -385,12 +572,48 @@ PYEOF
         && ok "openapi_import_execute.action_name_correct" \
         || fail "openapi_import_execute.action_name_correct" "expected greet, got: $action_name"
 
+    # HTTP: verify action active and callable via HTTP (bob has 50-5(CLI call)=45 left)
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$api_pid' 2>/dev/null; wait '$api_pid' 2>/dev/null; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp alice_tok bob_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)
+    alice_tok=$(strfield "$tok_resp" "token")
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@bob","password":"bobpass"}' 2>/dev/null)
+    bob_tok=$(strfield "$tok_resp" "token")
+    [ -n "$alice_tok" ] && [ -n "$bob_tok" ] \
+        && ok "openapi_import_execute.http_tokens" \
+        || fail "openapi_import_execute.http_tokens" "could not obtain tokens"
+
+    local http_action_show
+    http_action_show=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/actions/$action_id" 2>/dev/null)
+    [ "$(strfield "$http_action_show" "active")" = "True" ] \
+        && ok "openapi_import_execute.http_action_active" \
+        || fail "openapi_import_execute.http_action_active" "expected active=True via HTTP, got: $http_action_show"
+
+    local http_run_resp http_tx_id
+    http_run_resp=$(curl -sf -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $bob_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@alice/greet","args":{}}' 2>/dev/null)
+    http_tx_id=$(strfield "$http_run_resp" "tx_id")
+    [ -n "$http_tx_id" ] \
+        && ok "openapi_import_execute.http_call_succeeds" \
+        || fail "openapi_import_execute.http_call_succeeds" "no tx_id via HTTP: $http_run_resp"
+
     stop_api_server "$api_pid"
 }
 
 flow_openapi_changed_reimport() {
     echo "=== FLOW openapi_changed_reimport ==="
-    local dir db home_sys home_alice port api_port
+    local dir db home_sys home_alice port api_port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -517,12 +740,34 @@ PYEOF
         && ok "openapi_changed_reimport.action_id_preserved" \
         || fail "openapi_changed_reimport.action_id_preserved" "expected $action_id, got: $updated_id"
 
+    # HTTP: verify deactivated state visible via HTTP
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$api_pid' 2>/dev/null; wait '$api_pid' 2>/dev/null; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp alice_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)
+    alice_tok=$(strfield "$tok_resp" "token")
+    [ -n "$alice_tok" ] \
+        && ok "openapi_changed_reimport.http_token" \
+        || fail "openapi_changed_reimport.http_token" "no token: $tok_resp"
+
+    local http_action_show
+    http_action_show=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/actions/$action_id" 2>/dev/null)
+    [ "$(strfield "$http_action_show" "active")" = "False" ] \
+        && ok "openapi_changed_reimport.http_action_deactivated" \
+        || fail "openapi_changed_reimport.http_action_deactivated" "expected active=False via HTTP, got: $http_action_show"
+
     stop_api_server "$api_pid"
 }
 
 flow_openapi_unimport() {
     echo "=== FLOW openapi_unimport ==="
-    local dir db home_sys home_alice port api_port
+    local dir db home_sys home_alice port api_port addr
     dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
     db="$dir/juice.db"
     home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
@@ -636,6 +881,35 @@ for a in r.get('Created',[]):
     [ "$manual_active" = "True" ] \
         && ok "openapi_unimport.manual_action_unaffected" \
         || fail "openapi_unimport.manual_action_unaffected" "expected True, got: $manual_show"
+
+    # HTTP: greet inactive, manual still active via HTTP
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$api_pid' 2>/dev/null; wait '$api_pid' 2>/dev/null; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    local tok_resp alice_tok
+    tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)
+    alice_tok=$(strfield "$tok_resp" "token")
+    [ -n "$alice_tok" ] \
+        && ok "openapi_unimport.http_token" \
+        || fail "openapi_unimport.http_token" "no token: $tok_resp"
+
+    local http_greet_show
+    http_greet_show=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/actions/$greet_id" 2>/dev/null)
+    [ "$(strfield "$http_greet_show" "active")" = "False" ] \
+        && ok "openapi_unimport.http_openapi_deactivated" \
+        || fail "openapi_unimport.http_openapi_deactivated" "expected active=False via HTTP, got: $http_greet_show"
+
+    local http_manual_show
+    http_manual_show=$(curl -sf -H "Authorization: Bearer $alice_tok" \
+        "http://$addr/v1/actions/$manual_id" 2>/dev/null)
+    [ "$(strfield "$http_manual_show" "active")" = "True" ] \
+        && ok "openapi_unimport.http_manual_unaffected" \
+        || fail "openapi_unimport.http_manual_unaffected" "expected active=True via HTTP, got: $http_manual_show"
 
     stop_api_server "$api_pid"
 }
