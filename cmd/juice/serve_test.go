@@ -1890,3 +1890,63 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 		t.Errorf("unknown tx: want 404, got %d", resp2.StatusCode)
 	}
 }
+
+func TestServeListActionsOwnerAuth(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@la-auth-owner")
+
+	// Create a private (inactive, non-public) action.
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "la-auth-priv", "kind": "http", "price": 0, "source": "http://x.example",
+		"description": "private test action", "input_schema": minSchema, "output_schema": minSchema,
+	}, ownerTok)
+	var created map[string]any
+	decodeResponse(t, cr, &created)
+	if cr.StatusCode != http.StatusCreated {
+		t.Fatalf("create action: expected 201, got %d", cr.StatusCode)
+	}
+
+	// Without token: owner's private action not visible.
+	resp := httpDo(t, srv, "GET", "/v1/actions?owner=@la-auth-owner", nil, "")
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("unauthenticated list: expected 200, got %d", resp.StatusCode)
+	}
+	var noAuth []map[string]any
+	decodeResponse(t, resp, &noAuth)
+	if len(noAuth) != 0 {
+		t.Errorf("unauthenticated: expected 0 results, got %d", len(noAuth))
+	}
+
+	// With owner token: private action is visible.
+	resp2 := httpDo(t, srv, "GET", "/v1/actions?owner=@la-auth-owner", nil, ownerTok)
+	if resp2.StatusCode != http.StatusOK {
+		resp2.Body.Close()
+		t.Fatalf("authenticated list: expected 200, got %d", resp2.StatusCode)
+	}
+	var withAuth []map[string]any
+	decodeResponse(t, resp2, &withAuth)
+	if len(withAuth) == 0 {
+		t.Error("authenticated owner: expected private action to appear")
+	}
+}
+
+func TestServeWriteErrHasCode(t *testing.T) {
+	srv, _ := newTestHTTPServer(t)
+	defer srv.Close()
+
+	// GET a nonexistent action — should return 404 with both "error" and "code" fields.
+	resp := httpDo(t, srv, "GET", "/v1/actions/"+uuid.New().String(), nil, "sys-token-placeholder")
+	defer resp.Body.Close()
+	// The token is invalid so we expect 401, but any error response has both fields.
+	var body map[string]any
+	decodeResponse(t, resp, &body)
+	if _, ok := body["error"]; !ok {
+		t.Error("error response missing 'error' field")
+	}
+	if _, ok := body["code"]; !ok {
+		t.Error("error response missing 'code' field")
+	}
+}

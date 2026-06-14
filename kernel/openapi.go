@@ -554,7 +554,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 		}
 		// Validate base URL against SSRF rules (same as CreateAction for KindHTTP).
 		if raw.baseURL != "" {
-			if err := validateHTTPSource(ctx, raw.baseURL, k.cfg.AllowLocalSources); err != nil {
+			if err := k.validateHTTPSource(ctx, raw.baseURL, k.cfg.AllowLocalSources); err != nil {
 				rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "unsafe source URL: " + err.Error()})
 				continue
 			}

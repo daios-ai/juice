@@ -141,6 +141,9 @@ func TestServeListSteps(t *testing.T) {
 	if len(steps) < 2 {
 		t.Errorf("expected at least 2 steps, got %d", len(steps))
 	}
+	for _, s := range steps {
+		assertActionRef(t, s["action"])
+	}
 
 	// Filter by process_id.
 	resp2 := httpDo(t, srv, "GET", "/v1/steps?process_id="+pid, nil, ownerTok)

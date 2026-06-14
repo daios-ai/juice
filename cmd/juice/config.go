@@ -61,6 +61,7 @@ type ServerConfig struct {
 	ScriptTimeoutMS   int64        `json:"script_timeout_ms"`
 	ScriptMemoryBytes int64        `json:"script_memory_bytes"`
 	FeeBPS            int64        `json:"fee_bps"`
+	ImportBPS         int64        `json:"import_bps"`
 	TokenTTL          string       `json:"token_ttl"`
 	AuthIssuer        string       `json:"auth_issuer"`
 	AuthAudience      string       `json:"auth_audience"`
@@ -88,6 +89,7 @@ func DefaultServerConfig() ServerConfig {
 		ScriptTimeoutMS:   10000,
 		ScriptMemoryBytes: 64 * 1024 * 1024,
 		FeeBPS:            2000,
+		ImportBPS:         500,
 		TokenTTL:          "15m",
 		AuthIssuer:        "",
 		AuthAudience:      "",

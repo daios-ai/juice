@@ -40,17 +40,11 @@ func init() {
 }
 
 func runServer(addr string) error {
-	k, db, err := openKernel()
+	k, db, logger, err := openKernel()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-
-	logger, _ := log.New(log.Config{
-		Level:    globalCfg.LogLevel,
-		FilePath: globalCfg.LogFile,
-		Format:   globalCfg.LogFormat,
-	})
 
 	if err := bootstrap(k, globalCfg.Native); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
@@ -302,6 +296,24 @@ func callerFromContext(ctx context.Context) string {
 	return v
 }
 
+// optionalAuth extracts and verifies a Bearer token without failing the request.
+// Returns the caller user ID or "" if absent, invalid, or suspended.
+func (s *server) optionalAuth(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return ""
+	}
+	callerID, err := s.kernel.VerifyToken(strings.TrimPrefix(auth, "Bearer "))
+	if err != nil {
+		return ""
+	}
+	u, err := s.kernel.ReadUser(r.Context(), callerID)
+	if err != nil || u.SuspendedAt != nil {
+		return ""
+	}
+	return callerID
+}
+
 // ---- handlers ----
 
 func (s *server) postUser(w http.ResponseWriter, r *http.Request) {
@@ -346,6 +358,7 @@ func withActionRef(a *kernel.Action) actionResp {
 }
 
 func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
+	callerID := s.optionalAuth(r)
 	actions, err := s.kernel.ListPublicActions(r.Context(), 200, 0)
 	if err != nil {
 		writeErr(w, err)
@@ -358,13 +371,22 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, []actionResp{})
 			return
 		}
-		filtered := actions[:0]
-		for _, a := range actions {
-			if a.OwnerUserID == u.ID {
-				filtered = append(filtered, a)
+		if callerID != "" && callerID == u.ID {
+			// Authenticated owner sees all their own actions (including inactive/private).
+			actions, err = s.kernel.ListOwnedActions(r.Context(), u.ID, 200, 0)
+			if err != nil {
+				writeErr(w, err)
+				return
 			}
+		} else {
+			filtered := actions[:0]
+			for _, a := range actions {
+				if a.OwnerUserID == u.ID {
+					filtered = append(filtered, a)
+				}
+			}
+			actions = filtered
 		}
-		actions = filtered
 	}
 	if name := r.URL.Query().Get("name"); name != "" {
 		filtered := actions[:0]
@@ -494,6 +516,9 @@ func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	if ratings == nil {
+		ratings = []*kernel.Rating{}
+	}
 	writeJSON(w, http.StatusOK, ratings)
 }
 
@@ -548,6 +573,9 @@ func (s *server) listProcesses(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	if processes == nil {
+		processes = []*kernel.Process{}
+	}
 	writeJSON(w, http.StatusOK, processes)
 }
 
@@ -594,6 +622,9 @@ func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	if txs == nil {
+		txs = []*kernel.TransactionView{}
 	}
 	writeJSON(w, http.StatusOK, txs)
 }
@@ -739,10 +770,12 @@ func (s *server) listSteps(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	if steps == nil {
-		steps = []*kernel.Step{}
+	views := make([]*stepWithAction, len(steps))
+	for i, step := range steps {
+		action, _ := s.kernel.ReadAction(r.Context(), step.NextActionID)
+		views[i] = stepView(step, action)
 	}
-	writeJSON(w, http.StatusOK, steps)
+	writeJSON(w, http.StatusOK, views)
 }
 
 func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
@@ -1253,5 +1286,6 @@ func writeErr(w http.ResponseWriter, err error) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error": fmt.Sprintf("%v", err),
+		"code":  kernel.KernelErrorCode(err),
 	})
 }

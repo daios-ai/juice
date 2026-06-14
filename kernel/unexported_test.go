@@ -23,6 +23,11 @@ func newMinimalKernel() *Kernel {
 }
 
 func TestValidateHTTPSourceSSRF(t *testing.T) {
+	k := newMinimalKernel()
+	// Inject a resolver that never hits real DNS for known hosts.
+	k.SetLookupHost(func(_ context.Context, _ string) ([]string, error) {
+		return []string{"203.0.113.1"}, nil // TEST-NET, always public
+	})
 	rejected := []string{
 		"http://localhost/api",
 		"http://127.0.0.1/secret",
@@ -37,7 +42,7 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 	}
 	ctx := context.Background()
 	for _, u := range rejected {
-		if err := validateHTTPSource(ctx, u, false); err == nil {
+		if err := k.validateHTTPSource(ctx, u, false); err == nil {
 			t.Errorf("validateHTTPSource(%q): expected error, got nil", u)
 		}
 	}
@@ -51,17 +56,16 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 		"https://api.example.com/v2",
 	}
 	for _, u := range accepted {
-		if err := validateHTTPSource(ctx, u, false); err != nil {
+		if err := k.validateHTTPSource(ctx, u, false); err != nil {
 			t.Errorf("validateHTTPSource(%q): unexpected error: %v", u, err)
 		}
 	}
 }
 
 func TestValidateHTTPSourceDNSResolvesToPrivate(t *testing.T) {
-	// Install a fake resolver so the test does not need real DNS.
-	orig := lookupHostFn
-	defer func() { lookupHostFn = orig }()
-	lookupHostFn = func(_ context.Context, host string) ([]string, error) {
+	k := newMinimalKernel()
+	// Inject a fake resolver so the test does not need real DNS.
+	k.SetLookupHost(func(_ context.Context, host string) ([]string, error) {
 		m := map[string][]string{
 			"internal.corp":        {"10.0.0.1"},
 			"loopback.example":     {"127.0.0.1"},
@@ -73,7 +77,7 @@ func TestValidateHTTPSourceDNSResolvesToPrivate(t *testing.T) {
 			return addrs, nil
 		}
 		return nil, fmt.Errorf("no such host")
-	}
+	})
 
 	ctx := context.Background()
 	for _, u := range []string{
@@ -81,20 +85,20 @@ func TestValidateHTTPSourceDNSResolvesToPrivate(t *testing.T) {
 		"https://loopback.example/api",
 		"https://linklocal.example/api",
 	} {
-		if err := validateHTTPSource(ctx, u, false); err == nil {
+		if err := k.validateHTTPSource(ctx, u, false); err == nil {
 			t.Errorf("validateHTTPSource(%q): expected rejection for private-resolving hostname, got nil", u)
 		}
 	}
 	// Public-resolving hostname must be accepted.
-	if err := validateHTTPSource(ctx, "https://public.example/api", false); err != nil {
+	if err := k.validateHTTPSource(ctx, "https://public.example/api", false); err != nil {
 		t.Errorf("validateHTTPSource(public.example): unexpected error: %v", err)
 	}
 	// DNS failure (empty result, no error) must be allowed through.
-	if err := validateHTTPSource(ctx, "https://unresolvable.invalid/api", false); err != nil {
+	if err := k.validateHTTPSource(ctx, "https://unresolvable.invalid/api", false); err != nil {
 		t.Errorf("validateHTTPSource(unresolvable.invalid): DNS failure should be allowed: %v", err)
 	}
 	// allowLocal=true bypasses DNS resolution entirely.
-	if err := validateHTTPSource(ctx, "https://internal.corp/api", true); err != nil {
+	if err := k.validateHTTPSource(ctx, "https://internal.corp/api", true); err != nil {
 		t.Errorf("validateHTTPSource(internal.corp, allowLocal=true): unexpected error: %v", err)
 	}
 }

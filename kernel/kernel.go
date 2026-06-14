@@ -72,6 +72,7 @@ type Kernel struct {
 	log            *log.Logger
 	nativeHandlers map[string]NativeFunc
 	secretBox      SecretBox
+	lookupHost     func(context.Context, string) ([]string, error)
 }
 
 // SetSecretBox installs the credential encryption adapter. Must be called before any
@@ -91,7 +92,13 @@ func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, c
 		cfg:            cfg,
 		log:            logger,
 		nativeHandlers: make(map[string]NativeFunc),
+		lookupHost:     net.DefaultResolver.LookupHost,
 	}
+}
+
+// SetLookupHost overrides the DNS resolver used by validateHTTPSource. For tests only.
+func (k *Kernel) SetLookupHost(fn func(context.Context, string) ([]string, error)) {
+	k.lookupHost = fn
 }
 
 // RegisterNativeHandler registers a native action handler by action name.
@@ -417,17 +424,12 @@ type CreateActionRequest struct {
 	Auth         *AuthInput // upstream credentials; sealed into auth_json at rest; write-only
 }
 
-// lookupHostFn resolves a hostname to IP addresses. Overridable in tests.
-var lookupHostFn = func(ctx context.Context, host string) ([]string, error) {
-	return net.DefaultResolver.LookupHost(ctx, host)
-}
-
 // validateHTTPSource rejects URLs that could be used for SSRF attacks.
 // Allowed: http and https schemes with public hostnames or literal public IPs.
 // Rejected: other schemes, localhost, loopback, RFC 1918 private, and link-local addresses.
 // For hostname (non-literal-IP) sources, DNS is resolved to catch SSRF via private hostnames.
 // DNS failures are allowed through; the runtime dialer re-validates at call time.
-func validateHTTPSource(ctx context.Context, source string, allowLocal bool) error {
+func (k *Kernel) validateHTTPSource(ctx context.Context, source string, allowLocal bool) error {
 	u, err := url.Parse(source)
 	if err != nil {
 		return ErrInvalidInput.Wrapf("invalid URL: %v", err)
@@ -455,7 +457,7 @@ func validateHTTPSource(ctx context.Context, source string, allowLocal bool) err
 			}
 		} else {
 			// Resolve the hostname and reject if any address is private/loopback/link-local.
-			if addrs, err := lookupHostFn(ctx, host); err == nil {
+			if addrs, err := k.lookupHost(ctx, host); err == nil {
 				for _, a := range addrs {
 					if ip := net.ParseIP(a); ip != nil {
 						if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
@@ -486,7 +488,7 @@ func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateAc
 		return nil, ErrInvalidInput.Wrap("price must be non-negative")
 	}
 	if req.Kind == KindHTTP && req.Source != "" {
-		if err := validateHTTPSource(ctx, req.Source, k.cfg.AllowLocalSources); err != nil {
+		if err := k.validateHTTPSource(ctx, req.Source, k.cfg.AllowLocalSources); err != nil {
 			return nil, err
 		}
 	}
@@ -828,7 +830,7 @@ func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateAc
 	}
 	if req.Source != nil {
 		if a.Kind == KindHTTP {
-			if err := validateHTTPSource(ctx, *req.Source, k.cfg.AllowLocalSources); err != nil {
+			if err := k.validateHTTPSource(ctx, *req.Source, k.cfg.AllowLocalSources); err != nil {
 				return nil, err
 			}
 		}
@@ -902,7 +904,7 @@ func (k *Kernel) SetActive(ctx context.Context, callerID, actionID string, activ
 				}
 				src = osrc.BaseURL
 			}
-			if err := validateHTTPSource(ctx, src, k.cfg.AllowLocalSources); err != nil {
+			if err := k.validateHTTPSource(ctx, src, k.cfg.AllowLocalSources); err != nil {
 				return err
 			}
 		}
