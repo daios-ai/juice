@@ -510,27 +510,19 @@ func (k *Kernel) computeStats(_ context.Context, actionID string, tx *Transactio
 	return stats
 }
 
-// settleFailedCall builds a receipt and commits the failed transaction atomically.
+// settleFailedCall commits the failed transaction atomically.
+// The receipt is built inside CommitFailedCall's transaction so that the signed charge
+// (gross − refund) is guaranteed to match what is committed.
 // tx.Status and tx.Reason must be set by the caller before invoking this.
 func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, traceID, callerWalletID, callerWalletKind string, req CallRequest, action *Action, latency float64, callErr error) error {
 	if len(tx.ReplyJSON) == 0 {
 		tx.ReplyJSON = json.RawMessage("null")
 	}
-	// Compute charge = gross - refund before signing so it is covered by the JCS signature.
-	// refund = trace.available + Σ(waiting step prices in subtree).
-	refund, err := k.store.ReadPendingRefund(ctx, traceID)
-	if err != nil {
-		logger.Error("call.refund_read_failed", "trace", traceID, "error", err)
-		return ErrInternal.Wrap("could not read pending refund")
-	}
-	charge := tx.Gross - refund
 	stats := k.computeStats(ctx, action.ID, tx, latency)
-	receipt, receiptErr := k.buildReceipt(tx, charge)
-	if receiptErr != nil {
-		logger.Error("call.receipt_build_failed", "action", action.Name, "error", receiptErr)
-		return ErrInternal.Wrap("could not build receipt")
+	buildFn := func(refund int64) (*Receipt, error) {
+		return k.buildReceipt(tx, tx.Gross-refund)
 	}
-	if settlErr := k.store.CommitFailedCall(ctx, tx, receipt, traceID, callerWalletID, callerWalletKind, tx.Gross, stats, req.IdempotencyRecordID, KernelErrorCode(callErr), req.StepID); settlErr != nil {
+	if settlErr := k.store.CommitFailedCall(ctx, tx, buildFn, traceID, callerWalletID, callerWalletKind, tx.Gross, stats, req.IdempotencyRecordID, KernelErrorCode(callErr), req.StepID); settlErr != nil {
 		logger.Error("call.settlement_failed", "action", action.Name, "error", callErr, "settlement_error", settlErr)
 		return ErrInternal.Wrap("could not record failure transaction")
 	}

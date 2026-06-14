@@ -970,6 +970,18 @@ func (k *Kernel) DeleteAction(ctx context.Context, callerID, actionID string) er
 
 // runResolved creates a funded process and executes the root call. Shared by Run and RunFederated.
 func (k *Kernel) runResolved(ctx context.Context, callerID, targetUserID, actionName string, args map[string]any, price int64, idempotencyRecordID string) (*CallReply, error) {
+	// Validate preconditions that Call also checks, before locking funds in CreateProcess.
+	// This prevents stranding an open process when input is invalid or signing is not ready.
+	action, err := k.store.ReadActionByOwnerName(ctx, targetUserID, actionName)
+	if err != nil || action == nil {
+		return nil, ErrNotFound.Wrapf("action %s/%s not found", targetUserID, actionName)
+	}
+	if err := ValidateInput(action.InputSchema, args); err != nil {
+		return nil, err
+	}
+	if err := k.requireReceiptSigningReady(); err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	p := &Process{
 		ID:          uuid.New().String(),

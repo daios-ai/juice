@@ -1104,7 +1104,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 //   - total refund = trace.available + step prices
 //   - refunds total to caller wallet (process or parent trace); CallerStep → process.available
 //   - decrements owner.locked by (gross - refund)
-func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind string, gross int64, stats *kernel.Stats, idempotencyRecordID, errorCode, stepID string) error {
+func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buildReceipt func(refund int64) (*kernel.Receipt, error), traceID, callerWalletID, callerWalletKind string, gross int64, stats *kernel.Stats, idempotencyRecordID, errorCode, stepID string) error {
 	return s.withTx(ctx, "commit failed call", func(tx *sql.Tx) error {
 		// Read trace.available before zeroing.
 		var traceAvailable int64
@@ -1119,6 +1119,12 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, rece
 			return err
 		}
 		refund := traceAvailable + stepPrices
+		// Build and sign the receipt inside the transaction so that charge (gross − refund)
+		// is guaranteed to match what is committed — no TOCTOU window.
+		receipt, err := buildReceipt(refund)
+		if err != nil {
+			return err
+		}
 		// Zero trace.available.
 		if _, err = tx.ExecContext(ctx,
 			`UPDATE traces SET available=0 WHERE id=?`, traceID); err != nil {
@@ -1684,12 +1690,6 @@ func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status stri
 	})
 }
 
-func (s *DB) ResetStep(ctx context.Context, stepID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE steps SET status='waiting' WHERE id=? AND status='running' AND tx_id IS NULL`, stepID)
-	return dbErr(err, "reset step")
-}
-
 // ListOrphanRunningStepIDs returns IDs of running steps that have a completion trace but no tx.
 // These need ResetStepAndRepark to drain the completion trace and re-park funds before restart.
 func (s *DB) ListOrphanRunningStepIDs(ctx context.Context) ([]string, error) {
@@ -2201,31 +2201,6 @@ func scanReceipt(row *sql.Row, op string) (*kernel.Receipt, error) {
 	r.StartedAt = strToTime(startedAt)
 	r.CreatedAt = strToTime(createdAt)
 	return &r, nil
-}
-
-// ReadPendingRefund returns trace.available + Σ(waiting step prices in subtree).
-// This equals the refund that CommitFailedCall would issue, and is used to compute
-// charge = gross - refund before signing the failure receipt.
-func (s *DB) ReadPendingRefund(ctx context.Context, traceID string) (int64, error) {
-	var avail int64
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT available FROM traces WHERE id=?`, traceID).Scan(&avail); err != nil {
-		return 0, dbErr(err, "read_pending_refund: trace")
-	}
-	var stepSum int64
-	err := s.db.QueryRowContext(ctx, `
-		WITH RECURSIVE subtree(id) AS (
-		    SELECT id FROM traces WHERE id=?
-		    UNION ALL
-		    SELECT t.id FROM traces t JOIN subtree s ON t.parent_trace_id=s.id
-		)
-		SELECT COALESCE(SUM(st.price),0)
-		FROM steps st JOIN subtree su ON st.parent_trace_id=su.id
-		WHERE st.status='waiting'`, traceID).Scan(&stepSum)
-	if err != nil {
-		return 0, dbErr(err, "read_pending_refund: steps")
-	}
-	return avail + stepSum, nil
 }
 
 func (s *DB) ReadReceiptByTxID(ctx context.Context, txID string) (*kernel.Receipt, error) {

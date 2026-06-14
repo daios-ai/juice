@@ -168,7 +168,9 @@ type Store interface {
 	// wallet, decrements owner.locked, records a failure transaction, creates its receipt,
 	// updates trace latency, upserts action stats, completes the idempotency record (if
 	// non-empty), and marks the step done (if non-empty).
-	CommitFailedCall(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind string, gross int64, stats *Stats, idempotencyRecordID, errorCode, stepID string) error
+	// buildReceipt is called inside the transaction with the computed refund so that the
+	// signed charge (gross − refund) is guaranteed to match what is committed.
+	CommitFailedCall(ctx context.Context, tx *Transaction, buildReceipt func(refund int64) (*Receipt, error), traceID, callerWalletID, callerWalletKind string, gross int64, stats *Stats, idempotencyRecordID, errorCode, stepID string) error
 
 	// EndProcess cancels all waiting steps (returning parked prices to the process owner's
 	// available balance), then returns process.available to the owner, and closes the process.
@@ -225,9 +227,6 @@ type Store interface {
 	ReadStep(ctx context.Context, id string) (*Step, error)
 	// ListSteps returns steps visible to caller. processID and status are optional filters ("" = no filter).
 	ListSteps(ctx context.Context, callerUserID, processID, status string, isSuperuser bool) ([]*Step, error)
-	// ResetStep resets a single running step (tx_id IS NULL) back to waiting. Called when Call
-	// fails before creating a transaction — the step can be retried.
-	ResetStep(ctx context.Context, stepID string) error
 	// ResetStepAndRepark re-parks a step's price and resets to waiting. Used when the
 	// completion trace is empty (crash during execution) to prevent double-completion minting.
 	ResetStepAndRepark(ctx context.Context, stepID string) error
@@ -248,11 +247,6 @@ type Store interface {
 	// transaction, ordered deepest-first. Includes both orphan and pending-remote traces.
 	// Used by EndProcess to fail in-flight calls before closure.
 	ListUnsettledTracesForProcess(ctx context.Context, processID string) ([]*Trace, error)
-
-	// ReadPendingRefund returns the refund that CommitFailedCall would issue for traceID:
-	// trace.available plus the sum of all waiting step prices in the trace's subtree.
-	// Used to compute charge before signing a failure receipt.
-	ReadPendingRefund(ctx context.Context, traceID string) (int64, error)
 
 	// CommitRemoteSettlement atomically settles a remote-proxy call:
 	// releases the gross lock from the caller wallet, pays charge→proxyUserID and duty→feeRecipientID,

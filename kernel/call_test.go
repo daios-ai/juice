@@ -1265,7 +1265,7 @@ type failingCommitFailedCallStore struct {
 	kernel.Store
 }
 
-func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *kernel.Transaction, _ *kernel.Receipt, _, _, _ string, _ int64, _ *kernel.Stats, _, _, _ string) error {
+func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *kernel.Transaction, _ func(int64) (*kernel.Receipt, error), _, _, _ string, _ int64, _ *kernel.Stats, _, _, _ string) error {
 	return kernel.ErrInternal.Wrap("injected CommitFailedCall failure")
 }
 
@@ -1295,6 +1295,52 @@ func TestCommitFailedCallSettlementError(t *testing.T) {
 	// When CommitFailedCall fails, Call must return ErrInternal (not the original exec error).
 	if !errors.Is(err, kernel.ErrInternal) {
 		t.Errorf("expected ErrInternal when CommitFailedCall fails, got %v", err)
+	}
+}
+
+func TestFailedCallReceiptChargeMatchesCommittedCharge(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{err: kernel.ErrExecutionFailed.Wrap("boom")})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice-rcpt", 500)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "fail-act",
+		Kind: kernel.KindWasm, Active: true, Price: 200,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	p := setupProcess(t, st, alice.ID, 200)
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: alice.ID, ProcessID: p.ID,
+		IsRootCall: true, TargetUserID: alice.ID,
+		ActionName: "fail-act", Args: map[string]any{},
+	})
+	if err == nil {
+		t.Fatal("expected error from failing executor")
+	}
+
+	txs, listErr := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID})
+	if listErr != nil || len(txs) == 0 {
+		t.Fatalf("expected a failure transaction, got %v / %v", txs, listErr)
+	}
+	tx := txs[0]
+	receipt, rErr := st.ReadReceiptByTxID(ctx, tx.ID)
+	if rErr != nil {
+		t.Fatalf("ReadReceiptByTxID: %v", rErr)
+	}
+	// Pure execution failure with no subcalls or steps: trace.available = gross at failure,
+	// so refund = gross, charge = gross - refund = 0.
+	// This verifies the buildReceipt callback received the atomically-computed refund.
+	if receipt.Gross != tx.Gross {
+		t.Errorf("receipt.Gross=%d != tx.Gross=%d", receipt.Gross, tx.Gross)
+	}
+	if receipt.Charge != 0 {
+		t.Errorf("receipt.Charge=%d, want 0 (full refund on pure execution failure)", receipt.Charge)
 	}
 }
 
