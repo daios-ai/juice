@@ -636,6 +636,8 @@ Inbound: calls sign `JCS({action, counterparty, idempotency_key, timestamp, args
 
 HTTP API is primary. Every exposed endpoint has a CLI command. CLI uses the same service layer, supports human-readable and JSON output, works directly against local SQLite where feasible, and each command has at least one test. Admin is CLI-only.
 
+CLI handlers and HTTP handlers are thin wires: parse input, call the service layer, format output. All kernel calls, enrichment, validation, and transformation live in the service layer. No kernel calls outside the service layer.
+
 Required commands:
 
 ```text
