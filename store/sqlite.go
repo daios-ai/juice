@@ -1288,8 +1288,49 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 		if err != nil {
 			return dbErr(err, "end process: read")
 		}
-		// In-flight calls (locked > 0) are settled by the kernel before calling EndProcess;
-		// see Kernel.EndProcess which calls recoverTrace for each unsettled trace first.
+		// Handle running steps whose completion traces were excluded from recoverTrace
+		// (Fix A in ListUnsettledTracesForProcess). Drain their traces and cancel them
+		// atomically within this transaction so no funds are stranded.
+		runRows, runErr := tx.QueryContext(ctx,
+			`SELECT st.completion_trace_id, t.available
+			 FROM steps st JOIN traces t ON t.id=st.completion_trace_id
+			 WHERE st.process_id=? AND st.status='running' AND st.tx_id IS NULL
+			   AND st.completion_trace_id IS NOT NULL`,
+			processID)
+		if runErr != nil {
+			return dbErr(runErr, "end process: query running steps")
+		}
+		var runningTotal int64
+		var completionTraceIDs []string
+		for runRows.Next() {
+			var ctid string
+			var avail int64
+			if err2 := runRows.Scan(&ctid, &avail); err2 != nil {
+				runRows.Close()
+				return dbErr(err2, "end process: scan running step")
+			}
+			completionTraceIDs = append(completionTraceIDs, ctid)
+			runningTotal += avail
+		}
+		runRows.Close()
+		for _, ctid := range completionTraceIDs {
+			if _, err2 := tx.ExecContext(ctx,
+				`UPDATE traces SET available=0 WHERE id=?`, ctid); err2 != nil {
+				return dbErr(err2, "end process: drain completion trace")
+			}
+		}
+		if runningTotal > 0 {
+			if _, err2 := tx.ExecContext(ctx,
+				`UPDATE users SET available=available+?, locked=locked-? WHERE id=?`,
+				runningTotal, runningTotal, ownerID); err2 != nil {
+				return dbErr(err2, "end process: return running step funds to owner")
+			}
+		}
+		if _, err2 := tx.ExecContext(ctx,
+			`UPDATE steps SET status='cancelled' WHERE process_id=? AND status='running' AND tx_id IS NULL`,
+			processID); err2 != nil {
+			return dbErr(err2, "end process: cancel running steps")
+		}
 		// Cancel all waiting steps and collect parked prices to return to owner.
 		var parkedTotal int64
 		if err = tx.QueryRowContext(ctx,
@@ -1804,6 +1845,10 @@ func (s *DB) ListUnsettledTracesForProcess(ctx context.Context, processID string
 		`SELECT `+traceCols+` FROM traces t
 		 WHERE t.process_id=?
 		 AND NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)
+		 AND NOT EXISTS (
+		   SELECT 1 FROM steps st
+		   WHERE st.completion_trace_id=t.id AND st.status='running' AND st.tx_id IS NULL
+		 )
 		 ORDER BY (
 		   WITH RECURSIVE depth(id, d) AS (
 		     SELECT t.id, 0
@@ -1818,6 +1863,10 @@ func (s *DB) ListUnsettledTracesForProcess(ctx context.Context, processID string
 			`SELECT `+traceCols+` FROM traces t
 			 WHERE t.process_id=?
 			 AND NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)
+			 AND NOT EXISTS (
+			   SELECT 1 FROM steps st
+			   WHERE st.completion_trace_id=t.id AND st.status='running' AND st.tx_id IS NULL
+			 )
 			 ORDER BY created_at DESC`, processID)
 		if err != nil {
 			return nil, dbErr(err, "list unsettled traces for process")

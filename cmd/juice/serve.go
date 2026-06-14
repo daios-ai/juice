@@ -325,7 +325,7 @@ func (s *server) postUser(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	u, err := s.kernel.CreateUser(r.Context(), kernel.CreateUserRequest{
+	view, err := createUser(s.kernel, r.Context(), kernel.CreateUserRequest{
 		Handle:   req.Handle,
 		Email:    req.Email,
 		Password: req.Password,
@@ -334,80 +334,15 @@ func (s *server) postUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":        u.ID,
-		"handle":    u.Handle,
-		"email":     u.Email,
-		"available": u.Available,
-		"locked":    u.Locked,
-	})
-}
-
-// actionResp wraps an action with the computed @owner/name reference field (R8).
-type actionResp struct {
-	*kernel.Action
-	ActionRef string `json:"action"`
-}
-
-func withActionRef(a *kernel.Action) actionResp {
-	ref := ""
-	if a.OwnerHandle != "" && a.Name != "" {
-		ref = a.OwnerHandle + "/" + a.Name
-	}
-	return actionResp{Action: a, ActionRef: ref}
+	writeJSON(w, http.StatusCreated, view)
 }
 
 func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
-	callerID := s.optionalAuth(r)
-	actions, err := s.kernel.ListPublicActions(r.Context(), 200, 0)
+	resps, err := listPublicActions(s.kernel, r.Context(), s.optionalAuth(r),
+		r.URL.Query().Get("owner"), r.URL.Query().Get("name"), 200, 0)
 	if err != nil {
 		writeErr(w, err)
 		return
-	}
-
-	if owner := r.URL.Query().Get("owner"); owner != "" {
-		u, err := s.kernel.ReadUserByHandle(r.Context(), owner)
-		if err != nil {
-			writeJSON(w, http.StatusOK, []actionResp{})
-			return
-		}
-		if callerID != "" && callerID == u.ID {
-			// Authenticated owner sees all their own actions (including inactive/private).
-			actions, err = s.kernel.ListOwnedActions(r.Context(), u.ID, 200, 0)
-			if err != nil {
-				writeErr(w, err)
-				return
-			}
-		} else {
-			filtered := actions[:0]
-			for _, a := range actions {
-				if a.OwnerUserID == u.ID {
-					filtered = append(filtered, a)
-				}
-			}
-			actions = filtered
-		}
-	}
-	if name := r.URL.Query().Get("name"); name != "" {
-		filtered := actions[:0]
-		for _, a := range actions {
-			if a.Name == name {
-				filtered = append(filtered, a)
-			}
-		}
-		actions = filtered
-	}
-	// Strip execution-internal fields from public discovery; authorized users use
-	// the authenticated get-by-id endpoint to retrieve source and artifact data.
-	resps := make([]actionResp, len(actions))
-	for i, a := range actions {
-		cp := *a
-		cp.Source = ""
-		cp.ArtifactHash = ""
-		resps[i] = withActionRef(&cp)
-	}
-	if resps == nil {
-		resps = []actionResp{}
 	}
 	writeJSON(w, http.StatusOK, resps)
 }
@@ -469,16 +404,16 @@ func (s *server) unimportOpenAPI(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, req struct {
-		Name         string          `json:"name"`
-		Kind         string          `json:"kind"`
-		Price        int64           `json:"price"`
-		Description  string          `json:"description"`
-		InputSchema  map[string]any  `json:"input_schema"`
-		OutputSchema map[string]any  `json:"output_schema"`
-		Source       string          `json:"source"`
+		Name         string            `json:"name"`
+		Kind         string            `json:"kind"`
+		Price        int64             `json:"price"`
+		Description  string            `json:"description"`
+		InputSchema  map[string]any    `json:"input_schema"`
+		OutputSchema map[string]any    `json:"output_schema"`
+		Source       string            `json:"source"`
 		Auth         *kernel.AuthInput `json:"auth"`
 	}) (any, int, error) {
-		a, err := s.kernel.CreateAction(r.Context(), callerFrom(r), kernel.CreateActionRequest{
+		a, err := createAction(s.kernel, r.Context(), callerFrom(r), kernel.CreateActionRequest{
 			OwnerUserID:  callerFrom(r),
 			Name:         req.Name,
 			Kind:         kernel.ActionKind(req.Kind),
@@ -489,25 +424,17 @@ func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 			Source:       req.Source,
 			Auth:         req.Auth,
 		})
-		if err != nil {
-			return nil, 0, err
-		}
-		// Re-read to populate OwnerHandle via store JOIN.
-		full, err := s.kernel.ReadActionForSubject(r.Context(), callerFrom(r), a.ID)
-		if err != nil {
-			return nil, 0, err
-		}
-		return withActionRef(full), http.StatusCreated, nil
+		return a, http.StatusCreated, err
 	})(w, r)
 }
 
 func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
-	a, err := s.kernel.ReadActionForSubject(r.Context(), callerFrom(r), pathID(r))
+	a, err := getAction(s.kernel, r.Context(), callerFrom(r), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, withActionRef(a))
+	writeJSON(w, http.StatusOK, a)
 }
 
 func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
@@ -524,15 +451,15 @@ func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, body struct {
-		Price        *int64           `json:"price"`
-		Description  *string          `json:"description"`
-		Source       *string          `json:"source"`
-		InputSchema  map[string]any   `json:"input_schema"`
-		OutputSchema map[string]any   `json:"output_schema"`
-		Public       *bool            `json:"public"`
+		Price        *int64            `json:"price"`
+		Description  *string           `json:"description"`
+		Source       *string           `json:"source"`
+		InputSchema  map[string]any    `json:"input_schema"`
+		OutputSchema map[string]any    `json:"output_schema"`
+		Public       *bool             `json:"public"`
 		Auth         *kernel.AuthInput `json:"auth"`
 	}) (any, int, error) {
-		a, err := s.kernel.UpdateAction(r.Context(), callerFrom(r), kernel.UpdateActionRequest{
+		a, err := updateAction(s.kernel, r.Context(), callerFrom(r), kernel.UpdateActionRequest{
 			ID:           pathID(r),
 			Price:        body.Price,
 			Description:  body.Description,
@@ -542,16 +469,19 @@ func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 			Public:       body.Public,
 			Auth:         body.Auth,
 		})
-		if err != nil {
-			return nil, 0, err
-		}
-		return withActionRef(a), http.StatusOK, nil
+		return a, http.StatusOK, err
 	})(w, r)
 }
 
 func (s *server) setActionActive(active bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if err := s.kernel.SetActive(r.Context(), callerFrom(r), pathID(r), active); err != nil {
+		var err error
+		if active {
+			err = enableAction(s.kernel, r.Context(), callerFrom(r), pathID(r))
+		} else {
+			err = disableAction(s.kernel, r.Context(), callerFrom(r), pathID(r))
+		}
+		if err != nil {
 			writeErr(w, err)
 			return
 		}
@@ -560,7 +490,7 @@ func (s *server) setActionActive(active bool) http.HandlerFunc {
 }
 
 func (s *server) deleteAction(w http.ResponseWriter, r *http.Request) {
-	if err := s.kernel.DeleteAction(r.Context(), callerFrom(r), pathID(r)); err != nil {
+	if err := deleteAction(s.kernel, r.Context(), callerFrom(r), pathID(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -568,7 +498,7 @@ func (s *server) deleteAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listProcesses(w http.ResponseWriter, r *http.Request) {
-	processes, err := s.kernel.ListProcesses(r.Context(), callerFrom(r), 100, 0)
+	processes, err := listProcesses(s.kernel, r.Context(), callerFrom(r), 100, 0)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -580,7 +510,7 @@ func (s *server) listProcesses(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getProcess(w http.ResponseWriter, r *http.Request) {
-	p, err := s.kernel.ReadProcess(r.Context(), callerFrom(r), pathID(r))
+	p, err := getProcess(s.kernel, r.Context(), callerFrom(r), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -589,7 +519,7 @@ func (s *server) getProcess(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) endProcess(w http.ResponseWriter, r *http.Request) {
-	if err := s.kernel.EndProcess(r.Context(), callerFrom(r), pathID(r)); err != nil {
+	if err := endProcess(s.kernel, r.Context(), callerFrom(r), pathID(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -607,15 +537,14 @@ func (s *server) postRun(w http.ResponseWriter, r *http.Request) {
 		if req.Args == nil {
 			req.Args = map[string]any{}
 		}
-		reply, err := s.kernel.Run(r.Context(), callerFrom(r), req.Action, req.Args)
+		reply, err := run(s.kernel, r.Context(), callerFrom(r), req.Action, req.Args)
 		return reply, http.StatusOK, err
 	})(w, r)
 }
 
 
 func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
-	callerID := callerFrom(r)
-	txs, err := s.kernel.ListTransactions(r.Context(), callerID, kernel.TxFilter{
+	txs, err := listTransactions(s.kernel, r.Context(), callerFrom(r), kernel.TxFilter{
 		ProcessID: r.URL.Query().Get("process_id"),
 		Limit:     50,
 	})
@@ -631,7 +560,7 @@ func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
 
 
 func (s *server) getTransaction(w http.ResponseWriter, r *http.Request) {
-	tx, err := s.kernel.ReadTransaction(r.Context(), callerFrom(r), pathID(r))
+	tx, err := getTransaction(s.kernel, r.Context(), callerFrom(r), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -644,16 +573,13 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 		Rating float64 `json:"rating"`
 		Note   *string `json:"note"`
 	}) (any, int, error) {
-		if req.Rating != 0 && req.Rating != 1 {
-			return nil, 0, kernel.ErrInvalidInput.Wrap("rating must be 0 or 1")
-		}
-		rating, err := s.kernel.RateTransaction(r.Context(), callerFrom(r), pathID(r), req.Rating, req.Note)
+		rating, err := rateTransaction(s.kernel, r.Context(), callerFrom(r), pathID(r), req.Rating, req.Note)
 		return rating, http.StatusOK, err
 	})(w, r)
 }
 
 func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) {
-	v, err := s.kernel.VerifyRemoteReceipt(r.Context(), callerFrom(r), pathID(r))
+	v, err := verifyReceipt(s.kernel, r.Context(), callerFrom(r), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -662,7 +588,7 @@ func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *server) getStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := s.kernel.ReadStats(r.Context(), chi.URLParam(r, "action_id"))
+	stats, err := actionStats(s.kernel, r.Context(), chi.URLParam(r, "action_id"))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -763,17 +689,11 @@ func (s *server) postTokenMulti(w http.ResponseWriter, r *http.Request) {
 // ---- Step handlers ----
 
 func (s *server) listSteps(w http.ResponseWriter, r *http.Request) {
-	processID := r.URL.Query().Get("process_id")
-	status := r.URL.Query().Get("status")
-	steps, err := s.kernel.ListSteps(r.Context(), callerFrom(r), processID, status)
+	views, err := listSteps(s.kernel, r.Context(), callerFrom(r),
+		r.URL.Query().Get("process_id"), r.URL.Query().Get("status"))
 	if err != nil {
 		writeErr(w, err)
 		return
-	}
-	views := make([]*stepWithAction, len(steps))
-	for i, step := range steps {
-		action, _ := s.kernel.ReadAction(r.Context(), step.NextActionID)
-		views[i] = stepView(step, action)
 	}
 	writeJSON(w, http.StatusOK, views)
 }
@@ -810,43 +730,32 @@ func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("input_schema is required"))
 		return
 	}
-	action, err := s.kernel.ReadAction(r.Context(), req.NextActionID)
-	if err != nil {
-		writeErr(w, kernel.ErrNotFound.Wrap("action not found"))
-		return
-	}
-	// Resolve @handle → userID for required_caller.
-	requiredCallerHandle := req.RequiredCaller
-	if !strings.HasPrefix(requiredCallerHandle, "@") {
+	if !strings.HasPrefix(req.RequiredCaller, "@") {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("required_caller must be @handle"))
 		return
 	}
-	requiredCallerUser, err := s.kernel.ReadUserByHandle(r.Context(), requiredCallerHandle)
-	if err != nil {
-		writeErr(w, kernel.ErrNotFound.Wrap("required_caller not found"))
-		return
-	}
-	var parentTraceID *string
-	if req.ParentTraceID != "" {
-		parentTraceID = &req.ParentTraceID
-	}
-	step, err := s.kernel.CreateStep(r.Context(), callerFrom(r), req.ProcessID, parentTraceID,
-		action.ID, req.PartialArgs, req.InputSchema, requiredCallerUser.ID)
+	view, err := createStep(s.kernel, r.Context(), callerFrom(r), createStepParams{
+		ProcessID:      req.ProcessID,
+		ParentTraceID:  req.ParentTraceID,
+		ActionRef:      req.NextActionID,
+		RequiredCaller: req.RequiredCaller,
+		PartialArgs:    req.PartialArgs,
+		InputSchema:    req.InputSchema,
+	})
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, stepView(step, action))
+	writeJSON(w, http.StatusCreated, view)
 }
 
 func (s *server) getStep(w http.ResponseWriter, r *http.Request) {
-	step, err := s.kernel.ReadStep(r.Context(), callerFrom(r), pathID(r))
+	step, err := getStep(s.kernel, r.Context(), callerFrom(r), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	action, _ := s.kernel.ReadAction(r.Context(), step.NextActionID)
-	writeJSON(w, http.StatusOK, stepView(step, action))
+	writeJSON(w, http.StatusOK, step)
 }
 
 func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
@@ -856,24 +765,11 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 		if req.Args == nil {
 			return nil, 0, kernel.ErrInvalidInput.Wrap("args is required")
 		}
-		reply, err := s.kernel.CompleteStep(r.Context(), callerFrom(r), pathID(r), *req.Args)
+		reply, err := completeStep(s.kernel, r.Context(), callerFrom(r), pathID(r), *req.Args)
 		return reply, http.StatusOK, err
 	})(w, r)
 }
 
-// stepView adds a computed action field to a step response.
-type stepWithAction struct {
-	*kernel.Step
-	Action string `json:"action,omitempty"`
-}
-
-func stepView(step *kernel.Step, action *kernel.Action) *stepWithAction {
-	v := &stepWithAction{Step: step}
-	if action != nil {
-		v.Action = action.OwnerHandle + "/" + action.Name
-	}
-	return v
-}
 
 // ---- well-known / federation ----
 
@@ -1177,18 +1073,12 @@ func (s *server) getActionManifest(w http.ResponseWriter, r *http.Request) {
 // ---- me ----
 
 func (s *server) getMe(w http.ResponseWriter, r *http.Request) {
-	u, err := s.kernel.ReadUser(r.Context(), callerFrom(r))
+	view, err := getMe(s.kernel, r.Context(), callerFrom(r))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":        u.ID,
-		"handle":    u.Handle,
-		"email":     u.Email,
-		"available": u.Available,
-		"locked":    u.Locked,
-	})
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *server) putMe(w http.ResponseWriter, r *http.Request) {
@@ -1197,21 +1087,8 @@ func (s *server) putMe(w http.ResponseWriter, r *http.Request) {
 		CurrentPassword string `json:"current_password"`
 		Password        string `json:"password"`
 	}) (any, int, error) {
-		u, err := s.kernel.UpdateUser(r.Context(), callerFrom(r), kernel.UpdateUserRequest{
-			Email:           body.Email,
-			CurrentPassword: body.CurrentPassword,
-			NewPassword:     body.Password,
-		})
-		if err != nil {
-			return nil, 0, err
-		}
-		return map[string]any{
-			"id":        u.ID,
-			"handle":    u.Handle,
-			"email":     u.Email,
-			"available": u.Available,
-			"locked":    u.Locked,
-		}, http.StatusOK, nil
+		view, err := updateMe(s.kernel, r.Context(), callerFrom(r), body.Email, body.CurrentPassword, body.Password)
+		return view, http.StatusOK, err
 	})(w, r)
 }
 

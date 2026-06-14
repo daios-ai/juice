@@ -438,6 +438,175 @@ func TestEndProcessWithLockedFundsForceCloseSucceeds(t *testing.T) {
 }
 
 
+// TestEndProcessWithRunningStep verifies Fix B: EndProcess atomically drains completion
+// traces for running steps, cancels those steps, and returns their funds to the owner.
+func TestEndProcessWithRunningStep(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@ep-running", 1000)
+	_ = db.CreateUser(ctx, user)
+	caller := newUser("@ep-running-caller", 0)
+	_ = db.CreateUser(ctx, caller)
+
+	p := newProcess(user.ID)
+	if err := db.CreateProcess(ctx, p, user.ID, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	// BeginRootCall with price=50 — root trace gets available=50; process.locked=50.
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRootCall(ctx, p.ID, root, 50); err != nil {
+		t.Fatal(err)
+	}
+
+	act := newAction(user.ID, "ep-act", 50, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+
+	ptID := root.ID
+	step := &kernel.Step{
+		ID:                   uuid.New().String(),
+		ProcessID:            p.ID,
+		ParentTraceID:        &ptID,
+		RequiredCallerUserID: caller.ID,
+		NextActionID:         act.ID,
+		Price:                50,
+		Status:               kernel.StepWaiting,
+		CreatedAt:            time.Now().UTC(),
+	}
+	if err := db.CreateStep(ctx, step); err != nil {
+		t.Fatal(err)
+	}
+
+	// BeginStepCall: releases root.locked, creates completion trace with available=50.
+	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginStepCall(ctx, step.ID, ct); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify pre-conditions.
+	ct1, _ := db.ReadTrace(ctx, ct.ID)
+	if ct1.Available != 50 {
+		t.Fatalf("pre: completion_trace.available=%d, want 50", ct1.Available)
+	}
+
+	if err := db.EndProcess(ctx, p.ID); err != nil {
+		t.Fatalf("EndProcess: %v", err)
+	}
+
+	// Step must be cancelled.
+	s, _ := db.ReadStep(ctx, step.ID)
+	if s.Status != kernel.StepCancelled {
+		t.Errorf("step.status=%s, want cancelled", s.Status)
+	}
+
+	// Completion trace must be drained.
+	ct2, _ := db.ReadTrace(ctx, ct.ID)
+	if ct2.Available != 0 {
+		t.Errorf("completion_trace.available=%d after EndProcess, want 0", ct2.Available)
+	}
+
+	// Process must be closed with no funds.
+	proc, _ := db.ReadProcess(ctx, p.ID)
+	if proc.Status != kernel.ProcessClosed {
+		t.Errorf("process.status=%s, want closed", proc.Status)
+	}
+	if proc.Available != 0 || proc.Locked != 0 {
+		t.Errorf("process funds after close: available=%d locked=%d, want 0/0", proc.Available, proc.Locked)
+	}
+
+	// User must be fully restored: all 100 returned.
+	u, _ := db.ReadUser(ctx, user.ID)
+	if u.Available != 1000 {
+		t.Errorf("user.available=%d, want 1000 (full restoration)", u.Available)
+	}
+	if u.Locked != 0 {
+		t.Errorf("user.locked=%d, want 0", u.Locked)
+	}
+}
+
+// TestEndProcessDoesNotDoubleCountCompletedStep verifies that a step which was
+// successfully completed before EndProcess is called is left as 'done' and its
+// funds are not double-counted in the refund.
+func TestEndProcessDoesNotDoubleCountCompletedStep(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@ep-done", 1000)
+	_ = db.CreateUser(ctx, user)
+	caller := newUser("@ep-done-caller", 0)
+	_ = db.CreateUser(ctx, caller)
+
+	p := newProcess(user.ID)
+	if err := db.CreateProcess(ctx, p, user.ID, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRootCall(ctx, p.ID, root, 50); err != nil {
+		t.Fatal(err)
+	}
+
+	act := newAction(user.ID, "ep-done-act", 50, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+
+	ptID := root.ID
+	step := &kernel.Step{
+		ID:                   uuid.New().String(),
+		ProcessID:            p.ID,
+		ParentTraceID:        &ptID,
+		RequiredCallerUserID: caller.ID,
+		NextActionID:         act.ID,
+		Price:                50,
+		Status:               kernel.StepWaiting,
+		CreatedAt:            time.Now().UTC(),
+	}
+	if err := db.CreateStep(ctx, step); err != nil {
+		t.Fatal(err)
+	}
+
+	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginStepCall(ctx, step.ID, ct); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate successful call completion: step is done, tx_id is set, trace is consumed.
+	fakeTxID := uuid.New().String()
+	_, err := db.db.ExecContext(ctx,
+		`UPDATE steps SET status='done', tx_id=? WHERE id=?`, fakeTxID, step.ID)
+	if err != nil {
+		t.Fatalf("mark step done: %v", err)
+	}
+	_, err = db.db.ExecContext(ctx,
+		`UPDATE traces SET available=0 WHERE id=?`, ct.ID)
+	if err != nil {
+		t.Fatalf("drain completion trace: %v", err)
+	}
+
+	if err := db.EndProcess(ctx, p.ID); err != nil {
+		t.Fatalf("EndProcess: %v", err)
+	}
+
+	// Step must still be 'done', not re-cancelled by Fix B.
+	s, _ := db.ReadStep(ctx, step.ID)
+	if s.Status != kernel.StepDone {
+		t.Errorf("step.status=%s, want done (Fix B must not re-cancel completed steps)", s.Status)
+	}
+
+	// No negative balances — funds must not be double-counted.
+	u, _ := db.ReadUser(ctx, user.ID)
+	if u.Available < 0 {
+		t.Errorf("user.available=%d, must not go negative (double-counted refund)", u.Available)
+	}
+	if u.Locked < 0 {
+		t.Errorf("user.locked=%d, must not go negative", u.Locked)
+	}
+}
+
 // ---- Stats ----
 
 func TestStats(t *testing.T) {
