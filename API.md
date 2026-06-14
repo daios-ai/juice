@@ -88,7 +88,7 @@ Log lines, progress messages, and error text go to stderr. The only content writ
 | Operation | HTTP | CLI |
 |-----------|------|-----|
 | Password login | `POST /v1/auth/token` `{handle, password}` → `{token}` | `juice auth login --handle [--password]` |
-| PKCE authorize | `POST /v1/auth/authorize` `{handle, password, code_challenge, [redirect_uri]}` → `{redirect}` | `juice auth login --handle --pkce --server <url>` |
+| PKCE authorize | `POST /v1/auth/authorize` `{handle, password, code_challenge, [redirect_uri]}` → `302` if `redirect_uri` provided, else `200 {"redirect":"?code=CODE"}` | `juice auth login --handle --pkce --server <url>` |
 | PKCE token exchange | `POST /v1/auth/token` `{grant_type:"authorization_code", code, code_verifier, [redirect_uri]}` → `{access_token, refresh_token}` | (handled internally by `--pkce` login) |
 | Refresh token | `POST /v1/auth/refresh` `{refresh_token}` → `{access_token, refresh_token}` | `juice auth refresh` |
 | Logout | `POST /v1/auth/logout` `{refresh_token}` → 204 | `juice auth logout` |

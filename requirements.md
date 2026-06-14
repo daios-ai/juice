@@ -699,6 +699,8 @@ Endpoint rules:
 | `GET /v1/steps/{id}`                             | `CanReadStep`; returns step fields                                                                              |
 | `POST /v1/steps/{id}/complete`                   | `CanReadStep`; `args` required (`{}` valid); absent gives `ErrInvalidInput`; returns `result`, `tx_id`, `trace_id`, `step_id` |
 | `POST /v1/run`                                   | requires `args`; `{}` valid; absent gives `ErrInvalidInput`; action is `@owner/name`                            |
+| `POST /v1/auth/authorize`                        | unauthenticated; `{handle, password, code_challenge, [redirect_uri]}`; if `redirect_uri` provided → `302` redirect; if omitted → `200 {"redirect": "?code=CODE"}` for programmatic clients |
+| `POST /v1/auth/token`                            | unauthenticated; exchanges auth code + `code_verifier` for `access_token` and `refresh_token`                   |
 | `POST /v1/auth/logout`                           | refresh token body; missing/revoked gives `ErrUnauthenticated`                                                  |
 | `GET /v1/transactions`                           | transactions visible to the authenticated user under `CanReadTransaction`                                       |
 | `GET /v1/transactions/{id}`                      | full detail to parties; `ErrNotFound` to non-parties                                                            |
