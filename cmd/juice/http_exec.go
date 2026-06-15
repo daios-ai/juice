@@ -140,7 +140,7 @@ func validateResolvedIP(ipStr string) error {
 		return fmt.Errorf("invalid resolved IP %q", ipStr)
 	}
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-		return kernel.ErrInvalidInput.Wrap("resolved address is private or loopback")
+		return kernel.ErrInvalidInput.Wrap("resolved address is private or loopback — for local/dev use, set allow_local_peer_urls or allow_local_sources in juice.json")
 	}
 	return nil
 }

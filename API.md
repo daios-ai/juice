@@ -36,7 +36,7 @@ Auth configs (`Action.source` upstream credentials) are write-only: accepted on 
 ### CLI
 
 **C1 — All arguments use `--flag` style.**  
-No positional arguments anywhere. `remote import --remote <handle> --action @handle/name`.
+No positional arguments anywhere.
 
 **C2 — `--action` always carries `@owner/name`; `--id` always carries a UUID.**  
 `--action` is never a UUID. `--id` is never a name. Operations that manage a resource the caller owns use `--id`. Operations that reference a callable action use `--action @owner/name`.
@@ -116,7 +116,7 @@ Log lines, progress messages, and error text go to stderr. The only content writ
 | Delete action | `DELETE /v1/actions/{id}` → 204 | `juice action delete --id` |
 | Import OpenAPI | `POST /v1/actions/import` `{spec_url}` → import result | `juice action import --openapi <url>` |
 | Unimport OpenAPI | `POST /v1/actions/unimport` `{spec_url[, name]}` → action[] | `juice action unimport --openapi <url> [--name]` |
-| Get manifest | `GET /v1/actions/{id}/manifest` → signed manifest; served to friends in good standing per the exposure lever | — (used internally by `remote import`) |
+| Get manifest | `GET /v1/actions/{id}/manifest` → signed manifest; served to friends in good standing per the exposure lever | — (used internally by `peer friend`) |
 | Get stats | `GET /v1/stats/{action_id}` → stats | `juice action stats --id` |
 | List ratings | `GET /v1/actions/{id}/ratings` → rating[] | — |
 
@@ -177,15 +177,6 @@ Native actions registered at bootstrap, owned by `@sys`, public, runnable like a
 | `@sys/sink` | 0 | Universal no-op step target |
 | `@sys/message` | 0 | Message a user by creating a step they acknowledge |
 
-### Remote Actions
-
-| Operation | HTTP | CLI |
-|-----------|------|-----|
-| Import remote action | — | `juice remote import --remote <handle> --action @handle/name` |
-| Unimport remote action | — | `juice remote unimport --remote <handle> --action @handle/name` |
-
-Import fetches and verifies the signed manifest from a friend and creates the local proxy action, priced `manifest.price + maxduty`; local stats start at defaults. Unimport deactivates and preserves history.
-
 ### Federation (HTTP-only protocol surface)
 
 | Operation | HTTP |
@@ -203,14 +194,14 @@ Import fetches and verifies the signed manifest from a friend and creates the lo
 | Unsuspend user | `juice admin user unsuspend --id` |
 | Deposit credits | `juice admin user deposit --id\|--handle --amount [--reason]` |
 | Withdraw credits | `juice admin user withdraw --id\|--handle --amount [--reason]` |
-| Friend a kernel | `juice admin peer friend --url\|--handle\|--key` |
-| Unfriend a kernel | `juice admin peer unfriend --handle` |
-| List peers | `juice admin peer list [--gossip]` |
-| Gossip a kernel | `juice admin peer gossip --url\|--handle` |
+| Friend a kernel | `juice peer friend --url` |
+| Unfriend a kernel | `juice peer unfriend --handle` |
+| List peers | `juice peer list` |
+| Inspect a kernel | `juice peer inspect --url` |
 | List all actions | `juice admin action list [--limit --offset]` |
 | Disable action | `juice admin action disable --id` |
 | List all processes | `juice admin process list [--limit --offset]` |
 | List all transactions | `juice admin tx list [--limit --offset]` |
 | List all steps | `juice admin step list [--limit --offset]` |
 
-`withdraw` requires `target.available ≥ amount`; it redeems credits and obliges the out-of-band payout. `peer friend` on a denied key clears the denial and restarts the handshake. `unfriend` deny-lists the key, deactivates the peer's proxies, cancels steps addressed to it (parked prices refunded), and preserves balance and history.
+`withdraw` requires `target.available ≥ amount`; it redeems credits and obliges the out-of-band payout. `peer friend --url` on a denied key clears the denial and restarts the handshake. `peer unfriend` deny-lists the key, deactivates the peer's proxies, cancels steps addressed to it (parked prices refunded), and preserves balance and history.

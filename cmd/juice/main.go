@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -218,10 +219,17 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, error) {
 	return k, db, logger, nil
 }
 
-func tokenPath() string {
+// tokenDir returns a directory namespaced by the canonical DB path so that
+// tokens from different kernels never collide, even in the same HOME.
+func tokenDir() string {
 	home, _ := os.UserHomeDir()
-	return home + "/.juice/token"
+	abs, _ := filepath.Abs(flagDB)
+	h := sha256.Sum256([]byte(abs))
+	return filepath.Join(home, ".juice", "tokens", fmt.Sprintf("%x", h[:6]))
 }
+
+func tokenPath() string        { return filepath.Join(tokenDir(), "token") }
+func refreshTokenPath() string { return filepath.Join(tokenDir(), "refresh_token") }
 
 func loadToken() (string, error) {
 	data, err := os.ReadFile(tokenPath())
@@ -238,13 +246,8 @@ func saveFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
 }
 
-func saveToken(tok string) error        { return saveFile(tokenPath(), tok) }
-func removeToken() error                { return os.Remove(tokenPath()) }
-
-func refreshTokenPath() string {
-	home, _ := os.UserHomeDir()
-	return home + "/.juice/refresh_token"
-}
+func saveToken(tok string) error { return saveFile(tokenPath(), tok) }
+func removeToken() error         { return os.Remove(tokenPath()) }
 
 func loadRefreshToken() (string, error) {
 	data, err := os.ReadFile(refreshTokenPath())

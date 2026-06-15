@@ -2,9 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
@@ -291,5 +299,125 @@ func TestAdminListAllActions(t *testing.T) {
 	}
 	if len(actions) != 3 {
 		t.Errorf("expected 3 actions, got %d", len(actions))
+	}
+}
+
+// TestBulkImportPeerActions verifies that bulkImportPeerActions fetches all
+// actions from the mock peer, imports them, enables them, and makes them public.
+func TestBulkImportPeerActions(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+
+	const actionID = "bulk-action-id"
+	m := kernel.ActionManifest{
+		ActionID:     actionID,
+		OwnerHandle:  "@bulk-peer",
+		Name:         "hello",
+		Description:  "says hello",
+		Kind:         kernel.KindHTTP,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-bulk",
+		Stats:        &kernel.Stats{},
+		UpdatedAt:    time.Now(),
+	}
+	sig, err := kernel.SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/manifest") {
+			json.NewEncoder(w).Encode(m)
+		} else {
+			json.NewEncoder(w).Encode([]map[string]string{{"id": actionID, "name": "hello"}})
+		}
+	}))
+	defer remote.Close()
+
+	ctx := t.Context()
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerUser, err := k.AddPeer(ctx, sys.ID, "@bulk-peer", pubB64, remote.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	imported, skipped := bulkImportPeerActions(ctx, k, sys.ID, peerUser, true)
+	if imported != 1 {
+		t.Errorf("imported: got %d, want 1", imported)
+	}
+	if skipped != 0 {
+		t.Errorf("skipped: got %d, want 0", skipped)
+	}
+
+	actions, err := k.ListAllActions(ctx, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *kernel.Action
+	for _, a := range actions {
+		if a.Name == "hello" {
+			found = a
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("imported action 'hello' not found in ListAllActions")
+	}
+	if !found.Active {
+		t.Error("imported action should be enabled (active=true) after bulkImportPeerActions")
+	}
+	if !found.Public {
+		t.Error("imported action should be public after bulkImportPeerActions")
+	}
+}
+
+// TestBulkImportPeerActionsSkipsInvalidManifest verifies that when the manifest
+// endpoint returns an error, the action is counted as skipped, not imported.
+func TestBulkImportPeerActionsSkipsInvalidManifest(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/manifest") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode([]map[string]string{{"id": "skip-id", "name": "broken"}})
+	}))
+	defer remote.Close()
+
+	ctx := t.Context()
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerUser, err := k.AddPeer(ctx, sys.ID, "@skip-peer", pubB64, remote.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	imported, skipped := bulkImportPeerActions(ctx, k, sys.ID, peerUser, true)
+	if imported != 0 {
+		t.Errorf("imported: got %d, want 0", imported)
+	}
+	if skipped != 1 {
+		t.Errorf("skipped: got %d, want 1", skipped)
 	}
 }

@@ -68,7 +68,8 @@ type ServerConfig struct {
 	LogLevel          string       `json:"log_level"`
 	LogFile           string       `json:"log_file"`
 	LogFormat         string       `json:"log_format"`
-	AllowLocalSources bool         `json:"allow_local_sources"`
+	AllowLocalSources  bool         `json:"allow_local_sources"`
+	AllowLocalPeerURLs bool         `json:"allow_local_peer_urls"`
 	ServerURL         string       `json:"server_url"`
 	PeerAutoAccept    bool         `json:"peer_auto_accept"`
 	PeerHandle        string       `json:"peer_handle"`
@@ -96,7 +97,8 @@ func DefaultServerConfig() ServerConfig {
 		LogLevel:          "info",
 		LogFile:           "",
 		LogFormat:         "text",
-		AllowLocalSources: false,
+		AllowLocalSources:  false,
+		AllowLocalPeerURLs: false,
 		ServerURL:         "",
 		PeerAutoAccept:    true,
 	}

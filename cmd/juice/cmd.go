@@ -4,12 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
-	"strings"
-	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
@@ -213,7 +208,7 @@ func actionCreateCmd() *cobra.Command {
 }
 
 func actionUpdateCmd() *cobra.Command {
-	var actionID, description, source string
+	var actionID, actionRef, description, source string
 	var price int64
 	var public bool
 	var inputSchemaStr, outputSchemaStr string
@@ -222,7 +217,11 @@ func actionUpdateCmd() *cobra.Command {
 		Short: "Update an action's metadata",
 		RunE: func(c *cobra.Command, _ []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				req := kernel.UpdateActionRequest{ID: actionID}
+				id, err := resolveActionID(k, context.Background(), actionID, actionRef)
+				if err != nil {
+					return err
+				}
+				req := kernel.UpdateActionRequest{ID: id}
 				if c.Flags().Changed("description") {
 					req.Description = &description
 				}
@@ -261,54 +260,62 @@ func actionUpdateCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
+	cmd.Flags().StringVar(&actionID, "id", "", "Action ID")
+	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference (@owner/name)")
 	cmd.Flags().StringVar(&description, "description", "", "New description")
 	cmd.Flags().StringVar(&source, "source", "", "New source URL or file path")
 	cmd.Flags().Int64Var(&price, "price", 0, "New price in credits")
 	cmd.Flags().BoolVar(&public, "public", false, "Make action public (true) or private (false)")
 	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "New JSON Schema for inputs")
 	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "New JSON Schema for outputs")
-	_ = cmd.MarkFlagRequired("id")
 	return cmd
 }
 
 func actionEnableCmd() *cobra.Command {
-	var actionID string
+	var actionID, actionRef string
 	cmd := &cobra.Command{
 		Use:   "enable",
 		Short: "Activate an action",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				if err := enableAction(k, context.Background(), callerID, actionID); err != nil {
+				id, err := resolveActionID(k, context.Background(), actionID, actionRef)
+				if err != nil {
 					return err
 				}
-				fmt.Printf("Action %s enabled.\n", actionID)
+				if err := enableAction(k, context.Background(), callerID, id); err != nil {
+					return err
+				}
+				fmt.Printf("Action %s enabled.\n", id)
 				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
-	_ = cmd.MarkFlagRequired("id")
+	cmd.Flags().StringVar(&actionID, "id", "", "Action ID")
+	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference (@owner/name)")
 	return cmd
 }
 
 func actionDisableCmd() *cobra.Command {
-	var actionID string
+	var actionID, actionRef string
 	cmd := &cobra.Command{
 		Use:   "disable",
 		Short: "Deactivate an action",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				if err := disableAction(k, context.Background(), callerID, actionID); err != nil {
+				id, err := resolveActionID(k, context.Background(), actionID, actionRef)
+				if err != nil {
 					return err
 				}
-				fmt.Printf("Action %s disabled.\n", actionID)
+				if err := disableAction(k, context.Background(), callerID, id); err != nil {
+					return err
+				}
+				fmt.Printf("Action %s disabled.\n", id)
 				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
-	_ = cmd.MarkFlagRequired("id")
+	cmd.Flags().StringVar(&actionID, "id", "", "Action ID")
+	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference (@owner/name)")
 	return cmd
 }
 
@@ -360,13 +367,17 @@ func actionListCmd() *cobra.Command {
 }
 
 func actionShowCmd() *cobra.Command {
-	var actionID string
+	var actionID, actionRef string
 	cmd := &cobra.Command{
 		Use:   "show",
 		Short: "Show action details",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				a, err := getAction(k, context.Background(), callerID, actionID)
+				id, err := resolveActionID(k, context.Background(), actionID, actionRef)
+				if err != nil {
+					return err
+				}
+				a, err := getAction(k, context.Background(), callerID, id)
 				if err != nil {
 					return err
 				}
@@ -387,28 +398,32 @@ func actionShowCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
-	_ = cmd.MarkFlagRequired("id")
+	cmd.Flags().StringVar(&actionID, "id", "", "Action ID")
+	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference (@owner/name)")
 	return cmd
 }
 
 func actionDeleteCmd() *cobra.Command {
-	var actionID string
+	var actionID, actionRef string
 	cmd := &cobra.Command{
 		Use:   "delete",
 		Short: "Delete an action",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				if err := deleteAction(k, context.Background(), callerID, actionID); err != nil {
+				id, err := resolveActionID(k, context.Background(), actionID, actionRef)
+				if err != nil {
 					return err
 				}
-				fmt.Printf("Action %s deleted.\n", actionID)
+				if err := deleteAction(k, context.Background(), callerID, id); err != nil {
+					return err
+				}
+				fmt.Printf("Action %s deleted.\n", id)
 				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
-	_ = cmd.MarkFlagRequired("id")
+	cmd.Flags().StringVar(&actionID, "id", "", "Action ID")
+	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference (@owner/name)")
 	return cmd
 }
 
@@ -472,13 +487,17 @@ func actionUnimportCmd() *cobra.Command {
 }
 
 func actionStatsCmd() *cobra.Command {
-	var actionID string
+	var actionID, actionRef string
 	cmd := &cobra.Command{
 		Use:   "stats",
 		Short: "Show statistics for an action",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withKernel(func(k *kernel.Kernel) error {
-				stats, err := actionStats(k, context.Background(), actionID)
+				id, err := resolveActionID(k, context.Background(), actionID, actionRef)
+				if err != nil {
+					return err
+				}
+				stats, err := actionStats(k, context.Background(), id)
 				if err != nil {
 					return err
 				}
@@ -497,8 +516,8 @@ func actionStatsCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID (required)")
-	_ = cmd.MarkFlagRequired("id")
+	cmd.Flags().StringVar(&actionID, "id", "", "Action ID")
+	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference (@owner/name)")
 	return cmd
 }
 
@@ -910,146 +929,32 @@ func runCmd() *cobra.Command {
 	return cmd
 }
 
-// ---- remote ----
+// ---- action ID resolution ----
 
-func init() {
-	remoteCmd := &cobra.Command{
-		Use:   "remote",
-		Short: "Manage remote kernel actions",
+// resolveActionID returns the action UUID for either a direct --id or a --action @owner/name reference.
+// Exactly one of id or ref must be non-empty.
+func resolveActionID(k *kernel.Kernel, ctx context.Context, id, ref string) (string, error) {
+	if id != "" && ref != "" {
+		return "", fmt.Errorf("specify --id or --action, not both")
 	}
-
-	var importRemote, importAction string
-	remoteImportCmd := &cobra.Command{
-		Use:   "import",
-		Short: "Import an action from a remote kernel as a local proxy action (idempotent)",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return runRemoteImport(importRemote, importAction)
-		},
+	if id != "" {
+		return id, nil
 	}
-	remoteImportCmd.Flags().StringVar(&importRemote, "remote", "", "Remote kernel handle (required)")
-	remoteImportCmd.Flags().StringVar(&importAction, "action", "", "Action name on the remote kernel (required)")
-	_ = remoteImportCmd.MarkFlagRequired("remote")
-	_ = remoteImportCmd.MarkFlagRequired("action")
-
-	var unimportRemote, unimportAction string
-	remoteUnimportCmd := &cobra.Command{
-		Use:   "unimport",
-		Short: "Deactivate a local proxy action without deleting history",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return runRemoteUnimport(unimportRemote, unimportAction)
-		},
+	if ref != "" {
+		ownerHandle, name, err := kernel.ParseActionRef(ref)
+		if err != nil {
+			return "", err
+		}
+		owner, err := k.ReadUserByHandle(ctx, ownerHandle)
+		if err != nil || owner == nil {
+			return "", fmt.Errorf("action owner %q not found", ownerHandle)
+		}
+		action, err := k.ReadActionByOwnerName(ctx, owner.ID, name)
+		if err != nil || action == nil {
+			return "", fmt.Errorf("action %q not found", ref)
+		}
+		return action.ID, nil
 	}
-	remoteUnimportCmd.Flags().StringVar(&unimportRemote, "remote", "", "Remote kernel handle (required)")
-	remoteUnimportCmd.Flags().StringVar(&unimportAction, "action", "", "Action name to unimport (required)")
-	_ = remoteUnimportCmd.MarkFlagRequired("remote")
-	_ = remoteUnimportCmd.MarkFlagRequired("action")
-
-	remoteCmd.AddCommand(remoteImportCmd, remoteUnimportCmd)
-	rootCmd.AddCommand(remoteCmd)
+	return "", fmt.Errorf("--id or --action is required")
 }
 
-func runRemoteImport(remoteHandle, actionName string) error {
-	ctx := context.Background()
-	return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
-		remoteUser, err := k.ReadUserByHandle(ctx, remoteHandle)
-		if err != nil {
-			return fmt.Errorf("remote kernel %q not found; run 'juice admin peer friend' first", remoteHandle)
-		}
-		if remoteUser.RemoteBaseURL == "" {
-			return fmt.Errorf("%q is not a remote kernel", remoteHandle)
-		}
-
-		base := strings.TrimRight(remoteUser.RemoteBaseURL, "/")
-
-		listReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
-			fmt.Sprintf("%s/v1/actions?name=%s", base, url.QueryEscape(actionName)), nil)
-		if err != nil {
-			return fmt.Errorf("invalid remote URL: %w", err)
-		}
-		resp, err := newHTTPClient(30*time.Second, false).Do(listReq)
-		if err != nil {
-			return fmt.Errorf("fetch action list: %w", err)
-		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("remote kernel returned %d: %s", resp.StatusCode, body)
-		}
-		var actions []struct{ ID, Name string }
-		if err := json.Unmarshal(body, &actions); err != nil {
-			return fmt.Errorf("parse action list: %w", err)
-		}
-		actionID := ""
-		for _, a := range actions {
-			if a.Name == actionName {
-				actionID = a.ID
-				break
-			}
-		}
-		if actionID == "" {
-			result, err := k.ReconcileRemoteAction(ctx, subjectID, remoteHandle, actionName, nil)
-			if err != nil {
-				return fmt.Errorf("action %q not found on remote kernel %q: %w", actionName, remoteHandle, err)
-			}
-			_ = result
-			fmt.Printf("Remote action %q no longer available; deactivated local proxy\n", actionName)
-			return nil
-		}
-
-		manifestReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
-			fmt.Sprintf("%s/v1/actions/%s/manifest", base, actionID), nil)
-		if err != nil {
-			return fmt.Errorf("invalid manifest URL: %w", err)
-		}
-		resp2, err := newHTTPClient(30*time.Second, false).Do(manifestReq)
-		if err != nil {
-			return fmt.Errorf("fetch manifest: %w", err)
-		}
-		defer resp2.Body.Close()
-		body2, _ := io.ReadAll(resp2.Body)
-
-		if resp2.StatusCode != http.StatusOK {
-			result, reconcileErr := k.ReconcileRemoteAction(ctx, subjectID, remoteHandle, actionName, nil)
-			if reconcileErr != nil {
-				return fmt.Errorf("manifest unavailable (status %d) and could not deactivate local proxy: %w", resp2.StatusCode, reconcileErr)
-			}
-			_ = result
-			fmt.Printf("Remote action %q manifest unavailable (status %d); deactivated local proxy\n", actionName, resp2.StatusCode)
-			return nil
-		}
-
-		var m kernel.ActionManifest
-		if err := json.Unmarshal(body2, &m); err != nil {
-			return fmt.Errorf("parse manifest: %w", err)
-		}
-		if err := kernel.VerifyManifestSignature(remoteUser.PublicKey, &m); err != nil {
-			return fmt.Errorf("manifest signature invalid: %w", err)
-		}
-
-		result, err := k.ReconcileRemoteAction(ctx, subjectID, remoteHandle, actionName, &m)
-		if err != nil {
-			return fmt.Errorf("import action: %w", err)
-		}
-		switch {
-		case len(result.Created) > 0:
-			fmt.Printf("Imported action %s (id=%s)\n", result.Created[0].Name, result.Created[0].ID)
-		case len(result.Updated) > 0:
-			fmt.Printf("Updated action %s (id=%s, deactivated for review)\n", result.Updated[0].Name, result.Updated[0].ID)
-		case len(result.Unchanged) > 0:
-			fmt.Printf("Action %s unchanged (id=%s)\n", result.Unchanged[0].Name, result.Unchanged[0].ID)
-		}
-		return nil
-	})
-}
-
-func runRemoteUnimport(remoteHandle, actionName string) error {
-	ctx := context.Background()
-	return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
-		a, err := k.UnimportRemoteAction(ctx, subjectID, remoteHandle, actionName)
-		if err != nil {
-			return fmt.Errorf("unimport action: %w", err)
-		}
-		fmt.Printf("Deactivated action %s (id=%s)\n", a.Name, a.ID)
-		return nil
-	})
-}

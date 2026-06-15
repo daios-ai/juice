@@ -387,8 +387,13 @@ main() {
     flow_openapi_unimport
     flow_federation_import_execute
     flow_federation_changed_reimport
-    flow_federation_unimport
+    flow_federation_unfriend
     flow_fed_verify_receipt
+    flow_fed_all_receipt_checks
+    flow_fed_denial_unfriended
+    flow_fed_denial_underfunded
+    flow_fed_import_duty
+    flow_fed_failed_action_refund
     flow_transaction_access
     flow_admin_supervision
     flow_make

@@ -1219,13 +1219,8 @@ func TestRemoteImport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	tok, _ := k.Login(t.Context(), "@sys", "sys-pass")
-	_ = saveToken(tok)
-
-	if err := runRemoteImport("@import-remote", "greet"); err != nil {
-		t.Fatalf("runRemoteImport: %v", err)
+	if _, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "@import-remote", "greet", &m); err != nil {
+		t.Fatalf("ReconcileRemoteAction: %v", err)
 	}
 
 	actions, err := k.ListAllActions(t.Context(), 100, 0)
@@ -1294,17 +1289,19 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	tok, _ := k.Login(t.Context(), "@sys", "sys-pass")
-	_ = saveToken(tok)
-
-	if err := runRemoteImport("@disappear-remote", "bye"); err != nil {
+	r, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "@disappear-remote", "bye", &m)
+	if err != nil {
 		t.Fatalf("initial import: %v", err)
 	}
+	if len(r.Created) > 0 {
+		// Enable the proxy so the deactivation assertion below is meaningful.
+		if err := k.SetActive(t.Context(), sys.ID, r.Created[0].ID, true); err != nil {
+			t.Fatalf("SetActive: %v", err)
+		}
+	}
 
-	serveAction = false
-	if err := runRemoteImport("@disappear-remote", "bye"); err != nil {
+	serveAction = false // action gone from remote; passing nil manifest deactivates the proxy
+	if _, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "@disappear-remote", "bye", nil); err != nil {
 		t.Fatalf("reimport after disappearance: %v", err)
 	}
 
@@ -1359,12 +1356,7 @@ func TestRemoteUnimport(t *testing.T) {
 		t.Fatalf("ImportRemoteAction: %v", err)
 	}
 
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	tok, _ := k.Login(t.Context(), "@sys", "sys-pass")
-	_ = saveToken(tok)
-
-	if err := runRemoteUnimport("@unimport-peer", "greet"); err != nil {
-		t.Fatalf("runRemoteUnimport: %v", err)
+	if _, err := k.UnimportRemoteAction(t.Context(), sys.ID, "@unimport-peer", "greet"); err != nil {
+		t.Fatalf("UnimportRemoteAction: %v", err)
 	}
 }

@@ -74,6 +74,14 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 	}
 	k.SetSigningKey(ed25519.PrivateKey(privKeyBytes), su.ID)
 
+	// Persist peer identity so GetGossip can serve them from the DB.
+	if globalCfg.PeerHandle != "" {
+		_ = k.SetConfig(ctx, "kernel_handle", globalCfg.PeerHandle)
+	}
+	if globalCfg.ServerURL != "" {
+		_ = k.SetConfig(ctx, "kernel_base_url", globalCfg.ServerURL)
+	}
+
 	// Recover interrupted calls and re-park crashed step completions (after signing key is set).
 	if err := k.Recover(ctx); err != nil {
 		return fmt.Errorf("recover: %w", err)

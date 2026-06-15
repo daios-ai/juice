@@ -596,6 +596,23 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 	}); err != nil {
 		return err
 	}
+	// Store each transacted friend as a discovered kernel, introduced by the gossip source.
+	for _, f := range gossip.Friends {
+		if f.PublicKey == "" {
+			continue
+		}
+		friendStatsJSON, _ := json.Marshal(f.Actions)
+		_ = k.store.CreateOrUpdateDiscoveredKernel(ctx, &DiscoveredKernel{
+			PublicKey:    f.PublicKey,
+			IntroducedBy: gossip.PublicKey,
+			Handle:       f.Handle,
+			BaseURL:      f.BaseURL,
+			StatsJSON:    json.RawMessage(friendStatsJSON),
+			FirstSeen:    now,
+			UpdatedAt:    now,
+		})
+	}
+
 	// For each gossip action, find the matching local proxy (by remote_action_id) and
 	// write gossip_uses / gossip_rating stat tags so @sys/lookup can use them as a prior.
 	remoteUser, err := k.store.ReadUserByPublicKey(ctx, gossip.PublicKey)

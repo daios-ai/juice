@@ -48,40 +48,33 @@ _fed_setup() {
     j "$db_r" "$home_r" action enable --id "$action_id_r" >/dev/null 2>&1
     j "$db_r" "$home_r" action update --id "$action_id_r" --public >/dev/null 2>&1
 
-    # Start both serves (each serve reads its own subdir's juice.json with server_url set)
-    start_serve "$db_l" "127.0.0.1:$port_l" syspass "$home_l" \
-        || { echo "_fed_setup: start_serve local ($port_l) failed" >&2; return 1; }
-    echo "$SERVE_PID" > "$dir/pid_l"
+    # Start R's serve first. L's serve starts AFTER peer friend to avoid a race:
+    # R's async sendReciprocal goroutine would otherwise hit L's serve and call
+    # bulkImportPeerActions concurrently with the CLI, causing SQLite contention.
     start_serve "$db_r" "127.0.0.1:$port_r" syspass "$home_r" \
         || { echo "_fed_setup: start_serve remote ($port_r) failed" >&2; return 1; }
     echo "$SERVE_PID" > "$dir/pid_r"
 
-    # One admin peer friend call is sufficient: L registers R locally AND R registers L in
-    # its own postPeer handler (synchronous, completes before the HTTP 200 returns).
-    # The async sendReciprocal chain adds only redundant re-registrations; we don't need it.
-    j "$db_l" "$home_l" admin peer friend --url "http://127.0.0.1:$port_r" >/dev/null 2>&1 \
+    # peer friend: R is up, L serve is not yet started. R creates @kernel-l, fires
+    # sendReciprocal to L (which fails silently — L isn't listening). CLI's own
+    # bulkImportPeerActions runs without competition and imports greet.
+    j "$db_l" "$home_l" peer friend --url "http://127.0.0.1:$port_r" >/dev/null 2>&1 \
         || { echo "_fed_setup: peer friend L->R failed" >&2; return 1; }
 
     local remote_handle="@kernel-r"
     echo "$remote_handle" > "$dir/remote_handle"
 
-    # Import /greet from REMOTE into LOCAL
-    # Capture stdout only (stderr has log lines with action_id= that break the sed UUID parse)
-    local ri_out
-    ri_out=$(j "$db_l" "$home_l" remote import --remote "$remote_handle" --action greet 2>/dev/null)
-    if ! echo "$ri_out" | grep -qi "imported\|unchanged"; then
-        j "$db_l" "$home_l" remote import --remote "$remote_handle" --action greet 2>&1 | head -5 >&2
-        echo "_fed_setup: remote import failed" >&2; return 1
-    fi
-
-    # Extract proxy action ID from import output (format: "Imported action greet (id=<uuid>)")
+    # Resolve proxy action ID by name reference.
     local proxy_id
-    proxy_id=$(echo "$ri_out" | sed 's/.*id=\([^,)]*\).*/\1/')
-    # Enable proxy and grant-all (superuser can admin remote proxy)
-    j "$db_l" "$home_l" action enable --id "$proxy_id" >/dev/null 2>&1
-    j "$db_l" "$home_l" action update --id "$proxy_id" --public >/dev/null 2>&1
-
+    proxy_id=$(jj "$db_l" "$home_l" action show --action "@kernel-r/greet" 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)
+    [ -n "$proxy_id" ] || { echo "_fed_setup: proxy action not found after peer friend" >&2; return 1; }
     echo "$proxy_id" > "$dir/proxy_id"
+
+    # Now start L's serve (peer already established, no more race).
+    start_serve "$db_l" "127.0.0.1:$port_l" syspass "$home_l" \
+        || { echo "_fed_setup: start_serve local ($port_l) failed" >&2; return 1; }
+    echo "$SERVE_PID" > "$dir/pid_l"
 }
 
 _fed_teardown() {
@@ -178,59 +171,57 @@ flow_federation_changed_reimport() {
     db_l=$(cat "$dir/db_l"); db_r=$(cat "$dir/db_r")
     home_l=$(cat "$dir/home_l"); home_r=$(cat "$dir/home_r")
     proxy_id=$(cat "$dir/proxy_id" 2>/dev/null)
-
     local remote_handle
     remote_handle=$(cat "$dir/remote_handle")
 
-    # Make one call so there's a tx in history
-    local tx_id
-    tx_id=$(strfield "$(jj "$db_l" "$home_l" run \
-        --action "$remote_handle/greet" --args '{}')" "tx_id")
+    # Add a NEW action to R after the initial peer friend.  Re-friending must pick
+    # it up (incremental import).  The original greet proxy must remain active (unchanged).
+    local wave_id
+    wave_id=$(jj "$db_r" "$home_r" action create \
+        --name wave --kind http \
+        --source "http://127.0.0.1:$port_b" \
+        --description "wave endpoint" \
+        --price 0 | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)
+    [ -n "$wave_id" ] || { fail "fed_reimport.create_wave" "wave action_id empty"; return; }
+    j "$db_r" "$home_r" action enable --id "$wave_id" >/dev/null 2>&1
+    j "$db_r" "$home_r" action update --id "$wave_id" --public >/dev/null 2>&1
 
-    # Update action description on REMOTE (stop serve, update db, restart)
-    local pid_r
-    pid_r=$(cat "$dir/pid_r")
-    kill "$pid_r" 2>/dev/null; wait "$pid_r" 2>/dev/null
+    # Re-friend: L re-syncs with R; wave must appear on L.
+    j "$db_l" "$home_l" peer friend --url "http://127.0.0.1:$port_r" >/dev/null 2>&1 \
+        && ok "fed_reimport.refriend" \
+        || fail "fed_reimport.refriend" "peer friend re-sync failed"
 
-    # Update description on REMOTE via CLI
-    local remote_action_id
-    remote_action_id=$(cat "$dir/remote_action_id" 2>/dev/null)
-    j "$db_r" "$home_r" action update --id "$remote_action_id" --description "v2 greeting" >/dev/null 2>&1
+    # wave proxy now exists on L and is active.
+    local wave_proxy_show wave_proxy_active
+    wave_proxy_show=$(jj "$db_l" "$home_l" action show --action "@kernel-r/wave" 2>/dev/null)
+    wave_proxy_active=$(python3 -c "import sys,json; print(1 if json.loads(sys.argv[1])['active'] else 0)" "$wave_proxy_show" 2>/dev/null)
+    [ "$wave_proxy_active" = "1" ] \
+        && ok "fed_reimport.wave_proxy_created" \
+        || fail "fed_reimport.wave_proxy_created" "expected wave proxy active=1, got $wave_proxy_active"
 
-    # Restart REMOTE serve
-    start_serve "$db_r" "127.0.0.1:$port_r" syspass "$home_r"
-    echo "$SERVE_PID" > "$dir/pid_r"
+    # Original greet proxy still active (unchanged → left as-is by bulkImportPeerActions).
+    local greet_show greet_active
+    greet_show=$(jj "$db_l" "$home_l" action show --id "$proxy_id")
+    greet_active=$(python3 -c "import sys,json; print(1 if json.loads(sys.argv[1])['active'] else 0)" "$greet_show" 2>/dev/null)
+    [ "$greet_active" = "1" ] \
+        && ok "fed_reimport.greet_still_active" \
+        || fail "fed_reimport.greet_still_active" "expected greet proxy active=1, got $greet_active"
 
-    # Re-import
-    local reimport_out
-    reimport_out=$(j "$db_l" "$home_l" remote import --remote "$remote_handle" --action greet 2>&1)
-    echo "$reimport_out" | grep -qi "updated\|deactivated" \
-        && ok "fed_reimport.updated" \
-        || fail "fed_reimport.updated" "expected Updated, got: $reimport_out"
-
-    # Proxy should now be inactive
-    local proxy_show proxy_active
-    proxy_show=$(jj "$db_l" "$home_l" action show --id "$proxy_id")
-    proxy_active=$(python3 -c "import sys,json; print(1 if json.loads(sys.argv[1])['active'] else 0)" "$proxy_show" 2>/dev/null)
-    [ "$proxy_active" = "0" ] \
-        && ok "fed_reimport.proxy_deactivated" \
-        || fail "fed_reimport.proxy_deactivated" "expected active=0, got $proxy_active"
-
-    # Proxy ID preserved (id= is in reimport_out: "Updated action greet (id=<uuid>, ...)")
-    local new_proxy_id
-    new_proxy_id=$(echo "$reimport_out" | sed 's/.*id=\([^,)]*\).*/\1/')
-    [ "$new_proxy_id" = "$proxy_id" ] \
+    # Proxy ID for greet unchanged.
+    local current_proxy_id
+    current_proxy_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['id'])" "$greet_show" 2>/dev/null)
+    [ "$current_proxy_id" = "$proxy_id" ] \
         && ok "fed_reimport.id_preserved" \
-        || fail "fed_reimport.id_preserved" "expected $proxy_id, got $new_proxy_id"
+        || fail "fed_reimport.id_preserved" "expected $proxy_id, got $current_proxy_id"
 
-    # Prior tx still in history
-    local tx_check
-    tx_check=$(jj "$db_l" "$home_l" tx show --id "$tx_id" 2>/dev/null)
-    [ "$(strfield "$tx_check" "id")" = "$tx_id" ] \
-        && ok "fed_reimport.tx_history_intact" \
-        || fail "fed_reimport.tx_history_intact" "prior tx $tx_id missing from local db"
+    # Can call wave through the new proxy.
+    local wave_call_out
+    wave_call_out=$(jj "$db_l" "$home_l" run --action "$remote_handle/wave" --args '{}' 2>/dev/null)
+    [ -n "$(strfield "$wave_call_out" "tx_id")" ] \
+        && ok "fed_reimport.wave_callable" \
+        || fail "fed_reimport.wave_callable" "wave call failed: $wave_call_out"
 
-    # HTTP: proxy inactive visible via HTTP (local serve still running on port_l)
+    # HTTP: wave proxy active and accessible via REST.
     local tok_resp sys_tok
     tok_resp=$(curl -sf -X POST "http://127.0.0.1:$port_l/v1/auth/token" \
         -H "Content-Type: application/json" \
@@ -238,82 +229,78 @@ flow_federation_changed_reimport() {
     sys_tok=$(strfield "$tok_resp" "token")
     [ -n "$sys_tok" ] \
         && ok "fed_reimport.http_token" \
-        || fail "fed_reimport.http_token" "no sys token via HTTP: $tok_resp"
+        || fail "fed_reimport.http_token" "no sys token: $tok_resp"
 
-    local http_proxy_show
-    http_proxy_show=$(curl -sf -H "Authorization: Bearer $sys_tok" \
-        "http://127.0.0.1:$port_l/v1/actions/$proxy_id" 2>/dev/null)
-    [ "$(strfield "$http_proxy_show" "active")" = "False" ] \
-        && ok "fed_reimport.http_proxy_inactive" \
-        || fail "fed_reimport.http_proxy_inactive" "expected active=False via HTTP, got: $http_proxy_show"
-
-    # Prior tx accessible via HTTP too
-    local http_tx_show
-    http_tx_show=$(curl -sf -H "Authorization: Bearer $sys_tok" \
-        "http://127.0.0.1:$port_l/v1/transactions/$tx_id" 2>/dev/null)
-    [ "$(strfield "$http_tx_show" "id")" = "$tx_id" ] \
-        && ok "fed_reimport.http_tx_history_intact" \
-        || fail "fed_reimport.http_tx_history_intact" "prior tx not accessible via HTTP: $http_tx_show"
+    local wave_proxy_id
+    wave_proxy_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['id'])" "$wave_proxy_show" 2>/dev/null)
+    local http_wave_show
+    http_wave_show=$(curl -sf -H "Authorization: Bearer $sys_tok" \
+        "http://127.0.0.1:$port_l/v1/actions/$wave_proxy_id" 2>/dev/null)
+    [ "$(strfield "$http_wave_show" "active")" = "True" ] \
+        && ok "fed_reimport.http_wave_active" \
+        || fail "fed_reimport.http_wave_active" "expected active=True: $http_wave_show"
 }
 
-flow_federation_unimport() {
-    echo "=== FLOW federation_unimport ==="
+flow_federation_unfriend() {
+    echo "=== FLOW federation_unfriend ==="
     local dir port_l port_r port_b proxy_id
     dir=$(mktemp -d); trap "_fed_teardown '$dir'; rm -rf '$dir'" RETURN
     alloc_port; port_l=$_ALLOC_PORT;  alloc_port; port_r=$_ALLOC_PORT; alloc_port; port_b=$_ALLOC_PORT
 
     _fed_setup "$dir" "$port_l" "$port_r" "$port_b" \
-        || { fail "fed_unimport.setup" "setup failed"; return; }
+        || { fail "fed_unfriend.setup" "setup failed"; return; }
     local db_l db_r home_l home_r
     db_l=$(cat "$dir/db_l"); db_r=$(cat "$dir/db_r")
     home_l=$(cat "$dir/home_l"); home_r=$(cat "$dir/home_r")
     proxy_id=$(cat "$dir/proxy_id" 2>/dev/null)
 
-    local remote_handle
-    remote_handle=$(cat "$dir/remote_handle")
+    # L unfriends R: deactivates all proxy actions from R and deny-lists R's key.
+    local unfriend_out
+    unfriend_out=$(j "$db_l" "$home_l" peer unfriend --handle @kernel-r 2>&1)
+    echo "$unfriend_out" | grep -qi "unfriended\|denied\|ok" \
+        && ok "fed_unfriend.unfriended" \
+        || fail "fed_unfriend.unfriended" "unexpected output: $unfriend_out"
 
-    # Unimport
-    local unimport_out
-    unimport_out=$(j "$db_l" "$home_l" remote unimport --remote "$remote_handle" --action greet 2>&1)
-    echo "$unimport_out" | grep -qi "deactivated" \
-        && ok "fed_unimport.deactivated" \
-        || fail "fed_unimport.deactivated" "expected deactivated, got: $unimport_out"
-
-    # Proxy inactive on LOCAL
+    # Proxy must be inactive on L.
     local proxy_show proxy_active
     proxy_show=$(jj "$db_l" "$home_l" action show --id "$proxy_id")
     proxy_active=$(python3 -c "import sys,json; print(1 if json.loads(sys.argv[1])['active'] else 0)" "$proxy_show" 2>/dev/null)
     [ "$proxy_active" = "0" ] \
-        && ok "fed_unimport.proxy_inactive" \
-        || fail "fed_unimport.proxy_inactive" "expected active=0, got $proxy_active"
+        && ok "fed_unfriend.proxy_inactive" \
+        || fail "fed_unfriend.proxy_inactive" "expected active=0, got $proxy_active"
 
-    # Remote action still active
+    # R's action must still be active on R (L's unfriend only affects L).
     local remote_action_id remote_show remote_active
     remote_action_id=$(cat "$dir/remote_action_id" 2>/dev/null)
     remote_show=$(jj "$db_r" "$home_r" action show --id "$remote_action_id")
     remote_active=$(python3 -c "import sys,json; print(1 if json.loads(sys.argv[1])['active'] else 0)" "$remote_show" 2>/dev/null)
     [ "$remote_active" = "1" ] \
-        && ok "fed_unimport.remote_still_active" \
-        || fail "fed_unimport.remote_still_active" "expected remote active=1, got $remote_active"
+        && ok "fed_unfriend.remote_still_active" \
+        || fail "fed_unfriend.remote_still_active" "expected remote active=1, got $remote_active"
 
-    # HTTP: proxy inactive visible via HTTP (local serve still running on port_l)
+    # L's call through the proxy must now be rejected.
+    j "$db_l" "$home_l" run --action "@kernel-r/greet" --args '{}' >/dev/null 2>&1 \
+        && fail "fed_unfriend.call_rejected" "expected call to fail after unfriend" \
+        || ok "fed_unfriend.call_rejected"
+
+    # HTTP: proxy inactive on L.
     local tok_resp sys_tok
     tok_resp=$(curl -sf -X POST "http://127.0.0.1:$port_l/v1/auth/token" \
         -H "Content-Type: application/json" \
         -d '{"handle":"@sys","password":"syspass"}' 2>/dev/null)
     sys_tok=$(strfield "$tok_resp" "token")
     [ -n "$sys_tok" ] \
-        && ok "fed_unimport.http_token" \
-        || fail "fed_unimport.http_token" "no sys token via HTTP: $tok_resp"
+        && ok "fed_unfriend.http_token" \
+        || fail "fed_unfriend.http_token" "no sys token: $tok_resp"
 
     local http_proxy_show
     http_proxy_show=$(curl -sf -H "Authorization: Bearer $sys_tok" \
         "http://127.0.0.1:$port_l/v1/actions/$proxy_id" 2>/dev/null)
     [ "$(strfield "$http_proxy_show" "active")" = "False" ] \
-        && ok "fed_unimport.http_proxy_inactive" \
-        || fail "fed_unimport.http_proxy_inactive" "expected active=False via HTTP, got: $http_proxy_show"
+        && ok "fed_unfriend.http_proxy_inactive" \
+        || fail "fed_unfriend.http_proxy_inactive" "expected active=False: $http_proxy_show"
 
-    # Remote action still active via remote serve (port_r)
+    # R's action still active via R's serve.
     local tok_resp_r sys_tok_r
     tok_resp_r=$(curl -sf -X POST "http://127.0.0.1:$port_r/v1/auth/token" \
         -H "Content-Type: application/json" \
@@ -323,8 +310,8 @@ flow_federation_unimport() {
     http_remote_show=$(curl -sf -H "Authorization: Bearer $sys_tok_r" \
         "http://127.0.0.1:$port_r/v1/actions/$remote_action_id" 2>/dev/null)
     [ "$(strfield "$http_remote_show" "active")" = "True" ] \
-        && ok "fed_unimport.http_remote_still_active" \
-        || fail "fed_unimport.http_remote_still_active" "expected remote active=True via HTTP, got: $http_remote_show"
+        && ok "fed_unfriend.http_remote_still_active" \
+        || fail "fed_unfriend.http_remote_still_active" "expected remote active=True: $http_remote_show"
 }
 
 # flow_federation_replay has been moved to TestFederationReplay in cmd/juice/cmd_remote_test.go
@@ -410,4 +397,379 @@ assert d.get('checks',{}).get('receipt_hash') == True, 'receipt_hash not True'
 " "$http_vr_resp" 2>/dev/null \
         && ok "fed_verify.http_receipt_valid" \
         || fail "fed_verify.http_receipt_valid" "expected valid receipt via HTTP, got: $http_vr_resp"
+}
+
+# _assert_all_receipt_checks prefix vr_json
+# Asserts valid=true and all 9 individual checks are true in a verify-receipt JSON response.
+_assert_all_receipt_checks() {
+    local pfx="$1" vr_out="$2"
+    python3 -c "
+import sys, json
+vr = json.loads(sys.argv[1])
+c = vr.get('checks', {})
+ok_list = []
+fail_list = []
+if vr.get('valid') is not True:
+    fail_list.append('valid=False')
+for k in ['receipt_hash','signature','action_id','status','charge',
+          'settlement_arith','refund_conservation','args_hash','reply_hash']:
+    if c.get(k) is True:
+        ok_list.append(k)
+    else:
+        fail_list.append(f'{k}={c.get(k)}')
+if fail_list:
+    print('FAIL:' + ','.join(fail_list))
+else:
+    print('OK')
+" "$vr_out" 2>/dev/null
+}
+
+flow_fed_all_receipt_checks() {
+    echo "=== FLOW fed_all_receipt_checks ==="
+    local dir port_l port_r port_b
+    dir=$(mktemp -d); trap "_fed_teardown '$dir'; rm -rf '$dir'" RETURN
+    alloc_port; port_l=$_ALLOC_PORT; alloc_port; port_r=$_ALLOC_PORT; alloc_port; port_b=$_ALLOC_PORT
+
+    _fed_setup "$dir" "$port_l" "$port_r" "$port_b" \
+        || { fail "fed_all_receipt.setup" "setup failed"; return; }
+    local db_l home_l
+    db_l=$(cat "$dir/db_l"); home_l=$(cat "$dir/home_l")
+    local remote_handle
+    remote_handle=$(cat "$dir/remote_handle")
+
+    # Make one call through the proxy.
+    local tx_id
+    tx_id=$(strfield "$(jj "$db_l" "$home_l" run \
+        --action "$remote_handle/greet" --args '{}')" "tx_id")
+    [ -n "$tx_id" ] || { fail "fed_all_receipt.call" "call failed, no tx_id"; return; }
+
+    # CLI: all 9 checks must be true.
+    local vr_out result
+    vr_out=$(jj "$db_l" "$home_l" tx verify-receipt --id "$tx_id" 2>/dev/null)
+    result=$(_assert_all_receipt_checks "fed_all_receipt" "$vr_out")
+    [ "$result" = "OK" ] \
+        && ok "fed_all_receipt.all_9_checks_cli" \
+        || fail "fed_all_receipt.all_9_checks_cli" "$result; vr=$vr_out"
+
+    # HTTP: same via GET /v1/transactions/{txID}/receipt-verification.
+    local tok_resp sys_tok
+    tok_resp=$(curl -sf -X POST "http://127.0.0.1:$port_l/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@sys","password":"syspass"}' 2>/dev/null)
+    sys_tok=$(strfield "$tok_resp" "token")
+    [ -n "$sys_tok" ] \
+        && ok "fed_all_receipt.http_token" \
+        || fail "fed_all_receipt.http_token" "no sys token: $tok_resp"
+
+    local http_vr_out
+    http_vr_out=$(curl -sf -H "Authorization: Bearer $sys_tok" \
+        "http://127.0.0.1:$port_l/v1/transactions/$tx_id/receipt-verification" 2>/dev/null)
+    result=$(_assert_all_receipt_checks "fed_all_receipt" "$http_vr_out")
+    [ "$result" = "OK" ] \
+        && ok "fed_all_receipt.all_9_checks_http" \
+        || fail "fed_all_receipt.all_9_checks_http" "$result; vr=$http_vr_out"
+}
+
+flow_fed_denial_unfriended() {
+    echo "=== FLOW fed_denial_unfriended ==="
+    local dir port_l port_r port_b
+    dir=$(mktemp -d); trap "_fed_teardown '$dir'; rm -rf '$dir'" RETURN
+    alloc_port; port_l=$_ALLOC_PORT; alloc_port; port_r=$_ALLOC_PORT; alloc_port; port_b=$_ALLOC_PORT
+
+    _fed_setup "$dir" "$port_l" "$port_r" "$port_b" \
+        || { fail "fed_denial_unfriended.setup" "setup failed"; return; }
+    local db_l db_r home_l home_r
+    db_l=$(cat "$dir/db_l"); db_r=$(cat "$dir/db_r")
+    home_l=$(cat "$dir/home_l"); home_r=$(cat "$dir/home_r")
+    local remote_handle
+    remote_handle=$(cat "$dir/remote_handle")
+
+    # R unfriends L — R will now deny L's inbound federation calls.
+    local unfriend_out
+    unfriend_out=$(j "$db_r" "$home_r" peer unfriend --handle @kernel-l 2>&1)
+    echo "$unfriend_out" | grep -qi "unfriended\|denied\|ok" \
+        && ok "fed_denial_unfriended.unfriend" \
+        || fail "fed_denial_unfriended.unfriend" "unfriend failed: $unfriend_out"
+
+    # L calls its proxy (still active on L) — R returns 403 denial receipt.
+    j "$db_l" "$home_l" run --action "$remote_handle/greet" --args '{}' >/dev/null 2>&1 || true
+
+    # Get the failed tx (first in list).
+    local tx_list tx_id
+    tx_list=$(jj "$db_l" "$home_l" tx list 2>/dev/null)
+    tx_id=$(python3 -c "import sys,json; txs=json.load(sys.stdin); print(txs[0]['id'] if txs else '')" \
+        <<< "$tx_list" 2>/dev/null)
+    [ -n "$tx_id" ] \
+        && ok "fed_denial_unfriended.tx_recorded" \
+        || fail "fed_denial_unfriended.tx_recorded" "no tx recorded after denied call"
+    [ -n "$tx_id" ] || return
+
+    # tx.status must be failure.
+    local tx_show
+    tx_show=$(jj "$db_l" "$home_l" tx show --id "$tx_id" 2>/dev/null)
+    [ "$(strfield "$tx_show" "status")" = "failure" ] \
+        && ok "fed_denial_unfriended.tx_status_failure" \
+        || fail "fed_denial_unfriended.tx_status_failure" "expected failure: $tx_show"
+
+    # All 9 receipt checks must pass — action_id in particular guards the service.go fix.
+    local vr_out result
+    vr_out=$(jj "$db_l" "$home_l" tx verify-receipt --id "$tx_id" 2>/dev/null)
+    result=$(_assert_all_receipt_checks "fed_denial_unfriended" "$vr_out")
+    [ "$result" = "OK" ] \
+        && ok "fed_denial_unfriended.all_9_checks" \
+        || fail "fed_denial_unfriended.all_9_checks" "$result; vr=$vr_out"
+}
+
+flow_fed_denial_underfunded() {
+    echo "=== FLOW fed_denial_underfunded ==="
+    local dir port_l port_r port_b
+    dir=$(mktemp -d); trap "_fed_teardown '$dir'; rm -rf '$dir'" RETURN
+    alloc_port; port_l=$_ALLOC_PORT; alloc_port; port_r=$_ALLOC_PORT; alloc_port; port_b=$_ALLOC_PORT
+
+    _fed_setup "$dir" "$port_l" "$port_r" "$port_b" \
+        || { fail "fed_denial_underfunded.setup" "setup failed"; return; }
+    local db_l db_r home_l home_r
+    db_l=$(cat "$dir/db_l"); db_r=$(cat "$dir/db_r")
+    home_l=$(cat "$dir/home_l"); home_r=$(cat "$dir/home_r")
+    local remote_handle
+    remote_handle=$(cat "$dir/remote_handle")
+
+    # Create a paid action on R pointing to the same backend (already running on port_b).
+    local paid_action_id
+    paid_action_id=$(jj "$db_r" "$home_r" action create \
+        --name paid-svc --kind http \
+        --source "http://127.0.0.1:$port_b" \
+        --description "paid service" \
+        --price 100 | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)
+    [ -n "$paid_action_id" ] || { fail "fed_denial_underfunded.create_paid_action" "action_id empty"; return; }
+    j "$db_r" "$home_r" action enable --id "$paid_action_id" >/dev/null 2>&1
+    j "$db_r" "$home_r" action update --id "$paid_action_id" --public >/dev/null 2>&1
+
+    # Re-friend to pick up paid-svc (do NOT fund @kernel-l on R — it has 0 credits there).
+    j "$db_l" "$home_l" peer friend --url "http://127.0.0.1:$port_r" >/dev/null 2>&1 \
+        || { fail "fed_denial_underfunded.import" "peer re-friend failed"; return; }
+    local paid_proxy_id
+    paid_proxy_id=$(jj "$db_l" "$home_l" action show --action "@kernel-r/paid-svc" 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)
+    [ -n "$paid_proxy_id" ] || { fail "fed_denial_underfunded.import" "proxy not found after peer friend"; return; }
+
+    # Give L's @sys user enough credits on L.
+    j "$db_l" "$home_l" admin user deposit --handle @sys --amount 1000 >/dev/null 2>&1
+
+    # L calls the paid proxy — R rejects (L has 0 credits on R) → 402 denial receipt.
+    j "$db_l" "$home_l" run --action "$remote_handle/paid-svc" --args '{}' >/dev/null 2>&1 || true
+
+    # Get the failed tx.
+    local tx_list tx_id
+    tx_list=$(jj "$db_l" "$home_l" tx list 2>/dev/null)
+    tx_id=$(python3 -c "
+import sys,json
+txs=json.load(sys.stdin)
+# Find the paid-svc tx (not the free greet tx if any)
+for tx in txs:
+    if tx.get('action_name') == 'paid-svc':
+        print(tx['id']); break
+" <<< "$tx_list" 2>/dev/null)
+    [ -n "$tx_id" ] \
+        && ok "fed_denial_underfunded.tx_recorded" \
+        || fail "fed_denial_underfunded.tx_recorded" "no paid-svc tx found; list=$tx_list"
+    [ -n "$tx_id" ] || return
+
+    local tx_show
+    tx_show=$(jj "$db_l" "$home_l" tx show --id "$tx_id" 2>/dev/null)
+    [ "$(strfield "$tx_show" "status")" = "failure" ] \
+        && ok "fed_denial_underfunded.tx_status_failure" \
+        || fail "fed_denial_underfunded.tx_status_failure" "expected failure: $tx_show"
+
+    # All 9 receipt checks must pass.
+    local vr_out result
+    vr_out=$(jj "$db_l" "$home_l" tx verify-receipt --id "$tx_id" 2>/dev/null)
+    result=$(_assert_all_receipt_checks "fed_denial_underfunded" "$vr_out")
+    [ "$result" = "OK" ] \
+        && ok "fed_denial_underfunded.all_9_checks" \
+        || fail "fed_denial_underfunded.all_9_checks" "$result; vr=$vr_out"
+}
+
+flow_fed_import_duty() {
+    echo "=== FLOW fed_import_duty ==="
+    local dir port_l port_r port_b
+    dir=$(mktemp -d); trap "_fed_teardown '$dir'; rm -rf '$dir'" RETURN
+    alloc_port; port_l=$_ALLOC_PORT; alloc_port; port_r=$_ALLOC_PORT; alloc_port; port_b=$_ALLOC_PORT
+
+    _fed_setup "$dir" "$port_l" "$port_r" "$port_b" \
+        || { fail "fed_import_duty.setup" "setup failed"; return; }
+    local db_l db_r home_l home_r
+    db_l=$(cat "$dir/db_l"); db_r=$(cat "$dir/db_r")
+    home_l=$(cat "$dir/home_l"); home_r=$(cat "$dir/home_r")
+    local remote_handle
+    remote_handle=$(cat "$dir/remote_handle")
+
+    # Create a paid action on R (price=1000) backed by the existing backend.
+    local paid_action_id
+    paid_action_id=$(jj "$db_r" "$home_r" action create \
+        --name duty-svc --kind http \
+        --source "http://127.0.0.1:$port_b" \
+        --description "duty service" \
+        --price 1000 | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)
+    [ -n "$paid_action_id" ] || { fail "fed_import_duty.create_paid_action" "action_id empty"; return; }
+    j "$db_r" "$home_r" action enable --id "$paid_action_id" >/dev/null 2>&1
+    j "$db_r" "$home_r" action update --id "$paid_action_id" --public >/dev/null 2>&1
+
+    # Re-friend to pick up duty-svc; proxy price = 1000 + ceil(1000*500/10000) = 1050.
+    j "$db_l" "$home_l" peer friend --url "http://127.0.0.1:$port_r" >/dev/null 2>&1 \
+        || { fail "fed_import_duty.import" "peer re-friend failed"; return; }
+    local duty_proxy_id
+    duty_proxy_id=$(jj "$db_l" "$home_l" action show --action "@kernel-r/duty-svc" 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)
+    [ -n "$duty_proxy_id" ] || { fail "fed_import_duty.import" "proxy not found after peer friend"; return; }
+
+    # Verify the proxy price is exactly 1050.
+    local proxy_show proxy_price
+    proxy_show=$(jj "$db_l" "$home_l" action show --action "@kernel-r/duty-svc" 2>/dev/null)
+    proxy_price=$(numfield "$proxy_show" "price")
+    [ "$proxy_price" -eq 1050 ] \
+        && ok "fed_import_duty.proxy_price" \
+        || fail "fed_import_duty.proxy_price" "expected 1050, got $proxy_price"
+
+    # Fund @kernel-l on R (so the remote call can proceed).
+    j "$db_r" "$home_r" admin user deposit --handle @kernel-l --amount 5000 >/dev/null 2>&1
+    # Fund L's @sys on L.
+    j "$db_l" "$home_l" admin user deposit --handle @sys --amount 5000 >/dev/null 2>&1
+
+    # Capture balances before the call.
+    local user_bal_before peer_bal_before
+    user_bal_before=$(numfield "$(jj "$db_l" "$home_l" user me 2>/dev/null)" "available")
+    peer_bal_before=$(numfield "$(jj "$db_r" "$home_r" admin user show --handle @kernel-l 2>/dev/null)" "available")
+
+    # Make the call.
+    local call_out tx_id
+    call_out=$(jj "$db_l" "$home_l" run --action "$remote_handle/duty-svc" --args '{}' 2>/dev/null)
+    tx_id=$(strfield "$call_out" "tx_id")
+    [ -n "$tx_id" ] \
+        && ok "fed_import_duty.call_succeeded" \
+        || fail "fed_import_duty.call_succeeded" "no tx_id: $call_out"
+    [ -n "$tx_id" ] || return
+
+    # Capture balances after.
+    local user_bal_after peer_bal_after
+    user_bal_after=$(numfield "$(jj "$db_l" "$home_l" user me 2>/dev/null)" "available")
+    peer_bal_after=$(numfield "$(jj "$db_r" "$home_r" admin user show --handle @kernel-l 2>/dev/null)" "available")
+
+    local user_charged peer_charged
+    user_charged=$(( user_bal_before - user_bal_after ))
+    peer_charged=$(( peer_bal_before - peer_bal_after ))
+
+    # L's @sys is both caller and fee recipient: gross=1050 deducted, fee=50 credited back,
+    # so net balance change is 1000.
+    [ "$user_charged" -eq 1000 ] \
+        && ok "fed_import_duty.user_charged_proxy_price" \
+        || fail "fed_import_duty.user_charged_proxy_price" "expected 1000 (gross 1050 minus fee 50 rebate), got $user_charged"
+
+    # R charged L's peer exactly the base price (1000).
+    [ "$peer_charged" -eq 1000 ] \
+        && ok "fed_import_duty.peer_charged_base_price" \
+        || fail "fed_import_duty.peer_charged_base_price" "expected 1000, got $peer_charged"
+
+    # tx fields: gross=1050, net=1000, fee=50, status=success.
+    local tx_show
+    tx_show=$(jj "$db_l" "$home_l" tx show --id "$tx_id" 2>/dev/null)
+    [ "$(numfield "$tx_show" "gross")" -eq 1050 ] \
+        && ok "fed_import_duty.tx_gross" \
+        || fail "fed_import_duty.tx_gross" "expected 1050: $tx_show"
+    [ "$(numfield "$tx_show" "net")" -eq 1000 ] \
+        && ok "fed_import_duty.tx_net" \
+        || fail "fed_import_duty.tx_net" "expected 1000: $tx_show"
+    [ "$(numfield "$tx_show" "fee")" -eq 50 ] \
+        && ok "fed_import_duty.tx_fee" \
+        || fail "fed_import_duty.tx_fee" "expected 50 (5% duty): $tx_show"
+    [ "$(strfield "$tx_show" "status")" = "success" ] \
+        && ok "fed_import_duty.tx_status" \
+        || fail "fed_import_duty.tx_status" "expected success: $tx_show"
+}
+
+flow_fed_failed_action_refund() {
+    echo "=== FLOW fed_failed_action_refund ==="
+    local dir port_l port_r port_b port_fail
+    dir=$(mktemp -d); trap "_fed_teardown '$dir'; rm -rf '$dir'" RETURN
+    alloc_port; port_l=$_ALLOC_PORT; alloc_port; port_r=$_ALLOC_PORT; alloc_port; port_b=$_ALLOC_PORT
+
+    _fed_setup "$dir" "$port_l" "$port_r" "$port_b" \
+        || { fail "fed_failed_refund.setup" "setup failed"; return; }
+    local db_l db_r home_l home_r
+    db_l=$(cat "$dir/db_l"); db_r=$(cat "$dir/db_r")
+    home_l=$(cat "$dir/home_l"); home_r=$(cat "$dir/home_r")
+    local remote_handle
+    remote_handle=$(cat "$dir/remote_handle")
+
+    # Start a second backend that always returns 500.
+    alloc_port; port_fail=$_ALLOC_PORT
+    start_backend "$port_fail" 500 '{"error":"backend failure"}'
+    local fail_backend_pid=$BACKEND_PID
+    trap "_fed_teardown '$dir'; kill '$fail_backend_pid' 2>/dev/null; wait '$fail_backend_pid' 2>/dev/null; rm -rf '$dir'" RETURN
+
+    # Create paid action on R pointing to the 500 backend (price=100).
+    local fail_action_id
+    fail_action_id=$(jj "$db_r" "$home_r" action create \
+        --name fail-svc --kind http \
+        --source "http://127.0.0.1:$port_fail" \
+        --description "always fails" \
+        --price 100 | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)
+    [ -n "$fail_action_id" ] || { fail "fed_failed_refund.create_action" "action_id empty"; return; }
+    j "$db_r" "$home_r" action enable --id "$fail_action_id" >/dev/null 2>&1
+    j "$db_r" "$home_r" action update --id "$fail_action_id" --public >/dev/null 2>&1
+
+    # Re-friend to pick up fail-svc; proxy price = 100 + ceil(100*500/10000) = 105.
+    j "$db_l" "$home_l" peer friend --url "http://127.0.0.1:$port_r" >/dev/null 2>&1 \
+        || { fail "fed_failed_refund.import" "peer re-friend failed"; return; }
+
+    # Fund @kernel-l on R and L's @sys on L.
+    j "$db_r" "$home_r" admin user deposit --handle @kernel-l --amount 5000 >/dev/null 2>&1
+    j "$db_l" "$home_l" admin user deposit --handle @sys --amount 1000 >/dev/null 2>&1
+
+    local user_bal_before
+    user_bal_before=$(numfield "$(jj "$db_l" "$home_l" user me 2>/dev/null)" "available")
+
+    # Call — backend returns 500 → remote failure receipt → full refund to L's user.
+    j "$db_l" "$home_l" run --action "$remote_handle/fail-svc" --args '{}' >/dev/null 2>&1 || true
+
+    local user_bal_after
+    user_bal_after=$(numfield "$(jj "$db_l" "$home_l" user me 2>/dev/null)" "available")
+
+    # L's user balance must be unchanged (full refund).
+    [ "$user_bal_after" -eq "$user_bal_before" ] \
+        && ok "fed_failed_refund.balance_unchanged" \
+        || fail "fed_failed_refund.balance_unchanged" "expected $user_bal_before, got $user_bal_after"
+
+    # Find the fail-svc tx.
+    local tx_list tx_id
+    tx_list=$(jj "$db_l" "$home_l" tx list 2>/dev/null)
+    tx_id=$(python3 -c "
+import sys,json
+txs=json.load(sys.stdin)
+for tx in txs:
+    if tx.get('action_name') == 'fail-svc':
+        print(tx['id']); break
+" <<< "$tx_list" 2>/dev/null)
+    [ -n "$tx_id" ] \
+        && ok "fed_failed_refund.tx_recorded" \
+        || fail "fed_failed_refund.tx_recorded" "no fail-svc tx found"
+    [ -n "$tx_id" ] || return
+
+    # tx: status=failure, gross=105, net=0, fee=0.
+    local tx_show
+    tx_show=$(jj "$db_l" "$home_l" tx show --id "$tx_id" 2>/dev/null)
+    [ "$(strfield "$tx_show" "status")" = "failure" ] \
+        && ok "fed_failed_refund.tx_status_failure" \
+        || fail "fed_failed_refund.tx_status_failure" "expected failure: $tx_show"
+    [ "$(numfield "$tx_show" "gross")" -eq 105 ] \
+        && ok "fed_failed_refund.tx_gross" \
+        || fail "fed_failed_refund.tx_gross" "expected 105: $tx_show"
+    [ "$(numfield "$tx_show" "net")" -eq 0 ] \
+        && ok "fed_failed_refund.tx_net_zero" \
+        || fail "fed_failed_refund.tx_net_zero" "expected 0: $tx_show"
+    [ "$(numfield "$tx_show" "fee")" -eq 0 ] \
+        && ok "fed_failed_refund.tx_fee_zero" \
+        || fail "fed_failed_refund.tx_fee_zero" "expected 0: $tx_show"
+
+    stop_backend "$fail_backend_pid"
 }

@@ -369,7 +369,17 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 	}
 	// §13.2: denied peers are rejected with a signed rejection receipt so the caller can settle.
 	if counterparty.DeniedAt != nil {
-		receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, actionParam, argsHash, idempotencyKey)
+		// Resolve the action UUID so VerifyRemoteReceipt can match receipt.action_id against
+		// the caller's stored RemoteActionID. Fall back to the ref string if lookup fails.
+		denialActionID := actionParam
+		if oh, an, parseErr := kernel.ParseActionRef(actionParam); parseErr == nil {
+			if denialOwner, ownerErr := k.ReadUserByHandle(ctx, oh); ownerErr == nil && denialOwner != nil {
+				if act, actErr := k.ReadActionByOwnerName(ctx, denialOwner.ID, an); actErr == nil && act != nil {
+					denialActionID = act.ID
+				}
+			}
+		}
+		receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, denialActionID, argsHash, idempotencyKey)
 		if signErr != nil {
 			return 0, nil, kernel.ErrUnauthenticated.Wrap("counterparty is denied")
 		}
@@ -434,16 +444,20 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 			"code":  kernel.KernelErrorCode(callErr),
 		})
 		if errors.Is(callErr, kernel.ErrInsufficientFunds) {
-			if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, actionParam, argsHash, idempotencyKey); signErr == nil {
+			if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey); signErr == nil {
 				receiptJSON, _ := json.Marshal(receipt)
 				_ = k.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), string(receiptJSON))
 				return http.StatusPaymentRequired, map[string]any{"error": "insufficient balance", "receipt": receipt}, nil
 			}
 		}
-		if reply == nil {
-			_ = k.DeleteIdempotencyRecord(ctx, rec.ID)
+		// Execution failures (backend error, schema violation, etc.) return a signed failure
+		// receipt so the caller can settle locally rather than leaving the trace pending.
+		if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey); signErr == nil {
+			receiptJSON, _ := json.Marshal(receipt)
+			_ = k.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), string(receiptJSON))
+			return http.StatusUnprocessableEntity, map[string]any{"error": callErr.Error(), "receipt": receipt}, nil
 		}
-		_ = k.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), "")
+		_ = k.DeleteIdempotencyRecord(ctx, rec.ID)
 		return 0, nil, callErr
 	}
 

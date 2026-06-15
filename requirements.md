@@ -48,7 +48,7 @@ These meanings are fixed. In a transaction, `owner_user_id` is the process owner
 
 All execution paths use `Call()`: root calls (via `run`), native actions, WASM `juice.call`, step completion, OpenAPI-imported HTTP actions, and remote proxies. `Call()` dispatches by `action.kind`, not by action-owner identity.
 
-Supervision operations never route through `Call()`; they manage users, actions, processes, ratings, deposits, OpenAPI imports, and remote imports. Execution code must not rate outputs or propagate ratings.
+Supervision operations never route through `Call()`; they manage users, actions, processes, ratings, deposits, OpenAPI imports, and federation peering. Execution code must not rate outputs or propagate ratings.
 
 Juice is meant to be a kernel like an OS kernel: only minimal but general and robust primitives, the rest lives on the application layer (actions).
 
@@ -297,7 +297,7 @@ Inbound webhook payloads enter through the standard authenticated call path: ext
 
 ### Remote
 
-`remote import` fetches a signed manifest and creates or updates a local `kind=remote_proxy` action owned by the local remote-peer user row. It does not copy implementation.
+`peer friend` fetches the remote's active public actions, verifies each signed manifest, and creates or updates local `kind=remote_proxy` actions owned by the local remote-peer user row. Imported actions are immediately enabled and public. It does not copy implementation.
 
 Manifest required fields:
 
@@ -318,7 +318,7 @@ Remote contract fields:
 action_id artifact_hash description input_schema kind name output_schema owner_handle price
 ```
 
-Manifest stats and `updated_at` do not affect contract comparison; manifest stats never overwrite local `Stats` and are not stored as `StatTag`. Invalid signatures reject import. Missing, inactive, or non-public remote actions deactivate the proxy and reset current local stats. Unimport deactivates the proxy, does not contact the remote kernel, and preserves all history.
+Manifest stats and `updated_at` do not affect contract comparison; manifest stats never overwrite local `Stats` and are not stored as `StatTag`. Invalid signatures skip that action. A second `peer friend` re-syncs: new actions are imported, changed-contract actions are updated (re-enabled), and actions no longer active/public on the remote are deactivated and their stats reset. `peer unfriend` deactivates all proxies from that peer and preserves all history.
 
 The proxy's local `price` is `manifest.price` plus the worst-case import duty: `price = mp + ceil(mp * import_bps / 10000)` (§13). The local caller sees one price bounding the whole remote call, duty included; settlement charges duty on the actual remote charge and refunds the difference (§13). A change of the local `import_bps` recomputes proxy prices but is not a manifest contract change and does not deactivate.
 
@@ -565,10 +565,10 @@ A proxy user's handle is a **local alias** chosen at acceptance (default: the pe
 Two kernels transact only as **friends**: a reciprocal relation with the proxy-user pair (`@B` on A, `@A` on B).
 
 ```text
-juice admin peer friend <url|handle|key>   request friendship — and accept it (same verb both ways)
-juice admin peer unfriend <handle>         end the relation
-juice admin peer list                      friends, pending requests, balances; --gossip for the opinion list
-juice admin peer gossip <url|handle>       ask a kernel about itself and its friends
+juice peer friend --url <url>    register peer + bulk-import all their active public actions
+juice peer unfriend --handle <h> end the relation; deny future requests; deactivate all proxies
+juice peer list                  known peers and balances
+juice peer inspect --url <url>   view remote identity and public actions (no DB write)
 ```
 
 All `peer` commands are superuser supervision, CLI-only (§14). `POST /v1/peers` is the inbound protocol endpoint, authenticated by federation signature — not a local API.
@@ -663,9 +663,8 @@ juice admin user deposit                  juice admin user withdraw
 juice admin action list
 juice admin action disable                juice admin process list
 juice admin tx list                       juice admin step list
-juice admin peer friend                   juice admin peer unfriend
-juice admin peer list                     juice admin peer gossip
-juice remote import                       juice remote unimport
+juice peer friend                         juice peer unfriend
+juice peer list                           juice peer inspect
 ```
 
 OpenAPI commands:
