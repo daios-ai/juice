@@ -197,7 +197,7 @@ Native actions registered at bootstrap, owned by `@sys`, public, runnable like a
 | Friend a kernel | `juice peer friend --url` |
 | Unfriend a kernel | `juice peer unfriend --handle` |
 | List peers | `juice peer list` |
-| Inspect a kernel | `juice peer inspect --url` |
+| Inspect a kernel | `juice peer inspect --url` — identity, public actions, and transacted friends |
 | List all actions | `juice admin action list [--limit --offset]` |
 | Disable action | `juice admin action disable --id` |
 | List all processes | `juice admin process list [--limit --offset]` |

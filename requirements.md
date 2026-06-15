@@ -568,7 +568,7 @@ Two kernels transact only as **friends**: a reciprocal relation with the proxy-u
 juice peer friend --url <url>    register peer + bulk-import all their active public actions
 juice peer unfriend --handle <h> end the relation; deny future requests; deactivate all proxies
 juice peer list                  known peers and balances
-juice peer inspect --url <url>   view remote identity and public actions (no DB write)
+juice peer inspect --url <url>   view remote identity, public actions, and transacted friends (no DB write)
 ```
 
 All `peer` commands are superuser supervision, CLI-only (§14). `POST /v1/peers` is the inbound protocol endpoint, authenticated by federation signature — not a local API.
