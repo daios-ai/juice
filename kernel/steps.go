@@ -259,14 +259,10 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 		return nil, ErrInvalidInput.Wrap("merged args are not a valid JSON object")
 	}
 
-	// Look up next action to get owner+name for Call dispatch.
+	// Look up next action for trace setup and dispatch.
 	action, err := k.store.ReadAction(ctx, step.NextActionID)
 	if err != nil {
 		return nil, ErrNotFound.Wrap("next action not found")
-	}
-	owner, err := k.store.ReadUser(ctx, action.OwnerUserID)
-	if err != nil {
-		return nil, ErrNotFound.Wrap("next action owner not found")
 	}
 
 	// BeginStepCall atomically marks the step as running, releases its parked price
@@ -305,8 +301,7 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 		CallerID:      callerID,
 		ProcessID:     step.ProcessID,
 		ParentTraceID: stepTrace.ID,
-		TargetUserID:  owner.ID,
-		ActionName:    action.Name,
+		ActionID:      action.ID,
 		Args:          args,
 		StepID:        stepID,
 	})

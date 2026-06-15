@@ -1020,7 +1020,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	return k.Call(ctx, CallRequest{
 		CallerID:            caller.ID,
 		ProcessID:           p.ID,
-		ActionID:            action.ID,
+		Action:              action,
 		Args:                args,
 		ExistingTraceID:     t.ID,
 		IdempotencyRecordID: idempotencyRecordID,

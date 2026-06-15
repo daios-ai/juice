@@ -22,6 +22,10 @@ type CallRequest struct {
 	// For subcalls it is the parent trace ID.
 	// For step-completion calls it is set by BeginStepCall's trace.
 	ParentTraceID string
+	// Action, when non-nil, is the pre-validated action from beginRun.
+	// Call uses it directly and skips the DB read, eliminating the TOCTOU window
+	// between process/trace creation and execution.
+	Action *Action
 	// ActionRef is the action reference in "@owner/name" format.
 	// When set, it is parsed into TargetUserID and ActionName inside Call.
 	// Set either ActionRef or (TargetUserID + ActionName), not both.
@@ -105,11 +109,19 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	// 4. Resolve action.
-	// Root calls supply ActionID so we load by the exact ID that was funded by BeginRun,
-	// eliminating the TOCTOU window that a second owner/name lookup would reintroduce.
+	// Root calls supply Action (pre-validated by beginRun) so no DB read is needed,
+	// eliminating the TOCTOU window between process/trace creation and execution.
+	// Step completions supply ActionID to use the stable ID path (canCall still runs).
+	// Subcalls and direct test invocations use the owner/name path.
 	var action *Action
 	var target *User
-	if req.ActionID != "" {
+	if req.Action != nil {
+		action = req.Action
+		target, err = k.store.ReadUser(ctx, action.OwnerUserID)
+		if err != nil || target == nil {
+			return nil, ErrNotFound.Wrap("target user not found")
+		}
+	} else if req.ActionID != "" {
 		action, err = k.store.ReadAction(ctx, req.ActionID)
 		if err != nil || action == nil {
 			return nil, ErrNotFound.Wrap("action not found")

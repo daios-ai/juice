@@ -1030,7 +1030,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 			return dbErr(err, "commit call: zero trace available")
 		}
 		// Release the full gross from the caller wallet lock (not just taxable).
-		// gross = ktx.Gross = action.Price = total amount locked at BeginRootCall/BeginSubcall.
+		// gross = ktx.Gross = action.Price = total amount locked at BeginRun/BeginSubcall.
 		// subcall's taxables have already been deducted from the caller wallet lock by their
 		// own CommitCall, so by the time we arrive here caller.locked == taxable.
 		// We release the full gross to leave caller.locked exactly reduced.
