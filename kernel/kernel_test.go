@@ -819,11 +819,11 @@ func TestRateTransactionOwnerCallingOwnActionCanRate(t *testing.T) {
 	}
 }
 
-// TestCallPreconditionOrderParentTraceAfterAction verifies §4 ordering: action
-// existence (step 4) must be checked before parent trace existence (step 8).
-// C == P, invalid ParentTraceID, non-existent action → must return ErrNotFound
-// for the action, not ErrInvalidInput for the trace.
-func TestCallPreconditionOrderParentTraceAfterAction(t *testing.T) {
+// TestCallPreconditionOrderTraceBeforeAction verifies §4 ordering: parent trace existence
+// (step 3) must be checked before action existence (step 5).
+// C == P, invalid ParentTraceID, non-existent action → must return ErrInvalidInput for
+// the trace, not ErrNotFound for the action.
+func TestCallPreconditionOrderTraceBeforeAction(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -839,8 +839,39 @@ func TestCallPreconditionOrderParentTraceAfterAction(t *testing.T) {
 		ActionName:    "no-such-action",
 		Args:          map[string]any{},
 	})
+	if !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("expected ErrInvalidInput for missing parent trace (step 3 before step 5), got: %v", err)
+	}
+}
+
+// TestCallPreconditionOrderActionAfterValidTrace verifies §4 ordering: with a valid parent
+// trace, a missing action returns ErrNotFound (step 5).
+func TestCallPreconditionOrderActionAfterValidTrace(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@ptrace-owner2", 100)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "dummy",
+		Kind: kernel.KindNative, Active: true, Price: 0,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatalf("create action: %v", err)
+	}
+	p, tr := beginTestRun(t, st, owner.ID, a)
+
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID:      owner.ID,
+		ProcessID:     p.ID,
+		ParentTraceID: tr.ID,
+		TargetUserID:  owner.ID,
+		ActionName:    "no-such-action",
+		Args:          map[string]any{},
+	})
 	if !errors.Is(err, kernel.ErrNotFound) {
-		t.Errorf("expected ErrNotFound for missing action (before trace check), got: %v", err)
+		t.Errorf("expected ErrNotFound for missing action (after valid trace), got: %v", err)
 	}
 }
 

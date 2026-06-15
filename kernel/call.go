@@ -120,32 +120,24 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrNotFound.Wrapf("action %s/%s not found", req.TargetUserID, req.ActionName)
 	}
 
-	// 5. CanCall(process.owner, action)
-	if !canCall(process.OwnerUserID, action) {
+	// 5. CanCall(process.owner, action). Skip for root calls: beginRun already validated this,
+	// and making it single-pass eliminates the TOCTOU window between BeginRun and Call.
+	if req.ExistingTraceID == "" && !canCall(process.OwnerUserID, action) {
 		if !action.Active {
 			return nil, ErrInvalidState.Wrap("action is inactive")
 		}
 		return nil, ErrUnauthorized.Wrap("call permission denied")
 	}
 
-	// 6. Validate input schema.
-	if err := ValidateInput(action.InputSchema, req.Args); err != nil {
-		return nil, err
+	// 6. Validate input schema. Skip for root calls: same reason as step 5.
+	if req.ExistingTraceID == "" {
+		if err := ValidateInput(action.InputSchema, req.Args); err != nil {
+			return nil, err
+		}
 	}
 
 	// 7. Funds check (step calls pre-funded by BeginStepCall; ExistingTraceID calls pre-funded by BeginRun).
 	if req.StepID == "" && req.ExistingTraceID == "" {
-		// For subcalls: owner callers deferred the trace load to here (after the action check).
-		if parentTrace == nil && req.ParentTraceID != "" {
-			pt, err := k.store.ReadTrace(ctx, req.ParentTraceID)
-			if err != nil {
-				return nil, ErrInvalidInput.Wrap("parent trace not found")
-			}
-			if pt.ProcessID != process.ID {
-				return nil, ErrInvalidInput.Wrap("parent trace belongs to a different process")
-			}
-			parentTrace = pt
-		}
 		if parentTrace != nil && parentTrace.Available < action.Price {
 			return nil, ErrInsufficientFunds.Wrapf("parent trace has %d credits, action costs %d", parentTrace.Available, action.Price)
 		}
@@ -540,8 +532,10 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 }
 
 
-// resolveAndValidateParentTrace handles precondition check 3 for subcalls.
-// Returns the parent trace (loaded for non-owner callers) or nil (for owner callers).
+// resolveAndValidateParentTrace handles precondition checks 3–4 for subcalls (§4).
+// Step 3: parent trace must exist and belong to the process (checked for all callers).
+// Step 4: caller must be authorised to use the process (owner trivially passes; non-owners
+// must have action_owner_id == caller on the parent trace).
 // Also fills req.ParentTraceID with the root trace ID when not supplied.
 func (k *Kernel) resolveAndValidateParentTrace(ctx context.Context, req *CallRequest, process *Process) (*Trace, error) {
 	if req.ParentTraceID == "" {
@@ -552,23 +546,23 @@ func (k *Kernel) resolveAndValidateParentTrace(ctx context.Context, req *CallReq
 		req.ParentTraceID = root.ID
 		return root, nil
 	}
-	// Owner callers: authority trivially satisfied.
-	// Defer the trace existence and process-membership checks to after the action check (step 4)
-	// so that ErrNotFound for a missing action fires before ErrInvalidInput for a missing trace.
-	// We return nil here; the trace will be loaded at the funds-check step or fail at BeginSubcall.
-	if process.OwnerUserID == req.CallerID {
-		return nil, nil
-	}
-	// Non-owner caller: load the trace to verify trace-scoped process authority.
+	// Always validate trace existence and process membership at step 3 (§4), regardless of
+	// whether the caller is the process owner. This preserves the required precondition order:
+	// trace check (step 3) fires before action lookup (step 5).
 	parent, err := k.store.ReadTrace(ctx, req.ParentTraceID)
 	if err != nil {
-		return nil, ErrUnauthorized.Wrap("caller is not the process owner")
+		return nil, ErrInvalidInput.Wrap("parent trace not found")
 	}
 	if parent.ProcessID != process.ID {
 		return nil, ErrInvalidInput.Wrap("parent trace belongs to a different process")
 	}
+	// Owner callers: process-use authority trivially satisfied; no further check.
+	if process.OwnerUserID == req.CallerID {
+		return parent, nil
+	}
+	// Non-owner caller: verify trace-scoped process authority (§4 step 4).
 	if parent.ActionOwnerID != req.CallerID {
-		return nil, ErrUnauthorized.Wrap("caller is not the process owner")
+		return nil, ErrUnauthorized.Wrap("caller is not authorized to use this process")
 	}
 	return parent, nil
 }

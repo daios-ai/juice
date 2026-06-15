@@ -528,16 +528,16 @@ func (s *server) endProcess(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) postRun(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, req struct {
-		Action string         `json:"action"`
-		Args   map[string]any `json:"args"`
+		Action string          `json:"action"`
+		Args   *map[string]any `json:"args"`
 	}) (any, int, error) {
 		if req.Action == "" {
 			return nil, 0, kernel.ErrInvalidInput.Wrap("action is required")
 		}
 		if req.Args == nil {
-			req.Args = map[string]any{}
+			return nil, 0, kernel.ErrInvalidInput.Wrap("args is required")
 		}
-		reply, err := run(s.kernel, r.Context(), callerFrom(r), req.Action, req.Args)
+		reply, err := run(s.kernel, r.Context(), callerFrom(r), req.Action, *req.Args)
 		return reply, http.StatusOK, err
 	})(w, r)
 }

@@ -186,18 +186,10 @@ func TestCallPrivateDenied(t *testing.T) {
 
 	alice := setupUser(t, st, "@alice", 1000)
 	bob := setupUser(t, st, "@bob", 0)
-	a := setupAction(t, st, bob.ID, "private", 0)
+	setupAction(t, st, bob.ID, "private", 0)
 
-	p, tr := beginTestRun(t, st, alice.ID, a)
-
-	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:        alice.ID,
-		ProcessID:       p.ID,
-		ExistingTraceID: tr.ID,
-		TargetUserID:    bob.ID,
-		ActionName:      "private",
-		Args:            map[string]any{},
-	})
+	// Alice (not the owner) tries to run bob's private action via Run, which enforces CanCall.
+	_, err := k.Run(ctx, alice.ID, "@bob/private", map[string]any{})
 	if err == nil {
 		t.Error("expected call denial for private action owned by another user")
 	}
@@ -275,16 +267,8 @@ func TestCallPrivateActionOwnerOnly(t *testing.T) {
 		t.Fatalf("owner should call their own private action: %v", err)
 	}
 
-	// Alice (not the owner) cannot call bob's private action.
-	pAlice, trAlice := beginTestRun(t, st, alice.ID, a)
-	_, err = k.Call(ctx, kernel.CallRequest{
-		CallerID:        alice.ID,
-		ProcessID:       pAlice.ID,
-		ExistingTraceID: trAlice.ID,
-		TargetUserID:    bob.ID,
-		ActionName:      "priv",
-		Args:            map[string]any{},
-	})
+	// Alice (not the owner) cannot run bob's private action. Validated by Run → beginRun.
+	_, err = k.Run(ctx, alice.ID, "@bob/priv", map[string]any{})
 	if err == nil {
 		t.Error("non-owner should not be able to call private action")
 	}
@@ -296,28 +280,14 @@ func TestCallInactiveActionBlocked(t *testing.T) {
 	ctx := context.Background()
 
 	alice := setupUser(t, st, "@alice", 1000)
-	a := &kernel.Action{
-		ID:          uuid.New().String(),
-		OwnerUserID: alice.ID,
-		Name:        "inactive",
-		Kind:        kernel.KindWasm,
-		Active:      false,
-		Public:      true,
-		Price:       0,
-		CreatedAt:   time.Now().UTC(),
-		UpdatedAt:   time.Now().UTC(),
-	}
-	_ = st.CreateAction(ctx, a)
-
-	p, tr := beginTestRun(t, st, alice.ID, a)
-	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:        alice.ID,
-		ProcessID:       p.ID,
-		ExistingTraceID: tr.ID,
-		TargetUserID:    alice.ID,
-		ActionName:      "inactive",
-		Args:            map[string]any{},
+	_ = st.CreateAction(ctx, &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "inactive",
+		Kind: kernel.KindWasm, Active: false, Public: true, Price: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	})
+
+	// Run enforces CanCall (which requires active=true) in beginRun.
+	_, err := k.Run(ctx, alice.ID, "@alice/inactive", map[string]any{})
 	if err == nil {
 		t.Error("inactive action should be blocked regardless of public flag")
 	}
@@ -613,13 +583,9 @@ func TestCallInputSchemaRejection(t *testing.T) {
 		UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
-	p, tr := beginTestRun(t, st, alice.ID, a)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: alice.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
-		TargetUserID: alice.ID, ActionName: "strict",
-		Args: map[string]any{"wrong_field": "value"},
-	})
+	// Use Run, which enforces input schema validation in beginRun.
+	_, err := k.Run(ctx, alice.ID, "@alice/strict", map[string]any{"wrong_field": "value"})
 	if err == nil {
 		t.Error("expected schema violation error for missing required field")
 	}

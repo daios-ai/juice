@@ -150,10 +150,6 @@ type Store interface {
 	ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error)
 	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
 
-	// BeginRootCall atomically deducts price from process.available into process.locked
-	// and creates the root trace with available=price.
-	BeginRootCall(ctx context.Context, processID string, t *Trace, price int64) error
-
 	// BeginSubcall atomically deducts price from the parent trace's available into its locked
 	// and creates the child trace with available=price.
 	BeginSubcall(ctx context.Context, parentTraceID string, t *Trace, price int64) error
@@ -171,9 +167,12 @@ type Store interface {
 
 	// CommitFailedCall atomically cancels all outstanding steps in the trace's subtree
 	// (collecting their parked prices), refunds trace.available + step prices to the caller
-	// wallet, decrements owner.locked, records a failure transaction, creates its receipt,
-	// updates trace latency, upserts action stats, completes the idempotency record (if
-	// non-empty), and marks the step done (if non-empty).
+	// wallet, records a failure transaction, creates its receipt, updates trace latency,
+	// upserts action stats, completes the idempotency record (if non-empty), and marks the
+	// step done (if non-empty). The process owner's user.locked is decremented at process
+	// closure — closeProcessTx runs inside the same DB transaction when the process becomes
+	// quiescent. Implementations must NOT decrement user.locked directly here; doing so
+	// would double-count with the closure step.
 	// buildReceipt is called inside the transaction with the computed refund so that the
 	// signed charge (gross − refund) is guaranteed to match what is committed.
 	CommitFailedCall(ctx context.Context, tx *Transaction, buildReceipt func(refund int64) (*Receipt, error), traceID, callerWalletID, callerWalletKind string, gross int64, stats *Stats, idempotencyRecordID, errorCode, stepID string) error

@@ -1017,7 +1017,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 		return nil, err
 	}
 	k.log.With(ctx).Info("process.created", "process_id", p.ID, "owner", caller.ID, "price", action.Price)
-	reply, callErr := k.Call(ctx, CallRequest{
+	return k.Call(ctx, CallRequest{
 		CallerID:            caller.ID,
 		ProcessID:           p.ID,
 		TargetUserID:        targetUserID,
@@ -1026,19 +1026,6 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 		ExistingTraceID:     t.ID,
 		IdempotencyRecordID: idempotencyRecordID,
 	})
-	if callErr != nil {
-		// If Call rejected before creating a transaction (e.g. action deactivated in the gap
-		// between beginRun's CanCall check and Call's re-check), the root trace is orphaned
-		// and the process stays open with user.locked frozen. Settle inline so the caller
-		// gets their funds back immediately rather than waiting for the next Recover() call.
-		if proc, _ := k.store.ReadProcess(ctx, p.ID); proc != nil && proc.Status == ProcessOpen {
-			logger := k.log.With(ctx)
-			_ = k.recoverTrace(ctx, logger, t, "run rejected", "")
-			_ = k.store.EndProcess(ctx, p.ID)
-		}
-		return nil, callErr
-	}
-	return reply, nil
 }
 
 // Run atomically creates a process funded with action.Price, then executes the root call.

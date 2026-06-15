@@ -626,6 +626,38 @@ func TestServeCall(t *testing.T) {
 	}
 }
 
+func TestServeRunRejectsAbsentArgs(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@run-args-user")
+
+	// Absent args field must be rejected (ErrInvalidInput = 422), not silently treated as {}.
+	resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"action": "@run-args-user/nonexistent",
+	}, tok)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("expected 422 for absent args, got %d", resp.StatusCode)
+	}
+}
+
+func TestServeRunRejectsEmptyAction(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@run-action-user")
+
+	// Present args={} with absent action must be rejected (ErrInvalidInput = 422).
+	resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"args": map[string]any{},
+	}, tok)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("expected 422 for missing action, got %d", resp.StatusCode)
+	}
+}
+
 func TestServeListAndGetTransaction(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
