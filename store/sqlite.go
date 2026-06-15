@@ -1765,6 +1765,17 @@ func (s *DB) ResetStepAndRepark(ctx context.Context, stepID string) error {
 			return dbErr(err, "reset step and repark: read step")
 		}
 		if completionTraceID != nil && price > 0 && parentTraceID != nil {
+			// Verify the completion trace is truly empty before operating on it.
+			// available must equal price (nothing committed downstream) and locked must be 0.
+			var traceAvailable, traceLocked int64
+			if err = tx.QueryRowContext(ctx,
+				`SELECT available, locked FROM traces WHERE id=?`, *completionTraceID,
+			).Scan(&traceAvailable, &traceLocked); err != nil {
+				return dbErr(err, "reset step and repark: read trace")
+			}
+			if traceAvailable != price || traceLocked != 0 {
+				return kernel.ErrInvalidState.Wrap("completion trace is not empty; cannot re-park")
+			}
 			// Move funds from completion trace's available back to parent trace's locked.
 			if _, err = tx.ExecContext(ctx,
 				`UPDATE traces SET available=available-? WHERE id=?`, price, *completionTraceID); err != nil {
@@ -1899,7 +1910,7 @@ func (s *DB) ListUnsettledTracesForProcess(ctx context.Context, processID string
 		     SELECT p.id, d+1 FROM traces p JOIN depth ON depth.id=p.parent_trace_id
 		   )
 		   SELECT MAX(d) FROM depth
-		 ) DESC`, processID)
+		 ) ASC`, processID)
 	if err != nil {
 		// Fallback: simpler ordering without depth CTE.
 		rows, err = s.db.QueryContext(ctx,

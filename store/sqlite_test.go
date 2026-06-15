@@ -2226,3 +2226,83 @@ func TestListOrphanRunningStepsDistinguishesSettled(t *testing.T) {
 	}
 }
 
+// TestListUnsettledTracesChildFirst verifies Fix 1: ListUnsettledTracesForProcess returns
+// children before parents so EndProcess settles deepest traces first.
+func TestListUnsettledTracesChildFirst(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@unsettled-order", 200)
+	_ = db.CreateUser(ctx, user)
+
+	p := newProcess(user.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
+		ActionOwnerID: user.ID, CallerUserID: user.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, user.ID, 200); err != nil {
+		t.Fatalf("BeginRun: %v", err)
+	}
+
+	child := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
+		ActionOwnerID: user.ID, CallerUserID: user.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginSubcall(ctx, root.ID, child, 50); err != nil {
+		t.Fatalf("BeginSubcall: %v", err)
+	}
+
+	traces, err := db.ListUnsettledTracesForProcess(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("ListUnsettledTracesForProcess: %v", err)
+	}
+	if len(traces) != 2 {
+		t.Fatalf("expected 2 unsettled traces, got %d", len(traces))
+	}
+	if traces[0].ID != child.ID {
+		t.Errorf("first trace should be child %q (deepest-first), got %q", child.ID, traces[0].ID)
+	}
+	if traces[1].ID != root.ID {
+		t.Errorf("second trace should be root %q, got %q", root.ID, traces[1].ID)
+	}
+}
+
+// TestResetStepAndReparkNonEmptyTrace verifies Fix 2: ResetStepAndRepark returns
+// ErrInvalidState when the completion trace has committed downstream work.
+func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@repark-nonempty", 200)
+	_ = db.CreateUser(ctx, user)
+	act := newAction(user.ID, "repark-nonempty-act", 100, true)
+	_ = db.CreateAction(ctx, act)
+
+	p := newProcess(user.ID)
+	_ = db.CreateProcess(ctx, p, user.ID, 200)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	_ = db.BeginRootCall(ctx, p.ID, root, 100)
+	ptID := root.ID
+	step := &kernel.Step{
+		ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: &ptID,
+		RequiredCallerUserID: user.ID, NextActionID: act.ID,
+		Price: 100, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+	}
+	_ = db.CreateStep(ctx, step)
+	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	_ = db.BeginStepCall(ctx, step.ID, ct)
+
+	// Make the completion trace non-empty: lock funds via a subcall.
+	sub := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginSubcall(ctx, ct.ID, sub, 50); err != nil {
+		t.Fatalf("BeginSubcall: %v", err)
+	}
+
+	err := db.ResetStepAndRepark(ctx, step.ID)
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("expected ErrInvalidState for non-empty completion trace, got %v", err)
+	}
+
+	// Step must still be running (re-park was aborted).
+	got, _ := db.ReadStep(ctx, step.ID)
+	if got.Status != kernel.StepRunning {
+		t.Errorf("step.status after failed re-park: got %s, want running", got.Status)
+	}
+}
+

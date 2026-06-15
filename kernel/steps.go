@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/daios-ai/juice/log"
@@ -270,6 +271,23 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 		CallerUserID:  callerID,
 		CreatedAt:     time.Now().UTC(),
 	}
+	// For remote-proxy actions, generate and persist the idempotency key and dispatch
+	// payload atomically with the trace creation. BeginStepCall passes these through
+	// insertTraceTx so they land in the DB before any network dispatch. This ensures
+	// that on restart, ListPendingRemoteTraces finds the trace and RetryPendingRemoteDispatches
+	// can resume with the same idempotency key — matching the §5 recovery guarantee.
+	if action.Kind == KindRemoteProxy {
+		key := uuid.New().String()
+		stepTrace.IdempotencyKey = &key
+		mp := action.Price * 10000 / (10000 + k.cfg.ImportBPS)
+		djsonBytes, _ := json.Marshal(map[string]any{
+			"args":         args,
+			"step_id":      stepID,
+			"remote_price": mp,
+		})
+		djson := string(djsonBytes)
+		stepTrace.DispatchJSON = &djson
+	}
 	if err := k.store.BeginStepCall(ctx, stepID, stepTrace); err != nil {
 		return nil, err
 	}
@@ -284,9 +302,16 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 		StepID:        stepID,
 	})
 	if callErr != nil {
-		// If Call failed before creating a transaction, re-park the price and reset to waiting
-		// so the step can be retried. BeginStepCall already released the parent trace lock and
-		// created the completion trace; ResetStepAndRepark undoes that accounting.
+		// Remote-proxy timeout: the completion trace has idempotency_key set and the
+		// remote dispatch may already be in flight. Leave the step running so that
+		// RetryPendingRemoteDispatches can recover it via ListPendingRemoteTraces.
+		// Do NOT re-park — that would delete the pending trace and lose retry state.
+		if errors.Is(callErr, ErrTimeout) {
+			return nil, callErr
+		}
+		// Non-timeout: Call failed before creating a transaction. Re-park the price and
+		// reset to waiting so the step can be retried. BeginStepCall already released
+		// the parent trace lock; ResetStepAndRepark undoes that accounting.
 		// If CommitFailedCall already ran (step is done), this is a no-op.
 		_ = k.store.ResetStepAndRepark(ctx, stepID)
 		return nil, callErr

@@ -167,22 +167,29 @@ func beginTestRun(t *testing.T, st kernel.Store, callerID string, action *kernel
 	return p, tr
 }
 
-// setupOrphanTrace creates an uncommitted root trace (no tx) in the process.
-// The trace keeps the process quiescent-open so CreateStep / Call can still run against it.
-// actionOwnerID is recorded as the trace's action_owner_id (used for non-owner authority checks).
-func setupOrphanTrace(t *testing.T, st kernel.Store, processID, actionOwnerID, callerID string) *kernel.Trace {
+// setupOrphanTrace atomically creates a zero-price process+trace via BeginRun, mirroring
+// the production entry point. The trace keeps the process open (no tx) for CreateStep/Call.
+// actionOwnerID sets action_owner_id on the trace (used for non-owner authority checks).
+func setupOrphanTrace(t *testing.T, st kernel.Store, ownerID, actionOwnerID, callerID string) (*kernel.Process, *kernel.Trace) {
 	t.Helper()
+	ctx := context.Background()
+	p := &kernel.Process{
+		ID:          uuid.New().String(),
+		OwnerUserID: ownerID,
+		Status:      kernel.ProcessOpen,
+		CreatedAt:   time.Now().UTC(),
+	}
 	tr := &kernel.Trace{
 		ID:            uuid.New().String(),
-		ProcessID:     processID,
+		ProcessID:     p.ID,
 		ActionOwnerID: actionOwnerID,
 		CallerUserID:  callerID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := st.BeginRootCall(context.Background(), processID, tr, 0); err != nil {
+	if err := st.BeginRun(ctx, p, tr, ownerID, 0); err != nil {
 		t.Fatalf("setupOrphanTrace: %v", err)
 	}
-	return tr
+	return p, tr
 }
 
 type fakeScriptExec struct {

@@ -545,12 +545,12 @@ func TestCallNestedTraceTree(t *testing.T) {
 	ctx := context.Background()
 
 	alice := setupUser(t, st, "@alice", 0)
-	p := setupProcess(t, st, alice.ID, 0)
-
+	p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: alice.ID,
+		Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
 	traceA := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
 		ActionOwnerID: alice.ID, CallerUserID: alice.ID, CreatedAt: time.Now().UTC()}
-	if err := st.BeginRootCall(ctx, p.ID, traceA, 0); err != nil {
-		t.Fatalf("BeginRootCall A: %v", err)
+	if err := st.BeginRun(ctx, p, traceA, alice.ID, 0); err != nil {
+		t.Fatalf("BeginRun A: %v", err)
 	}
 	traceB := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
 		ActionOwnerID: alice.ID, CallerUserID: alice.ID, CreatedAt: time.Now().UTC()}
@@ -1186,8 +1186,10 @@ func TestCallCrossProcessParentTraceRejectedForNonOwner(t *testing.T) {
 	_ = st.CreateAction(ctx, callerAction)
 
 	// p1 and p2 are both owned by procOwner.
+	// p2 uses callerAction so its root trace has action_owner_id=actionOwner.ID (callerAction.OwnerUserID),
+	// granting actionOwner trace-scoped authority over p2 in the positive test below.
 	p1, p1tr := beginTestRun(t, st, procOwner.ID, callerAction)
-	p2 := setupProcess(t, st, procOwner.ID, 100)
+	p2, p2Orphan := beginTestRun(t, st, procOwner.ID, callerAction)
 
 	// Create a trace in p1 owned by actionOwner (by calling callerAction in p1).
 	reply1, err := k.Call(ctx, kernel.CallRequest{
@@ -1218,9 +1220,7 @@ func TestCallCrossProcessParentTraceRejectedForNonOwner(t *testing.T) {
 		t.Error("expected error for cross-process trace authority, got nil")
 	}
 
-	// But using an orphan trace in p2 (action_owner_id=actionOwner) should succeed.
-	// setupOrphanTrace keeps p2 open (no committed tx) and grants actionOwner trace authority.
-	p2Orphan := setupOrphanTrace(t, st, p2.ID, actionOwner.ID, procOwner.ID)
+	// Using the p2 root trace (action_owner_id=actionOwner.ID via callerAction) should succeed.
 	p2TraceID := p2Orphan.ID
 
 	_, err = k.Call(ctx, kernel.CallRequest{
