@@ -2263,6 +2263,135 @@ func TestListUnsettledTracesChildFirst(t *testing.T) {
 	}
 }
 
+// TestListDirectUnsettledChildren verifies that ListDirectUnsettledChildren returns only
+// direct children of the given parent trace that have no committed transaction, and that
+// a child with a committed transaction is excluded.
+func TestListDirectUnsettledChildren(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@unsettled-children", 300)
+	_ = db.CreateUser(ctx, user)
+	feeUser := newUser("@fee-uc", 0)
+	_ = db.CreateUser(ctx, feeUser)
+	act := newAction(user.ID, "uc-act", 0, true)
+	_ = db.CreateAction(ctx, act)
+
+	p := newProcess(user.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
+		ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, user.ID, 200); err != nil {
+		t.Fatalf("BeginRun: %v", err)
+	}
+
+	// child1: unsettled subcall
+	child1 := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
+		ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginSubcall(ctx, root.ID, child1, 50); err != nil {
+		t.Fatalf("BeginSubcall child1: %v", err)
+	}
+
+	// child2: settled subcall (has a committed transaction)
+	child2 := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
+		ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginSubcall(ctx, root.ID, child2, 50); err != nil {
+		t.Fatalf("BeginSubcall child2: %v", err)
+	}
+	tx2 := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: child2.ID,
+		OwnerUserID: user.ID, CallerUserID: user.ID, TargetUserID: user.ID,
+		ActionID: act.ID, Status: kernel.TxSuccess, Gross: 50, Net: 40, Fee: 10,
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	rc2 := &kernel.Receipt{
+		ID: uuid.New().String(), IssuerUserID: user.ID, TxID: tx2.ID, TraceID: child2.ID,
+		ActionID: act.ID, Status: kernel.TxSuccess, Gross: 50, Net: 40, Fee: 10,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := db.CommitCall(ctx, tx2, rc2, child2.ID, root.ID, kernel.CallerTrace, user.ID, feeUser.ID, 40, 10, nil, "", ""); err != nil {
+		t.Fatalf("CommitCall child2: %v", err)
+	}
+
+	// grandchild of child1: should NOT appear (not a direct child of root)
+	grandchild := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
+		ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginSubcall(ctx, child1.ID, grandchild, 20); err != nil {
+		t.Fatalf("BeginSubcall grandchild: %v", err)
+	}
+
+	children, err := db.ListDirectUnsettledChildren(ctx, root.ID)
+	if err != nil {
+		t.Fatalf("ListDirectUnsettledChildren: %v", err)
+	}
+	if len(children) != 1 {
+		t.Fatalf("expected 1 unsettled direct child, got %d", len(children))
+	}
+	if children[0].ID != child1.ID {
+		t.Errorf("expected child1 %q, got %q", child1.ID, children[0].ID)
+	}
+}
+
+// TestResetStepAndReparkWithDescendantTransaction verifies that ResetStepAndRepark rejects
+// a re-park when the completion trace has a committed descendant transaction, even if the
+// trace's own available/locked look correct.
+func TestResetStepAndReparkWithDescendantTransaction(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@repark-desc-tx", 200)
+	_ = db.CreateUser(ctx, user)
+	feeUser := newUser("@fee-rdtx", 0)
+	_ = db.CreateUser(ctx, feeUser)
+	act := newAction(user.ID, "repark-desc-tx-act", 100, true)
+	_ = db.CreateAction(ctx, act)
+
+	p := newProcess(user.ID)
+	_ = db.CreateProcess(ctx, p, user.ID, 200)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	_ = db.BeginRootCall(ctx, p.ID, root, 100)
+	ptID := root.ID
+	step := &kernel.Step{
+		ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: &ptID,
+		RequiredCallerUserID: user.ID, NextActionID: act.ID,
+		Price: 100, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+	}
+	_ = db.CreateStep(ctx, step)
+	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	_ = db.BeginStepCall(ctx, step.ID, ct)
+
+	// Create a descendant subcall of the completion trace and commit a transaction for it.
+	sub := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginSubcall(ctx, ct.ID, sub, 50); err != nil {
+		t.Fatalf("BeginSubcall: %v", err)
+	}
+	// Settle the subcall so ct.available and ct.locked look normal, but a descendant tx exists.
+	subTx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: sub.ID,
+		OwnerUserID: user.ID, CallerUserID: user.ID, TargetUserID: user.ID,
+		ActionID: act.ID, Status: kernel.TxSuccess, Gross: 50, Net: 40, Fee: 10,
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	subRc := &kernel.Receipt{
+		ID: uuid.New().String(), IssuerUserID: user.ID, TxID: subTx.ID, TraceID: sub.ID,
+		ActionID: act.ID, Status: kernel.TxSuccess, Gross: 50, Net: 40, Fee: 10,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := db.CommitCall(ctx, subTx, subRc, sub.ID, ct.ID, kernel.CallerTrace, user.ID, feeUser.ID, 40, 10, nil, "", ""); err != nil {
+		t.Fatalf("CommitCall sub: %v", err)
+	}
+
+	// ct.available == price and ct.locked == 0 at this point (subcall settled and released lock),
+	// but there IS a committed descendant transaction. Re-park must be rejected.
+	err := db.ResetStepAndRepark(ctx, step.ID)
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("expected ErrInvalidState for completion trace with descendant tx, got %v", err)
+	}
+	got, _ := db.ReadStep(ctx, step.ID)
+	if got.Status != kernel.StepRunning {
+		t.Errorf("step.status after failed re-park: got %s, want running", got.Status)
+	}
+}
+
 // TestResetStepAndReparkNonEmptyTrace verifies Fix 2: ResetStepAndRepark returns
 // ErrInvalidState when the completion trace has committed downstream work.
 func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {

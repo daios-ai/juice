@@ -20,6 +20,12 @@ func (k *Kernel) ResetRunningSteps(ctx context.Context) error {
 func (k *Kernel) Recover(ctx context.Context) error {
 	logger := k.log.With(ctx)
 
+	// 0: Retry pending remote dispatches first. If the remote kernel is reachable and
+	// the call committed, we settle cleanly here rather than force-failing via recoverTrace.
+	// Any still-pending remote traces are force-failed by settleFailedCall when their
+	// orphan parent traces are settled in phase C below.
+	k.RetryPendingRemoteDispatches(ctx)
+
 	// A: Re-park empty step-completion traces; collect non-empty ones for phase C.
 	// Empty means no subcall started (trace.locked==0, trace.available==step.price, no settled subtx).
 	orphanSteps, err := k.store.ListOrphanRunningSteps(ctx)

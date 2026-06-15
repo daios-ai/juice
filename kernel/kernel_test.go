@@ -1759,7 +1759,7 @@ func TestRunFederatedDoesNotCreateProcessOnInsufficientBalance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.RunFederated(ctx, caller.ID, target.ID, a.Name, map[string]any{}, 100, "")
+	_, err := k.RunFederated(ctx, caller.ID, target.ID, a.Name, map[string]any{}, "")
 	if !errors.Is(err, kernel.ErrInsufficientFunds) {
 		t.Fatalf("expected ErrInsufficientFunds, got %v", err)
 	}

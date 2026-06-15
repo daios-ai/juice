@@ -1776,6 +1776,22 @@ func (s *DB) ResetStepAndRepark(ctx context.Context, stepID string) error {
 			if traceAvailable != price || traceLocked != 0 {
 				return kernel.ErrInvalidState.Wrap("completion trace is not empty; cannot re-park")
 			}
+			// Also reject if any descendant transaction exists: a committed subcall means
+			// the trace was not truly empty even if available/locked look right.
+			var descTxCount int64
+			if err = tx.QueryRowContext(ctx, `
+WITH RECURSIVE sub(id) AS (
+    SELECT ?
+    UNION ALL
+    SELECT t.id FROM traces t JOIN sub s ON t.parent_trace_id=s.id
+)
+SELECT COUNT(*) FROM transactions WHERE trace_id IN (SELECT id FROM sub)`,
+				*completionTraceID).Scan(&descTxCount); err != nil {
+				return dbErr(err, "reset step and repark: check descendant transactions")
+			}
+			if descTxCount > 0 {
+				return kernel.ErrInvalidState.Wrap("completion trace has descendant transactions; cannot re-park")
+			}
 			// Move funds from completion trace's available back to parent trace's locked.
 			if _, err = tx.ExecContext(ctx,
 				`UPDATE traces SET available=available-? WHERE id=?`, price, *completionTraceID); err != nil {
@@ -1886,6 +1902,24 @@ func (s *DB) ListPendingRemoteTraces(ctx context.Context) ([]*kernel.Trace, erro
 		return nil, dbErr(err, "list pending remote traces")
 	}
 	return queryList(rows, "list pending remote traces", func(scan func(...any) error) (*kernel.Trace, error) {
+		var t kernel.Trace
+		if err := scanTrace(&t, scan); err != nil {
+			return nil, err
+		}
+		return &t, nil
+	})
+}
+
+func (s *DB) ListDirectUnsettledChildren(ctx context.Context, parentTraceID string) ([]*kernel.Trace, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+traceCols+` FROM traces t
+		 WHERE t.parent_trace_id=?
+		 AND NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)`,
+		parentTraceID)
+	if err != nil {
+		return nil, dbErr(err, "list direct unsettled children")
+	}
+	return queryList(rows, "list direct unsettled children", func(scan func(...any) error) (*kernel.Trace, error) {
 		var t kernel.Trace
 		if err := scanTrace(&t, scan); err != nil {
 			return nil, err

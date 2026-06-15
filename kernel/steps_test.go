@@ -963,6 +963,156 @@ func TestStepCompleteRemoteProxyPersistsIdempotencyKey(t *testing.T) {
 	}
 }
 
+// TestSettleFailedCallWithPendingRemoteChild verifies that when a parent trace has a
+// pending remote-proxy subcall (child trace with idempotency_key, no tx) and the parent
+// fails, settleFailedCall pre-settles the child first so the full parent price is refunded
+// to the caller and no funds are stranded in the child trace.
+func TestSettleFailedCallWithPendingRemoteChild(t *testing.T) {
+	st := newTestStore(t)
+	// FakeFederationHTTP with empty receiptJSON → ExecuteFederation returns no receipt → ErrTimeout.
+	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{receiptJSON: ""})
+	ctx := context.Background()
+
+	const parentPrice = 100
+	const childPrice = 60
+
+	owner := setupUser(t, st, "@psc-owner", 0)
+	// Remote proxy action with price=childPrice.
+	remoteAct := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID,
+		Name: "psc-remote-act", Kind: kernel.KindRemoteProxy,
+		Active: true, Public: true, Price: childPrice,
+		Source:    "https://remote.example.com/v1/federation/call?action=@owner/psc-remote-act&counterparty=us",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, remoteAct); err != nil {
+		t.Fatalf("CreateAction remoteAct: %v", err)
+	}
+
+	// Set up an open process+root trace funded with parentPrice.
+	caller := setupUser(t, st, "@psc-caller", parentPrice)
+	parentAct := setupAction(t, st, owner.ID, "psc-parent-act", parentPrice)
+	p, root := beginTestRun(t, st, caller.ID, parentAct)
+
+	// Simulate: parent trace makes a subcall to the remote proxy → BeginSubcall.
+	childTrace := &kernel.Trace{
+		ID:            uuid.New().String(),
+		ProcessID:     p.ID,
+		ActionOwnerID: owner.ID,
+		ActionID:      remoteAct.ID,
+		CallerUserID:  owner.ID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	ikey := uuid.New().String()
+	childTrace.IdempotencyKey = &ikey
+	djson := `{"args":{},"step_id":"","remote_price":60}`
+	childTrace.DispatchJSON = &djson
+	if err := st.BeginSubcall(ctx, root.ID, childTrace, childPrice); err != nil {
+		t.Fatalf("BeginSubcall: %v", err)
+	}
+	// Remote call timed out: child trace has idempotency_key and no tx. Parent.locked = childPrice.
+
+	// Simulate parent execution failure (e.g. WASM propagated the ErrTimeout).
+	if err := k.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	// Verify: child trace has a failure transaction.
+	childTx, err := st.ReadTrace(ctx, childTrace.ID)
+	if err != nil {
+		t.Fatalf("ReadTrace child: %v", err)
+	}
+	_ = childTx // trace still exists; check for transaction
+	children, err := st.ListDirectUnsettledChildren(ctx, root.ID)
+	if err != nil {
+		t.Fatalf("ListDirectUnsettledChildren: %v", err)
+	}
+	if len(children) != 0 {
+		t.Errorf("expected 0 unsettled children after Recover, got %d", len(children))
+	}
+
+	// Wallet invariant: caller gets back the full parentPrice.
+	u, _ := st.ReadUser(ctx, caller.ID)
+	if u.Available+u.Locked != parentPrice {
+		t.Errorf("caller wallet: available=%d locked=%d, want sum=%d", u.Available, u.Locked, parentPrice)
+	}
+	if u.Locked != 0 {
+		t.Errorf("caller.locked=%d after full recovery, want 0", u.Locked)
+	}
+}
+
+// TestRecoverWithOrphanParentAndPendingChild verifies that Recover correctly handles the
+// case where an orphan parent trace has a pending remote-proxy child (idempotency_key set):
+// the child is force-failed first, its funds return to the parent, and then the parent
+// is settled, restoring the full price to the caller.
+func TestRecoverWithOrphanParentAndPendingChild(t *testing.T) {
+	st := newTestStore(t)
+	// fakeFederationHTTP with empty receipt → retry in Recover returns ErrTimeout → child stays pending,
+	// then settleFailedCall pre-settles it.
+	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{receiptJSON: ""})
+	ctx := context.Background()
+
+	const parentPrice = 80
+	const childPrice = 50
+
+	owner := setupUser(t, st, "@roppc-owner", 0)
+	remoteAct := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID,
+		Name: "roppc-remote-act", Kind: kernel.KindRemoteProxy,
+		Active: true, Public: true, Price: childPrice,
+		Source:    "https://remote.example.com/v1/federation/call?action=@owner/roppc-remote-act&counterparty=us",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, remoteAct); err != nil {
+		t.Fatalf("CreateAction: %v", err)
+	}
+
+	caller := setupUser(t, st, "@roppc-caller", parentPrice)
+	parentAct := setupAction(t, st, owner.ID, "roppc-parent-act", parentPrice)
+	p, root := beginTestRun(t, st, caller.ID, parentAct)
+
+	// Child remote-proxy subcall in pending state.
+	childTrace := &kernel.Trace{
+		ID:            uuid.New().String(),
+		ProcessID:     p.ID,
+		ActionOwnerID: owner.ID,
+		ActionID:      remoteAct.ID,
+		CallerUserID:  owner.ID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	ikey := uuid.New().String()
+	childTrace.IdempotencyKey = &ikey
+	djson := `{"args":{},"step_id":"","remote_price":50}`
+	childTrace.DispatchJSON = &djson
+	if err := st.BeginSubcall(ctx, root.ID, childTrace, childPrice); err != nil {
+		t.Fatalf("BeginSubcall: %v", err)
+	}
+	// At this point: root is an orphan trace (no tx), child has idempotency_key (pending remote).
+	// Simulate server restart: Recover() should handle both.
+
+	if err := k.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	// All unsettled children of root must now be settled.
+	children, err := st.ListDirectUnsettledChildren(ctx, root.ID)
+	if err != nil {
+		t.Fatalf("ListDirectUnsettledChildren: %v", err)
+	}
+	if len(children) != 0 {
+		t.Errorf("expected 0 unsettled children after Recover, got %d", len(children))
+	}
+
+	// Caller must have full parentPrice back (no funds stranded).
+	u, _ := st.ReadUser(ctx, caller.ID)
+	if u.Available+u.Locked != parentPrice {
+		t.Errorf("caller wallet: available=%d locked=%d, want sum=%d", u.Available, u.Locked, parentPrice)
+	}
+	if u.Locked != 0 {
+		t.Errorf("caller.locked=%d after recovery, want 0", u.Locked)
+	}
+}
+
 // TestStepCompleteRemoteProxyTimeoutLeavesStepRunning verifies Fix 3B: CompleteStep does not
 // call ResetStepAndRepark on ErrTimeout, leaving the step running for RetryPendingRemoteDispatches.
 func TestStepCompleteRemoteProxyTimeoutLeavesStepRunning(t *testing.T) {

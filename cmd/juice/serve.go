@@ -912,14 +912,8 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("could not read request body"))
 		return
 	}
-	argsHash := sha256HexBytes(rawBody)
 	sigStr := r.Header.Get("X-Signature")
-	counterparty, err := validateFederationCall(s.kernel, ctx, cpPubKey, tsStr, idempotencyKey, actionParam, sigStr, argsHash)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	status, body, callErr := callFederated(s.kernel, ctx, counterparty, actionParam, argsHash, idempotencyKey, rawBody)
+	status, body, callErr := handleFederationCall(s.kernel, ctx, cpPubKey, tsStr, idempotencyKey, actionParam, sigStr, rawBody)
 	if callErr != nil {
 		writeErr(w, callErr)
 		return

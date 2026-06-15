@@ -251,6 +251,12 @@ type Store interface {
 	// These are in-flight remote proxy calls awaiting settlement by RetryPendingRemoteDispatches.
 	ListPendingRemoteTraces(ctx context.Context) ([]*Trace, error)
 
+	// ListDirectUnsettledChildren returns traces whose parent_trace_id equals parentTraceID
+	// and that have no committed transaction. Used by settleFailedCall to pre-settle child
+	// traces (e.g. timed-out remote subcalls) before committing the parent failure, so that
+	// the parent's refund correctly includes the child's allocation.
+	ListDirectUnsettledChildren(ctx context.Context, parentTraceID string) ([]*Trace, error)
+
 	// ListUnsettledTracesForProcess returns all traces for a process that have no committed
 	// transaction, ordered deepest-first. Includes both orphan and pending-remote traces.
 	// Used by EndProcess to fail in-flight calls before closure.

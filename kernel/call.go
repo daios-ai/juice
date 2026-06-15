@@ -517,6 +517,17 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 	if len(tx.ReplyJSON) == 0 {
 		tx.ReplyJSON = json.RawMessage("null")
 	}
+	// Pre-settle any unsettled direct child traces (e.g. remote subcalls that timed out).
+	// recoverTrace settles each child as a failure, crediting its refund back into this
+	// trace's available and zeroing its locked. CommitFailedCall below then includes those
+	// funds in the refund it returns to the caller, preventing stranded allocations.
+	if children, childErr := k.store.ListDirectUnsettledChildren(ctx, traceID); childErr == nil {
+		for _, child := range children {
+			if err := k.recoverTrace(ctx, logger, child, "parent call failed", ""); err != nil {
+				logger.Error("call.pre_settle_child_failed", "child_trace_id", child.ID, "error", err)
+			}
+		}
+	}
 	stats := k.computeStats(ctx, action.ID, tx, latency)
 	buildFn := func(refund int64) (*Receipt, error) {
 		return k.buildReceipt(tx, tx.Gross-refund)
