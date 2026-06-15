@@ -165,10 +165,11 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, error) {
 		URL:   globalCfg.Native.LLM.URL,
 		Model: globalCfg.Native.LLM.EmbedModel,
 	})
-	chatter := kernel.Chatter(&llm.OllamaChatter{
+	ollamaChatter := &llm.OllamaChatter{
 		URL:   globalCfg.Native.LLM.URL,
 		Model: globalCfg.Native.LLM.ChatModel,
-	})
+	}
+	chatter := kernel.Chatter(ollamaChatter)
 
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
 	k := kernel.New(db, exec, httpExec, embedder, cfg, logger)
@@ -195,6 +196,8 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, error) {
 	native.RegisterLookupHandler(k)
 	native.RegisterChatHandler(k, chatter)
 	native.RegisterEmbedHandler(k, embedder)
+	native.RegisterJSONHandler(k, ollamaChatter)
+	native.RegisterToolsHandler(k, ollamaChatter)
 	native.RegisterMakeHandler(k, native.MakeDeps{
 		Scripts:  exec,
 		Compiler: compiler,

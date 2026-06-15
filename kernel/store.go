@@ -74,6 +74,31 @@ type Chatter interface {
 	Chat(ctx context.Context, messages []ChatMessage) (ChatMessage, error)
 }
 
+// JSONChatter performs a chat completion constrained to a JSON schema.
+type JSONChatter interface {
+	ChatJSON(ctx context.Context, messages []ChatMessage, schema map[string]any) (any, error)
+}
+
+// ToolDefinition describes a Juice action offered to the LLM as a callable tool.
+type ToolDefinition struct {
+	Action       string
+	Description  string
+	InputSchema  map[string]any
+	OutputSchema map[string]any // optional
+	Price        *int64         // optional, informational
+}
+
+// ToolCall is a single tool invocation proposed by the LLM.
+type ToolCall struct {
+	Action string
+	Args   map[string]any
+}
+
+// ToolChatter performs a chat completion with tool definitions and returns proposed calls.
+type ToolChatter interface {
+	ChatTools(ctx context.Context, messages []ChatMessage, tools []ToolDefinition, toolChoice string, maxToolCalls int) ([]ToolCall, *ChatMessage, error)
+}
+
 // ---- Persistence interface ----
 
 // TxFilter narrows a ListTransactions query.

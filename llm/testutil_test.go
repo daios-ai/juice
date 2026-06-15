@@ -31,6 +31,33 @@ func TestFakeChatter_ConfiguredReply(t *testing.T) {
 	}
 }
 
+func TestFakeJSONChatter_ReturnsValue(t *testing.T) {
+	f := &FakeJSONChatter{Value: map[string]any{"x": float64(1)}}
+	got, err := f.ChatJSON(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m, ok := got.(map[string]any)
+	if !ok || m["x"] != float64(1) {
+		t.Errorf("unexpected value: %v", got)
+	}
+}
+
+func TestFakeToolChatter_ReturnsCalls(t *testing.T) {
+	calls := []kernel.ToolCall{{Action: "@sys/lookup", Args: map[string]any{"query": "test"}}}
+	f := &FakeToolChatter{Calls: calls}
+	got, msg, err := f.ChatTools(context.Background(), nil, nil, "auto", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0].Action != "@sys/lookup" {
+		t.Errorf("unexpected calls: %v", got)
+	}
+	if msg != nil {
+		t.Errorf("expected nil message, got %v", msg)
+	}
+}
+
 func TestFakeEmbedder_Length(t *testing.T) {
 	f := &FakeEmbedder{Dims: 4}
 	vec, err := f.Embed(context.Background(), "hello")

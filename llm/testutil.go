@@ -19,6 +19,27 @@ func (f *FakeChatter) Chat(_ context.Context, _ []kernel.ChatMessage) (kernel.Ch
 	return f.Reply, nil
 }
 
+// FakeJSONChatter returns a fixed JSON value for tests.
+type FakeJSONChatter struct {
+	Value any
+	Err   error
+}
+
+func (f *FakeJSONChatter) ChatJSON(_ context.Context, _ []kernel.ChatMessage, _ map[string]any) (any, error) {
+	return f.Value, f.Err
+}
+
+// FakeToolChatter returns fixed tool calls for tests.
+type FakeToolChatter struct {
+	Calls   []kernel.ToolCall
+	Message *kernel.ChatMessage
+	Err     error
+}
+
+func (f *FakeToolChatter) ChatTools(_ context.Context, _ []kernel.ChatMessage, _ []kernel.ToolDefinition, _ string, _ int) ([]kernel.ToolCall, *kernel.ChatMessage, error) {
+	return f.Calls, f.Message, f.Err
+}
+
 // FakeEmbedder returns a deterministic fixed-length vector for tests.
 // The vector is derived from the byte sum of the text so similarity is meaningful.
 type FakeEmbedder struct {
