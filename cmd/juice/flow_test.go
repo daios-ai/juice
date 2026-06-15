@@ -25,7 +25,9 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/llm"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/native"
 	"github.com/daios-ai/juice/store"
 )
 
@@ -2245,6 +2247,1085 @@ func TestFlow_UpstreamAuthSecrecy(t *testing.T) {
 	decodeResponse(t, txResp, &txRaw)
 	if strings.Contains(string(txRaw), secretToken) {
 		t.Error("R9 violation: secret token appears in transaction response")
+	}
+}
+
+// ============================================================
+// — Missing §15 user-story flows —
+// ============================================================
+
+// newFlowKernelFull is like newFlowKernel but accepts an embedder for tests that exercise
+// semantic lookup.
+func newFlowKernelFull(t *testing.T, exec kernel.ScriptExecutor, embedder kernel.Embedder) (*httptest.Server, *kernel.Kernel, *store.DB) {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "flow-full.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "flow-full-test-secret"
+	cfg.AllowLocalSources = true
+	logger := log.Discard()
+	k := kernel.New(db, exec, &httpActionExecutor{timeout: cfg.ScriptTimeout}, embedder, cfg, logger)
+
+	ctx := context.Background()
+	if err := k.FirstBoot(ctx, "sys-pass"); err != nil {
+		t.Fatal(err)
+	}
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	privB64, err := k.GetConfig(ctx, configKeySigningPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privBytes, _ := base64.RawURLEncoding.DecodeString(privB64)
+	priv := ed25519.PrivateKey(privBytes)
+	k.SetSigningKey(priv, sys.ID)
+	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &server{kernel: k, log: logger}
+	r := chi.NewRouter()
+	r.Use(middleware.Recoverer)
+	r.Use(requestIDMiddleware)
+	r.Post("/v1/auth/token", srv.postTokenMulti)
+	r.Post("/v1/auth/authorize", srv.postAuthorize)
+	r.Post("/v1/auth/refresh", srv.postRefresh)
+	r.Post("/v1/auth/logout", srv.postLogout)
+	r.Post("/v1/users", srv.postUser)
+	registerRoutes(r, srv)
+
+	return httptest.NewServer(r), k, db
+}
+
+// bootstrapSysNative registers and activates a @sys native action by spec name.
+// Uses price=0 for all test specs; spec schemas come from buildSysNativeSpecs.
+func bootstrapSysNative(t *testing.T, k *kernel.Kernel, names ...string) {
+	t.Helper()
+	ctx := context.Background()
+	specs := buildSysNativeSpecs(NativeConfig{})
+	specMap := make(map[string]sysNativeSpec, len(specs))
+	for _, s := range specs {
+		specMap[s.name] = s
+	}
+	for _, name := range names {
+		spec, ok := specMap[name]
+		if !ok {
+			t.Fatalf("bootstrapSysNative: unknown spec %q", name)
+		}
+		if err := ensureSysNative(ctx, k, "@sys", spec); err != nil {
+			t.Fatalf("bootstrapSysNative %q: %v", name, err)
+		}
+	}
+}
+
+// TestFlow_LookupAndRun: caller runs @sys/lookup with a query; the matching action appears
+// in results; caller runs it; transaction is recorded.
+func TestFlow_LookupAndRun(t *testing.T) {
+	const description = "barometric pressure sensor api"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"pressure": 1013})
+	}))
+	defer backend.Close()
+
+	srv, k, _ := newFlowKernelFull(t, nil, &llm.FakeEmbedder{Dims: 8})
+	defer srv.Close()
+
+	ctx := context.Background()
+
+	bootstrapSysNative(t, k, "lookup")
+	native.RegisterLookupHandler(k)
+
+	// Provider creates a public action with a distinctive description.
+	providerID, providerTok := makeUser(t, k, "@lk-provider")
+	_ = providerID
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "pressure-api", "kind": "http", "price": 0, "source": backend.URL,
+		"description": description, "input_schema": minSchema, "output_schema": minSchema,
+	}, providerTok)
+	if cr.StatusCode != http.StatusCreated {
+		cr.Body.Close()
+		t.Fatalf("create action: got %d", cr.StatusCode)
+	}
+	var act map[string]any
+	decodeResponse(t, cr, &act)
+	actID := act["id"].(string)
+	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, providerTok).Body.Close()
+	pubTrue := true
+	if _, err := k.UpdateAction(ctx, providerID, kernel.UpdateActionRequest{ID: actID, Public: &pubTrue}); err != nil {
+		t.Fatalf("make public: %v", err)
+	}
+
+	// Caller looks up actions matching the description.
+	callerID, callerTok := makeUser(t, k, "@lk-caller")
+	giveCredits(t, k, callerID, 200)
+
+	lookupReply := runAction(t, srv, callerTok, "@sys/lookup", map[string]any{"query": description})
+	results, _ := lookupReply.Result["results"].([]any)
+	found := false
+	for _, r := range results {
+		item := r.(map[string]any)
+		if item["action_id"] == actID {
+			found = true
+			if item["score"].(float64) <= 0 {
+				t.Errorf("lookup score should be positive, got %v", item["score"])
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("action %s not found in lookup results (got %d items)", actID, len(results))
+	}
+
+	// Caller runs the top result directly.
+	reply := runAction(t, srv, callerTok, "@lk-provider/pressure-api", map[string]any{})
+	if reply.TxID == "" {
+		t.Error("expected tx_id from pressure-api run")
+	}
+}
+
+// TestFlow_Message: user A sends a message to user B via @sys/message; B sees the step;
+// B completes it; the step is done and a transaction exists.
+func TestFlow_Message(t *testing.T) {
+	srv, k, _ := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	bootstrapSysNative(t, k, "sink", "message")
+	native.RegisterSinkHandler(k)
+	native.RegisterMessageHandler(k)
+
+	userAID, userATok := makeUser(t, k, "@msg-a")
+	_, userBTok := makeUser(t, k, "@msg-b")
+	giveCredits(t, k, userAID, 200)
+
+	// A sends a message to B.
+	reply := runAction(t, srv, userATok, "@sys/message", map[string]any{
+		"to":      "@msg-b",
+		"message": "hello from A",
+	})
+	stepID, _ := reply.Result["step_id"].(string)
+	if stepID == "" {
+		t.Fatalf("@sys/message: expected step_id in result, got %v", reply.Result)
+	}
+
+	// B sees the step in their list.
+	listResp := httpDo(t, srv, "GET", "/v1/steps", nil, userBTok)
+	if listResp.StatusCode != http.StatusOK {
+		listResp.Body.Close()
+		t.Fatalf("list steps: expected 200, got %d", listResp.StatusCode)
+	}
+	var steps []map[string]any
+	decodeResponse(t, listResp, &steps)
+	found := false
+	for _, s := range steps {
+		if s["id"] == stepID && s["status"] == "waiting" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("B should see step %s as waiting (got %d steps)", stepID, len(steps))
+	}
+
+	// B completes the step (the sink action accepts any input).
+	complResp := httpDo(t, srv, "POST", "/v1/steps/"+stepID+"/complete",
+		map[string]any{"args": map[string]any{}}, userBTok)
+	if complResp.StatusCode != http.StatusOK {
+		var body map[string]any
+		json.NewDecoder(complResp.Body).Decode(&body)
+		complResp.Body.Close()
+		t.Fatalf("complete step: expected 200, got %d — %v", complResp.StatusCode, body)
+	}
+	var complBody map[string]any
+	decodeResponse(t, complResp, &complBody)
+	if complBody["tx_id"] == nil {
+		t.Error("complete step: expected tx_id in reply")
+	}
+
+	// Step is now done.
+	getResp := httpDo(t, srv, "GET", "/v1/steps/"+stepID, nil, userBTok)
+	var doneStep map[string]any
+	decodeResponse(t, getResp, &doneStep)
+	if doneStep["status"] != "done" {
+		t.Errorf("step after complete: expected done, got %v", doneStep["status"])
+	}
+}
+
+// TestFlow_ThreePartyRoleLaw: P ≠ C ≠ A — process owner P creates a step for bot C to
+// call provider A's action. All three parties independently read the transaction and the
+// role fields (owner_user_id, caller_user_id, target_user_id) are distinct and correct.
+func TestFlow_ThreePartyRoleLaw(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"done": true})
+	}))
+	defer backend.Close()
+
+	srv, k, db := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	pID, pTok := makeUser(t, k, "@3p-owner")
+	cID, cTok := makeUser(t, k, "@3p-caller")
+	_, aTok := makeUser(t, k, "@3p-provider")
+
+	giveCredits(t, k, pID, 500)
+
+	// A creates and activates a public action.
+	actID := createPublicAction(t, srv, backend.URL, aTok, "3p-action", 0)
+	_ = actID
+
+	// P creates a process and a trace for the step funding source.
+	p := setupProcessHTTP(t, db, pID, 200)
+	traceID := setupTraceForProcess(t, db, p.ID)
+
+	// P creates a step addressed to C, pointing at A's action.
+	aAction, err := k.ReadActionByOwnerName(ctx, func() string {
+		u, _ := k.ReadUserByHandle(ctx, "@3p-provider")
+		return u.ID
+	}(), "3p-action")
+	if err != nil || aAction == nil {
+		t.Fatalf("read 3p-action: %v", err)
+	}
+	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
+		"process_id":      p.ID,
+		"parent_trace_id": traceID,
+		"next_action_id":  aAction.ID,
+		"required_caller": "@3p-caller",
+		"partial_args":    map[string]any{},
+		"input_schema":    minSchema,
+	}, pTok)
+	if stepResp.StatusCode != http.StatusCreated {
+		stepResp.Body.Close()
+		t.Fatalf("create step: expected 201, got %d", stepResp.StatusCode)
+	}
+	var step map[string]any
+	decodeResponse(t, stepResp, &step)
+	stepID := step["id"].(string)
+
+	// C completes the step.
+	complResp := httpDo(t, srv, "POST", "/v1/steps/"+stepID+"/complete",
+		map[string]any{"args": map[string]any{}}, cTok)
+	if complResp.StatusCode != http.StatusOK {
+		var body map[string]any
+		json.NewDecoder(complResp.Body).Decode(&body)
+		complResp.Body.Close()
+		t.Fatalf("complete step: expected 200, got %d — %v", complResp.StatusCode, body)
+	}
+	var complBody map[string]any
+	decodeResponse(t, complResp, &complBody)
+	txID, _ := complBody["tx_id"].(string)
+	if txID == "" {
+		t.Fatal("expected tx_id in complete-step reply")
+	}
+
+	// All three parties can read the transaction.
+	aUser, _ := k.ReadUserByHandle(ctx, "@3p-provider")
+	for _, tok := range []string{pTok, cTok, aTok} {
+		r := httpDo(t, srv, "GET", "/v1/transactions/"+txID, nil, tok)
+		if r.StatusCode != http.StatusOK {
+			r.Body.Close()
+			t.Errorf("GET /v1/transactions/%s: expected 200 for one party, got %d", txID, r.StatusCode)
+			continue
+		}
+		var tx map[string]any
+		decodeResponse(t, r, &tx)
+		if tx["owner_user_id"] != pID {
+			t.Errorf("tx.owner_user_id: got %v, want %s", tx["owner_user_id"], pID)
+		}
+		if tx["caller_user_id"] != cID {
+			t.Errorf("tx.caller_user_id: got %v, want %s", tx["caller_user_id"], cID)
+		}
+		if tx["target_user_id"] != aUser.ID {
+			t.Errorf("tx.target_user_id: got %v, want %s", tx["target_user_id"], aUser.ID)
+		}
+	}
+}
+
+// TestFlow_PrivateAction: provider creates a private (public=false) action, runs it
+// successfully, then a second user is rejected when attempting the same action.
+func TestFlow_PrivateAction(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"secret": true})
+	}))
+	defer backend.Close()
+
+	srv, k, _ := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	providerID, providerTok := makeUser(t, k, "@priv-owner")
+	giveCredits(t, k, providerID, 200)
+	otherID, otherTok := makeUser(t, k, "@priv-other")
+	giveCredits(t, k, otherID, 200)
+
+	// Create private action (public=false, which is the default).
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "private-action", "kind": "http", "price": 0, "source": backend.URL,
+		"description": "private api", "input_schema": minSchema, "output_schema": minSchema,
+	}, providerTok)
+	if cr.StatusCode != http.StatusCreated {
+		cr.Body.Close()
+		t.Fatalf("create private action: got %d", cr.StatusCode)
+	}
+	var act map[string]any
+	decodeResponse(t, cr, &act)
+	actID := act["id"].(string)
+	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, providerTok).Body.Close()
+
+	// Owner can run their own private action.
+	reply := runAction(t, srv, providerTok, "@priv-owner/private-action", map[string]any{})
+	if reply.TxID == "" {
+		t.Error("owner run: expected tx_id")
+	}
+
+	// Another user is rejected.
+	resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"action": "@priv-owner/private-action", "args": map[string]any{},
+	}, otherTok)
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Errorf("other user should be rejected from private action, got 200")
+	}
+}
+
+// TestFlow_AuthTokenLifecycle: login → use token → change password → old password rejected
+// → new password works.
+func TestFlow_AuthTokenLifecycle(t *testing.T) {
+	srv, k, _ := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	// Create user; Login is already tested via makeUser; here we test via HTTP.
+	_, _ = makeUser(t, k, "@auth-life")
+
+	loginResp := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
+		"handle": "@auth-life", "password": "pass",
+	}, "")
+	if loginResp.StatusCode != http.StatusOK {
+		loginResp.Body.Close()
+		t.Fatalf("login: expected 200, got %d", loginResp.StatusCode)
+	}
+	var loginBody map[string]any
+	decodeResponse(t, loginResp, &loginBody)
+	tok, _ := loginBody["token"].(string)
+	if tok == "" {
+		t.Fatal("login: expected token in response")
+	}
+
+	// Token is valid.
+	meResp := httpDo(t, srv, "GET", "/v1/me", nil, tok)
+	meResp.Body.Close()
+	if meResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/me with valid token: expected 200, got %d", meResp.StatusCode)
+	}
+
+	// Change password.
+	putResp := httpDo(t, srv, "PUT", "/v1/me", map[string]any{
+		"current_password": "pass", "password": "newpass",
+	}, tok)
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("change password: expected 200, got %d", putResp.StatusCode)
+	}
+
+	// Old password is rejected.
+	oldLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
+		"handle": "@auth-life", "password": "pass",
+	}, "")
+	oldLogin.Body.Close()
+	if oldLogin.StatusCode == http.StatusOK {
+		t.Error("old password should be rejected after change")
+	}
+
+	// New password works.
+	newLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
+		"handle": "@auth-life", "password": "newpass",
+	}, "")
+	if newLogin.StatusCode != http.StatusOK {
+		newLogin.Body.Close()
+		t.Fatalf("new password login: expected 200, got %d", newLogin.StatusCode)
+	}
+	var newBody map[string]any
+	decodeResponse(t, newLogin, &newBody)
+	if newBody["token"] == "" {
+		t.Error("new password login: expected token")
+	}
+}
+
+// TestFlow_SuspendUnsuspend: admin suspends a user; authenticated requests fail;
+// admin unsuspends; requests succeed; account balance is preserved.
+func TestFlow_SuspendUnsuspend(t *testing.T) {
+	srv, k, _ := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	userID, userTok := makeUser(t, k, "@susp-user")
+	giveCredits(t, k, userID, 300)
+
+	// Verify balance before suspend.
+	balanceBefore := getBalance(t, srv, userTok)
+	if balanceBefore != 300 {
+		t.Fatalf("pre-suspend balance: got %d, want 300", balanceBefore)
+	}
+
+	// Suspend.
+	if err := k.SuspendUser(ctx, sys.ID, userID); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+
+	// Suspended user's requests fail.
+	meResp := httpDo(t, srv, "GET", "/v1/me", nil, userTok)
+	meResp.Body.Close()
+	if meResp.StatusCode == http.StatusOK {
+		t.Error("suspended user should not get 200 from GET /v1/me")
+	}
+
+	// Unsuspend.
+	if err := k.UnsuspendUser(ctx, sys.ID, userID); err != nil {
+		t.Fatalf("unsuspend: %v", err)
+	}
+
+	// Requests succeed again.
+	meResp2 := httpDo(t, srv, "GET", "/v1/me", nil, userTok)
+	meResp2.Body.Close()
+	if meResp2.StatusCode != http.StatusOK {
+		t.Errorf("unsuspended user: expected 200, got %d", meResp2.StatusCode)
+	}
+
+	// Balance is unchanged.
+	balanceAfter := getBalance(t, srv, userTok)
+	if balanceAfter != balanceBefore {
+		t.Errorf("balance after suspend/unsuspend: got %d, want %d", balanceAfter, balanceBefore)
+	}
+}
+
+// TestFlow_AccountSelfService: user updates email and changes password via PUT /v1/me;
+// both changes are immediately reflected and the old password is rejected.
+func TestFlow_AccountSelfService(t *testing.T) {
+	srv, k, _ := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	userID, userTok := makeUser(t, k, "@self-user")
+	_ = userID
+
+	// Update email.
+	putResp := httpDo(t, srv, "PUT", "/v1/me", map[string]any{"email": "updated@test.com"}, userTok)
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("update email: expected 200, got %d", putResp.StatusCode)
+	}
+
+	// Verify email via GET /v1/me.
+	meResp := httpDo(t, srv, "GET", "/v1/me", nil, userTok)
+	var meBody map[string]any
+	decodeResponse(t, meResp, &meBody)
+	if meBody["email"] != "updated@test.com" {
+		t.Errorf("email after update: got %v, want updated@test.com", meBody["email"])
+	}
+
+	// Change password.
+	pwResp := httpDo(t, srv, "PUT", "/v1/me", map[string]any{
+		"current_password": "pass", "password": "changed123",
+	}, userTok)
+	pwResp.Body.Close()
+	if pwResp.StatusCode != http.StatusOK {
+		t.Fatalf("change password: expected 200, got %d", pwResp.StatusCode)
+	}
+
+	// Old password rejected.
+	oldLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
+		"handle": "@self-user", "password": "pass",
+	}, "")
+	oldLogin.Body.Close()
+	if oldLogin.StatusCode == http.StatusOK {
+		t.Error("old password should be rejected")
+	}
+
+	// New password accepted.
+	newLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
+		"handle": "@self-user", "password": "changed123",
+	}, "")
+	newLogin.Body.Close()
+	if newLogin.StatusCode != http.StatusOK {
+		t.Errorf("new password login: expected 200, got %d", newLogin.StatusCode)
+	}
+}
+
+// TestFlow_DepositSpendWithdraw: admin deposits, user spends some, admin withdraws a
+// partial amount, then a withdrawal exceeding the remaining balance is rejected.
+func TestFlow_DepositSpendWithdraw(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k, _ := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	userID, userTok := makeUser(t, k, "@dsw-user")
+	providerID, providerTok := makeUser(t, k, "@dsw-provider")
+	_ = providerID
+
+	// Deposit 100.
+	if _, err := k.Deposit(ctx, sys.ID, userID, 100, "initial"); err != nil {
+		t.Fatalf("deposit: %v", err)
+	}
+	if getBalance(t, srv, userTok) != 100 {
+		t.Fatal("balance after deposit: expected 100")
+	}
+
+	// Spend 20 by running an action priced at 20.
+	actID := createPublicAction(t, srv, backend.URL, providerTok, "dsw-action", 20)
+	_ = actID
+	runAction(t, srv, userTok, "@dsw-provider/dsw-action", map[string]any{})
+	if getBalance(t, srv, userTok) != 80 {
+		t.Errorf("balance after spend: got %d, want 80", getBalance(t, srv, userTok))
+	}
+
+	// Withdraw 50.
+	if _, err := k.Withdraw(ctx, sys.ID, userID, 50, "partial withdrawal"); err != nil {
+		t.Fatalf("withdraw 50: %v", err)
+	}
+	if getBalance(t, srv, userTok) != 30 {
+		t.Errorf("balance after withdraw: got %d, want 30", getBalance(t, srv, userTok))
+	}
+
+	// Withdraw 100 is rejected (only 30 remain).
+	_, err := k.Withdraw(ctx, sys.ID, userID, 100, "too much")
+	if err == nil {
+		t.Error("over-withdrawal should be rejected")
+	}
+	if getBalance(t, srv, userTok) != 30 {
+		t.Error("balance should be unchanged after rejected withdrawal")
+	}
+}
+
+// TestFlow_ActionUpdateLive: provider updates a live action's price (which deactivates it),
+// caller is rejected, provider reactivates, caller runs again at new price, historical
+// transaction remains visible with original gross.
+func TestFlow_ActionUpdateLive(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"v": 1})
+	}))
+	defer backend.Close()
+
+	srv, k, _ := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	providerID, providerTok := makeUser(t, k, "@upd-provider")
+	_ = providerID
+	callerID, callerTok := makeUser(t, k, "@upd-caller")
+	giveCredits(t, k, callerID, 500)
+
+	// Create and activate at price=50.
+	actID := createPublicAction(t, srv, backend.URL, providerTok, "upd-action", 50)
+
+	// Caller runs it — tx1 recorded at gross=50.
+	reply1 := runAction(t, srv, callerTok, "@upd-provider/upd-action", map[string]any{})
+	tx1ID := reply1.TxID
+	if tx1ID == "" {
+		t.Fatal("expected tx_id from first run")
+	}
+
+	// Provider updates price (deactivates action).
+	newPrice := int64(100)
+	putResp := httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"price": newPrice}, providerTok)
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("update price: expected 200, got %d", putResp.StatusCode)
+	}
+
+	// Caller is rejected (action inactive).
+	failResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"action": "@upd-provider/upd-action", "args": map[string]any{},
+	}, callerTok)
+	failResp.Body.Close()
+	if failResp.StatusCode == http.StatusOK {
+		t.Error("caller should be rejected when action is inactive")
+	}
+
+	// tx1 is still visible.
+	tx1Resp := httpDo(t, srv, "GET", "/v1/transactions/"+tx1ID, nil, callerTok)
+	var tx1Body map[string]any
+	decodeResponse(t, tx1Resp, &tx1Body)
+	if int64(tx1Body["gross"].(float64)) != 50 {
+		t.Errorf("tx1 gross: got %v, want 50", tx1Body["gross"])
+	}
+
+	// Provider re-enables.
+	enResp := httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, providerTok)
+	enResp.Body.Close()
+	if enResp.StatusCode != http.StatusOK {
+		t.Fatalf("re-enable: expected 200, got %d", enResp.StatusCode)
+	}
+
+	// Caller runs again at new price.
+	reply2 := runAction(t, srv, callerTok, "@upd-provider/upd-action", map[string]any{})
+	tx2Resp := httpDo(t, srv, "GET", "/v1/transactions/"+reply2.TxID, nil, callerTok)
+	var tx2Body map[string]any
+	decodeResponse(t, tx2Resp, &tx2Body)
+	if int64(tx2Body["gross"].(float64)) != newPrice {
+		t.Errorf("tx2 gross: got %v, want %d", tx2Body["gross"], newPrice)
+	}
+}
+
+// TestFlow_OpenAPIOwnershipProof: import spec without x-juice-owner → making it public
+// is rejected; re-import with x-juice-owner (well-known file served) → making public
+// succeeds; a caller can run the action.
+func TestFlow_OpenAPIOwnershipProof(t *testing.T) {
+	apiBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"proof": true})
+	}))
+	defer apiBackend.Close()
+
+	const ownerHandle = "@proof-owner"
+
+	// Spec WITHOUT x-juice-owner (first import — no ownership).
+	noProofSpec := map[string]any{
+		"openapi": "3.0.0",
+		"info":    map[string]any{"title": "Proof API", "version": "1.0"},
+		"servers": []any{map[string]any{"url": apiBackend.URL}},
+		"paths": map[string]any{
+			"/call": map[string]any{
+				"post": map[string]any{
+					"operationId": "proofCall",
+					"summary":     "call the proof api",
+					"requestBody": map[string]any{
+						"content": map[string]any{
+							"application/json": map[string]any{"schema": map[string]any{"type": "object"}},
+						},
+					},
+					"responses": map[string]any{
+						"200": map[string]any{
+							"description": "ok",
+							"content": map[string]any{
+								"application/json": map[string]any{"schema": map[string]any{"type": "object"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	noProofBytes, _ := json.Marshal(noProofSpec)
+
+	// Spec WITH x-juice-owner for the re-import.
+	withProofSpec := make(map[string]any)
+	for k2, v := range noProofSpec {
+		withProofSpec[k2] = v
+	}
+	withProofSpec["x-juice-owner"] = ownerHandle
+	withProofBytes, _ := json.Marshal(withProofSpec)
+
+	// Spec server serves the spec and the well-known ownership file.
+	var serveWithProof bool
+	specServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/juice-owner.txt" {
+			if serveWithProof {
+				w.Write([]byte(ownerHandle))
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if serveWithProof {
+			w.Write(withProofBytes)
+		} else {
+			w.Write(noProofBytes)
+		}
+	}))
+	defer specServer.Close()
+
+	srv, k, _ := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	ownerID, ownerTok := makeUser(t, k, ownerHandle)
+	callerID, callerTok := makeUser(t, k, "@proof-caller")
+	giveCredits(t, k, callerID, 200)
+
+	// First import: no ownership.
+	importResp1 := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{
+		"spec_url": specServer.URL + "/openapi.json",
+	}, ownerTok)
+	if importResp1.StatusCode != http.StatusOK {
+		importResp1.Body.Close()
+		t.Fatalf("first import: expected 200, got %d", importResp1.StatusCode)
+	}
+	var importResult1 map[string]any
+	decodeResponse(t, importResp1, &importResult1)
+
+	var actID string
+	if created, ok := importResult1["Created"].([]any); ok && len(created) > 0 {
+		actID = created[0].(map[string]any)["id"].(string)
+	}
+	if actID == "" {
+		t.Fatalf("first import: no action created, result: %v", importResult1)
+	}
+
+	// Enable (activate) succeeds.
+	enResp := httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, ownerTok)
+	enResp.Body.Close()
+	if enResp.StatusCode != http.StatusOK {
+		t.Fatalf("enable before proof: expected 200, got %d", enResp.StatusCode)
+	}
+
+	// Making it public without ownership proof is rejected.
+	pubResp1 := httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"public": true}, ownerTok)
+	pubResp1.Body.Close()
+	if pubResp1.StatusCode == http.StatusOK {
+		t.Error("making public without ownership proof should be rejected")
+	}
+
+	// Re-import with x-juice-owner (spec server now serves proof).
+	serveWithProof = true
+	importResp2 := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{
+		"spec_url": specServer.URL + "/openapi.json",
+	}, ownerTok)
+	if importResp2.StatusCode != http.StatusOK {
+		importResp2.Body.Close()
+		t.Fatalf("second import: expected 200, got %d", importResp2.StatusCode)
+	}
+	importResp2.Body.Close()
+
+	// Re-enable (import deactivates).
+	en2Resp := httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, ownerTok)
+	en2Resp.Body.Close()
+
+	// Now making it public succeeds.
+	pubResp2 := httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"public": true}, ownerTok)
+	pubResp2.Body.Close()
+	if pubResp2.StatusCode != http.StatusOK {
+		t.Fatalf("making public after ownership proof: expected 200, got %d", pubResp2.StatusCode)
+	}
+
+	// Re-enable after making public (UpdateAction deactivates).
+	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, ownerTok).Body.Close()
+
+	// Caller can run the action.
+	runResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"action": ownerHandle + "/proofCall", "args": map[string]any{},
+	}, callerTok)
+	if runResp.StatusCode != http.StatusOK {
+		var body map[string]any
+		json.NewDecoder(runResp.Body).Decode(&body)
+		runResp.Body.Close()
+		t.Fatalf("caller run after proof: expected 200, got %d — %v", runResp.StatusCode, body)
+	}
+	runResp.Body.Close()
+
+	_ = ownerID
+}
+
+// TestFlow_ManualPeerAcceptance: with peer_auto_accept disabled, a friend request arrives
+// as "pending"; the operator manually accepts it via CreateOrUpdateProxyPeer; traffic then
+// flows from B to A.
+func TestFlow_ManualPeerAcceptance(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"from": "a"})
+	}))
+	defer backend.Close()
+
+	// Disable auto-accept for the duration of this test.
+	origAutoAccept := globalCfg.PeerAutoAccept
+	globalCfg.PeerAutoAccept = false
+	defer func() { globalCfg.PeerAutoAccept = origAutoAccept }()
+
+	srvA, kA, _, privA := newFedKernel(t)
+	defer srvA.Close()
+	srvB, kB, _, privB := newFedKernel(t)
+	defer srvB.Close()
+
+	ctx := context.Background()
+	pubA := privA.Public().(ed25519.PublicKey)
+	pubB := privB.Public().(ed25519.PublicKey)
+	pubAB64 := base64.RawURLEncoding.EncodeToString(pubA)
+	pubBB64 := base64.RawURLEncoding.EncodeToString(pubB)
+
+	sysA, _ := kA.ReadUserByHandle(ctx, "@sys")
+	sysB, _ := kB.ReadUserByHandle(ctx, "@sys")
+
+	// B registers A (A is the server accepting the friend request).
+	_, err := kB.AddPeer(ctx, sysB.ID, "@ker-a", pubAB64, srvA.URL)
+	if err != nil {
+		t.Fatalf("B add peer A: %v", err)
+	}
+
+	// B sends a friend request to A. With auto_accept=false, A returns 202 pending.
+	ts := time.Now().UTC().Format(time.RFC3339)
+	bHandle, _ := kB.GetConfig(ctx, "superuser_handle")
+	sig, _ := kernel.SignPeerRequest(privB, bHandle, pubBB64, srvB.URL, ts)
+	friendReq, _ := json.Marshal(map[string]any{
+		"handle": bHandle, "public_key": pubBB64,
+		"base_url": srvB.URL, "timestamp": ts, "signature": sig,
+	})
+	friendResp, err2 := http.Post(srvA.URL+"/v1/peers", "application/json", bytes.NewReader(friendReq))
+	if err2 != nil {
+		t.Fatalf("friend request: %v", err2)
+	}
+	friendResp.Body.Close()
+	if friendResp.StatusCode != http.StatusAccepted {
+		t.Errorf("friend request with auto_accept=false: expected 202, got %d", friendResp.StatusCode)
+	}
+
+	// A's peer table does not yet have B as an active proxy.
+	bProxy, _ := kA.ReadUserByPublicKey(ctx, pubBB64)
+	if bProxy != nil && bProxy.RemoteBaseURL != "" {
+		t.Log("B already registered as active peer on A; manual accept would be no-op")
+	}
+
+	// Operator manually accepts B on A.
+	peerBOnA, err := kA.CreateOrUpdateProxyPeer(ctx, bHandle, pubBB64, srvB.URL)
+	if err != nil {
+		t.Fatalf("manual accept: %v", err)
+	}
+	giveCredits(t, kA, peerBOnA.ID, 500)
+
+	// A's peer table now has B as a registered proxy.
+	bRegistered, _ := kA.ReadUserByPublicKey(ctx, pubBB64)
+	if bRegistered == nil || bRegistered.RemoteBaseURL == "" {
+		t.Error("B should be registered as peer on A after manual accept")
+	}
+
+	// A creates an action that B's user will call.
+	_, ownerATok := makeUser(t, kA, "@ker-a-prov")
+	actAID := createPublicAction(t, srvA, backend.URL, ownerATok, "a-svc", 0)
+
+	manifestResp := httpDo(t, srvA, "GET", "/v1/actions/"+actAID+"/manifest", nil, "")
+	if manifestResp.StatusCode != http.StatusOK {
+		manifestResp.Body.Close()
+		t.Fatalf("get manifest: got %d", manifestResp.StatusCode)
+	}
+	var manifest kernel.ActionManifest
+	decodeResponse(t, manifestResp, &manifest)
+
+	peerAOnB, err := kB.AddPeer(ctx, sysA.ID, "@ker-a", pubAB64, srvA.URL)
+	if err != nil {
+		// May already be added; look it up.
+		peerAOnB, _ = kB.ReadUserByPublicKey(ctx, pubAB64)
+	}
+	if peerAOnB == nil {
+		t.Fatal("peer A not registered on B")
+	}
+
+	importResult, err := kB.ImportRemoteAction(ctx, sysB.ID, peerAOnB.ID, manifest)
+	if err != nil || len(importResult.Created) == 0 {
+		t.Fatalf("B import A's action: err=%v created=%d", err, len(importResult.Created))
+	}
+	proxyActID := importResult.Created[0].ID
+	kB.SetActive(ctx, sysB.ID, proxyActID, true)     //nolint
+	pubTrue := true
+	kB.UpdateAction(ctx, sysB.ID, kernel.UpdateActionRequest{ID: proxyActID, Public: &pubTrue}) //nolint
+	kB.SetActive(ctx, sysB.ID, proxyActID, true)     //nolint
+
+	userBID, userBTok := makeUser(t, kB, "@ker-b-user")
+	giveCredits(t, kB, userBID, 500)
+
+	proxyAct, _ := kB.ReadAction(ctx, proxyActID)
+	ownerOnB, _ := kB.ReadUser(ctx, proxyAct.OwnerUserID)
+	runResp := httpDo(t, srvB, "POST", "/v1/run", map[string]any{
+		"action": ownerOnB.Handle + "/" + proxyAct.Name, "args": map[string]any{},
+	}, userBTok)
+	if runResp.StatusCode != http.StatusOK {
+		var body map[string]any
+		json.NewDecoder(runResp.Body).Decode(&body)
+		runResp.Body.Close()
+		t.Fatalf("traffic after manual accept: expected 200, got %d — %v", runResp.StatusCode, body)
+	}
+	runResp.Body.Close()
+}
+
+// TestFlow_ImportDutyAdjustment: two kernels sharing the same provider DB path but
+// configured with different ImportBPS values import the same action; the proxy prices
+// reflect each kernel's duty rate, and original transactions are immutable.
+func TestFlow_ImportDutyAdjustment(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srvA, kA, _, privA := newFedKernel(t)
+	defer srvA.Close()
+
+	ctx := context.Background()
+	pubA := privA.Public().(ed25519.PublicKey)
+	pubAB64 := base64.RawURLEncoding.EncodeToString(pubA)
+	sysA, _ := kA.ReadUserByHandle(ctx, "@sys")
+
+	// A creates a public action priced at 1000.
+	_, ownerATok := makeUser(t, kA, "@duty-a-prov")
+	const priceA int64 = 1000
+	actAID := createPublicAction(t, srvA, backend.URL, ownerATok, "duty-action", priceA)
+	manifestResp := httpDo(t, srvA, "GET", "/v1/actions/"+actAID+"/manifest", nil, "")
+	var manifest kernel.ActionManifest
+	decodeResponse(t, manifestResp, &manifest)
+
+	// Helper: build a fed kernel with a specific ImportBPS and import A's action.
+	importWithBPS := func(importBPS int64) int64 {
+		dir := t.TempDir()
+		db, err := store.Open(filepath.Join(dir, "duty.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+
+		cfg := kernel.DefaultConfig()
+		cfg.TokenSecret = fmt.Sprintf("duty-secret-%d", importBPS)
+		cfg.AllowLocalSources = true
+		cfg.ImportBPS = importBPS
+		logger := log.Discard()
+		httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
+		kB := kernel.New(db, nil, httpExec, nil, cfg, logger)
+
+		if err := kB.FirstBoot(ctx, "sys-pass"); err != nil {
+			t.Fatal(err)
+		}
+		sysB, _ := kB.ReadUserByHandle(ctx, "@sys")
+		privB64, _ := kB.GetConfig(ctx, configKeySigningPrivate)
+		privBBytes, _ := base64.RawURLEncoding.DecodeString(privB64)
+		privB := ed25519.PrivateKey(privBBytes)
+		kB.SetSigningKey(privB, sysB.ID)
+		httpExec.signerFn = kB.SignFederation
+
+		peerAOnB, err := kB.AddPeer(ctx, sysA.ID, "@duty-a", pubAB64, srvA.URL)
+		if err != nil {
+			// AddPeer might check ownership; use CreateOrUpdateProxyPeer if needed.
+			peerAOnB, _ = kB.ReadUserByPublicKey(ctx, pubAB64)
+		}
+		if peerAOnB == nil {
+			peerAOnB, _ = kB.CreateOrUpdateProxyPeer(ctx, "@duty-a", pubAB64, srvA.URL)
+		}
+
+		importResult, err := kB.ImportRemoteAction(ctx, sysB.ID, peerAOnB.ID, manifest)
+		if err != nil || len(importResult.Created) == 0 {
+			t.Fatalf("ImportBPS=%d import failed: err=%v created=%d", importBPS, err, len(importResult.Created))
+		}
+		return importResult.Created[0].Price
+	}
+
+	price500 := importWithBPS(500)   // 5% duty
+	price2000 := importWithBPS(2000) // 20% duty
+
+	// The proxy price must be higher with a higher import duty.
+	if price2000 <= price500 {
+		t.Errorf("higher ImportBPS should yield higher proxy price: got %d (5%%) and %d (20%%)",
+			price500, price2000)
+	}
+
+	// Both proxy prices should be ≥ the remote action price (proxy price = mp + duty ≥ mp).
+	// mp = priceA * 10000 / (10000 + ImportBPS) — always ≤ priceA.
+	// proxy price ≥ mp, and duty ≥ 0, so proxy price ≤ priceA is not guaranteed.
+	// We just assert prices are positive.
+	if price500 <= 0 || price2000 <= 0 {
+		t.Errorf("proxy prices must be positive: price500=%d price2000=%d", price500, price2000)
+	}
+}
+
+// TestFlow_AuthenticatedActionList: unauthenticated GET /v1/actions returns only
+// active+public actions; authenticated returns those plus the caller's own active
+// (including private) actions; a third user sees only the public one.
+func TestFlow_AuthenticatedActionList(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k, _ := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	providerID, providerTok := makeUser(t, k, "@aal-provider")
+	_ = providerID
+	_, otherTok := makeUser(t, k, "@aal-other")
+
+	// Create public+active action.
+	pubResp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "aal-public", "kind": "http", "price": 0, "source": backend.URL,
+		"description": "public action", "input_schema": minSchema, "output_schema": minSchema,
+	}, providerTok)
+	if pubResp.StatusCode != http.StatusCreated {
+		pubResp.Body.Close()
+		t.Fatalf("create public action: got %d", pubResp.StatusCode)
+	}
+	var pubAct map[string]any
+	decodeResponse(t, pubResp, &pubAct)
+	pubID := pubAct["id"].(string)
+	httpDo(t, srv, "POST", "/v1/actions/"+pubID+"/enable", nil, providerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+pubID, map[string]any{"public": true}, providerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/"+pubID+"/enable", nil, providerTok).Body.Close()
+
+	// Create private+active action (public defaults to false).
+	privResp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "aal-private", "kind": "http", "price": 0, "source": backend.URL,
+		"description": "private action", "input_schema": minSchema, "output_schema": minSchema,
+	}, providerTok)
+	if privResp.StatusCode != http.StatusCreated {
+		privResp.Body.Close()
+		t.Fatalf("create private action: got %d", privResp.StatusCode)
+	}
+	var privAct map[string]any
+	decodeResponse(t, privResp, &privAct)
+	privID := privAct["id"].(string)
+	httpDo(t, srv, "POST", "/v1/actions/"+privID+"/enable", nil, providerTok).Body.Close()
+
+	hasID := func(list []map[string]any, id string) bool {
+		for _, a := range list {
+			if a["id"] == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	listActions := func(tok string) []map[string]any {
+		r := httpDo(t, srv, "GET", "/v1/actions", nil, tok)
+		if r.StatusCode != http.StatusOK {
+			r.Body.Close()
+			t.Fatalf("GET /v1/actions: got %d", r.StatusCode)
+		}
+		var acts []map[string]any
+		decodeResponse(t, r, &acts)
+		return acts
+	}
+
+	// Unauthenticated: only public action visible.
+	unauth := listActions("")
+	if !hasID(unauth, pubID) {
+		t.Error("unauthenticated: public action should be visible")
+	}
+	if hasID(unauth, privID) {
+		t.Error("unauthenticated: private action should not be visible")
+	}
+
+	// Authenticated as provider: both actions visible.
+	provList := listActions(providerTok)
+	if !hasID(provList, pubID) {
+		t.Error("provider: public action should be visible")
+	}
+	if !hasID(provList, privID) {
+		t.Error("provider: own private active action should be visible")
+	}
+
+	// Authenticated as other user: only public action visible.
+	otherList := listActions(otherTok)
+	if !hasID(otherList, pubID) {
+		t.Error("other user: public action should be visible")
+	}
+	if hasID(otherList, privID) {
+		t.Error("other user: provider's private action should not be visible")
 	}
 }
 

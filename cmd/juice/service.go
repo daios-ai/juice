@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/google/uuid"
 )
 
 // ---- Types ----
@@ -139,9 +143,11 @@ func updateAction(k *kernel.Kernel, ctx context.Context, callerID string, req ke
 	return enrichAction(a), nil
 }
 
-// listPublicActions returns public actions, optionally filtered by owner handle and name.
-// When callerID matches the owner, their private/inactive actions are included.
-// Source and ArtifactHash are stripped for public discovery.
+// listPublicActions returns actions visible to the caller, optionally filtered by owner handle and name.
+// Unauthenticated: active+public actions only.
+// Authenticated (no owner filter): active+public union caller's own active actions, deduplicated.
+// Authenticated with owner filter resolving to caller: all their actions regardless of active/public.
+// Source and ArtifactHash are stripped from all results.
 func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHandle, name string, limit, offset int) ([]actionResp, error) {
 	actions, err := k.ListPublicActions(ctx, limit, offset)
 	if err != nil {
@@ -165,6 +171,20 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 				}
 			}
 			actions = filtered
+		}
+	} else if callerID != "" {
+		owned, err := k.ListOwnedActions(ctx, callerID, limit, offset)
+		if err != nil {
+			return nil, err
+		}
+		seen := make(map[string]bool, len(actions))
+		for _, a := range actions {
+			seen[a.ID] = true
+		}
+		for _, a := range owned {
+			if a.Active && !seen[a.ID] {
+				actions = append(actions, a)
+			}
 		}
 	}
 	if name != "" {
@@ -323,4 +343,97 @@ func verifyReceipt(k *kernel.Kernel, ctx context.Context, callerID, id string) (
 
 func run(k *kernel.Kernel, ctx context.Context, callerID, actionRef string, args map[string]any) (*kernel.CallReply, error) {
 	return k.Run(ctx, callerID, actionRef, args)
+}
+
+// ---- Federation ----
+
+// callFederated handles the business logic for an inbound federated call after the HTTP
+// protocol layer (counterparty lookup, timestamp, signature) has already been verified.
+// Returns (httpStatus, responseBody, err); on non-nil err the caller should writeErr.
+func callFederated(k *kernel.Kernel, ctx context.Context, counterparty *kernel.User, actionParam, argsHash, idempotencyKey string, rawBody []byte) (int, map[string]any, error) {
+	// §13.2: denied peers are rejected with a signed rejection receipt so the caller can settle.
+	if counterparty.DeniedAt != nil {
+		receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, actionParam, argsHash, idempotencyKey)
+		if signErr != nil {
+			return 0, nil, kernel.ErrUnauthenticated.Wrap("counterparty is denied")
+		}
+		return http.StatusForbidden, map[string]any{"error": "counterparty denied", "receipt": receipt}, nil
+	}
+
+	ownerHandle, actionName, err := kernel.ParseActionRef(actionParam)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	var args map[string]any
+	if err := json.Unmarshal(rawBody, &args); err != nil {
+		return 0, nil, kernel.ErrInvalidInput.Wrap("invalid JSON")
+	}
+
+	owner, err := k.ReadUserByHandle(ctx, ownerHandle)
+	if err != nil || owner == nil {
+		return 0, nil, kernel.ErrNotFound.Wrap("action owner not found")
+	}
+	action, err := k.ReadActionByOwnerName(ctx, owner.ID, actionName)
+	if err != nil || action == nil {
+		return 0, nil, kernel.ErrNotFound.Wrapf("action %s not found", actionParam)
+	}
+	if !action.Active || !action.Public {
+		return 0, nil, kernel.ErrUnauthorized.Wrap("action is not active and public")
+	}
+
+	now := time.Now().UTC()
+	rec := &kernel.IdempotencyRecord{
+		ID:                 uuid.New().String(),
+		IdempotencyKey:     idempotencyKey,
+		CounterpartyUserID: counterparty.ID,
+		CreatedAt:          now,
+		ExpiresAt:          now.Add(24 * time.Hour),
+	}
+	if insertErr := k.InsertPendingIdempotencyRecord(ctx, rec); insertErr != nil {
+		existing, readErr := k.GetIdempotencyRecord(ctx, idempotencyKey, counterparty.ID)
+		if readErr == nil {
+			if existing.Status == "complete" {
+				var result map[string]any
+				_ = json.Unmarshal([]byte(existing.ResultJSON), &result)
+				var receipt *kernel.Receipt
+				if existing.ReceiptJSON != "" {
+					_ = json.Unmarshal([]byte(existing.ReceiptJSON), &receipt)
+				}
+				if _, isErr := result["error"]; isErr {
+					code, _ := result["code"].(string)
+					return kernel.HTTPStatusFromCode(code), map[string]any{"result": result, "receipt": receipt}, nil
+				}
+				return http.StatusOK, map[string]any{"result": result, "receipt": receipt}, nil
+			}
+			return http.StatusConflict, map[string]any{"error": "duplicate in flight"}, nil
+		}
+		return 0, nil, kernel.ErrInvalidState.Wrap("idempotency check failed")
+	}
+
+	reply, callErr := k.RunFederated(ctx, counterparty.ID, owner.ID, actionName, args, action.Price, rec.ID)
+	if callErr != nil {
+		errJSON, _ := json.Marshal(map[string]string{
+			"error": callErr.Error(),
+			"code":  kernel.KernelErrorCode(callErr),
+		})
+		if errors.Is(callErr, kernel.ErrInsufficientFunds) {
+			if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, actionParam, argsHash, idempotencyKey); signErr == nil {
+				receiptJSON, _ := json.Marshal(receipt)
+				_ = k.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), string(receiptJSON))
+				return http.StatusPaymentRequired, map[string]any{"error": "insufficient balance", "receipt": receipt}, nil
+			}
+		}
+		if reply == nil {
+			_ = k.DeleteIdempotencyRecord(ctx, rec.ID)
+		}
+		_ = k.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), "")
+		return 0, nil, callErr
+	}
+
+	var receipt *kernel.Receipt
+	if reply.ReceiptID != "" {
+		receipt, _ = k.GetReceiptByID(ctx, reply.ReceiptID)
+	}
+	return http.StatusOK, map[string]any{"result": reply.Result, "receipt": receipt}, nil
 }

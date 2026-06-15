@@ -409,8 +409,7 @@ func TestServeListActions(t *testing.T) {
 	decodeResponse(t, cr, &action)
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok).Body.Close()
 
-	// Public endpoint returns only active+public actions; private actions are not shown
-	// regardless of whether a bearer token is supplied.
+	// Authenticated owner sees their own active private action.
 	resp := httpDo(t, srv, "GET", "/v1/actions", nil, tok)
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
@@ -418,11 +417,11 @@ func TestServeListActions(t *testing.T) {
 	}
 	var actions []kernel.Action
 	decodeResponse(t, resp, &actions)
-	if len(actions) != 0 {
-		t.Fatalf("private action should not appear in public list even with owner token, got %d", len(actions))
+	if len(actions) != 1 {
+		t.Fatalf("owner should see own active private action, got %d", len(actions))
 	}
 
-	// Unauthenticated caller also does not see the private action.
+	// Unauthenticated caller does not see the private action.
 	resp2 := httpDo(t, srv, "GET", "/v1/actions", nil, "")
 	if resp2.StatusCode != http.StatusOK {
 		resp2.Body.Close()

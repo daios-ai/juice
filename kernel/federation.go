@@ -111,12 +111,15 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 		checks.SettlementArith = tx.Fee == 0
 	}
 
-	// 7. Args hash.
+	// 7. Refund conservation: the implied refund must be non-negative.
+	checks.RefundConservation = tx.Gross-tx.Net-tx.Fee >= 0
+
+	// 8. Args hash.
 	if h, hashErr := jcsHashStr(string(tx.ArgsJSON)); hashErr == nil {
 		checks.ArgsHash = r.ArgsHash == h
 	}
 
-	// 8. Reply hash (only meaningful on success).
+	// 9. Reply hash (only meaningful on success).
 	if tx.Status == TxSuccess {
 		if h, hashErr := jcsHashStr(string(tx.ReplyJSON)); hashErr == nil {
 			checks.ReplyHash = r.ReplyHash == h
@@ -127,7 +130,7 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 
 	valid := checks.ReceiptHash && checks.Signature && checks.ActionID &&
 		checks.Status && checks.Charge && checks.SettlementArith &&
-		checks.ArgsHash && checks.ReplyHash
+		checks.RefundConservation && checks.ArgsHash && checks.ReplyHash
 
 	return &ReceiptVerification{
 		TransactionID:         txID,
@@ -207,7 +210,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	ktx.RemoteReceiptJSON = fr.ReceiptJSON
 
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
-	localReceipt, receiptErr := k.buildReceipt(ktx, charge)
+	localReceipt, receiptErr := k.buildReceipt(ktx, charge+duty)
 	if receiptErr != nil {
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}

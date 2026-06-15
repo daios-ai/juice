@@ -108,7 +108,7 @@ Log lines, progress messages, and error text go to stderr. The only content writ
 | Operation | HTTP | CLI |
 |-----------|------|-----|
 | Create action | `POST /v1/actions` `{name, kind, [source, description, price, input_schema, output_schema, auth]}` → 201 action | `juice action create --name --kind [--source --description --price --input-schema --output-schema --auth]` |
-| List public actions | `GET /v1/actions[?owner=&name=]` → action[] | `juice action list [--all --limit --offset]` |
+| List actions | `GET /v1/actions[?owner=&name=]` → action[]; unauthenticated → active public actions; authenticated → active public actions plus caller's own active actions; `?owner=` filters by owner handle; `?name=` filters by name | `juice action list [--all --limit --offset]` |
 | Show action | `GET /v1/actions/{id}` → action | `juice action show --id` |
 | Update action | `PUT /v1/actions/{id}` `{[price, description, source, input_schema, output_schema, public, auth]}` → action | `juice action update --id [--price --description --source --input-schema --output-schema --public --auth]` |
 | Enable action | `POST /v1/actions/{id}/enable` → `{active:true}` | `juice action enable --id` |

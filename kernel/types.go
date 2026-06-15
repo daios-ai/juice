@@ -385,6 +385,7 @@ type ReceiptChecks struct {
 	Status             bool `json:"status"`
 	Charge             bool `json:"charge"`              // amount paid to proxy == receipt.gross
 	SettlementArith    bool `json:"settlement_arith"`    // net + fee == gross (internal receipt math)
+	RefundConservation bool `json:"refund_conservation"` // tx.Gross - tx.Net - tx.Fee >= 0 (refund non-negative)
 	ArgsHash           bool `json:"args_hash"`
 	ReplyHash          bool `json:"reply_hash"`
 }

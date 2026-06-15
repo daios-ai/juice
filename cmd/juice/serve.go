@@ -946,119 +946,12 @@ func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// §13.2: denied keys are rejected with a signed rejection receipt so the caller can settle.
-	if counterparty.DeniedAt != nil {
-		receipt, signErr := s.kernel.CreateSignedRejectionReceipt(counterparty.ID, actionParam, argsHash, idempotencyKey)
-		if signErr != nil {
-			writeErr(w, kernel.ErrUnauthenticated.Wrap("counterparty is denied"))
-			return
-		}
-		writeJSON(w, http.StatusForbidden, map[string]any{
-			"error":   "counterparty denied",
-			"receipt": receipt,
-		})
-		return
-	}
-
-	ownerHandle, actionName, err := kernel.ParseActionRef(actionParam)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-
-	var args map[string]any
-	if err := json.Unmarshal(rawBody, &args); err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("invalid JSON"))
-		return
-	}
-
-	// Resolve the action owner and the action — must be active and public.
-	owner, err := s.kernel.ReadUserByHandle(ctx, ownerHandle)
-	if err != nil || owner == nil {
-		writeErr(w, kernel.ErrNotFound.Wrap("action owner not found"))
-		return
-	}
-	action, err := s.kernel.ReadActionByOwnerName(ctx, owner.ID, actionName)
-	if err != nil || action == nil {
-		writeErr(w, kernel.ErrNotFound.Wrapf("action %s not found", actionParam))
-		return
-	}
-	if !action.Active || !action.Public {
-		writeErr(w, kernel.ErrUnauthorized.Wrap("action is not active and public"))
-		return
-	}
-
-	// 6. Pre-execution idempotency: INSERT pending record.
-	now := time.Now().UTC()
-	rec := &kernel.IdempotencyRecord{
-		ID:                 uuid.New().String(),
-		IdempotencyKey:     idempotencyKey,
-		CounterpartyUserID: counterparty.ID,
-		CreatedAt:          now,
-		ExpiresAt:          now.Add(24 * time.Hour),
-	}
-	if insertErr := s.kernel.InsertPendingIdempotencyRecord(ctx, rec); insertErr != nil {
-		// Unique conflict: key already exists.
-		existing, readErr := s.kernel.GetIdempotencyRecord(ctx, idempotencyKey, counterparty.ID)
-		if readErr == nil {
-			if existing.Status == "complete" {
-				var result map[string]any
-				_ = json.Unmarshal([]byte(existing.ResultJSON), &result)
-				var receipt *kernel.Receipt
-				if existing.ReceiptJSON != "" {
-					_ = json.Unmarshal([]byte(existing.ReceiptJSON), &receipt)
-				}
-				if _, isErr := result["error"]; isErr {
-					code, _ := result["code"].(string)
-					writeJSON(w, kernel.HTTPStatusFromCode(code), map[string]any{"result": result, "receipt": receipt})
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"result": result, "receipt": receipt})
-				return
-			}
-			// status == "pending": duplicate in-flight
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "duplicate in flight"})
-			return
-		}
-		writeErr(w, kernel.ErrInvalidState.Wrap("idempotency check failed"))
-		return
-	}
-
-	// Execute.
-	reply, callErr := s.kernel.RunFederated(ctx, counterparty.ID, owner.ID, actionName, args, action.Price, rec.ID)
+	status, body, callErr := callFederated(s.kernel, ctx, counterparty, actionParam, argsHash, idempotencyKey, rawBody)
 	if callErr != nil {
-		errJSON, _ := json.Marshal(map[string]string{
-			"error": callErr.Error(),
-			"code":  kernel.KernelErrorCode(callErr),
-		})
-		// §13: insufficient balance returns a signed rejection receipt so the caller can settle.
-		if errors.Is(callErr, kernel.ErrInsufficientFunds) {
-			if receipt, signErr := s.kernel.CreateSignedRejectionReceipt(counterparty.ID, actionParam, argsHash, idempotencyKey); signErr == nil {
-				receiptJSON, _ := json.Marshal(receipt)
-				_ = s.kernel.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), string(receiptJSON))
-				writeJSON(w, http.StatusPaymentRequired, map[string]any{
-					"error":   "insufficient balance",
-					"receipt": receipt,
-				})
-				return
-			}
-		}
-		// No call was attempted or signing failed; delete the pending record so the caller can retry.
-		if reply == nil {
-			_ = s.kernel.DeleteIdempotencyRecord(ctx, rec.ID)
-		}
-		// Complete the pending record so replays return the error instead of 409.
-		// If CommitFailedCall already completed it, this is a no-op (AND status='pending' guard).
-		_ = s.kernel.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), "")
 		writeErr(w, callErr)
 		return
 	}
-
-	var receipt *kernel.Receipt
-	if reply.ReceiptID != "" {
-		receipt, _ = s.kernel.GetReceiptByID(ctx, reply.ReceiptID)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"result": reply.Result, "receipt": receipt})
+	writeJSON(w, status, body)
 }
 
 func (s *server) getActionManifest(w http.ResponseWriter, r *http.Request) {

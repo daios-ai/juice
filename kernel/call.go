@@ -160,9 +160,12 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 	}
 
-	// Kernel must be bootstrapped.
-	if err := k.requireReceiptSigningReady(); err != nil {
-		return nil, err
+	// Kernel must be bootstrapped. Skip for ExistingTraceID calls — beginRun already
+	// verified this, and the signing key cannot change at runtime.
+	if req.ExistingTraceID == "" {
+		if err := k.requireReceiptSigningReady(); err != nil {
+			return nil, err
+		}
 	}
 
 	// 8. Atomically lock funds and create child trace.

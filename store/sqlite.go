@@ -1728,7 +1728,7 @@ func (s *DB) ListOrphanRunningSteps(ctx context.Context) ([]kernel.OrphanRunning
 		               UNION ALL
 		               SELECT ch.id FROM traces ch JOIN sub ON ch.parent_trace_id = sub.id
 		           )
-		           SELECT 1 FROM transactions tx WHERE tx.trace_id IN (SELECT id FROM sub) AND tx.status != 'failure'
+		           SELECT 1 FROM transactions tx WHERE tx.trace_id IN (SELECT id FROM sub)
 		       ) THEN 1 ELSE 0 END AS has_settled
 		FROM steps st
 		JOIN traces t ON t.id = st.completion_trace_id
