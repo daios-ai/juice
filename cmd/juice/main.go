@@ -203,6 +203,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, error) {
 	native.RegisterTimeHandler(k)
 	native.RegisterSinkHandler(k)
 	native.RegisterMessageHandler(k)
+	native.RegisterRandomHandler(k)
 
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).
 	if privB64, _ := db.GetConfig(context.Background(), configKeySigningPrivate); privB64 != "" {

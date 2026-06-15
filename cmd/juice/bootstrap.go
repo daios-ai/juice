@@ -268,6 +268,15 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 		outputSchema: map[string]any{"type": "object"},
 	},
 	{
+		name:         "random",
+		price:        cfg.Random.Price,
+		description:  "Returns a cryptographically secure random float in [0, 1)",
+		inputSchema:  map[string]any{"type": "object", "properties": map[string]any{}},
+		outputSchema: map[string]any{"type": "object", "properties": map[string]any{
+			"value": map[string]any{"type": "number", "description": "Random float in [0, 1)"},
+		}},
+	},
+	{
 		name:        "message",
 		price:       cfg.Message.Price,
 		description: "Sends a message to another platform user and creates a Step they must acknowledge",

@@ -43,6 +43,11 @@ type NativeMessageConfig struct {
 	Price int64 `json:"price"`
 }
 
+// NativeRandomConfig holds configuration for the @sys/random native action.
+type NativeRandomConfig struct {
+	Price int64 `json:"price"`
+}
+
 // NativeConfig holds per-action configuration for all native actions.
 type NativeConfig struct {
 	LLM     NativeLLMConfig     `json:"llm"`
@@ -51,6 +56,7 @@ type NativeConfig struct {
 	Time    NativeTimeConfig    `json:"time"`
 	Sink    NativeSinkConfig    `json:"sink"`
 	Message NativeMessageConfig `json:"message"`
+	Random  NativeRandomConfig  `json:"random"`
 }
 
 // ServerConfig holds all non-secret runtime configuration.
@@ -86,6 +92,7 @@ func DefaultServerConfig() ServerConfig {
 			Time:    NativeTimeConfig{Price: 0},
 			Sink:    NativeSinkConfig{Price: 0},
 			Message: NativeMessageConfig{Price: 0},
+			Random:  NativeRandomConfig{Price: 0},
 		},
 		ScriptTimeoutMS:   10000,
 		ScriptMemoryBytes: 64 * 1024 * 1024,
