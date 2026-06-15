@@ -29,15 +29,15 @@ func (f *FakeJSONChatter) ChatJSON(_ context.Context, _ []kernel.ChatMessage, _ 
 	return f.Value, f.Err
 }
 
-// FakeToolChatter returns fixed tool calls for tests.
-type FakeToolChatter struct {
-	Calls   []kernel.ToolCall
+// FakeDecideChatter returns a fixed decision for tests.
+type FakeDecideChatter struct {
+	Call    *kernel.ToolCall
 	Message *kernel.ChatMessage
 	Err     error
 }
 
-func (f *FakeToolChatter) ChatTools(_ context.Context, _ []kernel.ChatMessage, _ []kernel.ToolDefinition, _ string, _ int) ([]kernel.ToolCall, *kernel.ChatMessage, error) {
-	return f.Calls, f.Message, f.Err
+func (f *FakeDecideChatter) ChatDecide(_ context.Context, _ []kernel.DecideMessage, _ []kernel.ToolDefinition) (*kernel.ToolCall, *kernel.ChatMessage, error) {
+	return f.Call, f.Message, f.Err
 }
 
 // FakeEmbedder returns a deterministic fixed-length vector for tests.

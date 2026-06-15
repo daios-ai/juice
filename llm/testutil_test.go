@@ -43,15 +43,15 @@ func TestFakeJSONChatter_ReturnsValue(t *testing.T) {
 	}
 }
 
-func TestFakeToolChatter_ReturnsCalls(t *testing.T) {
-	calls := []kernel.ToolCall{{Action: "@sys/lookup", Args: map[string]any{"query": "test"}}}
-	f := &FakeToolChatter{Calls: calls}
-	got, msg, err := f.ChatTools(context.Background(), nil, nil, "auto", 0)
+func TestFakeDecideChatter_ReturnsCall(t *testing.T) {
+	call := &kernel.ToolCall{Action: "@sys/lookup", Args: map[string]any{"query": "test"}}
+	f := &FakeDecideChatter{Call: call}
+	got, msg, err := f.ChatDecide(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(got) != 1 || got[0].Action != "@sys/lookup" {
-		t.Errorf("unexpected calls: %v", got)
+	if got == nil || got.Action != "@sys/lookup" {
+		t.Errorf("unexpected call: %v", got)
 	}
 	if msg != nil {
 		t.Errorf("expected nil message, got %v", msg)

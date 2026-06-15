@@ -261,30 +261,25 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 		},
 	},
 	{
-		name:        "llm/tools",
+		name:        "llm/decide",
 		price:       cfg.LLM.Price,
-		description: "LLM tool selection over Juice action contracts; returns proposed calls without executing them",
+		description: "LLM-driven action selection; returns chosen action and args without executing",
 		inputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"messages":       map[string]any{"type": "array", "items": msgItemSchema, "description": "Conversation history"},
-				"system":         map[string]any{"type": "string", "description": "Optional system prompt"},
-				"tools":          map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "Juice action contracts offered as tools"},
-				"tool_choice":    map[string]any{"type": "string", "description": "auto, required, or none (default: auto)"},
-				"max_tool_calls": map[string]any{"type": "integer", "description": "Maximum number of tool calls to return"},
+				"messages": map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "Conversation turns (user/assistant/tool)"},
+				"actions":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Candidate actions as @owner/name strings"},
 			},
-			"required": []string{"messages", "tools"},
+			"required": []string{"messages", "actions"},
 		},
 		outputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"tool_calls": map[string]any{
-					"type":        "array",
-					"description": "Proposed Juice calls",
-					"items":       map[string]any{"type": "object"},
-				},
+				"action":  map[string]any{"type": "string", "description": "Selected @owner/name"},
+				"args":    map[string]any{"type": "object", "description": "Arguments for the selected action"},
 				"message": map[string]any{"type": "object", "description": "Optional text message from the model"},
 			},
+			"required": []string{"action", "args"},
 		},
 	},
 	{

@@ -133,15 +133,20 @@ func (o *OllamaChatter) ChatJSON(ctx context.Context, messages []kernel.ChatMess
 	return value, nil
 }
 
-// ChatTools calls /api/chat with tool definitions and returns proposed tool calls.
-func (o *OllamaChatter) ChatTools(ctx context.Context, messages []kernel.ChatMessage, tools []kernel.ToolDefinition, toolChoice string, maxToolCalls int) ([]kernel.ToolCall, *kernel.ChatMessage, error) {
-	type msg struct {
+// ChatDecide calls /api/chat with tool definitions and returns the LLM's single chosen action.
+func (o *OllamaChatter) ChatDecide(ctx context.Context, messages []kernel.DecideMessage, tools []kernel.ToolDefinition) (*kernel.ToolCall, *kernel.ChatMessage, error) {
+	type ollamaMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	}
-	var msgs []msg
+	var msgs []ollamaMsg
 	for _, m := range messages {
-		msgs = append(msgs, msg{Role: m.Role, Content: m.Content})
+		if m.Role == "tool" {
+			content, _ := json.Marshal(m.Result)
+			msgs = append(msgs, ollamaMsg{Role: "tool", Content: string(content)})
+		} else {
+			msgs = append(msgs, ollamaMsg{Role: m.Role, Content: m.Content})
+		}
 	}
 
 	type fnParams struct {
@@ -154,12 +159,12 @@ func (o *OllamaChatter) ChatTools(ctx context.Context, messages []kernel.ChatMes
 		Description string   `json:"description"`
 		Parameters  fnParams `json:"parameters"`
 	}
-	type tool struct {
+	type ollamaTool struct {
 		Type     string `json:"type"`
 		Function fn     `json:"function"`
 	}
 
-	var ollamaTools []tool
+	var ollamaTools []ollamaTool
 	for _, t := range tools {
 		params := fnParams{Type: "object"}
 		if props, ok := t.InputSchema["properties"].(map[string]any); ok {
@@ -172,37 +177,32 @@ func (o *OllamaChatter) ChatTools(ctx context.Context, messages []kernel.ChatMes
 				}
 			}
 		}
-		ollamaTools = append(ollamaTools, tool{
-			Type: "function",
+		ollamaTools = append(ollamaTools, ollamaTool{
+			Type:     "function",
 			Function: fn{Name: t.Action, Description: t.Description, Parameters: params},
 		})
 	}
 
-	payload := map[string]any{
+	body, _ := json.Marshal(map[string]any{
 		"model":    o.Model,
 		"messages": msgs,
 		"tools":    ollamaTools,
 		"stream":   false,
-	}
-	if toolChoice != "" && toolChoice != "auto" {
-		payload["tool_choice"] = toolChoice
-	}
-
-	body, _ := json.Marshal(payload)
+	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.URL+"/api/chat", bytes.NewReader(body))
 	if err != nil {
-		return nil, nil, kernel.ErrInternal.Wrapf("chat tools request: %v", err)
+		return nil, nil, kernel.ErrInternal.Wrapf("chat decide request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, nil, kernel.ErrInternal.Wrapf("chat tools HTTP: %v", err)
+		return nil, nil, kernel.ErrInternal.Wrapf("chat decide HTTP: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, kernel.ErrInternal.Wrapf("ollama chat tools returned status %d", resp.StatusCode)
+		return nil, nil, kernel.ErrInternal.Wrapf("ollama chat decide returned status %d", resp.StatusCode)
 	}
 
 	var result struct {
@@ -218,21 +218,19 @@ func (o *OllamaChatter) ChatTools(ctx context.Context, messages []kernel.ChatMes
 		} `json:"message"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, nil, kernel.ErrInternal.Wrapf("decode chat tools response: %v", err)
+		return nil, nil, kernel.ErrInternal.Wrapf("decode chat decide response: %v", err)
 	}
 
-	var calls []kernel.ToolCall
-	for _, tc := range result.Message.ToolCalls {
-		if maxToolCalls > 0 && len(calls) >= maxToolCalls {
-			break
-		}
-		calls = append(calls, kernel.ToolCall{Action: tc.Function.Name, Args: tc.Function.Arguments})
+	var call *kernel.ToolCall
+	if len(result.Message.ToolCalls) > 0 {
+		tc := result.Message.ToolCalls[0]
+		call = &kernel.ToolCall{Action: tc.Function.Name, Args: tc.Function.Arguments}
 	}
 
 	var replyMsg *kernel.ChatMessage
 	if result.Message.Content != "" {
 		replyMsg = &kernel.ChatMessage{Role: result.Message.Role, Content: result.Message.Content}
 	}
-	return calls, replyMsg, nil
+	return call, replyMsg, nil
 }
 

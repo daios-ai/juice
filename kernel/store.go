@@ -94,9 +94,19 @@ type ToolCall struct {
 	Args   map[string]any
 }
 
-// ToolChatter performs a chat completion with tool definitions and returns proposed calls.
-type ToolChatter interface {
-	ChatTools(ctx context.Context, messages []ChatMessage, tools []ToolDefinition, toolChoice string, maxToolCalls int) ([]ToolCall, *ChatMessage, error)
+// DecideMessage is a single turn in a decide conversation.
+// Role is "user", "assistant", or "tool". Tool turns carry Action, Args, and Result.
+type DecideMessage struct {
+	Role    string
+	Content string
+	Action  string
+	Args    map[string]any
+	Result  map[string]any
+}
+
+// DecideChatter asks the LLM to select a Juice action from a set of candidates.
+type DecideChatter interface {
+	ChatDecide(ctx context.Context, messages []DecideMessage, tools []ToolDefinition) (*ToolCall, *ChatMessage, error)
 }
 
 // ---- Persistence interface ----

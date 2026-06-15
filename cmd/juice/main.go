@@ -197,7 +197,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, error) {
 	native.RegisterChatHandler(k, chatter)
 	native.RegisterEmbedHandler(k, embedder)
 	native.RegisterJSONHandler(k, ollamaChatter)
-	native.RegisterToolsHandler(k, ollamaChatter)
+	native.RegisterDecideHandler(k, ollamaChatter)
 	native.RegisterMakeHandler(k, native.MakeDeps{
 		Scripts:  exec,
 		Compiler: compiler,
