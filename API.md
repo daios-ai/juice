@@ -172,6 +172,7 @@ Native actions registered at bootstrap, owned by `@sys`, public, runnable like a
 |--------|-------|---------|
 | `@sys/lookup` | 0 | Rank active actions by query |
 | `@sys/llm/chat` | 0 | Platform LLM chat |
+| `@sys/llm/embed` | 0 | Text embedding vector |
 | `@sys/make` | 20 (configurable, `native.make`) | Synthesize a WASM action from a description |
 | `@sys/time` | 0 | Current time |
 | `@sys/sink` | 0 | Universal no-op step target |
