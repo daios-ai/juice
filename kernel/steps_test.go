@@ -243,12 +243,12 @@ func TestStepCompleteResetsToWaitingOnPreTransactionReject(t *testing.T) {
 	owner := setupUser(t, st, "@prereject-owner", 500)
 	caller := setupUser(t, st, "@prereject-caller", 0)
 	action := setupWasmAction(t, st, owner.ID, "prereject-action", "", 0)
-	// Process has 100 in available.
-	p := setupProcess(t, st, owner.ID, 100)
+	// Process has funds for the root trace (action.Price=0, so trace.available=0).
+	p, tr := beginTestRun(t, st, owner.ID, action)
 
 	// Create a root trace so the step has a parent (required for step.price > 0 parking).
 	rootReply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: owner.ID, ProcessID: p.ID, IsRootCall: true,
+		CallerID: owner.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: owner.ID, ActionName: action.Name, Args: map[string]any{},
 	})
 	if err != nil {
@@ -722,17 +722,17 @@ func TestCreateStepTraceAuthorityWrongProcess(t *testing.T) {
 	action := setupWasmAction(t, st, actionOwner.ID, "xproc-step-action", "", 0)
 	nextAction := setupAction(t, st, procOwner.ID, "xproc-step-next-action", 0)
 
-	p1 := setupProcess(t, st, procOwner.ID, 100)
+	p1, tr1 := beginTestRun(t, st, procOwner.ID, action)
 	p2 := setupProcess(t, st, procOwner.ID, 100)
 
 	// Create a trace in p1 owned by actionOwner.
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:     procOwner.ID,
-		ProcessID:    p1.ID,
-		IsRootCall:   true,
-		TargetUserID: actionOwner.ID,
-		ActionName:   action.Name,
-		Args:         map[string]any{},
+		CallerID:        procOwner.ID,
+		ProcessID:       p1.ID,
+		ExistingTraceID: tr1.ID,
+		TargetUserID:    actionOwner.ID,
+		ActionName:      action.Name,
+		Args:            map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)

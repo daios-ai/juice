@@ -844,12 +844,12 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,
-		  action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		  action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
 		ktx.OwnerUserID, ktx.CallerUserID, ktx.TargetUserID, ktx.ActionID, ktx.ActionName, ktx.RemoteActionID,
 		rawJSONStr(ktx.ArgsJSON), rawJSONStr(ktx.ReplyJSON), string(ktx.Status),
-		ktx.Gross, ktx.Net, ktx.Fee, ktx.Reason, nullStr(ktx.RemoteReceiptHash), ktx.RemoteReceiptJSON,
+		ktx.Gross, ktx.Net, ktx.Fee, ktx.Refund, ktx.Reason, nullStr(ktx.RemoteReceiptHash), ktx.RemoteReceiptJSON,
 		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
 	); err != nil {
 		return dbErr(err, label+": insert transaction")
@@ -1200,6 +1200,7 @@ func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction
 		q := ktx.Gross // full locked amount (mp + maxduty)
 		taxable := charge + duty
 		refund := q - charge - duty
+		ktx.Refund = refund
 		// Zero trace.available.
 		if _, err := tx.ExecContext(ctx, `UPDATE traces SET available=0 WHERE id=?`, traceID); err != nil {
 			return dbErr(err, "commit remote settlement: zero trace available")
@@ -1487,7 +1488,7 @@ func (s *DB) ReadRootTrace(ctx context.Context, processID string) (*kernel.Trace
 // ---- Transactions ----
 
 const txColumns = `id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,` +
-	`action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at`
+	`action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at`
 
 // scanTx scans one transaction row using the provided scan function.
 // scan must be called with exactly the destinations expected by txColumns.
@@ -1498,7 +1499,7 @@ func scanTx(scan func(...any) error) (kernel.Transaction, error) {
 	if err := scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
 		&tx.OwnerUserID, &tx.CallerUserID, &tx.TargetUserID, &tx.ActionID, &tx.ActionName, &tx.RemoteActionID,
 		&argsJSON, &replyJSON, &status,
-		&tx.Gross, &tx.Net, &tx.Fee, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON,
+		&tx.Gross, &tx.Net, &tx.Fee, &tx.Refund, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON,
 		&startedAt, &endedAt); err != nil {
 		return tx, err
 	}
@@ -1844,7 +1845,7 @@ func (s *DB) ListOrphanTraces(ctx context.Context) ([]*kernel.Trace, error) {
 		     SELECT p.id, d+1 FROM traces p JOIN depth ON depth.id=p.parent_trace_id
 		   )
 		   SELECT MAX(d) FROM depth
-		 ) DESC`)
+		 ) ASC`)
 	if err != nil {
 		// Fallback: simpler ordering without depth CTE for SQLite versions that struggle.
 		rows, err = s.db.QueryContext(ctx,

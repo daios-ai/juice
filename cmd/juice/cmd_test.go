@@ -1101,7 +1101,6 @@ func TestCallClosedProcess(t *testing.T) {
 	_, err := env.k.Call(ctx, kernel.CallRequest{
 		CallerID:     owner.ID,
 		ProcessID:    p.ID,
-		IsRootCall:   true,
 		TargetUserID: owner.ID,
 		ActionName:   "echo",
 		Args:         map[string]any{},
@@ -1118,7 +1117,6 @@ func TestCallInsufficientFunds(t *testing.T) {
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@poorowner", Email: "poor@example.com", Password: "p",
 	})
-	p := setupProcessCmd(t, env, owner.ID, 0)
 
 	_, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "expensive",
@@ -1130,14 +1128,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	a, _ := env.k.ReadActionByOwnerName(ctx, owner.ID, "expensive")
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 
-	_, err = env.k.Call(ctx, kernel.CallRequest{
-		CallerID:     owner.ID,
-		ProcessID:    p.ID,
-		IsRootCall:   true,
-		TargetUserID: owner.ID,
-		ActionName:   "expensive",
-		Args:         map[string]any{},
-	})
+	_, err = env.k.Run(ctx, owner.ID, "@poorowner/expensive", map[string]any{})
 	if err == nil {
 		t.Error("expected insufficient funds error")
 	}

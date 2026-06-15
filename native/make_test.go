@@ -97,19 +97,27 @@ func newMakeKernel(t *testing.T, chatter kernel.Chatter) (*kernel.Kernel, kernel
 	return k, st
 }
 
-// setupNativeProcess creates a process directly via the store for native package tests.
-func setupNativeProcess(t *testing.T, st kernel.Store, ownerID string, funds int64) *kernel.Process {
+// beginMakeTestRun creates a process and root trace for @sys/make via BeginRun, mirroring production.
+func beginMakeTestRun(t *testing.T, st kernel.Store, callerID, sysID string) (*kernel.Process, *kernel.Trace) {
 	t.Helper()
+	ctx := context.Background()
+	a, err := st.ReadActionByOwnerName(ctx, sysID, "make")
+	if err != nil {
+		t.Fatalf("beginMakeTestRun: find @sys/make: %v", err)
+	}
 	p := &kernel.Process{
-		ID:          uuid.New().String(),
-		OwnerUserID: ownerID,
-		Status:      kernel.ProcessOpen,
-		CreatedAt:   time.Now().UTC(),
+		ID: uuid.New().String(), OwnerUserID: callerID,
+		Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC(),
 	}
-	if err := st.CreateProcess(context.Background(), p, ownerID, funds); err != nil {
-		t.Fatalf("setupNativeProcess: %v", err)
+	tr := &kernel.Trace{
+		ID: uuid.New().String(), ProcessID: p.ID,
+		ActionOwnerID: a.OwnerUserID, ActionID: a.ID,
+		CallerUserID: callerID, CreatedAt: time.Now().UTC(),
 	}
-	return p
+	if err := st.BeginRun(ctx, p, tr, callerID, a.Price); err != nil {
+		t.Fatalf("beginMakeTestRun: %v", err)
+	}
+	return p, tr
 }
 
 // seedMakeAction seeds @sys user, @sys/make native action, and @sys/llm/chat in the store.
@@ -197,10 +205,10 @@ func TestMakeRejectsEmptyDescription(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p := setupNativeProcess(t, st, caller.ID, 100)
+	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall:   true,
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{},
 	})
@@ -227,10 +235,10 @@ func TestMakeReturnsErrInvalidStateWithoutCompiler(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p := setupNativeProcess(t, st, caller.ID, 100)
+	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall:   true,
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "test"},
 	})
@@ -249,10 +257,10 @@ func TestMakeRegistersActionOnSuccess(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p := setupNativeProcess(t, st, caller.ID, 100)
+	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall:   true,
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{
 			"description": "An action that returns a fixed result",
@@ -310,10 +318,10 @@ func TestMakeRegisteredActionHasName(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p := setupNativeProcess(t, st, caller.ID, 100)
+	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall:   true,
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "compute something interesting"},
 	})
@@ -351,10 +359,10 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 10000)
-	p := setupNativeProcess(t, st, caller.ID, 1000)
+	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall:   true,
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "always fail"},
 	})
@@ -380,10 +388,10 @@ func TestMakeInternalChatCallCreatesChildTrace(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 10000)
-	p := setupNativeProcess(t, st, caller.ID, 1000)
+	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall:   true,
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "test"},
 	})
@@ -406,20 +414,20 @@ func TestMakeNameCollisionReturnsFailure(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p := setupNativeProcess(t, st, caller.ID, 200)
+	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	desc := map[string]any{"description": "An action that returns a fixed result"}
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall:   true,
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make", Args: desc,
 	})
 	if err != nil {
 		t.Fatalf("first Call: %v", err)
 	}
 	// Use a fresh process for the second call — the first call auto-closes p when quiescent.
-	p2 := setupNativeProcess(t, st, caller.ID, 200)
+	p2, tr2 := beginMakeTestRun(t, st, caller.ID, sys.ID)
 	reply2, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p2.ID, IsRootCall:   true,
+		CallerID: caller.ID, ProcessID: p2.ID, ExistingTraceID: tr2.ID,
 		TargetUserID: sys.ID, ActionName: "make", Args: desc,
 	})
 	if err != nil {
@@ -479,15 +487,15 @@ func TestMakePrivateActionNotSurfacedToForeignProcess(t *testing.T) {
 
 	// Create user B and their process. B explicitly references @owner-a/secret-tool.
 	ownerB := setupUser(t, st, "@owner-b", 5000)
-	p := setupNativeProcess(t, st, ownerB.ID, 1000)
+	p, tr := beginMakeTestRun(t, st, ownerB.ID, sys.ID)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:      ownerB.ID,
-		ProcessID:     p.ID,
-		IsRootCall:   true,
-		TargetUserID:  sys.ID,
-		ActionName:    "make",
-		Args:          map[string]any{"description": "use @owner-a/secret-tool to do something"},
+		CallerID:        ownerB.ID,
+		ProcessID:       p.ID,
+		ExistingTraceID: tr.ID,
+		TargetUserID:    sys.ID,
+		ActionName:      "make",
+		Args:            map[string]any{"description": "use @owner-a/secret-tool to do something"},
 	})
 	// The call may succeed or fail (synthesis will fail without a real compiler),
 	// but it must NOT expose the private action to B.
@@ -566,10 +574,10 @@ func TestMakeRejectsDisallowedWASMImport(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p := setupNativeProcess(t, st, caller.ID, 100)
+	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall:   true,
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "test action"},
 	})
@@ -607,10 +615,10 @@ func TestMakeAcceptsStepImports(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p := setupNativeProcess(t, st, caller.ID, 100)
+	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall:   true,
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "step-using action"},
 	})

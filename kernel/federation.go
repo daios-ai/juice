@@ -57,7 +57,7 @@ func verifyJCS(pub ed25519.PublicKey, v any, sigB64 string) error {
 //   - Signature: Ed25519 over JCS(receipt with Signature="") by peer key
 //   - ActionID: receipt.action_id == tx.remote_action_id (or tx.action_id if no remote ID)
 //   - Status: receipt.status == tx.status
-//   - Charge: tx.net == receipt.gross (local charge paid to proxy == what remote reported)
+//   - Charge: tx.net == receipt.charge (local charge paid to proxy == what remote reported)
 //   - SettlementArith: duty rule — tx.fee == ceil(tx.net*import_bps/10000) for success, 0 for failure
 //   - ArgsHash: receipt.args_hash == SHA-256(JCS(tx.args))
 //   - ReplyHash: receipt.reply_hash == SHA-256(JCS(tx.result)) on success
@@ -111,8 +111,8 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 		checks.SettlementArith = tx.Fee == 0
 	}
 
-	// 7. Refund conservation: the implied refund must be non-negative.
-	checks.RefundConservation = tx.Gross-tx.Net-tx.Fee >= 0
+	// 7. Refund conservation: stored refund must equal gross − net − fee exactly.
+	checks.RefundConservation = tx.Refund == tx.Gross-tx.Net-tx.Fee
 
 	// 8. Args hash.
 	if h, hashErr := jcsHashStr(string(tx.ArgsJSON)); hashErr == nil {

@@ -887,65 +887,38 @@ func (s *server) sendReciprocal(peerBaseURL string) {
 
 func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-
-	// 1. Require a registered counterparty, identified by its base64url Ed25519 public key.
 	cpPubKey := r.URL.Query().Get("counterparty")
 	if cpPubKey == "" {
 		writeErr(w, kernel.ErrUnauthenticated.Wrap("counterparty required"))
 		return
 	}
-	counterparty, err := s.kernel.ReadUserByPublicKey(ctx, cpPubKey)
-	if err != nil || counterparty.RemoteBaseURL == "" {
-		writeErr(w, kernel.ErrUnauthenticated.Wrap("counterparty not a registered peer"))
-		return
-	}
-
-	// 2. Require X-Timestamp within ±5 minutes.
 	tsStr := r.Header.Get("X-Timestamp")
 	if tsStr == "" {
 		writeErr(w, kernel.ErrUnauthenticated.Wrap("X-Timestamp required"))
 		return
 	}
-	ts, parseErr := time.Parse(time.RFC3339, tsStr)
-	if parseErr != nil {
-		writeErr(w, kernel.ErrUnauthenticated.Wrap("X-Timestamp must be RFC3339"))
-		return
-	}
-	diff := time.Since(ts)
-	if diff < -5*time.Minute || diff > 5*time.Minute {
-		writeErr(w, kernel.ErrUnauthenticated.Wrap("X-Timestamp out of range"))
-		return
-	}
-
-	// 3. Require X-Idempotency-Key.
 	idempotencyKey := r.Header.Get("X-Idempotency-Key")
 	if idempotencyKey == "" {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("X-Idempotency-Key required"))
 		return
 	}
-
-	// 4. Require action param (needed for signature verification).
 	actionParam := r.URL.Query().Get("action")
 	if actionParam == "" {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("action query param required"))
 		return
 	}
-
-	// 5. Read raw body so we can verify args_hash before decoding.
 	rawBody, readErr := io.ReadAll(r.Body)
 	if readErr != nil {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("could not read request body"))
 		return
 	}
 	argsHash := sha256HexBytes(rawBody)
-
-	// 6. Verify Ed25519 signature (covers action, args_hash, counterparty, idempotency_key, timestamp).
 	sigStr := r.Header.Get("X-Signature")
-	if verifyErr := kernel.VerifyFederationSignature(counterparty.PublicKey, actionParam, cpPubKey, idempotencyKey, tsStr, argsHash, sigStr); verifyErr != nil {
-		writeErr(w, verifyErr)
+	counterparty, err := validateFederationCall(s.kernel, ctx, cpPubKey, tsStr, idempotencyKey, actionParam, sigStr, argsHash)
+	if err != nil {
+		writeErr(w, err)
 		return
 	}
-
 	status, body, callErr := callFederated(s.kernel, ctx, counterparty, actionParam, argsHash, idempotencyKey, rawBody)
 	if callErr != nil {
 		writeErr(w, callErr)

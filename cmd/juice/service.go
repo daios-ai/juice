@@ -347,6 +347,27 @@ func run(k *kernel.Kernel, ctx context.Context, callerID, actionRef string, args
 
 // ---- Federation ----
 
+// validateFederationCall resolves the counterparty and verifies the Ed25519 request signature.
+// It accepts pre-extracted transport fields so it has no direct HTTP dependency.
+func validateFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, actionParam, sigStr, argsHash string) (*kernel.User, error) {
+	counterparty, err := k.ReadUserByPublicKey(ctx, cpPubKey)
+	if err != nil || counterparty.RemoteBaseURL == "" {
+		return nil, kernel.ErrUnauthenticated.Wrap("counterparty not a registered peer")
+	}
+	ts, err := time.Parse(time.RFC3339, tsStr)
+	if err != nil {
+		return nil, kernel.ErrUnauthenticated.Wrap("X-Timestamp must be RFC3339")
+	}
+	diff := time.Since(ts)
+	if diff < -5*time.Minute || diff > 5*time.Minute {
+		return nil, kernel.ErrUnauthenticated.Wrap("X-Timestamp out of range")
+	}
+	if err := kernel.VerifyFederationSignature(counterparty.PublicKey, actionParam, cpPubKey, idempotencyKey, tsStr, argsHash, sigStr); err != nil {
+		return nil, err
+	}
+	return counterparty, nil
+}
+
 // callFederated handles the business logic for an inbound federated call after the HTTP
 // protocol layer (counterparty lookup, timestamp, signature) has already been verified.
 // Returns (httpStatus, responseBody, err); on non-nil err the caller should writeErr.

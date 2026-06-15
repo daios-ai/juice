@@ -542,15 +542,15 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	}
 
 	caller := setupUser(t, st, "@proxy-caller", 0)
-	p := setupProcess(t, st, caller.ID, 0)
+	p, tr := beginTestRun(t, st, caller.ID, a)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:     caller.ID,
-		ProcessID:    p.ID,
-		IsRootCall:   true,
-		TargetUserID: "@proxy-peer",
-		ActionName:   "add",
-		Args:         map[string]any{},
+		CallerID:        caller.ID,
+		ProcessID:       p.ID,
+		ExistingTraceID: tr.ID,
+		TargetUserID:    "@proxy-peer",
+		ActionName:      "add",
+		Args:            map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -723,7 +723,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	}
 
 	caller := setupUser(t, st, "@verify-caller", 0)
-	p := setupProcess(t, st, caller.ID, 0)
+	p, tr := beginTestRun(t, st, caller.ID, a)
 
 	// Build a receipt whose fields match what Call() will record in the transaction.
 	// ActionID must be the remote action's ID (manifest ActionID), not the local proxy ID.
@@ -743,7 +743,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	fake.receiptJSON = string(receiptBytes)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall: true,
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: "@verify-peer", ActionName: "vact", Args: map[string]any{},
 	})
 	if err != nil {
@@ -776,7 +776,6 @@ func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
 	// Use a fake HTTP executor so we can call a KindHTTP action and get a local tx.
 	fakeHTTP := &fakeSuccessHTTP{}
 	k := newTestKernelWithHTTP(st, fakeHTTP)
-	p := setupProcess(t, st, caller.ID, 10)
 
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
@@ -799,8 +798,9 @@ func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	p, tr := beginTestRun(t, st, caller.ID, a)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall: true,
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "vrr-local", Args: map[string]any{},
 	})
 	if err != nil {
@@ -858,10 +858,10 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	fake.receiptJSON = string(receiptBytes)
 
 	caller := setupUser(t, st, "@tamper-caller", 0)
-	p := setupProcess(t, st, caller.ID, 0)
+	p, tr := beginTestRun(t, st, caller.ID, a)
 	// A receipt signed with the wrong key must be rejected: no settlement, trace stays open.
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall: true,
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: "@tamper-peer", ActionName: "tact", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrTimeout) {
@@ -912,7 +912,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	}
 
 	caller := setupUser(t, st, "@del-caller", 0)
-	p := setupProcess(t, st, caller.ID, 0)
+	p, tr := beginTestRun(t, st, caller.ID, a)
 
 	remoteReceipt := &kernel.Receipt{
 		ID: uuid.New().String(), IssuerUserID: "rs",
@@ -928,7 +928,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	fake.receiptJSON = string(receiptBytes)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, IsRootCall: true,
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: "@del-peer", ActionName: "dact", Args: map[string]any{},
 	})
 	if err != nil {

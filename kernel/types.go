@@ -175,6 +175,7 @@ type Transaction struct {
 	Gross             int64           `json:"gross"`
 	Net               int64           `json:"net"`
 	Fee               int64           `json:"fee"`
+	Refund            int64           `json:"refund"`
 	Reason            string          `json:"reason"`
 	RemoteReceiptHash string          `json:"remote_receipt_hash,omitempty"` // SHA-256 of the remote receipt JSON; empty for local calls
 	RemoteReceiptJSON string          `json:"remote_receipt_json,omitempty"` // full receipt JSON from the remote kernel; empty for local calls
@@ -383,9 +384,9 @@ type ReceiptChecks struct {
 	Signature          bool `json:"signature"`
 	ActionID           bool `json:"action_id"`
 	Status             bool `json:"status"`
-	Charge             bool `json:"charge"`              // amount paid to proxy == receipt.gross
+	Charge             bool `json:"charge"`              // amount paid to proxy == receipt.charge
 	SettlementArith    bool `json:"settlement_arith"`    // net + fee == gross (internal receipt math)
-	RefundConservation bool `json:"refund_conservation"` // tx.Gross - tx.Net - tx.Fee >= 0 (refund non-negative)
+	RefundConservation bool `json:"refund_conservation"` // tx.Refund == tx.Gross - tx.Net - tx.Fee (exact equality)
 	ArgsHash           bool `json:"args_hash"`
 	ReplyHash          bool `json:"reply_hash"`
 }

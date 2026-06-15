@@ -1023,7 +1023,6 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 		TargetUserID:        targetUserID,
 		ActionName:          actionName,
 		Args:                args,
-		IsRootCall:          true,
 		ExistingTraceID:     t.ID,
 		IdempotencyRecordID: idempotencyRecordID,
 	})

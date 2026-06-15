@@ -19,7 +19,6 @@ type CallRequest struct {
 	// ProcessID is the budgeted execution context.
 	ProcessID string
 	// ParentTraceID is the trace from which this call originates.
-	// For root calls it is set by Run() to the process ID (no parent trace).
 	// For subcalls it is the parent trace ID.
 	// For step-completion calls it is set by BeginStepCall's trace.
 	ParentTraceID string
@@ -33,13 +32,11 @@ type CallRequest struct {
 	ActionName string
 	// Args is the JSON-decoded input arguments.
 	Args map[string]any
-	// IsRootCall, when true, uses BeginRootCall (process wallet) instead of BeginSubcall.
-	IsRootCall bool
 	// StepID, if non-empty, causes CommitCall/CommitFailedCall to atomically mark the step done.
 	// Also signals CallerStep wallet kind (BeginStepCall was used, no lock to release).
 	StepID string
 	// ExistingTraceID, when non-empty, signals that the root trace was already created atomically
-	// by BeginRun. Call uses this trace instead of calling BeginRootCall.
+	// by BeginRun. Call uses this trace instead of calling BeginSubcall.
 	ExistingTraceID string
 	// IdempotencyRecordID, if non-empty, causes CommitCall/CommitFailedCall to atomically
 	// mark the pending idempotency record as complete. Set only by federation handlers.
@@ -69,7 +66,7 @@ func ParseActionRef(ref string) (ownerHandle, actionName string, err error) {
 
 // Call executes the central kernel transition.
 // Preconditions are checked in order per §5.1 of the requirements.
-// For root calls (req.IsRootCall), the process must already have been created by Run().
+// For root calls (req.ExistingTraceID), the process and trace must already have been created by Run().
 // For subcalls, the parent trace must have sufficient available funds.
 // For step-completion calls, BeginStepCall must have been called before invoking Call.
 func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) {
@@ -93,9 +90,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	// 3. For subcalls: resolve parent trace and validate process-use authority.
-	// Root calls and step-completion calls skip this check (caller authority established earlier).
+	// Root calls (ExistingTraceID) and step-completion calls skip this check.
 	var parentTrace *Trace
-	if !req.IsRootCall && req.StepID == "" {
+	if req.ExistingTraceID == "" && req.StepID == "" {
 		pt, resolveErr := k.resolveAndValidateParentTrace(ctx, &req, process)
 		if resolveErr != nil {
 			return nil, resolveErr
@@ -138,25 +135,19 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 
 	// 7. Funds check (step calls pre-funded by BeginStepCall; ExistingTraceID calls pre-funded by BeginRun).
 	if req.StepID == "" && req.ExistingTraceID == "" {
-		if req.IsRootCall {
-			if process.Available < action.Price {
-				return nil, ErrInsufficientFunds.Wrapf("process has %d credits, action costs %d", process.Available, action.Price)
+		// For subcalls: owner callers deferred the trace load to here (after the action check).
+		if parentTrace == nil && req.ParentTraceID != "" {
+			pt, err := k.store.ReadTrace(ctx, req.ParentTraceID)
+			if err != nil {
+				return nil, ErrInvalidInput.Wrap("parent trace not found")
 			}
-		} else {
-			// For subcalls: owner callers deferred the trace load to here (after the action check).
-			if parentTrace == nil && req.ParentTraceID != "" {
-				pt, err := k.store.ReadTrace(ctx, req.ParentTraceID)
-				if err != nil {
-					return nil, ErrInvalidInput.Wrap("parent trace not found")
-				}
-				if pt.ProcessID != process.ID {
-					return nil, ErrInvalidInput.Wrap("parent trace belongs to a different process")
-				}
-				parentTrace = pt
+			if pt.ProcessID != process.ID {
+				return nil, ErrInvalidInput.Wrap("parent trace belongs to a different process")
 			}
-			if parentTrace != nil && parentTrace.Available < action.Price {
-				return nil, ErrInsufficientFunds.Wrapf("parent trace has %d credits, action costs %d", parentTrace.Available, action.Price)
-			}
+			parentTrace = pt
+		}
+		if parentTrace != nil && parentTrace.Available < action.Price {
+			return nil, ErrInsufficientFunds.Wrapf("parent trace has %d credits, action costs %d", parentTrace.Available, action.Price)
 		}
 	}
 
@@ -222,15 +213,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		trace.ID = req.ExistingTraceID
 		if dbTrace, err := k.store.ReadTrace(ctx, req.ExistingTraceID); err == nil {
 			trace.Available      = dbTrace.Available
+			lockPrice            = dbTrace.Available // use the pre-locked amount, not current action.Price
 			trace.IdempotencyKey = dbTrace.IdempotencyKey
 			trace.DispatchJSON   = dbTrace.DispatchJSON
-		}
-	case req.IsRootCall:
-		if err := k.store.BeginRootCall(ctx, req.ProcessID, trace, lockPrice); err != nil {
-			if errors.Is(err, ErrInsufficientFunds) || errors.Is(err, ErrInvalidState) {
-				return nil, err
-			}
-			return nil, ErrInternal.Wrap("could not begin root call")
 		}
 	default:
 		if err := k.store.BeginSubcall(ctx, req.ParentTraceID, trace, lockPrice); err != nil {
@@ -358,7 +343,7 @@ func (k *Kernel) callerWallet(req CallRequest, process *Process, parentTrace *Tr
 	if req.StepID != "" {
 		return "", CallerStep
 	}
-	if req.IsRootCall || req.ExistingTraceID != "" {
+	if req.ExistingTraceID != "" {
 		return process.ID, CallerProcess
 	}
 	if parentTrace != nil {

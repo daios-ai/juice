@@ -69,24 +69,20 @@ func TestExecuteMessage_CreatesStep(t *testing.T) {
 	caller := seedUserWithBalance(t, st, "@caller", 1000)
 	recipient := seedOwner(t, st, "@recipient")
 
-	// Create process directly via store (new wallet model).
+	// Create process and root trace atomically via BeginRun (mirrors production).
 	p := &kernel.Process{
 		ID:          uuid.New().String(),
 		OwnerUserID: caller.ID,
 		Status:      kernel.ProcessOpen,
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := st.CreateProcess(ctx, p, caller.ID, 100); err != nil {
-		t.Fatalf("CreateProcess: %v", err)
-	}
-	// Create a root trace so CreateStep can park the step price.
 	rootTrace := &kernel.Trace{
 		ID:        uuid.New().String(),
 		ProcessID: p.ID,
 		CreatedAt: time.Now().UTC(),
 	}
-	if err := st.BeginRootCall(ctx, p.ID, rootTrace, 0); err != nil {
-		t.Fatalf("BeginRootCall: %v", err)
+	if err := st.BeginRun(ctx, p, rootTrace, caller.ID, 0); err != nil {
+		t.Fatalf("BeginRun: %v", err)
 	}
 
 	result, err := executeMessage(ctx, map[string]any{
