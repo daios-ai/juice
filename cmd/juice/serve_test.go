@@ -85,32 +85,35 @@ func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	return srv, k
 }
 
-// setupProcessHTTP creates a process directly via the store for HTTP integration tests.
+// setupProcessHTTP creates a process+root trace directly via the store for HTTP integration tests.
 // Used by tests that need a process_id before making HTTP calls.
 func setupProcessHTTP(t *testing.T, db *store.DB, ownerID string, funds int64) *kernel.Process {
 	t.Helper()
+	ctx := context.Background()
 	p := &kernel.Process{
 		ID:          uuid.New().String(),
 		OwnerUserID: ownerID,
 		Status:      kernel.ProcessOpen,
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := db.CreateProcess(context.Background(), p, ownerID, funds); err != nil {
+	tr := &kernel.Trace{
+		ID:            uuid.New().String(),
+		ProcessID:     p.ID,
+		ActionOwnerID: ownerID,
+		CallerUserID:  ownerID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := db.BeginRun(ctx, p, tr, ownerID, funds); err != nil {
 		t.Fatalf("setupProcessHTTP: %v", err)
 	}
 	return p
 }
 
-// setupTraceForProcess creates an orphan root trace for a process, as a parent for step creation in tests.
-// Uses price=0 so no funds need to be locked in the process.
+// setupTraceForProcess returns the root trace ID for a process created by setupProcessHTTP.
 func setupTraceForProcess(t *testing.T, db *store.DB, processID string) string {
 	t.Helper()
-	tr := &kernel.Trace{
-		ID:        uuid.New().String(),
-		ProcessID: processID,
-		CreatedAt: time.Now().UTC(),
-	}
-	if err := db.BeginRootCall(context.Background(), processID, tr, 0); err != nil {
+	tr, err := db.ReadRootTrace(context.Background(), processID)
+	if err != nil {
 		t.Fatalf("setupTraceForProcess: %v", err)
 	}
 	return tr.ID
@@ -579,8 +582,12 @@ func TestServeFundProcess(t *testing.T) {
 	}
 	var proc kernel.Process
 	decodeResponse(t, get, &proc)
-	if proc.Available != 100 {
-		t.Errorf("funded process: expected 100 available, got %d", proc.Available)
+	// With BeginRun, process.available is always 0 — funds are held in the root trace.
+	if proc.Available != 0 {
+		t.Errorf("funded process: expected 0 available (funds in root trace), got %d", proc.Available)
+	}
+	if proc.Status != kernel.ProcessOpen {
+		t.Errorf("funded process: expected status=open, got %s", proc.Status)
 	}
 }
 

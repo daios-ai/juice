@@ -1155,3 +1155,38 @@ func TestStepCompleteRemoteProxyTimeoutLeavesStepRunning(t *testing.T) {
 		t.Errorf("completion trace must still exist after ErrTimeout: %v", err)
 	}
 }
+
+// TestStepCompleteSuspendedCallerRejectedBeforeMutation verifies that a suspended
+// required_caller_user_id is rejected before BeginStepCall mutates state.
+func TestStepCompleteSuspendedCallerRejectedBeforeMutation(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@susp-owner", 500)
+	caller := setupUser(t, st, "@susp-caller", 0)
+	action := setupWasmAction(t, st, owner.ID, "susp-action", "", 0)
+	p, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
+	trID := tr.ID
+
+	step, err := k.CreateStep(ctx, owner.ID, p.ID, &trID, action.ID, nil, nil, caller.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+
+	// Suspend the caller before they complete the step.
+	if err := st.SuspendUser(ctx, caller.ID); err != nil {
+		t.Fatalf("SuspendUser: %v", err)
+	}
+
+	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	if !errors.Is(err, kernel.ErrUnauthenticated) {
+		t.Errorf("expected ErrUnauthenticated for suspended caller, got %v", err)
+	}
+
+	// Step must still be waiting — no state mutation occurred.
+	got, _ := st.ReadStep(ctx, step.ID)
+	if got.Status != kernel.StepWaiting {
+		t.Errorf("step.status after suspended caller: got %s, want waiting", got.Status)
+	}
+}

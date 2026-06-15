@@ -135,11 +135,6 @@ type Store interface {
 
 	// ---- Processes ----
 
-	// CreateProcess atomically debits price from owner.available, credits owner.locked,
-	// and creates the process with available=price. Returns ErrInsufficientFunds if
-	// owner.available < price.
-	CreateProcess(ctx context.Context, p *Process, ownerID string, price int64) error
-
 	// BeginRun atomically debits price from owner.available→locked, creates the process
 	// with available=0/locked=price, and creates the root trace with available=price.
 	// All precondition checks must happen in Go before calling BeginRun.

@@ -683,31 +683,8 @@ func finishAction(a *kernel.Action, kind string, active, public int, inJSON, out
 
 // ---- Processes ----
 
-// CreateProcess atomically debits price from owner.available into owner.locked and creates
-// the process with available=price, locked=0. Returns ErrInsufficientFunds if balance < price.
-func (s *DB) CreateProcess(ctx context.Context, p *kernel.Process, ownerID string, price int64) error {
-	return s.withTx(ctx, "create process", func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx,
-			`UPDATE users SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
-			price, price, ownerID, price,
-		)
-		if err != nil {
-			return dbErr(err, "create process: deduct user")
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return kernel.ErrInsufficientFunds.Wrap("insufficient user balance")
-		}
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at) VALUES (?,?,?,?,?,?,?)`,
-			p.ID, p.OwnerUserID, price, 0, string(p.Status), timeToStr(p.CreatedAt), nullTimeToStr(p.EndedAt),
-		)
-		return dbErr(err, "create process: insert")
-	})
-}
-
 // BeginRun atomically debits price from owner.available→locked, creates the process
 // with available=0/locked=price, and creates the root trace with available=price.
-// Net wallet state mirrors CreateProcess + BeginRootCall in sequence, but in one transaction.
 func (s *DB) BeginRun(ctx context.Context, p *kernel.Process, t *kernel.Trace, ownerID string, price int64) error {
 	return s.withTx(ctx, "begin run", func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
@@ -749,8 +726,6 @@ func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error
 	return &p, nil
 }
 
-// BeginRootCall atomically deducts price from process.available into process.locked
-// and creates the root trace with available=price.
 func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTraceID *string, price int64) error {
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,latency_ms,idempotency_key,dispatch_json,created_at)
@@ -758,23 +733,6 @@ func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTrace
 		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.LatencyMS, t.IdempotencyKey, t.DispatchJSON, timeToStr(t.CreatedAt),
 	)
 	return dbErr(err, "insert trace")
-}
-
-func (s *DB) BeginRootCall(ctx context.Context, processID string, t *kernel.Trace, price int64) error {
-	return s.withTx(ctx, "begin root call", func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx,
-			`UPDATE processes SET available=available-?, locked=locked+?
-			 WHERE id=? AND available>=? AND status='open'`,
-			price, price, processID, price,
-		)
-		if err != nil {
-			return dbErr(err, "begin root call: lock funds")
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return kernel.ErrInsufficientFunds.Wrap("not enough process funds or process closed")
-		}
-		return insertTraceTx(ctx, tx, t, t.ParentTraceID, price)
-	})
 }
 
 // BeginSubcall atomically deducts price from parent_trace.available into parent_trace.locked
@@ -1128,7 +1086,6 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 //   - cancels all outstanding steps in the trace's subtree, summing their parked prices
 //   - total refund = trace.available + step prices
 //   - refunds total to caller wallet (process or parent trace); CallerStep → process.available
-//   - decrements owner.locked by (gross - refund)
 func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buildReceipt func(refund int64) (*kernel.Receipt, error), traceID, callerWalletID, callerWalletKind string, gross int64, stats *kernel.Stats, idempotencyRecordID, errorCode, stepID string) error {
 	return s.withTx(ctx, "commit failed call", func(tx *sql.Tx) error {
 		// Read trace.available before zeroing.

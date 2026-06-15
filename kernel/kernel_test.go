@@ -130,15 +130,24 @@ func setupSys(t *testing.T, _ *kernel.Kernel, st kernel.Store) *kernel.User {
 
 func setupProcess(t *testing.T, st kernel.Store, ownerID string, funds int64) *kernel.Process {
 	t.Helper()
-	p := &kernel.Process{
-		ID:          uuid.New().String(),
-		OwnerUserID: ownerID,
-		Status:      kernel.ProcessOpen,
-		CreatedAt:   time.Now().UTC(),
+	// Use BeginRun (the single production path) to create the process+root trace atomically.
+	// Create a minimal dummy action at the requested price so BeginRun has something to bind to.
+	dummyAction := &kernel.Action{
+		ID:           uuid.New().String(),
+		OwnerUserID:  ownerID,
+		Name:         "setup-" + uuid.New().String(),
+		Kind:         kernel.KindNative,
+		Active:       true,
+		Price:        funds,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
 	}
-	if err := st.CreateProcess(context.Background(), p, ownerID, funds); err != nil {
-		t.Fatalf("setupProcess: %v", err)
+	if err := st.CreateAction(context.Background(), dummyAction); err != nil {
+		t.Fatalf("setupProcess: create action: %v", err)
 	}
+	p, _ := beginTestRun(t, st, ownerID, dummyAction)
 	return p
 }
 
@@ -483,17 +492,19 @@ func TestStartAndEndProcess(t *testing.T) {
 	owner := setupUser(t, st, "@owner", 1000)
 
 	p := setupProcess(t, st, owner.ID, 500)
+
+	// With BeginRun, the process holds available=0 (funds are in the root trace).
 	proc, err := st.ReadProcess(ctx, p.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if proc.Available != 500 {
-		t.Errorf("process.available: got %d, want 500", proc.Available)
+	if proc.Available != 0 || proc.Status != kernel.ProcessOpen {
+		t.Errorf("process initial state: available=%d status=%s, want 0/open", proc.Available, proc.Status)
 	}
 
 	u, _ := st.ReadUser(ctx, owner.ID)
 	if u.Available != 500 {
-		t.Errorf("owner balance after funding: got %d, want 500", u.Available)
+		t.Errorf("owner balance after funding: got %d, want 500 (500 locked)", u.Available)
 	}
 
 	if err := k.EndProcess(ctx, owner.ID, p.ID); err != nil {
@@ -1802,6 +1813,42 @@ func TestRunFederatedDoesNotCreateProcessOnInsufficientBalance(t *testing.T) {
 	procs, _ := st.ListProcesses(ctx, caller.ID, 10, 0)
 	if len(procs) != 0 {
 		t.Errorf("expected no processes after insufficient balance, got %d", len(procs))
+	}
+}
+
+// TestCallUsesActionIDNotOwnerName verifies Fix 1: when Call is invoked with ActionID set
+// (the root call path from beginRun), it loads the action by ID rather than by owner/name.
+// This prevents a race where the original action is deleted and a new action is created under
+// the same name between BeginRun and Call — the old code would silently execute the new action.
+// With the fix, deleting the funded action causes Call to return ErrNotFound (clean failure),
+// not to execute an unrelated replacement.
+func TestCallUsesActionIDNotOwnerName(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@pid-owner", 200)
+	actionA := setupWasmAction(t, st, owner.ID, "pid-act", "", 100)
+
+	// Fund a process+trace for action A.
+	p, tr := beginTestRun(t, st, owner.ID, actionA)
+
+	// Delete action A, simulating the race window where the funded action disappears.
+	if err := st.DeleteAction(ctx, actionA.ID); err != nil {
+		t.Fatalf("DeleteAction: %v", err)
+	}
+
+	// Call with ActionID pointing to the deleted action — must fail cleanly with ErrNotFound,
+	// NOT look up by owner/name (which would find nothing, or a future replacement).
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID:        owner.ID,
+		ProcessID:       p.ID,
+		ActionID:        actionA.ID,
+		Args:            map[string]any{},
+		ExistingTraceID: tr.ID,
+	})
+	if !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for deleted funded action, got %v", err)
 	}
 }
 

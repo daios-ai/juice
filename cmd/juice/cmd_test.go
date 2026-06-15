@@ -31,6 +31,8 @@ type testEnv struct {
 	dir string
 }
 
+const cmdTestIssuerID = "00000000-0000-0000-0000-000000000001"
+
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
@@ -41,8 +43,23 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("open db: %v", err)
 	}
 
+	// Seed the issuer user so receipt FK constraints pass and buildReceipt can sign.
+	hash, _ := kernel.HashPassword("issuer-pass")
+	issuer := &kernel.User{
+		ID: cmdTestIssuerID, Handle: "@_test_issuer", Email: "issuer@test.internal",
+		PasswordHash: hash, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := db.CreateUser(context.Background(), issuer); err != nil {
+		t.Fatalf("newTestEnv: seed issuer: %v", err)
+	}
+
+	_, signingKey, _ := ed25519.GenerateKey(rand.Reader)
+
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "cli-test-secret"
+	cfg.IssuerUserID = cmdTestIssuerID
+	cfg.FeeRecipientID = cmdTestIssuerID
+	cfg.SigningKey = signingKey
 	k := kernel.New(db, nil, nil, nil, cfg, log.Discard())
 	t.Setenv("JUICE_SECRET_KEY", "cli-test-secret")
 
@@ -574,7 +591,14 @@ func setupProcessCmd(t *testing.T, env *testEnv, ownerID string, funds int64) *k
 		Status:      kernel.ProcessOpen,
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := env.db.CreateProcess(ctx, p, ownerID, funds); err != nil {
+	tr := &kernel.Trace{
+		ID:            uuid.New().String(),
+		ProcessID:     p.ID,
+		ActionOwnerID: ownerID,
+		CallerUserID:  ownerID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := env.db.BeginRun(ctx, p, tr, ownerID, funds); err != nil {
 		t.Fatalf("setupProcessCmd: %v", err)
 	}
 	return p
@@ -601,8 +625,9 @@ func TestProcessStartFundEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if proc.Available != 500 {
-		t.Errorf("process.available: got %d, want 500", proc.Available)
+	// With BeginRun, process.available=0 (funds are in the root trace).
+	if proc.Available != 0 || proc.Status != kernel.ProcessOpen {
+		t.Errorf("process initial state: available=%d status=%s, want 0/open", proc.Available, proc.Status)
 	}
 
 	if err := env.k.EndProcess(ctx, owner.ID, p.ID); err != nil {
@@ -656,7 +681,14 @@ func TestProcessNegativeFundsFails(t *testing.T) {
 		Status:      kernel.ProcessOpen,
 		CreatedAt:   time.Now().UTC(),
 	}
-	err := env.db.CreateProcess(ctx, p, owner.ID, -1)
+	tr := &kernel.Trace{
+		ID:            uuid.New().String(),
+		ProcessID:     p.ID,
+		ActionOwnerID: owner.ID,
+		CallerUserID:  owner.ID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	err := env.db.BeginRun(ctx, p, tr, owner.ID, -1)
 	if err == nil {
 		t.Error("expected error creating process with negative funds")
 	}

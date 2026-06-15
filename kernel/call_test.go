@@ -1083,13 +1083,13 @@ func TestCallInvalidParentTraceDoesNotLockFunds(t *testing.T) {
 		t.Fatalf("expected ErrInvalidInput for bad parent trace, got %v", err)
 	}
 
-	// Funds must be untouched — no locking should have occurred.
-	proc, _ := st.ReadProcess(ctx, p.ID)
-	if proc.Available != 500 {
-		t.Errorf("process.available: got %d, want 500 (funds locked before trace validated)", proc.Available)
+	// Root trace funds must be untouched — the failed call must not move any funds.
+	root, _ := st.ReadRootTrace(ctx, p.ID)
+	if root.Available != 500 {
+		t.Errorf("root_trace.available: got %d, want 500 (funds moved before trace validated)", root.Available)
 	}
-	if proc.Locked != 0 {
-		t.Errorf("process.locked: got %d, want 0 (funds locked before trace validated)", proc.Locked)
+	if root.Locked != 0 {
+		t.Errorf("root_trace.locked: got %d, want 0 (subcall created before trace validated)", root.Locked)
 	}
 }
 

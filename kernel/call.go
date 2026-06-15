@@ -38,6 +38,10 @@ type CallRequest struct {
 	// ExistingTraceID, when non-empty, signals that the root trace was already created atomically
 	// by BeginRun. Call uses this trace instead of calling BeginSubcall.
 	ExistingTraceID string
+	// ActionID, when non-empty, causes Call to load the action by ID rather than by owner/name.
+	// Set by beginRun to bind execution to the exact action that was funded, eliminating the
+	// TOCTOU window between BeginRun and the second owner/name lookup.
+	ActionID string
 	// IdempotencyRecordID, if non-empty, causes CommitCall/CommitFailedCall to atomically
 	// mark the pending idempotency record as complete. Set only by federation handlers.
 	IdempotencyRecordID string
@@ -101,23 +105,38 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	// 4. Resolve action.
-	if req.ActionRef != "" {
-		var parseErr error
-		req.TargetUserID, req.ActionName, parseErr = ParseActionRef(req.ActionRef)
-		if parseErr != nil {
-			return nil, parseErr
+	// Root calls supply ActionID so we load by the exact ID that was funded by BeginRun,
+	// eliminating the TOCTOU window that a second owner/name lookup would reintroduce.
+	var action *Action
+	var target *User
+	if req.ActionID != "" {
+		action, err = k.store.ReadAction(ctx, req.ActionID)
+		if err != nil || action == nil {
+			return nil, ErrNotFound.Wrap("action not found")
 		}
-	}
-	target, err := k.store.ReadUserByHandle(ctx, req.TargetUserID)
-	if err != nil || target == nil {
-		target, err = k.store.ReadUser(ctx, req.TargetUserID)
+		target, err = k.store.ReadUser(ctx, action.OwnerUserID)
 		if err != nil || target == nil {
 			return nil, ErrNotFound.Wrap("target user not found")
 		}
-	}
-	action, err := k.store.ReadActionByOwnerName(ctx, target.ID, req.ActionName)
-	if err != nil || action == nil {
-		return nil, ErrNotFound.Wrapf("action %s/%s not found", req.TargetUserID, req.ActionName)
+	} else {
+		if req.ActionRef != "" {
+			var parseErr error
+			req.TargetUserID, req.ActionName, parseErr = ParseActionRef(req.ActionRef)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+		}
+		target, err = k.store.ReadUserByHandle(ctx, req.TargetUserID)
+		if err != nil || target == nil {
+			target, err = k.store.ReadUser(ctx, req.TargetUserID)
+			if err != nil || target == nil {
+				return nil, ErrNotFound.Wrap("target user not found")
+			}
+		}
+		action, err = k.store.ReadActionByOwnerName(ctx, target.ID, req.ActionName)
+		if err != nil || action == nil {
+			return nil, ErrNotFound.Wrapf("action %s/%s not found", req.TargetUserID, req.ActionName)
+		}
 	}
 
 	// 5. CanCall(process.owner, action). Skip for root calls: beginRun already validated this,
@@ -496,6 +515,9 @@ func (h *kernelHostFunctions) Log(ctx context.Context, level, msg string) error 
 // computeStats builds a delta Stats for this call outcome. The SQL in CommitCall/CommitFailedCall
 // applies these as incremental updates, making concurrent calls safe.
 func (k *Kernel) computeStats(_ context.Context, actionID string, tx *Transaction, latency float64) *Stats {
+	if actionID == "" {
+		return nil
+	}
 	stats := DefaultStats(actionID)
 	UpdateStats(stats, tx, latency)
 	return stats

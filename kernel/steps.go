@@ -214,6 +214,9 @@ func (k *Kernel) ListSteps(ctx context.Context, callerID, processID, status stri
 // CompleteStep resumes a waiting step by merging caller input with partial_args and executing the next call.
 // No superuser exception: only required_caller_user_id may complete the step.
 func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, input json.RawMessage) (*StepReply, error) {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+		return nil, err
+	}
 	step, err := k.store.ReadStep(ctx, stepID)
 	if err != nil {
 		return nil, err
