@@ -176,6 +176,7 @@ Native actions registered at bootstrap, owned by `@sys`, public, runnable like a
 | `@sys/time` | 0 | Current time |
 | `@sys/sink` | 0 | Universal no-op step target |
 | `@sys/message` | 0 | Message a user by creating a step they acknowledge |
+| `@sys/random` | 0 | Random float in `[0, 1)` |
 
 ### Federation (HTTP-only protocol surface)
 

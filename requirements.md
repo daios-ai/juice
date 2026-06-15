@@ -355,6 +355,7 @@ Native actions are standard actions shipped alongside the kernel as a platform s
 | `@sys/time`     | Public; action owner `@sys`; price 0 (configurable, `native.time`, §14); callable through `Call()`. No input required. Output: `unix` (integer seconds since UTC epoch), `iso` (RFC 3339 string). |
 | `@sys/sink`     | Public; action owner `@sys`; price 0 (configurable, `native.sink`, §14); callable through `Call()`. Accepts any input, returns `{}`. Universal no-op sink for steps that require a `next_action` but no further computation. |
 | `@sys/message`  | Public; action owner `@sys`; price 0 (configurable, `native.message`, §14); callable through `Call()`. Sends a message to another platform user by creating a Step they must acknowledge. Input: required `to` (`@handle` of recipient), required `message`. Output: `step_id`. The Step sets `required_caller_user_id` to the resolved target user and `partial_args` to `{"message":"..."}` so the recipient can read it via `step list`. Uses `@sys/sink` as the step's `next_action`. `ErrInvalidInput` if `to` cannot be resolved. |
+| `@sys/random`   | Public; action owner `@sys`; price 0 (configurable, `native.random`, §14); callable through `Call()`. No input required. Output: `value` (float in `[0, 1)`). Exists to provide randomness to WASM scripts, which have no ambient access to the OS random source. |
 
 Stats use:
 
@@ -540,7 +541,7 @@ config.jwt_secret          = 32 random bytes, hex
 
 Private signing key and JWT secret are never logged or returned. Partial first boot is rerunnable. `JUICE_SECRET_KEY` overrides stored JWT secret at runtime only.
 
-Every startup reads `config.superuser_handle` to confirm first boot and identify `@sys`; it verifies signing keys and aborts if either is absent. It then registers, enables, and makes public `@sys/lookup`, `@sys/llm/chat`, `@sys/make`, `@sys/time`, `@sys/sink`, and `@sys/message` if absent, and reconciles their configurable fields (price and action-specific settings) from config on every startup. It then runs recovery (§5).
+Every startup reads `config.superuser_handle` to confirm first boot and identify `@sys`; it verifies signing keys and aborts if either is absent. It then registers, enables, and makes public `@sys/lookup`, `@sys/llm/chat`, `@sys/make`, `@sys/time`, `@sys/sink`, `@sys/message`, and `@sys/random` if absent, and reconciles their configurable fields (price and action-specific settings) from config on every startup. It then runs recovery (§5).
 
 Bootstrap is idempotent. Supervision operations are not native actions.
 
@@ -735,7 +736,8 @@ Config lives in `juice.json` (path from `JUICE_CONFIG`, default `./juice.json`).
     "lookup":  { "default_limit": 10, "price": 0 },
     "time":    { "price": 0 },
     "sink":    { "price": 0 },
-    "message": { "price": 0 }
+    "message": { "price": 0 },
+    "random":  { "price": 0 }
   }
 }
 ```
@@ -803,6 +805,8 @@ suspended user rejected at authentication
 direct buyer can rate transaction
 non-buyer cannot rate transaction
 native action callable through Call()
+@sys/random returns value in [0, 1)
+wasm script can call @sys/random to obtain a random value
 non-superuser rejected from admin CLI commands
 active public action callable by any caller
 active private action callable only by owner
