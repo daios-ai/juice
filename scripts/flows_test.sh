@@ -394,6 +394,7 @@ main() {
     flow_fed_denial_underfunded
     flow_fed_import_duty
     flow_fed_failed_action_refund
+    flow_fed_gossip_discovery
     flow_transaction_access
     flow_admin_supervision
     flow_make

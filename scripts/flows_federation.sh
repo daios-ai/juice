@@ -773,3 +773,115 @@ for tx in txs:
 
     stop_backend "$fail_backend_pid"
 }
+
+_fed3_teardown() {
+    local dir="$1"
+    _fed_teardown "$dir"
+    local pid_t
+    pid_t=$(cat "$dir/pid_t" 2>/dev/null)
+    [ -n "$pid_t" ] && { kill "$pid_t" 2>/dev/null; wait "$pid_t" 2>/dev/null; }
+}
+
+flow_fed_gossip_discovery() {
+    echo "=== FLOW fed_gossip_discovery ==="
+    local dir port_l port_r port_b port_t
+    dir=$(mktemp -d)
+    trap "_fed3_teardown '$dir'; rm -rf '$dir'" RETURN
+    alloc_port; port_l=$_ALLOC_PORT
+    alloc_port; port_r=$_ALLOC_PORT
+    alloc_port; port_b=$_ALLOC_PORT
+    alloc_port; port_t=$_ALLOC_PORT
+
+    # Set up L and R: L friends R, greet (price=0) imported on L.
+    _fed_setup "$dir" "$port_l" "$port_r" "$port_b" \
+        || { fail "fed_gossip.setup" "L-R setup failed"; return; }
+    local db_l db_r home_l home_r
+    db_l=$(cat "$dir/db_l"); db_r=$(cat "$dir/db_r")
+    home_l=$(cat "$dir/home_l"); home_r=$(cat "$dir/home_r")
+
+    # L calls R's greet (price=0, no deposit needed) — R becomes a transacted friend of L.
+    local tx_id
+    tx_id=$(strfield "$(jj "$db_l" "$home_l" run \
+        --action "@kernel-r/greet" --args '{}')" "tx_id")
+    [ -n "$tx_id" ] \
+        && ok "fed_gossip.initial_call" \
+        || { fail "fed_gossip.initial_call" "L->R call failed"; return; }
+
+    # Read L's gossip — R must appear as a transacted friend with earned stats.
+    local gossip_json r_base_url
+    gossip_json=$(curl -sf "http://127.0.0.1:$port_l/v1/gossip" 2>/dev/null)
+    r_base_url=$(python3 -c "
+import sys, json
+g = json.loads(sys.argv[1])
+for f in g.get('friends', []):
+    if 'kernel-r' in f.get('handle', ''):
+        print(f['base_url']); break
+" "$gossip_json" 2>/dev/null)
+    [ -n "$r_base_url" ] \
+        && ok "fed_gossip.r_in_gossip" \
+        || { fail "fed_gossip.r_in_gossip" "R not found in L's gossip friends; gossip=$gossip_json"; return; }
+
+    local gossip_uses
+    gossip_uses=$(python3 -c "
+import sys, json
+g = json.loads(sys.argv[1])
+for f in g.get('friends', []):
+    if 'kernel-r' in f.get('handle', ''):
+        for a in f.get('actions', []):
+            if a.get('name') == 'greet':
+                print(a.get('uses', 0)); break
+" "$gossip_json" 2>/dev/null)
+    [ "${gossip_uses:-0}" -ge 1 ] \
+        && ok "fed_gossip.earned_stats_in_gossip" \
+        || fail "fed_gossip.earned_stats_in_gossip" "expected uses>=1 in gossip friends, got: $gossip_uses"
+
+    # Bootstrap T as a third, independent kernel.
+    local db_t home_t
+    db_t="$dir/t/juice.db"
+    home_t="$dir/tsys"
+    mkdir -p "$dir/t" "$home_t/.juice"
+    local boot_t
+    alloc_port; boot_t=$_ALLOC_PORT
+    bootstrap_kernel "$db_t" syspass "$home_t" "$boot_t" \
+        "server_url=http://127.0.0.1:$port_t" "peer_handle=@kernel-t" \
+        || { fail "fed_gossip.bootstrap_t" "T bootstrap failed"; return; }
+    j "$db_t" "$home_t" auth login --handle @sys --password syspass >/dev/null 2>&1
+    start_serve "$db_t" "127.0.0.1:$port_t" syspass "$home_t" \
+        || { fail "fed_gossip.start_t" "T serve failed"; return; }
+    echo "$SERVE_PID" > "$dir/pid_t"
+
+    # T uses the URL discovered from L's gossip to friend R directly (not through L).
+    j "$db_t" "$home_t" peer friend --url "$r_base_url" >/dev/null 2>&1 \
+        && ok "fed_gossip.t_friends_r" \
+        || { fail "fed_gossip.t_friends_r" "T failed to friend R via discovered URL $r_base_url"; return; }
+
+    # T's proxy for greet must exist with default stats (uses=0, not inherited from gossip).
+    local greet_proxy_show greet_proxy_id
+    greet_proxy_show=$(jj "$db_t" "$home_t" action show --action "@kernel-r/greet" 2>/dev/null)
+    greet_proxy_id=$(strfield "$greet_proxy_show" "id")
+    [ -n "$greet_proxy_id" ] \
+        && ok "fed_gossip.t_has_greet_proxy" \
+        || { fail "fed_gossip.t_has_greet_proxy" "T missing greet proxy: $greet_proxy_show"; return; }
+
+    local greet_stats uses_before
+    greet_stats=$(jj "$db_t" "$home_t" action stats --id "$greet_proxy_id" 2>/dev/null)
+    uses_before=$(numfield "$greet_stats" "uses")
+    [ "$uses_before" -eq 0 ] \
+        && ok "fed_gossip.t_stats_start_at_default" \
+        || fail "fed_gossip.t_stats_start_at_default" "expected uses=0 at import, got $uses_before"
+
+    # T calls R's greet (price=0, no deposit needed) — T's own stats must accumulate.
+    local t_tx_id
+    t_tx_id=$(strfield "$(jj "$db_t" "$home_t" run \
+        --action "@kernel-r/greet" --args '{}')" "tx_id")
+    [ -n "$t_tx_id" ] \
+        && ok "fed_gossip.t_call_succeeds" \
+        || { fail "fed_gossip.t_call_succeeds" "T->R call failed"; return; }
+
+    greet_stats=$(jj "$db_t" "$home_t" action stats --id "$greet_proxy_id" 2>/dev/null)
+    local uses_after
+    uses_after=$(numfield "$greet_stats" "uses")
+    [ "$uses_after" -eq 1 ] \
+        && ok "fed_gossip.t_stats_accumulate" \
+        || fail "fed_gossip.t_stats_accumulate" "expected uses=1 after call, got $uses_after"
+}
