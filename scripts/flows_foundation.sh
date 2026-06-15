@@ -94,7 +94,8 @@ flow_local_auth() {
 
     # Login stores tokens
     j "$db" "$home_sys" auth login --handle @sys --password syspass >/dev/null 2>&1
-    [ -f "$home_sys/.juice/token" ] \
+    local tdir; tdir=$(juice_token_dir "$home_sys" "$db")
+    [ -f "$tdir/token" ] \
         && ok "local_auth.token_stored" \
         || fail "local_auth.token_stored" "token file missing"
 
@@ -107,12 +108,12 @@ flow_local_auth() {
 
     # Save old refresh token before rotation
     local old_rt=""
-    [ -f "$home_sys/.juice/refresh_token" ] && old_rt=$(cat "$home_sys/.juice/refresh_token")
+    [ -f "$tdir/refresh_token" ] && old_rt=$(cat "$tdir/refresh_token")
 
     # Refresh rotates both tokens
     j "$db" "$home_sys" auth refresh >/dev/null 2>&1
     local new_rt=""
-    [ -f "$home_sys/.juice/refresh_token" ] && new_rt=$(cat "$home_sys/.juice/refresh_token")
+    [ -f "$tdir/refresh_token" ] && new_rt=$(cat "$tdir/refresh_token")
     [ -n "$new_rt" ] && [ "$new_rt" != "$old_rt" ] \
         && ok "local_auth.refresh_rotates_token" \
         || fail "local_auth.refresh_rotates_token" "refresh token not rotated"
@@ -125,19 +126,20 @@ flow_local_auth() {
 
     # Restoring the old refresh token and refreshing again must fail
     if [ -n "$old_rt" ]; then
-        echo "$old_rt" > "$home_sys/.juice/refresh_token"
+        mkdir -p "$tdir"
+        echo "$old_rt" > "$tdir/refresh_token"
         local reuse_out
         reuse_out=$(j "$db" "$home_sys" auth refresh 2>&1)
         echo "$reuse_out" | grep -qi "expired\|invalid\|error\|failed" \
             && ok "local_auth.refresh_token_rotation_enforced" \
             || fail "local_auth.refresh_token_rotation_enforced" "reused refresh token was accepted"
         # Restore new token so logout works
-        echo "$new_rt" > "$home_sys/.juice/refresh_token"
+        echo "$new_rt" > "$tdir/refresh_token"
     fi
 
     # Logout revokes and removes tokens
     j "$db" "$home_sys" auth logout >/dev/null 2>&1
-    [ ! -f "$home_sys/.juice/token" ] \
+    [ ! -f "$tdir/token" ] \
         && ok "local_auth.logout_removes_token" \
         || fail "local_auth.logout_removes_token" "token file still present after logout"
 

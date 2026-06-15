@@ -98,9 +98,11 @@ flow_refresh_rotation() {
     j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
     j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
 
+    local tdir; tdir=$(juice_token_dir "$home_alice" "$db")
+
     # Capture RT1 before refresh
     local rt1
-    rt1=$(cat "$home_alice/.juice/refresh_token" 2>/dev/null)
+    rt1=$(cat "$tdir/refresh_token" 2>/dev/null)
 
     # Refresh → RT1 rotated to RT2
     local refresh_out
@@ -110,11 +112,13 @@ flow_refresh_rotation() {
         || fail "refresh_rotation.refresh_succeeds" "unexpected output: $refresh_out"
 
     local rt2
-    rt2=$(cat "$home_alice/.juice/refresh_token" 2>/dev/null)
+    rt2=$(cat "$tdir/refresh_token" 2>/dev/null)
 
     # Old RT1 rejected
-    local home_old="$dir/old"; mkdir -p "$home_old/.juice"
-    echo "$rt1" > "$home_old/.juice/refresh_token"
+    local home_old="$dir/old"
+    local tdir_old; tdir_old=$(juice_token_dir "$home_old" "$db")
+    mkdir -p "$tdir_old"
+    echo "$rt1" > "$tdir_old/refresh_token"
     local bad_refresh
     bad_refresh=$(j "$db" "$home_old" auth refresh 2>&1)
     echo "$bad_refresh" | grep -qi "invalid\|expired\|unauthenticated" \
@@ -123,8 +127,10 @@ flow_refresh_rotation() {
 
     # Logout (revokes RT2) → RT2 rejected
     j "$db" "$home_alice" auth logout >/dev/null 2>&1
-    local home_rt2="$dir/rt2"; mkdir -p "$home_rt2/.juice"
-    echo "$rt2" > "$home_rt2/.juice/refresh_token"
+    local home_rt2="$dir/rt2"
+    local tdir_rt2; tdir_rt2=$(juice_token_dir "$home_rt2" "$db")
+    mkdir -p "$tdir_rt2"
+    echo "$rt2" > "$tdir_rt2/refresh_token"
     local after_logout
     after_logout=$(j "$db" "$home_rt2" auth refresh 2>&1)
     echo "$after_logout" | grep -qi "invalid\|expired\|unauthenticated" \

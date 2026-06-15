@@ -237,6 +237,16 @@ numfield() {
         "$1" "$2" 2>/dev/null
 }
 
+# juice_token_dir home db — mirrors tokenDir() in cmd/juice/main.go:
+# $HOME/.juice/tokens/{sha256(abs(db))[:6] as 12 hex chars}/
+juice_token_dir() {
+    python3 -c "
+import hashlib, os, sys
+h = hashlib.sha256(os.path.abspath(sys.argv[2]).encode()).hexdigest()[:12]
+print(os.path.join(sys.argv[1], '.juice', 'tokens', h))
+" "$1" "$2"
+}
+
 # ---------------------------------------------------------------------------
 # WASM generators
 # ---------------------------------------------------------------------------
