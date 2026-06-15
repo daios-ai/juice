@@ -194,6 +194,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, error) {
 	compiler := script.NewTinyGoCompiler(script.CompileConfig{})
 	native.RegisterLookupHandler(k)
 	native.RegisterChatHandler(k, chatter)
+	native.RegisterEmbedHandler(k, embedder)
 	native.RegisterMakeHandler(k, native.MakeDeps{
 		Scripts:  exec,
 		Compiler: compiler,

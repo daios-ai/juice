@@ -268,6 +268,17 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 		outputSchema: map[string]any{"type": "object"},
 	},
 	{
+		name:        "llm/embed",
+		price:       cfg.LLM.Price,
+		description: "Returns a text embedding vector from the configured embedding model",
+		inputSchema: map[string]any{"type": "object", "properties": map[string]any{
+			"text": map[string]any{"type": "string", "description": "Text to embed"},
+		}, "required": []string{"text"}},
+		outputSchema: map[string]any{"type": "object", "properties": map[string]any{
+			"embedding": map[string]any{"type": "array", "description": "Embedding vector", "items": map[string]any{"type": "number"}},
+		}},
+	},
+	{
 		name:         "random",
 		price:        cfg.Random.Price,
 		description:  "Returns a cryptographically secure random float in [0, 1)",
