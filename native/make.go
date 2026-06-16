@@ -69,7 +69,7 @@ type makeTestHost struct{}
 func (h *makeTestHost) Call(_ context.Context, _ string, _ []byte) ([]byte, error) {
 	return []byte("{}"), nil
 }
-func (h *makeTestHost) StepCreate(_ context.Context, _, _ []byte, _, _ string) (string, error) {
+func (h *makeTestHost) StepCreate(_ context.Context, _ []byte, _, _ string) (string, error) {
 	return "", nil
 }
 func (h *makeTestHost) StepComplete(_ context.Context, _ string, _ []byte) ([]byte, error) {
@@ -381,7 +381,6 @@ User request: %s`, userIntent)
 func callAction(ctx context.Context, actionRef string, args map[string]any, targetID, processID, parentTraceID string, k *kernel.Kernel) (map[string]any, error) {
 	reply, err := k.Call(ctx, kernel.CallRequest{
 		CallerID:      targetID,
-		ProcessID:     processID,
 		ParentTraceID: parentTraceID,
 		ActionRef:     actionRef,
 		Args:          args,

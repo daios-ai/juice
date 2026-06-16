@@ -393,8 +393,8 @@ func adminStepListCmd() *cobra.Command {
 					if s.TxID != nil {
 						txID = (*s.TxID)[:8]
 					}
-					fmt.Printf("%s  process=%-8s  status=%-7s  tx=%s\n",
-						s.ID[:8], s.ProcessID[:8], s.Status, txID)
+					fmt.Printf("%s  status=%-7s  tx=%s\n",
+						s.ID[:8], s.Status, txID)
 				}
 				return nil
 			})

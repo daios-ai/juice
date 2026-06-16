@@ -208,17 +208,16 @@ func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions
 			[]api.ValueType{},
 		).Export("log")
 
-	// juice.step_create(partialArgsPtr, partialArgsLen, inputSchemaPtr, inputSchemaLen,
-	//                   requiredCallerPtr, requiredCallerLen, nextActionPtr, nextActionLen) -> packedI64
+	// juice.step_create(partialArgsPtr, partialArgsLen,
+	//                   requiredCallerPtr, requiredCallerLen, actionIDPtr, actionIDLen) -> packedI64
 	b.NewFunctionBuilder().
 		WithGoModuleFunction(
 			api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 				mem := mod.Memory()
 				partialArgs, _ := mem.Read(uint32(stack[0]), uint32(stack[1]))
-				inputSchema, _ := mem.Read(uint32(stack[2]), uint32(stack[3]))
-				requiredCaller, _ := mem.Read(uint32(stack[4]), uint32(stack[5]))
-				nextAction, _ := mem.Read(uint32(stack[6]), uint32(stack[7]))
-				stepID, err := host.StepCreate(ctx, partialArgs, inputSchema, string(requiredCaller), string(nextAction))
+				requiredCaller, _ := mem.Read(uint32(stack[2]), uint32(stack[3]))
+				actionID, _ := mem.Read(uint32(stack[4]), uint32(stack[5]))
+				stepID, err := host.StepCreate(ctx, partialArgs, string(requiredCaller), string(actionID))
 				if err != nil {
 					panic(err.Error())
 				}
@@ -226,7 +225,7 @@ func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions
 				stack[0] = ptrs[0]<<32 | ptrs[1]
 			}),
 			[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32,
-				api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32},
+				api.ValueTypeI32, api.ValueTypeI32},
 			[]api.ValueType{api.ValueTypeI64},
 		).Export("step_create")
 

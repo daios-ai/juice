@@ -324,7 +324,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	argsJSON, _ := json.Marshal(dispatch.Args)
 	ktx.ArgsJSON = json.RawMessage(argsJSON)
 
-	req := CallRequest{ProcessID: trace.ProcessID, StepID: dispatch.StepID}
+	req := CallRequest{StepID: dispatch.StepID}
 	_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, 0)
 	if errors.Is(err, ErrTimeout) {
 		return nil // still pending (no receipt or invalid signature); retrier will try again

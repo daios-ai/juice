@@ -254,16 +254,15 @@ func endProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) erro
 // ---- Step operations ----
 
 type createStepParams struct {
-	ProcessID      string
-	ParentTraceID  string
+	TraceID        string
 	ActionRef      string
 	RequiredCaller string
 	PartialArgs    json.RawMessage
-	InputSchema    json.RawMessage
 }
 
-// createStep resolves ActionRef and RequiredCaller, calls kernel.CreateStep,
-// and returns an enriched *stepWithAction. Used by both HTTP and CLI surfaces.
+// createStep resolves ActionRef and RequiredCaller, enforces precondition-4 for the trace,
+// calls kernel.CreateStep, and returns an enriched *stepWithAction.
+// Used by both HTTP and CLI surfaces.
 func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p createStepParams) (*stepWithAction, error) {
 	action, err := resolveActionRef(k, ctx, p.ActionRef)
 	if err != nil {
@@ -273,11 +272,11 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 	if err != nil {
 		return nil, fmt.Errorf("required_caller not found: %w", err)
 	}
-	var parentTraceID *string
-	if p.ParentTraceID != "" {
-		parentTraceID = &p.ParentTraceID
+	// Precondition-4: external caller must be authorized to use the trace.
+	if err := k.AuthorizeTraceUse(ctx, callerID, p.TraceID); err != nil {
+		return nil, err
 	}
-	step, err := k.CreateStep(ctx, callerID, p.ProcessID, parentTraceID, action.ID, p.PartialArgs, p.InputSchema, callerUser.ID)
+	step, err := k.CreateStep(ctx, p.TraceID, action.ID, p.PartialArgs, callerUser.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +290,7 @@ func listSteps(k *kernel.Kernel, ctx context.Context, callerID, processID, statu
 	}
 	views := make([]*stepWithAction, len(steps))
 	for i, step := range steps {
-		action, _ := k.ReadAction(ctx, step.NextActionID)
+		action, _ := k.ReadAction(ctx, step.ActionID)
 		views[i] = enrichStep(step, action)
 	}
 	return views, nil
@@ -302,7 +301,7 @@ func getStep(k *kernel.Kernel, ctx context.Context, callerID, id string) (*stepW
 	if err != nil {
 		return nil, err
 	}
-	action, _ := k.ReadAction(ctx, step.NextActionID)
+	action, _ := k.ReadAction(ctx, step.ActionID)
 	return enrichStep(step, action), nil
 }
 

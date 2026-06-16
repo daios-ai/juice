@@ -700,22 +700,20 @@ func (s *server) listSteps(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProcessID      string          `json:"process_id"`
-		NextActionID   string          `json:"next_action_id"`
+		TraceID        string          `json:"trace_id"`
+		ActionID       string          `json:"action_id"`
 		PartialArgs    json.RawMessage `json:"partial_args"`
-		InputSchema    json.RawMessage `json:"input_schema"`
 		RequiredCaller string          `json:"required_caller"`
-		ParentTraceID  string          `json:"parent_trace_id"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	if req.ProcessID == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("process_id is required"))
+	if req.TraceID == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("trace_id is required"))
 		return
 	}
-	if req.NextActionID == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("next_action_id is required"))
+	if req.ActionID == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("action_id is required"))
 		return
 	}
 	if req.RequiredCaller == "" {
@@ -726,21 +724,15 @@ func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("partial_args is required"))
 		return
 	}
-	if req.InputSchema == nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("input_schema is required"))
-		return
-	}
 	if !strings.HasPrefix(req.RequiredCaller, "@") {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("required_caller must be @handle"))
 		return
 	}
 	view, err := createStep(s.kernel, r.Context(), callerFrom(r), createStepParams{
-		ProcessID:      req.ProcessID,
-		ParentTraceID:  req.ParentTraceID,
-		ActionRef:      req.NextActionID,
+		TraceID:        req.TraceID,
+		ActionRef:      req.ActionID,
 		RequiredCaller: req.RequiredCaller,
 		PartialArgs:    req.PartialArgs,
-		InputSchema:    req.InputSchema,
 	})
 	if err != nil {
 		writeErr(w, err)

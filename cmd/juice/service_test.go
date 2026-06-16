@@ -99,7 +99,7 @@ func TestUserView(t *testing.T) {
 }
 
 func TestEnrichStep(t *testing.T) {
-	step := &kernel.Step{ID: "s1", ProcessID: "p1"}
+	step := &kernel.Step{ID: "s1"}
 	action := &kernel.Action{OwnerHandle: "@alice", Name: "greet"}
 
 	v := enrichStep(step, action)
@@ -299,9 +299,8 @@ func TestListSteps_Enriched(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, p.ID)
 
 	_, err := createStep(k, ctx, ownerID, createStepParams{
-		ProcessID: p.ID, ParentTraceID: traceID,
-		ActionRef: "@svc-ls/svc-ls-action", RequiredCaller: "@svc-ls-hook",
-		PartialArgs: json.RawMessage(`{}`), InputSchema: json.RawMessage(`{}`),
+		TraceID: traceID, ActionRef: "@svc-ls/svc-ls-action",
+		RequiredCaller: "@svc-ls-hook", PartialArgs: json.RawMessage(`{}`),
 	})
 	if err != nil {
 		t.Fatalf("createStep: %v", err)
@@ -334,9 +333,8 @@ func TestGetStep_Enriched(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, p.ID)
 
 	view, err := createStep(k, ctx, ownerID, createStepParams{
-		ProcessID: p.ID, ParentTraceID: traceID,
-		ActionRef: "@svc-gs/svc-gs-action", RequiredCaller: "@svc-gs-hook",
-		PartialArgs: json.RawMessage(`{}`), InputSchema: json.RawMessage(`{}`),
+		TraceID: traceID, ActionRef: "@svc-gs/svc-gs-action",
+		RequiredCaller: "@svc-gs-hook", PartialArgs: json.RawMessage(`{}`),
 	})
 	if err != nil {
 		t.Fatalf("createStep: %v", err)
@@ -386,12 +384,10 @@ func TestCreateStep_SharedBehavior(t *testing.T) {
 
 	// Create step by @owner/name.
 	view, err := createStep(k, ctx, ownerID, createStepParams{
-		ProcessID:      p.ID,
-		ParentTraceID:  traceID,
+		TraceID:        traceID,
 		ActionRef:      "@svc-step-owner/svc-notify",
 		RequiredCaller: "@svc-webhook",
 		PartialArgs:    json.RawMessage(`{}`),
-		InputSchema:    json.RawMessage(`{}`),
 	})
 	if err != nil {
 		t.Fatalf("createStep by @owner/name: %v", err)
@@ -399,25 +395,23 @@ func TestCreateStep_SharedBehavior(t *testing.T) {
 	if view.Action != "@svc-step-owner/svc-notify" {
 		t.Errorf("action field: got %q, want %q", view.Action, "@svc-step-owner/svc-notify")
 	}
-	if view.Step.NextActionID != actID {
-		t.Errorf("next_action_id: got %q, want %q", view.Step.NextActionID, actID)
+	if view.Step.ActionID != actID {
+		t.Errorf("next_action_id: got %q, want %q", view.Step.ActionID, actID)
 	}
 
 	// Create step by raw action ID resolves to the same action.
 	p2 := setupProcessHTTP(t, db, ownerID, 100)
 	traceID2 := setupTraceForProcess(t, db, p2.ID)
 	view2, err := createStep(k, ctx, ownerID, createStepParams{
-		ProcessID:      p2.ID,
-		ParentTraceID:  traceID2,
+		TraceID:        traceID2,
 		ActionRef:      actID,
 		RequiredCaller: "@svc-webhook",
 		PartialArgs:    json.RawMessage(`{}`),
-		InputSchema:    json.RawMessage(`{}`),
 	})
 	if err != nil {
 		t.Fatalf("createStep by action ID: %v", err)
 	}
-	if view2.Step.NextActionID != actID {
-		t.Errorf("next_action_id by ID: got %q, want %q", view2.Step.NextActionID, actID)
+	if view2.Step.ActionID != actID {
+		t.Errorf("next_action_id by ID: got %q, want %q", view2.Step.ActionID, actID)
 	}
 }

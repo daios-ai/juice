@@ -506,12 +506,10 @@ func TestFlow_ApprovalStep(t *testing.T) {
 
 	// Owner creates a step (approval gate) addressed to the human.
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-		"process_id":      p.ID,
-		"parent_trace_id": traceID,
-		"next_action_id":  stepActionID,
+		"trace_id":        traceID,
+		"action_id":       stepActionID,
 		"required_caller": "@appr-human",
 		"partial_args":    map[string]any{"preset": "value"},
-		"input_schema":    minSchema,
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
 		stepResp.Body.Close()
@@ -596,12 +594,10 @@ func TestFlow_WebhookCompleteStep(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, p.ID)
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-		"process_id":      p.ID,
-		"parent_trace_id": traceID,
-		"next_action_id":  actionID,
+		"trace_id":        traceID,
+		"action_id":       actionID,
 		"required_caller": "@wh-webhook-sys",
 		"partial_args":    map[string]any{"purchase_id": "abc123"},
-		"input_schema":    minSchema,
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
 		stepResp.Body.Close()
@@ -668,12 +664,10 @@ func TestFlow_ForceEndWithSteps(t *testing.T) {
 	// Create two steps (parks funds).
 	for i := 0; i < 2; i++ {
 		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-			"process_id":      p.ID,
-			"parent_trace_id": traceID,
-			"next_action_id":  actionID,
+			"trace_id":        traceID,
+			"action_id":       actionID,
 			"required_caller": "@fend-caller",
 			"partial_args":    map[string]any{},
-			"input_schema":    minSchema,
 		}, ownerTok)
 		if r.StatusCode != http.StatusCreated {
 			r.Body.Close()
@@ -751,12 +745,10 @@ func TestFlow_RestartRecovery(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, p.ID)
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-		"process_id":      p.ID,
-		"parent_trace_id": traceID,
-		"next_action_id":  actionID,
+		"trace_id":        traceID,
+		"action_id":       actionID,
 		"required_caller": "@rst-caller",
 		"partial_args":    map[string]any{},
-		"input_schema":    minSchema,
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
 		stepResp.Body.Close()
@@ -1939,12 +1931,10 @@ func TestFlow_UnfriendReconnect(t *testing.T) {
 	pA := setupProcessHTTP(t, dbA, ownerAID, 100)
 	traceAID := setupTraceForProcess(t, dbA, pA.ID)
 	stepResp := httpDo(t, srvA, "POST", "/v1/steps", map[string]any{
-		"process_id":      pA.ID,
-		"parent_trace_id": traceAID,
-		"next_action_id":  actAID,
+		"trace_id":        traceAID,
+		"action_id":       actAID,
 		"required_caller": "@b-peer",
 		"partial_args":    map[string]any{},
-		"input_schema":    minSchema,
 	}, ownerATok2)
 	if stepResp.StatusCode != http.StatusCreated {
 		stepResp.Body.Close()
@@ -2495,12 +2485,10 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 		t.Fatalf("read 3p-action: %v", err)
 	}
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-		"process_id":      p.ID,
-		"parent_trace_id": traceID,
-		"next_action_id":  aAction.ID,
+		"trace_id":        traceID,
+		"action_id":       aAction.ID,
 		"required_caller": "@3p-caller",
 		"partial_args":    map[string]any{},
-		"input_schema":    minSchema,
 	}, pTok)
 	if stepResp.StatusCode != http.StatusCreated {
 		stepResp.Body.Close()

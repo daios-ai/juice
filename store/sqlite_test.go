@@ -484,10 +484,9 @@ func TestEndProcessWithRunningStep(t *testing.T) {
 	ptID := root.ID
 	step := &kernel.Step{
 		ID:                   uuid.New().String(),
-		ProcessID:            p.ID,
 		ParentTraceID:        &ptID,
 		RequiredCallerUserID: caller.ID,
-		NextActionID:         act.ID,
+		ActionID:             act.ID,
 		Price:                50,
 		Status:               kernel.StepWaiting,
 		CreatedAt:            time.Now().UTC(),
@@ -569,10 +568,9 @@ func TestEndProcessDoesNotDoubleCountCompletedStep(t *testing.T) {
 	ptID := root.ID
 	step := &kernel.Step{
 		ID:                   uuid.New().String(),
-		ProcessID:            p.ID,
 		ParentTraceID:        &ptID,
 		RequiredCallerUserID: caller.ID,
-		NextActionID:         act.ID,
+		ActionID:             act.ID,
 		Price:                50,
 		Status:               kernel.StepWaiting,
 		CreatedAt:            time.Now().UTC(),
@@ -2004,10 +2002,9 @@ func TestCancelAndRefundStepsForCaller(t *testing.T) {
 	ptID := root.ID
 	step := &kernel.Step{
 		ID:                   uuid.New().String(),
-		ProcessID:            p.ID,
 		ParentTraceID:        &ptID,
 		RequiredCallerUserID: caller.ID,
-		NextActionID:         act.ID,
+		ActionID:             act.ID,
 		Price:                100,
 		Status:               kernel.StepWaiting,
 		CreatedAt:            time.Now().UTC(),
@@ -2157,8 +2154,8 @@ func TestListOrphanRunningStepsDistinguishesSettled(t *testing.T) {
 		_ = db.BeginRun(ctx, p, root, user.ID, price)
 		ptID := root.ID
 		step := &kernel.Step{
-			ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: &ptID,
-			RequiredCallerUserID: user.ID, NextActionID: act.ID,
+			ID: uuid.New().String(), ParentTraceID: &ptID,
+			RequiredCallerUserID: user.ID, ActionID: act.ID,
 			Price: price, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
 		}
 		_ = db.CreateStep(ctx, step)
@@ -2331,8 +2328,8 @@ func TestResetStepAndReparkWithDescendantTransaction(t *testing.T) {
 	_ = db.BeginRun(ctx, p, root, user.ID, 100)
 	ptID := root.ID
 	step := &kernel.Step{
-		ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: &ptID,
-		RequiredCallerUserID: user.ID, NextActionID: act.ID,
+		ID: uuid.New().String(), ParentTraceID: &ptID,
+		RequiredCallerUserID: user.ID, ActionID: act.ID,
 		Price: 100, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
 	}
 	_ = db.CreateStep(ctx, step)
@@ -2388,8 +2385,8 @@ func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {
 	_ = db.BeginRun(ctx, p, root, user.ID, 100)
 	ptID := root.ID
 	step := &kernel.Step{
-		ID: uuid.New().String(), ProcessID: p.ID, ParentTraceID: &ptID,
-		RequiredCallerUserID: user.ID, NextActionID: act.ID,
+		ID: uuid.New().String(), ParentTraceID: &ptID,
+		RequiredCallerUserID: user.ID, ActionID: act.ID,
 		Price: 100, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
 	}
 	_ = db.CreateStep(ctx, step)

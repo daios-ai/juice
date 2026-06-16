@@ -582,7 +582,7 @@ func TestLookupRequiresEmbedder(t *testing.T) {
 
 // ---- process ----
 
-func setupProcessCmd(t *testing.T, env *testEnv, ownerID string, funds int64) *kernel.Process {
+func setupProcessCmd(t *testing.T, env *testEnv, ownerID string, funds int64) (*kernel.Process, *kernel.Trace) {
 	t.Helper()
 	ctx := context.Background()
 	p := &kernel.Process{
@@ -601,7 +601,7 @@ func setupProcessCmd(t *testing.T, env *testEnv, ownerID string, funds int64) *k
 	if err := env.db.BeginRun(ctx, p, tr, ownerID, funds); err != nil {
 		t.Fatalf("setupProcessCmd: %v", err)
 	}
-	return p
+	return p, tr
 }
 
 func TestProcessStartFundEnd(t *testing.T) {
@@ -620,7 +620,7 @@ func TestProcessStartFundEnd(t *testing.T) {
 	owner.PasswordHash = hash
 	_ = env.db.CreateUser(ctx, owner)
 
-	p := setupProcessCmd(t, env, owner.ID, 500)
+	p, _ := setupProcessCmd(t, env, owner.ID, 500)
 	proc, err := env.db.ReadProcess(ctx, p.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -710,7 +710,7 @@ func TestProcessEndReturnsBalance(t *testing.T) {
 	owner.PasswordHash = hash
 	_ = env.db.CreateUser(ctx, owner)
 
-	p := setupProcessCmd(t, env, owner.ID, 400)
+	p, _ := setupProcessCmd(t, env, owner.ID, 400)
 
 	u, _ := env.db.ReadUser(ctx, owner.ID)
 	if u.Available != 600 {
@@ -758,9 +758,12 @@ func newStepBackend(t *testing.T) *httptest.Server {
 
 func createStepAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, handle, name string) (string, string) {
 	t.Helper()
+	emptySchema := map[string]any{"type": "object", "properties": map[string]any{}}
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": name, "kind": "http", "price": 0, "source": backendURL,
-		"description": "step test action", "input_schema": minSchema, "output_schema": minSchema,
+		"description":   "test step action",
+		"input_schema":  emptySchema,
+		"output_schema": emptySchema,
 	}, ownerTok)
 	var act map[string]any
 	decodeResponse(t, cr, &act)
@@ -768,7 +771,11 @@ func createStepAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, 
 		t.Fatalf("create action %s: expected 201, got %d", name, cr.StatusCode)
 	}
 	id := act["id"].(string)
-	httpDo(t, srv, "POST", "/v1/actions/"+id+"/enable", nil, ownerTok).Body.Close()
+	er := httpDo(t, srv, "POST", "/v1/actions/"+id+"/enable", nil, ownerTok)
+	er.Body.Close()
+	if er.StatusCode != http.StatusOK {
+		t.Fatalf("enable action %s: expected 200, got %d", name, er.StatusCode)
+	}
 	httpDo(t, srv, "PUT", "/v1/actions/"+id, map[string]any{"public": true}, ownerTok).Body.Close()
 	return id, handle + "/" + name
 }
@@ -788,12 +795,10 @@ func TestServeCreateStep(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, pid)
 
 	resp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-		"process_id":      pid,
-		"parent_trace_id": traceID,
-		"next_action_id":  actionID,
+		"trace_id": traceID,
+		"action_id": actionID,
 		"required_caller": "@cs-create-caller",
 		"partial_args":    map[string]any{"preset": "val"},
-		"input_schema":    minSchema,
 	}, ownerTok)
 	if resp.StatusCode != http.StatusCreated {
 		resp.Body.Close()
@@ -829,13 +834,11 @@ func TestServeListSteps(t *testing.T) {
 
 	for range 2 {
 		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-			"process_id":      pid,
-			"parent_trace_id": traceID,
-			"next_action_id":  actionID,
+			"trace_id": traceID,
+			"action_id": actionID,
 			"required_caller": "@sl-steps-caller",
 			"partial_args":    map[string]any{},
-			"input_schema":    minSchema,
-		}, ownerTok)
+			}, ownerTok)
 		if r.StatusCode != http.StatusCreated {
 			r.Body.Close()
 			t.Fatalf("create step: expected 201, got %d", r.StatusCode)
@@ -898,12 +901,10 @@ func TestServeGetStep(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, pid)
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-		"process_id":      pid,
-		"parent_trace_id": traceID,
-		"next_action_id":  actionID,
+		"trace_id": traceID,
+		"action_id": actionID,
 		"required_caller": "@gs-steps-caller",
 		"partial_args":    map[string]any{},
-		"input_schema":    minSchema,
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
 		stepResp.Body.Close()
@@ -959,12 +960,10 @@ func TestServeCompleteStepMissingArgs(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, pid)
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-		"process_id":      pid,
-		"parent_trace_id": traceID,
-		"next_action_id":  actionID,
+		"trace_id": traceID,
+		"action_id": actionID,
 		"required_caller": "@csmiss-caller",
 		"partial_args":    map[string]any{},
-		"input_schema":    minSchema,
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
 		stepResp.Body.Close()
@@ -998,12 +997,10 @@ func TestServeCompleteStep(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, pid)
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-		"process_id":      pid,
-		"parent_trace_id": traceID,
-		"next_action_id":  actionID,
+		"trace_id": traceID,
+		"action_id": actionID,
 		"required_caller": "@cs2-caller",
 		"partial_args":    map[string]any{"from_partial": "A"},
-		"input_schema":    minSchema,
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
 		stepResp.Body.Close()
@@ -1069,7 +1066,7 @@ func TestTransactionRate(t *testing.T) {
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 
-	p := setupProcessCmd(t, env, owner.ID, 0)
+	p, _ := setupProcessCmd(t, env, owner.ID, 0)
 
 	_, err := env.k.RateTransaction(ctx, owner.ID, "nonexistent-tx", 1, nil)
 	if err == nil {
@@ -1085,7 +1082,7 @@ func TestTransactionRating(t *testing.T) {
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "@rater", Email: "r@e.com", Password: "p",
 	})
-	p := setupProcessCmd(t, env, owner.ID, 0)
+	p, _ := setupProcessCmd(t, env, owner.ID, 0)
 
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
@@ -1121,7 +1118,7 @@ func TestCallClosedProcess(t *testing.T) {
 	owner.PasswordHash = hash
 	_ = env.db.CreateUser(ctx, owner)
 
-	p := setupProcessCmd(t, env, owner.ID, 100)
+	p, tr := setupProcessCmd(t, env, owner.ID, 100)
 	_ = env.k.EndProcess(ctx, owner.ID, p.ID)
 
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
@@ -1131,11 +1128,11 @@ func TestCallClosedProcess(t *testing.T) {
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 
 	_, err := env.k.Call(ctx, kernel.CallRequest{
-		CallerID:     owner.ID,
-		ProcessID:    p.ID,
-		TargetUserID: owner.ID,
-		ActionName:   "echo",
-		Args:         map[string]any{},
+		CallerID:        owner.ID,
+		ExistingTraceID: tr.ID,
+		TargetUserID:    owner.ID,
+		ActionName:      "echo",
+		Args:            map[string]any{},
 	})
 	if err == nil {
 		t.Error("expected error calling on closed process")

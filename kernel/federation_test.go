@@ -546,7 +546,6 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
 		CallerID:        caller.ID,
-		ProcessID:       p.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    "@proxy-peer",
 		ActionName:      "add",
@@ -743,7 +742,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	fake.receiptJSON = string(receiptBytes)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: "@verify-peer", ActionName: "vact", Args: map[string]any{},
 	})
 	if err != nil {
@@ -800,7 +799,7 @@ func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
 
 	p, tr := beginTestRun(t, st, caller.ID, a)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "vrr-local", Args: map[string]any{},
 	})
 	if err != nil {
@@ -861,7 +860,7 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	p, tr := beginTestRun(t, st, caller.ID, a)
 	// A receipt signed with the wrong key must be rejected: no settlement, trace stays open.
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: "@tamper-peer", ActionName: "tact", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrTimeout) {
@@ -928,7 +927,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	fake.receiptJSON = string(receiptBytes)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: "@del-peer", ActionName: "dact", Args: map[string]any{},
 	})
 	if err != nil {

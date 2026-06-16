@@ -8,12 +8,12 @@ import (
 )
 
 func RegisterMessageHandler(k *kernel.Kernel) {
-	k.RegisterNativeHandler("message", func(ctx context.Context, args map[string]any, _, callerID, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
-		return executeMessage(ctx, args, callerID, ownerUserID, processID, parentTraceID, k)
+	k.RegisterNativeHandler("message", func(ctx context.Context, args map[string]any, _, _, ownerUserID, _, parentTraceID string) (map[string]any, error) {
+		return executeMessage(ctx, args, ownerUserID, parentTraceID, k)
 	})
 }
 
-func executeMessage(ctx context.Context, args map[string]any, callerID, ownerUserID, processID, parentTraceID string, k *kernel.Kernel) (map[string]any, error) {
+func executeMessage(ctx context.Context, args map[string]any, ownerUserID, parentTraceID string, k *kernel.Kernel) (map[string]any, error) {
 	to, _ := args["to"].(string)
 	if to == "" {
 		return nil, kernel.ErrInvalidInput.Wrap("message requires to")
@@ -35,12 +35,7 @@ func executeMessage(ctx context.Context, args map[string]any, callerID, ownerUse
 
 	partialArgs, _ := json.Marshal(map[string]any{"message": msg})
 
-	var ptID *string
-	if parentTraceID != "" {
-		ptID = &parentTraceID
-	}
-
-	step, err := k.CreateStep(ctx, callerID, processID, ptID, sink.ID, partialArgs, nil, recipient.ID)
+	step, err := k.CreateStep(ctx, parentTraceID, sink.ID, json.RawMessage(partialArgs), recipient.ID)
 	if err != nil {
 		return nil, err
 	}

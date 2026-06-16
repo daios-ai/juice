@@ -16,8 +16,6 @@ import (
 type CallRequest struct {
 	// CallerID is the authenticated user making the call.
 	CallerID string
-	// ProcessID is the budgeted execution context.
-	ProcessID string
 	// ParentTraceID is the trace from which this call originates.
 	// For subcalls it is the parent trace ID.
 	// For step-completion calls it is set by BeginStepCall's trace.
@@ -88,8 +86,38 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, err
 	}
 
+	// 1.5: Derive processID from the trace reference; for subcalls also read the parent trace.
+	var processID string
+	var preReadParent *Trace
+	switch {
+	case req.ExistingTraceID != "":
+		rt, err := k.store.ReadTrace(ctx, req.ExistingTraceID)
+		if err != nil {
+			return nil, ErrNotFound.Wrap("trace not found")
+		}
+		processID = rt.ProcessID
+	case req.StepID != "":
+		if req.ParentTraceID == "" {
+			return nil, ErrInvalidInput.Wrap("ParentTraceID required for step calls")
+		}
+		st, err := k.store.ReadTrace(ctx, req.ParentTraceID)
+		if err != nil {
+			return nil, ErrNotFound.Wrap("step trace not found")
+		}
+		processID = st.ProcessID
+	case req.ParentTraceID != "":
+		pt, err := k.store.ReadTrace(ctx, req.ParentTraceID)
+		if err != nil {
+			return nil, ErrInvalidInput.Wrap("parent trace not found")
+		}
+		processID = pt.ProcessID
+		preReadParent = pt
+	default:
+		return nil, ErrInvalidInput.Wrap("no trace reference provided")
+	}
+
 	// 2. Process must exist and be open.
-	process, err := k.store.ReadProcess(ctx, req.ProcessID)
+	process, err := k.store.ReadProcess(ctx, processID)
 	if err != nil {
 		return nil, ErrNotFound.Wrap("process not found")
 	}
@@ -97,15 +125,16 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInvalidState.Wrap("process is closed")
 	}
 
-	// 3. For subcalls: resolve parent trace and validate process-use authority.
+	// 3. For subcalls: validate process-use authority.
 	// Root calls (ExistingTraceID) and step-completion calls skip this check.
 	var parentTrace *Trace
 	if req.ExistingTraceID == "" && req.StepID == "" {
-		pt, resolveErr := k.resolveAndValidateParentTrace(ctx, &req, process)
-		if resolveErr != nil {
-			return nil, resolveErr
+		// preReadParent is the parent trace (derived processID came from it, so membership is implicit).
+		// Non-owner callers must have action_owner_id on the parent trace.
+		if process.OwnerUserID != req.CallerID && preReadParent.ActionOwnerID != req.CallerID {
+			return nil, ErrUnauthorized.Wrap("caller is not authorized to use this process")
 		}
-		parentTrace = pt
+		parentTrace = preReadParent
 	}
 
 	// 4. Resolve action.
@@ -191,7 +220,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 	trace := &Trace{
 		ID:            uuid.New().String(),
-		ProcessID:     req.ProcessID,
+		ProcessID:     processID,
 		ParentTraceID: parentTracePtr,
 		ActionOwnerID: action.OwnerUserID,
 		ActionID:      action.ID,
@@ -249,7 +278,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 	}
 
-	ctx = log.WithProcessID(ctx, req.ProcessID)
+	ctx = log.WithProcessID(ctx, processID)
 	ctx = log.WithCallerUserID(ctx, req.CallerID)
 	ctx = log.WithTraceID(ctx, trace.ID)
 	ctx = log.WithActionID(ctx, action.ID)
@@ -263,7 +292,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 	ktx := &Transaction{
 		ID:             txID,
-		ProcessID:      req.ProcessID,
+		ProcessID:      processID,
 		TraceID:        trace.ID,
 		ParentTraceID:  parentTraceIDStr,
 		OwnerUserID:    process.OwnerUserID,
@@ -441,10 +470,9 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 	}
 
 	host := &kernelHostFunctions{
-		kernel:    k,
-		processID: trace.ProcessID,
-		traceID:   trace.ID,
-		targetID:  targetID,
+		kernel:   k,
+		traceID:  trace.ID,
+		targetID: targetID,
 	}
 
 	outputJSON, err := k.scripts.Execute(ctx, artifact, inputJSON, host)
@@ -462,12 +490,11 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 }
 
 // kernelHostFunctions implements HostFunctions using the kernel itself.
-// Scripts never receive the caller's JWT — they inherit process+trace authority.
+// Scripts never receive the caller's JWT — they inherit trace authority.
 type kernelHostFunctions struct {
-	kernel    *Kernel
-	processID string
-	traceID   string
-	targetID  string // action owner; used as CallerID for subcalls
+	kernel   *Kernel
+	traceID  string
+	targetID string // action owner; used as CallerID for subcalls
 }
 
 func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJSON []byte) ([]byte, error) {
@@ -481,7 +508,6 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	}
 	reply, err := h.kernel.Call(ctx, CallRequest{
 		CallerID:      h.targetID,
-		ProcessID:     h.processID,
 		ParentTraceID: h.traceID,
 		TargetUserID:  parts[0],
 		ActionName:    parts[1],
@@ -493,9 +519,9 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	return json.Marshal(reply.Result)
 }
 
-func (h *kernelHostFunctions) StepCreate(ctx context.Context, partialArgs, inputSchema []byte, requiredCallerUserID, nextActionID string) (string, error) {
-	step, err := h.kernel.CreateStep(ctx, h.targetID, h.processID, &h.traceID,
-		nextActionID, json.RawMessage(partialArgs), json.RawMessage(inputSchema), requiredCallerUserID)
+func (h *kernelHostFunctions) StepCreate(ctx context.Context, partialArgs []byte, requiredCallerUserID, actionID string) (string, error) {
+	step, err := h.kernel.CreateStep(ctx, h.traceID, actionID,
+		json.RawMessage(partialArgs), requiredCallerUserID)
 	if err != nil {
 		return "", err
 	}
@@ -563,42 +589,6 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 		return ErrInternal.Wrap("could not record failure transaction")
 	}
 	return nil
-}
-
-
-// resolveAndValidateParentTrace handles precondition checks 3–4 for subcalls (§4).
-// Step 3: parent trace must exist and belong to the process (checked for all callers).
-// Step 4: caller must be authorised to use the process (owner trivially passes; non-owners
-// must have action_owner_id == caller on the parent trace).
-// Also fills req.ParentTraceID with the root trace ID when not supplied.
-func (k *Kernel) resolveAndValidateParentTrace(ctx context.Context, req *CallRequest, process *Process) (*Trace, error) {
-	if req.ParentTraceID == "" {
-		root, err := k.store.ReadRootTrace(ctx, process.ID)
-		if err != nil {
-			return nil, ErrInternal.Wrap("could not resolve root trace for process")
-		}
-		req.ParentTraceID = root.ID
-		return root, nil
-	}
-	// Always validate trace existence and process membership at step 3 (§4), regardless of
-	// whether the caller is the process owner. This preserves the required precondition order:
-	// trace check (step 3) fires before action lookup (step 5).
-	parent, err := k.store.ReadTrace(ctx, req.ParentTraceID)
-	if err != nil {
-		return nil, ErrInvalidInput.Wrap("parent trace not found")
-	}
-	if parent.ProcessID != process.ID {
-		return nil, ErrInvalidInput.Wrap("parent trace belongs to a different process")
-	}
-	// Owner callers: process-use authority trivially satisfied; no further check.
-	if process.OwnerUserID == req.CallerID {
-		return parent, nil
-	}
-	// Non-owner caller: verify trace-scoped process authority (§4 step 4).
-	if parent.ActionOwnerID != req.CallerID {
-		return nil, ErrUnauthorized.Wrap("caller is not authorized to use this process")
-	}
-	return parent, nil
 }
 
 // ComputeFee computes (net, fee) from the taxable amount (= trace.available post-execution).

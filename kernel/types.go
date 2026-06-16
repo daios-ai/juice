@@ -102,15 +102,14 @@ const (
 
 // Step is a partially applied future Call — a suspended computation boundary that
 // records enough context to resume when a caller later supplies the remaining input.
-// Core invariant: CompleteStep(caller, id, input) = Call(caller, process_id, next_action_id, partial_args ⊕ input)
+// Core invariant: CompleteStep(caller, id, input) = Call(caller, trace, action_id, partial_args ⊕ input)
+// The allowed completion input is derived live as action.input_schema \ keys(partial_args).
 type Step struct {
 	ID                   string          `json:"id"`
-	ProcessID            string          `json:"process_id"`
 	ParentTraceID        *string         `json:"parent_trace_id,omitempty"`
 	RequiredCallerUserID string          `json:"required_caller_user_id"`
-	NextActionID         string          `json:"next_action_id"`
+	ActionID             string          `json:"action_id"`
 	PartialArgs          json.RawMessage `json:"partial_args"`
-	InputSchema          json.RawMessage `json:"input_schema"`
 	Price                int64           `json:"price"`
 	Status               StepStatus      `json:"status"`
 	TxID                 *string         `json:"tx_id,omitempty"`
@@ -125,7 +124,6 @@ type OrphanRunningStep struct {
 	StepID            string
 	CompletionTraceID string
 	Price             int64
-	ProcessID         string
 	ParentTraceID     *string
 	TraceAvailable    int64
 	TraceLocked       int64
@@ -151,7 +149,6 @@ type Trace struct {
 	CallerUserID   string    `json:"caller_user_id"`
 	Available      int64     `json:"available"`
 	Locked         int64     `json:"locked"`
-	LatencyMS      int64     `json:"latency_ms"`
 	IdempotencyKey *string   `json:"idempotency_key,omitempty"`
 	DispatchJSON   *string   `json:"dispatch_json,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`

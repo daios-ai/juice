@@ -110,47 +110,37 @@ func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Tr
 	}
 
 	recoverErr := ErrInternal.Wrap(reason)
-	req := CallRequest{ProcessID: trace.ProcessID, StepID: stepID}
+	req := CallRequest{StepID: stepID}
 	return k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, recoverErr)
 }
 
 // CreateStep creates a new waiting step. The step records a future Call that a designated caller can resume.
-func (k *Kernel) CreateStep(ctx context.Context, callerID, processID string, parentTraceID *string, nextActionID string, partialArgs, inputSchema json.RawMessage, requiredCallerID string) (*Step, error) {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
-		return nil, err
+// The creating authority is derived from Trace(traceID).action_owner_id (implicit for in-execution creation).
+// For external creation (POST /v1/steps) the service layer must enforce precondition-4 before calling this.
+func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, requiredCallerID string) (*Step, error) {
+	if traceID == "" {
+		return nil, ErrInvalidInput.Wrap("trace_id is required")
 	}
-	process, err := k.store.ReadProcess(ctx, processID)
+	parent, err := k.store.ReadTrace(ctx, traceID)
+	if err != nil {
+		return nil, ErrNotFound.Wrap("parent trace not found")
+	}
+	process, err := k.store.ReadProcess(ctx, parent.ProcessID)
 	if err != nil {
 		return nil, ErrNotFound.Wrap("process not found")
 	}
 	if process.Status != ProcessOpen {
 		return nil, ErrInvalidState.Wrap("process is closed")
 	}
-	// §10: parent_trace_id is always required; it is the funding source for the parked price.
-	if parentTraceID == nil {
-		return nil, ErrInvalidInput.Wrap("parent_trace_id is required")
-	}
-	parent, err := k.store.ReadTrace(ctx, *parentTraceID)
+	action, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
-		return nil, ErrNotFound.Wrap("parent trace not found")
-	}
-	// §4 precondition: parent trace must belong to the same process.
-	if parent.ProcessID != processID {
-		return nil, ErrUnauthorized.Wrap("parent trace belongs to a different process")
-	}
-	// Process-use authority: C = P, or trace-scoped (parent trace's action_owner_id = C).
-	if process.OwnerUserID != callerID && parent.ActionOwnerID != callerID {
-		return nil, ErrUnauthorized.Wrap("caller is not authorized to use this process")
-	}
-	action, err := k.store.ReadAction(ctx, nextActionID)
-	if err != nil {
-		return nil, ErrNotFound.Wrap("next action not found")
+		return nil, ErrNotFound.Wrap("action not found")
 	}
 	if !canCall(process.OwnerUserID, action) {
 		if !action.Active {
-			return nil, ErrInvalidState.Wrap("next action is inactive")
+			return nil, ErrInvalidState.Wrap("action is inactive")
 		}
-		return nil, ErrUnauthorized.Wrap("process owner cannot call next action")
+		return nil, ErrUnauthorized.Wrap("process owner cannot call action")
 	}
 	if _, err := k.store.ReadUser(ctx, requiredCallerID); err != nil {
 		return nil, ErrNotFound.Wrap("required_caller_user_id not found")
@@ -160,25 +150,13 @@ func (k *Kernel) CreateStep(ctx context.Context, callerID, processID string, par
 	if normErr != nil {
 		return nil, normErr
 	}
-	inputSchema, normErr = normalizeJSONObject(inputSchema, "input_schema")
-	if normErr != nil {
-		return nil, normErr
-	}
-	var schemaMap map[string]any
-	if err := json.Unmarshal(inputSchema, &schemaMap); err == nil {
-		if err := ValidateSchema(schemaMap); err != nil {
-			return nil, err
-		}
-	}
 	now := time.Now().UTC()
 	step := &Step{
 		ID:                   uuid.New().String(),
-		ProcessID:            processID,
-		ParentTraceID:        parentTraceID,
+		ParentTraceID:        &traceID,
 		RequiredCallerUserID: requiredCallerID,
-		NextActionID:         nextActionID,
+		ActionID:             actionID,
 		PartialArgs:          partialArgs,
-		InputSchema:          inputSchema,
 		Price:                action.Price,
 		Status:               StepWaiting,
 		CreatedAt:            now,
@@ -186,7 +164,7 @@ func (k *Kernel) CreateStep(ctx context.Context, callerID, processID string, par
 	if err := k.store.CreateStep(ctx, step); err != nil {
 		return nil, err
 	}
-	k.log.With(ctx).Info("step.created", "step_id", step.ID, "process_id", processID, "status", "success")
+	k.log.With(ctx).Info("step.created", "step_id", step.ID, "trace_id", traceID, "status", "success")
 	return step, nil
 }
 
@@ -224,7 +202,15 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 	if step.Status != StepWaiting {
 		return nil, ErrInvalidState.Wrap("step is not waiting")
 	}
-	process, err := k.store.ReadProcess(ctx, step.ProcessID)
+	// Derive process from the step's parent trace.
+	if step.ParentTraceID == nil {
+		return nil, ErrInvalidState.Wrap("step has no parent trace")
+	}
+	parentTrace, err := k.store.ReadTrace(ctx, *step.ParentTraceID)
+	if err != nil {
+		return nil, ErrNotFound.Wrap("parent trace not found")
+	}
+	process, err := k.store.ReadProcess(ctx, parentTrace.ProcessID)
 	if err != nil {
 		return nil, ErrNotFound.Wrap("process not found")
 	}
@@ -234,7 +220,14 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 	if callerID != step.RequiredCallerUserID {
 		return nil, ErrUnauthorized.Wrap("only required_caller_user_id may complete this step")
 	}
-	// Parse and validate input.
+
+	// Look up action early — needed for derived allowed schema validation.
+	action, err := k.store.ReadAction(ctx, step.ActionID)
+	if err != nil {
+		return nil, ErrNotFound.Wrap("action not found")
+	}
+
+	// Parse and validate input against derived allowed schema: action.input_schema \ keys(partial_args).
 	if len(input) == 0 {
 		input = json.RawMessage("{}")
 	}
@@ -242,12 +235,10 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 	if err := json.Unmarshal(input, &inputArgs); err != nil {
 		return nil, ErrInvalidInput.Wrap("input must be a JSON object")
 	}
-	if len(step.InputSchema) > 0 {
-		var schema map[string]any
-		if err := json.Unmarshal(step.InputSchema, &schema); err == nil && len(schema) > 0 {
-			if err := ValidateInput(schema, inputArgs); err != nil {
-				return nil, err
-			}
+	allowedSchema := deriveAllowedSchema(action.InputSchema, step.PartialArgs)
+	if len(allowedSchema) > 0 {
+		if err := ValidateInput(allowedSchema, inputArgs); err != nil {
+			return nil, err
 		}
 	}
 	mergedArgs, err := mergeArgs(step.PartialArgs, input)
@@ -259,17 +250,11 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 		return nil, ErrInvalidInput.Wrap("merged args are not a valid JSON object")
 	}
 
-	// Look up next action for trace setup and dispatch.
-	action, err := k.store.ReadAction(ctx, step.NextActionID)
-	if err != nil {
-		return nil, ErrNotFound.Wrap("next action not found")
-	}
-
 	// BeginStepCall atomically marks the step as running, releases its parked price
 	// from parent_trace.locked, and creates a new trace with available=step.price.
 	stepTrace := &Trace{
 		ID:            uuid.New().String(),
-		ProcessID:     step.ProcessID,
+		ProcessID:     parentTrace.ProcessID,
 		ParentTraceID: step.ParentTraceID,
 		ActionOwnerID: action.OwnerUserID,
 		ActionID:      action.ID,
@@ -299,7 +284,6 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 
 	reply, callErr := k.Call(ctx, CallRequest{
 		CallerID:      callerID,
-		ProcessID:     step.ProcessID,
 		ParentTraceID: stepTrace.ID,
 		ActionID:      action.ID,
 		Args:          args,
@@ -329,14 +313,59 @@ func (k *Kernel) canReadStep(ctx context.Context, callerID string, step *Step) b
 	if callerID == step.RequiredCallerUserID {
 		return true
 	}
-	process, err := k.store.ReadProcess(ctx, step.ProcessID)
-	if err == nil && process.OwnerUserID == callerID {
-		return true
+	if step.ParentTraceID != nil {
+		if trace, err := k.store.ReadTrace(ctx, *step.ParentTraceID); err == nil {
+			if process, err := k.store.ReadProcess(ctx, trace.ProcessID); err == nil {
+				if process.OwnerUserID == callerID {
+					return true
+				}
+			}
+		}
 	}
 	if u, err := k.store.ReadUser(ctx, callerID); err == nil && k.isUserSuperuser(ctx, u) {
 		return true
 	}
 	return false
+}
+
+// deriveAllowedSchema returns the subset of actionSchema that is not already covered by partialArgs.
+// Properties and required fields whose keys appear in partialArgs are removed.
+func deriveAllowedSchema(actionSchema map[string]any, partialArgs json.RawMessage) map[string]any {
+	if len(actionSchema) == 0 {
+		return actionSchema
+	}
+	var partial map[string]any
+	if len(partialArgs) > 0 {
+		_ = json.Unmarshal(partialArgs, &partial)
+	}
+	if len(partial) == 0 {
+		return actionSchema
+	}
+	result := make(map[string]any, len(actionSchema))
+	for k, v := range actionSchema {
+		result[k] = v
+	}
+	if props, ok := result["properties"].(map[string]any); ok {
+		newProps := make(map[string]any, len(props))
+		for k, v := range props {
+			if _, bound := partial[k]; !bound {
+				newProps[k] = v
+			}
+		}
+		result["properties"] = newProps
+	}
+	if req, ok := result["required"].([]any); ok {
+		var newReq []any
+		for _, r := range req {
+			if s, ok := r.(string); ok {
+				if _, bound := partial[s]; !bound {
+					newReq = append(newReq, s)
+				}
+			}
+		}
+		result["required"] = newReq
+	}
+	return result
 }
 
 // normalizeJSONObject defaults an empty value to "{}" and rejects non-object JSON.

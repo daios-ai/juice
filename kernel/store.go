@@ -51,7 +51,7 @@ type FederationExecutor interface {
 // HostFunctions are the callbacks available to a running script.
 type HostFunctions interface {
 	Call(ctx context.Context, actionName string, args []byte) ([]byte, error)
-	StepCreate(ctx context.Context, partialArgs, inputSchema []byte, requiredCallerUserID, nextActionID string) (string, error)
+	StepCreate(ctx context.Context, partialArgs []byte, requiredCallerUserID, actionID string) (string, error)
 	StepComplete(ctx context.Context, stepID string, input []byte) ([]byte, error)
 	Log(ctx context.Context, level, msg string) error
 }

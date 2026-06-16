@@ -35,7 +35,7 @@ func TestExecuteMessage_MissingTo(t *testing.T) {
 	k, _ := newLookupTestKernel(t)
 	_, err := executeMessage(context.Background(), map[string]any{
 		"message": "hello",
-	}, "c", "o", "p", "", k)
+	}, "o", "", k)
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput, got %v", err)
 	}
@@ -45,7 +45,7 @@ func TestExecuteMessage_MissingMessage(t *testing.T) {
 	k, _ := newLookupTestKernel(t)
 	_, err := executeMessage(context.Background(), map[string]any{
 		"to": "@alice",
-	}, "c", "o", "p", "", k)
+	}, "o", "", k)
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput, got %v", err)
 	}
@@ -55,7 +55,7 @@ func TestExecuteMessage_UnknownRecipient(t *testing.T) {
 	k, _ := newLookupTestKernel(t)
 	_, err := executeMessage(context.Background(), map[string]any{
 		"to": "@nobody", "message": "hello",
-	}, "c", "o", "p", "", k)
+	}, "o", "", k)
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput, got %v", err)
 	}
@@ -87,7 +87,7 @@ func TestExecuteMessage_CreatesStep(t *testing.T) {
 
 	result, err := executeMessage(ctx, map[string]any{
 		"to": "@recipient", "message": "hello",
-	}, caller.ID, caller.ID, p.ID, rootTrace.ID, k)
+	}, caller.ID, rootTrace.ID, k)
 	if err != nil {
 		t.Fatalf("executeMessage: %v", err)
 	}

@@ -99,7 +99,7 @@ func TestMemoryPages(t *testing.T) {
 type nilHost struct{}
 
 func (nilHost) Call(_ context.Context, _ string, _ []byte) ([]byte, error) { return nil, nil }
-func (nilHost) StepCreate(_ context.Context, _, _ []byte, _, _ string) (string, error) {
+func (nilHost) StepCreate(_ context.Context, _ []byte, _, _ string) (string, error) {
 	return "", nil
 }
 func (nilHost) StepComplete(_ context.Context, _ string, _ []byte) ([]byte, error) {

@@ -1019,7 +1019,6 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	k.log.With(ctx).Info("process.created", "process_id", p.ID, "owner", caller.ID, "price", action.Price)
 	return k.Call(ctx, CallRequest{
 		CallerID:            caller.ID,
-		ProcessID:           p.ID,
 		Action:              action,
 		Args:                args,
 		ExistingTraceID:     t.ID,
@@ -1095,6 +1094,31 @@ func (k *Kernel) EndProcess(ctx context.Context, callerID, processID string) err
 	}
 	k.log.With(ctx).Info("process.ended", "process_id", processID, "status", "success")
 	return nil
+}
+
+// ReadTrace returns a trace by ID. Used by the service layer for authority checks.
+func (k *Kernel) ReadTrace(ctx context.Context, id string) (*Trace, error) {
+	return k.store.ReadTrace(ctx, id)
+}
+
+// AuthorizeTraceUse returns nil if callerID may use traceID for step creation.
+// Allowed if: caller == process.owner OR caller == Trace(trace).action_owner_id.
+func (k *Kernel) AuthorizeTraceUse(ctx context.Context, callerID, traceID string) error {
+	trace, err := k.store.ReadTrace(ctx, traceID)
+	if err != nil {
+		return ErrNotFound.Wrap("trace not found")
+	}
+	if trace.ActionOwnerID == callerID {
+		return nil
+	}
+	process, err := k.store.ReadProcess(ctx, trace.ProcessID)
+	if err != nil {
+		return ErrNotFound.Wrap("process not found")
+	}
+	if process.OwnerUserID == callerID {
+		return nil
+	}
+	return ErrUnauthorized.Wrap("caller is not authorized to use this trace")
 }
 
 // ReadProcess returns a process by ID, requiring the caller to be its owner.

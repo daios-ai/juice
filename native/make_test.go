@@ -254,10 +254,10 @@ func TestMakeRejectsEmptyDescription(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+	_, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{},
 	})
@@ -284,10 +284,10 @@ func TestMakeReturnsErrInvalidStateWithoutCompiler(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+	_, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "test"},
 	})
@@ -303,10 +303,10 @@ func TestMakeRegistersActionOnSuccess(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+	_, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{
 			"description": "An action that returns a fixed result",
@@ -359,10 +359,10 @@ func TestMakeRegisteredActionHasName(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+	_, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "compute something interesting"},
 	})
@@ -403,10 +403,10 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 10000)
-	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+	_, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "always fail"},
 	})
@@ -434,7 +434,7 @@ func TestMakeInternalChatCallCreatesChildTrace(t *testing.T) {
 	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "test"},
 	})
@@ -459,11 +459,11 @@ func TestMakeNameCollisionPicksAlternateName(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+	_, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	desc := map[string]any{"description": "An action that returns a fixed result"}
 	reply1, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make", Args: desc,
 	})
 	if err != nil {
@@ -480,9 +480,9 @@ func TestMakeNameCollisionPicksAlternateName(t *testing.T) {
 	fakeChat.idx = 0
 	decider.idx = 0
 
-	p2, tr2 := beginMakeTestRun(t, st, caller.ID, sys.ID)
+	_, tr2 := beginMakeTestRun(t, st, caller.ID, sys.ID)
 	reply2, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p2.ID, ExistingTraceID: tr2.ID,
+		CallerID: caller.ID, ExistingTraceID: tr2.ID,
 		TargetUserID: sys.ID, ActionName: "make", Args: desc,
 	})
 	if err != nil {
@@ -530,11 +530,10 @@ func TestMakePrivateActionNotSurfacedToForeignProcess(t *testing.T) {
 	}
 
 	ownerB := setupUser(t, st, "@owner-b", 5000)
-	p, tr := beginMakeTestRun(t, st, ownerB.ID, sys.ID)
+	_, tr := beginMakeTestRun(t, st, ownerB.ID, sys.ID)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID:        ownerB.ID,
-		ProcessID:       p.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    sys.ID,
 		ActionName:      "make",
@@ -558,10 +557,10 @@ func TestMakeRejectsDisallowedWASMImport(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+	_, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "test action"},
 	})
@@ -600,10 +599,10 @@ func TestMakeAcceptsStepImports(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+	_, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "step-using action"},
 	})
@@ -628,7 +627,7 @@ func TestMakeDecideIsCalledEachIteration(t *testing.T) {
 	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "test action"},
 	})
@@ -668,7 +667,7 @@ func TestMakeLookupResultAppearsInNextDecide(t *testing.T) {
 	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "test action with lookup"},
 	})
@@ -738,10 +737,10 @@ func TestMakeComputesPriceFromComposedActions(t *testing.T) {
 	}
 
 	caller := setupUser(t, st, "@alice", 1000)
-	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+	_, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "action that calls time and sink"},
 	})
@@ -775,10 +774,10 @@ func TestMakeDecideExhaustedReturnsFailure(t *testing.T) {
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
-	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+	_, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make",
 		Args: map[string]any{"description": "something"},
 	})

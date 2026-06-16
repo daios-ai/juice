@@ -607,8 +607,8 @@ func init() {
 }
 
 func stepCreateCmd() *cobra.Command {
-	var processID, action, requiredCaller, parentTrace string
-	var partialArgs, inputSchema string
+	var traceID, action, requiredCaller string
+	var partialArgs string
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a step (pause point for external completion)",
@@ -620,18 +620,12 @@ func stepCreateCmd() *cobra.Command {
 				if partialArgs != "" {
 					pa = json.RawMessage(partialArgs)
 				}
-				var is json.RawMessage
-				if inputSchema != "" {
-					is = json.RawMessage(inputSchema)
-				}
 
 				view, err := createStep(k, ctx, callerID, createStepParams{
-					ProcessID:      processID,
-					ParentTraceID:  parentTrace,
+					TraceID:        traceID,
 					ActionRef:      action,
 					RequiredCaller: requiredCaller,
 					PartialArgs:    pa,
-					InputSchema:    is,
 				})
 				if err != nil {
 					return err
@@ -643,19 +637,17 @@ func stepCreateCmd() *cobra.Command {
 				if flagOutput == "json" {
 					return printJSON(view)
 				}
-				fmt.Printf("Step created.\n  step_id:  %s\n  status:   %s\n  process:  %s\n  action:   %s\n",
-					view.ID, view.Status, view.ProcessID, view.Action)
+				fmt.Printf("Step created.\n  step_id:  %s\n  status:   %s\n  trace:    %s\n  action:   %s\n",
+					view.ID, view.Status, traceID, view.Action)
 				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&processID, "process", "", "Process ID (required)")
+	cmd.Flags().StringVar(&traceID, "trace", "", "Trace ID (required)")
 	cmd.Flags().StringVar(&action, "action", "", "Action reference @owner/name (required)")
 	cmd.Flags().StringVar(&requiredCaller, "required-caller", "", "Handle of user who must complete the step, e.g. @webhook (required)")
 	cmd.Flags().StringVar(&partialArgs, "partial-args", "", "Partial args as JSON object")
-	cmd.Flags().StringVar(&inputSchema, "input-schema", "", "JSON Schema for completion input")
-	cmd.Flags().StringVar(&parentTrace, "parent-trace", "", "Parent trace ID")
-	_ = cmd.MarkFlagRequired("process")
+	_ = cmd.MarkFlagRequired("trace")
 	_ = cmd.MarkFlagRequired("action")
 	_ = cmd.MarkFlagRequired("required-caller")
 	return cmd
@@ -676,7 +668,7 @@ func stepListCmd() *cobra.Command {
 					return printJSON(steps)
 				}
 				for _, s := range steps {
-					fmt.Printf("%s  %-7s  process:%s\n", s.ID[:8], s.Status, s.ProcessID[:8])
+					fmt.Printf("%s  %-7s\n", s.ID[:8], s.Status)
 				}
 				return nil
 			})
@@ -701,8 +693,8 @@ func stepShowCmd() *cobra.Command {
 				if flagOutput == "json" {
 					return printJSON(step)
 				}
-				fmt.Printf("Step: %s\n  status:          %s\n  process:         %s\n  action_id:       %s\n  required_caller: %s\n",
-					step.ID, step.Status, step.ProcessID, step.NextActionID, step.RequiredCallerUserID)
+				fmt.Printf("Step: %s\n  status:          %s\n  action_id:       %s\n  required_caller: %s\n",
+					step.ID, step.Status, step.ActionID, step.RequiredCallerUserID)
 				return nil
 			})
 		},

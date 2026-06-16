@@ -581,7 +581,7 @@ func TestProcessAvailablePlusLockedInvariant(t *testing.T) {
 	checkInvariant("initial", 100)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: alice.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -623,10 +623,10 @@ func TestUserLockedBalanceInvariant(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, tr := beginTestRun(t, st, alice.ID, a)
+	_, tr := beginTestRun(t, st, alice.ID, a)
 
 	if _, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: alice.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "svc", Args: map[string]any{},
 	}); err != nil {
 		t.Fatal(err)
@@ -723,9 +723,9 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, tr := beginTestRun(t, st, buyer.ID, a)
+	_, tr := beginTestRun(t, st, buyer.ID, a)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: buyer.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: buyer.ID, ExistingTraceID: tr.ID,
 		TargetUserID: provider.ID, ActionName: "rate-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -773,9 +773,9 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, tr := beginTestRun(t, st, buyer.ID, a)
+	_, tr := beginTestRun(t, st, buyer.ID, a)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: buyer.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: buyer.ID, ExistingTraceID: tr.ID,
 		TargetUserID: provider.ID, ActionName: "rerate-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -813,9 +813,9 @@ func TestRateTransactionOwnerCallingOwnActionCanRate(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, tr := beginTestRun(t, st, owner.ID, a)
+	_, tr := beginTestRun(t, st, owner.ID, a)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: owner.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: owner.ID, ExistingTraceID: tr.ID,
 		TargetUserID: owner.ID, ActionName: "self-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -840,11 +840,8 @@ func TestCallPreconditionOrderTraceBeforeAction(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@ptrace-owner", 100)
-	p := setupProcess(t, st, owner.ID, 50)
-
 	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID:      owner.ID,
-		ProcessID:     p.ID,
 		ParentTraceID: "nonexistent-trace-id",
 		TargetUserID:  owner.ID,
 		ActionName:    "no-such-action",
@@ -871,11 +868,10 @@ func TestCallPreconditionOrderActionAfterValidTrace(t *testing.T) {
 	if err := st.CreateAction(ctx, a); err != nil {
 		t.Fatalf("create action: %v", err)
 	}
-	p, tr := beginTestRun(t, st, owner.ID, a)
+	_, tr := beginTestRun(t, st, owner.ID, a)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID:      owner.ID,
-		ProcessID:     p.ID,
 		ParentTraceID: tr.ID,
 		TargetUserID:  owner.ID,
 		ActionName:    "no-such-action",
@@ -926,9 +922,9 @@ func TestReceiptCreatedWithCall(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, tr := beginTestRun(t, st, caller.ID, a)
+	_, tr := beginTestRun(t, st, caller.ID, a)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: caller.ID, ActionName: "rcpt-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -966,7 +962,7 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 
 	p, tr := beginTestRun(t, st, owner.ID, a)
 	reply, _ := k.Call(ctx, kernel.CallRequest{
-		CallerID: owner.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: owner.ID, ExistingTraceID: tr.ID,
 		TargetUserID: owner.ID, ActionName: "fail-svc", Args: map[string]any{},
 	})
 
@@ -1023,9 +1019,9 @@ func TestReadTransactionPartyAccess(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, tr := beginTestRun(t, st, caller.ID, a)
+	_, tr := beginTestRun(t, st, caller.ID, a)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: owner.ID, ActionName: "pvd-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1133,9 +1129,9 @@ func TestRatingRecordCreated(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, tr := beginTestRun(t, st, buyer.ID, a)
+	_, tr := beginTestRun(t, st, buyer.ID, a)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: buyer.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: buyer.ID, ExistingTraceID: tr.ID,
 		TargetUserID: provider.ID, ActionName: "rr-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1180,9 +1176,9 @@ func TestRatingDuplicateRejected(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, tr := beginTestRun(t, st, buyer.ID, a)
+	_, tr := beginTestRun(t, st, buyer.ID, a)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: buyer.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: buyer.ID, ExistingTraceID: tr.ID,
 		TargetUserID: provider.ID, ActionName: "dup-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1213,9 +1209,9 @@ func TestTransactionViewEmbeddedRating(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	p, tr := beginTestRun(t, st, buyer.ID, a)
+	_, tr := beginTestRun(t, st, buyer.ID, a)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: buyer.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: buyer.ID, ExistingTraceID: tr.ID,
 		TargetUserID: provider.ID, ActionName: "tv-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1589,9 +1585,9 @@ func TestSuperuserListTransactions(t *testing.T) {
 	if err := st.CreateAction(ctx, a); err != nil {
 		t.Fatalf("CreateAction: %v", err)
 	}
-	p, tr := beginTestRun(t, st, buyer.ID, a)
+	_, tr := beginTestRun(t, st, buyer.ID, a)
 	reply, err := k.Call(ctx, kernel.CallRequest{
-		CallerID: buyer.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		CallerID: buyer.ID, ExistingTraceID: tr.ID,
 		TargetUserID: provider.ID, ActionName: "su-svc", Args: map[string]any{},
 	})
 	if err != nil {
@@ -1831,7 +1827,7 @@ func TestCallUsesActionIDNotOwnerName(t *testing.T) {
 	actionA := setupWasmAction(t, st, owner.ID, "pid-act", "", 100)
 
 	// Fund a process+trace for action A.
-	p, tr := beginTestRun(t, st, owner.ID, actionA)
+	_, tr := beginTestRun(t, st, owner.ID, actionA)
 
 	// Delete action A, simulating the race window where the funded action disappears.
 	if err := st.DeleteAction(ctx, actionA.ID); err != nil {
@@ -1842,7 +1838,6 @@ func TestCallUsesActionIDNotOwnerName(t *testing.T) {
 	// NOT look up by owner/name (which would find nothing, or a future replacement).
 	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID:        owner.ID,
-		ProcessID:       p.ID,
 		ActionID:        actionA.ID,
 		Args:            map[string]any{},
 		ExistingTraceID: tr.ID,

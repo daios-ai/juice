@@ -728,9 +728,9 @@ func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error
 
 func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTraceID *string, price int64) error {
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,latency_ms,idempotency_key,dispatch_json,created_at)
-		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?)`,
-		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.LatencyMS, t.IdempotencyKey, t.DispatchJSON, timeToStr(t.CreatedAt),
+		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,created_at)
+		 VALUES (?,?,?,?,?,?,?,0,?,?,?)`,
+		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, timeToStr(t.CreatedAt),
 	)
 	return dbErr(err, "insert trace")
 }
@@ -782,6 +782,10 @@ func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace) 
 				return dbErr(err, "begin step call: release parent trace lock")
 			}
 		}
+		// Insert the completion trace first so the FK on steps.completion_trace_id is satisfied.
+		if err = insertTraceTx(ctx, tx, t, parentTraceID, price); err != nil {
+			return err
+		}
 		// Claim the step and record which trace will complete it.
 		res, err := tx.ExecContext(ctx,
 			`UPDATE steps SET status='running', completion_trace_id=? WHERE id=? AND status='waiting'`,
@@ -792,8 +796,7 @@ func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace) 
 		if n, _ := res.RowsAffected(); n == 0 {
 			return kernel.ErrInvalidState.Wrap("step already claimed")
 		}
-		// Create the trace funded by the step's price.
-		return insertTraceTx(ctx, tx, t, parentTraceID, price)
+		return nil
 	})
 }
 
@@ -830,22 +833,6 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 	return nil
 }
 
-// updateAncestorTraces updates latency_ms for all ancestor traces via a recursive CTE.
-func (s *DB) updateAncestorTraces(ctx context.Context, tx *sql.Tx, traceID string, endedAt time.Time, label string) error {
-	_, err := tx.ExecContext(ctx, `
-WITH RECURSIVE ancestors(id, parent_id) AS (
-    SELECT id, parent_trace_id FROM traces WHERE id=?
-    UNION ALL
-    SELECT t.id, t.parent_trace_id FROM traces t
-    JOIN ancestors a ON t.id=a.parent_id AND a.parent_id IS NOT NULL AND a.id!=a.parent_id
-)
-UPDATE traces SET
-    latency_ms=MAX(latency_ms, CAST((julianday(?)-julianday(created_at))*86400000 AS INTEGER))
-WHERE id IN (SELECT id FROM ancestors)`,
-		traceID, timeToStr(endedAt),
-	)
-	return dbErr(err, label+": update trace ancestors")
-}
 
 // upsertActionStats updates the incremental success or failure counters for an action.
 // rating_count/rating_estimate are excluded — owned by UpdateRating.
@@ -902,9 +889,6 @@ func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction
 	if err := s.insertAuditRows(ctx, tx, ktx, receipt, label); err != nil {
 		return err
 	}
-	if err := s.updateAncestorTraces(ctx, tx, ktx.TraceID, ktx.EndedAt, label); err != nil {
-		return err
-	}
 	if err := s.upsertActionStats(ctx, tx, stats, ktx.Status == kernel.TxSuccess, label); err != nil {
 		return err
 	}
@@ -932,7 +916,7 @@ func (s *DB) closeProcessTx(ctx context.Context, tx *sql.Tx, processID string) e
 	// Count open steps.
 	var openSteps int
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM steps WHERE process_id=? AND status IN ('waiting','running')`,
+		`SELECT COUNT(*) FROM steps s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status IN ('waiting','running')`,
 		processID,
 	).Scan(&openSteps); err != nil {
 		return dbErr(err, "close process: count open steps")
@@ -1282,8 +1266,10 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 		// atomically within this transaction so no funds are stranded.
 		runRows, runErr := tx.QueryContext(ctx,
 			`SELECT st.completion_trace_id, t.available
-			 FROM steps st JOIN traces t ON t.id=st.completion_trace_id
-			 WHERE st.process_id=? AND st.status='running' AND st.tx_id IS NULL
+			 FROM steps st
+			 JOIN traces pt ON pt.id=st.parent_trace_id
+			 JOIN traces t ON t.id=st.completion_trace_id
+			 WHERE pt.process_id=? AND st.status='running' AND st.tx_id IS NULL
 			   AND st.completion_trace_id IS NOT NULL`,
 			processID)
 		if runErr != nil {
@@ -1316,14 +1302,14 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 			}
 		}
 		if _, err2 := tx.ExecContext(ctx,
-			`UPDATE steps SET status='cancelled' WHERE process_id=? AND status='running' AND tx_id IS NULL`,
+			`UPDATE steps SET status='cancelled' WHERE id IN (SELECT s.id FROM steps s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='running' AND s.tx_id IS NULL)`,
 			processID); err2 != nil {
 			return dbErr(err2, "end process: cancel running steps")
 		}
 		// Cancel all waiting steps and collect parked prices to return to owner.
 		var parkedTotal int64
 		if err = tx.QueryRowContext(ctx,
-			`SELECT COALESCE(SUM(price),0) FROM steps WHERE process_id=? AND status='waiting'`,
+			`SELECT COALESCE(SUM(s.price),0) FROM steps s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='waiting'`,
 			processID,
 		).Scan(&parkedTotal); err != nil {
 			return dbErr(err, "end process: sum parked prices")
@@ -1332,7 +1318,7 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 			// Release parked prices: remove from parent trace locks, return to user.
 			// We cancel the steps in bulk; the trace.locked decrements must also happen.
 			rows, err2 := tx.QueryContext(ctx,
-				`SELECT parent_trace_id, SUM(price) FROM steps WHERE process_id=? AND status='waiting' GROUP BY parent_trace_id`,
+				`SELECT s.parent_trace_id, SUM(s.price) FROM steps s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='waiting' GROUP BY s.parent_trace_id`,
 				processID)
 			if err2 != nil {
 				return dbErr(err2, "end process: group parked by trace")
@@ -1370,7 +1356,7 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 			}
 		}
 		if _, err = tx.ExecContext(ctx,
-			`UPDATE steps SET status='cancelled' WHERE process_id=? AND status='waiting'`,
+			`UPDATE steps SET status='cancelled' WHERE id IN (SELECT s.id FROM steps s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='waiting')`,
 			processID); err != nil {
 			return dbErr(err, "end process: cancel waiting steps")
 		}
@@ -1392,13 +1378,13 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 
 // ---- Traces ----
 
-const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,latency_ms,idempotency_key,dispatch_json,created_at`
+const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,created_at`
 
 func scanTrace(t *kernel.Trace, scanFn func(...any) error) error {
 	var createdAt string
 	var parentID, idempotencyKey, dispatchJSON sql.NullString
 	err := scanFn(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.ActionID, &t.CallerUserID,
-		&t.Available, &t.Locked, &t.LatencyMS, &idempotencyKey, &dispatchJSON, &createdAt)
+		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &createdAt)
 	if err != nil {
 		return err
 	}
@@ -1600,29 +1586,28 @@ func (s *DB) CreateStep(ctx context.Context, step *kernel.Step) error {
 			}
 		}
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO steps (id,process_id,parent_trace_id,required_caller_user_id,next_action_id,
-			                    partial_args,input_schema,price,status,created_at)
-			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
-			step.ID, step.ProcessID, step.ParentTraceID, step.RequiredCallerUserID,
-			step.NextActionID, rawJSONStr(step.PartialArgs), rawJSONStr(step.InputSchema),
+			`INSERT INTO steps (id,parent_trace_id,required_caller_user_id,action_id,
+			                    partial_args,price,status,created_at)
+			 VALUES (?,?,?,?,?,?,?,?)`,
+			step.ID, step.ParentTraceID, step.RequiredCallerUserID,
+			step.ActionID, rawJSONStr(step.PartialArgs),
 			step.Price, string(step.Status), timeToStr(step.CreatedAt),
 		)
 		return dbErr(err, "create step: insert")
 	})
 }
 
-const stepCols = `id,process_id,parent_trace_id,required_caller_user_id,next_action_id,partial_args,input_schema,price,status,tx_id,completion_trace_id,created_at`
+const stepCols = `id,parent_trace_id,required_caller_user_id,action_id,partial_args,price,status,tx_id,completion_trace_id,created_at`
 
 func scanStep(step *kernel.Step, scanFn func(...any) error) error {
 	var parentTraceID, txID, completionTraceID *string
-	var createdAt, partialArgs, inputSchema, status string
-	if err := scanFn(&step.ID, &step.ProcessID, &parentTraceID, &step.RequiredCallerUserID,
-		&step.NextActionID, &partialArgs, &inputSchema, &step.Price, &status, &txID, &completionTraceID, &createdAt); err != nil {
+	var createdAt, partialArgs, status string
+	if err := scanFn(&step.ID, &parentTraceID, &step.RequiredCallerUserID,
+		&step.ActionID, &partialArgs, &step.Price, &status, &txID, &completionTraceID, &createdAt); err != nil {
 		return err
 	}
 	step.ParentTraceID = parentTraceID
 	step.PartialArgs = strToRawJSON(partialArgs)
-	step.InputSchema = strToRawJSON(inputSchema)
 	step.Status = kernel.StepStatus(status)
 	step.TxID = txID
 	step.CompletionTraceID = completionTraceID
@@ -1651,10 +1636,12 @@ func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status stri
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+stepCols+`
 		 FROM steps
-		 WHERE (process_id IN (SELECT id FROM processes WHERE owner_user_id=?)
+		 WHERE (parent_trace_id IN (
+		            SELECT id FROM traces WHERE process_id IN (
+		                SELECT id FROM processes WHERE owner_user_id=?))
 		        OR required_caller_user_id=?
 		        OR ?)
-		   AND (?='' OR process_id=?)
+		   AND (?='' OR parent_trace_id IN (SELECT id FROM traces WHERE process_id=?))
 		   AND (?='' OR status=?)
 		 ORDER BY created_at DESC`,
 		callerUserID, callerUserID, superInt,
@@ -1678,7 +1665,7 @@ func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status stri
 // HasSettled is true when the completion trace has locked funds or committed subcall transactions.
 func (s *DB) ListOrphanRunningSteps(ctx context.Context) ([]kernel.OrphanRunningStep, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT st.id, st.completion_trace_id, st.price, st.process_id, st.parent_trace_id,
+		SELECT st.id, st.completion_trace_id, st.price, st.parent_trace_id,
 		       t.available, t.locked,
 		       CASE WHEN t.locked > 0 OR EXISTS (
 		           WITH RECURSIVE sub(id) AS (
@@ -1697,7 +1684,7 @@ func (s *DB) ListOrphanRunningSteps(ctx context.Context) ([]kernel.OrphanRunning
 	return queryList(rows, "list orphan running steps", func(scan func(...any) error) (kernel.OrphanRunningStep, error) {
 		var row kernel.OrphanRunningStep
 		var hasSettled int
-		err := scan(&row.StepID, &row.CompletionTraceID, &row.Price, &row.ProcessID, &row.ParentTraceID,
+		err := scan(&row.StepID, &row.CompletionTraceID, &row.Price, &row.ParentTraceID,
 			&row.TraceAvailable, &row.TraceLocked, &hasSettled)
 		row.HasSettled = hasSettled == 1
 		return row, err
