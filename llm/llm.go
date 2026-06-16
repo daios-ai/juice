@@ -135,17 +135,31 @@ func (o *OllamaChatter) ChatJSON(ctx context.Context, messages []kernel.ChatMess
 
 // ChatDecide calls /api/chat with tool definitions and returns the LLM's single chosen action.
 func (o *OllamaChatter) ChatDecide(ctx context.Context, messages []kernel.DecideMessage, tools []kernel.ToolDefinition) (*kernel.ToolCall, *kernel.ChatMessage, error) {
-	type ollamaMsg struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
+	type ollamaToolCall struct {
+		Function struct {
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		} `json:"function"`
 	}
-	var msgs []ollamaMsg
+	type ollamaMsgWithTools struct {
+		Role      string           `json:"role"`
+		Content   string           `json:"content"`
+		ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
+	}
+
+	var msgs []ollamaMsgWithTools
 	for _, m := range messages {
-		if m.Role == "tool" {
-			content, _ := json.Marshal(m.Result)
-			msgs = append(msgs, ollamaMsg{Role: "tool", Content: string(content)})
-		} else {
-			msgs = append(msgs, ollamaMsg{Role: m.Role, Content: m.Content})
+		switch {
+		case m.Role == "assistant" && m.Tool != nil:
+			var tc ollamaToolCall
+			tc.Function.Name = m.Tool.Action
+			tc.Function.Arguments = m.Tool.Args
+			msgs = append(msgs, ollamaMsgWithTools{Role: "assistant", ToolCalls: []ollamaToolCall{tc}})
+		case m.Role == "tool" && m.Tool != nil:
+			content, _ := json.Marshal(m.Tool.Result)
+			msgs = append(msgs, ollamaMsgWithTools{Role: "tool", Content: string(content)})
+		default:
+			msgs = append(msgs, ollamaMsgWithTools{Role: m.Role, Content: m.Content})
 		}
 	}
 

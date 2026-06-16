@@ -267,7 +267,23 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 		inputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"messages": map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "Conversation turns (user/assistant/tool)"},
+				"messages": map[string]any{"type": "array", "description": "Conversation turns (system/user/assistant/tool)", "items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"role":    map[string]any{"type": "string", "description": "Message role: system, user, assistant, or tool"},
+						"content": map[string]any{"type": "string", "description": "Text content of the message"},
+						"tool": map[string]any{
+							"type":        "object",
+							"description": "Tool action and result; present on assistant proposal and tool result turns",
+							"properties": map[string]any{
+								"action": map[string]any{"type": "string", "description": "Juice action reference (@owner/name)"},
+								"args":   map[string]any{"type": "object", "description": "Arguments for the action"},
+								"result": map[string]any{"type": "object", "description": "Result from the action execution"},
+							},
+						},
+					},
+					"required": []string{"role"},
+				}},
 				"actions":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Candidate actions as @owner/name strings"},
 			},
 			"required": []string{"messages", "actions"},

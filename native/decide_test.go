@@ -151,10 +151,12 @@ func TestExecuteDecide_ToolTurn(t *testing.T) {
 		"messages": []any{
 			map[string]any{"role": "user", "content": "find something"},
 			map[string]any{
-				"role":   "tool",
-				"action": "@sys/lookup",
-				"args":   map[string]any{"query": "x"},
-				"result": map[string]any{"results": []any{}},
+				"role": "assistant",
+				"tool": map[string]any{"action": "@sys/lookup", "args": map[string]any{"query": "x"}},
+			},
+			map[string]any{
+				"role": "tool",
+				"tool": map[string]any{"action": "@sys/lookup", "result": map[string]any{"results": []any{}}},
 			},
 		},
 		"actions": []any{"@sys/lookup"},

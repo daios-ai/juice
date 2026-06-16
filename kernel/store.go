@@ -94,14 +94,22 @@ type ToolCall struct {
 	Args   map[string]any
 }
 
+// DecideTool holds the tool action and data for a single turn.
+// On assistant turns it carries the proposed Action and Args.
+// On tool turns it carries the Action and Result.
+type DecideTool struct {
+	Action string
+	Args   map[string]any
+	Result map[string]any
+}
+
 // DecideMessage is a single turn in a decide conversation.
-// Role is "user", "assistant", or "tool". Tool turns carry Action, Args, and Result.
+// Role is "system", "user", "assistant", or "tool".
+// Tool is non-nil on assistant proposal turns and tool result turns.
 type DecideMessage struct {
 	Role    string
 	Content string
-	Action  string
-	Args    map[string]any
-	Result  map[string]any
+	Tool    *DecideTool
 }
 
 // DecideChatter asks the LLM to select a Juice action from a set of candidates.

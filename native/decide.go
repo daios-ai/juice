@@ -43,18 +43,15 @@ func executeDecide(
 		if role == "" {
 			return nil, kernel.ErrInvalidInput.Wrap("each message must have a role")
 		}
-		if role == "tool" {
-			action, _ := m["action"].(string)
-			mArgs, _ := m["args"].(map[string]any)
-			result, _ := m["result"].(map[string]any)
-			messages = append(messages, kernel.DecideMessage{Role: "tool", Action: action, Args: mArgs, Result: result})
-		} else {
-			content, _ := m["content"].(string)
-			if content == "" {
-				return nil, kernel.ErrInvalidInput.Wrap("each non-tool message must have content")
-			}
-			messages = append(messages, kernel.DecideMessage{Role: role, Content: content})
+		content, _ := m["content"].(string)
+		var tool *kernel.DecideTool
+		if t, ok := m["tool"].(map[string]any); ok {
+			action, _ := t["action"].(string)
+			args, _ := t["args"].(map[string]any)
+			result, _ := t["result"].(map[string]any)
+			tool = &kernel.DecideTool{Action: action, Args: args, Result: result}
 		}
+		messages = append(messages, kernel.DecideMessage{Role: role, Content: content, Tool: tool})
 	}
 
 	rawActions, ok := args["actions"]
