@@ -77,7 +77,7 @@ func setupUser(t *testing.T, st kernel.Store, handle string, balance int64) *ker
 }
 
 // newMakeKernel builds a kernel and registers the native handlers for @sys/make tests.
-func newMakeKernel(t *testing.T, chatter kernel.Chatter) (*kernel.Kernel, kernel.Store) {
+func newMakeKernel(t *testing.T, chatter kernel.Chatter, decider kernel.DecideChatter) (*kernel.Kernel, kernel.Store) {
 	t.Helper()
 	st := newTestStore(t)
 	cfg := kernel.DefaultConfig()
@@ -89,6 +89,8 @@ func newMakeKernel(t *testing.T, chatter kernel.Chatter) (*kernel.Kernel, kernel
 	k := kernel.New(st, exec, nil, nil, cfg, log.Default())
 	fakeComp := &script.FakeCompiler{}
 	native.RegisterChatHandler(k, chatter)
+	native.RegisterDecideHandler(k, decider)
+	native.RegisterLookupHandler(k)
 	native.RegisterMakeHandler(k, native.MakeDeps{
 		Scripts:  exec,
 		Compiler: fakeComp,
@@ -120,7 +122,7 @@ func beginMakeTestRun(t *testing.T, st kernel.Store, callerID, sysID string) (*k
 	return p, tr
 }
 
-// seedMakeAction seeds @sys user, @sys/make native action, and @sys/llm/chat in the store.
+// seedMakeAction seeds @sys user and all native actions required by @sys/make tests.
 func seedMakeAction(t *testing.T, st kernel.Store) *kernel.User {
 	t.Helper()
 	ctx := context.Background()
@@ -167,6 +169,41 @@ func seedMakeAction(t *testing.T, st kernel.Store) *kernel.User {
 				"properties": map[string]any{"message": map[string]any{"type": "object", "description": "reply"}},
 			},
 		},
+		{
+			name:        "llm/decide",
+			price:       0,
+			description: "Select a Juice action and propose args",
+			inSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"messages": map[string]any{"type": "array", "description": "conversation history", "items": map[string]any{"type": "object"}},
+					"actions":  map[string]any{"type": "array", "description": "candidate actions", "items": map[string]any{"type": "string"}},
+				},
+				"required": []string{"messages", "actions"},
+			},
+			outSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action": map[string]any{"type": "string", "description": "selected action"},
+					"args":   map[string]any{"type": "object", "description": "proposed args"},
+				},
+				"required": []string{"action", "args"},
+			},
+		},
+		{
+			name:        "lookup",
+			price:       0,
+			description: "Rank active actions by semantic similarity and stats",
+			inSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"query": map[string]any{"type": "string", "description": "search query"}},
+				"required":   []string{"query"},
+			},
+			outSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"results": map[string]any{"type": "array", "description": "ranked results", "items": map[string]any{"type": "object"}}},
+			},
+		},
 	}
 	for _, spec := range actions {
 		a := &kernel.Action{
@@ -192,16 +229,28 @@ func seedMakeAction(t *testing.T, st kernel.Store) *kernel.User {
 }
 
 // fakeContract is a minimal valid contract JSON response for tests.
-const fakeContract = `{"name":"test-action","input_schema":{"type":"object","properties":{}},"output_schema":{"type":"object","properties":{"result":{"type":"string"}},"required":["result"]},"plan":"simple fixed response"}`
+const fakeContract = `{"name":"test-action","input_schema":{"type":"object","properties":{}},"output_schema":{"type":"object","properties":{"result":{"type":"string"}},"required":["result"]}}`
 
 // fakeCode is a minimal valid TinyGo run function for tests.
 const fakeCode = "```go\n//export run\nfunc run(inputPtr, inputLen uint32) (uint32, uint32) { return 0, 2 }\n```"
 
-// fakeExamples is an empty example list — unit tests use the compile smoke test only.
-const fakeExamples = `[]`
+// fakeExamples provides 3 inputs whose echo output satisfies fakeContract's output schema.
+const fakeExamples = `[{"result":"a"}, {"result":"b"}, {"result":"c"}]`
+
+// chatSelectCall returns a ToolCall that selects @sys/llm/chat for use with cycleDecideChatter.
+func chatSelectCall() *kernel.ToolCall {
+	return &kernel.ToolCall{
+		Action: "@sys/llm/chat",
+		Args: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "generate implementation"},
+			},
+		},
+	}
+}
 
 func TestMakeRejectsEmptyDescription(t *testing.T) {
-	k, st := newMakeKernel(t, &llm.FakeChatter{})
+	k, st := newMakeKernel(t, &llm.FakeChatter{}, &llm.FakeDecideChatter{})
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
@@ -248,12 +297,9 @@ func TestMakeReturnsErrInvalidStateWithoutCompiler(t *testing.T) {
 }
 
 func TestMakeRegistersActionOnSuccess(t *testing.T) {
-	fakeChat := &cycleFakeChatter{responses: []string{
-		fakeContract,
-		fakeCode,
-		fakeExamples,
-	}}
-	k, st := newMakeKernel(t, fakeChat)
+	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
+	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
+	k, st := newMakeKernel(t, fakeChat, decider)
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
@@ -298,23 +344,18 @@ func TestMakeRegistersActionOnSuccess(t *testing.T) {
 	if action.Kind != kernel.KindWasm {
 		t.Errorf("expected kind=wasm, got %q", action.Kind)
 	}
-	// Source must be TinyGo text, not WASM binary bytes.
 	if len(action.Source) > 0 && action.Source[0] == 0x00 {
 		t.Error("action.Source must be TinyGo source text, not WASM binary")
 	}
-	// WasmArtifact must be set when an artifact was compiled.
 	if action.WasmArtifact == "" {
 		t.Error("expected WasmArtifact to be set for @sys/make registered action")
 	}
 }
 
 func TestMakeRegisteredActionHasName(t *testing.T) {
-	fakeChat := &cycleFakeChatter{responses: []string{
-		fakeContract,
-		fakeCode,
-		fakeExamples,
-	}}
-	k, st := newMakeKernel(t, fakeChat)
+	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
+	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
+	k, st := newMakeKernel(t, fakeChat, decider)
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
@@ -340,8 +381,9 @@ func TestMakeRegisteredActionHasName(t *testing.T) {
 }
 
 func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
-	fakeChat := &llm.FakeChatter{Reply: kernel.ChatMessage{Role: "assistant", Content: "not a go block"}}
-	fakeComp := &script.FakeCompiler{Err: kernel.ErrInvalidInput.Wrap("syntax error")}
+	// deriveContract gets a valid contract; all code-gen attempts produce no Go block.
+	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, "no code here"}}
+	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
 
 	st := newTestStore(t)
 	cfg := kernel.DefaultConfig()
@@ -352,9 +394,11 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 	exec := script.New(script.Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
 	k := kernel.New(st, exec, nil, nil, cfg, log.Default())
 	native.RegisterChatHandler(k, fakeChat)
+	native.RegisterDecideHandler(k, decider)
+	native.RegisterLookupHandler(k)
 	native.RegisterMakeHandler(k, native.MakeDeps{
-		Scripts: exec, Compiler: fakeComp, Chatter: fakeChat,
-	}, "", 0)
+		Scripts: exec, Compiler: &script.FakeCompiler{}, Chatter: fakeChat,
+	}, "", 3) // small maxSteps to keep test fast
 
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
@@ -381,10 +425,9 @@ func TestMakeMaxStepsBoundsRepairLoop(t *testing.T) {
 }
 
 func TestMakeInternalChatCallCreatesChildTrace(t *testing.T) {
-	fakeChat := &cycleFakeChatter{responses: []string{
-		fakeContract, fakeCode, fakeExamples,
-	}}
-	k, st := newMakeKernel(t, fakeChat)
+	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
+	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
+	k, st := newMakeKernel(t, fakeChat, decider)
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 10000)
@@ -403,65 +446,66 @@ func TestMakeInternalChatCallCreatesChildTrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(txs) < 2 {
-		t.Errorf("expected at least 2 transactions (make + chat sub-calls), got %d", len(txs))
+	// make + decide + chat (code gen) + chat (examples) = at least 4
+	if len(txs) < 4 {
+		t.Errorf("expected at least 4 transactions (make + decide + chat sub-calls), got %d", len(txs))
 	}
 }
 
-func TestMakeNameCollisionReturnsFailure(t *testing.T) {
+func TestMakeNameCollisionPicksAlternateName(t *testing.T) {
 	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
-	k, st := newMakeKernel(t, fakeChat)
+	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
+	k, st := newMakeKernel(t, fakeChat, decider)
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
 	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
 
 	desc := map[string]any{"description": "An action that returns a fixed result"}
-	_, err := k.Call(ctx, kernel.CallRequest{
+	reply1, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "make", Args: desc,
 	})
 	if err != nil {
 		t.Fatalf("first Call: %v", err)
 	}
-	// Use a fresh process for the second call — the first call auto-closes p when quiescent.
+	var r1 native.MakeResult
+	b1, _ := json.Marshal(reply1.Result)
+	_ = json.Unmarshal(b1, &r1)
+	if r1.Status != "success" {
+		t.Fatalf("first Call: expected success, got %q (diagnostics: %v)", r1.Status, r1.Diagnostics)
+	}
+
+	// Reset chatter so the second call gets the same contract+code responses.
+	fakeChat.idx = 0
+	decider.idx = 0
+
 	p2, tr2 := beginMakeTestRun(t, st, caller.ID, sys.ID)
 	reply2, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ProcessID: p2.ID, ExistingTraceID: tr2.ID,
 		TargetUserID: sys.ID, ActionName: "make", Args: desc,
 	})
 	if err != nil {
-		t.Fatalf("second Call returned kernel error (expected status=failure): %v", err)
+		t.Fatalf("second Call: %v", err)
 	}
-	b, _ := json.Marshal(reply2.Result)
-	var result native.MakeResult
-	_ = json.Unmarshal(b, &result)
-	if result.Status != "failure" {
-		t.Errorf("expected status=failure on name collision, got %q", result.Status)
+	var r2 native.MakeResult
+	b2, _ := json.Marshal(reply2.Result)
+	_ = json.Unmarshal(b2, &r2)
+	if r2.Status != "success" {
+		t.Errorf("expected success on name collision (suffix retry), got %q (diagnostics: %v)", r2.Status, r2.Diagnostics)
 	}
-	if len(result.Diagnostics) == 0 {
-		t.Error("expected diagnostics on collision failure")
+	if r2.ActionName == r1.ActionName {
+		t.Errorf("expected different action name on collision, both got %q", r1.ActionName)
 	}
 }
 
 func TestMakePrivateActionNotSurfacedToForeignProcess(t *testing.T) {
-	// A private action owned by user A must not appear in the composable list when
-	// @sys/make is called in a process owned by user B.
 	ctx := context.Background()
-
-	// Build a chatter that returns a contract + no code (make will fail synthesis,
-	// but we only care that the private action is not in the composable list).
-	chatter := &cycleFakeChatter{
-		responses: []string{
-			fakeContract,
-			fakeExamples,
-			`[]`, // no examples
-		},
-	}
-	k, st := newMakeKernel(t, chatter)
+	chatter := &cycleFakeChatter{responses: []string{fakeContract, "no code", `[]`}}
+	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
+	k, st := newMakeKernel(t, chatter, decider)
 	sys := seedMakeAction(t, st)
 
-	// Create owner A with a private action.
 	ownerA := setupUser(t, st, "@owner-a", 5000)
 	privAction := &kernel.Action{
 		ID:          uuid.New().String(),
@@ -485,7 +529,6 @@ func TestMakePrivateActionNotSurfacedToForeignProcess(t *testing.T) {
 		t.Fatalf("create private action: %v", err)
 	}
 
-	// Create user B and their process. B explicitly references @owner-a/secret-tool.
 	ownerB := setupUser(t, st, "@owner-b", 5000)
 	p, tr := beginMakeTestRun(t, st, ownerB.ID, sys.ID)
 
@@ -497,80 +540,21 @@ func TestMakePrivateActionNotSurfacedToForeignProcess(t *testing.T) {
 		ActionName:      "make",
 		Args:            map[string]any{"description": "use @owner-a/secret-tool to do something"},
 	})
-	// The call may succeed or fail (synthesis will fail without a real compiler),
-	// but it must NOT expose the private action to B.
-	// If err == nil, verify the make result didn't error out due to a store auth bypass.
 	_ = err
-	// The key invariant: ReadCallableAction(ownerB, ...) must have returned ErrUnauthorized
-	// for @owner-a/secret-tool. We verify this directly.
 	_, callableErr := k.ReadCallableAction(ctx, "@owner-a", "secret-tool", ownerB.ID)
 	if callableErr == nil {
 		t.Error("expected error: private action should not be callable by foreign process owner")
 	}
 }
 
-// cycleFakeChatter cycles through a list of responses for successive Chat() calls.
-type cycleFakeChatter struct {
-	responses []string
-	idx       int
-}
-
-func (c *cycleFakeChatter) Chat(_ context.Context, _ []kernel.ChatMessage) (kernel.ChatMessage, error) {
-	if len(c.responses) == 0 {
-		return kernel.ChatMessage{Role: "assistant", Content: "{}"}, nil
-	}
-	r := c.responses[c.idx%len(c.responses)]
-	c.idx++
-	return kernel.ChatMessage{Role: "assistant", Content: r}, nil
-}
-
-// fakeInspectingScripts implements kernel.ScriptExecutor and kernel.WASMInspector
-// with a configurable import/export list. Used to test checkWASMImports behaviour
-// without invoking wazero.
-type fakeInspectingScripts struct {
-	imports []kernel.WASMImport
-	exports []string
-}
-
-func (f *fakeInspectingScripts) Compile(_ context.Context, src []byte) ([]byte, string, error) {
-	return src, "fake-hash", nil
-}
-
-func (f *fakeInspectingScripts) Execute(_ context.Context, _ []byte, _ []byte, _ kernel.HostFunctions) ([]byte, error) {
-	return []byte(`{"result":"ok"}`), nil
-}
-
-func (f *fakeInspectingScripts) InspectWASM(_ []byte) ([]kernel.WASMImport, []string, error) {
-	return f.imports, f.exports, nil
-}
-
-// newMakeKernelWithExec is like newMakeKernel but accepts a custom ScriptExecutor,
-// allowing tests to control what InspectWASM returns.
-func newMakeKernelWithExec(t *testing.T, chatter kernel.Chatter, exec kernel.ScriptExecutor) (*kernel.Kernel, kernel.Store) {
-	t.Helper()
-	st := newTestStore(t)
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, exec, nil, nil, cfg, log.Default())
-	native.RegisterChatHandler(k, chatter)
-	native.RegisterMakeHandler(k, native.MakeDeps{
-		Scripts:  exec,
-		Compiler: &script.FakeCompiler{},
-		Chatter:  chatter,
-	}, "", 0)
-	return k, st
-}
-
 func TestMakeRejectsDisallowedWASMImport(t *testing.T) {
 	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
+	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
 	insp := &fakeInspectingScripts{
 		imports: []kernel.WASMImport{{Module: "juice", Name: "emit"}},
 		exports: []string{"alloc", "run"},
 	}
-	k, st := newMakeKernelWithExec(t, fakeChat, insp)
+	k, st := newMakeKernelWithExec(t, fakeChat, decider, insp)
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
@@ -604,6 +588,7 @@ func TestMakeRejectsDisallowedWASMImport(t *testing.T) {
 
 func TestMakeAcceptsStepImports(t *testing.T) {
 	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
+	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
 	insp := &fakeInspectingScripts{
 		imports: []kernel.WASMImport{
 			{Module: "juice", Name: "step_create"},
@@ -611,7 +596,7 @@ func TestMakeAcceptsStepImports(t *testing.T) {
 		},
 		exports: []string{"alloc", "run"},
 	}
-	k, st := newMakeKernelWithExec(t, fakeChat, insp)
+	k, st := newMakeKernelWithExec(t, fakeChat, decider, insp)
 	ctx := context.Background()
 	sys := seedMakeAction(t, st)
 	caller := setupUser(t, st, "@alice", 1000)
@@ -631,4 +616,252 @@ func TestMakeAcceptsStepImports(t *testing.T) {
 	if result.Status != "success" {
 		t.Errorf("expected status=success for step_create/step_complete imports, got %q; diagnostics: %v", result.Status, result.Diagnostics)
 	}
+}
+
+func TestMakeDecideIsCalledEachIteration(t *testing.T) {
+	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
+	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
+	k, st := newMakeKernel(t, fakeChat, decider)
+	ctx := context.Background()
+	sys := seedMakeAction(t, st)
+	caller := setupUser(t, st, "@alice", 10000)
+	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		TargetUserID: sys.ID, ActionName: "make",
+		Args: map[string]any{"description": "test action"},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+
+	txs, err := k.ListTransactions(ctx, caller.ID, kernel.TxFilter{ProcessID: p.ID, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundDecide := false
+	for _, tx := range txs {
+		if tx.ActionName == "llm/decide" {
+			foundDecide = true
+			break
+		}
+	}
+	if !foundDecide {
+		t.Error("expected at least one @sys/llm/decide sub-transaction in the process")
+	}
+}
+
+func TestMakeLookupResultAppearsInNextDecide(t *testing.T) {
+	// First decide selects lookup; second selects chat. The lookup fails (no embedder),
+	// but the error is recorded in history and the loop continues to the chat call.
+	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
+	lookupCall := &kernel.ToolCall{
+		Action: "@sys/lookup",
+		Args:   map[string]any{"query": "find something useful"},
+	}
+	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{lookupCall, chatSelectCall()}}
+	k, st := newMakeKernel(t, fakeChat, decider)
+	ctx := context.Background()
+	sys := seedMakeAction(t, st)
+	caller := setupUser(t, st, "@alice", 10000)
+	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		TargetUserID: sys.ID, ActionName: "make",
+		Args: map[string]any{"description": "test action with lookup"},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+
+	// The lookup fails (no embedder) but the loop continues and chat produces code → success.
+	b, _ := json.Marshal(reply.Result)
+	var result native.MakeResult
+	_ = json.Unmarshal(b, &result)
+
+	txs, err := k.ListTransactions(ctx, caller.ID, kernel.TxFilter{ProcessID: p.ID, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Expect: make, decide (select lookup), lookup (fails), decide (select chat), chat, chat(examples)
+	if len(txs) < 5 {
+		t.Errorf("expected at least 5 sub-transactions (make+decide+lookup+decide+chat), got %d", len(txs))
+	}
+	foundLookup := false
+	for _, tx := range txs {
+		if tx.ActionName == "lookup" {
+			foundLookup = true
+			break
+		}
+	}
+	if !foundLookup {
+		t.Error("expected a @sys/lookup sub-transaction in the process")
+	}
+}
+
+func TestMakeComputesPriceFromComposedActions(t *testing.T) {
+	// Source references two actions via JuiceCall; registered action price = sum of their prices.
+	ctx := context.Background()
+	fakeCodeWithCalls := "```go\n//export run\nfunc run(inputPtr, inputLen uint32) uint64 {\n" +
+		"\tJuiceCall(\"@sys/time\", nil)\n" +
+		"\tJuiceCall(\"@sys/sink\", nil)\n" +
+		"\treturn 0\n}\n```"
+	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCodeWithCalls, fakeExamples}}
+	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
+	k, st := newMakeKernel(t, fakeChat, decider)
+	sys := seedMakeAction(t, st)
+
+	// Seed @sys/time (price=5) and @sys/sink (price=3) so computePrice can resolve them.
+	for _, spec := range []struct {
+		name  string
+		price int64
+	}{{"time", 5}, {"sink", 3}} {
+		a := &kernel.Action{
+			ID: uuid.New().String(), OwnerUserID: sys.ID,
+			Name: spec.name, Kind: kernel.KindNative,
+			Active: true, Public: true, Price: spec.price,
+			Description: spec.name + " action",
+			Source:      "native",
+			InputSchema: map[string]any{
+				"type": "object", "properties": map[string]any{},
+			},
+			OutputSchema: map[string]any{
+				"type": "object", "properties": map[string]any{},
+			},
+			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		}
+		if err := st.CreateAction(ctx, a); err != nil {
+			t.Fatalf("seed %s: %v", spec.name, err)
+		}
+	}
+
+	caller := setupUser(t, st, "@alice", 1000)
+	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		TargetUserID: sys.ID, ActionName: "make",
+		Args: map[string]any{"description": "action that calls time and sink"},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	b, _ := json.Marshal(reply.Result)
+	var result native.MakeResult
+	if err := json.Unmarshal(b, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "success" {
+		t.Fatalf("expected success, got %q; diagnostics: %v", result.Status, result.Diagnostics)
+	}
+
+	action, err := st.ReadAction(ctx, result.ActionID)
+	if err != nil {
+		t.Fatalf("ReadAction: %v", err)
+	}
+	const wantPrice = int64(5 + 3)
+	if action.Price != wantPrice {
+		t.Errorf("expected price=%d (sum of composed action prices), got %d", wantPrice, action.Price)
+	}
+}
+
+func TestMakeDecideExhaustedReturnsFailure(t *testing.T) {
+	// decide chatter always returns ErrExecutionFailed (no selection) → immediate failure.
+	fakeChat := &cycleFakeChatter{responses: []string{fakeContract}}
+	decider := &llm.FakeDecideChatter{Err: kernel.ErrExecutionFailed.Wrap("no selection")}
+	k, st := newMakeKernel(t, fakeChat, decider)
+	ctx := context.Background()
+	sys := seedMakeAction(t, st)
+	caller := setupUser(t, st, "@alice", 1000)
+	p, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: caller.ID, ProcessID: p.ID, ExistingTraceID: tr.ID,
+		TargetUserID: sys.ID, ActionName: "make",
+		Args: map[string]any{"description": "something"},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	b, _ := json.Marshal(reply.Result)
+	var result native.MakeResult
+	_ = json.Unmarshal(b, &result)
+	if result.Status != "failure" {
+		t.Errorf("expected status=failure when decide returns no selection, got %q", result.Status)
+	}
+	if len(result.Diagnostics) == 0 {
+		t.Error("expected diagnostics on decide exhaustion")
+	}
+}
+
+// cycleFakeChatter cycles through a list of responses for successive Chat() calls.
+type cycleFakeChatter struct {
+	responses []string
+	idx       int
+}
+
+func (c *cycleFakeChatter) Chat(_ context.Context, _ []kernel.ChatMessage) (kernel.ChatMessage, error) {
+	if len(c.responses) == 0 {
+		return kernel.ChatMessage{Role: "assistant", Content: "{}"}, nil
+	}
+	r := c.responses[c.idx%len(c.responses)]
+	c.idx++
+	return kernel.ChatMessage{Role: "assistant", Content: r}, nil
+}
+
+// cycleDecideChatter cycles through a list of ToolCall decisions for successive ChatDecide() calls.
+type cycleDecideChatter struct {
+	calls []*kernel.ToolCall
+	idx   int
+}
+
+func (c *cycleDecideChatter) ChatDecide(_ context.Context, _ []kernel.DecideMessage, _ []kernel.ToolDefinition) (*kernel.ToolCall, *kernel.ChatMessage, error) {
+	if len(c.calls) == 0 {
+		return nil, nil, kernel.ErrExecutionFailed.Wrap("no calls configured")
+	}
+	call := c.calls[c.idx%len(c.calls)]
+	c.idx++
+	return call, nil, nil
+}
+
+// fakeInspectingScripts implements kernel.ScriptExecutor and kernel.WASMInspector
+// with a configurable import/export list.
+type fakeInspectingScripts struct {
+	imports []kernel.WASMImport
+	exports []string
+}
+
+func (f *fakeInspectingScripts) Compile(_ context.Context, src []byte) ([]byte, string, error) {
+	return src, "fake-hash", nil
+}
+
+func (f *fakeInspectingScripts) Execute(_ context.Context, _ []byte, _ []byte, _ kernel.HostFunctions) ([]byte, error) {
+	return []byte(`{"result":"ok"}`), nil
+}
+
+func (f *fakeInspectingScripts) InspectWASM(_ []byte) ([]kernel.WASMImport, []string, error) {
+	return f.imports, f.exports, nil
+}
+
+// newMakeKernelWithExec is like newMakeKernel but accepts a custom ScriptExecutor.
+func newMakeKernelWithExec(t *testing.T, chatter kernel.Chatter, decider kernel.DecideChatter, exec kernel.ScriptExecutor) (*kernel.Kernel, kernel.Store) {
+	t.Helper()
+	st := newTestStore(t)
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	k := kernel.New(st, exec, nil, nil, cfg, log.Default())
+	native.RegisterChatHandler(k, chatter)
+	native.RegisterDecideHandler(k, decider)
+	native.RegisterLookupHandler(k)
+	native.RegisterMakeHandler(k, native.MakeDeps{
+		Scripts:  exec,
+		Compiler: &script.FakeCompiler{},
+		Chatter:  chatter,
+	}, "", 0)
+	return k, st
 }

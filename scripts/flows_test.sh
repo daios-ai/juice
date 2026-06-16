@@ -44,16 +44,17 @@ fail() { echo "  FAIL: $1 — $2"; ((FAIL++)); ERRS="${ERRS}\n  [$1] $2"; }
 
 # write_test_config db [key=value ...]
 # Writes juice.json next to the db file with test defaults and optional overrides.
-# Keys: fee_bps script_timeout_ms server_url (all others use defaults).
+# Keys: fee_bps script_timeout_ms server_url make_max_steps (all others use defaults).
 write_test_config() {
     local db="$1"; shift
-    local fee_bps=0 script_timeout_ms=10000 server_url="" peer_handle=""
+    local fee_bps=0 script_timeout_ms=10000 server_url="" peer_handle="" make_max_steps=5
     for arg in "$@"; do
         case "$arg" in
             fee_bps=*)           fee_bps="${arg#*=}" ;;
             script_timeout_ms=*) script_timeout_ms="${arg#*=}" ;;
             server_url=*)        server_url="${arg#*=}" ;;
             peer_handle=*)       peer_handle="${arg#*=}" ;;
+            make_max_steps=*)    make_max_steps="${arg#*=}" ;;
         esac
     done
     cat > "$(dirname "$db")/juice.json" << EOF
@@ -70,7 +71,7 @@ write_test_config() {
   "log_level": "error",
   "log_file": "",
   "log_format": "text",
-  "make_max_steps": 5,
+  "make_max_steps": $make_max_steps,
   "allow_local_sources": true,
   "server_url": "$server_url",
   "peer_handle": "$peer_handle"
@@ -408,6 +409,9 @@ main() {
     flow_transaction_access
     flow_admin_supervision
     flow_make
+    flow_make_calculator
+    flow_make_translator
+    flow_make_natural_language_calc
     flow_time
     flow_message
 

@@ -719,3 +719,175 @@ assert any(s.get('id')=='$http_step_id' for s in steps), 'step not visible to bo
         && ok "message.http_step_done" \
         || fail "message.http_step_done" "expected done, got: $http_step_show"
 }
+
+# _make_extract_result <run_output>  →  prints result JSON or {}
+_make_extract_result() {
+    echo "$1" | python3 -c "
+import sys, json, re
+text = sys.stdin.read()
+m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
+if m:
+    try: print(json.dumps(json.loads(m.group(1))))
+    except: print('{}')
+else: print('{}')
+" 2>/dev/null
+}
+
+# _make_first_input_field <actions_json> <action_name>  →  prints first required property name
+_make_first_input_field() {
+    echo "$1" | python3 -c "
+import sys, json
+actions = json.load(sys.stdin)
+a = next((x for x in actions if x.get('name') == sys.argv[1]), None)
+if not a:
+    print(''); sys.exit(0)
+props = a.get('input_schema', {}).get('properties', {})
+req   = a.get('input_schema', {}).get('required', list(props.keys()))
+print(next((k for k in req if k in props), ''))
+" "$2" 2>/dev/null
+}
+
+# _make_output_values <run_output>  →  prints space-joined top-level values
+_make_output_values() {
+    echo "$1" | python3 -c "
+import sys, json, re
+text = sys.stdin.read()
+m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
+if not m:
+    sys.exit(0)
+try:
+    obj = json.loads(m.group(1))
+    print(' '.join(str(v) for v in obj.values()))
+except:
+    pass
+" 2>/dev/null
+}
+
+flow_make_calculator() {
+    echo "=== FLOW make_calculator ==="
+    local dir db home_sys home_alice
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    alloc_port; local port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" make_max_steps=10 \
+        || { fail "make_calculator.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 500 >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+
+    local make_out make_result status action_name
+    make_out=$(j "$db" "$home_alice" run --action @sys/make \
+        --args '{"description": "A calculator that evaluates arithmetic expressions like (3+4)*5, supporting +, -, *, /. Use @sys/llm/chat to evaluate the expression and return the numeric result."}' 2>&1)
+    make_result=$(_make_extract_result "$make_out")
+    status=$(echo "$make_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+    [ "$status" = "success" ] \
+        && ok "make_calculator.status_success" \
+        || { fail "make_calculator.status_success" "expected success, got $status; diagnostics: $(echo "$make_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('diagnostics',''))" 2>/dev/null)"; return; }
+
+    action_name=$(echo "$make_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('action_name',''))" 2>/dev/null)
+    local actions_out input_field
+    actions_out=$(jj "$db" "$home_alice" action list --all 2>/dev/null)
+    input_field=$(_make_first_input_field "$actions_out" "$action_name")
+    [ -n "$input_field" ] || { fail "make_calculator.result_correct" "could not find input field for $action_name"; return; }
+
+    local call_out
+    call_out=$(j "$db" "$home_alice" run --action "@alice/$action_name" \
+        --args "{\"$input_field\": \"(3+4)*5\"}" 2>&1)
+    _make_output_values "$call_out" | grep -q "35" \
+        && ok "make_calculator.result_correct" \
+        || fail "make_calculator.result_correct" "expected 35 in output, got: $call_out"
+}
+
+flow_make_translator() {
+    echo "=== FLOW make_translator ==="
+    local dir db home_sys home_alice
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    alloc_port; local port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "make_translator.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 500 >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+
+    local make_out make_result status action_name
+    make_out=$(j "$db" "$home_alice" run --action @sys/make \
+        --args '{"description": "Translate text from English to Italian. Use @sys/llm/chat to perform the translation."}' 2>&1)
+    make_result=$(_make_extract_result "$make_out")
+    status=$(echo "$make_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+    [ "$status" = "success" ] \
+        && ok "make_translator.status_success" \
+        || { fail "make_translator.status_success" "expected success, got $status; diagnostics: $(echo "$make_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('diagnostics',''))" 2>/dev/null)"; return; }
+
+    action_name=$(echo "$make_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('action_name',''))" 2>/dev/null)
+    local actions_out input_field
+    actions_out=$(jj "$db" "$home_alice" action list --all 2>/dev/null)
+    input_field=$(_make_first_input_field "$actions_out" "$action_name")
+    [ -n "$input_field" ] || { fail "make_translator.output_nonempty" "could not find input field for $action_name"; return; }
+
+    local call_out
+    call_out=$(j "$db" "$home_alice" run --action "@alice/$action_name" \
+        --args "{\"$input_field\": \"Hello\"}" 2>&1)
+    _make_output_values "$call_out" | grep -qv "^$" \
+        && ok "make_translator.output_nonempty" \
+        || fail "make_translator.output_nonempty" "expected non-empty translation output, got: $call_out"
+}
+
+flow_make_natural_language_calc() {
+    echo "=== FLOW make_natural_language_calc ==="
+    local dir db home_sys home_alice
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    alloc_port; local port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" make_max_steps=10 \
+        || { fail "make_nl_calc.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 1000 >/dev/null 2>&1
+    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+
+    # Step 1: synthesize the calculator so it exists in the catalog.
+    local calc_out calc_result calc_status calc_name
+    calc_out=$(j "$db" "$home_alice" run --action @sys/make \
+        --args '{"description": "A calculator that evaluates arithmetic expressions like (3+4)*5, supporting +, -, *, /. Use @sys/llm/chat to evaluate the expression and return the numeric result."}' 2>&1)
+    calc_result=$(_make_extract_result "$calc_out")
+    calc_status=$(echo "$calc_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+    [ "$calc_status" = "success" ] \
+        && ok "make_nl_calc.calculator_success" \
+        || { fail "make_nl_calc.calculator_success" "calculator synthesis failed; diagnostics: $(echo "$calc_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('diagnostics',''))" 2>/dev/null)"; return; }
+    calc_name=$(echo "$calc_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('action_name',''))" 2>/dev/null)
+
+    # Step 2: synthesize the NL solver — @sys/lookup should find the calculator above.
+    local nl_out nl_result nl_status nl_name
+    nl_out=$(j "$db" "$home_alice" run --action @sys/make \
+        --args '{"description": "Given a sentence in natural language describing an arithmetic calculation (for example '\''what is three plus four'\''), look up and use an existing calculator action to compute the numeric result"}' 2>&1)
+    nl_result=$(_make_extract_result "$nl_out")
+    nl_status=$(echo "$nl_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+    [ "$nl_status" = "success" ] \
+        && ok "make_nl_calc.composer_success" \
+        || { fail "make_nl_calc.composer_success" "NL solver synthesis failed; diagnostics: $(echo "$nl_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('diagnostics',''))" 2>/dev/null)"; return; }
+    nl_name=$(echo "$nl_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('action_name',''))" 2>/dev/null)
+
+    local actions_out input_field
+    actions_out=$(jj "$db" "$home_alice" action list --all 2>/dev/null)
+    input_field=$(_make_first_input_field "$actions_out" "$nl_name")
+    [ -n "$input_field" ] || { fail "make_nl_calc.result_correct" "could not find input field for $nl_name"; return; }
+
+    local call_out
+    call_out=$(j "$db" "$home_alice" run --action "@alice/$nl_name" \
+        --args "{\"$input_field\": \"what is two plus two\"}" 2>&1)
+    _make_output_values "$call_out" | grep -q "4" \
+        && ok "make_nl_calc.result_correct" \
+        || fail "make_nl_calc.result_correct" "expected 4 in output, got: $call_out"
+}
