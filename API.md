@@ -157,12 +157,12 @@ Remote-proxy transactions include `remote_receipt_hash` and `remote_receipt_json
 
 | Operation | HTTP | CLI |
 |-----------|------|-----|
-| Create step | `POST /v1/steps` `{process_id, parent_trace_id, action, partial_args, input_schema, required_caller}` → 201 step | `juice step create --process --parent-trace --action @owner/name --partial-args --input-schema --required-caller @handle` |
+| Create step | `POST /v1/steps` `{trace_id, action_id, partial_args, required_caller}` → 201 step | `juice step create --trace --action @owner/name --partial-args --required-caller @handle` |
 | List steps | `GET /v1/steps[?process_id=&status=]` → step[] | `juice step list [--process --status]` |
 | Show step | `GET /v1/steps/{id}` → step | `juice step show --id` |
 | Complete step | `POST /v1/steps/{id}/complete` `{args}` → `{result, tx_id, trace_id, step_id}` | `juice step complete --id --args` |
 
-A step is a funded continuation: creation snapshots the action's price as `step.price` and parks it from the funding trace, which must belong to the same process (`Trace(parent_trace_id).process_id = process_id`). Completion spends the parked price — no funds check occurs, and the completion's allocation and transaction `gross` are `step.price`. `required_caller` is a `@handle`; the server resolves it to `required_caller_user_id`. `status` filter accepts `waiting`, `running`, `done`, or `cancelled`. The `args` field in the complete request is merged with the step's `partial_args` (completion `args` overwrites on key collision); a violation of `input_schema` rejects the completion and leaves the step `waiting` — it is never recorded as an action failure. Step read and list responses include `price` and a computed `action` field (`@owner/name`) alongside `next_action_id`. An outstanding step keeps its process open.
+A step is a funded continuation: creation snapshots the action's price as `step.price` and parks it from `trace_id`; the process is derived from `Trace(trace_id).process_id`. Completion spends the parked price — no funds check occurs, and the completion's allocation and transaction `gross` are `step.price`. `required_caller` is a `@handle`; the server resolves it to `required_caller_user_id`. `status` filter accepts `waiting`, `running`, `done`, or `cancelled`. The `args` field in the complete request is merged with the step's `partial_args` (completion `args` overwrites on key collision); the allowed completion input is derived as `action.input_schema \ keys(partial_args)` — a violation rejects the completion and leaves the step `waiting`, never recorded as an action failure. Step read and list responses include `price`, `action_id`, and a computed `action` field (`@owner/name`). An outstanding step keeps its process open.
 
 ### System Actions
 
