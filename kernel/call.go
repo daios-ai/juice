@@ -280,6 +280,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 
 	ctx = log.WithProcessID(ctx, processID)
 	ctx = log.WithCallerUserID(ctx, req.CallerID)
+	ctx = log.WithCallerHandle(ctx, k.callerHandle(ctx, req.CallerID))
 	ctx = log.WithTraceID(ctx, trace.ID)
 	ctx = log.WithActionID(ctx, action.ID)
 	logger = k.log.With(ctx)

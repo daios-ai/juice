@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/daios-ai/juice/log"
@@ -73,6 +74,25 @@ type Kernel struct {
 	nativeHandlers map[string]NativeFunc
 	secretBox      SecretBox
 	lookupHost     func(context.Context, string) ([]string, error)
+	userHandles    sync.Map // user ID → handle, cached for readable logging
+}
+
+// callerHandle returns a user's handle for logging, caching id→handle lookups.
+// Returns "" on error so callers can fall back to the raw id; handles are effectively
+// stable, so a never-invalidated cache only risks a cosmetic stale handle in logs.
+func (k *Kernel) callerHandle(ctx context.Context, id string) string {
+	if id == "" {
+		return ""
+	}
+	if v, ok := k.userHandles.Load(id); ok {
+		return v.(string)
+	}
+	u, err := k.store.ReadUser(ctx, id)
+	if err != nil || u == nil {
+		return ""
+	}
+	k.userHandles.Store(id, u.Handle)
+	return u.Handle
 }
 
 // SetSecretBox installs the credential encryption adapter. Must be called before any

@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/lmittmann/tint"
@@ -15,6 +16,7 @@ type contextKey int
 const (
 	keyRequestID contextKey = iota
 	keyCallerUserID
+	keyCallerHandle
 	keyProcessID
 	keyTraceID
 	keyActionID
@@ -42,11 +44,13 @@ func New(cfg Config) (*Logger, error) {
 	if cfg.Format == "json" {
 		terminal = slog.NewJSONHandler(os.Stderr, opts)
 	} else {
-		terminal = tint.NewHandler(os.Stderr, &tint.Options{
+		// Console: shorten IDs and prefer handles/names for readability. The optional
+		// JSON file handler (below) is left unwrapped so it keeps full IDs for tooling.
+		terminal = &readableHandler{inner: tint.NewHandler(os.Stderr, &tint.Options{
 			Level:      level,
 			TimeFormat: time.TimeOnly,
 			NoColor:    false,
-		})
+		})}
 	}
 
 	var handler slog.Handler = terminal
@@ -93,6 +97,9 @@ func (l *Logger) With(ctx context.Context) *Logger {
 	if v, ok := ctx.Value(keyCallerUserID).(string); ok && v != "" {
 		args = append(args, "caller_user_id", v)
 	}
+	if v, ok := ctx.Value(keyCallerHandle).(string); ok && v != "" {
+		args = append(args, "caller_handle", v)
+	}
 	if v, ok := ctx.Value(keyProcessID).(string); ok && v != "" {
 		args = append(args, "process_id", v)
 	}
@@ -118,6 +125,9 @@ func WithRequestID(ctx context.Context, id string) context.Context {
 }
 func WithCallerUserID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, keyCallerUserID, id)
+}
+func WithCallerHandle(ctx context.Context, handle string) context.Context {
+	return context.WithValue(ctx, keyCallerHandle, handle)
 }
 func WithProcessID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, keyProcessID, id)
@@ -164,6 +174,91 @@ func (h *multiHandler) WithGroup(name string) slog.Handler {
 		terminal: h.terminal.WithGroup(name),
 		file:     h.file.WithGroup(name),
 	}
+}
+
+// readableHandler wraps a console handler to make output scannable: it shortens UUID-ish
+// ID values to their first 8 chars, renames the noisy context keys to short forms, prefers
+// the caller's handle over its UUID, and drops action_id (the action name is already logged
+// as action=…). It is applied ONLY to the console; the JSON file handler keeps full fidelity.
+type readableHandler struct {
+	inner slog.Handler
+}
+
+func (h *readableHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.inner.Enabled(ctx, level)
+}
+
+func (h *readableHandler) Handle(ctx context.Context, r slog.Record) error {
+	// Rebuild the record with transformed attrs (records are otherwise immutable here).
+	var attrs []slog.Attr
+	r.Attrs(func(a slog.Attr) bool {
+		attrs = append(attrs, a)
+		return true
+	})
+	nr := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
+	nr.AddAttrs(transformAttrs(attrs)...)
+	return h.inner.Handle(ctx, nr)
+}
+
+func (h *readableHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &readableHandler{inner: h.inner.WithAttrs(transformAttrs(attrs))}
+}
+
+func (h *readableHandler) WithGroup(name string) slog.Handler {
+	return &readableHandler{inner: h.inner.WithGroup(name)}
+}
+
+// idKeyRenames maps verbose context keys to short console-friendly ones.
+var idKeyRenames = map[string]string{
+	"request_id": "req",
+	"process_id": "proc",
+	"trace_id":   "trace",
+	"tx_id":      "tx",
+}
+
+// transformAttrs applies the console readability rules to one batch of attributes.
+// Caller handling is batch-aware: caller_user_id is dropped only when caller_handle is
+// present in the same batch (context fields arrive together), else it falls back to a
+// short caller= value so the caller is never lost.
+func transformAttrs(attrs []slog.Attr) []slog.Attr {
+	hasHandle := false
+	for _, a := range attrs {
+		if a.Key == "caller_handle" && a.Value.String() != "" {
+			hasHandle = true
+			break
+		}
+	}
+	out := make([]slog.Attr, 0, len(attrs))
+	for _, a := range attrs {
+		switch {
+		case a.Key == "action_id":
+			// redundant with action=<name>
+			continue
+		case a.Key == "caller_handle":
+			out = append(out, slog.String("caller", a.Value.String()))
+		case a.Key == "caller_user_id":
+			if hasHandle {
+				continue
+			}
+			out = append(out, slog.String("caller", shortID(a.Value.String())))
+		case idKeyRenames[a.Key] != "":
+			out = append(out, slog.String(idKeyRenames[a.Key], shortID(a.Value.String())))
+		case strings.HasSuffix(a.Key, "_id"):
+			out = append(out, slog.String(a.Key, shortID(a.Value.String())))
+		default:
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// shortID returns the first 8 characters of an ID (UUID first group), or the whole
+// string when it is already short.
+func shortID(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
 }
 
 // Discard returns a logger that drops all output (useful in tests).
