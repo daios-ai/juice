@@ -111,7 +111,8 @@ func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Tr
 
 	recoverErr := ErrInternal.Wrap(reason)
 	req := CallRequest{StepID: stepID}
-	return k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, recoverErr)
+	_, settleErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, recoverErr)
+	return settleErr
 }
 
 // CreateStep creates a new waiting step. The step records a future Call that a designated caller can resume.
@@ -289,14 +290,7 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 	if action.Kind == KindRemoteProxy {
 		key := uuid.New().String()
 		stepTrace.IdempotencyKey = &key
-		mp := action.Price * 10000 / (10000 + k.cfg.ImportBPS)
-		djsonBytes, _ := json.Marshal(map[string]any{
-			"args":         args,
-			"step_id":      stepID,
-			"remote_price": mp,
-		})
-		djson := string(djsonBytes)
-		stepTrace.DispatchJSON = &djson
+		stepTrace.DispatchJSON = marshalDispatch(args, stepID, k.remoteManifestPrice(action.Price))
 	}
 	if err := k.store.BeginStepCall(ctx, stepID, stepTrace); err != nil {
 		return nil, err

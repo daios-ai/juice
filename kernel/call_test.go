@@ -1559,3 +1559,73 @@ func TestParseActionRef(t *testing.T) {
 		}
 	}
 }
+
+// subcallThenFailExec settles a subcall (inner) and then fails, leaving a settled descendant.
+type subcallThenFailExec struct {
+	targetUser   string
+	targetAction string
+}
+
+func (c *subcallThenFailExec) Compile(_ context.Context, src []byte) ([]byte, string, error) {
+	return src, "fakehash", nil
+}
+
+func (c *subcallThenFailExec) Execute(ctx context.Context, src []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
+	if string(src) == "outer" {
+		if _, err := host.Call(ctx, c.targetUser+"/"+c.targetAction, []byte(`{}`)); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("outer fails after settling inner")
+	}
+	return []byte(`{"ok":true}`), nil
+}
+
+// #1: a federated (inbound) call that fails AFTER settling a descendant must surface the
+// committed failure receipt — whose charge = gross − refund > 0 — not a zero-charge rejection.
+func TestRunFederatedFailureReturnsCommittedReceiptWithCharge(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	caller := setupUser(t, st, "@fed-caller", 1000) // proxy/counterparty user
+	provider := setupUser(t, st, "@provider", 0)
+	owner := setupUser(t, st, "@owner", 0)
+
+	inner := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "inner",
+		Kind: kernel.KindWasm, Source: "inner", Active: true, Public: true, Price: 100,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, inner); err != nil {
+		t.Fatal(err)
+	}
+	outer := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "outer",
+		Kind: kernel.KindWasm, Source: "outer", Active: true, Public: true, Price: 150,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, outer); err != nil {
+		t.Fatal(err)
+	}
+
+	exec := &subcallThenFailExec{targetUser: provider.ID, targetAction: "inner"}
+	k := newTestKernelWithScripts(st, exec)
+
+	reply, err := k.RunFederated(ctx, caller.ID, owner.ID, "outer", map[string]any{}, "")
+	if err == nil {
+		t.Fatal("expected outer call to fail")
+	}
+	if reply == nil || reply.ReceiptID == "" {
+		t.Fatalf("expected committed receipt on failure, got reply=%v", reply)
+	}
+	rcpt, gerr := k.GetReceiptByID(ctx, reply.ReceiptID)
+	if gerr != nil {
+		t.Fatalf("GetReceiptByID: %v", gerr)
+	}
+	if rcpt.Status != kernel.TxFailure {
+		t.Errorf("expected failure receipt, got status %s", rcpt.Status)
+	}
+	// inner settled for 100, so the failed outer charge = gross(150) − refund(50) = 100, not 0.
+	if rcpt.Charge != 100 {
+		t.Errorf("expected committed charge 100 (settled descendant), got %d", rcpt.Charge)
+	}
+}

@@ -1028,10 +1028,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	if action.Kind == KindRemoteProxy {
 		key := uuid.New().String()
 		t.IdempotencyKey = &key
-		mp := action.Price * 10000 / (10000 + k.cfg.ImportBPS)
-		djsonBytes, _ := json.Marshal(map[string]any{"args": args, "step_id": "", "remote_price": mp})
-		djson := string(djsonBytes)
-		t.DispatchJSON = &djson
+		t.DispatchJSON = marshalDispatch(args, "", k.remoteManifestPrice(action.Price))
 	}
 	if err := k.store.BeginRun(ctx, p, t, caller.ID, action.Price); err != nil {
 		return nil, err

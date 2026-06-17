@@ -23,6 +23,42 @@ func sha256Hex(s string) string {
 	return fmt.Sprintf("%x", h)
 }
 
+// remoteManifestPrice derives the original remote manifest price (mp) from a proxy price
+// (q = mp + import duty): mp = floor(q * 10000 / (10000 + ImportBPS)).
+func (k *Kernel) remoteManifestPrice(proxyPrice int64) int64 {
+	return proxyPrice * 10000 / (10000 + k.cfg.ImportBPS)
+}
+
+// dispatchPayload is the persisted remote-proxy dispatch record, stored on Trace.DispatchJSON
+// so a pending remote call can be replayed verbatim by RetryPendingRemoteDispatches after restart.
+type dispatchPayload struct {
+	Args        map[string]any `json:"args"`
+	StepID      string         `json:"step_id"`
+	RemotePrice int64          `json:"remote_price"`
+}
+
+// marshalDispatch serializes a dispatchPayload and returns a pointer suitable for Trace.DispatchJSON.
+func marshalDispatch(args map[string]any, stepID string, mp int64) *string {
+	b, _ := json.Marshal(dispatchPayload{Args: args, StepID: stepID, RemotePrice: mp})
+	s := string(b)
+	return &s
+}
+
+// callerWalletFor returns the (walletID, walletKind) that funds a call:
+//   - step completion → CallerStep (no wallet id; BeginStepCall already released the lock)
+//   - subcall (has parent trace) → CallerTrace
+//   - root call (no parent trace) → CallerProcess
+func callerWalletFor(stepID, processID string, parentTraceID *string) (id, kind string) {
+	switch {
+	case stepID != "":
+		return "", CallerStep
+	case parentTraceID != nil:
+		return *parentTraceID, CallerTrace
+	default:
+		return processID, CallerProcess
+	}
+}
+
 // signJCS signs the JCS-canonical form of v with key.
 func signJCS(key ed25519.PrivateKey, v any) (string, error) {
 	if len(key) != ed25519.PrivateKeySize {
@@ -157,10 +193,12 @@ func verifyRemoteReceiptSignature(r *Receipt, pubKeyB64 string) error {
 	return verifyJCS(pub, cp, r.Signature)
 }
 
-// parseAndVerifyRemoteReceipt parses receiptJSON and verifies the Ed25519 signature.
-// Returns ErrTimeout (keep-trace-open) on absent, unparseable, or invalidly signed receipts.
+// parseAndVerifyRemoteReceipt parses receiptJSON and enforces the settlement preconditions:
+// signature, action_id, and args_hash must all match what we requested. Returns ErrTimeout
+// (keep-trace-open) on absent, unparseable, invalidly signed, or mismatched receipts so the
+// trace is never settled against a receipt that fails the invariants VerifyRemoteReceipt audits.
 // Settlement must only proceed when this function returns without error.
-func parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64 string) (*Receipt, error) {
+func parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedActionID, expectedArgsHash string) (*Receipt, error) {
 	if receiptJSON == "" {
 		return nil, ErrTimeout.Wrap("remote receipt pending")
 	}
@@ -171,6 +209,12 @@ func parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64 string) (*Receipt, error
 	if err := verifyRemoteReceiptSignature(&r, pubKeyB64); err != nil {
 		return nil, ErrTimeout.Wrap("remote receipt: invalid signature")
 	}
+	if expectedActionID != "" && r.ActionID != expectedActionID {
+		return nil, ErrTimeout.Wrap("remote receipt: action_id mismatch")
+	}
+	if expectedArgsHash != "" && r.ArgsHash != expectedArgsHash {
+		return nil, ErrTimeout.Wrap("remote receipt: args_hash mismatch")
+	}
 	return &r, nil
 }
 
@@ -178,8 +222,10 @@ func parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64 string) (*Receipt, error
 // If the receipt is absent or has an invalid signature, the trace stays open for retry (ErrTimeout).
 // Otherwise it commits CommitRemoteSettlement with the correct charge/duty/refund split.
 func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, action *Action, ktx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req CallRequest, target *User, mp int64, fr FederationResult, latency float64) (*CallReply, error) {
-	// A missing, unparseable, or unsigned receipt keeps the trace open for retry.
-	rp, err := parseAndVerifyRemoteReceipt(fr.ReceiptJSON, target.PublicKey)
+	// A missing, unparseable, unsigned, or mismatched receipt keeps the trace open for retry.
+	// action_id and args_hash are enforced here so settlement is valid by construction.
+	expectedArgsHash, _ := jcsHashStr(string(ktx.ArgsJSON))
+	rp, err := parseAndVerifyRemoteReceipt(fr.ReceiptJSON, target.PublicKey, action.RemoteActionID, expectedArgsHash)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +273,9 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	if reason == "" {
 		reason = "remote call failed"
 	}
-	return nil, ErrExecutionFailed.Wrap(reason)
+	// Return the committed local receipt alongside the error so an inbound caller can settle
+	// the real charge (a re-proxied remote subcall may have settled with charge > 0).
+	return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID}, ErrExecutionFailed.Wrap(reason)
 }
 
 // RetryPendingRemoteDispatches retries all in-flight remote proxy traces that have an
@@ -252,11 +300,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	if trace.IdempotencyKey == nil || trace.DispatchJSON == nil {
 		return nil
 	}
-	var dispatch struct {
-		Args        map[string]any `json:"args"`
-		StepID      string         `json:"step_id"`
-		RemotePrice int64          `json:"remote_price"`
-	}
+	var dispatch dispatchPayload
 	if err := json.Unmarshal([]byte(*trace.DispatchJSON), &dispatch); err != nil {
 		return ErrInternal.Wrapf("parse dispatch_json: %v", err)
 	}
@@ -284,20 +328,12 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	mp := dispatch.RemotePrice
 	if mp == 0 {
 		// Fallback: derive from action.Price and ImportBPS.
-		mp = action.Price * 10000 / (10000 + k.cfg.ImportBPS)
+		mp = k.remoteManifestPrice(action.Price)
 	}
 	maxDuty := ceilDiv(mp*k.cfg.ImportBPS, 10000)
 	q := mp + maxDuty
 
-	callerWalletKind := CallerProcess
-	callerWalletID := process.ID
-	if dispatch.StepID != "" {
-		callerWalletKind = CallerStep
-		callerWalletID = ""
-	} else if trace.ParentTraceID != nil {
-		callerWalletKind = CallerTrace
-		callerWalletID = *trace.ParentTraceID
-	}
+	callerWalletID, callerWalletKind := callerWalletFor(dispatch.StepID, process.ID, trace.ParentTraceID)
 
 	now := time.Now().UTC()
 	ktx := &Transaction{

@@ -442,19 +442,26 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 			"error": callErr.Error(),
 			"code":  kernel.KernelErrorCode(callErr),
 		})
-		if errors.Is(callErr, kernel.ErrInsufficientFunds) {
-			if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey); signErr == nil {
-				receiptJSON, _ := json.Marshal(receipt)
-				_ = k.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), string(receiptJSON))
-				return http.StatusPaymentRequired, map[string]any{"error": "insufficient balance", "receipt": receipt}, nil
-			}
-		}
-		// Execution failures (backend error, schema violation, etc.) return a signed failure
-		// receipt so the caller can settle locally rather than leaving the trace pending.
-		if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey); signErr == nil {
+		// A committed transaction (reply carries a receipt) means the call settled — possibly
+		// with charge > 0 from settled descendants. Return THAT receipt so the caller settles
+		// the real charge, preserving bilateral conservation rather than under-paying with 0.
+		if reply != nil && reply.ReceiptID != "" {
+			receipt, _ := k.GetReceiptByID(ctx, reply.ReceiptID)
 			receiptJSON, _ := json.Marshal(receipt)
 			_ = k.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), string(receiptJSON))
 			return http.StatusUnprocessableEntity, map[string]any{"error": callErr.Error(), "receipt": receipt}, nil
+		}
+		// Pre-execution rejection (no transaction committed, e.g. insufficient funds): sign a
+		// zero-charge rejection receipt so the caller can settle locally without leaving the
+		// trace pending.
+		status, msg := http.StatusUnprocessableEntity, callErr.Error()
+		if errors.Is(callErr, kernel.ErrInsufficientFunds) {
+			status, msg = http.StatusPaymentRequired, "insufficient balance"
+		}
+		if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey); signErr == nil {
+			receiptJSON, _ := json.Marshal(receipt)
+			_ = k.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), string(receiptJSON))
+			return status, map[string]any{"error": msg, "receipt": receipt}, nil
 		}
 		_ = k.DeleteIdempotencyRecord(ctx, rec.ID)
 		return 0, nil, callErr

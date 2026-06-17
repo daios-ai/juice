@@ -492,6 +492,9 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	now := time.Now().UTC()
 	r := &kernel.Receipt{
 		ID: uuid.New().String(), TxID: "remote-tx-1",
+		// action_id and args_hash must match the request: settlement now enforces them
+		// (the call below uses remote action "proxy-action-1" with args {}).
+		ActionID: "proxy-action-1", ArgsHash: jcsHashForTest(t, `{}`),
 		Status: kernel.TxSuccess, StartedAt: now, CreatedAt: now,
 	}
 	r.Signature = signReceiptForTest(t, priv, r)
@@ -579,6 +582,107 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	}
 	if tx.Status != kernel.TxSuccess {
 		t.Errorf("expected TxSuccess, got %s", tx.Status)
+	}
+}
+
+// ---- #2/S2: settlement preconditions (action_id + args_hash) ----
+
+// setupSettleProxy creates an active+public remote proxy action and a funded caller with a
+// pre-funded root trace, returning everything needed to drive a remote settlement through Call.
+// The fake's receiptJSON is left empty for the caller to set.
+func setupSettleProxy(t *testing.T, st kernel.Store, fake *fakeFederationHTTP, priv ed25519.PrivateKey, pub ed25519.PublicKey, remoteActionID string) (*kernel.Kernel, *kernel.Action, *kernel.User) {
+	t.Helper()
+	ctx := context.Background()
+	sys := setupSys(t, nil, st)
+	k := newTestKernelWithHTTP(st, fake)
+
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@settle-peer", base64.RawURLEncoding.EncodeToString(pub), "https://settle.example.com")
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	m := kernel.ActionManifest{
+		ActionID: remoteActionID, OwnerHandle: "@settle-peer", Name: "settleact",
+		Kind: kernel.KindHTTP, Price: 0, Description: "s",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+	}
+	m.Signature, _ = kernel.SignManifest(priv, &m)
+	result, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("ImportRemoteAction: %v", err)
+	}
+	a := result.Created[0]
+	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	pubFed := true
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubFed}); err != nil {
+		t.Fatal(err)
+	}
+	caller := setupUser(t, st, "@settle-caller", 0)
+	return k, a, caller
+}
+
+func TestSettleRemoteCallRejectsWrongActionID(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	fake := &fakeFederationHTTP{}
+	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "settle-action-1")
+	_, tr := beginTestRun(t, st, caller.ID, a)
+
+	// Receipt is validly signed but carries the WRONG action_id.
+	now := time.Now().UTC()
+	r := &kernel.Receipt{
+		ID: uuid.New().String(), TxID: "rtx", ActionID: "some-other-action",
+		ArgsHash: jcsHashForTest(t, `{}`), Status: kernel.TxSuccess, StartedAt: now, CreatedAt: now,
+	}
+	r.Signature = signReceiptForTest(t, priv, r)
+	b, _ := json.Marshal(r)
+	fake.receiptJSON = string(b)
+
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
+		TargetUserID: "@settle-peer", ActionName: "settleact", Args: map[string]any{},
+	})
+	if !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("expected ErrTimeout on action_id mismatch, got %v", err)
+	}
+	// No settled transaction must exist: the trace stays open for retry.
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{})
+	if len(txs) != 0 {
+		t.Fatalf("expected no settled transaction, got %d", len(txs))
+	}
+}
+
+func TestSettleRemoteCallRejectsWrongArgsHash(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	fake := &fakeFederationHTTP{}
+	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "settle-action-2")
+	_, tr := beginTestRun(t, st, caller.ID, a)
+
+	// Receipt is validly signed with the right action_id but a MISMATCHED args_hash.
+	now := time.Now().UTC()
+	r := &kernel.Receipt{
+		ID: uuid.New().String(), TxID: "rtx", ActionID: "settle-action-2",
+		ArgsHash: jcsHashForTest(t, `{"tampered":true}`), Status: kernel.TxSuccess, StartedAt: now, CreatedAt: now,
+	}
+	r.Signature = signReceiptForTest(t, priv, r)
+	b, _ := json.Marshal(r)
+	fake.receiptJSON = string(b)
+
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
+		TargetUserID: "@settle-peer", ActionName: "settleact", Args: map[string]any{},
+	})
+	if !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("expected ErrTimeout on args_hash mismatch, got %v", err)
+	}
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{})
+	if len(txs) != 0 {
+		t.Fatalf("expected no settled transaction, got %d", len(txs))
 	}
 }
 

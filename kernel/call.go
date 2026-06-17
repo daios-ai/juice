@@ -222,16 +222,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	var mp int64 = action.Price // for non-remote-proxy: mp unused; for remote-proxy: corrected below
 	if action.Kind == KindRemoteProxy {
 		// mp_original = floor(q * 10000 / (10000 + ImportBPS))
-		mp = action.Price * 10000 / (10000 + k.cfg.ImportBPS)
+		mp = k.remoteManifestPrice(action.Price)
 		key := uuid.New().String()
 		trace.IdempotencyKey = &key
-		djsonBytes, _ := json.Marshal(map[string]any{
-			"args":         req.Args,
-			"step_id":      req.StepID,
-			"remote_price": mp,
-		})
-		djson := string(djsonBytes)
-		trace.DispatchJSON = &djson
+		trace.DispatchJSON = marshalDispatch(req.Args, req.StepID, mp)
 	}
 
 	callerWalletID, callerWalletKind := k.callerWallet(req, process, parentTrace)
@@ -242,23 +236,17 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		// trace was created by BeginStepCall; use the trace ID from req.
 		trace.ID = req.ParentTraceID // for step calls, ParentTraceID IS the new trace (set by CompleteStep)
 		// Fetch the real parent_trace_id from DB so the tx records it correctly (not a self-reference).
+		// BeginStepCall funded this trace with exactly step.price, so gross must be that snapshot —
+		// not the action's current price, which may have changed since step creation.
 		if dbTrace, err := k.store.ReadTrace(ctx, trace.ID); err == nil {
 			trace.ParentTraceID = dbTrace.ParentTraceID
-			trace.IdempotencyKey = dbTrace.IdempotencyKey
-			trace.DispatchJSON = dbTrace.DispatchJSON
-			trace.Available = dbTrace.Available
-			// BeginStepCall funded this trace with exactly step.price, so gross must be that
-			// snapshot — not the action's current price, which may have changed since step creation.
-			lockPrice = dbTrace.Available
+			lockPrice = applyPrefundedSnapshot(trace, dbTrace)
 		}
 	case req.ExistingTraceID != "":
 		// Root trace was pre-created atomically by BeginRun; load its full state.
 		trace.ID = req.ExistingTraceID
 		if dbTrace, err := k.store.ReadTrace(ctx, req.ExistingTraceID); err == nil {
-			trace.Available      = dbTrace.Available
-			lockPrice            = dbTrace.Available // use the pre-locked amount, not current action.Price
-			trace.IdempotencyKey = dbTrace.IdempotencyKey
-			trace.DispatchJSON   = dbTrace.DispatchJSON
+			lockPrice = applyPrefundedSnapshot(trace, dbTrace) // use the pre-locked amount, not current action.Price
 		}
 	default:
 		if err := k.store.BeginSubcall(ctx, req.ParentTraceID, trace, lockPrice); err != nil {
@@ -315,10 +303,11 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			ktx.Status = TxFailure
 			ktx.Reason = cfgErr.Error()
 			ktx.EndedAt = time.Now().UTC()
-			if err := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, cfgErr); err != nil {
-				return nil, err
+			receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, cfgErr)
+			if sErr != nil {
+				return nil, sErr
 			}
-			return nil, cfgErr
+			return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID}, cfgErr
 		}
 		ikey := ""
 		if trace.IdempotencyKey != nil {
@@ -337,21 +326,23 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if execErr != nil {
 		ktx.Status = TxFailure
 		ktx.Reason = execErr.Error()
-		if err := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, execErr); err != nil {
-			return nil, err
+		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, execErr)
+		if sErr != nil {
+			return nil, sErr
 		}
 		logger.Warn("call.failed", "action", action.Name, "error", execErr)
-		return nil, execErr
+		return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID}, execErr
 	}
 
 	// 10. Validate output schema.
 	if schemaErr := ValidateInput(action.OutputSchema, any(reply)); schemaErr != nil {
 		ktx.Status = TxFailure
 		ktx.Reason = "output schema violation: " + schemaErr.Error()
-		if err := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, schemaErr); err != nil {
-			return nil, err
+		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, schemaErr)
+		if sErr != nil {
+			return nil, sErr
 		}
-		return nil, schemaErr
+		return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID}, schemaErr
 	}
 
 	// 11. Read trace.available post-execution — this is the taxable amount.
@@ -361,7 +352,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		// If we can't read the trace, settle as failure to avoid fund loss.
 		ktx.Status = TxFailure
 		ktx.Reason = "could not read trace post-execution"
-		_ = k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, readErr)
+		_, _ = k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, readErr)
 		return nil, ErrInternal.Wrap("could not read trace")
 	}
 	taxable := postTrace.Available
@@ -377,7 +368,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if receiptErr != nil {
 		ktx.Status = TxFailure
 		ktx.Reason = "could not build receipt"
-		_ = k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, receiptErr)
+		_, _ = k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, receiptErr)
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
 	if err := k.store.CommitCall(ctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.StepID); err != nil {
@@ -395,17 +386,23 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 }
 
 // callerWallet returns the callerWalletID and callerWalletKind for CommitCall/CommitFailedCall.
+// Root calls (ExistingTraceID) have no parent trace, so they resolve to CallerProcess.
 func (k *Kernel) callerWallet(req CallRequest, process *Process, parentTrace *Trace) (id, kind string) {
-	if req.StepID != "" {
-		return "", CallerStep
-	}
-	if req.ExistingTraceID != "" {
-		return process.ID, CallerProcess
-	}
+	var parentTraceID *string
 	if parentTrace != nil {
-		return parentTrace.ID, CallerTrace
+		parentTraceID = &parentTrace.ID
 	}
-	return process.ID, CallerProcess
+	return callerWalletFor(req.StepID, process.ID, parentTraceID)
+}
+
+// applyPrefundedSnapshot copies the pre-funded state from a persisted trace onto the in-memory
+// trace and returns the locked amount (= dbTrace.Available) to use as gross. Shared by the
+// step-completion and root (ExistingTraceID) dispatch paths.
+func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
+	trace.Available = dbTrace.Available
+	trace.IdempotencyKey = dbTrace.IdempotencyKey
+	trace.DispatchJSON = dbTrace.DispatchJSON
+	return dbTrace.Available
 }
 
 // canCall returns true iff the action is callable by a process owned by ownerID.
@@ -569,7 +566,10 @@ func (k *Kernel) computeStats(_ context.Context, actionID string, tx *Transactio
 // The receipt is built inside CommitFailedCall's transaction so that the signed charge
 // (gross − refund) is guaranteed to match what is committed.
 // tx.Status and tx.Reason must be set by the caller before invoking this.
-func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, traceID, callerWalletID, callerWalletKind string, req CallRequest, action *Action, latency float64, callErr error) error {
+// It returns the committed receipt so callers can surface the real charge (e.g. an inbound
+// federation call that failed after settling descendants must return that receipt, not a
+// zero-charge rejection).
+func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, traceID, callerWalletID, callerWalletKind string, req CallRequest, action *Action, latency float64, callErr error) (*Receipt, error) {
 	if len(tx.ReplyJSON) == 0 {
 		tx.ReplyJSON = json.RawMessage("null")
 	}
@@ -585,14 +585,17 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 		}
 	}
 	stats := k.computeStats(ctx, action.ID, tx, latency)
+	var committed *Receipt
 	buildFn := func(refund int64) (*Receipt, error) {
-		return k.buildReceipt(tx, tx.Gross-refund)
+		r, err := k.buildReceipt(tx, tx.Gross-refund)
+		committed = r
+		return r, err
 	}
 	if settlErr := k.store.CommitFailedCall(ctx, tx, buildFn, traceID, callerWalletID, callerWalletKind, tx.Gross, stats, req.IdempotencyRecordID, KernelErrorCode(callErr), req.StepID); settlErr != nil {
 		logger.Error("call.settlement_failed", "action", action.Name, "error", callErr, "settlement_error", settlErr)
-		return ErrInternal.Wrap("could not record failure transaction")
+		return nil, ErrInternal.Wrap("could not record failure transaction")
 	}
-	return nil
+	return committed, nil
 }
 
 // ComputeFee computes (net, fee) from the taxable amount (= trace.available post-execution).
