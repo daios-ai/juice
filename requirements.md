@@ -694,7 +694,7 @@ juice action unimport --openapi <spec-url> --name <action-name>
 
 Server logs request, caller, process, trace, action, and transaction IDs where available; maps distinct auth, authorization, invalid input, insufficient funds, missing resource, and internal failures to distinct statuses; rate-limits auth, account creation, and peer requests per IP with 429. Action read/list responses include computed `action=@owner/name`.
 
-Endpoint rules:
+Endpoint rules (notable rules only; the complete HTTP endpoint list is in `API.md`):
 
 | Endpoint                                         | Rule                                                                                                            |
 | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
