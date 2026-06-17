@@ -618,7 +618,7 @@ The proxy user's balance is the bilateral account: `@B`'s balance on A rises whe
 
 ### Calls, receipts, settlement
 
-Outbound: a remote-proxy call follows normal role law (`owner` = local process owner, `caller` = local call caller, `target` = the proxy user) and normal wallet mechanics, funded with the proxy's local price `mp + maxduty` (§8). The handler records the UUID v4 `idempotency_key` and the outbound request payload (`dispatch_json`) on the proxy trace atomically with dispatch (§3, §5) — the stored payload is what makes retry after restart possible. On the remote kernel it is an ordinary inbound call by this kernel's proxy user there, paid from the prepaid balance, executed wholly under that kernel's §6.
+Outbound: a remote-proxy call follows normal role law (`owner` = local process owner, `caller` = local call caller, `target` = the proxy user) and normal wallet mechanics, funded with the proxy's local price `mp + maxduty` (§8). The handler records the UUID v4 `idempotency_key` and the outbound request payload (`dispatch_json`) on the proxy trace atomically with dispatch (§3, §5) — the stored payload is what makes retry after restart possible. On the remote kernel it arrives at `POST /v1/federation/call`, authenticated by the per-request federation signature (not a bearer token), and is then an ordinary inbound call by this kernel's proxy user there, paid from the prepaid balance, executed wholly under that kernel's §6.
 
 A proxy call settles **only on a signed remote receipt** — never on a network timeout:
 
@@ -704,6 +704,7 @@ Endpoint rules:
 | `GET /v1/actions/{id}/manifest`                  | signed public-action manifest; served to friends in good standing per the exposure lever (§13)                  |
 | `GET /v1/gossip`                                 | unauthenticated; identity, own actions with manifests and stats, transacted friends with stats (§13)            |
 | `POST /v1/peers`                                 | signed friend request (§13); rate-limited per IP                                                                |
+| `POST /v1/federation/call`                       | inbound proxy call (§13); `?action=@owner/name`, `?counterparty=` peer key; `X-Signature`/`X-Timestamp`/`X-Idempotency-Key` headers; per-request federation signature over the request, `args_hash` must match the body — not bearer-authenticated |
 | `GET /v1/me`                                     | authenticated `id`, `handle`, `email`, `available`, `locked`; suspended rejected before handler                 |
 | `PUT /v1/me`                                     | authenticated local user only; `{[email], [current_password, password]}`; `password` requires `current_password`; at least one field required; returns updated `id`, `handle`, `email`, `available`, `locked`; proxy user returns `ErrInvalidState` |
 | `PUT /v1/actions/{id}`                           | action-owner update; `public` updatable; deactivation rules apply                                               |
