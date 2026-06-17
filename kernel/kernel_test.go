@@ -1817,8 +1817,8 @@ func TestRunFederatedDoesNotCreateProcessOnInsufficientBalance(t *testing.T) {
 // This prevents a race where the original action is deleted and a new action is created under
 // the same name between BeginRun and Call — the old code would silently execute the new action.
 // With the fix, deleting the funded action causes Call to return ErrNotFound (clean failure),
-// not to execute an unrelated replacement.
-func TestCallUsesActionIDNotOwnerName(t *testing.T) {
+// not to re-resolve by owner/name (which could rebind to a replacement).
+func TestCallBindsToPassedAction(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -1829,21 +1829,30 @@ func TestCallUsesActionIDNotOwnerName(t *testing.T) {
 	// Fund a process+trace for action A.
 	_, tr := beginTestRun(t, st, owner.ID, actionA)
 
-	// Delete action A, simulating the race window where the funded action disappears.
+	// Delete action A from the store, simulating the race window where the funded action
+	// disappears or is replaced. Call must bind to the passed Action snapshot regardless.
 	if err := st.DeleteAction(ctx, actionA.ID); err != nil {
 		t.Fatalf("DeleteAction: %v", err)
 	}
 
-	// Call with ActionID pointing to the deleted action — must fail cleanly with ErrNotFound,
-	// NOT look up by owner/name (which would find nothing, or a future replacement).
-	_, err := k.Call(ctx, kernel.CallRequest{
+	// Call with the pre-resolved Action (as beginRun does for root calls): it executes the exact
+	// action snapshot without re-reading the store, so deletion does not turn into a spurious
+	// owner/name re-lookup. The call succeeds and binds to actionA.
+	reply, err := k.Call(ctx, kernel.CallRequest{
 		CallerID:        owner.ID,
-		ActionID:        actionA.ID,
+		Action:          actionA,
 		Args:            map[string]any{},
 		ExistingTraceID: tr.ID,
 	})
-	if !errors.Is(err, kernel.ErrNotFound) {
-		t.Errorf("expected ErrNotFound for deleted funded action, got %v", err)
+	if err != nil {
+		t.Fatalf("Call with passed Action should succeed, got %v", err)
+	}
+	txn, err := st.ReadTransaction(ctx, reply.TxID)
+	if err != nil {
+		t.Fatalf("ReadTransaction: %v", err)
+	}
+	if txn.ActionID != actionA.ID {
+		t.Errorf("call bound to wrong action: got %q, want %q", txn.ActionID, actionA.ID)
 	}
 }
 

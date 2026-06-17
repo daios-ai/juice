@@ -133,20 +133,33 @@ Trace relation:
 
 Use file-backed SQLite with WAL by default. Migrations are deterministic and stored in the repository. Tests use temporary SQLite databases. No production feature may depend on an in-memory-only store. `kernel` depends on a store interface, never SQLite.
 
-Store interface:
+Store interface. Each monetary transition commits together with its audit record (transaction, receipt, stats, step/idempotency state) inside one store call, so the atomic write-sets below are atomic at the store boundary rather than coordinated above it. The money-path methods are therefore **compound atomic operations**, not fine-grained primitives; reads and supervision are ordinary methods. The listing is representative, not exhaustive:
 
 ```text
-CreateUser ReadUser ReadUserByPublicKey ListUsers SuspendUser UnsuspendUser UpdateUser
-CreateAction ReadAction UpdateAction DeleteAction ListAllActions
-CreateProcess ReadProcess EndProcess ListAllProcesses
-CreateTrace CreateTransaction ListTransactions ListAllTransactions
-ReadStats UpdateStats
-CreateStep ReadStep ListSteps ClaimStep CompleteStep ResetRunningSteps
-GetConfig SetConfig CreateDeposit CreateWithdrawal
-CreateReceipt ReadReceipt
-CreateRating ReadRating ListRatings
-CreateIdempotencyRecord ReadIdempotencyRecord
-CreateOrUpdateDiscoveredKernel ListDiscoveredKernels
+Money paths (each commits a monetary transition + its audit record atomically):
+  BeginRun            user-wallet park + process creation/funding + root trace funded
+  BeginSubcall        parent-trace move (available → locked) + child trace funded
+  BeginStepCall       unpark step.price + completion trace funded + step waiting → running
+  CommitCall          success transaction + receipt + payout + lock release + stats (+ step/idempotency)
+  CommitFailedCall    failure transaction + receipt + subtree refund/cancellation + stats (+ step/idempotency)
+  CommitRemoteSettlement  remote-proxy settlement on a signed receipt (charge/duty/refund) + transaction + receipt
+  EndProcess          cancel waiting steps + return funds + close process
+  CreateStep          step record + park step.price from the creating trace
+  CreateDeposit CreateWithdrawal  out-of-band credit grant / redemption with its audit record
+  CreateRatingAndUpdateStats  rating record + rating stats
+Reads / supervision (no monetary mutation):
+  CreateUser ReadUser ReadUserByHandle ReadUserByPublicKey ListUsers SuspendUser UnsuspendUser UpdateUser
+  CreateAction ReadAction ReadActionByOwnerName UpdateAction UpdateActionAndResetStats DeleteAction ListAllActions
+  ReadProcess ListProcesses ListAllProcesses
+  ReadTrace ReadRootTrace ListTraces
+  ReadTransaction ListTransactions ListAllTransactions
+  ReadStats UpsertStats
+  ReadStep ListSteps ResetStepAndRepark ResetRunningSteps
+  ReadReceipt ReadReceiptByTxID
+  ReadRatingByTxID ListRatings
+  InsertPendingIdempotencyRecord ReadIdempotencyRecord CompleteIdempotencyRecordIfPending DeleteIdempotencyRecord
+  GetConfig SetConfig InitFirstBoot
+  CreateOrUpdateDiscoveredKernel ListDiscoveredKernels DenyPeerCascade CreateProxyUser
 ```
 
 `UpdateTransaction` is forbidden. Transactions are immutable after creation.

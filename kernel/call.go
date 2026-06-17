@@ -40,10 +40,6 @@ type CallRequest struct {
 	// ExistingTraceID, when non-empty, signals that the root trace was already created atomically
 	// by BeginRun. Call uses this trace instead of calling BeginSubcall.
 	ExistingTraceID string
-	// ActionID, when non-empty, causes Call to load the action by ID rather than by owner/name.
-	// Set by beginRun to bind execution to the exact action that was funded, eliminating the
-	// TOCTOU window between BeginRun and the second owner/name lookup.
-	ActionID string
 	// IdempotencyRecordID, if non-empty, causes CommitCall/CommitFailedCall to atomically
 	// mark the pending idempotency record as complete. Set only by federation handlers.
 	IdempotencyRecordID string
@@ -138,23 +134,14 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	// 4. Resolve action.
-	// Root calls supply Action (pre-validated by beginRun) so no DB read is needed,
-	// eliminating the TOCTOU window between process/trace creation and execution.
-	// Step completions supply ActionID to use the stable ID path (canCall still runs).
+	// Root calls and step completions supply a pre-resolved Action (validated by beginRun /
+	// read by CompleteStep), so no DB read is needed — this binds execution to the exact action
+	// that was funded and eliminates the TOCTOU window. canCall still runs (gated below).
 	// Subcalls and direct test invocations use the owner/name path.
 	var action *Action
 	var target *User
 	if req.Action != nil {
 		action = req.Action
-		target, err = k.store.ReadUser(ctx, action.OwnerUserID)
-		if err != nil || target == nil {
-			return nil, ErrNotFound.Wrap("target user not found")
-		}
-	} else if req.ActionID != "" {
-		action, err = k.store.ReadAction(ctx, req.ActionID)
-		if err != nil || action == nil {
-			return nil, ErrNotFound.Wrap("action not found")
-		}
 		target, err = k.store.ReadUser(ctx, action.OwnerUserID)
 		if err != nil || target == nil {
 			return nil, ErrNotFound.Wrap("target user not found")
@@ -259,6 +246,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			trace.ParentTraceID = dbTrace.ParentTraceID
 			trace.IdempotencyKey = dbTrace.IdempotencyKey
 			trace.DispatchJSON = dbTrace.DispatchJSON
+			trace.Available = dbTrace.Available
+			// BeginStepCall funded this trace with exactly step.price, so gross must be that
+			// snapshot — not the action's current price, which may have changed since step creation.
+			lockPrice = dbTrace.Available
 		}
 	case req.ExistingTraceID != "":
 		// Root trace was pre-created atomically by BeginRun; load its full state.
@@ -315,7 +306,19 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if action.Kind == KindRemoteProxy {
 		fe, ok := k.http.(FederationExecutor)
 		if !ok {
-			return nil, ErrInvalidState.Wrap("federation executor not configured")
+			// The trace is already funded (BeginSubcall / BeginRun). Returning here without
+			// settling would commit no transaction and strand the locked allocation. Route the
+			// misconfiguration through the normal failure path so a failure tx + receipt commits
+			// and the funds refund — the "no settlement" rule is only for a network timeout
+			// awaiting a remote receipt, not a local adapter being absent.
+			cfgErr := ErrInvalidState.Wrap("federation executor not configured")
+			ktx.Status = TxFailure
+			ktx.Reason = cfgErr.Error()
+			ktx.EndedAt = time.Now().UTC()
+			if err := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, cfgErr); err != nil {
+				return nil, err
+			}
+			return nil, cfgErr
 		}
 		ikey := ""
 		if trace.IdempotencyKey != nil {

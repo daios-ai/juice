@@ -1474,6 +1474,59 @@ func TestZeroPriceCallOnClosedProcessReturnsErrInvalidState(t *testing.T) {
 	}
 }
 
+// TestCallRemoteProxyMissingExecutorSettlesFailure verifies that a remote-proxy call whose kernel
+// has no FederationExecutor settles as a failure (committing one transaction + receipt and refunding
+// the locked funds) instead of returning early and stranding the allocation. The "no settlement" rule
+// applies only to a network timeout awaiting a remote receipt, not to a missing local adapter.
+func TestCallRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
+	st := newTestStore(t)
+	// fakeSuccessHTTP implements HTTPExecutor but NOT FederationExecutor → triggers the !ok branch.
+	k := newTestKernelWithHTTP(st, &fakeSuccessHTTP{})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@rpme-owner", 0)
+	caller := setupUser(t, st, "@rpme-caller", 100)
+	remoteAct := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID,
+		Name: "rpme-action", Kind: kernel.KindRemoteProxy,
+		Active: true, Public: true, Price: 50,
+		Source:    "https://remote.example.com/v1/federation/call?action=@rpme-owner/rpme-action&counterparty=us",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, remoteAct); err != nil {
+		t.Fatalf("CreateAction: %v", err)
+	}
+
+	_, err := k.Run(ctx, caller.ID, "@rpme-owner/rpme-action", map[string]any{})
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("expected ErrInvalidState for missing federation executor, got %v", err)
+	}
+
+	// Exactly one failure transaction was committed, with a receipt.
+	txs, err := st.ListAllTransactions(ctx, 100, 0)
+	if err != nil {
+		t.Fatalf("ListAllTransactions: %v", err)
+	}
+	if len(txs) != 1 {
+		t.Fatalf("expected exactly one transaction, got %d", len(txs))
+	}
+	if txs[0].Status != kernel.TxFailure {
+		t.Errorf("transaction status: got %q, want failure", txs[0].Status)
+	}
+	if r, err := st.ReadReceiptByTxID(ctx, txs[0].ID); err != nil || r == nil {
+		t.Errorf("expected a receipt for the failure transaction, got %v (err %v)", r, err)
+	}
+
+	// Funds are fully refunded — not stranded in the process/trace lock.
+	got, err := st.ReadUser(ctx, caller.ID)
+	if err != nil {
+		t.Fatalf("ReadUser: %v", err)
+	}
+	if got.Available != 100 || got.Locked != 0 {
+		t.Errorf("caller funds not refunded: available=%d locked=%d, want 100/0", got.Available, got.Locked)
+	}
+}
+
 func TestParseActionRef(t *testing.T) {
 	cases := []struct {
 		input       string

@@ -241,6 +241,26 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 			return nil, err
 		}
 	}
+	// Enforce the allowed-input rule §10: allowed input = action.input_schema \ keys(partial_args).
+	// This only constrains keys when the schema declares properties; an unconstrained schema imposes
+	// no restriction (the merge rule governs collisions there). The derived-schema check above misses
+	// the all-bound case: when partial_args binds every declared property, deriveAllowedSchema reduces
+	// properties to {}, which ValidateInput treats as accept-any — letting a completer supply an
+	// undeclared key or, worse, overwrite a creator-fixed value. Reject before any state mutation so
+	// the step stays waiting and no action failure is recorded.
+	if declared, ok := action.InputSchema["properties"].(map[string]any); ok && len(declared) > 0 {
+		var partial map[string]any
+		if len(step.PartialArgs) > 0 {
+			_ = json.Unmarshal(step.PartialArgs, &partial)
+		}
+		for key := range inputArgs {
+			_, isDeclared := declared[key]
+			_, isBound := partial[key]
+			if !isDeclared || isBound {
+				return nil, ErrSchemaViolation.Wrapf("input key %q is not an allowed completion key", key)
+			}
+		}
+	}
 	mergedArgs, err := mergeArgs(step.PartialArgs, input)
 	if err != nil {
 		return nil, ErrInvalidInput.Wrap("could not merge args")
@@ -285,7 +305,7 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 	reply, callErr := k.Call(ctx, CallRequest{
 		CallerID:      callerID,
 		ParentTraceID: stepTrace.ID,
-		ActionID:      action.ID,
+		Action:        action,
 		Args:          args,
 		StepID:        stepID,
 	})

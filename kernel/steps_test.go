@@ -611,6 +611,119 @@ func TestMergeArgsInputKeysOverwritePartialArgs(t *testing.T) {
 	}
 }
 
+// TestStepCompleteRejectsOverrideOfBoundKeyAllBound verifies that when partial_args binds every
+// declared property (so the derived allowed schema has empty properties), the completer cannot
+// supply a key that overwrites a creator-fixed value. The completion is rejected before any state
+// mutation: the step stays waiting and no transaction is recorded (§10, allowed-input rule).
+func TestStepCompleteRejectsOverrideOfBoundKeyAllBound(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@allbound-owner", 500)
+	caller := setupUser(t, st, "@allbound-caller", 0)
+	// Schema declares exactly one property; partial_args binds it, so the derived allowed schema is empty.
+	action := setupWasmAction(t, st, owner.ID, "allbound-action",
+		`{"type":"object","properties":{"x":{"type":"string"}}}`, 0)
+	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
+
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), caller.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+
+	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{"x":"attacker"}`))
+	if !errors.Is(err, kernel.ErrSchemaViolation) {
+		t.Fatalf("expected ErrSchemaViolation for overriding a bound key, got %v", err)
+	}
+
+	got, _ := st.ReadStep(ctx, step.ID)
+	if got.Status != kernel.StepWaiting {
+		t.Errorf("step should remain waiting after rejected completion, got %s", got.Status)
+	}
+	if got.TxID != nil {
+		t.Errorf("rejected completion must not record a transaction, got tx_id %v", *got.TxID)
+	}
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: tr.ProcessID})
+	if len(txs) != 0 {
+		t.Errorf("expected no transactions for a rejected completion, got %d", len(txs))
+	}
+}
+
+// TestStepCompleteAllowsDisjointInputAllBound is the negative control for the all-bound guard:
+// with every property bound and an empty input, the completion still succeeds. The guard fires
+// only on actual key collisions/undeclared keys, never on a no-extra-input completion.
+func TestStepCompleteAllowsDisjointInputAllBound(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@allbound2-owner", 500)
+	caller := setupUser(t, st, "@allbound2-caller", 0)
+	action := setupWasmAction(t, st, owner.ID, "allbound2-action",
+		`{"type":"object","properties":{"x":{"type":"string"}}}`, 0)
+	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
+
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), caller.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+
+	if _, err := k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("CompleteStep with empty input should succeed, got %v", err)
+	}
+
+	got, _ := st.ReadStep(ctx, step.ID)
+	if got.Status != kernel.StepDone {
+		t.Errorf("step should be done, got %s", got.Status)
+	}
+}
+
+// TestStepCompleteGrossEqualsStepPriceAcrossPriceChange verifies the completion transaction records
+// the parked step.price snapshot as gross, even when the action's price changed (deactivate → re-enable
+// with a new price) while the step waited. BeginStepCall funds the completion trace with step.price, so
+// gross must equal that, not the action's current price (§10).
+func TestStepCompleteGrossEqualsStepPriceAcrossPriceChange(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@gross-owner", 500)
+	caller := setupUser(t, st, "@gross-caller", 0)
+	action := setupWasmAction(t, st, owner.ID, "gross-action", "", 100)
+
+	// Fund a root trace with the action's price (100) and snapshot step.price = 100 at creation.
+	_, tr := beginTestRun(t, st, owner.ID, action)
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, caller.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+	if step.Price != 100 {
+		t.Fatalf("expected step.price snapshot 100, got %d", step.Price)
+	}
+
+	// Simulate the action being re-enabled with a higher price after the step was created.
+	action.Price = 500
+	if err := st.UpdateAction(ctx, action); err != nil {
+		t.Fatalf("UpdateAction: %v", err)
+	}
+
+	reply, err := k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("CompleteStep: %v", err)
+	}
+
+	tx, err := st.ReadTransaction(ctx, reply.TxID)
+	if err != nil {
+		t.Fatalf("ReadTransaction: %v", err)
+	}
+	if tx.Gross != 100 {
+		t.Errorf("gross must equal the parked step.price snapshot 100, got %d (current action price 500)", tx.Gross)
+	}
+	if tx.Gross != tx.Net+tx.Fee {
+		t.Errorf("settlement invariant violated: gross %d != net %d + fee %d", tx.Gross, tx.Net, tx.Fee)
+	}
+}
 
 // TestCreateStepTraceAuthority verifies that an action owner who is not the process owner
 // can create a step when they own the executing action in the parent trace (F3 fix).
@@ -873,6 +986,60 @@ func TestStepCompleteRemoteProxyPersistsIdempotencyKey(t *testing.T) {
 	}
 	if ct.DispatchJSON == nil || *ct.DispatchJSON == "" {
 		t.Error("completion trace must have non-nil dispatch_json for retry recovery")
+	}
+}
+
+// TestStepCompleteRemoteProxyMissingExecutorSettlesFailure verifies the step-completion variant of the
+// missing-FederationExecutor fix: instead of leaving the step running with stranded funds, the completion
+// settles as a failure — the step is marked done with a tx, and the recorded gross is the parked step.price
+// snapshot (exercising the Bug 2 fix in the same path), not the action's current price.
+func TestStepCompleteRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
+	st := newTestStore(t)
+	// fakeSuccessHTTP implements HTTPExecutor but NOT FederationExecutor → triggers the !ok branch.
+	k := newTestKernelWithHTTP(st, &fakeSuccessHTTP{})
+	ctx := context.Background()
+
+	procOwner := setupUser(t, st, "@rpme2-procowner", 50)
+	completer := setupUser(t, st, "@rpme2-completer", 0)
+	remoteAct := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: procOwner.ID,
+		Name: "rpme2-action", Kind: kernel.KindRemoteProxy,
+		Active: true, Public: true, Price: 50,
+		Source:    "https://remote.example.com/v1/federation/call?action=@rpme2-procowner/rpme2-action&counterparty=us",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, remoteAct); err != nil {
+		t.Fatalf("CreateAction: %v", err)
+	}
+
+	// Fund a root trace with 50 and park step.price=50 from it.
+	_, root := beginTestRun(t, st, procOwner.ID, remoteAct)
+	step, err := k.CreateStep(ctx, root.ID, remoteAct.ID, nil, completer.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+
+	_, err = k.CompleteStep(ctx, completer.ID, step.ID, json.RawMessage(`{}`))
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("expected ErrInvalidState for missing federation executor, got %v", err)
+	}
+
+	got, _ := st.ReadStep(ctx, step.ID)
+	if got.Status != kernel.StepDone {
+		t.Errorf("step should be done after settled failure, got %s", got.Status)
+	}
+	if got.TxID == nil {
+		t.Fatal("settled failure must record a tx_id on the step")
+	}
+	tx, err := st.ReadTransaction(ctx, *got.TxID)
+	if err != nil {
+		t.Fatalf("ReadTransaction: %v", err)
+	}
+	if tx.Status != kernel.TxFailure {
+		t.Errorf("transaction status: got %q, want failure", tx.Status)
+	}
+	if tx.Gross != 50 {
+		t.Errorf("gross must be the parked step.price snapshot 50, got %d", tx.Gross)
 	}
 }
 
