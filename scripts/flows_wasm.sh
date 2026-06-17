@@ -723,9 +723,9 @@ conn.execute("""
 """, [proc_id, owner_id])
 conn.execute("""
     INSERT INTO traces (id, process_id, parent_trace_id, action_owner_id, action_id,
-                        caller_user_id, available, locked, latency_ms, idempotency_key,
+                        caller_user_id, available, locked, idempotency_key,
                         dispatch_json, created_at)
-    VALUES (?, ?, NULL, ?, ?, ?, 20, 0, 0, NULL, NULL, datetime('now'))
+    VALUES (?, ?, NULL, ?, ?, ?, 20, 0, NULL, NULL, datetime('now'))
 """, [trace_id, proc_id, owner_id, action_id, owner_id])
 conn.commit()
 conn.close()

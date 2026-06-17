@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # End-to-end flow tests for the juice CLI.
-# Covers 37 independent user-story flows, each with its own SQLite database.
+# Each flow is an independent user story with its own SQLite database.
 #
-# Usage (manual):
+# Usage (manual — default suite, EXCLUDES the slow @sys/make flows):
 #   go build -o /tmp/juice ./cmd/juice/
 #   JUICE=/tmp/juice JUICE_SECRET_KEY=test bash scripts/flows_test.sh
+#
+# Usage (the slow @sys/make flows ONLY — opt in when working on @sys/make):
+#   JUICE_MAKE_FLOWS=1 JUICE=/tmp/juice JUICE_SECRET_KEY=test bash scripts/flows_test.sh
+#   (real TinyGo + live Ollama; minutes per flow; see make_flows() below for why
+#    they are kept out of the default run)
 #
 # Usage (via Go test suite):
 #   go test ./cmd/juice/ -run TestFlowsIntegration -v -timeout 300s
@@ -359,6 +364,29 @@ source "$DIR/flows_federation.sh"
 source "$DIR/flows_admin.sh"
 
 # ===========================================================================
+# @sys/make flows — ISOLATED FROM THE DEFAULT SUITE ON PURPOSE.
+#
+# These exercise real TinyGo compilation and a live Ollama model, so each takes
+# minutes, and their value-correctness checks (does the synthesized action return
+# the right number?) depend on nondeterministic local-LLM codegen. Running them as
+# part of every juice change would make the suite slow and flaky.
+#
+# They are therefore OFF by default. Run them deliberately, ONLY when working on
+# @sys/make, by setting JUICE_MAKE_FLOWS=1:
+#
+#   JUICE_MAKE_FLOWS=1 JUICE=/path/to/juice JUICE_SECRET_KEY=test bash scripts/flows_test.sh
+#
+# That runs ONLY the make flows (each bootstraps its own kernel, so nothing else is
+# needed). DO NOT wire flow_make* back into the default branch of main().
+# ===========================================================================
+make_flows() {
+    flow_make
+    flow_make_calculator
+    flow_make_translator
+    flow_make_natural_language_calc
+}
+
+# ===========================================================================
 # Main runner
 # ===========================================================================
 main() {
@@ -366,6 +394,19 @@ main() {
     pkill -9 -f "juice_b5" 2>/dev/null || true
     pkill -9 -f "python3 - [0-9]" 2>/dev/null || true
     sleep 0.5
+
+    # Opt-in: run ONLY the slow @sys/make flows (see make_flows above).
+    if [ "${JUICE_MAKE_FLOWS:-0}" = "1" ]; then
+        echo "=== @sys/make flows ONLY (JUICE_MAKE_FLOWS=1) ==="
+        make_flows
+        echo ""
+        echo "Results: ${PASS} passed, ${FAIL} failed"
+        if [ "$FAIL" -gt 0 ]; then
+            printf "Failures:%b\n" "$ERRS"
+            exit 1
+        fi
+        return 0
+    fi
 
     flow_bootstrap
     flow_local_auth
@@ -408,10 +449,10 @@ main() {
     flow_fed_gossip_discovery
     flow_transaction_access
     flow_admin_supervision
-    flow_make
-    flow_make_calculator
-    flow_make_translator
-    flow_make_natural_language_calc
+    # NOTE: flow_make* are DELIBERATELY EXCLUDED from the default suite — they are
+    # slow (real TinyGo + live Ollama) and their value-correctness checks depend on
+    # nondeterministic local-LLM codegen. Run them on their own with JUICE_MAKE_FLOWS=1
+    # (see make_flows() above). DO NOT add flow_make* calls back into this list.
     flow_time
     flow_message
 

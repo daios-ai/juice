@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -22,10 +21,10 @@ type MakeDeps struct {
 
 // RegisterMakeHandler registers the @sys/make native action handler on k.
 // sdk is the TinyGo SDK source (script.TinyGoSDK) prepended to every generated action.
-// maxSteps is the maximum number of decide-loop iterations; 0 uses the default of 10.
+// maxSteps is the maximum number of repair-loop iterations (default 5 per §9).
 func RegisterMakeHandler(k *kernel.Kernel, deps MakeDeps, sdk string, maxSteps int) {
 	if maxSteps <= 0 {
-		maxSteps = 10
+		maxSteps = 5
 	}
 	k.RegisterNativeHandler("make", func(ctx context.Context, args map[string]any, targetID, callerID, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
 		return executeMake(ctx, args, targetID, callerID, ownerUserID, processID, parentTraceID, k, deps, sdk, maxSteps)
@@ -38,6 +37,16 @@ type actionContract struct {
 	Description  string
 	InputSchema  map[string]any
 	OutputSchema map[string]any
+	Constraints  []string
+	Plan         []string
+}
+
+// composableAction is a platform action surfaced during research for use in codegen.
+type composableAction struct {
+	Ref            string
+	Description    string
+	Price          int64
+	RequiredInputs []string // required input field names from the action's input_schema
 }
 
 // MakeTest records the outcome of one test case run during synthesis.
@@ -61,9 +70,8 @@ type makeInput struct {
 	Description string
 }
 
-// makeTestHost implements kernel.HostFunctions for testing generated WASM during synthesis.
-// All sub-calls return {} — output values cannot be predicted when the action uses
-// catalog actions whose real responses are unknown at synthesis time.
+// makeTestHost implements kernel.HostFunctions for smoke-testing generated WASM.
+// Sub-calls return {} — real responses are unknown at synthesis time.
 type makeTestHost struct{}
 
 func (h *makeTestHost) Call(_ context.Context, _ string, _ []byte) ([]byte, error) {
@@ -77,12 +85,24 @@ func (h *makeTestHost) StepComplete(_ context.Context, _ string, _ []byte) ([]by
 }
 func (h *makeTestHost) Log(_ context.Context, _, _ string) error { return nil }
 
-// executeMake implements the @sys/make decide-driven synthesis loop.
-// targetID is make's action owner (@sys); callerID is the call caller who will own the synthesized action;
-// ownerUserID is the process owner (payer).
+// executeMake runs the @sys/make four-phase pipeline, all phases inside one repair loop:
+//
+//	Phase 1 — Plan & research: derive contract, constraints, plan; for each plan
+//	          capability run lookup→decide to surface composable actions.
+//	Phase 2 — Code: generate TinyGo from contract + constraints + surface + prior diagnostics.
+//	Phase 3 — Compile: TinyGo → WASM; validate imports/exports.
+//	Phase 4 — Evaluate: smoke-test ≥3 inputs, all must pass.
+//
+// All four phases repeat up to maxSteps times on failure; accumulated diagnostics feed back
+// into planning so a failed attempt can revise the contract, plan, and composable surface.
+// targetID is make's action owner (@sys); callerID is the call caller who will own the
+// synthesized action; ownerUserID is the payer.
 func executeMake(ctx context.Context, args map[string]any, targetID, callerID, ownerUserID, processID, parentTraceID string, k *kernel.Kernel, deps MakeDeps, sdk string, maxSteps int) (map[string]any, error) {
 	if deps.Compiler == nil {
 		return nil, kernel.ErrInvalidState.Wrap("source compiler not configured")
+	}
+	if deps.Chatter == nil {
+		return nil, kernel.ErrInvalidState.Wrap("LLM not configured")
 	}
 
 	in, err := parseMakeInput(args)
@@ -90,103 +110,36 @@ func executeMake(ctx context.Context, args map[string]any, targetID, callerID, o
 		return nil, err
 	}
 
-	// Phase 1: derive the action contract once via @sys/llm/chat.
-	contract, diag := deriveContract(ctx, in.Description, targetID, processID, parentTraceID, k)
-	if diag != "" {
-		return marshalMakeResult(&MakeResult{
-			Status:      "failure",
-			Diagnostics: []string{"contract derivation failed: " + diag},
-			Tests:       []MakeTest{},
-		})
-	}
-
-	// Seed the decide loop message history with the goal and derived contract.
-	contractJSON, _ := json.Marshal(map[string]any{
-		"name":          contract.Name,
-		"input_schema":  contract.InputSchema,
-		"output_schema": contract.OutputSchema,
-	})
-	messages := []any{
-		map[string]any{"role": "system", "content": buildSystemPrompt(sdk, contract)},
-		map[string]any{"role": "user", "content": "Build this action: " + in.Description},
-		map[string]any{"role": "tool", "tool": map[string]any{
-			"action": "@sys/llm/chat",
-			"result": map[string]any{"contract": string(contractJSON)},
-		}},
-	}
-
-	loopActions := []string{"@sys/lookup", "@sys/llm/chat"}
+	// Repair loop: every attempt re-plans, re-researches, codes, compiles, and
+	// evaluates. Accumulated diagnostics feed back into planning so a failed
+	// attempt can revise the contract, plan, and composable surface — not just
+	// re-generate code against a frozen plan.
 	diagnostics := []string{}
 	tests := []MakeTest{}
 
 	for step := 0; step < maxSteps; step++ {
-		// Ask the LLM what to do next given the accumulated history.
-		selected, selectedArgs, _, decideErr := callDecide(ctx, messages, loopActions, targetID, processID, parentTraceID, k)
-		if decideErr != nil {
-			// If the model chose @sys/llm/chat but proposed args that fail schema validation,
-			// recover: treat this as a decision to generate code. The args are always overridden
-			// below via buildCodeGenArgs, so the model's arg proposal doesn't matter.
-			if errors.Is(decideErr, kernel.ErrExecutionFailed) &&
-				strings.Contains(decideErr.Error(), "@sys/llm/chat") &&
-				strings.Contains(decideErr.Error(), "args failed validation") {
-				selected = "@sys/llm/chat"
-				selectedArgs = map[string]any{}
-			} else {
-				diagnostics = append(diagnostics, fmt.Sprintf("step %d: decide: %v", step+1, decideErr))
-				continue
-			}
-		}
-
-		// Record the assistant's proposal in the conversation.
-		messages = append(messages, map[string]any{
-			"role": "assistant",
-			"tool": map[string]any{"action": selected, "args": selectedArgs},
-		})
-
-		// For @sys/llm/chat: the decide model only chose the action; construct the actual
-		// code-generation args from the full accumulated history so the LLM has SDK context.
-		if selected == "@sys/llm/chat" {
-			selectedArgs = buildCodeGenArgs(messages, diagnostics)
-		}
-
-		// Execute the selected action.
-		result, execErr := callAction(ctx, selected, selectedArgs, targetID, processID, parentTraceID, k)
-		if execErr != nil {
-			messages = append(messages, map[string]any{
-				"role": "tool",
-				"tool": map[string]any{"action": selected, "args": selectedArgs, "result": map[string]any{"error": execErr.Error()}},
-			})
-			diagnostics = append(diagnostics, fmt.Sprintf("step %d: %s: %v", step+1, selected, execErr))
-			continue
-		}
-		messages = append(messages, map[string]any{
-			"role": "tool",
-			"tool": map[string]any{"action": selected, "args": selectedArgs, "result": result},
-		})
-
-		if selected != "@sys/llm/chat" {
-			// Informational action (e.g. @sys/lookup) — result is now in history.
+		// Phase 1: Plan & research.
+		contract, surface, failDiag := planAndResearch(ctx, in.Description, diagnostics, targetID, processID, parentTraceID, k)
+		if failDiag != "" {
+			diagnostics = append(diagnostics, fmt.Sprintf("step %d: plan & research: %s", step+1, failDiag))
 			continue
 		}
 
-		// @sys/llm/chat was selected: attempt to extract, compile, and test code.
-		msg, _ := result["message"].(map[string]any)
-		content, _ := msg["content"].(string)
-
-		runFunc := extractGoBlock(content)
-		if runFunc == "" {
-			diagnostics = append(diagnostics, fmt.Sprintf("step %d: no Go code block in response", step+1))
+		// Phase 2: Generate code.
+		source, codeDiag := generateCode(ctx, contract, surface, diagnostics, targetID, processID, parentTraceID, k, sdk)
+		if codeDiag != "" {
+			diagnostics = append(diagnostics, fmt.Sprintf("step %d: %s", step+1, codeDiag))
 			continue
 		}
-		source := prepareSource(sdk, runFunc)
 
+		// Phase 3: Compile.
 		wasm, _, compileErr := deps.Compiler.CompileSource(ctx, []byte(source))
 		if compileErr != nil {
 			diagnostics = append(diagnostics, fmt.Sprintf("step %d: compile: %v", step+1, compileErr))
 			continue
 		}
 
-		// Terminal failure: disallowed WASM imports are a structural violation, not retried.
+		// Validate WASM imports/exports — terminal failure, not retried.
 		if checkDiag := checkWASMImports(wasm, deps.Scripts); checkDiag != "" {
 			return marshalMakeResult(&MakeResult{
 				Status:      "failure",
@@ -195,6 +148,7 @@ func executeMake(ctx context.Context, args map[string]any, targetID, callerID, o
 			})
 		}
 
+		// Phase 4: Evaluate.
 		price := computePrice(ctx, source, ownerUserID, k)
 		tests = generateAndRunExamples(ctx, contract, wasm, targetID, processID, parentTraceID, k, deps.Scripts)
 
@@ -209,28 +163,17 @@ func executeMake(ctx context.Context, args map[string]any, targetID, callerID, o
 		if allPassed {
 			inSchema := sanitizeSchemaForRegistration(contract.InputSchema)
 			outSchema := sanitizeSchemaForRegistration(contract.OutputSchema)
-			var action *kernel.Action
-			var createErr error
-			for attempt := 0; attempt <= 9; attempt++ {
-				candidateName := contract.Name
-				if attempt > 0 {
-					candidateName = fmt.Sprintf("%s-%d", contract.Name, attempt+1)
-				}
-				action, createErr = k.CreateAction(ctx, callerID, kernel.CreateActionRequest{
-					OwnerUserID:  callerID,
-					Name:         candidateName,
-					Kind:         kernel.KindWasm,
-					Price:        price,
-					Description:  contract.Description,
-					InputSchema:  inSchema,
-					OutputSchema: outSchema,
-					Source:       source,
-					WasmArtifact: base64.StdEncoding.EncodeToString(wasm),
-				})
-				if createErr == nil || !isNameCollision(createErr) {
-					break
-				}
-			}
+			action, createErr := k.CreateAction(ctx, callerID, kernel.CreateActionRequest{
+				OwnerUserID:  callerID,
+				Name:         contract.Name,
+				Kind:         kernel.KindWasm,
+				Price:        price,
+				Description:  contract.Description,
+				InputSchema:  inSchema,
+				OutputSchema: outSchema,
+				Source:       source,
+				WasmArtifact: base64.StdEncoding.EncodeToString(wasm),
+			})
 			if createErr != nil {
 				return marshalMakeResult(&MakeResult{
 					Status:      "failure",
@@ -267,78 +210,170 @@ func parseMakeInput(args map[string]any) (*makeInput, error) {
 	return &makeInput{Description: desc}, nil
 }
 
-// buildSystemPrompt constructs the system message that seeds the decide loop.
-func buildSystemPrompt(sdk string, contract *actionContract) string {
-	inJSON, _ := json.MarshalIndent(contract.InputSchema, "", "  ")
-	outJSON, _ := json.MarshalIndent(contract.OutputSchema, "", "  ")
-	var sb strings.Builder
-	sb.WriteString("You are synthesizing a Juice WASM action. ")
-	sb.WriteString("Prefer composing existing platform actions via JuiceCall over writing new code from scratch.\n\n")
-	sb.WriteString("Contract:\n")
-	sb.WriteString("  name: " + contract.Name + "\n")
-	sb.WriteString("  input_schema: " + string(inJSON) + "\n")
-	sb.WriteString("  output_schema: " + string(outJSON) + "\n\n")
-	sb.WriteString("Toolkit:\n")
-	sb.WriteString("  @sys/lookup   — find existing actions by description\n")
-	sb.WriteString("  @sys/llm/chat — generate TinyGo code once you have sufficient context\n\n")
-	if sdk != "" {
-		sb.WriteString("TinyGo SDK (already included — DO NOT redeclare):\n```go\n")
-		sb.WriteString(sdk)
-		sb.WriteString("\n```\n\n")
+// planAndResearch runs Phase 1: derives the contract (with constraints and plan),
+// then for each plan capability runs lookup→decide to surface composable actions.
+// diagnostics from prior failed attempts are fed into contract derivation so the plan
+// can be revised. Returns the contract, a formatted surface string, and an error diagnostic.
+func planAndResearch(ctx context.Context, description string, diagnostics []string, targetID, processID, parentTraceID string, k *kernel.Kernel) (*actionContract, string, string) {
+	contract, diag := deriveContract(ctx, description, diagnostics, targetID, processID, parentTraceID, k)
+	if diag != "" {
+		return nil, "", diag
 	}
-	sb.WriteString("Code rules (STRICT — violations cause compile errors):\n")
-	sb.WriteString("- Output ONLY the body: //export run function plus any private helpers\n")
-	sb.WriteString("- NO package declaration, NO import statements — SDK already imports encoding/json and unsafe\n")
-	sb.WriteString("- NO redeclaration of any SDK symbol (mustMarshal, JuiceCall, _ptrLen, etc.)\n")
-	sb.WriteString("- ONLY encoding/json and unsafe are in scope — NO fmt, NO strings, NO other packages\n")
-	sb.WriteString("- NO fail(), success(), ptrToBytes() — those helpers do NOT exist in the SDK\n")
-	sb.WriteString("- Every variable declared with := MUST be used immediately; declare only what you need\n")
-	sb.WriteString("- Use float64 for numbers, string for text — rawNumber, json.Number, int are NOT available\n")
-	sb.WriteString("- argsJSON declared for JuiceCall MUST appear as the second argument of JuiceCall on the next line\n\n")
-	sb.WriteString("Required patterns:\n")
-	sb.WriteString("  Read input:    inBytes := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(inputPtr))), int(inputLen))\n")
-	sb.WriteString("                 json.Unmarshal(inBytes, &input)\n")
-	sb.WriteString("  Return result: out := mustMarshal(result); p, l := _ptrLen(out); return uint64(p)<<32 | uint64(l)\n")
-	sb.WriteString("  Sub-call (COMPLETE pattern — both lines required):\n")
-	sb.WriteString("    argsJSON := mustMarshal(map[string]any{\"key\": value})\n")
-	sb.WriteString("    replyBytes, _ := JuiceCall(\"@owner/name\", argsJSON)\n")
-	sb.WriteString("    var reply struct{ Result float64 `json:\"result\"` }\n")
-	sb.WriteString("    json.Unmarshal(replyBytes, &reply)\n\n")
-	sb.WriteString("@sys/llm/chat call and response (Juice format, NOT OpenAI):\n")
-	sb.WriteString("  args = mustMarshal(map[string]any{\"messages\": []any{map[string]any{\"role\": \"user\", \"content\": prompt}}})\n")
-	sb.WriteString("  replyBytes, _ = JuiceCall(\"@sys/llm/chat\", args)\n")
-	sb.WriteString("  var chatReply struct{ Message struct{ Content string `json:\"content\"` } `json:\"message\"` }\n")
-	sb.WriteString("  json.Unmarshal(replyBytes, &chatReply)  // chatReply.Message.Content is the text\n")
-	sb.WriteString("  // NOTE: response uses {\"message\":{\"content\":\"...\"}}, NOT {\"choices\":[...]}\n\n")
-	sb.WriteString("Minimal working example (echo action):\n")
-	sb.WriteString("```go\n")
-	sb.WriteString("//export run\n")
-	sb.WriteString("func run(inputPtr, inputLen uint32) uint64 {\n")
-	sb.WriteString("\tvar input struct{ Text string `json:\"text\"` }\n")
-	sb.WriteString("\tinBytes := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(inputPtr))), int(inputLen))\n")
-	sb.WriteString("\tjson.Unmarshal(inBytes, &input)\n")
-	sb.WriteString("\tout := mustMarshal(map[string]any{\"result\": input.Text})\n")
-	sb.WriteString("\tp, l := _ptrLen(out)\n")
-	sb.WriteString("\treturn uint64(p)<<32 | uint64(l)\n")
-	sb.WriteString("}\n")
-	sb.WriteString("```\n\n")
-	sb.WriteString("Wrap generated code in ```go\\n...\\n```\n")
+
+	seen := map[string]bool{}
+	var surface []composableAction
+
+	for _, capability := range contract.Plan {
+		candidates, err := researchCapability(ctx, capability, contract.Constraints, targetID, processID, parentTraceID, k)
+		if err != nil || len(candidates) == 0 {
+			continue // non-fatal: this capability will be implemented from scratch
+		}
+		for _, c := range candidates {
+			if !seen[c.Ref] {
+				seen[c.Ref] = true
+				surface = append(surface, c)
+			}
+		}
+	}
+
+	return contract, buildSurface(surface), ""
+}
+
+// researchCapability runs lookup then decide for one plan capability.
+// Returns the selected action or nil; errors are treated as from-scratch by the caller.
+func researchCapability(ctx context.Context, capability string, constraints []string, targetID, processID, parentTraceID string, k *kernel.Kernel) ([]composableAction, error) {
+	result, err := callAction(ctx, "@sys/lookup", map[string]any{"query": capability}, targetID, processID, parentTraceID, k)
+	if err != nil {
+		return nil, err
+	}
+
+	results, _ := result["results"].([]any)
+	if len(results) == 0 {
+		return nil, nil
+	}
+
+	var candidates []composableAction
+	for _, r := range results {
+		rm, _ := r.(map[string]any)
+		ownerHandle, _ := rm["owner_handle"].(string)
+		name, _ := rm["name"].(string)
+		desc, _ := rm["description"].(string)
+		price, _ := rm["price"].(float64)
+		if ownerHandle == "" || name == "" {
+			continue
+		}
+		candidates = append(candidates, composableAction{
+			Ref:         ownerHandle + "/" + name,
+			Description: desc,
+			Price:       int64(price),
+		})
+	}
+
+	candidates = filterCandidates(candidates, constraints)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	actionRefs := make([]string, len(candidates))
+	for i, c := range candidates {
+		actionRefs[i] = c.Ref
+	}
+
+	messages := []any{
+		map[string]any{"role": "user", "content": "Select the best existing action for this capability: " + capability},
+	}
+	selected, _, _, err := callDecide(ctx, messages, actionRefs, targetID, processID, parentTraceID, k)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, c := range candidates {
+		if c.Ref == selected {
+			// Fetch required input fields so codegen knows the correct argument names.
+			ownerHandle, actionName, parseErr := kernel.ParseActionRef(c.Ref)
+			if parseErr == nil {
+				if a, readErr := k.ReadCallableAction(ctx, ownerHandle, actionName, targetID); readErr == nil {
+					c.RequiredInputs = topLevelKeys(a.InputSchema)
+				}
+			}
+			return []composableAction{c}, nil
+		}
+	}
+	return nil, nil
+}
+
+// filterCandidates removes actions that violate the given constraints.
+func filterCandidates(candidates []composableAction, constraints []string) []composableAction {
+	if !hasLLMConstraint(constraints) {
+		return candidates
+	}
+	var out []composableAction
+	for _, c := range candidates {
+		if !strings.Contains(strings.ToLower(c.Ref), "llm") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// hasLLMConstraint returns true if any constraint prohibits LLM use.
+func hasLLMConstraint(constraints []string) bool {
+	for _, c := range constraints {
+		l := strings.ToLower(c)
+		if strings.Contains(l, "llm") || strings.Contains(l, "no ai") || strings.Contains(l, "without ai") {
+			return true
+		}
+	}
+	return false
+}
+
+// buildSurface formats the composable surface as a string for the codegen prompt.
+func buildSurface(surface []composableAction) string {
+	if len(surface) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, a := range surface {
+		line := fmt.Sprintf("  %s — %s (price %d)", a.Ref, a.Description, a.Price)
+		if len(a.RequiredInputs) > 0 {
+			line += " | required inputs: " + strings.Join(a.RequiredInputs, ", ")
+		}
+		sb.WriteString(line + "\n")
+	}
 	return sb.String()
 }
 
-// deriveContract calls @sys/llm/chat to produce name, description, input_schema, and output_schema.
-// The description field is a clean one-line summary derived from the user's intent, not the raw input.
-func deriveContract(ctx context.Context, userIntent, targetID, processID, parentTraceID string, k *kernel.Kernel) (*actionContract, string) {
+// deriveContract calls @sys/llm/chat to produce name, description, schemas,
+// constraints, and plan from the user's description. diagnostics from prior failed
+// attempts are appended so the LLM can revise the contract and plan.
+//
+// This uses plain @sys/llm/chat, NOT schema-constrained @sys/llm/json: the contract's
+// input_schema/output_schema are themselves free-form JSON Schema, and constraining their
+// generation with Ollama's `format` makes the model stall/truncate on the nested structure
+// (the §8.1 large-context JSON-mode failure). We parse defensively with extractJSON instead.
+// Schema-constrained decoding is reserved for example generation, where the target shape is
+// a concrete, already-derived input_schema (see generateAndRunExamples).
+func deriveContract(ctx context.Context, userIntent string, diagnostics []string, targetID, processID, parentTraceID string, k *kernel.Kernel) (*actionContract, string) {
 	prompt := fmt.Sprintf(`You are designing a callable API action for the Juice platform.
 Given the user's request, produce a JSON object with exactly these fields:
 {
   "name": "short-kebab-slug (3 words max, captures the core function)",
-  "description": "Clean one-line description of what this action does (ignore preamble, tips, or conversational phrasing)",
+  "description": "Clean one-line description of what this action does",
   "input_schema": { "type": "object", "properties": { ... }, "required": [...] },
-  "output_schema": { "type": "object", "properties": { ... }, "required": [...] }
+  "output_schema": { "type": "object", "properties": { ... }, "required": [...] },
+  "constraints": ["extract any restrictions from the user's phrasing, e.g. 'no LLM', 'only +-*/'"],
+  "plan": ["distinct capability needed to implement this action", ...]
 }
+Every schema property must have a "type" of object, array, string, integer, number, or boolean.
 Respond with ONLY the JSON object, nothing else.
 User request: %s`, userIntent)
+
+	if len(diagnostics) > 0 {
+		prompt += "\n\nPrior attempts failed with these errors — revise the plan, schemas, or constraints to avoid them:\n"
+		for _, d := range diagnostics {
+			prompt += "- " + d + "\n"
+		}
+	}
 
 	result, err := callAction(ctx, "@sys/llm/chat", map[string]any{
 		"messages": []any{map[string]any{"role": "user", "content": prompt}},
@@ -358,6 +393,8 @@ User request: %s`, userIntent)
 		Description  string         `json:"description"`
 		InputSchema  map[string]any `json:"input_schema"`
 		OutputSchema map[string]any `json:"output_schema"`
+		Constraints  []string       `json:"constraints"`
+		Plan         []string       `json:"plan"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
 		return nil, fmt.Sprintf("invalid JSON: %v", err)
@@ -373,7 +410,142 @@ User request: %s`, userIntent)
 		Description:  raw.Description,
 		InputSchema:  raw.InputSchema,
 		OutputSchema: raw.OutputSchema,
+		Constraints:  raw.Constraints,
+		Plan:         raw.Plan,
 	}, ""
+}
+
+// generateCode runs one code generation attempt via @sys/llm/chat.
+// Returns the prepared source and empty string, or "" and a diagnostic on failure.
+func generateCode(ctx context.Context, contract *actionContract, surface string, diagnostics []string, targetID, processID, parentTraceID string, k *kernel.Kernel, sdk string) (string, string) {
+	messages := buildCodeGenMessages(sdk, contract, surface, diagnostics)
+	result, err := callAction(ctx, "@sys/llm/chat", map[string]any{"messages": messages}, targetID, processID, parentTraceID, k)
+	if err != nil {
+		return "", "codegen LLM: " + err.Error()
+	}
+	msg, _ := result["message"].(map[string]any)
+	content, _ := msg["content"].(string)
+	body := extractGoBlock(content)
+	if body == "" {
+		return "", "no Go code block in LLM response"
+	}
+	return prepareSource(sdk, body), ""
+}
+
+// buildCodeGenMessages constructs the messages array for the code generation chat call.
+func buildCodeGenMessages(sdk string, contract *actionContract, surface string, diagnostics []string) []any {
+	inJSON, _ := json.MarshalIndent(contract.InputSchema, "", "  ")
+	outJSON, _ := json.MarshalIndent(contract.OutputSchema, "", "  ")
+
+	var sys strings.Builder
+	sys.WriteString("You are synthesizing a Juice WASM action in TinyGo.\n\n")
+	sys.WriteString("Contract:\n")
+	sys.WriteString("  name: " + contract.Name + "\n")
+	sys.WriteString("  input_schema: " + string(inJSON) + "\n")
+	sys.WriteString("  output_schema: " + string(outJSON) + "\n\n")
+
+	if len(contract.Constraints) > 0 {
+		sys.WriteString("Constraints (MUST honor):\n")
+		for _, c := range contract.Constraints {
+			sys.WriteString("  - " + c + "\n")
+		}
+		sys.WriteString("\n")
+	}
+
+	if surface != "" {
+		sys.WriteString("Available platform actions to compose via JuiceCall:\n")
+		sys.WriteString(surface)
+		sys.WriteString("\n")
+	}
+
+	if sdk != "" {
+		sys.WriteString("TinyGo SDK (already included — DO NOT redeclare):\n```go\n")
+		sys.WriteString(sdk)
+		sys.WriteString("\n```\n\n")
+	}
+
+	sys.WriteString("Code rules (STRICT — violations cause compile errors):\n")
+	sys.WriteString("- Output ONLY the body: //export run function plus any private helpers\n")
+	sys.WriteString("- NO package declaration, NO import statements — SDK already imports encoding/json and unsafe\n")
+	sys.WriteString("- NO redeclaration of any SDK symbol (mustMarshal, JuiceCall, _ptrLen, etc.)\n")
+	sys.WriteString("- ONLY encoding/json and unsafe are in scope — NO fmt, NO strings, NO other packages\n")
+	sys.WriteString("- NO fail(), success(), ptrToBytes() — those helpers do NOT exist in the SDK\n")
+	sys.WriteString("- Every variable declared with := MUST be used immediately; declare only what you need\n")
+	sys.WriteString("- Use float64 for numbers, string for text — rawNumber, json.Number, int are NOT available\n")
+	sys.WriteString("- argsJSON declared for JuiceCall MUST appear as the second argument of JuiceCall on the next line\n")
+	sys.WriteString("- JuiceCall's first argument MUST be a full \"@owner/name\" reference (use one from the\n")
+	sys.WriteString("  actions list above, e.g. \"@alice/calculator\") — NEVER a bare name, and NEVER this\n")
+	sys.WriteString("  action's own name (no self-calls; that recurses and fails).\n")
+	sys.WriteString("- Wrap generated code in ```go\\n...\\n```\n\n")
+	sys.WriteString("Required patterns:\n")
+	sys.WriteString("  Read input:    inBytes := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(inputPtr))), int(inputLen))\n")
+	sys.WriteString("                 json.Unmarshal(inBytes, &input)\n")
+	sys.WriteString("  Return result: out := mustMarshal(result); p, l := _ptrLen(out); return uint64(p)<<32 | uint64(l)\n")
+	sys.WriteString("  Sub-call (COMPLETE pattern — both lines required):\n")
+	sys.WriteString("    argsJSON := mustMarshal(map[string]any{\"key\": value})\n")
+	sys.WriteString("    replyBytes, _ := JuiceCall(\"@owner/name\", argsJSON)\n")
+	sys.WriteString("    var reply struct{ Result float64 `json:\"result\"` }\n")
+	sys.WriteString("    json.Unmarshal(replyBytes, &reply)\n\n")
+	sys.WriteString("Calling an LLM — choose the right action:\n")
+	sys.WriteString("- Need STRUCTURED data (a number, a record, a list, an enum)? Use @sys/llm/json — NEVER\n")
+	sys.WriteString("  hand-parse free-form text. A chat model replies 'The answer is 35', not '35'; parsing\n")
+	sys.WriteString("  that yourself silently fails. @sys/llm/json constrains the model to a schema you supply.\n")
+	sys.WriteString("- Need free-form natural-language TEXT (a translation, a summary)? Use @sys/llm/chat.\n\n")
+	sys.WriteString("@sys/llm/json call (STRUCTURED output — the reply's \"value\" is GUARANTEED to match output_schema):\n")
+	sys.WriteString("  jsonArgs := mustMarshal(map[string]any{\n")
+	sys.WriteString("    \"messages\": []any{map[string]any{\"role\": \"user\", \"content\": prompt}},\n")
+	sys.WriteString("    \"output_schema\": map[string]any{\n")
+	sys.WriteString("      \"type\": \"object\",\n")
+	sys.WriteString("      \"properties\": map[string]any{\"result\": map[string]any{\"type\": \"number\"}},\n")
+	sys.WriteString("      \"required\": []any{\"result\"},\n")
+	sys.WriteString("    },\n")
+	sys.WriteString("  })\n")
+	sys.WriteString("  jb, _ := JuiceCall(\"@sys/llm/json\", jsonArgs)\n")
+	sys.WriteString("  var jr struct{ Value struct{ Result float64 `json:\"result\"` } `json:\"value\"` }\n")
+	sys.WriteString("  json.Unmarshal(jb, &jr)  // jr.Value.Result is present and numeric, guaranteed\n")
+	sys.WriteString("  // output_schema MUST be type \"object\" (wrap scalars/lists in a field, e.g.\n")
+	sys.WriteString("  // {result: number} or {items: array}); the reply's \"value\" is always an object.\n\n")
+	sys.WriteString("@sys/llm/chat call and response (free-form TEXT only; Juice format, NOT OpenAI):\n")
+	sys.WriteString("  args := mustMarshal(map[string]any{\"messages\": []any{map[string]any{\"role\": \"user\", \"content\": prompt}}})\n")
+	sys.WriteString("  replyBytes, _ := JuiceCall(\"@sys/llm/chat\", args)\n")
+	sys.WriteString("  var chatReply struct{ Message struct{ Content string `json:\"content\"` } `json:\"message\"` }\n")
+	sys.WriteString("  json.Unmarshal(replyBytes, &chatReply)  // chatReply.Message.Content is the text\n")
+	sys.WriteString("  // NOTE: response uses {\"message\":{\"content\":\"...\"}}, NOT {\"choices\":[...]}\n\n")
+	sys.WriteString("@sys/llm/decide call (choose the best action from a list):\n")
+	sys.WriteString("  // REQUIRED: both 'messages' and 'actions' fields must be present\n")
+	sys.WriteString("  decideArgs := mustMarshal(map[string]any{\n")
+	sys.WriteString("    \"messages\": []any{map[string]any{\"role\": \"user\", \"content\": task}},\n")
+	sys.WriteString("    \"actions\": []any{\"@alice/calculator\", \"@alice/other-action\"},\n")
+	sys.WriteString("  })\n")
+	sys.WriteString("  decideBytes, _ := JuiceCall(\"@sys/llm/decide\", decideArgs)\n")
+	sys.WriteString("  var decideReply struct{ Action string `json:\"action\"`; Args map[string]any `json:\"args\"` }\n")
+	sys.WriteString("  json.Unmarshal(decideBytes, &decideReply)  // decideReply.Action is \"@alice/calculator\"\n\n")
+	sys.WriteString("Minimal working example (echo action):\n")
+	sys.WriteString("```go\n")
+	sys.WriteString("//export run\n")
+	sys.WriteString("func run(inputPtr, inputLen uint32) uint64 {\n")
+	sys.WriteString("\tvar input struct{ Text string `json:\"text\"` }\n")
+	sys.WriteString("\tinBytes := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(inputPtr))), int(inputLen))\n")
+	sys.WriteString("\tjson.Unmarshal(inBytes, &input)\n")
+	sys.WriteString("\tout := mustMarshal(map[string]any{\"result\": input.Text})\n")
+	sys.WriteString("\tp, l := _ptrLen(out)\n")
+	sys.WriteString("\treturn uint64(p)<<32 | uint64(l)\n")
+	sys.WriteString("}\n")
+	sys.WriteString("```\n")
+
+	var userMsg strings.Builder
+	userMsg.WriteString("Implement the action described above.")
+	if len(diagnostics) > 0 {
+		userMsg.WriteString("\n\nFix these errors from the previous attempt:\n")
+		for _, d := range diagnostics {
+			userMsg.WriteString("- " + d + "\n")
+		}
+	}
+
+	return []any{
+		map[string]any{"role": "system", "content": sys.String()},
+		map[string]any{"role": "user", "content": userMsg.String()},
+	}
 }
 
 // callAction calls any Juice action by @owner/name reference through kernel.Call,
@@ -391,72 +563,23 @@ func callAction(ctx context.Context, actionRef string, args map[string]any, targ
 	return reply.Result, nil
 }
 
-// buildCodeGenArgs constructs the @sys/llm/chat args for code generation from the accumulated
-// message history. The decide model only selects the action name; this function provides the
-// full context (SDK system prompt + task description + contract + any prior errors) so the
-// code-generation LLM has everything it needs without relying on the routing model to re-state it.
-func buildCodeGenArgs(messages []any, priorErrors []string) map[string]any {
-	var sysContent, taskDesc, contractStr string
-	var lookupSnippets []string
-
-	for _, m := range messages {
-		msg, _ := m.(map[string]any)
-		role, _ := msg["role"].(string)
-		switch role {
-		case "system":
-			if c, _ := msg["content"].(string); c != "" {
-				sysContent = c
-			}
-		case "user":
-			if c, _ := msg["content"].(string); c != "" && taskDesc == "" {
-				taskDesc = c
-			}
-		case "tool":
-			tool, _ := msg["tool"].(map[string]any)
-			action, _ := tool["action"].(string)
-			result, _ := tool["result"].(map[string]any)
-			switch action {
-			case "@sys/llm/chat":
-				if c, _ := result["contract"].(string); c != "" && contractStr == "" {
-					contractStr = c
-				}
-			case "@sys/lookup":
-				if b, err := json.Marshal(result); err == nil {
-					lookupSnippets = append(lookupSnippets, string(b))
-				}
-			}
-		}
+// callJSON calls @sys/llm/json with schema-constrained decoding and returns the validated
+// value. The reply is guaranteed to satisfy outputSchema — Ollama constrains generation to
+// the schema (format=schema, temperature 0) and @sys/llm/json validates locally — so callers
+// parse it directly without the prose-stripping heuristics plain @sys/llm/chat requires.
+// Returns the value, or a non-empty diagnostic string on failure.
+func callJSON(ctx context.Context, messages []any, outputSchema map[string]any, targetID, processID, parentTraceID string, k *kernel.Kernel) (any, string) {
+	result, err := callAction(ctx, "@sys/llm/json", map[string]any{
+		"messages":      messages,
+		"output_schema": outputSchema,
+	}, targetID, processID, parentTraceID, k)
+	if err != nil {
+		return nil, err.Error()
 	}
-
-	var userMsg strings.Builder
-	if taskDesc != "" {
-		userMsg.WriteString(taskDesc + "\n\n")
-	}
-	if contractStr != "" {
-		userMsg.WriteString("Contract:\n" + contractStr + "\n\n")
-	}
-	for _, s := range lookupSnippets {
-		userMsg.WriteString("Found existing actions:\n" + s + "\n\n")
-	}
-	if len(priorErrors) > 0 {
-		userMsg.WriteString("Fix these errors from the previous attempt:\n")
-		for _, e := range priorErrors {
-			userMsg.WriteString("- " + e + "\n")
-		}
-		userMsg.WriteString("\n")
-	}
-	userMsg.WriteString("Write the TinyGo code now.")
-
-	var chatMsgs []any
-	if sysContent != "" {
-		chatMsgs = append(chatMsgs, map[string]any{"role": "system", "content": sysContent})
-	}
-	chatMsgs = append(chatMsgs, map[string]any{"role": "user", "content": strings.TrimSpace(userMsg.String())})
-	return map[string]any{"messages": chatMsgs}
+	return result["value"], ""
 }
 
-// callDecide calls @sys/llm/decide and returns the selected action reference, its args,
-// and an optional message. Returns an error if decide fails or produces no selection.
+// callDecide calls @sys/llm/decide and returns the selected action reference and its args.
 func callDecide(ctx context.Context, messages []any, actions []string, targetID, processID, parentTraceID string, k *kernel.Kernel) (string, map[string]any, string, error) {
 	actionsAny := make([]any, len(actions))
 	for i, a := range actions {
@@ -505,8 +628,9 @@ func computePrice(ctx context.Context, source, processOwnerID string, k *kernel.
 	return total
 }
 
-// generateAndRunExamples asks the LLM for test inputs, executes them against the WASM,
-// and validates the output structure.
+// generateAndRunExamples asks the LLM for 3 example inputs, executes them against the WASM,
+// and validates the output structure. Failures to produce or run examples are recorded as
+// failed tests — never silently treated as passing.
 func generateAndRunExamples(ctx context.Context, contract *actionContract, wasm []byte, targetID, processID, parentTraceID string, k *kernel.Kernel, scripts kernel.ScriptExecutor) []MakeTest {
 	if scripts == nil {
 		return []MakeTest{{Name: "compile", Status: "failed", Reason: "script executor not configured"}}
@@ -517,42 +641,55 @@ func generateAndRunExamples(ctx context.Context, contract *actionContract, wasm 
 	}
 	results := []MakeTest{{Name: "compile", Status: "passed"}}
 
+	// Schema-constrained example generation: ask @sys/llm/json for an object holding an
+	// "examples" array whose items conform to the action's (sanitized) input schema. Ollama
+	// constrains generation to the schema, so every example is a valid input — no prose
+	// stripping, no parse guessing. The object envelope is required because @sys/llm/json's
+	// own output_schema constrains its "value" to an object (a bare array would be rejected).
+	itemSchema := sanitizeSchemaForRegistration(contract.InputSchema)
+	envelope := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"examples": map[string]any{"type": "array", "items": itemSchema},
+		},
+		"required": []any{"examples"},
+	}
 	inJSON, _ := json.MarshalIndent(contract.InputSchema, "", "  ")
-	prompt := fmt.Sprintf(`Given this JSON input schema, generate 3 realistic example inputs.
-Respond with ONLY a JSON array of objects, each matching the schema.
+	prompt := fmt.Sprintf(`Generate 3 realistic, distinct example inputs for an action with this input schema.
+Return an object with an "examples" array of exactly 3 objects, each conforming to the schema.
 
 Schema:
 %s`, string(inJSON))
 
-	result, err := callAction(ctx, "@sys/llm/chat", map[string]any{
-		"messages": []any{map[string]any{"role": "user", "content": prompt}},
-	}, targetID, processID, parentTraceID, k)
-	if err != nil {
+	value, diag := callJSON(ctx, []any{map[string]any{"role": "user", "content": prompt}}, envelope, targetID, processID, parentTraceID, k)
+	if diag != "" {
+		results = append(results, MakeTest{Name: "examples", Status: "failed", Reason: "could not generate example inputs: " + diag})
 		return results
 	}
-	msg, _ := result["message"].(map[string]any)
-	content, _ := msg["content"].(string)
-
-	jsonStr := extractJSON(content)
-	if jsonStr == "" {
+	obj, ok := value.(map[string]any)
+	if !ok {
+		results = append(results, MakeTest{Name: "examples", Status: "failed", Reason: "example output was not a JSON object"})
+		return results
+	}
+	rawArr, ok := obj["examples"].([]any)
+	if !ok {
+		results = append(results, MakeTest{Name: "examples", Status: "failed", Reason: "example output missing \"examples\" array"})
 		return results
 	}
 	var examples []map[string]any
-	if err := json.Unmarshal([]byte(jsonStr), &examples); err != nil {
-		var single map[string]any
-		if err2 := json.Unmarshal([]byte(jsonStr), &single); err2 == nil {
-			examples = []map[string]any{single}
-		} else {
-			return results
+	for _, e := range rawArr {
+		if m, ok := e.(map[string]any); ok {
+			examples = append(examples, m)
 		}
 	}
 	if len(examples) < 3 {
-		results = append(results, MakeTest{Name: "examples", Status: "failed", Reason: fmt.Sprintf("need 3 test inputs, got %d", len(examples))})
+		results = append(results, MakeTest{Name: "examples", Status: "failed",
+			Reason: fmt.Sprintf("need 3 example inputs, got %d", len(examples))})
 		return results
 	}
 
 	outKeys := topLevelKeys(contract.OutputSchema)
-	for i, exArgs := range examples {
+	for i, exArgs := range examples[:3] {
 		name := fmt.Sprintf("example-%d", i+1)
 		inputJSON, _ := json.Marshal(exArgs)
 		outputJSON, execErr := scripts.Execute(ctx, artifact, inputJSON, &makeTestHost{})
@@ -565,7 +702,7 @@ Schema:
 			results = append(results, MakeTest{Name: name, Status: "failed", Reason: "output not valid JSON"})
 			continue
 		}
-		missing := []string{}
+		var missing []string
 		for _, key := range outKeys {
 			if _, ok := output[key]; !ok {
 				missing = append(missing, key)
@@ -655,9 +792,17 @@ func prepareSource(sdk, generated string) string {
 	return sdk + "\n" + body
 }
 
-// sanitizeSchemaForRegistration strips unsupported JSON Schema keywords and ensures
-// every property has a description so the result passes ValidateSchema and
-// validateSchemaDescriptions at activation time.
+// supportedSchemaTypes are the JSON Schema "type" values the kernel's ValidateSchema accepts.
+var supportedSchemaTypes = map[string]bool{
+	"object": true, "array": true, "string": true,
+	"integer": true, "number": true, "boolean": true,
+}
+
+// sanitizeSchemaForRegistration strips unsupported JSON Schema keywords, drops malformed
+// "type" values (a local model may emit garbage like "::_string" or a non-string type), and
+// ensures every property has a description. The result is guaranteed to pass ValidateSchema —
+// both at activation and when used as the items schema for @sys/llm/json example generation.
+// A node whose type is dropped becomes unconstrained (accept-any), which is safe.
 func sanitizeSchemaForRegistration(schema map[string]any) map[string]any {
 	if schema == nil {
 		return map[string]any{}
@@ -667,6 +812,11 @@ func sanitizeSchemaForRegistration(schema map[string]any) map[string]any {
 	for _, key := range allowed {
 		if v, ok := schema[key]; ok {
 			result[key] = v
+		}
+	}
+	if t, ok := result["type"]; ok {
+		if s, isStr := t.(string); !isStr || !supportedSchemaTypes[s] {
+			delete(result, "type")
 		}
 	}
 	if props, ok := result["properties"].(map[string]any); ok {
@@ -706,12 +856,6 @@ func marshalMakeResult(r *MakeResult) (map[string]any, error) {
 	return m, nil
 }
 
-// isNameCollision reports whether err is a SQLite UNIQUE constraint violation on the
-// action name, which happens when the LLM proposes a name already registered by this owner.
-func isNameCollision(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unique constraint")
-}
-
 // extractGoBlock extracts the first ```go ... ``` block from an LLM response.
 func extractGoBlock(s string) string {
 	const start = "```go"
@@ -731,11 +875,12 @@ func extractGoBlock(s string) string {
 	return rest[:end2]
 }
 
-// extractJSON extracts the first {...} or [...] JSON value from a string.
+// extractJSON returns the first balanced {...} or [...] JSON span in s, skipping any prose
+// the model prepends. Used for @sys/llm/chat replies (contract derivation); @sys/llm/json
+// replies are already schema-constrained and need no extraction.
 func extractJSON(s string) string {
 	obj := strings.Index(s, "{")
 	arr := strings.Index(s, "[")
-	// Extract whichever valid JSON structure (array or object) appears first.
 	tryExtract := func(start int, open, close byte) string {
 		depth := 0
 		for j := start; j < len(s); j++ {
