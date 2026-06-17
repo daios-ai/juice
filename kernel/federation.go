@@ -218,6 +218,29 @@ func parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedActionID, expec
 	return &r, nil
 }
 
+// remoteReceiptInvalid returns a non-empty reason when a validly-signed remote receipt breaches the
+// §13 settlement invariants (success ⇒ charge = mp and reply_hash matches; failure ⇒ 0 ≤ charge ≤ mp),
+// so settlement can quarantine it (charge 0, full refund, no retry) instead of clamp-committing a
+// record that would fail VerifyRemoteReceipt. An empty string means the receipt is settleable.
+func remoteReceiptInvalid(r Receipt, mp int64, replyJSON []byte) string {
+	switch r.Status {
+	case TxSuccess:
+		if r.Charge != mp {
+			return "success charge != mp"
+		}
+		if h, err := jcsHashStr(string(replyJSON)); err != nil || r.ReplyHash != h {
+			return "reply_hash mismatch"
+		}
+	case TxFailure:
+		if r.Charge < 0 || r.Charge > mp {
+			return "failure charge out of range"
+		}
+	default:
+		return "unknown status"
+	}
+	return ""
+}
+
 // settleRemoteCall settles a remote-proxy call after ExecuteFederation returns.
 // If the receipt is absent or has an invalid signature, the trace stays open for retry (ErrTimeout).
 // Otherwise it commits CommitRemoteSettlement with the correct charge/duty/refund split.
@@ -231,27 +254,33 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	}
 	r := *rp
 
-	// Clamp remote charge to mp (protection against overcharging).
-	charge := r.Charge
-	if charge < 0 {
-		charge = 0
-	}
-	if charge > mp {
-		charge = mp
-	}
-	var duty int64
-	if r.Status == TxSuccess {
-		duty = ceilDiv(charge*k.cfg.ImportBPS, 10000)
-	}
-
+	// A validly-signed receipt is the peer's final, deterministic word: idempotent retry returns
+	// the same bytes, so a receipt that breaches the §13 settlement invariants can never heal.
+	// Settle it terminally as receipt-invalid (charge 0, full refund, raw receipt kept as evidence,
+	// no retry) rather than clamp-and-commit a record that would fail our own VerifyRemoteReceipt
+	// audit. Reconcile the discrepancy out of band (§13). The reply bytes are marshalled once so
+	// the hash here is computed over exactly what gets stored.
+	var replyJSON []byte
 	if r.Status == TxSuccess && fr.Result != nil {
-		replyJSON, _ := json.Marshal(fr.Result)
-		ktx.ReplyJSON = json.RawMessage(replyJSON)
+		replyJSON, _ = json.Marshal(fr.Result)
 	}
-	ktx.Status = r.Status
+	charge := r.Charge
+	var duty int64
+	if invalid := remoteReceiptInvalid(r, mp, replyJSON); invalid != "" {
+		logger.Warn("remote.receipt_invalid", "action", action.Name, "reason", invalid)
+		charge = 0
+		ktx.Status = TxFailure
+		ktx.Reason = "remote receipt invalid: " + invalid
+	} else {
+		if r.Status == TxSuccess {
+			duty = ceilDiv(charge*k.cfg.ImportBPS, 10000)
+			ktx.ReplyJSON = json.RawMessage(replyJSON)
+		}
+		ktx.Status = r.Status
+		ktx.Reason = r.Reason
+	}
 	ktx.Net = charge
 	ktx.Fee = duty
-	ktx.Reason = r.Reason
 	ktx.RemoteReceiptHash = sha256Hex(fr.ReceiptJSON)
 	ktx.RemoteReceiptJSON = fr.ReceiptJSON
 
@@ -264,9 +293,9 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 		return nil, ErrInternal.Wrap("could not commit remote settlement")
 	}
 
-	logger.Info("remote.settled", "action", action.Name, "status", r.Status, "charge", charge, "duty", duty)
+	logger.Info("remote.settled", "action", action.Name, "status", ktx.Status, "charge", charge, "duty", duty)
 
-	if r.Status == TxSuccess {
+	if ktx.Status == TxSuccess {
 		return &CallReply{Result: fr.Result, TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID}, nil
 	}
 	reason := ktx.Reason

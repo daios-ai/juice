@@ -492,10 +492,11 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	now := time.Now().UTC()
 	r := &kernel.Receipt{
 		ID: uuid.New().String(), TxID: "remote-tx-1",
-		// action_id and args_hash must match the request: settlement now enforces them
-		// (the call below uses remote action "proxy-action-1" with args {}).
+		// action_id, args_hash, and reply_hash must match the request: settlement now enforces them
+		// (the call below uses remote action "proxy-action-1" with args {} and reply {}).
 		ActionID: "proxy-action-1", ArgsHash: jcsHashForTest(t, `{}`),
-		Status: kernel.TxSuccess, StartedAt: now, CreatedAt: now,
+		ReplyHash: jcsHashForTest(t, `{}`),
+		Status:    kernel.TxSuccess, StartedAt: now, CreatedAt: now,
 	}
 	r.Signature = signReceiptForTest(t, priv, r)
 	receiptBytes, _ := json.Marshal(r)
@@ -590,7 +591,7 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 // setupSettleProxy creates an active+public remote proxy action and a funded caller with a
 // pre-funded root trace, returning everything needed to drive a remote settlement through Call.
 // The fake's receiptJSON is left empty for the caller to set.
-func setupSettleProxy(t *testing.T, st kernel.Store, fake *fakeFederationHTTP, priv ed25519.PrivateKey, pub ed25519.PublicKey, remoteActionID string) (*kernel.Kernel, *kernel.Action, *kernel.User) {
+func setupSettleProxy(t *testing.T, st kernel.Store, fake *fakeFederationHTTP, priv ed25519.PrivateKey, pub ed25519.PublicKey, remoteActionID string, proxyPrice int64) (*kernel.Kernel, *kernel.Action, *kernel.User) {
 	t.Helper()
 	ctx := context.Background()
 	sys := setupSys(t, nil, st)
@@ -602,7 +603,7 @@ func setupSettleProxy(t *testing.T, st kernel.Store, fake *fakeFederationHTTP, p
 	}
 	m := kernel.ActionManifest{
 		ActionID: remoteActionID, OwnerHandle: "@settle-peer", Name: "settleact",
-		Kind: kernel.KindHTTP, Price: 0, Description: "s",
+		Kind: kernel.KindHTTP, Price: proxyPrice, Description: "s",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
@@ -619,7 +620,8 @@ func setupSettleProxy(t *testing.T, st kernel.Store, fake *fakeFederationHTTP, p
 	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubFed}); err != nil {
 		t.Fatal(err)
 	}
-	caller := setupUser(t, st, "@settle-caller", 0)
+	// Fund the caller with exactly the proxy price so a full refund restores the original balance.
+	caller := setupUser(t, st, "@settle-caller", a.Price)
 	return k, a, caller
 }
 
@@ -628,7 +630,7 @@ func TestSettleRemoteCallRejectsWrongActionID(t *testing.T) {
 	ctx := context.Background()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	fake := &fakeFederationHTTP{}
-	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "settle-action-1")
+	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "settle-action-1", 0)
 	_, tr := beginTestRun(t, st, caller.ID, a)
 
 	// Receipt is validly signed but carries the WRONG action_id.
@@ -660,7 +662,7 @@ func TestSettleRemoteCallRejectsWrongArgsHash(t *testing.T) {
 	ctx := context.Background()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	fake := &fakeFederationHTTP{}
-	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "settle-action-2")
+	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "settle-action-2", 0)
 	_, tr := beginTestRun(t, st, caller.ID, a)
 
 	// Receipt is validly signed with the right action_id but a MISMATCHED args_hash.
@@ -683,6 +685,132 @@ func TestSettleRemoteCallRejectsWrongArgsHash(t *testing.T) {
 	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{})
 	if len(txs) != 0 {
 		t.Fatalf("expected no settled transaction, got %d", len(txs))
+	}
+}
+
+// ---- Finding 1: validly-signed but economically-invalid receipts are quarantined ----
+
+// A receipt whose signature/action_id/args_hash are correct but whose economics breach §13
+// (charge out of range, success≠mp, reply_hash mismatch, unknown status) must NOT be clamped and
+// committed as if valid — it settles terminally as a failure (charge 0, full refund) and is not
+// left open for retry. This is the fix for the clamp-and-commit defect.
+func TestSettleRemoteCallQuarantinesInvalidReceipt(t *testing.T) {
+	cases := []struct {
+		name   string
+		status kernel.TxStatus
+		charge func(mp int64) int64
+		reply  string // reply_hash source JSON; "" means the correct reply ({})
+	}{
+		{"success_charge_over_mp", kernel.TxSuccess, func(mp int64) int64 { return mp + 1 }, ""},
+		{"failure_charge_over_mp", kernel.TxFailure, func(mp int64) int64 { return mp + 1 }, ""},
+		{"failure_charge_negative", kernel.TxFailure, func(int64) int64 { return -1 }, ""},
+		{"success_reply_hash_mismatch", kernel.TxSuccess, func(mp int64) int64 { return mp }, `{"tampered":true}`},
+		{"unknown_status", kernel.TxStatus("weird"), func(int64) int64 { return 0 }, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestStore(t)
+			ctx := context.Background()
+			pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+			fake := &fakeFederationHTTP{}
+			k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "q-action", 1000)
+			_, tr := beginTestRun(t, st, caller.ID, a)
+			// mp is the remote manifest price; a.Price (= q) funds the caller and is fully refunded.
+			mp := a.Price * 10000 / (10000 + kernel.DefaultConfig().ImportBPS)
+
+			replyHash := jcsHashForTest(t, `{}`)
+			if tc.reply != "" {
+				replyHash = jcsHashForTest(t, tc.reply)
+			}
+			now := time.Now().UTC()
+			r := &kernel.Receipt{
+				ID: uuid.New().String(), TxID: "rtx", ActionID: "q-action",
+				ArgsHash: jcsHashForTest(t, `{}`), ReplyHash: replyHash,
+				Status: tc.status, Charge: tc.charge(mp), StartedAt: now, CreatedAt: now,
+			}
+			r.Signature = signReceiptForTest(t, priv, r)
+			b, _ := json.Marshal(r)
+			fake.receiptJSON = string(b)
+
+			_, err := k.Call(ctx, kernel.CallRequest{
+				CallerID: caller.ID, ExistingTraceID: tr.ID,
+				TargetUserID: "@settle-peer", ActionName: "settleact", Args: map[string]any{},
+			})
+			// Terminal failure, not ErrTimeout (no retry) and not a silent success.
+			if !errors.Is(err, kernel.ErrExecutionFailed) {
+				t.Fatalf("expected ErrExecutionFailed, got %v", err)
+			}
+			txs, _ := st.ListTransactions(ctx, kernel.TxFilter{})
+			if len(txs) != 1 {
+				t.Fatalf("expected 1 committed transaction, got %d", len(txs))
+			}
+			if tx := txs[0]; tx.Status != kernel.TxFailure || tx.Net != 0 || tx.Fee != 0 {
+				t.Fatalf("quarantine must commit a zero-charge failure: status=%s net=%d fee=%d", tx.Status, tx.Net, tx.Fee)
+			}
+			// Caller fully refunded: original balance restored, nothing left locked.
+			u, _ := st.ReadUser(ctx, caller.ID)
+			if u.Available != a.Price || u.Locked != 0 {
+				t.Errorf("caller not fully refunded: available=%d locked=%d (want available=%d)", u.Available, u.Locked, a.Price)
+			}
+			// Settled, therefore excluded from the retry set — no livelock.
+			if pending, _ := st.ListPendingRemoteTraces(ctx); len(pending) != 0 {
+				t.Errorf("expected no pending remote traces, got %d", len(pending))
+			}
+		})
+	}
+}
+
+// A valid receipt settles with its charge intact (no clamp), and VerifyRemoteReceipt — now a pure
+// confirmation of invariants already enforced at commit time — reports valid.
+func TestSettleRemoteCallValidChargeNotClamped(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	fake := &fakeFederationHTTP{}
+	bps := kernel.DefaultConfig().ImportBPS
+	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "valid-action", 1000)
+	_, tr := beginTestRun(t, st, caller.ID, a)
+	mp := a.Price * 10000 / (10000 + bps)
+
+	now := time.Now().UTC()
+	r := &kernel.Receipt{
+		ID: uuid.New().String(), TxID: "rtx", ActionID: "valid-action",
+		ArgsHash: jcsHashForTest(t, `{}`), ReplyHash: jcsHashForTest(t, `{}`),
+		Status: kernel.TxSuccess, Charge: mp, StartedAt: now, CreatedAt: now,
+	}
+	r.Signature = signReceiptForTest(t, priv, r)
+	b, _ := json.Marshal(r)
+	fake.receiptJSON = string(b)
+
+	if _, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
+		TargetUserID: "@settle-peer", ActionName: "settleact", Args: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{})
+	if len(txs) != 1 {
+		t.Fatalf("expected 1 transaction, got %d", len(txs))
+	}
+	tx := txs[0]
+	if tx.Status != kernel.TxSuccess {
+		t.Fatalf("status: got %s, want success", tx.Status)
+	}
+	if tx.Net != mp {
+		t.Errorf("net: got %d, want %d (mp, unclamped)", tx.Net, mp)
+	}
+	wantDuty := (mp*bps + 9999) / 10000 // ceilDiv(mp*bps, 10000)
+	if tx.Fee != wantDuty {
+		t.Errorf("duty: got %d, want %d", tx.Fee, wantDuty)
+	}
+	v, err := k.VerifyRemoteReceipt(ctx, caller.ID, tx.ID)
+	if err != nil {
+		t.Fatalf("VerifyRemoteReceipt: %v", err)
+	}
+	if !v.Valid {
+		t.Errorf("expected valid receipt, got checks %+v", v.Checks)
 	}
 }
 
