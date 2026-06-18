@@ -11,6 +11,10 @@
 #   (real TinyGo + live Ollama; minutes per flow; see make_flows() below for why
 #    they are kept out of the default run)
 #
+# Usage (the @sys/tinygo/compile flow ONLY — opt in when working on @sys/tinygo/compile):
+#   JUICE_TINYGO_FLOWS=1 JUICE=/tmp/juice JUICE_SECRET_KEY=test bash scripts/flows_test.sh
+#   (needs the real TinyGo toolchain on PATH; no Ollama; see tinygo_flows() below)
+#
 # Usage (via Go test suite):
 #   go test ./cmd/juice/ -run TestFlowsIntegration -v -timeout 300s
 #
@@ -390,6 +394,18 @@ make_flows() {
 }
 
 # ===========================================================================
+# @sys/tinygo/compile flow — OFF by default like the make flows.
+#
+# It drives REAL TinyGo compilation (no Ollama), so it needs the tinygo toolchain
+# on PATH and takes tens of seconds. Kept out of the offline/toolchain-light default
+# suite. Run deliberately with JUICE_TINYGO_FLOWS=1 (see flow_tinygo_compile in
+# flows_wasm.sh). DO NOT wire flow_tinygo_compile back into the default branch of main().
+# ===========================================================================
+tinygo_flows() {
+    flow_tinygo_compile
+}
+
+# ===========================================================================
 # Main runner
 # ===========================================================================
 main() {
@@ -404,6 +420,19 @@ main() {
     if [ "${JUICE_MAKE_FLOWS:-0}" = "1" ]; then
         echo "=== @sys/make flows ONLY (JUICE_MAKE_FLOWS=1) ==="
         make_flows
+        echo ""
+        echo "Results: ${PASS} passed, ${FAIL} failed"
+        if [ "$FAIL" -gt 0 ]; then
+            printf "Failures:%b\n" "$ERRS"
+            exit 1
+        fi
+        return 0
+    fi
+
+    # Opt-in: run ONLY the @sys/tinygo/compile flow (see tinygo_flows above).
+    if [ "${JUICE_TINYGO_FLOWS:-0}" = "1" ]; then
+        echo "=== @sys/tinygo/compile flow ONLY (JUICE_TINYGO_FLOWS=1) ==="
+        tinygo_flows
         echo ""
         echo "Results: ${PASS} passed, ${FAIL} failed"
         if [ "$FAIL" -gt 0 ]; then

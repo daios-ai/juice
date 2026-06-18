@@ -968,3 +968,172 @@ assert r['value'] == 1, f'value={r[\"value\"]}'
 
     stop_backend "$backend_pid"
 }
+
+# flow_tinygo_compile — @sys/tinygo/compile end-to-end (CLI + curl) with REAL TinyGo.
+# Gated out of the default suite (needs the tinygo toolchain); run via JUICE_TINYGO_FLOWS=1.
+#
+# Compiled WASM artifacts are ~1.4 MB. They MUST be parsed from FILES, never passed as a
+# python argv: a single argv string is capped at MAX_ARG_STRLEN (128 KB) and would silently
+# truncate/fail. Source INPUT is tiny, so it is fine inline. _rget reads nested result
+# fields from a saved JSON file.
+_rget() { python3 -c "import json,sys
+d=json.load(open(sys.argv[1]))
+for k in sys.argv[2:]: d=d.get(k,{}) if isinstance(d,dict) else {}
+print(d if not isinstance(d,(dict,list)) else '')" "$@" 2>/dev/null; }
+
+flow_tinygo_compile() {
+    echo "=== FLOW tinygo_compile ==="
+    local dir db home_sys home_alice port addr
+    # Real TinyGo shells out to `go`, which downloads a read-only Go toolchain cache under
+    # the temp HOME; chmod before rm so cleanup (and the script's exit code) stays clean.
+    dir=$(mktemp -d); trap "chmod -R u+w '$dir' 2>/dev/null; rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "tinygo_compile.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @alice 200 >/dev/null 2>&1
+
+    # The author writes ONLY a Handle func; @sys/tinygo/compile prepends the Juice SDK
+    # (package, imports, alloc, run, main). This one doubles its numeric input.
+    local src='func Handle(in map[string]any) (map[string]any, error) {
+	n, _ := in["n"].(float64)
+	return map[string]any{"doubled": n * 2}, nil
+}'
+    local args
+    args=$(python3 -c 'import json,sys; print(json.dumps({"source": sys.argv[1]}))' "$src")
+
+    # --- CLI: compile a valid Handle ---
+    jj "$db" "$home_alice" run @sys/tinygo/compile "$args" > "$dir/compile.json"
+    local status hash
+    status=$(_rget "$dir/compile.json" result status)
+    hash=$(_rget "$dir/compile.json" result artifact_hash)
+    python3 -c "import json;open('$dir/doubler.b64','w').write(json.load(open('$dir/compile.json')).get('result',{}).get('artifact',''))" 2>/dev/null
+    [ "$status" = "success" ] && [ -n "$hash" ] && [ -s "$dir/doubler.b64" ] \
+        && ok "tinygo_compile.cli_compile_success" \
+        || fail "tinygo_compile.cli_compile_success" "status=$status hash=$hash artifact_bytes=$(wc -c <"$dir/doubler.b64" 2>/dev/null)"
+
+    # --- CLI: empty source -> ErrInvalidInput (not charged) ---
+    local empty_out
+    empty_out=$(j "$db" "$home_alice" run @sys/tinygo/compile '{"source":""}' 2>&1)
+    echo "$empty_out" | grep -qi "invalid.input\|required\|source" \
+        && ok "tinygo_compile.cli_empty_source_rejected" \
+        || fail "tinygo_compile.cli_empty_source_rejected" "expected ErrInvalidInput, got: $empty_out"
+
+    # --- CLI: uncompilable source -> charged status=failure with diagnostics ---
+    jj "$db" "$home_alice" run @sys/tinygo/compile \
+        '{"source":"func Handle(in map[string]any) (map[string]any, error) { totally not go }"}' \
+        > "$dir/bad.json"
+    local bad_status bad_diag
+    bad_status=$(_rget "$dir/bad.json" result status)
+    bad_diag=$(python3 -c "import json;print(len(json.load(open('$dir/bad.json')).get('result',{}).get('diagnostics',[])))" 2>/dev/null)
+    [ "$bad_status" = "failure" ] && [ "${bad_diag:-0}" -ge 1 ] \
+        && ok "tinygo_compile.cli_bad_source_failure" \
+        || fail "tinygo_compile.cli_bad_source_failure" "status=$bad_status diagnostics=$bad_diag"
+
+    # --- CLI: register the compiled artifact as a wasm action and run it ---
+    # The create/show response JSON echoes the full ~1.8 MB base64 artifact, so it too
+    # must be parsed from a FILE (not strfield/argv — same 128 KB MAX_ARG_STRLEN limit).
+    local act_id reg_hash
+    jj "$db" "$home_alice" action create doubler --kind wasm --artifact "$dir/doubler.b64" \
+        --price 5 --description "doubles the numeric input n" \
+        --input-schema '{"type":"object","properties":{"n":{"type":"number","description":"number to double"}}}' \
+        --output-schema '{"type":"object","properties":{"doubled":{"type":"number","description":"twice n"}}}' \
+        > "$dir/create.json"
+    act_id=$(_rget "$dir/create.json" id)
+    reg_hash=$(_rget "$dir/create.json" artifact_hash)
+    [ -n "$act_id" ] \
+        && ok "tinygo_compile.cli_register_artifact" \
+        || fail "tinygo_compile.cli_register_artifact" "action create --artifact returned no id (kind=$(_rget "$dir/create.json" kind))"
+    [ -n "$reg_hash" ] \
+        && ok "tinygo_compile.cli_registered_artifact_hash" \
+        || fail "tinygo_compile.cli_registered_artifact_hash" "registered action has empty artifact_hash"
+    j "$db" "$home_alice" action enable "$act_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$act_id" --public >/dev/null 2>&1
+
+    jj "$db" "$home_alice" run @alice/doubler '{"n":21}' > "$dir/run.json"
+    local doubled
+    doubled=$(_rget "$dir/run.json" result doubled)
+    [ "${doubled%.*}" = "42" ] \
+        && ok "tinygo_compile.cli_run_compiled_action" \
+        || fail "tinygo_compile.cli_run_compiled_action" "expected doubled=42, got: $doubled ($(cat "$dir/run.json"))"
+
+    # --- curl: full HTTP round-trip — compile, register the artifact, run ---
+    # POST /v1/actions accepts the precompiled artifact via "wasm_artifact" (CLI/HTTP parity).
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    local serve_pid=$SERVE_PID
+    trap "kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null; chmod -R u+w '$dir' 2>/dev/null; rm -rf '$dir'" RETURN
+
+    local alice_tok
+    alice_tok=$(strfield "$(curl -sf -X POST "http://$addr/v1/auth/token" \
+        -H "Content-Type: application/json" \
+        -d '{"handle":"@alice","password":"alicepass"}' 2>/dev/null)" "token")
+    [ -n "$alice_tok" ] \
+        && ok "tinygo_compile.http_token" \
+        || fail "tinygo_compile.http_token" "could not obtain token"
+
+    python3 -c 'import json,sys; json.dump({"action":"@sys/tinygo/compile","args":{"source":sys.argv[1]}}, open(sys.argv[2],"w"))' \
+        "$src" "$dir/http_args.json"
+    curl -sf -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $alice_tok" \
+        -H "Content-Type: application/json" \
+        --data-binary "@$dir/http_args.json" > "$dir/http.json" 2>/dev/null
+    local http_status
+    http_status=$(_rget "$dir/http.json" result status)
+    python3 -c "import json;open('$dir/http_doubler.b64','w').write(json.load(open('$dir/http.json')).get('result',{}).get('artifact',''))" 2>/dev/null
+    [ "$http_status" = "success" ] && [ -s "$dir/http_doubler.b64" ] \
+        && ok "tinygo_compile.http_compile_success" \
+        || fail "tinygo_compile.http_compile_success" "expected success, got status=$http_status"
+
+    # Register the compiled artifact over HTTP via "wasm_artifact" (the ~1.4 MB body is built
+    # in a file and sent with --data-binary; the create response echoes the artifact, so the
+    # id is parsed from a file too).
+    python3 - "$dir/http_doubler.b64" "$dir/http_create_body.json" <<'PY'
+import json,sys
+b64=open(sys.argv[1]).read()
+body={"name":"doubler-http","kind":"wasm","price":5,"wasm_artifact":b64,
+      "description":"doubles n (registered over HTTP)",
+      "input_schema":{"type":"object","properties":{"n":{"type":"number","description":"number to double"}}},
+      "output_schema":{"type":"object","properties":{"doubled":{"type":"number","description":"twice n"}}}}
+json.dump(body,open(sys.argv[2],"w"))
+PY
+    curl -sf -X POST "http://$addr/v1/actions" \
+        -H "Authorization: Bearer $alice_tok" \
+        -H "Content-Type: application/json" \
+        --data-binary "@$dir/http_create_body.json" > "$dir/http_create.json" 2>/dev/null
+    local http_act_id
+    http_act_id=$(_rget "$dir/http_create.json" id)
+    [ -n "$http_act_id" ] \
+        && ok "tinygo_compile.http_register_artifact" \
+        || fail "tinygo_compile.http_register_artifact" "POST /v1/actions wasm_artifact returned no id"
+    curl -sf -X POST "http://$addr/v1/actions/$http_act_id/enable" \
+        -H "Authorization: Bearer $alice_tok" >/dev/null 2>&1
+    curl -sf -X PUT "http://$addr/v1/actions/$http_act_id" \
+        -H "Authorization: Bearer $alice_tok" -H "Content-Type: application/json" \
+        -d '{"public":true}' >/dev/null 2>&1
+
+    curl -sf -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $alice_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@alice/doubler-http","args":{"n":50}}' > "$dir/http_run.json" 2>/dev/null
+    local http_doubled
+    http_doubled=$(_rget "$dir/http_run.json" result doubled)
+    [ "${http_doubled%.*}" = "100" ] \
+        && ok "tinygo_compile.http_run_compiled_action" \
+        || fail "tinygo_compile.http_run_compiled_action" "expected doubled=100, got: $http_doubled"
+
+    local http_empty
+    http_empty=$(curl -s -X POST "http://$addr/v1/run" \
+        -H "Authorization: Bearer $alice_tok" \
+        -H "Content-Type: application/json" \
+        -d '{"action":"@sys/tinygo/compile","args":{"source":""}}' 2>/dev/null)
+    echo "$http_empty" | grep -qi "invalid\|required\|source" \
+        && ok "tinygo_compile.http_empty_source_rejected" \
+        || fail "tinygo_compile.http_empty_source_rejected" "expected error, got: $http_empty"
+}

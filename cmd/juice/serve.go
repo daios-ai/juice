@@ -57,7 +57,7 @@ func runServer(addr string) error {
 	r.Use(middleware.Recoverer)
 	r.Use(requestIDMiddleware)
 	r.Use(loggingMiddleware(logger))
-	r.Use(maxBytesMiddleware(1 << 20)) // 1 MiB request body limit
+	r.Use(maxBytesMiddleware) // request body limit (path-aware; see maxBytesMiddleware)
 
 	srv := &server{kernel: k, log: logger}
 
@@ -224,12 +224,37 @@ func ipRateLimiter(ratePerSec, burst float64) func(http.Handler) http.Handler {
 	}
 }
 
-func maxBytesMiddleware(n int64) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			r.Body = http.MaxBytesReader(w, r.Body, n)
-			next.ServeHTTP(w, r)
-		})
+// Request-body limits. Most endpoints take a tight default; the action create/update
+// routes accept a precompiled WASM artifact (POST /v1/actions "wasm_artifact") or WASM
+// source, which routinely exceed 1 MiB, so they get a larger cap.
+const (
+	defaultMaxBodyBytes = 1 << 20  // 1 MiB
+	actionMaxBodyBytes  = 16 << 20 // 16 MiB — accommodates compiled WASM artifacts
+)
+
+// maxBytesMiddleware caps the request body, choosing the limit by route so a large WASM
+// artifact may be registered over HTTP without loosening the default everywhere.
+func maxBytesMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limit := int64(defaultMaxBodyBytes)
+		if isActionWriteRoute(r) {
+			limit = actionMaxBodyBytes
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isActionWriteRoute reports whether r targets an action create/update endpoint — the
+// only write paths that may carry a base64 WASM artifact or WASM source.
+func isActionWriteRoute(r *http.Request) bool {
+	switch {
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/actions":
+		return true
+	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/actions/"):
+		return true
+	default:
+		return false
 	}
 }
 
@@ -411,6 +436,7 @@ func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 		InputSchema  map[string]any    `json:"input_schema"`
 		OutputSchema map[string]any    `json:"output_schema"`
 		Source       string            `json:"source"`
+		WasmArtifact string            `json:"wasm_artifact"`
 		Auth         *kernel.AuthInput `json:"auth"`
 	}) (any, int, error) {
 		a, err := createAction(s.kernel, r.Context(), callerFrom(r), kernel.CreateActionRequest{
@@ -422,6 +448,7 @@ func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 			InputSchema:  req.InputSchema,
 			OutputSchema: req.OutputSchema,
 			Source:       req.Source,
+			WasmArtifact: req.WasmArtifact,
 			Auth:         req.Auth,
 		})
 		return a, http.StatusCreated, err

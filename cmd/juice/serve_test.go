@@ -449,6 +449,92 @@ func TestServeListActions(t *testing.T) {
 	}
 }
 
+// TestServeCreateWasmActionFromArtifact verifies POST /v1/actions accepts a pre-compiled
+// base64 WASM artifact via "wasm_artifact" — CLI/HTTP parity with
+// `action create --kind wasm --artifact`. It stores the artifact, computes the hash, and
+// the artifact-only action (empty source) activates over HTTP. Uses newFlowKernel so the
+// kernel has a ScriptExecutor that hashes the artifact (newTestHTTPServer wires none).
+func TestServeCreateWasmActionFromArtifact(t *testing.T) {
+	srv, k, _ := newFlowKernel(t, &flowScriptExec{})
+	defer srv.Close()
+
+	ownerID, tok := makeUser(t, k, "@artifact-owner")
+
+	// A base64 artifact with no source — mirrors @sys/tinygo/compile output.
+	b64 := base64.StdEncoding.EncodeToString([]byte("fake-wasm-artifact-bytes"))
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "from-artifact", "kind": "wasm", "price": 0,
+		"wasm_artifact": b64,
+		"description":   "registered from a precompiled artifact",
+		"input_schema":  minSchema, "output_schema": minSchema,
+	}, tok)
+	if cr.StatusCode != http.StatusCreated {
+		cr.Body.Close()
+		t.Fatalf("create wasm action from artifact: expected 201, got %d", cr.StatusCode)
+	}
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	if action.Kind != kernel.KindWasm {
+		t.Errorf("kind = %q, want wasm", action.Kind)
+	}
+	if action.WasmArtifact != b64 {
+		t.Errorf("wasm_artifact not stored: got %q, want the posted base64", action.WasmArtifact)
+	}
+	if action.ArtifactHash == "" {
+		t.Error("ArtifactHash should be computed from the wasm_artifact bytes")
+	}
+
+	// The artifact-only action (empty source) must activate over HTTP.
+	en := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok)
+	if en.StatusCode != http.StatusOK {
+		en.Body.Close()
+		t.Fatalf("enable artifact-only wasm action: expected 200, got %d", en.StatusCode)
+	}
+	en.Body.Close()
+
+	got, err := k.ReadActionByOwnerName(context.Background(), ownerID, "from-artifact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Active {
+		t.Error("artifact-only wasm action should be active after enable")
+	}
+}
+
+// TestMaxBytesMiddlewareActionRoute verifies the path-aware body limit: a body over the
+// 1 MiB default is accepted on the action create route (it may carry a WASM artifact) but
+// rejected on an ordinary route.
+func TestMaxBytesMiddlewareActionRoute(t *testing.T) {
+	h := maxBytesMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.ReadAll(r.Body); err != nil {
+			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	big := bytes.Repeat([]byte("a"), 4<<20) // 4 MiB — over the 1 MiB default, under 16 MiB
+
+	cases := []struct {
+		name, method, path string
+		want               int
+	}{
+		{"action create accepts large body", http.MethodPost, "/v1/actions", http.StatusOK},
+		{"action update accepts large body", http.MethodPut, "/v1/actions/abc-123", http.StatusOK},
+		{"run rejects large body", http.MethodPost, "/v1/run", http.StatusRequestEntityTooLarge},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(c.method, c.path, bytes.NewReader(big))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != c.want {
+				t.Fatalf("%s %s with 4 MiB body: got %d, want %d", c.method, c.path, rec.Code, c.want)
+			}
+		})
+	}
+}
+
 func TestServeEnableDisableAction(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
