@@ -40,8 +40,11 @@ alloc_port() { _ALLOC_PORT=$_NEXT_PORT; _NEXT_PORT=$((_NEXT_PORT + 1)); }
 # ---------------------------------------------------------------------------
 # Assertion helpers
 # ---------------------------------------------------------------------------
-ok()   { echo "  PASS: $1"; ((PASS++)); }
-fail() { echo "  FAIL: $1 — $2"; ((FAIL++)); ERRS="${ERRS}\n  [$1] $2"; }
+# Use $((...)) assignment, not ((...)): the arithmetic command returns exit 1 when the
+# post-increment value is 0 (i.e. the very first ok/fail in a run), which would make the
+# `cond && ok || fail` idiom fire BOTH branches. Assignment always returns exit 0.
+ok()   { echo "  PASS: $1"; PASS=$((PASS+1)); }
+fail() { echo "  FAIL: $1 — $2"; FAIL=$((FAIL+1)); ERRS="${ERRS}\n  [$1] $2"; }
 
 # ---------------------------------------------------------------------------
 # Config file helpers
@@ -390,8 +393,10 @@ make_flows() {
 # Main runner
 # ===========================================================================
 main() {
-    # Kill all stray juice serves and Python test-backends from interrupted runs.
-    pkill -9 -f "juice_b5" 2>/dev/null || true
+    # Kill stray serves and Python test-backends left by an interrupted/previous run
+    # so their bound ports are free. Match the actual binary under test ($JUICE), not a
+    # hardcoded name — otherwise a leaked serve collides with the next run's start_serve.
+    pkill -9 -f "$JUICE" 2>/dev/null || true
     pkill -9 -f "python3 - [0-9]" 2>/dev/null || true
     sleep 0.5
 

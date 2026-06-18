@@ -372,30 +372,16 @@ print(json.dumps(m) if m else 'null')
     # Succeeds as a kernel call regardless of whether tinygo/Ollama is available.
     # Returns {status: "success"|"failure", diagnostics: [...]} — never a hard kernel error.
     local make_out make_result status make_tx_id proc_id
-    make_out=$(j "$db" "$home_alice" run @sys/make \
+    make_out=$(jj "$db" "$home_alice" run @sys/make \
         '{"description": "Return a fixed greeting message that says Hello followed by the name"}' 2>&1)
-    make_result=$(echo "$make_out" | python3 -c "
-import sys, json, re
-text = sys.stdin.read()
-# Extract JSON object from the result: section
-m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
-if m:
-    try: print(json.dumps(json.loads(m.group(1))))
-    except: print('{}')
-else:
-    print('{}')
-" 2>/dev/null)
+    make_result=$(_make_extract_result "$make_out")
     status=$(echo "$make_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
     [ "$status" = "success" ] || [ "$status" = "failure" ] \
         && ok "make.returns_structured_result" \
         || fail "make.returns_structured_result" "expected success|failure status, got: $make_out"
 
     # Extract proc_id from the make tx to filter related transactions.
-    make_tx_id=$(echo "$make_out" | python3 -c "
-import sys, re
-m = re.search(r'^tx_id:\s+(\S+)', sys.stdin.read(), re.MULTILINE)
-print(m.group(1) if m else '')
-" 2>/dev/null)
+    make_tx_id=$(strfield "$make_out" "tx_id")
     proc_id=$(strfield "$(jj "$db" "$home_alice" tx show "$make_tx_id" 2>/dev/null)" "process_id")
 
     # Transactions must have been recorded for the process (make + any sub-calls).
@@ -693,16 +679,13 @@ assert any(s.get('id')=='$http_step_id' for s in steps), 'step not visible to bo
         || fail "message.http_step_done" "expected done, got: $http_step_show"
 }
 
-# _make_extract_result <run_output>  →  prints result JSON or {}
+# _make_extract_result <jj_run_output>  →  prints result JSON or {}
+# Input is the JSON CallReply from `jj ... run` ({result, tx_id, ...}).
 _make_extract_result() {
     echo "$1" | python3 -c "
-import sys, json, re
-text = sys.stdin.read()
-m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
-if m:
-    try: print(json.dumps(json.loads(m.group(1))))
-    except: print('{}')
-else: print('{}')
+import sys, json
+try: print(json.dumps(json.load(sys.stdin).get('result', {})))
+except: print('{}')
 " 2>/dev/null
 }
 
@@ -720,16 +703,13 @@ print(next((k for k in req if k in props), ''))
 " "$2" 2>/dev/null
 }
 
-# _make_output_values <run_output>  →  prints space-joined top-level values
+# _make_output_values <jj_run_output>  →  prints space-joined result values
+# Input is the JSON CallReply from `jj ... run` ({result, tx_id, ...}).
 _make_output_values() {
     echo "$1" | python3 -c "
-import sys, json, re
-text = sys.stdin.read()
-m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
-if not m:
-    sys.exit(0)
+import sys, json
 try:
-    obj = json.loads(m.group(1))
+    obj = json.load(sys.stdin).get('result', {})
     print(' '.join(str(v) for v in obj.values()))
 except:
     pass
@@ -753,7 +733,7 @@ flow_make_calculator() {
     j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     local make_out make_result status action_name
-    make_out=$(j "$db" "$home_alice" run @sys/make \
+    make_out=$(jj "$db" "$home_alice" run @sys/make \
         '{"description": "A calculator that evaluates arithmetic expressions like (3+4)*5, supporting +, -, *, /. Use @sys/llm/chat to evaluate the expression and return the numeric result."}' 2>&1)
     make_result=$(_make_extract_result "$make_out")
     status=$(echo "$make_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
@@ -768,7 +748,7 @@ flow_make_calculator() {
     [ -n "$input_field" ] || { fail "make_calculator.result_correct" "could not find input field for $action_name"; return; }
 
     local call_out
-    call_out=$(j "$db" "$home_alice" run "@alice/$action_name" \
+    call_out=$(jj "$db" "$home_alice" run "@alice/$action_name" \
         "{\"$input_field\": \"(3+4)*5\"}" 2>&1)
     _make_output_values "$call_out" | grep -q "35" \
         && ok "make_calculator.result_correct" \
@@ -792,7 +772,7 @@ flow_make_translator() {
     j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     local make_out make_result status action_name
-    make_out=$(j "$db" "$home_alice" run @sys/make \
+    make_out=$(jj "$db" "$home_alice" run @sys/make \
         '{"description": "Translate text from English to Italian. Use @sys/llm/chat to perform the translation."}' 2>&1)
     make_result=$(_make_extract_result "$make_out")
     status=$(echo "$make_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
@@ -807,7 +787,7 @@ flow_make_translator() {
     [ -n "$input_field" ] || { fail "make_translator.output_nonempty" "could not find input field for $action_name"; return; }
 
     local call_out
-    call_out=$(j "$db" "$home_alice" run "@alice/$action_name" \
+    call_out=$(jj "$db" "$home_alice" run "@alice/$action_name" \
         "{\"$input_field\": \"Hello\"}" 2>&1)
     _make_output_values "$call_out" | grep -qv "^$" \
         && ok "make_translator.output_nonempty" \
@@ -832,7 +812,7 @@ flow_make_natural_language_calc() {
 
     # Step 1: synthesize the calculator so it exists in the catalog.
     local calc_out calc_result calc_status calc_name
-    calc_out=$(j "$db" "$home_alice" run @sys/make \
+    calc_out=$(jj "$db" "$home_alice" run @sys/make \
         '{"description": "A calculator that evaluates arithmetic expressions like (3+4)*5, supporting +, -, *, /. Use @sys/llm/chat to evaluate the expression and return the numeric result."}' 2>&1)
     calc_result=$(_make_extract_result "$calc_out")
     calc_status=$(echo "$calc_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
@@ -843,7 +823,7 @@ flow_make_natural_language_calc() {
 
     # Step 2: synthesize the NL solver — @sys/lookup should find the calculator above.
     local nl_out nl_result nl_status nl_name
-    nl_out=$(j "$db" "$home_alice" run @sys/make \
+    nl_out=$(jj "$db" "$home_alice" run @sys/make \
         '{"description": "Given a sentence in natural language describing an arithmetic calculation (for example '\''what is three plus four'\''), look up and use an existing calculator action to compute the numeric result"}' 2>&1)
     nl_result=$(_make_extract_result "$nl_out")
     nl_status=$(echo "$nl_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
@@ -858,7 +838,7 @@ flow_make_natural_language_calc() {
     [ -n "$input_field" ] || { fail "make_nl_calc.result_correct" "could not find input field for $nl_name"; return; }
 
     local call_out
-    call_out=$(j "$db" "$home_alice" run "@alice/$nl_name" \
+    call_out=$(jj "$db" "$home_alice" run "@alice/$nl_name" \
         "{\"$input_field\": \"what is two plus two\"}" 2>&1)
     _make_output_values "$call_out" | grep -q "4" \
         && ok "make_nl_calc.result_correct" \

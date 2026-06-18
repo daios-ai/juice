@@ -36,7 +36,12 @@ type DB struct {
 
 // Open opens (or creates) a SQLite database at path and runs migrations.
 func Open(path string) (*DB, error) {
-	dsn := path + "?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000"
+	// modernc.org/sqlite ignores mattn-style params (_journal_mode, _busy_timeout, …);
+	// pragmas must use its _pragma=NAME(VALUE) form or they silently have no effect.
+	// _txlock=immediate makes write transactions take the write lock at BEGIN so that
+	// busy_timeout retries on contention instead of dead-locking — required for safe
+	// concurrent access from a running server and a CLI process on the same DB file.
+	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store.Open: %w", err)
