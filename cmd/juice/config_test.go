@@ -29,6 +29,9 @@ func TestDefaultServerConfig(t *testing.T) {
 	if cfg.Native.Make.Price != 20 {
 		t.Errorf("Native.Make.Price default = %d, want 20", cfg.Native.Make.Price)
 	}
+	if cfg.Native.TinyGo.Price != 5 {
+		t.Errorf("Native.TinyGo.Price default = %d, want 5", cfg.Native.TinyGo.Price)
+	}
 }
 
 func TestLoadOrCreateConfig_CreatesFile(t *testing.T) {

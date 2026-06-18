@@ -18,6 +18,7 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/script"
 	"github.com/daios-ai/juice/store"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -482,6 +483,45 @@ func TestActionCreateSchemasAndAuthFromFile(t *testing.T) {
 	}
 	if a.AuthJSON == "" {
 		t.Error("auth config not stored from --auth @file")
+	}
+}
+
+// TestActionCreateFromArtifact creates a wasm action from a base64 pre-compiled
+// artifact (the shape @sys/tinygo/compile returns) via the --artifact flag.
+func TestActionCreateFromArtifact(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@wasmowner", Email: "wasmowner@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := env.k.Login(ctx, "@wasmowner", "pass")
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+
+	// A valid WASM artifact (the script package's minimal echo module), base64-encoded.
+	wasm, _, _ := (&script.FakeCompiler{}).CompileSource(ctx, []byte("x"))
+	b64 := base64.StdEncoding.EncodeToString(wasm)
+
+	if _, err := execTestCmd(t, actionCreateCmd(), "/echo",
+		"--kind", "wasm", "--artifact", b64,
+		"--description", "echo", "--price", "0"); err != nil {
+		t.Fatalf("action create --artifact: %v", err)
+	}
+
+	a, err := env.k.ReadActionByOwnerName(ctx, owner.ID, "/echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Kind != kernel.KindWasm {
+		t.Errorf("kind = %q, want wasm", a.Kind)
+	}
+	if a.ArtifactHash == "" {
+		t.Error("ArtifactHash should be computed from the --artifact bytes")
 	}
 }
 

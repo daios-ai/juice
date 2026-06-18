@@ -285,8 +285,8 @@ const fakeContractWithPlan = `{"name":"test-action","description":"test","input_
 // fakeContractNoLLM is a contract JSON with a "no LLM" constraint.
 const fakeContractNoLLM = `{"name":"calculator","description":"arithmetic calculator","input_schema":{"type":"object","properties":{"expression":{"type":"string","description":"expression"}},"required":["expression"]},"output_schema":{"type":"object","properties":{"result":{"type":"number","description":"numeric result"}},"required":["result"]},"constraints":["no LLM"],"plan":[]}`
 
-// fakeCode is a minimal valid TinyGo run function for tests.
-const fakeCode = "```go\n//export run\nfunc run(inputPtr, inputLen uint32) (uint32, uint32) { return 0, 2 }\n```"
+// fakeCode is a minimal valid TinyGo Handle function for tests.
+const fakeCode = "```go\nfunc Handle(in map[string]any) (map[string]any, error) { return in, nil }\n```"
 
 // fakeExamples is the @sys/llm/json envelope @sys/make requests for example generation:
 // an object with an "examples" array of 3 inputs. minimalEchoWASM echoes input as output,
@@ -767,10 +767,10 @@ func TestMakeResearchSkipsDecideOnEmptyLookup(t *testing.T) {
 
 func TestMakeComputesPriceFromComposedActions(t *testing.T) {
 	ctx := context.Background()
-	fakeCodeWithCalls := "```go\n//export run\nfunc run(inputPtr, inputLen uint32) uint64 {\n" +
+	fakeCodeWithCalls := "```go\nfunc Handle(in map[string]any) (map[string]any, error) {\n" +
 		"\tJuiceCall(\"@sys/time\", nil)\n" +
 		"\tJuiceCall(\"@sys/sink\", nil)\n" +
-		"\treturn 0\n}\n```"
+		"\treturn in, nil\n}\n```"
 	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCodeWithCalls, fakeExamples}}
 	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
 	k, st := newMakeKernel(t, fakeChat, decider)
@@ -990,6 +990,38 @@ func TestMakeHonorsNoLLMConstraint(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected 'no LLM' constraint in codegen system message; captured system messages: %v", capturedSystem)
+	}
+}
+
+// TestMakeCodegenPromptUsesHandleContract pins that the codegen prompt instructs the
+// LLM to implement the Handle entry point, not a hand-written run/unsafe ABI.
+func TestMakeCodegenPromptUsesHandleContract(t *testing.T) {
+	var capturedSystem []string
+	inner := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
+	cap := &capturingSystemChatter{inner: inner, captured: &capturedSystem}
+	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
+	k, st := newMakeKernel(t, cap, decider)
+	ctx := context.Background()
+	sys := seedMakeAction(t, st)
+	caller := setupUser(t, st, "@alice", 1000)
+	_, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+
+	if _, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
+		TargetUserID: sys.ID, ActionName: "make",
+		Args: map[string]any{"description": "double a number"},
+	}); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+
+	joined := strings.Join(capturedSystem, "\n")
+	if !strings.Contains(joined, "func Handle(in map[string]any) (map[string]any, error)") {
+		t.Errorf("codegen prompt should teach the Handle contract; captured: %v", capturedSystem)
+	}
+	for _, banned := range []string{"//export run", "unsafe.Slice", "uint64(p)<<32"} {
+		if strings.Contains(joined, banned) {
+			t.Errorf("codegen prompt should no longer reference the raw ABI %q", banned)
+		}
 	}
 }
 

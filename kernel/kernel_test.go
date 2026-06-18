@@ -277,6 +277,47 @@ func TestNativeActionNormalLifecycleRejected(t *testing.T) {
 	}
 }
 
+// TestActivateWasmActionFromArtifactOnly covers a wasm action registered with a
+// pre-compiled artifact (e.g. @sys/tinygo/compile output via `action create
+// --artifact`) and no stored TinyGo source: the artifact satisfies activation.
+func TestActivateWasmActionFromArtifactOnly(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+	owner := setupUser(t, st, "@wasm-owner", 0)
+
+	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+		OwnerUserID:  owner.ID,
+		Name:         "from-artifact",
+		Kind:         kernel.KindWasm,
+		Price:        0,
+		Description:  "compiled out of band",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		WasmArtifact: base64.StdEncoding.EncodeToString([]byte("wat")),
+	})
+	if err != nil {
+		t.Fatalf("CreateAction: %v", err)
+	}
+	if a.Source != "" {
+		t.Fatalf("expected empty Source for artifact-only action, got %q", a.Source)
+	}
+
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatalf("activating artifact-only wasm action should succeed: %v", err)
+	}
+	got, err := k.ReadAction(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Active {
+		t.Error("action should be active")
+	}
+	if got.ArtifactHash == "" {
+		t.Error("artifact hash should be computed at activation")
+	}
+}
+
 func TestActivateNativeActionBootstrapPath(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)

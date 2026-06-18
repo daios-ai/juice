@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
@@ -211,7 +212,7 @@ func init() {
 }
 
 func actionCreateCmd() *cobra.Command {
-	var kind, source, description string
+	var kind, source, description, artifact string
 	var price int64
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
@@ -250,6 +251,18 @@ func actionCreateCmd() *cobra.Command {
 						srcData = string(data)
 					}
 				}
+				// --artifact carries a pre-compiled base64 WASM artifact (e.g. the
+				// output of @sys/tinygo/compile); a file path is read for its contents.
+				artData := artifact
+				if artifact != "" {
+					if _, err := os.Stat(artifact); err == nil {
+						data, err := os.ReadFile(artifact)
+						if err != nil {
+							return fmt.Errorf("reading artifact file: %w", err)
+						}
+						artData = strings.TrimSpace(string(data))
+					}
+				}
 				a, err := createAction(k, context.Background(), callerID, kernel.CreateActionRequest{
 					OwnerUserID:  callerID,
 					Name:         name,
@@ -259,6 +272,7 @@ func actionCreateCmd() *cobra.Command {
 					InputSchema:  inputSchema,
 					OutputSchema: outputSchema,
 					Source:       srcData,
+					WasmArtifact: artData,
 					Auth:         auth,
 				})
 				if err != nil {
@@ -270,6 +284,7 @@ func actionCreateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&kind, "kind", "http", "Action kind: http, wasm, native")
 	cmd.Flags().StringVar(&source, "source", "", "URL (http) or file path (wasm)")
+	cmd.Flags().StringVar(&artifact, "artifact", "", "Base64 pre-compiled WASM artifact, or file path (wasm; e.g. @sys/tinygo/compile output)")
 	cmd.Flags().StringVar(&description, "description", "", "Human-readable description")
 	cmd.Flags().Int64Var(&price, "price", 0, "Price in credits")
 	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "JSON Schema for inputs (or @file.json)")

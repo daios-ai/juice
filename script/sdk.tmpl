@@ -2,17 +2,38 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"math"
+	"sort"
+	"strconv"
+	"strings"
 	"unsafe"
 )
 
-// Host imports — provided by the Juice kernel.
-// juice.call returns a packed i64: upper 32 bits = resultPtr, lower 32 bits = resultLen.
+// Standard-library toolkit available to action authors. Kept "used" with blank
+// references so an action that doesn't touch them still compiles (Go rejects
+// unused imports). fmt is deliberately excluded — it pulls reflection into the
+// wasm binary. Authors needing more should compile their own wasm and register
+// it with `action create --kind wasm`.
+var (
+	_ = strings.TrimSpace
+	_ = strconv.Itoa
+	_ = math.Abs
+	_ = sort.Ints
+	_ = errors.New
+)
+
+// Host imports — provided by the Juice kernel. Each packed return is an i64:
+// upper 32 bits = resultPtr, lower 32 bits = resultLen.
 //
 //go:wasmimport juice call
 func hostCall(namePtr, nameLen, argsPtr, argsLen uint32) uint64
 
-//go:wasmimport juice emit
-func hostEmit(eventPtr, eventLen, argsPtr, argsLen uint32)
+//go:wasmimport juice step_create
+func hostStepCreate(partialPtr, partialLen, callerPtr, callerLen, actionPtr, actionLen uint32) uint64
+
+//go:wasmimport juice step_complete
+func hostStepComplete(stepPtr, stepLen, inputPtr, inputLen uint32) uint64
 
 //go:wasmimport juice log
 func hostLog(lvlPtr, lvlLen, msgPtr, msgLen uint32)
@@ -41,23 +62,50 @@ func _strPtrLen(s string) (uint32, uint32) {
 	return _ptrLen(b)
 }
 
+func _unpack(packed uint64) []byte {
+	outPtr, outLen := uint32(packed>>32), uint32(packed)
+	if outLen == 0 {
+		return nil
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(uintptr(outPtr))), int(outLen))
+}
+
 // JuiceCall calls the action at @owner/name with JSON args and returns the JSON reply.
 func JuiceCall(action string, args []byte) ([]byte, error) {
 	aPtr, aLen := _strPtrLen(action)
 	argPtr, argLen := _ptrLen(args)
-	packed := hostCall(aPtr, aLen, argPtr, argLen)
-	outPtr, outLen := uint32(packed>>32), uint32(packed)
-	if outLen == 0 {
+	out := _unpack(hostCall(aPtr, aLen, argPtr, argLen))
+	if out == nil {
 		return []byte("{}"), nil
 	}
-	return unsafe.Slice((*byte)(unsafe.Pointer(uintptr(outPtr))), int(outLen)), nil
+	return out, nil
 }
 
-// JuiceEmit emits a named event with JSON args through the kernel event path.
-func JuiceEmit(event string, args []byte) {
-	ePtr, eLen := _strPtrLen(event)
-	aPtr, aLen := _ptrLen(args)
-	hostEmit(ePtr, eLen, aPtr, aLen)
+// JuiceStepCreate creates a waiting step bound to the current process and trace,
+// returning the new step id. partialArgs is JSON; requiredCaller and actionID are
+// the @handle of the allowed completer and the onward action id.
+func JuiceStepCreate(partialArgs []byte, requiredCaller, actionID string) string {
+	pPtr, pLen := _ptrLen(partialArgs)
+	cPtr, cLen := _strPtrLen(requiredCaller)
+	aPtr, aLen := _strPtrLen(actionID)
+	out := _unpack(hostStepCreate(pPtr, pLen, cPtr, cLen, aPtr, aLen))
+	var id string
+	if out != nil {
+		_ = json.Unmarshal(out, &id)
+	}
+	return id
+}
+
+// JuiceStepComplete completes a waiting step with JSON input and returns the
+// resumed call's JSON reply.
+func JuiceStepComplete(stepID string, input []byte) []byte {
+	sPtr, sLen := _strPtrLen(stepID)
+	iPtr, iLen := _ptrLen(input)
+	out := _unpack(hostStepComplete(sPtr, sLen, iPtr, iLen))
+	if out == nil {
+		return []byte("{}")
+	}
+	return out
 }
 
 // JuiceLog writes a structured log record associated with the current trace.
@@ -76,15 +124,31 @@ func mustMarshal(v any) []byte {
 	return b
 }
 
+// run is the exported entry point. It decodes the input JSON object, invokes the
+// author-supplied Handle, and returns Handle's result as JSON. A non-nil error
+// from Handle aborts the call (surfaced by the kernel as ErrExecutionFailed).
+// Authors implement Handle; they never touch run, alloc, or the wasm ABI.
+//
+//	func Handle(in map[string]any) (map[string]any, error) {
+//	    // your logic; call JuiceCall / JuiceStepCreate / JuiceLog as needed
+//	    return map[string]any{"result": in["x"]}, nil
+//	}
+//
+//export run
+func run(inputPtr, inputLen uint32) uint64 {
+	in := map[string]any{}
+	if inputLen > 0 {
+		raw := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(inputPtr))), int(inputLen))
+		_ = json.Unmarshal(raw, &in)
+	}
+	out, err := Handle(in)
+	if err != nil {
+		panic(err.Error())
+	}
+	b := mustMarshal(out)
+	p, l := _ptrLen(b)
+	return uint64(p)<<32 | uint64(l)
+}
+
 // main is required by the TinyGo wasip1 target.
 func main() {}
-
-// run is the entry point. Generated actions must implement and export this function.
-// Returns a packed i64: upper 32 bits = outputPtr, lower 32 bits = outputLen.
-//
-//	//export run
-//	func run(inputPtr, inputLen uint32) uint64 {
-//	    out := mustMarshal(result)
-//	    p, l := _ptrLen(out)
-//	    return uint64(p)<<32 | uint64(l)
-//	}

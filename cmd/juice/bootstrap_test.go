@@ -307,6 +307,36 @@ func TestBootstrapRegistersMake(t *testing.T) {
 	}
 }
 
+func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
+	ctx := context.Background()
+	k := newTestKernel(t)
+
+	if err := k.FirstBoot(ctx, "secret"); err != nil {
+		t.Fatalf("FirstBoot: %v", err)
+	}
+	if err := bootstrap(k, DefaultServerConfig().Native); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := k.ReadActionByOwnerName(ctx, sys.ID, "tinygo/compile")
+	if err != nil {
+		t.Fatalf("@sys/tinygo/compile not registered after bootstrap: %v", err)
+	}
+	if !a.Active || !a.Public {
+		t.Errorf("@sys/tinygo/compile should be active and public, got active=%v public=%v", a.Active, a.Public)
+	}
+	if a.Kind != kernel.KindNative {
+		t.Errorf("@sys/tinygo/compile kind = %q, want native", a.Kind)
+	}
+	if a.Price != 5 {
+		t.Errorf("@sys/tinygo/compile price = %d, want 5", a.Price)
+	}
+}
+
 func TestEnsureSysNativeReconcilesPrice(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)

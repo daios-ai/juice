@@ -2,7 +2,10 @@ package script
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
@@ -97,6 +100,111 @@ func TestSDKEmbedded(t *testing.T) {
 		t.Errorf("TinyGoSDK suspiciously short (%d bytes)", len(TinyGoSDK))
 	}
 }
+
+// TestSDKContract pins the author-facing contract: the SDK owns the entry point
+// (main + run) and delegates to an author-supplied Handle, exposes the call/step/log
+// helpers, and no longer references the removed juice.emit host import.
+func TestSDKContract(t *testing.T) {
+	must := []string{
+		"//export run",
+		"func run(",
+		"Handle(in)",          // run delegates to author's Handle
+		"func JuiceCall(",
+		"func JuiceStepCreate(",
+		"func JuiceStepComplete(",
+		"func JuiceLog(",
+		"//export alloc",
+		"func main()",
+	}
+	for _, s := range must {
+		if !strings.Contains(TinyGoSDK, s) {
+			t.Errorf("TinyGoSDK missing required substring %q", s)
+		}
+	}
+	for _, banned := range []string{"emit", "hostEmit", "JuiceEmit"} {
+		if strings.Contains(TinyGoSDK, banned) {
+			t.Errorf("TinyGoSDK must not reference removed host function %q", banned)
+		}
+	}
+}
+
+// TestSDKCompilesWithRealTinyGo prepends the SDK to a Handle body and compiles it
+// with the real TinyGo toolchain, proving the SDK is valid TinyGo and that an action
+// author truly only needs to write Handle. Skipped when tinygo is not installed.
+func TestSDKCompilesWithRealTinyGo(t *testing.T) {
+	if _, err := exec.LookPath("tinygo"); err != nil {
+		t.Skip("tinygo not installed; skipping real-compile integration test")
+	}
+	body := `
+func Handle(in map[string]any) (map[string]any, error) {
+	n, _ := in["n"].(float64)
+	JuiceLog("info", "doubling "+strconv.Itoa(int(n)))
+	return map[string]any{"result": math.Abs(n) * 2, "kind": strings.ToUpper("ok")}, nil
+}
+`
+	src := TinyGoSDK + "\n" + body
+	c := NewTinyGoCompiler(CompileConfig{TimeoutMS: 60000})
+	wasm, hash, err := c.CompileSource(context.Background(), []byte(src))
+	if err != nil {
+		t.Fatalf("compile SDK+Handle: %v", err)
+	}
+	if len(wasm) == 0 || hash == "" {
+		t.Fatal("expected non-empty artifact and hash")
+	}
+
+	imports, exports, err := InspectModule(wasm)
+	if err != nil {
+		t.Fatalf("inspect artifact: %v", err)
+	}
+	hasAlloc, hasRun := false, false
+	for _, e := range exports {
+		switch e {
+		case "alloc":
+			hasAlloc = true
+		case "run":
+			hasRun = true
+		}
+	}
+	if !hasAlloc || !hasRun {
+		t.Errorf("artifact must export alloc and run; exports=%v", exports)
+	}
+	allowed := map[string]bool{"call": true, "step_create": true, "step_complete": true, "log": true}
+	for _, imp := range imports {
+		if imp.Module == "wasi_snapshot_preview1" {
+			continue
+		}
+		if imp.Module != "juice" || !allowed[imp.Name] {
+			t.Errorf("artifact imports disallowed %q from %q", imp.Name, imp.Module)
+		}
+	}
+
+	// The artifact runs: feed input through alloc/run and read back the JSON output.
+	e := New(Config{TimeoutMS: 10000, MemoryBytes: 16 * 1024 * 1024})
+	out, err := e.Execute(context.Background(), wasm, []byte(`{"n":-3}`), &sdkTestHost{})
+	if err != nil {
+		t.Fatalf("execute artifact: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("output not JSON: %v (%s)", err, out)
+	}
+	if got["result"] != float64(6) {
+		t.Errorf("result = %v, want 6", got["result"])
+	}
+	if got["kind"] != "OK" {
+		t.Errorf("kind = %v, want OK", got["kind"])
+	}
+}
+
+// sdkTestHost is a no-op kernel.HostFunctions for the SDK compile test.
+type sdkTestHost struct{}
+
+func (sdkTestHost) Call(context.Context, string, []byte) ([]byte, error)       { return []byte("{}"), nil }
+func (sdkTestHost) StepCreate(context.Context, []byte, string, string) (string, error) { return "", nil }
+func (sdkTestHost) StepComplete(context.Context, string, []byte) ([]byte, error) {
+	return []byte("{}"), nil
+}
+func (sdkTestHost) Log(context.Context, string, string) error { return nil }
 
 func TestMagicByteDetection(t *testing.T) {
 	// WASM magic bytes → compileWasmSource should pass directly to ScriptExecutor.

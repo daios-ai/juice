@@ -208,6 +208,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, error) {
 	native.RegisterSinkHandler(k)
 	native.RegisterMessageHandler(k)
 	native.RegisterRandomHandler(k)
+	native.RegisterTinyGoCompileHandler(k, native.CompileDeps{Compiler: compiler, Scripts: exec}, script.TinyGoSDK)
 
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).
 	if privB64, _ := db.GetConfig(context.Background(), configKeySigningPrivate); privB64 != "" {

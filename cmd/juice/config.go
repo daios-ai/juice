@@ -48,6 +48,11 @@ type NativeRandomConfig struct {
 	Price int64 `json:"price"`
 }
 
+// NativeTinyGoConfig holds configuration for the @sys/tinygo/compile native action.
+type NativeTinyGoConfig struct {
+	Price int64 `json:"price"`
+}
+
 // NativeConfig holds per-action configuration for all native actions.
 type NativeConfig struct {
 	LLM     NativeLLMConfig     `json:"llm"`
@@ -57,6 +62,7 @@ type NativeConfig struct {
 	Sink    NativeSinkConfig    `json:"sink"`
 	Message NativeMessageConfig `json:"message"`
 	Random  NativeRandomConfig  `json:"random"`
+	TinyGo  NativeTinyGoConfig  `json:"tinygo"`
 }
 
 // ServerConfig holds all non-secret runtime configuration.
@@ -93,6 +99,7 @@ func DefaultServerConfig() ServerConfig {
 			Sink:    NativeSinkConfig{Price: 0},
 			Message: NativeMessageConfig{Price: 0},
 			Random:  NativeRandomConfig{Price: 0},
+			TinyGo:  NativeTinyGoConfig{Price: 5},
 		},
 		ScriptTimeoutMS:   10000,
 		ScriptMemoryBytes: 64 * 1024 * 1024,

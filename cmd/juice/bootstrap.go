@@ -365,5 +365,27 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 			},
 		},
 	},
+	{
+		name:        "tinygo/compile",
+		price:       cfg.TinyGo.Price,
+		description: "Compiles TinyGo source (a Handle function written against the Juice SDK) to a WASM artifact, ready to register with action create --kind wasm --artifact",
+		inputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"source": map[string]any{"type": "string", "description": "TinyGo source: a func Handle(in map[string]any) (map[string]any, error) plus any private helpers; the SDK (package, imports, alloc, run, main) is prepended automatically"},
+			},
+			"required": []string{"source"},
+		},
+		outputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"status":        map[string]any{"type": "string", "description": "success or failure"},
+				"artifact":      map[string]any{"type": "string", "description": "Base64-encoded WASM artifact, present on success"},
+				"artifact_hash": map[string]any{"type": "string", "description": "SHA-256 hex of the artifact, present on success"},
+				"diagnostics":   map[string]any{"type": "array", "description": "Compile/validation diagnostics", "items": map[string]any{"type": "string"}},
+			},
+			"required": []string{"status", "diagnostics"},
+		},
+	},
 	}
 }

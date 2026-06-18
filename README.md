@@ -12,7 +12,7 @@ Actions can be HTTP endpoints, WebAssembly modules, or native handlers. Every ca
 - **Tracing** — every call creates a child trace; nested WASM calls form a full trace tree across the process
 - **Auth** — bcrypt passwords, short-lived JWT access tokens (15 min), rotating refresh tokens (30 days), PKCE S256 flow
 - **Events** — named event listeners that fire an action when an event is emitted by a source user; pollable queues
-- **WASM host functions** — scripts can call other actions, emit events, and log via `juice.call`, `juice.emit`, `juice.log`
+- **WASM host functions** — scripts can call other actions, create/complete steps, and log via `juice.call`, `juice.step_create`, `juice.step_complete`, `juice.log`
 - **Stats** — incremental mean tracking per action for latency, price, success rate, and rating
 - **Feedback** — recursive cost and wall-clock latency for any subtree of the trace tree
 - **Lookup** — cosine similarity search over action embeddings, re-ranked by success rate

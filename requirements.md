@@ -372,6 +372,7 @@ Native actions are standard actions shipped alongside the kernel as a platform s
 | `@sys/sink`     | Public; action owner `@sys`; price 0 (configurable, `native.sink`, §14); callable through `Call()`. Accepts any input, returns `{}`. Universal no-op sink for steps that require an onward action but no further computation. |
 | `@sys/message`  | Public; action owner `@sys`; price 0 (configurable, `native.message`, §14); callable through `Call()`. Sends a message to another platform user by creating a Step they must acknowledge. Input: required `to` (`@handle` of recipient), required `message`. Output: `step_id`. The Step sets `required_caller_user_id` to the resolved target user and `partial_args` to `{"message":"..."}` so the recipient can read it via `step list`. Uses `@sys/sink` as the step's `action`. `ErrInvalidInput` if `to` cannot be resolved. |
 | `@sys/random`   | Public; action owner `@sys`; price 0 (configurable, `native.random`, §14); callable through `Call()`. No input required. Output: `value` (float in `[0, 1)`). Exists to provide randomness to WASM scripts, which have no ambient access to the OS random source. |
+| `@sys/tinygo/compile` | Public; action owner `@sys`; price 5 (configurable, `native.tinygo`, §14); callable through `Call()`. Compiles author-supplied TinyGo to a WASM artifact using the platform TinyGo compiler, prepending the Juice WASM SDK so the author writes only `func Handle(in map[string]any) (map[string]any, error)` (the SDK owns `package`, imports, `alloc`, `run`, `main`). Input: required `source`. Output: `status` (`success`/`failure`), `artifact` (base64 WASM, on success), `artifact_hash` (SHA-256 hex, on success), `diagnostics` (array). Empty `source` gives `ErrInvalidInput`; an unavailable compiler toolchain gives `ErrInvalidState` (platform misconfiguration — the call fails and is not charged). Author compile errors and import/export-validation failures use output failure status, not kernel errors (so the attempt is charged), mirroring `@sys/make`. Registration is separate supervision: pass the returned artifact to `action create --kind wasm --artifact` (§14). |
 
 Stats use:
 
@@ -555,7 +556,7 @@ config.jwt_secret          = 32 random bytes, hex
 
 Private signing key and JWT secret are never logged or returned. Partial first boot is rerunnable. `JUICE_SECRET_KEY` overrides stored JWT secret at runtime only.
 
-Every startup reads `config.superuser_handle` to confirm first boot and identify `@sys`; it verifies signing keys and aborts if either is absent. It then registers, enables, and makes public `@sys/lookup`, `@sys/llm/chat`, `@sys/llm/embed`, `@sys/llm/json`, `@sys/llm/decide`, `@sys/make`, `@sys/time`, `@sys/sink`, `@sys/message`, and `@sys/random` if absent, and reconciles their configurable fields (price and action-specific settings) from config on every startup. It then runs recovery (§5).
+Every startup reads `config.superuser_handle` to confirm first boot and identify `@sys`; it verifies signing keys and aborts if either is absent. It then registers, enables, and makes public `@sys/lookup`, `@sys/llm/chat`, `@sys/llm/embed`, `@sys/llm/json`, `@sys/llm/decide`, `@sys/make`, `@sys/time`, `@sys/sink`, `@sys/message`, `@sys/random`, and `@sys/tinygo/compile` if absent, and reconciles their configurable fields (price and action-specific settings) from config on every startup. It then runs recovery (§5).
 
 Bootstrap is idempotent. Supervision operations are not native actions.
 
@@ -752,7 +753,8 @@ Config lives in `juice.json` (path from `JUICE_CONFIG`, default `./juice.json`).
     "time":    { "price": 0 },
     "sink":    { "price": 0 },
     "message": { "price": 0 },
-    "random":  { "price": 0 }
+    "random":  { "price": 0 },
+    "tinygo":  { "price": 5 }
   }
 }
 ```
@@ -825,6 +827,8 @@ non-buyer cannot rate transaction
 native action callable through Call()
 @sys/random returns value in [0, 1)
 wasm script can call @sys/random to obtain a random value
+@sys/tinygo/compile returns base64 artifact and hash for valid source; status=failure with diagnostics on compile or import-validation error; empty source returns ErrInvalidInput
+action create --artifact registers a wasm action from a pre-compiled base64 artifact
 @sys/llm/embed returns embedding array for valid text
 @sys/llm/embed with empty text returns ErrInvalidInput
 @sys/llm/embed with unconfigured embedder returns ErrInvalidState

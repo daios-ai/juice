@@ -903,7 +903,10 @@ func (k *Kernel) SetActive(ctx context.Context, callerID, actionID string, activ
 		if strings.TrimSpace(a.Description) == "" {
 			return ErrInvalidState.Wrap("description is required before activation")
 		}
-		if a.Source == "" && a.Kind != KindNative {
+		// A pre-compiled wasm artifact (e.g. from @sys/tinygo/compile registered via
+		// `action create --artifact`) is itself the executable, so it satisfies the
+		// source requirement even when the TinyGo source is not stored.
+		if a.Source == "" && a.Kind != KindNative && !(a.Kind == KindWasm && a.WasmArtifact != "") {
 			return ErrInvalidState.Wrap("cannot activate action with no source")
 		}
 		if err := ValidateSchema(a.InputSchema); err != nil {
