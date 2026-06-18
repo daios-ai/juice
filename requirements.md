@@ -362,7 +362,7 @@ Native actions are standard actions shipped alongside the kernel as a platform s
 
 | Action          | Rules                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@sys/lookup`   | Public; action owner `@sys`; price 0 (configurable, `native.lookup`, §14); callable only through `Call()`. Rank active actions by tested formula combining semantic similarity and stats. Replaceable ranking storage; brute-force cosine acceptable. Input: required `query`, optional `limit=10`. Output: `results[]` with `action_id`, `name`, `owner_handle`, `description`, `score`. Direct lookup only for diagnostics, not user-facing APIs or WASM hosts.                                                                                                                                                                                                                                                                                                       |
+| `@sys/lookup`   | Public; action owner `@sys`; price 0 (configurable, `native.lookup`, §14); callable only through `Call()`. Rank active actions by tested formula combining semantic similarity and stats. Replaceable ranking storage; brute-force cosine acceptable. Input: required `query`, optional `limit=10`. Output: `results[]` with `action_id`, `action` (`@owner/name`), `description`, `score`, `input_schema`, `output_schema`. Direct lookup only for diagnostics, not user-facing APIs or WASM hosts.                                                                                                                                                                                                                                                                                                       |
 | `@sys/llm/chat` | Public; action owner `@sys`; price 0 (configurable, `native.llm`, §14); callable through `Call()`. Input: `messages[]` of `{role,content}` plus optional `system`. Output: `message{role,content}`. `ErrInvalidState` if chat unconfigured.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `@sys/llm/embed` | Public; action owner `@sys`; price 0 (configurable, `native.llm`, §14); callable through `Call()`. Input: required `text` (string). Output: `embedding` (array of numbers). `ErrInvalidInput` if `text` is empty. `ErrInvalidState` if embedder unconfigured. |
 | `@sys/llm/json` | Public; action owner `@sys`; price 0 (configurable, `native.llm`, §14); callable through `Call()`. Input: `messages[]` of `{role,content}`, optional `system`, required `output_schema`. Output: `value` (JSON value). Validates model output locally against `output_schema`. `ErrSchemaViolation` for unsupported schema. `ErrInvalidState` if structured output unavailable. `ErrExecutionFailed` if no valid JSON produced. |
@@ -580,10 +580,10 @@ A proxy user's handle is a **local alias** chosen at acceptance (default: the pe
 Two kernels transact only as **friends**: a reciprocal relation with the proxy-user pair (`@B` on A, `@A` on B).
 
 ```text
-juice peer friend --url <url>    register peer + bulk-import all their active public actions
-juice peer unfriend --handle <h> end the relation; deny future requests; deactivate all proxies
-juice peer list                  known peers and balances
-juice peer inspect --url <url>   view remote identity, public actions, and transacted friends (no DB write)
+juice peer friend <url>      register peer + bulk-import all their active public actions
+juice peer unfriend <user>   end the relation; deny future requests; deactivate all proxies (user is @handle)
+juice peer list              known peers and balances
+juice peer inspect <url>     view remote identity, public actions, and transacted friends (no DB write)
 ```
 
 All `peer` commands are superuser supervision, CLI-only (§14). `POST /v1/peers` is the inbound protocol endpoint, authenticated by federation signature — not a local API.
@@ -649,7 +649,7 @@ Inbound: calls sign `JCS({action, counterparty, idempotency_key, timestamp, args
 
 ## 14. CLI, HTTP, logging, config
 
-HTTP API is primary. Every exposed endpoint has a CLI command. CLI uses the same service layer, supports human-readable and JSON output, works directly against local SQLite where feasible, and each command has at least one test. Admin is CLI-only.
+HTTP API is primary. Every exposed endpoint has a CLI command. CLI uses the same service layer, supports human-readable and JSON output, works directly against local SQLite where feasible, and each command has at least one test. Admin is CLI-only. A command's primary identifier is a positional argument by its natural key — a user is `@handle` (never an id), an action is `@owner/name` (an id is also accepted), and processes, steps, and transactions are ids; a second mandatory value (amount, rating) is the second positional. CLI human-readable output exposes the same fields as the corresponding HTTP response; `--json` selects the canonical JSON form (the HTTP shape).
 
 CLI handlers and HTTP handlers are thin wires: parse input, call the service layer, format output. All kernel calls, enrichment, validation, and transformation live in the service layer. No kernel calls outside the service layer.
 
@@ -657,37 +657,37 @@ Required commands:
 
 ```text
 juice serve
-juice user create                         juice user me
+juice user create <user> <email>          juice user me
 juice user update
-juice auth login                          juice auth logout
-juice action create                       juice action update
-juice action delete                       juice action enable
-juice action disable                      juice action list
-juice action import                       juice action unimport
-juice action stats
-juice process list                        juice process show
-juice process end                         juice run
-juice step create                         juice step list
-juice step show                           juice step complete
-juice tx list                             juice tx show
-juice tx rate                             juice tx verify-receipt
+juice auth login <user>                    juice auth logout
+juice action create <name>                 juice action update <action>
+juice action delete <action>              juice action enable <action>
+juice action disable <action>             juice action list
+juice action import <spec-url>            juice action unimport <spec-url>
+juice action stats <action>
+juice process list                        juice process show <id>
+juice process end <id>                    juice run <action> [json]
+juice step create <action>                juice step list
+juice step show <id>                      juice step complete <id> [json]
+juice tx list                             juice tx show <id>
+juice tx rate <id> <0|1>                  juice tx verify <id>
 juice health
-juice admin user list                     juice admin user show
-juice admin user suspend                  juice admin user unsuspend
-juice admin user deposit                  juice admin user withdraw
-juice admin action list
-juice admin action disable                juice admin process list
-juice admin tx list                       juice admin step list
-juice peer friend                         juice peer unfriend
-juice peer list                           juice peer inspect
+juice admin users                         juice admin show <user>
+juice admin suspend <user>                juice admin unsuspend <user>
+juice admin deposit <user> <amount>       juice admin withdraw <user> <amount>
+juice admin actions
+juice admin disable <action>              juice admin processes
+juice admin txs                           juice admin steps
+juice peer friend <url>                   juice peer unfriend <user>
+juice peer list                           juice peer inspect <url>
 ```
 
-OpenAPI commands:
+OpenAPI commands (the OpenAPI spec URL is the positional argument):
 
 ```text
-juice action import --openapi <spec-url>
-juice action unimport --openapi <spec-url>
-juice action unimport --openapi <spec-url> --name <action-name>
+juice action import <spec-url>
+juice action unimport <spec-url>
+juice action unimport <spec-url> --name <action-name>
 ```
 
 `juice serve` handles `SIGTERM`/`SIGINT`, stops accepting new requests, drains in-flight calls, exits cleanly. No `juice stop`.
@@ -812,8 +812,11 @@ wasm host function call (juice.call, juice.step_create, juice.step_complete)
 script timeout
 script memory limit
 lookup ranking with fake embeddings
+lookup results include action (@owner/name), input_schema, and output_schema
 stats update
 CLI commands
+CLI primary identifiers are positional natural keys (user=@handle, action=@owner/name)
+CLI human-readable output exposes the same fields as the corresponding HTTP response
 logging smoke test
 superuser first-boot prompt and config storage
 suspended user rejected at authentication
@@ -999,7 +1002,7 @@ caller rates a transaction with a note; the note and rating value appear in tran
 — Federation —
 two kernels friend each other (auto-accept); operator A deposits B's proxy (and vice versa);
   B imports A's action; B's user runs it; charge lands in A's proxy balance on B, duty to B's @sys,
-  difference refunded; both sides' tx verify-receipt passes all checks
+  difference refunded; both sides' tx verify passes all checks
 kernel gossips a transacted peer; third kernel reads the gossip, sees earned stats, friends the
   subject directly, imports, runs — its own Stats start at defaults and accumulate
 A unfriends B: B's proxies deactivate, B's next inbound call gets a signed rejection receipt,

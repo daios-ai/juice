@@ -16,14 +16,14 @@ flow_transaction_access() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "tx_access.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @carol --email carol@test.com --password carolpass >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_carol" auth login --handle @carol --password carolpass >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 300 >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @carol carol@test.com --password carolpass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_carol" auth login @carol --password carolpass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @bob 300 >/dev/null 2>&1
 
     start_backend "$backend_port" 200 '{"ok":true}'
     local backend_pid=$BACKEND_PID
@@ -31,11 +31,11 @@ flow_transaction_access() {
 
     # @alice (seller) creates a paid action (price=10) callable by anyone.
     local create_out action_id
-    create_out=$(jj "$db" "$home_alice" action create --name pvd-action --kind http \
+    create_out=$(jj "$db" "$home_alice" action create pvd-action --kind http \
         --source "http://127.0.0.1:${backend_port}/pvd" --price 10 --description "tx access test")
     action_id=$(strfield "$create_out" "id")
-    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$action_id" --public >/dev/null 2>&1
 
     # Start serve alongside backend
     addr="127.0.0.1:$port"
@@ -46,7 +46,7 @@ flow_transaction_access() {
     # @bob (buyer) calls @alice's action 3 times.
     local i call_out a_tx_id
     for i in 1 2 3; do
-        call_out=$(jj "$db" "$home_bob" run --action @alice/pvd-action --args '{}')
+        call_out=$(jj "$db" "$home_bob" run @alice/pvd-action '{}')
         a_tx_id=$(strfield "$call_out" "tx_id")
     done
 
@@ -84,7 +84,7 @@ flow_transaction_access() {
         && ok "tx_access.non_party_sees_none" \
         || fail "tx_access.non_party_sees_none" "expected 0 txs for non-party, got $carol_count: $carol_txs"
 
-    carol_show=$(j "$db" "$home_carol" tx show --id "$a_tx_id" 2>&1)
+    carol_show=$(j "$db" "$home_carol" tx show "$a_tx_id" 2>&1)
     echo "$carol_show" | grep -qi "not found" \
         && ok "tx_access.non_party_denied" \
         || fail "tx_access.non_party_denied" "expected not found, got: $carol_show"
@@ -158,17 +158,16 @@ flow_admin_supervision() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "admin.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys" auth login --handle @sys --password syspass >/dev/null 2>&1
+    j "$db" "$home_sys" auth login @sys --password syspass >/dev/null 2>&1
 
     # Create alice
     local alice_id
-    j "$db" "$home_sys" user create \
-        --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    alice_id=$(strfield "$(jj "$db" "$home_sys" admin user show --handle @alice)" "id")
+    j "$db" "$home_sys" user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    alice_id=$(strfield "$(jj "$db" "$home_sys" admin show @alice)" "id")
 
-    # admin user list shows both
+    # admin users shows both
     local user_list
-    user_list=$(jj "$db" "$home_sys" admin user list)
+    user_list=$(jj "$db" "$home_sys" admin users)
     echo "$user_list" | python3 -c "
 import sys,json
 users = json.load(sys.stdin)
@@ -178,9 +177,9 @@ assert '@sys' in handles and '@alice' in handles, f'missing user in {handles}'
         && ok "admin.user_list" \
         || fail "admin.user_list" "expected @sys and @alice in list"
 
-    # admin user show --handle @alice
+    # admin show @alice
     local show_out
-    show_out=$(jj "$db" "$home_sys" admin user show --handle @alice)
+    show_out=$(jj "$db" "$home_sys" admin show @alice)
     echo "$show_out" | python3 -c "
 import sys,json; d=json.load(sys.stdin); assert d.get('handle')=='@alice'
 " 2>/dev/null \
@@ -188,7 +187,7 @@ import sys,json; d=json.load(sys.stdin); assert d.get('handle')=='@alice'
         || fail "admin.user_show" "expected Handle=@alice, got: $show_out"
 
     # Suspend alice
-    j "$db" "$home_sys" admin user suspend --id "$alice_id" >/dev/null 2>&1
+    j "$db" "$home_sys" admin suspend @alice >/dev/null 2>&1
     local me_out
     me_out=$(j "$db" "$home_alice" user me)
     echo "$me_out" | grep -qi "suspended\|unauthenticated\|invalid\|error" \
@@ -196,8 +195,8 @@ import sys,json; d=json.load(sys.stdin); assert d.get('handle')=='@alice'
         || fail "admin.suspend_blocks_alice" "expected auth failure, got: $me_out"
 
     # Unsuspend alice
-    j "$db" "$home_sys" admin user unsuspend --id "$alice_id" >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys" admin unsuspend @alice >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
     local me2_out
     me2_out=$(jj "$db" "$home_alice" user me)
     [ "$(strfield "$me2_out" "handle")" = "@alice" ] \
@@ -211,15 +210,14 @@ import sys,json; d=json.load(sys.stdin); assert d.get('handle')=='@alice'
         || { fail "admin.backend" "backend failed to start"; return; }
     local bpid=$BACKEND_PID
     trap "kill '$bpid' 2>/dev/null; wait '$bpid' 2>/dev/null; rm -rf '$dir'" RETURN
-    action_id=$(strfield "$(jj "$db" "$home_sys" action create \
-        --name test --kind http \
+    action_id=$(strfield "$(jj "$db" "$home_sys" action create test --kind http \
         --source "http://127.0.0.1:$bport" \
         --description "admin test action" --price 0)" "id")
-    j "$db" "$home_sys" action enable --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_sys" action enable "$action_id" >/dev/null 2>&1
 
-    # admin action list shows the action
+    # admin actions shows the action
     local act_list
-    act_list=$(jj "$db" "$home_sys" admin action list)
+    act_list=$(jj "$db" "$home_sys" admin actions)
     echo "$act_list" | python3 -c "
 import sys,json; ids=[a['id'] for a in json.load(sys.stdin)]
 assert sys.argv[1] in ids
@@ -227,10 +225,10 @@ assert sys.argv[1] in ids
         && ok "admin.action_list" \
         || fail "admin.action_list" "action $action_id not in list"
 
-    # admin action disable
-    j "$db" "$home_sys" admin action disable --id "$action_id" >/dev/null 2>&1
+    # admin disable (action)
+    j "$db" "$home_sys" admin disable "$action_id" >/dev/null 2>&1
     local show_action
-    show_action=$(jj "$db" "$home_sys" action show --id "$action_id")
+    show_action=$(jj "$db" "$home_sys" action show "$action_id")
     echo "$show_action" | python3 -c "
 import sys,json; d=json.load(sys.stdin); assert not d.get('active'), f'still active: {d}'
 " 2>/dev/null \
@@ -238,18 +236,18 @@ import sys,json; d=json.load(sys.stdin); assert not d.get('active'), f'still act
         || fail "admin.action_disable" "action still active after disable: $show_action"
 
     # Re-enable and call to create a process and tx for admin list tests
-    j "$db" "$home_sys" action enable --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_sys" action update --id "$action_id" --public >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys" admin user deposit --handle @alice --amount 100 >/dev/null 2>&1
+    j "$db" "$home_sys" action enable "$action_id" >/dev/null 2>&1
+    j "$db" "$home_sys" action update "$action_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys" admin deposit @alice 100 >/dev/null 2>&1
     local run_out run_tx_id proc_id
-    run_out=$(jj "$db" "$home_alice" run --action @sys/test --args '{}')
+    run_out=$(jj "$db" "$home_alice" run @sys/test '{}')
     run_tx_id=$(strfield "$run_out" "tx_id")
-    proc_id=$(strfield "$(jj "$db" "$home_alice" tx show --id "$run_tx_id")" "process_id")
+    proc_id=$(strfield "$(jj "$db" "$home_alice" tx show "$run_tx_id")" "process_id")
 
-    # admin process list shows the process
+    # admin processes shows the process
     local proc_list
-    proc_list=$(jj "$db" "$home_sys" admin process list)
+    proc_list=$(jj "$db" "$home_sys" admin processes)
     echo "$proc_list" | python3 -c "
 import sys,json; ids=[p['id'] for p in json.load(sys.stdin)]
 assert sys.argv[1] in ids
@@ -257,9 +255,9 @@ assert sys.argv[1] in ids
         && ok "admin.process_list" \
         || fail "admin.process_list" "process $proc_id not in list"
 
-    # admin tx list shows transactions
+    # admin txs shows transactions
     local tx_list
-    tx_list=$(jj "$db" "$home_sys" admin tx list)
+    tx_list=$(jj "$db" "$home_sys" admin txs)
     echo "$tx_list" | python3 -c "
 import sys,json; txs=json.load(sys.stdin); assert len(txs)>0
 " 2>/dev/null \
@@ -268,7 +266,7 @@ import sys,json; txs=json.load(sys.stdin); assert len(txs)>0
 
     # Non-sys user rejected from admin commands
     local alice_admin_out
-    alice_admin_out=$(j "$db" "$home_alice" admin user list 2>&1)
+    alice_admin_out=$(j "$db" "$home_alice" admin users 2>&1)
     echo "$alice_admin_out" | grep -qi "unauthorized\|superuser" \
         && ok "admin.non_sys_rejected" \
         || fail "admin.non_sys_rejected" "expected rejection, got: $alice_admin_out"
@@ -298,7 +296,7 @@ import sys,json; txs=json.load(sys.stdin); assert len(txs)>0
         || fail "admin.http_alice_active" "expected @alice via HTTP, got: $http_me"
 
     # Suspend alice via CLI → HTTP GET /v1/me rejected
-    j "$db" "$home_sys" admin user suspend --id "$alice_id" >/dev/null 2>&1
+    j "$db" "$home_sys" admin suspend @alice >/dev/null 2>&1
     local http_suspended
     http_suspended=$(curl -s -H "Authorization: Bearer $alice_tok" "http://$addr/v1/me" 2>/dev/null)
     echo "$http_suspended" | grep -qi "suspended\|unauthenticated\|unauthorized\|error" \
@@ -306,7 +304,7 @@ import sys,json; txs=json.load(sys.stdin); assert len(txs)>0
         || fail "admin.http_suspended_blocked" "expected rejection for suspended user via HTTP, got: $http_suspended"
 
     # Unsuspend via CLI → HTTP access restored
-    j "$db" "$home_sys" admin user unsuspend --id "$alice_id" >/dev/null 2>&1
+    j "$db" "$home_sys" admin unsuspend @alice >/dev/null 2>&1
     local http_restored
     http_restored=$(curl -sf -H "Authorization: Bearer $alice_tok" "http://$addr/v1/me" 2>/dev/null)
     [ "$(strfield "$http_restored" "handle")" = "@alice" ] \
@@ -357,15 +355,15 @@ print(json.dumps(m) if m else 'null')
         || fail "make.price_20" "expected price 20, got: $price"
 
     # Set up alice with credits.
-    j "$db" "$home_sys"   auth login --handle @sys --password syspass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 500 >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @alice 500 >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     # Missing description → schema violation before any execution.
     local no_desc_out
-    no_desc_out=$(j "$db" "$home_alice" run --action @sys/make \
-        --args '{}' 2>&1) || true
+    no_desc_out=$(j "$db" "$home_alice" run @sys/make \
+        '{}' 2>&1) || true
     echo "$no_desc_out" | grep -qi "description\|required\|schema" \
         && ok "make.missing_description_rejected" \
         || fail "make.missing_description_rejected" "expected schema error, got: $no_desc_out"
@@ -374,8 +372,8 @@ print(json.dumps(m) if m else 'null')
     # Succeeds as a kernel call regardless of whether tinygo/Ollama is available.
     # Returns {status: "success"|"failure", diagnostics: [...]} — never a hard kernel error.
     local make_out make_result status make_tx_id proc_id
-    make_out=$(j "$db" "$home_alice" run --action @sys/make \
-        --args '{"description": "Return a fixed greeting message that says Hello followed by the name"}' 2>&1)
+    make_out=$(j "$db" "$home_alice" run @sys/make \
+        '{"description": "Return a fixed greeting message that says Hello followed by the name"}' 2>&1)
     make_result=$(echo "$make_out" | python3 -c "
 import sys, json, re
 text = sys.stdin.read()
@@ -398,7 +396,7 @@ import sys, re
 m = re.search(r'^tx_id:\s+(\S+)', sys.stdin.read(), re.MULTILINE)
 print(m.group(1) if m else '')
 " 2>/dev/null)
-    proc_id=$(strfield "$(jj "$db" "$home_alice" tx show --id "$make_tx_id" 2>/dev/null)" "process_id")
+    proc_id=$(strfield "$(jj "$db" "$home_alice" tx show "$make_tx_id" 2>/dev/null)" "process_id")
 
     # Transactions must have been recorded for the process (make + any sub-calls).
     local tx_out tx_count
@@ -459,9 +457,9 @@ flow_time() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "time.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     # @sys/time must be registered, active, public, price=0 after bootstrap.
     local actions_out time_json
@@ -482,26 +480,10 @@ print(json.dumps(m) if m else 'null')
 
     # Call @sys/time with run (price=0, no funds needed).
     local call_out unix_val iso_val
-    call_out=$(j "$db" "$home_alice" run --action @sys/time --args '{}' 2>&1)
+    call_out=$(jj "$db" "$home_alice" run @sys/time '{}')
 
-    unix_val=$(echo "$call_out" | python3 -c "
-import sys, json, re
-text = sys.stdin.read()
-m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
-if m:
-    try: print(json.loads(m.group(1)).get('unix', ''))
-    except: print('')
-else: print('')
-" 2>/dev/null)
-    iso_val=$(echo "$call_out" | python3 -c "
-import sys, json, re
-text = sys.stdin.read()
-m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
-if m:
-    try: print(json.loads(m.group(1)).get('iso', ''))
-    except: print('')
-else: print('')
-" 2>/dev/null)
+    unix_val=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get('unix',''))" "$call_out" 2>/dev/null)
+    iso_val=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get('iso',''))" "$call_out" 2>/dev/null)
 
     [ -n "$unix_val" ] && [ "$unix_val" -gt 0 ] 2>/dev/null \
         && ok "time.returns_unix" \
@@ -586,27 +568,19 @@ flow_message() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "message.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 500 >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @alice 500 >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
 
     # @alice sends @sys/message to @bob (price=0, no funds needed).
     local msg_out step_id
-    msg_out=$(j "$db" "$home_alice" run --action @sys/message \
-        --args '{"to":"@bob","message":"Please review doc"}' 2>&1)
+    msg_out=$(jj "$db" "$home_alice" run @sys/message \
+        '{"to":"@bob","message":"Please review doc"}')
 
-    step_id=$(echo "$msg_out" | python3 -c "
-import sys, json, re
-text = sys.stdin.read()
-m = re.search(r'result:\n(\{.*\})', text, re.DOTALL)
-if m:
-    try: print(json.loads(m.group(1)).get('step_id', ''))
-    except: print('')
-else: print('')
-" 2>/dev/null)
+    step_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get('step_id',''))" "$msg_out" 2>/dev/null)
 
     [ -n "$step_id" ] \
         && ok "message.step_created" \
@@ -626,24 +600,23 @@ print(json.dumps(m) if m else 'null')
         || fail "message.bob_sees_step" "@bob cannot see step $step_id"
 
     local complete_out
-    complete_out=$(j "$db" "$home_bob" step complete \
-        --id "$step_id" --args '{}' 2>&1)
+    complete_out=$(j "$db" "$home_bob" step complete "$step_id" '{}' 2>&1)
     echo "$complete_out" | grep -qi "tx_id\|transaction\|success\|complete" \
         && ok "message.bob_completes_step" \
         || fail "message.bob_completes_step" "@bob failed to complete step: $complete_out"
 
     # Missing required 'to' → error.
     local bad_out
-    bad_out=$(j "$db" "$home_alice" run --action @sys/message \
-        --args '{"message":"hi"}' 2>&1) || true
+    bad_out=$(j "$db" "$home_alice" run @sys/message \
+        '{"message":"hi"}' 2>&1) || true
     echo "$bad_out" | grep -qi "to\|required\|invalid" \
         && ok "message.missing_to_rejected" \
         || fail "message.missing_to_rejected" "expected error for missing to, got: $bad_out"
 
     # Unknown recipient → error.
     local unknown_out
-    unknown_out=$(j "$db" "$home_alice" run --action @sys/message \
-        --args '{"to":"@nobody","message":"hi"}' 2>&1) || true
+    unknown_out=$(j "$db" "$home_alice" run @sys/message \
+        '{"to":"@nobody","message":"hi"}' 2>&1) || true
     echo "$unknown_out" | grep -qi "not found\|invalid\|unknown" \
         && ok "message.unknown_recipient_rejected" \
         || fail "message.unknown_recipient_rejected" "expected error for unknown recipient, got: $unknown_out"
@@ -774,14 +747,14 @@ flow_make_calculator() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" make_max_steps=10 \
         || { fail "make_calculator.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 500 >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @alice 500 >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     local make_out make_result status action_name
-    make_out=$(j "$db" "$home_alice" run --action @sys/make \
-        --args '{"description": "A calculator that evaluates arithmetic expressions like (3+4)*5, supporting +, -, *, /. Use @sys/llm/chat to evaluate the expression and return the numeric result."}' 2>&1)
+    make_out=$(j "$db" "$home_alice" run @sys/make \
+        '{"description": "A calculator that evaluates arithmetic expressions like (3+4)*5, supporting +, -, *, /. Use @sys/llm/chat to evaluate the expression and return the numeric result."}' 2>&1)
     make_result=$(_make_extract_result "$make_out")
     status=$(echo "$make_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
     [ "$status" = "success" ] \
@@ -795,8 +768,8 @@ flow_make_calculator() {
     [ -n "$input_field" ] || { fail "make_calculator.result_correct" "could not find input field for $action_name"; return; }
 
     local call_out
-    call_out=$(j "$db" "$home_alice" run --action "@alice/$action_name" \
-        --args "{\"$input_field\": \"(3+4)*5\"}" 2>&1)
+    call_out=$(j "$db" "$home_alice" run "@alice/$action_name" \
+        "{\"$input_field\": \"(3+4)*5\"}" 2>&1)
     _make_output_values "$call_out" | grep -q "35" \
         && ok "make_calculator.result_correct" \
         || fail "make_calculator.result_correct" "expected 35 in output, got: $call_out"
@@ -813,14 +786,14 @@ flow_make_translator() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "make_translator.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 500 >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @alice 500 >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     local make_out make_result status action_name
-    make_out=$(j "$db" "$home_alice" run --action @sys/make \
-        --args '{"description": "Translate text from English to Italian. Use @sys/llm/chat to perform the translation."}' 2>&1)
+    make_out=$(j "$db" "$home_alice" run @sys/make \
+        '{"description": "Translate text from English to Italian. Use @sys/llm/chat to perform the translation."}' 2>&1)
     make_result=$(_make_extract_result "$make_out")
     status=$(echo "$make_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
     [ "$status" = "success" ] \
@@ -834,8 +807,8 @@ flow_make_translator() {
     [ -n "$input_field" ] || { fail "make_translator.output_nonempty" "could not find input field for $action_name"; return; }
 
     local call_out
-    call_out=$(j "$db" "$home_alice" run --action "@alice/$action_name" \
-        --args "{\"$input_field\": \"Hello\"}" 2>&1)
+    call_out=$(j "$db" "$home_alice" run "@alice/$action_name" \
+        "{\"$input_field\": \"Hello\"}" 2>&1)
     _make_output_values "$call_out" | grep -qv "^$" \
         && ok "make_translator.output_nonempty" \
         || fail "make_translator.output_nonempty" "expected non-empty translation output, got: $call_out"
@@ -852,15 +825,15 @@ flow_make_natural_language_calc() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" make_max_steps=10 \
         || { fail "make_nl_calc.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 1000 >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @alice 1000 >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     # Step 1: synthesize the calculator so it exists in the catalog.
     local calc_out calc_result calc_status calc_name
-    calc_out=$(j "$db" "$home_alice" run --action @sys/make \
-        --args '{"description": "A calculator that evaluates arithmetic expressions like (3+4)*5, supporting +, -, *, /. Use @sys/llm/chat to evaluate the expression and return the numeric result."}' 2>&1)
+    calc_out=$(j "$db" "$home_alice" run @sys/make \
+        '{"description": "A calculator that evaluates arithmetic expressions like (3+4)*5, supporting +, -, *, /. Use @sys/llm/chat to evaluate the expression and return the numeric result."}' 2>&1)
     calc_result=$(_make_extract_result "$calc_out")
     calc_status=$(echo "$calc_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
     [ "$calc_status" = "success" ] \
@@ -870,8 +843,8 @@ flow_make_natural_language_calc() {
 
     # Step 2: synthesize the NL solver — @sys/lookup should find the calculator above.
     local nl_out nl_result nl_status nl_name
-    nl_out=$(j "$db" "$home_alice" run --action @sys/make \
-        --args '{"description": "Given a sentence in natural language describing an arithmetic calculation (for example '\''what is three plus four'\''), look up and use an existing calculator action to compute the numeric result"}' 2>&1)
+    nl_out=$(j "$db" "$home_alice" run @sys/make \
+        '{"description": "Given a sentence in natural language describing an arithmetic calculation (for example '\''what is three plus four'\''), look up and use an existing calculator action to compute the numeric result"}' 2>&1)
     nl_result=$(_make_extract_result "$nl_out")
     nl_status=$(echo "$nl_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
     [ "$nl_status" = "success" ] \
@@ -885,8 +858,8 @@ flow_make_natural_language_calc() {
     [ -n "$input_field" ] || { fail "make_nl_calc.result_correct" "could not find input field for $nl_name"; return; }
 
     local call_out
-    call_out=$(j "$db" "$home_alice" run --action "@alice/$nl_name" \
-        --args "{\"$input_field\": \"what is two plus two\"}" 2>&1)
+    call_out=$(j "$db" "$home_alice" run "@alice/$nl_name" \
+        "{\"$input_field\": \"what is two plus two\"}" 2>&1)
     _make_output_values "$call_out" | grep -q "4" \
         && ok "make_nl_calc.result_correct" \
         || fail "make_nl_calc.result_correct" "expected 4 in output, got: $call_out"

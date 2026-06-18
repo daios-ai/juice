@@ -40,7 +40,7 @@ var rootCmd = &cobra.Command{
 var (
 	flagDB     string
 	flagConfig string
-	flagOutput string
+	flagJSON   bool
 	flagQuiet  bool
 )
 
@@ -53,7 +53,7 @@ var resolvedConfigPath string
 func init() {
 	rootCmd.PersistentFlags().StringVar(&flagDB, "db", "juice.db", "SQLite database path")
 	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", "", "JSON config file (default: juice.json in --db directory)")
-	rootCmd.PersistentFlags().StringVar(&flagOutput, "output", "text", "Output format: text or json")
+	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Output canonical JSON (same shape as the HTTP API) instead of human-readable text")
 	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "Print only the created resource ID")
 	cobra.OnInitialize(initConfig)
 }

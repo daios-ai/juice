@@ -12,21 +12,21 @@ flow_process_lifecycle() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "process_lifecycle.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @alice --amount 1000 >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @alice 1000 >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     # run @sys/message from @alice to @alice: creates process+step (price=0)
     local msg_out tx_id trace_id
-    msg_out=$(jj "$db" "$home_alice" run --action @sys/message \
-        --args '{"to":"@alice","message":"test lifecycle"}')
+    msg_out=$(jj "$db" "$home_alice" run @sys/message \
+        '{"to":"@alice","message":"test lifecycle"}')
     tx_id=$(strfield "$msg_out" "tx_id")
     trace_id=$(strfield "$msg_out" "trace_id")
     local step_id proc_id
     step_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get('step_id',''))" \
         "$msg_out" 2>/dev/null)
-    proc_id=$(strfield "$(jj "$db" "$home_alice" tx show --id "$tx_id")" "process_id")
+    proc_id=$(strfield "$(jj "$db" "$home_alice" tx show "$tx_id")" "process_id")
 
     [ -n "$proc_id" ] \
         && ok "process_lifecycle.started" \
@@ -44,7 +44,7 @@ flow_process_lifecycle() {
 
     # Process fields: funded with 0, status=open while step outstanding
     local proc_show
-    proc_show=$(jj "$db" "$home_alice" process show --id "$proc_id")
+    proc_show=$(jj "$db" "$home_alice" process show "$proc_id")
     [ "$(numfield "$proc_show" "available")" -eq 0 ] \
         && ok "process_lifecycle.process_available" \
         || fail "process_lifecycle.process_available" "expected 0, got: $proc_show"
@@ -53,13 +53,13 @@ flow_process_lifecycle() {
         || fail "process_lifecycle.status_open" "expected open, got: $proc_show"
 
     # End process — cancels waiting steps, returns 0 (price was 0)
-    j "$db" "$home_alice" process end --id "$proc_id" >/dev/null 2>&1
+    j "$db" "$home_alice" process end "$proc_id" >/dev/null 2>&1
     local me_restored
     me_restored=$(jj "$db" "$home_alice" user me)
     [ "$(numfield "$me_restored" "available")" -eq 1000 ] \
         && ok "process_lifecycle.funds_restored" \
         || fail "process_lifecycle.funds_restored" "expected 1000, got: $me_restored"
-    proc_show=$(jj "$db" "$home_alice" process show --id "$proc_id")
+    proc_show=$(jj "$db" "$home_alice" process show "$proc_id")
     [ "$(strfield "$proc_show" "status")" = "closed" ] \
         && ok "process_lifecycle.status_closed" \
         || fail "process_lifecycle.status_closed" "expected closed, got: $proc_show"
@@ -149,42 +149,42 @@ flow_acl_public() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "acl_public.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
 
     # @alice creates and enables an action pointing to unreachable backend (port 1)
     local create_out action_id
-    create_out=$(jj "$db" "$home_alice" action create --name target --kind http \
+    create_out=$(jj "$db" "$home_alice" action create target --kind http \
         --source "http://127.0.0.1:1/target" --price 0 --description "acl test")
     action_id=$(strfield "$create_out" "id")
-    j "$db" "$home_alice" action enable --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$action_id" >/dev/null 2>&1
 
     # Private action: @bob cannot run @alice's action (checked before process creation)
     local out
-    out=$(j "$db" "$home_bob" run --action @alice/target --args '{}')
+    out=$(j "$db" "$home_bob" run @alice/target '{}')
     echo "$out" | grep -qi "unauthorized\|permission\|error" \
         && ok "acl_public.private_denied" \
         || fail "acl_public.private_denied" "call on private action succeeded: $out"
 
     # Non-owner cannot make action public
-    out=$(j "$db" "$home_bob" action update --id "$action_id" --public)
+    out=$(j "$db" "$home_bob" action update "$action_id" --public)
     echo "$out" | grep -qi "unauthorized\|error" \
         && ok "acl_public.update_public_owner_only" \
         || fail "acl_public.update_public_owner_only" "non-owner made action public: $out"
 
     # Make public: @bob now passes the permission check (fails at backend, not permission)
-    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
-    out=$(j "$db" "$home_bob" run --action @alice/target --args '{}')
+    j "$db" "$home_alice" action update "$action_id" --public >/dev/null 2>&1
+    out=$(j "$db" "$home_bob" run @alice/target '{}')
     echo "$out" | grep -qiv "unauthorized\|permission denied" \
         && ok "acl_public.public_passes" \
         || fail "acl_public.public_passes" "public action still denied: $out"
 
     # Make private: permission check enforced again
-    j "$db" "$home_alice" action update --id "$action_id" --public=false >/dev/null 2>&1
-    out=$(j "$db" "$home_bob" run --action @alice/target --args '{}')
+    j "$db" "$home_alice" action update "$action_id" --public=false >/dev/null 2>&1
+    out=$(j "$db" "$home_bob" run @alice/target '{}')
     echo "$out" | grep -qi "unauthorized\|permission\|error" \
         && ok "acl_public.private_enforced" \
         || fail "acl_public.private_enforced" "call after making private was accepted: $out"
@@ -259,12 +259,12 @@ flow_successful_paid_call() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "successful_paid_call.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 500 >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @bob 500 >/dev/null 2>&1
 
     start_backend "$backend_port" 200 '{"result":"ok"}'
     local backend_pid=$BACKEND_PID
@@ -272,15 +272,15 @@ flow_successful_paid_call() {
 
     # @alice creates price=100 action with grant-all
     local create_out action_id
-    create_out=$(jj "$db" "$home_alice" action create --name pay --kind http \
+    create_out=$(jj "$db" "$home_alice" action create pay --kind http \
         --source "http://127.0.0.1:${backend_port}/pay" --price 100 --description "paid action")
     action_id=$(strfield "$create_out" "id")
-    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$action_id" --public >/dev/null 2>&1
 
     # Get @sys starting balance for fee accounting
     local sys_show sys_start
-    sys_show=$(jj "$db" "$home_sys" admin user show --handle @sys)
+    sys_show=$(jj "$db" "$home_sys" admin show @sys)
     sys_start=$(numfield "$sys_show" "available")
 
     # Write config with fee_bps=2000 before starting serve so server reads it
@@ -295,7 +295,7 @@ flow_successful_paid_call() {
     # Call with fee_bps=2000 → fee=20, net=80, gross=100
     local call_out tx_id
     call_out=$(HOME="$home_bob" \
-        "$JUICE" --db "$db" --output json run --action @alice/pay --args '{}' 2>/dev/null)
+        "$JUICE" --db "$db" --json run @alice/pay '{}' 2>/dev/null)
     tx_id=$(strfield "$call_out" "tx_id")
     [ -n "$tx_id" ] \
         && ok "successful_paid_call.call_succeeded" \
@@ -303,7 +303,7 @@ flow_successful_paid_call() {
 
     # tx fields
     local tx_show
-    tx_show=$(jj "$db" "$home_bob" tx show --id "$tx_id")
+    tx_show=$(jj "$db" "$home_bob" tx show "$tx_id")
     [ "$(numfield "$tx_show" "gross")" -eq 100 ] \
         && ok "successful_paid_call.tx_gross" \
         || fail "successful_paid_call.tx_gross" "expected Gross=100, got: $tx_show"
@@ -333,7 +333,7 @@ flow_successful_paid_call() {
 
     # Fee recipient (@sys) credited fee=20
     local sys_end
-    sys_end=$(numfield "$(jj "$db" "$home_sys" admin user show --handle @sys)" "available")
+    sys_end=$(numfield "$(jj "$db" "$home_sys" admin show @sys)" "available")
     [ "$sys_end" -eq $(( sys_start + 20 )) ] \
         && ok "successful_paid_call.fee_credited" \
         || fail "successful_paid_call.fee_credited" "expected +20; start=$sys_start end=$sys_end"
@@ -393,12 +393,12 @@ flow_failed_call_refund() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "failed_call_refund.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 500 >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @bob 500 >/dev/null 2>&1
 
     start_backend "$backend_port" 500 '{"error":"backend error"}'
     local backend_pid=$BACKEND_PID
@@ -406,11 +406,11 @@ flow_failed_call_refund() {
 
     # @alice creates price=100 action
     local create_out action_id
-    create_out=$(jj "$db" "$home_alice" action create --name fail --kind http \
+    create_out=$(jj "$db" "$home_alice" action create fail --kind http \
         --source "http://127.0.0.1:${backend_port}/fail" --price 100 --description "failing action")
     action_id=$(strfield "$create_out" "id")
-    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$action_id" --public >/dev/null 2>&1
 
     # Start serve alongside backend
     addr="127.0.0.1:$port"
@@ -419,7 +419,7 @@ flow_failed_call_refund() {
     trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
 
     # Call — backend returns 500 → execution failure (run exits non-zero)
-    j "$db" "$home_bob" run --action @alice/fail --args '{}' >/dev/null 2>&1 || true
+    j "$db" "$home_bob" run @alice/fail '{}' >/dev/null 2>&1 || true
 
     # bob.available unchanged: process funded 100, refunded 100, auto-closed
     local bob_me
@@ -446,7 +446,7 @@ flow_failed_call_refund() {
     # tx.Status = failure
     local tx_id tx_show
     tx_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])[0]['id'])" "$tx_list" 2>/dev/null)
-    tx_show=$(jj "$db" "$home_bob" tx show --id "$tx_id")
+    tx_show=$(jj "$db" "$home_bob" tx show "$tx_id")
     [ "$(strfield "$tx_show" "status")" = "failure" ] \
         && ok "failed_call_refund.tx_status_failure" \
         || fail "failed_call_refund.tx_status_failure" "expected failure, got: $tx_show"
@@ -488,25 +488,25 @@ flow_input_schema_failure() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "input_schema_failure.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 300 >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @bob 300 >/dev/null 2>&1
 
     # @alice creates action with input schema requiring field "x" (price=0 avoids balance leak)
     local create_out action_id
-    create_out=$(jj "$db" "$home_alice" action create --name schema-in --kind http \
+    create_out=$(jj "$db" "$home_alice" action create schema-in --kind http \
         --source "http://127.0.0.1:1/schema-in" --price 0 --description "schema test" \
         --input-schema '{"type":"object","properties":{"x":{"type":"string","description":"the x parameter"}},"required":["x"]}')
     action_id=$(strfield "$create_out" "id")
-    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$action_id" --public >/dev/null 2>&1
 
     # Call without required field "x" → schema error before trace creation
     local call_out
-    call_out=$(j "$db" "$home_bob" run --action @alice/schema-in --args '{}')
+    call_out=$(j "$db" "$home_bob" run @alice/schema-in '{}')
     echo "$call_out" | grep -qi "schema\|invalid\|required\|error" \
         && ok "input_schema_failure.error_returned" \
         || fail "input_schema_failure.error_returned" "expected schema error, got: $call_out"
@@ -577,12 +577,12 @@ flow_output_schema_failure() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "output_schema_failure.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 300 >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @bob 300 >/dev/null 2>&1
 
     # Backend returns {"ok":true} — missing required output field "id"
     start_backend "$backend_port" 200 '{"ok":true}'
@@ -591,12 +591,12 @@ flow_output_schema_failure() {
 
     # @alice creates action with output schema requiring field "id"
     local create_out action_id
-    create_out=$(jj "$db" "$home_alice" action create --name schema-out --kind http \
+    create_out=$(jj "$db" "$home_alice" action create schema-out --kind http \
         --source "http://127.0.0.1:${backend_port}/schema-out" --price 50 --description "schema out test" \
         --output-schema '{"type":"object","properties":{"id":{"type":"string","description":"the record id"}},"required":["id"]}')
     action_id=$(strfield "$create_out" "id")
-    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$action_id" --public >/dev/null 2>&1
 
     # Start serve alongside backend
     addr="127.0.0.1:$port"
@@ -606,7 +606,7 @@ flow_output_schema_failure() {
 
     # Call — execution runs, output schema check fails → CommitFailedCall
     local call_out
-    call_out=$(j "$db" "$home_bob" run --action @alice/schema-out --args '{}')
+    call_out=$(j "$db" "$home_bob" run @alice/schema-out '{}')
     echo "$call_out" | grep -qi "schema\|invalid\|error" \
         && ok "output_schema_failure.error_returned" \
         || fail "output_schema_failure.error_returned" "expected schema error, got: $call_out"
@@ -629,7 +629,7 @@ flow_output_schema_failure() {
     # tx.Status = failure
     local tx_id_os tx_show_os
     tx_id_os=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])[0]['id'])" "$tx_list" 2>/dev/null)
-    tx_show_os=$(jj "$db" "$home_bob" tx show --id "$tx_id_os")
+    tx_show_os=$(jj "$db" "$home_bob" tx show "$tx_id_os")
     [ "$(strfield "$tx_show_os" "status")" = "failure" ] \
         && ok "output_schema_failure.tx_status_failure" \
         || fail "output_schema_failure.tx_status_failure" "expected failure, got: $tx_show_os"

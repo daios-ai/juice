@@ -420,7 +420,7 @@ func TestActionShowPrivate(t *testing.T) {
 	if err := saveToken(ownerTok); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := execTestCmd(t, actionShowCmd(), "--id", a.ID); err != nil {
+	if _, err := execTestCmd(t, actionShowCmd(), a.ID); err != nil {
 		t.Errorf("owner: unexpected error: %v", err)
 	}
 
@@ -428,7 +428,7 @@ func TestActionShowPrivate(t *testing.T) {
 	if err := saveToken(strangerTok); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := execTestCmd(t, actionShowCmd(), "--id", a.ID); err == nil {
+	if _, err := execTestCmd(t, actionShowCmd(), a.ID); err == nil {
 		t.Error("stranger: expected error, got nil")
 	}
 }
@@ -455,7 +455,7 @@ func TestActionImportOpenAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := execTestCmd(t, actionImportCmd(), "--openapi", specSrv.URL+"/spec.json"); err != nil {
+	if _, err := execTestCmd(t, actionImportCmd(), specSrv.URL+"/spec.json"); err != nil {
 		t.Fatalf("action import: %v", err)
 	}
 
@@ -497,10 +497,10 @@ func TestActionUnimportOpenAPI(t *testing.T) {
 	}
 
 	specURL := specSrv.URL + "/spec.json"
-	if _, err := execTestCmd(t, actionImportCmd(), "--openapi", specURL); err != nil {
+	if _, err := execTestCmd(t, actionImportCmd(), specURL); err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	if _, err := execTestCmd(t, actionUnimportCmd(), "--openapi", specURL); err != nil {
+	if _, err := execTestCmd(t, actionUnimportCmd(), specURL); err != nil {
 		t.Fatalf("unimport: %v", err)
 	}
 }
@@ -1387,5 +1387,71 @@ func TestRemoteUnimport(t *testing.T) {
 
 	if _, err := k.UnimportRemoteAction(t.Context(), sys.ID, "@unimport-peer", "greet"); err != nil {
 		t.Fatalf("UnimportRemoteAction: %v", err)
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns what it printed.
+func captureStdout(t *testing.T, fn func() error) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	runErr := fn()
+	_ = w.Close()
+	os.Stdout = orig
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	if runErr != nil {
+		t.Fatalf("render fn returned error: %v", runErr)
+	}
+	return buf.String()
+}
+
+// TestPrintTextParity asserts that printText surfaces every field the canonical JSON
+// (what the HTTP API returns) carries — the CLI/HTTP parity invariant (§14). It also
+// checks that structured values are rendered as inline JSON.
+func TestPrintTextParity(t *testing.T) {
+	objects := []any{
+		enrichAction(&kernel.Action{
+			ID: "a1", OwnerUserID: "u1", OwnerHandle: "@alice", Name: "weather",
+			Kind: kernel.KindHTTP, Active: true, Public: true, Price: 5,
+			Description:  "current weather",
+			InputSchema:  map[string]any{"type": "object"},
+			OutputSchema: map[string]any{"type": "object"},
+		}),
+		&kernel.TransactionView{Transaction: &kernel.Transaction{ID: "t1", Status: "success", Gross: 10, Net: 8, Fee: 2}},
+		&stepWithAction{Step: &kernel.Step{ID: "s1", Status: "waiting"}, Action: "@alice/weather"},
+	}
+	for _, obj := range objects {
+		// Canonical key set from the marshaled object (what HTTP would send).
+		raw, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		text := captureStdout(t, func() error { return printText(obj) })
+		for key := range fields {
+			if !strings.Contains(text, key+":") {
+				t.Errorf("%T text output missing field %q\n%s", obj, key, text)
+			}
+		}
+	}
+
+	// Structured values must appear as inline JSON, not be dropped.
+	text := captureStdout(t, func() error {
+		return printText(enrichAction(&kernel.Action{
+			ID: "a1", Name: "x", Kind: kernel.KindHTTP,
+			InputSchema:  map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
+			OutputSchema: map[string]any{"type": "object"},
+		}))
+	})
+	if !strings.Contains(text, `input_schema: {"properties"`) && !strings.Contains(text, `input_schema: {"type"`) {
+		t.Errorf("input_schema not rendered as inline JSON:\n%s", text)
 	}
 }

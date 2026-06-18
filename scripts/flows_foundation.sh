@@ -14,7 +14,7 @@ flow_bootstrap() {
     ok "bootstrap.first_boot"
 
     # Log in as @sys and verify handle
-    j "$db" "$home_sys" auth login --handle @sys --password syspass >/dev/null 2>&1
+    j "$db" "$home_sys" auth login @sys --password syspass >/dev/null 2>&1
     local me
     me=$(jj "$db" "$home_sys" user me)
     [ "$(strfield "$me" "handle")" = "@sys" ] \
@@ -93,7 +93,7 @@ flow_local_auth() {
         || { fail "local_auth.boot" "bootstrap failed"; return; }
 
     # Login stores tokens
-    j "$db" "$home_sys" auth login --handle @sys --password syspass >/dev/null 2>&1
+    j "$db" "$home_sys" auth login @sys --password syspass >/dev/null 2>&1
     local tdir; tdir=$(juice_token_dir "$home_sys" "$db")
     [ -f "$tdir/token" ] \
         && ok "local_auth.token_stored" \
@@ -189,9 +189,9 @@ flow_suspension() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "suspension.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys" auth login --handle @sys --password syspass >/dev/null 2>&1
-    j "$db" "$home_sys" user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$home_sys" user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     # Start HTTP server so we can mirror CLI assertions via curl.
     local addr="127.0.0.1:$port"
@@ -223,7 +223,7 @@ flow_suspension() {
     # @sys suspends @alice by ID
     local alice_id
     alice_id=$(strfield "$me" "id")
-    j "$db" "$home_sys" admin user suspend --id "$alice_id" >/dev/null 2>&1
+    j "$db" "$home_sys" admin suspend @alice >/dev/null 2>&1
 
     # @alice's existing token is now rejected — use j so the error message is in stdout
     local suspended_out
@@ -241,13 +241,13 @@ flow_suspension() {
 
     # Data preserved — @sys can still see @alice
     local alice_show
-    alice_show=$(jj "$db" "$home_sys" admin user show --handle @alice)
+    alice_show=$(jj "$db" "$home_sys" admin show @alice)
     [ "$(strfield "$alice_show" "handle")" = "@alice" ] \
         && ok "suspension.data_preserved" \
         || fail "suspension.data_preserved" "admin show failed: $alice_show"
 
     # @sys unsuspends @alice
-    j "$db" "$home_sys" admin user unsuspend --id "$alice_id" >/dev/null 2>&1
+    j "$db" "$home_sys" admin unsuspend @alice >/dev/null 2>&1
 
     # @alice's existing token works again (no re-login required) — CLI
     me=$(jj "$db" "$home_alice" user me)
@@ -274,11 +274,11 @@ flow_deposits() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "deposits.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys" auth login --handle @sys --password syspass >/dev/null 2>&1
-    j "$db" "$home_sys" user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys" user create --handle @bob --email bob@test.com --password bobpass >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$home_sys" user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys" user create @bob bob@test.com --password bobpass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
 
     # Start HTTP server to mirror CLI balance checks via curl.
     local addr="127.0.0.1:$port"
@@ -307,7 +307,7 @@ flow_deposits() {
         || fail "deposits.http_initial_zero" "HTTP initial balance not zero: $me_resp"
 
     # @sys deposits 500 to @alice
-    j "$db" "$home_sys" admin user deposit --handle @alice --amount 500 >/dev/null 2>&1
+    j "$db" "$home_sys" admin deposit @alice 500 >/dev/null 2>&1
     me=$(jj "$db" "$home_alice" user me)
     [ "$(numfield "$me" "available")" -eq 500 ] \
         && ok "deposits.balance_updated" \
@@ -320,7 +320,7 @@ flow_deposits() {
         || fail "deposits.http_balance_updated" "HTTP expected 500, got: $me_resp"
 
     # Second deposit accumulates
-    j "$db" "$home_sys" admin user deposit --handle @alice --amount 200 >/dev/null 2>&1
+    j "$db" "$home_sys" admin deposit @alice 200 >/dev/null 2>&1
     me=$(jj "$db" "$home_alice" user me)
     [ "$(numfield "$me" "available")" -eq 700 ] \
         && ok "deposits.accumulates" \
@@ -334,7 +334,7 @@ flow_deposits() {
 
     # Non-sys user cannot deposit
     local bob_deposit
-    bob_deposit=$(j "$db" "$home_bob" admin user deposit --handle @alice --amount 10 2>&1)
+    bob_deposit=$(j "$db" "$home_bob" admin deposit @alice 10 2>&1)
     echo "$bob_deposit" | grep -qi "unauthorized\|superuser\|error" \
         && ok "deposits.non_sys_rejected" \
         || fail "deposits.non_sys_rejected" "non-sys deposit was accepted: $bob_deposit"
@@ -360,15 +360,15 @@ flow_action_lifecycle() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "action_lifecycle.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
 
     # Create action — inactive by default
     local create_out action_id
-    create_out=$(jj "$db" "$home_alice" action create --name greet --kind http \
+    create_out=$(jj "$db" "$home_alice" action create greet --kind http \
         --source "http://127.0.0.1:1/greet" --description "hello world" --price 5)
     action_id=$(strfield "$create_out" "id")
     [ -n "$action_id" ] \
@@ -384,52 +384,52 @@ flow_action_lifecycle() {
         || fail "action_lifecycle.inactive_by_default" "expected False, got Active=$active"
 
     # Enable → active
-    j "$db" "$home_alice" action enable --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$action_id" >/dev/null 2>&1
     local show
-    show=$(jj "$db" "$home_alice" action show --id "$action_id")
+    show=$(jj "$db" "$home_alice" action show "$action_id")
     active=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['active'])" "$show" 2>/dev/null)
     [ "$active" = "True" ] \
         && ok "action_lifecycle.enabled" \
         || fail "action_lifecycle.enabled" "expected True, got $active; show: $show"
 
     # Disable → inactive
-    j "$db" "$home_alice" action disable --id "$action_id" >/dev/null 2>&1
-    show=$(jj "$db" "$home_alice" action show --id "$action_id")
+    j "$db" "$home_alice" action disable "$action_id" >/dev/null 2>&1
+    show=$(jj "$db" "$home_alice" action show "$action_id")
     active=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['active'])" "$show" 2>/dev/null)
     [ "$active" = "False" ] \
         && ok "action_lifecycle.disabled" \
         || fail "action_lifecycle.disabled" "expected False, got $active; show: $show"
 
     # Update description — persisted
-    j "$db" "$home_alice" action update --id "$action_id" --description "updated desc" >/dev/null 2>&1
-    show=$(jj "$db" "$home_alice" action show --id "$action_id")
+    j "$db" "$home_alice" action update "$action_id" --description "updated desc" >/dev/null 2>&1
+    show=$(jj "$db" "$home_alice" action show "$action_id")
     echo "$show" | grep -q "updated desc" \
         && ok "action_lifecycle.update_persisted" \
         || fail "action_lifecycle.update_persisted" "description not updated; show: $show"
 
     # Delete — use j (text mode) so the error message is in stdout for grep
-    j "$db" "$home_alice" action delete --id "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action delete "$action_id" >/dev/null 2>&1
     local show_deleted
-    show_deleted=$(j "$db" "$home_alice" action show --id "$action_id")
+    show_deleted=$(j "$db" "$home_alice" action show "$action_id")
     echo "$show_deleted" | grep -qi "not found\|error" \
         && ok "action_lifecycle.deleted" \
         || fail "action_lifecycle.deleted" "action still visible after delete: $show_deleted"
 
     # Non-owner (regular user @bob) cannot delete @alice's action
-    create_out=$(jj "$db" "$home_alice" action create --name hello --kind http \
+    create_out=$(jj "$db" "$home_alice" action create hello --kind http \
         --source "http://127.0.0.1:1/hello")
     local alice_action_id
     alice_action_id=$(strfield "$create_out" "id")
     local bob_delete
-    bob_delete=$(j "$db" "$home_bob" action delete --id "$alice_action_id")
+    bob_delete=$(j "$db" "$home_bob" action delete "$alice_action_id")
     echo "$bob_delete" | grep -qi "unauthorized\|not found\|error" \
         && ok "action_lifecycle.owner_enforced" \
         || fail "action_lifecycle.owner_enforced" "non-owner delete succeeded: $bob_delete"
 
     # Name reuse: after deleting an action, the same name can be registered again
-    j "$db" "$home_alice" action delete --id "$alice_action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action delete "$alice_action_id" >/dev/null 2>&1
     local reuse_out
-    reuse_out=$(jj "$db" "$home_alice" action create --name hello --kind http \
+    reuse_out=$(jj "$db" "$home_alice" action create hello --kind http \
         --source "http://127.0.0.1:1/hello2" --description "reused name")
     local reuse_id
     reuse_id=$(strfield "$reuse_out" "id")
@@ -446,22 +446,22 @@ flow_action_lifecycle() {
     trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
 
     local tx_action_id
-    create_out=$(jj "$db" "$home_alice" action create --name callable \
+    create_out=$(jj "$db" "$home_alice" action create callable \
         --kind http --source "http://127.0.0.1:${backend_port}/call" \
         --description "for tx test" --price 0)
     tx_action_id=$(strfield "$create_out" "id")
-    j "$db" "$home_alice" action enable    --id "$tx_action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$tx_action_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$tx_action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$tx_action_id" --public >/dev/null 2>&1
 
-    j "$db" "$home_bob"   auth login --handle @bob --password bobpass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob --password bobpass >/dev/null 2>&1
     local call_out tx_id
-    call_out=$(jj "$db" "$home_bob" run --action "@alice/callable" --args '{}')
+    call_out=$(jj "$db" "$home_bob" run "@alice/callable" '{}')
     tx_id=$(strfield "$call_out" "tx_id")
 
     # Delete the action — transaction must still carry the name
-    j "$db" "$home_alice" action delete --id "$tx_action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action delete "$tx_action_id" >/dev/null 2>&1
     local tx_show action_name_in_tx
-    tx_show=$(jj "$db" "$home_bob" tx show --id "$tx_id")
+    tx_show=$(jj "$db" "$home_bob" tx show "$tx_id")
     action_name_in_tx=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('action_name',''))" "$tx_show" 2>/dev/null)
     [ "$action_name_in_tx" = "callable" ] \
         && ok "action_lifecycle.action_name_in_tx_after_delete" \
@@ -546,12 +546,12 @@ flow_action_owner_visibility() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "action_owner_visibility.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     # Create an inactive (private) action — no --enable or --public flags.
-    j "$db" "$home_alice" action create --name secret-op --kind http \
+    j "$db" "$home_alice" action create secret-op --kind http \
         --source "http://127.0.0.1:1/secret" --description "private" >/dev/null 2>&1
 
     start_serve "$db" "$addr" syspass "$home_sys"

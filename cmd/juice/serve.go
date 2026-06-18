@@ -962,7 +962,7 @@ func healthCmd() *cobra.Command {
 			if resp.StatusCode != http.StatusOK {
 				return fmt.Errorf("server returned %d", resp.StatusCode)
 			}
-			if flagOutput == "json" {
+			if flagJSON {
 				return printJSON(body)
 			}
 			fmt.Println("ok")

@@ -14,26 +14,26 @@ flow_wasm_execution() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "wasm_execution.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 200 >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @bob 200 >/dev/null 2>&1
 
     # @alice creates echo WASM action
     local echo_wasm="$dir/echo.wasm"
     make_echo_wasm "$echo_wasm"
     local create_out action_id
-    create_out=$(jj "$db" "$home_alice" action create --name echo --kind wasm \
+    create_out=$(jj "$db" "$home_alice" action create echo --kind wasm \
         --source "$echo_wasm" --price 10 --description "echo wasm")
     action_id=$(strfield "$create_out" "id")
-    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$action_id" --public >/dev/null 2>&1
 
     # ArtifactHash is set after enable (WASM compiled on activation)
     local action_show artifact_hash
-    action_show=$(jj "$db" "$home_alice" action show --id "$action_id")
+    action_show=$(jj "$db" "$home_alice" action show "$action_id")
     artifact_hash=$(strfield "$action_show" "artifact_hash")
     [ -n "$artifact_hash" ] \
         && ok "wasm_execution.artifact_hash" \
@@ -41,7 +41,7 @@ flow_wasm_execution() {
 
     # @bob calls echo WASM
     local call_out tx_id
-    call_out=$(jj "$db" "$home_bob" run --action @alice/echo --args '{"msg":"hello"}')
+    call_out=$(jj "$db" "$home_bob" run @alice/echo '{"msg":"hello"}')
     tx_id=$(strfield "$call_out" "tx_id")
     [ -n "$tx_id" ] \
         && ok "wasm_execution.echo_call_succeeds" \
@@ -51,15 +51,15 @@ flow_wasm_execution() {
     local loop_wasm="$dir/loop.wasm"
     make_infinite_loop_wasm "$loop_wasm"
     local loop_out loop_id
-    loop_out=$(jj "$db" "$home_alice" action create --name loop --kind wasm \
+    loop_out=$(jj "$db" "$home_alice" action create loop --kind wasm \
         --source "$loop_wasm" --price 10 --description "infinite loop")
     loop_id=$(strfield "$loop_out" "id")
-    j "$db" "$home_alice" action enable   --id "$loop_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$loop_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$loop_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$loop_id" --public >/dev/null 2>&1
 
     local timeout_out
     write_test_config "$db" "script_timeout_ms=200"
-    timeout_out=$(HOME="$home_bob" "$JUICE" --db "$db" run --action @alice/loop --args '{}' 2>&1)
+    timeout_out=$(HOME="$home_bob" "$JUICE" --db "$db" run @alice/loop '{}' 2>&1)
     echo "$timeout_out" | grep -qi "timeout\|timed\|execution" \
         && ok "wasm_execution.infinite_loop_timeout" \
         || fail "wasm_execution.infinite_loop_timeout" "expected timeout error, got: $timeout_out"
@@ -122,15 +122,15 @@ flow_contractor_subcall() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "contractor_subcall.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @carol --email carol@test.com --password carolpass >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_carol" auth login --handle @carol --password carolpass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @carol carol@test.com --password carolpass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_carol" auth login @carol --password carolpass >/dev/null 2>&1
     # @carol funds the process — her process pays for the sub-call (price=50)
-    j "$db" "$home_sys"   admin user deposit --handle @carol --amount 50 >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @carol 50 >/dev/null 2>&1
 
     start_backend "$backend_port" 200 '{"ok":true}'
     local backend_pid=$BACKEND_PID
@@ -138,25 +138,25 @@ flow_contractor_subcall() {
 
     # @bob creates sub-target HTTP action (price=50)
     local sub_out sub_id
-    sub_out=$(jj "$db" "$home_bob" action create --name sub-target --kind http \
+    sub_out=$(jj "$db" "$home_bob" action create sub-target --kind http \
         --source "http://127.0.0.1:${backend_port}/sub" --price 50 --description "sub target")
     sub_id=$(strfield "$sub_out" "id")
-    j "$db" "$home_bob" action enable   --id "$sub_id" >/dev/null 2>&1
-    j "$db" "$home_bob" action update --id "$sub_id" --public >/dev/null 2>&1
+    j "$db" "$home_bob" action enable "$sub_id" >/dev/null 2>&1
+    j "$db" "$home_bob" action update "$sub_id" --public >/dev/null 2>&1
 
     # @alice creates WASM (price=50) that sub-calls @bob/sub-target
     local contractor_wasm="$dir/contractor.wasm"
     make_contractor_wasm "$contractor_wasm" "@bob/sub-target"
     local cont_out cont_id
-    cont_out=$(jj "$db" "$home_alice" action create --name contractor --kind wasm \
+    cont_out=$(jj "$db" "$home_alice" action create contractor --kind wasm \
         --source "$contractor_wasm" --price 50 --description "contractor wasm")
     cont_id=$(strfield "$cont_out" "id")
-    j "$db" "$home_alice" action enable   --id "$cont_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$cont_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$cont_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$cont_id" --public >/dev/null 2>&1
 
     # @carol has 50 credits (= contractor price); run funds process with 50, WASM sub-calls @bob
     local call_out tx_id
-    call_out=$(jj "$db" "$home_carol" run --action @alice/contractor --args '{}')
+    call_out=$(jj "$db" "$home_carol" run @alice/contractor '{}')
     tx_id=$(strfield "$call_out" "tx_id")
     [ -n "$tx_id" ] \
         && ok "contractor_subcall.call_succeeds" \
@@ -239,15 +239,15 @@ flow_contractor_failure() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "contractor_failure.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @carol --email carol@test.com --password carolpass >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_carol" auth login --handle @carol --password carolpass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @carol carol@test.com --password carolpass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_carol" auth login @carol --password carolpass >/dev/null 2>&1
     # @carol gets 30 credits — not enough for the sub-call (price=50) → insufficient funds
-    j "$db" "$home_sys" admin user deposit --handle @carol --amount 30 >/dev/null 2>&1
+    j "$db" "$home_sys" admin deposit @carol 30 >/dev/null 2>&1
 
     start_backend "$backend_port" 200 '{"ok":true}'
     local backend_pid=$BACKEND_PID
@@ -255,25 +255,25 @@ flow_contractor_failure() {
 
     # @bob creates sub-target (price=50)
     local sub_out sub_id
-    sub_out=$(jj "$db" "$home_bob" action create --name sub-target --kind http \
+    sub_out=$(jj "$db" "$home_bob" action create sub-target --kind http \
         --source "http://127.0.0.1:${backend_port}/sub" --price 50 --description "sub target")
     sub_id=$(strfield "$sub_out" "id")
-    j "$db" "$home_bob" action enable   --id "$sub_id" >/dev/null 2>&1
-    j "$db" "$home_bob" action update --id "$sub_id" --public >/dev/null 2>&1
+    j "$db" "$home_bob" action enable "$sub_id" >/dev/null 2>&1
+    j "$db" "$home_bob" action update "$sub_id" --public >/dev/null 2>&1
 
     # @alice creates WASM (price=50) that sub-calls @bob/sub-target
     local contractor_wasm="$dir/contractor.wasm"
     make_contractor_wasm "$contractor_wasm" "@bob/sub-target"
     local cont_out cont_id
-    cont_out=$(jj "$db" "$home_alice" action create --name contractor --kind wasm \
+    cont_out=$(jj "$db" "$home_alice" action create contractor --kind wasm \
         --source "$contractor_wasm" --price 50 --description "contractor wasm")
     cont_id=$(strfield "$cont_out" "id")
-    j "$db" "$home_alice" action enable   --id "$cont_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$cont_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$cont_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$cont_id" --public >/dev/null 2>&1
 
     # @carol has 30 < 50 → run fails at balance check before creating a process
     local call_out
-    call_out=$(j "$db" "$home_carol" run --action @alice/contractor --args '{}' 2>&1)
+    call_out=$(j "$db" "$home_carol" run @alice/contractor '{}' 2>&1)
     echo "$call_out" | grep -qi "insufficient\|balance\|funds\|credits\|costs" \
         && ok "contractor_failure.error_returned" \
         || fail "contractor_failure.error_returned" "expected insufficient-funds error, got: $call_out"
@@ -337,20 +337,20 @@ flow_step_success() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "step_success.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
 
     # @alice sends @sys/message to @bob: creates a process+step (price=0, next_action=@sys/sink)
     local msg_out tx_id step_id proc_id
-    msg_out=$(jj "$db" "$home_alice" run --action @sys/message \
-        --args '{"to":"@bob","message":"Please review doc"}')
+    msg_out=$(jj "$db" "$home_alice" run @sys/message \
+        '{"to":"@bob","message":"Please review doc"}')
     tx_id=$(strfield "$msg_out" "tx_id")
     step_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get('step_id',''))" \
         "$msg_out" 2>/dev/null)
-    proc_id=$(strfield "$(jj "$db" "$home_alice" tx show --id "$tx_id")" "process_id")
+    proc_id=$(strfield "$(jj "$db" "$home_alice" tx show "$tx_id")" "process_id")
 
     [ -n "$step_id" ] \
         && ok "step_success.create_returns_id" \
@@ -358,7 +358,7 @@ flow_step_success() {
 
     # Verify step is waiting via step show
     local step_show step_status
-    step_show=$(jj "$db" "$home_alice" step show --id "$step_id")
+    step_show=$(jj "$db" "$home_alice" step show "$step_id")
     step_status=$(strfield "$step_show" "status")
     [ "$step_status" = "waiting" ] \
         && ok "step_success.create_status_waiting" \
@@ -384,7 +384,7 @@ flow_step_success() {
 
     # @bob completes the step (next_action=@sys/sink, accepts any input, price=0).
     local complete_out complete_tx complete_step_id
-    complete_out=$(jj "$db" "$home_bob" step complete --id "$step_id" --args '{}')
+    complete_out=$(jj "$db" "$home_bob" step complete "$step_id" '{}')
     complete_tx=$(strfield "$complete_out" "tx_id")
     complete_step_id=$(strfield "$complete_out" "step_id")
     [ -n "$complete_tx" ] \
@@ -396,7 +396,7 @@ flow_step_success() {
 
     # Step status is now done.
     local show_out show_status
-    show_out=$(jj "$db" "$home_alice" step show --id "$step_id")
+    show_out=$(jj "$db" "$home_alice" step show "$step_id")
     show_status=$(strfield "$show_out" "status")
     [ "$show_status" = "done" ] \
         && ok "step_success.status_done_after_complete" \
@@ -482,37 +482,37 @@ flow_step_failure() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "step_failure.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @carol --email carol@test.com --password carolpass >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_carol" auth login --handle @carol --password carolpass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @carol carol@test.com --password carolpass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_carol" auth login @carol --password carolpass >/dev/null 2>&1
 
     # @alice sends @sys/message to @bob; @bob completes it.
     local msg1_out step_id
-    msg1_out=$(jj "$db" "$home_alice" run --action @sys/message \
-        --args '{"to":"@bob","message":"first message"}')
+    msg1_out=$(jj "$db" "$home_alice" run @sys/message \
+        '{"to":"@bob","message":"first message"}')
     step_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get('step_id',''))" \
         "$msg1_out" 2>/dev/null)
-    jj "$db" "$home_bob" step complete --id "$step_id" --args '{}' >/dev/null 2>&1
+    jj "$db" "$home_bob" step complete "$step_id" '{}' >/dev/null 2>&1
 
     # Completing the step again (status=done) → ErrInvalidState
     local complete2_out
-    complete2_out=$(j "$db" "$home_bob" step complete --id "$step_id" --args '{}' 2>&1)
+    complete2_out=$(j "$db" "$home_bob" step complete "$step_id" '{}' 2>&1)
     echo "$complete2_out" | grep -qi "invalid.state\|already.*done\|not.*waiting" \
         && ok "step_failure.double_complete_rejected" \
         || fail "step_failure.double_complete_rejected" "expected invalid state, got: $complete2_out"
 
     # @alice sends a second @sys/message to @bob; @carol tries to complete → ErrUnauthorized
     local msg2_out step2_id
-    msg2_out=$(jj "$db" "$home_alice" run --action @sys/message \
-        --args '{"to":"@bob","message":"second message"}')
+    msg2_out=$(jj "$db" "$home_alice" run @sys/message \
+        '{"to":"@bob","message":"second message"}')
     step2_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get('step_id',''))" \
         "$msg2_out" 2>/dev/null)
     local carol_complete_out
-    carol_complete_out=$(j "$db" "$home_carol" step complete --id "$step2_id" --args '{}' 2>&1)
+    carol_complete_out=$(j "$db" "$home_carol" step complete "$step2_id" '{}' 2>&1)
     echo "$carol_complete_out" | grep -qi "unauthorized\|permission\|caller" \
         && ok "step_failure.wrong_caller_rejected" \
         || fail "step_failure.wrong_caller_rejected" "expected unauthorized, got: $carol_complete_out"
@@ -569,21 +569,21 @@ flow_step_restart() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "step_restart.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
 
     # @alice sends @sys/message to @bob; verify the created step is waiting.
     local msg_out step_id
-    msg_out=$(jj "$db" "$home_alice" run --action @sys/message \
-        --args '{"to":"@bob","message":"restart test"}')
+    msg_out=$(jj "$db" "$home_alice" run @sys/message \
+        '{"to":"@bob","message":"restart test"}')
     step_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get('step_id',''))" \
         "$msg_out" 2>/dev/null)
 
     local step_show step_status
-    step_show=$(jj "$db" "$home_alice" step show --id "$step_id")
+    step_show=$(jj "$db" "$home_alice" step show "$step_id")
     step_status=$(strfield "$step_show" "status")
     [ "$step_status" = "waiting" ] \
         && ok "step_restart.initial_waiting" \
@@ -601,7 +601,7 @@ PYEOF
 
     # Verify the injected running state is visible.
     local show_running_out running_status
-    show_running_out=$(jj "$db" "$home_alice" step show --id "$step_id")
+    show_running_out=$(jj "$db" "$home_alice" step show "$step_id")
     running_status=$(strfield "$show_running_out" "status")
     [ "$running_status" = "running" ] \
         && ok "step_restart.injected_running" \
@@ -614,14 +614,14 @@ PYEOF
 
     # Step must be waiting again and completable by @bob.
     local show_reset_out reset_status
-    show_reset_out=$(jj "$db" "$home_alice" step show --id "$step_id")
+    show_reset_out=$(jj "$db" "$home_alice" step show "$step_id")
     reset_status=$(strfield "$show_reset_out" "status")
     [ "$reset_status" = "waiting" ] \
         && ok "step_restart.reset_to_waiting" \
         || fail "step_restart.reset_to_waiting" "expected waiting after bootstrap, got: $reset_status"
 
     local complete_out complete_tx
-    complete_out=$(jj "$db" "$home_bob" step complete --id "$step_id" --args '{}')
+    complete_out=$(jj "$db" "$home_bob" step complete "$step_id" '{}')
     complete_tx=$(strfield "$complete_out" "tx_id")
     [ -n "$complete_tx" ] \
         && ok "step_restart.completable_after_reset" \
@@ -698,8 +698,8 @@ flow_locked_funds_recovery() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "locked_funds.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys" auth login --handle @sys --password syspass >/dev/null 2>&1
-    j "$db" "$home_sys" admin user deposit --handle @sys --amount 200 >/dev/null 2>&1
+    j "$db" "$home_sys" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$home_sys" admin deposit @sys 200 >/dev/null 2>&1
 
     # Direct DB injection: simulate BeginRootCall for @sys/make (price=20) that crashed
     # before CommitCall/CommitFailedCall. Cannot be produced via the public API surface.
@@ -737,7 +737,7 @@ PYEOF
 
     # Verify injected state before restart
     local pre_show
-    pre_show=$(jj "$db" "$home_sys" process show --id "$proc_id")
+    pre_show=$(jj "$db" "$home_sys" process show "$proc_id")
     [ "$(numfield "$pre_show" "locked")" -eq 20 ] \
         && ok "locked_funds.injected" \
         || fail "locked_funds.injected" "expected locked=20: $pre_show"
@@ -751,11 +751,11 @@ PYEOF
     alloc_port; port2=$_ALLOC_PORT
     bootstrap_kernel "$db" syspass "$home_sys" "$port2" >/dev/null 2>&1
 
-    j "$db" "$home_sys" auth login --handle @sys --password syspass >/dev/null 2>&1
+    j "$db" "$home_sys" auth login @sys --password syspass >/dev/null 2>&1
 
     # Process should be closed with locked=0 after recovery
     local post_show
-    post_show=$(jj "$db" "$home_sys" process show --id "$proc_id")
+    post_show=$(jj "$db" "$home_sys" process show "$proc_id")
     [ "$(numfield "$post_show" "locked")" -eq 0 ] \
         && ok "locked_funds.locked_cleared" \
         || fail "locked_funds.locked_cleared" "expected locked=0: $post_show"
@@ -814,12 +814,12 @@ flow_rating() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "rating.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 200 >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @bob 200 >/dev/null 2>&1
 
     start_backend "$backend_port" 200 '{"ok":true}'
     local backend_pid=$BACKEND_PID
@@ -827,11 +827,11 @@ flow_rating() {
 
     # @alice creates action (price=10)
     local create_out action_id
-    create_out=$(jj "$db" "$home_alice" action create --name rate-me --kind http \
+    create_out=$(jj "$db" "$home_alice" action create rate-me --kind http \
         --source "http://127.0.0.1:${backend_port}/rate" --price 10 --description "rateable action")
     action_id=$(strfield "$create_out" "id")
-    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$action_id" --public >/dev/null 2>&1
 
     # Start serve alongside backend
     addr="127.0.0.1:$port"
@@ -841,12 +841,12 @@ flow_rating() {
 
     # @bob calls @alice's action → tx_id
     local call_out tx_id
-    call_out=$(jj "$db" "$home_bob" run --action @alice/rate-me --args '{}')
+    call_out=$(jj "$db" "$home_bob" run @alice/rate-me '{}')
     tx_id=$(strfield "$call_out" "tx_id")
 
     # Before rating: detail response has null rating field.
     local show_before
-    show_before=$(jj "$db" "$home_bob" tx show --id "$tx_id")
+    show_before=$(jj "$db" "$home_bob" tx show "$tx_id")
     python3 -c "import sys,json; d=json.loads(sys.argv[1]); assert d.get('rating') is None, d" \
         "$show_before" 2>/dev/null \
         && ok "rating.unrated_null" \
@@ -854,21 +854,21 @@ flow_rating() {
 
     # @bob rates tx with a note → success
     local rate_out
-    rate_out=$(j "$db" "$home_bob" tx rate --id "$tx_id" --rating 1 --note "great service" 2>&1)
+    rate_out=$(j "$db" "$home_bob" tx rate "$tx_id" 1 --note "great service" 2>&1)
     echo "$rate_out" | grep -q "rated" \
         && ok "rating.rate_succeeds" \
         || fail "rating.rate_succeeds" "unexpected rate output: $rate_out"
 
     # stats.rating_count = 1
     local stats_out
-    stats_out=$(jj "$db" "$home_bob" action stats --id "$action_id")
+    stats_out=$(jj "$db" "$home_bob" action stats "$action_id")
     [ "$(numfield "$stats_out" "rating_count")" -eq 1 ] \
         && ok "rating.stats_updated" \
         || fail "rating.stats_updated" "expected rating_count=1, got: $stats_out"
 
     # Buyer (@bob) sees embedded rating with value and note in detail.
     local show_buyer
-    show_buyer=$(jj "$db" "$home_bob" tx show --id "$tx_id")
+    show_buyer=$(jj "$db" "$home_bob" tx show "$tx_id")
     python3 -c "
 import sys, json
 d = json.loads(sys.argv[1])
@@ -882,7 +882,7 @@ assert r['note'] == 'great service', f'note={r[\"note\"]}'
 
     # Seller (@alice) also sees embedded rating with note in detail.
     local show_seller
-    show_seller=$(jj "$db" "$home_alice" tx show --id "$tx_id")
+    show_seller=$(jj "$db" "$home_alice" tx show "$tx_id")
     python3 -c "
 import sys, json
 d = json.loads(sys.argv[1])
@@ -911,14 +911,14 @@ assert r['value'] == 1, f'value={r[\"value\"]}'
 
     # Duplicate rate → ErrInvalidInput
     local rate2_out
-    rate2_out=$(j "$db" "$home_bob" tx rate --id "$tx_id" --rating 0 2>&1)
+    rate2_out=$(j "$db" "$home_bob" tx rate "$tx_id" 0 2>&1)
     echo "$rate2_out" | grep -qi "invalid.input\|already.rated\|already" \
         && ok "rating.duplicate_rejected" \
         || fail "rating.duplicate_rejected" "expected already-rated error, got: $rate2_out"
 
     # @alice (non-buyer) rates → ErrUnauthorized
     local rate3_out
-    rate3_out=$(j "$db" "$home_alice" tx rate --id "$tx_id" --rating 1 2>&1)
+    rate3_out=$(j "$db" "$home_alice" tx rate "$tx_id" 1 2>&1)
     echo "$rate3_out" | grep -qi "unauthorized\|buyer\|permission" \
         && ok "rating.non_buyer_rejected" \
         || fail "rating.non_buyer_rejected" "expected unauthorized, got: $rate3_out"

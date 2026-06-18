@@ -109,7 +109,7 @@ func TestExecuteLookup_ReturnsMatchingAction(t *testing.T) {
 	ctx := context.Background()
 
 	owner := seedOwner(t, st, "@alice")
-	seedAction(t, st, owner.ID, "/weather", "weather forecast temperature rain")
+	seedAction(t, st, owner.ID, "weather", "weather forecast temperature rain")
 
 	result, err := executeLookup(ctx, map[string]any{"query": "weather forecast"}, "", k)
 	if err != nil {
@@ -120,17 +120,16 @@ func TestExecuteLookup_ReturnsMatchingAction(t *testing.T) {
 		t.Fatalf("expected non-empty results, got %v", result)
 	}
 	first, _ := items[0].(map[string]any)
-	if first["name"] != "/weather" {
-		t.Errorf("expected /weather first, got %v", first["name"])
+	if first["action"] != "@alice/weather" {
+		t.Errorf("expected @alice/weather first, got %v", first["action"])
 	}
-	if _, ok := first["action_id"]; !ok {
-		t.Error("result missing action_id")
+	for _, required := range []string{"action_id", "score", "input_schema", "output_schema"} {
+		if _, ok := first[required]; !ok {
+			t.Errorf("result missing %q", required)
+		}
 	}
-	if _, ok := first["score"]; !ok {
-		t.Error("result missing score")
-	}
-	// Fields beyond the required schema must not be present.
-	for _, banned := range []string{"price", "uses", "failures"} {
+	// The consolidated ref replaces the separate name/owner_handle fields.
+	for _, banned := range []string{"name", "owner_handle", "price", "uses", "failures"} {
 		if _, ok := first[banned]; ok {
 			t.Errorf("result must not include field %q", banned)
 		}

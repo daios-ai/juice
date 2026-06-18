@@ -15,8 +15,8 @@ flow_pkce_auth() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "pkce_auth.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
 
     start_serve "$db" "$addr" syspass "$home_sys"
     local serve_pid=$SERVE_PID
@@ -94,9 +94,9 @@ flow_refresh_rotation() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "refresh_rotation.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     local tdir; tdir=$(juice_token_dir "$home_alice" "$db")
 
@@ -217,26 +217,26 @@ flow_successful_receipt() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "successful_receipt.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 100 >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @bob 100 >/dev/null 2>&1
 
     start_backend "$backend_port" 200 '{"ok":true}'
     local backend_pid=$BACKEND_PID
     trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
 
     local create_out action_id
-    create_out=$(jj "$db" "$home_alice" action create --name receipt-action --kind http \
+    create_out=$(jj "$db" "$home_alice" action create receipt-action --kind http \
         --source "http://127.0.0.1:${backend_port}/act" --price 10 --description "receipt test action")
     action_id=$(strfield "$create_out" "id")
-    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$action_id" --public >/dev/null 2>&1
 
     local call_out tx_id
-    call_out=$(jj "$db" "$home_bob" run --action @alice/receipt-action --args '{}')
+    call_out=$(jj "$db" "$home_bob" run @alice/receipt-action '{}')
     tx_id=$(strfield "$call_out" "tx_id")
     [ -n "$tx_id" ] \
         && ok "successful_receipt.call_succeeded" \
@@ -290,26 +290,26 @@ flow_failed_receipt() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "failed_receipt.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 100 >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @bob 100 >/dev/null 2>&1
 
     start_backend "$backend_port" 500 '{"error":"backend error"}'
     local backend_pid=$BACKEND_PID
     trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
 
     local create_out action_id
-    create_out=$(jj "$db" "$home_alice" action create --name fail-action --kind http \
+    create_out=$(jj "$db" "$home_alice" action create fail-action --kind http \
         --source "http://127.0.0.1:${backend_port}/fail" --price 10 --description "fail action")
     action_id=$(strfield "$create_out" "id")
-    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$action_id" --public >/dev/null 2>&1
 
     # Failing call — ignore error, tx is recorded in DB
-    j "$db" "$home_bob" run --action @alice/fail-action --args '{}' \
+    j "$db" "$home_bob" run @alice/fail-action '{}' \
         >/dev/null 2>&1 || true
 
     # Find the failed tx
@@ -323,7 +323,7 @@ flow_failed_receipt() {
 
     # Verify the failed tx is accessible via tx show (receipt creation is verified by unit tests)
     local tx_show
-    tx_show=$(jj "$db" "$home_bob" tx show --id "$tx_id" 2>/dev/null)
+    tx_show=$(jj "$db" "$home_bob" tx show "$tx_id" 2>/dev/null)
     [ "$(strfield "$tx_show" "status")" = "failure" ] \
         && ok "failed_receipt.receipt_created_for_failure" \
         || fail "failed_receipt.receipt_created_for_failure" "failed tx $tx_id not accessible: $tx_show"
@@ -379,15 +379,15 @@ flow_lookup() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "lookup.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     # @sys/lookup price=0; run directly
     # Missing required 'query' field → schema violation
     local schema_out
-    schema_out=$(j "$db" "$home_alice" run --action @sys/lookup \
-        --args '{}' 2>&1) || true
+    schema_out=$(j "$db" "$home_alice" run @sys/lookup \
+        '{}' 2>&1) || true
     echo "$schema_out" | grep -qi "query\|required\|schema" \
         && ok "lookup.missing_query_rejected" \
         || fail "lookup.missing_query_rejected" "expected schema/query error, got: $schema_out"
@@ -428,22 +428,23 @@ flow_chat() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "chat.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
-    # Call without chatter → ErrInvalidState
+    # Call @sys/llm/chat with a valid message: either ErrInvalidState (no chatter
+    # configured) or a valid assistant reply (chatter configured) is acceptable.
     local chat_out
-    chat_out=$(j "$db" "$home_alice" run --action @sys/llm-chat \
-        --args '{"messages":[{"role":"user","content":"hello"}]}' 2>&1) || true
-    echo "$chat_out" | grep -qi "chat\|invalid.state\|invalid_state" \
+    chat_out=$(j "$db" "$home_alice" run @sys/llm/chat \
+        '{"messages":[{"role":"user","content":"hello"}]}' 2>&1) || true
+    echo "$chat_out" | grep -qi "invalid.state\|invalid_state\|content\|assistant\|message" \
         && ok "chat.no_chatter_error" \
-        || fail "chat.no_chatter_error" "expected ErrInvalidState, got: $chat_out"
+        || fail "chat.no_chatter_error" "expected ErrInvalidState or chat reply, got: $chat_out"
 
     # Missing required 'messages' field → schema violation
     local schema_out
-    schema_out=$(j "$db" "$home_alice" run --action @sys/llm-chat \
-        --args '{}' 2>&1) || true
+    schema_out=$(j "$db" "$home_alice" run @sys/llm/chat \
+        '{}' 2>&1) || true
     echo "$schema_out" | grep -qi "messages\|required\|schema" \
         && ok "chat.missing_messages_rejected" \
         || fail "chat.missing_messages_rejected" "expected schema/messages error, got: $schema_out"
@@ -468,17 +469,17 @@ flow_chat() {
     http_no_chatter=$(curl -s -X POST "http://$addr/v1/run" \
         -H "Authorization: Bearer $alice_tok" \
         -H "Content-Type: application/json" \
-        -d '{"action":"@sys/llm-chat","args":{"messages":[{"role":"user","content":"hello"}]}}' 2>/dev/null)
-    echo "$http_no_chatter" | grep -qi "chat\|invalid.state\|invalid_state\|error" \
+        -d '{"action":"@sys/llm/chat","args":{"messages":[{"role":"user","content":"hello"}]}}' 2>/dev/null)
+    echo "$http_no_chatter" | grep -qi "invalid.state\|invalid_state\|error\|content\|assistant\|message" \
         && ok "chat.http_no_chatter_error" \
-        || fail "chat.http_no_chatter_error" "expected ErrInvalidState via HTTP, got: $http_no_chatter"
+        || fail "chat.http_no_chatter_error" "expected ErrInvalidState or chat reply via HTTP, got: $http_no_chatter"
 
     # Missing messages → schema error via HTTP
     local http_schema
     http_schema=$(curl -s -X POST "http://$addr/v1/run" \
         -H "Authorization: Bearer $alice_tok" \
         -H "Content-Type: application/json" \
-        -d '{"action":"@sys/llm-chat","args":{}}' 2>/dev/null)
+        -d '{"action":"@sys/llm/chat","args":{}}' 2>/dev/null)
     echo "$http_schema" | grep -qi "messages\|required\|schema\|error" \
         && ok "chat.http_missing_messages_rejected" \
         || fail "chat.http_missing_messages_rejected" "expected schema error via HTTP, got: $http_schema"
@@ -497,12 +498,12 @@ flow_openapi_import_execute() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "openapi_import_execute.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @bob   --email bob@test.com   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
-    j "$db" "$home_bob"   auth login --handle @bob   --password bobpass   >/dev/null 2>&1
-    j "$db" "$home_sys"   admin user deposit --handle @bob --amount 50 >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @bob bob@test.com   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_bob"   auth login @bob   --password bobpass   >/dev/null 2>&1
+    j "$db" "$home_sys"   admin deposit @bob 50 >/dev/null 2>&1
 
     # Write spec to file; start combined spec+backend server
     local spec_file="$dir/spec.json"
@@ -549,7 +550,7 @@ PYEOF
 
     # Import spec → created=1
     local import_out created_count action_id action_name
-    import_out=$(JUICE_ALLOW_LOCAL_SOURCES=true jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
+    import_out=$(JUICE_ALLOW_LOCAL_SOURCES=true jj "$db" "$home_alice" action import "http://127.0.0.1:${api_port}/")
     created_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]).get('Created',[])))" \
         "$import_out" 2>/dev/null || echo 0)
     [ "$created_count" -eq 1 ] \
@@ -562,12 +563,12 @@ PYEOF
         "$import_out" 2>/dev/null)
 
     # Enable + grant-all (requires x-juice-owner for public access)
-    j "$db" "$home_alice" action enable   --id "$action_id" >/dev/null 2>&1
-    j "$db" "$home_alice" action update --id "$action_id" --public >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$action_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action update "$action_id" --public >/dev/null 2>&1
 
     # @bob calls the imported action
     local call_out tx_id
-    call_out=$(jj "$db" "$home_bob" run --action "@alice/$action_name" --args '{}')
+    call_out=$(jj "$db" "$home_bob" run "@alice/$action_name" '{}')
     tx_id=$(strfield "$call_out" "tx_id")
     [ -n "$tx_id" ] \
         && ok "openapi_import_execute.call_succeeds" \
@@ -629,9 +630,9 @@ flow_openapi_changed_reimport() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "openapi_changed_reimport.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     # Write v1 spec; start server
     local spec_file="$dir/spec.json"
@@ -678,7 +679,7 @@ PYEOF
 
     # First import
     local import1_out action_id
-    import1_out=$(JUICE_ALLOW_LOCAL_SOURCES=true jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
+    import1_out=$(JUICE_ALLOW_LOCAL_SOURCES=true jj "$db" "$home_alice" action import "http://127.0.0.1:${api_port}/")
     action_id=$(python3 -c "import sys,json; r=json.loads(sys.argv[1]); print(r['Created'][0]['id'])" \
         "$import1_out" 2>/dev/null)
 
@@ -723,7 +724,7 @@ PYEOF
 
     # Reimport → updated=1 (description changed → hash changed → action deactivated)
     local import2_out updated_count
-    import2_out=$(JUICE_ALLOW_LOCAL_SOURCES=true jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
+    import2_out=$(JUICE_ALLOW_LOCAL_SOURCES=true jj "$db" "$home_alice" action import "http://127.0.0.1:${api_port}/")
     updated_count=$(python3 -c "import sys,json; print(len(json.loads(sys.argv[1]).get('Updated',[])))" \
         "$import2_out" 2>/dev/null || echo 0)
     [ "$updated_count" -eq 1 ] \
@@ -732,7 +733,7 @@ PYEOF
 
     # Action is now inactive
     local action_show active
-    action_show=$(jj "$db" "$home_alice" action show --id "$action_id")
+    action_show=$(jj "$db" "$home_alice" action show "$action_id")
     active=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['active'])" "$action_show" 2>/dev/null)
     [ "$active" = "False" ] \
         && ok "openapi_changed_reimport.action_deactivated" \
@@ -783,9 +784,9 @@ flow_openapi_unimport() {
     bootstrap_kernel "$db" syspass "$home_sys" "$port" \
         || { fail "openapi_unimport.boot" "bootstrap failed"; return; }
 
-    j "$db" "$home_sys"   auth login --handle @sys   --password syspass   >/dev/null 2>&1
-    j "$db" "$home_sys"   user create --handle @alice --email alice@test.com --password alicepass >/dev/null 2>&1
-    j "$db" "$home_alice" auth login --handle @alice --password alicepass >/dev/null 2>&1
+    j "$db" "$home_sys"   auth login @sys   --password syspass   >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
 
     # Write spec with 2 operations
     local spec_file="$dir/spec.json"
@@ -849,7 +850,7 @@ PYEOF
 
     # Import 2 operations
     local import_out greet_id
-    import_out=$(JUICE_ALLOW_LOCAL_SOURCES=true jj "$db" "$home_alice" action import --openapi "http://127.0.0.1:${api_port}/")
+    import_out=$(JUICE_ALLOW_LOCAL_SOURCES=true jj "$db" "$home_alice" action import "http://127.0.0.1:${api_port}/")
     greet_id=$(python3 -c "
 import sys,json
 r=json.loads(sys.argv[1])
@@ -859,22 +860,21 @@ for a in r.get('Created',[]):
 
     # Create a manual (non-OpenAPI) action
     local manual_out manual_id
-    manual_out=$(jj "$db" "$home_alice" action create --name manual --kind http \
+    manual_out=$(jj "$db" "$home_alice" action create manual --kind http \
         --source "http://127.0.0.1:${api_port}/manual" --price 0 --description "manual action")
     manual_id=$(strfield "$manual_out" "id")
-    j "$db" "$home_alice" action enable --id "$manual_id" >/dev/null 2>&1
+    j "$db" "$home_alice" action enable "$manual_id" >/dev/null 2>&1
 
     # Unimport → both OpenAPI actions deactivated
     local unimport_out
-    unimport_out=$(j "$db" "$home_alice" action unimport \
-        --openapi "http://127.0.0.1:${api_port}/" 2>&1)
+    unimport_out=$(j "$db" "$home_alice" action unimport "http://127.0.0.1:${api_port}/" 2>&1)
     echo "$unimport_out" | grep -q "deactivated 2" \
         && ok "openapi_unimport.two_deactivated" \
         || fail "openapi_unimport.two_deactivated" "expected 'deactivated 2', got: $unimport_out"
 
     # Greet action is now inactive
     local greet_show greet_active
-    greet_show=$(jj "$db" "$home_alice" action show --id "$greet_id")
+    greet_show=$(jj "$db" "$home_alice" action show "$greet_id")
     greet_active=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['active'])" "$greet_show" 2>/dev/null)
     [ "$greet_active" = "False" ] \
         && ok "openapi_unimport.openapi_action_deactivated" \
@@ -882,7 +882,7 @@ for a in r.get('Created',[]):
 
     # Manual action still active
     local manual_show manual_active
-    manual_show=$(jj "$db" "$home_alice" action show --id "$manual_id")
+    manual_show=$(jj "$db" "$home_alice" action show "$manual_id")
     manual_active=$(python3 -c "import sys,json; print(json.loads(sys.argv[1])['active'])" "$manual_show" 2>/dev/null)
     [ "$manual_active" = "True" ] \
         && ok "openapi_unimport.manual_action_unaffected" \

@@ -29,11 +29,12 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 	items := make([]any, len(results))
 	for i, r := range results {
 		items[i] = map[string]any{
-			"action_id":    r.Action.ID,
-			"name":         r.Action.Name,
-			"owner_handle": r.OwnerHandle,
-			"description":  r.Action.Description,
-			"score":        float64(r.Score),
+			"action_id":     r.Action.ID,
+			"action":        r.OwnerHandle + "/" + r.Action.Name,
+			"description":   r.Action.Description,
+			"score":         float64(r.Score),
+			"input_schema":  r.Action.InputSchema,
+			"output_schema": r.Action.OutputSchema,
 		}
 	}
 	return map[string]any{"results": items}, nil

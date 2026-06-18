@@ -203,11 +203,12 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
-							"action_id":    map[string]any{"type": "string", "description": "Unique action identifier"},
-							"name":         map[string]any{"type": "string", "description": "Action name"},
-							"owner_handle": map[string]any{"type": "string", "description": "Handle of the action owner"},
-							"description":  map[string]any{"type": "string", "description": "Human-readable description of the action"},
-							"score":        map[string]any{"type": "number", "description": "Relevance score between 0 and 1"},
+							"action_id":     map[string]any{"type": "string", "description": "Unique action identifier"},
+							"action":        map[string]any{"type": "string", "description": "Action reference as @owner/name"},
+							"description":   map[string]any{"type": "string", "description": "Human-readable description of the action"},
+							"score":         map[string]any{"type": "number", "description": "Relevance score between 0 and 1"},
+							"input_schema":  map[string]any{"type": "object", "description": "JSON Schema for the action's input"},
+							"output_schema": map[string]any{"type": "object", "description": "JSON Schema for the action's output"},
 						},
 					},
 				},

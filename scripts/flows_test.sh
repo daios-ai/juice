@@ -87,7 +87,7 @@ EOF
 # ---------------------------------------------------------------------------
 # CLI wrappers
 # j  db home [args...] — run juice against db with the given HOME
-# jj db home [args...] — same with --output json
+# jj db home [args...] — same with --json
 # ---------------------------------------------------------------------------
 j() {
     local db="$1" home="$2"; shift 2
@@ -97,7 +97,7 @@ j() {
 # jj — JSON output; stderr suppressed so log lines don't corrupt JSON parsing.
 jj() {
     local db="$1" home="$2"; shift 2
-    HOME="$home" "$JUICE" --db "$db" --output json "$@" 2>/dev/null
+    HOME="$home" "$JUICE" --db "$db" --json "$@" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------

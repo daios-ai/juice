@@ -1,14 +1,103 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
 )
+
+// ---- output helpers ----
+
+func printJSON(v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(b))
+	return nil
+}
+
+// printText renders v as a complete, human-readable view of the SAME object the HTTP
+// API serializes. It marshals v to JSON, then prints one "key: value" line per
+// top-level field in declaration order; scalar values are printed plainly and
+// object/array values as compact inline JSON. Because the field set is derived from
+// the marshaled object, the text view can never silently drop a field the HTTP
+// response carries (CLI/HTTP parity, §14).
+func printText(v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	// Non-object top levels (arrays, scalars) have no labeled fields; print as JSON.
+	trimmed := b
+	for len(trimmed) > 0 && (trimmed[0] == ' ' || trimmed[0] == '\n' || trimmed[0] == '\t') {
+		trimmed = trimmed[1:]
+	}
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return printJSON(v)
+	}
+	// Re-decode preserving field order via the JSON object's marshaled byte order.
+	dec := json.NewDecoder(bytes.NewReader(b))
+	// consume opening '{'
+	if _, err := dec.Token(); err != nil {
+		return err
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, _ := keyTok.(string)
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return err
+		}
+		fmt.Printf("  %s: %s\n", key, renderValue(raw))
+	}
+	return nil
+}
+
+// renderValue formats one JSON value for text output: strings unquoted, objects and
+// arrays as compact JSON, everything else as-is.
+func renderValue(raw json.RawMessage) string {
+	r := []byte(raw)
+	for len(r) > 0 && (r[0] == ' ' || r[0] == '\n' || r[0] == '\t') {
+		r = r[1:]
+	}
+	if len(r) == 0 {
+		return ""
+	}
+	if r[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return s
+		}
+	}
+	if r[0] == '{' || r[0] == '[' {
+		var buf interface{}
+		if err := json.Unmarshal(raw, &buf); err == nil {
+			if compact, err := json.Marshal(buf); err == nil {
+				return string(compact)
+			}
+		}
+	}
+	return string(r)
+}
+
+// emit prints a single resource object: canonical JSON with --json, else the complete
+// text view. Both render the same object, guaranteeing CLI/HTTP parity.
+func emit(v any) error {
+	if flagJSON {
+		return printJSON(v)
+	}
+	return printText(v)
+}
 
 // ---- user ----
 
@@ -19,11 +108,13 @@ func init() {
 }
 
 func userCreateCmd() *cobra.Command {
-	var handle, email, password string
+	var password string
 	cmd := &cobra.Command{
-		Use:   "create",
+		Use:   "create <user> <email>",
 		Short: "Create a new user account",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Args:  cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			user, email := args[0], args[1]
 			if password == "" {
 				p, err := promptPassword("Password: ")
 				if err != nil {
@@ -33,26 +124,18 @@ func userCreateCmd() *cobra.Command {
 			}
 			return withKernel(func(k *kernel.Kernel) error {
 				view, err := createUser(k, context.Background(), kernel.CreateUserRequest{
-					Handle:   handle,
+					Handle:   user,
 					Email:    email,
 					Password: password,
 				})
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
-					return printJSON(view)
-				}
-				fmt.Printf("User created: %s (id: %s)\n", view["handle"], view["id"])
-				return nil
+				return emit(view)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&handle, "handle", "", "Unique handle, e.g. @alice (required)")
-	cmd.Flags().StringVar(&email, "email", "", "Email address (required)")
 	cmd.Flags().StringVar(&password, "password", "", "Password (prompted if omitted)")
-	_ = cmd.MarkFlagRequired("handle")
-	_ = cmd.MarkFlagRequired("email")
 	return cmd
 }
 
@@ -60,18 +143,14 @@ func userMeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "me",
 		Short: "Show the authenticated user's profile",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				view, err := getMe(k, context.Background(), callerID)
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
-					return printJSON(view)
-				}
-				fmt.Printf("id:        %s\nhandle:    %s\nemail:     %s\navailable: %d\nlocked:    %d\n",
-					view["id"], view["handle"], view["email"], view["available"], view["locked"])
-				return nil
+				return emit(view)
 			})
 		},
 	}
@@ -82,7 +161,8 @@ func userUpdateCmd() *cobra.Command {
 	var changePassword bool
 	cmd := &cobra.Command{
 		Use:   "update",
-		Short: "Update email or password",
+		Short: "Update your email or password",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if email == "" && !changePassword {
 				return fmt.Errorf("at least one of --email or --password must be specified")
@@ -102,27 +182,13 @@ func userUpdateCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
-					return printJSON(view)
-				}
-				fmt.Printf("id:        %s\nhandle:    %s\nemail:     %s\navailable: %d\nlocked:    %d\n",
-					view["id"], view["handle"], view["email"], view["available"], view["locked"])
-				return nil
+				return emit(view)
 			})
 		},
 	}
 	cmd.Flags().StringVar(&email, "email", "", "New email address")
 	cmd.Flags().BoolVar(&changePassword, "password", false, "Change password (prompts for current and new)")
 	return cmd
-}
-
-func printJSON(v any) error {
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return err
-	}
-	fmt.Println(string(b))
-	return nil
 }
 
 // ---- action ----
@@ -145,13 +211,15 @@ func init() {
 }
 
 func actionCreateCmd() *cobra.Command {
-	var name, kind, source, description string
+	var kind, source, description string
 	var price int64
 	var inputSchemaStr, outputSchemaStr string
 	cmd := &cobra.Command{
-		Use:   "create",
-		Short: "Create a new action",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Use:   "create <name>",
+		Short: "Create a new action owned by you (name e.g. /hello)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			name := args[0]
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				inputSchema := map[string]any{}
 				if inputSchemaStr != "" {
@@ -188,40 +256,35 @@ func actionCreateCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
-					return printJSON(a)
-				}
-				fmt.Printf("Action created: %s (id: %s)\n", a.Name, a.ID)
-				return nil
+				return emit(a)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&name, "name", "", "Action name, e.g. /hello (required)")
 	cmd.Flags().StringVar(&kind, "kind", "http", "Action kind: http, wasm, native")
 	cmd.Flags().StringVar(&source, "source", "", "URL (http) or file path (wasm)")
 	cmd.Flags().StringVar(&description, "description", "", "Human-readable description")
 	cmd.Flags().Int64Var(&price, "price", 0, "Price in credits")
 	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "JSON Schema for inputs")
 	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "JSON Schema for outputs")
-	_ = cmd.MarkFlagRequired("name")
 	return cmd
 }
 
 func actionUpdateCmd() *cobra.Command {
-	var actionID, actionRef, description, source string
+	var description, source string
 	var price int64
 	var public bool
 	var inputSchemaStr, outputSchemaStr string
 	cmd := &cobra.Command{
-		Use:   "update",
-		Short: "Update an action's metadata",
-		RunE: func(c *cobra.Command, _ []string) error {
+		Use:   "update <action>",
+		Short: "Update an action's metadata (action is @owner/name or an id)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				id, err := resolveActionID(k, context.Background(), actionID, actionRef)
+				a0, err := resolveActionRef(k, context.Background(), args[0])
 				if err != nil {
 					return err
 				}
-				req := kernel.UpdateActionRequest{ID: id}
+				req := kernel.UpdateActionRequest{ID: a0.ID}
 				if c.Flags().Changed("description") {
 					req.Description = &description
 				}
@@ -252,16 +315,10 @@ func actionUpdateCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
-					return printJSON(a)
-				}
-				fmt.Printf("Action %s updated (active=%v, public=%v).\n", a.Name, a.Active, a.Public)
-				return nil
+				return emit(a)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID")
-	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference (@owner/name)")
 	cmd.Flags().StringVar(&description, "description", "", "New description")
 	cmd.Flags().StringVar(&source, "source", "", "New source URL or file path")
 	cmd.Flags().Int64Var(&price, "price", 0, "New price in credits")
@@ -272,51 +329,51 @@ func actionUpdateCmd() *cobra.Command {
 }
 
 func actionEnableCmd() *cobra.Command {
-	var actionID, actionRef string
-	cmd := &cobra.Command{
-		Use:   "enable",
-		Short: "Activate an action",
-		RunE: func(_ *cobra.Command, _ []string) error {
+	return &cobra.Command{
+		Use:   "enable <action>",
+		Short: "Activate an action (action is @owner/name or an id)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				id, err := resolveActionID(k, context.Background(), actionID, actionRef)
+				a, err := resolveActionRef(k, context.Background(), args[0])
 				if err != nil {
 					return err
 				}
-				if err := enableAction(k, context.Background(), callerID, id); err != nil {
+				if err := enableAction(k, context.Background(), callerID, a.ID); err != nil {
 					return err
 				}
-				fmt.Printf("Action %s enabled.\n", id)
+				if flagJSON {
+					return printJSON(map[string]bool{"active": true})
+				}
+				fmt.Printf("Action %s enabled.\n", args[0])
 				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID")
-	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference (@owner/name)")
-	return cmd
 }
 
 func actionDisableCmd() *cobra.Command {
-	var actionID, actionRef string
-	cmd := &cobra.Command{
-		Use:   "disable",
-		Short: "Deactivate an action",
-		RunE: func(_ *cobra.Command, _ []string) error {
+	return &cobra.Command{
+		Use:   "disable <action>",
+		Short: "Deactivate an action (action is @owner/name or an id)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				id, err := resolveActionID(k, context.Background(), actionID, actionRef)
+				a, err := resolveActionRef(k, context.Background(), args[0])
 				if err != nil {
 					return err
 				}
-				if err := disableAction(k, context.Background(), callerID, id); err != nil {
+				if err := disableAction(k, context.Background(), callerID, a.ID); err != nil {
 					return err
 				}
-				fmt.Printf("Action %s disabled.\n", id)
+				if flagJSON {
+					return printJSON(map[string]bool{"active": false})
+				}
+				fmt.Printf("Action %s disabled.\n", args[0])
 				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID")
-	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference (@owner/name)")
-	return cmd
 }
 
 func actionListCmd() *cobra.Command {
@@ -325,6 +382,7 @@ func actionListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List actions",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if all {
 				return withCaller(func(k *kernel.Kernel, callerID string) error {
@@ -332,7 +390,7 @@ func actionListCmd() *cobra.Command {
 					if err != nil {
 						return err
 					}
-					if flagOutput == "json" {
+					if flagJSON {
 						return printJSON(actions)
 					}
 					for _, a := range actions {
@@ -340,7 +398,7 @@ func actionListCmd() *cobra.Command {
 						if a.Active {
 							active = "*"
 						}
-						fmt.Printf("[%s] %s  %-30s  %d credits\n", active, a.ID[:8], a.Name, a.Price)
+						fmt.Printf("[%s] %s  %-30s  %d credits\n", active, a.ActionRef, a.Name, a.Price)
 					}
 					return nil
 				})
@@ -350,11 +408,11 @@ func actionListCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
+				if flagJSON {
 					return printJSON(actions)
 				}
 				for _, a := range actions {
-					fmt.Printf("  %s  %-30s  %d credits\n", a.ID[:8], a.Name, a.Price)
+					fmt.Printf("  %-24s  %d credits\n", a.ActionRef, a.Price)
 				}
 				return nil
 			})
@@ -367,72 +425,54 @@ func actionListCmd() *cobra.Command {
 }
 
 func actionShowCmd() *cobra.Command {
-	var actionID, actionRef string
-	cmd := &cobra.Command{
-		Use:   "show",
-		Short: "Show action details",
-		RunE: func(_ *cobra.Command, _ []string) error {
+	return &cobra.Command{
+		Use:   "show <action>",
+		Short: "Show action details, including input/output schemas (action is @owner/name or an id)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				id, err := resolveActionID(k, context.Background(), actionID, actionRef)
+				a0, err := resolveActionRef(k, context.Background(), args[0])
 				if err != nil {
 					return err
 				}
-				a, err := getAction(k, context.Background(), callerID, id)
+				a, err := getAction(k, context.Background(), callerID, a0.ID)
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
-					return printJSON(a)
-				}
-				active := "inactive"
-				if a.Active {
-					active = "active"
-				}
-				public := "private"
-				if a.Public {
-					public = "public"
-				}
-				fmt.Printf("Action: %s\n  name:        %s\n  kind:        %s\n  status:      %s  (%s)\n  price:       %d credits\n  owner:       %s\n  description: %s\n",
-					a.ID, a.Name, a.Kind, active, public, a.Price, a.OwnerUserID, a.Description)
-				return nil
+				return emit(a)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID")
-	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference (@owner/name)")
-	return cmd
 }
 
 func actionDeleteCmd() *cobra.Command {
-	var actionID, actionRef string
-	cmd := &cobra.Command{
-		Use:   "delete",
-		Short: "Delete an action",
-		RunE: func(_ *cobra.Command, _ []string) error {
+	return &cobra.Command{
+		Use:   "delete <action>",
+		Short: "Delete an action, preserving history (action is @owner/name or an id)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				id, err := resolveActionID(k, context.Background(), actionID, actionRef)
+				a, err := resolveActionRef(k, context.Background(), args[0])
 				if err != nil {
 					return err
 				}
-				if err := deleteAction(k, context.Background(), callerID, id); err != nil {
+				if err := deleteAction(k, context.Background(), callerID, a.ID); err != nil {
 					return err
 				}
-				fmt.Printf("Action %s deleted.\n", id)
+				fmt.Printf("Action %s deleted.\n", args[0])
 				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID")
-	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference (@owner/name)")
-	return cmd
 }
 
 func actionImportCmd() *cobra.Command {
-	var specURL string
 	cmd := &cobra.Command{
-		Use:   "import",
+		Use:   "import <spec-url>",
 		Short: "Import OpenAPI operations as inactive http actions (idempotent)",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			specURL := args[0]
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				allowLocal := os.Getenv("JUICE_ALLOW_LOCAL_SOURCES") == "true"
 				specBytes, err := fetchOpenAPISpec(context.Background(), specURL, allowLocal)
@@ -443,7 +483,7 @@ func actionImportCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
+				if flagJSON {
 					return printJSON(result)
 				}
 				fmt.Printf("created=%d unchanged=%d updated=%d deactivated=%d rejected=%d\n",
@@ -456,23 +496,23 @@ func actionImportCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&specURL, "openapi", "", "OpenAPI spec URL (required)")
-	_ = cmd.MarkFlagRequired("openapi")
 	return cmd
 }
 
 func actionUnimportCmd() *cobra.Command {
-	var specURL, name string
+	var name string
 	cmd := &cobra.Command{
-		Use:   "unimport",
+		Use:   "unimport <spec-url>",
 		Short: "Deactivate OpenAPI-imported actions without deleting history",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			specURL := args[0]
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				actions, err := k.UnimportOpenAPI(context.Background(), callerID, callerID, specURL, name)
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
+				if flagJSON {
 					return printJSON(actions)
 				}
 				fmt.Printf("deactivated %d action(s)\n", len(actions))
@@ -480,45 +520,36 @@ func actionUnimportCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&specURL, "openapi", "", "OpenAPI spec URL (required)")
 	cmd.Flags().StringVar(&name, "name", "", "Deactivate only the action with this name or operation_key")
-	_ = cmd.MarkFlagRequired("openapi")
 	return cmd
 }
 
 func actionStatsCmd() *cobra.Command {
-	var actionID, actionRef string
-	cmd := &cobra.Command{
-		Use:   "stats",
-		Short: "Show statistics for an action",
-		RunE: func(_ *cobra.Command, _ []string) error {
+	return &cobra.Command{
+		Use:   "stats <action>",
+		Short: "Show statistics for an action (action is @owner/name or an id)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withKernel(func(k *kernel.Kernel) error {
-				id, err := resolveActionID(k, context.Background(), actionID, actionRef)
+				a, err := resolveActionRef(k, context.Background(), args[0])
 				if err != nil {
 					return err
 				}
-				stats, err := actionStats(k, context.Background(), id)
+				stats, err := actionStats(k, context.Background(), a.ID)
 				if err != nil {
 					return err
 				}
 				if stats == nil {
+					if flagJSON {
+						return printJSON(nil)
+					}
 					fmt.Println("No statistics yet.")
 					return nil
 				}
-				if flagOutput == "json" {
-					return printJSON(stats)
-				}
-				fmt.Printf("Stats for %s:\n  uses:             %d\n  successes:        %d\n  failures:         %d\n  latency_estimate: %.3fs\n  rating_estimate:  %.3f\n  last_used:        %s\n",
-					stats.ActionID, stats.Uses, stats.Successes, stats.Failures,
-					stats.LatencyEstimate, stats.RatingEstimate,
-					stats.LastUsedAt.Format("2006-01-02T15:04:05"))
-				return nil
+				return emit(stats)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID")
-	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference (@owner/name)")
-	return cmd
 }
 
 // ---- process ----
@@ -530,72 +561,61 @@ func init() {
 }
 
 func processListCmd() *cobra.Command {
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "list",
 		Short: "List processes owned by the current user",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				processes, err := listProcesses(k, context.Background(), callerID, 100, 0)
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
+				if flagJSON {
 					return printJSON(processes)
 				}
 				for _, p := range processes {
 					fmt.Printf("%s  %-6s  available:%-6d  locked:%-6d\n",
-						p.ID[:8], p.Status, p.Available, p.Locked)
+						p.ID, p.Status, p.Available, p.Locked)
 				}
 				return nil
 			})
 		},
 	}
-	return cmd
 }
 
 func processEndCmd() *cobra.Command {
-	var processID string
-	cmd := &cobra.Command{
-		Use:   "end",
+	return &cobra.Command{
+		Use:   "end <id>",
 		Short: "End a process and return remaining funds",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				if err := endProcess(k, context.Background(), callerID, processID); err != nil {
+				if err := endProcess(k, context.Background(), callerID, args[0]); err != nil {
 					return err
 				}
-				fmt.Printf("Process %s ended.\n", processID)
+				fmt.Printf("Process %s ended.\n", args[0])
 				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&processID, "id", "", "Process ID (required)")
-	_ = cmd.MarkFlagRequired("id")
-	return cmd
 }
 
 func processShowCmd() *cobra.Command {
-	var processID string
-	cmd := &cobra.Command{
-		Use:   "show",
+	return &cobra.Command{
+		Use:   "show <id>",
 		Short: "Show process details",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				p, err := getProcess(k, context.Background(), callerID, processID)
+				p, err := getProcess(k, context.Background(), callerID, args[0])
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
-					return printJSON(p)
-				}
-				fmt.Printf("Process: %s\n  owner:     %s\n  status:    %s\n  available: %d\n  locked:    %d\n",
-					p.ID, p.OwnerUserID, p.Status, p.Available, p.Locked)
-				return nil
+				return emit(p)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&processID, "id", "", "Process ID (required)")
-	_ = cmd.MarkFlagRequired("id")
-	return cmd
 }
 
 // ---- step ----
@@ -607,12 +627,13 @@ func init() {
 }
 
 func stepCreateCmd() *cobra.Command {
-	var traceID, action, requiredCaller string
+	var traceID, requiredCaller string
 	var partialArgs string
 	cmd := &cobra.Command{
-		Use:   "create",
-		Short: "Create a step (pause point for external completion)",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Use:   "create <action>",
+		Short: "Create a step (pause point for external completion; action is @owner/name)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				ctx := context.Background()
 
@@ -623,7 +644,7 @@ func stepCreateCmd() *cobra.Command {
 
 				view, err := createStep(k, ctx, callerID, createStepParams{
 					TraceID:        traceID,
-					ActionRef:      action,
+					ActionRef:      args[0],
 					RequiredCaller: requiredCaller,
 					PartialArgs:    pa,
 				})
@@ -634,21 +655,14 @@ func stepCreateCmd() *cobra.Command {
 					fmt.Println(view.ID)
 					return nil
 				}
-				if flagOutput == "json" {
-					return printJSON(view)
-				}
-				fmt.Printf("Step created.\n  step_id:  %s\n  status:   %s\n  trace:    %s\n  action:   %s\n",
-					view.ID, view.Status, traceID, view.Action)
-				return nil
+				return emit(view)
 			})
 		},
 	}
 	cmd.Flags().StringVar(&traceID, "trace", "", "Trace ID (required)")
-	cmd.Flags().StringVar(&action, "action", "", "Action reference @owner/name (required)")
-	cmd.Flags().StringVar(&requiredCaller, "required-caller", "", "Handle of user who must complete the step, e.g. @webhook (required)")
+	cmd.Flags().StringVar(&requiredCaller, "required-caller", "", "User who must complete the step, e.g. @webhook (required)")
 	cmd.Flags().StringVar(&partialArgs, "partial-args", "", "Partial args as JSON object")
 	_ = cmd.MarkFlagRequired("trace")
-	_ = cmd.MarkFlagRequired("action")
 	_ = cmd.MarkFlagRequired("required-caller")
 	return cmd
 }
@@ -658,17 +672,18 @@ func stepListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List steps visible to the current user",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				steps, err := listSteps(k, context.Background(), callerID, processID, status)
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
+				if flagJSON {
 					return printJSON(steps)
 				}
 				for _, s := range steps {
-					fmt.Printf("%s  %-7s\n", s.ID[:8], s.Status)
+					fmt.Printf("%s  %-7s  %s\n", s.ID, s.Status, s.Action)
 				}
 				return nil
 			})
@@ -680,44 +695,34 @@ func stepListCmd() *cobra.Command {
 }
 
 func stepShowCmd() *cobra.Command {
-	var stepID string
-	cmd := &cobra.Command{
-		Use:   "show",
+	return &cobra.Command{
+		Use:   "show <id>",
 		Short: "Show step details",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				step, err := getStep(k, context.Background(), callerID, stepID)
+				step, err := getStep(k, context.Background(), callerID, args[0])
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
-					return printJSON(step)
-				}
-				fmt.Printf("Step: %s\n  status:          %s\n  action_id:       %s\n  required_caller: %s\n",
-					step.ID, step.Status, step.ActionID, step.RequiredCallerUserID)
-				return nil
+				return emit(step)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&stepID, "id", "", "Step ID (required)")
-	_ = cmd.MarkFlagRequired("id")
-	return cmd
 }
 
 func stepCompleteCmd() *cobra.Command {
-	var stepID, args string
 	cmd := &cobra.Command{
-		Use:   "complete",
-		Short: "Complete a waiting step",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Use:   "complete <id> [json]",
+		Short: "Complete a waiting step (json is the input object, default {})",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				var input json.RawMessage
-				if args != "" {
-					input = json.RawMessage(args)
-				} else {
-					input = json.RawMessage("{}")
+				input := json.RawMessage("{}")
+				if len(args) == 2 && args[1] != "" {
+					input = json.RawMessage(args[1])
 				}
-				reply, err := completeStep(k, context.Background(), callerID, stepID, input)
+				reply, err := completeStep(k, context.Background(), callerID, args[0], input)
 				if err != nil {
 					return err
 				}
@@ -725,17 +730,10 @@ func stepCompleteCmd() *cobra.Command {
 					fmt.Println(reply.TxID)
 					return nil
 				}
-				if flagOutput == "json" {
-					return printJSON(reply)
-				}
-				fmt.Printf("Step completed.\n  step_id: %s\n  tx_id:   %s\n", reply.StepID, reply.TxID)
-				return nil
+				return emit(reply)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&stepID, "id", "", "Step ID (required)")
-	cmd.Flags().StringVar(&args, "args", "", "Input args as JSON object")
-	_ = cmd.MarkFlagRequired("id")
 	return cmd
 }
 
@@ -753,6 +751,7 @@ func txListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List transactions",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				txs, err := listTransactions(k, context.Background(), callerID, kernel.TxFilter{
@@ -763,13 +762,13 @@ func txListCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
+				if flagJSON {
 					return printJSON(txs)
 				}
 				for _, tx := range txs {
-					fmt.Printf("[%s] %s  action:%s  status:%s  gross:%d\n",
+					fmt.Printf("[%s] %s  status:%s  gross:%d\n",
 						tx.StartedAt.Format("2006-01-02T15:04:05"),
-						tx.ID[:8], tx.ActionID[:8], tx.Status, tx.Gross)
+						tx.ID, tx.Status, tx.Gross)
 				}
 				return nil
 			})
@@ -782,101 +781,64 @@ func txListCmd() *cobra.Command {
 }
 
 func txShowCmd() *cobra.Command {
-	var txID string
-	cmd := &cobra.Command{
-		Use:   "show",
+	return &cobra.Command{
+		Use:   "show <id>",
 		Short: "Show a transaction",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				tv, err := getTransaction(k, context.Background(), callerID, txID)
+				tv, err := getTransaction(k, context.Background(), callerID, args[0])
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
-					return printJSON(tv)
-				}
-				fmt.Printf("Transaction: %s\n  status:  %s\n  action:  %s\n  gross:   %d\n  net:     %d\n  fee:     %d\n  reason:  %s\n",
-					tv.ID, tv.Status, tv.ActionID, tv.Gross, tv.Net, tv.Fee, tv.Reason)
-				if tv.Rating != nil {
-					if tv.Rating.Note != nil {
-						fmt.Printf("  rating:  %.0f (%s)\n", tv.Rating.Value, *tv.Rating.Note)
-					} else {
-						fmt.Printf("  rating:  %.0f\n", tv.Rating.Value)
-					}
-				}
-				return nil
+				return emit(tv)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&txID, "id", "", "Transaction ID (required)")
-	_ = cmd.MarkFlagRequired("id")
-	return cmd
 }
 
 func txVerifyReceiptCmd() *cobra.Command {
-	var txID string
-	cmd := &cobra.Command{
-		Use:   "verify-receipt",
+	return &cobra.Command{
+		Use:   "verify <id>",
 		Short: "Verify the remote receipt for a transaction",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				v, err := verifyReceipt(k, context.Background(), callerID, txID)
+				v, err := verifyReceipt(k, context.Background(), callerID, args[0])
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
-					return printJSON(v)
-				}
-				status := "PASS"
-				if !v.Valid {
-					status = "FAIL"
-				}
-				shortID := txID
-				if len(shortID) > 8 {
-					shortID = shortID[:8]
-				}
-				fmt.Printf("Receipt verification: %s  [%s]\n  remote: %s\n", shortID, status, v.RemoteKernelHandle)
-				fmt.Printf("  receipt_hash:  %v\n  signature:     %v\n  action_id:     %v\n",
-					v.Checks.ReceiptHash, v.Checks.Signature, v.Checks.ActionID)
-				fmt.Printf("  status:        %v\n  charge:        %v\n  settlement_arith: %v\n",
-					v.Checks.Status, v.Checks.Charge, v.Checks.SettlementArith)
-				fmt.Printf("  args_hash:     %v\n  reply_hash:    %v\n",
-					v.Checks.ArgsHash, v.Checks.ReplyHash)
-				return nil
+				return emit(v)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&txID, "id", "", "Transaction ID (required)")
-	_ = cmd.MarkFlagRequired("id")
-	return cmd
 }
 
 func txRateCmd() *cobra.Command {
-	var txID string
-	var rating float64
 	var note string
 	cmd := &cobra.Command{
-		Use:   "rate",
-		Short: "Rate a transaction (0 or 1)",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Use:   "rate <id> <0|1>",
+		Short: "Rate a transaction (0 bad, 1 good)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			rating, err := strconv.ParseFloat(args[1], 64)
+			if err != nil {
+				return fmt.Errorf("rating must be 0 or 1")
+			}
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				var notePtr *string
 				if note != "" {
 					notePtr = &note
 				}
-				if _, err := rateTransaction(k, context.Background(), callerID, txID, rating, notePtr); err != nil {
+				r, err := rateTransaction(k, context.Background(), callerID, args[0], rating, notePtr)
+				if err != nil {
 					return err
 				}
-				fmt.Printf("Transaction %s rated %.0f.\n", txID, rating)
-				return nil
+				return emit(r)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&txID, "id", "", "Transaction ID (required)")
-	cmd.Flags().Float64Var(&rating, "rating", -1, "Rating: 0 (bad) or 1 (good) (required)")
 	cmd.Flags().StringVar(&note, "note", "", "Optional justification note")
-	_ = cmd.MarkFlagRequired("id")
-	_ = cmd.MarkFlagRequired("rating")
 	return cmd
 }
 
@@ -887,17 +849,21 @@ func init() {
 }
 
 func runCmd() *cobra.Command {
-	var actionRef, argsStr string
 	cmd := &cobra.Command{
-		Use:   "run",
+		Use:   "run <action> [json]",
 		Short: "Run an action (creates a process, calls the action, closes the process)",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(_ *cobra.Command, cmdArgs []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
+				argsStr := "{}"
+				if len(cmdArgs) == 2 && cmdArgs[1] != "" {
+					argsStr = cmdArgs[1]
+				}
 				args, err := readJSONArg(argsStr)
 				if err != nil {
-					return fmt.Errorf("invalid --args: %w", err)
+					return fmt.Errorf("invalid args: %w", err)
 				}
-				reply, err := run(k, context.Background(), callerID, actionRef, args)
+				reply, err := run(k, context.Background(), callerID, cmdArgs[0], args)
 				if err != nil {
 					return err
 				}
@@ -905,48 +871,9 @@ func runCmd() *cobra.Command {
 					fmt.Println(reply.TxID)
 					return nil
 				}
-				if flagOutput == "json" {
-					return printJSON(reply)
-				}
-				resultJSON, _ := json.MarshalIndent(reply.Result, "", "  ")
-				fmt.Printf("tx_id:    %s\ntrace_id: %s\nresult:\n%s\n",
-					reply.TxID, reply.TraceID, string(resultJSON))
-				return nil
+				return emit(reply)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference as @owner/name (required)")
-	cmd.Flags().StringVar(&argsStr, "args", "{}", "JSON-encoded arguments or @file.json")
-	_ = cmd.MarkFlagRequired("action")
 	return cmd
 }
-
-// ---- action ID resolution ----
-
-// resolveActionID returns the action UUID for either a direct --id or a --action @owner/name reference.
-// Exactly one of id or ref must be non-empty.
-func resolveActionID(k *kernel.Kernel, ctx context.Context, id, ref string) (string, error) {
-	if id != "" && ref != "" {
-		return "", fmt.Errorf("specify --id or --action, not both")
-	}
-	if id != "" {
-		return id, nil
-	}
-	if ref != "" {
-		ownerHandle, name, err := kernel.ParseActionRef(ref)
-		if err != nil {
-			return "", err
-		}
-		owner, err := k.ReadUserByHandle(ctx, ownerHandle)
-		if err != nil || owner == nil {
-			return "", fmt.Errorf("action owner %q not found", ownerHandle)
-		}
-		action, err := k.ReadActionByOwnerName(ctx, owner.ID, name)
-		if err != nil || action == nil {
-			return "", fmt.Errorf("action %q not found", ref)
-		}
-		return action.ID, nil
-	}
-	return "", fmt.Errorf("--id or --action is required")
-}
-

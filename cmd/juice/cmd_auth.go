@@ -22,13 +22,15 @@ func init() {
 }
 
 func loginCmd() *cobra.Command {
-	var handle, password string
+	var password string
 	var usePKCE bool
 	var serverURL string
 	cmd := &cobra.Command{
-		Use:   "login",
-		Short: "Log in and store a bearer token",
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Use:   "login <user>",
+		Short: "Log in and store a bearer token (user is @handle)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			handle := args[0]
 			if password == "" {
 				p, err := promptPassword("Password: ")
 				if err != nil {
@@ -42,11 +44,9 @@ func loginCmd() *cobra.Command {
 			return loginDirect(handle, password)
 		},
 	}
-	cmd.Flags().StringVar(&handle, "handle", "", "User handle (required)")
 	cmd.Flags().StringVar(&password, "password", "", "Password (prompted if omitted)")
 	cmd.Flags().BoolVar(&usePKCE, "pkce", false, "Use PKCE authorization code flow")
 	cmd.Flags().StringVar(&serverURL, "server", "", "Juice server URL for PKCE flow (e.g. http://localhost:4040)")
-	_ = cmd.MarkFlagRequired("handle")
 	return cmd
 }
 

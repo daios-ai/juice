@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,31 +14,20 @@ import (
 )
 
 func init() {
-	adminCmd := &cobra.Command{Use: "admin", Short: "Admin management commands"}
-
-	userCmd := &cobra.Command{Use: "user", Short: "User admin commands"}
-	userCmd.AddCommand(
-		adminUserListCmd(),
-		adminUserShowCmd(),
-		adminUserSuspendCmd(),
-		adminUserUnsuspendCmd(),
-		adminUserDepositCmd(),
-		adminUserWithdrawCmd(),
+	adminCmd := &cobra.Command{Use: "admin", Short: "Admin management commands (superuser only)"}
+	adminCmd.AddCommand(
+		adminUsersCmd(),
+		adminShowCmd(),
+		adminSuspendCmd(),
+		adminUnsuspendCmd(),
+		adminDepositCmd(),
+		adminWithdrawCmd(),
+		adminActionsCmd(),
+		adminDisableCmd(),
+		adminProcessesCmd(),
+		adminTxsCmd(),
+		adminStepsCmd(),
 	)
-
-	actionCmd := &cobra.Command{Use: "action", Short: "Action admin commands"}
-	actionCmd.AddCommand(adminActionListCmd(), adminActionDisableCmd())
-
-	processCmd := &cobra.Command{Use: "process", Short: "Process admin commands"}
-	processCmd.AddCommand(adminProcessListCmd())
-
-	txCmd := &cobra.Command{Use: "tx", Short: "Transaction admin commands"}
-	txCmd.AddCommand(adminTxListCmd())
-
-	stepCmd := &cobra.Command{Use: "step", Short: "Step admin commands"}
-	stepCmd.AddCommand(adminStepListCmd())
-
-	adminCmd.AddCommand(userCmd, actionCmd, processCmd, txCmd, stepCmd)
 	rootCmd.AddCommand(adminCmd)
 }
 
@@ -72,18 +62,19 @@ func requireSuperuser(k *kernel.Kernel) (string, error) {
 	return subjectID, nil
 }
 
-func adminUserListCmd() *cobra.Command {
+func adminUsersCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   "users",
 		Short: "List all users",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSuperuser(func(k *kernel.Kernel, _ string) error {
 				users, err := k.ListUsers(context.Background(), limit, offset)
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
+				if flagJSON {
 					return printJSON(users)
 				}
 				for _, u := range users {
@@ -91,7 +82,7 @@ func adminUserListCmd() *cobra.Command {
 					if u.SuspendedAt != nil {
 						suspended = " [SUSPENDED]"
 					}
-					fmt.Printf("%s  %-20s  %s%s\n", u.ID[:8], u.Handle, u.Email, suspended)
+					fmt.Printf("%-20s  %s%s\n", u.Handle, u.Email, suspended)
 				}
 				return nil
 			})
@@ -102,178 +93,136 @@ func adminUserListCmd() *cobra.Command {
 	return cmd
 }
 
-func adminUserShowCmd() *cobra.Command {
-	var userID, handle string
-	cmd := &cobra.Command{
-		Use:   "show",
-		Short: "Show user details",
-		RunE: func(c *cobra.Command, _ []string) error {
+func adminShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <user>",
+		Short: "Show user details (user is @handle)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withSuperuser(func(k *kernel.Kernel, _ string) error {
-				ctx := context.Background()
-				var u *kernel.User
-				var err error
-				if c.Flags().Changed("handle") {
-					u, err = k.ReadUserByHandle(ctx, handle)
-				} else if c.Flags().Changed("id") {
-					u, err = k.ReadUser(ctx, userID)
-				} else {
-					return fmt.Errorf("either --id or --handle is required")
-				}
+				u, err := resolveHandle(k, context.Background(), args[0])
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
-					return printJSON(u)
-				}
-				suspended := "no"
-				if u.SuspendedAt != nil {
-					suspended = u.SuspendedAt.String()
-				}
-				fmt.Printf("User: %s\n  handle:     %s\n  email:      %s\n  available:  %d\n  suspended:  %s\n",
-					u.ID, u.Handle, u.Email, u.Available, suspended)
-				return nil
+				return emit(u)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&userID, "id", "", "User ID")
-	cmd.Flags().StringVar(&handle, "handle", "", "User handle (e.g. @sys)")
-	return cmd
 }
 
-func adminUserSuspendCmd() *cobra.Command {
-	var userID string
-	cmd := &cobra.Command{
-		Use:   "suspend",
-		Short: "Suspend a user account",
-		RunE: func(_ *cobra.Command, _ []string) error {
+func adminSuspendCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "suspend <user>",
+		Short: "Suspend a user account (user is @handle)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withSuperuser(func(k *kernel.Kernel, operatorID string) error {
-				if err := k.SuspendUser(context.Background(), operatorID, userID); err != nil {
+				u, err := resolveHandle(k, context.Background(), args[0])
+				if err != nil {
 					return err
 				}
-				fmt.Printf("User %s suspended.\n", userID)
-				return nil
-			})
-		},
-	}
-	cmd.Flags().StringVar(&userID, "id", "", "User ID to suspend (required)")
-	_ = cmd.MarkFlagRequired("id")
-	return cmd
-}
-
-func adminUserUnsuspendCmd() *cobra.Command {
-	var userID string
-	cmd := &cobra.Command{
-		Use:   "unsuspend",
-		Short: "Unsuspend a user account",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return withSuperuser(func(k *kernel.Kernel, operatorID string) error {
-				if err := k.UnsuspendUser(context.Background(), operatorID, userID); err != nil {
+				if err := k.SuspendUser(context.Background(), operatorID, u.ID); err != nil {
 					return err
 				}
-				fmt.Printf("User %s unsuspended.\n", userID)
+				fmt.Printf("User %s suspended.\n", u.Handle)
 				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&userID, "id", "", "User ID to unsuspend (required)")
-	_ = cmd.MarkFlagRequired("id")
-	return cmd
 }
 
-func adminUserDepositCmd() *cobra.Command {
-	var userID, handle, reason string
-	var amount int64
+func adminUnsuspendCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unsuspend <user>",
+		Short: "Unsuspend a user account (user is @handle)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return withSuperuser(func(k *kernel.Kernel, operatorID string) error {
+				u, err := resolveHandle(k, context.Background(), args[0])
+				if err != nil {
+					return err
+				}
+				if err := k.UnsuspendUser(context.Background(), operatorID, u.ID); err != nil {
+					return err
+				}
+				fmt.Printf("User %s unsuspended.\n", u.Handle)
+				return nil
+			})
+		},
+	}
+}
+
+func adminDepositCmd() *cobra.Command {
+	var reason string
 	cmd := &cobra.Command{
-		Use:   "deposit",
-		Short: "Add credits to a user account",
-		RunE: func(c *cobra.Command, _ []string) error {
+		Use:   "deposit <user> <amount>",
+		Short: "Add credits to a user account (user is @handle)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			amount, err := strconv.ParseInt(args[1], 10, 64)
+			if err != nil {
+				return fmt.Errorf("amount must be a positive integer")
+			}
 			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
 				ctx := context.Background()
-				var targetID string
-				if c.Flags().Changed("handle") {
-					u, err := k.ReadUserByHandle(ctx, handle)
-					if err != nil {
-						return err
-					}
-					targetID = u.ID
-				} else if c.Flags().Changed("id") {
-					targetID = userID
-				} else {
-					return fmt.Errorf("either --id or --handle is required")
-				}
-				d, err := k.Deposit(ctx, subjectID, targetID, amount, reason)
+				u, err := resolveHandle(k, ctx, args[0])
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
-					return printJSON(d)
+				d, err := k.Deposit(ctx, subjectID, u.ID, amount, reason)
+				if err != nil {
+					return err
 				}
-				fmt.Printf("Deposited %d credits to %s (deposit id: %s)\n", d.Amount, targetID, d.ID)
-				return nil
+				return emit(d)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&userID, "id", "", "Target user ID")
-	cmd.Flags().StringVar(&handle, "handle", "", "Target user handle (e.g. @alice)")
-	cmd.Flags().Int64Var(&amount, "amount", 0, "Credits to deposit (required, > 0)")
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
-	_ = cmd.MarkFlagRequired("amount")
 	return cmd
 }
 
-func adminUserWithdrawCmd() *cobra.Command {
-	var userID, handle, reason string
-	var amount int64
+func adminWithdrawCmd() *cobra.Command {
+	var reason string
 	cmd := &cobra.Command{
-		Use:   "withdraw",
-		Short: "Deduct credits from a user account",
-		RunE: func(c *cobra.Command, _ []string) error {
+		Use:   "withdraw <user> <amount>",
+		Short: "Deduct credits from a user account (user is @handle)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			amount, err := strconv.ParseInt(args[1], 10, 64)
+			if err != nil {
+				return fmt.Errorf("amount must be a positive integer")
+			}
 			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
 				ctx := context.Background()
-				var targetID string
-				if c.Flags().Changed("handle") {
-					u, err := k.ReadUserByHandle(ctx, handle)
-					if err != nil {
-						return err
-					}
-					targetID = u.ID
-				} else if c.Flags().Changed("id") {
-					targetID = userID
-				} else {
-					return fmt.Errorf("either --id or --handle is required")
-				}
-				w, err := k.Withdraw(ctx, subjectID, targetID, amount, reason)
+				u, err := resolveHandle(k, ctx, args[0])
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
-					return printJSON(w)
+				w, err := k.Withdraw(ctx, subjectID, u.ID, amount, reason)
+				if err != nil {
+					return err
 				}
-				fmt.Printf("Withdrew %d credits from %s (withdrawal id: %s)\n", w.Amount, targetID, w.ID)
-				return nil
+				return emit(w)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&userID, "id", "", "Target user ID")
-	cmd.Flags().StringVar(&handle, "handle", "", "Target user handle (e.g. @alice)")
-	cmd.Flags().Int64Var(&amount, "amount", 0, "Credits to withdraw (required, > 0)")
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
-	_ = cmd.MarkFlagRequired("amount")
 	return cmd
 }
 
-func adminActionListCmd() *cobra.Command {
+func adminActionsCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   "actions",
 		Short: "List all actions",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSuperuser(func(k *kernel.Kernel, _ string) error {
 				actions, err := k.ListAllActions(context.Background(), limit, offset)
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
+				if flagJSON {
 					return printJSON(actions)
 				}
 				for _, a := range actions {
@@ -285,7 +234,7 @@ func adminActionListCmd() *cobra.Command {
 					if a.Public {
 						public = "P"
 					}
-					fmt.Printf("[%s%s] %s  %-30s  %d credits\n", active, public, a.ID[:8], a.Name, a.Price)
+					fmt.Printf("[%s%s] @%s/%s  %d credits\n", active, public, a.OwnerHandle, a.Name, a.Price)
 				}
 				return nil
 			})
@@ -296,47 +245,45 @@ func adminActionListCmd() *cobra.Command {
 	return cmd
 }
 
-func adminActionDisableCmd() *cobra.Command {
-	var actionID, actionRef string
-	cmd := &cobra.Command{
-		Use:   "disable",
-		Short: "Disable an action",
-		RunE: func(_ *cobra.Command, _ []string) error {
+func adminDisableCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "disable <action>",
+		Short: "Disable any action (action is @owner/name or an id)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
-				id, err := resolveActionID(k, context.Background(), actionID, actionRef)
+				a, err := resolveActionRef(k, context.Background(), args[0])
 				if err != nil {
 					return err
 				}
-				if err := k.SetActive(context.Background(), subjectID, id, false); err != nil {
+				if err := k.SetActive(context.Background(), subjectID, a.ID, false); err != nil {
 					return err
 				}
-				fmt.Printf("Action %s disabled.\n", id)
+				fmt.Printf("Action %s disabled.\n", args[0])
 				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&actionID, "id", "", "Action ID")
-	cmd.Flags().StringVar(&actionRef, "action", "", "Action reference (@owner/name)")
-	return cmd
 }
 
-func adminProcessListCmd() *cobra.Command {
+func adminProcessesCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   "processes",
 		Short: "List all processes",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSuperuser(func(k *kernel.Kernel, _ string) error {
 				processes, err := k.ListAllProcesses(context.Background(), limit, offset)
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
+				if flagJSON {
 					return printJSON(processes)
 				}
 				for _, p := range processes {
-					fmt.Printf("%s  owner=%-20s  status=%-6s  avail=%d\n",
-						p.ID[:8], p.OwnerUserID[:8], p.Status, p.Available)
+					fmt.Printf("%s  owner=%s  status=%-6s  avail=%d\n",
+						p.ID, p.OwnerUserID, p.Status, p.Available)
 				}
 				return nil
 			})
@@ -347,23 +294,24 @@ func adminProcessListCmd() *cobra.Command {
 	return cmd
 }
 
-func adminTxListCmd() *cobra.Command {
+func adminTxsCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   "txs",
 		Short: "List all transactions",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSuperuser(func(k *kernel.Kernel, _ string) error {
 				txs, err := k.ListAllTransactions(context.Background(), limit, offset)
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
+				if flagJSON {
 					return printJSON(txs)
 				}
 				for _, tx := range txs {
-					fmt.Printf("%s  action=%-20s  status=%-7s  gross=%d\n",
-						tx.ID[:8], tx.ActionID[:8], tx.Status, tx.Gross)
+					fmt.Printf("%s  action=%s  status=%-7s  gross=%d\n",
+						tx.ID, tx.ActionName, tx.Status, tx.Gross)
 				}
 				return nil
 			})
@@ -374,27 +322,27 @@ func adminTxListCmd() *cobra.Command {
 	return cmd
 }
 
-func adminStepListCmd() *cobra.Command {
+func adminStepsCmd() *cobra.Command {
 	var processID, status string
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   "steps",
 		Short: "List all steps",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSuperuser(func(k *kernel.Kernel, superuserID string) error {
 				steps, err := k.ListSteps(context.Background(), superuserID, processID, status)
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
+				if flagJSON {
 					return printJSON(steps)
 				}
 				for _, s := range steps {
 					txID := "-"
 					if s.TxID != nil {
-						txID = (*s.TxID)[:8]
+						txID = *s.TxID
 					}
-					fmt.Printf("%s  status=%-7s  tx=%s\n",
-						s.ID[:8], s.Status, txID)
+					fmt.Printf("%s  status=%-7s  tx=%s\n", s.ID, s.Status, txID)
 				}
 				return nil
 			})
@@ -406,13 +354,13 @@ func adminStepListCmd() *cobra.Command {
 }
 
 func peerInspectCmd() *cobra.Command {
-	var peerURL string
 	cmd := &cobra.Command{
-		Use:   "inspect",
+		Use:   "inspect <url>",
 		Short: "Show a remote kernel's identity and public actions (no auth, no DB write)",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
-			base := strings.TrimRight(peerURL, "/")
+			base := strings.TrimRight(args[0], "/")
 			allow := allowLocalPeers()
 
 			// Fetch peer identity from well-known endpoint.
@@ -464,21 +412,19 @@ func peerInspectCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&peerURL, "url", "", "Remote kernel base URL (required)")
-	_ = cmd.MarkFlagRequired("url")
 	return cmd
 }
 
 func peerFriendCmd() *cobra.Command {
-	var peerURL string
 	cmd := &cobra.Command{
-		Use:   "friend",
+		Use:   "friend <url>",
 		Short: "Befriend a remote kernel: register as peer and import all their active public actions",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
 				ctx := context.Background()
 				allow := allowLocalPeers()
-				base := strings.TrimRight(peerURL, "/")
+				base := strings.TrimRight(args[0], "/")
 
 				// Fetch peer identity.
 				wkBody, status, err := doHTTP(ctx, http.MethodGet, base+"/.well-known/juice-kernel.json", nil, nil, 15*time.Second, allow)
@@ -549,8 +495,6 @@ func peerFriendCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&peerURL, "url", "", "Remote kernel base URL (required)")
-	_ = cmd.MarkFlagRequired("url")
 	return cmd
 }
 
@@ -601,12 +545,16 @@ func bulkImportPeerActions(ctx context.Context, k *kernel.Kernel, subjectID stri
 }
 
 func peerUnfriendCmd() *cobra.Command {
-	var handle string
 	cmd := &cobra.Command{
-		Use:   "unfriend",
-		Short: "Unfriend a peer: deny their calls and deactivate their proxy actions",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Use:   "unfriend <user>",
+		Short: "Unfriend a peer: deny their calls and deactivate their proxy actions (user is @handle)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
 			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
+				handle := args[0]
+				if !strings.HasPrefix(handle, "@") {
+					handle = "@" + handle
+				}
 				if err := k.DenyPeer(context.Background(), subjectID, handle); err != nil {
 					return err
 				}
@@ -615,8 +563,6 @@ func peerUnfriendCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&handle, "handle", "", "Peer handle (required)")
-	_ = cmd.MarkFlagRequired("handle")
 	return cmd
 }
 
@@ -625,6 +571,7 @@ func peerListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List known remote kernel peers",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSuperuser(func(k *kernel.Kernel, _ string) error {
 				ctx := context.Background()
@@ -632,7 +579,7 @@ func peerListCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if flagOutput == "json" {
+				if flagJSON {
 					return printJSON(peers)
 				}
 				if len(peers) == 0 {
