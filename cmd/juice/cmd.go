@@ -213,7 +213,7 @@ func init() {
 func actionCreateCmd() *cobra.Command {
 	var kind, source, description string
 	var price int64
-	var inputSchemaStr, outputSchemaStr string
+	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
 		Use:   "create <name>",
 		Short: "Create a new action owned by you (name e.g. /hello)",
@@ -223,14 +223,21 @@ func actionCreateCmd() *cobra.Command {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
 				inputSchema := map[string]any{}
 				if inputSchemaStr != "" {
-					if err := json.Unmarshal([]byte(inputSchemaStr), &inputSchema); err != nil {
+					if err := unmarshalJSONArg(inputSchemaStr, &inputSchema); err != nil {
 						return fmt.Errorf("invalid --input-schema: %w", err)
 					}
 				}
 				outputSchema := map[string]any{}
 				if outputSchemaStr != "" {
-					if err := json.Unmarshal([]byte(outputSchemaStr), &outputSchema); err != nil {
+					if err := unmarshalJSONArg(outputSchemaStr, &outputSchema); err != nil {
 						return fmt.Errorf("invalid --output-schema: %w", err)
+					}
+				}
+				var auth *kernel.AuthInput
+				if authStr != "" {
+					auth = &kernel.AuthInput{}
+					if err := unmarshalJSONArg(authStr, auth); err != nil {
+						return fmt.Errorf("invalid --auth: %w", err)
 					}
 				}
 				srcData := source
@@ -252,6 +259,7 @@ func actionCreateCmd() *cobra.Command {
 					InputSchema:  inputSchema,
 					OutputSchema: outputSchema,
 					Source:       srcData,
+					Auth:         auth,
 				})
 				if err != nil {
 					return err
@@ -264,8 +272,9 @@ func actionCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&source, "source", "", "URL (http) or file path (wasm)")
 	cmd.Flags().StringVar(&description, "description", "", "Human-readable description")
 	cmd.Flags().Int64Var(&price, "price", 0, "Price in credits")
-	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "JSON Schema for inputs")
-	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "JSON Schema for outputs")
+	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "JSON Schema for inputs (or @file.json)")
+	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "JSON Schema for outputs (or @file.json)")
+	cmd.Flags().StringVar(&authStr, "auth", "", "Upstream auth config JSON {scheme,config,secrets} (or @file.json)")
 	return cmd
 }
 
@@ -273,7 +282,7 @@ func actionUpdateCmd() *cobra.Command {
 	var description, source string
 	var price int64
 	var public bool
-	var inputSchemaStr, outputSchemaStr string
+	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
 		Use:   "update <action>",
 		Short: "Update an action's metadata (action is @owner/name or an id)",
@@ -299,17 +308,24 @@ func actionUpdateCmd() *cobra.Command {
 				}
 				if inputSchemaStr != "" {
 					m := map[string]any{}
-					if err := json.Unmarshal([]byte(inputSchemaStr), &m); err != nil {
+					if err := unmarshalJSONArg(inputSchemaStr, &m); err != nil {
 						return fmt.Errorf("invalid --input-schema: %w", err)
 					}
 					req.InputSchema = m
 				}
 				if outputSchemaStr != "" {
 					m := map[string]any{}
-					if err := json.Unmarshal([]byte(outputSchemaStr), &m); err != nil {
+					if err := unmarshalJSONArg(outputSchemaStr, &m); err != nil {
 						return fmt.Errorf("invalid --output-schema: %w", err)
 					}
 					req.OutputSchema = m
+				}
+				if c.Flags().Changed("auth") {
+					auth := &kernel.AuthInput{}
+					if err := unmarshalJSONArg(authStr, auth); err != nil {
+						return fmt.Errorf("invalid --auth: %w", err)
+					}
+					req.Auth = auth
 				}
 				a, err := updateAction(k, context.Background(), callerID, req)
 				if err != nil {
@@ -323,8 +339,9 @@ func actionUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&source, "source", "", "New source URL or file path")
 	cmd.Flags().Int64Var(&price, "price", 0, "New price in credits")
 	cmd.Flags().BoolVar(&public, "public", false, "Make action public (true) or private (false)")
-	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "New JSON Schema for inputs")
-	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "New JSON Schema for outputs")
+	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "New JSON Schema for inputs (or @file.json)")
+	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "New JSON Schema for outputs (or @file.json)")
+	cmd.Flags().StringVar(&authStr, "auth", "", "Upstream auth config JSON {scheme,config,secrets} (or @file.json)")
 	return cmd
 }
 
@@ -639,7 +656,10 @@ func stepCreateCmd() *cobra.Command {
 
 				var pa json.RawMessage
 				if partialArgs != "" {
-					pa = json.RawMessage(partialArgs)
+					var err error
+					if pa, err = loadJSONArg(partialArgs); err != nil {
+						return fmt.Errorf("invalid --partial-args: %w", err)
+					}
 				}
 
 				view, err := createStep(k, ctx, callerID, createStepParams{
@@ -718,9 +738,13 @@ func stepCompleteCmd() *cobra.Command {
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				input := json.RawMessage("{}")
-				if len(args) == 2 && args[1] != "" {
-					input = json.RawMessage(args[1])
+				raw := ""
+				if len(args) == 2 {
+					raw = args[1]
+				}
+				input, err := loadJSONArg(raw)
+				if err != nil {
+					return fmt.Errorf("invalid input: %w", err)
 				}
 				reply, err := completeStep(k, context.Background(), callerID, args[0], input)
 				if err != nil {

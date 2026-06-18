@@ -345,24 +345,45 @@ func promptPassword(prompt string) (string, error) {
 	return string(b), err
 }
 
-// readJSONArg parses a JSON argument string, supporting @file.json to read from a file.
-func readJSONArg(s string) (map[string]any, error) {
-	if s == "" || s == "{}" {
-		return map[string]any{}, nil
+// loadJSONArg resolves a JSON-valued CLI argument to its raw bytes, supporting the
+// @path/to/file.json convention (API.md C9): a leading "@" reads the value from the named file.
+// Empty input yields "{}". The result is validated as JSON before being returned. This is the
+// single loader for every JSON-valued CLI input (run/step-complete args, schemas, auth).
+func loadJSONArg(s string) (json.RawMessage, error) {
+	if s == "" {
+		return json.RawMessage("{}"), nil
 	}
+	data := []byte(s)
 	if strings.HasPrefix(s, "@") {
-		data, err := os.ReadFile(s[1:])
+		b, err := os.ReadFile(s[1:])
 		if err != nil {
 			return nil, fmt.Errorf("read file %s: %w", s[1:], err)
 		}
-		var m map[string]any
-		if err := json.Unmarshal(data, &m); err != nil {
-			return nil, fmt.Errorf("parse JSON from file: %w", err)
-		}
-		return m, nil
+		data = b
+	}
+	if !json.Valid(data) {
+		return nil, fmt.Errorf("invalid JSON")
+	}
+	return json.RawMessage(data), nil
+}
+
+// unmarshalJSONArg loads a JSON-valued argument (see loadJSONArg) and decodes it into v.
+func unmarshalJSONArg(s string, v any) error {
+	data, err := loadJSONArg(s)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, v)
+}
+
+// readJSONArg loads a JSON-valued argument (see loadJSONArg) and decodes it into an object.
+func readJSONArg(s string) (map[string]any, error) {
+	data, err := loadJSONArg(s)
+	if err != nil {
+		return nil, err
 	}
 	var m map[string]any
-	if err := json.Unmarshal([]byte(s), &m); err != nil {
+	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("parse JSON: %w", err)
 	}
 	return m, nil

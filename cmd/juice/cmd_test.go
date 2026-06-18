@@ -433,6 +433,58 @@ func TestActionShowPrivate(t *testing.T) {
 	}
 }
 
+// TestActionCreateSchemasAndAuthFromFile covers the @file.json convention (API.md C9) for
+// --input-schema/--output-schema/--auth, and confirms the stored auth secret never surfaces.
+func TestActionCreateSchemasAndAuthFromFile(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@authowner", Email: "authowner@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := env.k.Login(ctx, "@authowner", "pass")
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	schemaFile := filepath.Join(dir, "in.json")
+	if err := os.WriteFile(schemaFile, []byte(`{"type":"object","properties":{"q":{"type":"string"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "s3cr3t-token-value"
+	authFile := filepath.Join(dir, "auth.json")
+	if err := os.WriteFile(authFile, []byte(`{"scheme":"bearer","secrets":{"token":"`+secret+`"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := execTestCmd(t, actionCreateCmd(), "/svc",
+		"--kind", "http", "--source", "https://example.com",
+		"--description", "svc", "--price", "0",
+		"--input-schema", "@"+schemaFile,
+		"--auth", "@"+authFile)
+	if err != nil {
+		t.Fatalf("action create with @file flags: %v", err)
+	}
+	if strings.Contains(out, secret) {
+		t.Error("auth secret leaked in action create output")
+	}
+
+	a, err := env.k.ReadActionByOwnerName(ctx, owner.ID, "/svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.InputSchema["type"] != "object" {
+		t.Errorf("input schema not loaded from file: %#v", a.InputSchema)
+	}
+	if a.AuthJSON == "" {
+		t.Error("auth config not stored from --auth @file")
+	}
+}
+
 func TestActionImportOpenAPI(t *testing.T) {
 	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1031,6 +1083,30 @@ func TestServeCompleteStep(t *testing.T) {
 	decodeResponse(t, getResp, &doneStep)
 	if doneStep["status"] != "done" {
 		t.Errorf("expected step status=done after complete, got %v", doneStep["status"])
+	}
+}
+
+// TestStepCompleteFileArg verifies the positional json argument of `step complete` honours the
+// @file convention (API.md C9): a missing file is reported as a read error before any kernel
+// call, rather than the literal bytes "@file" being shipped as the step input.
+func TestStepCompleteFileArg(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@sc-caller", Email: "sc-caller@example.com", Password: "pass",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := env.k.Login(ctx, "@sc-caller", "pass")
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+
+	missing := filepath.Join(t.TempDir(), "absent.json")
+	_, err := execTestCmd(t, stepCompleteCmd(), "no-such-step", "@"+missing)
+	if err == nil || !strings.Contains(err.Error(), "read file") {
+		t.Errorf("expected file-read error for @missing-file, got %v", err)
 	}
 }
 
