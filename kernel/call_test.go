@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -459,6 +460,96 @@ func TestCallFailureRefundsFunds(t *testing.T) {
 	}
 	if alice2.Available != 1000 {
 		t.Errorf("user.available after failure+close: got %d, want 1000", alice2.Available)
+	}
+}
+
+// TestWasmHandleErrorSentinelMapsToExecutionFailed verifies that the SDK's error
+// envelope {"__juice_error__":"<msg>"} returned by run() is mapped to
+// ErrExecutionFailed carrying the message — so a Handle error surfaces its reason
+// instead of an opaque wasm "unreachable" trap.
+func TestWasmHandleErrorSentinelMapsToExecutionFailed(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"__juice_error__":"boom from handle"}`})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@sentinel-alice", 1000)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "handle-err",
+		Kind: kernel.KindWasm, Active: true, Price: 100,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	_, tr := beginTestRun(t, st, alice.ID, a)
+
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: alice.ID, ExistingTraceID: tr.ID,
+		TargetUserID: alice.ID, ActionName: "handle-err", Args: map[string]any{},
+	})
+	if !errors.Is(err, kernel.ErrExecutionFailed) {
+		t.Fatalf("expected ErrExecutionFailed, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "boom from handle") {
+		t.Errorf("expected Handle error message to survive, got %q", err.Error())
+	}
+
+	// Funds refunded after the failure settles and the process closes.
+	alice2, _ := st.ReadUser(ctx, alice.ID)
+	if alice2.Locked != 0 || alice2.Available != 1000 {
+		t.Errorf("after handle-error failure: available=%d locked=%d, want 1000/0", alice2.Available, alice2.Locked)
+	}
+}
+
+// cancelDuringExec cancels the execution context mid-run (simulating a client
+// disconnect or timeout while the action executes), then fails.
+type cancelDuringExec struct {
+	cancel context.CancelFunc
+}
+
+func (c *cancelDuringExec) Compile(_ context.Context, src []byte) ([]byte, string, error) {
+	return src, "fakehash", nil
+}
+
+func (c *cancelDuringExec) Execute(_ context.Context, _ []byte, _ []byte, _ kernel.HostFunctions) ([]byte, error) {
+	c.cancel()
+	return nil, kernel.ErrExecutionFailed.Wrap("boom after cancel")
+}
+
+// TestFailureSettlesUnderCancelledContext is the regression for "could not record
+// failure transaction": settlement must commit even when the execution context was
+// cancelled, so the locked allocation is never stranded.
+func TestFailureSettlesUnderCancelledContext(t *testing.T) {
+	st := newTestStore(t)
+	exec := &cancelDuringExec{}
+	k := newTestKernelWithScripts(st, exec)
+	ctx, cancel := context.WithCancel(context.Background())
+	exec.cancel = cancel
+	defer cancel()
+
+	alice := setupUser(t, st, "@cancel-alice", 1000)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "cancels",
+		Kind: kernel.KindWasm, Active: true, Price: 100,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	_, tr := beginTestRun(t, st, alice.ID, a)
+
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: alice.ID, ExistingTraceID: tr.ID,
+		TargetUserID: alice.ID, ActionName: "cancels", Args: map[string]any{},
+	})
+	// The call fails with the execution error — NOT an internal settlement failure.
+	if !errors.Is(err, kernel.ErrExecutionFailed) {
+		t.Fatalf("expected ErrExecutionFailed, got %v", err)
+	}
+	if errors.Is(err, kernel.ErrInternal) || strings.Contains(err.Error(), "could not record failure transaction") {
+		t.Fatalf("settlement was aborted by cancellation (stranded funds): %v", err)
+	}
+
+	// The failure transaction committed and funds were refunded despite cancellation.
+	alice2, _ := st.ReadUser(context.Background(), alice.ID)
+	if alice2.Locked != 0 || alice2.Available != 1000 {
+		t.Errorf("after cancelled-call failure: available=%d locked=%d, want 1000/0", alice2.Available, alice2.Locked)
 	}
 }
 

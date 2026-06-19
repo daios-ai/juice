@@ -289,7 +289,11 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	if receiptErr != nil {
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
-	if err := k.store.CommitRemoteSettlement(ctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, charge, duty, stats, req.IdempotencyRecordID, req.StepID); err != nil {
+	// Detach settlement from execution-scoped cancellation so the remote settlement
+	// (charge/duty/refund + audit record) always commits once the signed receipt is in.
+	sctx, cancel := settlementContext(ctx)
+	defer cancel()
+	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, charge, duty, stats, req.IdempotencyRecordID, req.StepID); err != nil {
 		return nil, ErrInternal.Wrap("could not commit remote settlement")
 	}
 

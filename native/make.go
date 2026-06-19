@@ -70,21 +70,6 @@ type makeInput struct {
 	Description string
 }
 
-// makeTestHost implements kernel.HostFunctions for smoke-testing generated WASM.
-// Sub-calls return {} — real responses are unknown at synthesis time.
-type makeTestHost struct{}
-
-func (h *makeTestHost) Call(_ context.Context, _ string, _ []byte) ([]byte, error) {
-	return []byte("{}"), nil
-}
-func (h *makeTestHost) StepCreate(_ context.Context, _ []byte, _, _ string) (string, error) {
-	return "", nil
-}
-func (h *makeTestHost) StepComplete(_ context.Context, _ string, _ []byte) ([]byte, error) {
-	return []byte("{}"), nil
-}
-func (h *makeTestHost) Log(_ context.Context, _, _ string) error { return nil }
-
 // executeMake runs the @sys/make four-phase pipeline, all phases inside one repair loop:
 //
 //	Phase 1 — Plan & research: derive contract, constraints, plan; for each plan
@@ -626,6 +611,29 @@ func computePrice(ctx context.Context, source, processOwnerID string, k *kernel.
 	return total
 }
 
+// exampleGenAttempts bounds how many times example-input generation is retried
+// before a repair step gives up. A slow or truncating model can fail one call
+// ("unexpected EOF" / timeout); retrying the cheap meta-call usually succeeds
+// without discarding the (compiled, valid) generated code and re-running codegen.
+const exampleGenAttempts = 3
+
+// retryJSON calls fn up to attempts times, returning the first result whose
+// diagnostic is empty; otherwise it returns the last (value, diagnostic). A
+// non-positive attempts count means a single call.
+func retryJSON(attempts int, fn func() (any, string)) (any, string) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var value any
+	var diag string
+	for i := 0; i < attempts; i++ {
+		if value, diag = fn(); diag == "" {
+			return value, ""
+		}
+	}
+	return value, diag
+}
+
 // generateAndRunExamples asks the LLM for 3 example inputs, executes them against the WASM,
 // and validates the output structure. Failures to produce or run examples are recorded as
 // failed tests — never silently treated as passing.
@@ -659,9 +667,11 @@ Return an object with an "examples" array of exactly 3 objects, each conforming 
 Schema:
 %s`, string(inJSON))
 
-	value, diag := callJSON(ctx, []any{map[string]any{"role": "user", "content": prompt}}, envelope, targetID, processID, parentTraceID, k)
+	value, diag := retryJSON(exampleGenAttempts, func() (any, string) {
+		return callJSON(ctx, []any{map[string]any{"role": "user", "content": prompt}}, envelope, targetID, processID, parentTraceID, k)
+	})
 	if diag != "" {
-		results = append(results, MakeTest{Name: "examples", Status: "failed", Reason: "could not generate example inputs: " + diag})
+		results = append(results, MakeTest{Name: "examples", Status: "failed", Reason: "could not generate example inputs (after retries): " + diag})
 		return results
 	}
 	obj, ok := value.(map[string]any)
@@ -690,7 +700,7 @@ Schema:
 	for i, exArgs := range examples[:3] {
 		name := fmt.Sprintf("example-%d", i+1)
 		inputJSON, _ := json.Marshal(exArgs)
-		outputJSON, execErr := scripts.Execute(ctx, artifact, inputJSON, &makeTestHost{})
+		outputJSON, execErr := scripts.Execute(ctx, artifact, inputJSON, k.HostFunctionsForTrace(parentTraceID, targetID))
 		if execErr != nil {
 			results = append(results, MakeTest{Name: name, Status: "failed", Reason: "execution: " + execErr.Error()})
 			continue
@@ -698,6 +708,14 @@ Schema:
 		var output map[string]any
 		if err := json.Unmarshal(outputJSON, &output); err != nil {
 			results = append(results, MakeTest{Name: name, Status: "failed", Reason: "output not valid JSON"})
+			continue
+		}
+		// The SDK reports a Handle error as the {WasmErrorKey:"<msg>"} envelope rather
+		// than trapping (this smoke test runs the artifact directly, bypassing the
+		// kernel's executeWasm decode). Surface the real message so the repair loop can
+		// act on it instead of misreading it as a missing-output-field failure.
+		if msg, ok := kernel.WasmHandleError(output); ok {
+			results = append(results, MakeTest{Name: name, Status: "failed", Reason: "handle returned error: " + msg})
 			continue
 		}
 		var missing []string
@@ -774,14 +792,33 @@ func checkWASMImports(wasm []byte, scripts kernel.ScriptExecutor) string {
 	return ""
 }
 
-// prepareSource combines the SDK with the LLM-generated run function.
+// prepareSource combines the SDK with the LLM-generated Handle body. The SDK already
+// owns `package main` and all imports, so any `package`/`import` declaration the model
+// emits (despite the prompt forbidding them) must be stripped — otherwise the assembled
+// file places imports after the SDK's declarations and TinyGo rejects it with
+// "imports must appear before other declarations". Stripping a needed import surfaces as
+// a clear "undefined: X" the repair loop can act on, which beats an unrecoverable
+// placement error.
 func prepareSource(sdk, generated string) string {
 	var kept []string
+	inImportBlock := false
 	for _, line := range strings.Split(generated, "\n") {
-		if strings.TrimSpace(line) == "package main" {
-			continue
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case inImportBlock:
+			// Skip the body of a multi-line `import (` ... `)` block.
+			if trimmed == ")" || strings.HasSuffix(trimmed, ")") {
+				inImportBlock = false
+			}
+		case strings.HasPrefix(trimmed, "package "):
+			// drop package declaration
+		case strings.HasPrefix(trimmed, "import ("):
+			inImportBlock = !strings.HasSuffix(trimmed, ")") // single-line `import (...)` ends immediately
+		case strings.HasPrefix(trimmed, "import "):
+			// drop single-line `import "x"` / `import x "y"`
+		default:
+			kept = append(kept, line)
 		}
-		kept = append(kept, line)
 	}
 	body := strings.TrimSpace(strings.Join(kept, "\n"))
 	if sdk == "" {

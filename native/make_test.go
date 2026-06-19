@@ -959,6 +959,67 @@ func TestMakeRequiresAllExamplesPass(t *testing.T) {
 	}
 }
 
+// TestMakeSmokeTestSurfacesHandleError verifies that when the generated artifact's
+// Handle returns an error (reported by the SDK as the {WasmErrorKey} envelope rather
+// than a trap), the smoke test reports the real message — not a misleading
+// "missing required fields" — so the repair loop can act on it.
+func TestMakeSmokeTestSurfacesHandleError(t *testing.T) {
+	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
+	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
+	// Execute returns the SDK error envelope: Handle failed with a real message.
+	insp := &fakeInspectingScripts{
+		exports:    []string{"alloc", "run"},
+		execResult: []byte(`{"__juice_error__":"divide by zero in Handle"}`),
+	}
+
+	st := newTestStore(t)
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	k := kernel.New(st, insp, nil, nil, cfg, log.Default())
+	native.RegisterChatHandler(k, fakeChat)
+	native.RegisterDecideHandler(k, decider)
+	native.RegisterLookupHandler(k)
+	registerJSONIfSupported(k, fakeChat)
+	native.RegisterMakeHandler(k, native.MakeDeps{
+		Scripts: insp, Compiler: &script.FakeCompiler{}, Chatter: fakeChat,
+	}, "", 1)
+
+	ctx := context.Background()
+	sys := seedMakeAction(t, st)
+	caller := setupUser(t, st, "@alice", 1000)
+	_, tr := beginMakeTestRun(t, st, caller.ID, sys.ID)
+
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
+		TargetUserID: sys.ID, ActionName: "make",
+		Args: map[string]any{"description": "test"},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	b, _ := json.Marshal(reply.Result)
+	var result native.MakeResult
+	_ = json.Unmarshal(b, &result)
+	if result.Status != "failure" {
+		t.Fatalf("expected status=failure, got %q", result.Status)
+	}
+	found := false
+	for _, tc := range result.Tests {
+		if tc.Status == "failed" && strings.Contains(tc.Reason, "divide by zero in Handle") {
+			found = true
+		}
+		if strings.Contains(tc.Reason, "missing required fields") {
+			t.Errorf("Handle error masked as missing-fields: %q", tc.Reason)
+		}
+	}
+	if !found {
+		t.Errorf("expected smoke test to surface the Handle error message, got %+v", result.Tests)
+	}
+}
+
 // TestMakeHonorsNoLLMConstraint verifies that when the derived contract contains a "no LLM"
 // constraint, it is passed through into the codegen system prompt.
 func TestMakeHonorsNoLLMConstraint(t *testing.T) {

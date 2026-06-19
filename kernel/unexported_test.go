@@ -13,6 +13,36 @@ import (
 	"time"
 )
 
+// TestSettlementContextDetachesCancellation verifies that settlementContext strips
+// execution-scoped cancellation/deadline (so a money commit never aborts when the
+// call is cancelled or times out) while preserving context values.
+func TestSettlementContextDetachesCancellation(t *testing.T) {
+	type ctxKey struct{}
+	parent := context.WithValue(context.Background(), ctxKey{}, "kept")
+	parent, cancel := context.WithCancel(parent)
+
+	sctx, scancel := settlementContext(parent)
+	defer scancel()
+
+	// Cancelling the parent must NOT cancel the settlement context.
+	cancel()
+	select {
+	case <-sctx.Done():
+		t.Fatal("settlementContext was cancelled when parent was cancelled")
+	default:
+	}
+
+	// Values survive the detachment.
+	if got, _ := sctx.Value(ctxKey{}).(string); got != "kept" {
+		t.Errorf("settlementContext lost context value: got %q, want %q", got, "kept")
+	}
+
+	// It still carries its own backstop deadline.
+	if _, ok := sctx.Deadline(); !ok {
+		t.Error("settlementContext should have its own backstop deadline")
+	}
+}
+
 // newMinimalKernel creates a Kernel with a nil store for tests that only
 // exercise unexported methods that do not touch the store.
 func newMinimalKernel() *Kernel {

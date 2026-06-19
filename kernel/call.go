@@ -371,7 +371,11 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		_, _ = k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, receiptErr)
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
-	if err := k.store.CommitCall(ctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.StepID); err != nil {
+	// Detach settlement from execution-scoped cancellation so the success commit
+	// (payout + lock release + audit record) is never aborted mid-flight (§5).
+	sctx, cancel := settlementContext(ctx)
+	defer cancel()
+	if err := k.store.CommitCall(sctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.StepID); err != nil {
 		return nil, ErrInternal.Wrap("could not commit transaction")
 	}
 
@@ -487,7 +491,31 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 	if err := json.Unmarshal(outputJSON, &result); err != nil {
 		return nil, ErrExecutionFailed.Wrap("wasm output is not valid JSON")
 	}
+	// The SDK reports a Handle error as the reserved sole-key object
+	// {WasmErrorKey:"<message>"} rather than trapping, so the failure reason reaches
+	// the caller (and @sys/make's repair loop). The sole-key guard keeps legitimate
+	// output that happens to contain the key from being misclassified.
+	if msg, ok := WasmHandleError(result); ok {
+		return nil, ErrExecutionFailed.Wrap(msg)
+	}
 	return result, nil
+}
+
+// WasmErrorKey is the reserved sole key the WASM SDK uses to report a Handle error
+// as JSON output (see script/sdk.tmpl) instead of trapping the module. Every consumer
+// of raw SDK output must recognize it: kernel.executeWasm maps it to ErrExecutionFailed,
+// and @sys/make's smoke test reports it as the real failure reason.
+const WasmErrorKey = "__juice_error__"
+
+// WasmHandleError reports whether a decoded WASM output object is the SDK's error
+// envelope, returning the carried message. The sole-key guard prevents legitimate
+// output that merely contains the key from being misclassified as an error.
+func WasmHandleError(output map[string]any) (string, bool) {
+	if len(output) != 1 {
+		return "", false
+	}
+	msg, ok := output[WasmErrorKey].(string)
+	return msg, ok
 }
 
 // kernelHostFunctions implements HostFunctions using the kernel itself.
@@ -496,6 +524,17 @@ type kernelHostFunctions struct {
 	kernel   *Kernel
 	traceID  string
 	targetID string // action owner; used as CallerID for subcalls
+}
+
+// HostFunctionsForTrace returns HostFunctions whose subcalls and steps run through
+// the kernel on the given trace, attributed to targetID (the subcall caller — it
+// must equal the trace's action owner to satisfy process-use authority, §4). It lets
+// @sys/make smoke-test a synthesized artifact against the REAL platform actions
+// (e.g. @sys/llm/chat) on its own funded make trace before registering it: a stub
+// host that returns empty results is rejected by the Handle error contract, so the
+// only faithful validation is to run the real subcalls.
+func (k *Kernel) HostFunctionsForTrace(traceID, targetID string) HostFunctions {
+	return &kernelHostFunctions{kernel: k, traceID: traceID, targetID: targetID}
 }
 
 func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJSON []byte) ([]byte, error) {
@@ -570,6 +609,12 @@ func (k *Kernel) computeStats(_ context.Context, actionID string, tx *Transactio
 // federation call that failed after settling descendants must return that receipt, not a
 // zero-charge rejection).
 func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, traceID, callerWalletID, callerWalletKind string, req CallRequest, action *Action, latency float64, callErr error) (*Receipt, error) {
+	// Settlement is a money transition + its audit record (§5); it must commit even
+	// if the call timed out or the client disconnected. Detach from execution-scoped
+	// cancellation so a cancelled/contended ctx can never strand the locked allocation.
+	sctx, cancel := settlementContext(ctx)
+	defer cancel()
+	ctx = sctx
 	if len(tx.ReplyJSON) == 0 {
 		tx.ReplyJSON = json.RawMessage("null")
 	}
@@ -596,6 +641,15 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 		return nil, ErrInternal.Wrap("could not record failure transaction")
 	}
 	return committed, nil
+}
+
+// settlementContext derives a context for committing a money transition and its
+// audit record. It strips execution-scoped cancellation/deadline (so a timed-out
+// or client-cancelled call still settles and never strands locked funds, §5) while
+// preserving log/trace values, then bounds the write with its own timeout as a
+// backstop against a wedged single-connection store. Callers must defer cancel().
+func settlementContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 }
 
 // ComputeFee computes (net, fee) from the taxable amount (= trace.available post-execution).

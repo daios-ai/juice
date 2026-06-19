@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 )
@@ -195,6 +196,111 @@ func Handle(in map[string]any) (map[string]any, error) {
 		t.Errorf("kind = %v, want OK", got["kind"])
 	}
 }
+
+// TestSDKHandleErrorSurfacesMessage proves the SDK reports a Handle error as the
+// reserved envelope {"__juice_error__":"<msg>"} instead of trapping, so the failure
+// reason survives execution. Skipped when tinygo is not installed.
+func TestSDKHandleErrorSurfacesMessage(t *testing.T) {
+	if _, err := exec.LookPath("tinygo"); err != nil {
+		t.Skip("tinygo not installed; skipping real-compile integration test")
+	}
+	body := `
+func Handle(in map[string]any) (map[string]any, error) {
+	return nil, errors.New("deliberate handle failure")
+}
+`
+	src := TinyGoSDK + "\n" + body
+	c := NewTinyGoCompiler(CompileConfig{TimeoutMS: 60000})
+	wasm, _, err := c.CompileSource(context.Background(), []byte(src))
+	if err != nil {
+		t.Fatalf("compile SDK+Handle: %v", err)
+	}
+
+	e := New(Config{TimeoutMS: 10000, MemoryBytes: 16 * 1024 * 1024})
+	out, err := e.Execute(context.Background(), wasm, []byte(`{}`), &sdkTestHost{})
+	if err != nil {
+		t.Fatalf("execute artifact (should return envelope, not trap): %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("output not JSON: %v (%s)", err, out)
+	}
+	msg, ok := got["__juice_error__"].(string)
+	if !ok {
+		t.Fatalf("expected __juice_error__ envelope, got %s", out)
+	}
+	if msg != "deliberate handle failure" {
+		t.Errorf("error message = %q, want %q", msg, "deliberate handle failure")
+	}
+}
+
+// TestSDKNestedJuiceCall proves a WASM action can call another action via
+// juice.call without self-deadlocking — the host re-enters Execute on the same
+// Executor. Before the persistent-host-module change this hung on a global lock.
+// Skipped when tinygo is not installed.
+func TestSDKNestedJuiceCall(t *testing.T) {
+	if _, err := exec.LookPath("tinygo"); err != nil {
+		t.Skip("tinygo not installed; skipping real-compile integration test")
+	}
+	body := `
+func Handle(in map[string]any) (map[string]any, error) {
+	reply, _ := JuiceCall("@owner/inner", []byte("{}"))
+	var sub map[string]any
+	_ = json.Unmarshal(reply, &sub)
+	return map[string]any{"inner": sub["inner"]}, nil
+}
+`
+	src := TinyGoSDK + "\n" + body
+	c := NewTinyGoCompiler(CompileConfig{TimeoutMS: 60000})
+	outerWASM, _, err := c.CompileSource(context.Background(), []byte(src))
+	if err != nil {
+		t.Fatalf("compile outer SDK+Handle: %v", err)
+	}
+
+	e := New(Config{TimeoutMS: 10000, MemoryBytes: 16 * 1024 * 1024})
+
+	// The host's Call re-enters the executor to run echoWASM (which returns its input).
+	host := &reentrantHost{e: e, reply: []byte(`{"inner":"ok"}`)}
+
+	// Guard against a regression to the deadlock: bound the whole execution.
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	out, err := e.Execute(ctx, outerWASM, []byte(`{}`), host)
+	if err != nil {
+		t.Fatalf("nested execute: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("output not JSON: %v (%s)", err, out)
+	}
+	if got["inner"] != "ok" {
+		t.Errorf("inner = %v, want ok", got["inner"])
+	}
+	if !host.reentered {
+		t.Error("host.Call did not re-enter the executor")
+	}
+}
+
+// reentrantHost.Call re-enters the executor (running echoWASM) to prove nested
+// WASM execution works; the other host functions are no-ops.
+type reentrantHost struct {
+	e         *Executor
+	reply     []byte
+	reentered bool
+}
+
+func (h *reentrantHost) Call(ctx context.Context, _ string, _ []byte) ([]byte, error) {
+	h.reentered = true
+	// Re-enter Execute on a different artifact; the reply bytes are echoed back.
+	return h.e.Execute(ctx, echoWASM, h.reply, nilHost{})
+}
+func (h *reentrantHost) StepCreate(context.Context, []byte, string, string) (string, error) {
+	return "", nil
+}
+func (h *reentrantHost) StepComplete(context.Context, string, []byte) ([]byte, error) {
+	return []byte("{}"), nil
+}
+func (h *reentrantHost) Log(context.Context, string, string) error { return nil }
 
 // sdkTestHost is a no-op kernel.HostFunctions for the SDK compile test.
 type sdkTestHost struct{}

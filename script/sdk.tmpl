@@ -126,7 +126,9 @@ func mustMarshal(v any) []byte {
 
 // run is the exported entry point. It decodes the input JSON object, invokes the
 // author-supplied Handle, and returns Handle's result as JSON. A non-nil error
-// from Handle aborts the call (surfaced by the kernel as ErrExecutionFailed).
+// from Handle is returned as the reserved sole-key object
+// {"__juice_error__":"<message>"}, which the kernel maps to ErrExecutionFailed
+// carrying the message — never a wasm trap, so the failure reason survives.
 // Authors implement Handle; they never touch run, alloc, or the wasm ABI.
 //
 //	func Handle(in map[string]any) (map[string]any, error) {
@@ -143,7 +145,7 @@ func run(inputPtr, inputLen uint32) uint64 {
 	}
 	out, err := Handle(in)
 	if err != nil {
-		panic(err.Error())
+		out = map[string]any{"__juice_error__": err.Error()}
 	}
 	b := mustMarshal(out)
 	p, l := _ptrLen(b)

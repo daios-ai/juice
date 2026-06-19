@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+#
+# ###########################################################################
+# ##  ALWAYS RUN THIS SCRIPT IN THE BACKGROUND.                            ##
+# ##  Foreground runs get the process group signalled (exit 144) before    ##
+# ##  the suite finishes. Launch detached and poll the log for the final   ##
+# ##  "FLOWS_EXIT=" line, e.g.:                                            ##
+# ##                                                                       ##
+# ##    JUICE=/tmp/juice JUICE_SECRET_KEY=test \                           ##
+# ##      bash flows/flows_test.sh > /tmp/flows.log 2>&1 &                 ##
+# ##    # then read /tmp/flows.log until it ends with FLOWS_EXIT=0         ##
+# ##                                                                       ##
+# ##  (Claude: you keep rediscovering this. It is written down here now.)  ##
+# ###########################################################################
+#
 # End-to-end flow tests for the juice CLI.
 # Each flow is an independent user story with its own SQLite database.
 #

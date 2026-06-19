@@ -20,9 +20,19 @@ type Executor struct {
 	runtime wazero.Runtime
 	cfg     Config
 
-	mu     sync.Mutex // guards cache
-	execMu sync.Mutex // serializes Execute: wazero host modules share a name in the runtime
-	cache  map[string]wazero.CompiledModule // keyed by artifact hash
+	mu    sync.Mutex                       // guards cache
+	cache map[string]wazero.CompiledModule // keyed by artifact hash
+}
+
+// hostKey carries the per-call kernel.HostFunctions through the execution context.
+// The "juice" host module is instantiated once and stateless; each invocation reads
+// the active call's host from the context, so executions run concurrently and may
+// nest (a WASM action calling another via juice.call) without a global lock.
+type hostKey struct{}
+
+func hostFromCtx(ctx context.Context) kernel.HostFunctions {
+	h, _ := ctx.Value(hostKey{}).(kernel.HostFunctions)
+	return h
 }
 
 // Config holds script execution limits.
@@ -41,6 +51,15 @@ func New(cfg Config) *Executor {
 	rt := wazero.NewRuntimeWithConfig(ctx, rCfg)
 	// Provide WASI host functions required by TinyGo's wasip1 target.
 	wasi_snapshot_preview1.MustInstantiate(ctx, rt)
+	// Instantiate the "juice" host module once. Its callbacks are stateless and read
+	// the active call's HostFunctions from the context, so it is shared across all
+	// (concurrent and nested) executions. The guest imports are hardwired to module
+	// "juice" (//go:wasmimport juice ...), so the name is fixed by the SDK.
+	hostBuilder := rt.NewHostModuleBuilder("juice")
+	registerHostFunctions(hostBuilder)
+	if _, err := hostBuilder.Instantiate(ctx); err != nil {
+		panic("script: instantiate juice host module: " + err.Error())
+	}
 	return &Executor{
 		runtime: rt,
 		cfg:     cfg,
@@ -93,20 +112,13 @@ func (e *Executor) Execute(ctx context.Context, artifact []byte, input []byte, h
 		e.mu.Unlock()
 	}
 
-	// Serialize host module instantiation: the runtime's module namespace is shared,
-	// so concurrent Execute calls would collide on the "juice" host module name.
-	e.execMu.Lock()
-	defer e.execMu.Unlock()
+	// Carry this call's host functions through the context so the shared, persistent
+	// "juice" host module (instantiated in New) dispatches to the right kernel state.
+	// This is what lets executions run concurrently and nest without a global lock.
+	ctx = context.WithValue(ctx, hostKey{}, host)
 
-	// Build the host module ("juice") that exposes callbacks.
-	hostBuilder := e.runtime.NewHostModuleBuilder("juice")
-	registerHostFunctions(hostBuilder, host)
-	hostMod, err := hostBuilder.Instantiate(ctx)
-	if err != nil {
-		return nil, kernel.ErrInternal.Wrapf("instantiate host module: %v", err)
-	}
-	defer hostMod.Close(ctx)
-
+	// WithName("") leaves the guest module unregistered in the runtime's namespace,
+	// so concurrent and nested guests never collide on a name.
 	// WithStartFunctions() skips _start so proc_exit(0) never closes the module.
 	// TinyGo's wasip1 runtime initializes lazily on first exported-function call.
 	modCfg := wazero.NewModuleConfig().WithName("").WithStartFunctions()
@@ -169,14 +181,17 @@ func (e *Executor) Execute(ctx context.Context, artifact []byte, input []byte, h
 }
 
 // registerHostFunctions wires kernel.HostFunctions into the wazero host module.
-// Each host function receives/returns JSON via wasm linear memory.
-func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions) {
+// Each host function receives/returns JSON via wasm linear memory. The module is
+// instantiated once and shared; each callback reads the active call's host from the
+// execution context (see hostKey).
+func registerHostFunctions(b wazero.HostModuleBuilder) {
 	// juice.call(actionNamePtr, actionNameLen, argsPtr, argsLen) -> packedI64
 	// Returns resultPtr in upper 32 bits and resultLen in lower 32 bits.
 	// TinyGo //go:wasmimport only supports a single return value.
 	b.NewFunctionBuilder().
 		WithGoModuleFunction(
 			api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+				host := hostFromCtx(ctx)
 				namePtr, nameLen := uint32(stack[0]), uint32(stack[1])
 				argsPtr, argsLen := uint32(stack[2]), uint32(stack[3])
 				mem := mod.Memory()
@@ -197,6 +212,7 @@ func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions
 	b.NewFunctionBuilder().
 		WithGoModuleFunction(
 			api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+				host := hostFromCtx(ctx)
 				lvlPtr, lvlLen := uint32(stack[0]), uint32(stack[1])
 				msgPtr, msgLen := uint32(stack[2]), uint32(stack[3])
 				mem := mod.Memory()
@@ -213,6 +229,7 @@ func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions
 	b.NewFunctionBuilder().
 		WithGoModuleFunction(
 			api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+				host := hostFromCtx(ctx)
 				mem := mod.Memory()
 				partialArgs, _ := mem.Read(uint32(stack[0]), uint32(stack[1]))
 				requiredCaller, _ := mem.Read(uint32(stack[2]), uint32(stack[3]))
@@ -233,6 +250,7 @@ func registerHostFunctions(b wazero.HostModuleBuilder, host kernel.HostFunctions
 	b.NewFunctionBuilder().
 		WithGoModuleFunction(
 			api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+				host := hostFromCtx(ctx)
 				mem := mod.Memory()
 				stepID, _ := mem.Read(uint32(stack[0]), uint32(stack[1]))
 				input, _ := mem.Read(uint32(stack[2]), uint32(stack[3]))

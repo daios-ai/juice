@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -225,10 +226,46 @@ func TestExecutorConfiguredTimeout(t *testing.T) {
 	}
 }
 
+// TestExecuteConcurrent runs many executions in parallel on one Executor. With the
+// shared, persistent "juice" host module and anonymous guest instances, concurrent
+// Execute calls must not collide on a module name or serialize behind a global lock.
+func TestExecuteConcurrent(t *testing.T) {
+	e := New(Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
+	ctx := context.Background()
+	artifact, _, err := e.Compile(ctx, echoWASM)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	const n = 32
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			input := []byte(fmt.Sprintf(`{"i":%d}`, i))
+			out, err := e.Execute(ctx, artifact, input, nilHost{})
+			if err != nil {
+				errs <- fmt.Errorf("exec %d: %w", i, err)
+				return
+			}
+			if !bytes.Equal(out, input) {
+				errs <- fmt.Errorf("exec %d: got %q want %q", i, out, input)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
 func TestHostModuleExportsStepCreate(t *testing.T) {
 	e := New(Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
 	builder := e.runtime.NewHostModuleBuilder("juice-test")
-	registerHostFunctions(builder, nilHost{})
+	registerHostFunctions(builder)
 	mod, err := builder.Instantiate(context.Background())
 	if err != nil {
 		t.Fatalf("Instantiate host module: %v", err)
@@ -243,7 +280,7 @@ func TestHostModuleExportsStepCreate(t *testing.T) {
 func TestHostModuleExportsStepComplete(t *testing.T) {
 	e := New(Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
 	builder := e.runtime.NewHostModuleBuilder("juice-test2")
-	registerHostFunctions(builder, nilHost{})
+	registerHostFunctions(builder)
 	mod, err := builder.Instantiate(context.Background())
 	if err != nil {
 		t.Fatalf("Instantiate host module: %v", err)

@@ -1093,23 +1093,28 @@ func (k *Kernel) EndProcess(ctx context.Context, callerID, processID string) err
 	if p.Status != ProcessOpen {
 		return ErrInvalidState.Wrap("process is already closed")
 	}
+	// Closure cancels waiting steps, settles unsettled traces, and returns funds — a
+	// money transition + audit record that must commit regardless of caller cancellation
+	// (§5). Detach from execution-scoped cancellation from here on.
+	sctx, cancel := settlementContext(ctx)
+	defer cancel()
 	// Settle any unsettled traces (e.g. stalled remote-proxy calls holding locked funds).
 	// When the last trace settles and no steps remain, closeProcessTx auto-closes the process;
 	// in that case store.EndProcess is unnecessary — check before calling to avoid an error.
 	logger := k.log.With(ctx)
-	if unsettled, listErr := k.store.ListUnsettledTracesForProcess(ctx, processID); listErr == nil {
+	if unsettled, listErr := k.store.ListUnsettledTracesForProcess(sctx, processID); listErr == nil {
 		for _, trace := range unsettled {
-			if err := k.recoverTrace(ctx, logger, trace, "process force-closed", ""); err != nil {
+			if err := k.recoverTrace(sctx, logger, trace, "process force-closed", ""); err != nil {
 				logger.Error("process.end.settle_failed", "trace_id", trace.ID, "error", err)
 			}
 		}
 	}
 	// Re-read: recoverTrace may have auto-closed the process (became quiescent after settlement).
-	if p2, readErr := k.store.ReadProcess(ctx, processID); readErr == nil && p2.Status == ProcessClosed {
+	if p2, readErr := k.store.ReadProcess(sctx, processID); readErr == nil && p2.Status == ProcessClosed {
 		k.log.With(ctx).Info("process.ended", "process_id", processID, "status", "success")
 		return nil
 	}
-	if err := k.store.EndProcess(ctx, processID); err != nil {
+	if err := k.store.EndProcess(sctx, processID); err != nil {
 		return err
 	}
 	k.log.With(ctx).Info("process.ended", "process_id", processID, "status", "success")
