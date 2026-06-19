@@ -4,15 +4,15 @@
 #
 # Usage (manual — default suite, EXCLUDES the slow @sys/make flows):
 #   go build -o /tmp/juice ./cmd/juice/
-#   JUICE=/tmp/juice JUICE_SECRET_KEY=test bash scripts/flows_test.sh
+#   JUICE=/tmp/juice JUICE_SECRET_KEY=test bash flows/flows_test.sh
 #
 # Usage (the slow @sys/make flows ONLY — opt in when working on @sys/make):
-#   JUICE_MAKE_FLOWS=1 JUICE=/tmp/juice JUICE_SECRET_KEY=test bash scripts/flows_test.sh
+#   JUICE_MAKE_FLOWS=1 JUICE=/tmp/juice JUICE_SECRET_KEY=test bash flows/flows_test.sh
 #   (real TinyGo + live Ollama; minutes per flow; see make_flows() below for why
 #    they are kept out of the default run)
 #
 # Usage (the @sys/tinygo/compile flow ONLY — opt in when working on @sys/tinygo/compile):
-#   JUICE_TINYGO_FLOWS=1 JUICE=/tmp/juice JUICE_SECRET_KEY=test bash scripts/flows_test.sh
+#   JUICE_TINYGO_FLOWS=1 JUICE=/tmp/juice JUICE_SECRET_KEY=test bash flows/flows_test.sh
 #   (needs the real TinyGo toolchain on PATH; no Ollama; see tinygo_flows() below)
 #
 # Usage (via Go test suite):
@@ -381,7 +381,7 @@ source "$DIR/flows_admin.sh"
 # They are therefore OFF by default. Run them deliberately, ONLY when working on
 # @sys/make, by setting JUICE_MAKE_FLOWS=1:
 #
-#   JUICE_MAKE_FLOWS=1 JUICE=/path/to/juice JUICE_SECRET_KEY=test bash scripts/flows_test.sh
+#   JUICE_MAKE_FLOWS=1 JUICE=/path/to/juice JUICE_SECRET_KEY=test bash flows/flows_test.sh
 #
 # That runs ONLY the make flows (each bootstraps its own kernel, so nothing else is
 # needed). DO NOT wire flow_make* back into the default branch of main().

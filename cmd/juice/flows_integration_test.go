@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// TestFlowsIntegration builds the juice binary and runs scripts/flows_test.sh.
+// TestFlowsIntegration builds the juice binary and runs flows/flows_test.sh.
 // It covers all 34 CLI user-story flows end-to-end against a real SQLite database.
 func TestFlowsIntegration(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "juice")
@@ -23,7 +23,7 @@ func TestFlowsIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := filepath.Join(moduleRoot, "scripts", "flows_test.sh")
+	script := filepath.Join(moduleRoot, "flows", "flows_test.sh")
 	if _, err := os.Stat(script); err != nil {
 		t.Fatalf("flows_test.sh not found at %s: %v", script, err)
 	}
