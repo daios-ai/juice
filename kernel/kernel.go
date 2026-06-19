@@ -32,8 +32,8 @@ type Config struct {
 	AllowLocalSources bool               // permit loopback/private URLs as action sources (tests only)
 	SigningKey        ed25519.PrivateKey // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
 	IssuerUserID      string             // @sys user ID, set during bootstrap
-	AuthIssuer        string             // JUICE_AUTH_ISSUER — iss claim in JWTs; empty = no claim
-	AuthAudience      string             // JUICE_AUTH_AUDIENCE — aud claim in JWTs; empty = no validation
+	AuthIssuer        string             // juice.json auth_issuer — iss claim in JWTs; empty = no claim
+	AuthAudience      string             // juice.json auth_audience — aud claim in JWTs; empty = no validation
 }
 
 // DefaultConfig returns safe local defaults.
@@ -1101,19 +1101,28 @@ func (k *Kernel) EndProcess(ctx context.Context, callerID, processID string) err
 	logger := k.log.With(ctx)
 	// Map each running step-completion trace to its step so recoverTrace fails the completion
 	// call with CallerStep semantics (transaction + receipt), mirroring startup Recover.
+	// A failure to enumerate aborts the close: closing a process whose traces were not all
+	// settled would return funds without a complete audit record (§5).
 	stepByTrace := map[string]string{}
-	if runs, runErr := k.store.ListOrphanRunningStepsForProcess(sctx, processID); runErr == nil {
-		for _, r := range runs {
-			stepByTrace[r.CompletionTraceID] = r.StepID
-		}
+	runs, err := k.store.ListOrphanRunningStepsForProcess(sctx, processID)
+	if err != nil {
+		return err
+	}
+	for _, r := range runs {
+		stepByTrace[r.CompletionTraceID] = r.StepID
 	}
 	// Settle every unsettled trace deepest-first (now including running step-completion traces).
 	// Children settle before parents, so a completion trace's subcalls gain a tx before it settles.
-	if unsettled, listErr := k.store.ListUnsettledTracesForProcess(sctx, processID); listErr == nil {
-		for _, trace := range unsettled {
-			if err := k.recoverTrace(sctx, logger, trace, "process force-closed", stepByTrace[trace.ID]); err != nil {
-				logger.Error("process.end.settle_failed", "trace_id", trace.ID, "error", err)
-			}
+	// Any settlement failure aborts before close so a half-settled process is never closed and
+	// credited — the all-or-nothing audit guarantee holds even under store errors.
+	unsettled, err := k.store.ListUnsettledTracesForProcess(sctx, processID)
+	if err != nil {
+		return err
+	}
+	for _, trace := range unsettled {
+		if err := k.recoverTrace(sctx, logger, trace, "process force-closed", stepByTrace[trace.ID]); err != nil {
+			logger.Error("process.end.settle_failed", "trace_id", trace.ID, "error", err)
+			return err
 		}
 	}
 	// Re-read: recoverTrace may have auto-closed the process (became quiescent after settlement).

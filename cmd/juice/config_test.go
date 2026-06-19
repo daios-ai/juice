@@ -108,94 +108,31 @@ func TestLoadOrCreateConfig_BadJSON(t *testing.T) {
 }
 
 func TestApplyEnvOverrides(t *testing.T) {
-	t.Run("overrides file values", func(t *testing.T) {
+	// Only the spec-documented runtime overrides remain (§14): JUICE_LOG_LEVEL and the
+	// runtime-only JUICE_CREDENTIALS_KEY. Everything else is configured via juice.json.
+	t.Run("overrides log level", func(t *testing.T) {
 		t.Setenv("JUICE_LOG_LEVEL", "debug")
-		t.Setenv("JUICE_FEE_BPS", "500")
-		t.Setenv("JUICE_OLLAMA_URL", "http://custom:11434")
-		t.Setenv("JUICE_SCRIPT_TIMEOUT_MS", "5000")
-		t.Setenv("JUICE_SCRIPT_MEMORY_BYTES", "33554432")
-		t.Setenv("JUICE_TOKEN_TTL", "30m")
-		t.Setenv("JUICE_AUTH_ISSUER", "https://issuer.example")
-		t.Setenv("JUICE_AUTH_AUDIENCE", "juice")
-		t.Setenv("JUICE_OLLAMA_CHAT_MODEL", "llama3")
-		t.Setenv("JUICE_OLLAMA_EMBED_MODEL", "all-minilm")
-		t.Setenv("JUICE_LOG_FILE", "/tmp/juice.log")
-
 		cfg := DefaultServerConfig()
-		if err := applyEnvOverrides(&cfg); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		applyEnvOverrides(&cfg)
 		if cfg.LogLevel != "debug" {
 			t.Errorf("LogLevel: got %q", cfg.LogLevel)
-		}
-		if cfg.FeeBPS != 500 {
-			t.Errorf("FeeBPS: got %d", cfg.FeeBPS)
-		}
-		if cfg.Native.LLM.URL != "http://custom:11434" {
-			t.Errorf("Native.LLM.URL: got %q", cfg.Native.LLM.URL)
-		}
-		if cfg.ScriptTimeoutMS != 5000 {
-			t.Errorf("ScriptTimeoutMS: got %d", cfg.ScriptTimeoutMS)
-		}
-		if cfg.ScriptMemoryBytes != 33554432 {
-			t.Errorf("ScriptMemoryBytes: got %d", cfg.ScriptMemoryBytes)
-		}
-		if cfg.TokenTTL != "30m" {
-			t.Errorf("TokenTTL: got %q", cfg.TokenTTL)
-		}
-		if cfg.AuthIssuer != "https://issuer.example" {
-			t.Errorf("AuthIssuer: got %q", cfg.AuthIssuer)
-		}
-		if cfg.AuthAudience != "juice" {
-			t.Errorf("AuthAudience: got %q", cfg.AuthAudience)
-		}
-		if cfg.Native.LLM.ChatModel != "llama3" {
-			t.Errorf("Native.LLM.ChatModel: got %q", cfg.Native.LLM.ChatModel)
-		}
-		if cfg.Native.LLM.EmbedModel != "all-minilm" {
-			t.Errorf("Native.LLM.EmbedModel: got %q", cfg.Native.LLM.EmbedModel)
-		}
-		if cfg.LogFile != "/tmp/juice.log" {
-			t.Errorf("LogFile: got %q", cfg.LogFile)
 		}
 	})
 
 	t.Run("absent env leaves file value", func(t *testing.T) {
 		cfg := DefaultServerConfig()
+		cfg.LogLevel = "warn"
 		cfg.Native.LLM.URL = "http://from-file:11434"
 		cfg.FeeBPS = 1234
-		if err := applyEnvOverrides(&cfg); err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		applyEnvOverrides(&cfg)
+		if cfg.LogLevel != "warn" {
+			t.Errorf("LogLevel should not be overridden, got %q", cfg.LogLevel)
 		}
 		if cfg.Native.LLM.URL != "http://from-file:11434" {
 			t.Errorf("Native.LLM.URL should not be overridden, got %q", cfg.Native.LLM.URL)
 		}
 		if cfg.FeeBPS != 1234 {
 			t.Errorf("FeeBPS should not be overridden, got %d", cfg.FeeBPS)
-		}
-	})
-
-	t.Run("bad JUICE_FEE_BPS returns error", func(t *testing.T) {
-		t.Setenv("JUICE_FEE_BPS", "notanumber")
-		cfg := DefaultServerConfig()
-		if err := applyEnvOverrides(&cfg); err == nil {
-			t.Error("expected error for bad JUICE_FEE_BPS")
-		}
-	})
-
-	t.Run("bad JUICE_SCRIPT_TIMEOUT_MS returns error", func(t *testing.T) {
-		t.Setenv("JUICE_SCRIPT_TIMEOUT_MS", "bad")
-		cfg := DefaultServerConfig()
-		if err := applyEnvOverrides(&cfg); err == nil {
-			t.Error("expected error for bad JUICE_SCRIPT_TIMEOUT_MS")
-		}
-	})
-
-	t.Run("bad JUICE_SCRIPT_MEMORY_BYTES returns error", func(t *testing.T) {
-		t.Setenv("JUICE_SCRIPT_MEMORY_BYTES", "bad")
-		cfg := DefaultServerConfig()
-		if err := applyEnvOverrides(&cfg); err == nil {
-			t.Error("expected error for bad JUICE_SCRIPT_MEMORY_BYTES")
 		}
 	})
 
@@ -206,9 +143,7 @@ func TestApplyEnvOverrides(t *testing.T) {
 		}
 		t.Setenv("JUICE_CREDENTIALS_KEY", base64.RawURLEncoding.EncodeToString(key))
 		cfg := DefaultServerConfig()
-		if err := applyEnvOverrides(&cfg); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		applyEnvOverrides(&cfg)
 		if cfg.CredentialsKey != base64.RawURLEncoding.EncodeToString(key) {
 			t.Errorf("CredentialsKey not overridden, got %q", cfg.CredentialsKey)
 		}

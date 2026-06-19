@@ -149,10 +149,11 @@ Key groups:
 | `allow_local_sources` / `allow_local_peer_urls` | Permit loopback/private URLs (off by default) |
 | `credentials_key` | Auto-generated AES-256 key encrypting action upstream credentials |
 
-Runtime-only environment overrides (never written to `juice.json`): `JUICE_DB_PATH`,
-`JUICE_SECRET_KEY`, `JUICE_CREDENTIALS_KEY`, `JUICE_LOG_LEVEL`, `JUICE_LOG_FILE`,
-`JUICE_OLLAMA_URL`, `JUICE_OLLAMA_CHAT_MODEL`, `JUICE_OLLAMA_EMBED_MODEL`, `JUICE_FEE_BPS`, and
-related `JUICE_*` keys. The HTTP listen address is the `--addr` flag.
+Environment variables are bootstrap and overrides only (everything else is configured
+through `juice.json`): `JUICE_CONFIG`, `JUICE_DB_PATH`, `JUICE_SECRET_KEY`,
+`JUICE_LOG_LEVEL`, `JUICE_CREDENTIALS_KEY`, `JUICE_BOOTSTRAP_PASSWORD`,
+`JUICE_BOOTSTRAP_PEER_HANDLE`, and `JUICE_ALLOW_LOCAL_SOURCES`. The HTTP listen address is
+the `--addr` flag.
 
 ## Architecture
 

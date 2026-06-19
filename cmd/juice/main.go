@@ -59,13 +59,17 @@ func init() {
 }
 
 // initConfig loads the JSON config file and applies JUICE_* environment overrides.
-// The path defaults to juice.json in the same directory as --db so that both
-// files stay co-located. JUICE_DB_PATH overrides the --db flag default.
+// The config path is the --config flag, else JUICE_CONFIG, else juice.json in the same
+// directory as --db so that both files stay co-located. JUICE_DB_PATH overrides the
+// --db flag default.
 func initConfig() {
 	if v := os.Getenv("JUICE_DB_PATH"); v != "" && flagDB == "juice.db" {
 		flagDB = v
 	}
 	path := flagConfig
+	if path == "" {
+		path = os.Getenv("JUICE_CONFIG")
+	}
 	if path == "" {
 		path = filepath.Join(filepath.Dir(flagDB), "juice.json")
 	}
@@ -75,10 +79,7 @@ func initConfig() {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
 	}
-	if err := applyEnvOverrides(&cfg); err != nil {
-		fmt.Fprintln(os.Stderr, "config:", err)
-		os.Exit(1)
-	}
+	applyEnvOverrides(&cfg)
 	globalCfg = cfg
 }
 

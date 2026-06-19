@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 )
 
 // NativeLLMConfig holds configuration for the @sys/llm/chat native action.
@@ -139,60 +138,18 @@ func LoadOrCreateConfig(path string) (ServerConfig, error) {
 	return cfg, nil
 }
 
-// applyEnvOverrides reads JUICE_* environment variables and overrides the matching
-// config fields. An unparseable numeric or duration value is a fatal startup error.
-// Returns a non-nil error only on parse failures; missing env vars are silently skipped.
-func applyEnvOverrides(cfg *ServerConfig) error {
+// applyEnvOverrides applies the spec-documented runtime overrides (§14). Everything
+// else is configured through juice.json; environment variables are bootstrap and
+// overrides only. JUICE_LOG_LEVEL overrides the log level; JUICE_CREDENTIALS_KEY is a
+// runtime-only override of the §8 AES credentials key that never overwrites the config
+// file. Missing env vars are silently skipped.
+func applyEnvOverrides(cfg *ServerConfig) {
 	if v := os.Getenv("JUICE_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
 	}
-	if v := os.Getenv("JUICE_LOG_FILE"); v != "" {
-		cfg.LogFile = v
-	}
-	if v := os.Getenv("JUICE_FEE_BPS"); v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return fmt.Errorf("JUICE_FEE_BPS: %w", err)
-		}
-		cfg.FeeBPS = n
-	}
-	if v := os.Getenv("JUICE_AUTH_ISSUER"); v != "" {
-		cfg.AuthIssuer = v
-	}
-	if v := os.Getenv("JUICE_AUTH_AUDIENCE"); v != "" {
-		cfg.AuthAudience = v
-	}
-	if v := os.Getenv("JUICE_TOKEN_TTL"); v != "" {
-		cfg.TokenTTL = v
-	}
-	if v := os.Getenv("JUICE_OLLAMA_URL"); v != "" {
-		cfg.Native.LLM.URL = v
-	}
-	if v := os.Getenv("JUICE_OLLAMA_CHAT_MODEL"); v != "" {
-		cfg.Native.LLM.ChatModel = v
-	}
-	if v := os.Getenv("JUICE_OLLAMA_EMBED_MODEL"); v != "" {
-		cfg.Native.LLM.EmbedModel = v
-	}
-	if v := os.Getenv("JUICE_SCRIPT_TIMEOUT_MS"); v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return fmt.Errorf("JUICE_SCRIPT_TIMEOUT_MS: %w", err)
-		}
-		cfg.ScriptTimeoutMS = n
-	}
-	if v := os.Getenv("JUICE_SCRIPT_MEMORY_BYTES"); v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return fmt.Errorf("JUICE_SCRIPT_MEMORY_BYTES: %w", err)
-		}
-		cfg.ScriptMemoryBytes = n
-	}
-	// JUICE_CREDENTIALS_KEY is a runtime-only override; it never overwrites the config file.
 	if v := os.Getenv("JUICE_CREDENTIALS_KEY"); v != "" {
 		cfg.CredentialsKey = v
 	}
-	return nil
 }
 
 func writeConfig(path string, cfg ServerConfig) error {

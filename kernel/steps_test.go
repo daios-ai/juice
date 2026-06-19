@@ -992,6 +992,52 @@ func TestEndProcessFailsRunningStep(t *testing.T) {
 	}
 }
 
+// failUnsettledListStore wraps a Store and fails ListUnsettledTracesForProcess for one
+// process, simulating a store error mid-close.
+type failUnsettledListStore struct {
+	kernel.Store
+	failProcessID string
+	err           error
+}
+
+func (s *failUnsettledListStore) ListUnsettledTracesForProcess(ctx context.Context, processID string) ([]*kernel.Trace, error) {
+	if processID == s.failProcessID {
+		return nil, s.err
+	}
+	return s.Store.ListUnsettledTracesForProcess(ctx, processID)
+}
+
+// TestEndProcessAbortsOnSettlementError verifies that a store failure while enumerating
+// unsettled traces aborts the close: the process must stay open and the owner's funds stay
+// parked, never closed-and-credited with a half-settled subtree (the all-or-nothing audit
+// guarantee, §5).
+func TestEndProcessAbortsOnSettlementError(t *testing.T) {
+	st := newTestStore(t)
+	failErr := kernel.ErrInternal.Wrap("injected unsettled-list failure")
+	fs := &failUnsettledListStore{Store: st, err: failErr}
+	k := newTestKernel(fs)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@ep-abort-owner", 100)
+	_, ct := setupStepWithCompletionTrace(t, st, k, owner.ID, 100)
+	processID := ct.ProcessID
+	fs.failProcessID = processID // inject only after setup
+
+	if err := k.EndProcess(ctx, owner.ID, processID); err == nil {
+		t.Fatal("EndProcess must abort when unsettled-trace enumeration fails")
+	}
+
+	// Process must remain open; owner's funds must stay parked (not returned).
+	proc, _ := st.ReadProcess(ctx, processID)
+	if proc.Status != kernel.ProcessOpen {
+		t.Errorf("process.status=%s after aborted EndProcess; want open (not closed/credited)", proc.Status)
+	}
+	u, _ := st.ReadUser(ctx, owner.ID)
+	if u.Locked == 0 {
+		t.Errorf("owner.locked=0 after aborted EndProcess; funds must stay parked, not returned")
+	}
+}
+
 // TestEndProcessFailsNonEmptyRunningStep is TestEndProcessFailsRunningStep with a settled
 // subcall beneath the running completion trace: the settled subcall stays paid, the remainder
 // refunds up, the completion settles as failure, and balances stay conserved (no negatives).

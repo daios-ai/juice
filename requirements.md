@@ -738,7 +738,7 @@ time level event request_id caller_user_id process_id trace_id action_id tx_id
 status duration_ms error
 ```
 
-Config lives in `juice.json` (path from `JUICE_CONFIG`, default `./juice.json`). Top-level kernel keys: `db_path`, `fee_bps`, `import_bps`, `peer_auto_accept`, auth issuer/audience/token TTL, log file/format/level, script timeout and memory limits. All native-action configuration lives under `native.<action>`; no deeper nesting:
+Config lives in `juice.json` (path from `JUICE_CONFIG`, default `./juice.json`). Top-level kernel keys: `db_path`, `fee_bps`, `import_bps`, `peer_auto_accept`, auth issuer/audience/token TTL, log file/format/level, script timeout and memory limits, plus the federation identity and credential keys this kernel needs to satisfy §8 and §13: `server_url` and `peer_handle` (this kernel's advertised base URL and handle for the §13 `.well-known` document and reciprocal friend requests), `credentials_key` (the §8 base64url AES-256-GCM key for `auth_json`, auto-generated at first boot), and `allow_local_sources`/`allow_local_peer_urls` (dev-only escape hatches over §7's loopback/private/link-local URL rejection, default `false`). All native-action configuration lives under `native.<action>`; no deeper nesting:
 
 ```json
 {
@@ -746,6 +746,11 @@ Config lives in `juice.json` (path from `JUICE_CONFIG`, default `./juice.json`).
   "fee_bps": 2000,
   "import_bps": 500,
   "peer_auto_accept": true,
+  "server_url": "",
+  "peer_handle": "",
+  "credentials_key": "",
+  "allow_local_sources": false,
+  "allow_local_peer_urls": false,
   "native": {
     "llm":     { "url": "http://localhost:11434", "chat_model": "gemma4:26b", "embed_model": "nomic-embed-text", "price": 0 },
     "make":    { "compiler": "tinygo", "max_steps": 5, "price": 20 },
@@ -764,11 +769,17 @@ Safe local defaults apply when the file or a key is absent; invalid startup conf
 Environment variables are bootstrap and overrides only:
 
 ```text
-JUICE_CONFIG       path to juice.json
-JUICE_DB_PATH      database path override
-JUICE_SECRET_KEY   JWT secret override, runtime only (§12)
-JUICE_LOG_LEVEL    log level override
+JUICE_CONFIG               path to juice.json
+JUICE_DB_PATH              database path override
+JUICE_SECRET_KEY           JWT secret override, runtime only (§12)
+JUICE_LOG_LEVEL            log level override
+JUICE_CREDENTIALS_KEY      AES credentials key override, runtime only (§8)
+JUICE_BOOTSTRAP_PASSWORD   superuser password for unattended first boot (§12)
+JUICE_BOOTSTRAP_PEER_HANDLE  peer handle for unattended first boot (§13)
+JUICE_ALLOW_LOCAL_SOURCES  dev-only: permit loopback/private/link-local source and peer URLs (§7)
 ```
+
+All other settings are configured through `juice.json` only; there are no further environment overrides.
 
 ## 15. Required automated tests
 
