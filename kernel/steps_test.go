@@ -940,6 +940,111 @@ func TestRecoverSettlesNonEmptyStepCompletionTrace(t *testing.T) {
 	}
 }
 
+// TestEndProcessFailsRunningStep verifies that force-closing a process with a running
+// step-completion trace settles that completion as a failed CALL (transaction + receipt),
+// not a silent balance drain: the step ends `done` with a tx_id, a failure transaction and
+// receipt exist, the process closes, and the owner's funds are fully restored.
+func TestEndProcessFailsRunningStep(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@ep-fail-owner", 100)
+	step, ct := setupStepWithCompletionTrace(t, st, k, owner.ID, 100)
+	processID := ct.ProcessID
+
+	if err := k.EndProcess(ctx, owner.ID, processID); err != nil {
+		t.Fatalf("EndProcess: %v", err)
+	}
+
+	// Step must be done with a tx_id (settled as a failed call), NOT cancelled.
+	got, _ := st.ReadStep(ctx, step.ID)
+	if got.Status != kernel.StepDone {
+		t.Errorf("step.status=%s after EndProcess; want done (failed-call settlement)", got.Status)
+	}
+	if got.TxID == nil {
+		t.Fatal("step.TxID must be set atomically with done")
+	}
+
+	// A failure transaction and a receipt must explain the balance change (audit conservation).
+	tx, err := st.ReadTransaction(ctx, *got.TxID)
+	if err != nil {
+		t.Fatalf("ReadTransaction: %v", err)
+	}
+	if tx.Status != kernel.TxFailure {
+		t.Errorf("tx.status=%s, want failure", tx.Status)
+	}
+	if tx.TraceID != ct.ID {
+		t.Errorf("tx.trace_id=%s, want completion trace %s", tx.TraceID, ct.ID)
+	}
+	if _, err := st.ReadReceiptByTxID(ctx, *got.TxID); err != nil {
+		t.Errorf("ReadReceiptByTxID: %v (every committed call must have a receipt)", err)
+	}
+
+	// Process closed; owner fully restored, no negative balances.
+	proc, _ := st.ReadProcess(ctx, processID)
+	if proc.Status != kernel.ProcessClosed {
+		t.Errorf("process.status=%s, want closed", proc.Status)
+	}
+	u, _ := st.ReadUser(ctx, owner.ID)
+	if u.Available != 100 || u.Locked != 0 {
+		t.Errorf("owner wallet after close: available=%d locked=%d, want 100/0", u.Available, u.Locked)
+	}
+}
+
+// TestEndProcessFailsNonEmptyRunningStep is TestEndProcessFailsRunningStep with a settled
+// subcall beneath the running completion trace: the settled subcall stays paid, the remainder
+// refunds up, the completion settles as failure, and balances stay conserved (no negatives).
+func TestEndProcessFailsNonEmptyRunningStep(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@ep-fail-ne-owner", 200)
+	step, ct := setupStepWithCompletionTrace(t, st, k, owner.ID, 200)
+	processID := ct.ProcessID
+
+	// Lock funds into a child subcall so the completion trace is non-empty (HasSettled=true).
+	ctID := ct.ID
+	child := &kernel.Trace{
+		ID:            uuid.New().String(),
+		ProcessID:     ct.ProcessID,
+		ParentTraceID: &ctID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := st.BeginSubcall(ctx, ct.ID, child, 50); err != nil {
+		t.Fatalf("BeginSubcall: %v", err)
+	}
+
+	if err := k.EndProcess(ctx, owner.ID, processID); err != nil {
+		t.Fatalf("EndProcess: %v", err)
+	}
+
+	got, _ := st.ReadStep(ctx, step.ID)
+	if got.Status != kernel.StepDone || got.TxID == nil {
+		t.Errorf("step after EndProcess: status=%s tx_id=%v, want done with tx_id", got.Status, got.TxID)
+	}
+	tx, err := st.ReadTransaction(ctx, *got.TxID)
+	if err != nil {
+		t.Fatalf("ReadTransaction: %v", err)
+	}
+	if tx.Status != kernel.TxFailure {
+		t.Errorf("tx.status=%s, want failure", tx.Status)
+	}
+
+	proc, _ := st.ReadProcess(ctx, processID)
+	if proc.Status != kernel.ProcessClosed {
+		t.Errorf("process.status=%s, want closed", proc.Status)
+	}
+	u, _ := st.ReadUser(ctx, owner.ID)
+	if u.Available < 0 || u.Locked < 0 {
+		t.Errorf("negative owner balance: available=%d locked=%d", u.Available, u.Locked)
+	}
+	if u.Available+u.Locked != 200 {
+		t.Errorf("owner wallet sum=%d, want 200 (conservation)", u.Available+u.Locked)
+	}
+}
+
 // TestStepCompleteRemoteProxyPersistsIdempotencyKey verifies Fix 3A: CompleteStep generates
 // and persists idempotency_key and dispatch_json on the completion trace before dispatching.
 func TestStepCompleteRemoteProxyPersistsIdempotencyKey(t *testing.T) {

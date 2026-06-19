@@ -134,9 +134,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	// 4. Resolve action.
-	// Root calls and step completions supply a pre-resolved Action (validated by beginRun /
-	// read by CompleteStep), so no DB read is needed — this binds execution to the exact action
-	// that was funded and eliminates the TOCTOU window. canCall still runs (gated below).
+	// Root calls and step completions supply a pre-resolved Action (read by beginRun /
+	// CompleteStep), so no DB read is needed — this binds execution to the exact action that
+	// was funded and eliminates the TOCTOU window. The snapshot is still validated below.
 	// Subcalls and direct test invocations use the owner/name path.
 	var action *Action
 	var target *User
@@ -167,35 +167,24 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 	}
 
-	// 5. CanCall(process.owner, action). Skip for root calls: beginRun already validated this,
-	// and making it single-pass eliminates the TOCTOU window between BeginRun and Call.
-	if req.ExistingTraceID == "" && !canCall(process.OwnerUserID, action) {
-		if !action.Active {
-			return nil, ErrInvalidState.Wrap("action is inactive")
-		}
-		return nil, ErrUnauthorized.Wrap("call permission denied")
+	// 5 + 6. CanCall(process.owner, action) and input-schema validation, enforced for every
+	// path (root, step, subcall). The pre-resolved snapshot (req.Action) is validated, so root
+	// calls are checked here too with no extra DB read and no TOCTOU window — Call is the single
+	// validity function; no entry path bypasses it (beginRun runs the same check before funding).
+	if err := k.checkCallPreconditions(process.OwnerUserID, action, req.Args); err != nil {
+		return nil, err
 	}
 
-	// 6. Validate input schema. Skip for root calls: same reason as step 5.
-	if req.ExistingTraceID == "" {
-		if err := ValidateInput(action.InputSchema, req.Args); err != nil {
-			return nil, err
-		}
-	}
-
-	// 7. Funds check (step calls pre-funded by BeginStepCall; ExistingTraceID calls pre-funded by BeginRun).
+	// 7. Funds check (step calls pre-funded by BeginStepCall; ExistingTraceID root calls pre-funded by BeginRun).
 	if req.StepID == "" && req.ExistingTraceID == "" {
 		if parentTrace != nil && parentTrace.Available < action.Price {
 			return nil, ErrInsufficientFunds.Wrapf("parent trace has %d credits, action costs %d", parentTrace.Available, action.Price)
 		}
 	}
 
-	// Kernel must be bootstrapped. Skip for ExistingTraceID calls — beginRun already
-	// verified this, and the signing key cannot change at runtime.
-	if req.ExistingTraceID == "" {
-		if err := k.requireReceiptSigningReady(); err != nil {
-			return nil, err
-		}
+	// Kernel must be bootstrapped (signing key present) to issue receipts.
+	if err := k.requireReceiptSigningReady(); err != nil {
+		return nil, err
 	}
 
 	// 8. Atomically lock funds and create child trace.
@@ -413,6 +402,21 @@ func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
 // CanCall(ownerID, a) := active(a) ∧ (public(a) ∨ ownerID = a.OwnerUserID)
 func canCall(ownerID string, action *Action) bool {
 	return action.Active && (action.Public || ownerID == action.OwnerUserID)
+}
+
+// checkCallPreconditions enforces the §4 semantic call-validity rules (steps 6 and 7) for a
+// resolved action: CanCall by the process owner, and input against the action's schema. It is
+// the single validity function — Call runs it unconditionally for every entry path, and
+// beginRun runs it once before funding so an invalid root call never creates a funded process
+// (a precondition rejection must create no transaction, §6).
+func (k *Kernel) checkCallPreconditions(ownerID string, action *Action, args map[string]any) error {
+	if !canCall(ownerID, action) {
+		if !action.Active {
+			return ErrInvalidState.Wrap("action is inactive")
+		}
+		return ErrUnauthorized.Wrap("call permission denied")
+	}
+	return ValidateInput(action.InputSchema, args)
 }
 
 // execute dispatches to the correct execution backend for HTTP, WASM, and native actions.

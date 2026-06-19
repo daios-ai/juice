@@ -998,13 +998,10 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	if err != nil || action == nil {
 		return nil, ErrNotFound.Wrapf("action %s/%s not found", targetUserID, actionName)
 	}
-	if !canCall(caller.ID, action) {
-		if !action.Active {
-			return nil, ErrInvalidState.Wrap("action is inactive")
-		}
-		return nil, ErrUnauthorized.Wrap("call permission denied")
-	}
-	if err := ValidateInput(action.InputSchema, args); err != nil {
+	// Pre-funding validity gate: Call re-runs checkCallPreconditions authoritatively, but a
+	// rejection must not leave a funded process behind (a rejected call creates no transaction,
+	// §6), so the same check runs here before BeginRun parks funds.
+	if err := k.checkCallPreconditions(caller.ID, action, args); err != nil {
 		return nil, err
 	}
 	if err := k.requireReceiptSigningReady(); err != nil {
@@ -1102,9 +1099,19 @@ func (k *Kernel) EndProcess(ctx context.Context, callerID, processID string) err
 	// When the last trace settles and no steps remain, closeProcessTx auto-closes the process;
 	// in that case store.EndProcess is unnecessary — check before calling to avoid an error.
 	logger := k.log.With(ctx)
+	// Map each running step-completion trace to its step so recoverTrace fails the completion
+	// call with CallerStep semantics (transaction + receipt), mirroring startup Recover.
+	stepByTrace := map[string]string{}
+	if runs, runErr := k.store.ListOrphanRunningStepsForProcess(sctx, processID); runErr == nil {
+		for _, r := range runs {
+			stepByTrace[r.CompletionTraceID] = r.StepID
+		}
+	}
+	// Settle every unsettled trace deepest-first (now including running step-completion traces).
+	// Children settle before parents, so a completion trace's subcalls gain a tx before it settles.
 	if unsettled, listErr := k.store.ListUnsettledTracesForProcess(sctx, processID); listErr == nil {
 		for _, trace := range unsettled {
-			if err := k.recoverTrace(sctx, logger, trace, "process force-closed", ""); err != nil {
+			if err := k.recoverTrace(sctx, logger, trace, "process force-closed", stepByTrace[trace.ID]); err != nil {
 				logger.Error("process.end.settle_failed", "trace_id", trace.ID, "error", err)
 			}
 		}

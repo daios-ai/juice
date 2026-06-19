@@ -13,6 +13,39 @@ import (
 	"github.com/google/uuid"
 )
 
+// TestCallValidatesRootActionSnapshot proves Call is self-validating for the root path:
+// after the root trace is funded, the action is deactivated, and Call must still reject the
+// call via checkCallPreconditions (not trust an upstream gate). Guards against a future entry
+// point inheriting a validation exemption.
+func TestCallValidatesRootActionSnapshot(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice-selfvalidate", 500)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "act",
+		Kind: kernel.KindWasm, Source: "x", Active: true, Price: 10,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	_, tr := beginTestRun(t, st, alice.ID, a)
+
+	// Deactivate the action AFTER the root trace is funded.
+	a.Active = false
+	if err := st.UpdateAction(ctx, a); err != nil {
+		t.Fatalf("UpdateAction: %v", err)
+	}
+
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: alice.ID, ExistingTraceID: tr.ID,
+		TargetUserID: alice.ID, ActionName: "act", Args: map[string]any{},
+	})
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("Call on funded root trace with deactivated action: got %v, want ErrInvalidState", err)
+	}
+}
+
 func TestWasmTimeoutReturnsErrTimeout(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &sleepingFailExec{err: context.DeadlineExceeded})

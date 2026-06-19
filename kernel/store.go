@@ -277,6 +277,9 @@ type Store interface {
 	// with enough detail to decide between re-parking (empty trace) or settling as failed.
 	// HasSettled is true when the completion trace has locked funds or committed subcall transactions.
 	ListOrphanRunningSteps(ctx context.Context) ([]OrphanRunningStep, error)
+	// ListOrphanRunningStepsForProcess is ListOrphanRunningSteps scoped to one process.
+	// Used by EndProcess to fail in-flight step completions as failed calls before closure.
+	ListOrphanRunningStepsForProcess(ctx context.Context, processID string) ([]OrphanRunningStep, error)
 	// ResetRunningSteps sets status=waiting where status=running AND tx_id IS NULL.
 	ResetRunningSteps(ctx context.Context) error
 	// ListOrphanTraces returns traces that have no associated transaction and no idempotency_key,

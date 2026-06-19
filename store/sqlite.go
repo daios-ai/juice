@@ -1266,51 +1266,9 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 		if err != nil {
 			return dbErr(err, "end process: read")
 		}
-		// Handle running steps whose completion traces were excluded from recoverTrace
-		// (Fix A in ListUnsettledTracesForProcess). Drain their traces and cancel them
-		// atomically within this transaction so no funds are stranded.
-		runRows, runErr := tx.QueryContext(ctx,
-			`SELECT st.completion_trace_id, t.available
-			 FROM steps st
-			 JOIN traces pt ON pt.id=st.parent_trace_id
-			 JOIN traces t ON t.id=st.completion_trace_id
-			 WHERE pt.process_id=? AND st.status='running' AND st.tx_id IS NULL
-			   AND st.completion_trace_id IS NOT NULL`,
-			processID)
-		if runErr != nil {
-			return dbErr(runErr, "end process: query running steps")
-		}
-		var runningTotal int64
-		var completionTraceIDs []string
-		for runRows.Next() {
-			var ctid string
-			var avail int64
-			if err2 := runRows.Scan(&ctid, &avail); err2 != nil {
-				runRows.Close()
-				return dbErr(err2, "end process: scan running step")
-			}
-			completionTraceIDs = append(completionTraceIDs, ctid)
-			runningTotal += avail
-		}
-		runRows.Close()
-		for _, ctid := range completionTraceIDs {
-			if _, err2 := tx.ExecContext(ctx,
-				`UPDATE traces SET available=0 WHERE id=?`, ctid); err2 != nil {
-				return dbErr(err2, "end process: drain completion trace")
-			}
-		}
-		if runningTotal > 0 {
-			if _, err2 := tx.ExecContext(ctx,
-				`UPDATE users SET available=available+?, locked=locked-? WHERE id=?`,
-				runningTotal, runningTotal, ownerID); err2 != nil {
-				return dbErr(err2, "end process: return running step funds to owner")
-			}
-		}
-		if _, err2 := tx.ExecContext(ctx,
-			`UPDATE steps SET status='cancelled' WHERE id IN (SELECT s.id FROM steps s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='running' AND s.tx_id IS NULL)`,
-			processID); err2 != nil {
-			return dbErr(err2, "end process: cancel running steps")
-		}
+		// Running step-completion traces are settled as failed calls (transaction + receipt)
+		// by kernel.EndProcess via recoverTrace before this runs, so by now no step is in
+		// the running state. This method only cancels waiting steps and returns funds.
 		// Cancel all waiting steps and collect parked prices to return to owner.
 		var parkedTotal int64
 		if err = tx.QueryRowContext(ctx,
@@ -1696,6 +1654,38 @@ func (s *DB) ListOrphanRunningSteps(ctx context.Context) ([]kernel.OrphanRunning
 	})
 }
 
+// ListOrphanRunningStepsForProcess is ListOrphanRunningSteps scoped to a single process.
+// Used by EndProcess to map each running step-completion trace back to its step so the
+// completion call can be failed (transaction + receipt) rather than drained.
+func (s *DB) ListOrphanRunningStepsForProcess(ctx context.Context, processID string) ([]kernel.OrphanRunningStep, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT st.id, st.completion_trace_id, st.price, st.parent_trace_id,
+		       t.available, t.locked,
+		       CASE WHEN t.locked > 0 OR EXISTS (
+		           WITH RECURSIVE sub(id) AS (
+		               SELECT st.completion_trace_id
+		               UNION ALL
+		               SELECT ch.id FROM traces ch JOIN sub ON ch.parent_trace_id = sub.id
+		           )
+		           SELECT 1 FROM transactions tx WHERE tx.trace_id IN (SELECT id FROM sub)
+		       ) THEN 1 ELSE 0 END AS has_settled
+		FROM steps st
+		JOIN traces t ON t.id = st.completion_trace_id
+		WHERE st.status = 'running' AND st.tx_id IS NULL AND st.completion_trace_id IS NOT NULL
+		  AND t.process_id = ?`, processID)
+	if err != nil {
+		return nil, dbErr(err, "list orphan running steps for process")
+	}
+	return queryList(rows, "list orphan running steps for process", func(scan func(...any) error) (kernel.OrphanRunningStep, error) {
+		var row kernel.OrphanRunningStep
+		var hasSettled int
+		err := scan(&row.StepID, &row.CompletionTraceID, &row.Price, &row.ParentTraceID,
+			&row.TraceAvailable, &row.TraceLocked, &hasSettled)
+		row.HasSettled = hasSettled == 1
+		return row, err
+	})
+}
+
 // ResetStepAndRepark re-parks the step: it moves the completion trace's available funds back into
 // the parent trace's locked position (the original park), deletes the empty completion trace,
 // clears completion_trace_id, and resets the step to waiting. This prevents double-completion minting.
@@ -1882,10 +1872,6 @@ func (s *DB) ListUnsettledTracesForProcess(ctx context.Context, processID string
 		`SELECT `+traceCols+` FROM traces t
 		 WHERE t.process_id=?
 		 AND NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)
-		 AND NOT EXISTS (
-		   SELECT 1 FROM steps st
-		   WHERE st.completion_trace_id=t.id AND st.status='running' AND st.tx_id IS NULL
-		 )
 		 ORDER BY (
 		   WITH RECURSIVE depth(id, d) AS (
 		     SELECT t.id, 0
@@ -1900,10 +1886,6 @@ func (s *DB) ListUnsettledTracesForProcess(ctx context.Context, processID string
 			`SELECT `+traceCols+` FROM traces t
 			 WHERE t.process_id=?
 			 AND NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)
-			 AND NOT EXISTS (
-			   SELECT 1 FROM steps st
-			   WHERE st.completion_trace_id=t.id AND st.status='running' AND st.tx_id IS NULL
-			 )
 			 ORDER BY created_at DESC`, processID)
 		if err != nil {
 			return nil, dbErr(err, "list unsettled traces for process")

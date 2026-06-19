@@ -457,9 +457,12 @@ func TestEndProcessWithLockedFundsForceCloseSucceeds(t *testing.T) {
 }
 
 
-// TestEndProcessWithRunningStep verifies Fix B: EndProcess atomically drains completion
-// traces for running steps, cancels those steps, and returns their funds to the owner.
-func TestEndProcessWithRunningStep(t *testing.T) {
+// TestEndProcessCancelsWaitingStep verifies the store.EndProcess primitive: it cancels
+// waiting steps, returns their parked prices to the owner, and closes the process.
+// Running step-completion traces are settled as failed calls by kernel.EndProcess before
+// this primitive runs (see kernel TestEndProcessFailsRunningStep), so this method only
+// handles waiting steps and remaining available.
+func TestEndProcessCancelsWaitingStep(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -469,8 +472,7 @@ func TestEndProcessWithRunningStep(t *testing.T) {
 	_ = db.CreateUser(ctx, caller)
 
 	p := newProcess(user.ID)
-	// BeginRun: process.locked=50, root trace.available=50.
-	// Step parks all 50 from root, so root.available=0 after BeginStepCall.
+	// BeginRun: user.locked=50, root trace.available=50.
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
 	if err := db.BeginRun(ctx, p, root, user.ID, 50); err != nil {
 		t.Fatal(err)
@@ -481,6 +483,7 @@ func TestEndProcessWithRunningStep(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// CreateStep parks the price from the root trace; the step stays waiting.
 	ptID := root.ID
 	step := &kernel.Step{
 		ID:                   uuid.New().String(),
@@ -495,32 +498,14 @@ func TestEndProcessWithRunningStep(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// BeginStepCall: releases root.locked, creates completion trace with available=50.
-	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginStepCall(ctx, step.ID, ct); err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify pre-conditions.
-	ct1, _ := db.ReadTrace(ctx, ct.ID)
-	if ct1.Available != 50 {
-		t.Fatalf("pre: completion_trace.available=%d, want 50", ct1.Available)
-	}
-
 	if err := db.EndProcess(ctx, p.ID); err != nil {
 		t.Fatalf("EndProcess: %v", err)
 	}
 
-	// Step must be cancelled.
+	// Waiting step must be cancelled (parked price returned).
 	s, _ := db.ReadStep(ctx, step.ID)
 	if s.Status != kernel.StepCancelled {
 		t.Errorf("step.status=%s, want cancelled", s.Status)
-	}
-
-	// Completion trace must be drained.
-	ct2, _ := db.ReadTrace(ctx, ct.ID)
-	if ct2.Available != 0 {
-		t.Errorf("completion_trace.available=%d after EndProcess, want 0", ct2.Available)
 	}
 
 	// Process must be closed with no funds.
@@ -532,7 +517,7 @@ func TestEndProcessWithRunningStep(t *testing.T) {
 		t.Errorf("process funds after close: available=%d locked=%d, want 0/0", proc.Available, proc.Locked)
 	}
 
-	// User must be fully restored: all 100 returned.
+	// User must be fully restored.
 	u, _ := db.ReadUser(ctx, user.ID)
 	if u.Available != 1000 {
 		t.Errorf("user.available=%d, want 1000 (full restoration)", u.Available)

@@ -3,12 +3,21 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
 )
+
+// erroringBox is a SecretBox whose Open always fails, simulating an unreadable auth_json
+// (wrong key, key rotation, corrupted ciphertext).
+type erroringBox struct{}
+
+func (erroringBox) Seal(aad, plaintext string) (string, error)  { return plaintext, nil }
+func (erroringBox) Open(aad, ciphertext string) (string, error) { return "", fmt.Errorf("decrypt failed") }
 
 func TestValidateResolvedIPBlocked(t *testing.T) {
 	blocked := []string{"127.0.0.1", "::1", "192.168.1.1", "10.0.0.1", "172.16.0.1", "169.254.1.1"}
@@ -135,6 +144,70 @@ func TestHTTPActionExecutorInvalidJSON(t *testing.T) {
 	_, err := exec.Execute(context.Background(), &kernel.Action{Source: srv.URL}, map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for non-JSON response")
+	}
+}
+
+// TestHTTPActionAuthDecryptFailsClosed: undecryptable auth_json must abort with
+// ErrInvalidState and make no upstream request (fail closed, not unauthenticated).
+func TestHTTPActionAuthDecryptFailsClosed(t *testing.T) {
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer srv.Close()
+
+	exec := &httpActionExecutor{secretBox: erroringBox{}}
+	_, err := exec.Execute(context.Background(),
+		&kernel.Action{Source: srv.URL, AuthJSON: "unreadable-ciphertext"}, map[string]any{})
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("got %v, want ErrInvalidState", err)
+	}
+	if hit {
+		t.Error("upstream request was made despite unusable credentials (must fail closed)")
+	}
+}
+
+// TestHTTPActionAuthParseFailsClosed: malformed plaintext auth_json (no SecretBox) must
+// abort with ErrInvalidState before any upstream request.
+func TestHTTPActionAuthParseFailsClosed(t *testing.T) {
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer srv.Close()
+
+	exec := &httpActionExecutor{} // box nil → auth_json treated as plaintext
+	_, err := exec.Execute(context.Background(),
+		&kernel.Action{Source: srv.URL, AuthJSON: "{not valid json"}, map[string]any{})
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("got %v, want ErrInvalidState", err)
+	}
+	if hit {
+		t.Error("upstream request was made despite unparseable credentials (must fail closed)")
+	}
+}
+
+// TestHTTPActionValidAuthApplied: a valid bearer auth_json is applied to the request.
+func TestHTTPActionValidAuthApplied(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer srv.Close()
+
+	auth := kernel.AuthInput{Scheme: "bearer", Secrets: map[string]any{"token": "s3cret"}}
+	authJSON, _ := json.Marshal(auth)
+	exec := &httpActionExecutor{} // box nil → plaintext auth_json
+	_, err := exec.Execute(context.Background(),
+		&kernel.Action{Source: srv.URL, AuthJSON: string(authJSON)}, map[string]any{})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if gotAuth != "Bearer s3cret" {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer s3cret")
 	}
 }
 

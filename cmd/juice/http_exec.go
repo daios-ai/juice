@@ -81,23 +81,26 @@ func (b *aesGCMBox) Open(aad, ciphertext string) (string, error) {
 // applyUpstreamAuth reads the decrypted auth JSON from action and applies it to headers/URL.
 // headers must be non-nil; rawURL is modified in-place for "query" scheme.
 // When box is nil, auth_json is treated as plaintext (dev/test mode with no encryption).
-func applyUpstreamAuth(action *kernel.Action, headers map[string]string, rawURL *string, box kernel.SecretBox) {
+// Returns nil when no auth is configured (empty auth_json) or auth applied successfully.
+// Fails closed: if configured credentials cannot be decrypted or parsed, the action is not
+// executable as registered, so it returns an error instead of proceeding unauthenticated.
+func applyUpstreamAuth(action *kernel.Action, headers map[string]string, rawURL *string, box kernel.SecretBox) error {
 	if action.AuthJSON == "" {
-		return
+		return nil
 	}
 	var plaintext string
 	if box != nil {
 		var err error
 		plaintext, err = box.Open(action.ID, action.AuthJSON)
 		if err != nil {
-			return // fail closed: no auth applied, call will proceed unauthenticated
+			return kernel.ErrInvalidState.Wrap("upstream auth credentials could not be decrypted")
 		}
 	} else {
 		plaintext = action.AuthJSON // stored as plaintext when no SecretBox configured
 	}
 	var auth kernel.AuthInput
 	if err := json.Unmarshal([]byte(plaintext), &auth); err != nil {
-		return
+		return kernel.ErrInvalidState.Wrap("upstream auth credentials could not be parsed")
 	}
 	switch auth.Scheme {
 	case "header":
@@ -126,6 +129,7 @@ func applyUpstreamAuth(action *kernel.Action, headers map[string]string, rawURL 
 		pass, _ := auth.Secrets["password"].(string)
 		headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 	}
+	return nil
 }
 
 func sha256HexBytes(b []byte) string {
@@ -305,7 +309,9 @@ func (e *httpActionExecutor) Execute(ctx context.Context, action *kernel.Action,
 	}
 	rawURL := action.Source
 	headers := map[string]string{"Content-Type": "application/json"}
-	applyUpstreamAuth(action, headers, &rawURL, e.secretBox)
+	if err := applyUpstreamAuth(action, headers, &rawURL, e.secretBox); err != nil {
+		return nil, err
+	}
 	respBody, status, err := doHTTP(ctx, http.MethodPost, rawURL, headers, strings.NewReader(string(body)), e.timeout, e.allowLocal)
 	if err != nil {
 		return nil, err
@@ -400,7 +406,9 @@ func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, action *kernel.
 		reqBody = strings.NewReader(string(b))
 		headers["Content-Type"] = "application/json"
 	}
-	applyUpstreamAuth(action, headers, &rawURL, e.secretBox)
+	if err := applyUpstreamAuth(action, headers, &rawURL, e.secretBox); err != nil {
+		return nil, err
+	}
 
 	respBody, status, err := doHTTP(ctx, method, rawURL, headers, reqBody, e.timeout, e.allowLocal)
 	if err != nil {
