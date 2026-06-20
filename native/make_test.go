@@ -512,7 +512,7 @@ func TestMakeInternalChatCallCreatesChildTrace(t *testing.T) {
 
 // TestMakeNameCollisionReturnsFailure verifies that a name collision returns status="failure"
 // with a single attempt — no alternate-name retry (per §9).
-func TestMakeNameCollisionReturnsFailure(t *testing.T) {
+func TestMakeNameCollisionBumpsSuffix(t *testing.T) {
 	fakeChat := &cycleFakeChatter{responses: []string{fakeContract, fakeCode, fakeExamples}}
 	decider := &cycleDecideChatter{calls: []*kernel.ToolCall{chatSelectCall()}}
 	k, st := newMakeKernel(t, fakeChat, decider)
@@ -535,8 +535,11 @@ func TestMakeNameCollisionReturnsFailure(t *testing.T) {
 	if r1.Status != "success" {
 		t.Fatalf("first Call: expected success, got %q (diagnostics: %v)", r1.Status, r1.Diagnostics)
 	}
+	if r1.ActionName != "test-action" {
+		t.Fatalf("first Call: expected name %q, got %q", "test-action", r1.ActionName)
+	}
 
-	// Reset so second call derives the same contract name → collision.
+	// Reset so second call derives the same contract name → collision → suffix bump.
 	fakeChat.idx = 0
 	decider.idx = 0
 
@@ -551,19 +554,18 @@ func TestMakeNameCollisionReturnsFailure(t *testing.T) {
 	var r2 native.MakeResult
 	b2, _ := json.Marshal(reply2.Result)
 	_ = json.Unmarshal(b2, &r2)
-	if r2.Status != "failure" {
-		t.Errorf("expected status=failure on name collision (no alternate-name retry), got %q (name: %q)", r2.Status, r2.ActionName)
+	if r2.Status != "success" {
+		t.Errorf("expected status=success with bumped name, got %q (diagnostics: %v)", r2.Status, r2.Diagnostics)
 	}
-	hasCollisionDiag := false
-	for _, d := range r2.Diagnostics {
-		l := strings.ToLower(d)
-		if strings.Contains(l, "registration") || strings.Contains(l, "unique") || strings.Contains(l, "already") {
-			hasCollisionDiag = true
-			break
-		}
+	if r2.ActionName != "test-action-2" {
+		t.Errorf("expected bumped name %q, got %q", "test-action-2", r2.ActionName)
 	}
-	if !hasCollisionDiag {
-		t.Errorf("expected registration/collision diagnostic, got %v", r2.Diagnostics)
+	// Both actions are registered, active, and distinct.
+	if r2.ActionID == r1.ActionID || r2.ActionID == "" {
+		t.Errorf("expected a distinct second action id, got r1=%q r2=%q", r1.ActionID, r2.ActionID)
+	}
+	if a2, err := st.ReadActionByOwnerName(ctx, caller.ID, "test-action-2"); err != nil || a2 == nil || !a2.Active {
+		t.Errorf("expected active @alice/test-action-2 registered; err=%v a2=%v", err, a2)
 	}
 }
 

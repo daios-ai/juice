@@ -148,9 +148,22 @@ func executeMake(ctx context.Context, args map[string]any, targetID, callerID, o
 		if allPassed {
 			inSchema := sanitizeSchemaForRegistration(contract.InputSchema)
 			outSchema := sanitizeSchemaForRegistration(contract.OutputSchema)
+			// Resolve a free action name: if contract.Name is taken by a live action,
+			// bump a numeric suffix (name, name-2, …, name-100) and register under the
+			// first free one — a name collision must not throw away a good synthesis.
+			// Mirrors proxy-handle allocation (CreateOrUpdateProxyPeer). Soft-deleted
+			// actions don't count: the unique index and ReadActionByOwnerName both scope
+			// to deleted_at IS NULL.
+			name := contract.Name
+			for suffix := 2; suffix <= 100; suffix++ {
+				if existing, _ := k.ReadActionByOwnerName(ctx, callerID, name); existing == nil {
+					break
+				}
+				name = fmt.Sprintf("%s-%d", contract.Name, suffix)
+			}
 			action, createErr := k.CreateAction(ctx, callerID, kernel.CreateActionRequest{
 				OwnerUserID:  callerID,
-				Name:         contract.Name,
+				Name:         name,
 				Kind:         kernel.KindWasm,
 				Price:        price,
 				Description:  contract.Description,
