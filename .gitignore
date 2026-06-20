@@ -26,6 +26,9 @@ juice.json
 # Scratch / archive
 /.old/
 
+# agent.py synthesized-action output (generated TinyGo source + WASM artifacts)
+/.agent_build/
+
 # Claude Code
 .claude/
 
