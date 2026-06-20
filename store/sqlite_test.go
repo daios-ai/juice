@@ -120,12 +120,15 @@ func TestUserCRUD(t *testing.T) {
 		t.Errorf("handle: got %q, want %q", got.Handle, u.Handle)
 	}
 
-	got2, err := db.ReadUserByHandle(ctx, "@alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got2.ID != u.ID {
-		t.Errorf("id via handle: got %q, want %q", got2.ID, u.ID)
+	// ReadUserByHandle canonicalizes its argument, so both "@alice" and "alice" resolve.
+	for _, h := range []string{"@alice", "alice"} {
+		got2, err := db.ReadUserByHandle(ctx, h)
+		if err != nil {
+			t.Fatalf("ReadUserByHandle(%q): %v", h, err)
+		}
+		if got2.ID != u.ID {
+			t.Errorf("id via handle %q: got %q, want %q", h, got2.ID, u.ID)
+		}
 	}
 
 	_, err = db.ReadUser(ctx, "nonexistent")

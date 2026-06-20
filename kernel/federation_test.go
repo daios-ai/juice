@@ -86,6 +86,29 @@ func TestCreateOrUpdateProxyPeerHandleConflict(t *testing.T) {
 	}
 }
 
+func TestCreateOrUpdateProxyPeerNormalizesHandle(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	setupSys(t, k, st)
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	key := base64.RawURLEncoding.EncodeToString(pub)
+
+	// Peer self-reports a handle without "@": the local alias is canonicalized.
+	u, err := k.CreateOrUpdateProxyPeer(ctx, "peerless", key, "https://d.example.com")
+	if err != nil {
+		t.Fatalf("create proxy: %v", err)
+	}
+	if u.Handle != "@peerless" {
+		t.Fatalf("want @peerless, got %s", u.Handle)
+	}
+	got, err := k.ReadUserByHandle(ctx, "peerless")
+	if err != nil || got == nil || got.ID != u.ID {
+		t.Errorf("ReadUserByHandle(peerless): got %v err %v, want id %s", got, err, u.ID)
+	}
+}
+
 // ---- Remote proxy / manifest tests ----
 
 func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {

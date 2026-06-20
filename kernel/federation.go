@@ -425,6 +425,9 @@ func (k *Kernel) CreateOrUpdateProxyPeer(ctx context.Context, handle, publicKey,
 	if publicKey == "" || baseURL == "" {
 		return nil, ErrInvalidInput.Wrap("handle, public_key, and base_url are required")
 	}
+	// Canonicalize the local proxy alias only; the manifest owner_handle and signature
+	// inputs are never rewritten (they must match what the remote kernel signed).
+	handle = NormalizeHandle(handle)
 	if err := validateHandle(handle); err != nil {
 		return nil, err
 	}

@@ -551,10 +551,7 @@ func peerUnfriendCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
-				handle := args[0]
-				if !strings.HasPrefix(handle, "@") {
-					handle = "@" + handle
-				}
+				handle := kernel.NormalizeHandle(args[0])
 				if err := k.DenyPeer(context.Background(), subjectID, handle); err != nil {
 					return err
 				}

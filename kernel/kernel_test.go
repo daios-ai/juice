@@ -470,6 +470,55 @@ func TestCreateUser(t *testing.T) {
 	}
 }
 
+func TestNormalizeHandle(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"bob", "@bob"},
+		{"@bob", "@bob"},
+		{"  carol  ", "@carol"},
+		{" @dave ", "@dave"},
+		{"", ""},
+		{"@", "@"},
+	}
+	for _, c := range cases {
+		if got := kernel.NormalizeHandle(c.in); got != c.want {
+			t.Errorf("NormalizeHandle(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestCreateUserNormalizesHandle(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	// Created without a leading "@": stored canonically as "@carol".
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "carol", Email: "carol@example.com", Password: "secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Handle != "@carol" {
+		t.Errorf("stored handle = %q, want %q", u.Handle, "@carol")
+	}
+	// Both forms resolve to the same user.
+	for _, h := range []string{"carol", "@carol"} {
+		got, err := k.ReadUserByHandle(ctx, h)
+		if err != nil || got == nil || got.ID != u.ID {
+			t.Errorf("ReadUserByHandle(%q): got %v err %v, want id %s", h, got, err, u.ID)
+		}
+	}
+
+	// A bare "@" and an empty handle are rejected.
+	for _, bad := range []string{"@", "  ", ""} {
+		if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{
+			Handle: bad, Email: "x@example.com", Password: "secret",
+		}); err == nil {
+			t.Errorf("CreateUser(handle=%q) should be rejected", bad)
+		}
+	}
+}
+
 func TestLogin(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)

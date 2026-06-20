@@ -60,6 +60,15 @@ func TestResolveActionRef(t *testing.T) {
 		t.Errorf("by @owner/name: got ID %q, want %q", got.ID, actID)
 	}
 
+	// Resolve by owner/name without the leading "@".
+	got1b, err := resolveActionRef(k, ctx, "svc-alice/svc-greet")
+	if err != nil {
+		t.Fatalf("resolveActionRef(svc-alice/svc-greet): %v", err)
+	}
+	if got1b.ID != actID {
+		t.Errorf("by owner/name (no @): got ID %q, want %q", got1b.ID, actID)
+	}
+
 	// Resolve by raw action ID.
 	got2, err := resolveActionRef(k, ctx, actID)
 	if err != nil {

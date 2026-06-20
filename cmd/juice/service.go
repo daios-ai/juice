@@ -60,15 +60,17 @@ func userView(u *kernel.User) map[string]any {
 // resolveHandle resolves a handle string to a *kernel.User.
 // Accepts handle with or without the leading "@".
 func resolveHandle(k *kernel.Kernel, ctx context.Context, handle string) (*kernel.User, error) {
-	if !strings.HasPrefix(handle, "@") {
-		handle = "@" + handle
-	}
-	return k.ReadUserByHandle(ctx, handle)
+	return k.ReadUserByHandle(ctx, kernel.NormalizeHandle(handle))
 }
 
-// resolveActionRef resolves "@owner/name" or a raw action ID to a *kernel.Action.
+// resolveActionRef resolves "owner/name" (with or without a leading "@") or a raw action
+// ID to a *kernel.Action. Raw action IDs are UUIDs and contain no "/", so any ref with a
+// "/" is an action reference whose owner handle is canonicalized before lookup.
 func resolveActionRef(k *kernel.Kernel, ctx context.Context, ref string) (*kernel.Action, error) {
-	if strings.HasPrefix(ref, "@") {
+	if strings.Contains(ref, "/") {
+		if !strings.HasPrefix(ref, "@") {
+			ref = "@" + ref
+		}
 		ownerHandle, actionName, err := kernel.ParseActionRef(ref)
 		if err != nil {
 			return nil, err

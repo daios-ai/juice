@@ -751,8 +751,9 @@ func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("partial_args is required"))
 		return
 	}
-	if !strings.HasPrefix(req.RequiredCaller, "@") {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("required_caller must be @handle"))
+	req.RequiredCaller = kernel.NormalizeHandle(req.RequiredCaller)
+	if req.RequiredCaller == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("required_caller is required"))
 		return
 	}
 	view, err := createStep(s.kernel, r.Context(), callerFrom(r), createStepParams{

@@ -167,10 +167,22 @@ type CreateUserRequest struct {
 	Password string
 }
 
-// validateHandle rejects empty handles and handles containing /, enforcing the
-// invariant that @owner/name references are unambiguous (handles ≡ hostnames, no /).
+// NormalizeHandle canonicalizes a user handle to start with "@". It trims surrounding
+// whitespace and prepends "@" when missing, so "bob" and "@bob" denote the same user.
+// Idempotent; leaves "" untouched (validateHandle rejects it).
+func NormalizeHandle(h string) string {
+	h = strings.TrimSpace(h)
+	if h == "" || strings.HasPrefix(h, "@") {
+		return h
+	}
+	return "@" + h
+}
+
+// validateHandle rejects empty handles, a bare "@", and handles containing /, enforcing
+// the invariant that @owner/name references are unambiguous (handles ≡ hostnames, no /).
+// Callers normalize with NormalizeHandle first, so a valid handle is "@" followed by ≥1 char.
 func validateHandle(handle string) error {
-	if handle == "" {
+	if handle == "" || handle == "@" {
 		return ErrInvalidInput.Wrap("handle is required")
 	}
 	if strings.Contains(handle, "/") {
@@ -183,6 +195,7 @@ func validateHandle(handle string) error {
 func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*User, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
+	req.Handle = NormalizeHandle(req.Handle)
 	logger.Info("user.create.start", "handle", req.Handle)
 	if err := validateHandle(req.Handle); err != nil {
 		return nil, err

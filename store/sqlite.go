@@ -250,6 +250,9 @@ func (s *DB) ReadUser(ctx context.Context, id string) (*kernel.User, error) {
 }
 
 func (s *DB) ReadUserByHandle(ctx context.Context, handle string) (*kernel.User, error) {
+	// Canonicalize at the single read funnel so "x" and "@x" resolve to the same row,
+	// regardless of caller (login, federation, CLI, HTTP all reach here).
+	handle = kernel.NormalizeHandle(handle)
 	return s.scanUser(s.db.QueryRowContext(ctx,
 		`SELECT `+userCols+` FROM users WHERE handle=?`, handle))
 }
