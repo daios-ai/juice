@@ -349,11 +349,11 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 	{
 		name:        "web",
 		price:       cfg.Web.Price,
-		description: "Fetch a public web page (read-only HTTP GET); returns status, body, and content type",
+		description: "Fetch a public web page (read-only HTTP GET); returns status, body, content type, and final URL",
 		inputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"url": map[string]any{"type": "string", "description": "Public http(s) URL to fetch"},
+				"url": map[string]any{"type": "string", "description": "Public URL to fetch; a scheme-less URL defaults to https"},
 			},
 			"required": []string{"url"},
 		},
@@ -363,6 +363,7 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 				"status":       map[string]any{"type": "integer", "description": "HTTP response status code"},
 				"body":         map[string]any{"type": "string", "description": "Response body"},
 				"content_type": map[string]any{"type": "string", "description": "Response Content-Type header"},
+				"final_url":    map[string]any{"type": "string", "description": "Final URL fetched, after scheme defaulting and redirects"},
 			},
 		},
 	},

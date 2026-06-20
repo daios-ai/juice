@@ -331,31 +331,51 @@ func (e *httpActionExecutor) FetchURL(ctx context.Context, rawURL string) ([]byt
 }
 
 // fetchWeb performs a read-only GET for the @sys/web native action, returning the
-// HTTP status, body, and Content-Type. It reuses the SSRF dial guard in
-// newHTTPClient (loopback/RFC 1918/link-local rejected unless allowLocal) and sets
-// the configured User-Agent. Non-2xx responses are returned with their status, not
-// raised as errors, so callers and crawlers can react to them. Enforces a 10 MiB cap.
-func (e *httpActionExecutor) fetchWeb(ctx context.Context, rawURL, userAgent string) (int, []byte, string, error) {
+// HTTP status, body, Content-Type, and the final URL fetched (after scheme
+// resolution and redirects). A scheme-less URL is defaulted to https (HTTPS-first,
+// like a browser); an explicit http/https scheme is respected as-is and never
+// downgraded. It reuses the SSRF dial guard in newHTTPClient (loopback/RFC 1918/
+// link-local rejected unless allowLocal) and sets the configured User-Agent. Non-2xx
+// responses are returned with their status, not raised as errors, so callers and
+// crawlers can react to them. Enforces a 10 MiB cap.
+func (e *httpActionExecutor) fetchWeb(ctx context.Context, rawURL, userAgent string) (int, []byte, string, string, error) {
+	rawURL = defaultScheme(rawURL)
 	if err := validatePublicURL(rawURL, e.allowLocal); err != nil {
-		return 0, nil, "", err
+		return 0, nil, "", "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return 0, nil, "", kernel.ErrInvalidInput.Wrapf("invalid URL: %v", err)
+		return 0, nil, "", "", kernel.ErrInvalidInput.Wrapf("invalid URL: %v", err)
 	}
 	if userAgent != "" {
 		req.Header.Set("User-Agent", userAgent)
 	}
 	resp, err := newHTTPClient(e.timeout, e.allowLocal).Do(req)
 	if err != nil {
-		return 0, nil, "", kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
+		return 0, nil, "", "", kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
-		return resp.StatusCode, nil, "", kernel.ErrExecutionFailed.Wrap("could not read response body")
+		return resp.StatusCode, nil, "", "", kernel.ErrExecutionFailed.Wrap("could not read response body")
 	}
-	return resp.StatusCode, body, resp.Header.Get("Content-Type"), nil
+	finalURL := rawURL
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String() // reflects any redirects followed
+	}
+	return resp.StatusCode, body, resp.Header.Get("Content-Type"), finalURL, nil
+}
+
+// defaultScheme prepends https:// to a scheme-less URL (HTTPS-first, like a browser).
+// A URL that already carries a scheme (contains "://") is returned unchanged, so an
+// explicit http:// is respected and never silently upgraded. A protocol-relative
+// "//host" form is upgraded to https. Whitespace is trimmed first.
+func defaultScheme(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" || strings.Contains(rawURL, "://") {
+		return rawURL
+	}
+	return "https://" + strings.TrimPrefix(rawURL, "//")
 }
 
 // Execute fires a kind=http action. The source is the canonical HTTPSource JSON

@@ -425,7 +425,7 @@ func TestFetchWebSuccess(t *testing.T) {
 
 	// allowLocal=true so the httptest loopback server is reachable.
 	exec := &httpActionExecutor{allowLocal: true}
-	status, body, ct, err := exec.fetchWeb(context.Background(), srv.URL, "test-agent/1.0")
+	status, body, ct, finalURL, err := exec.fetchWeb(context.Background(), srv.URL, "test-agent/1.0")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -438,6 +438,9 @@ func TestFetchWebSuccess(t *testing.T) {
 	if ct != "text/html; charset=utf-8" {
 		t.Errorf("content_type = %q", ct)
 	}
+	if finalURL != srv.URL {
+		t.Errorf("final_url = %q, want %q", finalURL, srv.URL)
+	}
 }
 
 func TestFetchWebReturnsNon2xxStatus(t *testing.T) {
@@ -448,7 +451,7 @@ func TestFetchWebReturnsNon2xxStatus(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{allowLocal: true}
-	status, body, _, err := exec.fetchWeb(context.Background(), srv.URL, "")
+	status, body, _, _, err := exec.fetchWeb(context.Background(), srv.URL, "")
 	if err != nil {
 		t.Fatalf("non-2xx must not error, got %v", err)
 	}
@@ -463,7 +466,7 @@ func TestFetchWebReturnsNon2xxStatus(t *testing.T) {
 func TestFetchWebRejectsLoopbackWhenLocalDisallowed(t *testing.T) {
 	// allowLocal defaults to false: a literal loopback IP must be rejected at parse time.
 	exec := &httpActionExecutor{}
-	_, _, _, err := exec.fetchWeb(context.Background(), "http://127.0.0.1:11434/", "")
+	_, _, _, _, err := exec.fetchWeb(context.Background(), "http://127.0.0.1:11434/", "")
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("got %v, want ErrInvalidInput", err)
 	}
@@ -471,8 +474,38 @@ func TestFetchWebRejectsLoopbackWhenLocalDisallowed(t *testing.T) {
 
 func TestFetchWebRejectsNonHTTPScheme(t *testing.T) {
 	exec := &httpActionExecutor{allowLocal: true}
-	_, _, _, err := exec.fetchWeb(context.Background(), "file:///etc/passwd", "")
+	_, _, _, _, err := exec.fetchWeb(context.Background(), "file:///etc/passwd", "")
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("got %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestFetchWebSchemelessDefaultsToHTTPS(t *testing.T) {
+	// A scheme-less URL is upgraded to https before the SSRF guard runs. Pointing it
+	// at a loopback host with allowLocal=false proves the https:// prefix was applied:
+	// the guard rejects the resolved private address rather than failing to parse.
+	exec := &httpActionExecutor{}
+	_, _, _, _, err := exec.fetchWeb(context.Background(), "127.0.0.1:11434/path", "")
+	if !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Fatalf("got %v, want ErrInvalidInput (guard on https-upgraded loopback)", err)
+	}
+}
+
+func TestDefaultScheme(t *testing.T) {
+	cases := map[string]string{
+		"example.com":          "https://example.com",
+		"example.com/wiki/X":   "https://example.com/wiki/X",
+		"en.wikipedia.org:443": "https://en.wikipedia.org:443",
+		"//example.com":        "https://example.com",
+		"http://example.com":   "http://example.com",  // explicit http respected, not upgraded
+		"https://example.com":  "https://example.com", // unchanged
+		"ftp://example.com":    "ftp://example.com",   // scheme present; rejected later by validatePublicURL
+		"  example.com  ":      "https://example.com", // trimmed
+		"":                     "",
+	}
+	for in, want := range cases {
+		if got := defaultScheme(in); got != want {
+			t.Errorf("defaultScheme(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
