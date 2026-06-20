@@ -347,6 +347,26 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 		}},
 	},
 	{
+		name:        "web",
+		price:       cfg.Web.Price,
+		description: "Fetch a public web page (read-only HTTP GET); returns status, body, and content type",
+		inputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"url": map[string]any{"type": "string", "description": "Public http(s) URL to fetch"},
+			},
+			"required": []string{"url"},
+		},
+		outputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"status":       map[string]any{"type": "integer", "description": "HTTP response status code"},
+				"body":         map[string]any{"type": "string", "description": "Response body"},
+				"content_type": map[string]any{"type": "string", "description": "Response Content-Type header"},
+			},
+		},
+	},
+	{
 		name:        "message",
 		price:       cfg.Message.Price,
 		description: "Sends a message to another platform user and creates a Step they must acknowledge",

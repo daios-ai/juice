@@ -209,6 +209,12 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, error) {
 	native.RegisterSinkHandler(k)
 	native.RegisterMessageHandler(k)
 	native.RegisterRandomHandler(k)
+	webUA := globalCfg.Native.Web.UserAgent
+	native.RegisterWebHandler(k, native.WebDeps{
+		Fetch: func(ctx context.Context, url string) (int, []byte, string, error) {
+			return httpExec.fetchWeb(ctx, url, webUA)
+		},
+	})
 	native.RegisterTinyGoCompileHandler(k, native.CompileDeps{Compiler: compiler, Scripts: exec}, script.TinyGoSDK)
 
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).

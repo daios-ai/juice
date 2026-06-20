@@ -52,6 +52,12 @@ type NativeTinyGoConfig struct {
 	Price int64 `json:"price"`
 }
 
+// NativeWebConfig holds configuration for the @sys/web native action.
+type NativeWebConfig struct {
+	Price     int64  `json:"price"`
+	UserAgent string `json:"user_agent"`
+}
+
 // NativeConfig holds per-action configuration for all native actions.
 type NativeConfig struct {
 	LLM     NativeLLMConfig     `json:"llm"`
@@ -61,6 +67,7 @@ type NativeConfig struct {
 	Sink    NativeSinkConfig    `json:"sink"`
 	Message NativeMessageConfig `json:"message"`
 	Random  NativeRandomConfig  `json:"random"`
+	Web     NativeWebConfig     `json:"web"`
 	TinyGo  NativeTinyGoConfig  `json:"tinygo"`
 }
 
@@ -98,6 +105,7 @@ func DefaultServerConfig() ServerConfig {
 			Sink:    NativeSinkConfig{Price: 0},
 			Message: NativeMessageConfig{Price: 0},
 			Random:  NativeRandomConfig{Price: 0},
+			Web:     NativeWebConfig{Price: 0, UserAgent: "juice-kernel/0.4 (+https://github.com/daios-ai/juice)"},
 			TinyGo:  NativeTinyGoConfig{Price: 5},
 		},
 		ScriptTimeoutMS:   10000,

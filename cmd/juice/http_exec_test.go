@@ -411,3 +411,68 @@ func TestExecuteHTTPInvalidSource(t *testing.T) {
 		t.Fatalf("got %v, want ErrInvalidState", err)
 	}
 }
+
+func TestFetchWebSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != "test-agent/1.0" {
+			t.Errorf("User-Agent = %q, want test-agent/1.0", got)
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "<html>ok</html>")
+	}))
+	defer srv.Close()
+
+	// allowLocal=true so the httptest loopback server is reachable.
+	exec := &httpActionExecutor{allowLocal: true}
+	status, body, ct, err := exec.fetchWeb(context.Background(), srv.URL, "test-agent/1.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if string(body) != "<html>ok</html>" {
+		t.Errorf("body = %q", string(body))
+	}
+	if ct != "text/html; charset=utf-8" {
+		t.Errorf("content_type = %q", ct)
+	}
+}
+
+func TestFetchWebReturnsNon2xxStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, "nope")
+	}))
+	defer srv.Close()
+
+	exec := &httpActionExecutor{allowLocal: true}
+	status, body, _, err := exec.fetchWeb(context.Background(), srv.URL, "")
+	if err != nil {
+		t.Fatalf("non-2xx must not error, got %v", err)
+	}
+	if status != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", status)
+	}
+	if string(body) != "nope" {
+		t.Errorf("body = %q", string(body))
+	}
+}
+
+func TestFetchWebRejectsLoopbackWhenLocalDisallowed(t *testing.T) {
+	// allowLocal defaults to false: a literal loopback IP must be rejected at parse time.
+	exec := &httpActionExecutor{}
+	_, _, _, err := exec.fetchWeb(context.Background(), "http://127.0.0.1:11434/", "")
+	if !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Fatalf("got %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestFetchWebRejectsNonHTTPScheme(t *testing.T) {
+	exec := &httpActionExecutor{allowLocal: true}
+	_, _, _, err := exec.fetchWeb(context.Background(), "file:///etc/passwd", "")
+	if !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Fatalf("got %v, want ErrInvalidInput", err)
+	}
+}

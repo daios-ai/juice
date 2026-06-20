@@ -180,6 +180,7 @@ Native actions registered at bootstrap, owned by `@sys`, public, runnable like a
 | `@sys/sink` | 0 | Universal no-op step target |
 | `@sys/message` | 0 | Message a user by creating a step they acknowledge |
 | `@sys/random` | 0 | Random float in `[0, 1)` |
+| `@sys/web` | 0 | Fetch a public web page (read-only GET) |
 
 ### Federation (HTTP-only protocol surface)
 

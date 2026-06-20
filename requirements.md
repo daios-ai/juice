@@ -337,7 +337,7 @@ The proxy's local `price` is `manifest.price` plus the worst-case import duty: `
 
 ## 9. Adapters, native actions, and stats
 
-WASM uses wazero. Scripts receive no ambient filesystem, network, environment, process access, or raw user tokens. They receive only explicit host functions, each execution having memory limit, timeout, deterministic context cancellation, and artifact-hash compiled-module cache. Store source and artifact; authorized users may inspect source; activation should precompile; compilation failures are typed.
+WASM uses wazero. Scripts receive no ambient filesystem, network, environment, process access, or raw user tokens. They receive only explicit host functions, each execution having memory limit, timeout, deterministic context cancellation, and artifact-hash compiled-module cache. The network is reachable only mediated, never ambient: a script holds no sockets and reaches the web solely by calling the read-only, SSRF-restricted `@sys/web` action (or a provider's pinned `kind=http` action) through `Call()`, charged like any other call. Store source and artifact; authorized users may inspect source; activation should precompile; compilation failures are typed.
 
 Host surface:
 
@@ -372,6 +372,7 @@ Native actions are standard actions shipped alongside the kernel as a platform s
 | `@sys/sink`     | Public; action owner `@sys`; price 0 (configurable, `native.sink`, §14); callable through `Call()`. Accepts any input, returns `{}`. Universal no-op sink for steps that require an onward action but no further computation. |
 | `@sys/message`  | Public; action owner `@sys`; price 0 (configurable, `native.message`, §14); callable through `Call()`. Sends a message to another platform user by creating a Step they must acknowledge. Input: required `to` (`@handle` of recipient), required `message`. Output: `step_id`. The Step sets `required_caller_user_id` to the resolved target user and `partial_args` to `{"message":"..."}` so the recipient can read it via `step list`. Uses `@sys/sink` as the step's `action`. `ErrInvalidInput` if `to` cannot be resolved. |
 | `@sys/random`   | Public; action owner `@sys`; price 0 (configurable, `native.random`, §14); callable through `Call()`. No input required. Output: `value` (float in `[0, 1)`). Exists to provide randomness to WASM scripts, which have no ambient access to the OS random source. |
+| `@sys/web`      | Public; action owner `@sys`; price 0 (configurable, `native.web`, §14); callable through `Call()`. Read-only fetch of a public web page. Input: required `url` (string). Output: `status` (HTTP status integer), `body` (response body string), `content_type` (response `Content-Type` string). GET only; no caller-supplied headers or auth, so nothing sensitive enters args/receipts/logs. A fixed, configurable descriptive `User-Agent` is set by the action itself. Same SSRF discipline as `kind=http` (§7): loopback, RFC 1918 private, and link-local `169.254.x.x` hosts are rejected with `ErrInvalidInput` unless `allow_local_sources` is set. Non-2xx statuses are returned in `status`, not raised as errors, so crawlers can react to them; 10 MiB response cap. `ErrInvalidInput` for empty `url`; `ErrInvalidState` if the fetcher is unconfigured; `ErrExecutionFailed` on transport failure. The mediated path by which WASM scripts read the network: scripts still receive no ambient sockets — they reach the web only by calling this action through `Call()`, charged and SSRF-restricted to public hosts (§9). |
 | `@sys/tinygo/compile` | Public; action owner `@sys`; price 5 (configurable, `native.tinygo`, §14); callable through `Call()`. Compiles author-supplied TinyGo to a WASM artifact using the platform TinyGo compiler, prepending the Juice WASM SDK so the author writes only `func Handle(in map[string]any) (map[string]any, error)` (the SDK owns `package`, imports, `alloc`, `run`, `main`). Input: required `source`. Output: `status` (`success`/`failure`), `artifact` (base64 WASM, on success), `artifact_hash` (SHA-256 hex, on success), `diagnostics` (array). Empty `source` gives `ErrInvalidInput`; an unavailable compiler toolchain gives `ErrInvalidState` (platform misconfiguration — the call fails and is not charged). Author compile errors and import/export-validation failures use output failure status, not kernel errors (so the attempt is charged), mirroring `@sys/make`. Registration is separate supervision: pass the returned artifact to `action create --kind wasm --artifact` (§14). |
 
 Stats use:
@@ -556,7 +557,7 @@ config.jwt_secret          = 32 random bytes, hex
 
 Private signing key and JWT secret are never logged or returned. Partial first boot is rerunnable. `JUICE_SECRET_KEY` overrides stored JWT secret at runtime only.
 
-Every startup reads `config.superuser_handle` to confirm first boot and identify `@sys`; it verifies signing keys and aborts if either is absent. It then registers, enables, and makes public `@sys/lookup`, `@sys/llm/chat`, `@sys/llm/embed`, `@sys/llm/json`, `@sys/llm/decide`, `@sys/make`, `@sys/time`, `@sys/sink`, `@sys/message`, `@sys/random`, and `@sys/tinygo/compile` if absent, and reconciles their configurable fields (price and action-specific settings) from config on every startup. It then runs recovery (§5).
+Every startup reads `config.superuser_handle` to confirm first boot and identify `@sys`; it verifies signing keys and aborts if either is absent. It then registers, enables, and makes public `@sys/lookup`, `@sys/llm/chat`, `@sys/llm/embed`, `@sys/llm/json`, `@sys/llm/decide`, `@sys/make`, `@sys/time`, `@sys/sink`, `@sys/message`, `@sys/random`, `@sys/web`, and `@sys/tinygo/compile` if absent, and reconciles their configurable fields (price and action-specific settings) from config on every startup. It then runs recovery (§5).
 
 Bootstrap is idempotent. Supervision operations are not native actions.
 
@@ -759,6 +760,7 @@ Config lives in `juice.json` (path from `JUICE_CONFIG`, default `./juice.json`).
     "sink":    { "price": 0 },
     "message": { "price": 0 },
     "random":  { "price": 0 },
+    "web":     { "price": 0, "user_agent": "juice-kernel/0.4 (+https://github.com/daios-ai/juice)" },
     "tinygo":  { "price": 5 }
   }
 }
@@ -838,6 +840,10 @@ non-buyer cannot rate transaction
 native action callable through Call()
 @sys/random returns value in [0, 1)
 wasm script can call @sys/random to obtain a random value
+@sys/web returns status, body, and content_type for a public URL (fake fetcher)
+@sys/web with missing or empty url returns ErrInvalidInput
+@sys/web with unconfigured fetcher returns ErrInvalidState
+@sys/web rejects loopback/private/link-local URLs unless allow_local_sources
 @sys/tinygo/compile returns base64 artifact and hash for valid source; status=failure with diagnostics on compile or import-validation error; empty source returns ErrInvalidInput
 action create --artifact registers a wasm action from a pre-compiled base64 artifact
 @sys/llm/embed returns embedding array for valid text

@@ -149,6 +149,38 @@ func validateResolvedIP(ipStr string) error {
 	return nil
 }
 
+// validatePublicURL rejects URLs unsafe for an outbound fetch: non-http(s) schemes
+// and, unless allowLocal, localhost / loopback / RFC 1918 / link-local literal hosts.
+// Hostname (non-literal-IP) targets are re-validated against DNS by newHTTPClient's
+// dial guard at call time; this catches the literal-IP and localhost cases the dialer
+// deliberately skips ("validated at URL parse time").
+func validatePublicURL(rawURL string, allowLocal bool) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return kernel.ErrInvalidInput.Wrapf("invalid URL: %v", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return kernel.ErrInvalidInput.Wrap("URL scheme must be http or https")
+	}
+	// Bracketless IPv6 (e.g. "::1") is malformed and may be an SSRF probe.
+	if strings.Count(u.Host, ":") > 1 && !strings.HasPrefix(u.Host, "[") {
+		return kernel.ErrInvalidInput.Wrap("unsafe URL: private or reserved address")
+	}
+	if allowLocal {
+		return nil
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") || host == "" {
+		return kernel.ErrInvalidInput.Wrap("unsafe URL: localhost not allowed")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			return kernel.ErrInvalidInput.Wrap("unsafe URL: private/loopback host")
+		}
+	}
+	return nil
+}
+
 // validateRedirectHost returns an error if hostname should not be followed as a redirect.
 func validateRedirectHost(hostname string, allowLocal bool) error {
 	if allowLocal {
@@ -298,6 +330,34 @@ func (e *httpActionExecutor) FetchURL(ctx context.Context, rawURL string) ([]byt
 	return body, nil
 }
 
+// fetchWeb performs a read-only GET for the @sys/web native action, returning the
+// HTTP status, body, and Content-Type. It reuses the SSRF dial guard in
+// newHTTPClient (loopback/RFC 1918/link-local rejected unless allowLocal) and sets
+// the configured User-Agent. Non-2xx responses are returned with their status, not
+// raised as errors, so callers and crawlers can react to them. Enforces a 10 MiB cap.
+func (e *httpActionExecutor) fetchWeb(ctx context.Context, rawURL, userAgent string) (int, []byte, string, error) {
+	if err := validatePublicURL(rawURL, e.allowLocal); err != nil {
+		return 0, nil, "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return 0, nil, "", kernel.ErrInvalidInput.Wrapf("invalid URL: %v", err)
+	}
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
+	resp, err := newHTTPClient(e.timeout, e.allowLocal).Do(req)
+	if err != nil {
+		return 0, nil, "", kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return resp.StatusCode, nil, "", kernel.ErrExecutionFailed.Wrap("could not read response body")
+	}
+	return resp.StatusCode, body, resp.Header.Get("Content-Type"), nil
+}
+
 // Execute fires a kind=http action. The source is the canonical HTTPSource JSON
 // (manual and OpenAPI-imported actions share one representation); executeHTTP
 // applies its method, path templating, and parameter binding uniformly.
@@ -413,23 +473,8 @@ func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Act
 // fetchOpenAPISpec fetches and returns the raw bytes of an OpenAPI spec at specURL.
 // It rejects loopback, private, and link-local addresses unless allowLocal is true.
 func fetchOpenAPISpec(ctx context.Context, specURL string, allowLocal bool) ([]byte, error) {
-	u, err := url.Parse(specURL)
-	if err != nil {
-		return nil, kernel.ErrInvalidInput.Wrapf("invalid spec URL: %v", err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, kernel.ErrInvalidInput.Wrap("spec URL scheme must be http or https")
-	}
-	if !allowLocal {
-		host := u.Hostname()
-		if strings.EqualFold(host, "localhost") || host == "" {
-			return nil, kernel.ErrInvalidInput.Wrap("unsafe spec URL")
-		}
-		if ip := net.ParseIP(host); ip != nil {
-			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-				return nil, kernel.ErrInvalidInput.Wrap("unsafe spec URL: private/loopback host")
-			}
-		}
+	if err := validatePublicURL(specURL, allowLocal); err != nil {
+		return nil, err
 	}
 	respBody, status, err := doHTTP(ctx, http.MethodGet, specURL, nil, nil, 30*time.Second, allowLocal)
 	if err != nil {
