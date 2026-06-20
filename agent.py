@@ -13,14 +13,18 @@ Unlike @sys/make (a stateless pipeline that regenerates from scratch each attemp
 here is never reset — the model repairs its previous code in place. Verification is real kernel
 execution, and nothing is published until it runs correctly 3 times.
 
+The action is published under whoever is currently logged into the CLI (resolved via
+`juice user me`); log in first with `juice auth login <user>`.
+
 USAGE
-    AGENT_PASSWORD=demo python3 agent.py "translate English into Chilean Spanish with heavy slang"
+    juice auth login @me            # whoever you log in as owns the published action
+    python3 agent.py "translate English into Chilean Spanish with heavy slang"
 
 CONFIG (environment)
     JUICE_BIN        path to the juice binary           (default: ./juice)
     JUICE_DB         SQLite db path                      (default: juice.db)
-    AGENT            handle the loop runs as             (default: @agent)
-    AGENT_PASSWORD   if set, auto-login as AGENT first   (default: unset — assumes logged in)
+    AGENT            optional: handle to auto-login as   (default: unset — use current CLI login)
+    AGENT_PASSWORD   optional: password for that auto-login
     MAX_ITERS        cap on model tool-call turns        (default: 14)
     JUICE_AGENT_OUT  dir for saved synthesized code      (default: ./.agent_build)
     VERBOSE          if set, dump full payloads to stderr
@@ -40,8 +44,9 @@ import tempfile
 
 JUICE_BIN = os.environ.get("JUICE_BIN", "./juice")
 JUICE_DB = os.environ.get("JUICE_DB", "juice.db")
-AGENT = os.environ.get("AGENT", "@agent")
-AGENT_PASSWORD = os.environ.get("AGENT_PASSWORD")
+AGENT = os.environ.get("AGENT")                     # optional: handle to auto-login as
+AGENT_PASSWORD = os.environ.get("AGENT_PASSWORD")   # optional: its password
+OWNER = None                                        # the logged-in handle, resolved at startup
 MAX_ITERS = int(os.environ.get("MAX_ITERS", "14"))
 BUILD_DIR = os.environ.get("JUICE_AGENT_OUT", ".agent_build")
 VERBOSE = bool(os.environ.get("VERBOSE"))
@@ -167,7 +172,10 @@ def juice_cli(*args):
 
 
 def ensure_login():
-    if AGENT_PASSWORD:
+    """Resolve OWNER = whoever is logged into the CLI; the action is published under them.
+    Optionally auto-login first if AGENT + AGENT_PASSWORD are set (convenience for unattended runs)."""
+    global OWNER
+    if AGENT and AGENT_PASSWORD:
         p = subprocess.run([JUICE_BIN, "--db", JUICE_DB, "auth", "login", AGENT,
                             "--password", AGENT_PASSWORD], capture_output=True, text=True,
                            timeout=CALL_TIMEOUT)
@@ -177,9 +185,10 @@ def ensure_login():
     me = subprocess.run([JUICE_BIN, "--db", JUICE_DB, "--json", "user", "me"],
                         capture_output=True, text=True, timeout=CALL_TIMEOUT)
     if me.returncode != 0:
-        log(f"not authenticated (run: juice auth login {AGENT}, or set AGENT_PASSWORD)")
+        log("not logged in — run `juice auth login <user>` first (or set AGENT + AGENT_PASSWORD)")
         sys.exit(1)
-    log(f"running as {json.loads(me.stdout).get('handle', '?')}")
+    OWNER = json.loads(me.stdout).get("handle")
+    log(f"publishing as {OWNER}")
 
 
 def slugify(s, maxlen=32):
@@ -188,12 +197,12 @@ def slugify(s, maxlen=32):
 
 
 def free_name(base):
-    """Resolve a free action name for AGENT: the clean `base`, else `base-2`, `base-3`, … up to
-    `base-100` — the first not taken by a live action. Mirrors @sys/make's name allocation
+    """Resolve a free action name for the logged-in owner: the clean `base`, else `base-2`, `base-3`,
+    … up to `base-100` — the first not taken by a live action. Mirrors @sys/make's name allocation
     (make.go); soft-deleted names don't count (action show returns not-found for them)."""
     name = base
     for suffix in range(2, 101):
-        rc, _, _ = juice_cli("action", "show", f"{AGENT}/{name}")
+        rc, _, _ = juice_cli("action", "show", f"{OWNER}/{name}")
         if rc != 0:           # not found -> free
             return name
         name = f"{base}-{suffix}"
@@ -307,7 +316,7 @@ def temp_action(state, h):
     price = state["prices"][h]
     rc, out, err = juice_cli("action", "create", name, "--kind", "wasm", "--artifact", b64_path,
                              "--price", str(price), "--description", "agent smoke-test (temporary)")
-    ref = f"{AGENT}/{name}"
+    ref = f"{OWNER}/{name}"
     if rc == 0:
         try:
             ref = json.loads(out).get("action", ref)
@@ -386,7 +395,7 @@ def execute_tool(tool, args, source, state):
         rc, out, err = juice_cli(*create_args)
         if rc != 0:
             return {"error": "create failed: " + clean_err(err, rc)}
-        ref = json.loads(out).get("action", f"{AGENT}/{name}")
+        ref = json.loads(out).get("action", f"{OWNER}/{name}")
         rc, out, err = juice_cli("action", "enable", ref)
         if rc != 0:
             juice_cli("action", "delete", ref)
