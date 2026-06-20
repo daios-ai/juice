@@ -298,35 +298,18 @@ func (e *httpActionExecutor) FetchURL(ctx context.Context, rawURL string) ([]byt
 	return body, nil
 }
 
+// Execute fires a kind=http action. The source is the canonical HTTPSource JSON
+// (manual and OpenAPI-imported actions share one representation); executeHTTP
+// applies its method, path templating, and parameter binding uniformly.
 func (e *httpActionExecutor) Execute(ctx context.Context, action *kernel.Action, args map[string]any) (map[string]any, error) {
-	var src kernel.OpenAPISource
-	if json.Unmarshal([]byte(action.Source), &src) == nil && src.Type == "openapi" {
-		return e.executeOpenAPI(ctx, action, &src, args)
+	var src kernel.HTTPSource
+	if err := json.Unmarshal([]byte(action.Source), &src); err != nil {
+		return nil, kernel.ErrInvalidState.Wrap("http action source is not valid HTTPSource JSON")
 	}
-	body, err := json.Marshal(args)
-	if err != nil {
-		return nil, kernel.ErrInvalidInput.Wrap("could not serialize args")
-	}
-	rawURL := action.Source
-	headers := map[string]string{"Content-Type": "application/json"}
-	if err := applyUpstreamAuth(action, headers, &rawURL, e.secretBox); err != nil {
-		return nil, err
-	}
-	respBody, status, err := doHTTP(ctx, http.MethodPost, rawURL, headers, strings.NewReader(string(body)), e.timeout, e.allowLocal)
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, kernel.ErrExecutionFailed.Wrapf("action returned status %d: %s", status, string(respBody))
-	}
-	var result map[string]any
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, kernel.ErrExecutionFailed.Wrap("action response is not valid JSON")
-	}
-	return result, nil
+	return e.executeHTTP(ctx, action, &src, args)
 }
 
-func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, action *kernel.Action, src *kernel.OpenAPISource, args map[string]any) (map[string]any, error) {
+func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Action, src *kernel.HTTPSource, args map[string]any) (map[string]any, error) {
 	path := src.Path
 	queryVals := url.Values{}
 	bodyArgs := map[string]any{}
@@ -398,7 +381,10 @@ func (e *httpActionExecutor) executeOpenAPI(ctx context.Context, action *kernel.
 
 	var reqBody io.Reader
 	headers := map[string]string{}
-	if len(bodyArgs) > 0 || (method != http.MethodGet && len(src.Params) > 0) {
+	// Send a JSON body for body-bearing verbs (POST/PUT/PATCH always carry one,
+	// even when empty, matching the original bare-URL POST behavior); GET/DELETE
+	// only carry one when args were explicitly bound to the body.
+	if len(bodyArgs) > 0 || method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
 		b, err := json.Marshal(bodyArgs)
 		if err != nil {
 			return nil, kernel.ErrInvalidInput.Wrap("could not serialize args")

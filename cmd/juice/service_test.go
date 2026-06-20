@@ -424,3 +424,53 @@ func TestCreateStep_SharedBehavior(t *testing.T) {
 		t.Errorf("next_action_id by ID: got %q, want %q", view2.Step.ActionID, actID)
 	}
 }
+
+func TestParseParams(t *testing.T) {
+	got, err := parseParams([]string{"city:path", "q:query", "data:body"})
+	if err != nil {
+		t.Fatalf("parseParams: %v", err)
+	}
+	if len(got) != 3 || got[0] != (kernel.HTTPParam{Name: "city", In: "path"}) {
+		t.Errorf("parseParams result unexpected: %+v", got)
+	}
+	if _, err := parseParams([]string{"noColon"}); err == nil {
+		t.Error("expected error for malformed param spec")
+	}
+	if _, err := parseParams(nil); err != nil {
+		t.Errorf("nil specs should be nil,nil: %v", err)
+	}
+}
+
+// TestManualHTTPActionRoundTrip: a manual kind=http action read back through the
+// service layer exposes the same {method,url,params} it was created with.
+func TestManualHTTPActionRoundTrip(t *testing.T) {
+	_, k, _ := newTestHTTPServerFull(t)
+	ctx := context.Background()
+	ownerID, _ := makeUser(t, k, "@svc-httpview")
+
+	resp, err := createAction(k, ctx, ownerID, kernel.CreateActionRequest{
+		OwnerUserID: ownerID, Name: "weather", Kind: kernel.KindHTTP,
+		Source: "https://api.example.com/weather/{city}", Method: "GET",
+		Params: []kernel.HTTPParam{{Name: "city", In: "path"}},
+	})
+	if err != nil {
+		t.Fatalf("createAction: %v", err)
+	}
+	if resp.HTTP == nil {
+		t.Fatal("expected http view on create response")
+	}
+	if resp.HTTP.Method != "GET" || resp.HTTP.URL != "https://api.example.com/weather/{city}" {
+		t.Errorf("http view: %+v", resp.HTTP)
+	}
+
+	got, err := getAction(k, ctx, ownerID, resp.ID)
+	if err != nil {
+		t.Fatalf("getAction: %v", err)
+	}
+	if got.HTTP == nil || got.HTTP.Method != "GET" || got.HTTP.URL != "https://api.example.com/weather/{city}" {
+		t.Errorf("read-back http view mismatch: %+v", got.HTTP)
+	}
+	if len(got.HTTP.Params) != 1 || got.HTTP.Params[0].In != "path" {
+		t.Errorf("read-back params: %+v", got.HTTP.Params)
+	}
+}

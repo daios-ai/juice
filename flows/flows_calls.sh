@@ -380,6 +380,54 @@ flow_successful_paid_call() {
     stop_backend "$backend_pid"
 }
 
+flow_http_verbs() {
+    echo "=== FLOW http_verbs ==="
+    local dir db home_sys home_alice port backend_port
+    dir=$(mktemp -d); trap "rm -rf '$dir'" RETURN
+    db="$dir/juice.db"
+    home_sys="$dir/sys";     mkdir -p "$home_sys/.juice"
+    home_alice="$dir/alice"; mkdir -p "$home_alice/.juice"
+    alloc_port; port=$_ALLOC_PORT
+    alloc_port; backend_port=$_ALLOC_PORT
+    bootstrap_kernel "$db" syspass "$home_sys" "$port" \
+        || { fail "http_verbs.boot" "bootstrap failed"; return; }
+
+    j "$db" "$home_sys"   auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$home_sys"   user create @alice alice@test.com --password alicepass >/dev/null 2>&1
+    j "$db" "$home_alice" auth login @alice --password alicepass >/dev/null 2>&1
+
+    start_echo_backend "$backend_port" \
+        || { fail "http_verbs.backend" "echo backend failed to start"; return; }
+    local backend_pid=$ECHO_BACKEND_PID
+    trap "rm -rf '$dir'; kill '$backend_pid' 2>/dev/null; wait '$backend_pid' 2>/dev/null" RETURN
+
+    # A manual kind=http action must fire whichever verb it was created with, and
+    # the input value must reach the upstream (query for GET, body otherwise).
+    local verb lname aid run_out got_method got_v
+    for verb in GET PUT PATCH DELETE; do
+        lname=$(printf '%s' "$verb" | tr 'A-Z' 'a-z')
+        aid=$(strfield "$(jj "$db" "$home_alice" action create "v-$lname" --kind http \
+            --method "$verb" --source "http://127.0.0.1:${backend_port}/echo" \
+            --price 0 --description "verb $verb")" "id")
+        j "$db" "$home_alice" action enable "$aid" >/dev/null 2>&1
+        run_out=$(HOME="$home_alice" "$JUICE" --db "$db" --json run "@alice/v-$lname" '{"v":"x"}' 2>/dev/null)
+        got_method=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get('method',''))" "$run_out" 2>/dev/null)
+        got_v=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get('v',''))" "$run_out" 2>/dev/null)
+        { [ "$got_method" = "$verb" ] && [ "$got_v" = "x" ]; } \
+            && ok "http_verbs.$lname" \
+            || fail "http_verbs.$lname" "expected method=$verb v=x, got: $run_out"
+    done
+
+    # The decomposed http view round-trips on read: action show exposes method+url.
+    local show_out
+    show_out=$(jj "$db" "$home_alice" action show "@alice/v-get" 2>/dev/null)
+    [ "$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('http',{}).get('method',''))" "$show_out" 2>/dev/null)" = "GET" ] \
+        && ok "http_verbs.read_view" \
+        || fail "http_verbs.read_view" "expected http.method=GET in show, got: $show_out"
+
+    stop_backend "$backend_pid"
+}
+
 flow_failed_call_refund() {
     echo "=== FLOW failed_call_refund ==="
     local dir db home_sys home_alice home_bob port backend_port addr

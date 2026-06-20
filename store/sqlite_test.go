@@ -1471,7 +1471,7 @@ func TestListActionsByOwnerOpenAPISpec(t *testing.T) {
 	specURL2 := "https://spec.example.com/api2.json"
 
 	makeSrc := func(su, key string) string {
-		src := kernel.OpenAPISource{
+		src := kernel.HTTPSource{
 			Type: "openapi", SpecURL: su, OperationKey: key,
 			BaseURL: "https://api.example.com", Method: "GET", Path: "/" + key,
 		}
@@ -2399,3 +2399,52 @@ func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {
 	}
 }
 
+
+// TestMigration011RewritesBareURLSources verifies the http-source unification
+// migration converts legacy bare-URL kind=http sources into structured HTTPSource
+// JSON while leaving already-structured (OpenAPI) sources untouched.
+func TestMigration011RewritesBareURLSources(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@mig-owner", 0)
+	if err := db.CreateUser(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+
+	// Legacy manual action: bare URL string.
+	bare := newAction(owner.ID, "/legacy", 0, false)
+	bare.Source = "https://api.example.com/hook"
+	if err := db.CreateAction(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	// OpenAPI action: already-structured JSON.
+	oapi := newAction(owner.ID, "/imported", 0, false)
+	oapi.Source = `{"type":"openapi","base_url":"https://api.example.com","method":"GET","path":"/items"}`
+	if err := db.CreateAction(ctx, oapi); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-apply migration 011 (idempotent over already-structured rows).
+	sqlBytes, err := migrationFS.ReadFile("migrations/011_http_source_structured.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	if _, err := db.db.ExecContext(ctx, string(sqlBytes)); err != nil {
+		t.Fatalf("apply migration: %v", err)
+	}
+
+	gotBare, _ := db.ReadAction(ctx, bare.ID)
+	var s kernel.HTTPSource
+	if err := json.Unmarshal([]byte(gotBare.Source), &s); err != nil {
+		t.Fatalf("legacy source not rewritten to JSON: %v (%s)", err, gotBare.Source)
+	}
+	if s.Type != "http" || s.Method != "POST" || s.BaseURL != "https://api.example.com/hook" {
+		t.Errorf("rewritten source unexpected: %+v", s)
+	}
+
+	gotOapi, _ := db.ReadAction(ctx, oapi.ID)
+	if gotOapi.Source != oapi.Source {
+		t.Errorf("openapi source must be untouched: got %s", gotOapi.Source)
+	}
+}

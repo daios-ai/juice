@@ -1421,6 +1421,124 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 	}
 }
 
+// decodeHTTPSource unmarshals an action's stored source as an HTTPSource.
+func decodeHTTPSource(t *testing.T, src string) kernel.HTTPSource {
+	t.Helper()
+	var s kernel.HTTPSource
+	if err := json.Unmarshal([]byte(src), &s); err != nil {
+		t.Fatalf("source is not HTTPSource JSON: %v (%s)", err, src)
+	}
+	return s
+}
+
+func TestCreateHTTPActionBuildsStructuredSource(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "@hsrc-owner", 0)
+
+	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID,
+		Name:        "weather",
+		Kind:        kernel.KindHTTP,
+		Source:      "https://api.example.com/weather/{city}",
+		Method:      "get",
+		Params:      []kernel.HTTPParam{{Name: "city", In: "path"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateAction: %v", err)
+	}
+	s := decodeHTTPSource(t, a.Source)
+	if s.Type != "http" {
+		t.Errorf("type: got %q, want http", s.Type)
+	}
+	if s.Method != "GET" {
+		t.Errorf("method: got %q, want GET (uppercased)", s.Method)
+	}
+	if s.BaseURL != "https://api.example.com" {
+		t.Errorf("base_url: got %q", s.BaseURL)
+	}
+	if s.Path != "/weather/{city}" {
+		t.Errorf("path: got %q, want /weather/{city}", s.Path)
+	}
+	if len(s.Params) != 1 || s.Params[0].In != "path" {
+		t.Errorf("params: got %+v", s.Params)
+	}
+}
+
+func TestCreateHTTPActionDefaultsToPOST(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "@hpost-owner", 0)
+
+	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID, Name: "hook", Kind: kernel.KindHTTP,
+		Source: "https://api.example.com/hook",
+	})
+	if err != nil {
+		t.Fatalf("CreateAction: %v", err)
+	}
+	if m := decodeHTTPSource(t, a.Source).Method; m != "POST" {
+		t.Errorf("default method: got %q, want POST", m)
+	}
+}
+
+func TestCreateHTTPActionRejectsBadMethodAndParam(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "@hbad-owner", 0)
+
+	_, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID, Name: "bad-method", Kind: kernel.KindHTTP,
+		Source: "https://api.example.com", Method: "FETCH",
+	})
+	if !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("bad method: got %v, want ErrInvalidInput", err)
+	}
+
+	_, err = k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID, Name: "bad-param", Kind: kernel.KindHTTP,
+		Source: "https://api.example.com", Params: []kernel.HTTPParam{{Name: "x", In: "header"}},
+	})
+	if !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("bad param 'in': got %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestUpdateHTTPActionMergesSource(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "@hmerge-owner", 0)
+
+	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID, Name: "svc", Kind: kernel.KindHTTP,
+		Source: "https://api.example.com/v1", Method: "GET",
+	})
+	if err != nil {
+		t.Fatalf("CreateAction: %v", err)
+	}
+
+	// Change only the method; base_url/path must be preserved.
+	newMethod := "POST"
+	upd, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Method: &newMethod})
+	if err != nil {
+		t.Fatalf("UpdateAction: %v", err)
+	}
+	s := decodeHTTPSource(t, upd.Source)
+	if s.Method != "POST" {
+		t.Errorf("method: got %q, want POST", s.Method)
+	}
+	if s.BaseURL != "https://api.example.com" || s.Path != "/v1" {
+		t.Errorf("base/path not preserved: base=%q path=%q", s.BaseURL, s.Path)
+	}
+	if upd.Active {
+		t.Error("source change must deactivate the action")
+	}
+}
+
 func TestSetActiveRequiresDescription(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)

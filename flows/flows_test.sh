@@ -213,6 +213,44 @@ stop_backend() {
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 0
 }
 
+# Starts a backend that reflects the request method and an echoed value `v`
+# (read from the query string, else the JSON body) for every HTTP verb. Used to
+# verify manual kind=http actions fire the configured verb. Sets ECHO_BACKEND_PID.
+ECHO_BACKEND_PID=""
+start_echo_backend() {
+    local port="$1"
+    python3 - "$port" <<'PYEOF' &
+import sys, json, http.server
+from urllib.parse import urlparse, parse_qs
+port = int(sys.argv[1])
+class H(http.server.BaseHTTPRequestHandler):
+    def respond(self):
+        v = parse_qs(urlparse(self.path).query).get('v', [''])[0]
+        n = int(self.headers.get('Content-Length', 0))
+        if n:
+            try:
+                b = json.loads(self.rfile.read(n) or b'{}')
+                if not v: v = b.get('v', '')
+            except Exception:
+                pass
+        body = json.dumps({"method": self.command, "v": v}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(body)
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = respond
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
+PYEOF
+    ECHO_BACKEND_PID=$!
+    local deadline=$(( $(date +%s) + 5 ))
+    until curl -sf "http://127.0.0.1:${port}/" >/dev/null 2>&1; do
+        if ! kill -0 "$ECHO_BACKEND_PID" 2>/dev/null; then return 1; fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then kill "$ECHO_BACKEND_PID" 2>/dev/null; return 1; fi
+        sleep 0.05
+    done
+}
+
 # start_api_server port spec_file
 # Serves spec_file on GET and '{"message":"ok"}' on POST. Sets API_SERVER_PID.
 API_SERVER_PID=""
@@ -465,6 +503,7 @@ main() {
     flow_process_lifecycle
     flow_acl_public
     flow_successful_paid_call
+    flow_http_verbs
     flow_failed_call_refund
     flow_input_schema_failure
     flow_output_schema_failure

@@ -51,7 +51,7 @@ type rawOp struct {
 	method       string
 	path         string
 	baseURL      string
-	params       []OpenAPIParam
+	params       []HTTPParam
 	inputSchema  map[string]any
 	outputSchema map[string]any
 	price        int64
@@ -246,7 +246,7 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 
 			hash := openAPIOperationHash(baseURL, desc, method, path, inputSchema, outputSchema, price, params)
 
-			src := OpenAPISource{
+			src := HTTPSource{
 				Type:          "openapi",
 				SpecURL:       specURL,
 				BaseURL:       baseURL,
@@ -359,7 +359,7 @@ func openAPIAmbiguous2xxSchema(op, doc map[string]any) (bool, string) {
 // openAPICompileOperation builds both the validation input schema and the HTTP parameter
 // binding list for one operation in a single pass, resolving local $ref values throughout.
 // This is the single source of truth for what fields an operation accepts and where they go.
-func openAPICompileOperation(op, pathItem, doc map[string]any) (inputSchema map[string]any, params []OpenAPIParam) {
+func openAPICompileOperation(op, pathItem, doc map[string]any) (inputSchema map[string]any, params []HTTPParam) {
 	properties := map[string]any{}
 	var required []string
 	seen := map[string]struct{}{}
@@ -393,7 +393,7 @@ func openAPICompileOperation(op, pathItem, doc map[string]any) (inputSchema map[
 				schema["description"] = desc
 			}
 			properties[name] = schema
-			params = append(params, OpenAPIParam{Name: name, In: in})
+			params = append(params, HTTPParam{Name: name, In: in})
 			if req, _ := p["required"].(bool); req || in == "path" {
 				required = append(required, name)
 			}
@@ -410,7 +410,7 @@ func openAPICompileOperation(op, pathItem, doc map[string]any) (inputSchema map[
 					if _, dup := seen[name]; !dup {
 						seen[name] = struct{}{}
 						properties[name] = v
-						params = append(params, OpenAPIParam{Name: name, In: "body"})
+						params = append(params, HTTPParam{Name: name, In: "body"})
 					}
 				}
 			}
@@ -431,8 +431,8 @@ func openAPICompileOperation(op, pathItem, doc map[string]any) (inputSchema map[
 	return result, params
 }
 
-func openAPIOperationHash(baseURL, description, method, path string, inputSchema, outputSchema map[string]any, price int64, params []OpenAPIParam) string {
-	sorted := make([]OpenAPIParam, len(params))
+func openAPIOperationHash(baseURL, description, method, path string, inputSchema, outputSchema map[string]any, price int64, params []HTTPParam) string {
+	sorted := make([]HTTPParam, len(params))
 	copy(sorted, params)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 	paramsSlice := make([]any, len(sorted))
@@ -514,14 +514,14 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 
 	existingByKey := make(map[string]*Action, len(existing))
 	for _, a := range existing {
-		var src OpenAPISource
+		var src HTTPSource
 		if err := json.Unmarshal([]byte(a.Source), &src); err == nil {
 			existingByKey[src.OperationKey] = a
 		}
 	}
 
 	hashOf := func(a *Action) string {
-		var src OpenAPISource
+		var src HTTPSource
 		if err := json.Unmarshal([]byte(a.Source), &src); err == nil {
 			return src.OperationHash
 		}
@@ -561,7 +561,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 		}
 		sourceJSON := raw.sourceJSON
 		if ownershipVerified {
-			var osrc OpenAPISource
+			var osrc HTTPSource
 			_ = json.Unmarshal([]byte(raw.sourceJSON), &osrc)
 			osrc.OwnershipVerified = true
 			if b, marshalErr := json.Marshal(osrc); marshalErr == nil {
@@ -606,7 +606,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 	// Staleness fix: re-evaluate ownership on Unchanged actions too.
 	// Proof state may have changed since the last import (e.g., well-known file removed).
 	for _, a := range result.Unchanged {
-		var src OpenAPISource
+		var src HTTPSource
 		if jsonErr := json.Unmarshal([]byte(a.Source), &src); jsonErr == nil && src.OwnershipVerified != ownershipVerified {
 			src.OwnershipVerified = ownershipVerified
 			if b, marshalErr := json.Marshal(src); marshalErr == nil {
@@ -637,7 +637,7 @@ func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specUR
 	if name != "" {
 		var filtered []*Action
 		for _, a := range actions {
-			var src OpenAPISource
+			var src HTTPSource
 			json.Unmarshal([]byte(a.Source), &src)
 			if a.Name == name || src.OperationKey == name {
 				filtered = append(filtered, a)

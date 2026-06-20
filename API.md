@@ -28,7 +28,7 @@ No envelope objects. `GET /v1/steps` returns `[…]` directly. Metadata such as 
 The handler rejects invalid inputs before calling the kernel. `rating` must be 0 or 1; returns `ErrInvalidInput` when violated.
 
 **R8 — Action responses include both `id` and `action`.**  
-Every read or list response for an action resource includes both `id` (UUID, for management operations) and a computed `action` field containing `@owner/name` (for running). Clients can copy the `action` value directly into run requests without a separate lookup.
+Every read or list response for an action resource includes both `id` (UUID, for management operations) and a computed `action` field containing `@owner/name` (for running). Clients can copy the `action` value directly into run requests without a separate lookup. For `kind=http` actions, responses also include a decomposed `http` object `{method, url, params}` — identical in shape for manually-created and OpenAPI-imported actions — that round-trips with the `source`/`method`/`param` create and update inputs.
 
 **R9 — Secrets never serialize.**  
 Auth configs (`Action.source` upstream credentials) are write-only: accepted on create and update, never present in any read, list, log, receipt, hash, or manifest response. There is no read path for a stored secret.
@@ -42,7 +42,7 @@ The thing a command acts on is positional, not a flag. A second mandatory value 
 A user is `@handle` (never a UUID — handles are unique). An action is `@owner/name` (a raw id is also accepted). Processes, steps, and transactions, which have no human-readable name, are ids. The CLI never asks the user to type a user UUID.
 
 **C3 — `--source` is reserved for URLs and file paths.**  
-`--source` is used for action source URLs and script paths (`action create --source`). User-handle inputs use descriptively named flags: `--required-caller @handle` in `step create`.
+`--source` is used for action source URLs and script paths (`action create --source`). For `kind=http`, `--method` sets the verb (default `POST`; GET/POST/PUT/PATCH/DELETE) and the repeatable `--param name:in` (`in` = `path`/`query`/`body`) binds input fields; omitting `--param` uses implicit routing (`{name}` placeholders in the URL become path params, remaining args go to the query for GET/DELETE or the JSON body otherwise). User-handle inputs use descriptively named flags: `--required-caller @handle` in `step create`.
 
 **C4 — Creation uses `create`.**  
 All resource-creation commands use `create`: `user create`, `action create`, `step create`. Processes are not created by users — `run` creates them (see Run).
@@ -107,10 +107,10 @@ Log lines, progress messages, and error text go to stderr. The only content writ
 
 | Operation | HTTP | CLI |
 |-----------|------|-----|
-| Create action | `POST /v1/actions` `{name, kind, [source, description, price, input_schema, output_schema, auth]}` → 201 action | `juice action create <name> --kind [--source --description --price --input-schema --output-schema --auth]` |
+| Create action | `POST /v1/actions` `{name, kind, [source, method, params, description, price, input_schema, output_schema, auth]}` → 201 action | `juice action create <name> --kind [--source --method --param --description --price --input-schema --output-schema --auth]` |
 | List actions | `GET /v1/actions[?owner=&name=]` → action[]; unauthenticated → active public actions; authenticated → active public actions plus caller's own active actions; `?owner=` filters by owner handle; `?name=` filters by name | `juice action list [--all --limit --offset]` |
 | Show action | `GET /v1/actions/{id}` → action | `juice action show <action>` |
-| Update action | `PUT /v1/actions/{id}` `{[price, description, source, input_schema, output_schema, public, auth]}` → action | `juice action update <action> [--price --description --source --input-schema --output-schema --public --auth]` |
+| Update action | `PUT /v1/actions/{id}` `{[price, description, source, method, params, input_schema, output_schema, public, auth]}` → action | `juice action update <action> [--price --description --source --method --param --input-schema --output-schema --public --auth]` |
 | Enable action | `POST /v1/actions/{id}/enable` → `{active:true}` | `juice action enable <action>` |
 | Disable action | `POST /v1/actions/{id}/disable` → `{active:false}` | `juice action disable <action>` |
 | Delete action | `DELETE /v1/actions/{id}` → 204 | `juice action delete <action>` |

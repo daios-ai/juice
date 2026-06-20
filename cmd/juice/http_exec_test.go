@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
@@ -18,6 +19,19 @@ type erroringBox struct{}
 
 func (erroringBox) Seal(aad, plaintext string) (string, error)  { return plaintext, nil }
 func (erroringBox) Open(aad, ciphertext string) (string, error) { return "", fmt.Errorf("decrypt failed") }
+
+// httpSrc builds canonical HTTPSource JSON for a full URL + method (path split
+// from the URL), mirroring what the kernel stores for a manual kind=http action.
+func httpSrc(rawURL, method string, params ...kernel.HTTPParam) string {
+	base, path := rawURL, ""
+	if i := strings.Index(rawURL, "://"); i >= 0 {
+		if j := strings.IndexByte(rawURL[i+3:], '/'); j >= 0 {
+			base, path = rawURL[:i+3+j], rawURL[i+3+j:]
+		}
+	}
+	b, _ := json.Marshal(kernel.HTTPSource{Type: "http", BaseURL: base, Path: path, Method: method, Params: params})
+	return string(b)
+}
 
 func TestValidateResolvedIPBlocked(t *testing.T) {
 	blocked := []string{"127.0.0.1", "::1", "192.168.1.1", "10.0.0.1", "172.16.0.1", "169.254.1.1"}
@@ -112,7 +126,7 @@ func TestHTTPActionExecutorSuccess(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), &kernel.Action{Source: srv.URL}, map[string]any{"msg": "hello"})
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{"msg": "hello"})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -128,7 +142,7 @@ func TestHTTPActionExecutorNon200(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	_, err := exec.Execute(context.Background(), &kernel.Action{Source: srv.URL}, map[string]any{})
+	_, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for non-200 response")
 	}
@@ -141,7 +155,7 @@ func TestHTTPActionExecutorInvalidJSON(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	_, err := exec.Execute(context.Background(), &kernel.Action{Source: srv.URL}, map[string]any{})
+	_, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for non-JSON response")
 	}
@@ -159,7 +173,7 @@ func TestHTTPActionAuthDecryptFailsClosed(t *testing.T) {
 
 	exec := &httpActionExecutor{secretBox: erroringBox{}}
 	_, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: srv.URL, AuthJSON: "unreadable-ciphertext"}, map[string]any{})
+		&kernel.Action{Source: httpSrc(srv.URL, "POST"), AuthJSON: "unreadable-ciphertext"}, map[string]any{})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("got %v, want ErrInvalidState", err)
 	}
@@ -180,7 +194,7 @@ func TestHTTPActionAuthParseFailsClosed(t *testing.T) {
 
 	exec := &httpActionExecutor{} // box nil → auth_json treated as plaintext
 	_, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: srv.URL, AuthJSON: "{not valid json"}, map[string]any{})
+		&kernel.Action{Source: httpSrc(srv.URL, "POST"), AuthJSON: "{not valid json"}, map[string]any{})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("got %v, want ErrInvalidState", err)
 	}
@@ -202,7 +216,7 @@ func TestHTTPActionValidAuthApplied(t *testing.T) {
 	authJSON, _ := json.Marshal(auth)
 	exec := &httpActionExecutor{} // box nil → plaintext auth_json
 	_, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: srv.URL, AuthJSON: string(authJSON)}, map[string]any{})
+		&kernel.Action{Source: httpSrc(srv.URL, "POST"), AuthJSON: string(authJSON)}, map[string]any{})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -343,5 +357,57 @@ func TestExecuteOpenAPIPostQueryParam(t *testing.T) {
 	}
 	if result["body_param"] != "hello" {
 		t.Errorf("body_param: got %v, want %q", result["body_param"], "hello")
+	}
+}
+
+// TestExecuteHTTPManualGet: a manual kind=http action with method GET routes
+// otherwise-unbound args to the query string (implicit routing).
+func TestExecuteHTTPManualGet(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "want GET", http.StatusMethodNotAllowed)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"q": r.URL.Query().Get("q")})
+	}))
+	defer srv.Close()
+
+	exec := &httpActionExecutor{}
+	result, err := exec.Execute(context.Background(),
+		&kernel.Action{Source: httpSrc(srv.URL, "GET")}, map[string]any{"q": "hi"})
+	if err != nil {
+		t.Fatalf("Execute manual GET: %v", err)
+	}
+	if result["q"] != "hi" {
+		t.Errorf("q: got %v, want %q", result["q"], "hi")
+	}
+}
+
+// TestExecuteHTTPManualPathTemplate: a manual action whose URL carries a {name}
+// placeholder substitutes it from args via implicit routing.
+func TestExecuteHTTPManualPathTemplate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"path": r.URL.Path})
+	}))
+	defer srv.Close()
+
+	exec := &httpActionExecutor{}
+	result, err := exec.Execute(context.Background(),
+		&kernel.Action{Source: httpSrc(srv.URL+"/items/{id}", "GET")}, map[string]any{"id": "42"})
+	if err != nil {
+		t.Fatalf("Execute manual path template: %v", err)
+	}
+	if result["path"] != "/items/42" {
+		t.Errorf("path: got %v, want /items/42", result["path"])
+	}
+}
+
+// TestExecuteHTTPInvalidSource: a non-HTTPSource source is rejected (no sniffing).
+func TestExecuteHTTPInvalidSource(t *testing.T) {
+	exec := &httpActionExecutor{}
+	_, err := exec.Execute(context.Background(),
+		&kernel.Action{Source: "https://not-json.example.com"}, map[string]any{})
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("got %v, want ErrInvalidState", err)
 	}
 }

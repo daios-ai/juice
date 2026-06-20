@@ -248,7 +248,7 @@ No ephemeral process is created. All subcalls spend from their parent call's tra
 
 ## 7. Action lifecycle
 
-`CreateAction`: inactive by default. Validate action owner, name, kind, non-negative price. `description`, schemas, and source are required at activation. WASM creation validates or compiles only when an executor is configured. HTTP creation validates endpoint configuration without calling it unless requested. Reject non-HTTP(S), loopback, RFC 1918 private, and link-local `169.254.x.x` source URLs at creation and activation. Normal `CreateAction` rejects `kind=native`.
+`CreateAction`: inactive by default. Validate action owner, name, kind, non-negative price. `description`, schemas, and source are required at activation. WASM creation validates or compiles only when an executor is configured. HTTP creation validates endpoint configuration without calling it unless requested; every `kind=http` action — manual or imported — stores one structured source (verb, base URL, path, parameter bindings), with an optional verb (default POST) and explicit or implicit field routing (§8). Reject non-HTTP(S), loopback, RFC 1918 private, and link-local `169.254.x.x` source URLs at creation and activation. Normal `CreateAction` rejects `kind=native`.
 
 `RegisterNativeAction`: bootstrap-only; caller is responsible for `@sys` ownership.
 
@@ -274,7 +274,7 @@ Shared reconciliation: import is idempotent over its match key. Reimport compare
 Call(args: JSON object) -> JSON object
 ```
 
-Allowed methods: GET, POST, PUT, PATCH, DELETE. Method is stored in `Action.source`, not `Call()` semantics.
+Allowed methods: GET, POST, PUT, PATCH, DELETE. Method is stored in `Action.source`, not `Call()` semantics. Imports and manual `kind=http` actions share one source representation, distinguished only by `source.type` (`openapi` vs `http`); import reconciliation (§8 match key) is scoped to `source.type=openapi` rows and never touches manual actions.
 
 Required or rejected/kept inactive with validation messages: `operationId` or `x-juice-name`; `description` or `summary`; parameters and/or requestBody schema; 2xx JSON response schema; optional `x-juice-price` defaulting to 0. Path, query, and JSON body fields compile into one canonical `input_schema`; selected 2xx JSON response schema becomes `output_schema`.
 

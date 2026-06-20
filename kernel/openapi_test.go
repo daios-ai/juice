@@ -35,9 +35,9 @@ func TestImportOpenAPI(t *testing.T) {
 	if a.Active {
 		t.Error("imported action must be inactive")
 	}
-	var src kernel.OpenAPISource
+	var src kernel.HTTPSource
 	if err := json.Unmarshal([]byte(a.Source), &src); err != nil {
-		t.Fatalf("action source is not valid OpenAPISource JSON: %v", err)
+		t.Fatalf("action source is not valid HTTPSource JSON: %v", err)
 	}
 	if src.OperationKey != "sayHello" {
 		t.Errorf("operation_key: got %q, want %q", src.OperationKey, "sayHello")
@@ -87,6 +87,49 @@ func TestUnimportOpenAPI(t *testing.T) {
 	}
 }
 
+// TestUnimportOpenAPILeavesManualHTTPUntouched verifies a manually-created
+// kind=http action (type:"http") owned by the same user is invisible to OpenAPI
+// reconciliation: reimport does not see it and unimport does not deactivate it.
+func TestUnimportOpenAPILeavesManualHTTPUntouched(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@oapi-isolation-owner", 0)
+	specURL := "https://spec.example.com/api.json"
+
+	// A manual http action with the same owner.
+	manual, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID, Name: "manual-svc", Kind: kernel.KindHTTP,
+		Source: "https://api.example.com/manual", Method: "POST",
+	})
+	if err != nil {
+		t.Fatalf("CreateAction: %v", err)
+	}
+
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec)); err != nil {
+		t.Fatalf("ImportOpenAPI: %v", err)
+	}
+	deactivated, err := k.UnimportOpenAPI(ctx, owner.ID, owner.ID, specURL, "")
+	if err != nil {
+		t.Fatalf("UnimportOpenAPI: %v", err)
+	}
+	for _, a := range deactivated {
+		if a.ID == manual.ID {
+			t.Fatal("unimport must not touch the manual http action")
+		}
+	}
+	// The manual action's source must still be its structured http form.
+	got, err := k.ReadAction(ctx, manual.ID)
+	if err != nil {
+		t.Fatalf("ReadAction: %v", err)
+	}
+	var s kernel.HTTPSource
+	if err := json.Unmarshal([]byte(got.Source), &s); err != nil || s.Type != "http" {
+		t.Errorf("manual source changed: type=%q err=%v", s.Type, err)
+	}
+}
+
 func TestOpenAPIActivation(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
@@ -121,8 +164,8 @@ func TestOpenAPIActivationRejectsPrivateBaseURL(t *testing.T) {
 
 	owner := setupUser(t, st, "@oapi-private-owner", 0)
 
-	// Craft an OpenAPISource with a private execution base URL.
-	src := kernel.OpenAPISource{
+	// Craft an HTTPSource with a private execution base URL.
+	src := kernel.HTTPSource{
 		Type:          "openapi",
 		SpecURL:       "https://spec.example.com/api.json",
 		BaseURL:       "http://10.0.0.1",
@@ -168,7 +211,7 @@ func TestImportOpenAPISetsOwnershipVerified(t *testing.T) {
 	if len(result.Created) != 1 {
 		t.Fatalf("expected 1 created action, got %d", len(result.Created))
 	}
-	var src kernel.OpenAPISource
+	var src kernel.HTTPSource
 	if err := json.Unmarshal([]byte(result.Created[0].Source), &src); err != nil {
 		t.Fatalf("source JSON invalid: %v", err)
 	}
@@ -183,7 +226,7 @@ func TestMakePublicOpenAPIRequiresOwnershipVerified(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@oapi-grant-owner", 0)
-	src := kernel.OpenAPISource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: false}
+	src := kernel.HTTPSource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: false}
 	srcBytes, _ := json.Marshal(src)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "@oapi-grant-owner/sayHello",
@@ -210,7 +253,7 @@ func TestMakePublicOpenAPIWithOwnershipVerified(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@oapi-grant-verified", 0)
-	src := kernel.OpenAPISource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: true}
+	src := kernel.HTTPSource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: true}
 	srcBytes, _ := json.Marshal(src)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "@oapi-grant-verified/sayHello",
@@ -233,7 +276,7 @@ func TestSetActivePublicOpenAPIRequiresOwnershipVerified(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@oapi-setactive-owner", 0)
-	src := kernel.OpenAPISource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: false}
+	src := kernel.HTTPSource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: false}
 	srcBytes, _ := json.Marshal(src)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "@oapi-setactive-owner/sayHello",
@@ -291,7 +334,7 @@ func TestImportOpenAPIWellKnownSetsOwnershipVerified(t *testing.T) {
 	if len(result.Created) != 1 {
 		t.Fatalf("expected 1 created action, got %d", len(result.Created))
 	}
-	var src kernel.OpenAPISource
+	var src kernel.HTTPSource
 	if err := json.Unmarshal([]byte(result.Created[0].Source), &src); err != nil {
 		t.Fatalf("source JSON invalid: %v", err)
 	}
@@ -335,7 +378,7 @@ func TestImportOpenAPIOwnershipStalenessFixed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var src kernel.OpenAPISource
+	var src kernel.HTTPSource
 	if err := json.Unmarshal([]byte(a.Source), &src); err != nil {
 		t.Fatalf("source JSON: %v", err)
 	}
@@ -501,7 +544,7 @@ func TestOpenAPIBodyRefParamsIncluded(t *testing.T) {
 	}
 
 	a := result.Created[0]
-	var src kernel.OpenAPISource
+	var src kernel.HTTPSource
 	if err := json.Unmarshal([]byte(a.Source), &src); err != nil {
 		t.Fatalf("unmarshal source: %v", err)
 	}

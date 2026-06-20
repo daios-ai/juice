@@ -213,8 +213,8 @@ func TestRemoteManifestHashIncludesKindAndArtifact(t *testing.T) {
 
 func TestOpenAPIOperationHashIncludesParams(t *testing.T) {
 	schema := map[string]any{"type": "object"}
-	paramsBody := []OpenAPIParam{{Name: "data", In: "body"}}
-	paramsQuery := []OpenAPIParam{{Name: "data", In: "query"}}
+	paramsBody := []HTTPParam{{Name: "data", In: "body"}}
+	paramsQuery := []HTTPParam{{Name: "data", In: "query"}}
 
 	hashBody := openAPIOperationHash("http://api.example.com", "do thing", "POST", "/do",
 		schema, schema, 0, paramsBody)
@@ -226,8 +226,8 @@ func TestOpenAPIOperationHashIncludesParams(t *testing.T) {
 	}
 
 	// Order of params must not affect the hash.
-	p1 := []OpenAPIParam{{Name: "a", In: "query"}, {Name: "b", In: "body"}}
-	p2 := []OpenAPIParam{{Name: "b", In: "body"}, {Name: "a", In: "query"}}
+	p1 := []HTTPParam{{Name: "a", In: "query"}, {Name: "b", In: "body"}}
+	p2 := []HTTPParam{{Name: "b", In: "body"}, {Name: "a", In: "query"}}
 	h1 := openAPIOperationHash("http://api.example.com", "do thing", "POST", "/do",
 		schema, schema, 0, p1)
 	h2 := openAPIOperationHash("http://api.example.com", "do thing", "POST", "/do",

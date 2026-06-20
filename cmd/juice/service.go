@@ -21,10 +21,21 @@ type stepWithAction struct {
 	Action string `json:"action,omitempty"`
 }
 
-// actionResp wraps an action with the computed @owner/name reference field.
+// actionResp wraps an action with the computed @owner/name reference field and,
+// for kind=http, a decomposed view of the request shape so manual and
+// OpenAPI-imported actions read identically and round-trip with create/update.
 type actionResp struct {
 	*kernel.Action
-	ActionRef string `json:"action"`
+	ActionRef string    `json:"action"`
+	HTTP      *httpView `json:"http,omitempty"`
+}
+
+// httpView is the read-side decomposition of an action's HTTPSource. It carries
+// no secrets (auth_json is never surfaced, §8).
+type httpView struct {
+	Method string             `json:"method"`
+	URL    string             `json:"url"`
+	Params []kernel.HTTPParam `json:"params,omitempty"`
 }
 
 // ---- Enrichment helpers ----
@@ -42,7 +53,36 @@ func enrichAction(a *kernel.Action) actionResp {
 	if a.OwnerHandle != "" && a.Name != "" {
 		ref = a.OwnerHandle + "/" + a.Name
 	}
-	return actionResp{Action: a, ActionRef: ref}
+	return actionResp{Action: a, ActionRef: ref, HTTP: httpViewOf(a)}
+}
+
+// httpViewOf decomposes a kind=http action's stored HTTPSource into a uniform
+// {method, url, params} view, or nil if the action is not http or has no source.
+func httpViewOf(a *kernel.Action) *httpView {
+	if a.Kind != kernel.KindHTTP || a.Source == "" {
+		return nil
+	}
+	var s kernel.HTTPSource
+	if err := json.Unmarshal([]byte(a.Source), &s); err != nil {
+		return nil
+	}
+	return &httpView{Method: s.Method, URL: s.BaseURL + s.Path, Params: s.Params}
+}
+
+// parseParams parses repeatable "name:in" CLI bindings into HTTPParam values.
+func parseParams(specs []string) ([]kernel.HTTPParam, error) {
+	if len(specs) == 0 {
+		return nil, nil
+	}
+	params := make([]kernel.HTTPParam, 0, len(specs))
+	for _, s := range specs {
+		name, in, ok := strings.Cut(s, ":")
+		if !ok || name == "" || in == "" {
+			return nil, fmt.Errorf("invalid --param %q: expected name:in (in=path|query|body)", s)
+		}
+		params = append(params, kernel.HTTPParam{Name: name, In: in})
+	}
+	return params, nil
 }
 
 func userView(u *kernel.User) map[string]any {
@@ -201,9 +241,10 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 	resps := make([]actionResp, len(actions))
 	for i, a := range actions {
 		cp := *a
+		r := enrichAction(&cp) // decompose http view before hiding the raw blob
 		cp.Source = ""
 		cp.ArtifactHash = ""
-		resps[i] = enrichAction(&cp)
+		resps[i] = r
 	}
 	if resps == nil {
 		resps = []actionResp{}

@@ -212,7 +212,8 @@ func init() {
 }
 
 func actionCreateCmd() *cobra.Command {
-	var kind, source, description, artifact string
+	var kind, source, description, artifact, method string
+	var params []string
 	var price int64
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
@@ -263,6 +264,10 @@ func actionCreateCmd() *cobra.Command {
 						artData = strings.TrimSpace(string(data))
 					}
 				}
+				httpParams, err := parseParams(params)
+				if err != nil {
+					return err
+				}
 				a, err := createAction(k, context.Background(), callerID, kernel.CreateActionRequest{
 					OwnerUserID:  callerID,
 					Name:         name,
@@ -272,6 +277,8 @@ func actionCreateCmd() *cobra.Command {
 					InputSchema:  inputSchema,
 					OutputSchema: outputSchema,
 					Source:       srcData,
+					Method:       method,
+					Params:       httpParams,
 					WasmArtifact: artData,
 					Auth:         auth,
 				})
@@ -284,6 +291,8 @@ func actionCreateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&kind, "kind", "http", "Action kind: http, wasm, native")
 	cmd.Flags().StringVar(&source, "source", "", "URL (http) or file path (wasm)")
+	cmd.Flags().StringVar(&method, "method", "", "HTTP verb for --kind http: GET, POST (default), PUT, PATCH, DELETE")
+	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (in=path|query|body); repeatable. Omit for implicit routing")
 	cmd.Flags().StringVar(&artifact, "artifact", "", "Base64 pre-compiled WASM artifact, or file path (wasm; e.g. @sys/tinygo/compile output)")
 	cmd.Flags().StringVar(&description, "description", "", "Human-readable description")
 	cmd.Flags().Int64Var(&price, "price", 0, "Price in credits")
@@ -294,7 +303,8 @@ func actionCreateCmd() *cobra.Command {
 }
 
 func actionUpdateCmd() *cobra.Command {
-	var description, source string
+	var description, source, method string
+	var params []string
 	var price int64
 	var public bool
 	var inputSchemaStr, outputSchemaStr, authStr string
@@ -314,6 +324,16 @@ func actionUpdateCmd() *cobra.Command {
 				}
 				if c.Flags().Changed("source") {
 					req.Source = &source
+				}
+				if c.Flags().Changed("method") {
+					req.Method = &method
+				}
+				if c.Flags().Changed("param") {
+					httpParams, err := parseParams(params)
+					if err != nil {
+						return err
+					}
+					req.Params = &httpParams
 				}
 				if c.Flags().Changed("price") {
 					req.Price = &price
@@ -352,6 +372,8 @@ func actionUpdateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&description, "description", "", "New description")
 	cmd.Flags().StringVar(&source, "source", "", "New source URL or file path")
+	cmd.Flags().StringVar(&method, "method", "", "New HTTP verb for --kind http: GET, POST, PUT, PATCH, DELETE")
+	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (in=path|query|body); repeatable")
 	cmd.Flags().Int64Var(&price, "price", 0, "New price in credits")
 	cmd.Flags().BoolVar(&public, "public", false, "Make action public (true) or private (false)")
 	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "New JSON Schema for inputs (or @file.json)")

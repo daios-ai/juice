@@ -452,9 +452,11 @@ type CreateActionRequest struct {
 	Description  string
 	InputSchema  map[string]any
 	OutputSchema map[string]any
-	Source       string
-	WasmArtifact string    // base64-encoded pre-compiled WASM; if set, stored as-is and used for the hash
-	Auth         *AuthInput // upstream credentials; sealed into auth_json at rest; write-only
+	Source       string      // for http: the upstream URL; assembled into canonical HTTPSource JSON
+	Method       string      // http only: verb (default POST); GET/POST/PUT/PATCH/DELETE
+	Params       []HTTPParam // http only: explicit field bindings; empty = implicit routing
+	WasmArtifact string      // base64-encoded pre-compiled WASM; if set, stored as-is and used for the hash
+	Auth         *AuthInput  // upstream credentials; sealed into auth_json at rest; write-only
 }
 
 // validateHTTPSource rejects URLs that could be used for SSRF attacks.
@@ -504,6 +506,124 @@ func (k *Kernel) validateHTTPSource(ctx context.Context, source string, allowLoc
 	return nil
 }
 
+// httpMethods is the set of verbs a kind=http action may use (§8).
+var httpMethods = map[string]bool{"GET": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true}
+
+// splitHTTPURL splits a raw URL into base (scheme://host[:port]) and the path
+// remainder, preserving "{}" path placeholders and any literal query verbatim
+// (string split, not url re-encoding) so the result matches the base_url+path
+// shape that OpenAPI import produces.
+func splitHTTPURL(raw string) (base, path string, err error) {
+	u, perr := url.Parse(raw)
+	if perr != nil || u.Scheme == "" || u.Host == "" {
+		return "", "", ErrInvalidInput.Wrap("source must be an absolute http(s) URL")
+	}
+	base = u.Scheme + "://" + u.Host
+	rest := raw
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	if j := strings.IndexByte(rest, '/'); j >= 0 {
+		path = rest[j:]
+	}
+	return base, path, nil
+}
+
+// validateHTTPParams checks explicit parameter bindings.
+func validateHTTPParams(params []HTTPParam) error {
+	for _, p := range params {
+		if p.Name == "" {
+			return ErrInvalidInput.Wrap("http param name is required")
+		}
+		if p.In != "path" && p.In != "query" && p.In != "body" {
+			return ErrInvalidInput.Wrapf("http param %q: 'in' must be path, query, or body", p.Name)
+		}
+	}
+	return nil
+}
+
+// httpSourceFromURL builds the canonical HTTPSource JSON for a manual kind=http
+// action from a raw upstream URL plus optional method/params, validating the URL
+// against SSRF rules and the verb against the allowed set.
+func (k *Kernel) httpSourceFromURL(ctx context.Context, rawURL, method string, params []HTTPParam) (string, error) {
+	base, path, err := splitHTTPURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+	if err := k.validateHTTPSource(ctx, base, k.cfg.AllowLocalSources); err != nil {
+		return "", err
+	}
+	if method == "" {
+		method = "POST"
+	}
+	method = strings.ToUpper(method)
+	if !httpMethods[method] {
+		return "", ErrInvalidInput.Wrapf("unsupported HTTP method %q", method)
+	}
+	if err := validateHTTPParams(params); err != nil {
+		return "", err
+	}
+	src := HTTPSource{Type: "http", BaseURL: base, Path: path, Method: method, Params: params}
+	b, err := json.Marshal(src)
+	if err != nil {
+		return "", ErrInternal.Wrapf("marshal http source: %v", err)
+	}
+	return string(b), nil
+}
+
+// mergeHTTPSource applies a partial update (any of url/method/params) onto an
+// action's existing HTTPSource JSON, preserving every other field — including
+// OpenAPI provenance — and re-validating the base URL and verb. nil arguments
+// leave the corresponding field unchanged.
+func (k *Kernel) mergeHTTPSource(ctx context.Context, existing string, rawURL, method *string, params *[]HTTPParam) (string, error) {
+	var s HTTPSource
+	_ = json.Unmarshal([]byte(existing), &s) // tolerate empty/legacy source
+	if s.Type == "" {
+		s.Type = "http"
+	}
+	if rawURL != nil {
+		base, path, err := splitHTTPURL(*rawURL)
+		if err != nil {
+			return "", err
+		}
+		s.BaseURL, s.Path = base, path
+	}
+	if method != nil {
+		m := strings.ToUpper(*method)
+		if !httpMethods[m] {
+			return "", ErrInvalidInput.Wrapf("unsupported HTTP method %q", m)
+		}
+		s.Method = m
+	}
+	if params != nil {
+		if err := validateHTTPParams(*params); err != nil {
+			return "", err
+		}
+		s.Params = *params
+	}
+	if s.Method == "" {
+		s.Method = "POST"
+	}
+	if err := k.validateHTTPSource(ctx, s.BaseURL, k.cfg.AllowLocalSources); err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		return "", ErrInternal.Wrapf("marshal http source: %v", err)
+	}
+	return string(b), nil
+}
+
+// httpSourceBaseURL extracts the base URL from a stored kind=http source for
+// validation. Falls back to the raw string for legacy/unstructured sources.
+func httpSourceBaseURL(source string) string {
+	var s HTTPSource
+	if json.Unmarshal([]byte(source), &s) == nil && s.BaseURL != "" {
+		return s.BaseURL
+	}
+	return source
+}
+
 func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateActionRequest) (*Action, error) {
 	if err := k.requireSelf(ctx, callerID, req.OwnerUserID); err != nil {
 		return nil, err
@@ -521,9 +641,11 @@ func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateAc
 		return nil, ErrInvalidInput.Wrap("price must be non-negative")
 	}
 	if req.Kind == KindHTTP && req.Source != "" {
-		if err := k.validateHTTPSource(ctx, req.Source, k.cfg.AllowLocalSources); err != nil {
+		srcJSON, err := k.httpSourceFromURL(ctx, req.Source, req.Method, req.Params)
+		if err != nil {
 			return nil, err
 		}
+		req.Source = srcJSON
 	}
 	if req.InputSchema != nil {
 		if err := ValidateSchema(req.InputSchema); err != nil {
@@ -816,7 +938,9 @@ type UpdateActionRequest struct {
 	Description  *string
 	InputSchema  map[string]any
 	OutputSchema map[string]any
-	Source       *string
+	Source       *string      // http: new upstream URL (merged into existing HTTPSource)
+	Method       *string      // http: new verb (merged into existing HTTPSource)
+	Params       *[]HTTPParam // http: new explicit bindings (merged into existing HTTPSource)
 	Public       *bool
 	Auth         *AuthInput // upstream credentials; sealed into auth_json at rest; write-only
 }
@@ -861,12 +985,15 @@ func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateAc
 		a.OutputSchema = req.OutputSchema
 		a.Active = false
 	}
-	if req.Source != nil {
-		if a.Kind == KindHTTP {
-			if err := k.validateHTTPSource(ctx, *req.Source, k.cfg.AllowLocalSources); err != nil {
-				return nil, err
-			}
+	if a.Kind == KindHTTP && (req.Source != nil || req.Method != nil || req.Params != nil) {
+		srcJSON, err := k.mergeHTTPSource(ctx, a.Source, req.Source, req.Method, req.Params)
+		if err != nil {
+			return nil, err
 		}
+		a.Source = srcJSON
+		a.Active = false
+	}
+	if req.Source != nil && a.Kind != KindHTTP {
 		a.Source = *req.Source
 		a.Active = false
 		if a.Kind == KindWasm && k.scripts != nil {
@@ -932,15 +1059,7 @@ func (k *Kernel) SetActive(ctx context.Context, callerID, actionID string, activ
 			return err
 		}
 		if a.Kind == KindHTTP {
-			src := a.Source
-			if strings.HasPrefix(strings.TrimSpace(src), "{") {
-				var osrc OpenAPISource
-				if err := json.Unmarshal([]byte(src), &osrc); err != nil {
-					return ErrInvalidInput.Wrap("invalid OpenAPI source JSON")
-				}
-				src = osrc.BaseURL
-			}
-			if err := k.validateHTTPSource(ctx, src, k.cfg.AllowLocalSources); err != nil {
+			if err := k.validateHTTPSource(ctx, httpSourceBaseURL(a.Source), k.cfg.AllowLocalSources); err != nil {
 				return err
 			}
 		}
@@ -1508,7 +1627,7 @@ func requireOpenAPIOwnershipIfPublic(a *Action) error {
 	if !strings.HasPrefix(strings.TrimSpace(a.Source), "{") {
 		return nil
 	}
-	var osrc OpenAPISource
+	var osrc HTTPSource
 	if jsonErr := json.Unmarshal([]byte(a.Source), &osrc); jsonErr != nil || osrc.Type != "openapi" {
 		return nil
 	}

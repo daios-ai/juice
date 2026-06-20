@@ -61,7 +61,7 @@ type Action struct {
 	Description    string         `json:"description"`
 	InputSchema    map[string]any `json:"input_schema"`
 	OutputSchema   map[string]any `json:"output_schema"`
-	Source         string         `json:"source,omitempty"`           // URL for http; TinyGo source for wasm; federation URL for remote_proxy
+	Source         string         `json:"source,omitempty"`           // structured HTTPSource JSON for http; TinyGo source for wasm; federation URL for remote_proxy
 	ArtifactHash   string         `json:"artifact_hash,omitempty"`    // content-addressed compiled WASM artifact
 	WasmArtifact   string         `json:"wasm_artifact,omitempty"`    // base64-encoded compiled WASM bytes (wasm only); Source holds the TinyGo text
 	RemoteActionID string         `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
@@ -330,23 +330,27 @@ type ImportRejection struct {
 	Reason string
 }
 
-// OpenAPIParam records where one input field is sent in the HTTP request.
-type OpenAPIParam struct {
+// HTTPParam records where one input field is sent in the HTTP request.
+type HTTPParam struct {
 	Name string `json:"name"`
 	In   string `json:"in"` // "path", "query", or "body"
 }
 
-// OpenAPISource is the provenance stored in Action.Source for OpenAPI-imported actions.
-type OpenAPISource struct {
-	Type              string         `json:"type"`
-	SpecURL           string         `json:"spec_url"`
-	BaseURL           string         `json:"base_url"`
-	Method            string         `json:"method"`
-	Path              string         `json:"path"`
-	OperationKey      string         `json:"operation_key"`
-	OperationHash     string         `json:"operation_hash"`
-	Params            []OpenAPIParam `json:"params,omitempty"`
-	OwnershipVerified bool           `json:"ownership_verified,omitempty"`
+// HTTPSource is the structured request shape stored in Action.Source for every
+// kind=http action — both manually created actions and OpenAPI imports. Type is
+// "http" for manual actions and "openapi" for imports; the OpenAPI provenance
+// fields (SpecURL, OperationKey, OperationHash, OwnershipVerified) are empty for
+// manual actions, and import reconciliation is scoped to Type=="openapi" rows.
+type HTTPSource struct {
+	Type              string      `json:"type"`
+	SpecURL           string      `json:"spec_url,omitempty"`
+	BaseURL           string      `json:"base_url"`
+	Method            string      `json:"method"`
+	Path              string      `json:"path"`
+	OperationKey      string      `json:"operation_key,omitempty"`
+	OperationHash     string      `json:"operation_hash,omitempty"`
+	Params            []HTTPParam `json:"params,omitempty"`
+	OwnershipVerified bool        `json:"ownership_verified,omitempty"`
 }
 
 // ActionManifest is a signed, exportable description of a public active action.
