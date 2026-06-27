@@ -311,11 +311,12 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 		if errors.Is(callErr, ErrTimeout) {
 			return nil, callErr
 		}
-		// Non-timeout: Call failed before creating a transaction. Re-park the price and
-		// reset to waiting so the step can be retried. BeginStepCall already released
-		// the parent trace lock; ResetStepAndRepark undoes that accounting.
-		// If CommitFailedCall already ran (step is done), this is a no-op.
-		_ = k.store.ResetStepAndRepark(ctx, stepID)
+		// Non-timeout: Call failed before creating a transaction. Re-park and reset to waiting so
+		// the step can be retried. A no-op if CommitFailedCall already ran (step done); a non-nil
+		// error is a genuine store failure worth logging (callErr is still returned).
+		if resetErr := k.store.ResetStepAndRepark(ctx, stepID); resetErr != nil {
+			k.log.With(ctx).Error("step.reset_failed", "step_id", stepID, "error", resetErr, "call_error", callErr)
+		}
 		return nil, callErr
 	}
 	k.log.With(ctx).Info("step.completed", "step_id", stepID, "tx_id", reply.TxID, "status", "success")

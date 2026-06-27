@@ -178,11 +178,11 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	}, nil
 }
 
-// verifyRemoteReceiptSignature returns nil if the receipt's Ed25519 signature is valid
-// against pubKeyB64. When pubKeyB64 is empty the check is skipped (no key configured).
+// verifyRemoteReceiptSignature checks the receipt's Ed25519 signature against pubKeyB64. Fails
+// closed on an empty key: a missing key must never let an unverified receipt pass as valid (§13).
 func verifyRemoteReceiptSignature(r *Receipt, pubKeyB64 string) error {
 	if pubKeyB64 == "" {
-		return nil
+		return ErrInvalidState.Wrap("peer public key is not configured; cannot verify receipt signature")
 	}
 	pub, err := decodeRemotePublicKey(pubKeyB64)
 	if err != nil {
@@ -353,11 +353,6 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	if !ok {
 		return ErrInvalidState.Wrap("federation executor not configured")
 	}
-	fr, _ := fe.ExecuteFederation(ctx, action.Source, *trace.IdempotencyKey, dispatch.Args)
-	if fr.ReceiptJSON == "" {
-		// Still pending.
-		return nil
-	}
 	mp := dispatch.RemotePrice
 	if mp == 0 {
 		// Fallback: derive from action.Price and ImportBPS.
@@ -394,11 +389,31 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	ktx.ArgsJSON = json.RawMessage(argsJSON)
 
 	req := CallRequest{StepID: dispatch.StepID}
-	_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, 0)
-	if errors.Is(err, ErrTimeout) {
-		return nil // still pending (no receipt or invalid signature); retrier will try again
+
+	fr, _ := fe.ExecuteFederation(ctx, action.Source, *trace.IdempotencyKey, dispatch.Args)
+	if fr.ReceiptJSON != "" {
+		_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, 0)
+		if !errors.Is(err, ErrTimeout) {
+			return err // settled, or a real settlement error
+		}
+		// ErrTimeout here = a received-but-invalid receipt; fall through to the age bound rather
+		// than failing on the first malformed response (could be transient transport junk).
 	}
-	return err
+
+	// No settleable receipt yet. Past the bound the §13 idempotency key may be gone on the remote,
+	// so settle as a failure with full refund rather than retry forever; otherwise keep retrying.
+	maxAge := k.cfg.RemotePendingMaxAge
+	if maxAge == 0 {
+		maxAge = 24 * time.Hour
+	}
+	if now.Sub(trace.CreatedAt) > maxAge {
+		ktx.Status = TxFailure
+		ktx.Reason = "remote call unsettled past max pending age"
+		logger.Warn("remote.retry.expired", "trace_id", trace.ID, "age_seconds", now.Sub(trace.CreatedAt).Seconds())
+		_, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, ErrTimeout.Wrap("remote call unsettled past max pending age"))
+		return sErr
+	}
+	return nil
 }
 
 // SignFederation signs a federation payload with the platform key and returns

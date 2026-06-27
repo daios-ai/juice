@@ -12,7 +12,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// CallRequest is input to the central Call() operation.
+// CallRequest is input to the central Call() operation. Exactly one of ParentTraceID (subcall),
+// ExistingTraceID (root call, by beginRun), or StepID (completion, by CompleteStep) selects the
+// dispatch mode; each mode's funding is set up by that wrapper before Call runs.
 type CallRequest struct {
 	// CallerID is the authenticated user making the call.
 	CallerID string
@@ -121,8 +123,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, ErrInvalidState.Wrap("process is closed")
 	}
 
-	// 3. For subcalls: validate process-use authority.
-	// Root calls (ExistingTraceID) and step-completion calls skip this check.
+	// 3. Process-use authority (§4 precondition 4), enforced here for subcalls. Root calls have
+	// C = P by construction (beginRun) and step completions are checked by CompleteStep, so both
+	// satisfy it before reaching Call.
 	var parentTrace *Trace
 	if req.ExistingTraceID == "" && req.StepID == "" {
 		// preReadParent is the parent trace (derived processID came from it, so membership is implicit).

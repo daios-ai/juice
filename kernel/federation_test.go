@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/log"
 	"github.com/google/uuid"
 )
 
@@ -616,9 +617,15 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 // The fake's receiptJSON is left empty for the caller to set.
 func setupSettleProxy(t *testing.T, st kernel.Store, fake *fakeFederationHTTP, priv ed25519.PrivateKey, pub ed25519.PublicKey, remoteActionID string, proxyPrice int64) (*kernel.Kernel, *kernel.Action, *kernel.User) {
 	t.Helper()
+	return setupSettleProxyWithKernel(t, st, newTestKernelWithHTTP(st, fake), priv, pub, remoteActionID, proxyPrice)
+}
+
+// setupSettleProxyWithKernel is setupSettleProxy against a caller-supplied kernel, so a test
+// can configure the kernel (e.g. RemotePendingMaxAge) before importing the proxy.
+func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel, priv ed25519.PrivateKey, pub ed25519.PublicKey, remoteActionID string, proxyPrice int64) (*kernel.Kernel, *kernel.Action, *kernel.User) {
+	t.Helper()
 	ctx := context.Background()
 	sys := setupSys(t, nil, st)
-	k := newTestKernelWithHTTP(st, fake)
 
 	remoteUser, err := k.AddPeer(ctx, sys.ID, "@settle-peer", base64.RawURLEncoding.EncodeToString(pub), "https://settle.example.com")
 	if err != nil {
@@ -646,6 +653,61 @@ func setupSettleProxy(t *testing.T, st kernel.Store, fake *fakeFederationHTTP, p
 	// Fund the caller with exactly the proxy price so a full refund restores the original balance.
 	caller := setupUser(t, st, "@settle-caller", a.Price)
 	return k, a, caller
+}
+
+// TestRetryExpiredRemoteTraceSettlesAsFailure (#5): past RemotePendingMaxAge a never-settled
+// remote-proxy call is settled as a failure with full refund, not retried forever (§13).
+func TestRetryExpiredRemoteTraceSettlesAsFailure(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+
+	// Empty receiptJSON → ExecuteFederation always reports "pending" (genuine silence).
+	fake := &fakeFederationHTTP{}
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	cfg.RemotePendingMaxAge = time.Nanosecond // any pending trace is immediately past the bound
+	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+
+	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "exp-action", 1000)
+	before, _ := st.ReadUser(ctx, caller.ID)
+
+	// Real root run: the empty receipt makes the proxy call time out; the process stays open and
+	// the trace persists in the DB with its idempotency key (beginRun records the dispatch).
+	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("Run: expected ErrTimeout, got %v", err)
+	}
+	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
+		t.Fatalf("expected 1 pending remote trace after timeout, got %d", len(pend))
+	}
+
+	// The periodic retrier runs. The trace is already past the 1ns window → terminal failure.
+	k.RetryPendingRemoteDispatches(ctx)
+
+	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 0 {
+		t.Fatalf("expected 0 pending traces after expiry settlement, got %d", len(pend))
+	}
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{})
+	var failures int
+	for _, tx := range txs {
+		if tx.Status == kernel.TxFailure {
+			failures++
+		}
+	}
+	if failures != 1 {
+		t.Fatalf("expected exactly 1 failure transaction for the expired call, got %d", failures)
+	}
+	// Full refund: the root failure auto-closes the process and returns the caller's funds.
+	after, _ := st.ReadUser(ctx, caller.ID)
+	if after.Available != before.Available {
+		t.Errorf("expected full refund to %d, got %d", before.Available, after.Available)
+	}
+	if after.Locked != 0 {
+		t.Errorf("expected 0 locked after refund, got %d", after.Locked)
+	}
 }
 
 func TestSettleRemoteCallRejectsWrongActionID(t *testing.T) {

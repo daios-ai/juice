@@ -6,12 +6,36 @@ package kernel
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
 	"time"
 )
+
+// TestVerifyRemoteReceiptSignatureFailsClosedOnEmptyKey: an empty peer public key must make
+// signature verification fail, never be silently skipped — a missing key cannot authenticate
+// a receipt, so it must never let an unverified receipt pass as valid (§13).
+func TestVerifyRemoteReceiptSignatureFailsClosedOnEmptyKey(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	r := &Receipt{ID: "r1", ActionID: "a1", Status: TxSuccess, Gross: 5, Net: 5}
+	sig, err := signReceipt(priv, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Signature = sig
+
+	if err := verifyRemoteReceiptSignature(r, ""); err == nil {
+		t.Fatal("empty peer key: got nil, want error (must fail closed)")
+	}
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	if err := verifyRemoteReceiptSignature(r, pubB64); err != nil {
+		t.Fatalf("valid signature with correct key: %v", err)
+	}
+}
 
 // TestSettlementContextDetachesCancellation verifies that settlementContext strips
 // execution-scoped cancellation/deadline (so a money commit never aborts when the

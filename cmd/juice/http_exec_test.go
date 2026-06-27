@@ -161,45 +161,42 @@ func TestHTTPActionExecutorInvalidJSON(t *testing.T) {
 	}
 }
 
-// TestHTTPActionAuthDecryptFailsClosed: undecryptable auth_json must abort with
-// ErrInvalidState and make no upstream request (fail closed, not unauthenticated).
-func TestHTTPActionAuthDecryptFailsClosed(t *testing.T) {
-	hit := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hit = true
-		json.NewEncoder(w).Encode(map[string]any{"ok": true})
-	}))
-	defer srv.Close()
+// malformedBox decrypts to invalid JSON, simulating credentials that decrypt but cannot be parsed.
+type malformedBox struct{}
 
-	exec := &httpActionExecutor{secretBox: erroringBox{}}
-	_, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: httpSrc(srv.URL, "POST"), AuthJSON: "unreadable-ciphertext"}, map[string]any{})
-	if !errors.Is(err, kernel.ErrInvalidState) {
-		t.Fatalf("got %v, want ErrInvalidState", err)
-	}
-	if hit {
-		t.Error("upstream request was made despite unusable credentials (must fail closed)")
-	}
-}
+func (malformedBox) Seal(aad, plaintext string) (string, error)  { return plaintext, nil }
+func (malformedBox) Open(aad, ciphertext string) (string, error) { return "{not valid json", nil }
 
-// TestHTTPActionAuthParseFailsClosed: malformed plaintext auth_json (no SecretBox) must
-// abort with ErrInvalidState before any upstream request.
-func TestHTTPActionAuthParseFailsClosed(t *testing.T) {
-	hit := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hit = true
-		json.NewEncoder(w).Encode(map[string]any{"ok": true})
-	}))
-	defer srv.Close()
-
-	exec := &httpActionExecutor{} // box nil → auth_json treated as plaintext
-	_, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: httpSrc(srv.URL, "POST"), AuthJSON: "{not valid json"}, map[string]any{})
-	if !errors.Is(err, kernel.ErrInvalidState) {
-		t.Fatalf("got %v, want ErrInvalidState", err)
+// TestHTTPActionAuthFailsClosed: auth_json that cannot be authentically decrypted and parsed must
+// abort with ErrInvalidState and make no upstream request — never treated as plaintext (§8).
+func TestHTTPActionAuthFailsClosed(t *testing.T) {
+	cases := []struct {
+		name string
+		box  kernel.SecretBox
+	}{
+		{"no_box", nil},                  // credentials present, no encryption configured
+		{"undecryptable", erroringBox{}}, // wrong key / corrupt ciphertext
+		{"malformed", malformedBox{}},    // decrypts to invalid JSON
 	}
-	if hit {
-		t.Error("upstream request was made despite unparseable credentials (must fail closed)")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hit := false
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hit = true
+				json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			}))
+			defer srv.Close()
+
+			exec := &httpActionExecutor{secretBox: tc.box}
+			_, err := exec.Execute(context.Background(),
+				&kernel.Action{Source: httpSrc(srv.URL, "POST"), AuthJSON: "x"}, map[string]any{})
+			if !errors.Is(err, kernel.ErrInvalidState) {
+				t.Fatalf("got %v, want ErrInvalidState", err)
+			}
+			if hit {
+				t.Error("upstream request made despite unusable credentials (must fail closed)")
+			}
+		})
 	}
 }
 
@@ -214,9 +211,17 @@ func TestHTTPActionValidAuthApplied(t *testing.T) {
 
 	auth := kernel.AuthInput{Scheme: "bearer", Secrets: map[string]any{"token": "s3cret"}}
 	authJSON, _ := json.Marshal(auth)
-	exec := &httpActionExecutor{} // box nil → plaintext auth_json
-	_, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: httpSrc(srv.URL, "POST"), AuthJSON: string(authJSON)}, map[string]any{})
+	box, err := newAESGCMBox(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("newAESGCMBox: %v", err)
+	}
+	action := &kernel.Action{ID: "act-auth", Source: httpSrc(srv.URL, "POST")}
+	action.AuthJSON, err = box.Seal(action.ID, string(authJSON))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	exec := &httpActionExecutor{secretBox: box}
+	_, err = exec.Execute(context.Background(), action, map[string]any{})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}

@@ -37,7 +37,14 @@ func newTestHTTPServerFull(t *testing.T) (*httptest.Server, *kernel.Kernel, *sto
 	cfg.TokenSecret = "serve-test-secret"
 	cfg.AllowLocalSources = true
 	logger := log.Discard()
-	k := kernel.New(db, nil, &httpActionExecutor{timeout: cfg.ScriptTimeout}, nil, cfg, logger)
+	// Credential encryption is mandatory (§8); production wires a box to both the kernel and
+	// the HTTP executor, so the test server does too.
+	box, err := newAESGCMBox(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := kernel.New(db, nil, &httpActionExecutor{timeout: cfg.ScriptTimeout, secretBox: box}, nil, cfg, logger)
+	k.SetSecretBox(box)
 
 	ctx := context.Background()
 	if err := k.FirstBoot(ctx, "sys-pass"); err != nil {

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -274,6 +275,57 @@ func TestNativeActionNormalLifecycleRejected(t *testing.T) {
 	}
 	if err := k.DeleteAction(ctx, owner.ID, a.ID); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("DeleteAction native error: got %v, want ErrUnauthorized", err)
+	}
+}
+
+// b64Box is a test SecretBox that base64-encodes plaintext so the stored ciphertext does
+// not literally contain the secret, letting tests assert auth_json is sealed at rest.
+type b64Box struct{}
+
+func (b64Box) Seal(_, plaintext string) (string, error) {
+	return base64.StdEncoding.EncodeToString([]byte(plaintext)), nil
+}
+func (b64Box) Open(_, ciphertext string) (string, error) {
+	b, err := base64.StdEncoding.DecodeString(ciphertext)
+	return string(b), err
+}
+
+// TestAuthCredentialsRequireSecretBox: storing or activating upstream auth without a SecretBox
+// fails closed (§8 — encrypted at rest, no plaintext fallback); with a box, auth_json is sealed.
+func TestAuthCredentialsRequireSecretBox(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	owner := setupUser(t, st, "@svcowner", 0)
+	req := kernel.CreateActionRequest{
+		OwnerUserID:  owner.ID,
+		Name:         "svc",
+		Kind:         kernel.KindHTTP,
+		Source:       "https://example.com",
+		Description:  "svc",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		Auth:         &kernel.AuthInput{Scheme: "bearer", Secrets: map[string]any{"token": "s3cret-token"}},
+	}
+
+	// No box: creation is refused.
+	if _, err := newTestKernel(st).CreateAction(ctx, owner.ID, req); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("create with no box: got %v, want ErrInvalidState", err)
+	}
+
+	// With a box: creation succeeds and auth_json is sealed (never the raw secret).
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	a, err := k.CreateAction(ctx, owner.ID, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.AuthJSON == "" || strings.Contains(a.AuthJSON, "s3cret-token") {
+		t.Errorf("auth_json not sealed: %q", a.AuthJSON)
+	}
+
+	// A fresh box-less kernel over the same store must refuse activation.
+	if err := newTestKernel(st).SetActive(ctx, owner.ID, a.ID, true); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("activate with no box: got %v, want ErrInvalidState", err)
 	}
 }
 

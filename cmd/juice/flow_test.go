@@ -72,7 +72,15 @@ func newFlowKernel(t *testing.T, exec kernel.ScriptExecutor) (*httptest.Server, 
 	cfg.TokenSecret = "flow-test-secret"
 	cfg.AllowLocalSources = true
 	logger := log.Discard()
-	k := kernel.New(db, exec, &httpActionExecutor{timeout: cfg.ScriptTimeout}, nil, cfg, logger)
+	// Credential encryption is mandatory (§8); the production binary always wires a box to
+	// both the kernel and the HTTP executor, so the flow harness does too.
+	box, err := newAESGCMBox(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, secretBox: box}
+	k := kernel.New(db, exec, httpExec, nil, cfg, logger)
+	k.SetSecretBox(box)
 
 	ctx := context.Background()
 	if err := k.FirstBoot(ctx, "sys-pass"); err != nil {

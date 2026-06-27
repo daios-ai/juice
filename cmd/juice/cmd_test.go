@@ -62,6 +62,11 @@ func newTestEnv(t *testing.T) *testEnv {
 	cfg.FeeRecipientID = cmdTestIssuerID
 	cfg.SigningKey = signingKey
 	k := kernel.New(db, nil, nil, nil, cfg, log.Discard())
+	// Credential encryption is mandatory (§8): the production binary always wires a box,
+	// so tests do too. Without it, creating/activating an action with upstream auth fails closed.
+	if box, err := newAESGCMBox(make([]byte, 32)); err == nil {
+		k.SetSecretBox(box)
+	}
 	t.Setenv("JUICE_SECRET_KEY", "cli-test-secret")
 
 	t.Cleanup(func() { db.Close() })

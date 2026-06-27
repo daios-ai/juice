@@ -1021,11 +1021,9 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 			`UPDATE traces SET available=0 WHERE id=?`, traceID); err != nil {
 			return dbErr(err, "commit call: zero trace available")
 		}
-		// Release the full gross from the caller wallet lock (not just taxable).
-		// gross = ktx.Gross = action.Price = total amount locked at BeginRun/BeginSubcall.
-		// subcall's taxables have already been deducted from the caller wallet lock by their
-		// own CommitCall, so by the time we arrive here caller.locked == taxable.
-		// We release the full gross to leave caller.locked exactly reduced.
+		// Release the full gross from the caller's lock row (per callerWalletKind, see doc above).
+		// Each settled subcall already released its own gross from this row, so it now holds
+		// exactly this call's gross.
 		if ktx.Gross > 0 {
 			switch callerWalletKind {
 			case kernel.CallerProcess:
@@ -1836,10 +1834,12 @@ func (s *DB) ListOrphanTraces(ctx context.Context) ([]*kernel.Trace, error) {
 }
 
 func (s *DB) ListPendingRemoteTraces(ctx context.Context) ([]*kernel.Trace, error) {
+	// The correlation must be qualified (transactions.trace_id=traces.id): an unqualified `id`
+	// binds to transactions.id, making the predicate always false and every trace look pending.
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+traceCols+` FROM traces
 		 WHERE idempotency_key IS NOT NULL
-		 AND NOT EXISTS (SELECT 1 FROM transactions WHERE trace_id=id)`)
+		 AND NOT EXISTS (SELECT 1 FROM transactions WHERE transactions.trace_id=traces.id)`)
 	if err != nil {
 		return nil, dbErr(err, "list pending remote traces")
 	}

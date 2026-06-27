@@ -88,15 +88,14 @@ func applyUpstreamAuth(action *kernel.Action, headers map[string]string, rawURL 
 	if action.AuthJSON == "" {
 		return nil
 	}
-	var plaintext string
-	if box != nil {
-		var err error
-		plaintext, err = box.Open(action.ID, action.AuthJSON)
-		if err != nil {
-			return kernel.ErrInvalidState.Wrap("upstream auth credentials could not be decrypted")
-		}
-	} else {
-		plaintext = action.AuthJSON // stored as plaintext when no SecretBox configured
+	// Fail closed: credentials are always encrypted at rest (§8), so a missing box means the
+	// stored auth cannot be authentically decrypted — never treat auth_json as plaintext.
+	if box == nil {
+		return kernel.ErrInvalidState.Wrap("upstream auth credentials present but credential encryption is not configured")
+	}
+	plaintext, err := box.Open(action.ID, action.AuthJSON)
+	if err != nil {
+		return kernel.ErrInvalidState.Wrap("upstream auth credentials could not be decrypted")
 	}
 	var auth kernel.AuthInput
 	if err := json.Unmarshal([]byte(plaintext), &auth); err != nil {

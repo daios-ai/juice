@@ -34,6 +34,9 @@ type Config struct {
 	IssuerUserID      string             // @sys user ID, set during bootstrap
 	AuthIssuer        string             // juice.json auth_issuer — iss claim in JWTs; empty = no claim
 	AuthAudience      string             // juice.json auth_audience — aud claim in JWTs; empty = no validation
+	// RemotePendingMaxAge bounds how long a remote-proxy call may stay pending before it settles
+	// as a failure with full refund, so a silent peer can't pin a process open. 0 = default 24h.
+	RemotePendingMaxAge time.Duration
 }
 
 // DefaultConfig returns safe local defaults.
@@ -127,22 +130,21 @@ func (k *Kernel) RegisterNativeHandler(name string, fn NativeFunc) {
 	k.nativeHandlers[name] = fn
 }
 
-// sealAuthJSON marshals auth to JSON and, if a SecretBox is configured, encrypts it before
-// storing in a.AuthJSON. Without a SecretBox the plaintext JSON is stored (dev/test only).
+// sealAuthJSON encrypts auth with the configured SecretBox into a.AuthJSON. Fails closed with no
+// box: credentials are encrypted at rest (§8), never stored as plaintext.
 func (k *Kernel) sealAuthJSON(a *Action, auth *AuthInput) error {
+	if k.secretBox == nil {
+		return ErrInvalidState.Wrap("credential encryption is not configured; cannot store upstream auth")
+	}
 	b, err := json.Marshal(auth)
 	if err != nil {
 		return ErrInvalidInput.Wrapf("marshal auth: %v", err)
 	}
-	if k.secretBox != nil {
-		ciphertext, err := k.secretBox.Seal(a.ID, string(b))
-		if err != nil {
-			return ErrInternal.Wrapf("seal auth: %v", err)
-		}
-		a.AuthJSON = ciphertext
-	} else {
-		a.AuthJSON = string(b)
+	ciphertext, err := k.secretBox.Seal(a.ID, string(b))
+	if err != nil {
+		return ErrInternal.Wrapf("seal auth: %v", err)
 	}
+	a.AuthJSON = ciphertext
 	return nil
 }
 
@@ -1062,6 +1064,11 @@ func (k *Kernel) SetActive(ctx context.Context, callerID, actionID string, activ
 			if err := k.validateHTTPSource(ctx, httpSourceBaseURL(a.Source), k.cfg.AllowLocalSources); err != nil {
 				return err
 			}
+			// Fail closed: don't activate an action with stored credentials when no box is
+			// configured — they'd be unreadable (or legacy plaintext) at dispatch (§8).
+			if a.AuthJSON != "" && k.secretBox == nil {
+				return ErrInvalidState.Wrap("cannot activate action with upstream auth: credential encryption is not configured")
+			}
 		}
 		if a.Kind == KindWasm {
 			if k.scripts == nil {
@@ -1166,6 +1173,8 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 		return nil, err
 	}
 	k.log.With(ctx).Info("process.created", "process_id", p.ID, "owner", caller.ID, "price", action.Price)
+	// Pass the validated Action snapshot and the funded root trace into Call: binds execution to
+	// the row just funded (no TOCTOU window). Call re-validates the snapshot.
 	return k.Call(ctx, CallRequest{
 		CallerID:            caller.ID,
 		Action:              action,
