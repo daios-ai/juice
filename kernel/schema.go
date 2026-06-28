@@ -158,16 +158,6 @@ func validateValue(schema map[string]any, data any, path string) error {
 
 	t, _ := schema["type"].(string)
 
-	// Enum check.
-	if enums, ok := schema["enum"].([]any); ok {
-		for _, e := range enums {
-			if fmt.Sprintf("%v", e) == fmt.Sprintf("%v", data) {
-				return nil
-			}
-		}
-		return ErrSchemaViolation.Wrapf("field %s: value not in enum", path)
-	}
-
 	switch t {
 	case "object":
 		obj, ok := data.(map[string]any)
@@ -267,6 +257,18 @@ func validateValue(schema map[string]any, data any, path string) error {
 		if _, ok := data.(bool); !ok {
 			return ErrSchemaViolation.Wrapf("field %s: expected boolean, got %T", path, data)
 		}
+	}
+
+	// Enum membership runs after type validation so a value of the wrong JSON type is
+	// rejected first (e.g. numeric 1 must not satisfy {type:string, enum:["1"]}). With the
+	// type confirmed, comparing the canonical string rendering is unambiguous.
+	if enums, ok := schema["enum"].([]any); ok {
+		for _, e := range enums {
+			if fmt.Sprintf("%v", e) == fmt.Sprintf("%v", data) {
+				return nil
+			}
+		}
+		return ErrSchemaViolation.Wrapf("field %s: value not in enum", path)
 	}
 
 	return nil

@@ -142,7 +142,7 @@ func validateResolvedIP(ipStr string) error {
 	if ip == nil {
 		return fmt.Errorf("invalid resolved IP %q", ipStr)
 	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+	if kernel.UnsafeIP(ip) {
 		return kernel.ErrInvalidInput.Wrap("resolved address is private or loopback — for local/dev use, set allow_local_peer_urls or allow_local_sources in juice.json")
 	}
 	return nil
@@ -172,10 +172,8 @@ func validatePublicURL(rawURL string, allowLocal bool) error {
 	if strings.EqualFold(host, "localhost") || host == "" {
 		return kernel.ErrInvalidInput.Wrap("unsafe URL: localhost not allowed")
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-			return kernel.ErrInvalidInput.Wrap("unsafe URL: private/loopback host")
-		}
+	if ip := net.ParseIP(host); ip != nil && kernel.UnsafeIP(ip) {
+		return kernel.ErrInvalidInput.Wrap("unsafe URL: private/loopback host")
 	}
 	return nil
 }
@@ -185,13 +183,8 @@ func validateRedirectHost(hostname string, allowLocal bool) error {
 	if allowLocal {
 		return nil
 	}
-	if strings.EqualFold(hostname, "localhost") || hostname == "" {
-		return kernel.ErrInvalidInput.Wrap("unsafe redirect target")
-	}
-	if ip := net.ParseIP(hostname); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-			return kernel.ErrInvalidInput.Wrap("unsafe redirect target: private/loopback host")
-		}
+	if kernel.UnsafeHost(hostname) {
+		return kernel.ErrInvalidInput.Wrap("unsafe redirect target: private/loopback host")
 	}
 	return nil
 }

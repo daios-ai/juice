@@ -461,6 +461,26 @@ type CreateActionRequest struct {
 	Auth         *AuthInput  // upstream credentials; sealed into auth_json at rest; write-only
 }
 
+// UnsafeIP reports whether ip is loopback, RFC 1918 private, or link-local — the addresses an
+// outbound fetch, redirect, or peer URL must not target (SSRF discipline, §7/§9). This is the
+// single source of truth for that predicate; do not re-inline the three checks elsewhere.
+func UnsafeIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+// UnsafeHost reports whether host (a hostname or literal IP) is empty, localhost, or a literal
+// private/loopback/link-local IP. Non-IP hostnames return false — callers that resolve DNS must
+// check the resolved addresses with UnsafeIP separately.
+func UnsafeHost(host string) bool {
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return UnsafeIP(ip)
+	}
+	return false
+}
+
 // validateHTTPSource rejects URLs that could be used for SSRF attacks.
 // Allowed: http and https schemes with public hostnames or literal public IPs.
 // Rejected: other schemes, localhost, loopback, RFC 1918 private, and link-local addresses.
@@ -489,17 +509,15 @@ func (k *Kernel) validateHTTPSource(ctx context.Context, source string, allowLoc
 			return ErrInvalidInput.Wrap("URL must not target localhost")
 		}
 		if ip := net.ParseIP(host); ip != nil {
-			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			if UnsafeIP(ip) {
 				return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
 			}
 		} else {
 			// Resolve the hostname and reject if any address is private/loopback/link-local.
 			if addrs, err := k.lookupHost(ctx, host); err == nil {
 				for _, a := range addrs {
-					if ip := net.ParseIP(a); ip != nil {
-						if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-							return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
-						}
+					if ip := net.ParseIP(a); ip != nil && UnsafeIP(ip) {
+						return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
 					}
 				}
 			}

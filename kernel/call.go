@@ -12,15 +12,15 @@ import (
 	"github.com/google/uuid"
 )
 
-// CallRequest is input to the central Call() operation. Exactly one of ParentTraceID (subcall),
-// ExistingTraceID (root call, by beginRun), or StepID (completion, by CompleteStep) selects the
-// dispatch mode; each mode's funding is set up by that wrapper before Call runs.
+// CallRequest is input to the central Call() operation. The dispatch mode is selected by which
+// trace reference is set: ParentTraceID for a subcall (funded here by BeginSubcall), or
+// ExistingTraceID for a pre-created, pre-funded trace — a root call (BeginRun) or a step
+// completion (BeginStepCall). StepID is an orthogonal flag, not a third trace mode.
 type CallRequest struct {
 	// CallerID is the authenticated user making the call.
 	CallerID string
-	// ParentTraceID is the trace from which this call originates.
-	// For subcalls it is the parent trace ID.
-	// For step-completion calls it is set by BeginStepCall's trace.
+	// ParentTraceID is the parent trace of a subcall; the call's funds are moved from it by
+	// BeginSubcall. Empty for root calls and step completions (those set ExistingTraceID).
 	ParentTraceID string
 	// Action, when non-nil, is the pre-validated action from beginRun.
 	// Call uses it directly and skips the DB read, eliminating the TOCTOU window
@@ -36,11 +36,13 @@ type CallRequest struct {
 	ActionName string
 	// Args is the JSON-decoded input arguments.
 	Args map[string]any
-	// StepID, if non-empty, causes CommitCall/CommitFailedCall to atomically mark the step done.
-	// Also signals CallerStep wallet kind (BeginStepCall was used, no lock to release).
+	// StepID, if non-empty, causes CommitCall/CommitFailedCall to atomically mark the step done
+	// and selects the CallerStep wallet kind (BeginStepCall already released the parent lock).
+	// It accompanies ExistingTraceID on a step completion; it is not itself a trace reference.
 	StepID string
-	// ExistingTraceID, when non-empty, signals that the root trace was already created atomically
-	// by BeginRun. Call uses this trace instead of calling BeginSubcall.
+	// ExistingTraceID names a trace already created and funded atomically by its wrapper —
+	// BeginRun (root call) or BeginStepCall (step completion). Call adopts it instead of
+	// calling BeginSubcall, and uses its pre-locked amount as gross.
 	ExistingTraceID string
 	// IdempotencyRecordID, if non-empty, causes CommitCall/CommitFailedCall to atomically
 	// mark the pending idempotency record as complete. Set only by federation handlers.
@@ -84,9 +86,12 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, err
 	}
 
-	// 1.5: Derive processID from the trace reference; for subcalls also read the parent trace.
+	// 1.5: Derive processID from the trace reference and read the referenced trace once.
+	// ExistingTraceID names a trace already created and funded by its wrapper — BeginRun for a
+	// root call, BeginStepCall for a step completion; preReadExisting is reused in section 8 to
+	// avoid a second read. ParentTraceID names a subcall's parent.
 	var processID string
-	var preReadParent *Trace
+	var preReadParent, preReadExisting *Trace
 	switch {
 	case req.ExistingTraceID != "":
 		rt, err := k.store.ReadTrace(ctx, req.ExistingTraceID)
@@ -94,15 +99,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			return nil, ErrNotFound.Wrap("trace not found")
 		}
 		processID = rt.ProcessID
-	case req.StepID != "":
-		if req.ParentTraceID == "" {
-			return nil, ErrInvalidInput.Wrap("ParentTraceID required for step calls")
-		}
-		st, err := k.store.ReadTrace(ctx, req.ParentTraceID)
-		if err != nil {
-			return nil, ErrNotFound.Wrap("step trace not found")
-		}
-		processID = st.ProcessID
+		preReadExisting = rt
 	case req.ParentTraceID != "":
 		pt, err := k.store.ReadTrace(ctx, req.ParentTraceID)
 		if err != nil {
@@ -124,10 +121,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	// 3. Process-use authority (§4 precondition 4), enforced here for subcalls. Root calls have
-	// C = P by construction (beginRun) and step completions are checked by CompleteStep, so both
-	// satisfy it before reaching Call.
+	// C = P by construction (beginRun) and step completions are checked by CompleteStep; both
+	// arrive via ExistingTraceID and satisfy it before reaching Call.
 	var parentTrace *Trace
-	if req.ExistingTraceID == "" && req.StepID == "" {
+	if req.ExistingTraceID == "" {
 		// preReadParent is the parent trace (derived processID came from it, so membership is implicit).
 		// Non-owner callers must have action_owner_id on the parent trace.
 		if process.OwnerUserID != req.CallerID && preReadParent.ActionOwnerID != req.CallerID {
@@ -178,8 +175,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		return nil, err
 	}
 
-	// 7. Funds check (step calls pre-funded by BeginStepCall; ExistingTraceID root calls pre-funded by BeginRun).
-	if req.StepID == "" && req.ExistingTraceID == "" {
+	// 7. Funds check. Only subcalls check here; ExistingTraceID calls (root via BeginRun, step
+	// completion via BeginStepCall) are pre-funded with their exact allocation.
+	if req.ExistingTraceID == "" {
 		if parentTrace != nil && parentTrace.Available < action.Price {
 			return nil, ErrInsufficientFunds.Wrapf("parent trace has %d credits, action costs %d", parentTrace.Available, action.Price)
 		}
@@ -223,23 +221,14 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	callerWalletID, callerWalletKind := k.callerWallet(req, process, parentTrace)
 
 	switch {
-	case req.StepID != "":
-		// BeginStepCall was already called by CompleteStep; skip BeginRootCall/BeginSubcall.
-		// trace was created by BeginStepCall; use the trace ID from req.
-		trace.ID = req.ParentTraceID // for step calls, ParentTraceID IS the new trace (set by CompleteStep)
-		// Fetch the real parent_trace_id from DB so the tx records it correctly (not a self-reference).
-		// BeginStepCall funded this trace with exactly step.price, so gross must be that snapshot —
-		// not the action's current price, which may have changed since step creation.
-		if dbTrace, err := k.store.ReadTrace(ctx, trace.ID); err == nil {
-			trace.ParentTraceID = dbTrace.ParentTraceID
-			lockPrice = applyPrefundedSnapshot(trace, dbTrace)
-		}
 	case req.ExistingTraceID != "":
-		// Root trace was pre-created atomically by BeginRun; load its full state.
+		// Trace was pre-created and funded atomically by its wrapper (BeginRun for a root call,
+		// BeginStepCall for a step completion); skip BeginSubcall and adopt that trace. Use its
+		// pre-locked amount as gross — for a step that is step.price, the snapshot taken at step
+		// creation, not the action's possibly-changed current price. preReadExisting was read in
+		// section 1.5, so no second read is needed.
 		trace.ID = req.ExistingTraceID
-		if dbTrace, err := k.store.ReadTrace(ctx, req.ExistingTraceID); err == nil {
-			lockPrice = applyPrefundedSnapshot(trace, dbTrace) // use the pre-locked amount, not current action.Price
-		}
+		lockPrice = applyPrefundedSnapshot(trace, preReadExisting)
 	default:
 		if err := k.store.BeginSubcall(ctx, req.ParentTraceID, trace, lockPrice); err != nil {
 			if errors.Is(err, ErrInsufficientFunds) {
@@ -249,15 +238,16 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 	}
 
+	txID := uuid.New().String()
 	ctx = log.WithProcessID(ctx, processID)
 	ctx = log.WithCallerUserID(ctx, req.CallerID)
 	ctx = log.WithCallerHandle(ctx, k.callerHandle(ctx, req.CallerID))
 	ctx = log.WithTraceID(ctx, trace.ID)
 	ctx = log.WithActionID(ctx, action.ID)
+	ctx = log.WithTxID(ctx, txID)
 	logger = k.log.With(ctx)
 	logger.Info("call.start", "action", action.Name, "price", lockPrice)
 
-	txID := uuid.New().String()
 	var parentTraceIDStr string
 	if trace.ParentTraceID != nil {
 		parentTraceIDStr = *trace.ParentTraceID
@@ -392,10 +382,13 @@ func (k *Kernel) callerWallet(req CallRequest, process *Process, parentTrace *Tr
 }
 
 // applyPrefundedSnapshot copies the pre-funded state from a persisted trace onto the in-memory
-// trace and returns the locked amount (= dbTrace.Available) to use as gross. Shared by the
-// step-completion and root (ExistingTraceID) dispatch paths.
+// trace and returns the locked amount (= dbTrace.Available) to use as gross. Shared by both
+// pre-created-trace dispatch paths: root calls (BeginRun) and step completions (BeginStepCall).
+// ParentTraceID is copied from the persisted trace — null for a root trace, the step's parent
+// for a completion trace — so the recorded causality is correct without a special case.
 func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
 	trace.Available = dbTrace.Available
+	trace.ParentTraceID = dbTrace.ParentTraceID
 	trace.IdempotencyKey = dbTrace.IdempotencyKey
 	trace.DispatchJSON = dbTrace.DispatchJSON
 	return dbTrace.Available

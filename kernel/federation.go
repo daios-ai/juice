@@ -364,27 +364,11 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	callerWalletID, callerWalletKind := callerWalletFor(dispatch.StepID, process.ID, trace.ParentTraceID)
 
 	now := time.Now().UTC()
-	ktx := &Transaction{
-		ID:             uuid.New().String(),
-		ProcessID:      trace.ProcessID,
-		TraceID:        trace.ID,
-		ParentTraceID:  func() string {
-			if trace.ParentTraceID != nil {
-				return *trace.ParentTraceID
-			}
-			return ""
-		}(),
-		OwnerUserID:    process.OwnerUserID,
-		CallerUserID:   trace.CallerUserID,
-		TargetUserID:   trace.ActionOwnerID,
-		ActionID:       trace.ActionID,
-		ActionName:     action.Name,
-		RemoteActionID: action.RemoteActionID,
-		Status:         TxFailure,
-		Gross:          q,
-		StartedAt:      trace.CreatedAt,
-		EndedAt:        now,
+	ktx := newTraceFailureTx(trace, process, action, q, now)
+	if trace.ParentTraceID != nil {
+		ktx.ParentTraceID = *trace.ParentTraceID
 	}
+	ktx.RemoteActionID = action.RemoteActionID
 	argsJSON, _ := json.Marshal(dispatch.Args)
 	ktx.ArgsJSON = json.RawMessage(argsJSON)
 

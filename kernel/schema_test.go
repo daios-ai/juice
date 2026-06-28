@@ -231,4 +231,24 @@ func TestValidateInput(t *testing.T) {
 			t.Errorf("unexpected error when all required fields present: %v", err)
 		}
 	})
+
+	t.Run("enum is checked after type so wrong-typed values are rejected", func(t *testing.T) {
+		s := map[string]any{"type": "string", "enum": []any{"1", "2"}}
+		// Numeric 1 renders as "1" but must not satisfy a string enum.
+		if err := ValidateInput(s, float64(1)); err == nil {
+			t.Error("expected error: numeric 1 must not satisfy {type:string, enum:[\"1\"]}")
+		}
+		// Matched-type membership still passes; non-member of the right type is rejected.
+		if err := ValidateInput(s, "1"); err != nil {
+			t.Errorf("string \"1\" should satisfy the enum: %v", err)
+		}
+		if err := ValidateInput(s, "3"); err == nil {
+			t.Error("expected error: \"3\" is not in the enum")
+		}
+		// Integer enum still works for matched numeric input.
+		si := map[string]any{"type": "integer", "enum": []any{float64(1), float64(2)}}
+		if err := ValidateInput(si, float64(2)); err != nil {
+			t.Errorf("integer 2 should satisfy the enum: %v", err)
+		}
+	})
 }

@@ -64,6 +64,25 @@ func TestMigrationsAreFileBackedAndRecorded(t *testing.T) {
 	}
 }
 
+// columnExists reports whether table has a column with the given name (test-only schema check).
+func (s *DB) columnExists(table, column string) bool {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, colType string
+		var dflt any
+		_ = rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk)
+		if name == column {
+			return true
+		}
+	}
+	return false
+}
+
 func newUser(handle string, balance int64) *kernel.User {
 	return &kernel.User{
 		ID:           uuid.New().String(),
@@ -602,6 +621,48 @@ func TestEndProcessDoesNotDoubleCountCompletedStep(t *testing.T) {
 	}
 	if u.Locked < 0 {
 		t.Errorf("user.locked=%d, must not go negative", u.Locked)
+	}
+}
+
+// TestBeginStepCallGuardsParkInvariant verifies BeginStepCall returns a typed ErrInvalidState
+// (not a raw CHECK constraint failure) if the parent trace's locked is below the step price —
+// i.e. the park invariant is broken. Mirrors BeginSubcall's guarded-update pattern.
+func TestBeginStepCallGuardsParkInvariant(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@bsc-guard", 1000)
+	_ = db.CreateUser(ctx, user)
+	caller := newUser("@bsc-guard-caller", 0)
+	_ = db.CreateUser(ctx, caller)
+
+	p := newProcess(user.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, user.ID, 50); err != nil {
+		t.Fatal(err)
+	}
+	act := newAction(user.ID, "bsc-guard-act", 50, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	ptID := root.ID
+	step := &kernel.Step{
+		ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: caller.ID,
+		ActionID: act.ID, Price: 50, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+	}
+	if err := db.CreateStep(ctx, step); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt the park: drop the parent trace's locked below the step price.
+	if _, err := db.db.ExecContext(ctx, `UPDATE traces SET locked=0 WHERE id=?`, root.ID); err != nil {
+		t.Fatalf("corrupt locked: %v", err)
+	}
+
+	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	err := db.BeginStepCall(ctx, step.ID, ct)
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("BeginStepCall with broken park: got %v, want ErrInvalidState", err)
 	}
 }
 

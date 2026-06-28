@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -2113,6 +2115,71 @@ func TestCallBindsToPassedAction(t *testing.T) {
 	}
 	if txn.ActionID != actionA.ID {
 		t.Errorf("call bound to wrong action: got %q, want %q", txn.ActionID, actionA.ID)
+	}
+}
+
+// TestCallLogsTxID verifies that a real call emits log lines carrying tx_id (§14 required
+// field). Regression guard: the logger reads tx_id from context but nothing wired it until
+// Call() began calling log.WithTxID.
+func TestCallLogsTxID(t *testing.T) {
+	st := newTestStore(t)
+	logPath := filepath.Join(t.TempDir(), "call.log")
+	logger, err := log.New(log.Config{Level: "info", FilePath: logPath, Format: "json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	k := kernel.New(st, &fakeScriptExec{result: `{"ok":true}`}, nil, nil, cfg, logger)
+
+	ctx := context.Background()
+	alice := setupUser(t, st, "@alice", 2000)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "paid", Kind: kernel.KindWasm,
+		Active: true, Price: 100, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	_, tr := beginTestRun(t, st, alice.ID, a)
+
+	reply, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: alice.ID, ExistingTraceID: tr.ID, TargetUserID: alice.ID,
+		ActionName: "paid", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call failed: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), reply.TxID) {
+		t.Errorf("call log missing tx_id %q; content: %s", reply.TxID, string(data))
+	}
+}
+
+// TestUnsafeHostAndIP covers the single-source-of-truth SSRF predicate (§7/§9).
+func TestUnsafeHostAndIP(t *testing.T) {
+	unsafe := []string{"", "localhost", "LocalHost", "127.0.0.1", "::1", "10.0.0.1", "192.168.1.1", "169.254.0.1", "172.16.0.1"}
+	for _, h := range unsafe {
+		if !kernel.UnsafeHost(h) {
+			t.Errorf("UnsafeHost(%q) = false, want true", h)
+		}
+	}
+	safe := []string{"example.com", "8.8.8.8", "1.1.1.1", "api.stripe.com"}
+	for _, h := range safe {
+		if kernel.UnsafeHost(h) {
+			t.Errorf("UnsafeHost(%q) = true, want false", h)
+		}
+	}
+	if kernel.UnsafeIP(net.ParseIP("8.8.8.8")) {
+		t.Error("UnsafeIP(8.8.8.8) = true, want false")
+	}
+	if !kernel.UnsafeIP(net.ParseIP("127.0.0.1")) {
+		t.Error("UnsafeIP(127.0.0.1) = false, want true")
 	}
 }
 

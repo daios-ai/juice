@@ -172,25 +172,6 @@ func splitSQLStatements(sqlText string) []string {
 	return stmts
 }
 
-// columnExists reports whether table has a column with the given name.
-// Used by tests to verify schema shape after migrations.
-func (s *DB) columnExists(table, column string) bool {
-	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
-	if err != nil {
-		return false
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid, notNull, pk int
-		var name, colType string
-		var dflt any
-		_ = rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk)
-		if name == column {
-			return true
-		}
-	}
-	return false
-}
 
 // ---- time helpers ----
 
@@ -782,12 +763,18 @@ func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace) 
 		}
 		// The step's price was previously parked from parent_trace.locked;
 		// release the lock (parent keeps the park; it flows into the new trace's available).
+		// Guard locked>=price like BeginSubcall so a broken park invariant surfaces as a typed
+		// kernel error rather than a raw CHECK(locked>=0) constraint failure.
 		if parentTraceID != nil {
-			if _, err = tx.ExecContext(ctx,
-				`UPDATE traces SET locked=locked-? WHERE id=?`,
-				price, *parentTraceID,
-			); err != nil {
-				return dbErr(err, "begin step call: release parent trace lock")
+			res, lerr := tx.ExecContext(ctx,
+				`UPDATE traces SET locked=locked-? WHERE id=? AND locked>=?`,
+				price, *parentTraceID, price,
+			)
+			if lerr != nil {
+				return dbErr(lerr, "begin step call: release parent trace lock")
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return kernel.ErrInvalidState.Wrap("step park invariant violated: parent trace locked < step price")
 			}
 		}
 		// Insert the completion trace first so the FK on steps.completion_trace_id is satisfied.

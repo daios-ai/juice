@@ -66,6 +66,27 @@ func (k *Kernel) Recover(ctx context.Context) error {
 	return nil
 }
 
+// newTraceFailureTx builds the failure Transaction skeleton shared by the two crash-recovery
+// paths (recoverTrace here and remote-dispatch recovery in federation.go): the role-law fields
+// derived from an orphaned trace and its process. Callers fill in path-specific extras
+// (ParentTraceID, RemoteActionID, Reason, ReplyJSON).
+func newTraceFailureTx(trace *Trace, process *Process, action *Action, gross int64, now time.Time) *Transaction {
+	return &Transaction{
+		ID:           uuid.New().String(),
+		ProcessID:    trace.ProcessID,
+		TraceID:      trace.ID,
+		OwnerUserID:  process.OwnerUserID,
+		CallerUserID: trace.CallerUserID,
+		TargetUserID: trace.ActionOwnerID,
+		ActionID:     trace.ActionID,
+		ActionName:   action.Name,
+		Status:       TxFailure,
+		Gross:        gross,
+		StartedAt:    trace.CreatedAt,
+		EndedAt:      now,
+	}
+}
+
 // recoverTrace settles a single orphan trace as a failure with the given reason.
 // stepID is non-empty only for step-completion traces; it causes CommitFailedCall to
 // use CallerStep wallet semantics (parent lock already released) and mark the step done.
@@ -79,35 +100,13 @@ func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Tr
 		action = &Action{ID: trace.ActionID, Name: "unknown", OwnerUserID: trace.ActionOwnerID}
 	}
 
-	callerWalletKind := CallerTrace
-	callerWalletID := ""
-	if stepID != "" {
-		// Completion trace: BeginStepCall already released the parent lock; refund to process.
-		callerWalletKind = CallerStep
-	} else if trace.ParentTraceID == nil {
-		callerWalletKind = CallerProcess
-		callerWalletID = process.ID
-	} else {
-		callerWalletID = *trace.ParentTraceID
-	}
+	// Completion trace (stepID set): BeginStepCall already released the parent lock, so the
+	// refund routes to the process via CallerStep — same routing as a live call.
+	callerWalletID, callerWalletKind := callerWalletFor(stepID, process.ID, trace.ParentTraceID)
 
-	now := time.Now().UTC()
-	ktx := &Transaction{
-		ID:           uuid.New().String(),
-		ProcessID:    trace.ProcessID,
-		TraceID:      trace.ID,
-		OwnerUserID:  process.OwnerUserID,
-		CallerUserID: trace.CallerUserID,
-		TargetUserID: trace.ActionOwnerID,
-		ActionID:     trace.ActionID,
-		ActionName:   action.Name,
-		Status:       TxFailure,
-		Gross:        trace.Available + trace.Locked,
-		Reason:       reason,
-		StartedAt:    trace.CreatedAt,
-		EndedAt:      now,
-		ReplyJSON:    json.RawMessage("null"),
-	}
+	ktx := newTraceFailureTx(trace, process, action, trace.Available+trace.Locked, time.Now().UTC())
+	ktx.Reason = reason
+	ktx.ReplyJSON = json.RawMessage("null")
 
 	recoverErr := ErrInternal.Wrap(reason)
 	req := CallRequest{StepID: stepID}
@@ -297,11 +296,11 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 	}
 
 	reply, callErr := k.Call(ctx, CallRequest{
-		CallerID:      callerID,
-		ParentTraceID: stepTrace.ID,
-		Action:        action,
-		Args:          args,
-		StepID:        stepID,
+		CallerID:        callerID,
+		ExistingTraceID: stepTrace.ID, // BeginStepCall pre-created and funded this completion trace
+		Action:          action,
+		Args:            args,
+		StepID:          stepID, // marks the step done at commit + selects CallerStep wallet
 	})
 	if callErr != nil {
 		// Remote-proxy timeout: the completion trace has idempotency_key set and the
