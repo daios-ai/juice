@@ -2033,42 +2033,65 @@ func (s *DB) InitFirstBoot(ctx context.Context, u *kernel.User, configs map[stri
 	})
 }
 
-// ---- Deposits / Withdrawals ----
+// ---- Adjustments ----
 
-func (s *DB) CreateDeposit(ctx context.Context, d *kernel.Deposit) error {
-	return s.withTx(ctx, "deposit", func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO deposits (id,operator_user_id,target_user_id,amount,reason,created_at)
-			 VALUES (?,?,?,?,?,?)`,
-			d.ID, d.OperatorUserID, d.TargetUserID, d.Amount, d.Reason, timeToStr(d.CreatedAt),
-		); err != nil {
-			return dbErr(err, "insert deposit")
+func (s *DB) CreateAdjustment(ctx context.Context, a *kernel.Adjustment) error {
+	return s.withTx(ctx, "adjustment", func(tx *sql.Tx) error {
+		// Idempotent replay: an existing external_key returns the recorded adjustment
+		// before any balance change, so a debit replay never re-evaluates the guard below.
+		if a.ExternalKey != "" {
+			existing, err := readAdjustmentByExternalKey(ctx, tx, a.ExternalKey)
+			if err != nil {
+				return err
+			}
+			if existing != nil {
+				*a = *existing
+				return nil
+			}
+		}
+		if a.Direction == kernel.DirectionDebit {
+			res, err := tx.ExecContext(ctx,
+				`UPDATE users SET available=available-? WHERE id=? AND available>=?`,
+				a.Amount, a.TargetUserID, a.Amount,
+			)
+			if err != nil {
+				return dbErr(err, "adjustment: debit user")
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return kernel.ErrInsufficientFunds.Wrap("insufficient balance for withdrawal")
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE users SET available=available+? WHERE id=?`, a.Amount, a.TargetUserID,
+			); err != nil {
+				return dbErr(err, "adjustment: credit user")
+			}
 		}
 		_, err := tx.ExecContext(ctx,
-			`UPDATE users SET available=available+? WHERE id=?`, d.Amount, d.TargetUserID)
-		return dbErr(err, "deposit: update user balance")
+			`INSERT INTO adjustments (id,operator_user_id,target_user_id,direction,amount,reason,external_key,created_at)
+			 VALUES (?,?,?,?,?,?,?,?)`,
+			a.ID, a.OperatorUserID, a.TargetUserID, a.Direction, a.Amount, a.Reason,
+			nullStr(a.ExternalKey), timeToStr(a.CreatedAt),
+		)
+		return dbErr(err, "adjustment: insert record")
 	})
 }
 
-func (s *DB) CreateWithdrawal(ctx context.Context, w *kernel.Withdrawal) error {
-	return s.withTx(ctx, "withdrawal", func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx,
-			`UPDATE users SET available=available-? WHERE id=? AND available>=?`,
-			w.Amount, w.TargetUserID, w.Amount,
-		)
-		if err != nil {
-			return dbErr(err, "withdrawal: debit user")
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return kernel.ErrInsufficientFunds.Wrap("insufficient balance for withdrawal")
-		}
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO withdrawals (id,operator_user_id,target_user_id,amount,reason,created_at)
-			 VALUES (?,?,?,?,?,?)`,
-			w.ID, w.OperatorUserID, w.TargetUserID, w.Amount, w.Reason, timeToStr(w.CreatedAt),
-		)
-		return dbErr(err, "withdrawal: insert record")
-	})
+func readAdjustmentByExternalKey(ctx context.Context, tx *sql.Tx, externalKey string) (*kernel.Adjustment, error) {
+	var a kernel.Adjustment
+	var createdAt string
+	err := tx.QueryRowContext(ctx,
+		`SELECT id,operator_user_id,target_user_id,direction,amount,reason,external_key,created_at
+		 FROM adjustments WHERE external_key=?`, externalKey,
+	).Scan(&a.ID, &a.OperatorUserID, &a.TargetUserID, &a.Direction, &a.Amount, &a.Reason, &a.ExternalKey, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, dbErr(err, "read adjustment by external_key")
+	}
+	a.CreatedAt = strToTime(createdAt)
+	return &a, nil
 }
 
 // ---- Embeddings ----

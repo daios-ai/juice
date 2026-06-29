@@ -338,12 +338,14 @@ type Store interface {
 	// ReadReceipt returns the receipt with the given ID.
 	ReadReceipt(ctx context.Context, id string) (*Receipt, error)
 
-	// ---- Deposits / Withdrawals ----
+	// ---- Adjustments ----
 
-	CreateDeposit(ctx context.Context, d *Deposit) error
-	// CreateWithdrawal atomically debits amount from target.available and records the withdrawal.
-	// Returns ErrInsufficientFunds if target.available < amount.
-	CreateWithdrawal(ctx context.Context, w *Withdrawal) error
+	// CreateAdjustment atomically applies a.Direction to target.available and records the
+	// adjustment. A credit adds amount; a debit subtracts it and returns ErrInsufficientFunds
+	// if target.available < amount. When a.ExternalKey is set and already present, the existing
+	// record is returned (loaded into a) and no balance change is applied — the idempotency
+	// check runs before the debit's available-balance guard.
+	CreateAdjustment(ctx context.Context, a *Adjustment) error
 
 	// ---- Embeddings ----
 

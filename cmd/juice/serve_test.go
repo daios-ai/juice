@@ -151,7 +151,7 @@ func giveCredits(t *testing.T, k *kernel.Kernel, userID string, amount int64) {
 	if err != nil {
 		t.Fatalf("giveCredits: @sys not found: %v", err)
 	}
-	if _, err := k.Deposit(ctx, sys.ID, userID, amount, "test"); err != nil {
+	if _, err := k.Deposit(ctx, sys.ID, userID, amount, "test", ""); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -2774,7 +2774,7 @@ func TestFlow_DepositSpendWithdraw(t *testing.T) {
 	_ = providerID
 
 	// Deposit 100.
-	if _, err := k.Deposit(ctx, sys.ID, userID, 100, "initial"); err != nil {
+	if _, err := k.Deposit(ctx, sys.ID, userID, 100, "initial", ""); err != nil {
 		t.Fatalf("deposit: %v", err)
 	}
 	if getBalance(t, srv, userTok) != 100 {
@@ -2790,7 +2790,7 @@ func TestFlow_DepositSpendWithdraw(t *testing.T) {
 	}
 
 	// Withdraw 50.
-	if _, err := k.Withdraw(ctx, sys.ID, userID, 50, "partial withdrawal"); err != nil {
+	if _, err := k.Withdraw(ctx, sys.ID, userID, 50, "partial withdrawal", ""); err != nil {
 		t.Fatalf("withdraw 50: %v", err)
 	}
 	if getBalance(t, srv, userTok) != 30 {
@@ -2798,7 +2798,7 @@ func TestFlow_DepositSpendWithdraw(t *testing.T) {
 	}
 
 	// Withdraw 100 is rejected (only 30 remain).
-	_, err := k.Withdraw(ctx, sys.ID, userID, 100, "too much")
+	_, err := k.Withdraw(ctx, sys.ID, userID, 100, "too much", "")
 	if err == nil {
 		t.Error("over-withdrawal should be rejected")
 	}

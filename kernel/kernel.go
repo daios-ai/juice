@@ -382,7 +382,7 @@ func (k *Kernel) ValidateFeeRecipient(ctx context.Context) error {
 	return nil
 }
 
-func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, amount int64, reason string) (*Deposit, error) {
+func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, amount int64, reason, externalKey string) (*Adjustment, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
 	logger.Info("deposit.start", "target_user_id", targetUserID, "amount", amount)
@@ -396,24 +396,26 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 	if _, err := k.store.ReadUser(ctx, targetUserID); err != nil {
 		return nil, err
 	}
-	d := &Deposit{
+	a := &Adjustment{
 		ID:             uuid.New().String(),
 		OperatorUserID: operatorID,
 		TargetUserID:   targetUserID,
+		Direction:      DirectionCredit,
 		Amount:         amount,
 		Reason:         reason,
+		ExternalKey:    externalKey,
 		CreatedAt:      time.Now().UTC(),
 	}
-	if err := k.store.CreateDeposit(ctx, d); err != nil {
+	if err := k.store.CreateAdjustment(ctx, a); err != nil {
 		logger.Warn("deposit.failed", "target_user_id", targetUserID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, err
 	}
-	logger.Info("deposit.created", "deposit_id", d.ID, "target_user_id", targetUserID, "amount", amount, "status", "success", "duration_ms", time.Since(start).Milliseconds())
-	return d, nil
+	logger.Info("deposit.created", "deposit_id", a.ID, "target_user_id", targetUserID, "amount", amount, "status", "success", "duration_ms", time.Since(start).Milliseconds())
+	return a, nil
 }
 
 // Withdraw deducts credits from a user's available balance. Superuser only.
-func (k *Kernel) Withdraw(ctx context.Context, operatorID, targetUserID string, amount int64, reason string) (*Withdrawal, error) {
+func (k *Kernel) Withdraw(ctx context.Context, operatorID, targetUserID string, amount int64, reason, externalKey string) (*Adjustment, error) {
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
 		return nil, err
 	}
@@ -423,19 +425,21 @@ func (k *Kernel) Withdraw(ctx context.Context, operatorID, targetUserID string, 
 	if _, err := k.store.ReadUser(ctx, targetUserID); err != nil {
 		return nil, err
 	}
-	w := &Withdrawal{
+	a := &Adjustment{
 		ID:             uuid.New().String(),
 		OperatorUserID: operatorID,
 		TargetUserID:   targetUserID,
+		Direction:      DirectionDebit,
 		Amount:         amount,
 		Reason:         reason,
+		ExternalKey:    externalKey,
 		CreatedAt:      time.Now().UTC(),
 	}
-	if err := k.store.CreateWithdrawal(ctx, w); err != nil {
+	if err := k.store.CreateAdjustment(ctx, a); err != nil {
 		return nil, err
 	}
-	k.log.With(ctx).Info("withdrawal.created", "withdrawal_id", w.ID, "target_user_id", targetUserID, "amount", amount)
-	return w, nil
+	k.log.With(ctx).Info("withdrawal.created", "withdrawal_id", a.ID, "target_user_id", targetUserID, "amount", amount)
+	return a, nil
 }
 
 // VerifyToken validates a bearer token and returns the subject user ID.

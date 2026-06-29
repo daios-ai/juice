@@ -201,23 +201,24 @@ type StatTag struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// Deposit is an admin credit grant to a user's available balance.
-type Deposit struct {
-	ID             string    `json:"id"`
-	OperatorUserID string    `json:"operator_user_id"`
-	TargetUserID   string    `json:"target_user_id"`
-	Amount         int64     `json:"amount"`
-	Reason         string    `json:"reason"`
-	CreatedAt      time.Time `json:"created_at"`
-}
+// Adjustment direction values.
+const (
+	DirectionCredit = "credit"
+	DirectionDebit  = "debit"
+)
 
-// Withdrawal is an admin debit from a user's available balance.
-type Withdrawal struct {
+// Adjustment is an immutable audit record of a superuser balance change: a credit
+// grants out-of-band funds, a debit redeems them obliging an out-of-band payout.
+// ExternalKey is an optional opaque idempotency token from the out-of-band system;
+// when present it is globally unique and a replay re-applies no balance change.
+type Adjustment struct {
 	ID             string    `json:"id"`
 	OperatorUserID string    `json:"operator_user_id"`
 	TargetUserID   string    `json:"target_user_id"`
+	Direction      string    `json:"direction"`
 	Amount         int64     `json:"amount"`
 	Reason         string    `json:"reason"`
+	ExternalKey    string    `json:"external_key,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 }
 

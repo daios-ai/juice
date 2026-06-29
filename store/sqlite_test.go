@@ -57,10 +57,16 @@ func TestMigrationsAreFileBackedAndRecorded(t *testing.T) {
 		{"traces", "dispatch_json"},
 		{"steps", "completion_trace_id"},
 		{"actions", "auth_json"},
+		{"adjustments", "direction"},
+		{"adjustments", "external_key"},
 	} {
 		if !db.columnExists(tc.table, tc.column) {
 			t.Fatalf("expected %s.%s to exist after migrations", tc.table, tc.column)
 		}
+	}
+	// The unified ledger replaced the per-direction tables.
+	if db.columnExists("deposits", "id") || db.columnExists("withdrawals", "id") {
+		t.Fatal("deposits/withdrawals tables should be dropped after the adjustments migration")
 	}
 }
 

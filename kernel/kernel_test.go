@@ -1038,12 +1038,87 @@ func TestDepositNonSuperuserRejected(t *testing.T) {
 	recipient := setupUser(t, st, "@recipient", 0)
 
 	// Superuser can deposit.
-	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 100, "ok"); err != nil {
+	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 100, "ok", ""); err != nil {
 		t.Fatalf("superuser deposit: %v", err)
 	}
 	// Regular user cannot deposit.
-	if _, err := k.Deposit(ctx, regular.ID, recipient.ID, 100, "bad"); !errors.Is(err, kernel.ErrUnauthorized) {
+	if _, err := k.Deposit(ctx, regular.ID, recipient.ID, 100, "bad", ""); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized for non-superuser deposit, got %v", err)
+	}
+}
+
+func TestAdjustmentExternalKeyIdempotent(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	su := setupUser(t, st, "@sys", 0)
+	recipient := setupUser(t, st, "@recipient", 0)
+
+	balance := func() int64 {
+		u, err := k.ReadUser(ctx, recipient.ID)
+		if err != nil {
+			t.Fatalf("read user: %v", err)
+		}
+		return u.Available
+	}
+
+	// Same external_key credits once; the replay returns the original record.
+	first, err := k.Deposit(ctx, su.ID, recipient.ID, 100, "wire", "wire-1")
+	if err != nil {
+		t.Fatalf("first deposit: %v", err)
+	}
+	replay, err := k.Deposit(ctx, su.ID, recipient.ID, 100, "wire", "wire-1")
+	if err != nil {
+		t.Fatalf("replay deposit: %v", err)
+	}
+	if replay.ID != first.ID || replay.Amount != first.Amount {
+		t.Errorf("replay returned a new record: got %+v, want id=%s amount=%d", replay, first.ID, first.Amount)
+	}
+	if balance() != 100 {
+		t.Errorf("balance after same-key replay: got %d, want 100 (credited once)", balance())
+	}
+
+	// Distinct keys each apply.
+	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 50, "", "wire-2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 50, "", "wire-3"); err != nil {
+		t.Fatal(err)
+	}
+	if balance() != 200 {
+		t.Errorf("balance after two distinct keys: got %d, want 200", balance())
+	}
+
+	// Empty key never dedups: both apply.
+	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 10, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 10, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if balance() != 220 {
+		t.Errorf("balance after two empty-key deposits: got %d, want 220", balance())
+	}
+
+	// Withdraw replay returns the existing record before the available-balance guard:
+	// after the first debit drops the balance below amount, the replay still succeeds.
+	w, err := k.Withdraw(ctx, su.ID, recipient.ID, 200, "redeem", "red-1")
+	if err != nil {
+		t.Fatalf("withdraw: %v", err)
+	}
+	if balance() != 20 {
+		t.Fatalf("balance after withdraw: got %d, want 20", balance())
+	}
+	wReplay, err := k.Withdraw(ctx, su.ID, recipient.ID, 200, "redeem", "red-1")
+	if err != nil {
+		t.Fatalf("withdraw replay must not fail on dropped balance: %v", err)
+	}
+	if wReplay.ID != w.ID {
+		t.Errorf("withdraw replay returned a new record: got %s, want %s", wReplay.ID, w.ID)
+	}
+	if balance() != 20 {
+		t.Errorf("balance after withdraw replay: got %d, want 20 (debited once)", balance())
 	}
 }
 

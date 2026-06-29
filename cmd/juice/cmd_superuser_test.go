@@ -114,7 +114,7 @@ func TestAdminDeposit(t *testing.T) {
 	}
 
 	// Deposit succeeds and balance increases.
-	d, err := k.Deposit(ctx, admin.ID, u.ID, 500, "initial grant")
+	d, err := k.Deposit(ctx, admin.ID, u.ID, 500, "initial grant", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestAdminDeposit(t *testing.T) {
 	}
 
 	// Second deposit accumulates.
-	if _, err := k.Deposit(ctx, admin.ID, u.ID, 200, "top-up"); err != nil {
+	if _, err := k.Deposit(ctx, admin.ID, u.ID, 200, "top-up", ""); err != nil {
 		t.Fatal(err)
 	}
 	u3, _ := k.ReadUser(ctx, u.ID)
@@ -143,17 +143,17 @@ func TestAdminDeposit(t *testing.T) {
 	}
 
 	// Zero amount rejected.
-	if _, err := k.Deposit(ctx, admin.ID, u.ID, 0, ""); err == nil {
+	if _, err := k.Deposit(ctx, admin.ID, u.ID, 0, "", ""); err == nil {
 		t.Error("expected error for zero amount")
 	}
 
 	// Negative amount rejected.
-	if _, err := k.Deposit(ctx, admin.ID, u.ID, -1, ""); err == nil {
+	if _, err := k.Deposit(ctx, admin.ID, u.ID, -1, "", ""); err == nil {
 		t.Error("expected error for negative amount")
 	}
 
 	// Unknown user rejected.
-	if _, err := k.Deposit(ctx, admin.ID, "nonexistent", 100, ""); err == nil {
+	if _, err := k.Deposit(ctx, admin.ID, "nonexistent", 100, "", ""); err == nil {
 		t.Error("expected error for unknown target user")
 	}
 }
@@ -261,7 +261,7 @@ func TestAdminDepositEnforcesSuperuser(t *testing.T) {
 	if subjectID != su.ID {
 		t.Fatalf("subjectID: got %q, want %q", subjectID, su.ID)
 	}
-	d, err := env.k.Deposit(ctx, subjectID, recipient.ID, 500, "test grant")
+	d, err := env.k.Deposit(ctx, subjectID, recipient.ID, 500, "test grant", "")
 	if err != nil {
 		t.Fatalf("deposit by superuser: %v", err)
 	}

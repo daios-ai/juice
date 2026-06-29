@@ -153,7 +153,7 @@ func adminUnsuspendCmd() *cobra.Command {
 }
 
 func adminDepositCmd() *cobra.Command {
-	var reason string
+	var reason, externalKey string
 	cmd := &cobra.Command{
 		Use:   "deposit <user> <amount>",
 		Short: "Add credits to a user account (user is @handle)",
@@ -169,7 +169,7 @@ func adminDepositCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				d, err := k.Deposit(ctx, subjectID, u.ID, amount, reason)
+				d, err := k.Deposit(ctx, subjectID, u.ID, amount, reason, externalKey)
 				if err != nil {
 					return err
 				}
@@ -178,11 +178,12 @@ func adminDepositCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
+	cmd.Flags().StringVar(&externalKey, "external-key", "", "Optional idempotency token from the out-of-band payment system")
 	return cmd
 }
 
 func adminWithdrawCmd() *cobra.Command {
-	var reason string
+	var reason, externalKey string
 	cmd := &cobra.Command{
 		Use:   "withdraw <user> <amount>",
 		Short: "Deduct credits from a user account (user is @handle)",
@@ -198,7 +199,7 @@ func adminWithdrawCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				w, err := k.Withdraw(ctx, subjectID, u.ID, amount, reason)
+				w, err := k.Withdraw(ctx, subjectID, u.ID, amount, reason, externalKey)
 				if err != nil {
 					return err
 				}
@@ -207,6 +208,7 @@ func adminWithdrawCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
+	cmd.Flags().StringVar(&externalKey, "external-key", "", "Optional idempotency token from the out-of-band payment system")
 	return cmd
 }
 
