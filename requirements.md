@@ -95,10 +95,10 @@ OpenAPI registration and federation create or update ordinary `Action` rows. The
 ## 4. Authorization, call validity, and traces
 
 ```text
-CanCall(P, a) := active(a) ∧ (public(a) ∨ P = a.owner_user_id)
+CanCall(P, a) := active(a) ∧ ¬suspended(a.owner_user_id) ∧ (public(a) ∨ P = a.owner_user_id)
 ```
 
-`CanCall` is about the process owner `P`, not the call caller `C`. Public actions are callable by any process owner. Private actions are callable only when the process owner is the action owner. The call caller may differ from both only if process-use authority permits it.
+`CanCall` is about the process owner `P`, not the call caller `C`. Public actions are callable by any process owner. Private actions are callable only when the process owner is the action owner. The call caller may differ from both only if process-use authority permits it. An action whose owner is suspended fails `CanCall` regardless of `active`/`public` state: a suspended owner's actions are not callable and are excluded from action listings (§14); unsuspending restores them, since suspension preserves data (§12).
 
 Check call preconditions in this exact order and return the typed error for the first failure:
 
@@ -560,7 +560,7 @@ Every startup reads `config.superuser_handle` to confirm first boot and identify
 
 Bootstrap is idempotent. Supervision operations are not native actions.
 
-The superuser may suspend or unsuspend users. Suspension preserves data and makes every authenticated request return `ErrUnauthenticated`.
+The superuser may suspend or unsuspend users. Suspension preserves data and makes every authenticated request return `ErrUnauthenticated`. It also excludes the suspended user's actions from action listings and makes them uncallable (`CanCall` fails on a suspended owner, §4); their data survives and unsuspending restores listing and callability.
 
 `Kernel.Deposit(operator_user_id,target_user_id,amount,reason)` is admin-CLI-only supervision. It requires configured superuser and positive amount, then atomically credits `user.available` with a credit adjustment record. `reason` is optional and stored when provided. The operation is idempotent over `external_key` when supplied. No HTTP endpoint exists.
 
@@ -701,7 +701,7 @@ Endpoint rules (notable rules only; the complete HTTP endpoint list is in `API.m
 | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
 | `GET /health`                                    | unauthenticated                                                                                                 |
 | `GET /.well-known/juice-kernel.json`             | unauthenticated; `public_key`, handle (`@sys`), `base_url` (§13)                                                |
-| `GET /v1/actions[?owner=&name=]`                 | unauthenticated → active public actions; authenticated → active public actions plus caller's own active actions (union, deduplicated); `?owner=` further filters by that owner's handle; `?name=` filters by name |
+| `GET /v1/actions[?owner=&name=]`                 | unauthenticated → active public actions; authenticated → active public actions plus caller's own active actions (union, deduplicated); a suspended owner's actions are excluded (§12); `?owner=` further filters by that owner's handle; `?name=` filters by name |
 | `GET /v1/actions/{id}/manifest`                  | signed public-action manifest; served to friends in good standing per the exposure lever (§13)                  |
 | `GET /v1/gossip`                                 | unauthenticated; identity, own actions with manifests and stats, transacted friends with stats (§13)            |
 | `POST /v1/peers`                                 | signed friend request (§13); rate-limited per IP                                                                |
@@ -862,6 +862,7 @@ non-superuser rejected from admin CLI commands
 active public action callable by any caller
 active private action callable only by owner
 inactive action not callable
+suspended owner's active public action is excluded from GET /v1/actions and uncallable (ErrInvalidState); unsuspend restores both
 bootstrap is idempotent
 subcall uses parent process, not an ephemeral process
 subcall caller is parent action owner and owner is original process owner

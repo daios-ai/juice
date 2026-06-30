@@ -53,6 +53,7 @@ type Action struct {
 	ID             string         `json:"id"`
 	OwnerUserID    string         `json:"owner_user_id"`
 	OwnerHandle    string         `json:"owner_handle,omitempty"` // populated via JOIN; empty if not loaded
+	OwnerSuspended bool           `json:"owner_suspended,omitempty"` // populated via JOIN; true when the owner is suspended (§12)
 	Name           string         `json:"name"`
 	Kind           ActionKind     `json:"kind"`
 	Active         bool           `json:"active"`

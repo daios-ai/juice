@@ -324,6 +324,43 @@ func TestCallInactiveActionBlocked(t *testing.T) {
 	}
 }
 
+// TestCallSuspendedOwnerActionBlocked proves a suspended owner's active public action is
+// uncallable with ErrInvalidState (§12 hide+disable), and that unsuspend restores it.
+func TestCallSuspendedOwnerActionBlocked(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 1000) // process owner / caller
+	bob := setupUser(t, st, "@bob", 0)        // action owner (provider)
+	_ = st.CreateAction(ctx, &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "svc",
+		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	})
+
+	// Callable before suspension.
+	if _, err := k.Run(ctx, alice.ID, "@bob/svc", map[string]any{}); err != nil {
+		t.Fatalf("action should be callable before owner suspension: %v", err)
+	}
+
+	// Suspending the owner makes the action uncallable with ErrInvalidState.
+	if err := st.SuspendUser(ctx, bob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Run(ctx, alice.ID, "@bob/svc", map[string]any{}); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("suspended owner's action should fail with ErrInvalidState, got %v", err)
+	}
+
+	// Unsuspending restores callability.
+	if err := st.UnsuspendUser(ctx, bob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Run(ctx, alice.ID, "@bob/svc", map[string]any{}); err != nil {
+		t.Fatalf("unsuspend should restore callability: %v", err)
+	}
+}
+
 func TestCallInsufficientFunds(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)

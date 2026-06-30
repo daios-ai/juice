@@ -517,7 +517,7 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 
 // actionCols is the canonical column list for action SELECT statements.
 // Must stay in sync with scanAction/scanActionFn/finishAction.
-const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,a.auth_json,a.created_at,a.updated_at,a.deleted_at`
+const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),(u.suspended_at IS NOT NULL),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,a.auth_json,a.created_at,a.updated_at,a.deleted_at`
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
@@ -575,7 +575,7 @@ func (s *DB) DeleteAction(ctx context.Context, id string) error {
 func (s *DB) ListPublicActions(ctx context.Context, limit, offset int) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
-		 WHERE a.active=1 AND a.public=1 AND a.deleted_at IS NULL
+		 WHERE a.active=1 AND a.public=1 AND a.deleted_at IS NULL AND u.suspended_at IS NULL
 		 ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list public actions")
@@ -625,12 +625,13 @@ func scanActionFn(scan func(...any) error) (*kernel.Action, error) {
 	var a kernel.Action
 	var kind, inJSON, outJSON, createdAt, updatedAt string
 	var deletedAt sql.NullString
-	var active, public int
-	if err := scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &a.Name, &kind, &active, &public, &a.Price,
+	var active, public, ownerSuspended int
+	if err := scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &ownerSuspended, &a.Name, &kind, &active, &public, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.WasmArtifact, &a.RemoteActionID,
 		&a.AuthJSON, &createdAt, &updatedAt, &deletedAt); err != nil {
 		return nil, err
 	}
+	a.OwnerSuspended = ownerSuspended != 0
 	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt, deletedAt)
 }
 

@@ -276,6 +276,46 @@ func TestListActions(t *testing.T) {
 	}
 }
 
+// TestListPublicActionsExcludesSuspendedOwner proves the suspended-owner JOIN both hides the
+// action from the public listing and surfaces OwnerSuspended on a direct read (§12).
+func TestListPublicActionsExcludesSuspendedOwner(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@owner", 0)
+	_ = db.CreateUser(ctx, owner)
+	a := newAction(owner.ID, "/svc", 0, true)
+	a.Public = true
+	_ = db.CreateAction(ctx, a)
+
+	before, err := db.ListPublicActions(ctx, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 1 || before[0].OwnerSuspended {
+		t.Fatalf("active owner: want 1 action with OwnerSuspended=false, got %d", len(before))
+	}
+
+	if err := db.SuspendUser(ctx, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	after, err := db.ListPublicActions(ctx, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("suspended owner: want 0 public actions, got %d", len(after))
+	}
+
+	got, err := db.ReadAction(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.OwnerSuspended {
+		t.Error("ReadAction: OwnerSuspended should be true for suspended owner")
+	}
+}
+
 // ---- Fund operations ----
 
 func TestBeginRunDeductsFunds(t *testing.T) {

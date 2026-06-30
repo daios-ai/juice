@@ -397,7 +397,7 @@ func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
 // canCall returns true iff the action is callable by a process owned by ownerID.
 // CanCall(ownerID, a) := active(a) ∧ (public(a) ∨ ownerID = a.OwnerUserID)
 func canCall(ownerID string, action *Action) bool {
-	return action.Active && (action.Public || ownerID == action.OwnerUserID)
+	return action.Active && !action.OwnerSuspended && (action.Public || ownerID == action.OwnerUserID)
 }
 
 // checkCallPreconditions enforces the §4 semantic call-validity rules (steps 6 and 7) for a
@@ -409,6 +409,9 @@ func (k *Kernel) checkCallPreconditions(ownerID string, action *Action, args map
 	if !canCall(ownerID, action) {
 		if !action.Active {
 			return ErrInvalidState.Wrap("action is inactive")
+		}
+		if action.OwnerSuspended {
+			return ErrInvalidState.Wrap("action owner is suspended")
 		}
 		return ErrUnauthorized.Wrap("call permission denied")
 	}

@@ -456,6 +456,38 @@ func TestServeListActions(t *testing.T) {
 	}
 }
 
+// TestServeListActionsExcludesSuspendedOwner proves GET /v1/actions hides a suspended
+// owner's active public action (§12 hide+disable).
+func TestServeListActionsExcludesSuspendedOwner(t *testing.T) {
+	srv, k, st := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	ownerID, tok := makeUser(t, k, "@susp-owner")
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "svc", "kind": "http", "price": 0, "source": "http://x.example",
+		"description": "test action", "input_schema": minSchema, "output_schema": minSchema,
+	}, tok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, tok).Body.Close()
+
+	var before []kernel.Action
+	decodeResponse(t, httpDo(t, srv, "GET", "/v1/actions", nil, ""), &before)
+	if len(before) != 1 {
+		t.Fatalf("want 1 public action before suspension, got %d", len(before))
+	}
+
+	if err := st.SuspendUser(context.Background(), ownerID); err != nil {
+		t.Fatal(err)
+	}
+	var after []kernel.Action
+	decodeResponse(t, httpDo(t, srv, "GET", "/v1/actions", nil, ""), &after)
+	if len(after) != 0 {
+		t.Fatalf("suspended owner's action should be hidden, got %d", len(after))
+	}
+}
+
 // TestServeCreateWasmActionFromArtifact verifies POST /v1/actions accepts a pre-compiled
 // base64 WASM artifact via "wasm_artifact" — CLI/HTTP parity with
 // `action create --kind wasm --artifact`. It stores the artifact, computes the hash, and
