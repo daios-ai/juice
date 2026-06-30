@@ -304,16 +304,16 @@ func adminTxsCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return withSuperuser(func(k *kernel.Kernel, _ string) error {
-				txs, err := k.ListAllTransactions(context.Background(), limit, offset)
+				rows, err := adminListTxRows(k, context.Background(), limit, offset)
 				if err != nil {
 					return err
 				}
 				if flagJSON {
-					return printJSON(txs)
+					return printJSON(rows)
 				}
-				for _, tx := range txs {
-					fmt.Printf("%s  action=%s  status=%-7s  gross=%d\n",
-						tx.ID, tx.ActionName, tx.Status, tx.Gross)
+				for _, r := range rows {
+					fmt.Printf("%s  %s  payer=%s  caller=%s  status=%-7s  gross=%d\n",
+						r.ID, r.ActionRef, r.PayerHandle, r.CallerHandle, r.Status, r.Gross)
 				}
 				return nil
 			})

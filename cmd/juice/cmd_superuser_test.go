@@ -343,6 +343,76 @@ func TestAdminActionsCmdRendersSingleAt(t *testing.T) {
 	}
 }
 
+// TestAdminListTxRowsEnrichesAndStaysCanonical proves admin txs resolves @owner/name and
+// party handles for human output while keeping --json canonical (rating embedded, no
+// display-only fields leaked).
+func TestAdminListTxRowsEnrichesAndStaysCanonical(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@tx-owner")
+	_, callerTok := makeUser(t, k, "@tx-caller")
+
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "svc", "kind": "http", "price": 0, "source": backend.URL,
+		"description": "test action", "input_schema": minSchema, "output_schema": minSchema,
+	}, ownerTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, ownerTok).Body.Close()
+
+	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"action": "@tx-owner/svc", "args": map[string]any{},
+	}, callerTok)
+	var callReply kernel.CallReply
+	decodeResponse(t, call, &callReply)
+	if callReply.TxID == "" {
+		t.Fatal("expected tx_id from run")
+	}
+	httpDo(t, srv, "POST", "/v1/transactions/"+callReply.TxID+"/rate", map[string]any{"rating": 1}, callerTok).Body.Close()
+
+	rows, err := adminListTxRows(k, context.Background(), 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want 1 row, got %d", len(rows))
+	}
+	r := rows[0]
+	if r.ActionRef != "@tx-owner/svc" {
+		t.Errorf("ActionRef: got %q, want @tx-owner/svc", r.ActionRef)
+	}
+	// Root run: payer (P) and caller (C) are both the run requester (@tx-caller).
+	if r.PayerHandle != "@tx-caller" {
+		t.Errorf("PayerHandle: got %q, want @tx-caller", r.PayerHandle)
+	}
+	if r.CallerHandle != "@tx-caller" {
+		t.Errorf("CallerHandle: got %q, want @tx-caller", r.CallerHandle)
+	}
+	if r.Rating == nil || r.Rating.Value != 1 {
+		t.Errorf("embedded rating: got %+v, want value 1", r.Rating)
+	}
+
+	blob, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(blob)
+	if !strings.Contains(s, `"rating"`) {
+		t.Errorf("canonical JSON should include rating: %s", s)
+	}
+	if strings.Contains(s, "ActionRef") || strings.Contains(s, "PayerHandle") || strings.Contains(s, "CallerHandle") {
+		t.Errorf("display-only fields must not leak into canonical JSON: %s", s)
+	}
+}
+
 // TestBulkImportPeerActions verifies that bulkImportPeerActions fetches all
 // actions from the mock peer, imports them, enables them, and makes them public.
 func TestBulkImportPeerActions(t *testing.T) {

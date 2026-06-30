@@ -358,6 +358,58 @@ func listTransactions(k *kernel.Kernel, ctx context.Context, callerID string, f 
 	return k.ListTransactions(ctx, callerID, f)
 }
 
+// adminTxRow is the admin-listing view of a transaction: the canonical TransactionView
+// (so --json matches GET /v1/transactions, rating included) plus display-only fields for
+// human output. The display fields are json:"-" so they never alter the canonical shape.
+type adminTxRow struct {
+	*kernel.TransactionView
+	ActionRef    string `json:"-"` // @owner/name: target owner handle + captured action_name
+	PayerHandle  string `json:"-"` // process owner (P)
+	CallerHandle string `json:"-"` // call caller (C)
+}
+
+// adminListTxRows lists every transaction for admin, enriching each with @owner/name and
+// resolved party handles via a small per-call handle cache (target_user_id is the action
+// owner per role law; the captured action_name keeps the ref valid after deletion).
+func adminListTxRows(k *kernel.Kernel, ctx context.Context, limit, offset int) ([]adminTxRow, error) {
+	views, err := k.ListAllTransactionViews(ctx, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	handles := map[string]string{}
+	handleOf := func(id string) string {
+		if id == "" {
+			return ""
+		}
+		if h, ok := handles[id]; ok {
+			return h
+		}
+		h := ""
+		if u, err := k.ReadUser(ctx, id); err == nil {
+			h = u.Handle
+		}
+		handles[id] = h
+		return h
+	}
+	rows := make([]adminTxRow, len(views))
+	for i, v := range views {
+		ref := v.ActionName
+		if th := handleOf(v.TargetUserID); th != "" {
+			ref = th + "/" + v.ActionName
+		}
+		payer := handleOf(v.OwnerUserID)
+		if payer == "" {
+			payer = v.OwnerUserID
+		}
+		caller := handleOf(v.CallerUserID)
+		if caller == "" {
+			caller = v.CallerUserID
+		}
+		rows[i] = adminTxRow{TransactionView: v, ActionRef: ref, PayerHandle: payer, CallerHandle: caller}
+	}
+	return rows, nil
+}
+
 func getTransaction(k *kernel.Kernel, ctx context.Context, callerID, id string) (*kernel.TransactionView, error) {
 	return k.ReadTransaction(ctx, callerID, id)
 }

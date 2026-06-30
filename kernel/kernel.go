@@ -877,6 +877,20 @@ func (k *Kernel) ListAllTransactions(ctx context.Context, limit, offset int) ([]
 	return k.store.ListAllTransactions(ctx, limit, offset)
 }
 
+// ListAllTransactionViews returns all transactions as TransactionViews (with embedded
+// rating), so admin listings expose the same canonical shape as ListTransactions (§14).
+func (k *Kernel) ListAllTransactionViews(ctx context.Context, limit, offset int) ([]*TransactionView, error) {
+	txs, err := k.store.ListAllTransactions(ctx, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]*TransactionView, len(txs))
+	for i, tx := range txs {
+		views[i] = k.toTransactionView(ctx, tx)
+	}
+	return views, nil
+}
+
 
 // GetConfig returns a persistent config value by key.
 func (k *Kernel) GetConfig(ctx context.Context, key string) (string, error) {

@@ -1490,6 +1490,51 @@ func TestTransactionViewEmbeddedRating(t *testing.T) {
 	}
 }
 
+// TestListAllTransactionViewsAttachesRating proves the admin-listing helper returns the
+// canonical TransactionView shape: nil rating before, embedded rating after (§14).
+func TestListAllTransactionViewsAttachesRating(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 1000)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "svc",
+		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0, Source: "wat",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	reply, err := k.Run(ctx, alice.ID, "@alice/svc", map[string]any{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	views, err := k.ListAllTransactionViews(ctx, 50, 0)
+	if err != nil {
+		t.Fatalf("ListAllTransactionViews: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("want 1 view, got %d", len(views))
+	}
+	if views[0].Rating != nil {
+		t.Errorf("unrated tx should have nil rating, got %+v", views[0].Rating)
+	}
+
+	if _, err := k.RateTransaction(ctx, alice.ID, reply.TxID, 1, nil); err != nil {
+		t.Fatalf("RateTransaction: %v", err)
+	}
+	views, err = k.ListAllTransactionViews(ctx, 50, 0)
+	if err != nil {
+		t.Fatalf("ListAllTransactionViews after rating: %v", err)
+	}
+	if views[0].Rating == nil || views[0].Rating.Value != 1 {
+		t.Errorf("rated tx view should carry rating value 1, got %+v", views[0].Rating)
+	}
+}
+
 // ---- Zero-credit process tests ----
 
 func TestZeroCreditProcess(t *testing.T) {
