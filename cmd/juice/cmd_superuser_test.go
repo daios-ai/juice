@@ -302,6 +302,47 @@ func TestAdminListAllActions(t *testing.T) {
 	}
 }
 
+// TestAdminActionsCmdRendersSingleAt proves `admin actions` prints @owner/name with a
+// single leading @ — OwnerHandle already carries it (regression: it used to print @@).
+func TestAdminActionsCmdRendersSingleAt(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnv(t)
+	if err := env.k.FirstBoot(ctx, "pass"); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@owner", Email: "owner@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID, Name: "svc", Kind: kernel.KindHTTP, Price: 0,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		Source: "http://example.com",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	suToken, err := env.k.Login(ctx, "@sys", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveToken(suToken); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() error {
+		_, e := execTestCmd(t, adminActionsCmd())
+		return e
+	})
+	if !strings.Contains(out, "@owner/svc") {
+		t.Errorf("expected @owner/svc in output, got: %q", out)
+	}
+	if strings.Contains(out, "@@") {
+		t.Errorf("double-@ regression in admin actions output: %q", out)
+	}
+}
+
 // TestBulkImportPeerActions verifies that bulkImportPeerActions fetches all
 // actions from the mock peer, imports them, enables them, and makes them public.
 func TestBulkImportPeerActions(t *testing.T) {

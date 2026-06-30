@@ -236,7 +236,7 @@ func adminActionsCmd() *cobra.Command {
 					if a.Public {
 						public = "P"
 					}
-					fmt.Printf("[%s%s] @%s/%s  %d credits\n", active, public, a.OwnerHandle, a.Name, a.Price)
+					fmt.Printf("[%s%s] %s/%s  %d credits\n", active, public, a.OwnerHandle, a.Name, a.Price)
 				}
 				return nil
 			})
