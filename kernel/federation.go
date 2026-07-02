@@ -9,9 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/daios-ai/juice/log"
@@ -374,7 +372,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 
 	req := CallRequest{StepID: dispatch.StepID}
 
-	fr, _ := fe.ExecuteFederation(ctx, action.Source, *trace.IdempotencyKey, dispatch.Args)
+	fr, _ := fe.ExecuteFederation(ctx, target.PublicKey, action.Source, *trace.IdempotencyKey, dispatch.Args)
 	if fr.ReceiptJSON != "" {
 		_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, 0)
 		if !errors.Is(err, ErrTimeout) {
@@ -410,19 +408,21 @@ func (k *Kernel) SignFederation(action, counterparty, idempotencyKey, argsHash s
 
 // SignPeerRequestNow signs a peer friend request with the platform key and returns
 // (signature, timestamp). Returns an error if the signing key is not configured.
-func (k *Kernel) SignPeerRequestNow(handle, publicKey, baseURL string) (sig, ts string, err error) {
+func (k *Kernel) SignPeerRequestNow(handle, publicKey string) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = SignPeerRequest(k.cfg.SigningKey, handle, publicKey, baseURL, ts)
+	sig, err = SignPeerRequest(k.cfg.SigningKey, handle, publicKey, ts)
 	return
 }
 
 // ---- Peer / friendship operations ----
 
-// CreateOrUpdateProxyPeer creates or updates a local user record representing a remote kernel peer.
+// CreateOrUpdateProxyPeer creates or updates a local user record representing a remote kernel peer,
+// addressed by Ed25519 public key. Location is not stored — the federation transport resolves the
+// key to a live path (§13) — so re-friending a known key is idempotent with nothing to update.
 // Used both by the friendship acceptance path and by federation admins.
-func (k *Kernel) CreateOrUpdateProxyPeer(ctx context.Context, handle, publicKey, baseURL string) (*User, error) {
-	if publicKey == "" || baseURL == "" {
-		return nil, ErrInvalidInput.Wrap("handle, public_key, and base_url are required")
+func (k *Kernel) CreateOrUpdateProxyPeer(ctx context.Context, handle, publicKey string) (*User, error) {
+	if publicKey == "" {
+		return nil, ErrInvalidInput.Wrap("handle and public_key are required")
 	}
 	// Canonicalize the local proxy alias only; the manifest owner_handle and signature
 	// inputs are never rewritten (they must match what the remote kernel signed).
@@ -433,27 +433,10 @@ func (k *Kernel) CreateOrUpdateProxyPeer(ctx context.Context, handle, publicKey,
 	if _, err := decodeRemotePublicKey(publicKey); err != nil {
 		return nil, err
 	}
-	if err := validateRemoteBaseURL(baseURL); err != nil {
-		return nil, err
-	}
-	// Same identity → update base URL (idempotent re-registration).
+	// Same identity → idempotent re-registration; nothing to update (no location is stored).
 	existing, err := k.store.ReadUserByPublicKey(ctx, publicKey)
 	if err == nil && existing != nil {
-		oldBase := existing.RemoteBaseURL
-		if err := k.store.UpdateRemoteBaseURL(ctx, existing.ID, baseURL); err != nil {
-			return nil, err
-		}
-		existing.RemoteBaseURL = baseURL
-		if oldBase != baseURL {
-			if err := k.store.UpdateRemoteProxySourceURLs(ctx, existing.ID, oldBase, baseURL); err != nil {
-				return nil, err
-			}
-		}
 		return existing, nil
-	}
-	// Base URL conflict with a different key → reject.
-	if byURL, err := k.store.ReadRemoteKernelByBaseURL(ctx, baseURL); err == nil && byURL != nil && byURL.PublicKey != publicKey {
-		return nil, ErrInvalidInput.Wrap("base URL already registered with a different public key")
 	}
 	// Find a free handle: try handle, handle-2, ..., handle-99.
 	resolvedHandle := ""
@@ -473,12 +456,11 @@ func (k *Kernel) CreateOrUpdateProxyPeer(ctx context.Context, handle, publicKey,
 	}
 	now := time.Now().UTC()
 	u := &User{
-		ID:            uuid.New().String(),
-		Handle:        resolvedHandle,
-		PublicKey:     publicKey,
-		RemoteBaseURL: baseURL,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:        uuid.New().String(),
+		Handle:    resolvedHandle,
+		PublicKey: publicKey,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	if err := k.store.CreateProxyUser(ctx, u); err != nil {
 		// A friend and its reciprocal can both pass the existence check above and race to
@@ -490,19 +472,19 @@ func (k *Kernel) CreateOrUpdateProxyPeer(ctx context.Context, handle, publicKey,
 		}
 		return nil, err
 	}
-	k.log.With(ctx).Info("peer.created", "handle", resolvedHandle, "base_url", baseURL)
+	k.log.With(ctx).Info("peer.created", "handle", resolvedHandle, "public_key", publicKey)
 	return u, nil
 }
 
 // AddPeer requires superuser and creates/updates a proxy peer record.
-func (k *Kernel) AddPeer(ctx context.Context, subjectID, handle, publicKey, baseURL string) (*User, error) {
+func (k *Kernel) AddPeer(ctx context.Context, subjectID, handle, publicKey string) (*User, error) {
 	if err := k.requireSuperuser(ctx, subjectID); err != nil {
 		return nil, err
 	}
-	return k.CreateOrUpdateProxyPeer(ctx, handle, publicKey, baseURL)
+	return k.CreateOrUpdateProxyPeer(ctx, handle, publicKey)
 }
 
-// ListPeers returns all remote kernel peers (proxy users with a RemoteBaseURL).
+// ListPeers returns all remote kernel peers (proxy users, identified by a set public_key).
 func (k *Kernel) ListPeers(ctx context.Context) ([]*User, error) {
 	all, err := k.store.ListUsers(ctx, 1000, 0)
 	if err != nil {
@@ -510,7 +492,7 @@ func (k *Kernel) ListPeers(ctx context.Context) ([]*User, error) {
 	}
 	var peers []*User
 	for _, u := range all {
-		if u.RemoteBaseURL != "" {
+		if u.PublicKey != "" {
 			peers = append(peers, u)
 		}
 	}
@@ -556,7 +538,6 @@ func (k *Kernel) GetGossip(ctx context.Context) (*GossipResponse, error) {
 		pubKeyB64 = base64.RawURLEncoding.EncodeToString(pub)
 	}
 	handle, _ := k.store.GetConfig(ctx, "kernel_handle")
-	baseURL, _ := k.store.GetConfig(ctx, "kernel_base_url")
 
 	actions, err := k.store.ListPublicActions(ctx, 100, 0)
 	if err != nil {
@@ -608,7 +589,6 @@ func (k *Kernel) GetGossip(ctx context.Context) (*GossipResponse, error) {
 		}
 		friendViews = append(friendViews, GossipFriendView{
 			Handle:    p.Handle,
-			BaseURL:   p.RemoteBaseURL,
 			PublicKey: p.PublicKey,
 			Actions:   fActions,
 		})
@@ -617,7 +597,6 @@ func (k *Kernel) GetGossip(ctx context.Context) (*GossipResponse, error) {
 	return &GossipResponse{
 		PublicKey: pubKeyB64,
 		Handle:    handle,
-		BaseURL:   baseURL,
 		Actions:   gossipActions,
 		Friends:   friendViews,
 	}, nil
@@ -667,7 +646,6 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 		PublicKey:    gossip.PublicKey,
 		IntroducedBy: introducerPublicKey,
 		Handle:       gossip.Handle,
-		BaseURL:      gossip.BaseURL,
 		StatsJSON:    json.RawMessage(statsJSON),
 		FirstSeen:    now,
 		UpdatedAt:    now,
@@ -684,7 +662,6 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 			PublicKey:    f.PublicKey,
 			IntroducedBy: gossip.PublicKey,
 			Handle:       f.Handle,
-			BaseURL:      f.BaseURL,
 			StatsJSON:    json.RawMessage(friendStatsJSON),
 			FirstSeen:    now,
 			UpdatedAt:    now,
@@ -723,19 +700,6 @@ func decodeRemotePublicKey(publicKey string) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(key), nil
 }
 
-func validateRemoteBaseURL(baseURL string) error {
-	u, err := url.Parse(baseURL)
-	if err != nil || u == nil || u.Scheme == "" || u.Host == "" {
-		return ErrInvalidInput.Wrap("remote_base_url must be an absolute URL")
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return ErrInvalidInput.Wrap("remote_base_url must use http or https")
-	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return ErrInvalidInput.Wrap("remote_base_url must not include userinfo, query, or fragment")
-	}
-	return nil
-}
 
 // ---- Federation import (uses reconcileImport from kernel.go) ----
 
@@ -773,14 +737,11 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 	if err != nil {
 		return nil, err
 	}
-	if remoteUser.RemoteBaseURL == "" {
+	if remoteUser.PublicKey == "" {
 		return nil, ErrInvalidInput.Wrap("user is not a remote kernel")
 	}
 	if m.ActionID == "" {
 		return nil, ErrInvalidInput.Wrap("manifest missing action_id")
-	}
-	if remoteUser.PublicKey == "" {
-		return nil, ErrInvalidInput.Wrap("remote kernel has no public key")
 	}
 	if err := VerifyManifestSignature(remoteUser.PublicKey, &m); err != nil {
 		return nil, err
@@ -812,17 +773,10 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 	if m.Price < 0 {
 		return nil, ErrInvalidInput.Wrap("price must be non-negative")
 	}
-	// counterparty is this kernel's base64url Ed25519 public key so the remote can
-	// look it up by key (handle-based lookup would require knowing what handle the
-	// remote assigned to us, which we don't have without a round-trip).
-	localCounterparty := ""
-	if len(k.cfg.SigningKey) == ed25519.PrivateKeySize {
-		pub := k.cfg.SigningKey.Public().(ed25519.PublicKey)
-		localCounterparty = base64.RawURLEncoding.EncodeToString(pub)
-	}
-	source := strings.TrimRight(remoteUser.RemoteBaseURL, "/") +
-		"/v1/federation/call?action=" + url.QueryEscape(m.OwnerHandle+"/"+m.Name) +
-		"&counterparty=" + url.QueryEscape(localCounterparty)
+	// For a key-addressed proxy, Source holds only the remote action ref (@owner/name).
+	// The peer is identified by remoteUser.PublicKey; the federation transport resolves that
+	// key to a live path and supplies this kernel's own key as the signed counterparty (§13).
+	source := m.OwnerHandle + "/" + m.Name
 
 	existingByKey := map[string]*Action{}
 	if existing, err := k.store.ReadActionByOwnerRemoteID(ctx, remoteUserID, m.ActionID); err == nil {
@@ -888,7 +842,7 @@ func (k *Kernel) UnimportRemoteAction(ctx context.Context, subjectID, remoteHand
 	if err != nil {
 		return nil, ErrNotFound.Wrapf("remote kernel %q not found", remoteHandle)
 	}
-	if remoteUser.RemoteBaseURL == "" {
+	if remoteUser.PublicKey == "" {
 		return nil, ErrInvalidInput.Wrapf("%q is not a remote kernel", remoteHandle)
 	}
 	a, err := k.store.ReadActionByOwnerName(ctx, remoteUser.ID, actionName)
@@ -1020,11 +974,10 @@ func SignFederationPayload(key ed25519.PrivateKey, action, counterparty, idempot
 	})
 }
 
-// SignPeerRequest creates a base64url Ed25519 signature over JCS({handle, public_key, base_url, timestamp}).
-// Used when sending a friend request to POST /v1/peers on a remote kernel.
-func SignPeerRequest(key ed25519.PrivateKey, handle, publicKey, baseURL, timestamp string) (string, error) {
+// SignPeerRequest creates a base64url Ed25519 signature over JCS({handle, public_key, timestamp}).
+// Used when sending a friend request over the /juice/fed/friend/1 transport protocol (§13).
+func SignPeerRequest(key ed25519.PrivateKey, handle, publicKey, timestamp string) (string, error) {
 	return signJCS(key, map[string]string{
-		"base_url":   baseURL,
 		"handle":     handle,
 		"public_key": publicKey,
 		"timestamp":  timestamp,
@@ -1032,14 +985,13 @@ func SignPeerRequest(key ed25519.PrivateKey, handle, publicKey, baseURL, timesta
 }
 
 // VerifyPeerRequestSignature verifies a friend-request signature: Ed25519 over
-// JCS({handle, public_key, base_url, timestamp}) by the key embedded in the request.
-func VerifyPeerRequestSignature(pubKeyB64, handle, publicKey, baseURL, timestamp, sigB64 string) error {
+// JCS({handle, public_key, timestamp}) by the key embedded in the request.
+func VerifyPeerRequestSignature(pubKeyB64, handle, publicKey, timestamp, sigB64 string) error {
 	pub, err := decodeRemotePublicKey(pubKeyB64)
 	if err != nil {
 		return ErrUnauthorized.Wrap("invalid public key in peer request")
 	}
 	return verifyJCS(pub, map[string]string{
-		"base_url":   baseURL,
 		"handle":     handle,
 		"public_key": publicKey,
 		"timestamp":  timestamp,

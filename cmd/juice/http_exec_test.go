@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 )
 
@@ -69,23 +73,34 @@ func TestValidateRedirectHostAllowed(t *testing.T) {
 	}
 }
 
-func TestExecuteFederationSuccess(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Idempotency-Key") == "" {
-			http.Error(w, "missing idempotency key", http.StatusBadRequest)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]any{
-			"result":  map[string]any{"ok": true},
-			"receipt": map[string]any{"id": "r1", "status": "success"},
-		})
-	}))
-	defer srv.Close()
+// fakeFedCaller stands in for the libp2p transport: it returns a canned CallResponse so the
+// envelope-parsing + result/receipt extraction in executeFederationOverTransport is testable
+// without a network.
+type fakeFedCaller struct {
+	resp    fed.CallResponse
+	err     error
+	lastReq fed.CallRequest
+}
 
-	exec := &httpActionExecutor{}
-	fr, err := exec.ExecuteFederation(context.Background(), srv.URL, "key-123", map[string]any{})
+func (f *fakeFedCaller) Call(_ context.Context, _ string, req fed.CallRequest) (fed.CallResponse, error) {
+	f.lastReq = req
+	return f.resp, f.err
+}
+
+func TestExecuteFederationSuccess(t *testing.T) {
+	fc := &fakeFedCaller{resp: fed.CallResponse{
+		Status: 200,
+		Body:   []byte(`{"result":{"ok":true},"receipt":{"id":"r1","status":"success"}}`),
+	}}
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	signer := func(action, cp, ikey, argsHash string) (string, string, error) {
+		return "sig", "ts", nil
+	}
+	fr, err := executeFederationOverTransport(context.Background(), fc, signer,
+		base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)),
+		"peerkey", "@owner/act", "key-123", map[string]any{})
 	if err != nil {
-		t.Fatalf("ExecuteFederation: %v", err)
+		t.Fatalf("executeFederationOverTransport: %v", err)
 	}
 	if fr.Result["ok"] != true {
 		t.Errorf("result: got %v, want ok:true", fr.Result)
@@ -93,24 +108,36 @@ func TestExecuteFederationSuccess(t *testing.T) {
 	if fr.ReceiptJSON == "" {
 		t.Error("expected non-empty receiptJSON")
 	}
+	// The exact args bytes were signed and forwarded (the args_hash contract).
+	if fc.lastReq.IdempotencyKey != "key-123" || string(fc.lastReq.Args) != "{}" {
+		t.Errorf("request not forwarded verbatim: %+v", fc.lastReq)
+	}
 }
 
 func TestExecuteFederationNon200(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "error", http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	exec := &httpActionExecutor{}
-	fr, err := exec.ExecuteFederation(context.Background(), srv.URL, "key-x", map[string]any{})
+	// A non-200 with no parseable receipt → no receipt, status propagated (caller stays pending).
+	fc := &fakeFedCaller{resp: fed.CallResponse{Status: 500, Body: []byte(`error`)}}
+	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", "@o/a", "key-x", map[string]any{})
 	if err != nil {
-		t.Fatalf("ExecuteFederation: unexpected error: %v", err)
+		t.Fatalf("executeFederationOverTransport: unexpected error: %v", err)
 	}
 	if fr.ReceiptJSON != "" {
-		t.Error("expected empty receiptJSON for non-JSON non-200 response")
+		t.Error("expected empty receiptJSON for non-receipt response")
 	}
 	if fr.HTTPStatus != 500 {
 		t.Errorf("expected HTTPStatus=500, got %d", fr.HTTPStatus)
+	}
+}
+
+// A transport error yields a zero result so the kernel keeps the call pending for retry (§13).
+func TestExecuteFederationTransportError(t *testing.T) {
+	fc := &fakeFedCaller{err: fmt.Errorf("unreachable")}
+	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", "@o/a", "key-y", map[string]any{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fr.HTTPStatus != 0 || fr.ReceiptJSON != "" {
+		t.Errorf("transport error should be pending, got %+v", fr)
 	}
 }
 

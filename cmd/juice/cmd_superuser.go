@@ -40,8 +40,42 @@ func init() {
 		peerUnfriendCmd(),
 		peerListCmd(),
 		peerInspectCmd(),
+		identityCmd(),
 	)
 	rootCmd.AddCommand(adminCmd)
+}
+
+// identityCmd prints this kernel's own federation identity: its public key (which peers use to
+// friend it), handle, and libp2p listen addresses. Federation no longer exposes a .well-known
+// document, so this is how an operator learns the key to share.
+func identityCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "identity",
+		Short: "Show this kernel's federation identity (public key, handle, listen addresses)",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			var out struct {
+				Handle    string   `json:"handle"`
+				PublicKey string   `json:"public_key"`
+				Addrs     []string `json:"addrs"`
+			}
+			if err := ctlCall(context.Background(), "GET", "/control/identity", nil, &out); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(out)
+			}
+			fmt.Printf("Handle:     %s\n", out.Handle)
+			fmt.Printf("Public key: %s\n", out.PublicKey)
+			if len(out.Addrs) > 0 {
+				fmt.Println("Listen addresses:")
+				for _, a := range out.Addrs {
+					fmt.Printf("  %s\n", a)
+				}
+			}
+			return nil
+		},
+	}
 }
 
 func adminUsersCmd() *cobra.Command {
@@ -146,25 +180,32 @@ func adminWithdrawCmd() *cobra.Command {
 
 func peerInspectCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "inspect <url>",
-		Short: "Show a remote kernel's identity and public actions (no auth, no DB write)",
+		Use:   "inspect <key>",
+		Short: "Show a remote kernel's identity, public actions, and reachability (by public key)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			var out struct {
 				Handle    string `json:"handle"`
 				PublicKey string `json:"public_key"`
-				BaseURL   string `json:"base_url"`
 				Actions   []struct {
 					Name  string `json:"name"`
 					Price int64  `json:"price"`
 					Uses  int64  `json:"uses"`
 				} `json:"actions"`
 				Friends []struct {
-					Handle  string `json:"handle"`
-					BaseURL string `json:"base_url"`
+					Handle    string `json:"handle"`
+					PublicKey string `json:"public_key"`
+					Actions   []struct {
+						Name string `json:"name"`
+						Uses int64  `json:"uses"`
+					} `json:"actions"`
 				} `json:"friends"`
+				Reachability struct {
+					Path      string `json:"path"`
+					RTTmillis int64  `json:"rtt_millis"`
+				} `json:"reachability"`
 			}
-			if err := ctlCall(context.Background(), "GET", "/control/peers/inspect?url="+url.QueryEscape(args[0]), nil, &out); err != nil {
+			if err := ctlCall(context.Background(), "GET", "/control/peers/inspect?key="+url.QueryEscape(args[0]), nil, &out); err != nil {
 				return err
 			}
 			if flagJSON {
@@ -174,9 +215,9 @@ func peerInspectCmd() *cobra.Command {
 			if len(fp) > 16 {
 				fp = fp[:16] + "…"
 			}
-			fmt.Printf("Handle:     %s\n", out.Handle)
-			fmt.Printf("Public key: %s\n", fp)
-			fmt.Printf("Base URL:   %s\n", out.BaseURL)
+			fmt.Printf("Handle:       %s\n", out.Handle)
+			fmt.Printf("Public key:   %s\n", fp)
+			fmt.Printf("Reachability: %s (%dms)\n", out.Reachability.Path, out.Reachability.RTTmillis)
 			if len(out.Actions) > 0 {
 				fmt.Printf("\nActive actions (%d):\n", len(out.Actions))
 				for _, a := range out.Actions {
@@ -186,7 +227,11 @@ func peerInspectCmd() *cobra.Command {
 			if len(out.Friends) > 0 {
 				fmt.Printf("\nTransacted friends (%d):\n", len(out.Friends))
 				for _, f := range out.Friends {
-					fmt.Printf("  %s  %s\n", f.Handle, f.BaseURL)
+					k := f.PublicKey
+					if len(k) > 16 {
+						k = k[:16] + "…"
+					}
+					fmt.Printf("  %-20s %s\n", f.Handle, k)
 				}
 			}
 			return nil
@@ -196,8 +241,8 @@ func peerInspectCmd() *cobra.Command {
 
 func peerFriendCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "friend <url>",
-		Short: "Befriend a remote kernel: register as peer and import all their active public actions",
+		Use:   "friend <key>",
+		Short: "Befriend a remote kernel by public key: register as peer and import their active public actions",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			var out struct {
@@ -206,7 +251,7 @@ func peerFriendCmd() *cobra.Command {
 				Skipped  int    `json:"skipped"`
 			}
 			if err := ctlCall(context.Background(), "POST", "/control/peers/friend",
-				map[string]any{"url": args[0]}, &out); err != nil {
+				map[string]any{"key": args[0]}, &out); err != nil {
 				return err
 			}
 			if flagJSON {
@@ -266,13 +311,17 @@ func peerListCmd() *cobra.Command {
 			if len(out.Peers) == 0 {
 				fmt.Println("No peers registered.")
 			} else {
-				fmt.Printf("%-20s %-36s %s\n", "HANDLE", "ID", "BASE_URL")
+				fmt.Printf("%-20s %-36s %s\n", "HANDLE", "ID", "PUBLIC_KEY")
 				for _, p := range out.Peers {
 					denied := ""
 					if p.DeniedAt != nil {
 						denied = " [denied]"
 					}
-					fmt.Printf("%-20s %-36s %s%s\n", p.Handle, p.ID, p.RemoteBaseURL, denied)
+					k := p.PublicKey
+					if len(k) > 16 {
+						k = k[:16] + "…"
+					}
+					fmt.Printf("%-20s %-36s %s%s\n", p.Handle, p.ID, k, denied)
 				}
 			}
 			if showGossip && len(out.Discovered) > 0 {
@@ -292,7 +341,11 @@ func peerListCmd() *cobra.Command {
 					if h, ok := peerHandle[fp]; ok {
 						via = fp + " (" + h + ")"
 					}
-					fmt.Printf("  %-20s %-50s (via %s)\n", d.Handle, d.BaseURL, via)
+					dk := d.PublicKey
+					if len(dk) > 16 {
+						dk = dk[:16] + "…"
+					}
+					fmt.Printf("  %-20s %-20s (via %s)\n", d.Handle, dk, via)
 				}
 			}
 			return nil

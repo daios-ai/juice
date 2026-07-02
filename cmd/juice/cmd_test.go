@@ -301,12 +301,11 @@ func TestUserUpdateProxyUser(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := &kernel.User{
-		ID:            "proxy-id-1",
-		Handle:        "@remote-peer",
-		PublicKey:     "dGVzdGtleQ==",
-		RemoteBaseURL: "https://remote.example.com",
-		CreatedAt:     time.Now().UTC(),
-		UpdatedAt:     time.Now().UTC(),
+		ID:        "proxy-id-1",
+		Handle:    "@remote-peer",
+		PublicKey: "dGVzdGtleQ==",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
 	}
 	if err := env.db.CreateProxyUser(ctx, proxy); err != nil {
 		t.Fatal(err)
@@ -1421,7 +1420,7 @@ func TestRemoteImport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := k.AddPeer(t.Context(), sys.ID, "@import-remote", pubB64, remote.URL); err != nil {
+	if _, err := k.AddPeer(t.Context(), sys.ID, "@import-remote", pubB64); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1491,7 +1490,7 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.AddPeer(t.Context(), sys.ID, "@disappear-remote", pubB64, remote.URL); err != nil {
+	if _, err := k.AddPeer(t.Context(), sys.ID, "@disappear-remote", pubB64); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1535,7 +1534,7 @@ func TestRemoteUnimport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	remoteUser, err := k.AddPeer(t.Context(), sys.ID, "@unimport-peer", pubB64, "https://unimport.example.com")
+	remoteUser, err := k.AddPeer(t.Context(), sys.ID, "@unimport-peer", pubB64)
 	if err != nil {
 		t.Fatal(err)
 	}

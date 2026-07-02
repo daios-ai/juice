@@ -295,7 +295,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		if trace.IdempotencyKey != nil {
 			ikey = *trace.IdempotencyKey
 		}
-		fr, _ := fe.ExecuteFederation(ctx, action.Source, ikey, req.Args)
+		fr, _ := fe.ExecuteFederation(ctx, target.PublicKey, action.Source, ikey, req.Args)
 		latency := time.Since(started).Seconds()
 		ktx.EndedAt = time.Now().UTC()
 		return k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, latency)

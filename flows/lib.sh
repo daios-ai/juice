@@ -62,19 +62,22 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 # Config
 # ---------------------------------------------------------------------------
 # write_config db [key=value ...]  — juice.json next to db. server_url is intentionally
-# empty: the server advertises its real bound address (works under --addr :0). log_format is
-# json so `server.ready` is machine-readable; log_level info so it is emitted at all.
-# Keys: fee_bps script_timeout_ms peer_handle make_max_steps.
+# empty (CLI dials the real bound address). log_format is json so `server.ready` is
+# machine-readable. bootstrap_peers seeds the federation transport (§13); empty = no discovery.
+# Keys: fee_bps script_timeout_ms kernel_handle make_max_steps bootstrap_peers.
 write_config() {
     local db="$1"; shift
-    local fee_bps=0 script_timeout_ms=10000 peer_handle="" make_max_steps=5
+    local fee_bps=0 script_timeout_ms=10000 kernel_handle="" make_max_steps=5 bootstrap_peers=""
     local a
     for a in "$@"; do case "$a" in
         fee_bps=*)           fee_bps=${a#*=} ;;
         script_timeout_ms=*) script_timeout_ms=${a#*=} ;;
-        peer_handle=*)       peer_handle=${a#*=} ;;
+        kernel_handle=*)     kernel_handle=${a#*=} ;;
         make_max_steps=*)    make_max_steps=${a#*=} ;;
+        bootstrap_peers=*)   bootstrap_peers=${a#*=} ;;
     esac; done
+    local bp_json="[]"
+    [ -n "$bootstrap_peers" ] && bp_json="[\"$bootstrap_peers\"]"
     cat > "$(dirname "$db")/juice.json" <<EOF
 {
   "script_timeout_ms": $script_timeout_ms,
@@ -86,9 +89,40 @@ write_config() {
   "make_max_steps": $make_max_steps,
   "allow_local_sources": true,
   "server_url": "",
-  "peer_handle": "$peer_handle"
+  "kernel_handle": "$kernel_handle",
+  "bootstrap_peers": $bp_json
 }
 EOF
+}
+
+# start_seed  — launch a federation bootstrap+relay seed node on loopback and record its
+# multiaddr in SEED_ADDR. The whole federation network in the flows resolves through it.
+SEED_ADDR=""
+start_seed() {
+    local dir="$1"
+    local log="$dir/seed.log"
+    HOME="$dir" "$JUICE" seed --addr /ip4/127.0.0.1/tcp/0 --allow-local >"$log" 2>&1 &
+    local pid=$!; track_pid "$pid"
+    local deadline=$(( $(date +%s) + 20 ))
+    while :; do
+        # seed prints each multiaddr on its own line at column 0 (fmt.Println); the log line is
+        # indented/prefixed. Strip ANSI, then take a line that STARTS with /ip4 (the plain one).
+        SEED_ADDR=$(sed 's/\x1b\[[0-9;]*m//g' "$log" 2>/dev/null | grep -m1 '^/ip4/127.0.0.1/tcp/[0-9]*/p2p/' | tr -d '\r')
+        [ -n "$SEED_ADDR" ] && break
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "  seed exited during boot:" >&2; sed 's/^/    | /' "$log" >&2; return 1
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "  seed not ready within 20s:" >&2; sed 's/^/    | /' "$log" >&2; return 1
+        fi
+        sleep 0.05
+    done
+    return 0
+}
+
+# kernel_key db home  — print a kernel's own federation public key (via admin identity).
+kernel_key() {
+    strfield "$(jj "$1" "$2" admin identity)" public_key
 }
 
 # ---------------------------------------------------------------------------

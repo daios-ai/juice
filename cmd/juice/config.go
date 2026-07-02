@@ -86,11 +86,11 @@ type ServerConfig struct {
 	LogLevel          string       `json:"log_level"`
 	LogFile           string       `json:"log_file"`
 	LogFormat         string       `json:"log_format"`
-	AllowLocalSources  bool         `json:"allow_local_sources"`
-	AllowLocalPeerURLs bool         `json:"allow_local_peer_urls"`
-	ServerURL         string       `json:"server_url"`
+	AllowLocalSources bool         `json:"allow_local_sources"`
+	ServerURL         string       `json:"server_url"` // local base URL the CLI dials; never a federation identity (§14)
 	PeerAutoAccept    bool         `json:"peer_auto_accept"`
-	PeerHandle        string       `json:"peer_handle"`
+	KernelHandle      string       `json:"kernel_handle"`   // handle this kernel presents in friend handshakes and gossip (§13)
+	BootstrapPeers    []string     `json:"bootstrap_peers"` // seed multiaddrs; sole seed source; empty = no announce/discovery (§13)
 	CredentialsKey    string       `json:"credentials_key,omitempty"` // base64url AES-256 key; generated on first boot
 }
 
@@ -118,10 +118,10 @@ func DefaultServerConfig() ServerConfig {
 		LogLevel:          "info",
 		LogFile:           "",
 		LogFormat:         "text",
-		AllowLocalSources:  false,
-		AllowLocalPeerURLs: false,
+		AllowLocalSources: false,
 		ServerURL:         "",
 		PeerAutoAccept:    true,
+		BootstrapPeers:    []string{},
 	}
 }
 

@@ -392,7 +392,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 	argsHash := sha256HexBytes(rawBody)
 
 	counterparty, err := k.ReadUserByPublicKey(ctx, cpPubKey)
-	if err != nil || counterparty.RemoteBaseURL == "" {
+	if err != nil || counterparty.PublicKey == "" {
 		return 0, nil, kernel.ErrUnauthenticated.Wrap("counterparty not a registered peer")
 	}
 	ts, err := time.Parse(time.RFC3339, tsStr)

@@ -30,16 +30,16 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 		if err != nil {
 			return err
 		}
-		if globalCfg.PeerHandle == "" {
-			ph := os.Getenv("JUICE_BOOTSTRAP_PEER_HANDLE")
+		if globalCfg.KernelHandle == "" {
+			ph := os.Getenv("JUICE_BOOTSTRAP_KERNEL_HANDLE")
 			if ph == "" && term.IsTerminal(int(os.Stdin.Fd())) {
-				fmt.Fprint(os.Stderr, "Kernel peer handle (e.g. @myorg, or Enter to skip): ")
+				fmt.Fprint(os.Stderr, "Kernel handle (e.g. @myorg, or Enter to skip): ")
 				var line string
 				fmt.Fscanln(os.Stdin, &line)
 				ph = strings.TrimSpace(line)
 			}
 			if ph != "" {
-				globalCfg.PeerHandle = ph
+				globalCfg.KernelHandle = ph
 				_ = writeConfig(resolvedConfigPath, globalCfg)
 			}
 		}
@@ -74,12 +74,9 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 	}
 	k.SetSigningKey(ed25519.PrivateKey(privKeyBytes), su.ID)
 
-	// Persist peer identity so GetGossip can serve them from the DB.
-	if globalCfg.PeerHandle != "" {
-		_ = k.SetConfig(ctx, "kernel_handle", globalCfg.PeerHandle)
-	}
-	if globalCfg.ServerURL != "" {
-		_ = k.SetConfig(ctx, "kernel_base_url", globalCfg.ServerURL)
+	// Persist the kernel handle so GetGossip can serve it from the DB.
+	if globalCfg.KernelHandle != "" {
+		_ = k.SetConfig(ctx, "kernel_handle", globalCfg.KernelHandle)
 	}
 
 	// Recover interrupted calls and re-park crashed step completions (after signing key is set).

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"math"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -1459,7 +1458,6 @@ func TestReadUserByPublicKey(t *testing.T) {
 
 	u := newUser("@remote", 0)
 	u.PublicKey = "ed25519pubkeyABC"
-	u.RemoteBaseURL = "https://remote.example.com"
 	if err := db.CreateUser(ctx, u); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -1471,8 +1469,8 @@ func TestReadUserByPublicKey(t *testing.T) {
 	if got.Handle != "@remote" {
 		t.Errorf("handle: got %q, want @remote", got.Handle)
 	}
-	if got.RemoteBaseURL != "https://remote.example.com" {
-		t.Errorf("RemoteBaseURL: got %q", got.RemoteBaseURL)
+	if got.PublicKey != "ed25519pubkeyABC" {
+		t.Errorf("PublicKey: got %q", got.PublicKey)
 	}
 
 	// Unknown key returns ErrNotFound.
@@ -1863,66 +1861,26 @@ func TestUpsertAndListEmbeddings(t *testing.T) {
 
 // ---- Federation store methods ----
 
-func TestUpdateRemoteProxySourceURLs(t *testing.T) {
+func TestProxyUserIdentifiedByPublicKey(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@proxy-owner", 0)
-	owner.PublicKey = "validkey"
-	owner.RemoteBaseURL = "https://old.example.com"
-	if err := db.CreateUser(ctx, owner); err != nil {
-		t.Fatal(err)
-	}
-
-	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "act",
-		Kind: kernel.KindRemoteProxy, Active: false, Price: 0,
-		Source:       "https://old.example.com/v1/federation/call?action=@owner/act&counterparty=abc",
-		InputSchema:  map[string]any{}, OutputSchema: map[string]any{},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	if err := db.CreateAction(ctx, a); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.UpdateRemoteProxySourceURLs(ctx, owner.ID, "https://old.example.com", "https://new.example.com"); err != nil {
-		t.Fatalf("UpdateRemoteProxySourceURLs: %v", err)
-	}
-
-	updated, err := db.ReadAction(ctx, a.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(updated.Source, "old.example.com") {
-		t.Errorf("old base URL still in source: %s", updated.Source)
-	}
-	if !strings.Contains(updated.Source, "new.example.com") {
-		t.Errorf("new base URL not in source: %s", updated.Source)
-	}
-}
-
-func TestReadRemoteKernelByBaseURL(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	peer := newUser("@rburl-peer", 0)
+	peer := newUser("@key-peer", 0)
 	peer.PublicKey = "somepubkey"
-	peer.RemoteBaseURL = "https://rburl.example.com"
-	if err := db.CreateUser(ctx, peer); err != nil {
-		t.Fatal(err)
+	if err := db.CreateProxyUser(ctx, peer); err != nil {
+		t.Fatalf("CreateProxyUser: %v", err)
 	}
 
-	found, err := db.ReadRemoteKernelByBaseURL(ctx, "https://rburl.example.com")
+	found, err := db.ReadUserByPublicKey(ctx, "somepubkey")
 	if err != nil {
-		t.Fatalf("ReadRemoteKernelByBaseURL: %v", err)
+		t.Fatalf("ReadUserByPublicKey: %v", err)
 	}
 	if found.ID != peer.ID {
 		t.Errorf("expected peer ID %s, got %s", peer.ID, found.ID)
 	}
-
-	_, err = db.ReadRemoteKernelByBaseURL(ctx, "https://notfound.example.com")
-	if !errors.Is(err, kernel.ErrNotFound) {
-		t.Errorf("expected ErrNotFound for unknown base URL, got %v", err)
+	// A proxy user carries a public key and no password — that is what marks it remote.
+	if found.PublicKey == "" || found.PasswordHash != "" {
+		t.Errorf("proxy user should have public_key set and empty password, got key=%q hash=%q", found.PublicKey, found.PasswordHash)
 	}
 }
 

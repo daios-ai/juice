@@ -116,7 +116,7 @@ func VerifyCodeChallenge(verifier, challenge string) bool {
 // Returns ErrUnauthenticated for any credential failure (including proxy users).
 func (k *Kernel) authenticateLocal(ctx context.Context, handle, password string) (*User, error) {
 	u, err := k.store.ReadUserByHandle(ctx, handle)
-	if err != nil || u.RemoteBaseURL != "" || !CheckPassword(password, u.PasswordHash) {
+	if err != nil || u.PublicKey != "" || !CheckPassword(password, u.PasswordHash) {
 		return nil, ErrUnauthenticated.Wrap("invalid credentials")
 	}
 	return u, rejectSuspended(u)

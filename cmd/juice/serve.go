@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
 	"github.com/go-chi/chi/v5"
@@ -40,7 +40,7 @@ func init() {
 }
 
 func runServer(addr string) error {
-	k, db, logger, err := openKernel()
+	k, db, logger, httpExec, err := openKernel()
 	if err != nil {
 		return err
 	}
@@ -79,15 +79,27 @@ func runServer(addr string) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
-	// Under --addr :0 the real port is only known now; advertise it so federation
-	// (.well-known, gossip, reciprocal) reports where we actually listen. A configured
-	// server_url (e.g. a public proxy URL) takes precedence and is left as bootstrap set it.
-	if globalCfg.ServerURL == "" {
-		_ = k.SetConfig(context.Background(), "kernel_base_url", "http://"+ln.Addr().String())
+	// Start the federation transport (§13): peers addressed by key, no HTTP endpoints. The
+	// libp2p identity is the platform signing key, so the transport IS this kernel's identity.
+	fedTransport, ferr := startFedTransport(context.Background(), k, logger)
+	if ferr != nil {
+		logger.Error("fed.start_failed", "error", ferr)
+	} else {
+		srv.fed = fedTransport
+		httpExec.fedTransport = fedTransport
+		httpExec.localPubKey, _ = k.GetConfig(context.Background(), configKeySigningPublic)
+		defer fedTransport.Close()
 	}
-	// server.ready is emitted only after a successful bind — the harness waits on this line
-	// (and reads the real addr from it) instead of blind-polling /health.
-	logger.Info("server.ready", "addr", ln.Addr().String())
+
+	// server.ready is emitted only after a successful bind — the harness waits on this line.
+	// It carries the kernel's public key and libp2p listen addrs, because federation no longer
+	// exposes them over HTTP (there is no .well-known).
+	pubKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+	readyFields := []any{"addr", ln.Addr().String(), "public_key", pubKey}
+	if srv.fed != nil {
+		readyFields = append(readyFields, "fed_addrs", srv.fed.ListenAddrs())
+	}
+	logger.Info("server.ready", readyFields...)
 
 	// Superuser supervision (admin/peer) is served on a local Unix socket, never TCP, so
 	// `serve` is the sole process that opens the DB (§14).
@@ -127,6 +139,7 @@ func runServer(addr string) error {
 type server struct {
 	kernel *kernel.Kernel
 	log    *log.Logger
+	fed    *fed.Transport // federation transport (§13); nil until runServer starts it
 }
 
 // registerRoutes mounts all application routes onto r for the given server.
@@ -137,17 +150,10 @@ func registerRoutes(r chi.Router, srv *server) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	// Well-known kernel metadata (unauthenticated).
-	r.Get("/.well-known/juice-kernel.json", srv.getWellKnown)
-
-	// Federation endpoints (unauthenticated).
-	r.Post("/v1/federation/call", srv.postFederationCall)
-	r.Get("/v1/gossip", srv.getGossip)
-	r.Post("/v1/peers", srv.postPeer)
-
-	// Public action routes — no auth required.
+	// Federation has no HTTP surface: peer identity, the friend handshake, inbound calls,
+	// manifests, gossip, and inspection travel over the libp2p transport (§13), started in
+	// runServer. Public action listing stays on HTTP for local/user clients.
 	r.Get("/v1/actions", srv.getActions)
-	r.Get("/v1/actions/{id}/manifest", srv.getActionManifest)
 
 	// Actions (authenticated).
 	r.Group(func(r chi.Router) {
@@ -820,167 +826,6 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 	})(w, r)
 }
 
-
-// ---- well-known / federation ----
-
-func (s *server) getWellKnown(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	pubKey, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	handle := globalCfg.PeerHandle
-	if handle == "" {
-		handle, _ = s.kernel.GetConfig(ctx, configKeySuperuser)
-	}
-	if handle == "" {
-		handle = "@sys"
-	}
-	// kernel_base_url is the address we actually advertise: the configured server_url, or
-	// the real bound address under --addr :0 (set in runServer).
-	baseURL, _ := s.kernel.GetConfig(ctx, "kernel_base_url")
-	writeJSON(w, http.StatusOK, map[string]string{
-		"handle":     handle,
-		"public_key": pubKey,
-		"base_url":   baseURL,
-	})
-}
-
-func (s *server) getGossip(w http.ResponseWriter, r *http.Request) {
-	gossip, err := s.kernel.GetGossip(r.Context())
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, gossip)
-}
-
-// postPeer handles inbound friend requests from remote kernels.
-// Body: {handle, public_key, base_url, timestamp, signature}
-// signature = SignPeerRequest({handle, public_key, base_url, timestamp}) by the requester.
-func (s *server) postPeer(w http.ResponseWriter, r *http.Request) {
-	handle(func(r *http.Request, req struct {
-		Handle    string `json:"handle"`
-		PublicKey string `json:"public_key"`
-		BaseURL   string `json:"base_url"`
-		Timestamp string `json:"timestamp"`
-		Signature string `json:"signature"`
-	}) (any, int, error) {
-		ctx := r.Context()
-
-		// Verify timestamp (±5 min).
-		ts, err := time.Parse(time.RFC3339, req.Timestamp)
-		if err != nil {
-			return nil, 0, kernel.ErrInvalidInput.Wrap("timestamp must be RFC3339")
-		}
-		if diff := time.Since(ts); diff < -5*time.Minute || diff > 5*time.Minute {
-			return nil, 0, kernel.ErrUnauthenticated.Wrap("timestamp out of range")
-		}
-
-		// Verify Ed25519 signature against the public key embedded in the request.
-		if err := kernel.VerifyPeerRequestSignature(req.PublicKey, req.Handle, req.PublicKey, req.BaseURL, req.Timestamp, req.Signature); err != nil {
-			return nil, 0, kernel.ErrUnauthorized.Wrap("invalid peer request signature")
-		}
-
-		// Deny check; capture existing peer so we can skip reciprocal if already known.
-		existing, _ := s.kernel.ReadUserByPublicKey(ctx, req.PublicKey)
-		if existing != nil && existing.DeniedAt != nil {
-			return nil, 0, kernel.ErrUnauthorized.Wrap("peer is denied")
-		}
-
-		if !globalCfg.PeerAutoAccept {
-			_ = s.kernel.AccumulateGossip(ctx, &kernel.GossipResponse{
-				PublicKey: req.PublicKey,
-				Handle:    req.Handle,
-				BaseURL:   req.BaseURL,
-			}, "friend-request")
-			return map[string]any{"status": "pending"}, http.StatusAccepted, nil
-		}
-
-		u, err := s.kernel.CreateOrUpdateProxyPeer(ctx, req.Handle, req.PublicKey, req.BaseURL)
-		if err != nil {
-			return nil, 0, err
-		}
-		// Only send a reciprocal friend request if the peer was previously unknown.
-		// This prevents mutual sendReciprocal cascades where each server keeps responding
-		// to the other's reciprocal, flooding both DBs with concurrent writes.
-		if existing == nil {
-			go s.sendReciprocal(req.BaseURL)
-		}
-		return map[string]any{"id": u.ID, "handle": u.Handle}, http.StatusOK, nil
-	})(w, r)
-}
-
-// sendReciprocal sends a signed friend request back to peerBaseURL/v1/peers. Best-effort.
-func (s *server) sendReciprocal(peerBaseURL string) {
-	ctx := context.Background()
-	pubKeyB64, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	localHandle := globalCfg.PeerHandle
-	if localHandle == "" {
-		localHandle, _ = s.kernel.GetConfig(ctx, configKeySuperuser)
-	}
-	localBaseURL, _ := s.kernel.GetConfig(ctx, "kernel_base_url")
-	if pubKeyB64 == "" || localBaseURL == "" {
-		return
-	}
-	sig, ts, err := s.kernel.SignPeerRequestNow(localHandle, pubKeyB64, localBaseURL)
-	if err != nil {
-		return
-	}
-	body, _ := json.Marshal(map[string]string{
-		"handle":     localHandle,
-		"public_key": pubKeyB64,
-		"base_url":   localBaseURL,
-		"timestamp":  ts,
-		"signature":  sig,
-	})
-	exec := &httpActionExecutor{timeout: 10 * time.Second, allowLocal: globalCfg.AllowLocalSources}
-	_, _, _ = doHTTP(ctx, http.MethodPost, strings.TrimRight(peerBaseURL, "/")+"/v1/peers",
-		map[string]string{"Content-Type": "application/json"}, strings.NewReader(string(body)),
-		exec.timeout, exec.allowLocal)
-}
-
-func (s *server) postFederationCall(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	cpPubKey := r.URL.Query().Get("counterparty")
-	if cpPubKey == "" {
-		writeErr(w, kernel.ErrUnauthenticated.Wrap("counterparty required"))
-		return
-	}
-	tsStr := r.Header.Get("X-Timestamp")
-	if tsStr == "" {
-		writeErr(w, kernel.ErrUnauthenticated.Wrap("X-Timestamp required"))
-		return
-	}
-	idempotencyKey := r.Header.Get("X-Idempotency-Key")
-	if idempotencyKey == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("X-Idempotency-Key required"))
-		return
-	}
-	actionParam := r.URL.Query().Get("action")
-	if actionParam == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("action query param required"))
-		return
-	}
-	rawBody, readErr := io.ReadAll(r.Body)
-	if readErr != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("could not read request body"))
-		return
-	}
-	sigStr := r.Header.Get("X-Signature")
-	status, body, callErr := handleFederationCall(s.kernel, ctx, cpPubKey, tsStr, idempotencyKey, actionParam, sigStr, rawBody)
-	if callErr != nil {
-		writeErr(w, callErr)
-		return
-	}
-	writeJSON(w, status, body)
-}
-
-func (s *server) getActionManifest(w http.ResponseWriter, r *http.Request) {
-	m, err := s.kernel.GetActionManifest(r.Context(), pathID(r))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, m)
-}
 
 // ---- me ----
 

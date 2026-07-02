@@ -429,7 +429,7 @@ func TestRegisterRemoteKernelRequiresSuperuser(t *testing.T) {
 	pub := priv.Public().(ed25519.PublicKey)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
-	_, err := k.AddPeer(ctx, notSys.ID, "@peer", pubB64, "https://peer.example.com")
+	_, err := k.AddPeer(ctx, notSys.ID, "@peer", pubB64)
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("non-superuser AddPeer: want ErrUnauthorized, got %v", err)
 	}

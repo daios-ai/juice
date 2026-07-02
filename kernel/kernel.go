@@ -249,7 +249,7 @@ func (k *Kernel) UpdateUser(ctx context.Context, callerID string, req UpdateUser
 	if err != nil {
 		return nil, err
 	}
-	if u.RemoteBaseURL != "" {
+	if u.PublicKey != "" {
 		return nil, ErrInvalidState.Wrap("proxy users cannot update their account")
 	}
 	if req.Email == "" && req.NewPassword == "" {

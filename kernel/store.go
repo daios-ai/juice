@@ -42,10 +42,13 @@ type URLFetcher interface {
 	FetchURL(ctx context.Context, rawURL string) ([]byte, error)
 }
 
-// FederationExecutor sends a cross-kernel call to a remote proxy target.
-// HTTPExecutor implementations may optionally implement this interface; kernel checks via type assertion.
+// FederationExecutor sends a cross-kernel call to a remote proxy target over the federation
+// transport (§13), addressing the peer by its Ed25519 public key. actionRef is the remote
+// action reference (@owner/name); the transport signs the request as this kernel and resolves
+// peerPublicKey to a live path (direct / hole-punched / relayed). HTTPExecutor implementations
+// may optionally implement this interface; kernel checks via type assertion.
 type FederationExecutor interface {
-	ExecuteFederation(ctx context.Context, source, idempotencyKey string, args map[string]any) (FederationResult, error)
+	ExecuteFederation(ctx context.Context, peerPublicKey, actionRef, idempotencyKey string, args map[string]any) (FederationResult, error)
 }
 
 // HostFunctions are the callbacks available to a running script.
@@ -146,12 +149,6 @@ type Store interface {
 	ReadUser(ctx context.Context, id string) (*User, error)
 	ReadUserByHandle(ctx context.Context, handle string) (*User, error)
 	ReadUserByPublicKey(ctx context.Context, publicKey string) (*User, error)
-	UpdateRemoteBaseURL(ctx context.Context, userID, baseURL string) error
-	// ReadRemoteKernelByBaseURL returns the remote-kernel user with the given base URL.
-	ReadRemoteKernelByBaseURL(ctx context.Context, baseURL string) (*User, error)
-	// UpdateRemoteProxySourceURLs replaces oldBase with newBase in Action.source for all
-	// remote_proxy actions owned by ownerUserID.
-	UpdateRemoteProxySourceURLs(ctx context.Context, ownerUserID, oldBase, newBase string) error
 	ListUsers(ctx context.Context, limit, offset int) ([]*User, error)
 	SuspendUser(ctx context.Context, id string) error
 	UnsuspendUser(ctx context.Context, id string) error
@@ -362,7 +359,7 @@ type Store interface {
 	// UndenyUser clears denied_at on the user.
 	UndenyUser(ctx context.Context, id string) error
 	// CreateProxyUser creates a proxy user record (Kind is inferred from empty PasswordHash +
-	// non-empty PublicKey + non-empty RemoteBaseURL). Does not create a password.
+	// non-empty PublicKey). Does not create a password.
 	CreateProxyUser(ctx context.Context, u *User) error
 
 	// ---- Gossip / Federation ----

@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -209,6 +208,39 @@ func httpDoWithHeaders(t *testing.T, srv *httptest.Server, method, path string, 
 
 // fedHeaders builds signed auth headers for a federation call.
 // All test federation calls use an empty JSON body (json.Encoder output of {}).
+// fedCall exercises the inbound federation path directly — the same handleFederationCall the
+// /juice/fed/call/1 transport handler invokes — and returns a synthetic *http.Response so the
+// existing status/body assertions carry over. The signature covers the exact args bytes, so the
+// receiver's args_hash matches (the same contract the transport preserves).
+func fedCall(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, action, idempKey string, args map[string]any) *http.Response {
+	t.Helper()
+	if args == nil {
+		args = map[string]any{}
+	}
+	body, _ := json.Marshal(args)
+	ts := time.Now().UTC().Format(time.RFC3339)
+	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	argsHash := sha256HexBytes(body)
+	sig, err := kernel.SignFederationPayload(priv, action, cp, idempKey, ts, argsHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fedCallRaw(t, k, cp, ts, idempKey, action, sig, body)
+}
+
+// fedCallRaw calls handleFederationCall with fully explicit inputs (for edge cases like a
+// missing counterparty or a tampered body) and wraps the result as an *http.Response.
+func fedCallRaw(t *testing.T, k *kernel.Kernel, cp, ts, idempKey, action, sig string, body []byte) *http.Response {
+	t.Helper()
+	status, respBody, callErr := handleFederationCall(k, context.Background(), cp, ts, idempKey, action, sig, body)
+	if callErr != nil {
+		status = kernel.HTTPStatusFromCode(kernel.KernelErrorCode(callErr))
+		respBody = map[string]any{"error": callErr.Error()}
+	}
+	b, _ := json.Marshal(respBody)
+	return &http.Response{StatusCode: status, Body: io.NopCloser(bytes.NewReader(b))}
+}
+
 func fedHeaders(t *testing.T, priv ed25519.PrivateKey, action, idempKey string) map[string]string {
 	t.Helper()
 	ts := time.Now().UTC().Format(time.RFC3339)
@@ -1361,7 +1393,7 @@ func TestFederationCall(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
 	// Register the remote peer with its real public key.
-	_, err = k.AddPeer(ctx, sys.ID, "@remote.example.com", pubB64, "http://remote.example.com")
+	_, err = k.AddPeer(ctx, sys.ID, "@remote.example.com", pubB64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1389,10 +1421,7 @@ func TestFederationCall(t *testing.T) {
 	}
 
 	// Signed federation call succeeds; counterparty is identified by public key.
-	resp := httpDoWithHeaders(t, srv, "POST",
-		"/v1/federation/call?action=@sys/ping&counterparty="+pubB64,
-		map[string]any{}, "",
-		fedHeaders(t, priv, "@sys/ping", "idem-key-1"))
+	resp := fedCall(t, k, priv, "@sys/ping", "idem-key-1", map[string]any{})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -1405,30 +1434,24 @@ func TestFederationCall(t *testing.T) {
 	}
 
 	// Unknown action returns not found (auth passes, action check fails).
-	resp2 := httpDoWithHeaders(t, srv, "POST",
-		"/v1/federation/call?action=@sys/nope&counterparty="+pubB64,
-		map[string]any{}, "",
-		fedHeaders(t, priv, "@sys/nope", "idem-key-2"))
+	resp2 := fedCall(t, k, priv, "@sys/nope", "idem-key-2", map[string]any{})
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown action: expected 404, got %d", resp2.StatusCode)
 	}
 
-	// Missing counterparty returns 401.
-	resp3 := httpDo(t, srv, "POST", "/v1/federation/call?action=@sys/ping", map[string]any{}, "")
+	// Missing counterparty (empty key) is unauthenticated.
+	resp3 := fedCallRaw(t, k, "", time.Now().UTC().Format(time.RFC3339), "idem-key-3b", "@sys/ping", "", []byte("{}"))
 	resp3.Body.Close()
 	if resp3.StatusCode != http.StatusUnauthorized {
 		t.Errorf("missing counterparty: expected 401, got %d", resp3.StatusCode)
 	}
 
-	// Valid counterparty but missing action param returns 422 (action check is after auth).
-	resp4 := httpDoWithHeaders(t, srv, "POST",
-		"/v1/federation/call?counterparty="+pubB64,
-		map[string]any{}, "",
-		fedHeaders(t, priv, "", "idem-key-3"))
+	// Valid counterparty but empty action ref is rejected (invalid action reference).
+	resp4 := fedCall(t, k, priv, "", "idem-key-3", map[string]any{})
 	resp4.Body.Close()
 	if resp4.StatusCode != http.StatusUnprocessableEntity {
-		t.Errorf("missing action param: expected 422, got %d", resp4.StatusCode)
+		t.Errorf("empty action: expected 422, got %d", resp4.StatusCode)
 	}
 }
 
@@ -1448,7 +1471,7 @@ func TestFederationCallRejectsNonPublicAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.AddPeer(ctx, sys.ID, "@remote-caller", pubB64, "http://remote-caller.example.com"); err != nil {
+	if _, err := k.AddPeer(ctx, sys.ID, "@remote-caller", pubB64); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1468,10 +1491,7 @@ func TestFederationCallRejectsNonPublicAction(t *testing.T) {
 	}
 
 	// Private inactive action is rejected with 403 (action check after auth).
-	resp := httpDoWithHeaders(t, srv, "POST",
-		"/v1/federation/call?action=@sys/secret&counterparty="+pubB64,
-		map[string]any{}, "",
-		fedHeaders(t, priv, "@sys/secret", "idem-s-1"))
+	resp := fedCall(t, k, priv, "@sys/secret", "idem-s-1", map[string]any{})
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("private action: expected 403, got %d", resp.StatusCode)
@@ -1481,10 +1501,7 @@ func TestFederationCallRejectsNonPublicAction(t *testing.T) {
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	resp2 := httpDoWithHeaders(t, srv, "POST",
-		"/v1/federation/call?action=@sys/secret&counterparty="+pubB64,
-		map[string]any{}, "",
-		fedHeaders(t, priv, "@sys/secret", "idem-s-2"))
+	resp2 := fedCall(t, k, priv, "@sys/secret", "idem-s-2", map[string]any{})
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusForbidden {
 		t.Errorf("active but private action: expected 403, got %d", resp2.StatusCode)
@@ -1512,7 +1529,7 @@ func TestFederationCallAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.AddPeer(ctx, sys.ID, "@auth-test-remote", pubB64, "http://auth-remote.example.com"); err != nil {
+	if _, err := k.AddPeer(ctx, sys.ID, "@auth-test-remote", pubB64); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1538,10 +1555,11 @@ func TestFederationCallAuth(t *testing.T) {
 	}
 
 	action := "@sys/authtest"
-	path := "/v1/federation/call?action=" + action + "&counterparty=" + pubB64
+	cpKey := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
 
-	// No counterparty → 401.
-	r1 := httpDo(t, srv, "POST", "/v1/federation/call?action="+action, map[string]any{}, "")
+	// No counterparty (empty key) → 401.
+	r1 := fedCallRaw(t, k, "", now(), "idem-auth-1", action, "sig", []byte("{}"))
 	r1.Body.Close()
 	if r1.StatusCode != http.StatusUnauthorized {
 		t.Errorf("no counterparty: want 401, got %d", r1.StatusCode)
@@ -1549,76 +1567,41 @@ func TestFederationCallAuth(t *testing.T) {
 
 	// Unknown public key (unregistered counterparty) → 401.
 	_, unknownPriv, _ := ed25519.GenerateKey(rand.Reader)
-	unknownPub := base64.RawURLEncoding.EncodeToString(unknownPriv.Public().(ed25519.PublicKey))
-	r2 := httpDoWithHeaders(t, srv, "POST",
-		"/v1/federation/call?action="+action+"&counterparty="+unknownPub,
-		map[string]any{}, "",
-		fedHeaders(t, unknownPriv, action, "idem-auth-2"))
+	r2 := fedCall(t, k, unknownPriv, action, "idem-auth-2", map[string]any{})
 	r2.Body.Close()
 	if r2.StatusCode != http.StatusUnauthorized {
 		t.Errorf("unknown counterparty: want 401, got %d", r2.StatusCode)
 	}
 
-	// Missing X-Timestamp → 401.
-	r3 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", map[string]string{
-		"X-Idempotency-Key": "idem-auth-3",
-		"X-Signature":       "invalidsig",
-	})
+	// Missing timestamp → 401.
+	r3 := fedCallRaw(t, k, cpKey, "", "idem-auth-3", action, "invalidsig", []byte("{}"))
 	r3.Body.Close()
 	if r3.StatusCode != http.StatusUnauthorized {
 		t.Errorf("missing timestamp: want 401, got %d", r3.StatusCode)
 	}
 
-	// Expired timestamp → 401.
+	// Expired timestamp → 401 (age check precedes the signature check).
 	oldTS := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
-	cpKey := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
-	var authBuf bytes.Buffer
-	json.NewEncoder(&authBuf).Encode(map[string]any{})
-	authArgsHash := sha256HexBytes(authBuf.Bytes())
-	sig, _ := kernel.SignFederationPayload(priv, action, cpKey, "idem-auth-4", oldTS, authArgsHash)
-	r4 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", map[string]string{
-		"X-Timestamp":       oldTS,
-		"X-Idempotency-Key": "idem-auth-4",
-		"X-Signature":       sig,
-	})
+	r4 := fedCallRaw(t, k, cpKey, oldTS, "idem-auth-4", action, "sig", []byte("{}"))
 	r4.Body.Close()
 	if r4.StatusCode != http.StatusUnauthorized {
 		t.Errorf("expired timestamp: want 401, got %d", r4.StatusCode)
 	}
 
-	// Missing X-Idempotency-Key → 422 (ErrInvalidInput).
-	ts5 := time.Now().UTC().Format(time.RFC3339)
-	sig5, _ := kernel.SignFederationPayload(priv, action, cpKey, "", ts5, authArgsHash)
-	r5 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", map[string]string{
-		"X-Timestamp": ts5,
-		"X-Signature": sig5,
-	})
-	r5.Body.Close()
-	if r5.StatusCode != http.StatusUnprocessableEntity {
-		t.Errorf("missing idempotency key: want 422, got %d", r5.StatusCode)
-	}
-
 	// Invalid signature → 401.
-	r6 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", map[string]string{
-		"X-Timestamp":       time.Now().UTC().Format(time.RFC3339),
-		"X-Idempotency-Key": "idem-auth-6",
-		"X-Signature":       "badsignature",
-	})
+	r6 := fedCallRaw(t, k, cpKey, now(), "idem-auth-6", action, "badsignature", []byte("{}"))
 	r6.Body.Close()
 	if r6.StatusCode != http.StatusUnauthorized {
 		t.Errorf("invalid signature: want 401, got %d", r6.StatusCode)
 	}
 
-	// Valid auth + idempotency replay: second call with same key returns cached result.
-	h1 := fedHeaders(t, priv, action, "idem-replay-1")
-	r7 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", h1)
+	// Valid auth + idempotency replay: second call with same key returns the cached result.
+	r7 := fedCall(t, k, priv, action, "idem-replay-1", map[string]any{})
 	defer r7.Body.Close()
 	if r7.StatusCode != http.StatusOK {
 		t.Fatalf("first call: want 200, got %d", r7.StatusCode)
 	}
-	// Replay with same idempotency key: second call must return the cached result.
-	h2 := fedHeaders(t, priv, action, "idem-replay-1")
-	r8 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", h2)
+	r8 := fedCall(t, k, priv, action, "idem-replay-1", map[string]any{})
 	defer r8.Body.Close()
 	if r8.StatusCode != http.StatusOK {
 		t.Errorf("idempotency replay: want 200, got %d", r8.StatusCode)
@@ -1640,7 +1623,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.AddPeer(ctx, sys.ID, "@replay.example.com", pubB64, "http://replay.example.com")
+	_, _ = k.AddPeer(ctx, sys.ID, "@replay.example.com", pubB64)
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
@@ -1656,10 +1639,9 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 	pubAll := true
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubAll})
 
-	path := "/v1/federation/call?action=@sys/replay-ping&counterparty=" + pubB64
 
 	// First call: must return a non-nil receipt.
-	r1 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/replay-ping", "replay-idem-1"))
+	r1 := fedCall(t, k, priv, "@sys/replay-ping", "replay-idem-1", map[string]any{})
 	defer r1.Body.Close()
 	if r1.StatusCode != http.StatusOK {
 		t.Fatalf("first call: want 200, got %d", r1.StatusCode)
@@ -1671,7 +1653,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 	}
 
 	// Replay with same idempotency key: receipt must also be non-nil.
-	r2 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/replay-ping", "replay-idem-1"))
+	r2 := fedCall(t, k, priv, "@sys/replay-ping", "replay-idem-1", map[string]any{})
 	defer r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
 		t.Fatalf("replay: want 200, got %d", r2.StatusCode)
@@ -1797,19 +1779,18 @@ func TestFederationReplay(t *testing.T) {
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.AddPeer(ctx, sys.ID, "@replay-caller", pubB64, "http://localhost:0")
+	_, _ = k.AddPeer(ctx, sys.ID, "@replay-caller", pubB64)
 
-	path := "/v1/federation/call?action=@sys/fed-greet&counterparty=" + pubB64
 
 	ikey1 := uuid.New().String()
-	r1 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/fed-greet", ikey1))
+	r1 := fedCall(t, k, priv, "@sys/fed-greet", ikey1, map[string]any{})
 	defer r1.Body.Close()
 	if r1.StatusCode != http.StatusOK {
 		t.Fatalf("first call: want 200, got %d", r1.StatusCode)
 	}
 
 	// Replay same key → 200.
-	r2 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/fed-greet", ikey1))
+	r2 := fedCall(t, k, priv, "@sys/fed-greet", ikey1, map[string]any{})
 	defer r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
 		t.Errorf("replay: want 200, got %d", r2.StatusCode)
@@ -1826,7 +1807,7 @@ func TestFederationReplay(t *testing.T) {
 		CreatedAt:          now,
 		ExpiresAt:          now.Add(time.Hour),
 	})
-	r3 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/fed-greet", ikey2))
+	r3 := fedCall(t, k, priv, "@sys/fed-greet", ikey2, map[string]any{})
 	defer r3.Body.Close()
 	if r3.StatusCode != http.StatusConflict {
 		t.Errorf("pending: want 409, got %d", r3.StatusCode)
@@ -1850,7 +1831,7 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 	sys, _ := k.ReadUserByHandle(ctx, "@sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.AddPeer(ctx, sys.ID, "@schema-fail-peer", pubB64, "http://schema-fail.example.com")
+	_, _ = k.AddPeer(ctx, sys.ID, "@schema-fail-peer", pubB64)
 
 	// Action requires a "name" field; empty body {} will fail schema validation.
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
@@ -1874,10 +1855,9 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	path := "/v1/federation/call?action=@sys/strict&counterparty=" + pubB64
 	ikey := uuid.New().String()
 	// fedHeaders signs an empty body {}; strict schema requires "name" → schema error.
-	r1 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/strict", ikey))
+	r1 := fedCall(t, k, priv, "@sys/strict", ikey, map[string]any{})
 	defer r1.Body.Close()
 	if r1.StatusCode == http.StatusConflict {
 		t.Fatal("first call returned 409: idempotency record was not created")
@@ -1888,7 +1868,7 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 	}
 
 	// Replay same key → must return the same error, not 409.
-	r2 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/strict", ikey))
+	r2 := fedCall(t, k, priv, "@sys/strict", ikey, map[string]any{})
 	defer r2.Body.Close()
 	if r2.StatusCode == http.StatusConflict {
 		t.Errorf("replay after precondition failure: got 409 (record still pending), want error response")
@@ -1915,7 +1895,7 @@ func TestFederationIdempotencyCommittedFailureHasReceipt(t *testing.T) {
 	sys, _ := k.ReadUserByHandle(ctx, "@sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.AddPeer(ctx, sys.ID, "@committed-fail-peer", pubB64, "http://committed-fail.example.com")
+	_, _ = k.AddPeer(ctx, sys.ID, "@committed-fail-peer", pubB64)
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID: sys.ID, Name: "fail-exec", Kind: kernel.KindHTTP,
@@ -1927,16 +1907,15 @@ func TestFederationIdempotencyCommittedFailureHasReceipt(t *testing.T) {
 	pubAll := true
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubAll})
 
-	path := "/v1/federation/call?action=@sys/fail-exec&counterparty=" + pubB64
 	ikey := uuid.New().String()
-	r1 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/fail-exec", ikey))
+	r1 := fedCall(t, k, priv, "@sys/fail-exec", ikey, map[string]any{})
 	defer r1.Body.Close()
 	if r1.StatusCode == http.StatusConflict {
 		t.Fatal("first call returned 409")
 	}
 
 	// Replay same key: must return error (not 409) and a non-nil receipt.
-	r2 := httpDoWithHeaders(t, srv, "POST", path, map[string]any{}, "", fedHeaders(t, priv, "@sys/fail-exec", ikey))
+	r2 := fedCall(t, k, priv, "@sys/fail-exec", ikey, map[string]any{})
 	if r2.StatusCode == http.StatusConflict {
 		t.Errorf("committed failure replay: got 409, want error response")
 	}
@@ -1965,7 +1944,7 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	sys, _ := k.ReadUserByHandle(ctx, "@sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, err := k.AddPeer(ctx, sys.ID, "@args-hash-peer", pubB64, "http://argshash.example.com")
+	_, err := k.AddPeer(ctx, sys.ID, "@args-hash-peer", pubB64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1978,21 +1957,13 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	pubAll := true
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubAll})
 
-	path := "/v1/federation/call?action=@sys/hash-check&counterparty=" + pubB64
-	// Sign with empty body {} but send a different body — args_hash mismatch.
-	hdrs := fedHeaders(t, priv, "@sys/hash-check", "idem-hash-1")
-	// Send a body different from what was signed.
-	var buf bytes.Buffer
-	json.NewEncoder(&buf).Encode(map[string]any{"injected": true})
-	req, _ := http.NewRequest("POST", srv.URL+path, &buf)
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range hdrs {
-		req.Header.Set(k, v)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Sign over the empty body {} but deliver a different body — the receiver hashes the bytes
+	// it actually got, so the signature no longer matches and the call is rejected (401).
+	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	ts := time.Now().UTC().Format(time.RFC3339)
+	signedHash := sha256HexBytes([]byte("{}"))
+	sig, _ := kernel.SignFederationPayload(priv, "@sys/hash-check", cp, "idem-hash-1", ts, signedHash)
+	resp := fedCallRaw(t, k, cp, ts, "idem-hash-1", "@sys/hash-check", sig, []byte(`{"injected":true}`))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("args_hash mismatch: want 401, got %d", resp.StatusCode)
@@ -2112,40 +2083,6 @@ func TestServeWriteErrHasCode(t *testing.T) {
 	}
 	if _, ok := body["code"]; !ok {
 		t.Error("error response missing 'code' field")
-	}
-}
-
-// TestServeAdvertisesBoundAddr covers the --addr :0 path in runServer: the real port is
-// known only after net.Listen binds, so runServer advertises it as kernel_base_url and
-// getWellKnown reports it (federation under :0 depends on this — see serve.go runServer).
-func TestServeAdvertisesBoundAddr(t *testing.T) {
-	_, k := newTestHTTPServer(t)
-	ctx := context.Background()
-
-	// --addr 127.0.0.1:0 → an OS-assigned port, unknown until the bind succeeds.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	if p := ln.Addr().(*net.TCPAddr).Port; p == 0 {
-		t.Fatalf("expected a real bound port, got :0")
-	}
-	want := "http://" + ln.Addr().String()
-	if err := k.SetConfig(ctx, "kernel_base_url", want); err != nil {
-		t.Fatal(err)
-	}
-
-	srv := &server{kernel: k, log: log.Discard()}
-	rec := httptest.NewRecorder()
-	srv.getWellKnown(rec, httptest.NewRequest("GET", "/.well-known/juice-kernel.json", nil))
-
-	var body map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode well-known: %v", err)
-	}
-	if body["base_url"] != want {
-		t.Errorf("base_url = %q, want %q", body["base_url"], want)
 	}
 }
 

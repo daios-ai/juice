@@ -1,30 +1,37 @@
-# Federation flows (real multi-kernel). Built on flows/lib.sh.
-# Dedupe: CLI tx-verify/action-show/stats already hit the HTTP endpoints, so the per-flow
-# curl mirrors are dropped. Curl is kept only for the raw /v1/gossip JSON (no CLI equivalent).
+# Federation flows (real multi-kernel over the libp2p transport, §13). Built on flows/lib.sh.
 #
-# _fed_setup uses --addr :0: each kernel advertises its real bound URL (kernel_base_url), so
-# `admin friend $(url ...)` and the reciprocal work without pre-assigned ports. Concurrent
-# friend+reciprocal proxy-user creation is idempotent in the kernel.
+# _fed_setup boots a local seed node (bootstrap + relay) plus two kernels, all on 127.0.0.1.
+# The kernels are addressed only by Ed25519 public key: they announce to the seed, resolve each
+# other by key through its DHT, and friend by key — no URL anywhere. This is the loopback
+# analogue of home kernels finding each other with no dialable address. FED_RKEY holds R's key.
 
-# Globals set by _fed_setup: FED_DBL FED_DBR FED_HL FED_HR FED_BPORT FED_RID FED_PROXY.
+# Globals set by _fed_setup: FED_DBL FED_DBR FED_HL FED_HR FED_BPORT FED_RID FED_PROXY FED_RKEY FED_LKEY.
 _fed_setup() {
     local dir="$1"
     FED_DBL="$dir/l/juice.db"; FED_DBR="$dir/r/juice.db"
     FED_HL="$dir/lsys"; FED_HR="$dir/rsys"
     mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
 
+    start_seed "$dir" || return 1
+
     FED_BPORT=$(backend_port); start_backend "$FED_BPORT" 200 '{"greeting":"hello"}'
-    start_server "$FED_DBR" "$FED_HR" peer_handle=@kernel-r || return 1
-    start_server "$FED_DBL" "$FED_HL" peer_handle=@kernel-l || return 1
+    start_server "$FED_DBR" "$FED_HR" kernel_handle=@kernel-r bootstrap_peers="$SEED_ADDR" || return 1
+    start_server "$FED_DBL" "$FED_HL" kernel_handle=@kernel-l bootstrap_peers="$SEED_ADDR" || return 1
     j "$FED_DBR" "$FED_HR" auth login @sys --password syspass >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" auth login @sys --password syspass >/dev/null 2>&1
+
+    # Learn each kernel's own public key (federation identity; no .well-known anymore).
+    FED_RKEY=$(kernel_key "$FED_DBR" "$FED_HR")
+    FED_LKEY=$(kernel_key "$FED_DBL" "$FED_HL")
+    [ -n "$FED_RKEY" ] && [ -n "$FED_LKEY" ] || return 1
 
     FED_RID=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create greet --kind http --source "http://127.0.0.1:$FED_BPORT" --description "greet" --price 0)" id)
     [ -n "$FED_RID" ] || return 1
     j "$FED_DBR" "$FED_HR" action enable "$FED_RID" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$FED_RID" --public >/dev/null 2>&1
 
-    j "$FED_DBL" "$FED_HL" admin friend "$(url "$FED_DBR")" >/dev/null 2>&1 || return 1
+    # L friends R by key alone; the transport resolves the key via the seed.
+    j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1 || return 1
     FED_PROXY=$(strfield "$(jj "$FED_DBL" "$FED_HL" action show "@kernel-r/greet")" id)
     [ -n "$FED_PROXY" ] || return 1
     return 0
@@ -63,7 +70,7 @@ flow_federation_changed_reimport() {
     local wid; wid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create wave --kind http --source "http://127.0.0.1:$FED_BPORT" --description "wave" --price 0)" id)
     j "$FED_DBR" "$FED_HR" action enable "$wid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$wid" --public >/dev/null 2>&1
-    assert_eq "fed_reimport.refriend" 0 "$(j "$FED_DBL" "$FED_HL" admin friend "$(url "$FED_DBR")" >/dev/null 2>&1; echo $?)"
+    assert_eq "fed_reimport.refriend" 0 "$(j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1; echo $?)"
 
     assert_json "fed_reimport.wave_proxy_active" "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/wave)" active True
     local greet; greet=$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")
@@ -135,7 +142,7 @@ flow_fed_denial_underfunded() {
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create paid-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 100)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$pid" --public >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin friend "$(url "$FED_DBR")" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit @sys 1000 >/dev/null 2>&1
 
     j "$FED_DBL" "$FED_HL" run @kernel-r/paid-svc '{}' >/dev/null 2>&1 || true
@@ -154,7 +161,7 @@ flow_fed_import_duty() {
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create duty-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "duty" --price 1000)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$pid" --public >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin friend "$(url "$FED_DBR")" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1
     assert_jnum "fed_import_duty.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/duty-svc)" price 1050
 
     j "$FED_DBR" "$FED_HR" admin deposit @kernel-l 5000 >/dev/null 2>&1
@@ -184,7 +191,7 @@ flow_fed_failed_action_refund() {
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create fail-svc --kind http --source "http://127.0.0.1:$fport" --description "fails" --price 100)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$pid" --public >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin friend "$(url "$FED_DBR")" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" admin deposit @kernel-l 5000 >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit @sys 1000 >/dev/null 2>&1
     local ub; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
@@ -208,17 +215,20 @@ flow_fed_gossip_discovery() {
 
     # L calls R (price 0) → R becomes a transacted friend in L's gossip with earned stats.
     assert_nonempty "fed_gossip.initial_call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/greet '{}')" tx_id)"
-    local gossip; gossip=$(curl -sf "$(url "$FED_DBL")/v1/gossip" 2>/dev/null)
-    local r_url; r_url=$(python3 -c "import sys,json;print(next((f['base_url'] for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','')),''))" "$gossip" 2>/dev/null)
-    assert_nonempty "fed_gossip.r_in_gossip" "$r_url"
-    local guses; guses=$(python3 -c "import sys,json;print(next((a.get('uses',0) for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','') for a in f.get('actions',[]) if a.get('name')=='greet'),0))" "$gossip" 2>/dev/null)
+
+    # Third kernel T discovers R by inspecting L's gossip over the transport, then friends R by key.
+    local dbt ht; dbt="$dir/t/juice.db"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
+    start_server "$dbt" "$ht" kernel_handle=@kernel-t bootstrap_peers="$SEED_ADDR" || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
+    j "$dbt" "$ht" auth login @sys --password syspass >/dev/null 2>&1
+
+    # T inspects L (resolved by key via the seed); L's transacted-friends list carries R's key + stats.
+    local ldoc; ldoc=$(jj "$dbt" "$ht" admin inspect "$FED_LKEY")
+    local rkey; rkey=$(python3 -c "import sys,json;print(next((f['public_key'] for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','')),''))" "$ldoc" 2>/dev/null)
+    assert_nonempty "fed_gossip.r_in_gossip" "$rkey"
+    local guses; guses=$(python3 -c "import sys,json;print(next((a.get('uses',0) for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','') for a in f.get('actions',[]) if a.get('name')=='greet'),0))" "$ldoc" 2>/dev/null)
     assert_eq "fed_gossip.earned_stats" yes "$([ "${guses:-0}" -ge 1 ] && echo yes || echo no)"
 
-    # Third kernel T discovers R's URL from L's gossip and friends R directly (not via L).
-    local dbt ht; dbt="$dir/t/juice.db"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
-    start_server "$dbt" "$ht" peer_handle=@kernel-t || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
-    j "$dbt" "$ht" auth login @sys --password syspass >/dev/null 2>&1
-    assert_eq "fed_gossip.t_friends_r" 0 "$(j "$dbt" "$ht" admin friend "$r_url" >/dev/null 2>&1; echo $?)"
+    assert_eq "fed_gossip.t_friends_r" 0 "$(j "$dbt" "$ht" admin friend "$rkey" >/dev/null 2>&1; echo $?)"
 
     # T's greet proxy exists with default stats (uses=0, NOT inherited from gossip).
     local tp; tp=$(strfield "$(jj "$dbt" "$ht" action show @kernel-r/greet)" id)

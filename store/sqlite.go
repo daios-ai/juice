@@ -208,15 +208,15 @@ func strVal(s *string) string {
 
 // ---- Users ----
 
-const userCols = `id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,remote_base_url,created_at,updated_at`
+const userCols = `id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,created_at,updated_at`
 
 func (s *DB) CreateUser(ctx context.Context, u *kernel.User) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO users (id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,remote_base_url,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO users (id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		u.ID, u.Handle, u.Email, u.PasswordHash, u.Available, u.Locked,
 		nullTimeToStr(u.SuspendedAt), nullTimeToStr(u.DeniedAt),
-		nullStr(u.PublicKey), nullStr(u.RemoteBaseURL),
+		nullStr(u.PublicKey),
 		timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
 	)
 	if err != nil {
@@ -241,27 +241,6 @@ func (s *DB) ReadUserByHandle(ctx context.Context, handle string) (*kernel.User,
 func (s *DB) ReadUserByPublicKey(ctx context.Context, publicKey string) (*kernel.User, error) {
 	return s.scanUser(s.db.QueryRowContext(ctx,
 		`SELECT `+userCols+` FROM users WHERE public_key=?`, publicKey))
-}
-
-func (s *DB) UpdateRemoteBaseURL(ctx context.Context, userID, baseURL string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE users SET remote_base_url=?, updated_at=? WHERE id=?`,
-		nullStr(baseURL), timeToStr(time.Now().UTC()), userID,
-	)
-	return dbErr(err, "update remote base url")
-}
-
-func (s *DB) ReadRemoteKernelByBaseURL(ctx context.Context, baseURL string) (*kernel.User, error) {
-	return s.scanUser(s.db.QueryRowContext(ctx,
-		`SELECT `+userCols+` FROM users WHERE remote_base_url=? AND remote_base_url!=''`, baseURL))
-}
-
-func (s *DB) UpdateRemoteProxySourceURLs(ctx context.Context, ownerUserID, oldBase, newBase string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE actions SET source=REPLACE(source,?,?) WHERE owner_user_id=? AND kind='remote_proxy'`,
-		oldBase, newBase, ownerUserID,
-	)
-	return dbErr(err, "update remote proxy source urls")
 }
 
 func (s *DB) DenyUser(ctx context.Context, id string) error {
@@ -429,11 +408,11 @@ func (s *DB) CreateProxyUser(ctx context.Context, u *kernel.User) error {
 	// Use handle+"@remote" as a unique placeholder email for proxy users.
 	proxyEmail := u.Handle + "@remote"
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO users (id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,remote_base_url,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO users (id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		u.ID, u.Handle, proxyEmail, "", 0, 0,
 		nil, nil,
-		nullStr(u.PublicKey), nullStr(u.RemoteBaseURL),
+		nullStr(u.PublicKey),
 		timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
 	)
 	return dbErr(err, "create proxy user")
@@ -442,15 +421,14 @@ func (s *DB) CreateProxyUser(ctx context.Context, u *kernel.User) error {
 func scanUserFn(scan func(...any) error) (*kernel.User, error) {
 	var u kernel.User
 	var createdAt, updatedAt string
-	var suspendedAt, deniedAt, publicKey, remoteBaseURL *string
+	var suspendedAt, deniedAt, publicKey *string
 	if err := scan(&u.ID, &u.Handle, &u.Email, &u.PasswordHash,
-		&u.Available, &u.Locked, &suspendedAt, &deniedAt, &publicKey, &remoteBaseURL, &createdAt, &updatedAt); err != nil {
+		&u.Available, &u.Locked, &suspendedAt, &deniedAt, &publicKey, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	u.SuspendedAt = strToNullTime(suspendedAt)
 	u.DeniedAt = strToNullTime(deniedAt)
 	u.PublicKey = strVal(publicKey)
-	u.RemoteBaseURL = strVal(remoteBaseURL)
 	u.CreatedAt = strToTime(createdAt)
 	u.UpdatedAt = strToTime(updatedAt)
 	return &u, nil
@@ -2137,12 +2115,12 @@ func (s *DB) CreateOrUpdateDiscoveredKernel(ctx context.Context, k *kernel.Disco
 		statsJSON = string(k.StatsJSON)
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO discovered_kernels (public_key,introduced_by,handle,base_url,stats_json,first_seen,updated_at)
-		 VALUES (?,?,?,?,?,?,?)
+		`INSERT INTO discovered_kernels (public_key,introduced_by,handle,stats_json,first_seen,updated_at)
+		 VALUES (?,?,?,?,?,?)
 		 ON CONFLICT(public_key,introduced_by) DO UPDATE SET
-		   handle=excluded.handle, base_url=excluded.base_url,
+		   handle=excluded.handle,
 		   stats_json=excluded.stats_json, updated_at=excluded.updated_at`,
-		k.PublicKey, k.IntroducedBy, k.Handle, k.BaseURL, statsJSON,
+		k.PublicKey, k.IntroducedBy, k.Handle, statsJSON,
 		timeToStr(k.FirstSeen), timeToStr(k.UpdatedAt),
 	)
 	return dbErr(err, "create or update discovered kernel")
@@ -2150,7 +2128,7 @@ func (s *DB) CreateOrUpdateDiscoveredKernel(ctx context.Context, k *kernel.Disco
 
 func (s *DB) ListDiscoveredKernels(ctx context.Context) ([]*kernel.DiscoveredKernel, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT public_key,introduced_by,handle,base_url,stats_json,first_seen,updated_at
+		`SELECT public_key,introduced_by,handle,stats_json,first_seen,updated_at
 		 FROM discovered_kernels ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, dbErr(err, "list discovered kernels")
@@ -2158,7 +2136,7 @@ func (s *DB) ListDiscoveredKernels(ctx context.Context) ([]*kernel.DiscoveredKer
 	return queryList(rows, "list discovered kernels", func(scan func(...any) error) (*kernel.DiscoveredKernel, error) {
 		var k kernel.DiscoveredKernel
 		var firstSeen, updatedAt, statsJSON string
-		if err := scan(&k.PublicKey, &k.IntroducedBy, &k.Handle, &k.BaseURL, &statsJSON, &firstSeen, &updatedAt); err != nil {
+		if err := scan(&k.PublicKey, &k.IntroducedBy, &k.Handle, &statsJSON, &firstSeen, &updatedAt); err != nil {
 			return nil, err
 		}
 		k.StatsJSON = json.RawMessage(statsJSON)

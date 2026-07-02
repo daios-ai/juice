@@ -24,16 +24,16 @@ func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
 	ctx := context.Background()
 	sys := setupSys(t, k, st)
 
-	if _, err := k.AddPeer(ctx, sys.ID, "@bad/handle", "not-base64url", "https://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.AddPeer(ctx, sys.ID, "@bad/handle", "not-base64url"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for handle containing /, got %v", err)
 	}
 
-	if _, err := k.AddPeer(ctx, sys.ID, "@bad-key", "not-base64url", "https://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.AddPeer(ctx, sys.ID, "@bad-key", "not-base64url"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for malformed public key, got %v", err)
 	}
 
 	shortKey := base64.RawURLEncoding.EncodeToString([]byte("short"))
-	if _, err := k.AddPeer(ctx, sys.ID, "@short-key", shortKey, "https://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.AddPeer(ctx, sys.ID, "@short-key", shortKey); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for short public key, got %v", err)
 	}
 
@@ -42,10 +42,7 @@ func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	validKey := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.AddPeer(ctx, sys.ID, "@bad-url", validKey, "ftp://remote.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Fatalf("expected ErrInvalidInput for unsupported URL scheme, got %v", err)
-	}
-	if _, err := k.AddPeer(ctx, sys.ID, "@remote", validKey, "https://remote.example.com"); err != nil {
+	if _, err := k.AddPeer(ctx, sys.ID, "@remote", validKey); err != nil {
 		t.Fatalf("valid remote kernel should register: %v", err)
 	}
 }
@@ -63,7 +60,7 @@ func TestCreateOrUpdateProxyPeerHandleConflict(t *testing.T) {
 	key2 := base64.RawURLEncoding.EncodeToString(pub2)
 	key3 := base64.RawURLEncoding.EncodeToString(pub3)
 
-	u1, err := k.CreateOrUpdateProxyPeer(ctx, "@remote", key1, "https://a.example.com")
+	u1, err := k.CreateOrUpdateProxyPeer(ctx, "@remote", key1)
 	if err != nil {
 		t.Fatalf("first peer: %v", err)
 	}
@@ -71,7 +68,7 @@ func TestCreateOrUpdateProxyPeerHandleConflict(t *testing.T) {
 		t.Fatalf("want @remote, got %s", u1.Handle)
 	}
 
-	u2, err := k.CreateOrUpdateProxyPeer(ctx, "@remote", key2, "https://b.example.com")
+	u2, err := k.CreateOrUpdateProxyPeer(ctx, "@remote", key2)
 	if err != nil {
 		t.Fatalf("second peer: %v", err)
 	}
@@ -79,7 +76,7 @@ func TestCreateOrUpdateProxyPeerHandleConflict(t *testing.T) {
 		t.Fatalf("want @remote-2, got %s", u2.Handle)
 	}
 
-	u3, err := k.CreateOrUpdateProxyPeer(ctx, "@remote", key3, "https://c.example.com")
+	u3, err := k.CreateOrUpdateProxyPeer(ctx, "@remote", key3)
 	if err != nil {
 		t.Fatalf("third peer: %v", err)
 	}
@@ -103,7 +100,7 @@ func TestCreateOrUpdateProxyPeerConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = k.CreateOrUpdateProxyPeer(context.Background(), "@remote", key, "https://a.example.com")
+			_, errs[i] = k.CreateOrUpdateProxyPeer(context.Background(), "@remote", key)
 		}(i)
 	}
 	wg.Wait()
@@ -124,7 +121,7 @@ func TestCreateOrUpdateProxyPeerNormalizesHandle(t *testing.T) {
 	key := base64.RawURLEncoding.EncodeToString(pub)
 
 	// Peer self-reports a handle without "@": the local alias is canonicalized.
-	u, err := k.CreateOrUpdateProxyPeer(ctx, "peerless", key, "https://d.example.com")
+	u, err := k.CreateOrUpdateProxyPeer(ctx, "peerless", key)
 	if err != nil {
 		t.Fatalf("create proxy: %v", err)
 	}
@@ -146,7 +143,7 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "@remote-peer", base64.RawURLEncoding.EncodeToString(pub), "https://remote.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@remote-peer", base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +193,7 @@ func TestImportRemoteActionReimp(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "@reimp-peer", base64.RawURLEncoding.EncodeToString(pub), "https://reimp.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@reimp-peer", base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +256,7 @@ func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "@stable-peer", base64.RawURLEncoding.EncodeToString(pub), "https://stable.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@stable-peer", base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +321,7 @@ func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "@idem-peer", base64.RawURLEncoding.EncodeToString(pub), "https://idem.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@idem-peer", base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +387,7 @@ func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "@bad-sig-peer", base64.RawURLEncoding.EncodeToString(pub), "https://badsig.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@bad-sig-peer", base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +415,7 @@ func TestImportRemoteActionRejectsNegativePrice(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "@neg-price-peer", base64.RawURLEncoding.EncodeToString(pub), "https://neg.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@neg-price-peer", base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +448,7 @@ func TestImportRemoteActionRejectsMissingRequiredFields(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "@mrf-peer", base64.RawURLEncoding.EncodeToString(pub), "https://mrf.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@mrf-peer", base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +552,7 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	fake := &fakeFederationHTTP{receiptJSON: fakeReceiptJSON}
 	k := newTestKernelWithHTTP(st, fake)
 
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "@proxy-peer", base64.RawURLEncoding.EncodeToString(pub), "https://proxy.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@proxy-peer", base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -654,7 +651,7 @@ func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel,
 	ctx := context.Background()
 	sys := setupSys(t, nil, st)
 
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "@settle-peer", base64.RawURLEncoding.EncodeToString(pub), "https://settle.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@settle-peer", base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
@@ -926,9 +923,9 @@ func TestSettleRemoteCallValidChargeNotClamped(t *testing.T) {
 	}
 }
 
-// ---- D1: source URL update on base URL change ----
+// ---- D1: proxy action source is the remote action ref ----
 
-func TestRegisterRemoteKernelUpdatesSourceURLs(t *testing.T) {
+func TestImportRemoteActionSourceIsActionRef(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -937,14 +934,13 @@ func TestRegisterRemoteKernelUpdatesSourceURLs(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
-	peer, err := k.AddPeer(ctx, sys.ID, "@url-update-peer", pubB64, "https://old.example.com")
+	peer, err := k.AddPeer(ctx, sys.ID, "@ref-peer", pubB64)
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
-	// Import an action whose Source URL contains the old base URL.
 	m := kernel.ActionManifest{
-		ActionID: "url-update-action-1", OwnerHandle: "@url-update-peer", Name: "act",
+		ActionID: "ref-action-1", OwnerHandle: "@ref-peer", Name: "act",
 		Kind: kernel.KindHTTP, Price: 0, Description: "d",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
@@ -956,25 +952,12 @@ func TestRegisterRemoteKernelUpdatesSourceURLs(t *testing.T) {
 		t.Fatalf("ImportRemoteAction: %v", err)
 	}
 	a := result.Created[0]
-	if !contains(a.Source, "old.example.com") {
-		t.Fatalf("expected old base URL in source, got %s", a.Source)
+	// Source is the remote action ref (@owner/name) — never a URL; the peer is resolved by key.
+	if a.Source != "@ref-peer/act" {
+		t.Errorf("source: want @ref-peer/act, got %q", a.Source)
 	}
-
-	// Re-register with new base URL using the same public key.
-	if _, err := k.AddPeer(ctx, sys.ID, "@url-update-peer", pubB64, "https://new.example.com"); err != nil {
-		t.Fatalf("re-register: %v", err)
-	}
-
-	// Source URL on existing proxy action must reflect new base URL.
-	updated, err := st.ReadAction(ctx, a.ID)
-	if err != nil {
-		t.Fatalf("ReadAction: %v", err)
-	}
-	if contains(updated.Source, "old.example.com") {
-		t.Errorf("old base URL still present in source after base URL change: %s", updated.Source)
-	}
-	if !contains(updated.Source, "new.example.com") {
-		t.Errorf("new base URL not found in source: %s", updated.Source)
+	if a.RemoteActionID != "ref-action-1" {
+		t.Errorf("remote_action_id: want ref-action-1, got %q", a.RemoteActionID)
 	}
 }
 
@@ -991,7 +974,7 @@ func TestRegisterRemoteKernelResolvesDuplicateHandle(t *testing.T) {
 	pub1B64 := base64.RawURLEncoding.EncodeToString(pub1)
 	pub2B64 := base64.RawURLEncoding.EncodeToString(pub2)
 
-	u1, err := k.AddPeer(ctx, sys.ID, "@dup-handle", pub1B64, "https://a.example.com")
+	u1, err := k.AddPeer(ctx, sys.ID, "@dup-handle", pub1B64)
 	if err != nil {
 		t.Fatalf("first register: %v", err)
 	}
@@ -999,32 +982,12 @@ func TestRegisterRemoteKernelResolvesDuplicateHandle(t *testing.T) {
 		t.Fatalf("want @dup-handle, got %s", u1.Handle)
 	}
 	// Same preferred handle, different public key → auto-resolved to suffix.
-	u2, err := k.AddPeer(ctx, sys.ID, "@dup-handle", pub2B64, "https://b.example.com")
+	u2, err := k.AddPeer(ctx, sys.ID, "@dup-handle", pub2B64)
 	if err != nil {
 		t.Fatalf("second register: %v", err)
 	}
 	if u2.Handle != "@dup-handle-2" {
 		t.Errorf("want @dup-handle-2, got %s", u2.Handle)
-	}
-}
-
-func TestRegisterRemoteKernelRejectsDuplicateBaseURL(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-	sys := setupSys(t, k, st)
-
-	pub1, _, _ := ed25519.GenerateKey(rand.Reader)
-	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
-	pub1B64 := base64.RawURLEncoding.EncodeToString(pub1)
-	pub2B64 := base64.RawURLEncoding.EncodeToString(pub2)
-
-	if _, err := k.AddPeer(ctx, sys.ID, "@dup-url-a", pub1B64, "https://shared.example.com"); err != nil {
-		t.Fatalf("first register: %v", err)
-	}
-	// Same base URL, different public key → must fail.
-	if _, err := k.AddPeer(ctx, sys.ID, "@dup-url-b", pub2B64, "https://shared.example.com"); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("expected ErrInvalidInput for duplicate base URL, got %v", err)
 	}
 }
 
@@ -1039,7 +1002,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	fake := &fakeFederationHTTP{}
 	k := newTestKernelWithHTTP(st, fake)
 
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "@verify-peer", base64.RawURLEncoding.EncodeToString(pub), "https://verify.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@verify-peer", base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -1172,7 +1135,7 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	fake := &fakeFederationHTTP{}
 	k := newTestKernelWithHTTP(st, fake)
 
-	remoteUser, _ := k.AddPeer(ctx, sys.ID, "@tamper-peer", base64.RawURLEncoding.EncodeToString(pub), "https://tamper.example.com")
+	remoteUser, _ := k.AddPeer(ctx, sys.ID, "@tamper-peer", base64.RawURLEncoding.EncodeToString(pub))
 	m := kernel.ActionManifest{
 		ActionID: "tamper-action-1", OwnerHandle: "@tamper-peer", Name: "tact",
 		Kind: kernel.KindHTTP, Price: 0, Description: "t",
@@ -1228,7 +1191,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	fake := &fakeFederationHTTP{}
 	k := newTestKernelWithHTTP(st, fake)
 
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "@del-peer", base64.RawURLEncoding.EncodeToString(pub), "https://del.example.com")
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "@del-peer", base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -1317,7 +1280,7 @@ func TestCreateSignedRejectionReceipt(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pub := priv.Public().(ed25519.PublicKey)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	peer, err := k.AddPeer(ctx, sys.ID, "@rejection-peer", pubB64, "https://rejection.example.com")
+	peer, err := k.AddPeer(ctx, sys.ID, "@rejection-peer", pubB64)
 	if err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
@@ -1354,7 +1317,7 @@ func TestDenyPeerDeactivatesActionsAndCancelsSteps(t *testing.T) {
 	_, privB, _ := ed25519.GenerateKey(rand.Reader)
 	pubB := privB.Public().(ed25519.PublicKey)
 	pubBB64 := base64.RawURLEncoding.EncodeToString(pubB)
-	peerB, err := k.AddPeer(ctx, sys.ID, "@deny-peer-b", pubBB64, "https://deny-b.example.com")
+	peerB, err := k.AddPeer(ctx, sys.ID, "@deny-peer-b", pubBB64)
 	if err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
@@ -1414,14 +1377,14 @@ func TestGetGossipOnlyIncludesTransactedFriends(t *testing.T) {
 	_, privA, _ := ed25519.GenerateKey(rand.Reader)
 	pubA := privA.Public().(ed25519.PublicKey)
 	pubAB64 := base64.RawURLEncoding.EncodeToString(pubA)
-	peerA, err := k.AddPeer(ctx, sys.ID, "@gossip-transacted", pubAB64, "https://gossip-a.example.com")
+	peerA, err := k.AddPeer(ctx, sys.ID, "@gossip-transacted", pubAB64)
 	if err != nil {
 		t.Fatalf("AddPeer A: %v", err)
 	}
 	_, privB, _ := ed25519.GenerateKey(rand.Reader)
 	pubB := privB.Public().(ed25519.PublicKey)
 	pubBB64 := base64.RawURLEncoding.EncodeToString(pubB)
-	_, err = k.AddPeer(ctx, sys.ID, "@gossip-untransacted", pubBB64, "https://gossip-b.example.com")
+	_, err = k.AddPeer(ctx, sys.ID, "@gossip-untransacted", pubBB64)
 	if err != nil {
 		t.Fatalf("AddPeer B: %v", err)
 	}

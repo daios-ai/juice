@@ -32,7 +32,8 @@ const (
 )
 
 // User is an authenticated subject with balances.
-// A user with PublicKey and RemoteBaseURL set represents a remote kernel peer.
+// A user with PublicKey set represents a remote kernel peer (proxy user); location is
+// not stored — the federation transport resolves the key to a live path (§13).
 type User struct {
 	ID            string     `json:"id"`
 	Handle        string     `json:"handle"`
@@ -42,8 +43,7 @@ type User struct {
 	Locked        int64      `json:"locked"`
 	SuspendedAt   *time.Time `json:"suspended_at,omitempty"`
 	DeniedAt      *time.Time `json:"denied_at,omitempty"`
-	PublicKey     string     `json:"public_key,omitempty"`      // Ed25519 public key, base64url; empty for local users
-	RemoteBaseURL string     `json:"remote_base_url,omitempty"` // HTTP API base URL of the remote kernel; empty for local users
+	PublicKey     string     `json:"public_key,omitempty"` // Ed25519 public key, base64url; empty for local users
 	CreatedAt     time.Time  `json:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at"`
 }
@@ -228,7 +228,6 @@ type DiscoveredKernel struct {
 	PublicKey    string          `json:"public_key"`
 	IntroducedBy string          `json:"introduced_by"`
 	Handle       string          `json:"handle"`
-	BaseURL      string          `json:"base_url"`
 	StatsJSON    json.RawMessage `json:"stats_json"`
 	FirstSeen    time.Time       `json:"first_seen"`
 	UpdatedAt    time.Time       `json:"updated_at"`
@@ -406,7 +405,6 @@ const (
 // PeerView is a peer kernel in the friendship list.
 type PeerView struct {
 	Handle    string     `json:"handle"`
-	BaseURL   string     `json:"base_url"`
 	PublicKey string     `json:"public_key"`
 	DeniedAt  *time.Time `json:"denied_at,omitempty"`
 }
@@ -425,7 +423,6 @@ type GossipAction struct {
 // has settled calls with, including this kernel's locally earned stats for their actions.
 type GossipFriendView struct {
 	Handle    string         `json:"handle"`
-	BaseURL   string         `json:"base_url"`
 	PublicKey string         `json:"public_key"`
 	Actions   []GossipAction `json:"actions"`
 }
@@ -434,7 +431,6 @@ type GossipFriendView struct {
 type GossipResponse struct {
 	PublicKey string             `json:"public_key"`
 	Handle    string             `json:"handle"`
-	BaseURL   string             `json:"base_url"`
 	Actions   []GossipAction     `json:"actions"`
 	Friends   []GossipFriendView `json:"friends"`
 }

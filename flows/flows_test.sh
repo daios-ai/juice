@@ -28,7 +28,15 @@ source "$here/flows_calls.sh"
 source "$here/flows_wasm.sh"
 source "$here/flows_remote.sh"
 source "$here/flows_federation.sh"
+source "$here/flows_network.sh"
 source "$here/flows_admin.sh"
+
+# Opt-in: real-network federation check (public internet; run from a NAT'd machine).
+if [ "${JUICE_NETWORK_FLOWS:-0}" = "1" ]; then
+    echo "=== real-network federation check ONLY (JUICE_NETWORK_FLOWS=1) ==="
+    run_flows flow_network_reachability
+    exit $?
+fi
 
 # Opt-in: @sys/make synthesis only (real TinyGo + live Ollama).
 if [ "${JUICE_MAKE_FLOWS:-0}" = "1" ]; then

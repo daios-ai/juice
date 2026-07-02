@@ -83,8 +83,8 @@ Every user-facing command runs by calling the server over HTTP; the base URL res
 | Operation | HTTP | CLI |
 |-----------|------|-----|
 | Health check | `GET /health` (open) → `{status}` | `juice health [--url]` |
-| Federation metadata | `GET /.well-known/juice-kernel.json` (open) → `{public_key, handle, base_url}` | — |
-| Gossip | `GET /v1/gossip` (open) → identity, own actions with manifests and stats, transacted friends with stats | — (surfaced by `admin peers --gossip`) |
+
+Federation has no HTTP surface: peer identity, gossip, manifests, the friend handshake, and inbound calls travel over the libp2p transport (§13), not over this API. Gossip is surfaced locally by `admin peers --gossip`; a remote kernel is inspected with `admin inspect <key>`.
 
 ### Authentication
 
@@ -119,7 +119,6 @@ Every user-facing command runs by calling the server over HTTP; the base URL res
 | Delete action | `DELETE /v1/actions/{id}` → 204 | `juice action delete <action>` |
 | Import OpenAPI | `POST /v1/actions/import` `{spec_url}` → import result | `juice action import <spec-url>` |
 | Unimport OpenAPI | `POST /v1/actions/unimport` `{spec_url[, name]}` → action[] | `juice action unimport <spec-url> [--name]` |
-| Get manifest | `GET /v1/actions/{id}/manifest` → signed manifest; served to friends in good standing per the exposure lever | — (used internally by `admin friend`) |
 | Get stats | `GET /v1/stats/{action_id}` → stats | `juice action stats <action>` |
 | List ratings | `GET /v1/actions/{id}/ratings` → rating[] | — |
 
@@ -185,12 +184,9 @@ Native actions registered at bootstrap, owned by `@sys`, public, runnable like a
 | `@sys/random` | 0 | Random float in `[0, 1)` |
 | `@sys/web` | 0 | Fetch a public web page (read-only GET) |
 
-### Federation (HTTP-only protocol surface)
+### Federation (libp2p transport, not HTTP)
 
-| Operation | HTTP |
-|-----------|------|
-| Friend request | `POST /v1/peers` — signed; auto-accepted by default (`peer_auto_accept`), pending under manual mode; rate-limited per IP |
-| Inbound federation call | `POST /v1/federation/call?action=@owner%2Fname&counterparty=<pubkey>` — signature-authenticated; runs as the proxy user from its prepaid balance; underfunded or denied callers receive a signed rejection receipt |
+Federation is carried entirely over the libp2p transport (§13), addressed by peer public key — there are no HTTP endpoints. Versioned protocols: `/juice/fed/friend/1` (signed friend request; auto-accepted by default, pending under manual mode; rate-limited at the transport), `/juice/fed/call/1` (inbound proxy call; signature-authenticated; runs as the proxy user from its prepaid balance; underfunded or denied callers receive a signed rejection receipt), `/juice/fed/manifest/1` (signed manifests, chunked per action; served to friends per the exposure lever), `/juice/fed/gossip/1`, and `/juice/fed/inspect/1`. Per-request signatures and the `(idempotency_key, counterparty)` idempotency rule are unchanged from HTTP federation; only the carrier differs.
 
 ### Admin (control-socket, superuser)
 
@@ -204,9 +200,9 @@ The operator verbs no ordinary user performs — money, access, federation trust
 | Unsuspend user | `juice admin unsuspend <user>` |
 | Deposit credits | `juice admin deposit <user> <amount> [--reason --external-key]` |
 | Withdraw credits | `juice admin withdraw <user> <amount> [--reason --external-key]` |
-| Friend a kernel | `juice admin friend <url>` |
+| Friend a kernel | `juice admin friend <key>` |
 | Unfriend a kernel | `juice admin unfriend <user>` |
 | List peers | `juice admin peers [--gossip]` |
-| Inspect a kernel | `juice admin inspect <url>` — identity, public actions, and transacted friends |
+| Inspect a kernel | `juice admin inspect <key>` — identity, public actions, transacted friends, and reachability (direct / hole-punched / relayed) |
 
-`<user>` is a `@handle`; `<action>` is `@owner/name` (or an id). `withdraw` requires `target.available ≥ amount`; it redeems credits and obliges the out-of-band payout. `admin friend <url>` on a denied key clears the denial and restarts the handshake. `admin unfriend` deny-lists the key, deactivates the peer's proxies, cancels steps addressed to it (parked prices refunded), and preserves balance and history.
+`<user>` is a `@handle`; `<action>` is `@owner/name` (or an id); `<key>` is a peer's base64url public key. `withdraw` requires `target.available ≥ amount`; it redeems credits and obliges the out-of-band payout. `admin friend <key>` on a denied key clears the denial and restarts the handshake. `admin unfriend` deny-lists the key, deactivates the peer's proxies, cancels steps addressed to it (parked prices refunded), and preserves balance and history.

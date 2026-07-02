@@ -134,10 +134,10 @@ func exitCodeFor(err error) int {
 
 // openKernel opens the SQLite store and constructs a Kernel from globalCfg.
 // The caller is responsible for closing the store when done.
-func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, error) {
+func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, error) {
 	db, err := store.Open(flagDB)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("open db: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("open db: %w", err)
 	}
 
 	cfg := kernel.DefaultConfig()
@@ -152,19 +152,19 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, error) {
 	cfg.FeeBPS = globalCfg.FeeBPS
 	if globalCfg.FeeBPS < 0 || globalCfg.FeeBPS > 10000 {
 		db.Close()
-		return nil, nil, nil, fmt.Errorf("fee_bps must be 0–10000")
+		return nil, nil, nil, nil, fmt.Errorf("fee_bps must be 0–10000")
 	}
 
 	cfg.ImportBPS = globalCfg.ImportBPS
 	if globalCfg.ImportBPS < 0 || globalCfg.ImportBPS > 10000 {
 		db.Close()
-		return nil, nil, nil, fmt.Errorf("import_bps must be 0–10000")
+		return nil, nil, nil, nil, fmt.Errorf("import_bps must be 0–10000")
 	}
 
 	tokenTTL, err := time.ParseDuration(globalCfg.TokenTTL)
 	if err != nil {
 		db.Close()
-		return nil, nil, nil, fmt.Errorf("token_ttl invalid: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("token_ttl invalid: %w", err)
 	}
 	cfg.TokenTTL = tokenTTL
 	cfg.ScriptTimeout = time.Duration(globalCfg.ScriptTimeoutMS) * time.Millisecond
@@ -251,7 +251,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, error) {
 	// Wire signing callback into the HTTP executor; private key stays inside kernel.
 	httpExec.signerFn = k.SignFederation
 
-	return k, db, logger, nil
+	return k, db, logger, httpExec, nil
 }
 
 // tokenDir returns a directory namespaced by the canonical DB path so that tokens for

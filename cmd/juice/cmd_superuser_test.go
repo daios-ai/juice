@@ -6,10 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -196,8 +193,16 @@ func TestAdminListAllActions(t *testing.T) {
 // the party filter for superusers); superuser scope on the read endpoints is covered in
 // control/serve tests. The bespoke enriched admin-txs view was removed with adminListTxRows.
 
-// TestBulkImportPeerActions verifies that bulkImportPeerActions fetches all
-// actions from the mock peer, imports them, enables them, and makes them public.
+// fakeManifestFetcher returns canned manifest frames, standing in for the transport so the
+// import + enable + publish logic is tested without libp2p.
+type fakeManifestFetcher struct{ frames []json.RawMessage }
+
+func (f *fakeManifestFetcher) Manifests(_ context.Context, _ string) ([]json.RawMessage, error) {
+	return f.frames, nil
+}
+
+// TestBulkImportPeerActions verifies that bulkImportPeerActionsFed imports a peer's manifests,
+// enables them, and makes them public.
 func TestBulkImportPeerActions(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 
@@ -207,9 +212,8 @@ func TestBulkImportPeerActions(t *testing.T) {
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
-	const actionID = "bulk-action-id"
 	m := kernel.ActionManifest{
-		ActionID:     actionID,
+		ActionID:     "bulk-action-id",
 		OwnerHandle:  "@bulk-peer",
 		Name:         "hello",
 		Description:  "says hello",
@@ -225,28 +229,20 @@ func TestBulkImportPeerActions(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Signature = sig
-
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(r.URL.Path, "/manifest") {
-			json.NewEncoder(w).Encode(m)
-		} else {
-			json.NewEncoder(w).Encode([]map[string]string{{"id": actionID, "name": "hello"}})
-		}
-	}))
-	defer remote.Close()
+	mBytes, _ := json.Marshal(m)
 
 	ctx := t.Context()
 	sys, err := k.ReadUserByHandle(ctx, "@sys")
 	if err != nil {
 		t.Fatal(err)
 	}
-	peerUser, err := k.AddPeer(ctx, sys.ID, "@bulk-peer", pubB64, remote.URL)
+	peerUser, err := k.AddPeer(ctx, sys.ID, "@bulk-peer", pubB64)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	imported, skipped := bulkImportPeerActions(ctx, k, sys.ID, peerUser, true)
+	fetcher := &fakeManifestFetcher{frames: []json.RawMessage{mBytes}}
+	imported, skipped := bulkImportPeerActionsFed(ctx, fetcher, k, sys.ID, pubB64, peerUser)
 	if imported != 1 {
 		t.Errorf("imported: got %d, want 1", imported)
 	}
@@ -269,15 +265,15 @@ func TestBulkImportPeerActions(t *testing.T) {
 		t.Fatal("imported action 'hello' not found in ListAllActions")
 	}
 	if !found.Active {
-		t.Error("imported action should be enabled (active=true) after bulkImportPeerActions")
+		t.Error("imported action should be enabled (active=true) after bulk import")
 	}
 	if !found.Public {
-		t.Error("imported action should be public after bulkImportPeerActions")
+		t.Error("imported action should be public after bulk import")
 	}
 }
 
-// TestBulkImportPeerActionsSkipsInvalidManifest verifies that when the manifest
-// endpoint returns an error, the action is counted as skipped, not imported.
+// TestBulkImportPeerActionsSkipsInvalidManifest verifies that a manifest frame that fails to
+// verify is counted as skipped, not imported.
 func TestBulkImportPeerActionsSkipsInvalidManifest(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 
@@ -287,27 +283,27 @@ func TestBulkImportPeerActionsSkipsInvalidManifest(t *testing.T) {
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(r.URL.Path, "/manifest") {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		json.NewEncoder(w).Encode([]map[string]string{{"id": "skip-id", "name": "broken"}})
-	}))
-	defer remote.Close()
-
 	ctx := t.Context()
 	sys, err := k.ReadUserByHandle(ctx, "@sys")
 	if err != nil {
 		t.Fatal(err)
 	}
-	peerUser, err := k.AddPeer(ctx, sys.ID, "@skip-peer", pubB64, remote.URL)
+	peerUser, err := k.AddPeer(ctx, sys.ID, "@skip-peer", pubB64)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	imported, skipped := bulkImportPeerActions(ctx, k, sys.ID, peerUser, true)
+	// A manifest with an invalid signature (never signed) must be skipped, not imported.
+	bad := kernel.ActionManifest{
+		ActionID: "skip-id", OwnerHandle: "@skip-peer", Name: "broken", Description: "d",
+		Kind: kernel.KindHTTP, InputSchema: map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "x",
+		Stats: &kernel.Stats{}, UpdatedAt: time.Now(), Signature: "bad",
+	}
+	badBytes, _ := json.Marshal(bad)
+
+	fetcher := &fakeManifestFetcher{frames: []json.RawMessage{badBytes}}
+	imported, skipped := bulkImportPeerActionsFed(ctx, fetcher, k, sys.ID, pubB64, peerUser)
 	if imported != 0 {
 		t.Errorf("imported: got %d, want 0", imported)
 	}

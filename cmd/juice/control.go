@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 	"github.com/go-chi/chi/v5"
 )
@@ -22,10 +23,11 @@ import (
 // 0600 socket next to the DB, plus a valid @sys bearer token (§14). The socket path is
 // derived from --db so the client needs no configuration.
 
-// allowLocalPeers reports whether peer federation HTTP may reach local/private addresses.
-// allow_local_peer_urls targets peer traffic only; allow_local_sources enables everything.
+// allowLocalPeers reports whether outbound federation-import HTTP fetches may reach
+// local/private addresses. Federation transport itself is libp2p (§13); this remains
+// only for the action-import fetch paths, gated by the action-source dev escape hatch.
 func allowLocalPeers() bool {
-	return globalCfg.AllowLocalPeerURLs || globalCfg.AllowLocalSources
+	return globalCfg.AllowLocalSources
 }
 
 func controlSocketPath(dbPath string) string {
@@ -84,6 +86,7 @@ func (s *server) controlRouter() http.Handler {
 	r.Get("/control/peers/inspect", s.ctlInspectPeer)
 	r.Post("/control/peers/friend", s.ctlFriendPeer)
 	r.Post("/control/peers/unfriend", s.ctlUnfriendPeer)
+	r.Get("/control/identity", s.ctlIdentity)
 	return r
 }
 
@@ -184,49 +187,89 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	base := strings.TrimRight(r.URL.Query().Get("url"), "/")
-	allow := allowLocalPeers()
-	wk, err := fetchWellKnown(ctx, base, allow)
-	if err != nil {
-		writeErr(w, err)
+	peerKey := strings.TrimSpace(r.URL.Query().Get("key"))
+	if s.fed == nil {
+		writeErr(w, kernel.ErrInvalidState.Wrap("federation transport not running"))
 		return
 	}
-	out := map[string]any{"handle": wk.Handle, "public_key": wk.PublicKey, "base_url": wk.BaseURL}
-	if g := fetchGossip(ctx, base, allow); g != nil {
-		out["actions"] = g.Actions
-		out["friends"] = g.Friends
+	iRaw, err := s.fed.Inspect(ctx, peerKey)
+	if err != nil {
+		writeErr(w, kernel.ErrExecutionFailed.Wrapf("cannot reach peer: %v", err))
+		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	var g kernel.GossipResponse
+	if json.Unmarshal(iRaw, &g) != nil {
+		writeErr(w, kernel.ErrExecutionFailed.Wrap("could not parse peer inspect document"))
+		return
+	}
+	// Reachability diagnostics replace the browser-reachable endpoint that no longer exists.
+	reach := s.fed.Probe(ctx, peerKey)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"handle":       g.Handle,
+		"public_key":   g.PublicKey,
+		"actions":      g.Actions,
+		"friends":      g.Friends,
+		"reachability": reach,
+	})
 }
 
 func (s *server) ctlFriendPeer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		URL string `json:"url"`
+		Key string `json:"key"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
+	if s.fed == nil {
+		writeErr(w, kernel.ErrInvalidState.Wrap("federation transport not running"))
+		return
+	}
 	ctx := r.Context()
-	allow := allowLocalPeers()
-	wk, err := fetchWellKnown(ctx, strings.TrimRight(req.URL, "/"), allow)
+	peerKey := strings.TrimSpace(req.Key)
+
+	// Resolve the peer by key and read its gossip (identity + actions + friends). The gossip's
+	// public_key must match the key we dialed — the transport authenticated the connection by
+	// key, so this is a consistency check, not the trust boundary.
+	gRaw, err := s.fed.Gossip(ctx, peerKey)
+	if err != nil {
+		writeErr(w, kernel.ErrExecutionFailed.Wrapf("cannot reach peer: %v", err))
+		return
+	}
+	var g kernel.GossipResponse
+	if json.Unmarshal(gRaw, &g) != nil || g.PublicKey != peerKey {
+		writeErr(w, kernel.ErrExecutionFailed.Wrap("peer gossip identity mismatch"))
+		return
+	}
+
+	// Register the peer locally (clears any prior denial), send a signed friend handshake so it
+	// registers + reciprocates, import its active public actions, then accumulate its gossip.
+	u, err := s.kernel.CreateOrUpdateProxyPeer(ctx, g.Handle, peerKey)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	// Register the peer locally (clears any prior denial), announce ourselves, import their
-	// active public actions, then accumulate their gossip to discover their friends.
-	u, err := s.kernel.CreateOrUpdateProxyPeer(ctx, wk.Handle, wk.PublicKey, wk.BaseURL)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	s.announcePeer(ctx, wk.BaseURL, allow)
-	imported, skipped := bulkImportPeerActions(ctx, s.kernel, callerFrom(r), u, allow)
-	if g := fetchGossip(ctx, wk.BaseURL, allow); g != nil {
-		pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-		_ = s.kernel.AccumulateGossip(ctx, g, pub)
-	}
+	s.announcePeerFed(ctx, peerKey)
+	imported, skipped := bulkImportPeerActionsFed(ctx, s.fed, s.kernel, callerFrom(r), peerKey, u)
+	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	_ = s.kernel.AccumulateGossip(ctx, &g, pub)
 	writeJSON(w, http.StatusOK, map[string]any{"handle": u.Handle, "imported": imported, "skipped": skipped})
+}
+
+// ctlIdentity reports this kernel's federation identity: public key, handle, and libp2p listen
+// addresses. This is how an operator obtains the key to share for friending, now that the
+// .well-known document is gone (§13).
+func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	handle := globalCfg.KernelHandle
+	if handle == "" {
+		handle, _ = s.kernel.GetConfig(ctx, configKeySuperuser)
+	}
+	var addrs []string
+	if s.fed != nil {
+		addrs = s.fed.ListenAddrs()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"handle": handle, "public_key": pub, "addrs": addrs})
 }
 
 func (s *server) ctlUnfriendPeer(w http.ResponseWriter, r *http.Request) {
@@ -251,92 +294,49 @@ func writeOr(w http.ResponseWriter, v any, err error) {
 }
 
 // ---------------------------------------------------------------------------
-// Server: peer outbound helpers (relocated here so `serve` owns all federation HTTP)
+// Server: peer outbound helpers (over the libp2p federation transport, §13)
 // ---------------------------------------------------------------------------
 
-type wellKnown struct {
-	Handle    string `json:"handle"`
-	PublicKey string `json:"public_key"`
-	BaseURL   string `json:"base_url"`
-}
-
-func fetchWellKnown(ctx context.Context, base string, allow bool) (*wellKnown, error) {
-	body, status, err := doHTTP(ctx, http.MethodGet, base+"/.well-known/juice-kernel.json", nil, nil, 15*time.Second, allow)
-	if err != nil {
-		return nil, errUnreachable(base, err)
+// announcePeerFed sends a signed friend request to a peer by key so it registers + reciprocates.
+func (s *server) announcePeerFed(ctx context.Context, peerKey string) {
+	if s.fed == nil {
+		return
 	}
-	if status != http.StatusOK {
-		return nil, kernel.ErrExecutionFailed.Wrapf("peer well-known returned status %d", status)
-	}
-	var wk wellKnown
-	if err := json.Unmarshal(body, &wk); err != nil {
-		return nil, kernel.ErrExecutionFailed.Wrapf("parse well-known: %v", err)
-	}
-	return &wk, nil
-}
-
-func fetchGossip(ctx context.Context, base string, allow bool) *kernel.GossipResponse {
-	body, status, err := doHTTP(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/v1/gossip", nil, nil, 15*time.Second, allow)
-	if err != nil || status != http.StatusOK {
-		return nil
-	}
-	var g kernel.GossipResponse
-	if json.Unmarshal(body, &g) != nil {
-		return nil
-	}
-	return &g
-}
-
-// announcePeer sends a signed friend request to the peer's /v1/peers so it can reciprocate.
-func (s *server) announcePeer(ctx context.Context, peerBaseURL string, allow bool) {
 	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	handle := globalCfg.PeerHandle
+	handle := globalCfg.KernelHandle
 	if handle == "" {
 		handle, _ = s.kernel.GetConfig(ctx, configKeySuperuser)
 	}
-	// The address we advertise: the real bound port (set at boot under --addr :0).
-	baseURL, _ := s.kernel.GetConfig(ctx, "kernel_base_url")
-	if pub == "" || baseURL == "" {
+	if pub == "" {
 		return
 	}
-	sig, ts, err := s.kernel.SignPeerRequestNow(handle, pub, baseURL)
+	sig, ts, err := s.kernel.SignPeerRequestNow(handle, pub)
 	if err != nil {
 		return
 	}
-	body, _ := json.Marshal(map[string]string{
-		"handle": handle, "public_key": pub, "base_url": baseURL, "timestamp": ts, "signature": sig,
-	})
-	_, _, _ = doHTTP(ctx, http.MethodPost, strings.TrimRight(peerBaseURL, "/")+"/v1/peers",
-		map[string]string{"Content-Type": "application/json"}, strings.NewReader(string(body)), 15*time.Second, allow)
+	_, _ = s.fed.Friend(ctx, peerKey, fed.FriendRequest{Handle: handle, PublicKey: pub, Timestamp: ts, Signature: sig})
 }
 
-// bulkImportPeerActions fetches a peer's active public actions and imports them as enabled,
-// public remote_proxy actions. Returns the counts imported and skipped.
-func bulkImportPeerActions(ctx context.Context, k *kernel.Kernel, subjectID string, peer *kernel.User, allowLocal bool) (imported, skipped int) {
-	base := strings.TrimRight(peer.RemoteBaseURL, "/")
-	listBody, status, err := doHTTP(ctx, http.MethodGet, base+"/v1/actions", nil, nil, 30*time.Second, allowLocal)
-	if err != nil || status != http.StatusOK {
+// manifestFetcher is the transport capability bulk import needs; *fed.Transport satisfies it,
+// and tests supply a fake so the import + enable + publish logic is unit-testable without libp2p.
+type manifestFetcher interface {
+	Manifests(ctx context.Context, peerKey string) ([]json.RawMessage, error)
+}
+
+// bulkImportPeerActionsFed fetches a peer's manifests over the transport and imports them as
+// enabled, public remote_proxy actions. Returns the counts imported and skipped.
+func bulkImportPeerActionsFed(ctx context.Context, tr manifestFetcher, k *kernel.Kernel, subjectID, peerKey string, peer *kernel.User) (imported, skipped int) {
+	manifests, err := tr.Manifests(ctx, peerKey)
+	if err != nil {
 		return 0, 0
 	}
-	var actions []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	if json.Unmarshal(listBody, &actions) != nil {
-		return 0, 0
-	}
-	for _, a := range actions {
-		mBody, mStatus, mErr := doHTTP(ctx, http.MethodGet, base+"/v1/actions/"+a.ID+"/manifest", nil, nil, 30*time.Second, allowLocal)
-		if mErr != nil || mStatus != http.StatusOK {
-			skipped++
-			continue
-		}
+	for _, raw := range manifests {
 		var m kernel.ActionManifest
-		if json.Unmarshal(mBody, &m) != nil {
+		if json.Unmarshal(raw, &m) != nil {
 			skipped++
 			continue
 		}
-		result, rErr := k.ReconcileRemoteAction(ctx, subjectID, peer.Handle, a.Name, &m)
+		result, rErr := k.ReconcileRemoteAction(ctx, subjectID, peer.Handle, m.Name, &m)
 		if rErr != nil {
 			skipped++
 			continue
