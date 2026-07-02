@@ -2305,3 +2305,46 @@ func TestUnsafeHostAndIP(t *testing.T) {
 
 // Ensure fmt is used.
 var _ = fmt.Sprintf
+
+// TestListProcessesSuperuserWidening proves supervision is scope: the superuser sees every
+// process and may read any, while an ordinary user stays scoped to their own (mirrors the
+// existing ListTransactions/ListSteps widening).
+func TestListProcessesSuperuserWidening(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	sys := setupSys(t, k, st)
+	alice := setupUser(t, st, "@alice", 100)
+	bob := setupUser(t, st, "@bob", 0)
+	proc := setupProcess(t, st, alice.ID, 0)
+
+	has := func(callerID string) bool {
+		ps, err := k.ListProcesses(ctx, callerID, 50, 0)
+		if err != nil {
+			t.Fatalf("ListProcesses(%s): %v", callerID, err)
+		}
+		for _, p := range ps {
+			if p.ID == proc.ID {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(alice.ID) {
+		t.Error("@alice should see her own process")
+	}
+	if !has(sys.ID) {
+		t.Error("@sys should see @alice's process (superuser widening)")
+	}
+	if has(bob.ID) {
+		t.Error("@bob must not see @alice's process")
+	}
+
+	if _, err := k.ReadProcess(ctx, sys.ID, proc.ID); err != nil {
+		t.Errorf("@sys ReadProcess should succeed: %v", err)
+	}
+	if _, err := k.ReadProcess(ctx, bob.ID, proc.ID); err == nil {
+		t.Error("@bob ReadProcess of @alice's process should fail")
+	}
+}

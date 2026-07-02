@@ -863,9 +863,17 @@ func (k *Kernel) ListAllActions(ctx context.Context, limit, offset int) ([]*Acti
 	return k.store.ListAllActions(ctx, limit, offset)
 }
 
-// ListAllProcesses returns all processes ordered by creation time.
-func (k *Kernel) ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error) {
-	return k.store.ListProcesses(ctx, ownerID, limit, offset)
+// ListProcesses returns the caller's processes, or all of them when the caller is the
+// superuser (supervision is scope on the normal endpoint, mirroring ListTransactions).
+func (k *Kernel) ListProcesses(ctx context.Context, callerID string, limit, offset int) ([]*Process, error) {
+	u, err := k.requireActiveUser(ctx, callerID)
+	if err != nil {
+		return nil, err
+	}
+	if k.isUserSuperuser(ctx, u) {
+		return k.store.ListAllProcesses(ctx, limit, offset)
+	}
+	return k.store.ListProcesses(ctx, callerID, limit, offset)
 }
 
 func (k *Kernel) ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error) {
@@ -1345,7 +1353,7 @@ func (k *Kernel) ReadProcess(ctx context.Context, callerID, id string) (*Process
 	if err != nil {
 		return nil, err
 	}
-	if p.OwnerUserID != callerID {
+	if p.OwnerUserID != callerID && !k.IsSuperuser(ctx, callerID) {
 		return nil, ErrUnauthorized.Wrap("not authorized to view this process")
 	}
 	return p, nil
@@ -1635,6 +1643,16 @@ func (k *Kernel) requireActiveUser(ctx context.Context, userID string) (*User, e
 // isUserSuperuser returns true if u is the platform superuser (@sys is fixed by the spec).
 func (k *Kernel) isUserSuperuser(_ context.Context, u *User) bool {
 	return u.Handle == "@sys"
+}
+
+// IsSuperuser reports whether userID is the configured superuser. Exported so the service
+// layer can widen read scope for @sys (supervision is scope on the normal endpoints, §14).
+func (k *Kernel) IsSuperuser(ctx context.Context, userID string) bool {
+	u, err := k.store.ReadUser(ctx, userID)
+	if err != nil || u == nil {
+		return false
+	}
+	return k.isUserSuperuser(ctx, u)
 }
 
 // requireAdmin returns nil if callerID is authenticated, non-suspended, and is the owner

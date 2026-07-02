@@ -2148,3 +2148,81 @@ func TestServeAdvertisesBoundAddr(t *testing.T) {
 		t.Errorf("base_url = %q, want %q", body["base_url"], want)
 	}
 }
+
+// TestSuperuserScopeOverTCP proves supervision is scope on the normal TCP endpoints: over the
+// public API a @sys token sees another user's private action and process and may disable any
+// action, while a normal caller stays own-scoped. This is what replaced admin actions/
+// processes/disable (no separate admin surface).
+func TestSuperuserScopeOverTCP(t *testing.T) {
+	srv, k, db := newTestHTTPServerFull(t)
+	defer srv.Close()
+	ctx := context.Background()
+
+	sysTok, err := k.Login(ctx, "@sys", "sys-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceID, aliceTok := makeUser(t, k, "@alice")
+
+	// @alice creates a private, inactive action.
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "secret", "kind": "http", "price": 0, "source": "http://127.0.0.1:1/x",
+		"description": "private", "input_schema": minSchema, "output_schema": minSchema,
+	}, aliceTok)
+	var action kernel.Action
+	decodeResponse(t, cr, &action)
+
+	// Anonymous listing of @alice's actions excludes the private one; @sys sees it.
+	anon := decodeActions(t, httpDo(t, srv, "GET", "/v1/actions?owner=@alice", nil, ""))
+	if len(anon) != 0 {
+		t.Errorf("anonymous should see 0 of @alice's actions, got %d", len(anon))
+	}
+	asSys := decodeActions(t, httpDo(t, srv, "GET", "/v1/actions?owner=@alice", nil, sysTok))
+	if len(asSys) != 1 {
+		t.Errorf("@sys should see @alice's private action, got %d", len(asSys))
+	}
+
+	// @alice owns a process; @sys sees it in the system-wide process list, a stranger doesn't.
+	giveCredits(t, k, aliceID, 100)
+	proc := setupProcessHTTP(t, db, aliceID, 100)
+	if !containsProcess(t, httpDo(t, srv, "GET", "/v1/processes", nil, sysTok), proc.ID) {
+		t.Error("@sys process list should include @alice's process")
+	}
+	_, bobTok := makeUser(t, k, "@bob")
+	if containsProcess(t, httpDo(t, srv, "GET", "/v1/processes", nil, bobTok), proc.ID) {
+		t.Error("@bob must not see @alice's process")
+	}
+
+	// @sys may disable @alice's action over TCP (owner-or-superuser); @bob may not.
+	if resp := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/disable", nil, bobTok); resp.StatusCode < 400 {
+		t.Errorf("@bob disabling @alice's action should fail, got %d", resp.StatusCode)
+	}
+	if resp := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/disable", nil, sysTok); resp.StatusCode >= 400 {
+		t.Errorf("@sys disabling @alice's action should succeed, got %d", resp.StatusCode)
+	}
+}
+
+func decodeActions(t *testing.T, resp *http.Response) []map[string]any {
+	t.Helper()
+	defer resp.Body.Close()
+	var out []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode actions: %v", err)
+	}
+	return out
+}
+
+func containsProcess(t *testing.T, resp *http.Response, id string) bool {
+	t.Helper()
+	defer resp.Body.Close()
+	var procs []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&procs); err != nil {
+		t.Fatalf("decode processes: %v", err)
+	}
+	for _, p := range procs {
+		if p["id"] == id {
+			return true
+		}
+	}
+	return false
+}

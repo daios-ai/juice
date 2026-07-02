@@ -309,7 +309,7 @@ Inbound webhook payloads enter through the standard authenticated call path: ext
 
 ### Remote
 
-`peer friend` fetches the remote's active public actions, verifies each signed manifest, and creates or updates local `kind=remote_proxy` actions owned by the local remote-peer user row. Imported actions are immediately enabled and public. It does not copy implementation.
+`admin friend` fetches the remote's active public actions, verifies each signed manifest, and creates or updates local `kind=remote_proxy` actions owned by the local remote-peer user row. Imported actions are immediately enabled and public. It does not copy implementation.
 
 Manifest required fields:
 
@@ -330,7 +330,7 @@ Remote contract fields:
 action_id artifact_hash description input_schema kind name output_schema owner_handle price
 ```
 
-Manifest stats and `updated_at` do not affect contract comparison; manifest stats never overwrite local `Stats` and are not stored as `StatTag`. Invalid signatures skip that action. A second `peer friend` re-syncs: new actions are imported, changed-contract actions are updated (re-enabled), and actions no longer active/public on the remote are deactivated and their stats reset. `peer unfriend` deactivates all proxies from that peer and preserves all history.
+Manifest stats and `updated_at` do not affect contract comparison; manifest stats never overwrite local `Stats` and are not stored as `StatTag`. Invalid signatures skip that action. A second `admin friend` re-syncs: new actions are imported, changed-contract actions are updated (re-enabled), and actions no longer active/public on the remote are deactivated and their stats reset. `admin unfriend` deactivates all proxies from that peer and preserves all history.
 
 The proxy's local `price` is `manifest.price` plus the worst-case import duty: `price = mp + ceil(mp * import_bps / 10000)` (§13). The local caller sees one price bounding the whole remote call, duty included; settlement charges duty on the actual remote charge and refunds the difference (§13). A change of the local `import_bps` recomputes proxy prices but is not a manifest contract change and does not deactivate.
 
@@ -581,13 +581,13 @@ A proxy user's handle is a **local alias** chosen at acceptance (default: the pe
 Two kernels transact only as **friends**: a reciprocal relation with the proxy-user pair (`@B` on A, `@A` on B).
 
 ```text
-juice peer friend <url>      register peer + bulk-import all their active public actions
-juice peer unfriend <user>   end the relation; deny future requests; deactivate all proxies (user is @handle)
-juice peer list              known peers and balances
-juice peer inspect <url>     view remote identity, public actions, and transacted friends (no DB write)
+juice admin friend <url>      register peer + bulk-import all their active public actions
+juice admin unfriend <user>   end the relation; deny future requests; deactivate all proxies (user is @handle)
+juice admin peers             known peers and balances
+juice admin inspect <url>     view remote identity, public actions, and transacted friends (no DB write)
 ```
 
-All `peer` commands are superuser supervision, served over the local control socket (§14). `POST /v1/peers` is the inbound protocol endpoint, authenticated by federation signature — not a local API.
+Federation trust is superuser supervision, so these live under `admin`, served over the local control socket (§14). `POST /v1/peers` is the inbound protocol endpoint, authenticated by federation signature — not a local API.
 
 `friend` verifies `<url>/.well-known/juice-kernel.json` and sends a signed request. By default kernels **auto-accept** (`peer_auto_accept = true`): the proxy user is created with balance 0 and a reciprocal request completes the pair. With manual mode, requests sit pending until the operator friends back. Friend requests are rate-limited per IP like account creation (§14).
 
@@ -676,12 +676,11 @@ juice health
 juice admin users                         juice admin show <user>
 juice admin suspend <user>                juice admin unsuspend <user>
 juice admin deposit <user> <amount>       juice admin withdraw <user> <amount>
-juice admin actions
-juice admin disable <action>              juice admin processes
-juice admin txs                           juice admin steps
-juice peer friend <url>                   juice peer unfriend <user>
-juice peer list                           juice peer inspect <url>
+juice admin friend <url>                  juice admin unfriend <user>
+juice admin peers                         juice admin inspect <url>
 ```
+
+`admin` holds only the operator verbs no ordinary user performs — money, access, federation trust, and the global roster (`users`/`show`). Supervision over everything else is **scope on the normal commands**: a superuser sees all rows on `action list`, `process list`, `tx list`, and `step list`, and may `action disable`/`enable` any action, all over the public TCP API. There is no `admin actions/disable/processes/txs/steps` — those were duplicates of the base commands with wider reach.
 
 OpenAPI commands (the OpenAPI spec URL is the positional argument):
 
@@ -727,7 +726,7 @@ Endpoint rules (notable rules only; the complete HTTP endpoint list is in `API.m
 
 Transaction list/detail include `rating: {"value":0|1,"note":string|null}` or `null`, visible to all transaction parties.
 
-Admin commands require configured `@sys`, reject non-superusers with `ErrUnauthorized`, stay outside `Call()`, and are served only on the control socket — no admin routes on the public TCP API.
+Admin commands require configured `@sys`, reject non-superusers with `ErrUnauthorized`, and stay outside `Call()`. The operator verbs (money, access, federation trust, roster reads) are served only on the control socket — no such routes on the public TCP API. Superuser *scope* on the normal read/toggle endpoints (seeing all rows, disabling any action) is enforced server-side on the public TCP API by an `IsSuperuser` check, mirroring the existing transaction/step widening.
 
 Logs go to stderr and optionally file; stdout is resource payloads only. Configurable format, level, file. Every kernel transition logs start/end; errors include stable codes; script logs include trace ID.
 

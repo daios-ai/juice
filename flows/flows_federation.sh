@@ -3,7 +3,7 @@
 # curl mirrors are dropped. Curl is kept only for the raw /v1/gossip JSON (no CLI equivalent).
 #
 # _fed_setup uses --addr :0: each kernel advertises its real bound URL (kernel_base_url), so
-# `peer friend $(url ...)` and the reciprocal work without pre-assigned ports. Concurrent
+# `admin friend $(url ...)` and the reciprocal work without pre-assigned ports. Concurrent
 # friend+reciprocal proxy-user creation is idempotent in the kernel.
 
 # Globals set by _fed_setup: FED_DBL FED_DBR FED_HL FED_HR FED_BPORT FED_RID FED_PROXY.
@@ -24,7 +24,7 @@ _fed_setup() {
     j "$FED_DBR" "$FED_HR" action enable "$FED_RID" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$FED_RID" --public >/dev/null 2>&1
 
-    j "$FED_DBL" "$FED_HL" peer friend "$(url "$FED_DBR")" >/dev/null 2>&1 || return 1
+    j "$FED_DBL" "$FED_HL" admin friend "$(url "$FED_DBR")" >/dev/null 2>&1 || return 1
     FED_PROXY=$(strfield "$(jj "$FED_DBL" "$FED_HL" action show "@kernel-r/greet")" id)
     [ -n "$FED_PROXY" ] || return 1
     return 0
@@ -63,7 +63,7 @@ flow_federation_changed_reimport() {
     local wid; wid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create wave --kind http --source "http://127.0.0.1:$FED_BPORT" --description "wave" --price 0)" id)
     j "$FED_DBR" "$FED_HR" action enable "$wid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$wid" --public >/dev/null 2>&1
-    assert_eq "fed_reimport.refriend" 0 "$(j "$FED_DBL" "$FED_HL" peer friend "$(url "$FED_DBR")" >/dev/null 2>&1; echo $?)"
+    assert_eq "fed_reimport.refriend" 0 "$(j "$FED_DBL" "$FED_HL" admin friend "$(url "$FED_DBR")" >/dev/null 2>&1; echo $?)"
 
     assert_json "fed_reimport.wave_proxy_active" "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/wave)" active True
     local greet; greet=$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")
@@ -77,7 +77,7 @@ flow_federation_unfriend() {
     local dir; dir=$(new_dir)
     _fed_setup "$dir" || { fail "fed_unfriend.setup" "setup failed"; return; }
 
-    assert_contains "fed_unfriend.unfriended" "nfriended" "$(j "$FED_DBL" "$FED_HL" peer unfriend @kernel-r 2>&1)"
+    assert_contains "fed_unfriend.unfriended" "nfriended" "$(j "$FED_DBL" "$FED_HL" admin unfriend @kernel-r 2>&1)"
     assert_json "fed_unfriend.proxy_inactive" "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" active False
     # L's unfriend only affects L; R's original action stays active.
     assert_json "fed_unfriend.remote_still_active" "$(jj "$FED_DBR" "$FED_HR" action show "$FED_RID")" active True
@@ -118,7 +118,7 @@ flow_fed_denial_unfriended() {
 
     # R unfriends L → R denies L's inbound calls; L's proxy is still active locally, so the
     # call goes out and comes back as a signed 403 denial receipt (failure tx, all checks pass).
-    assert_contains "fed_denial_unfriended.unfriend" "nfriended" "$(j "$FED_DBR" "$FED_HR" peer unfriend @kernel-l 2>&1)"
+    assert_contains "fed_denial_unfriended.unfriend" "nfriended" "$(j "$FED_DBR" "$FED_HR" admin unfriend @kernel-l 2>&1)"
     j "$FED_DBL" "$FED_HL" run @kernel-r/greet '{}' >/dev/null 2>&1 || true
     local tx_id; tx_id=$(python3 -c "import sys,json;t=json.loads(sys.argv[1]);print(t[0]['id'] if t else '')" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
     assert_nonempty "fed_denial_unfriended.tx_recorded" "$tx_id"
@@ -135,7 +135,7 @@ flow_fed_denial_underfunded() {
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create paid-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 100)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$pid" --public >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" peer friend "$(url "$FED_DBR")" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin friend "$(url "$FED_DBR")" >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit @sys 1000 >/dev/null 2>&1
 
     j "$FED_DBL" "$FED_HL" run @kernel-r/paid-svc '{}' >/dev/null 2>&1 || true
@@ -154,7 +154,7 @@ flow_fed_import_duty() {
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create duty-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "duty" --price 1000)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$pid" --public >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" peer friend "$(url "$FED_DBR")" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin friend "$(url "$FED_DBR")" >/dev/null 2>&1
     assert_jnum "fed_import_duty.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/duty-svc)" price 1050
 
     j "$FED_DBR" "$FED_HR" admin deposit @kernel-l 5000 >/dev/null 2>&1
@@ -184,7 +184,7 @@ flow_fed_failed_action_refund() {
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create fail-svc --kind http --source "http://127.0.0.1:$fport" --description "fails" --price 100)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$pid" --public >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" peer friend "$(url "$FED_DBR")" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin friend "$(url "$FED_DBR")" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" admin deposit @kernel-l 5000 >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit @sys 1000 >/dev/null 2>&1
     local ub; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
@@ -218,7 +218,7 @@ flow_fed_gossip_discovery() {
     local dbt ht; dbt="$dir/t/juice.db"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
     start_server "$dbt" "$ht" peer_handle=@kernel-t || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
     j "$dbt" "$ht" auth login @sys --password syspass >/dev/null 2>&1
-    assert_eq "fed_gossip.t_friends_r" 0 "$(j "$dbt" "$ht" peer friend "$r_url" >/dev/null 2>&1; echo $?)"
+    assert_eq "fed_gossip.t_friends_r" 0 "$(j "$dbt" "$ht" admin friend "$r_url" >/dev/null 2>&1; echo $?)"
 
     # T's greet proxy exists with default stats (uses=0, NOT inherited from gossip).
     local tp; tp=$(strfield "$(jj "$dbt" "$ht" action show @kernel-r/greet)" id)

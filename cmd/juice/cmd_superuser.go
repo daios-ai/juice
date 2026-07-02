@@ -18,12 +18,17 @@ func parseAmount(s string) (int64, error) {
 	return amount, nil
 }
 
-// admin and peer are superuser supervision commands. They are clients of the local Unix
-// control socket served by `juice serve` (ctlCall/ctlEmit route over it); the server
-// enforces superuser and is the only process that touches SQLite (§14).
-
+// admin holds the superuser-only supervisory verbs — the operations no ordinary user ever
+// performs: money (deposit/withdraw), access (suspend/unsuspend), federation trust
+// (friend/unfriend/peers/inspect), and the global roster (users/show). They are clients of
+// the local Unix control socket served by `juice serve` (ctlCall/ctlEmit route over it); the
+// server enforces superuser and is the only process that touches SQLite (§14).
+//
+// Everything that is merely "the same operation with wider reach" is NOT here: a superuser
+// sees all rows on `action/process/tx/step list` and may `action disable` any action, all
+// over the normal TCP API (supervision is scope, not a separate surface).
 func init() {
-	adminCmd := &cobra.Command{Use: "admin", Short: "Admin management commands (superuser only)"}
+	adminCmd := &cobra.Command{Use: "admin", Short: "Superuser supervision (money, access, federation, roster)"}
 	adminCmd.AddCommand(
 		adminUsersCmd(),
 		adminShowCmd(),
@@ -31,19 +36,12 @@ func init() {
 		adminUnsuspendCmd(),
 		adminDepositCmd(),
 		adminWithdrawCmd(),
-		adminActionsCmd(),
-		adminDisableCmd(),
-		adminProcessesCmd(),
-		adminTxsCmd(),
-		adminStepsCmd(),
+		peerFriendCmd(),
+		peerUnfriendCmd(),
+		peerListCmd(),
+		peerInspectCmd(),
 	)
 	rootCmd.AddCommand(adminCmd)
-}
-
-func init() {
-	peerCmd := &cobra.Command{Use: "peer", Short: "Manage peer kernels and federation"}
-	peerCmd.AddCommand(peerInspectCmd(), peerFriendCmd(), peerUnfriendCmd(), peerListCmd())
-	rootCmd.AddCommand(peerCmd)
 }
 
 func adminUsersCmd() *cobra.Command {
@@ -144,145 +142,6 @@ func adminDepositCmd() *cobra.Command {
 
 func adminWithdrawCmd() *cobra.Command {
 	return adjustCmd("withdraw <user> <amount>", "Deduct credits from a user account (user is @handle)", "/control/withdraw")
-}
-
-func adminActionsCmd() *cobra.Command {
-	var limit, offset int
-	cmd := &cobra.Command{
-		Use:   "actions",
-		Short: "List all actions",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			var actions []*kernel.Action
-			if err := ctlCall(context.Background(), "GET", ctlPath("/control/actions", limit, offset), nil, &actions); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(actions)
-			}
-			for _, a := range actions {
-				active, public := " ", " "
-				if a.Active {
-					active = "*"
-				}
-				if a.Public {
-					public = "P"
-				}
-				fmt.Printf("[%s%s] %s/%s  %d credits\n", active, public, a.OwnerHandle, a.Name, a.Price)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
-	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
-	return cmd
-}
-
-func adminDisableCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "disable <action>",
-		Short: "Disable any action (action is @owner/name or an id)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			if err := ctlCall(context.Background(), "POST", "/control/actions/disable",
-				map[string]any{"ref": args[0]}, nil); err != nil {
-				return err
-			}
-			fmt.Printf("Action %s disabled.\n", args[0])
-			return nil
-		},
-	}
-}
-
-func adminProcessesCmd() *cobra.Command {
-	var limit, offset int
-	cmd := &cobra.Command{
-		Use:   "processes",
-		Short: "List all processes",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			var processes []*kernel.Process
-			if err := ctlCall(context.Background(), "GET", ctlPath("/control/processes", limit, offset), nil, &processes); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(processes)
-			}
-			for _, p := range processes {
-				fmt.Printf("%s  owner=%s  status=%-6s  avail=%d\n", p.ID, p.OwnerUserID, p.Status, p.Available)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
-	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
-	return cmd
-}
-
-func adminTxsCmd() *cobra.Command {
-	var limit, offset int
-	cmd := &cobra.Command{
-		Use:   "txs",
-		Short: "List all transactions",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			var rows []adminTxRow
-			if err := ctlCall(context.Background(), "GET", ctlPath("/control/txs", limit, offset), nil, &rows); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(rows)
-			}
-			for _, r := range rows {
-				fmt.Printf("%s  %s  payer=%s  caller=%s  status=%-7s  gross=%d\n",
-					r.ID, r.ActionRef, r.PayerHandle, r.CallerHandle, r.Status, r.Gross)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
-	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
-	return cmd
-}
-
-func adminStepsCmd() *cobra.Command {
-	var processID, status string
-	cmd := &cobra.Command{
-		Use:   "steps",
-		Short: "List all steps",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			q := url.Values{}
-			if processID != "" {
-				q.Set("process", processID)
-			}
-			if status != "" {
-				q.Set("status", status)
-			}
-			path := "/control/steps"
-			if len(q) > 0 {
-				path += "?" + q.Encode()
-			}
-			var steps []*kernel.Step
-			if err := ctlCall(context.Background(), "GET", path, nil, &steps); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(steps)
-			}
-			for _, s := range steps {
-				txID := "-"
-				if s.TxID != nil {
-					txID = *s.TxID
-				}
-				fmt.Printf("%s  status=%-7s  tx=%s\n", s.ID, s.Status, txID)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
-	cmd.Flags().StringVar(&status, "status", "", "Filter by status (waiting, running, done)")
-	return cmd
 }
 
 func peerInspectCmd() *cobra.Command {
@@ -386,7 +245,7 @@ func peerUnfriendCmd() *cobra.Command {
 func peerListCmd() *cobra.Command {
 	var showGossip bool
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   "peers",
 		Short: "List known remote kernel peers",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {

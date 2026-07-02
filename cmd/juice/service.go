@@ -191,7 +191,16 @@ func updateAction(k *kernel.Kernel, ctx context.Context, callerID string, req ke
 // Authenticated with owner filter resolving to caller: all their actions regardless of active/public.
 // Source and ArtifactHash are stripped from all results.
 func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHandle, name string, limit, offset int) ([]actionResp, error) {
-	actions, err := k.ListPublicActions(ctx, limit, offset)
+	// The superuser sees every action (supervision is scope on the normal endpoint, §14);
+	// everyone else starts from the public+active set and unions their own below.
+	superuser := callerID != "" && k.IsSuperuser(ctx, callerID)
+	var actions []*kernel.Action
+	var err error
+	if superuser {
+		actions, err = k.ListAllActions(ctx, limit, offset)
+	} else {
+		actions, err = k.ListPublicActions(ctx, limit, offset)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +209,7 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 		if err != nil {
 			return []actionResp{}, nil
 		}
-		if callerID != "" && callerID == u.ID {
+		if !superuser && callerID != "" && callerID == u.ID {
 			actions, err = k.ListOwnedActions(ctx, u.ID, limit, offset)
 			if err != nil {
 				return nil, err
@@ -214,7 +223,7 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 			}
 			actions = filtered
 		}
-	} else if callerID != "" {
+	} else if !superuser && callerID != "" {
 		owned, err := k.ListOwnedActions(ctx, callerID, limit, offset)
 		if err != nil {
 			return nil, err
@@ -344,58 +353,6 @@ func completeStep(k *kernel.Kernel, ctx context.Context, callerID, id string, ar
 
 func listTransactions(k *kernel.Kernel, ctx context.Context, callerID string, f kernel.TxFilter) ([]*kernel.TransactionView, error) {
 	return k.ListTransactions(ctx, callerID, f)
-}
-
-// adminTxRow is the admin-listing view of a transaction: the canonical TransactionView
-// (so --json matches GET /v1/transactions, rating included) plus display-only fields for
-// human output. The display fields are json:"-" so they never alter the canonical shape.
-type adminTxRow struct {
-	*kernel.TransactionView
-	ActionRef    string `json:"action_ref"`    // @owner/name: target owner handle + captured action_name
-	PayerHandle  string `json:"payer_handle"`  // process owner (P)
-	CallerHandle string `json:"caller_handle"` // call caller (C)
-}
-
-// adminListTxRows lists every transaction for admin, enriching each with @owner/name and
-// resolved party handles via a small per-call handle cache (target_user_id is the action
-// owner per role law; the captured action_name keeps the ref valid after deletion).
-func adminListTxRows(k *kernel.Kernel, ctx context.Context, limit, offset int) ([]adminTxRow, error) {
-	views, err := k.ListAllTransactionViews(ctx, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	handles := map[string]string{}
-	handleOf := func(id string) string {
-		if id == "" {
-			return ""
-		}
-		if h, ok := handles[id]; ok {
-			return h
-		}
-		h := ""
-		if u, err := k.ReadUser(ctx, id); err == nil {
-			h = u.Handle
-		}
-		handles[id] = h
-		return h
-	}
-	rows := make([]adminTxRow, len(views))
-	for i, v := range views {
-		ref := v.ActionName
-		if th := handleOf(v.TargetUserID); th != "" {
-			ref = th + "/" + v.ActionName
-		}
-		payer := handleOf(v.OwnerUserID)
-		if payer == "" {
-			payer = v.OwnerUserID
-		}
-		caller := handleOf(v.CallerUserID)
-		if caller == "" {
-			caller = v.CallerUserID
-		}
-		rows[i] = adminTxRow{TransactionView: v, ActionRef: ref, PayerHandle: payer, CallerHandle: caller}
-	}
-	return rows, nil
 }
 
 func getTransaction(k *kernel.Kernel, ctx context.Context, callerID, id string) (*kernel.TransactionView, error) {

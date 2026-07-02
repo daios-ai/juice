@@ -66,29 +66,32 @@ flow_admin_supervision() {
     j "$db" "$ha" auth login @alice --password pw >/dev/null 2>&1
     assert_json "admin.unsuspend_restores_alice" "$(jj "$db" "$ha" user me)" handle @alice
 
-    # An action, exercised to create a process + tx for the admin list views.
+    # Supervision is scope on the normal commands: @sys sees any owner's actions/processes/txs
+    # and may disable any action, all over the standard TCP API (no separate admin surface).
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
     local aid
-    aid=$(strfield "$(jj "$db" "$hs" action create test --kind http \
-        --source "http://127.0.0.1:$bport" --description "admin test action" --price 0)" id)
-    j "$db" "$hs" action enable "$aid" >/dev/null 2>&1
-    assert_contains "admin.action_list" "$aid" "$(jj "$db" "$hs" admin actions)"
+    aid=$(strfield "$(jj "$db" "$ha" action create test --kind http \
+        --source "http://127.0.0.1:$bport" --description "alice's action" --price 0)" id)
+    j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --public >/dev/null 2>&1
+    # @sys `action list` shows @alice's action (system-wide scope).
+    assert_contains "admin.action_list_scope" "$aid" "$(jj "$db" "$hs" action list)"
 
-    # admin disable / enable round-trip.
-    j "$db" "$hs" admin disable "$aid" >/dev/null 2>&1
-    assert_json "admin.action_disable" "$(jj "$db" "$hs" action show "$aid")" active False
-    j "$db" "$hs" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$hs" action update "$aid" --public >/dev/null 2>&1
+    # @sys disables @alice's action over TCP (owner-or-superuser); @bob cannot.
+    j "$db" "$hs" action disable "$aid" >/dev/null 2>&1
+    assert_json "admin.action_disable_scope" "$(jj "$db" "$hs" action show "$aid")" active False
+    j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
 
     deposit "$db" "$hs" @alice 100
     local tx_id proc_id
-    tx_id=$(strfield "$(jj "$db" "$ha" run @sys/test '{}')" tx_id)
+    tx_id=$(strfield "$(jj "$db" "$ha" run @alice/test '{}')" tx_id)
     proc_id=$(strfield "$(jj "$db" "$ha" tx show "$tx_id")" process_id)
-    assert_contains "admin.process_list" "$proc_id" "$(jj "$db" "$hs" admin processes)"
-    assert_eq "admin.tx_list" yes \
-        "$([ "$(list_len "$(jj "$db" "$hs" admin txs)")" -ge 1 ] && echo yes || echo no)"
+    # @sys `process list` / `tx list` span all users.
+    assert_contains "admin.process_list_scope" "$proc_id" "$(jj "$db" "$hs" process list)"
+    assert_eq "admin.tx_list_scope" yes \
+        "$([ "$(list_len "$(jj "$db" "$hs" tx list)")" -ge 1 ] && echo yes || echo no)"
 
-    # A non-superuser is rejected from admin commands.
+    # A non-superuser is rejected from the operator commands.
     assert_fails "admin.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$ha" admin users
 }
 

@@ -80,11 +80,6 @@ func (s *server) controlRouter() http.Handler {
 	r.Post("/control/users/{handle}/unsuspend", s.ctlSetSuspended(false))
 	r.Post("/control/deposit", s.ctlAdjust(kernel.DirectionCredit))
 	r.Post("/control/withdraw", s.ctlAdjust(kernel.DirectionDebit))
-	r.Get("/control/actions", s.ctlListActions)
-	r.Post("/control/actions/disable", s.ctlDisableAction)
-	r.Get("/control/processes", s.ctlListProcesses)
-	r.Get("/control/txs", s.ctlListTxs)
-	r.Get("/control/steps", s.ctlListSteps)
 	r.Get("/control/peers", s.ctlListPeers)
 	r.Get("/control/peers/inspect", s.ctlInspectPeer)
 	r.Post("/control/peers/friend", s.ctlFriendPeer)
@@ -96,16 +91,7 @@ func (s *server) controlRouter() http.Handler {
 // after authMiddleware, so the caller is already authenticated and unsuspended.
 func (s *server) requireSuperuserMW(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u, err := s.kernel.ReadUser(r.Context(), callerFrom(r))
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		want, _ := s.kernel.GetConfig(r.Context(), configKeySuperuser)
-		if want == "" {
-			want = superuserHandle
-		}
-		if u.Handle != want {
+		if !s.kernel.IsSuperuser(r.Context(), callerFrom(r)) {
 			writeErr(w, kernel.ErrUnauthorized.Wrap("superuser required"))
 			return
 		}
@@ -176,43 +162,6 @@ func (s *server) ctlAdjust(direction string) http.HandlerFunc {
 		}
 		writeOr(w, adj, err)
 	}
-}
-
-func (s *server) ctlListActions(w http.ResponseWriter, r *http.Request) {
-	actions, err := s.kernel.ListAllActions(r.Context(), qInt(r, "limit", 50), qInt(r, "offset", 0))
-	writeOr(w, actions, err)
-}
-
-func (s *server) ctlDisableAction(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Ref string `json:"ref"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	a, err := resolveActionRef(s.kernel, r.Context(), req.Ref)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	err = s.kernel.SetActive(r.Context(), callerFrom(r), a.ID, false)
-	writeOr(w, map[string]string{"id": a.ID}, err)
-}
-
-func (s *server) ctlListProcesses(w http.ResponseWriter, r *http.Request) {
-	procs, err := s.kernel.ListAllProcesses(r.Context(), qInt(r, "limit", 50), qInt(r, "offset", 0))
-	writeOr(w, procs, err)
-}
-
-func (s *server) ctlListTxs(w http.ResponseWriter, r *http.Request) {
-	rows, err := adminListTxRows(s.kernel, r.Context(), qInt(r, "limit", 50), qInt(r, "offset", 0))
-	writeOr(w, rows, err)
-}
-
-func (s *server) ctlListSteps(w http.ResponseWriter, r *http.Request) {
-	steps, err := s.kernel.ListSteps(r.Context(), callerFrom(r),
-		r.URL.Query().Get("process"), r.URL.Query().Get("status"))
-	writeOr(w, steps, err)
 }
 
 func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
