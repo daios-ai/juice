@@ -55,6 +55,12 @@ _NEXT_PORT=39000
 _ALLOC_PORT=0
 alloc_port() { _ALLOC_PORT=$_NEXT_PORT; _NEXT_PORT=$((_NEXT_PORT + 1)); }
 
+# db -> "host:port" of the running server that user-facing CLI commands should target.
+# User-facing commands are HTTP clients now (§14); bootstrap_kernel/start_serve keep a
+# server alive and register it here, and j/jj point the CLI at it via JUICE_SERVER.
+declare -A DB_SERVER
+declare -A DB_SERVE_PID
+
 # ---------------------------------------------------------------------------
 # Assertion helpers
 # ---------------------------------------------------------------------------
@@ -110,15 +116,19 @@ EOF
 # j  db home [args...] — run juice against db with the given HOME
 # jj db home [args...] — same with --json
 # ---------------------------------------------------------------------------
+# j/jj target the db's registered server (if any) so user-facing commands reach it; admin
+# and peer commands ignore JUICE_SERVER and run locally against --db.
 j() {
     local db="$1" home="$2"; shift 2
-    HOME="$home" "$JUICE" --db "$db" "$@" 2>&1
+    HOME="$home" JUICE_SERVER="${DB_SERVER[$db]:+http://${DB_SERVER[$db]}}" \
+        "$JUICE" --db "$db" "$@" 2>&1
 }
 
 # jj — JSON output; stderr suppressed so log lines don't corrupt JSON parsing.
 jj() {
     local db="$1" home="$2"; shift 2
-    HOME="$home" "$JUICE" --db "$db" --json "$@" 2>/dev/null
+    HOME="$home" JUICE_SERVER="${DB_SERVER[$db]:+http://${DB_SERVER[$db]}}" \
+        "$JUICE" --db "$db" --json "$@" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -126,8 +136,9 @@ jj() {
 # ---------------------------------------------------------------------------
 
 # bootstrap_kernel db pass home port [config_overrides...]
-# Writes the default config file (with optional overrides), then starts juice serve briefly to trigger
-# first-boot initialisation and stops it.
+# Writes the default config file (with optional overrides), first-boots the kernel, and
+# leaves the server running on 127.0.0.1:$port. User-facing CLI commands are HTTP clients
+# now (§14), so the server stays up for the flow and is registered in DB_SERVER[$db].
 bootstrap_kernel() {
     local db="$1" pass="$2" home="$3" port="$4"; shift 4
     write_test_config "$db" "$@"
@@ -147,7 +158,9 @@ bootstrap_kernel() {
     if ! kill -0 "$pid" 2>/dev/null; then
         return 1
     fi
-    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 0
+    DB_SERVER["$db"]="127.0.0.1:$port"
+    DB_SERVE_PID["$db"]="$pid"
+    return 0
 }
 
 # start_serve db addr pass home
@@ -155,6 +168,12 @@ bootstrap_kernel() {
 SERVE_PID=""
 start_serve() {
     local db="$1" addr="$2" pass="$3" home="$4"
+    # A db has a single kernel: if one is already running (e.g. from bootstrap_kernel on a
+    # different port), stop it so we can (re)start on the requested addr and re-register.
+    if [ -n "${DB_SERVE_PID[$db]:-}" ]; then
+        kill "${DB_SERVE_PID[$db]}" 2>/dev/null; wait "${DB_SERVE_PID[$db]}" 2>/dev/null
+        unset "DB_SERVE_PID[$db]"; unset "DB_SERVER[$db]"
+    fi
     JUICE_BOOTSTRAP_PASSWORD="$pass" \
         HOME="$home" "$JUICE" --db "$db" serve --addr "$addr" >/dev/null 2>&1 &
     SERVE_PID=$!
@@ -171,11 +190,31 @@ start_serve() {
     if ! kill -0 "$SERVE_PID" 2>/dev/null; then
         return 1
     fi
+    DB_SERVER["$db"]="$addr"
+    DB_SERVE_PID["$db"]="$SERVE_PID"
 }
 
 stop_serve() {
     local pid="$1"
-    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 0
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    # Drop any db registration pointing at this pid so later j/jj don't target a dead server.
+    local d
+    for d in "${!DB_SERVE_PID[@]}"; do
+        if [ "${DB_SERVE_PID[$d]}" = "$pid" ]; then
+            unset "DB_SERVE_PID[$d]"; unset "DB_SERVER[$d]"
+        fi
+    done
+    return 0
+}
+
+# stop_all_serves kills every registered server (end-of-run cleanup so bootstrap_kernel's
+# long-lived servers don't leak across the suite).
+stop_all_serves() {
+    local d
+    for d in "${!DB_SERVE_PID[@]}"; do
+        kill "${DB_SERVE_PID[$d]}" 2>/dev/null; wait "${DB_SERVE_PID[$d]}" 2>/dev/null
+        unset "DB_SERVE_PID[$d]"; unset "DB_SERVER[$d]"
+    done
 }
 
 # start_backend port [status_code] [body]
@@ -494,54 +533,31 @@ main() {
         return 0
     fi
 
-    flow_bootstrap
-    flow_local_auth
-    flow_suspension
-    flow_deposits
-    flow_action_lifecycle
-    flow_action_owner_visibility
-    flow_process_lifecycle
-    flow_acl_public
-    flow_successful_paid_call
-    flow_http_verbs
-    flow_failed_call_refund
-    flow_input_schema_failure
-    flow_output_schema_failure
-    flow_wasm_execution
-    flow_contractor_subcall
-    flow_contractor_failure
-    flow_step_success
-    flow_step_failure
-    flow_step_restart
-    flow_locked_funds_recovery
-    flow_rating
-    flow_pkce_auth
-    flow_refresh_rotation
-    flow_successful_receipt
-    flow_failed_receipt
-    flow_lookup
-    flow_chat
-    flow_openapi_import_execute
-    flow_openapi_changed_reimport
-    flow_openapi_unimport
-    flow_federation_import_execute
-    flow_federation_changed_reimport
-    flow_federation_unfriend
-    flow_fed_verify_receipt
-    flow_fed_all_receipt_checks
-    flow_fed_denial_unfriended
-    flow_fed_denial_underfunded
-    flow_fed_import_duty
-    flow_fed_failed_action_refund
-    flow_fed_gossip_discovery
-    flow_transaction_access
-    flow_admin_supervision
-    # NOTE: flow_make* are DELIBERATELY EXCLUDED from the default suite — they are
-    # slow (real TinyGo + live Ollama) and their value-correctness checks depend on
-    # nondeterministic local-LLM codegen. Run them on their own with JUICE_MAKE_FLOWS=1
-    # (see make_flows() above). DO NOT add flow_make* calls back into this list.
-    flow_time
-    flow_message
+    # User-facing CLI commands are HTTP clients now (§14), so each flow leaves a server
+    # running (bootstrap_kernel/start_serve). Run flows one at a time and tear down every
+    # server after each so long-lived servers don't accumulate and exhaust resources.
+    # NOTE: flow_make* are DELIBERATELY EXCLUDED — slow (real TinyGo + live Ollama) and
+    # nondeterministic; run them alone with JUICE_MAKE_FLOWS=1 (see make_flows()).
+    local flows=(
+        flow_bootstrap flow_local_auth flow_suspension flow_deposits
+        flow_action_lifecycle flow_action_owner_visibility flow_process_lifecycle
+        flow_acl_public flow_successful_paid_call flow_http_verbs flow_failed_call_refund
+        flow_input_schema_failure flow_output_schema_failure flow_wasm_execution
+        flow_contractor_subcall flow_contractor_failure flow_step_success flow_step_failure
+        flow_step_restart flow_locked_funds_recovery flow_rating flow_pkce_auth
+        flow_refresh_rotation flow_successful_receipt flow_failed_receipt flow_lookup
+        flow_chat flow_openapi_import_execute flow_openapi_changed_reimport
+        flow_openapi_unimport flow_federation_import_execute flow_federation_changed_reimport
+        flow_federation_unfriend flow_fed_verify_receipt flow_fed_all_receipt_checks
+        flow_fed_denial_unfriended flow_fed_denial_underfunded flow_fed_import_duty
+        flow_fed_failed_action_refund flow_fed_gossip_discovery flow_transaction_access
+        flow_admin_supervision flow_time flow_message
+    )
+    local f
+    for f in "${flows[@]}"; do
+        "$f"
+        stop_all_serves
+    done
 
     echo ""
     echo "Results: ${PASS} passed, ${FAIL} failed"

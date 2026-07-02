@@ -23,13 +23,11 @@ func init() {
 
 func loginCmd() *cobra.Command {
 	var password string
-	var usePKCE bool
-	var serverURL string
 	cmd := &cobra.Command{
 		Use:   "login <user>",
 		Short: "Log in and store a bearer token (user is @handle)",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			handle := args[0]
 			if password == "" {
 				p, err := promptPassword("Password: ")
@@ -38,35 +36,11 @@ func loginCmd() *cobra.Command {
 				}
 				password = p
 			}
-			if usePKCE && serverURL != "" {
-				return loginPKCE(handle, password, serverURL)
-			}
-			return loginDirect(handle, password)
+			return loginPKCE(handle, password, serverBaseURL())
 		},
 	}
 	cmd.Flags().StringVar(&password, "password", "", "Password (prompted if omitted)")
-	cmd.Flags().BoolVar(&usePKCE, "pkce", false, "Use PKCE authorization code flow")
-	cmd.Flags().StringVar(&serverURL, "server", "", "Juice server URL for PKCE flow (e.g. http://localhost:4040)")
 	return cmd
-}
-
-func loginDirect(handle, password string) error {
-	return withKernel(func(k *kernel.Kernel) error {
-		access, refresh, err := k.LoginWithRefresh(context.Background(), handle, password)
-		if err != nil {
-			return err
-		}
-		if err := saveToken(access); err != nil {
-			return fmt.Errorf("could not save token: %w", err)
-		}
-		if refresh != "" {
-			if err := saveRefreshToken(refresh); err != nil {
-				_ = err // non-fatal
-			}
-		}
-		fmt.Println("Logged in.")
-		return nil
-	})
 }
 
 // loginPKCE performs the authorization code + PKCE flow against a running juice server.
@@ -79,7 +53,7 @@ func loginPKCE(handle, password, server string) error {
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return fmt.Errorf("could not start loopback server: %w", err)
+		return kernel.ErrInternal.Wrapf("could not start loopback server: %v", err)
 	}
 	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", ln.Addr().(*net.TCPAddr).Port)
 
@@ -107,18 +81,18 @@ func loginPKCE(handle, password, server string) error {
 	})
 	resp, err := http.Post(strings.TrimRight(server, "/")+"/v1/auth/authorize", "application/json", bytes.NewReader(authBody))
 	if err != nil {
-		return fmt.Errorf("authorize request failed: %w", err)
+		return errUnreachable(server, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusFound {
-		return fmt.Errorf("server returned status %d", resp.StatusCode)
+		return kernel.ErrExecutionFailed.Wrapf("authorize failed: status %d", resp.StatusCode)
 	}
 
 	var code string
 	select {
 	case code = <-codeCh:
 	case <-time.After(30 * time.Second):
-		return fmt.Errorf("timed out waiting for authorization code")
+		return kernel.ErrTimeout.Wrap("timed out waiting for authorization code")
 	}
 
 	tokenBody, _ := json.Marshal(map[string]string{
@@ -129,7 +103,7 @@ func loginPKCE(handle, password, server string) error {
 	})
 	resp2, err := http.Post(strings.TrimRight(server, "/")+"/v1/auth/token", "application/json", bytes.NewReader(tokenBody))
 	if err != nil {
-		return fmt.Errorf("token exchange failed: %w", err)
+		return errUnreachable(server, err)
 	}
 	defer resp2.Body.Close()
 
@@ -138,18 +112,18 @@ func loginPKCE(handle, password, server string) error {
 		RefreshToken string `json:"refresh_token"`
 	}
 	if err := decodeJSON(resp2.Body, &tokenResp); err != nil {
-		return fmt.Errorf("decode token response: %w", err)
+		return kernel.ErrExecutionFailed.Wrapf("decode token response: %v", err)
 	}
 	if tokenResp.AccessToken == "" {
-		return fmt.Errorf("server did not return an access token")
+		return kernel.ErrExecutionFailed.Wrap("server did not return an access token")
 	}
 	if err := saveToken(tokenResp.AccessToken); err != nil {
-		return fmt.Errorf("could not save token: %w", err)
+		return kernel.ErrInternal.Wrapf("could not save token: %v", err)
 	}
 	if tokenResp.RefreshToken != "" {
 		_ = saveRefreshToken(tokenResp.RefreshToken)
 	}
-	fmt.Println("Logged in via PKCE.")
+	fmt.Println("Logged in.")
 	return nil
 }
 
@@ -159,10 +133,8 @@ func logoutCmd() *cobra.Command {
 		Short: "Revoke the stored refresh token and remove local credentials",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if rt, err := loadRefreshToken(); err == nil {
-				_ = withKernel(func(k *kernel.Kernel) error {
-					_ = k.RevokeRefreshToken(context.Background(), rt)
-					return nil
-				})
+				_ = apiCall(context.Background(), "POST", "/v1/auth/logout",
+					map[string]string{"refresh_token": rt}, nil)
 			}
 			if err := removeToken(); err != nil && !os.IsNotExist(err) {
 				return err
@@ -181,22 +153,24 @@ func refreshCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			rt, err := loadRefreshToken()
 			if err != nil {
-				return fmt.Errorf("no refresh token stored; run: juice auth login")
+				return kernel.ErrUnauthenticated.Wrap("no refresh token stored; run: juice auth login")
 			}
-			return withKernel(func(k *kernel.Kernel) error {
-				access, newRT, err := k.RefreshAccessToken(context.Background(), rt)
-				if err != nil {
-					return err
-				}
-				if err := saveToken(access); err != nil {
-					return err
-				}
-				if err := saveRefreshToken(newRT); err != nil {
-					return err
-				}
-				fmt.Println("Token refreshed.")
-				return nil
-			})
+			var out struct {
+				AccessToken  string `json:"access_token"`
+				RefreshToken string `json:"refresh_token"`
+			}
+			if err := apiCall(context.Background(), "POST", "/v1/auth/refresh",
+				map[string]string{"refresh_token": rt}, &out); err != nil {
+				return err
+			}
+			if err := saveToken(out.AccessToken); err != nil {
+				return err
+			}
+			if err := saveRefreshToken(out.RefreshToken); err != nil {
+				return err
+			}
+			fmt.Println("Token refreshed.")
+			return nil
 		},
 	}
 }

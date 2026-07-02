@@ -161,7 +161,7 @@ func adminDepositCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			amount, err := strconv.ParseInt(args[1], 10, 64)
 			if err != nil {
-				return fmt.Errorf("amount must be a positive integer")
+				return kernel.ErrInvalidInput.Wrap("amount must be a positive integer")
 			}
 			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
 				ctx := context.Background()
@@ -191,7 +191,7 @@ func adminWithdrawCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			amount, err := strconv.ParseInt(args[1], 10, 64)
 			if err != nil {
-				return fmt.Errorf("amount must be a positive integer")
+				return kernel.ErrInvalidInput.Wrap("amount must be a positive integer")
 			}
 			return withSuperuser(func(k *kernel.Kernel, subjectID string) error {
 				ctx := context.Background()
@@ -368,10 +368,10 @@ func peerInspectCmd() *cobra.Command {
 			// Fetch peer identity from well-known endpoint.
 			wkBody, status, err := doHTTP(ctx, http.MethodGet, base+"/.well-known/juice-kernel.json", nil, nil, 15*time.Second, allow)
 			if err != nil {
-				return fmt.Errorf("fetch well-known: %w", err)
+				return errUnreachable(base, err)
 			}
 			if status != http.StatusOK {
-				return fmt.Errorf("fetch well-known: status %d", status)
+				return kernel.ErrExecutionFailed.Wrapf("peer well-known returned status %d", status)
 			}
 			var wk struct {
 				Handle    string `json:"handle"`
@@ -379,7 +379,7 @@ func peerInspectCmd() *cobra.Command {
 				BaseURL   string `json:"base_url"`
 			}
 			if err := json.Unmarshal(wkBody, &wk); err != nil {
-				return fmt.Errorf("parse well-known: %w", err)
+				return kernel.ErrExecutionFailed.Wrapf("parse well-known: %v", err)
 			}
 			fp := wk.PublicKey
 			if len(fp) > 16 {
@@ -431,10 +431,10 @@ func peerFriendCmd() *cobra.Command {
 				// Fetch peer identity.
 				wkBody, status, err := doHTTP(ctx, http.MethodGet, base+"/.well-known/juice-kernel.json", nil, nil, 15*time.Second, allow)
 				if err != nil {
-					return fmt.Errorf("fetch well-known: %w", err)
+					return errUnreachable(base, err)
 				}
 				if status != http.StatusOK {
-					return fmt.Errorf("fetch well-known: status %d", status)
+					return kernel.ErrExecutionFailed.Wrapf("peer well-known returned status %d", status)
 				}
 				var wk struct {
 					Handle    string `json:"handle"`
@@ -442,13 +442,13 @@ func peerFriendCmd() *cobra.Command {
 					BaseURL   string `json:"base_url"`
 				}
 				if err := json.Unmarshal(wkBody, &wk); err != nil {
-					return fmt.Errorf("parse well-known: %w", err)
+					return kernel.ErrExecutionFailed.Wrapf("parse well-known: %v", err)
 				}
 
 				// Register peer locally (clears denial if previously denied).
 				u, err := k.CreateOrUpdateProxyPeer(ctx, wk.Handle, wk.PublicKey, wk.BaseURL)
 				if err != nil {
-					return fmt.Errorf("register peer locally: %w", err)
+					return err
 				}
 
 				// Send signed friend request to the peer's /v1/peers.

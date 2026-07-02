@@ -71,6 +71,9 @@ The step completer is identified by a user handle at creation time. The server r
 **C12 — Diagnostic output goes to stderr; resource data goes to stdout.**  
 Log lines, progress messages, and error text go to stderr. The only content written to stdout is the resource payload: human-readable summaries, `--json` bodies, and `--quiet` IDs. This makes every command pipeable and keeps `$(juice ... --quiet)` capture reliable.
 
+**C13 — User-facing commands are HTTP clients; admin/peer are local.**  
+Every command in the operation tables below runs by calling the server over HTTP; the base URL resolves from `--server`, then `JUICE_SERVER`, then `server_url` in config, defaulting to `http://localhost:4040`. `admin *` and `peer *` are CLI-only supervision with no HTTP routes and run in-process against local SQLite.
+
 ---
 
 ## Operation Reference

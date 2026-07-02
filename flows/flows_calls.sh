@@ -294,8 +294,7 @@ flow_successful_paid_call() {
 
     # Call with fee_bps=2000 → fee=20, net=80, gross=100
     local call_out tx_id
-    call_out=$(HOME="$home_bob" \
-        "$JUICE" --db "$db" --json run @alice/pay '{}' 2>/dev/null)
+    call_out=$(jj "$db" "$home_bob" run @alice/pay '{}')
     tx_id=$(strfield "$call_out" "tx_id")
     [ -n "$tx_id" ] \
         && ok "successful_paid_call.call_succeeded" \
@@ -410,7 +409,7 @@ flow_http_verbs() {
             --method "$verb" --source "http://127.0.0.1:${backend_port}/echo" \
             --price 0 --description "verb $verb")" "id")
         j "$db" "$home_alice" action enable "$aid" >/dev/null 2>&1
-        run_out=$(HOME="$home_alice" "$JUICE" --db "$db" --json run "@alice/v-$lname" '{"v":"x"}' 2>/dev/null)
+        run_out=$(jj "$db" "$home_alice" run "@alice/v-$lname" '{"v":"x"}')
         got_method=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get('method',''))" "$run_out" 2>/dev/null)
         got_v=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get('v',''))" "$run_out" 2>/dev/null)
         { [ "$got_method" = "$verb" ] && [ "$got_v" = "x" ]; } \

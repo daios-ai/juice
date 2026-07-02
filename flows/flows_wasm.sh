@@ -57,18 +57,23 @@ flow_wasm_execution() {
     j "$db" "$home_alice" action enable "$loop_id" >/dev/null 2>&1
     j "$db" "$home_alice" action update "$loop_id" --public >/dev/null 2>&1
 
-    local timeout_out
+    # Restart the server with a short script timeout so the infinite-loop WASM is killed
+    # quickly; the loop run then returns a timeout/execution error and is refunded. The CLI
+    # is an HTTP client now (§14), so the running server — not the next command — reads config.
+    local timeout_out addr serve_pid
     write_test_config "$db" "script_timeout_ms=200"
-    timeout_out=$(HOME="$home_bob" "$JUICE" --db "$db" run @alice/loop '{}' 2>&1)
+    addr="127.0.0.1:$port"
+    start_serve "$db" "$addr" syspass "$home_sys"
+    serve_pid=$SERVE_PID
+    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+
+    timeout_out=$(j "$db" "$home_bob" run @alice/loop '{}')
     echo "$timeout_out" | grep -qi "timeout\|timed\|execution" \
         && ok "wasm_execution.infinite_loop_timeout" \
         || fail "wasm_execution.infinite_loop_timeout" "expected timeout error, got: $timeout_out"
 
-    # HTTP: echo action callable via HTTP; bob has 200-10(CLI echo)=190 (loop timeout refunded)
-    addr="127.0.0.1:$port"
-    start_serve "$db" "$addr" syspass "$home_sys"
-    local serve_pid=$SERVE_PID
-    trap "rm -rf '$dir'; kill '$serve_pid' 2>/dev/null; wait '$serve_pid' 2>/dev/null" RETURN
+    # HTTP: echo action callable via HTTP; bob has 200-10(CLI echo)=190 (loop timeout refunded).
+    # The server is already running on $addr with the short-timeout config.
 
     local tok_resp alice_tok bob_tok
     tok_resp=$(curl -sf -X POST "http://$addr/v1/auth/token" \

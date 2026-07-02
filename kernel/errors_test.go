@@ -49,6 +49,20 @@ func TestKernelErrorIs(t *testing.T) {
 	}
 }
 
+func TestKernelErrorBecauseUnwrap(t *testing.T) {
+	cause := errors.New("dial tcp: connection refused")
+	e := ErrInvalidState.Wrap("cannot reach server").Because(cause)
+	if e.Error() != "cannot reach server" {
+		t.Errorf("Error() should show only the friendly message, got %q", e.Error())
+	}
+	if !errors.Is(e, ErrInvalidState) {
+		t.Error("Because must preserve the code for errors.Is")
+	}
+	if errors.Unwrap(e) != cause {
+		t.Error("Unwrap should return the attached cause")
+	}
+}
+
 func TestHTTPStatus(t *testing.T) {
 	cases := []struct {
 		err    error

@@ -47,21 +47,19 @@ _fed_setup() {
     j "$db_r" "$home_r" action enable "$action_id_r" >/dev/null 2>&1
     j "$db_r" "$home_r" action update "$action_id_r" --public >/dev/null 2>&1
 
-    # Start R's serve first. L's serve starts AFTER peer friend to avoid a race:
-    # R's async sendReciprocal goroutine would otherwise hit L's serve and call
-    # bulkImportPeerActions concurrently with the CLI, causing SQLite contention.
+    # Bring both kernels up on their flow ports. peer friend runs in-process against db_l
+    # while L's server is also up and R fires its async reciprocal at it — the concurrent
+    # proxy-user create is idempotent in the kernel, so no sequencing dance is needed.
     start_serve "$db_r" "127.0.0.1:$port_r" syspass "$home_r" \
         || { echo "_fed_setup: start_serve remote ($port_r) failed" >&2; return 1; }
     echo "$SERVE_PID" > "$dir/pid_r"
+    start_serve "$db_l" "127.0.0.1:$port_l" syspass "$home_l" \
+        || { echo "_fed_setup: start_serve local ($port_l) failed" >&2; return 1; }
+    echo "$SERVE_PID" > "$dir/pid_l"
 
-    # peer friend: R is up, L serve is not yet started. R creates @kernel-l, fires
-    # sendReciprocal to L (which fails silently — L isn't listening). CLI's own
-    # bulkImportPeerActions runs without competition and imports greet.
     j "$db_l" "$home_l" peer friend "http://127.0.0.1:$port_r" >/dev/null 2>&1 \
         || { echo "_fed_setup: peer friend L->R failed" >&2; return 1; }
-
-    local remote_handle="@kernel-r"
-    echo "$remote_handle" > "$dir/remote_handle"
+    echo "@kernel-r" > "$dir/remote_handle"
 
     # Resolve proxy action ID by name reference.
     local proxy_id
@@ -69,11 +67,6 @@ _fed_setup() {
         | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)
     [ -n "$proxy_id" ] || { echo "_fed_setup: proxy action not found after peer friend" >&2; return 1; }
     echo "$proxy_id" > "$dir/proxy_id"
-
-    # Now start L's serve (peer already established, no more race).
-    start_serve "$db_l" "127.0.0.1:$port_l" syspass "$home_l" \
-        || { echo "_fed_setup: start_serve local ($port_l) failed" >&2; return 1; }
-    echo "$SERVE_PID" > "$dir/pid_l"
 }
 
 _fed_teardown() {

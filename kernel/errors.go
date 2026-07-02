@@ -7,6 +7,7 @@ type KernelError struct {
 	Code    string
 	HTTP    int
 	Message string
+	cause   error // optional underlying error; hidden from Error(), exposed via Unwrap()
 }
 
 func (e *KernelError) Error() string {
@@ -15,6 +16,16 @@ func (e *KernelError) Error() string {
 	}
 	return e.Code
 }
+
+// Because attaches an underlying cause (e.g. a raw transport error) while keeping this
+// error's code, HTTP status, and message. The cause stays out of Error() but is reachable
+// via Unwrap(), so a verbose renderer can surface it without polluting the default message.
+func (e *KernelError) Because(cause error) *KernelError {
+	return &KernelError{Code: e.Code, HTTP: e.HTTP, Message: e.Message, cause: cause}
+}
+
+// Unwrap returns the attached cause, if any.
+func (e *KernelError) Unwrap() error { return e.cause }
 
 // Wrap returns a new KernelError with an attached message.
 func (e *KernelError) Wrap(msg string) *KernelError {

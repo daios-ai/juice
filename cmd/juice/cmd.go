@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
@@ -24,6 +27,28 @@ func printJSON(v any) error {
 	return nil
 }
 
+// printJSONBytes indents already-marshaled JSON in place. json.Indent preserves the
+// source field order (unlike unmarshal-then-MarshalIndent, which would alphabetize map
+// keys), so server responses print in their declared order.
+func printJSONBytes(b []byte) error {
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, b, "", "  "); err != nil {
+		fmt.Println(string(b)) // not an object/array; print verbatim
+		return nil
+	}
+	fmt.Println(buf.String())
+	return nil
+}
+
+// emitRaw prints a server JSON response, preserving field order: canonical indented
+// JSON with --json, else the human field view. The client analogue of emit.
+func emitRaw(b []byte) error {
+	if flagJSON {
+		return printJSONBytes(b)
+	}
+	return printTextBytes(b)
+}
+
 // printText renders v as a complete, human-readable view of the SAME object the HTTP
 // API serializes. It marshals v to JSON, then prints one "key: value" line per
 // top-level field in declaration order; scalar values are printed plainly and
@@ -35,13 +60,20 @@ func printText(v any) error {
 	if err != nil {
 		return err
 	}
+	return printTextBytes(b)
+}
+
+// printTextBytes renders already-marshaled JSON bytes as the human view, preserving
+// the source field order (so server responses print in their declared order, not
+// alphabetized). See printText for the field-view contract.
+func printTextBytes(b []byte) error {
 	// Non-object top levels (arrays, scalars) have no labeled fields; print as JSON.
 	trimmed := b
 	for len(trimmed) > 0 && (trimmed[0] == ' ' || trimmed[0] == '\n' || trimmed[0] == '\t') {
 		trimmed = trimmed[1:]
 	}
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return printJSON(v)
+		return printJSONBytes(b)
 	}
 	// Re-decode preserving field order via the JSON object's marshaled byte order.
 	dec := json.NewDecoder(bytes.NewReader(b))
@@ -65,7 +97,7 @@ func printText(v any) error {
 }
 
 // renderValue formats one JSON value for text output: strings unquoted, objects and
-// arrays as compact JSON, everything else as-is.
+// arrays as indented JSON, everything else as-is.
 func renderValue(raw json.RawMessage) string {
 	r := []byte(raw)
 	for len(r) > 0 && (r[0] == ' ' || r[0] == '\n' || r[0] == '\t') {
@@ -81,11 +113,11 @@ func renderValue(raw json.RawMessage) string {
 		}
 	}
 	if r[0] == '{' || r[0] == '[' {
-		var buf interface{}
-		if err := json.Unmarshal(raw, &buf); err == nil {
-			if compact, err := json.Marshal(buf); err == nil {
-				return string(compact)
-			}
+		// Indent nested objects/arrays; the "  " prefix keeps continuation lines and the
+		// closing bracket aligned under the "  key:" label. json.Indent preserves key order.
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, raw, "  ", "  "); err == nil {
+			return buf.String()
 		}
 	}
 	return string(r)
@@ -123,16 +155,8 @@ func userCreateCmd() *cobra.Command {
 				}
 				password = p
 			}
-			return withKernel(func(k *kernel.Kernel) error {
-				view, err := createUser(k, context.Background(), kernel.CreateUserRequest{
-					Handle:   user,
-					Email:    email,
-					Password: password,
-				})
-				if err != nil {
-					return err
-				}
-				return emit(view)
+			return apiEmit("POST", "/v1/users", map[string]any{
+				"handle": user, "email": email, "password": password,
 			})
 		},
 	}
@@ -146,13 +170,7 @@ func userMeCmd() *cobra.Command {
 		Short: "Show the authenticated user's profile",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				view, err := getMe(k, context.Background(), callerID)
-				if err != nil {
-					return err
-				}
-				return emit(view)
-			})
+			return apiEmit("GET", "/v1/me", nil)
 		},
 	}
 }
@@ -166,7 +184,7 @@ func userUpdateCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if email == "" && !changePassword {
-				return fmt.Errorf("at least one of --email or --password must be specified")
+				return kernel.ErrInvalidInput.Wrap("at least one of --email or --password must be specified")
 			}
 			var currentPassword, newPassword string
 			if changePassword {
@@ -178,13 +196,15 @@ func userUpdateCmd() *cobra.Command {
 					return err
 				}
 			}
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				view, err := updateMe(k, context.Background(), callerID, email, currentPassword, newPassword)
-				if err != nil {
-					return err
-				}
-				return emit(view)
-			})
+			body := map[string]any{}
+			if email != "" {
+				body["email"] = email
+			}
+			if changePassword {
+				body["current_password"] = currentPassword
+				body["password"] = newPassword
+			}
+			return apiEmit("PUT", "/v1/me", body)
 		},
 	}
 	cmd.Flags().StringVar(&email, "email", "", "New email address")
@@ -222,71 +242,75 @@ func actionCreateCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				inputSchema := map[string]any{}
-				if inputSchemaStr != "" {
-					if err := unmarshalJSONArg(inputSchemaStr, &inputSchema); err != nil {
-						return fmt.Errorf("invalid --input-schema: %w", err)
+			inputSchema := map[string]any{}
+			if inputSchemaStr != "" {
+				if err := unmarshalJSONArg(inputSchemaStr, &inputSchema); err != nil {
+					return kernel.ErrInvalidInput.Wrapf("invalid --input-schema: %v", err)
+				}
+			}
+			outputSchema := map[string]any{}
+			if outputSchemaStr != "" {
+				if err := unmarshalJSONArg(outputSchemaStr, &outputSchema); err != nil {
+					return kernel.ErrInvalidInput.Wrapf("invalid --output-schema: %v", err)
+				}
+			}
+			var auth *kernel.AuthInput
+			if authStr != "" {
+				auth = &kernel.AuthInput{}
+				if err := unmarshalJSONArg(authStr, auth); err != nil {
+					return kernel.ErrInvalidInput.Wrapf("invalid --auth: %v", err)
+				}
+			}
+			srcData := source
+			if source != "" {
+				if _, err := os.Stat(source); err == nil {
+					data, err := os.ReadFile(source)
+					if err != nil {
+						return kernel.ErrInvalidInput.Wrapf("reading source file: %v", err)
 					}
+					srcData = string(data)
 				}
-				outputSchema := map[string]any{}
-				if outputSchemaStr != "" {
-					if err := unmarshalJSONArg(outputSchemaStr, &outputSchema); err != nil {
-						return fmt.Errorf("invalid --output-schema: %w", err)
+			}
+			// --artifact carries a pre-compiled base64 WASM artifact (e.g. the
+			// output of @sys/tinygo/compile); a file path is read for its contents.
+			artData := artifact
+			if artifact != "" {
+				if _, err := os.Stat(artifact); err == nil {
+					data, err := os.ReadFile(artifact)
+					if err != nil {
+						return kernel.ErrInvalidInput.Wrapf("reading artifact file: %v", err)
 					}
+					artData = strings.TrimSpace(string(data))
 				}
-				var auth *kernel.AuthInput
-				if authStr != "" {
-					auth = &kernel.AuthInput{}
-					if err := unmarshalJSONArg(authStr, auth); err != nil {
-						return fmt.Errorf("invalid --auth: %w", err)
-					}
+			}
+			httpParams, err := parseParams(params)
+			if err != nil {
+				return err
+			}
+			// A compiled WASM module is binary and cannot ride losslessly in a JSON string
+			// (invalid UTF-8 is replaced with U+FFFD). Route a binary wasm source through the
+			// base64 wasm_artifact field instead; TinyGo text source stays in source.
+			if kind == "wasm" && srcData != "" && !utf8.ValidString(srcData) {
+				if artData == "" {
+					artData = base64.StdEncoding.EncodeToString([]byte(srcData))
 				}
-				srcData := source
-				if source != "" {
-					if _, err := os.Stat(source); err == nil {
-						data, err := os.ReadFile(source)
-						if err != nil {
-							return fmt.Errorf("reading source file: %w", err)
-						}
-						srcData = string(data)
-					}
-				}
-				// --artifact carries a pre-compiled base64 WASM artifact (e.g. the
-				// output of @sys/tinygo/compile); a file path is read for its contents.
-				artData := artifact
-				if artifact != "" {
-					if _, err := os.Stat(artifact); err == nil {
-						data, err := os.ReadFile(artifact)
-						if err != nil {
-							return fmt.Errorf("reading artifact file: %w", err)
-						}
-						artData = strings.TrimSpace(string(data))
-					}
-				}
-				httpParams, err := parseParams(params)
-				if err != nil {
-					return err
-				}
-				a, err := createAction(k, context.Background(), callerID, kernel.CreateActionRequest{
-					OwnerUserID:  callerID,
-					Name:         name,
-					Kind:         kernel.ActionKind(kind),
-					Price:        price,
-					Description:  description,
-					InputSchema:  inputSchema,
-					OutputSchema: outputSchema,
-					Source:       srcData,
-					Method:       method,
-					Params:       httpParams,
-					WasmArtifact: artData,
-					Auth:         auth,
-				})
-				if err != nil {
-					return err
-				}
-				return emit(a)
-			})
+				srcData = ""
+			}
+			body := map[string]any{
+				"name": name, "kind": kind, "price": price, "description": description,
+				"input_schema": inputSchema, "output_schema": outputSchema,
+				"source": srcData, "wasm_artifact": artData,
+			}
+			if method != "" {
+				body["method"] = method
+			}
+			if len(httpParams) > 0 {
+				body["params"] = httpParams
+			}
+			if auth != nil {
+				body["auth"] = auth
+			}
+			return apiEmit("POST", "/v1/actions", body)
 		},
 	}
 	cmd.Flags().StringVar(&kind, "kind", "http", "Action kind: http, wasm, native")
@@ -313,61 +337,56 @@ func actionUpdateCmd() *cobra.Command {
 		Short: "Update an action's metadata (action is @owner/name or an id)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				a0, err := resolveActionRef(k, context.Background(), args[0])
+			ctx := context.Background()
+			id, err := resolveActionID(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			req := map[string]any{}
+			if c.Flags().Changed("description") {
+				req["description"] = description
+			}
+			if c.Flags().Changed("source") {
+				req["source"] = source
+			}
+			if c.Flags().Changed("method") {
+				req["method"] = method
+			}
+			if c.Flags().Changed("param") {
+				httpParams, err := parseParams(params)
 				if err != nil {
 					return err
 				}
-				req := kernel.UpdateActionRequest{ID: a0.ID}
-				if c.Flags().Changed("description") {
-					req.Description = &description
+				req["params"] = httpParams
+			}
+			if c.Flags().Changed("price") {
+				req["price"] = price
+			}
+			if c.Flags().Changed("public") {
+				req["public"] = public
+			}
+			if inputSchemaStr != "" {
+				m := map[string]any{}
+				if err := unmarshalJSONArg(inputSchemaStr, &m); err != nil {
+					return kernel.ErrInvalidInput.Wrapf("invalid --input-schema: %v", err)
 				}
-				if c.Flags().Changed("source") {
-					req.Source = &source
+				req["input_schema"] = m
+			}
+			if outputSchemaStr != "" {
+				m := map[string]any{}
+				if err := unmarshalJSONArg(outputSchemaStr, &m); err != nil {
+					return kernel.ErrInvalidInput.Wrapf("invalid --output-schema: %v", err)
 				}
-				if c.Flags().Changed("method") {
-					req.Method = &method
+				req["output_schema"] = m
+			}
+			if c.Flags().Changed("auth") {
+				auth := &kernel.AuthInput{}
+				if err := unmarshalJSONArg(authStr, auth); err != nil {
+					return kernel.ErrInvalidInput.Wrapf("invalid --auth: %v", err)
 				}
-				if c.Flags().Changed("param") {
-					httpParams, err := parseParams(params)
-					if err != nil {
-						return err
-					}
-					req.Params = &httpParams
-				}
-				if c.Flags().Changed("price") {
-					req.Price = &price
-				}
-				if c.Flags().Changed("public") {
-					req.Public = &public
-				}
-				if inputSchemaStr != "" {
-					m := map[string]any{}
-					if err := unmarshalJSONArg(inputSchemaStr, &m); err != nil {
-						return fmt.Errorf("invalid --input-schema: %w", err)
-					}
-					req.InputSchema = m
-				}
-				if outputSchemaStr != "" {
-					m := map[string]any{}
-					if err := unmarshalJSONArg(outputSchemaStr, &m); err != nil {
-						return fmt.Errorf("invalid --output-schema: %w", err)
-					}
-					req.OutputSchema = m
-				}
-				if c.Flags().Changed("auth") {
-					auth := &kernel.AuthInput{}
-					if err := unmarshalJSONArg(authStr, auth); err != nil {
-						return fmt.Errorf("invalid --auth: %w", err)
-					}
-					req.Auth = auth
-				}
-				a, err := updateAction(k, context.Background(), callerID, req)
-				if err != nil {
-					return err
-				}
-				return emit(a)
-			})
+				req["auth"] = auth
+			}
+			return apiEmit("PUT", "/v1/actions/"+id, req)
 		},
 	}
 	cmd.Flags().StringVar(&description, "description", "", "New description")
@@ -388,20 +407,19 @@ func actionEnableCmd() *cobra.Command {
 		Short: "Activate an action (action is @owner/name or an id)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				a, err := resolveActionRef(k, context.Background(), args[0])
-				if err != nil {
-					return err
-				}
-				if err := enableAction(k, context.Background(), callerID, a.ID); err != nil {
-					return err
-				}
-				if flagJSON {
-					return printJSON(map[string]bool{"active": true})
-				}
-				fmt.Printf("Action %s enabled.\n", args[0])
-				return nil
-			})
+			ctx := context.Background()
+			id, err := resolveActionID(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			if err := apiCall(ctx, "POST", "/v1/actions/"+id+"/enable", nil, nil); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(map[string]bool{"active": true})
+			}
+			fmt.Printf("Action %s enabled.\n", args[0])
+			return nil
 		},
 	}
 }
@@ -412,20 +430,19 @@ func actionDisableCmd() *cobra.Command {
 		Short: "Deactivate an action (action is @owner/name or an id)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				a, err := resolveActionRef(k, context.Background(), args[0])
-				if err != nil {
-					return err
-				}
-				if err := disableAction(k, context.Background(), callerID, a.ID); err != nil {
-					return err
-				}
-				if flagJSON {
-					return printJSON(map[string]bool{"active": false})
-				}
-				fmt.Printf("Action %s disabled.\n", args[0])
-				return nil
-			})
+			ctx := context.Background()
+			id, err := resolveActionID(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			if err := apiCall(ctx, "POST", "/v1/actions/"+id+"/disable", nil, nil); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(map[string]bool{"active": false})
+			}
+			fmt.Printf("Action %s disabled.\n", args[0])
+			return nil
 		},
 	}
 }
@@ -438,38 +455,42 @@ func actionListCmd() *cobra.Command {
 		Short: "List actions",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if all {
-				return withCaller(func(k *kernel.Kernel, callerID string) error {
-					actions, err := listOwnedActions(k, context.Background(), callerID, limit, offset)
-					if err != nil {
-						return err
-					}
-					if flagJSON {
-						return printJSON(actions)
-					}
-					for _, a := range actions {
-						active := " "
-						if a.Active {
-							active = "*"
-						}
-						fmt.Printf("[%s] %s  %-30s  %d credits\n", active, a.ActionRef, a.Name, a.Price)
-					}
-					return nil
-				})
+			ctx := context.Background()
+			q := url.Values{}
+			if limit > 0 {
+				q.Set("limit", strconv.Itoa(limit))
 			}
-			return withKernel(func(k *kernel.Kernel) error {
-				actions, err := listPublicActions(k, context.Background(), "", "", "", limit, offset)
+			if offset > 0 {
+				q.Set("offset", strconv.Itoa(offset))
+			}
+			// --all lists the caller's own actions regardless of active/public via the
+			// self-owner filter (§3); it needs the caller's handle.
+			if all {
+				h, err := currentHandle(ctx)
 				if err != nil {
 					return err
 				}
-				if flagJSON {
-					return printJSON(actions)
-				}
-				for _, a := range actions {
+				q.Set("owner", h)
+			}
+			var actions []actionResp
+			if err := apiCall(ctx, "GET", "/v1/actions?"+q.Encode(), nil, &actions); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(actions)
+			}
+			for _, a := range actions {
+				if all {
+					active := " "
+					if a.Active {
+						active = "*"
+					}
+					fmt.Printf("[%s] %s  %-30s  %d credits\n", active, a.ActionRef, a.Name, a.Price)
+				} else {
 					fmt.Printf("  %-24s  %d credits\n", a.ActionRef, a.Price)
 				}
-				return nil
-			})
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Include own inactive/private actions (requires auth)")
@@ -484,17 +505,12 @@ func actionShowCmd() *cobra.Command {
 		Short: "Show action details, including input/output schemas (action is @owner/name or an id)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				a0, err := resolveActionRef(k, context.Background(), args[0])
-				if err != nil {
-					return err
-				}
-				a, err := getAction(k, context.Background(), callerID, a0.ID)
-				if err != nil {
-					return err
-				}
-				return emit(a)
-			})
+			ctx := context.Background()
+			id, err := resolveActionID(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			return apiEmit("GET", "/v1/actions/"+id, nil)
 		},
 	}
 }
@@ -505,17 +521,16 @@ func actionDeleteCmd() *cobra.Command {
 		Short: "Delete an action, preserving history (action is @owner/name or an id)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				a, err := resolveActionRef(k, context.Background(), args[0])
-				if err != nil {
-					return err
-				}
-				if err := deleteAction(k, context.Background(), callerID, a.ID); err != nil {
-					return err
-				}
-				fmt.Printf("Action %s deleted.\n", args[0])
-				return nil
-			})
+			ctx := context.Background()
+			id, err := resolveActionID(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			if err := apiCall(ctx, "DELETE", "/v1/actions/"+id, nil, nil); err != nil {
+				return err
+			}
+			fmt.Printf("Action %s deleted.\n", args[0])
+			return nil
 		},
 	}
 }
@@ -527,27 +542,21 @@ func actionImportCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			specURL := args[0]
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				allowLocal := os.Getenv("JUICE_ALLOW_LOCAL_SOURCES") == "true"
-				specBytes, err := fetchOpenAPISpec(context.Background(), specURL, allowLocal)
-				if err != nil {
-					return err
-				}
-				result, err := k.ImportOpenAPI(context.Background(), callerID, callerID, specURL, specBytes)
-				if err != nil {
-					return err
-				}
-				if flagJSON {
-					return printJSON(result)
-				}
-				fmt.Printf("created=%d unchanged=%d updated=%d deactivated=%d rejected=%d\n",
-					len(result.Created), len(result.Unchanged), len(result.Updated),
-					len(result.Deactivated), len(result.Rejected))
-				for _, r := range result.Rejected {
-					fmt.Printf("  rejected %s: %s\n", r.Key, r.Reason)
-				}
-				return nil
-			})
+			var result kernel.ImportResult
+			if err := apiCall(context.Background(), "POST", "/v1/actions/import",
+				map[string]any{"spec_url": specURL}, &result); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(result)
+			}
+			fmt.Printf("created=%d unchanged=%d updated=%d deactivated=%d rejected=%d\n",
+				len(result.Created), len(result.Unchanged), len(result.Updated),
+				len(result.Deactivated), len(result.Rejected))
+			for _, r := range result.Rejected {
+				fmt.Printf("  rejected %s: %s\n", r.Key, r.Reason)
+			}
+			return nil
 		},
 	}
 	return cmd
@@ -561,17 +570,19 @@ func actionUnimportCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			specURL := args[0]
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				actions, err := k.UnimportOpenAPI(context.Background(), callerID, callerID, specURL, name)
-				if err != nil {
-					return err
-				}
-				if flagJSON {
-					return printJSON(actions)
-				}
-				fmt.Printf("deactivated %d action(s)\n", len(actions))
-				return nil
-			})
+			body := map[string]any{"spec_url": specURL}
+			if name != "" {
+				body["name"] = name
+			}
+			var actions []actionResp
+			if err := apiCall(context.Background(), "POST", "/v1/actions/unimport", body, &actions); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(actions)
+			}
+			fmt.Printf("deactivated %d action(s)\n", len(actions))
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "Deactivate only the action with this name or operation_key")
@@ -584,24 +595,23 @@ func actionStatsCmd() *cobra.Command {
 		Short: "Show statistics for an action (action is @owner/name or an id)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return withKernel(func(k *kernel.Kernel) error {
-				a, err := resolveActionRef(k, context.Background(), args[0])
-				if err != nil {
-					return err
+			ctx := context.Background()
+			id, err := resolveActionID(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			var raw json.RawMessage
+			if err := apiCall(ctx, "GET", "/v1/stats/"+id, nil, &raw); err != nil {
+				return err
+			}
+			if len(raw) == 0 || string(raw) == "null" {
+				if flagJSON {
+					return printJSON(nil)
 				}
-				stats, err := actionStats(k, context.Background(), a.ID)
-				if err != nil {
-					return err
-				}
-				if stats == nil {
-					if flagJSON {
-						return printJSON(nil)
-					}
-					fmt.Println("No statistics yet.")
-					return nil
-				}
-				return emit(stats)
-			})
+				fmt.Println("No statistics yet.")
+				return nil
+			}
+			return emitRaw(raw)
 		},
 	}
 }
@@ -620,20 +630,18 @@ func processListCmd() *cobra.Command {
 		Short: "List processes owned by the current user",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				processes, err := listProcesses(k, context.Background(), callerID, 100, 0)
-				if err != nil {
-					return err
-				}
-				if flagJSON {
-					return printJSON(processes)
-				}
-				for _, p := range processes {
-					fmt.Printf("%s  %-6s  available:%-6d  locked:%-6d\n",
-						p.ID, p.Status, p.Available, p.Locked)
-				}
-				return nil
-			})
+			var processes []*kernel.Process
+			if err := apiCall(context.Background(), "GET", "/v1/processes", nil, &processes); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(processes)
+			}
+			for _, p := range processes {
+				fmt.Printf("%s  %-6s  available:%-6d  locked:%-6d\n",
+					p.ID, p.Status, p.Available, p.Locked)
+			}
+			return nil
 		},
 	}
 }
@@ -644,13 +652,11 @@ func processEndCmd() *cobra.Command {
 		Short: "End a process and return remaining funds",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				if err := endProcess(k, context.Background(), callerID, args[0]); err != nil {
-					return err
-				}
-				fmt.Printf("Process %s ended.\n", args[0])
-				return nil
-			})
+			if err := apiCall(context.Background(), "POST", "/v1/processes/"+args[0]+"/end", nil, nil); err != nil {
+				return err
+			}
+			fmt.Printf("Process %s ended.\n", args[0])
+			return nil
 		},
 	}
 }
@@ -661,13 +667,7 @@ func processShowCmd() *cobra.Command {
 		Short: "Show process details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				p, err := getProcess(k, context.Background(), callerID, args[0])
-				if err != nil {
-					return err
-				}
-				return emit(p)
-			})
+			return apiEmit("GET", "/v1/processes/"+args[0], nil)
 		},
 	}
 }
@@ -688,32 +688,30 @@ func stepCreateCmd() *cobra.Command {
 		Short: "Create a step (pause point for external completion; action is @owner/name)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				ctx := context.Background()
-
-				var pa json.RawMessage
-				if partialArgs != "" {
-					var err error
-					if pa, err = loadJSONArg(partialArgs); err != nil {
-						return fmt.Errorf("invalid --partial-args: %w", err)
-					}
+			pa := json.RawMessage("{}")
+			if partialArgs != "" {
+				var err error
+				if pa, err = loadJSONArg(partialArgs); err != nil {
+					return kernel.ErrInvalidInput.Wrapf("invalid --partial-args: %v", err)
 				}
-
-				view, err := createStep(k, ctx, callerID, createStepParams{
-					TraceID:        traceID,
-					ActionRef:      args[0],
-					RequiredCaller: requiredCaller,
-					PartialArgs:    pa,
-				})
-				if err != nil {
+			}
+			body := map[string]any{
+				"trace_id":        traceID,
+				"action_id":       args[0], // @owner/name or id; the server resolves it
+				"required_caller": requiredCaller,
+				"partial_args":    pa,
+			}
+			if flagQuiet {
+				var view struct {
+					ID string `json:"id"`
+				}
+				if err := apiCall(context.Background(), "POST", "/v1/steps", body, &view); err != nil {
 					return err
 				}
-				if flagQuiet {
-					fmt.Println(view.ID)
-					return nil
-				}
-				return emit(view)
-			})
+				fmt.Println(view.ID)
+				return nil
+			}
+			return apiEmit("POST", "/v1/steps", body)
 		},
 	}
 	cmd.Flags().StringVar(&traceID, "trace", "", "Trace ID (required)")
@@ -731,19 +729,24 @@ func stepListCmd() *cobra.Command {
 		Short: "List steps visible to the current user",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				steps, err := listSteps(k, context.Background(), callerID, processID, status)
-				if err != nil {
-					return err
-				}
-				if flagJSON {
-					return printJSON(steps)
-				}
-				for _, s := range steps {
-					fmt.Printf("%s  %-7s  %s\n", s.ID, s.Status, s.Action)
-				}
-				return nil
-			})
+			q := url.Values{}
+			if processID != "" {
+				q.Set("process_id", processID)
+			}
+			if status != "" {
+				q.Set("status", status)
+			}
+			var steps []stepWithAction
+			if err := apiCall(context.Background(), "GET", "/v1/steps?"+q.Encode(), nil, &steps); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(steps)
+			}
+			for _, s := range steps {
+				fmt.Printf("%s  %-7s  %s\n", s.ID, s.Status, s.Action)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
@@ -757,13 +760,7 @@ func stepShowCmd() *cobra.Command {
 		Short: "Show step details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				step, err := getStep(k, context.Background(), callerID, args[0])
-				if err != nil {
-					return err
-				}
-				return emit(step)
-			})
+			return apiEmit("GET", "/v1/steps/"+args[0], nil)
 		},
 	}
 }
@@ -774,25 +771,28 @@ func stepCompleteCmd() *cobra.Command {
 		Short: "Complete a waiting step (json is the input object, default {})",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				raw := ""
-				if len(args) == 2 {
-					raw = args[1]
+			raw := ""
+			if len(args) == 2 {
+				raw = args[1]
+			}
+			input, err := loadJSONArg(raw)
+			if err != nil {
+				return kernel.ErrInvalidInput.Wrapf("invalid input: %v", err)
+			}
+			var reply json.RawMessage
+			if err := apiCall(context.Background(), "POST", "/v1/steps/"+args[0]+"/complete",
+				map[string]any{"args": input}, &reply); err != nil {
+				return err
+			}
+			if flagQuiet {
+				var r struct {
+					TxID string `json:"tx_id"`
 				}
-				input, err := loadJSONArg(raw)
-				if err != nil {
-					return fmt.Errorf("invalid input: %w", err)
-				}
-				reply, err := completeStep(k, context.Background(), callerID, args[0], input)
-				if err != nil {
-					return err
-				}
-				if flagQuiet {
-					fmt.Println(reply.TxID)
-					return nil
-				}
-				return emit(reply)
-			})
+				_ = json.Unmarshal(reply, &r)
+				fmt.Println(r.TxID)
+				return nil
+			}
+			return emitRaw(reply)
 		},
 	}
 	return cmd
@@ -814,25 +814,29 @@ func txListCmd() *cobra.Command {
 		Short: "List transactions",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				txs, err := listTransactions(k, context.Background(), callerID, kernel.TxFilter{
-					ProcessID: processID,
-					Limit:     limit,
-					Offset:    offset,
-				})
-				if err != nil {
-					return err
-				}
-				if flagJSON {
-					return printJSON(txs)
-				}
-				for _, tx := range txs {
-					fmt.Printf("[%s] %s  status:%s  gross:%d\n",
-						tx.StartedAt.Format("2006-01-02T15:04:05"),
-						tx.ID, tx.Status, tx.Gross)
-				}
-				return nil
-			})
+			q := url.Values{}
+			if processID != "" {
+				q.Set("process_id", processID)
+			}
+			if limit > 0 {
+				q.Set("limit", strconv.Itoa(limit))
+			}
+			if offset > 0 {
+				q.Set("offset", strconv.Itoa(offset))
+			}
+			var txs []*kernel.TransactionView
+			if err := apiCall(context.Background(), "GET", "/v1/transactions?"+q.Encode(), nil, &txs); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(txs)
+			}
+			for _, tx := range txs {
+				fmt.Printf("[%s] %s  status:%s  gross:%d\n",
+					tx.StartedAt.Format("2006-01-02T15:04:05"),
+					tx.ID, tx.Status, tx.Gross)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
@@ -847,13 +851,7 @@ func txShowCmd() *cobra.Command {
 		Short: "Show a transaction",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				tv, err := getTransaction(k, context.Background(), callerID, args[0])
-				if err != nil {
-					return err
-				}
-				return emit(tv)
-			})
+			return apiEmit("GET", "/v1/transactions/"+args[0], nil)
 		},
 	}
 }
@@ -864,13 +862,7 @@ func txVerifyReceiptCmd() *cobra.Command {
 		Short: "Verify the remote receipt for a transaction",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				v, err := verifyReceipt(k, context.Background(), callerID, args[0])
-				if err != nil {
-					return err
-				}
-				return emit(v)
-			})
+			return apiEmit("GET", "/v1/transactions/"+args[0]+"/receipt-verification", nil)
 		},
 	}
 }
@@ -884,19 +876,13 @@ func txRateCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			rating, err := strconv.ParseFloat(args[1], 64)
 			if err != nil {
-				return fmt.Errorf("rating must be 0 or 1")
+				return kernel.ErrInvalidInput.Wrap("rating must be 0 or 1")
 			}
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				var notePtr *string
-				if note != "" {
-					notePtr = &note
-				}
-				r, err := rateTransaction(k, context.Background(), callerID, args[0], rating, notePtr)
-				if err != nil {
-					return err
-				}
-				return emit(r)
-			})
+			body := map[string]any{"rating": rating}
+			if note != "" {
+				body["note"] = note
+			}
+			return apiEmit("POST", "/v1/transactions/"+args[0]+"/rate", body)
 		},
 	}
 	cmd.Flags().StringVar(&note, "note", "", "Optional justification note")
@@ -915,25 +901,28 @@ func runCmd() *cobra.Command {
 		Short: "Run an action (creates a process, calls the action, closes the process)",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, cmdArgs []string) error {
-			return withCaller(func(k *kernel.Kernel, callerID string) error {
-				argsStr := "{}"
-				if len(cmdArgs) == 2 && cmdArgs[1] != "" {
-					argsStr = cmdArgs[1]
+			argsStr := "{}"
+			if len(cmdArgs) == 2 && cmdArgs[1] != "" {
+				argsStr = cmdArgs[1]
+			}
+			args, err := readJSONArg(argsStr)
+			if err != nil {
+				return kernel.ErrInvalidInput.Wrapf("invalid args: %v", err)
+			}
+			var raw json.RawMessage
+			if err := apiCall(context.Background(), "POST", "/v1/run",
+				map[string]any{"action": cmdArgs[0], "args": args}, &raw); err != nil {
+				return err
+			}
+			if flagQuiet {
+				var r struct {
+					TxID string `json:"tx_id"`
 				}
-				args, err := readJSONArg(argsStr)
-				if err != nil {
-					return fmt.Errorf("invalid args: %w", err)
-				}
-				reply, err := run(k, context.Background(), callerID, cmdArgs[0], args)
-				if err != nil {
-					return err
-				}
-				if flagQuiet {
-					fmt.Println(reply.TxID)
-					return nil
-				}
-				return emit(reply)
-			})
+				_ = json.Unmarshal(raw, &r)
+				fmt.Println(r.TxID)
+				return nil
+			}
+			return emitRaw(raw)
 		},
 	}
 	return cmd

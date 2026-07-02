@@ -481,6 +481,13 @@ func (k *Kernel) CreateOrUpdateProxyPeer(ctx context.Context, handle, publicKey,
 		UpdatedAt:     now,
 	}
 	if err := k.store.CreateProxyUser(ctx, u); err != nil {
+		// A friend and its reciprocal can both pass the existence check above and race to
+		// create the same proxy user (CLI + server both writing this DB); the loser hits a
+		// unique-key conflict. Treat that as idempotent success: re-read by public key and
+		// return the row the winner created, rather than surfacing the conflict.
+		if winner, rerr := k.store.ReadUserByPublicKey(ctx, publicKey); rerr == nil && winner != nil {
+			return winner, nil
+		}
 		return nil, err
 	}
 	k.log.With(ctx).Info("peer.created", "handle", resolvedHandle, "base_url", baseURL)

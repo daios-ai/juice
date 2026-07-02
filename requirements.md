@@ -650,9 +650,9 @@ Inbound: calls sign `JCS({action, counterparty, idempotency_key, timestamp, args
 
 ## 14. CLI, HTTP, logging, config
 
-HTTP API is primary. Every exposed endpoint has a CLI command. CLI uses the same service layer, supports human-readable and JSON output, works directly against local SQLite where feasible, and each command has at least one test. Admin is CLI-only. A command's primary identifier is a positional argument by its natural key — a user is `@handle` (never an id), an action is `@owner/name` (an id is also accepted), and processes, steps, and transactions are ids; a second mandatory value (amount, rating) is the second positional. CLI human-readable output exposes the same fields as the corresponding HTTP response; `--json` selects the canonical JSON form (the HTTP shape).
+HTTP API is primary. Every exposed endpoint has a CLI command. CLI uses the same service layer, supports human-readable and JSON output, and each command has at least one test. User-facing commands are HTTP clients of the server (base URL from `--server`/`JUICE_SERVER`/`server_url`); admin and peer commands are CLI-only and run locally against SQLite. A command's primary identifier is a positional argument by its natural key — a user is `@handle` (never an id), an action is `@owner/name` (an id is also accepted), and processes, steps, and transactions are ids; a second mandatory value (amount, rating) is the second positional. CLI human-readable output exposes the same fields as the corresponding HTTP response; `--json` selects the canonical JSON form (the HTTP shape).
 
-CLI handlers and HTTP handlers are thin wires: parse input, call the service layer, format output. All kernel calls, enrichment, validation, and transformation live in the service layer. No kernel calls outside the service layer.
+CLI handlers and HTTP handlers are thin wires: parse input, call the service layer (admin/peer) or the HTTP API (user-facing commands), format output. All kernel calls, enrichment, validation, and transformation live in the service layer. No kernel calls outside the service layer.
 
 Required commands:
 

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,14 +35,20 @@ var rootCmd = &cobra.Command{
 	Use:     "juice",
 	Short:   "Juice kernel — callable action platform",
 	Version: version + " (" + commit + ")",
+	// main() is the single error renderer (renderError): don't let cobra also print the
+	// error and dump the usage block on a runtime failure.
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 // Global flags.
 var (
-	flagDB     string
-	flagConfig string
-	flagJSON   bool
-	flagQuiet  bool
+	flagDB      string
+	flagConfig  string
+	flagJSON    bool
+	flagQuiet   bool
+	flagServer  string
+	flagVerbose bool
 )
 
 // globalCfg is populated from the config file before any command runs.
@@ -55,6 +62,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", "", "JSON config file (default: juice.json in --db directory)")
 	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Output canonical JSON (same shape as the HTTP API) instead of human-readable text")
 	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "Print only the created resource ID")
+	rootCmd.PersistentFlags().StringVar(&flagServer, "server", "", "Juice server base URL (default: server_url in config, else http://localhost:4040)")
+	rootCmd.PersistentFlags().BoolVar(&flagVerbose, "verbose", false, "Show the underlying cause of an error in addition to the message")
 	cobra.OnInitialize(initConfig)
 }
 
@@ -76,8 +85,8 @@ func initConfig() {
 	resolvedConfigPath = path
 	cfg, err := LoadOrCreateConfig(path)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "config:", err)
-		os.Exit(1)
+		renderError(kernel.ErrInvalidInput.Wrapf("config: %v", err))
+		os.Exit(exitCodeFor(kernel.ErrInvalidInput))
 	}
 	applyEnvOverrides(&cfg)
 	globalCfg = cfg
@@ -85,8 +94,21 @@ func initConfig() {
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		renderError(err)
 		os.Exit(exitCodeFor(err))
+	}
+}
+
+// renderError is the single place CLI errors are printed: "error: <message>" to stderr,
+// once, with no usage dump. With --verbose it also prints the underlying cause chain, so
+// the friendly message stays clean by default while raw detail (e.g. a dial error) remains
+// available for troubleshooting.
+func renderError(err error) {
+	fmt.Fprintln(os.Stderr, "error:", err.Error())
+	if flagVerbose {
+		for cause := errors.Unwrap(err); cause != nil; cause = errors.Unwrap(cause) {
+			fmt.Fprintln(os.Stderr, "  caused by:", cause.Error())
+		}
 	}
 }
 
@@ -232,8 +254,11 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, error) {
 	return k, db, logger, nil
 }
 
-// tokenDir returns a directory namespaced by the canonical DB path so that
-// tokens from different kernels never collide, even in the same HOME.
+// tokenDir returns a directory namespaced by the canonical DB path so that tokens for
+// different kernels never collide, even in the same HOME. A token authenticates a user
+// against a specific kernel (verified by that kernel's JWT secret), so keying by the DB
+// path keeps it stable regardless of which server address the client talks to, and lets
+// the local admin path and the HTTP client share one token for the same --db.
 func tokenDir() string {
 	home, _ := os.UserHomeDir()
 	abs, _ := filepath.Abs(flagDB)
@@ -247,7 +272,7 @@ func refreshTokenPath() string { return filepath.Join(tokenDir(), "refresh_token
 func loadToken() (string, error) {
 	data, err := os.ReadFile(tokenPath())
 	if err != nil {
-		return "", fmt.Errorf("not logged in; run: juice auth login")
+		return "", kernel.ErrUnauthenticated.Wrap("not logged in; run: juice auth login")
 	}
 	return string(data), nil
 }
@@ -291,11 +316,11 @@ func requireCallerID(k *kernel.Kernel) (string, error) {
 		// Access token invalid — attempt silent refresh.
 		rt, rtErr := loadRefreshToken()
 		if rtErr != nil {
-			return "", fmt.Errorf("session expired; run: juice auth login")
+			return "", kernel.ErrUnauthenticated.Wrap("session expired; run: juice auth login")
 		}
 		access, newRT, rtErr := k.RefreshAccessToken(context.Background(), rt)
 		if rtErr != nil {
-			return "", fmt.Errorf("session expired; run: juice auth login")
+			return "", kernel.ErrUnauthenticated.Wrap("session expired; run: juice auth login")
 		}
 		if err := saveToken(access); err != nil {
 			return "", err
@@ -322,17 +347,6 @@ func withKernel(fn func(*kernel.Kernel) error) error {
 	}
 	defer db.Close()
 	return fn(k)
-}
-
-// withCaller opens the kernel, resolves the authenticated caller, and calls fn.
-func withCaller(fn func(*kernel.Kernel, string) error) error {
-	return withKernel(func(k *kernel.Kernel) error {
-		callerID, err := requireCallerID(k)
-		if err != nil {
-			return err
-		}
-		return fn(k, callerID)
-	})
 }
 
 // withSuperuser opens the kernel, requires the caller to be the superuser, and calls fn.

@@ -20,6 +20,7 @@ import (
 	"github.com/daios-ai/juice/log"
 	"github.com/daios-ai/juice/script"
 	"github.com/daios-ai/juice/store"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
@@ -61,12 +62,14 @@ func newTestEnv(t *testing.T) *testEnv {
 	cfg.IssuerUserID = cmdTestIssuerID
 	cfg.FeeRecipientID = cmdTestIssuerID
 	cfg.SigningKey = signingKey
-	k := kernel.New(db, nil, nil, nil, cfg, log.Discard())
+	cfg.AllowLocalSources = true // CLI-command tests import specs from loopback httptest servers
 	// Credential encryption is mandatory (§8): the production binary always wires a box,
 	// so tests do too. Without it, creating/activating an action with upstream auth fails closed.
-	if box, err := newAESGCMBox(make([]byte, 32)); err == nil {
-		k.SetSecretBox(box)
-	}
+	box, _ := newAESGCMBox(make([]byte, 32))
+	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, secretBox: box, allowLocal: true}
+	exec := script.New(script.Config{TimeoutMS: cfg.ScriptTimeout.Milliseconds(), MemoryBytes: cfg.ScriptMemory})
+	k := kernel.New(db, exec, httpExec, nil, cfg, log.Discard())
+	k.SetSecretBox(box)
 	t.Setenv("JUICE_SECRET_KEY", "cli-test-secret")
 
 	t.Cleanup(func() { db.Close() })
@@ -79,7 +82,30 @@ func newTestEnv(t *testing.T) *testEnv {
 	os.Setenv("HOME", dir)
 	t.Cleanup(func() { os.Setenv("HOME", origHome) })
 
+	// User-facing CLI commands are HTTP clients now: point them at a server backed by env.k.
+	ts := mountTestServer(t, k)
+	origServer := flagServer
+	flagServer = ts.URL
+	t.Cleanup(func() { flagServer = origServer })
+
 	return &testEnv{db: db, k: k, dir: dir}
+}
+
+// mountTestServer starts an httptest server exposing the full route set backed by k, for
+// tests that drive user-facing CLI commands (which are HTTP clients).
+func mountTestServer(t *testing.T, k *kernel.Kernel) *httptest.Server {
+	t.Helper()
+	srv := &server{kernel: k, log: log.Discard()}
+	r := chi.NewRouter()
+	r.Post("/v1/auth/token", srv.postTokenMulti)
+	r.Post("/v1/auth/authorize", srv.postAuthorize)
+	r.Post("/v1/auth/refresh", srv.postRefresh)
+	r.Post("/v1/auth/logout", srv.postLogout)
+	r.Post("/v1/users", srv.postUser)
+	registerRoutes(r, srv)
+	ts := httptest.NewServer(r)
+	t.Cleanup(ts.Close)
+	return ts
 }
 
 func execTestCmd(t *testing.T, cmd *cobra.Command, args ...string) (string, error) {
@@ -527,6 +553,36 @@ func TestActionCreateFromArtifact(t *testing.T) {
 	}
 	if a.ArtifactHash == "" {
 		t.Error("ArtifactHash should be computed from the --artifact bytes")
+	}
+}
+
+// TestActionCreateHTTPMethodParam verifies --method and --param survive the HTTP client
+// round-trip into the stored source (the create request now carries them, §8).
+func TestActionCreateHTTPMethodParam(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@httpowner", Email: "httpowner@example.com", Password: "pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := env.k.Login(ctx, "@httpowner", "pass")
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execTestCmd(t, actionCreateCmd(), "/search",
+		"--kind", "http", "--source", "https://api.example.com/search",
+		"--method", "GET", "--param", "q:query",
+		"--description", "search", "--price", "0"); err != nil {
+		t.Fatalf("action create with --method/--param: %v", err)
+	}
+	a, err := env.k.ReadActionByOwnerName(ctx, owner.ID, "/search")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(a.Source, `"GET"`) || !strings.Contains(a.Source, `"q"`) {
+		t.Fatalf("stored source missing method/param binding: %s", a.Source)
 	}
 }
 
@@ -1533,7 +1589,7 @@ func captureStdout(t *testing.T, fn func() error) string {
 
 // TestPrintTextParity asserts that printText surfaces every field the canonical JSON
 // (what the HTTP API returns) carries — the CLI/HTTP parity invariant (§14). It also
-// checks that structured values are rendered as inline JSON.
+// checks that structured values are rendered as indented JSON.
 func TestPrintTextParity(t *testing.T) {
 	objects := []any{
 		enrichAction(&kernel.Action{
@@ -1564,7 +1620,7 @@ func TestPrintTextParity(t *testing.T) {
 		}
 	}
 
-	// Structured values must appear as inline JSON, not be dropped.
+	// Structured values must appear as indented JSON, not be dropped.
 	text := captureStdout(t, func() error {
 		return printText(enrichAction(&kernel.Action{
 			ID: "a1", Name: "x", Kind: kernel.KindHTTP,
@@ -1572,7 +1628,7 @@ func TestPrintTextParity(t *testing.T) {
 			OutputSchema: map[string]any{"type": "object"},
 		}))
 	})
-	if !strings.Contains(text, `input_schema: {"properties"`) && !strings.Contains(text, `input_schema: {"type"`) {
-		t.Errorf("input_schema not rendered as inline JSON:\n%s", text)
+	if !strings.Contains(text, "input_schema: {") || !strings.Contains(text, `"type": "object"`) {
+		t.Errorf("input_schema not rendered as indented JSON:\n%s", text)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,6 +85,32 @@ func TestCreateOrUpdateProxyPeerHandleConflict(t *testing.T) {
 	}
 	if u3.Handle != "@remote-3" {
 		t.Fatalf("want @remote-3, got %s", u3.Handle)
+	}
+}
+
+// A friend and its reciprocal both create the same proxy user at once; every concurrent
+// caller must succeed idempotently, never hit a unique-key conflict.
+func TestCreateOrUpdateProxyPeerConcurrent(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	setupSys(t, k, st)
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	key := base64.RawURLEncoding.EncodeToString(pub)
+
+	errs := make([]error, 8)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = k.CreateOrUpdateProxyPeer(context.Background(), "@remote", key, "https://a.example.com")
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent create must be idempotent: %v", err)
+		}
 	}
 }
 

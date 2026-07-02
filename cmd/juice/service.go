@@ -252,18 +252,6 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 	return resps, nil
 }
 
-func listOwnedActions(k *kernel.Kernel, ctx context.Context, callerID string, limit, offset int) ([]actionResp, error) {
-	actions, err := k.ListOwnedActions(ctx, callerID, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	resps := make([]actionResp, len(actions))
-	for i, a := range actions {
-		resps[i] = enrichAction(a)
-	}
-	return resps, nil
-}
-
 func enableAction(k *kernel.Kernel, ctx context.Context, callerID, id string) error {
 	return k.SetActive(ctx, callerID, id, true)
 }

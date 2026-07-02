@@ -429,15 +429,17 @@ func (s *server) unimportOpenAPI(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, req struct {
-		Name         string            `json:"name"`
-		Kind         string            `json:"kind"`
-		Price        int64             `json:"price"`
-		Description  string            `json:"description"`
-		InputSchema  map[string]any    `json:"input_schema"`
-		OutputSchema map[string]any    `json:"output_schema"`
-		Source       string            `json:"source"`
-		WasmArtifact string            `json:"wasm_artifact"`
-		Auth         *kernel.AuthInput `json:"auth"`
+		Name         string             `json:"name"`
+		Kind         string             `json:"kind"`
+		Price        int64              `json:"price"`
+		Description  string             `json:"description"`
+		InputSchema  map[string]any     `json:"input_schema"`
+		OutputSchema map[string]any     `json:"output_schema"`
+		Source       string             `json:"source"`
+		Method       string             `json:"method"`
+		Params       []kernel.HTTPParam `json:"params"`
+		WasmArtifact string             `json:"wasm_artifact"`
+		Auth         *kernel.AuthInput  `json:"auth"`
 	}) (any, int, error) {
 		a, err := createAction(s.kernel, r.Context(), callerFrom(r), kernel.CreateActionRequest{
 			OwnerUserID:  callerFrom(r),
@@ -448,6 +450,8 @@ func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
 			InputSchema:  req.InputSchema,
 			OutputSchema: req.OutputSchema,
 			Source:       req.Source,
+			Method:       req.Method,
+			Params:       req.Params,
 			WasmArtifact: req.WasmArtifact,
 			Auth:         req.Auth,
 		})
@@ -478,19 +482,23 @@ func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, body struct {
-		Price        *int64            `json:"price"`
-		Description  *string           `json:"description"`
-		Source       *string           `json:"source"`
-		InputSchema  map[string]any    `json:"input_schema"`
-		OutputSchema map[string]any    `json:"output_schema"`
-		Public       *bool             `json:"public"`
-		Auth         *kernel.AuthInput `json:"auth"`
+		Price        *int64              `json:"price"`
+		Description  *string             `json:"description"`
+		Source       *string             `json:"source"`
+		Method       *string             `json:"method"`
+		Params       *[]kernel.HTTPParam `json:"params"`
+		InputSchema  map[string]any      `json:"input_schema"`
+		OutputSchema map[string]any      `json:"output_schema"`
+		Public       *bool               `json:"public"`
+		Auth         *kernel.AuthInput   `json:"auth"`
 	}) (any, int, error) {
 		a, err := updateAction(s.kernel, r.Context(), callerFrom(r), kernel.UpdateActionRequest{
 			ID:           pathID(r),
 			Price:        body.Price,
 			Description:  body.Description,
 			Source:       body.Source,
+			Method:       body.Method,
+			Params:       body.Params,
 			InputSchema:  body.InputSchema,
 			OutputSchema: body.OutputSchema,
 			Public:       body.Public,
@@ -982,13 +990,15 @@ func healthCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			resp, err := http.Get(healthURL + "/health") //nolint:noctx
 			if err != nil {
-				return fmt.Errorf("server unreachable: %w", err)
+				return kernel.ErrInvalidState.
+					Wrapf("cannot reach juice server at %s (is `juice serve` running?)", healthURL).
+					Because(err)
 			}
 			defer resp.Body.Close()
 			var body map[string]any
 			_ = json.NewDecoder(resp.Body).Decode(&body)
 			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("server returned %d", resp.StatusCode)
+				return kernel.ErrExecutionFailed.Wrapf("server returned status %d", resp.StatusCode)
 			}
 			if flagJSON {
 				return printJSON(body)

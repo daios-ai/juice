@@ -1,0 +1,204 @@
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/daios-ai/juice/kernel"
+)
+
+// stubServer starts an httptest server, points the CLI client at it via flagServer, and
+// isolates token storage in a temp HOME. Everything resets at test end.
+func stubServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	old := flagServer
+	flagServer = srv.URL
+	t.Cleanup(func() { flagServer = old })
+	t.Setenv("HOME", t.TempDir())
+	return srv
+}
+
+func TestServerBaseURL(t *testing.T) {
+	oldServer, oldCfg := flagServer, globalCfg.ServerURL
+	t.Cleanup(func() { flagServer = oldServer; globalCfg.ServerURL = oldCfg })
+
+	flagServer, globalCfg.ServerURL = "", ""
+	t.Setenv("JUICE_SERVER", "")
+	if got := serverBaseURL(); got != "http://localhost:4040" {
+		t.Fatalf("default: got %q", got)
+	}
+	globalCfg.ServerURL = "http://cfg:1/"
+	if got := serverBaseURL(); got != "http://cfg:1" {
+		t.Fatalf("config: got %q", got)
+	}
+	t.Setenv("JUICE_SERVER", "http://env:2")
+	if got := serverBaseURL(); got != "http://env:2" {
+		t.Fatalf("env: got %q", got)
+	}
+	flagServer = "http://flag:3/"
+	if got := serverBaseURL(); got != "http://flag:3" {
+		t.Fatalf("flag: got %q", got)
+	}
+}
+
+func TestAPICallSuccess(t *testing.T) {
+	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/v1/thing" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "n": 5})
+	})
+	var out struct {
+		OK bool `json:"ok"`
+		N  int  `json:"n"`
+	}
+	if err := apiCall(context.Background(), "GET", "/v1/thing", nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK || out.N != 5 {
+		t.Fatalf("got %+v", out)
+	}
+}
+
+func TestAPICallErrorMapsCode(t *testing.T) {
+	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no such action", "code": "not_found"})
+	})
+	err := apiCall(context.Background(), "GET", "/v1/x", nil, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if kernel.KernelErrorCode(err) != "not_found" {
+		t.Fatalf("code: %s", kernel.KernelErrorCode(err))
+	}
+	if exitCodeFor(err) != 4 {
+		t.Fatalf("exit code: %d", exitCodeFor(err))
+	}
+	if !errors.Is(err, kernel.ErrNotFound) {
+		t.Fatal("errors.Is(ErrNotFound) should hold")
+	}
+}
+
+func TestAPICallUnreachable(t *testing.T) {
+	old := flagServer
+	t.Cleanup(func() { flagServer = old })
+	flagServer = "http://127.0.0.1:1" // nothing listening
+	t.Setenv("HOME", t.TempDir())
+	err := apiCall(context.Background(), "GET", "/v1/x", nil, nil)
+	if err == nil || kernel.KernelErrorCode(err) != "invalid_state" {
+		t.Fatalf("expected invalid_state, got %v", err)
+	}
+}
+
+func TestAPICallRefreshOn401(t *testing.T) {
+	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/auth/refresh":
+			_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "new-access", "refresh_token": "new-refresh"})
+		case "/v1/thing":
+			if r.Header.Get("Authorization") != "Bearer new-access" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "expired", "code": "unauthenticated"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		}
+	})
+	if err := saveToken("stale"); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveRefreshToken("rt"); err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	if err := apiCall(context.Background(), "GET", "/v1/thing", nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK {
+		t.Fatal("expected ok after refresh-and-retry")
+	}
+	if tok, _ := loadToken(); tok != "new-access" {
+		t.Fatalf("rotated token not persisted: %q", tok)
+	}
+}
+
+// TestRunCommandPostsToServer proves the converted `run` command marshals {action, args}
+// and posts to /v1/run.
+func TestRunCommandPostsToServer(t *testing.T) {
+	var gotAction string
+	var gotArgs map[string]any
+	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/v1/run" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		var req struct {
+			Action string         `json:"action"`
+			Args   map[string]any `json:"args"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotAction, gotArgs = req.Action, req.Args
+		_ = json.NewEncoder(w).Encode(map[string]any{"tx_id": "tx-1", "result": map[string]any{"ok": true}})
+	})
+	if _, err := execTestCmd(t, runCmd(), "@a/b", `{"x":1}`); err != nil {
+		t.Fatal(err)
+	}
+	if gotAction != "@a/b" {
+		t.Fatalf("action = %q", gotAction)
+	}
+	if gotArgs["x"].(float64) != 1 {
+		t.Fatalf("args = %v", gotArgs)
+	}
+}
+
+// TestActionCreateBinaryWasmRoutesToArtifact verifies a binary (non-UTF-8) wasm --source is
+// sent base64-encoded via wasm_artifact, not in the JSON source string (which would corrupt it).
+func TestActionCreateBinaryWasmRoutesToArtifact(t *testing.T) {
+	binary := []byte{0x00, 0x61, 0x73, 0x6d, 0x80, 0xff} // 0x80/0xff → invalid UTF-8
+	f := filepath.Join(t.TempDir(), "m.wasm")
+	if err := os.WriteFile(f, binary, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var gotSource, gotArtifact string
+	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Source       string `json:"source"`
+			WasmArtifact string `json:"wasm_artifact"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotSource, gotArtifact = req.Source, req.WasmArtifact
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "x", "action": "@a/m"})
+	})
+	if _, err := execTestCmd(t, actionCreateCmd(), "m",
+		"--kind", "wasm", "--source", f, "--price", "0", "--description", "d"); err != nil {
+		t.Fatal(err)
+	}
+	if gotSource != "" {
+		t.Fatalf("binary wasm must not ride in source: %q", gotSource)
+	}
+	if gotArtifact != base64.StdEncoding.EncodeToString(binary) {
+		t.Fatalf("wasm_artifact = %q, want base64 of the binary module", gotArtifact)
+	}
+}
+
+func TestErrorFromResponseNonJSON(t *testing.T) {
+	err := errorFromResponse(500, []byte("boom"))
+	if kernel.KernelErrorCode(err) != "internal" {
+		t.Fatalf("code %s", kernel.KernelErrorCode(err))
+	}
+	if err.Error() != "boom" {
+		t.Fatalf("msg %q", err.Error())
+	}
+}
