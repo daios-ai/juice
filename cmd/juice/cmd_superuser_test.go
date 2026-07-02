@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -158,117 +157,8 @@ func TestAdminDeposit(t *testing.T) {
 	}
 }
 
-func TestRequireSuperuser(t *testing.T) {
-	ctx := context.Background()
-	env := newTestEnv(t)
-
-	admin, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@sys", Email: "sys@sys", Password: "pass",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	regular, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@regular", Email: "regular@example.com", Password: "pass",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	adminToken, err := env.k.Login(ctx, "@sys", "pass")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := saveToken(adminToken); err != nil {
-		t.Fatal(err)
-	}
-	got, err := requireSuperuser(env.k)
-	if err != nil {
-		t.Fatalf("admin should pass superuser check: %v", err)
-	}
-	if got != admin.ID {
-		t.Fatalf("subject id: got %q, want %q", got, admin.ID)
-	}
-
-	regularToken, err := env.k.Login(ctx, "@regular", "pass")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := saveToken(regularToken); err != nil {
-		t.Fatal(err)
-	}
-	_, err = requireSuperuser(env.k)
-	if !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Fatalf("regular user should be unauthorized, got %v", err)
-	}
-	if regular.ID == "" {
-		t.Fatal("regular user setup failed")
-	}
-}
-
-// TestAdminDepositEnforcesSuperuser exercises the exact code path that
-// adminUserDepositCmd uses: requireSuperuser guard followed by k.Deposit.
-func TestAdminDepositEnforcesSuperuser(t *testing.T) {
-	ctx := context.Background()
-	env := newTestEnv(t)
-
-	if err := env.k.FirstBoot(ctx, "pass"); err != nil {
-		t.Fatal(err)
-	}
-	su, err := env.k.ReadUserByHandle(ctx, "@sys")
-	if err != nil {
-		t.Fatal(err)
-	}
-	regular, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@regular", Email: "regular@example.com", Password: "pass",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	recipient, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@recipient", Email: "rec@example.com", Password: "pass",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Non-superuser token: requireSuperuser must reject before Deposit is reached.
-	regularToken, err := env.k.Login(ctx, "@regular", "pass")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := saveToken(regularToken); err != nil {
-		t.Fatal(err)
-	}
-	_, err = requireSuperuser(env.k)
-	if !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Fatalf("non-superuser should be rejected by requireSuperuser, got %v", err)
-	}
-	_ = regular.ID // referenced above
-
-	// Superuser token: requireSuperuser succeeds, Deposit goes through.
-	suToken, err := env.k.Login(ctx, "@sys", "pass")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := saveToken(suToken); err != nil {
-		t.Fatal(err)
-	}
-	subjectID, err := requireSuperuser(env.k)
-	if err != nil {
-		t.Fatalf("superuser should pass requireSuperuser: %v", err)
-	}
-	if subjectID != su.ID {
-		t.Fatalf("subjectID: got %q, want %q", subjectID, su.ID)
-	}
-	d, err := env.k.Deposit(ctx, subjectID, recipient.ID, 500, "test grant", "")
-	if err != nil {
-		t.Fatalf("deposit by superuser: %v", err)
-	}
-	if d.Amount != 500 {
-		t.Errorf("deposit amount: got %d, want 500", d.Amount)
-	}
-}
+// Superuser enforcement now lives in the control plane (requireSuperuserMW); it is covered
+// end-to-end over the socket in control_test.go (TestControlPlaneRejectsNonSuperuser).
 
 func TestAdminListAllActions(t *testing.T) {
 	ctx := context.Background()
@@ -302,50 +192,13 @@ func TestAdminListAllActions(t *testing.T) {
 	}
 }
 
-// TestAdminActionsCmdRendersSingleAt proves `admin actions` prints @owner/name with a
-// single leading @ — OwnerHandle already carries it (regression: it used to print @@).
-func TestAdminActionsCmdRendersSingleAt(t *testing.T) {
-	ctx := context.Background()
-	env := newTestEnv(t)
-	if err := env.k.FirstBoot(ctx, "pass"); err != nil {
-		t.Fatal(err)
-	}
-	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@owner", Email: "owner@example.com", Password: "pass",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "svc", Kind: kernel.KindHTTP, Price: 0,
-		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
-		Source: "http://example.com",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	suToken, err := env.k.Login(ctx, "@sys", "pass")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := saveToken(suToken); err != nil {
-		t.Fatal(err)
-	}
-
-	out := captureStdout(t, func() error {
-		_, e := execTestCmd(t, adminActionsCmd())
-		return e
-	})
-	if !strings.Contains(out, "@owner/svc") {
-		t.Errorf("expected @owner/svc in output, got: %q", out)
-	}
-	if strings.Contains(out, "@@") {
-		t.Errorf("double-@ regression in admin actions output: %q", out)
-	}
-}
+// `admin actions` single-@ rendering (regression: OwnerHandle already carries @) is covered
+// end-to-end over the control plane in control_test.go.
 
 // TestAdminListTxRowsEnrichesAndStaysCanonical proves admin txs resolves @owner/name and
-// party handles for human output while keeping --json canonical (rating embedded, no
-// display-only fields leaked).
+// party handles, and that the control-plane JSON carries them alongside the embedded rating
+// (admin txs has no public HTTP endpoint, so this enriched view is its canonical shape; the
+// human view prints the same fields — CLI/HTTP parity, §14).
 func TestAdminListTxRowsEnrichesAndStaysCanonical(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -405,11 +258,10 @@ func TestAdminListTxRowsEnrichesAndStaysCanonical(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(blob)
-	if !strings.Contains(s, `"rating"`) {
-		t.Errorf("canonical JSON should include rating: %s", s)
-	}
-	if strings.Contains(s, "ActionRef") || strings.Contains(s, "PayerHandle") || strings.Contains(s, "CallerHandle") {
-		t.Errorf("display-only fields must not leak into canonical JSON: %s", s)
+	for _, want := range []string{`"rating"`, `"action_ref"`, `"payer_handle"`, `"caller_handle"`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("canonical control-plane JSON should include %s: %s", want, s)
+		}
 	}
 }
 

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
@@ -93,16 +92,5 @@ func TestRevokeRefreshToken(t *testing.T) {
 	}
 }
 
-func TestRequireCallerIDExpired(t *testing.T) {
-	dir := t.TempDir()
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", dir)
-	t.Cleanup(func() { os.Setenv("HOME", origHome) })
-
-	env := newTestEnv(t)
-	// No token saved — requireCallerID must fail.
-	_, err := requireCallerID(env.k)
-	if err == nil {
-		t.Error("expected error when no token saved")
-	}
-}
+// Token verification for authenticated commands is enforced server-side (authMiddleware)
+// and covered in serve_test.go / control_test.go.

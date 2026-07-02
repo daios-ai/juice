@@ -302,63 +302,6 @@ func decodeJSON(r io.Reader, v any) error {
 	return json.NewDecoder(r).Decode(v)
 }
 
-// requireCallerID loads the stored access token and verifies it.
-// If the access token is expired, it silently uses the refresh token to obtain
-// a new one, saves both new tokens, and returns the caller ID.
-// Returns ErrUnauthenticated if the account is suspended.
-func requireCallerID(k *kernel.Kernel) (string, error) {
-	tok, err := loadToken()
-	if err != nil {
-		return "", err
-	}
-	callerID, err := k.VerifyToken(tok)
-	if err != nil {
-		// Access token invalid — attempt silent refresh.
-		rt, rtErr := loadRefreshToken()
-		if rtErr != nil {
-			return "", kernel.ErrUnauthenticated.Wrap("session expired; run: juice auth login")
-		}
-		access, newRT, rtErr := k.RefreshAccessToken(context.Background(), rt)
-		if rtErr != nil {
-			return "", kernel.ErrUnauthenticated.Wrap("session expired; run: juice auth login")
-		}
-		if err := saveToken(access); err != nil {
-			return "", err
-		}
-		_ = saveRefreshToken(newRT)
-		callerID, err = k.VerifyToken(access)
-		if err != nil {
-			return "", err
-		}
-	}
-	// Mirror authMiddleware: reject suspended accounts at every authenticated CLI call.
-	u, uErr := k.ReadUser(context.Background(), callerID)
-	if uErr == nil && u.SuspendedAt != nil {
-		return "", kernel.ErrUnauthenticated.Wrap("account suspended")
-	}
-	return callerID, nil
-}
-
-// withKernel opens the kernel, calls fn, then closes the store.
-func withKernel(fn func(*kernel.Kernel) error) error {
-	k, db, _, err := openKernel()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	return fn(k)
-}
-
-// withSuperuser opens the kernel, requires the caller to be the superuser, and calls fn.
-func withSuperuser(fn func(*kernel.Kernel, string) error) error {
-	return withKernel(func(k *kernel.Kernel) error {
-		operatorID, err := requireSuperuser(k)
-		if err != nil {
-			return err
-		}
-		return fn(k, operatorID)
-	})
-}
 
 func promptPassword(prompt string) (string, error) {
 	fmt.Fprint(os.Stderr, prompt)

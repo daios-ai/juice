@@ -29,29 +29,34 @@ fail() { echo "  FAIL: $1 — $2"; FAIL=$((FAIL+1)); ERRS="${ERRS}\n  [$1] $2"; 
 # ---------------------------------------------------------------------------
 # Process/dir registry + cleanup. Every server and backend registers its PID here;
 # `reap` (per-flow) and the EXIT/INT/TERM trap (whole run) kill them all, unconditionally.
+# All per-flow temp dirs live under one run root, so cleanup is a single rm — no per-dir
+# tracking (new_dir runs in a $() subshell and can't mutate a parent-shell array).
 # ---------------------------------------------------------------------------
 declare -a _PIDS=()
-declare -a _DIRS=()
+_RUNROOT="$(mktemp -d)"
 declare -A SERVER_URL=()   # db path -> http://host:port of its running server
 declare -A SERVER_PID=()   # db path -> serve pid
 
 track_pid() { _PIDS+=("$1"); }
-track_dir() { _DIRS+=("$1"); }
 
 # reap: kill everything spawned so far (SIGKILL for fast, deterministic teardown — test DBs
-# are disposable) and forget it. Called after every flow and by the exit trap.
+# are disposable) and clear this flow's temp dirs. SIGKILL means a server's own cleanup (e.g.
+# its control socket) never runs, so wiping the run root is what clears those artifacts.
 reap() {
     local p
     for p in "${_PIDS[@]:-}"; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null; done
     for p in "${_PIDS[@]:-}"; do [ -n "$p" ] && wait "$p" 2>/dev/null; done
+    rm -rf "${_RUNROOT:?}"/* 2>/dev/null
     _PIDS=()
     SERVER_URL=()
     SERVER_PID=()
 }
-trap reap EXIT INT TERM
+# On exit also remove the run root itself; per-flow reap only clears its contents.
+cleanup_all() { reap; rm -rf "$_RUNROOT" 2>/dev/null; }
+trap cleanup_all EXIT INT TERM
 
-# new_dir — a temp dir tracked for cleanup; echoes its path.
-new_dir() { local d; d=$(mktemp -d); track_dir "$d"; echo "$d"; }
+# new_dir — a temp dir under the run root; echoes its path. Cleaned by reap/cleanup_all.
+new_dir() { mktemp -d -p "$_RUNROOT"; }
 
 # ---------------------------------------------------------------------------
 # Config

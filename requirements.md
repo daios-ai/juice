@@ -562,9 +562,9 @@ Bootstrap is idempotent. Supervision operations are not native actions.
 
 The superuser may suspend or unsuspend users. Suspension preserves data and makes every authenticated request return `ErrUnauthenticated`. It also excludes the suspended user's actions from action listings and makes them uncallable (`CanCall` fails on a suspended owner, §4); their data survives and unsuspending restores listing and callability.
 
-`Kernel.Deposit(operator_user_id,target_user_id,amount,reason)` is admin-CLI-only supervision. It requires configured superuser and positive amount, then atomically credits `user.available` with a credit adjustment record. `reason` is optional and stored when provided. The operation is idempotent over `external_key` when supplied. No HTTP endpoint exists.
+`Kernel.Deposit(operator_user_id,target_user_id,amount,reason)` is admin-CLI-only supervision. It requires configured superuser and positive amount, then atomically credits `user.available` with a credit adjustment record. `reason` is optional and stored when provided. The operation is idempotent over `external_key` when supplied. It is served only over the local superuser control socket (§14), never the public HTTP API.
 
-`Kernel.Withdraw(operator_user_id,target_user_id,amount,reason)` is admin-CLI-only supervision: the mirror of `Deposit`. It requires configured superuser, positive amount, and `target.available ≥ amount`, then atomically debits `user.available` with an immutable debit adjustment record — the user's credits are redeemed and the operator owes the out-of-band payout. The operation is idempotent over `external_key` when supplied: a replay returns the existing adjustment record before the `target.available ≥ amount` check runs, so a replayed withdrawal never fails on a balance that has since dropped. No HTTP endpoint exists.
+`Kernel.Withdraw(operator_user_id,target_user_id,amount,reason)` is admin-CLI-only supervision: the mirror of `Deposit`. It requires configured superuser, positive amount, and `target.available ≥ amount`, then atomically debits `user.available` with an immutable debit adjustment record — the user's credits are redeemed and the operator owes the out-of-band payout. The operation is idempotent over `external_key` when supplied: a replay returns the existing adjustment record before the `target.available ≥ amount` check runs, so a replayed withdrawal never fails on a balance that has since dropped. It is served only over the local superuser control socket (§14), never the public HTTP API.
 
 `Kernel.UpdateUser(callerUserID, email, currentPassword, newPassword)` is user self-service: only the authenticated, non-suspended local user may update their own account. `email` and `newPassword` are both optional; at least one must be provided. When `newPassword` is non-empty, `currentPassword` must match the stored hash; mismatch returns `ErrUnauthenticated`. Proxy users have no stored password and cannot use this operation (`ErrInvalidState`). `handle` is immutable. The update is atomic.
 
@@ -587,7 +587,7 @@ juice peer list              known peers and balances
 juice peer inspect <url>     view remote identity, public actions, and transacted friends (no DB write)
 ```
 
-All `peer` commands are superuser supervision, CLI-only (§14). `POST /v1/peers` is the inbound protocol endpoint, authenticated by federation signature — not a local API.
+All `peer` commands are superuser supervision, served over the local control socket (§14). `POST /v1/peers` is the inbound protocol endpoint, authenticated by federation signature — not a local API.
 
 `friend` verifies `<url>/.well-known/juice-kernel.json` and sends a signed request. By default kernels **auto-accept** (`peer_auto_accept = true`): the proxy user is created with balance 0 and a reciprocal request completes the pair. With manual mode, requests sit pending until the operator friends back. Friend requests are rate-limited per IP like account creation (§14).
 
@@ -650,9 +650,9 @@ Inbound: calls sign `JCS({action, counterparty, idempotency_key, timestamp, args
 
 ## 14. CLI, HTTP, logging, config
 
-HTTP API is primary. Every exposed endpoint has a CLI command. CLI uses the same service layer, supports human-readable and JSON output, and each command has at least one test. User-facing commands are HTTP clients of the server (base URL from `--server`/`JUICE_SERVER`/`server_url`); admin and peer commands are CLI-only and run locally against SQLite. A command's primary identifier is a positional argument by its natural key — a user is `@handle` (never an id), an action is `@owner/name` (an id is also accepted), and processes, steps, and transactions are ids; a second mandatory value (amount, rating) is the second positional. CLI human-readable output exposes the same fields as the corresponding HTTP response; `--json` selects the canonical JSON form (the HTTP shape).
+HTTP API is primary. Every exposed endpoint has a CLI command. CLI uses the same service layer, supports human-readable and JSON output, and each command has at least one test. User-facing commands are HTTP clients of the server (base URL from `--server`/`JUICE_SERVER`/`server_url`); admin and peer commands are clients of a local Unix-domain control socket (`0600`, next to the DB) served by `juice serve`, authenticated by a superuser bearer token plus filesystem access. `juice serve` is the sole process that opens SQLite; the CLI never touches the database directly. A command's primary identifier is a positional argument by its natural key — a user is `@handle` (never an id), an action is `@owner/name` (an id is also accepted), and processes, steps, and transactions are ids; a second mandatory value (amount, rating) is the second positional. CLI human-readable output exposes the same fields as the corresponding HTTP response; `--json` selects the canonical JSON form (the HTTP shape).
 
-CLI handlers and HTTP handlers are thin wires: parse input, call the service layer (admin/peer) or the HTTP API (user-facing commands), format output. All kernel calls, enrichment, validation, and transformation live in the service layer. No kernel calls outside the service layer.
+CLI handlers and HTTP handlers are thin wires: parse input, call the HTTP API — the public TCP API for user-facing commands, the local control socket for admin/peer — and format output. All kernel calls, enrichment, validation, and transformation live server-side in the service layer. No kernel calls outside the service layer.
 
 Required commands:
 
@@ -727,7 +727,7 @@ Endpoint rules (notable rules only; the complete HTTP endpoint list is in `API.m
 
 Transaction list/detail include `rating: {"value":0|1,"note":string|null}` or `null`, visible to all transaction parties.
 
-Admin commands require configured `@sys`, reject non-superusers with `ErrUnauthorized`, stay outside `Call()`, and register no `/v1/admin/*` routes.
+Admin commands require configured `@sys`, reject non-superusers with `ErrUnauthorized`, stay outside `Call()`, and are served only on the control socket — no admin routes on the public TCP API.
 
 Logs go to stderr and optionally file; stdout is resource payloads only. Configurable format, level, file. Every kernel transition logs start/end; errors include stable codes; script logs include trace ID.
 

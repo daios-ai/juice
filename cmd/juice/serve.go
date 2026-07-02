@@ -89,6 +89,14 @@ func runServer(addr string) error {
 	// (and reads the real addr from it) instead of blind-polling /health.
 	logger.Info("server.ready", "addr", ln.Addr().String())
 
+	// Superuser supervision (admin/peer) is served on a local Unix socket, never TCP, so
+	// `serve` is the sole process that opens the DB (§14).
+	if control, cerr := startControlPlane(srv, flagDB); cerr != nil {
+		logger.Error("control.start_failed", "error", cerr)
+	} else {
+		defer control.Close()
+	}
+
 	httpSrv := &http.Server{Handler: r}
 
 	serveErr := make(chan error, 1)

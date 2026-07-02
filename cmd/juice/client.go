@@ -53,15 +53,29 @@ func apiDo(ctx context.Context, method, path string, body, out any, retry bool) 
 	if tok, err := loadToken(); err == nil {
 		headers["Authorization"] = "Bearer " + tok
 	}
-	base := serverBaseURL()
-	respBody, status, err := doHTTP(ctx, method, base+path, headers, rdr, 0, true)
-	if err != nil && status == 0 {
-		return errUnreachable(base, err)
+	// admin/peer commands put the control-socket path in ctx and route over the local Unix
+	// control socket (superuser supervision, §14); user-facing commands use TCP.
+	var respBody []byte
+	var status int
+	var err error
+	if sock := controlSockFromCtx(ctx); sock != "" {
+		respBody, status, err = doControlHTTP(ctx, sock, method, path, headers, rdr)
+		if err != nil && status == 0 {
+			return kernel.ErrInvalidState.
+				Wrap("cannot reach control socket (is `juice serve` running?)").Because(err)
+		}
+	} else {
+		base := serverBaseURL()
+		respBody, status, err = doHTTP(ctx, method, base+path, headers, rdr, 0, true)
+		if err != nil && status == 0 {
+			return errUnreachable(base, err)
+		}
 	}
 	if err != nil {
 		return err
 	}
-	if status == 401 && retry && refreshToken(ctx) {
+	// Token refresh needs the TCP auth endpoints; over the control socket a 401 just surfaces.
+	if status == 401 && retry && controlSockFromCtx(ctx) == "" && refreshToken(ctx) {
 		return apiDo(ctx, method, path, body, out, false)
 	}
 	if status < 200 || status >= 300 {
@@ -78,8 +92,12 @@ func apiDo(ctx context.Context, method, path string, body, out any, retry bool) 
 // apiEmit runs the request and prints the server's JSON response via emitRaw, preserving
 // field order. An empty body (e.g. 204) prints nothing.
 func apiEmit(method, path string, body any) error {
+	return apiEmitCtx(context.Background(), method, path, body)
+}
+
+func apiEmitCtx(ctx context.Context, method, path string, body any) error {
 	var out json.RawMessage
-	if err := apiCall(context.Background(), method, path, body, &out); err != nil {
+	if err := apiCall(ctx, method, path, body, &out); err != nil {
 		return err
 	}
 	if len(out) == 0 {

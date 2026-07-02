@@ -351,9 +351,9 @@ func listTransactions(k *kernel.Kernel, ctx context.Context, callerID string, f 
 // human output. The display fields are json:"-" so they never alter the canonical shape.
 type adminTxRow struct {
 	*kernel.TransactionView
-	ActionRef    string `json:"-"` // @owner/name: target owner handle + captured action_name
-	PayerHandle  string `json:"-"` // process owner (P)
-	CallerHandle string `json:"-"` // call caller (C)
+	ActionRef    string `json:"action_ref"`    // @owner/name: target owner handle + captured action_name
+	PayerHandle  string `json:"payer_handle"`  // process owner (P)
+	CallerHandle string `json:"caller_handle"` // call caller (C)
 }
 
 // adminListTxRows lists every transaction for admin, enriching each with @owner/name and
