@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -2111,5 +2112,39 @@ func TestServeWriteErrHasCode(t *testing.T) {
 	}
 	if _, ok := body["code"]; !ok {
 		t.Error("error response missing 'code' field")
+	}
+}
+
+// TestServeAdvertisesBoundAddr covers the --addr :0 path in runServer: the real port is
+// known only after net.Listen binds, so runServer advertises it as kernel_base_url and
+// getWellKnown reports it (federation under :0 depends on this — see serve.go runServer).
+func TestServeAdvertisesBoundAddr(t *testing.T) {
+	_, k := newTestHTTPServer(t)
+	ctx := context.Background()
+
+	// --addr 127.0.0.1:0 → an OS-assigned port, unknown until the bind succeeds.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if p := ln.Addr().(*net.TCPAddr).Port; p == 0 {
+		t.Fatalf("expected a real bound port, got :0")
+	}
+	want := "http://" + ln.Addr().String()
+	if err := k.SetConfig(ctx, "kernel_base_url", want); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &server{kernel: k, log: log.Discard()}
+	rec := httptest.NewRecorder()
+	srv.getWellKnown(rec, httptest.NewRequest("GET", "/.well-known/juice-kernel.json", nil))
+
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode well-known: %v", err)
+	}
+	if body["base_url"] != want {
+		t.Errorf("base_url = %q, want %q", body["base_url"], want)
 	}
 }

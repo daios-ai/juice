@@ -73,13 +73,27 @@ func runServer(addr string) error {
 
 	registerRoutes(r, srv)
 
-	logger.Info("server.start", "addr", addr)
+	// Bind explicitly so a bind failure is a real, immediate error, and so --addr host:0
+	// (OS-assigned port) works: we then advertise the address we actually bound.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	// Under --addr :0 the real port is only known now; advertise it so federation
+	// (.well-known, gossip, reciprocal) reports where we actually listen. A configured
+	// server_url (e.g. a public proxy URL) takes precedence and is left as bootstrap set it.
+	if globalCfg.ServerURL == "" {
+		_ = k.SetConfig(context.Background(), "kernel_base_url", "http://"+ln.Addr().String())
+	}
+	// server.ready is emitted only after a successful bind — the harness waits on this line
+	// (and reads the real addr from it) instead of blind-polling /health.
+	logger.Info("server.ready", "addr", ln.Addr().String())
 
-	httpSrv := &http.Server{Addr: addr, Handler: r}
+	httpSrv := &http.Server{Handler: r}
 
 	serveErr := make(chan error, 1)
 	go func() {
-		if err := httpSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		if err := httpSrv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}
 		close(serveErr)
@@ -811,7 +825,9 @@ func (s *server) getWellKnown(w http.ResponseWriter, r *http.Request) {
 	if handle == "" {
 		handle = "@sys"
 	}
-	baseURL := globalCfg.ServerURL
+	// kernel_base_url is the address we actually advertise: the configured server_url, or
+	// the real bound address under --addr :0 (set in runServer).
+	baseURL, _ := s.kernel.GetConfig(ctx, "kernel_base_url")
 	writeJSON(w, http.StatusOK, map[string]string{
 		"handle":     handle,
 		"public_key": pubKey,
@@ -892,7 +908,7 @@ func (s *server) sendReciprocal(peerBaseURL string) {
 	if localHandle == "" {
 		localHandle, _ = s.kernel.GetConfig(ctx, configKeySuperuser)
 	}
-	localBaseURL := globalCfg.ServerURL
+	localBaseURL, _ := s.kernel.GetConfig(ctx, "kernel_base_url")
 	if pubKeyB64 == "" || localBaseURL == "" {
 		return
 	}

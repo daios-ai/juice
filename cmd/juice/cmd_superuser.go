@@ -457,7 +457,9 @@ func peerFriendCmd() *cobra.Command {
 				if localHandle == "" {
 					localHandle, _ = k.GetConfig(ctx, configKeySuperuser)
 				}
-				localBaseURL := globalCfg.ServerURL
+				// Read the address the local server actually advertises (set at its boot),
+				// which under --addr :0 is the real bound port, not a static config value.
+				localBaseURL, _ := k.GetConfig(ctx, "kernel_base_url")
 				if localPubKey != "" && localBaseURL != "" {
 					if sig, ts, serr := k.SignPeerRequestNow(localHandle, localPubKey, localBaseURL); serr == nil {
 						body, _ := json.Marshal(map[string]string{
