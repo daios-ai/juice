@@ -3,6 +3,7 @@ package fed
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -12,8 +13,16 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
+	relayv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 	"github.com/multiformats/go-multiaddr"
 )
+
+// StdPort is the standard Juice federation port. A publicly-reachable kernel that binds it has a
+// stable, well-known address others can bootstrap to. Below the Linux ephemeral range (32768+),
+// uncommon, and echoes Ethereum's 30303. If it is already taken, the transport falls back to an
+// OS-assigned port (kernels are found by key via the DHT, so only a public bootstrap node needs
+// the fixed one) and warns.
+const StdPort = 31313
 
 // Transport is the running federation carrier: a libp2p host plus a Kademlia DHT for
 // resolve-by-key, with the five §13 protocols registered. It implements the outbound client
@@ -21,6 +30,7 @@ import (
 type Transport struct {
 	host      host.Host
 	dht       *dht.IpfsDHT
+	relay     *relayv2.Relay
 	cfg       Config
 	bootstrap []peer.AddrInfo
 
@@ -36,37 +46,60 @@ func New(ctx context.Context, cfg Config) (*Transport, error) {
 		return nil, err
 	}
 
-	listen := cfg.ListenAddrs
-	if len(listen) == 0 {
-		// Default: an OS-assigned TCP and QUIC port on all interfaces.
-		listen = []string{
-			"/ip4/0.0.0.0/tcp/0",
-			"/ip4/0.0.0.0/udp/0/quic-v1",
-		}
-	}
-
 	bootstrap, err := parseAddrInfos(cfg.BootstrapPeers)
 	if err != nil {
 		return nil, err
 	}
 
-	opts := []libp2p.Option{
+	baseOpts := []libp2p.Option{
 		libp2p.Identity(hostKey),
-		libp2p.ListenAddrStrings(listen...),
 		libp2p.EnableNATService(),
 		libp2p.EnableHolePunching(),
 		libp2p.NATPortMap(),
 	}
 	if len(bootstrap) > 0 {
-		opts = append(opts, libp2p.EnableAutoRelayWithStaticRelays(bootstrap))
+		baseOpts = append(baseOpts, libp2p.EnableAutoRelayWithStaticRelays(bootstrap))
 	}
 
-	h, err := libp2p.New(opts...)
+	build := func(listen []string) (host.Host, error) {
+		return libp2p.New(append(baseOpts, libp2p.ListenAddrStrings(listen...))...)
+	}
+
+	ephemeral := []string{"/ip4/0.0.0.0/tcp/0", "/ip4/0.0.0.0/udp/0/quic-v1"}
+
+	// A caller-supplied ListenAddrs is used verbatim. In loopback/test mode (AllowPrivateAddrs)
+	// use OS-assigned ports so many kernels can share one host without colliding on the standard
+	// port. Otherwise bind the standard port (a public node needs a stable address); if it is
+	// taken, fall back to OS-assigned ports (found-by-key doesn't need a fixed port) and warn.
+	var h host.Host
+	switch {
+	case len(cfg.ListenAddrs) > 0:
+		h, err = build(cfg.ListenAddrs)
+	case cfg.AllowPrivateAddrs:
+		h, err = build(ephemeral)
+	default:
+		std := []string{
+			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", StdPort),
+			fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", StdPort),
+		}
+		h, err = build(std)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fed: standard port %d unavailable (%v); using an OS-assigned port instead — set a fixed listen address on a public bootstrap node\n", StdPort, err)
+			h, err = build(ephemeral)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("fed: build host: %w", err)
 	}
 
+	// ModeAuto in production: a publicly-reachable node (a bootstrap host) becomes a DHT server
+	// and holds the routing table; NAT-bound nodes stay clients. On loopback, AutoNAT can't
+	// confirm reachability, so force ModeServer there — otherwise no node serves the table and
+	// resolve-by-key finds nothing.
 	dhtMode := dht.ModeAuto
+	if cfg.AllowPrivateAddrs {
+		dhtMode = dht.ModeServer
+	}
 	dhtOpts := []dht.Option{dht.Mode(dhtMode), dht.BootstrapPeers(bootstrap...)}
 	if cfg.AllowPrivateAddrs {
 		// Loopback flows run the whole network on 127.0.0.1; permit private addresses in the
@@ -88,6 +121,14 @@ func New(ctx context.Context, cfg Config) (*Transport, error) {
 	}
 
 	t := &Transport{host: h, dht: kdht, cfg: cfg, bootstrap: bootstrap}
+
+	// Every kernel offers the circuit-relay service. On a NAT-bound node it is unreachable and
+	// idle (harmless); on a publicly-reachable node it automatically becomes the relay that lets
+	// NAT-bound peers be reached — so a public `juice serve` is the network's meeting point, with
+	// no separate seed process. Resource limits are libp2p defaults.
+	if r, rerr := relayv2.New(h); rerr == nil {
+		t.relay = r
+	}
 
 	// Connect to bootstrap peers so discovery and relay reservations can proceed.
 	for _, ai := range bootstrap {
@@ -125,6 +166,9 @@ func (t *Transport) Close() error {
 		return nil
 	}
 	t.closed = true
+	if t.relay != nil {
+		_ = t.relay.Close()
+	}
 	_ = t.dht.Close()
 	return t.host.Close()
 }

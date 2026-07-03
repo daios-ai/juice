@@ -577,7 +577,7 @@ The superuser may suspend or unsuspend users. Suspension preserves data and make
 
 Federation has exactly one carrier: a peer-to-peer transport (libp2p) behind the replaceable `fed` interface (§2), which `kernel` never imports. The kernel addresses a peer only by its `public_key`; the transport resolves that key to a live connection — direct when the peer is publicly reachable, hole-punched through NAT when possible, relayed through a public helper node as a last resort. Streams are mutually authenticated by peer key, so a connection is itself proof of the counterparty's network identity; the per-request Juice signatures below are nonetheless retained deliberately, because receipts, rejections, and dispatch records must be storable and verifiable offline (§11) — channel authentication cannot replace a signed artifact. The transport-handshake and Juice-payload signature domains are disjoint (§12).
 
-On startup the kernel announces its key to the discovery network (DHT / rendezvous), seeded from `bootstrap_peers` in `juice.json` (§14). Config is the sole seed source; an empty list means the kernel neither announces nor discovers. Publicly-addressed and NAT-bound kernels are indistinguishable in how they federate; a home kernel behind a router federates identically to one on a public host, with no advertised address, port-forwarding, or `.well-known` document of any kind (the local `server_url` in §14 is only the loopback URL the CLI dials to drive your own kernel, never a federation address).
+On startup the kernel announces its key to the discovery network (DHT / rendezvous), bootstrapped from `bootstrap_peers` in `juice.json` (§14). A bootstrap peer is just a publicly-reachable kernel (every kernel runs the DHT and a relay, §13 above); the shipped default points at the project's public node, so a fresh `juice serve` joins out of the box. An empty list means the kernel neither announces nor discovers. Publicly-addressed and NAT-bound kernels are indistinguishable in how they federate; a home kernel behind a router federates identically to one on a public host, with no advertised address, port-forwarding, or `.well-known` document of any kind (the local `server_url` in §14 is only the loopback URL the CLI dials to drive your own kernel, never a federation address).
 
 Federation protocols are versioned libp2p streams: `/juice/fed/call/1` (inbound proxy call), `/juice/fed/friend/1` (friend handshake), `/juice/fed/manifest/1` (manifest serving, chunked per action so a large-catalog sync survives bandwidth-capped relayed connections), `/juice/fed/gossip/1`, and `/juice/fed/inspect/1`. Payloads and verification are exactly the settlement rules below; only the carrier is libp2p.
 
@@ -602,7 +602,7 @@ juice admin inspect <key>     view remote identity, public actions, transacted f
 
 Federation trust is superuser supervision, so these live under `admin`, served over the local control socket (§14). The inbound friend handshake is the `/juice/fed/friend/1` protocol, authenticated by federation signature — not a local API. `admin inspect <key>` is the operator's window into a remote kernel (there is no browser-reachable federation endpoint): it reports the peer's identity, public actions, and transacted friends, plus reachability diagnostics (direct / hole-punched / relayed, latency, protocol versions).
 
-`admin identity` prints this kernel's own federation identity — its public key (the value peers friend it by, since there is no `.well-known`), handle, and libp2p listen addresses. `juice seed` runs a bootstrap + relay helper node (DHT server + circuit-relay service): it holds no kernel and no DB, seeds discovery, and brokers relayed connections for NAT-bound kernels; the same binary serves the local test harness and a public helper node. `friend` opens an authenticated stream to `<key>` and sends a signed request; the peer's self-reported handle arrives over the protocol. By default kernels **auto-accept** (`peer_auto_accept = true`): the proxy user is created with balance 0 and a reciprocal request completes the pair. With manual mode, requests sit pending until the operator friends back. Friend requests are subject to the §13 transport resource limits.
+`admin identity` prints this kernel's own federation identity — its public key (the value peers friend it by, since there is no `.well-known`), handle, and libp2p listen addresses. Every kernel runs a circuit-relay service and joins the discovery DHT, so a **publicly-reachable `juice serve` automatically acts as the network's bootstrap + relay** — the meeting point NAT-bound kernels announce to and are reached through; there is no separate seed process. A public node binds the standard federation port `31313` for a stable address (a NAT-bound node uses an OS-assigned port and is found by key). `friend` opens an authenticated stream to `<key>` and sends a signed request; the peer's self-reported handle arrives over the protocol. By default kernels **auto-accept** (`peer_auto_accept = true`): the proxy user is created with balance 0 and a reciprocal request completes the pair. With manual mode, requests sit pending until the operator friends back. Friend requests are subject to the §13 transport resource limits.
 
 Friendship by itself grants nothing: a zero-balance friend's calls are all rejected. The trust decision is the **deposit** — an operator credits a friend's proxy user only after real money moved out of band (§12). Friendship exchanges keys; funding expresses trust.
 
@@ -693,7 +693,7 @@ juice admin suspend <user>                juice admin unsuspend <user>
 juice admin deposit <user> <amount>       juice admin withdraw <user> <amount>
 juice admin friend <key>                  juice admin unfriend <user>
 juice admin peers                         juice admin inspect <key>
-juice admin identity                      juice seed
+juice admin identity
 ```
 
 `admin` holds only the operator verbs no ordinary user performs — money, access, federation trust, and the global roster (`users`/`show`). Supervision over everything else is **scope on the normal commands**: a superuser sees all rows on `action list`, `process list`, `tx list`, and `step list`, and may `action disable`/`enable` any action, all over the public TCP API. There is no `admin actions/disable/processes/txs/steps` — those were duplicates of the base commands with wider reach.
@@ -748,7 +748,7 @@ time level event request_id caller_user_id process_id trace_id action_id tx_id
 status duration_ms error
 ```
 
-Config lives in `juice.json` (path from `JUICE_CONFIG`, default `./juice.json`). Top-level kernel keys: `db_path`, `fee_bps`, `import_bps`, `peer_auto_accept`, `server_url` (the local server base URL the CLI dials for user-facing commands — a loopback address for driving your own kernel, not a federation identity), auth issuer/audience/token TTL, log file/format/level, script timeout and memory limits, plus the federation identity and discovery keys this kernel needs to satisfy §8 and §13: `kernel_handle` (the handle this kernel presents to the network in friend handshakes and gossip), `bootstrap_peers` (the seed entries the transport dials to join the discovery network — the sole seed source; empty means the kernel neither announces nor discovers), `credentials_key` (the §8 base64url AES-256-GCM key for `auth_json`, auto-generated at first boot), and `allow_local_sources` (dev-only escape hatch over §7's loopback/private/link-local URL rejection for action source URLs, default `false`). All native-action configuration lives under `native.<action>`; no deeper nesting:
+Config lives in `juice.json` (path from `JUICE_CONFIG`, default `./juice.json`). Top-level kernel keys: `db_path`, `fee_bps`, `import_bps`, `peer_auto_accept`, `server_url` (the local server base URL the CLI dials for user-facing commands — a loopback address for driving your own kernel, not a federation identity), auth issuer/audience/token TTL, log file/format/level, script timeout and memory limits, plus the federation identity and discovery keys this kernel needs to satisfy §8 and §13: `kernel_handle` (the handle this kernel presents to the network in friend handshakes and gossip), `bootstrap_peers` (the peer multiaddrs the transport dials to join the discovery network; defaults to the project's public node so `juice serve` works out of the box, empty means the kernel neither announces nor discovers), `credentials_key` (the §8 base64url AES-256-GCM key for `auth_json`, auto-generated at first boot), and `allow_local_sources` (dev-only escape hatch over §7's loopback/private/link-local URL rejection for action source URLs, default `false`). All native-action configuration lives under `native.<action>`; no deeper nesting:
 
 ```json
 {
@@ -758,7 +758,7 @@ Config lives in `juice.json` (path from `JUICE_CONFIG`, default `./juice.json`).
   "peer_auto_accept": true,
   "server_url": "",
   "kernel_handle": "",
-  "bootstrap_peers": ["/dns4/seed.example.invalid/tcp/4001/p2p/12D3KooPLACEHOLDERreplaceWithRealSeedKey"],
+  "bootstrap_peers": ["/dns4/daios.ai/tcp/31313/p2p/12D3KooWJSwNRSf1Nyv7dQU43QP99GYqXmD4hHqmjYbpmPJoC5Ad"],
   "credentials_key": "",
   "allow_local_sources": false,
   "native": {
@@ -796,7 +796,7 @@ All other settings are configured through `juice.json` only; there are no furthe
 
 `go test ./...` must pass without external network access. Tests use temporary SQLite databases, fake Ollama, fake script, and fake `fed`-transport adapters unless explicitly integration tests, no global state, and no order dependence.
 
-Federation is tested in three tiers. **Unit** (`go test ./...`, offline): kernel federation logic runs against a fake `fed` transport, exercising every §13 settlement rule without a real network. **Flows** (offline, real transport on loopback): the multi-kernel flow suite runs the actual libp2p transport over `127.0.0.1`, booting a local seed node (bootstrap + relay) alongside the kernels so discovery-by-key, forced-relay carriage, and restart-retry are exercised on one machine with no internet. **Real-network check** (release gate for any federation-touching change, not part of `go test ./...`): a scripted flow run from a machine behind a real NAT against one remote peer, asserting hole-punch and relay-fallback paths that loopback cannot reproduce.
+Federation is tested in three tiers. **Unit** (`go test ./...`, offline): kernel federation logic runs against a fake `fed` transport, exercising every §13 settlement rule without a real network. **Flows** (offline, real transport on loopback): the multi-kernel flow suite runs the actual libp2p transport over `127.0.0.1`, with one kernel serving as the bootstrap + relay for the others (every kernel runs the DHT and relay, so no separate seed process) — discovery-by-key, relayed carriage, and restart-retry are exercised on one machine with no internet. **Real-network check** (release gate for any federation-touching change, not part of `go test ./...`): a scripted flow run from a machine behind a real NAT against one remote peer, asserting hole-punch and relay-fallback paths that loopback cannot reproduce.
 
 Required suites:
 
@@ -1037,9 +1037,9 @@ caller executes a paid action multiple times; the action owner lists transaction
 caller rates a transaction with a note; the note and rating value appear in transaction detail and
   list responses for all parties; an unrated transaction returns null for the rating field
 
-— Federation (real transport over loopback + a local seed node) —
-two kernels and a local seed node (bootstrap + relay) start on 127.0.0.1; each kernel announces its key
-  and friends the other by key alone (no URL); the seed resolves keys — no dialable address is configured
+— Federation (real transport over loopback; one kernel is the bootstrap+relay) —
+two kernels start on 127.0.0.1; the first serves as bootstrap+relay, the second dials it, and they
+  friend each other by key alone (no URL); keys resolve through the DHT — no dialable address is configured
 two kernels friend each other (auto-accept); operator A deposits B's proxy (and vice versa);
   B imports A's action; B's user runs it; charge lands in A's proxy balance on B, duty to B's @sys,
   difference refunded; both sides' tx verify passes all checks

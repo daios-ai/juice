@@ -95,29 +95,14 @@ write_config() {
 EOF
 }
 
-# start_seed  — launch a federation bootstrap+relay seed node on loopback and record its
-# multiaddr in SEED_ADDR. The whole federation network in the flows resolves through it.
-SEED_ADDR=""
-start_seed() {
-    local dir="$1"
-    local log="$dir/seed.log"
-    HOME="$dir" "$JUICE" seed --addr /ip4/127.0.0.1/tcp/0 --allow-local >"$log" 2>&1 &
-    local pid=$!; track_pid "$pid"
-    local deadline=$(( $(date +%s) + 20 ))
-    while :; do
-        # seed prints each multiaddr on its own line at column 0 (fmt.Println); the log line is
-        # indented/prefixed. Strip ANSI, then take a line that STARTS with /ip4 (the plain one).
-        SEED_ADDR=$(sed 's/\x1b\[[0-9;]*m//g' "$log" 2>/dev/null | grep -m1 '^/ip4/127.0.0.1/tcp/[0-9]*/p2p/' | tr -d '\r')
-        [ -n "$SEED_ADDR" ] && break
-        if ! kill -0 "$pid" 2>/dev/null; then
-            echo "  seed exited during boot:" >&2; sed 's/^/    | /' "$log" >&2; return 1
-        fi
-        if [ "$(date +%s)" -ge "$deadline" ]; then
-            echo "  seed not ready within 20s:" >&2; sed 's/^/    | /' "$log" >&2; return 1
-        fi
-        sleep 0.05
-    done
-    return 0
+# kernel_fed_addr db  — print a running kernel's loopback libp2p multiaddr, scraped from the
+# fed_addrs on its `server.ready` log line. Every kernel now serves as a DHT+relay node, so one
+# kernel can be the bootstrap for the others — there is no separate seed process.
+kernel_fed_addr() {
+    local db="$1"
+    local log; log="$(dirname "$db")/server.log"
+    sed 's/\x1b\[[0-9;]*m//g' "$log" 2>/dev/null \
+        | grep -o '/ip4/127\.0\.0\.1/tcp/[0-9]*/p2p/[A-Za-z0-9]*' | head -1 | tr -d '\r'
 }
 
 # kernel_key db home  — print a kernel's own federation public key (via admin identity).

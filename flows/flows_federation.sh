@@ -1,22 +1,24 @@
 # Federation flows (real multi-kernel over the libp2p transport, §13). Built on flows/lib.sh.
 #
-# _fed_setup boots a local seed node (bootstrap + relay) plus two kernels, all on 127.0.0.1.
-# The kernels are addressed only by Ed25519 public key: they announce to the seed, resolve each
-# other by key through its DHT, and friend by key — no URL anywhere. This is the loopback
-# analogue of home kernels finding each other with no dialable address. FED_RKEY holds R's key.
+# _fed_setup boots two kernels on 127.0.0.1. R comes up first and acts as the bootstrap + relay
+# for the network (every kernel now serves the DHT and relay — no separate seed process). L
+# bootstraps to R's address, then the kernels are addressed only by Ed25519 public key: they
+# resolve each other by key through R's DHT and friend by key — no URL anywhere. This is the
+# loopback analogue of home kernels finding each other with no dialable address. FED_RKEY holds R's key.
 
-# Globals set by _fed_setup: FED_DBL FED_DBR FED_HL FED_HR FED_BPORT FED_RID FED_PROXY FED_RKEY FED_LKEY.
+# Globals set by _fed_setup: FED_DBL FED_DBR FED_HL FED_HR FED_BPORT FED_RID FED_PROXY FED_RKEY FED_LKEY FED_BOOT.
 _fed_setup() {
     local dir="$1"
     FED_DBL="$dir/l/juice.db"; FED_DBR="$dir/r/juice.db"
     FED_HL="$dir/lsys"; FED_HR="$dir/rsys"
     mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
 
-    start_seed "$dir" || return 1
-
     FED_BPORT=$(backend_port); start_backend "$FED_BPORT" 200 '{"greeting":"hello"}'
-    start_server "$FED_DBR" "$FED_HR" kernel_handle=@kernel-r bootstrap_peers="$SEED_ADDR" || return 1
-    start_server "$FED_DBL" "$FED_HL" kernel_handle=@kernel-l bootstrap_peers="$SEED_ADDR" || return 1
+    # R boots first and is the flow's bootstrap+relay; L (and T, in the gossip flow) dial it.
+    start_server "$FED_DBR" "$FED_HR" kernel_handle=@kernel-r || return 1
+    FED_BOOT=$(kernel_fed_addr "$FED_DBR")
+    [ -n "$FED_BOOT" ] || return 1
+    start_server "$FED_DBL" "$FED_HL" kernel_handle=@kernel-l bootstrap_peers="$FED_BOOT" || return 1
     j "$FED_DBR" "$FED_HR" auth login @sys --password syspass >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" auth login @sys --password syspass >/dev/null 2>&1
 
@@ -218,7 +220,7 @@ flow_fed_gossip_discovery() {
 
     # Third kernel T discovers R by inspecting L's gossip over the transport, then friends R by key.
     local dbt ht; dbt="$dir/t/juice.db"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
-    start_server "$dbt" "$ht" kernel_handle=@kernel-t bootstrap_peers="$SEED_ADDR" || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
+    start_server "$dbt" "$ht" kernel_handle=@kernel-t bootstrap_peers="$FED_BOOT" || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
     j "$dbt" "$ht" auth login @sys --password syspass >/dev/null 2>&1
 
     # T inspects L (resolved by key via the seed); L's transacted-friends list carries R's key + stats.
