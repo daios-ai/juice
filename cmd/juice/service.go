@@ -482,7 +482,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 				}
 			}
 		}
-		receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, denialActionID, argsHash, idempotencyKey)
+		receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, denialActionID, argsHash, idempotencyKey, "counterparty denied")
 		if signErr != nil {
 			return 0, nil, kernel.ErrUnauthenticated.Wrap("counterparty is denied")
 		}
@@ -565,7 +565,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 		if errors.Is(callErr, kernel.ErrInsufficientFunds) {
 			status, msg = http.StatusPaymentRequired, "insufficient balance"
 		}
-		if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey); signErr == nil {
+		if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey, msg); signErr == nil {
 			receiptJSON, _ := json.Marshal(receipt)
 			_ = k.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), string(receiptJSON))
 			return status, map[string]any{"error": msg, "receipt": receipt}, nil

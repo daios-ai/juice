@@ -1444,7 +1444,7 @@ func TestCreateSignedRejectionReceipt(t *testing.T) {
 		t.Fatalf("AddPeer: %v", err)
 	}
 
-	r, err := k.CreateSignedRejectionReceipt(peer.ID, "@owner/some-action", "argsHash123", "idem-key-456")
+	r, err := k.CreateSignedRejectionReceipt(peer.ID, "@owner/some-action", "argsHash123", "idem-key-456", "action inactive")
 	if err != nil {
 		t.Fatalf("CreateSignedRejectionReceipt: %v", err)
 	}
@@ -1455,8 +1455,8 @@ func TestCreateSignedRejectionReceipt(t *testing.T) {
 	if r.Gross != 0 || r.Net != 0 || r.Fee != 0 {
 		t.Errorf("expected zero charge, got gross=%d net=%d fee=%d", r.Gross, r.Net, r.Fee)
 	}
-	if r.Reason != "denied" {
-		t.Errorf("expected reason=denied, got %q", r.Reason)
+	if r.Reason != "action inactive" {
+		t.Errorf("expected the supplied reason, got %q", r.Reason)
 	}
 	if r.Signature == "" {
 		t.Error("rejection receipt must be signed")

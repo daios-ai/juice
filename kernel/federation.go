@@ -619,10 +619,12 @@ func (k *Kernel) GetGossip(ctx context.Context) (*GossipResponse, error) {
 	}, nil
 }
 
-// CreateSignedRejectionReceipt produces a signed Receipt (status=failure, gross=0) for a
-// denied inbound federation call. No transaction is created; the receipt is signed with
-// the kernel's Ed25519 key so the caller can verify the rejection was authentic.
-func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, actionParam, argsHash, idempotencyKey string) (*Receipt, error) {
+// CreateSignedRejectionReceipt produces a signed Receipt (status=failure, gross=0) for an inbound
+// federation call the receiver refuses before execution. No transaction is created; the receipt is
+// signed with the kernel's Ed25519 key so the caller can verify the rejection was authentic. reason
+// records why (e.g. "counterparty denied", "insufficient balance", "action inactive") so the caller's
+// settled failure is legible rather than always reading "denied".
+func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, actionParam, argsHash, idempotencyKey, reason string) (*Receipt, error) {
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
@@ -638,7 +640,7 @@ func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, actionParam, argsH
 		Gross:        0,
 		Net:          0,
 		Fee:          0,
-		Reason:       "denied",
+		Reason:       reason,
 		StartedAt:    now,
 		CreatedAt:    now,
 	}

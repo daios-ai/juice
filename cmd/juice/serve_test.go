@@ -1522,6 +1522,11 @@ func TestFederationCallSignsRejectionForNonExecutableAction(t *testing.T) {
 		if env.Receipt.Signature == "" {
 			t.Errorf("%s: rejection receipt is unsigned", label)
 		}
+		// The reason must reflect why the action wouldn't run, not the misleading "denied"
+		// (which means the peer was unfriended — a different thing).
+		if env.Receipt.Reason == "" || env.Receipt.Reason == "denied" || env.Receipt.Reason == "counterparty denied" {
+			t.Errorf("%s: reason = %q, want a specific non-executable reason", label, env.Receipt.Reason)
+		}
 	}
 
 	// Inactive action → signed rejection.
