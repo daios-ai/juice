@@ -39,6 +39,8 @@ var rootCmd = &cobra.Command{
 	// error and dump the usage block on a runtime failure.
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	// Hide cobra's stock `completion` command from the help listing (it still works if invoked).
+	CompletionOptions: cobra.CompletionOptions{HiddenDefaultCmd: true},
 }
 
 // Global flags.
