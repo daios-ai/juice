@@ -815,11 +815,6 @@ func TestAwaitingReceiptSince(t *testing.T) {
 
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "await-action", 1000)
 
-	// No pending calls yet.
-	if since, _ := k.AwaitingReceiptSince(ctx); len(since) != 0 {
-		t.Fatalf("expected no awaiting processes, got %d", len(since))
-	}
-
 	// Offline call → parked, awaiting a receipt.
 	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
@@ -828,16 +823,73 @@ func TestAwaitingReceiptSince(t *testing.T) {
 	if len(pend) != 1 {
 		t.Fatalf("expected 1 pending trace, got %d", len(pend))
 	}
-	since, err := k.AwaitingReceiptSince(ctx)
+	awaitingPID := pend[0].ProcessID
+
+	// A process with no pending remote call is not reported.
+	if since, _ := k.AwaitingReceiptSince(ctx, []string{"no-such-process"}); len(since) != 0 {
+		t.Fatalf("expected no awaiting processes for an unrelated id, got %d", len(since))
+	}
+
+	since, err := k.AwaitingReceiptSince(ctx, []string{awaitingPID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts, ok := since[pend[0].ProcessID]
+	ts, ok := since[awaitingPID]
 	if !ok {
 		t.Fatalf("process %s not reported awaiting", pend[0].ProcessID)
 	}
 	if !ts.Equal(pend[0].CreatedAt) {
 		t.Errorf("awaiting-since = %v, want the pending trace's created_at %v", ts, pend[0].CreatedAt)
+	}
+}
+
+// TestPendingRemoteTracesAndRetryWrappers: the serve-loop-facing wrappers behave like the bulk
+// method — PendingRemoteTraces lists the parked call, and RetryRemoteTrace settles it once the peer
+// answers with a valid receipt.
+func TestPendingRemoteTracesAndRetryWrappers(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	bps := kernel.DefaultConfig().ImportBPS
+
+	fake := &fakeFederationHTTP{} // offline: no receipt → pending
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+
+	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "wrap-action", 1000)
+	mp := a.Price * 10000 / (10000 + bps)
+
+	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("Run: expected ErrTimeout, got %v", err)
+	}
+	pending, err := k.PendingRemoteTraces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("PendingRemoteTraces: expected 1, got %d", len(pending))
+	}
+
+	// Peer returns with a valid receipt; RetryRemoteTrace settles the one trace.
+	now := time.Now().UTC()
+	r := &kernel.Receipt{
+		ID: uuid.New().String(), TxID: "rtx", ActionID: "wrap-action",
+		ArgsHash: jcsHashForTest(t, `{}`), ReplyHash: jcsHashForTest(t, `{}`),
+		Status: kernel.TxSuccess, Charge: mp, StartedAt: now, CreatedAt: now,
+	}
+	r.Signature = signReceiptForTest(t, priv, r)
+	b, _ := json.Marshal(r)
+	fake.receiptJSON = string(b)
+
+	if err := k.RetryRemoteTrace(ctx, pending[0]); err != nil {
+		t.Fatalf("RetryRemoteTrace: %v", err)
+	}
+	if p, _ := k.PendingRemoteTraces(ctx); len(p) != 0 {
+		t.Fatalf("expected 0 pending after retry settled, got %d", len(p))
 	}
 }
 

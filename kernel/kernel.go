@@ -1327,18 +1327,28 @@ func (k *Kernel) ReadTrace(ctx context.Context, id string) (*Trace, error) {
 	return k.store.ReadTrace(ctx, id)
 }
 
-// AwaitingReceiptSince maps each open process that has a remote-proxy call still awaiting its
-// receipt (§13) to the earliest such call's start time. It reports the awaiting-receipt state the
-// process listings must surface, plus how long funds have been parked. Read-only; no probing.
-func (k *Kernel) AwaitingReceiptSince(ctx context.Context) (map[string]time.Time, error) {
-	pending, err := k.store.ListPendingRemoteTraces(ctx)
-	if err != nil {
-		return nil, err
-	}
-	since := make(map[string]time.Time, len(pending))
-	for _, tr := range pending {
-		if cur, ok := since[tr.ProcessID]; !ok || tr.CreatedAt.Before(cur) {
-			since[tr.ProcessID] = tr.CreatedAt
+// AwaitingReceiptSince maps each of the given processes that has a remote-proxy call still awaiting
+// its receipt (§13) to the earliest such call's start time. It reports the awaiting-receipt state
+// the process listings must surface, plus how long funds have been parked. Scoped to the passed
+// processes so a listing scans only what it displays (process_id is indexed), not every trace.
+// Read-only; no probing.
+func (k *Kernel) AwaitingReceiptSince(ctx context.Context, processIDs []string) (map[string]time.Time, error) {
+	since := make(map[string]time.Time, len(processIDs))
+	for _, pid := range processIDs {
+		traces, err := k.store.ListUnsettledTracesForProcess(ctx, pid)
+		if err != nil {
+			return nil, err
+		}
+		for _, tr := range traces {
+			// A remote-proxy call awaiting its receipt is an unsettled trace with an idempotency
+			// key (the same filter as the global ListPendingRemoteTraces); a local call still
+			// executing has none and is not "awaiting a receipt".
+			if tr.IdempotencyKey == nil {
+				continue
+			}
+			if cur, ok := since[pid]; !ok || tr.CreatedAt.Before(cur) {
+				since[pid] = tr.CreatedAt
+			}
 		}
 	}
 	return since, nil

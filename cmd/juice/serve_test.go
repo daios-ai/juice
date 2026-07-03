@@ -1567,35 +1567,85 @@ func TestWaitingOnPeer(t *testing.T) {
 	}
 }
 
-// TestStartRemoteRetryLoop: the serve retry loop calls the retry function on its interval and
+// TestStartRemoteRetryLoop: the serve retry loop lists pending traces, retries the due ones, and
 // stops promptly when its context is cancelled (§13 — this is what settles parked remote calls
 // without a restart). The retry's own settlement behavior is covered in kernel/federation_test.go.
 func TestStartRemoteRetryLoop(t *testing.T) {
-	calls := make(chan struct{}, 100)
+	// One trace created well in the past, so it is due on the first tick (nextAt = created + base).
+	tr := &kernel.Trace{ID: "t1", ProcessID: "p1", CreatedAt: time.Now().Add(-time.Hour)}
+	list := func(context.Context) ([]*kernel.Trace, error) { return []*kernel.Trace{tr}, nil }
+	calls := make(chan string, 100)
+	retry := func(_ context.Context, tr *kernel.Trace) error {
+		select {
+		case calls <- tr.ID:
+		default:
+		}
+		return nil
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		startRemoteRetryLoop(ctx, func(context.Context) {
-			select {
-			case calls <- struct{}{}:
-			default:
-			}
-		}, time.Millisecond)
+		startRemoteRetryLoop(ctx, list, retry, time.Millisecond)
 		close(done)
 	}()
 
 	select {
-	case <-calls: // retry fired at least once
+	case id := <-calls:
+		if id != "t1" {
+			t.Fatalf("retried wrong trace: %q", id)
+		}
 	case <-time.After(2 * time.Second):
 		cancel()
-		t.Fatal("retry was never called")
+		t.Fatal("due trace was never retried")
 	}
 
 	cancel()
 	select {
-	case <-done: // loop returned on cancel
+	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("loop did not stop on ctx cancel")
+	}
+}
+
+// TestBackoffScheduler pins the retry schedule: first attempt one base after creation, exponential
+// spacing (base, 2×, 4×, …) capped, and pruning of traces that have resolved (dropped from the list).
+func TestBackoffScheduler(t *testing.T) {
+	base := time.Minute
+	s := newBackoffScheduler(base)
+	t0 := time.Now()
+	tr := &kernel.Trace{ID: "a", ProcessID: "p", CreatedAt: t0}
+	in := []*kernel.Trace{tr}
+
+	// Before created+base: not due (skips the inline round-trip window).
+	if got := s.due(in, t0.Add(30*time.Second)); len(got) != 0 {
+		t.Fatalf("expected not due before base, got %d", len(got))
+	}
+	// At created+base: first retry.
+	if got := s.due(in, t0.Add(base)); len(got) != 1 {
+		t.Fatalf("expected 1 due at base, got %d", len(got))
+	}
+	// Immediately after: not due — next attempt is base later.
+	if got := s.due(in, t0.Add(base+time.Second)); len(got) != 0 {
+		t.Fatalf("expected not due right after first retry, got %d", len(got))
+	}
+	// Second retry one base after the first; then spacing must double to 2×base.
+	if got := s.due(in, t0.Add(2*base)); len(got) != 1 {
+		t.Fatalf("expected 2nd retry at 2×base, got %d", len(got))
+	}
+	if got := s.due(in, t0.Add(3*base)); len(got) != 0 {
+		t.Fatalf("expected still backed off at 3×base (needs 2×base gap), got %d", len(got))
+	}
+	if got := s.due(in, t0.Add(4*base)); len(got) != 1 {
+		t.Fatalf("expected 3rd retry at 4×base, got %d", len(got))
+	}
+
+	// Resolved: the trace drops out of the list → its schedule state is pruned.
+	if got := s.due(nil, t0.Add(5*base)); len(got) != 0 {
+		t.Fatalf("expected nothing due for empty list, got %d", len(got))
+	}
+	if len(s.entries) != 0 {
+		t.Fatalf("expected pruned scheduler state, got %d entries", len(s.entries))
 	}
 }
 

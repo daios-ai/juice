@@ -328,6 +328,21 @@ func (k *Kernel) RetryPendingRemoteDispatches(ctx context.Context) {
 	}
 }
 
+// PendingRemoteTraces returns the in-flight remote-proxy traces awaiting a receipt (idempotency key
+// set, no settled transaction). Exposed for the serve retry loop, which schedules per-trace retries
+// with backoff instead of re-dispatching the whole set every tick.
+func (k *Kernel) PendingRemoteTraces(ctx context.Context) ([]*Trace, error) {
+	return k.store.ListPendingRemoteTraces(ctx)
+}
+
+// RetryRemoteTrace re-issues one pending remote dispatch and settles it if a receipt has arrived,
+// or settles it as a terminal failure once RemotePendingMaxAge has elapsed (§13). Idempotent: the
+// retry carries the same key, so the remote replays rather than re-executing. The serve loop calls
+// this per due trace; it derives its own logger so callers never handle one.
+func (k *Kernel) RetryRemoteTrace(ctx context.Context, trace *Trace) error {
+	return k.retryRemoteTrace(ctx, k.log.With(ctx), trace)
+}
+
 // retryRemoteTrace re-issues one pending remote dispatch and settles it if a receipt arrives.
 func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace *Trace) error {
 	if trace.IdempotencyKey == nil || trace.DispatchJSON == nil {

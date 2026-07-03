@@ -323,7 +323,11 @@ func listProcesses(k *kernel.Kernel, ctx context.Context, callerID string, limit
 	if err != nil {
 		return nil, err
 	}
-	since, err := k.AwaitingReceiptSince(ctx)
+	ids := make([]string, len(processes))
+	for i, p := range processes {
+		ids[i] = p.ID
+	}
+	since, err := k.AwaitingReceiptSince(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +343,7 @@ func getProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) (*pr
 	if err != nil {
 		return nil, err
 	}
-	since, err := k.AwaitingReceiptSince(ctx)
+	since, err := k.AwaitingReceiptSince(ctx, []string{p.ID})
 	if err != nil {
 		return nil, err
 	}

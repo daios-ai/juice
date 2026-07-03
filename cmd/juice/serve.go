@@ -96,7 +96,7 @@ func runServer(addr string) error {
 		// them moving. The loop stops when runServer returns.
 		retryCtx, retryCancel := context.WithCancel(context.Background())
 		defer retryCancel()
-		go startRemoteRetryLoop(retryCtx, k.RetryPendingRemoteDispatches, globalCfg.remoteRetryInterval())
+		go startRemoteRetryLoop(retryCtx, k.PendingRemoteTraces, k.RetryRemoteTrace, globalCfg.remoteRetryInterval())
 	}
 
 	// server.ready is emitted only after a successful bind — the harness waits on this line.
@@ -142,12 +142,13 @@ func runServer(addr string) error {
 	}
 }
 
-// startRemoteRetryLoop calls retry every interval until ctx is cancelled. Runs are sequential — a
-// tick never overlaps the previous one — and the retry (RetryPendingRemoteDispatches) is idempotent
-// (it carries the same key, so the remote replays), so any overlap with a step-completion-triggered
-// retry is harmless and loses cleanly at the atomic store commit. This is the "server ticker" §13
-// relies on to settle parked calls without a restart.
-func startRemoteRetryLoop(ctx context.Context, retry func(context.Context), interval time.Duration) {
+// startRemoteRetryLoop is the "server ticker" §13 relies on to settle parked remote calls without a
+// restart. Every interval it lists the pending remote traces and retries only those a backoffScheduler
+// says are due, so a long-offline peer is backed off rather than hammered every tick, and a call still
+// mid-inline-round-trip isn't duplicate-dispatched. Runs are sequential (a tick never overlaps the
+// previous one); the retry is idempotent (same key → the remote replays). Stops when ctx is cancelled.
+func startRemoteRetryLoop(ctx context.Context, list func(context.Context) ([]*kernel.Trace, error), retry func(context.Context, *kernel.Trace) error, interval time.Duration) {
+	sched := newBackoffScheduler(interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -155,9 +156,67 @@ func startRemoteRetryLoop(ctx context.Context, retry func(context.Context), inte
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			retry(ctx)
+			traces, err := list(ctx)
+			if err != nil {
+				continue
+			}
+			for _, tr := range sched.due(traces, time.Now()) {
+				_ = retry(ctx, tr)
+			}
 		}
 	}
+}
+
+// backoffScheduler decides which pending remote traces are due for a retry, spacing each trace's
+// attempts with exponential backoff so a peer that stays offline is retried ever-less-often (bounded
+// anyway by RemotePendingMaxAge, §13). State is in-memory and per-serve-process: a restart re-drives
+// everything once via bootstrap, so nothing is lost. It is the only sweeper of pending traces during
+// live serving (Recover/bootstrap run only at startup), so a plain map needs no locking.
+type backoffScheduler struct {
+	base    time.Duration
+	entries map[string]*backoffEntry
+}
+
+type backoffEntry struct {
+	attempts int
+	nextAt   time.Time
+}
+
+func newBackoffScheduler(base time.Duration) *backoffScheduler {
+	return &backoffScheduler{base: base, entries: map[string]*backoffEntry{}}
+}
+
+// due returns the traces to retry now and advances their schedules. A trace is first scheduled one
+// base interval after its creation (skipping the inline round-trip window); each retry pushes the
+// next attempt out by base<<min(attempts,5) — doubling up to a 32×base cap. Traces absent from the
+// list are resolved (settled/cancelled) and their state is pruned.
+func (b *backoffScheduler) due(traces []*kernel.Trace, now time.Time) []*kernel.Trace {
+	live := make(map[string]struct{}, len(traces))
+	var out []*kernel.Trace
+	for _, tr := range traces {
+		live[tr.ID] = struct{}{}
+		e := b.entries[tr.ID]
+		if e == nil {
+			e = &backoffEntry{nextAt: tr.CreatedAt.Add(b.base)}
+			b.entries[tr.ID] = e
+		}
+		if now.Before(e.nextAt) {
+			continue
+		}
+		out = append(out, tr)
+		e.attempts++
+		shift := e.attempts - 1 // 1st retry waits base, then 2×, 4×, … capped at 32×
+		if shift > 5 {
+			shift = 5
+		}
+		e.nextAt = now.Add(b.base << shift)
+	}
+	for id := range b.entries {
+		if _, ok := live[id]; !ok {
+			delete(b.entries, id)
+		}
+	}
+	return out
 }
 
 // ---- server ----
