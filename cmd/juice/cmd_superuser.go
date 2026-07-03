@@ -28,7 +28,7 @@ func parseAmount(s string) (int64, error) {
 // sees all rows on `action/process/tx/step list` and may `action disable` any action, all
 // over the normal TCP API (supervision is scope, not a separate surface).
 func init() {
-	adminCmd := &cobra.Command{Use: "admin", Short: "Superuser supervision (money, access, federation, roster)"}
+	adminCmd := &cobra.Command{Use: "admin", Short: "Superuser supervision"}
 	adminCmd.AddCommand(
 		adminUsersCmd(),
 		adminShowCmd(),
@@ -51,7 +51,7 @@ func init() {
 func identityCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "identity",
-		Short: "Show this kernel's federation identity (public key, handle, listen addresses)",
+		Short: "Show this kernel's federation identity",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			var out struct {
@@ -82,7 +82,7 @@ func adminUsersCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{
 		Use:   "users",
-		Short: "List all users",
+		Short: "List users",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			var users []*kernel.User
@@ -110,7 +110,7 @@ func adminUsersCmd() *cobra.Command {
 func adminShowCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "show <user>",
-		Short: "Show user details (user is @handle)",
+		Short: "Show user details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return ctlEmit("GET", "/control/users/"+url.PathEscape(args[0]), nil)
@@ -121,7 +121,7 @@ func adminShowCmd() *cobra.Command {
 func adminSuspendCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "suspend <user>",
-		Short: "Suspend a user account (user is @handle)",
+		Short: "Suspend a user",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if err := ctlCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/suspend", nil, nil); err != nil {
@@ -136,7 +136,7 @@ func adminSuspendCmd() *cobra.Command {
 func adminUnsuspendCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "unsuspend <user>",
-		Short: "Unsuspend a user account (user is @handle)",
+		Short: "Unsuspend a user",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if err := ctlCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/unsuspend", nil, nil); err != nil {
@@ -166,22 +166,22 @@ func adjustCmd(use, short, path string) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
-	cmd.Flags().StringVar(&externalKey, "external-key", "", "Optional idempotency token from the out-of-band payment system")
+	cmd.Flags().StringVar(&externalKey, "external-key", "", "Optional idempotency token")
 	return cmd
 }
 
 func adminDepositCmd() *cobra.Command {
-	return adjustCmd("deposit <user> <amount>", "Add credits to a user account (user is @handle)", "/control/deposit")
+	return adjustCmd("deposit <user> <amount>", "Add credits to a user", "/control/deposit")
 }
 
 func adminWithdrawCmd() *cobra.Command {
-	return adjustCmd("withdraw <user> <amount>", "Deduct credits from a user account (user is @handle)", "/control/withdraw")
+	return adjustCmd("withdraw <user> <amount>", "Deduct credits from a user", "/control/withdraw")
 }
 
 func peerInspectCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "inspect <key>",
-		Short: "Show a remote kernel's identity, public actions, and reachability (by public key)",
+		Short: "Inspect a remote kernel",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			var out struct {
@@ -242,7 +242,7 @@ func peerInspectCmd() *cobra.Command {
 func peerFriendCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "friend <key>",
-		Short: "Befriend a remote kernel by public key: register as peer and import their active public actions",
+		Short: "Befriend a kernel and import its actions",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			var out struct {
@@ -273,7 +273,7 @@ func peerFriendCmd() *cobra.Command {
 func peerUnfriendCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "unfriend <user>",
-		Short: "Unfriend a peer: deny their calls and deactivate their proxy actions (user is @handle)",
+		Short: "Unfriend a peer",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			handle := kernel.NormalizeHandle(args[0])
@@ -291,7 +291,7 @@ func peerListCmd() *cobra.Command {
 	var showGossip bool
 	cmd := &cobra.Command{
 		Use:   "peers",
-		Short: "List known remote kernel peers",
+		Short: "List peers",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			path := "/control/peers"

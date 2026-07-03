@@ -135,7 +135,7 @@ func emit(v any) error {
 // ---- user ----
 
 func init() {
-	userCmd := &cobra.Command{Use: "user", Short: "User account commands"}
+	userCmd := &cobra.Command{Use: "user", Short: "Manage your account"}
 	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd())
 	rootCmd.AddCommand(userCmd)
 }
@@ -144,7 +144,7 @@ func userCreateCmd() *cobra.Command {
 	var password string
 	cmd := &cobra.Command{
 		Use:   "create <user> <email>",
-		Short: "Create a new user account",
+		Short: "Create a user account",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			user, email := args[0], args[1]
@@ -167,7 +167,7 @@ func userCreateCmd() *cobra.Command {
 func userMeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "me",
-		Short: "Show the authenticated user's profile",
+		Short: "Show your profile",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return apiEmit("GET", "/v1/me", nil)
@@ -208,14 +208,14 @@ func userUpdateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&email, "email", "", "New email address")
-	cmd.Flags().BoolVar(&changePassword, "password", false, "Change password (prompts for current and new)")
+	cmd.Flags().BoolVar(&changePassword, "password", false, "Change your password")
 	return cmd
 }
 
 // ---- action ----
 
 func init() {
-	actionCmd := &cobra.Command{Use: "action", Short: "Action management commands"}
+	actionCmd := &cobra.Command{Use: "action", Short: "Manage actions"}
 	actionCmd.AddCommand(
 		actionCreateCmd(),
 		actionUpdateCmd(),
@@ -238,7 +238,7 @@ func actionCreateCmd() *cobra.Command {
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
 		Use:   "create <name>",
-		Short: "Create a new action owned by you (name e.g. /hello)",
+		Short: "Create an action",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
@@ -315,14 +315,14 @@ func actionCreateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&kind, "kind", "http", "Action kind: http, wasm, native")
 	cmd.Flags().StringVar(&source, "source", "", "URL (http) or file path (wasm)")
-	cmd.Flags().StringVar(&method, "method", "", "HTTP verb for --kind http: GET, POST (default), PUT, PATCH, DELETE")
-	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (in=path|query|body); repeatable. Omit for implicit routing")
-	cmd.Flags().StringVar(&artifact, "artifact", "", "Base64 pre-compiled WASM artifact, or file path (wasm; e.g. @sys/tinygo/compile output)")
-	cmd.Flags().StringVar(&description, "description", "", "Human-readable description")
+	cmd.Flags().StringVar(&method, "method", "", "HTTP verb (default POST)")
+	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (path|query|body); repeatable")
+	cmd.Flags().StringVar(&artifact, "artifact", "", "Base64 WASM artifact or file path")
+	cmd.Flags().StringVar(&description, "description", "", "Description")
 	cmd.Flags().Int64Var(&price, "price", 0, "Price in credits")
 	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "JSON Schema for inputs (or @file.json)")
 	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "JSON Schema for outputs (or @file.json)")
-	cmd.Flags().StringVar(&authStr, "auth", "", "Upstream auth config JSON {scheme,config,secrets} (or @file.json)")
+	cmd.Flags().StringVar(&authStr, "auth", "", "Upstream auth config JSON (or @file.json)")
 	return cmd
 }
 
@@ -334,7 +334,7 @@ func actionUpdateCmd() *cobra.Command {
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
 		Use:   "update <action>",
-		Short: "Update an action's metadata (action is @owner/name or an id)",
+		Short: "Update an action",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -391,20 +391,20 @@ func actionUpdateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&description, "description", "", "New description")
 	cmd.Flags().StringVar(&source, "source", "", "New source URL or file path")
-	cmd.Flags().StringVar(&method, "method", "", "New HTTP verb for --kind http: GET, POST, PUT, PATCH, DELETE")
-	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (in=path|query|body); repeatable")
+	cmd.Flags().StringVar(&method, "method", "", "New HTTP verb")
+	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (path|query|body); repeatable")
 	cmd.Flags().Int64Var(&price, "price", 0, "New price in credits")
-	cmd.Flags().BoolVar(&public, "public", false, "Make action public (true) or private (false)")
+	cmd.Flags().BoolVar(&public, "public", false, "Make action public or private")
 	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "New JSON Schema for inputs (or @file.json)")
 	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "New JSON Schema for outputs (or @file.json)")
-	cmd.Flags().StringVar(&authStr, "auth", "", "Upstream auth config JSON {scheme,config,secrets} (or @file.json)")
+	cmd.Flags().StringVar(&authStr, "auth", "", "Upstream auth config JSON (or @file.json)")
 	return cmd
 }
 
 func actionEnableCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "enable <action>",
-		Short: "Activate an action (action is @owner/name or an id)",
+		Short: "Activate an action",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -427,7 +427,7 @@ func actionEnableCmd() *cobra.Command {
 func actionDisableCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "disable <action>",
-		Short: "Deactivate an action (action is @owner/name or an id)",
+		Short: "Deactivate an action",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -493,7 +493,7 @@ func actionListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&all, "all", false, "Include own inactive/private actions (requires auth)")
+	cmd.Flags().BoolVar(&all, "all", false, "Include your inactive/private actions")
 	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
 	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
 	return cmd
@@ -502,7 +502,7 @@ func actionListCmd() *cobra.Command {
 func actionShowCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "show <action>",
-		Short: "Show action details, including input/output schemas (action is @owner/name or an id)",
+		Short: "Show an action's details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -518,7 +518,7 @@ func actionShowCmd() *cobra.Command {
 func actionDeleteCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <action>",
-		Short: "Delete an action, preserving history (action is @owner/name or an id)",
+		Short: "Delete an action, preserving history",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -538,7 +538,7 @@ func actionDeleteCmd() *cobra.Command {
 func actionImportCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "import <spec-url>",
-		Short: "Import OpenAPI operations as inactive http actions (idempotent)",
+		Short: "Import OpenAPI operations",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			specURL := args[0]
@@ -566,7 +566,7 @@ func actionUnimportCmd() *cobra.Command {
 	var name string
 	cmd := &cobra.Command{
 		Use:   "unimport <spec-url>",
-		Short: "Deactivate OpenAPI-imported actions without deleting history",
+		Short: "Deactivate OpenAPI-imported actions",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			specURL := args[0]
@@ -585,14 +585,14 @@ func actionUnimportCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&name, "name", "", "Deactivate only the action with this name or operation_key")
+	cmd.Flags().StringVar(&name, "name", "", "Deactivate only this name or operation_key")
 	return cmd
 }
 
 func actionStatsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stats <action>",
-		Short: "Show statistics for an action (action is @owner/name or an id)",
+		Short: "Show an action's statistics",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -619,7 +619,7 @@ func actionStatsCmd() *cobra.Command {
 // ---- process ----
 
 func init() {
-	processCmd := &cobra.Command{Use: "process", Short: "Process lifecycle commands"}
+	processCmd := &cobra.Command{Use: "process", Short: "Manage processes"}
 	processCmd.AddCommand(processListCmd(), processEndCmd(), processShowCmd())
 	rootCmd.AddCommand(processCmd)
 }
@@ -627,7 +627,7 @@ func init() {
 func processListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List processes owned by the current user",
+		Short: "List processes",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			var processes []*kernel.Process
@@ -649,7 +649,7 @@ func processListCmd() *cobra.Command {
 func processEndCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "end <id>",
-		Short: "End a process and return remaining funds",
+		Short: "End a process",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if err := apiCall(context.Background(), "POST", "/v1/processes/"+args[0]+"/end", nil, nil); err != nil {
@@ -675,7 +675,7 @@ func processShowCmd() *cobra.Command {
 // ---- step ----
 
 func init() {
-	stepCmd := &cobra.Command{Use: "step", Short: "Step management commands"}
+	stepCmd := &cobra.Command{Use: "step", Short: "Manage steps"}
 	stepCmd.AddCommand(stepCreateCmd(), stepListCmd(), stepShowCmd(), stepCompleteCmd())
 	rootCmd.AddCommand(stepCmd)
 }
@@ -685,7 +685,7 @@ func stepCreateCmd() *cobra.Command {
 	var partialArgs string
 	cmd := &cobra.Command{
 		Use:   "create <action>",
-		Short: "Create a step (pause point for external completion; action is @owner/name)",
+		Short: "Create a step",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			pa := json.RawMessage("{}")
@@ -715,7 +715,7 @@ func stepCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&traceID, "trace", "", "Trace ID (required)")
-	cmd.Flags().StringVar(&requiredCaller, "required-caller", "", "User who must complete the step, e.g. @webhook (required)")
+	cmd.Flags().StringVar(&requiredCaller, "required-caller", "", "User who must complete the step (required)")
 	cmd.Flags().StringVar(&partialArgs, "partial-args", "", "Partial args as JSON object")
 	_ = cmd.MarkFlagRequired("trace")
 	_ = cmd.MarkFlagRequired("required-caller")
@@ -726,7 +726,7 @@ func stepListCmd() *cobra.Command {
 	var processID, status string
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List steps visible to the current user",
+		Short: "List steps",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			q := url.Values{}
@@ -768,7 +768,7 @@ func stepShowCmd() *cobra.Command {
 func stepCompleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "complete <id> [json]",
-		Short: "Complete a waiting step (json is the input object, default {})",
+		Short: "Complete a waiting step",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			raw := ""
@@ -801,7 +801,7 @@ func stepCompleteCmd() *cobra.Command {
 // ---- tx ----
 
 func init() {
-	txCmd := &cobra.Command{Use: "tx", Short: "Transaction commands"}
+	txCmd := &cobra.Command{Use: "tx", Short: "Manage transactions"}
 	txCmd.AddCommand(txListCmd(), txShowCmd(), txRateCmd(), txVerifyReceiptCmd())
 	rootCmd.AddCommand(txCmd)
 }
@@ -859,7 +859,7 @@ func txShowCmd() *cobra.Command {
 func txVerifyReceiptCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "verify <id>",
-		Short: "Verify the remote receipt for a transaction",
+		Short: "Verify a transaction's remote receipt",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return apiEmit("GET", "/v1/transactions/"+args[0]+"/receipt-verification", nil)
@@ -898,7 +898,7 @@ func init() {
 func runCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run <action> [json]",
-		Short: "Run an action (creates a process, calls the action, closes the process)",
+		Short: "Run an action",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, cmdArgs []string) error {
 			argsStr := "{}"

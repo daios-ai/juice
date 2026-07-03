@@ -28,7 +28,7 @@ func init() {
 	var addr string
 	serveCmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Start the HTTP API server",
+		Short: "Start the server",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return runServer(addr)
 		},

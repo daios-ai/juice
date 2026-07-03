@@ -16,7 +16,7 @@ import (
 )
 
 func init() {
-	authCmd := &cobra.Command{Use: "auth", Short: "Authentication commands"}
+	authCmd := &cobra.Command{Use: "auth", Short: "Manage authentication"}
 	authCmd.AddCommand(loginCmd(), logoutCmd(), refreshCmd())
 	rootCmd.AddCommand(authCmd)
 }
@@ -25,7 +25,7 @@ func loginCmd() *cobra.Command {
 	var password string
 	cmd := &cobra.Command{
 		Use:   "login <user>",
-		Short: "Log in and store a bearer token (user is @handle)",
+		Short: "Log in",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			handle := args[0]
@@ -130,7 +130,7 @@ func loginPKCE(handle, password, server string) error {
 func logoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
-		Short: "Revoke the stored refresh token and remove local credentials",
+		Short: "Log out",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if rt, err := loadRefreshToken(); err == nil {
 				_ = apiCall(context.Background(), "POST", "/v1/auth/logout",
@@ -149,7 +149,7 @@ func logoutCmd() *cobra.Command {
 func refreshCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "refresh",
-		Short: "Rotate the refresh token and get a new access token",
+		Short: "Refresh your access token",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			rt, err := loadRefreshToken()
 			if err != nil {

@@ -59,11 +59,11 @@ var resolvedConfigPath string
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&flagDB, "db", "juice.db", "SQLite database path")
-	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", "", "JSON config file (default: juice.json in --db directory)")
-	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Output canonical JSON (same shape as the HTTP API) instead of human-readable text")
+	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", "", "Config file path")
+	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Output JSON instead of human-readable text")
 	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "Print only the created resource ID")
-	rootCmd.PersistentFlags().StringVar(&flagServer, "server", "", "Juice server base URL (default: server_url in config, else http://localhost:4040)")
-	rootCmd.PersistentFlags().BoolVar(&flagVerbose, "verbose", false, "Show the underlying cause of an error in addition to the message")
+	rootCmd.PersistentFlags().StringVar(&flagServer, "server", "", "Server base URL")
+	rootCmd.PersistentFlags().BoolVar(&flagVerbose, "verbose", false, "Show underlying error causes")
 	cobra.OnInitialize(initConfig)
 }
 
