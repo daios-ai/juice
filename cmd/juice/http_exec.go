@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 )
 
@@ -268,6 +269,50 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, peerPublicKe
 	}
 	return executeFederationOverTransport(ctx, e.fedTransport, e.signerFn, e.localPubKey,
 		peerPublicKey, actionRef, idempotencyKey, args)
+}
+
+// federationTransport is the outbound half of the libp2p transport this executor needs; *fed.Transport
+// satisfies it. Keeping it an interface lets the fake in tests stand in without a real network.
+type federationTransport interface {
+	Call(ctx context.Context, peerKey string, req fed.CallRequest) (fed.CallResponse, error)
+}
+
+// executeFederationOverTransport is the transport-backed kernel.FederationExecutor. It signs the
+// request as this kernel and sends the exact args bytes so the receiver's args_hash matches.
+func executeFederationOverTransport(ctx context.Context, tr federationTransport, signerFn signerFunc,
+	localPubKey, peerPublicKey, actionRef, idempotencyKey string, args map[string]any) (kernel.FederationResult, error) {
+
+	body, err := json.Marshal(args)
+	if err != nil {
+		return kernel.FederationResult{}, kernel.ErrInvalidInput.Wrap("could not serialize args")
+	}
+	argsHash := sha256HexBytes(body)
+	req := fed.CallRequest{
+		Action:         actionRef,
+		Counterparty:   localPubKey,
+		IdempotencyKey: idempotencyKey,
+		Args:           json.RawMessage(body),
+	}
+	if signerFn != nil {
+		if sig, ts, serr := signerFn(actionRef, localPubKey, idempotencyKey, argsHash); serr == nil {
+			req.Signature = sig
+			req.Timestamp = ts
+		}
+	}
+	resp, err := tr.Call(ctx, peerPublicKey, req)
+	if err != nil {
+		// Transport error: no receipt → the kernel keeps the call pending for retry (§13).
+		return kernel.FederationResult{HTTPStatus: 0}, nil
+	}
+	var envelope struct {
+		Result  map[string]any  `json:"result"`
+		Receipt json.RawMessage `json:"receipt"`
+	}
+	var receiptJSON string
+	if json.Unmarshal(resp.Body, &envelope) == nil && len(envelope.Receipt) > 0 && string(envelope.Receipt) != "null" {
+		receiptJSON = string(envelope.Receipt)
+	}
+	return kernel.FederationResult{Result: envelope.Result, ReceiptJSON: receiptJSON, HTTPStatus: resp.Status}, nil
 }
 
 type httpActionExecutor struct {

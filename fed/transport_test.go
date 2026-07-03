@@ -1,15 +1,20 @@
 package fed
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"testing"
+	"time"
 
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/record"
 )
+
+// ---- Identity ----
 
 // The network identity must derive deterministically from the platform signing key (§12).
 func TestDeriveIdentityDeterministic(t *testing.T) {
@@ -119,8 +124,8 @@ func TestSignatureDomainsDisjoint(t *testing.T) {
 // testRecord is a minimal record.Record for the disjointness test.
 type testRecord struct{ data []byte }
 
-func (r *testRecord) Domain() string           { return "juice-test-domain" }
-func (r *testRecord) Codec() []byte            { return []byte("/juice/test") }
+func (r *testRecord) Domain() string                 { return "juice-test-domain" }
+func (r *testRecord) Codec() []byte                  { return []byte("/juice/test") }
 func (r *testRecord) MarshalRecord() ([]byte, error) { return r.data, nil }
 func (r *testRecord) UnmarshalRecord(b []byte) error { r.data = b; return nil }
 
@@ -134,4 +139,94 @@ func extractEnvelopeSig(t *testing.T, key libp2pcrypto.PrivKey, env *record.Enve
 		return b[len(b)-ed25519.SignatureSize:]
 	}
 	return make([]byte, ed25519.SignatureSize)
+}
+
+// ---- Reachability ----
+
+// A direct loopback connection classifies as "direct".
+func TestProbeDirect(t *testing.T) {
+	a := newTestTransport(t, &fakeHandlers{}, nil)
+	b := newTestTransport(t, &fakeHandlers{}, a.ListenAddrs())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r := b.Probe(ctx, a.PublicKey())
+	if r.Path != "direct" {
+		t.Errorf("path: got %q, want direct", r.Path)
+	}
+	if r.Error != "" {
+		t.Errorf("unexpected error: %s", r.Error)
+	}
+	if len(r.Protocols) == 0 {
+		t.Error("expected the peer to advertise protocols")
+	}
+}
+
+// An unresolvable key classifies as "unreachable" with an error, and does not hang.
+func TestProbeUnreachable(t *testing.T) {
+	a := newTestTransport(t, &fakeHandlers{}, nil)
+	// A syntactically valid but unroutable key.
+	unknown := a.PublicKey()[:len(a.PublicKey())-2] + "ZZ"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	r := a.Probe(ctx, unknown)
+	if time.Since(start) > 8*time.Second {
+		t.Error("probe took too long for an unreachable peer")
+	}
+	if r.Path != "unreachable" {
+		t.Errorf("path: got %q, want unreachable", r.Path)
+	}
+}
+
+func TestIsRelayAddr(t *testing.T) {
+	if !isRelayAddr("/ip4/1.2.3.4/tcp/1/p2p/QmSeed/p2p-circuit/p2p/QmTarget") {
+		t.Error("expected relay addr to be detected")
+	}
+	if isRelayAddr("/ip4/1.2.3.4/tcp/1/p2p/QmDirect") {
+		t.Error("direct addr misclassified as relay")
+	}
+}
+
+// ---- Discovery ----
+
+// Discovery-by-key with no dedicated seed: three transports where one (R) is the bootstrap.
+// Every transport now runs a DHT server + relay, so a plain kernel is the meeting point. B knows
+// only R, yet resolves A by public key through R's DHT and round-trips gossip — the loopback
+// analogue of a home kernel being found by key with no dialable address and no separate seed.
+func TestDiscoveryByKeyViaBootstrapKernel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping DHT discovery test in short mode")
+	}
+	// R is the bootstrap/relay node (an ordinary transport).
+	r := newTestTransport(t, &fakeHandlers{}, nil)
+	boot := r.ListenAddrs()
+
+	// A serves gossip; B knows only R and must find A by key.
+	a := newTestTransport(t, &fakeHandlers{gossip: json.RawMessage(`{"public_key":"a"}`)}, boot)
+	b := newTestTransport(t, &fakeHandlers{}, boot)
+
+	deadline := time.Now().Add(30 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		g, err := b.Gossip(ctx, a.PublicKey())
+		cancel()
+		if err == nil && string(g) == `{"public_key":"a"}` {
+			return // discovered by key through R's DHT and round-tripped
+		}
+		lastErr = err
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("B never discovered A by key via the bootstrap kernel: %v", lastErr)
+}
+
+// A publicly-reachable transport offers the circuit-relay service (folded into every host); this
+// just asserts the relay is wired without error on a normal transport.
+func TestTransportOffersRelay(t *testing.T) {
+	tr := newTestTransport(t, &fakeHandlers{}, nil)
+	if tr.relay == nil {
+		t.Error("expected the transport to run a circuit-relay service")
+	}
 }
