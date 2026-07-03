@@ -72,7 +72,7 @@ The step completer is identified by a user handle at creation time. The server r
 Log lines, progress messages, and error text go to stderr. The only content written to stdout is the resource payload: human-readable summaries, `--json` bodies, and `--quiet` IDs. This makes every command pipeable and keeps `$(juice ... --quiet)` capture reliable.
 
 **C13 — User-facing commands are TCP clients; `admin` is a control-socket client.**  
-Every user-facing command runs by calling the server over HTTP; the base URL resolves from `--server`, then `JUICE_SERVER`, then `server_url` in config, defaulting to `http://localhost:4040`. `admin *` are superuser supervision served over a local `0600` Unix control socket next to the DB (bearer token + filesystem access), never the public TCP API. `juice serve` is the sole process that opens SQLite. Supervision over ordinary resources is **scope**, not a separate surface: a superuser sees all rows on `action/process/tx/step list` and may `action disable`/`enable` any action, all over the normal TCP API.
+Every user-facing command runs by calling the server over HTTP; the base URL resolves from `--server`, then `JUICE_SERVER`, then `server_url` in config, defaulting to `http://localhost:4040`. `admin *` are superuser supervision served over a local `0600` Unix control socket next to the DB (bearer token + filesystem access), never the public TCP API. `juice serve` is the sole process that opens the database. Supervision over ordinary resources is **scope**, not a separate surface: a superuser sees all rows on `action/process/tx/step list` and may `action disable`/`enable` any action, all over the normal TCP API.
 
 ---
 
@@ -84,7 +84,7 @@ Every user-facing command runs by calling the server over HTTP; the base URL res
 |-----------|------|-----|
 | Health check | `GET /health` (open) → `{status}` | `juice health [--url]` |
 
-Federation has no HTTP surface: peer identity, gossip, manifests, the friend handshake, and inbound calls travel over the libp2p transport (§13), not over this API. Gossip is surfaced locally by `admin peers --gossip`; a remote kernel is inspected with `admin inspect <key>`.
+Federation has no HTTP surface: peer identity, gossip, manifests, the friend handshake, and inbound calls travel over the cross-kernel transport (§13), not over this API. Gossip is surfaced locally by `admin peers --gossip`; a remote kernel is inspected with `admin inspect <key>`.
 
 ### Authentication
 
@@ -137,7 +137,7 @@ Federation has no HTTP surface: peer identity, gossip, manifests, the friend han
 | Operation | HTTP | CLI |
 |-----------|------|-----|
 | List processes | `GET /v1/processes` → process[]; own processes, or **all for a superuser** | `juice process list` |
-| Show process | `GET /v1/processes/{id}` → process (`available`, `locked`, `status`) | `juice process show <id>` |
+| Show process | `GET /v1/processes/{id}` → process (`available`, `locked`, `status`, `awaiting_receipt`, `awaiting_receipt_since?`) | `juice process show <id>` |
 | End process | `POST /v1/processes/{id}/end` → 204 | `juice process end <id>` |
 
 Processes are created only by `run` and close automatically. `end` is the forced abort: it fails running calls, cancels waiting steps with their parked prices refunded, and returns remaining funds to the owner. An in-flight remote call is not force-failed by restart recovery and settles on its receipt.
@@ -164,7 +164,7 @@ Remote-proxy transactions include `remote_receipt_hash` and `remote_receipt_json
 | Show step | `GET /v1/steps/{id}` → step | `juice step show <id>` |
 | Complete step | `POST /v1/steps/{id}/complete` `{args}` → `{result, tx_id, trace_id, step_id}` | `juice step complete <id> [json]` |
 
-A step is a funded continuation: creation snapshots the action's price as `step.price` and parks it from `trace_id`; the process is derived from `Trace(trace_id).process_id`. Completion spends the parked price — no funds check occurs, and the completion's allocation and transaction `gross` are `step.price`. `required_caller` is a `@handle`; the server resolves it to `required_caller_user_id`. Step listing returns the caller's own steps (as process owner or required caller), or all of them for a superuser. `status` filter accepts `waiting`, `running`, `done`, or `cancelled`. The `args` field in the complete request is merged with the step's `partial_args` (completion `args` overwrites on key collision); the allowed completion input is derived as `action.input_schema \ keys(partial_args)` — a violation rejects the completion and leaves the step `waiting`, never recorded as an action failure. Step read and list responses include `price`, `action_id`, and a computed `action` field (`@owner/name`). An outstanding step keeps its process open.
+A step is a funded continuation: creation snapshots the action's price as `step.price` and parks it from `trace_id`; the process is derived from `Trace(trace_id).process_id`. Completion spends the parked price — no funds check occurs, and the completion's allocation and transaction `gross` are `step.price`. `required_caller` is a `@handle`; the server resolves it to `required_caller_user_id`. Step listing returns the caller's own steps (as process owner or required caller), or all of them for a superuser. `status` filter accepts `waiting`, `running`, `done`, or `cancelled`. The `args` field in the complete request is merged with the step's `partial_args` (completion `args` overwrites on key collision); the allowed completion input is derived as `action.input_schema \ keys(partial_args)` — a violation rejects the completion and leaves the step `waiting`, never recorded as an action failure. Step read and list responses include `price`, `action_id`, a computed `action` field (`@owner/name`), and `waiting_on_peer` on a waiting step whose required caller is a peer. An outstanding step keeps its process open.
 
 ### System Actions
 
@@ -183,10 +183,11 @@ Native actions registered at bootstrap, owned by `@sys`, public, runnable like a
 | `@sys/message` | 0 | Message a user by creating a step they acknowledge |
 | `@sys/random` | 0 | Random float in `[0, 1)` |
 | `@sys/web` | 0 | Fetch a public web page (read-only GET) |
+| `@sys/tinygo/compile` | 5 (configurable, `native.tinygo`) | Compile TinyGo source to a WASM artifact |
 
-### Federation (libp2p transport, not HTTP)
+### Federation
 
-Federation is carried entirely over the libp2p transport (§13), addressed by peer public key — there are no HTTP endpoints. Versioned protocols: `/juice/fed/friend/1` (signed friend request; auto-accepted by default, pending under manual mode; rate-limited at the transport), `/juice/fed/call/1` (inbound proxy call; signature-authenticated; runs as the proxy user from its prepaid balance; underfunded or denied callers receive a signed rejection receipt), `/juice/fed/manifest/1` (signed manifests, chunked per action; served to friends per the exposure lever), `/juice/fed/gossip/1`, and `/juice/fed/inspect/1`. Per-request signatures and the `(idempotency_key, counterparty)` idempotency rule are unchanged from HTTP federation; only the carrier differs.
+Peer actions (`@peer/name`) are called through `POST /v1/run` like any local action; there are no federation HTTP endpoints. Trust and peering are managed via the admin commands below. The cross-kernel transport is an implementation detail (§13).
 
 ### Admin (control-socket, superuser)
 
@@ -203,6 +204,7 @@ The operator verbs no ordinary user performs — money, access, federation trust
 | Friend a kernel | `juice admin friend <key>` |
 | Unfriend a kernel | `juice admin unfriend <user>` |
 | List peers | `juice admin peers [--gossip]` |
-| Inspect a kernel | `juice admin inspect <key>` — identity, public actions, transacted friends, and reachability (direct / hole-punched / relayed) |
+| Inspect a kernel | `juice admin inspect <key>` — identity, public actions, transacted friends, and reachability |
+| Show own identity | `juice admin identity` — this kernel's public key, handle, listen addresses |
 
 `<user>` is a `@handle`; `<action>` is `@owner/name` (or an id); `<key>` is a peer's base64url public key. `withdraw` requires `target.available ≥ amount`; it redeems credits and obliges the out-of-band payout. `admin friend <key>` on a denied key clears the denial and restarts the handshake. `admin unfriend` deny-lists the key, deactivates the peer's proxies, cancels steps addressed to it (parked prices refunded), and preserves balance and history.
