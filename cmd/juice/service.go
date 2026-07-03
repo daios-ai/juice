@@ -15,10 +15,22 @@ import (
 
 // ---- Types ----
 
-// stepWithAction enriches a step with a computed @owner/name action field.
+// stepWithAction enriches a step with a computed @owner/name action field. waiting_on_peer flags a
+// waiting step whose required caller is a peer (proxy) user — work parked on someone who may be
+// offline (§13); its age is the step's created_at.
 type stepWithAction struct {
 	*kernel.Step
-	Action string `json:"action,omitempty"`
+	Action        string `json:"action,omitempty"`
+	WaitingOnPeer bool   `json:"waiting_on_peer,omitempty"`
+}
+
+// processView enriches a process with its awaiting-receipt state and age (§13): a process holding a
+// remote-proxy call still waiting for its signed receipt, and when the earliest such call started —
+// so an operator can see funds parked on an unreachable peer and for how long.
+type processView struct {
+	*kernel.Process
+	AwaitingReceipt      bool       `json:"awaiting_receipt"`
+	AwaitingReceiptSince *time.Time `json:"awaiting_receipt_since,omitempty"`
 }
 
 // actionResp wraps an action with the computed @owner/name reference field and,
@@ -40,12 +52,39 @@ type httpView struct {
 
 // ---- Enrichment helpers ----
 
-func enrichStep(step *kernel.Step, action *kernel.Action) *stepWithAction {
-	v := &stepWithAction{Step: step}
+func enrichStep(step *kernel.Step, action *kernel.Action, waitingOnPeer bool) *stepWithAction {
+	v := &stepWithAction{Step: step, WaitingOnPeer: waitingOnPeer}
 	if action != nil {
 		v.Action = action.OwnerHandle + "/" + action.Name
 	}
 	return v
+}
+
+// enrichProcess flags a process awaiting a remote receipt, with the earliest such call's start time
+// from the awaiting-receipt map (kernel.AwaitingReceiptSince).
+func enrichProcess(p *kernel.Process, since map[string]time.Time) *processView {
+	v := &processView{Process: p}
+	if t, ok := since[p.ID]; ok {
+		tt := t
+		v.AwaitingReceipt = true
+		v.AwaitingReceiptSince = &tt
+	}
+	return v
+}
+
+// waitingOnPeer reports whether a waiting step's required caller is a peer (proxy) user. A read
+// error is treated as "not a peer" — this is an advisory annotation, never a gate.
+func waitingOnPeer(k *kernel.Kernel, ctx context.Context, step *kernel.Step, cache map[string]bool) bool {
+	if step.Status != kernel.StepWaiting {
+		return false
+	}
+	if v, ok := cache[step.RequiredCallerUserID]; ok {
+		return v
+	}
+	u, _ := k.ReadUser(ctx, step.RequiredCallerUserID)
+	isPeer := u != nil && u.PublicKey != ""
+	cache[step.RequiredCallerUserID] = isPeer
+	return isPeer
 }
 
 func enrichAction(a *kernel.Action) actionResp {
@@ -279,12 +318,32 @@ func actionStats(k *kernel.Kernel, ctx context.Context, id string) (*kernel.Stat
 
 // ---- Process operations ----
 
-func listProcesses(k *kernel.Kernel, ctx context.Context, callerID string, limit, offset int) ([]*kernel.Process, error) {
-	return k.ListProcesses(ctx, callerID, limit, offset)
+func listProcesses(k *kernel.Kernel, ctx context.Context, callerID string, limit, offset int) ([]*processView, error) {
+	processes, err := k.ListProcesses(ctx, callerID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	since, err := k.AwaitingReceiptSince(ctx)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]*processView, len(processes))
+	for i, p := range processes {
+		views[i] = enrichProcess(p, since)
+	}
+	return views, nil
 }
 
-func getProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) (*kernel.Process, error) {
-	return k.ReadProcess(ctx, callerID, id)
+func getProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) (*processView, error) {
+	p, err := k.ReadProcess(ctx, callerID, id)
+	if err != nil {
+		return nil, err
+	}
+	since, err := k.AwaitingReceiptSince(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return enrichProcess(p, since), nil
 }
 
 func endProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) error {
@@ -320,7 +379,7 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 	if err != nil {
 		return nil, err
 	}
-	return enrichStep(step, action), nil
+	return enrichStep(step, action, callerUser.PublicKey != "" && step.Status == kernel.StepWaiting), nil
 }
 
 func listSteps(k *kernel.Kernel, ctx context.Context, callerID, processID, status string) ([]*stepWithAction, error) {
@@ -329,9 +388,10 @@ func listSteps(k *kernel.Kernel, ctx context.Context, callerID, processID, statu
 		return nil, err
 	}
 	views := make([]*stepWithAction, len(steps))
+	peerCache := map[string]bool{}
 	for i, step := range steps {
 		action, _ := k.ReadAction(ctx, step.ActionID)
-		views[i] = enrichStep(step, action)
+		views[i] = enrichStep(step, action, waitingOnPeer(k, ctx, step, peerCache))
 	}
 	return views, nil
 }
@@ -342,7 +402,7 @@ func getStep(k *kernel.Kernel, ctx context.Context, callerID, id string) (*stepW
 		return nil, err
 	}
 	action, _ := k.ReadAction(ctx, step.ActionID)
-	return enrichStep(step, action), nil
+	return enrichStep(step, action, waitingOnPeer(k, ctx, step, map[string]bool{})), nil
 }
 
 func completeStep(k *kernel.Kernel, ctx context.Context, callerID, id string, args json.RawMessage) (*kernel.StepReply, error) {
@@ -443,9 +503,12 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 	if err != nil || action == nil {
 		return 0, nil, kernel.ErrNotFound.Wrapf("action %s not found", actionParam)
 	}
-	if !action.Active || !action.Public {
-		return 0, nil, kernel.ErrUnauthorized.Wrap("action is not active and public")
-	}
+	// A known-but-non-executable action (inactive, non-public, suspended owner) is NOT rejected
+	// here: letting the call flow into RunFederated makes CanCall fail before any transaction, and
+	// the pre-execution branch below signs a zero-charge rejection receipt carrying action.ID — so
+	// the caller settles immediately instead of pinning funds until the 24h pending bound (§13).
+	// Only a genuinely absent/unverifiable action stays a plain error (its ID can't match the
+	// caller's stored RemoteActionID, so a receipt there would just re-pin the caller).
 
 	now := time.Now().UTC()
 	rec := &kernel.IdempotencyRecord{

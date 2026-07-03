@@ -154,6 +154,22 @@ flow_fed_denial_underfunded() {
     assert_eq "fed_denial_underfunded.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
 }
 
+flow_fed_disabled_action_rejection() {
+    echo "=== FLOW fed_disabled_action_rejection ==="
+    local dir; dir=$(new_dir)
+    _fed_setup "$dir" || { fail "fed_disabled.setup" "setup failed"; return; }
+
+    # R disables greet (which L has imported and still shows active locally). L's call goes out,
+    # R answers with a signed zero-charge rejection instead of a receiptless error, so L settles
+    # IMMEDIATELY as a failure rather than pinning funds until the 24h pending bound.
+    j "$FED_DBR" "$FED_HR" action disable "$FED_RID" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" run @kernel-r/greet '{}' >/dev/null 2>&1 || true
+    local tx_id; tx_id=$(python3 -c "import sys,json;print(next((t['id'] for t in json.loads(sys.argv[1]) if t.get('action_name')=='greet'),''))" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
+    assert_nonempty "fed_disabled.tx_settled_not_pending" "$tx_id"
+    assert_json "fed_disabled.tx_status_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
+    assert_eq "fed_disabled.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
+}
+
 flow_fed_import_duty() {
     echo "=== FLOW fed_import_duty ==="
     local dir; dir=$(new_dir)

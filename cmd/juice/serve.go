@@ -89,6 +89,14 @@ func runServer(addr string) error {
 		httpExec.fedTransport = fedTransport
 		httpExec.localPubKey, _ = k.GetConfig(context.Background(), configKeySigningPublic)
 		defer fedTransport.Close()
+
+		// Drive pending remote-proxy calls on a timer so a peer coming back online settles parked
+		// calls without a restart, and the RemotePendingMaxAge refund fires from the running server
+		// (§13). bootstrap already ran one pass for calls pending at the last shutdown; this keeps
+		// them moving. The loop stops when runServer returns.
+		retryCtx, retryCancel := context.WithCancel(context.Background())
+		defer retryCancel()
+		go startRemoteRetryLoop(retryCtx, k.RetryPendingRemoteDispatches, globalCfg.remoteRetryInterval())
 	}
 
 	// server.ready is emitted only after a successful bind — the harness waits on this line.
@@ -131,6 +139,24 @@ func runServer(addr string) error {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		return httpSrv.Shutdown(shutCtx)
+	}
+}
+
+// startRemoteRetryLoop calls retry every interval until ctx is cancelled. Runs are sequential — a
+// tick never overlaps the previous one — and the retry (RetryPendingRemoteDispatches) is idempotent
+// (it carries the same key, so the remote replays), so any overlap with a step-completion-triggered
+// retry is harmless and loses cleanly at the atomic store commit. This is the "server ticker" §13
+// relies on to settle parked calls without a restart.
+func startRemoteRetryLoop(ctx context.Context, retry func(context.Context), interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			retry(ctx)
+		}
 	}
 }
 
@@ -567,7 +593,7 @@ func (s *server) listProcesses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if processes == nil {
-		processes = []*kernel.Process{}
+		processes = []*processView{}
 	}
 	writeJSON(w, http.StatusOK, processes)
 }

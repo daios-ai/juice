@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 )
 
 // NativeLLMConfig holds configuration for the @sys/llm/chat native action.
@@ -92,6 +93,17 @@ type ServerConfig struct {
 	KernelHandle      string       `json:"kernel_handle"`   // handle this kernel presents in friend handshakes and gossip (§13)
 	BootstrapPeers    []string     `json:"bootstrap_peers"` // seed multiaddrs; sole seed source; empty = no announce/discovery (§13)
 	CredentialsKey    string       `json:"credentials_key,omitempty"` // base64url AES-256 key; generated on first boot
+	RemoteRetryIntervalSec int64   `json:"remote_retry_interval"` // seconds between retry passes for pending remote calls (§13); <=0 → default
+}
+
+// remoteRetryInterval is how often the running server re-drives pending remote-proxy calls so a
+// peer coming back online settles parked calls without a restart (§13). A non-positive config
+// value falls back to the 60s default.
+func (c ServerConfig) remoteRetryInterval() time.Duration {
+	if c.RemoteRetryIntervalSec <= 0 {
+		return 60 * time.Second
+	}
+	return time.Duration(c.RemoteRetryIntervalSec) * time.Second
 }
 
 // DefaultServerConfig returns a ServerConfig populated with safe defaults.
@@ -124,7 +136,8 @@ func DefaultServerConfig() ServerConfig {
 		// The public daios.ai node is the default meeting point, so a fresh `juice serve` joins
 		// the network out of the box (it listens on the standard port 31313, §13). Override or
 		// extend for a private network; clear it to run standalone.
-		BootstrapPeers: []string{"/dns4/daios.ai/tcp/31313/p2p/12D3KooWJSwNRSf1Nyv7dQU43QP99GYqXmD4hHqmjYbpmPJoC5Ad"},
+		BootstrapPeers:         []string{"/dns4/daios.ai/tcp/31313/p2p/12D3KooWJSwNRSf1Nyv7dQU43QP99GYqXmD4hHqmjYbpmPJoC5Ad"},
+		RemoteRetryIntervalSec: 60,
 	}
 }
 

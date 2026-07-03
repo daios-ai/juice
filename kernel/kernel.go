@@ -1327,6 +1327,23 @@ func (k *Kernel) ReadTrace(ctx context.Context, id string) (*Trace, error) {
 	return k.store.ReadTrace(ctx, id)
 }
 
+// AwaitingReceiptSince maps each open process that has a remote-proxy call still awaiting its
+// receipt (§13) to the earliest such call's start time. It reports the awaiting-receipt state the
+// process listings must surface, plus how long funds have been parked. Read-only; no probing.
+func (k *Kernel) AwaitingReceiptSince(ctx context.Context) (map[string]time.Time, error) {
+	pending, err := k.store.ListPendingRemoteTraces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	since := make(map[string]time.Time, len(pending))
+	for _, tr := range pending {
+		if cur, ok := since[tr.ProcessID]; !ok || tr.CreatedAt.Before(cur) {
+			since[tr.ProcessID] = tr.CreatedAt
+		}
+	}
+	return since, nil
+}
+
 // AuthorizeTraceUse returns nil if callerID may use traceID for step creation.
 // Allowed if: caller == process.owner OR caller == Trace(trace).action_owner_id.
 func (k *Kernel) AuthorizeTraceUse(ctx context.Context, callerID, traceID string) error {
@@ -1540,10 +1557,15 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	scored = scored[:oversub]
 
 	// Apply quality factor: local stats dominate; gossip StatTag prior as fallback.
+	// Local quality is the Laplace-smoothed success ratio (1+successes)/(2+uses): an untested
+	// action sits at 0.5, while observed failures pull it BELOW 0.5 toward 0 — so a dead-but-active
+	// action is demoted past an untried one instead of tying it. Known limit: stats are all-time
+	// (no recency), so a scar fades only as successes accumulate; time-windowed recency is future
+	// work (see docs/fedreport.md §6.4). Availability is still never a callability gate — only rank.
 	for i := range scored {
 		quality := float32(0.5)
 		if stats, _ := k.store.ReadStats(ctx, scored[i].actionID); stats != nil && stats.Uses > 0 {
-			quality = float32(0.5 + 0.5*float64(stats.Successes)/float64(stats.Uses))
+			quality = float32(float64(1+stats.Successes) / float64(2+stats.Uses))
 		} else if tags, _ := k.store.ListStatTagsByAction(ctx, scored[i].actionID); len(tags) > 0 {
 			quality = gossipQualityPrior(tags)
 		}

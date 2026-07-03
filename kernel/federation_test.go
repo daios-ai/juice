@@ -734,6 +734,113 @@ func TestRetryExpiredRemoteTraceSettlesAsFailure(t *testing.T) {
 	}
 }
 
+// TestRetryPendingRemoteTraceSettlesWhenPeerReturns: a call parked because the peer was offline
+// settles as success once RetryPendingRemoteDispatches runs and the peer answers with a valid
+// receipt — no restart, no interrupted refund. This is the value the serve retry loop delivers (§13).
+func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	bps := kernel.DefaultConfig().ImportBPS
+
+	// Empty receiptJSON → the peer is "offline": ExecuteFederation returns no receipt → pending.
+	fake := &fakeFederationHTTP{}
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	// Default RemotePendingMaxAge (24h): the trace stays pending, not force-expired.
+	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+
+	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "ret-action", 1000)
+	mp := a.Price * 10000 / (10000 + bps)
+
+	// Call while the peer is offline → pending, no settled transaction, funds locked.
+	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("Run: expected ErrTimeout (pending), got %v", err)
+	}
+	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
+		t.Fatalf("expected 1 pending remote trace, got %d", len(pend))
+	}
+	if txs, _ := st.ListTransactions(ctx, kernel.TxFilter{}); len(txs) != 0 {
+		t.Fatalf("expected no settled transaction while pending, got %d", len(txs))
+	}
+
+	// The peer returns: it now answers with a valid signed success receipt.
+	now := time.Now().UTC()
+	r := &kernel.Receipt{
+		ID: uuid.New().String(), TxID: "rtx", ActionID: "ret-action",
+		ArgsHash: jcsHashForTest(t, `{}`), ReplyHash: jcsHashForTest(t, `{}`),
+		Status: kernel.TxSuccess, Charge: mp, StartedAt: now, CreatedAt: now,
+	}
+	r.Signature = signReceiptForTest(t, priv, r)
+	b, _ := json.Marshal(r)
+	fake.receiptJSON = string(b)
+
+	// The retry loop's action settles the parked call — no restart involved.
+	k.RetryPendingRemoteDispatches(ctx)
+
+	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 0 {
+		t.Fatalf("expected 0 pending traces after retry settled, got %d", len(pend))
+	}
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{})
+	if len(txs) != 1 || txs[0].Status != kernel.TxSuccess {
+		t.Fatalf("expected 1 success transaction after retry, got %+v", txs)
+	}
+	if txs[0].Net != mp {
+		t.Errorf("net: got %d, want %d", txs[0].Net, mp)
+	}
+	// Caller was funded exactly the proxy price (mp+duty); a success spends it all and closes the process.
+	after, _ := st.ReadUser(ctx, caller.ID)
+	if after.Locked != 0 {
+		t.Errorf("expected 0 locked after settlement, got %d", after.Locked)
+	}
+}
+
+// TestAwaitingReceiptSince: a process holding a remote call parked for its receipt is reported by
+// AwaitingReceiptSince (with the call's start time); once it settles, it drops out (§13).
+func TestAwaitingReceiptSince(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+
+	fake := &fakeFederationHTTP{} // offline: no receipt → pending
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+
+	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "await-action", 1000)
+
+	// No pending calls yet.
+	if since, _ := k.AwaitingReceiptSince(ctx); len(since) != 0 {
+		t.Fatalf("expected no awaiting processes, got %d", len(since))
+	}
+
+	// Offline call → parked, awaiting a receipt.
+	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("Run: expected ErrTimeout, got %v", err)
+	}
+	pend, _ := st.ListPendingRemoteTraces(ctx)
+	if len(pend) != 1 {
+		t.Fatalf("expected 1 pending trace, got %d", len(pend))
+	}
+	since, err := k.AwaitingReceiptSince(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts, ok := since[pend[0].ProcessID]
+	if !ok {
+		t.Fatalf("process %s not reported awaiting", pend[0].ProcessID)
+	}
+	if !ts.Equal(pend[0].CreatedAt) {
+		t.Errorf("awaiting-since = %v, want the pending trace's created_at %v", ts, pend[0].CreatedAt)
+	}
+}
+
 func TestSettleRemoteCallRejectsWrongActionID(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()

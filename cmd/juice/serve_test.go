@@ -1455,7 +1455,11 @@ func TestFederationCall(t *testing.T) {
 	}
 }
 
-func TestFederationCallRejectsNonPublicAction(t *testing.T) {
+// TestFederationCallSignsRejectionForNonExecutableAction: an inbound call to a known-but-non-
+// executable action (inactive, or active-but-private) returns a SIGNED zero-charge rejection
+// receipt carrying the action's UUID — so the caller settles immediately instead of pinning
+// funds until the 24h pending bound (§13). Previously this returned a bare error with no receipt.
+func TestFederationCallSignsRejectionForNonExecutableAction(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
@@ -1490,21 +1494,108 @@ func TestFederationCallRejectsNonPublicAction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Private inactive action is rejected with 403 (action check after auth).
-	resp := fedCall(t, k, priv, "@sys/secret", "idem-s-1", map[string]any{})
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("private action: expected 403, got %d", resp.StatusCode)
+	// assertSignedRejection checks the response carries a zero-charge failure receipt whose
+	// action_id is the real UUID (so the caller's VerifyRemoteReceipt action_id match passes).
+	assertSignedRejection := func(label string, resp *http.Response) {
+		t.Helper()
+		defer resp.Body.Close()
+		var env struct {
+			Receipt *kernel.Receipt `json:"receipt"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+			t.Fatalf("%s: decode: %v", label, err)
+		}
+		if env.Receipt == nil {
+			t.Fatalf("%s: expected a signed rejection receipt, got none (status %d)", label, resp.StatusCode)
+		}
+		if env.Receipt.Status != kernel.TxFailure {
+			t.Errorf("%s: receipt status = %q, want failure", label, env.Receipt.Status)
+		}
+		if env.Receipt.Charge != 0 || env.Receipt.Gross != 0 || env.Receipt.Net != 0 || env.Receipt.Fee != 0 {
+			t.Errorf("%s: expected zero-charge receipt, got charge=%d gross=%d net=%d fee=%d",
+				label, env.Receipt.Charge, env.Receipt.Gross, env.Receipt.Net, env.Receipt.Fee)
+		}
+		if env.Receipt.ActionID != a.ID {
+			t.Errorf("%s: receipt action_id = %q, want %q (caller verification would fail otherwise)",
+				label, env.Receipt.ActionID, a.ID)
+		}
+		if env.Receipt.Signature == "" {
+			t.Errorf("%s: rejection receipt is unsigned", label)
+		}
 	}
 
-	// Activate but keep private — still rejected.
+	// Inactive action → signed rejection.
+	assertSignedRejection("inactive", fedCall(t, k, priv, "@sys/secret", "idem-s-1", map[string]any{}))
+
+	// Activate but keep private → still non-executable for a non-owner → signed rejection.
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	resp2 := fedCall(t, k, priv, "@sys/secret", "idem-s-2", map[string]any{})
-	resp2.Body.Close()
-	if resp2.StatusCode != http.StatusForbidden {
-		t.Errorf("active but private action: expected 403, got %d", resp2.StatusCode)
+	assertSignedRejection("active-private", fedCall(t, k, priv, "@sys/secret", "idem-s-2", map[string]any{}))
+}
+
+// TestWaitingOnPeer: a waiting step whose required caller is a peer (proxy) user is flagged
+// waiting_on_peer; a local-user caller or a non-waiting step is not (§13 — advisory, never a gate).
+func TestWaitingOnPeer(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+	ctx := context.Background()
+
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localID, _ := makeUser(t, k, "@local-caller")
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	peer, err := k.AddPeer(ctx, sys.ID, "@peer-caller", base64.RawURLEncoding.EncodeToString(pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cache := map[string]bool{}
+	peerStep := &kernel.Step{Status: kernel.StepWaiting, RequiredCallerUserID: peer.ID}
+	if !waitingOnPeer(k, ctx, peerStep, cache) {
+		t.Error("step addressed to a peer should be waiting_on_peer")
+	}
+	localStep := &kernel.Step{Status: kernel.StepWaiting, RequiredCallerUserID: localID}
+	if waitingOnPeer(k, ctx, localStep, cache) {
+		t.Error("step addressed to a local user should not be waiting_on_peer")
+	}
+	doneStep := &kernel.Step{Status: kernel.StepDone, RequiredCallerUserID: peer.ID}
+	if waitingOnPeer(k, ctx, doneStep, cache) {
+		t.Error("a non-waiting step should never be waiting_on_peer")
+	}
+}
+
+// TestStartRemoteRetryLoop: the serve retry loop calls the retry function on its interval and
+// stops promptly when its context is cancelled (§13 — this is what settles parked remote calls
+// without a restart). The retry's own settlement behavior is covered in kernel/federation_test.go.
+func TestStartRemoteRetryLoop(t *testing.T) {
+	calls := make(chan struct{}, 100)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		startRemoteRetryLoop(ctx, func(context.Context) {
+			select {
+			case calls <- struct{}{}:
+			default:
+			}
+		}, time.Millisecond)
+		close(done)
+	}()
+
+	select {
+	case <-calls: // retry fired at least once
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("retry was never called")
+	}
+
+	cancel()
+	select {
+	case <-done: // loop returned on cancel
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop did not stop on ctx cancel")
 	}
 }
 

@@ -117,6 +117,49 @@ func TestLookupRankingWithStats(t *testing.T) {
 	}
 }
 
+// TestLookupDemotesFailingBelowUntested: with the Laplace-smoothed quality (1+S)/(2+U), an action
+// that always fails ranks BELOW an untested one (which ties an unproven action at 0.5) — where the
+// old 0.5-floor formula tied them. All three share a description so cosine similarity is equal and
+// quality alone orders them: reliable (11/12) > untested (1/2) > failing (1/12).
+func TestLookupDemotesFailingBelowUntested(t *testing.T) {
+	st := newTestStore(t)
+	emb := &fakeEmbedder{}
+	k := newTestKernelWithEmbedder(st, emb)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@alice", 0)
+	ids := map[string]string{}
+	for _, name := range []string{"/reliable", "/untested", "/failing"} {
+		a := &kernel.Action{
+			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: name,
+			Kind: kernel.KindHTTP, Active: true, Public: true, Description: "compute data results",
+			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		}
+		_ = st.CreateAction(ctx, a)
+		ids[name] = a.ID
+		vec, _ := emb.Embed(ctx, a.Description)
+		_ = st.UpsertEmbedding(ctx, a.ID, vec)
+	}
+	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/reliable"], Uses: 10, Successes: 10, LastUsedAt: time.Now()})
+	// /untested has NO stats row (quality 0.5).
+	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/failing"], Uses: 10, Successes: 0, LastUsedAt: time.Now()})
+
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "compute data", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) < 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	order := []string{results[0].Action.Name, results[1].Action.Name, results[2].Action.Name}
+	want := []string{"/reliable", "/untested", "/failing"}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("ranking = %v, want %v (failing must rank below untested)", order, want)
+		}
+	}
+}
+
 func TestLookupNoEmbedder(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)

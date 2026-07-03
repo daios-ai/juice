@@ -657,9 +657,9 @@ This is the local failure rule (§6) applied across the wire: a failed call refu
 
 Duty taxes the actual import, to the local `@sys`; the remote kernel never sees it. Default `import_bps = 500`, per peer. Forced closure (`EndProcess`) fails an in-flight proxy call like any running call (§6) and refunds the caller; if the remote side did commit, its charge stands there and is absorbed by the bilateral account, surfacing at reconciliation.
 
-The no-receipt state is the expected steady state of a network of intermittently-online home kernels, not an error: a caller of an offline peer holds its allocation locked and its process open until the peer returns and a signed receipt settles the call, or the process owner forces closure. Process listings must surface this awaiting-receipt state so an operator can see funds parked on an unreachable peer.
+The no-receipt state is the expected steady state of a network of intermittently-online home kernels, not an error: a caller of an offline peer holds its allocation locked and its process open until the peer returns and a signed receipt settles the call, or the process owner forces closure. Process listings must surface this awaiting-receipt state — with the time it has been awaiting (the earliest parked call's start) — so an operator can see funds parked on an unreachable peer and for how long. Step listings likewise flag a waiting step whose required caller is a peer, so work parked on a possibly-offline peer is visible; both are factual (age, peer-ness), never a liveness claim.
 
-Inbound: calls sign `JCS({action, counterparty, idempotency_key, timestamp, args_hash})`; `counterparty` is the caller's base64url public key; `args_hash = SHA-256(raw body)`. Receiver verifies signature, raw hash, friendship, timestamp age ≤ 5 minutes; non-friends and denied keys are rejected. A valid signature authenticates the proxy user for that request; the call is `run` as that user, paying from its balance. Insufficient balance returns a **signed rejection receipt** (`status = failure`, zero charge) so the caller always has something to settle on. Idempotency: insert pending before execution, unique `(idempotency_key, counterparty_user_id)`; completed replay returns the stored receipt, pending replay 409, expiry 24h.
+Inbound: calls sign `JCS({action, counterparty, idempotency_key, timestamp, args_hash})`; `counterparty` is the caller's base64url public key; `args_hash = SHA-256(raw body)`. Receiver verifies signature, raw hash, friendship, timestamp age ≤ 5 minutes; non-friends and denied keys are rejected. A valid signature authenticates the proxy user for that request; the call is `run` as that user, paying from its balance. Any inbound call the receiver can determine will not execute — insufficient balance, or a known-but-non-executable action (inactive, non-public, suspended owner) — returns a **signed rejection receipt** (`status = failure`, zero charge) carrying the action's id, so the caller always has something to settle on rather than pinning funds until the pending bound. Only a genuinely absent or unverifiable action stays a plain error (no receipt whose `action_id` could match the caller's stored `remote_action_id`), leaving the caller pending. Idempotency: insert pending before execution, unique `(idempotency_key, counterparty_user_id)`; completed replay returns the stored receipt, pending replay 409, expiry 24h.
 
 `VerifyRemoteReceipt(caller_id, tx_id)` requires `CanReadTransaction` and verifies entirely locally, in two parts. **Receipt integrity:** signature against the peer's `public_key`, stored JSON against its stored SHA-256, `receipt.action_id == proxy.remote_action_id`. **Settlement consistency:** the local transaction's outcome matches `receipt.status`; the amount paid to the proxy user equals `receipt.charge`; the local refund equals `(mp + maxduty) − receipt.charge − duty` with duty per this section (zero on failure); `args_hash` and `reply_hash` match the local record. The receipt's own `gross/net/fee` are the remote kernel's economics and are reported, not compared. Returns per-check results and top-level `valid`; non-proxy transactions give `ErrInvalidState`.
 
@@ -722,8 +722,8 @@ Endpoint rules (notable rules only; the complete HTTP endpoint list is in `API.m
 | `DELETE /v1/actions/{id}`                        | action-owner delete preserving history                                                                          |
 | `POST /v1/actions/import`                        | authenticated OpenAPI supervision import                                                                        |
 | `POST /v1/actions/unimport`                      | action-owner import-provenance deactivation                                                                     |
-| `GET /v1/processes`                              | process owner's processes, descending `created_at`                                                              |
-| `GET /v1/steps`                                  | authenticated; returns steps visible to caller per `CanListStep`; optional `?process_id=` and `?status=` filters |
+| `GET /v1/processes`                              | process owner's processes, descending `created_at`; each carries `awaiting_receipt` and, when set, `awaiting_receipt_since` (§13) |
+| `GET /v1/steps`                                  | authenticated; returns steps visible to caller per `CanListStep`; optional `?process_id=` and `?status=` filters; a waiting step whose required caller is a peer carries `waiting_on_peer` (§13) |
 | `POST /v1/steps`                                 | authenticated; creates a waiting step; requires `trace_id` (funding trace), `action_id`, `required_caller`, `partial_args`; the authenticated user must be authorized to use `trace_id` (§4 precondition 4) |
 | `GET /v1/steps/{id}`                             | `CanReadStep`; returns step fields                                                                              |
 | `POST /v1/steps/{id}/complete`                   | `CanReadStep`; `args` required (`{}` valid); absent gives `ErrInvalidInput`; returns `result`, `tx_id`, `trace_id`, `step_id` |
@@ -748,7 +748,7 @@ time level event request_id caller_user_id process_id trace_id action_id tx_id
 status duration_ms error
 ```
 
-Config lives in `juice.json` (path from `JUICE_CONFIG`, default `./juice.json`). Top-level kernel keys: `db_path`, `fee_bps`, `import_bps`, `peer_auto_accept`, `server_url` (the local server base URL the CLI dials for user-facing commands — a loopback address for driving your own kernel, not a federation identity), auth issuer/audience/token TTL, log file/format/level, script timeout and memory limits, plus the federation identity and discovery keys this kernel needs to satisfy §8 and §13: `kernel_handle` (the handle this kernel presents to the network in friend handshakes and gossip), `bootstrap_peers` (the peer multiaddrs the transport dials to join the discovery network; defaults to the project's public node so `juice serve` works out of the box, empty means the kernel neither announces nor discovers), `credentials_key` (the §8 base64url AES-256-GCM key for `auth_json`, auto-generated at first boot), and `allow_local_sources` (dev-only escape hatch over §7's loopback/private/link-local URL rejection for action source URLs, default `false`). All native-action configuration lives under `native.<action>`; no deeper nesting:
+Config lives in `juice.json` (path from `JUICE_CONFIG`, default `./juice.json`). Top-level kernel keys: `db_path`, `fee_bps`, `import_bps`, `peer_auto_accept`, `server_url` (the local server base URL the CLI dials for user-facing commands — a loopback address for driving your own kernel, not a federation identity), auth issuer/audience/token TTL, log file/format/level, script timeout and memory limits, plus the federation identity and discovery keys this kernel needs to satisfy §8 and §13: `kernel_handle` (the handle this kernel presents to the network in friend handshakes and gossip), `bootstrap_peers` (the peer multiaddrs the transport dials to join the discovery network; defaults to the project's public node so `juice serve` works out of the box, empty means the kernel neither announces nor discovers), `credentials_key` (the §8 base64url AES-256-GCM key for `auth_json`, auto-generated at first boot), `allow_local_sources` (dev-only escape hatch over §7's loopback/private/link-local URL rejection for action source URLs, default `false`), and `remote_retry_interval` (seconds between passes of the running server's retry loop that re-drives pending remote-proxy calls so a returning peer settles parked calls — and the §13 max-age refund fires — without a restart; default 60, non-positive falls back to the default). All native-action configuration lives under `native.<action>`; no deeper nesting:
 
 ```json
 {
@@ -761,6 +761,7 @@ Config lives in `juice.json` (path from `JUICE_CONFIG`, default `./juice.json`).
   "bootstrap_peers": ["/dns4/daios.ai/tcp/31313/p2p/12D3KooWJSwNRSf1Nyv7dQU43QP99GYqXmD4hHqmjYbpmPJoC5Ad"],
   "credentials_key": "",
   "allow_local_sources": false,
+  "remote_retry_interval": 60,
   "native": {
     "llm":     { "url": "http://localhost:11434", "chat_model": "gemma4:26b", "embed_model": "nomic-embed-text", "price": 0 },
     "make":    { "compiler": "tinygo", "max_steps": 5, "price": 20 },
@@ -838,6 +839,7 @@ wasm host function call (juice.call, juice.step_create, juice.step_complete)
 script timeout
 script memory limit
 lookup ranking with fake embeddings
+lookup demotes a persistently-failing action below an untested one (Laplace-smoothed quality)
 lookup results include action (@owner/name), input_schema, and output_schema
 stats update
 CLI commands
@@ -941,6 +943,7 @@ remote manifest signature is Ed25519 over canonical JSON excluding signature
 remote proxy transaction has target_user_id = proxy user id
 friend auto-accept creates zero-balance proxy pair; manual mode holds pending
 zero-balance friend's inbound call gets signed rejection receipt
+inbound call to a known-but-non-executable action (inactive, non-public, suspended owner) gets a signed zero-charge rejection receipt the caller settles on immediately
 unfriend sets denied_at, deactivates proxies, cancels steps addressed to peer; balance survives
 denied key's friend request rejected; own friend clears denial
 gossip lists only transacted friends with stats, keyed by public key with no URLs; non-transacted friends absent
@@ -951,6 +954,8 @@ failure counts against proxy stats regardless of charge
 duty credited to @sys; charge credited to proxy user
 timeout does not settle; retry with same idempotency key recovers receipt
 restart with a dispatched proxy call resumes retry; receipt obtained after restart settles it; no interrupted refund
+running server's retry loop settles a pending remote call when the peer returns, without a restart; max-age expiry fires from the running server too
+process awaiting a remote receipt is reported with awaiting_receipt and its age; a waiting step addressed to a peer is flagged waiting_on_peer
 inbound federation call rejected when args_hash does not match request body
 full remote receipt JSON stored atomically with transaction on remote-proxy call
 receipt verification returns valid for a well-formed stored remote receipt

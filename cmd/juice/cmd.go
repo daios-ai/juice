@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/daios-ai/juice/kernel"
@@ -630,7 +631,7 @@ func processListCmd() *cobra.Command {
 		Short: "List processes",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			var processes []*kernel.Process
+			var processes []*processView
 			if err := apiCall(context.Background(), "GET", "/v1/processes", nil, &processes); err != nil {
 				return err
 			}
@@ -638,8 +639,12 @@ func processListCmd() *cobra.Command {
 				return printJSON(processes)
 			}
 			for _, p := range processes {
-				fmt.Printf("%s  %-6s  available:%-6d  locked:%-6d\n",
-					p.ID, p.Status, p.Available, p.Locked)
+				awaiting := ""
+				if p.AwaitingReceipt && p.AwaitingReceiptSince != nil {
+					awaiting = fmt.Sprintf("  awaiting-receipt since %s", p.AwaitingReceiptSince.Format(time.RFC3339))
+				}
+				fmt.Printf("%s  %-6s  available:%-6d  locked:%-6d%s\n",
+					p.ID, p.Status, p.Available, p.Locked, awaiting)
 			}
 			return nil
 		},
@@ -744,7 +749,11 @@ func stepListCmd() *cobra.Command {
 				return printJSON(steps)
 			}
 			for _, s := range steps {
-				fmt.Printf("%s  %-7s  %s\n", s.ID, s.Status, s.Action)
+				marker := ""
+				if s.WaitingOnPeer {
+					marker = "  waiting-on-peer"
+				}
+				fmt.Printf("%s  %-7s  %s%s\n", s.ID, s.Status, s.Action, marker)
 			}
 			return nil
 		},

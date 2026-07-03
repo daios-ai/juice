@@ -311,7 +311,9 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 
 // RetryPendingRemoteDispatches retries all in-flight remote proxy traces that have an
 // idempotency key but no settled transaction. Called once at startup (after Recover) and
-// periodically by the server ticker. Errors for individual traces are logged and skipped.
+// periodically by the serve retry loop (startRemoteRetryLoop) — that loop is what lets a peer
+// returning online settle parked calls, and the RemotePendingMaxAge refund fire, without a
+// restart. Errors for individual traces are logged and skipped.
 func (k *Kernel) RetryPendingRemoteDispatches(ctx context.Context) {
 	logger := k.log.With(ctx)
 	traces, err := k.store.ListPendingRemoteTraces(ctx)

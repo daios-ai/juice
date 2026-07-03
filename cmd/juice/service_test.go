@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 )
@@ -111,18 +112,44 @@ func TestEnrichStep(t *testing.T) {
 	step := &kernel.Step{ID: "s1"}
 	action := &kernel.Action{OwnerHandle: "@alice", Name: "greet"}
 
-	v := enrichStep(step, action)
+	v := enrichStep(step, action, false)
 	if v.Action != "@alice/greet" {
 		t.Errorf("enrichStep: Action = %q, want @alice/greet", v.Action)
 	}
 	if v.ID != "s1" {
 		t.Errorf("enrichStep: embedded Step.ID = %q, want s1", v.ID)
 	}
+	if v.WaitingOnPeer {
+		t.Error("enrichStep: WaitingOnPeer should be false")
+	}
 
-	// Nil action → empty action field.
-	v2 := enrichStep(step, nil)
+	// Nil action → empty action field; waiting-on-peer flag flows through.
+	v2 := enrichStep(step, nil, true)
 	if v2.Action != "" {
 		t.Errorf("enrichStep(nil action): Action = %q, want empty", v2.Action)
+	}
+	if !v2.WaitingOnPeer {
+		t.Error("enrichStep: WaitingOnPeer should be true")
+	}
+}
+
+func TestEnrichProcess(t *testing.T) {
+	p := &kernel.Process{ID: "p1", Status: kernel.ProcessOpen}
+	when := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+
+	// Not awaiting: no entry in the since map.
+	v := enrichProcess(p, map[string]time.Time{})
+	if v.AwaitingReceipt || v.AwaitingReceiptSince != nil {
+		t.Errorf("expected not awaiting, got %+v", v)
+	}
+	if v.ID != "p1" {
+		t.Errorf("embedded Process.ID = %q, want p1", v.ID)
+	}
+
+	// Awaiting: since map carries this process → flag + timestamp surface.
+	v2 := enrichProcess(p, map[string]time.Time{"p1": when})
+	if !v2.AwaitingReceipt || v2.AwaitingReceiptSince == nil || !v2.AwaitingReceiptSince.Equal(when) {
+		t.Errorf("expected awaiting since %v, got %+v", when, v2)
 	}
 }
 
