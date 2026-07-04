@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/spf13/cobra"
 )
 
 // captureStderr runs fn with os.Stderr redirected to a pipe and returns what was written.
@@ -54,6 +55,62 @@ func TestRenderError(t *testing.T) {
 	out = captureStderr(t, func() { renderError(errors.New("boom")) })
 	if strings.TrimSpace(out) != "error: boom" {
 		t.Fatalf("plain error render: %q", out)
+	}
+}
+
+// TestErrorLine pins the red/plain formatting of the one-line error.
+func TestErrorLine(t *testing.T) {
+	if got := errorLine("boom", false); got != "error: boom" {
+		t.Errorf("plain: got %q", got)
+	}
+	if got := errorLine("boom", true); got != "\x1b[31merror: boom\x1b[0m" {
+		t.Errorf("colored: got %q", got)
+	}
+}
+
+// TestUsageShownOnlyForParseErrors pins the mechanism main relies on: PersistentPreRun runs
+// only after flag/argument validation passes, so an arg error never enters the command body
+// (main then shows usage), while a runtime error does (main suppresses usage). Uses a local
+// cobra tree to avoid the global rootCmd's initConfig side effects.
+func TestUsageShownOnlyForParseErrors(t *testing.T) {
+	build := func() (*cobra.Command, *bool) {
+		entered := false
+		root := &cobra.Command{
+			Use: "t", SilenceUsage: true, SilenceErrors: true,
+			PersistentPreRun: func(_ *cobra.Command, _ []string) { entered = true },
+		}
+		sub := &cobra.Command{
+			Use: "deposit <user> <amount>", Args: cobra.ExactArgs(2),
+			RunE: func(_ *cobra.Command, _ []string) error { return errors.New("runtime failure") },
+		}
+		root.AddCommand(sub)
+		root.SetOut(&bytes.Buffer{})
+		root.SetErr(&bytes.Buffer{})
+		return root, &entered
+	}
+
+	// Argument error: body never runs, so main would show usage.
+	root, entered := build()
+	root.SetArgs([]string{"deposit"})
+	cmd, err := root.ExecuteC()
+	if err == nil {
+		t.Fatal("expected an argument error")
+	}
+	if *entered {
+		t.Fatal("arg error must not enter the command body")
+	}
+	if cmd.UsageString() == "" {
+		t.Fatal("usage string should be available to print")
+	}
+
+	// Runtime error: body ran, so main would suppress usage.
+	root, entered = build()
+	root.SetArgs([]string{"deposit", "@alice", "5"})
+	if _, err := root.ExecuteC(); err == nil {
+		t.Fatal("expected a runtime error")
+	}
+	if !*entered {
+		t.Fatal("runtime error must have entered the command body")
 	}
 }
 

@@ -35,13 +35,24 @@ var rootCmd = &cobra.Command{
 	Use:     "juice",
 	Short:   "Juice kernel — callable action platform",
 	Version: version + " (" + commit + ")",
-	// main() is the single error renderer (renderError): don't let cobra also print the
-	// error and dump the usage block on a runtime failure.
+	// main() is the single place errors and usage are printed. Cobra prints neither itself,
+	// so every command is handled identically: main renders the error, and shows usage only
+	// for flag/argument mistakes (see enteredCommand and main).
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	// PersistentPreRun fires after flag parsing and argument validation pass, just before a
+	// command body runs. Marking that boundary lets main distinguish a syntax error (usage
+	// worth showing) from a runtime error (usage would be noise). No subcommand overrides
+	// this, so the behavior is uniform across every command.
+	PersistentPreRun: func(_ *cobra.Command, _ []string) { enteredCommand = true },
 	// Hide cobra's stock `completion` command from the help listing (it still works if invoked).
 	CompletionOptions: cobra.CompletionOptions{HiddenDefaultCmd: true},
 }
+
+// enteredCommand becomes true once a matched command clears flag/argument validation and its
+// body starts. If Execute returns an error while it is still false, the failure came from
+// parsing — so main prints usage to show the correct syntax.
+var enteredCommand bool
 
 // Global flags.
 var (
@@ -95,18 +106,53 @@ func initConfig() {
 }
 
 func main() {
-	if err := rootCmd.Execute(); err != nil {
+	// ExecuteC returns the command that actually ran/failed, so usage (when shown) is that
+	// command's, not the root's.
+	cmd, err := rootCmd.ExecuteC()
+	if err != nil {
 		renderError(err)
+		if !enteredCommand {
+			// The error came from flag parsing or argument validation, before the command
+			// body ran: show how to invoke it correctly. Usage goes to stderr so stdout stays
+			// payload-only (§14).
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprint(os.Stderr, cmd.UsageString())
+		}
 		os.Exit(exitCodeFor(err))
 	}
 }
 
-// renderError is the single place CLI errors are printed: "error: <message>" to stderr,
-// once, with no usage dump. With --verbose it also prints the underlying cause chain, so
-// the friendly message stays clean by default while raw detail (e.g. a dial error) remains
-// available for troubleshooting.
+// ANSI colors for terminal error output; applied only when useColor reports a color-capable
+// stderr, so piped or redirected output stays plain.
+const (
+	ansiRed   = "\x1b[31m"
+	ansiReset = "\x1b[0m"
+)
+
+// useColor reports whether error output should be colorized: only when NO_COLOR is unset and
+// stderr is an interactive terminal (never for pipes, files, or CI).
+func useColor() bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	return term.IsTerminal(int(os.Stderr.Fd()))
+}
+
+// errorLine formats the one-line error message, in red when color is enabled.
+func errorLine(msg string, color bool) string {
+	line := "error: " + msg
+	if color {
+		return ansiRed + line + ansiReset
+	}
+	return line
+}
+
+// renderError is the single place CLI errors are printed: "error: <message>" to stderr, once,
+// in red on a terminal. Usage (when applicable) is printed separately by main. With --verbose
+// it also prints the underlying cause chain, so the friendly message stays clean by default
+// while raw detail (e.g. a dial error) remains available for troubleshooting.
 func renderError(err error) {
-	fmt.Fprintln(os.Stderr, "error:", err.Error())
+	fmt.Fprintln(os.Stderr, errorLine(err.Error(), useColor()))
 	if flagVerbose {
 		for cause := errors.Unwrap(err); cause != nil; cause = errors.Unwrap(cause) {
 			fmt.Fprintln(os.Stderr, "  caused by:", cause.Error())
