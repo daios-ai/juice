@@ -305,11 +305,31 @@ func decodeJSON(r io.Reader, v any) error {
 	return json.NewDecoder(r).Decode(v)
 }
 
-func promptPassword(prompt string) (string, error) {
+// promptPassword reads a password from the terminal without echo. It is a
+// package var so tests can substitute scripted input for the interactive prompt.
+var promptPassword = func(prompt string) (string, error) {
 	fmt.Fprint(os.Stderr, prompt)
 	b, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Fprintln(os.Stderr)
 	return string(b), err
+}
+
+// promptNewPassword prompts for a password twice and requires the two entries
+// to match, so a mistyped password is caught when it is defined rather than
+// silently locking the account. Used wherever a password is set (never on login).
+func promptNewPassword(prompt string) (string, error) {
+	first, err := promptPassword(prompt)
+	if err != nil {
+		return "", err
+	}
+	second, err := promptPassword("Confirm password: ")
+	if err != nil {
+		return "", err
+	}
+	if first != second {
+		return "", kernel.ErrInvalidInput.Wrap("passwords do not match")
+	}
+	return first, nil
 }
 
 // loadJSONArg resolves a JSON-valued CLI argument to its raw bytes, supporting the

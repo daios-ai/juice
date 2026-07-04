@@ -150,7 +150,7 @@ func userCreateCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			user, email := args[0], args[1]
 			if password == "" {
-				p, err := promptPassword("Password: ")
+				p, err := promptNewPassword("Password: ")
 				if err != nil {
 					return err
 				}
@@ -193,7 +193,7 @@ func userUpdateCmd() *cobra.Command {
 				if currentPassword, err = promptPassword("Current password: "); err != nil {
 					return err
 				}
-				if newPassword, err = promptPassword("New password: "); err != nil {
+				if newPassword, err = promptNewPassword("New password: "); err != nil {
 					return err
 				}
 			}

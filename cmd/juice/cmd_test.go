@@ -120,6 +120,22 @@ func execTestCmd(t *testing.T, cmd *cobra.Command, args ...string) (string, erro
 
 // ---- user ----
 
+// TestUserCreateMismatchedPassword pins that `user create` runs the confirm-twice
+// prompt: two differing entries abort with ErrInvalidInput before any user is created.
+func TestUserCreateMismatchedPassword(t *testing.T) {
+	env := newTestEnv(t)
+	stubPasswordPrompts(t, "s3cret", "typo")
+
+	// No --password flag, so the command falls through to the interactive prompt.
+	_, err := execTestCmd(t, userCreateCmd(), "@newuser", "new@example.com")
+	if !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Fatalf("mismatch: want ErrInvalidInput, got %v", err)
+	}
+	if _, err := env.db.ReadUserByHandle(context.Background(), "@newuser"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Fatalf("no user should be created on mismatch, got %v", err)
+	}
+}
+
 func TestUserCreate(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()

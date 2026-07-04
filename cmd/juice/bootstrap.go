@@ -109,13 +109,11 @@ func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 
 	password := os.Getenv("JUICE_BOOTSTRAP_PASSWORD")
 	if password == "" {
-		fmt.Fprint(os.Stderr, "Superuser password: ")
-		passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Fprintln(os.Stderr)
+		p, err := promptNewPassword("Superuser password: ")
 		if err != nil {
 			return "", fmt.Errorf("reading password: %w", err)
 		}
-		password = strings.TrimSpace(string(passwordBytes))
+		password = p
 	}
 	if password == "" {
 		return "", fmt.Errorf("password cannot be empty")

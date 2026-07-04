@@ -119,6 +119,48 @@ func TestLoadJSONArg(t *testing.T) {
 	}
 }
 
+// stubPasswordPrompts replaces promptPassword with a stub that returns the given
+// entries in order (and errs once exhausted), restoring the original on cleanup.
+// Each promptNewPassword call consumes two entries: the value and its confirmation.
+func stubPasswordPrompts(t *testing.T, entries ...string) {
+	t.Helper()
+	orig := promptPassword
+	i := 0
+	promptPassword = func(string) (string, error) {
+		if i >= len(entries) {
+			return "", errors.New("no more scripted password entries")
+		}
+		v := entries[i]
+		i++
+		return v, nil
+	}
+	t.Cleanup(func() { promptPassword = orig })
+}
+
+func TestPromptNewPassword(t *testing.T) {
+	// Matching entries return the password.
+	stubPasswordPrompts(t, "s3cret", "s3cret")
+	got, err := promptNewPassword("Password: ")
+	if err != nil || got != "s3cret" {
+		t.Fatalf("match: got %q, err %v; want s3cret, nil", got, err)
+	}
+
+	// Mismatched entries are rejected as invalid input, not returned.
+	stubPasswordPrompts(t, "s3cret", "typo")
+	if _, err := promptNewPassword("Password: "); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Fatalf("mismatch: want ErrInvalidInput, got %v", err)
+	}
+
+	// A read error from the underlying prompt propagates.
+	readErr := errors.New("read failed")
+	orig := promptPassword
+	promptPassword = func(string) (string, error) { return "", readErr }
+	t.Cleanup(func() { promptPassword = orig })
+	if _, err := promptNewPassword("Password: "); !errors.Is(err, readErr) {
+		t.Fatalf("read error: want propagated, got %v", err)
+	}
+}
+
 func TestRefreshTokenRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	origHome := os.Getenv("HOME")
