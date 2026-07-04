@@ -597,7 +597,7 @@ Two kernels transact only as **friends**: a reciprocal relation with the proxy-u
 juice admin friend <key>      register peer by public key + bulk-import all their active public actions
 juice admin unfriend <user>   end the relation; deny future requests; deactivate all proxies (user is @handle or key)
 juice admin peers             known peers and balances
-juice admin inspect <key>     view remote identity, public actions, transacted friends, and reachability (no DB write)
+juice admin inspect <key|user>  view remote identity, public actions, transacted friends, and reachability (key, or @handle if already friended; no DB write)
 ```
 
 Federation trust is superuser supervision, so these live under `admin`, served over the local control socket (§14). The inbound friend handshake is the `/juice/fed/friend/1` protocol, authenticated by federation signature — not a local API. `admin inspect <key>` is the operator's window into a remote kernel (there is no browser-reachable federation endpoint): it reports the peer's identity, public actions, and transacted friends, plus reachability diagnostics (direct / hole-punched / relayed, latency, protocol versions).

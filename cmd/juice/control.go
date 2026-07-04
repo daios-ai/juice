@@ -188,6 +188,11 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	peerKey := strings.TrimSpace(r.URL.Query().Get("key"))
+	// Accept an @handle for an already-friended peer, not just its key; a stranger's raw key
+	// (no local account yet) falls through unchanged.
+	if u, err := resolveHandle(s.kernel, ctx, peerKey); err == nil && u.PublicKey != "" {
+		peerKey = u.PublicKey
+	}
 	if s.fed == nil {
 		writeErr(w, kernel.ErrInvalidState.Wrap("federation transport not running"))
 		return

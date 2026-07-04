@@ -180,8 +180,8 @@ func adminWithdrawCmd() *cobra.Command {
 
 func peerInspectCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "inspect <key>",
-		Short: "Inspect a remote kernel",
+		Use:   "inspect <key|handle>",
+		Short: "Inspect a remote kernel (by key, or @handle if already friended)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			var out struct {
