@@ -172,7 +172,6 @@ func splitSQLStatements(sqlText string) []string {
 	return stmts
 }
 
-
 // ---- time helpers ----
 
 const timeLayout = time.RFC3339Nano
@@ -303,6 +302,84 @@ func (s *DB) DenyPeerCascade(ctx context.Context, userID string) error {
 					return dbErr(err, "refund trace")
 				}
 			}
+		}
+		return nil
+	})
+}
+
+// ListPurgeablePeers returns peer users (public_key set) idle past cutoff at zero balance (§13).
+// last_active = max(created_at, latest transaction naming the peer, latest deposit/withdrawal to
+// the peer, latest gossip mention of the peer's key). Timestamps are compared via julianday() so
+// the variable-width RFC3339Nano text (timeLayout) can't misorder near a second boundary. A peer
+// with any waiting/running step addressed to it or to one of its actions is still in use and skipped.
+func (s *DB) ListPurgeablePeers(ctx context.Context, cutoff time.Time) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT u.id FROM users u
+WHERE u.public_key IS NOT NULL AND u.public_key != ''
+  AND u.available = 0 AND u.locked = 0
+  AND max(
+        julianday(u.created_at),
+        COALESCE((SELECT MAX(julianday(ended_at)) FROM transactions
+                    WHERE owner_user_id=u.id OR caller_user_id=u.id OR target_user_id=u.id), julianday(u.created_at)),
+        COALESCE((SELECT MAX(julianday(created_at)) FROM adjustments WHERE target_user_id=u.id), julianday(u.created_at)),
+        COALESCE((SELECT MAX(julianday(updated_at)) FROM discovered_kernels WHERE public_key=u.public_key), julianday(u.created_at))
+      ) < julianday(?)
+  AND NOT EXISTS (
+        SELECT 1 FROM steps s
+         WHERE s.status IN ('waiting','running')
+           AND (s.required_caller_user_id=u.id
+                OR s.action_id IN (SELECT id FROM actions WHERE owner_user_id=u.id)))
+ORDER BY u.id`, timeToStr(cutoff))
+	if err != nil {
+		return nil, dbErr(err, "list purgeable peers")
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, dbErr(err, "scan purgeable peer")
+		}
+		ids = append(ids, id)
+	}
+	return ids, dbErr(rows.Err(), "purgeable peers rows")
+}
+
+// PurgePeerCascade deletes a purged peer's derived data and anonymizes the user row (§13 Retention).
+// It removes the peer's proxy actions and their stats/stat_tags, the peer's steps and any steps
+// bound to its actions, and its discovered_kernels rows; then clears public_key and denied_at so the
+// identity is forgotten (re-friending starts fresh). The transaction/receipt ledger is left intact —
+// its party ids carry no foreign key, so a now-dangling peer id is harmless and local counterparties'
+// history stays reconstructible (§11). Deletes run children-before-parents so the RESTRICT foreign
+// keys (steps→actions, stats→actions) never block.
+func (s *DB) PurgePeerCascade(ctx context.Context, userID string) error {
+	return s.withTx(ctx, "purge peer cascade", func(tx *sql.Tx) error {
+		var pubKey sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT public_key FROM users WHERE id=?`, userID).Scan(&pubKey); err != nil {
+			return dbErr(err, "read peer key")
+		}
+		const owned = `SELECT id FROM actions WHERE owner_user_id=?`
+		if _, err := tx.ExecContext(ctx, `DELETE FROM stat_tags WHERE action_id IN (`+owned+`)`, userID); err != nil {
+			return dbErr(err, "delete stat_tags")
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM action_stats WHERE action_id IN (`+owned+`)`, userID); err != nil {
+			return dbErr(err, "delete action_stats")
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM steps WHERE required_caller_user_id=? OR action_id IN (`+owned+`)`, userID, userID); err != nil {
+			return dbErr(err, "delete steps")
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM actions WHERE owner_user_id=?`, userID); err != nil {
+			return dbErr(err, "delete actions")
+		}
+		if pubKey.Valid && pubKey.String != "" {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM discovered_kernels WHERE public_key=?`, pubKey.String); err != nil {
+				return dbErr(err, "delete discovered_kernels")
+			}
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE users SET public_key=NULL, denied_at=NULL, updated_at=? WHERE id=?`,
+			timeToStr(time.Now().UTC()), userID); err != nil {
+			return dbErr(err, "anonymize peer")
 		}
 		return nil
 	})
@@ -793,7 +870,6 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 	return nil
 }
 
-
 // upsertActionStats updates the incremental success or failure counters for an action.
 // rating_count/rating_estimate are excluded — owned by UpdateRating.
 func (s *DB) upsertActionStats(ctx context.Context, tx *sql.Tx, stats *kernel.Stats, success bool, label string) error {
@@ -988,7 +1064,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 					`UPDATE traces SET locked=locked-? WHERE id=?`, ktx.Gross, callerWalletID); err != nil {
 					return dbErr(err, "commit call: release parent trace lock")
 				}
-			// CallerStep: BeginStepCall already released the lock; nothing to do here.
+				// CallerStep: BeginStepCall already released the lock; nothing to do here.
 			}
 		}
 		// Decrement owner.locked by taxable (only the portion that settles to target/sys).
@@ -1717,7 +1793,6 @@ func nullStr(s string) *string {
 	}
 	return &s
 }
-
 
 // rawJSONStr returns the string form of a json.RawMessage, defaulting to "null" when empty.
 func rawJSONStr(r json.RawMessage) string {

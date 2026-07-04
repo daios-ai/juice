@@ -1,6 +1,9 @@
 package kernel
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // ---- Script execution interfaces ----
 
@@ -124,10 +127,10 @@ type DecideChatter interface {
 
 // TxFilter narrows a ListTransactions query.
 type TxFilter struct {
-	OwnerUserID   string
+	OwnerUserID  string
 	CallerUserID string
-	TargetUserID  string
-	ProcessID     string
+	TargetUserID string
+	ProcessID    string
 	// PartyUserID matches transactions where the user is any party:
 	// process owner (owner_user_id), call caller (caller_user_id), or action owner (target_user_id).
 	PartyUserID string
@@ -371,6 +374,18 @@ type Store interface {
 	// DenyPeerCascade atomically: sets denied_at on the user, deactivates all their proxy
 	// actions, and cancels+refunds all waiting steps addressed to them as caller.
 	DenyPeerCascade(ctx context.Context, userID string) error
+	// ListPurgeablePeers returns the IDs of peer users (public_key set) that are idle past
+	// cutoff at zero balance (§13 Retention): available=0, locked=0, last activity (max of
+	// created_at, latest transaction naming them, latest deposit/withdrawal, latest gossip
+	// mention) before cutoff, and no waiting/running step addressed to them or to their actions.
+	ListPurgeablePeers(ctx context.Context, cutoff time.Time) ([]string, error)
+	// PurgePeerCascade atomically deletes a purged peer's derived data — its proxy actions,
+	// their stats and stat_tags, its steps, and its discovered_kernels rows — and forgets the
+	// peer identity by clearing public_key and denied_at on the user row. The immutable
+	// transaction/receipt ledger is preserved (party ids carry no FK), keeping local
+	// counterparties' credits reconstructible (§11); the anonymized user row stays as a ledger
+	// anchor so old history remains legible.
+	PurgePeerCascade(ctx context.Context, userID string) error
 	// DeactivateActionsOwnedBy sets active=false for all non-deleted actions owned by ownerUserID.
 	DeactivateActionsOwnedBy(ctx context.Context, ownerUserID string) error
 	// CancelAndRefundStepsForCaller cancels all waiting steps where required_caller_user_id=callerUserID,

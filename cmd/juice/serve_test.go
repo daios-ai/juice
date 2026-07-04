@@ -674,7 +674,6 @@ func TestServeDeleteAction(t *testing.T) {
 	}
 }
 
-
 func TestServeProcessLifecycle(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
@@ -1058,7 +1057,6 @@ func TestServeLookupEndpointRemoved(t *testing.T) {
 	}
 }
 
-
 func TestServeUpdateAction(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
@@ -1114,7 +1112,6 @@ func TestServeListProcesses(t *testing.T) {
 		t.Errorf("list processes: got %d, want 2", len(processes))
 	}
 }
-
 
 func TestServeLogout(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
@@ -1613,6 +1610,43 @@ func TestStartRemoteRetryLoop(t *testing.T) {
 	}
 }
 
+// TestStartPeerRetentionSweep checks the §13 retention sweep runs once at startup, keeps ticking,
+// and stops on ctx cancel. The purge func is injected (no DB needed), like the retry-loop test.
+func TestStartPeerRetentionSweep(t *testing.T) {
+	calls := make(chan struct{}, 8)
+	purge := func(context.Context) (int, error) {
+		select {
+		case calls <- struct{}{}:
+		default:
+		}
+		return 0, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		startPeerRetentionSweep(ctx, purge, time.Millisecond)
+		close(done)
+	}()
+
+	// Startup pass runs immediately, then the ticker drives at least one more.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-calls:
+		case <-time.After(2 * time.Second):
+			cancel()
+			t.Fatalf("purge pass %d did not run", i)
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sweep did not stop on ctx cancel")
+	}
+}
+
 // TestBackoffScheduler pins the retry schedule: first attempt one base after creation, exponential
 // spacing (base, 2×, 4×, …) capped, and pruning of traces that have resolved (dropped from the list).
 func TestBackoffScheduler(t *testing.T) {
@@ -1785,7 +1819,6 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 	pubAll := true
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubAll})
 
-
 	// First call: must return a non-nil receipt.
 	r1 := fedCall(t, k, priv, "@sys/replay-ping", "replay-idem-1", map[string]any{})
 	defer r1.Body.Close()
@@ -1926,7 +1959,6 @@ func TestFederationReplay(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	_, _ = k.AddPeer(ctx, sys.ID, "@replay-caller", pubB64)
-
 
 	ikey1 := uuid.New().String()
 	r1 := fedCall(t, k, priv, "@sys/fed-greet", ikey1, map[string]any{})

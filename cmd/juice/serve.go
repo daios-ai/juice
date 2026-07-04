@@ -101,6 +101,14 @@ func runServer(addr string) error {
 		go startRemoteRetryLoop(retryCtx, k.PendingRemoteTraces, k.RetryRemoteTrace, globalCfg.remoteRetryInterval())
 	}
 
+	// Reap peers idle past peer_retention_days (§13 Retention) on a slow timer, plus one pass now.
+	// DB-only, so it runs regardless of the federation transport; started only when enabled.
+	if globalCfg.peerRetention() > 0 {
+		sweepCtx, sweepCancel := context.WithCancel(context.Background())
+		defer sweepCancel()
+		go startPeerRetentionSweep(sweepCtx, k.PurgeIdlePeers, peerRetentionSweepInterval)
+	}
+
 	// server.ready is emitted only after a successful bind — the harness waits on this line.
 	// It carries the kernel's public key and libp2p listen addrs, because federation no longer
 	// exposes them over HTTP (there is no .well-known).
@@ -165,6 +173,28 @@ func startRemoteRetryLoop(ctx context.Context, list func(context.Context) ([]*ke
 			for _, tr := range sched.due(traces, time.Now()) {
 				_ = retry(ctx, tr)
 			}
+		}
+	}
+}
+
+// peerRetentionSweepInterval is how often the running server reaps idle peers (§13 Retention).
+// Retention is a day-scale policy, so hourly resolution is ample; kept a fixed const rather than a
+// config knob to avoid surface — the policy itself (peer_retention_days) is the tunable.
+const peerRetentionSweepInterval = time.Hour
+
+// startPeerRetentionSweep reaps peers idle past PeerRetention (§13) once immediately, then every
+// interval until ctx is cancelled. PurgeIdlePeers is a no-op when retention is disabled, so this is
+// safe to start unconditionally; runs are sequential. Mirrors startRemoteRetryLoop.
+func startPeerRetentionSweep(ctx context.Context, purge func(context.Context) (int, error), interval time.Duration) {
+	_, _ = purge(ctx) // one pass at startup
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_, _ = purge(ctx)
 		}
 	}
 }
@@ -692,7 +722,6 @@ func (s *server) postRun(w http.ResponseWriter, r *http.Request) {
 	})(w, r)
 }
 
-
 func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
 	txs, err := listTransactions(s.kernel, r.Context(), callerFrom(r), kernel.TxFilter{
 		ProcessID: r.URL.Query().Get("process_id"),
@@ -707,7 +736,6 @@ func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, txs)
 }
-
 
 func (s *server) getTransaction(w http.ResponseWriter, r *http.Request) {
 	tx, err := getTransaction(s.kernel, r.Context(), callerFrom(r), pathID(r))
@@ -912,7 +940,6 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 		return reply, http.StatusOK, err
 	})(w, r)
 }
-
 
 // ---- me ----
 

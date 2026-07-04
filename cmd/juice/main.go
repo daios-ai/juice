@@ -174,6 +174,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	cfg.AllowLocalSources = globalCfg.AllowLocalSources
 	cfg.AuthIssuer = globalCfg.AuthIssuer
 	cfg.AuthAudience = globalCfg.AuthAudience
+	cfg.PeerRetention = globalCfg.peerRetention()
 
 	logger, _ := log.New(log.Config{
 		Level:    globalCfg.LogLevel,
@@ -304,7 +305,6 @@ func decodeJSON(r io.Reader, v any) error {
 	return json.NewDecoder(r).Decode(v)
 }
 
-
 func promptPassword(prompt string) (string, error) {
 	fmt.Fprint(os.Stderr, prompt)
 	b, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -355,4 +355,3 @@ func readJSONArg(s string) (map[string]any, error) {
 	}
 	return m, nil
 }
-

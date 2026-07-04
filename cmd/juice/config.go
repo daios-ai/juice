@@ -76,34 +76,45 @@ type NativeConfig struct {
 // Secrets (JUICE_SECRET_KEY, JUICE_BOOTSTRAP_PASSWORD) are read from environment variables.
 // All other settings come from this struct, populated from the JSON config file.
 type ServerConfig struct {
-	Native            NativeConfig `json:"native"`
-	ScriptTimeoutMS   int64        `json:"script_timeout_ms"`
-	ScriptMemoryBytes int64        `json:"script_memory_bytes"`
-	FeeBPS            int64        `json:"fee_bps"`
-	ImportBPS         int64        `json:"import_bps"`
-	TokenTTL          string       `json:"token_ttl"`
-	AuthIssuer        string       `json:"auth_issuer"`
-	AuthAudience      string       `json:"auth_audience"`
-	LogLevel          string       `json:"log_level"`
-	LogFile           string       `json:"log_file"`
-	LogFormat         string       `json:"log_format"`
-	AllowLocalSources bool         `json:"allow_local_sources"`
-	ServerURL         string       `json:"server_url"` // local base URL the CLI dials; never a federation identity (§14)
-	PeerAutoAccept    bool         `json:"peer_auto_accept"`
-	KernelHandle      string       `json:"kernel_handle"`   // handle this kernel presents in friend handshakes and gossip (§13)
-	BootstrapPeers    []string     `json:"bootstrap_peers"` // seed multiaddrs; sole seed source; empty = no announce/discovery (§13)
-	CredentialsKey    string       `json:"credentials_key,omitempty"` // base64url AES-256 key; generated on first boot
-	RemoteRetryIntervalSec int64   `json:"remote_retry_interval"` // seconds between retry passes for pending remote calls (§13); <=0 → default
+	Native                     NativeConfig `json:"native"`
+	ScriptTimeoutMS            int64        `json:"script_timeout_ms"`
+	ScriptMemoryBytes          int64        `json:"script_memory_bytes"`
+	FeeBPS                     int64        `json:"fee_bps"`
+	ImportBPS                  int64        `json:"import_bps"`
+	TokenTTL                   string       `json:"token_ttl"`
+	AuthIssuer                 string       `json:"auth_issuer"`
+	AuthAudience               string       `json:"auth_audience"`
+	LogLevel                   string       `json:"log_level"`
+	LogFile                    string       `json:"log_file"`
+	LogFormat                  string       `json:"log_format"`
+	AllowLocalSources          bool         `json:"allow_local_sources"`
+	ServerURL                  string       `json:"server_url"` // local base URL the CLI dials; never a federation identity (§14)
+	PeerAutoAccept             bool         `json:"peer_auto_accept"`
+	KernelHandle               string       `json:"kernel_handle"`                 // handle this kernel presents in friend handshakes and gossip (§13)
+	BootstrapPeers             []string     `json:"bootstrap_peers"`               // seed multiaddrs; sole seed source; empty = no announce/discovery (§13)
+	CredentialsKey             string       `json:"credentials_key,omitempty"`     // base64url AES-256 key; generated on first boot
+	RemoteRetryIntervalSeconds int64        `json:"remote_retry_interval_seconds"` // seconds between retry passes for pending remote calls (§13); <=0 → default
+	PeerRetentionDays          int64        `json:"peer_retention_days"`           // days a peer may stay idle at zero balance before purge (§13); <=0 → disabled
 }
 
 // remoteRetryInterval is how often the running server re-drives pending remote-proxy calls so a
 // peer coming back online settles parked calls without a restart (§13). A non-positive config
 // value falls back to the 60s default.
 func (c ServerConfig) remoteRetryInterval() time.Duration {
-	if c.RemoteRetryIntervalSec <= 0 {
+	if c.RemoteRetryIntervalSeconds <= 0 {
 		return 60 * time.Second
 	}
-	return time.Duration(c.RemoteRetryIntervalSec) * time.Second
+	return time.Duration(c.RemoteRetryIntervalSeconds) * time.Second
+}
+
+// peerRetention is how long a peer may stay idle at zero balance before it is purged (§13).
+// Unlike remoteRetryInterval, a non-positive value disables purging entirely (returns 0), so
+// operators can opt out rather than get a silent default.
+func (c ServerConfig) peerRetention() time.Duration {
+	if c.PeerRetentionDays <= 0 {
+		return 0
+	}
+	return time.Duration(c.PeerRetentionDays) * 24 * time.Hour
 }
 
 // DefaultServerConfig returns a ServerConfig populated with safe defaults.
@@ -136,8 +147,9 @@ func DefaultServerConfig() ServerConfig {
 		// The public daios.ai node is the default meeting point, so a fresh `juice serve` joins
 		// the network out of the box (it listens on the standard port 31313, §13). Override or
 		// extend for a private network; clear it to run standalone.
-		BootstrapPeers:         []string{"/dns4/daios.ai/tcp/31313/p2p/12D3KooWJSwNRSf1Nyv7dQU43QP99GYqXmD4hHqmjYbpmPJoC5Ad"},
-		RemoteRetryIntervalSec: 60,
+		BootstrapPeers:             []string{"/dns4/daios.ai/tcp/31313/p2p/12D3KooWJSwNRSf1Nyv7dQU43QP99GYqXmD4hHqmjYbpmPJoC5Ad"},
+		RemoteRetryIntervalSeconds: 60,
+		PeerRetentionDays:          30,
 	}
 }
 

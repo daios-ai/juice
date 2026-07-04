@@ -37,6 +37,9 @@ type Config struct {
 	// RemotePendingMaxAge bounds how long a remote-proxy call may stay pending before it settles
 	// as a failure with full refund, so a silent peer can't pin a process open. 0 = default 24h.
 	RemotePendingMaxAge time.Duration
+	// PeerRetention bounds how long a peer may stay idle at zero balance before it is purged
+	// (§13 Retention). 0 = disabled (never purge). Set from peer_retention_days.
+	PeerRetention time.Duration
 }
 
 // DefaultConfig returns safe local defaults.
@@ -729,7 +732,6 @@ func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateAc
 	return a, nil
 }
 
-
 // RegisterNativeAction creates a native action for bootstrap use.
 // Unlike CreateAction, it does not reject KindNative. Call only from bootstrap.
 func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionRequest) (*Action, error) {
@@ -898,7 +900,6 @@ func (k *Kernel) ListAllTransactionViews(ctx context.Context, limit, offset int)
 	}
 	return views, nil
 }
-
 
 // GetConfig returns a persistent config value by key.
 func (k *Kernel) GetConfig(ctx context.Context, key string) (string, error) {

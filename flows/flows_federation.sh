@@ -240,8 +240,14 @@ flow_fed_gossip_discovery() {
     j "$dbt" "$ht" auth login @sys --password syspass >/dev/null 2>&1
 
     # T inspects L (resolved by key via the seed); L's transacted-friends list carries R's key + stats.
-    local ldoc; ldoc=$(jj "$dbt" "$ht" admin inspect "$FED_LKEY")
-    local rkey; rkey=$(python3 -c "import sys,json;print(next((f['public_key'] for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','')),''))" "$ldoc" 2>/dev/null)
+    # Retry until the DHT lookup converges (loopback is usually instant, but slow under CPU load).
+    local ldoc rkey=""
+    for _ in $(seq 1 25); do
+        ldoc=$(jj "$dbt" "$ht" admin inspect "$FED_LKEY")
+        rkey=$(python3 -c "import sys,json;print(next((f['public_key'] for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','')),''))" "$ldoc" 2>/dev/null)
+        [ -n "$rkey" ] && break
+        sleep 0.2
+    done
     assert_nonempty "fed_gossip.r_in_gossip" "$rkey"
     local guses; guses=$(python3 -c "import sys,json;print(next((a.get('uses',0) for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','') for a in f.get('actions',[]) if a.get('name')=='sys/greet'),0))" "$ldoc" 2>/dev/null)
     assert_eq "fed_gossip.earned_stats" yes "$([ "${guses:-0}" -ge 1 ] && echo yes || echo no)"

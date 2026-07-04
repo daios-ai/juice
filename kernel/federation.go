@@ -550,6 +550,34 @@ func (k *Kernel) ListDiscoveredKernels(ctx context.Context) ([]*DiscoveredKernel
 	return k.store.ListDiscoveredKernels(ctx)
 }
 
+// PurgeIdlePeers reaps peers idle past PeerRetention at zero balance (§13 Retention): it deletes
+// each such peer's proxy actions, stats, stat_tags, and discovered_kernels rows and forgets the
+// peer identity, keeping the transaction ledger intact. Internal maintenance (like
+// RetryPendingRemoteDispatches, no superuser gate) — driven by the serve sweep and once at startup.
+// PeerRetention <= 0 disables it. Returns the number of peers purged.
+func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
+	if k.cfg.PeerRetention <= 0 {
+		return 0, nil
+	}
+	logger := k.log.With(ctx)
+	cutoff := time.Now().UTC().Add(-k.cfg.PeerRetention)
+	ids, err := k.store.ListPurgeablePeers(ctx, cutoff)
+	if err != nil {
+		logger.Error("peer.purge.list_failed", "error", err)
+		return 0, err
+	}
+	purged := 0
+	for _, id := range ids {
+		if err := k.store.PurgePeerCascade(ctx, id); err != nil {
+			logger.Error("peer.purge.failed", "user_id", id, "error", err)
+			continue
+		}
+		purged++
+		logger.Info("peer.purged", "user_id", id)
+	}
+	return purged, nil
+}
+
 // GetGossip returns this kernel's gossip payload: identity, public active actions, and peer list.
 func (k *Kernel) GetGossip(ctx context.Context) (*GossipResponse, error) {
 	var pubKeyB64 string
@@ -722,7 +750,6 @@ func decodeRemotePublicKey(publicKey string) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(key), nil
 }
 
-
 // ---- Federation import (uses reconcileImport from kernel.go) ----
 
 // remoteManifestHash returns the manifest hash for a remote_proxy action: a hex-encoded
@@ -815,11 +842,11 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 		key:  m.ActionID,
 		hash: contentHash,
 		apply: func(a *Action) {
-			a.Name         = name
-			a.Source       = source
-			a.Price        = proxyPrice
-			a.Description  = m.Description
-			a.InputSchema  = m.InputSchema
+			a.Name = name
+			a.Source = source
+			a.Price = proxyPrice
+			a.Description = m.Description
+			a.InputSchema = m.InputSchema
 			a.OutputSchema = m.OutputSchema
 			a.ArtifactHash = contentHash
 		},

@@ -1247,7 +1247,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 		CallerUserID: "c1", ProcessID: "p1",
 		ArgsHash:  jcsHashForTest(t, `{}`),
 		ReplyHash: jcsHashForTest(t, `{}`),
-		Status: kernel.TxSuccess, Gross: 0, Net: 0, Fee: 0,
+		Status:    kernel.TxSuccess, Gross: 0, Net: 0, Fee: 0,
 		StartedAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
 	}
 	// Sign with the remote peer's private key using the same method as the kernel.
@@ -1434,7 +1434,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 		CallerUserID: "c1", ProcessID: "p1",
 		ArgsHash:  jcsHashForTest(t, `{}`),
 		ReplyHash: jcsHashForTest(t, `{}`),
-		Status: kernel.TxSuccess, Gross: 0, Net: 0, Fee: 0,
+		Status:    kernel.TxSuccess, Gross: 0, Net: 0, Fee: 0,
 		StartedAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
 	}
 	remoteReceipt.Signature = signReceiptForTest(t, priv, remoteReceipt)
@@ -1534,8 +1534,8 @@ func TestDenyPeerDeactivatesActionsAndCancelsSteps(t *testing.T) {
 	act := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: peerB.ID, Name: "b-act",
 		Kind: kernel.KindRemoteProxy, Active: true, Price: 0,
-		Source: "https://deny-b.example.com/v1/federation/call?action=@b/b-act&counterparty=x",
-		InputSchema:  map[string]any{}, OutputSchema: map[string]any{},
+		Source:      "https://deny-b.example.com/v1/federation/call?action=@b/b-act&counterparty=x",
+		InputSchema: map[string]any{}, OutputSchema: map[string]any{},
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(ctx, act); err != nil {
@@ -1575,6 +1575,91 @@ func TestDenyPeerDeactivatesActionsAndCancelsSteps(t *testing.T) {
 	}
 }
 
+// TestPurgeIdlePeers (§13 Retention): a peer idle past PeerRetention at zero balance is purged —
+// its proxy actions, stats, and discovered_kernels rows deleted and its identity forgotten — while
+// the anchor user row survives. PeerRetention <= 0 disables the sweep.
+func TestPurgeIdlePeers(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	baseCfg := func() kernel.Config {
+		cfg := kernel.DefaultConfig()
+		cfg.TokenSecret = "test-secret"
+		cfg.IssuerUserID = testIssuerUserID
+		cfg.FeeRecipientID = testIssuerUserID
+		cfg.SigningKey = testSigningKey()
+		return cfg
+	}
+
+	kDisabled := kernel.New(st, nil, nil, nil, baseCfg(), log.Default())
+	sys := setupSys(t, kDisabled, st)
+
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub := priv.Public().(ed25519.PublicKey)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	peer, err := kDisabled.AddPeer(ctx, sys.ID, "@old-peer", pubB64)
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+
+	act := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: peer.ID, Name: "p-act",
+		Kind: kernel.KindRemoteProxy, Active: true, Price: 0,
+		Source:      "https://old-peer.example.com/call",
+		InputSchema: map[string]any{}, OutputSchema: map[string]any{},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, act); err != nil {
+		t.Fatalf("create action: %v", err)
+	}
+	if err := st.UpsertStats(ctx, &kernel.Stats{ActionID: act.ID, Uses: 3, Successes: 3, LastUsedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: pubB64, IntroducedBy: "x", Handle: "@old-peer", StatsJSON: json.RawMessage("{}"), FirstSeen: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Disabled by default (PeerRetention == 0): a no-op that touches nothing.
+	if n, err := kDisabled.PurgeIdlePeers(ctx); err != nil || n != 0 {
+		t.Fatalf("disabled purge: n=%d err=%v, want 0/nil", n, err)
+	}
+	if _, err := kDisabled.ReadAction(ctx, act.ID); err != nil {
+		t.Fatalf("action must survive while purge disabled: %v", err)
+	}
+
+	// Enabled with a tiny retention so the just-created peer is immediately idle.
+	cfg := baseCfg()
+	cfg.PeerRetention = time.Nanosecond
+	kEnabled := kernel.New(st, nil, nil, nil, cfg, log.Default())
+	n, err := kEnabled.PurgeIdlePeers(ctx)
+	if err != nil {
+		t.Fatalf("PurgeIdlePeers: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("purged %d peers, want 1", n)
+	}
+
+	if _, err := kEnabled.ReadAction(ctx, act.ID); err == nil {
+		t.Error("proxy action must be deleted after purge")
+	}
+	if peers, _ := kEnabled.ListPeers(ctx); len(peers) != 0 {
+		t.Errorf("ListPeers = %d, want 0 (peer identity forgotten)", len(peers))
+	}
+	u, err := kEnabled.ReadUser(ctx, peer.ID)
+	if err != nil {
+		t.Fatalf("anchor user row must remain: %v", err)
+	}
+	if u.PublicKey != "" {
+		t.Errorf("public_key must be cleared, got %q", u.PublicKey)
+	}
+	dks, _ := kEnabled.ListDiscoveredKernels(ctx)
+	for _, d := range dks {
+		if d.PublicKey == pubB64 {
+			t.Error("discovered_kernels row for the purged peer must be deleted")
+		}
+	}
+}
+
 func TestGetGossipOnlyIncludesTransactedFriends(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
@@ -1601,8 +1686,8 @@ func TestGetGossipOnlyIncludesTransactedFriends(t *testing.T) {
 	actA := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: peerA.ID, Name: "a-act",
 		Kind: kernel.KindRemoteProxy, Active: true, Price: 10,
-		Source: "https://gossip-a.example.com/v1/federation/call?action=@gossip-transacted/a-act&counterparty=x",
-		InputSchema:  map[string]any{}, OutputSchema: map[string]any{},
+		Source:      "https://gossip-a.example.com/v1/federation/call?action=@gossip-transacted/a-act&counterparty=x",
+		InputSchema: map[string]any{}, OutputSchema: map[string]any{},
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(ctx, actA); err != nil {

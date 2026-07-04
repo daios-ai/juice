@@ -125,6 +125,39 @@ func newProcess(ownerID string) *kernel.Process {
 	}
 }
 
+// newPeer builds and inserts a proxy/peer user (public_key set) with explicit balances and
+// creation time, for §13 retention-purge tests.
+func newPeer(t *testing.T, db *DB, handle, key string, available, locked int64, createdAt time.Time) *kernel.User {
+	t.Helper()
+	u := newUser(handle, available)
+	u.Locked = locked
+	u.PublicKey = key
+	u.CreatedAt = createdAt
+	u.UpdatedAt = createdAt
+	if err := db.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("create peer %s: %v", handle, err)
+	}
+	return u
+}
+
+// insertTx inserts a bare transaction row naming the given users, for ledger/activity assertions.
+// Transactions carry no foreign key on their user/process/trace columns, so arbitrary ids are fine.
+func insertTx(t *testing.T, db *DB, ownerID, callerID, targetID, actionID string, endedAt time.Time) string {
+	t.Helper()
+	id := uuid.New().String()
+	_, err := db.db.ExecContext(context.Background(),
+		`INSERT INTO transactions
+		   (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,
+		    action_id,status,gross,net,fee,started_at,ended_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		id, "p-"+id, "t-"+id, "", ownerID, callerID, targetID, actionID,
+		"success", 0, 0, 0, timeToStr(endedAt), timeToStr(endedAt))
+	if err != nil {
+		t.Fatalf("insert tx: %v", err)
+	}
+	return id
+}
+
 // ---- User CRUD ----
 
 func TestUserCRUD(t *testing.T) {
@@ -522,7 +555,6 @@ func TestEndProcessWithLockedFundsForceCloseSucceeds(t *testing.T) {
 		t.Fatalf("EndProcess should succeed even with locked funds; got: %v", err)
 	}
 }
-
 
 // TestEndProcessCancelsWaitingStep verifies the store.EndProcess primitive: it cancels
 // waiting steps, returns their parked prices to the owner, and closes the process.
@@ -1055,7 +1087,6 @@ func TestListProcesses(t *testing.T) {
 	}
 }
 
-
 func TestRevokeRefreshToken(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -1101,14 +1132,14 @@ func TestCreateReadReceipt(t *testing.T) {
 	_ = db.CreateUser(ctx, issuer)
 
 	tx := &kernel.Transaction{
-		ID:            uuid.New().String(),
-		OwnerUserID:   issuer.ID,
+		ID:           uuid.New().String(),
+		OwnerUserID:  issuer.ID,
 		CallerUserID: issuer.ID,
-		TargetUserID:  issuer.ID,
-		ActionID:      uuid.New().String(),
-		Status:        kernel.TxSuccess,
-		StartedAt:     time.Now().UTC(),
-		EndedAt:       time.Now().UTC(),
+		TargetUserID: issuer.ID,
+		ActionID:     uuid.New().String(),
+		Status:       kernel.TxSuccess,
+		StartedAt:    time.Now().UTC(),
+		EndedAt:      time.Now().UTC(),
 	}
 	_ = db.createTransaction(ctx, tx)
 
@@ -1157,14 +1188,14 @@ func TestCreateRatingDirect(t *testing.T) {
 	_ = db.CreateUser(ctx, rater)
 
 	tx := &kernel.Transaction{
-		ID:            uuid.New().String(),
-		OwnerUserID:   rater.ID,
+		ID:           uuid.New().String(),
+		OwnerUserID:  rater.ID,
 		CallerUserID: rater.ID,
-		TargetUserID:  rater.ID,
-		ActionID:      uuid.New().String(),
-		Status:        kernel.TxSuccess,
-		StartedAt:     time.Now().UTC(),
-		EndedAt:       time.Now().UTC(),
+		TargetUserID: rater.ID,
+		ActionID:     uuid.New().String(),
+		Status:       kernel.TxSuccess,
+		StartedAt:    time.Now().UTC(),
+		EndedAt:      time.Now().UTC(),
 	}
 	_ = db.createTransaction(ctx, tx)
 
@@ -1220,7 +1251,7 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 
 	// Seed stats so rating_count starts at 0.
 	if err := db.UpsertStats(ctx, &kernel.Stats{
-		ActionID: action.ID,
+		ActionID:   action.ID,
 		LastUsedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("UpsertStats: %v", err)
@@ -1229,14 +1260,14 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 	rater := newUser("@rater", 0)
 	_ = db.CreateUser(ctx, rater)
 	tx := &kernel.Transaction{
-		ID:            uuid.New().String(),
-		OwnerUserID:   rater.ID,
+		ID:           uuid.New().String(),
+		OwnerUserID:  rater.ID,
 		CallerUserID: rater.ID,
-		TargetUserID:  owner.ID,
-		ActionID:      action.ID,
-		Status:        kernel.TxSuccess,
-		StartedAt:     time.Now().UTC(),
-		EndedAt:       time.Now().UTC(),
+		TargetUserID: owner.ID,
+		ActionID:     action.ID,
+		Status:       kernel.TxSuccess,
+		StartedAt:    time.Now().UTC(),
+		EndedAt:      time.Now().UTC(),
 	}
 	_ = db.createTransaction(ctx, tx)
 
@@ -1276,14 +1307,14 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 	rater2 := newUser("@rater2", 0)
 	_ = db.CreateUser(ctx, rater2)
 	tx2 := &kernel.Transaction{
-		ID:            uuid.New().String(),
-		OwnerUserID:   rater2.ID,
+		ID:           uuid.New().String(),
+		OwnerUserID:  rater2.ID,
 		CallerUserID: rater2.ID,
-		TargetUserID:  owner.ID,
-		ActionID:      action.ID,
-		Status:        kernel.TxSuccess,
-		StartedAt:     time.Now().UTC(),
-		EndedAt:       time.Now().UTC(),
+		TargetUserID: owner.ID,
+		ActionID:     action.ID,
+		Status:       kernel.TxSuccess,
+		StartedAt:    time.Now().UTC(),
+		EndedAt:      time.Now().UTC(),
 	}
 	_ = db.createTransaction(ctx, tx2)
 	r2 := &kernel.Rating{
@@ -1319,14 +1350,14 @@ func TestListRatings(t *testing.T) {
 
 	makeTxAndRating := func(id string, rating float64, offset time.Duration) {
 		tx := &kernel.Transaction{
-			ID:            id,
-			OwnerUserID:   rater.ID,
+			ID:           id,
+			OwnerUserID:  rater.ID,
 			CallerUserID: rater.ID,
-			TargetUserID:  owner.ID,
-			ActionID:      action.ID,
-			Status:        kernel.TxSuccess,
-			StartedAt:     time.Now().UTC(),
-			EndedAt:       time.Now().UTC(),
+			TargetUserID: owner.ID,
+			ActionID:     action.ID,
+			Status:       kernel.TxSuccess,
+			StartedAt:    time.Now().UTC(),
+			EndedAt:      time.Now().UTC(),
 		}
 		_ = db.createTransaction(ctx, tx)
 		r := &kernel.Rating{
@@ -1394,7 +1425,7 @@ func TestListTransactionsByParty(t *testing.T) {
 			TraceID:       id + "-tr",
 			ParentTraceID: id + "-tr",
 			OwnerUserID:   caller.ID,
-			CallerUserID: caller.ID,
+			CallerUserID:  caller.ID,
 			TargetUserID:  owner.ID,
 			ActionID:      action.ID,
 			Status:        kernel.TxSuccess,
@@ -1435,8 +1466,8 @@ func TestListTransactionsByParty(t *testing.T) {
 		ProcessID:     p.ID,
 		TraceID:       "party-tx-distinct-tr",
 		ParentTraceID: "party-tx-distinct-tr",
-		OwnerUserID:   caller.ID,    // process owner
-		CallerUserID: distinctCaller.ID, // distinct call caller
+		OwnerUserID:   caller.ID,         // process owner
+		CallerUserID:  distinctCaller.ID, // distinct call caller
 		TargetUserID:  owner.ID,
 		ActionID:      action.ID,
 		Status:        kernel.TxSuccess,
@@ -1961,7 +1992,6 @@ func (s *DB) createTransaction(ctx context.Context, tx *kernel.Transaction) erro
 	return dbErr(err, "create transaction")
 }
 
-
 func (s *DB) createReceipt(ctx context.Context, r *kernel.Receipt) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
@@ -2115,10 +2145,10 @@ func TestListStatsByOwner(t *testing.T) {
 	// Upsert stats: a1 has uses=3, a2 has uses=0 (default).
 	now := time.Now().UTC()
 	if err := db.UpsertStats(ctx, &kernel.Stats{
-		ActionID:    a1.ID,
-		Uses:        3,
-		Successes:   3,
-		LastUsedAt:  now,
+		ActionID:   a1.ID,
+		Uses:       3,
+		Successes:  3,
+		LastUsedAt: now,
 	}); err != nil {
 		t.Fatalf("UpsertStats: %v", err)
 	}
@@ -2466,7 +2496,6 @@ func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {
 	}
 }
 
-
 // TestMigration011RewritesBareURLSources verifies the http-source unification
 // migration converts legacy bare-URL kind=http sources into structured HTTPSource
 // JSON while leaving already-structured (OpenAPI) sources untouched.
@@ -2513,5 +2542,132 @@ func TestMigration011RewritesBareURLSources(t *testing.T) {
 	gotOapi, _ := db.ReadAction(ctx, oapi.ID)
 	if gotOapi.Source != oapi.Source {
 		t.Errorf("openapi source must be untouched: got %s", gotOapi.Source)
+	}
+}
+
+// ---- Peer retention purge (§13) ----
+
+func TestPurgePeerCascade(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	peer := newPeer(t, db, "@peerP", "peerkeyAAA", 0, 0, time.Now().UTC())
+
+	var actIDs []string
+	for _, n := range []string{"svc-1", "svc-2"} {
+		a := newAction(peer.ID, n, 10, true)
+		if err := db.CreateAction(ctx, a); err != nil {
+			t.Fatalf("create action: %v", err)
+		}
+		actIDs = append(actIDs, a.ID)
+		if err := db.UpsertStats(ctx, &kernel.Stats{ActionID: a.ID, Uses: 5, Successes: 5, LastUsedAt: time.Now().UTC()}); err != nil {
+			t.Fatalf("upsert stats: %v", err)
+		}
+		if err := db.UpsertStatTag(ctx, &kernel.StatTag{ActionID: a.ID, Key: "gossip_uses", Value: "5", Source: "introX", UpdatedAt: time.Now().UTC()}); err != nil {
+			t.Fatalf("upsert stat tag: %v", err)
+		}
+	}
+
+	// A discovered_kernels row about the peer (must be deleted) and one about another kernel that
+	// the peer merely introduced (must survive — it is information about a different peer).
+	now := time.Now().UTC()
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "peerkeyAAA", IntroducedBy: "someIntro", Handle: "@peerP", StatsJSON: json.RawMessage("{}"), FirstSeen: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "otherkeyBBB", IntroducedBy: "peerkeyAAA", Handle: "@other", StatsJSON: json.RawMessage("{}"), FirstSeen: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ledger: a transaction crediting the peer as target, referencing a peer action that gets
+	// deleted. It must survive the purge with its now-dangling action id intact (§11).
+	txID := insertTx(t, db, "some-local-owner", "some-local-owner", peer.ID, actIDs[0], now)
+
+	if err := db.PurgePeerCascade(ctx, peer.ID); err != nil {
+		t.Fatalf("PurgePeerCascade: %v", err)
+	}
+
+	count := func(q string, args ...any) int {
+		var n int
+		if err := db.db.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+			t.Fatalf("count %q: %v", q, err)
+		}
+		return n
+	}
+	if n := count(`SELECT COUNT(*) FROM actions WHERE owner_user_id=?`, peer.ID); n != 0 {
+		t.Errorf("peer actions after purge = %d, want 0", n)
+	}
+	if n := count(`SELECT COUNT(*) FROM action_stats WHERE action_id IN (?,?)`, actIDs[0], actIDs[1]); n != 0 {
+		t.Errorf("action_stats after purge = %d, want 0", n)
+	}
+	if n := count(`SELECT COUNT(*) FROM stat_tags WHERE action_id IN (?,?)`, actIDs[0], actIDs[1]); n != 0 {
+		t.Errorf("stat_tags after purge = %d, want 0", n)
+	}
+	if n := count(`SELECT COUNT(*) FROM discovered_kernels WHERE public_key=?`, "peerkeyAAA"); n != 0 {
+		t.Errorf("discovered_kernels(peer) after purge = %d, want 0", n)
+	}
+	if n := count(`SELECT COUNT(*) FROM discovered_kernels WHERE public_key=?`, "otherkeyBBB"); n != 1 {
+		t.Errorf("discovered_kernels(other) after purge = %d, want 1 (preserved)", n)
+	}
+	if _, err := db.ReadTransaction(ctx, txID); err != nil {
+		t.Errorf("ledger transaction must survive purge: %v", err)
+	}
+	u, err := db.ReadUser(ctx, peer.ID)
+	if err != nil {
+		t.Fatalf("peer user must remain as ledger anchor: %v", err)
+	}
+	if u.PublicKey != "" {
+		t.Errorf("peer public_key must be cleared, got %q", u.PublicKey)
+	}
+	if u.DeniedAt != nil {
+		t.Errorf("peer denied_at must be cleared")
+	}
+}
+
+func TestListPurgeablePeers(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-40 * 24 * time.Hour)
+	now := time.Now().UTC()
+	cutoff := now.Add(-30 * 24 * time.Hour)
+
+	idle := newPeer(t, db, "@idle", "k-idle", 0, 0, old) // the only purgeable peer
+
+	newPeer(t, db, "@funded", "k-funded", 100, 0, old) // excluded: holds value (available)
+	newPeer(t, db, "@locked", "k-locked", 0, 50, old)  // excluded: holds value (locked)
+	newPeer(t, db, "@recent", "k-recent", 0, 0, now)   // excluded: created within the window
+
+	// excluded: a recent gossip mention keeps it live
+	newPeer(t, db, "@gossip", "k-gossip", 0, 0, old)
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "k-gossip", IntroducedBy: "x", Handle: "@gossip", StatsJSON: json.RawMessage("{}"), FirstSeen: old, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	// excluded: a recent transaction names the peer, though its balance is zero
+	txp := newPeer(t, db, "@txp", "k-txp", 0, 0, old)
+	insertTx(t, db, txp.ID, txp.ID, "some-target", "some-action", now)
+
+	// excluded: a waiting step is addressed to the peer as required caller
+	stepp := newPeer(t, db, "@stepp", "k-stepp", 0, 0, old)
+	owner := newUser("@sowner", 0)
+	_ = db.CreateUser(ctx, owner)
+	act := newAction(owner.ID, "approve", 0, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateStep(ctx, &kernel.Step{ID: uuid.New().String(), RequiredCallerUserID: stepp.ID, ActionID: act.ID, Price: 0, Status: kernel.StepWaiting, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	// excluded: a local (non-peer) account, even though old and zero-balance
+	local := newUser("@local", 0)
+	local.CreatedAt = old
+	_ = db.CreateUser(ctx, local)
+
+	ids, err := db.ListPurgeablePeers(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("ListPurgeablePeers: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != idle.ID {
+		t.Fatalf("purgeable = %v, want exactly [%s (@idle)]", ids, idle.ID)
 	}
 }

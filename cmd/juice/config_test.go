@@ -12,19 +12,37 @@ import (
 
 func TestRemoteRetryInterval(t *testing.T) {
 	// Configured positive value is honored.
-	if got := (ServerConfig{RemoteRetryIntervalSec: 5}).remoteRetryInterval(); got != 5*time.Second {
+	if got := (ServerConfig{RemoteRetryIntervalSeconds: 5}).remoteRetryInterval(); got != 5*time.Second {
 		t.Errorf("configured: got %v, want 5s", got)
 	}
 	// Zero and negative fall back to the 60s default.
-	if got := (ServerConfig{RemoteRetryIntervalSec: 0}).remoteRetryInterval(); got != 60*time.Second {
+	if got := (ServerConfig{RemoteRetryIntervalSeconds: 0}).remoteRetryInterval(); got != 60*time.Second {
 		t.Errorf("zero: got %v, want 60s", got)
 	}
-	if got := (ServerConfig{RemoteRetryIntervalSec: -3}).remoteRetryInterval(); got != 60*time.Second {
+	if got := (ServerConfig{RemoteRetryIntervalSeconds: -3}).remoteRetryInterval(); got != 60*time.Second {
 		t.Errorf("negative: got %v, want 60s", got)
 	}
 	// The default config ships a sane interval.
 	if DefaultServerConfig().remoteRetryInterval() != 60*time.Second {
 		t.Errorf("default config interval = %v, want 60s", DefaultServerConfig().remoteRetryInterval())
+	}
+}
+
+func TestPeerRetention(t *testing.T) {
+	// Configured positive value converts days → duration.
+	if got := (ServerConfig{PeerRetentionDays: 30}).peerRetention(); got != 30*24*time.Hour {
+		t.Errorf("configured: got %v, want 720h", got)
+	}
+	// Zero and negative disable purging (0 duration), NOT a silent default.
+	if got := (ServerConfig{PeerRetentionDays: 0}).peerRetention(); got != 0 {
+		t.Errorf("zero: got %v, want 0 (disabled)", got)
+	}
+	if got := (ServerConfig{PeerRetentionDays: -5}).peerRetention(); got != 0 {
+		t.Errorf("negative: got %v, want 0 (disabled)", got)
+	}
+	// The default config ships a 30-day retention.
+	if DefaultServerConfig().peerRetention() != 30*24*time.Hour {
+		t.Errorf("default config retention = %v, want 720h", DefaultServerConfig().peerRetention())
 	}
 }
 
