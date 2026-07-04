@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -88,6 +91,39 @@ func TestControlPlaneDepositAndLifecycle(t *testing.T) {
 	}
 	if u.Available != 500 {
 		t.Errorf("available after deposit: got %d, want 500", u.Available)
+	}
+}
+
+// TestControlPlaneDepositByKey: a peer is funded by its base64url public key (the global name it
+// was friended with), not just its local @handle — the out-of-band settlement path.
+func TestControlPlaneDepositByKey(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	sock, suTok := bootControlPlane(t, env)
+
+	sys, err := env.k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyB64 := base64.RawURLEncoding.EncodeToString(pub)
+	peer, err := env.k.AddPeer(ctx, sys.ID, "@peerx", keyB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Address the peer by key, not by @handle.
+	body, status := ctlDo(t, sock, suTok, "POST", "/control/deposit",
+		map[string]any{"handle": keyB64, "amount": 300})
+	if status != http.StatusOK {
+		t.Fatalf("deposit-by-key status %d: %s", status, body)
+	}
+	u, err := env.k.ReadUser(ctx, peer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Available != 300 {
+		t.Errorf("peer balance after deposit-by-key: got %d, want 300", u.Available)
 	}
 }
 

@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 	"time"
@@ -40,6 +43,22 @@ func TestResolveHandle(t *testing.T) {
 	_, err = resolveHandle(k, ctx, "@nobody-svc")
 	if err == nil {
 		t.Error("expected error for missing handle")
+	}
+
+	// A peer is resolvable by its base64url public key (the global name), not only its @handle.
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyB64 := base64.RawURLEncoding.EncodeToString(pub)
+	peer, err := k.AddPeer(ctx, sys.ID, "@svc-peer", keyB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byKey, err := resolveHandle(k, ctx, keyB64)
+	if err != nil || byKey.ID != peer.ID {
+		t.Errorf("resolveHandle(key): got %v (err %v), want peer %q", byKey, err, peer.ID)
 	}
 }
 
