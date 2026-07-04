@@ -136,10 +136,15 @@ func userView(u *kernel.User) map[string]any {
 
 // ---- Resolution helpers ----
 
-// resolveHandle resolves a handle string to a *kernel.User.
-// Accepts handle with or without the leading "@".
-func resolveHandle(k *kernel.Kernel, ctx context.Context, handle string) (*kernel.User, error) {
-	return k.ReadUserByHandle(ctx, kernel.NormalizeHandle(handle))
+// resolveHandle resolves an account by its @handle (kernel-local name) or public key (global name):
+// an @-prefixed string is a handle, a bare string is tried as a key first, then a handle.
+func resolveHandle(k *kernel.Kernel, ctx context.Context, ident string) (*kernel.User, error) {
+	if !strings.HasPrefix(ident, "@") {
+		if u, err := k.ReadUserByPublicKey(ctx, ident); err == nil {
+			return u, nil
+		}
+	}
+	return k.ReadUserByHandle(ctx, kernel.NormalizeHandle(ident))
 }
 
 // resolveActionRef resolves "owner/name" (with or without a leading "@") or a raw action

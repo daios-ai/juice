@@ -256,13 +256,13 @@ func TestBulkImportPeerActions(t *testing.T) {
 	}
 	var found *kernel.Action
 	for _, a := range actions {
-		if a.Name == "hello" {
+		if a.Name == "bulk-peer/hello" { // owner-qualified local name
 			found = a
 			break
 		}
 	}
 	if found == nil {
-		t.Fatal("imported action 'hello' not found in ListAllActions")
+		t.Fatal("imported action 'bulk-peer/hello' not found in ListAllActions")
 	}
 	if !found.Active {
 		t.Error("imported action should be enabled (active=true) after bulk import")

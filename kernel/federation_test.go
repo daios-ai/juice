@@ -600,7 +600,7 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 		CallerID:        caller.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    "@proxy-peer",
-		ActionName:      "add",
+		ActionName:      "proxy-peer/add",
 		Args:            map[string]any{},
 	})
 	if err != nil {
@@ -701,7 +701,7 @@ func TestRetryExpiredRemoteTraceSettlesAsFailure(t *testing.T) {
 
 	// Real root run: the empty receipt makes the proxy call time out; the process stays open and
 	// the trace persists in the DB with its idempotency key (beginRun records the dispatch).
-	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -757,7 +757,7 @@ func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
 	mp := a.Price * 10000 / (10000 + bps)
 
 	// Call while the peer is offline → pending, no settled transaction, funds locked.
-	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (pending), got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -816,7 +816,7 @@ func TestAwaitingReceiptSince(t *testing.T) {
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "await-action", 1000)
 
 	// Offline call → parked, awaiting a receipt.
-	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	pend, _ := st.ListPendingRemoteTraces(ctx)
@@ -863,7 +863,7 @@ func TestPendingRemoteTracesAndRetryWrappers(t *testing.T) {
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "wrap-action", 1000)
 	mp := a.Price * 10000 / (10000 + bps)
 
-	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	pending, err := k.PendingRemoteTraces(ctx)
@@ -913,7 +913,7 @@ func TestSettleRemoteCallRejectsWrongActionID(t *testing.T) {
 
 	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
-		TargetUserID: "@settle-peer", ActionName: "settleact", Args: map[string]any{},
+		TargetUserID: "@settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("expected ErrTimeout on action_id mismatch, got %v", err)
@@ -945,7 +945,7 @@ func TestSettleRemoteCallRejectsWrongArgsHash(t *testing.T) {
 
 	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
-		TargetUserID: "@settle-peer", ActionName: "settleact", Args: map[string]any{},
+		TargetUserID: "@settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("expected ErrTimeout on args_hash mismatch, got %v", err)
@@ -1003,7 +1003,7 @@ func TestSettleRemoteCallQuarantinesInvalidReceipt(t *testing.T) {
 
 			_, err := k.Call(ctx, kernel.CallRequest{
 				CallerID: caller.ID, ExistingTraceID: tr.ID,
-				TargetUserID: "@settle-peer", ActionName: "settleact", Args: map[string]any{},
+				TargetUserID: "@settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
 			})
 			// Terminal failure, not ErrTimeout (no retry) and not a silent success.
 			if !errors.Is(err, kernel.ErrExecutionFailed) {
@@ -1053,7 +1053,7 @@ func TestSettleRemoteCallValidChargeNotClamped(t *testing.T) {
 
 	if _, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
-		TargetUserID: "@settle-peer", ActionName: "settleact", Args: map[string]any{},
+		TargetUserID: "@settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
 	}); err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -1152,6 +1152,55 @@ func TestRegisterRemoteKernelResolvesDuplicateHandle(t *testing.T) {
 
 // ---- D4: VerifyRemoteReceipt ----
 
+// TestRemoteImportOwnerQualifiedNoCollision: two owners on peer B with the same action name both
+// import under the one proxy user, owner-qualified (alice/greet, bob/greet), with no collision — and
+// each resolves via mount descent (@B.alice/greet → account @B, action "alice/greet").
+func TestRemoteImportOwnerQualifiedNoCollision(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sys := setupSys(t, nil, st)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{})
+
+	peer, err := k.AddPeer(ctx, sys.ID, "@B", base64.RawURLEncoding.EncodeToString(pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	imp := func(owner, actionID string) {
+		m := kernel.ActionManifest{
+			ActionID: actionID, OwnerHandle: owner, Name: "greet",
+			Kind: kernel.KindHTTP, Price: 0, Description: "g",
+			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+			ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+		}
+		m.Signature, _ = kernel.SignManifest(priv, &m)
+		if _, err := k.ImportRemoteAction(ctx, sys.ID, peer.ID, m); err != nil {
+			t.Fatalf("import %s: %v", owner, err)
+		}
+	}
+	imp("@alice", "act-alice")
+	imp("@bob", "act-bob") // same Name "greet", different owner — must NOT collide
+
+	// Addressed @B/<owner>/<name>: parses to owner @B and name "<owner>/greet", so alice's and bob's
+	// same-named actions are distinct rows and both resolve under the one @B mount.
+	for _, tc := range []struct{ addr, wantName string }{
+		{"@B/alice/greet", "alice/greet"},
+		{"@B/bob/greet", "bob/greet"},
+	} {
+		oh, an, err := kernel.ParseActionRef(tc.addr)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.addr, err)
+		}
+		owner, err := k.ReadUserByHandle(ctx, oh)
+		if err != nil || owner.ID != peer.ID || an != tc.wantName {
+			t.Errorf("%s resolved to owner=%v name=%q, want the @B mount and %q", tc.addr, oh, an, tc.wantName)
+		}
+		if _, err := k.ReadActionByOwnerName(ctx, owner.ID, an); err != nil {
+			t.Errorf("%s: action %q not found under @B: %v", tc.addr, an, err)
+		}
+	}
+}
+
 func TestVerifyRemoteReceiptValid(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -1209,7 +1258,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
-		TargetUserID: "@verify-peer", ActionName: "vact", Args: map[string]any{},
+		TargetUserID: "@verify-peer", ActionName: "verify-peer/vact", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -1327,7 +1376,7 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	// A receipt signed with the wrong key must be rejected: no settlement, trace stays open.
 	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
-		TargetUserID: "@tamper-peer", ActionName: "tact", Args: map[string]any{},
+		TargetUserID: "@tamper-peer", ActionName: "tamper-peer/tact", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("expected ErrTimeout for invalid signature, got %v", err)
@@ -1394,7 +1443,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
-		TargetUserID: "@del-peer", ActionName: "dact", Args: map[string]any{},
+		TargetUserID: "@del-peer", ActionName: "del-peer/dact", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)

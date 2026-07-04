@@ -404,20 +404,6 @@ func (s *DB) ListStatsByOwner(ctx context.Context, ownerUserID string) ([]*kerne
 	})
 }
 
-func (s *DB) CreateProxyUser(ctx context.Context, u *kernel.User) error {
-	// Use handle+"@remote" as a unique placeholder email for proxy users.
-	proxyEmail := u.Handle + "@remote"
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO users (id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		u.ID, u.Handle, proxyEmail, "", 0, 0,
-		nil, nil,
-		nullStr(u.PublicKey),
-		timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
-	)
-	return dbErr(err, "create proxy user")
-}
-
 func scanUserFn(scan func(...any) error) (*kernel.User, error) {
 	var u kernel.User
 	var createdAt, updatedAt string

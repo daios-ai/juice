@@ -31,9 +31,9 @@ const (
 	TxFailure TxStatus = "failure"
 )
 
-// User is an authenticated subject with balances.
-// A user with PublicKey set represents a remote kernel peer (proxy user); location is
-// not stored — the federation transport resolves the key to a live path (§13).
+// User is an account with balances, distinguished only by the credentials it holds — a password
+// (session) and/or a PublicKey (federation signature); there is no "kind". A key makes it a peer
+// kernel here, its live path resolved from the key by the transport (§13).
 type User struct {
 	ID            string     `json:"id"`
 	Handle        string     `json:"handle"`
@@ -43,7 +43,7 @@ type User struct {
 	Locked        int64      `json:"locked"`
 	SuspendedAt   *time.Time `json:"suspended_at,omitempty"`
 	DeniedAt      *time.Time `json:"denied_at,omitempty"`
-	PublicKey     string     `json:"public_key,omitempty"` // Ed25519 public key, base64url; empty for local users
+	PublicKey     string     `json:"public_key,omitempty"` // Ed25519 public key, base64url; empty = no signature credential
 	CreatedAt     time.Time  `json:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at"`
 }

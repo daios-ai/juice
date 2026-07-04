@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/daios-ai/juice/log"
@@ -472,14 +473,16 @@ func (k *Kernel) CreateOrUpdateProxyPeer(ctx context.Context, handle, publicKey 
 		return nil, ErrInvalidInput.Wrapf("no free handle for %s (tried 99 variants)", handle)
 	}
 	now := time.Now().UTC()
+	// A key-only account: no password, a placeholder email for the unique-email column. Same insert.
 	u := &User{
 		ID:        uuid.New().String(),
 		Handle:    resolvedHandle,
+		Email:     resolvedHandle + "@remote",
 		PublicKey: publicKey,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	if err := k.store.CreateProxyUser(ctx, u); err != nil {
+	if err := k.store.CreateUser(ctx, u); err != nil {
 		// A friend and its reciprocal can both pass the existence check above and race to
 		// create the same proxy user (CLI + server both writing this DB); the loser hits a
 		// unique-key conflict. Treat that as idempotent success: re-read by public key and
@@ -803,7 +806,8 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 	}
 
 	contentHash := remoteManifestHash(m)
-	name := m.Name
+	// Owner-qualified (addressed @peer/owner/name) so same-named actions from different owners on the peer don't collide.
+	name := strings.TrimPrefix(m.OwnerHandle, "@") + "/" + m.Name
 	// Proxy price = mp + ceil(mp * import_bps / 10000): the caller pays the remote price
 	// plus the local import duty, all locked atomically at dispatch time.
 	proxyPrice := m.Price + ceilDiv(m.Price*k.cfg.ImportBPS, 10000)

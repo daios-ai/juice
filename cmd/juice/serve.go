@@ -1141,9 +1141,6 @@ func (h *fedHandlers) sendReciprocal(peerKey string) {
 	defer cancel()
 	pubKeyB64, _ := h.kernel.GetConfig(ctx, configKeySigningPublic)
 	localHandle := globalCfg.KernelHandle
-	if localHandle == "" {
-		localHandle, _ = h.kernel.GetConfig(ctx, configKeySuperuser)
-	}
 	if pubKeyB64 == "" {
 		return
 	}

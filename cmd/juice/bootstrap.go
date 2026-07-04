@@ -67,6 +67,12 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 		return fmt.Errorf("signing_public_key does not match signing_private_key")
 	}
 
+	// Always give the kernel a network handle: a distinct key-derived default, never the shared "@sys".
+	if globalCfg.KernelHandle == "" {
+		globalCfg.KernelHandle = "@k-" + pubKeyB64[:8]
+		_ = writeConfig(resolvedConfigPath, globalCfg)
+	}
+
 	// Load the signing key and issuer user ID into the kernel.
 	su, err := k.ReadUserByHandle(ctx, handle)
 	if err != nil {
@@ -74,10 +80,8 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 	}
 	k.SetSigningKey(ed25519.PrivateKey(privKeyBytes), su.ID)
 
-	// Persist the kernel handle so GetGossip can serve it from the DB.
-	if globalCfg.KernelHandle != "" {
-		_ = k.SetConfig(ctx, "kernel_handle", globalCfg.KernelHandle)
-	}
+	// Persist the kernel handle so GetGossip serves it from the DB.
+	_ = k.SetConfig(ctx, "kernel_handle", globalCfg.KernelHandle)
 
 	// Recover interrupted calls and re-park crashed step completions (after signing key is set).
 	if err := k.Recover(ctx); err != nil {

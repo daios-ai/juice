@@ -303,11 +303,12 @@ func TestUserUpdateProxyUser(t *testing.T) {
 	proxy := &kernel.User{
 		ID:        "proxy-id-1",
 		Handle:    "@remote-peer",
+		Email:     "@remote-peer@remote",
 		PublicKey: "dGVzdGtleQ==",
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
-	if err := env.db.CreateProxyUser(ctx, proxy); err != nil {
+	if err := env.db.CreateUser(ctx, proxy); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1434,12 +1435,12 @@ func TestRemoteImport(t *testing.T) {
 	}
 	found := false
 	for _, a := range actions {
-		if a.Name == "greet" {
+		if a.Name == "import-remote/greet" { // owner-qualified: addressed @import-remote.import-remote/greet
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected imported action /greet to appear in @import-remote's actions")
+		t.Error("expected imported action import-remote/greet to appear in @import-remote's actions")
 	}
 }
 
@@ -1505,8 +1506,9 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 		}
 	}
 
-	serveAction = false // action gone from remote; passing nil manifest deactivates the proxy
-	if _, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "@disappear-remote", "bye", nil); err != nil {
+	serveAction = false // action gone from remote; passing nil manifest deactivates the proxy.
+	// The local action is owner-qualified (disappear-remote/bye); deactivation is by that name.
+	if _, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "@disappear-remote", "disappear-remote/bye", nil); err != nil {
 		t.Fatalf("reimport after disappearance: %v", err)
 	}
 
@@ -1515,7 +1517,7 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, a := range actions {
-		if a.Name == "bye" && a.Active {
+		if a.Name == "disappear-remote/bye" && a.Active {
 			t.Error("expected local proxy to be deactivated after remote action disappeared")
 		}
 	}
@@ -1561,7 +1563,7 @@ func TestRemoteUnimport(t *testing.T) {
 		t.Fatalf("ImportRemoteAction: %v", err)
 	}
 
-	if _, err := k.UnimportRemoteAction(t.Context(), sys.ID, "@unimport-peer", "greet"); err != nil {
+	if _, err := k.UnimportRemoteAction(t.Context(), sys.ID, "@unimport-peer", "unimport-peer/greet"); err != nil {
 		t.Fatalf("UnimportRemoteAction: %v", err)
 	}
 }

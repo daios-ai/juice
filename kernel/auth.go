@@ -112,11 +112,11 @@ func VerifyCodeChallenge(verifier, challenge string) bool {
 	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }
 
-// authenticateLocal verifies handle+password for a local (non-proxy) user and returns the User.
-// Returns ErrUnauthenticated for any credential failure (including proxy users).
+// authenticateLocal verifies handle+password and returns the account. A key-only account has an
+// empty password hash, which CheckPassword rejects, so it can never obtain a token by this path.
 func (k *Kernel) authenticateLocal(ctx context.Context, handle, password string) (*User, error) {
 	u, err := k.store.ReadUserByHandle(ctx, handle)
-	if err != nil || u.PublicKey != "" || !CheckPassword(password, u.PasswordHash) {
+	if err != nil || !CheckPassword(password, u.PasswordHash) {
 		return nil, ErrUnauthenticated.Wrap("invalid credentials")
 	}
 	return u, rejectSuspended(u)

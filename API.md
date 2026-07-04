@@ -187,7 +187,7 @@ Native actions registered at bootstrap, owned by `@sys`, public, runnable like a
 
 ### Federation
 
-Peer actions (`@peer/name`) are called through `POST /v1/run` like any local action; there are no federation HTTP endpoints. Trust and peering are managed via the admin commands below. The cross-kernel transport is an implementation detail (§13).
+Friending a peer imports its actions owner-qualified, so a peer action is addressed `@peer/owner/name` and is called through `POST /v1/run` like any local action; there are no federation HTTP endpoints. Trust and peering are managed via the admin commands below. The cross-kernel transport is an implementation detail (§13).
 
 ### Admin (control-socket, superuser)
 
@@ -199,12 +199,12 @@ The operator verbs no ordinary user performs — money, access, federation trust
 | Show user | `juice admin show <user>` |
 | Suspend user | `juice admin suspend <user>` |
 | Unsuspend user | `juice admin unsuspend <user>` |
-| Deposit credits | `juice admin deposit <user> <amount> [--reason --external-key]` |
-| Withdraw credits | `juice admin withdraw <user> <amount> [--reason --external-key]` |
+| Deposit credits | `juice admin deposit <user\|key> <amount> [--reason --external-key]` |
+| Withdraw credits | `juice admin withdraw <user\|key> <amount> [--reason --external-key]` |
 | Friend a kernel | `juice admin friend <key>` |
-| Unfriend a kernel | `juice admin unfriend <user>` |
+| Unfriend a kernel | `juice admin unfriend <user\|key>` |
 | List peers | `juice admin peers [--gossip]` |
 | Inspect a kernel | `juice admin inspect <key>` — identity, public actions, transacted friends, and reachability |
 | Show own identity | `juice admin identity` — this kernel's public key, handle, listen addresses |
 
-`<user>` is a `@handle`; `<action>` is `@owner/name` (or an id); `<key>` is a peer's base64url public key. `withdraw` requires `target.available ≥ amount`; it redeems credits and obliges the out-of-band payout. `admin friend <key>` on a denied key clears the denial and restarts the handshake. `admin unfriend` deny-lists the key, deactivates the peer's proxies, cancels steps addressed to it (parked prices refunded), and preserves balance and history.
+`<user>` is a `@handle` — or, for a peer, its base64url public key (the global name); `<action>` is `@owner/name` (or an id); `<key>` is a peer's base64url public key. `withdraw` requires `target.available ≥ amount`; it redeems credits and obliges the out-of-band payout. `admin friend <key>` on a denied key clears the denial and restarts the handshake. `admin unfriend` deny-lists the key, deactivates the peer's proxies, cancels steps addressed to it (parked prices refunded), and preserves balance and history.

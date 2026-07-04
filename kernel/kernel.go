@@ -239,7 +239,7 @@ type UpdateUserRequest struct {
 	NewPassword     string // empty = don't change
 }
 
-// UpdateUser lets an authenticated local user update their own email and/or password.
+// UpdateUser lets an authenticated password account update its own email and/or password.
 func (k *Kernel) UpdateUser(ctx context.Context, callerID string, req UpdateUserRequest) (*User, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
@@ -249,8 +249,8 @@ func (k *Kernel) UpdateUser(ctx context.Context, callerID string, req UpdateUser
 	if err != nil {
 		return nil, err
 	}
-	if u.PublicKey != "" {
-		return nil, ErrInvalidState.Wrap("proxy users cannot update their account")
+	if u.PasswordHash == "" {
+		return nil, ErrInvalidState.Wrap("account has no password to update")
 	}
 	if req.Email == "" && req.NewPassword == "" {
 		return nil, ErrInvalidInput.Wrap("at least one of email or password must be provided")

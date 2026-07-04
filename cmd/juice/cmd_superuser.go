@@ -273,15 +273,18 @@ func peerFriendCmd() *cobra.Command {
 func peerUnfriendCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "unfriend <user>",
-		Short: "Unfriend a peer",
+		Short: "Unfriend a peer (@handle or key)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			handle := kernel.NormalizeHandle(args[0])
+			var out struct {
+				Handle string `json:"handle"`
+			}
+			// Pass the identifier raw (a key must not become an @handle); the server resolves either.
 			if err := ctlCall(context.Background(), "POST", "/control/peers/unfriend",
-				map[string]any{"handle": handle}, nil); err != nil {
+				map[string]any{"handle": args[0]}, &out); err != nil {
 				return err
 			}
-			fmt.Printf("Unfriended %s.\n", handle)
+			fmt.Printf("Unfriended %s.\n", out.Handle)
 			return nil
 		},
 	}

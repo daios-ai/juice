@@ -1393,7 +1393,7 @@ func TestFederationCall(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
 	// Register the remote peer with its real public key.
-	_, err = k.AddPeer(ctx, sys.ID, "@remote.example.com", pubB64)
+	_, err = k.AddPeer(ctx, sys.ID, "@remote-example", pubB64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1769,7 +1769,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.AddPeer(ctx, sys.ID, "@replay.example.com", pubB64)
+	_, _ = k.AddPeer(ctx, sys.ID, "@replay-example", pubB64)
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,

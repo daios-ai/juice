@@ -34,7 +34,7 @@ _fed_setup() {
 
     # L friends R by key alone; the transport resolves the key via the seed.
     j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1 || return 1
-    FED_PROXY=$(strfield "$(jj "$FED_DBL" "$FED_HL" action show "@kernel-r/greet")" id)
+    FED_PROXY=$(strfield "$(jj "$FED_DBL" "$FED_HL" action show "@kernel-r/sys/greet")" id)
     [ -n "$FED_PROXY" ] || return 1
     return 0
 }
@@ -55,7 +55,7 @@ flow_federation_import_execute() {
     local dir; dir=$(new_dir)
     _fed_setup "$dir" || { fail "fed_import.setup" "setup failed"; return; }
 
-    local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/greet '{}')" tx_id)
+    local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}')" tx_id)
     assert_nonempty "fed_import.call_succeeds" "$tx_id"
     local tx; tx=$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")
     assert_nonempty "fed_import.remote_receipt_hash" "$(strfield "$tx" remote_receipt_hash)"
@@ -74,11 +74,11 @@ flow_federation_changed_reimport() {
     j "$FED_DBR" "$FED_HR" action update "$wid" --public >/dev/null 2>&1
     assert_eq "fed_reimport.refriend" 0 "$(j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1; echo $?)"
 
-    assert_json "fed_reimport.wave_proxy_active" "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/wave)" active True
+    assert_json "fed_reimport.wave_proxy_active" "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/sys/wave)" active True
     local greet; greet=$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")
     assert_json "fed_reimport.greet_still_active" "$greet" active True
     assert_json "fed_reimport.id_preserved" "$greet" id "$FED_PROXY"
-    assert_nonempty "fed_reimport.wave_callable" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/wave '{}')" tx_id)"
+    assert_nonempty "fed_reimport.wave_callable" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/wave '{}')" tx_id)"
 }
 
 flow_federation_unfriend() {
@@ -90,7 +90,7 @@ flow_federation_unfriend() {
     assert_json "fed_unfriend.proxy_inactive" "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" active False
     # L's unfriend only affects L; R's original action stays active.
     assert_json "fed_unfriend.remote_still_active" "$(jj "$FED_DBR" "$FED_HR" action show "$FED_RID")" active True
-    assert_fails "fed_unfriend.call_rejected" "" -- j "$FED_DBL" "$FED_HL" run @kernel-r/greet '{}'
+    assert_fails "fed_unfriend.call_rejected" "" -- j "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}'
 }
 
 flow_fed_verify_receipt() {
@@ -98,7 +98,7 @@ flow_fed_verify_receipt() {
     local dir; dir=$(new_dir)
     _fed_setup "$dir" || { fail "fed_verify.setup" "setup failed"; return; }
 
-    local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/greet '{}')" tx_id)
+    local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}')" tx_id)
     [ -n "$tx_id" ] || { fail "fed_verify.call" "no tx_id"; return; }
     local vr; vr=$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")
     assert_json "fed_verify.buyer_valid"    "$vr" valid True
@@ -115,7 +115,7 @@ flow_fed_all_receipt_checks() {
     local dir; dir=$(new_dir)
     _fed_setup "$dir" || { fail "fed_all_receipt.setup" "setup failed"; return; }
 
-    local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/greet '{}')" tx_id)
+    local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}')" tx_id)
     [ -n "$tx_id" ] || { fail "fed_all_receipt.call" "no tx_id"; return; }
     assert_eq "fed_all_receipt.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
 }
@@ -128,7 +128,7 @@ flow_fed_denial_unfriended() {
     # R unfriends L → R denies L's inbound calls; L's proxy is still active locally, so the
     # call goes out and comes back as a signed 403 denial receipt (failure tx, all checks pass).
     assert_contains "fed_denial_unfriended.unfriend" "nfriended" "$(j "$FED_DBR" "$FED_HR" admin unfriend @kernel-l 2>&1)"
-    j "$FED_DBL" "$FED_HL" run @kernel-r/greet '{}' >/dev/null 2>&1 || true
+    j "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}' >/dev/null 2>&1 || true
     local tx_id; tx_id=$(python3 -c "import sys,json;t=json.loads(sys.argv[1]);print(t[0]['id'] if t else '')" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
     assert_nonempty "fed_denial_unfriended.tx_recorded" "$tx_id"
     assert_json "fed_denial_unfriended.tx_status_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
@@ -147,8 +147,8 @@ flow_fed_denial_underfunded() {
     j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit @sys 1000 >/dev/null 2>&1
 
-    j "$FED_DBL" "$FED_HL" run @kernel-r/paid-svc '{}' >/dev/null 2>&1 || true
-    local tx_id; tx_id=$(python3 -c "import sys,json;print(next((t['id'] for t in json.loads(sys.argv[1]) if t.get('action_name')=='paid-svc'),''))" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
+    j "$FED_DBL" "$FED_HL" run @kernel-r/sys/paid-svc '{}' >/dev/null 2>&1 || true
+    local tx_id; tx_id=$(python3 -c "import sys,json;print(next((t['id'] for t in json.loads(sys.argv[1]) if t.get('action_name')=='sys/paid-svc'),''))" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
     assert_nonempty "fed_denial_underfunded.tx_recorded" "$tx_id"
     assert_json "fed_denial_underfunded.tx_status_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
     assert_eq "fed_denial_underfunded.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
@@ -163,8 +163,8 @@ flow_fed_disabled_action_rejection() {
     # R answers with a signed zero-charge rejection instead of a receiptless error, so L settles
     # IMMEDIATELY as a failure rather than pinning funds until the 24h pending bound.
     j "$FED_DBR" "$FED_HR" action disable "$FED_RID" >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" run @kernel-r/greet '{}' >/dev/null 2>&1 || true
-    local tx_id; tx_id=$(python3 -c "import sys,json;print(next((t['id'] for t in json.loads(sys.argv[1]) if t.get('action_name')=='greet'),''))" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
+    j "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}' >/dev/null 2>&1 || true
+    local tx_id; tx_id=$(python3 -c "import sys,json;print(next((t['id'] for t in json.loads(sys.argv[1]) if t.get('action_name')=='sys/greet'),''))" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
     assert_nonempty "fed_disabled.tx_settled_not_pending" "$tx_id"
     assert_json "fed_disabled.tx_status_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
     assert_eq "fed_disabled.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
@@ -180,13 +180,13 @@ flow_fed_import_duty() {
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$pid" --public >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1
-    assert_jnum "fed_import_duty.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/duty-svc)" price 1050
+    assert_jnum "fed_import_duty.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/sys/duty-svc)" price 1050
 
     j "$FED_DBR" "$FED_HR" admin deposit @kernel-l 5000 >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit @sys 5000 >/dev/null 2>&1
     local ub pb; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available); pb=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show @kernel-l)" available)
 
-    local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/duty-svc '{}')" tx_id)
+    local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/duty-svc '{}')" tx_id)
     assert_nonempty "fed_import_duty.call_succeeded" "$tx_id"
     local ua pa; ua=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available); pa=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show @kernel-l)" available)
     # L's @sys is caller AND fee recipient: gross 1050 out, fee 50 back → net 1000.
@@ -215,9 +215,9 @@ flow_fed_failed_action_refund() {
     local ub; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
     # Remote 500 → remote failure receipt → full refund to L's caller.
-    j "$FED_DBL" "$FED_HL" run @kernel-r/fail-svc '{}' >/dev/null 2>&1 || true
+    j "$FED_DBL" "$FED_HL" run @kernel-r/sys/fail-svc '{}' >/dev/null 2>&1 || true
     assert_jnum "fed_failed_refund.balance_unchanged" "$(jj "$FED_DBL" "$FED_HL" user me)" available "$ub"
-    local tx_id; tx_id=$(python3 -c "import sys,json;print(next((t['id'] for t in json.loads(sys.argv[1]) if t.get('action_name')=='fail-svc'),''))" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
+    local tx_id; tx_id=$(python3 -c "import sys,json;print(next((t['id'] for t in json.loads(sys.argv[1]) if t.get('action_name')=='sys/fail-svc'),''))" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
     assert_nonempty "fed_failed_refund.tx_recorded" "$tx_id"
     local tx; tx=$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")
     assert_json "fed_failed_refund.tx_status_failure" "$tx" status failure
@@ -232,7 +232,7 @@ flow_fed_gossip_discovery() {
     _fed_setup "$dir" || { fail "fed_gossip.setup" "L-R setup failed"; return; }
 
     # L calls R (price 0) → R becomes a transacted friend in L's gossip with earned stats.
-    assert_nonempty "fed_gossip.initial_call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/greet '{}')" tx_id)"
+    assert_nonempty "fed_gossip.initial_call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}')" tx_id)"
 
     # Third kernel T discovers R by inspecting L's gossip over the transport, then friends R by key.
     local dbt ht; dbt="$dir/t/juice.db"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
@@ -243,16 +243,16 @@ flow_fed_gossip_discovery() {
     local ldoc; ldoc=$(jj "$dbt" "$ht" admin inspect "$FED_LKEY")
     local rkey; rkey=$(python3 -c "import sys,json;print(next((f['public_key'] for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','')),''))" "$ldoc" 2>/dev/null)
     assert_nonempty "fed_gossip.r_in_gossip" "$rkey"
-    local guses; guses=$(python3 -c "import sys,json;print(next((a.get('uses',0) for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','') for a in f.get('actions',[]) if a.get('name')=='greet'),0))" "$ldoc" 2>/dev/null)
+    local guses; guses=$(python3 -c "import sys,json;print(next((a.get('uses',0) for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','') for a in f.get('actions',[]) if a.get('name')=='sys/greet'),0))" "$ldoc" 2>/dev/null)
     assert_eq "fed_gossip.earned_stats" yes "$([ "${guses:-0}" -ge 1 ] && echo yes || echo no)"
 
     assert_eq "fed_gossip.t_friends_r" 0 "$(j "$dbt" "$ht" admin friend "$rkey" >/dev/null 2>&1; echo $?)"
 
     # T's greet proxy exists with default stats (uses=0, NOT inherited from gossip).
-    local tp; tp=$(strfield "$(jj "$dbt" "$ht" action show @kernel-r/greet)" id)
+    local tp; tp=$(strfield "$(jj "$dbt" "$ht" action show @kernel-r/sys/greet)" id)
     assert_nonempty "fed_gossip.t_has_greet_proxy" "$tp"
     assert_jnum "fed_gossip.t_stats_start_default" "$(jj "$dbt" "$ht" action stats "$tp")" uses 0
     # T's own call accumulates T's own stats.
-    assert_nonempty "fed_gossip.t_call_succeeds" "$(strfield "$(jj "$dbt" "$ht" run @kernel-r/greet '{}')" tx_id)"
+    assert_nonempty "fed_gossip.t_call_succeeds" "$(strfield "$(jj "$dbt" "$ht" run @kernel-r/sys/greet '{}')" tx_id)"
     assert_jnum "fed_gossip.t_stats_accumulate" "$(jj "$dbt" "$ht" action stats "$tp")" uses 1
 }

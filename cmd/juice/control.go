@@ -262,9 +262,6 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
 	handle := globalCfg.KernelHandle
-	if handle == "" {
-		handle, _ = s.kernel.GetConfig(ctx, configKeySuperuser)
-	}
 	var addrs []string
 	if s.fed != nil {
 		addrs = s.fed.ListenAddrs()
@@ -279,9 +276,14 @@ func (s *server) ctlUnfriendPeer(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	handle := kernel.NormalizeHandle(req.Handle)
-	err := s.kernel.DenyPeer(r.Context(), callerFrom(r), handle)
-	writeOr(w, map[string]string{"handle": handle}, err)
+	// Accept @handle or the peer's key (the global name it was friended by).
+	u, err := resolveHandle(s.kernel, r.Context(), req.Handle)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	err = s.kernel.DenyPeer(r.Context(), callerFrom(r), u.Handle)
+	writeOr(w, map[string]string{"handle": u.Handle}, err)
 }
 
 // writeOr writes v as JSON on success, or the error otherwise.
@@ -304,9 +306,6 @@ func (s *server) announcePeerFed(ctx context.Context, peerKey string) {
 	}
 	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
 	handle := globalCfg.KernelHandle
-	if handle == "" {
-		handle, _ = s.kernel.GetConfig(ctx, configKeySuperuser)
-	}
 	if pub == "" {
 		return
 	}

@@ -358,9 +358,6 @@ type Store interface {
 	DenyUser(ctx context.Context, id string) error
 	// UndenyUser clears denied_at on the user.
 	UndenyUser(ctx context.Context, id string) error
-	// CreateProxyUser creates a proxy user record (Kind is inferred from empty PasswordHash +
-	// non-empty PublicKey). Does not create a password.
-	CreateProxyUser(ctx context.Context, u *User) error
 
 	// ---- Gossip / Federation ----
 

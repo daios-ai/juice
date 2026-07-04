@@ -1865,10 +1865,13 @@ func TestProxyUserIdentifiedByPublicKey(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
+	// A key-only account: a public key, no password (that credential combination is what makes it
+	// a peer). Same CreateUser insert as any account.
 	peer := newUser("@key-peer", 0)
 	peer.PublicKey = "somepubkey"
-	if err := db.CreateProxyUser(ctx, peer); err != nil {
-		t.Fatalf("CreateProxyUser: %v", err)
+	peer.PasswordHash = ""
+	if err := db.CreateUser(ctx, peer); err != nil {
+		t.Fatalf("CreateUser: %v", err)
 	}
 
 	found, err := db.ReadUserByPublicKey(ctx, "somepubkey")
@@ -1878,9 +1881,8 @@ func TestProxyUserIdentifiedByPublicKey(t *testing.T) {
 	if found.ID != peer.ID {
 		t.Errorf("expected peer ID %s, got %s", peer.ID, found.ID)
 	}
-	// A proxy user carries a public key and no password — that is what marks it remote.
 	if found.PublicKey == "" || found.PasswordHash != "" {
-		t.Errorf("proxy user should have public_key set and empty password, got key=%q hash=%q", found.PublicKey, found.PasswordHash)
+		t.Errorf("key-only account should have public_key set and empty password, got key=%q hash=%q", found.PublicKey, found.PasswordHash)
 	}
 }
 
