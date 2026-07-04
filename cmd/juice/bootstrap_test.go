@@ -3,12 +3,36 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
 	"github.com/daios-ai/juice/store"
 )
+
+// TestFirstBootRequiresKernelName: a headless first boot with no kernel name configured must fail
+// (never silently name the kernel); providing the name via env lets it boot and persists it.
+func TestFirstBootRequiresKernelName(t *testing.T) {
+	saved := globalCfg.KernelHandle
+	t.Cleanup(func() { globalCfg.KernelHandle = saved })
+	t.Setenv("JUICE_BOOTSTRAP_PASSWORD", "pw")
+
+	globalCfg.KernelHandle = ""
+	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native); err == nil ||
+		!strings.Contains(err.Error(), "kernel name is required") {
+		t.Fatalf("headless boot with no name: want required-name error, got %v", err)
+	}
+
+	t.Setenv("JUICE_BOOTSTRAP_KERNEL_HANDLE", "@acme")
+	globalCfg.KernelHandle = ""
+	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native); err != nil {
+		t.Fatalf("boot with name via env: %v", err)
+	}
+	if globalCfg.KernelHandle != "@acme" {
+		t.Errorf("kernel handle = %q, want @acme", globalCfg.KernelHandle)
+	}
+}
 
 func TestFirstBootAtomic(t *testing.T) {
 	ctx := context.Background()

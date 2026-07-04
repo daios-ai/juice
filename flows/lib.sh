@@ -67,7 +67,7 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 # Keys: fee_bps script_timeout_ms kernel_handle make_max_steps bootstrap_peers.
 write_config() {
     local db="$1"; shift
-    local fee_bps=0 script_timeout_ms=10000 kernel_handle="" make_max_steps=5 bootstrap_peers="" remote_retry_interval=60
+    local fee_bps=0 script_timeout_ms=10000 kernel_handle="@test-kernel" make_max_steps=5 bootstrap_peers="" remote_retry_interval=60
     local a
     for a in "$@"; do case "$a" in
         fee_bps=*)               fee_bps=${a#*=} ;;

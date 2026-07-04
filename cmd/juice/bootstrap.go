@@ -30,18 +30,21 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 		if err != nil {
 			return err
 		}
+		// The kernel's network name is required at first boot — it's how the kernel presents itself
+		// to peers. From JUICE_BOOTSTRAP_KERNEL_HANDLE, else prompt until a non-empty name is given.
 		if globalCfg.KernelHandle == "" {
 			ph := os.Getenv("JUICE_BOOTSTRAP_KERNEL_HANDLE")
-			if ph == "" && term.IsTerminal(int(os.Stdin.Fd())) {
-				fmt.Fprint(os.Stderr, "Kernel handle (e.g. @myorg, or Enter to skip): ")
+			for ph == "" && term.IsTerminal(int(os.Stdin.Fd())) {
+				fmt.Fprint(os.Stderr, "Kernel name — the @handle this kernel presents to the network (required): ")
 				var line string
 				fmt.Fscanln(os.Stdin, &line)
 				ph = strings.TrimSpace(line)
 			}
-			if ph != "" {
-				globalCfg.KernelHandle = ph
-				_ = writeConfig(resolvedConfigPath, globalCfg)
+			if ph == "" {
+				return fmt.Errorf("kernel name is required at first boot: run interactively or set JUICE_BOOTSTRAP_KERNEL_HANDLE")
 			}
+			globalCfg.KernelHandle = kernel.NormalizeHandle(ph)
+			_ = writeConfig(resolvedConfigPath, globalCfg)
 		}
 	}
 
@@ -67,7 +70,8 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 		return fmt.Errorf("signing_public_key does not match signing_private_key")
 	}
 
-	// Always give the kernel a network handle: a distinct key-derived default, never the shared "@sys".
+	// Fallback for a pre-existing DB that predates the required-name boot and still has no handle:
+	// a distinct key-derived name, never the shared "@sys". Fresh boots always set a name above.
 	if globalCfg.KernelHandle == "" {
 		globalCfg.KernelHandle = "@k-" + pubKeyB64[:8]
 		_ = writeConfig(resolvedConfigPath, globalCfg)

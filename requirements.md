@@ -555,7 +555,7 @@ config.signing_private_key = base64url Ed25519 private key
 config.jwt_secret          = 32 random bytes, hex
 ```
 
-Private signing key and JWT secret are never logged or returned. Partial first boot is rerunnable. `JUICE_SECRET_KEY` overrides stored JWT secret at runtime only. Startup also ensures a `kernel_handle` — the operator's chosen one (config or `JUICE_BOOTSTRAP_KERNEL_HANDLE`), else a distinct key-derived default `@k-<first8 of the public key>`, never the `@sys` superuser handle (which every unnamed kernel would share on the network).
+Private signing key and JWT secret are never logged or returned. Partial first boot is rerunnable. `JUICE_SECRET_KEY` overrides stored JWT secret at runtime only. First boot also **requires a `kernel_handle`** — the name this kernel presents to the network (§13): from config, else `JUICE_BOOTSTRAP_KERNEL_HANDLE`, else an interactive prompt that repeats until a non-empty name is given; a headless first boot with none set fails rather than name the kernel silently.
 
 The kernel's federation network identity is derived deterministically from this same Ed25519 signing key; there is no second identity or network key. The `public_key` is simultaneously the kernel's Juice identity (§13) and its address on the federation transport. The signature domains of the transport handshake and of Juice payloads (receipts, ratings, manifests, federation requests) must be disjoint: no byte string signed in one domain may verify as a valid message in the other. This disjointness is verified by test (§15).
 
@@ -787,7 +787,7 @@ JUICE_SECRET_KEY           JWT secret override, runtime only (§12)
 JUICE_LOG_LEVEL            log level override
 JUICE_CREDENTIALS_KEY      AES credentials key override, runtime only (§8)
 JUICE_BOOTSTRAP_PASSWORD   superuser password for unattended first boot (§12)
-JUICE_BOOTSTRAP_KERNEL_HANDLE  kernel handle for unattended first boot (§13)
+JUICE_BOOTSTRAP_KERNEL_HANDLE  kernel name, required for an unattended first boot (§12, §13)
 JUICE_ALLOW_LOCAL_SOURCES  dev-only: permit loopback/private/link-local action source URLs (§7)
 ```
 
