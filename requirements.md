@@ -762,7 +762,7 @@ Config lives in `juice.json` (path from `JUICE_CONFIG`, default `./juice.json`).
   "peer_auto_accept": true,
   "server_url": "",
   "kernel_handle": "",
-  "bootstrap_peers": ["/dns4/daios.ai/tcp/31313/p2p/12D3KooWJSwNRSf1Nyv7dQU43QP99GYqXmD4hHqmjYbpmPJoC5Ad"],
+  "bootstrap_peers": ["/dns4/daios.ai/tcp/31313/p2p/12D3KooWJ5ZwPSAV17q2hv6ttZ8J3hHsTMNaSC61kbVbvxvtArjK"],
   "credentials_key": "",
   "allow_local_sources": false,
   "remote_retry_interval_seconds": 60,

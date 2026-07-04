@@ -147,7 +147,7 @@ func DefaultServerConfig() ServerConfig {
 		// The public daios.ai node is the default meeting point, so a fresh `juice serve` joins
 		// the network out of the box (it listens on the standard port 31313, §13). Override or
 		// extend for a private network; clear it to run standalone.
-		BootstrapPeers:             []string{"/dns4/daios.ai/tcp/31313/p2p/12D3KooWJSwNRSf1Nyv7dQU43QP99GYqXmD4hHqmjYbpmPJoC5Ad"},
+		BootstrapPeers:             []string{"/dns4/daios.ai/tcp/31313/p2p/12D3KooWJ5ZwPSAV17q2hv6ttZ8J3hHsTMNaSC61kbVbvxvtArjK"},
 		RemoteRetryIntervalSeconds: 60,
 		PeerRetentionDays:          30,
 	}
