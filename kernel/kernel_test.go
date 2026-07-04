@@ -105,6 +105,23 @@ func setupUser(t *testing.T, st kernel.Store, handle string, balance int64) *ker
 	return u
 }
 
+// assertUserBalance checks a user's available and locked wallet fields for exact equality.
+// Deliberately plain: tests that assert non-negativity or available+locked==sum invariants
+// keep those checks inline, since those are the property under test.
+func assertUserBalance(t *testing.T, st kernel.Store, userID string, wantAvail, wantLocked int64) {
+	t.Helper()
+	u, err := st.ReadUser(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("assertUserBalance: ReadUser: %v", err)
+	}
+	if u.Available != wantAvail {
+		t.Errorf("user.available got %d, want %d", u.Available, wantAvail)
+	}
+	if u.Locked != wantLocked {
+		t.Errorf("user.locked got %d, want %d", u.Locked, wantLocked)
+	}
+}
+
 func setupAction(t *testing.T, st kernel.Store, ownerID, name string, price int64) *kernel.Action {
 	t.Helper()
 	a := &kernel.Action{
@@ -742,21 +759,7 @@ func TestUserLockedBalanceInvariant(t *testing.T) {
 
 	alice := setupUser(t, st, "@alice", 1000)
 
-	checkUser := func(tag string, wantAvail, wantLocked int64) {
-		t.Helper()
-		u, err := st.ReadUser(ctx, alice.ID)
-		if err != nil {
-			t.Fatalf("%s: ReadUser: %v", tag, err)
-		}
-		if u.Available != wantAvail {
-			t.Errorf("%s: user.available got %d, want %d", tag, u.Available, wantAvail)
-		}
-		if u.Locked != wantLocked {
-			t.Errorf("%s: user.locked got %d, want %d", tag, u.Locked, wantLocked)
-		}
-	}
-
-	checkUser("initial", 1000, 0)
+	assertUserBalance(t, st, alice.ID, 1000, 0)
 
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "svc",

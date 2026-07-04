@@ -878,10 +878,6 @@ func (k *Kernel) ListProcesses(ctx context.Context, callerID string, limit, offs
 	return k.store.ListProcesses(ctx, callerID, limit, offset)
 }
 
-func (k *Kernel) ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error) {
-	return k.store.ListAllProcesses(ctx, limit, offset)
-}
-
 // ListAllTransactions returns all transactions ordered by started_at.
 func (k *Kernel) ListAllTransactions(ctx context.Context, limit, offset int) ([]*Transaction, error) {
 	return k.store.ListAllTransactions(ctx, limit, offset)

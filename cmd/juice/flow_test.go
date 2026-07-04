@@ -19,9 +19,6 @@ import (
 	"strings"
 	"testing"
 
-	chi "github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/llm"
 	"github.com/daios-ai/juice/log"
@@ -80,41 +77,13 @@ func newFlowKernel(t *testing.T, exec kernel.ScriptExecutor) (*httptest.Server, 
 	k := kernel.New(db, exec, httpExec, nil, cfg, logger)
 	k.SetSecretBox(box)
 
-	ctx := context.Background()
-	if err := k.FirstBoot(ctx, "sys-pass"); err != nil {
+	if err := k.FirstBoot(context.Background(), "sys-pass"); err != nil {
 		t.Fatal(err)
 	}
-
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
-	if err != nil {
-		t.Fatal(err)
-	}
-	privB64, err := k.GetConfig(ctx, configKeySigningPrivate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	privBytes, err := base64.RawURLEncoding.DecodeString(privB64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	priv := ed25519.PrivateKey(privBytes)
-	k.SetSigningKey(priv, sys.ID)
-	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
-		t.Fatal(err)
-	}
+	bootstrapSigning(t, k)
 
 	srv := &server{kernel: k, log: logger}
-	r := chi.NewRouter()
-	r.Use(middleware.Recoverer)
-	r.Use(requestIDMiddleware)
-	r.Post("/v1/auth/token", srv.postTokenMulti)
-	r.Post("/v1/auth/authorize", srv.postAuthorize)
-	r.Post("/v1/auth/refresh", srv.postRefresh)
-	r.Post("/v1/auth/logout", srv.postLogout)
-	r.Post("/v1/users", srv.postUser)
-	registerRoutes(r, srv)
-
-	return httptest.NewServer(r), k, db
+	return httptest.NewServer(mountFullRouter(srv)), k, db
 }
 
 // ---- helpers used across flow tests ----
@@ -137,18 +106,19 @@ func runAction(t *testing.T, srv *httptest.Server, tok, actionRef string, args m
 	return reply
 }
 
-// createPublicAction creates, enables, and makes public an HTTP action. Returns action ID.
-func createPublicAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, name string, price int64) string {
+// createEnabledPublicAction creates, enables, and makes public an action of the given kind.
+// Returns action ID.
+func createEnabledPublicAction(t *testing.T, srv *httptest.Server, ownerTok, name, kind, source, description string, price int64) string {
 	t.Helper()
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": name, "kind": "http", "price": price, "source": backendURL,
-		"description": "flow test action",
+		"name": name, "kind": kind, "price": price, "source": source,
+		"description":   description,
 		"input_schema":  minSchema,
 		"output_schema": minSchema,
 	}, ownerTok)
 	if cr.StatusCode != http.StatusCreated {
 		cr.Body.Close()
-		t.Fatalf("create action %s: expected 201, got %d", name, cr.StatusCode)
+		t.Fatalf("create %s action %s: expected 201, got %d", kind, name, cr.StatusCode)
 	}
 	var act map[string]any
 	decodeResponse(t, cr, &act)
@@ -158,25 +128,16 @@ func createPublicAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok
 	return id
 }
 
+// createPublicAction creates, enables, and makes public an HTTP action. Returns action ID.
+func createPublicAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, name string, price int64) string {
+	t.Helper()
+	return createEnabledPublicAction(t, srv, ownerTok, name, "http", backendURL, "flow test action", price)
+}
+
 // createWasmAction creates a WASM action using the flowScriptExec (kind=wasm, source=handlerName).
 func createWasmAction(t *testing.T, srv *httptest.Server, ownerTok, name string, price int64) string {
 	t.Helper()
-	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": name, "kind": "wasm", "price": price, "source": name,
-		"description":   "flow wasm action",
-		"input_schema":  minSchema,
-		"output_schema": minSchema,
-	}, ownerTok)
-	if cr.StatusCode != http.StatusCreated {
-		cr.Body.Close()
-		t.Fatalf("create wasm action %s: expected 201, got %d", name, cr.StatusCode)
-	}
-	var act map[string]any
-	decodeResponse(t, cr, &act)
-	id := act["id"].(string)
-	httpDo(t, srv, "POST", "/v1/actions/"+id+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+id, map[string]any{"public": true}, ownerTok).Body.Close()
-	return id
+	return createEnabledPublicAction(t, srv, ownerTok, name, "wasm", name, "flow wasm action", price)
 }
 
 // getTxList returns transaction list for the caller.
@@ -190,6 +151,16 @@ func getTxList(t *testing.T, srv *httptest.Server, tok string) []map[string]any 
 	var txs []map[string]any
 	decodeResponse(t, resp, &txs)
 	return txs
+}
+
+// findTx returns the transaction with the given id from a tx-list response, or nil.
+func findTx(txs []map[string]any, id string) map[string]any {
+	for _, tx := range txs {
+		if tx["id"] == id {
+			return tx
+		}
+	}
+	return nil
 }
 
 // getBalance returns the caller's available balance via GET /v1/me.
@@ -265,38 +236,23 @@ func TestFlow_SignupDepositRun(t *testing.T) {
 
 	// Transaction appears in caller's tx list with correct gross.
 	txs := getTxList(t, srv, callerTok)
-	var found bool
-	for _, tx := range txs {
-		if tx["id"] == reply.TxID {
-			found = true
-			if int64(tx["gross"].(float64)) != price {
-				t.Errorf("tx gross: got %v, want %d", tx["gross"], price)
-			}
-			if tx["status"] != "success" {
-				t.Errorf("tx status: got %v, want success", tx["status"])
-			}
-			break
-		}
-	}
-	if !found {
+	if tx := findTx(txs, reply.TxID); tx == nil {
 		t.Errorf("tx %s not found in caller tx list (got %d txs)", reply.TxID, len(txs))
+	} else {
+		if int64(tx["gross"].(float64)) != price {
+			t.Errorf("tx gross: got %v, want %d", tx["gross"], price)
+		}
+		if tx["status"] != "success" {
+			t.Errorf("tx status: got %v, want success", tx["status"])
+		}
 	}
 
 	// Provider also sees the tx (they are target).
 	providerTxs := getTxList(t, srv, providerTok)
-	found = false
-	for _, tx := range providerTxs {
-		if tx["id"] == reply.TxID {
-			found = true
-			netVal := int64(tx["net"].(float64))
-			if netVal != expectedNet {
-				t.Errorf("provider tx net: got %d, want %d", netVal, expectedNet)
-			}
-			break
-		}
-	}
-	if !found {
+	if tx := findTx(providerTxs, reply.TxID); tx == nil {
 		t.Errorf("tx %s not in provider tx list", reply.TxID)
+	} else if netVal := int64(tx["net"].(float64)); netVal != expectedNet {
+		t.Errorf("provider tx net: got %d, want %d", netVal, expectedNet)
 	}
 
 	// Check action was created correctly.
@@ -1454,44 +1410,16 @@ func newFedKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store.DB, ed
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
 	k := kernel.New(db, nil, httpExec, nil, cfg, logger)
 
-	ctx := context.Background()
-	if err := k.FirstBoot(ctx, "sys-pass"); err != nil {
+	if err := k.FirstBoot(context.Background(), "sys-pass"); err != nil {
 		t.Fatal(err)
 	}
-
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
-	if err != nil {
-		t.Fatal(err)
-	}
-	privB64, err := k.GetConfig(ctx, configKeySigningPrivate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	privBytes, err := base64.RawURLEncoding.DecodeString(privB64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	priv := ed25519.PrivateKey(privBytes)
-	k.SetSigningKey(priv, sys.ID)
-	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
-		t.Fatal(err)
-	}
+	priv := bootstrapSigning(t, k)
 
 	// Wire the outbound federation signer so signed calls to peer kernels work.
 	httpExec.signerFn = k.SignFederation
 
 	srv := &server{kernel: k, log: logger}
-	r := chi.NewRouter()
-	r.Use(middleware.Recoverer)
-	r.Use(requestIDMiddleware)
-	r.Post("/v1/auth/token", srv.postTokenMulti)
-	r.Post("/v1/auth/authorize", srv.postAuthorize)
-	r.Post("/v1/auth/refresh", srv.postRefresh)
-	r.Post("/v1/auth/logout", srv.postLogout)
-	r.Post("/v1/users", srv.postUser)
-	registerRoutes(r, srv)
-
-	return httptest.NewServer(r), k, db, priv
+	return httptest.NewServer(mountFullRouter(srv)), k, db, priv
 }
 
 // TestFlow_UpstreamAuthSecrecy: action created with bearer auth credentials; the secret
@@ -1623,37 +1551,13 @@ func newFlowKernelFull(t *testing.T, exec kernel.ScriptExecutor, embedder kernel
 	logger := log.Discard()
 	k := kernel.New(db, exec, &httpActionExecutor{timeout: cfg.ScriptTimeout}, embedder, cfg, logger)
 
-	ctx := context.Background()
-	if err := k.FirstBoot(ctx, "sys-pass"); err != nil {
+	if err := k.FirstBoot(context.Background(), "sys-pass"); err != nil {
 		t.Fatal(err)
 	}
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
-	if err != nil {
-		t.Fatal(err)
-	}
-	privB64, err := k.GetConfig(ctx, configKeySigningPrivate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	privBytes, _ := base64.RawURLEncoding.DecodeString(privB64)
-	priv := ed25519.PrivateKey(privBytes)
-	k.SetSigningKey(priv, sys.ID)
-	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
-		t.Fatal(err)
-	}
+	bootstrapSigning(t, k)
 
 	srv := &server{kernel: k, log: logger}
-	r := chi.NewRouter()
-	r.Use(middleware.Recoverer)
-	r.Use(requestIDMiddleware)
-	r.Post("/v1/auth/token", srv.postTokenMulti)
-	r.Post("/v1/auth/authorize", srv.postAuthorize)
-	r.Post("/v1/auth/refresh", srv.postRefresh)
-	r.Post("/v1/auth/logout", srv.postLogout)
-	r.Post("/v1/users", srv.postUser)
-	registerRoutes(r, srv)
-
-	return httptest.NewServer(r), k, db
+	return httptest.NewServer(mountFullRouter(srv)), k, db
 }
 
 // bootstrapSysNative registers and activates a @sys native action by spec name.

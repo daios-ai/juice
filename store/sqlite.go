@@ -1393,6 +1393,15 @@ func scanTrace(t *kernel.Trace, scanFn func(...any) error) error {
 	return nil
 }
 
+// scanTracePtr is the queryList adapter for trace lists.
+func scanTracePtr(scan func(...any) error) (*kernel.Trace, error) {
+	var t kernel.Trace
+	if err := scanTrace(&t, scan); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 func (s *DB) ReadTrace(ctx context.Context, id string) (*kernel.Trace, error) {
 	var t kernel.Trace
 	err := scanTrace(&t, s.db.QueryRowContext(ctx,
@@ -1447,6 +1456,15 @@ func scanTx(scan func(...any) error) (kernel.Transaction, error) {
 	return tx, nil
 }
 
+// scanTxPtr is the queryList adapter for transaction lists.
+func scanTxPtr(scan func(...any) error) (*kernel.Transaction, error) {
+	tx, err := scanTx(scan)
+	if err != nil {
+		return nil, err
+	}
+	return &tx, nil
+}
+
 func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transaction, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT `+txColumns+` FROM transactions WHERE id=?`, id)
@@ -1495,13 +1513,7 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 	if err != nil {
 		return nil, dbErr(err, "list transactions")
 	}
-	return queryList(rows, "list transactions", func(scan func(...any) error) (*kernel.Transaction, error) {
-		tx, err := scanTx(scan)
-		if err != nil {
-			return nil, err
-		}
-		return &tx, nil
-	})
+	return queryList(rows, "list transactions", scanTxPtr)
 }
 
 func (s *DB) ListAllTransactions(ctx context.Context, limit, offset int) ([]*kernel.Transaction, error) {
@@ -1514,13 +1526,7 @@ func (s *DB) ListAllTransactions(ctx context.Context, limit, offset int) ([]*ker
 	if err != nil {
 		return nil, dbErr(err, "list all transactions")
 	}
-	return queryList(rows, "list all transactions", func(scan func(...any) error) (*kernel.Transaction, error) {
-		tx, err := scanTx(scan)
-		if err != nil {
-			return nil, err
-		}
-		return &tx, nil
-	})
+	return queryList(rows, "list all transactions", scanTxPtr)
 }
 
 // ---- Stats ----
@@ -1652,6 +1658,16 @@ func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status stri
 	})
 }
 
+// scanOrphanRunningStep is the queryList adapter shared by the orphan-running-step lists.
+func scanOrphanRunningStep(scan func(...any) error) (kernel.OrphanRunningStep, error) {
+	var row kernel.OrphanRunningStep
+	var hasSettled int
+	err := scan(&row.StepID, &row.CompletionTraceID, &row.Price, &row.ParentTraceID,
+		&row.TraceAvailable, &row.TraceLocked, &hasSettled)
+	row.HasSettled = hasSettled == 1
+	return row, err
+}
+
 // ListOrphanRunningSteps returns running steps that have a completion trace but no tx,
 // with enough detail to decide between re-parking (empty trace) or settling as failed.
 // HasSettled is true when the completion trace has locked funds or committed subcall transactions.
@@ -1673,14 +1689,7 @@ func (s *DB) ListOrphanRunningSteps(ctx context.Context) ([]kernel.OrphanRunning
 	if err != nil {
 		return nil, dbErr(err, "list orphan running steps")
 	}
-	return queryList(rows, "list orphan running steps", func(scan func(...any) error) (kernel.OrphanRunningStep, error) {
-		var row kernel.OrphanRunningStep
-		var hasSettled int
-		err := scan(&row.StepID, &row.CompletionTraceID, &row.Price, &row.ParentTraceID,
-			&row.TraceAvailable, &row.TraceLocked, &hasSettled)
-		row.HasSettled = hasSettled == 1
-		return row, err
-	})
+	return queryList(rows, "list orphan running steps", scanOrphanRunningStep)
 }
 
 // ListOrphanRunningStepsForProcess is ListOrphanRunningSteps scoped to a single process.
@@ -1705,14 +1714,7 @@ func (s *DB) ListOrphanRunningStepsForProcess(ctx context.Context, processID str
 	if err != nil {
 		return nil, dbErr(err, "list orphan running steps for process")
 	}
-	return queryList(rows, "list orphan running steps for process", func(scan func(...any) error) (kernel.OrphanRunningStep, error) {
-		var row kernel.OrphanRunningStep
-		var hasSettled int
-		err := scan(&row.StepID, &row.CompletionTraceID, &row.Price, &row.ParentTraceID,
-			&row.TraceAvailable, &row.TraceLocked, &hasSettled)
-		row.HasSettled = hasSettled == 1
-		return row, err
-	})
+	return queryList(rows, "list orphan running steps for process", scanOrphanRunningStep)
 }
 
 // ResetStepAndRepark re-parks the step: it moves the completion trace's available funds back into
@@ -1818,13 +1820,7 @@ func (s *DB) ListTraces(ctx context.Context, processID string) ([]*kernel.Trace,
 	if err != nil {
 		return nil, dbErr(err, "list traces")
 	}
-	return queryList(rows, "list traces", func(scan func(...any) error) (*kernel.Trace, error) {
-		var t kernel.Trace
-		if err := scanTrace(&t, scan); err != nil {
-			return nil, err
-		}
-		return &t, nil
-	})
+	return queryList(rows, "list traces", scanTracePtr)
 }
 
 func (s *DB) ListOrphanTraces(ctx context.Context) ([]*kernel.Trace, error) {
@@ -1851,13 +1847,7 @@ func (s *DB) ListOrphanTraces(ctx context.Context) ([]*kernel.Trace, error) {
 			return nil, dbErr(err, "list orphan traces")
 		}
 	}
-	return queryList(rows, "list orphan traces", func(scan func(...any) error) (*kernel.Trace, error) {
-		var t kernel.Trace
-		if err := scanTrace(&t, scan); err != nil {
-			return nil, err
-		}
-		return &t, nil
-	})
+	return queryList(rows, "list orphan traces", scanTracePtr)
 }
 
 func (s *DB) ListPendingRemoteTraces(ctx context.Context) ([]*kernel.Trace, error) {
@@ -1870,13 +1860,7 @@ func (s *DB) ListPendingRemoteTraces(ctx context.Context) ([]*kernel.Trace, erro
 	if err != nil {
 		return nil, dbErr(err, "list pending remote traces")
 	}
-	return queryList(rows, "list pending remote traces", func(scan func(...any) error) (*kernel.Trace, error) {
-		var t kernel.Trace
-		if err := scanTrace(&t, scan); err != nil {
-			return nil, err
-		}
-		return &t, nil
-	})
+	return queryList(rows, "list pending remote traces", scanTracePtr)
 }
 
 func (s *DB) ListDirectUnsettledChildren(ctx context.Context, parentTraceID string) ([]*kernel.Trace, error) {
@@ -1888,13 +1872,7 @@ func (s *DB) ListDirectUnsettledChildren(ctx context.Context, parentTraceID stri
 	if err != nil {
 		return nil, dbErr(err, "list direct unsettled children")
 	}
-	return queryList(rows, "list direct unsettled children", func(scan func(...any) error) (*kernel.Trace, error) {
-		var t kernel.Trace
-		if err := scanTrace(&t, scan); err != nil {
-			return nil, err
-		}
-		return &t, nil
-	})
+	return queryList(rows, "list direct unsettled children", scanTracePtr)
 }
 
 func (s *DB) ListUnsettledTracesForProcess(ctx context.Context, processID string) ([]*kernel.Trace, error) {
@@ -1921,13 +1899,7 @@ func (s *DB) ListUnsettledTracesForProcess(ctx context.Context, processID string
 			return nil, dbErr(err, "list unsettled traces for process")
 		}
 	}
-	return queryList(rows, "list unsettled traces for process", func(scan func(...any) error) (*kernel.Trace, error) {
-		var t kernel.Trace
-		if err := scanTrace(&t, scan); err != nil {
-			return nil, err
-		}
-		return &t, nil
-	})
+	return queryList(rows, "list unsettled traces for process", scanTracePtr)
 }
 
 // ---- Auth codes ----

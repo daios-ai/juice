@@ -403,9 +403,19 @@ func actionUpdateCmd() *cobra.Command {
 }
 
 func actionEnableCmd() *cobra.Command {
+	return actionActiveCmd("enable <action>", "Activate an action", "enable", "enabled", true)
+}
+
+func actionDisableCmd() *cobra.Command {
+	return actionActiveCmd("disable <action>", "Deactivate an action", "disable", "disabled", false)
+}
+
+// actionActiveCmd builds the enable/disable action command; the two differ only in wording
+// and the endpoint suffix.
+func actionActiveCmd(use, short, suffix, pastTense string, active bool) *cobra.Command {
 	return &cobra.Command{
-		Use:   "enable <action>",
-		Short: "Activate an action",
+		Use:   use,
+		Short: short,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -413,38 +423,25 @@ func actionEnableCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := apiCall(ctx, "POST", "/v1/actions/"+id+"/enable", nil, nil); err != nil {
+			if err := apiCall(ctx, "POST", "/v1/actions/"+id+"/"+suffix, nil, nil); err != nil {
 				return err
 			}
 			if flagJSON {
-				return printJSON(map[string]bool{"active": true})
+				return printJSON(map[string]bool{"active": active})
 			}
-			fmt.Printf("Action %s enabled.\n", args[0])
+			fmt.Printf("Action %s %s.\n", args[0], pastTense)
 			return nil
 		},
 	}
 }
 
-func actionDisableCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "disable <action>",
-		Short: "Deactivate an action",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			ctx := context.Background()
-			id, err := resolveActionID(ctx, args[0])
-			if err != nil {
-				return err
-			}
-			if err := apiCall(ctx, "POST", "/v1/actions/"+id+"/disable", nil, nil); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(map[string]bool{"active": false})
-			}
-			fmt.Printf("Action %s disabled.\n", args[0])
-			return nil
-		},
+// setLimitOffset adds the standard pagination params to a query when set (>0).
+func setLimitOffset(q url.Values, limit, offset int) {
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if offset > 0 {
+		q.Set("offset", strconv.Itoa(offset))
 	}
 }
 
@@ -458,12 +455,7 @@ func actionListCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			ctx := context.Background()
 			q := url.Values{}
-			if limit > 0 {
-				q.Set("limit", strconv.Itoa(limit))
-			}
-			if offset > 0 {
-				q.Set("offset", strconv.Itoa(offset))
-			}
+			setLimitOffset(q, limit, offset)
 			// --all lists the caller's own actions regardless of active/public via the
 			// self-owner filter (§3); it needs the caller's handle.
 			if all {
@@ -827,12 +819,7 @@ func txListCmd() *cobra.Command {
 			if processID != "" {
 				q.Set("process_id", processID)
 			}
-			if limit > 0 {
-				q.Set("limit", strconv.Itoa(limit))
-			}
-			if offset > 0 {
-				q.Set("offset", strconv.Itoa(offset))
-			}
+			setLimitOffset(q, limit, offset)
 			var txs []*kernel.TransactionView
 			if err := apiCall(context.Background(), "GET", "/v1/transactions?"+q.Encode(), nil, &txs); err != nil {
 				return err

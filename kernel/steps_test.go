@@ -986,10 +986,7 @@ func TestEndProcessFailsRunningStep(t *testing.T) {
 	if proc.Status != kernel.ProcessClosed {
 		t.Errorf("process.status=%s, want closed", proc.Status)
 	}
-	u, _ := st.ReadUser(ctx, owner.ID)
-	if u.Available != 100 || u.Locked != 0 {
-		t.Errorf("owner wallet after close: available=%d locked=%d, want 100/0", u.Available, u.Locked)
-	}
+	assertUserBalance(t, st, owner.ID, 100, 0)
 }
 
 // failUnsettledListStore wraps a Store and fails ListUnsettledTracesForProcess for one

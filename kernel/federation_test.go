@@ -1017,10 +1017,7 @@ func TestSettleRemoteCallQuarantinesInvalidReceipt(t *testing.T) {
 				t.Fatalf("quarantine must commit a zero-charge failure: status=%s net=%d fee=%d", tx.Status, tx.Net, tx.Fee)
 			}
 			// Caller fully refunded: original balance restored, nothing left locked.
-			u, _ := st.ReadUser(ctx, caller.ID)
-			if u.Available != a.Price || u.Locked != 0 {
-				t.Errorf("caller not fully refunded: available=%d locked=%d (want available=%d)", u.Available, u.Locked, a.Price)
-			}
+			assertUserBalance(t, st, caller.ID, a.Price, 0)
 			// Settled, therefore excluded from the retry set — no livelock.
 			if pending, _ := st.ListPendingRemoteTraces(ctx); len(pending) != 0 {
 				t.Errorf("expected no pending remote traces, got %d", len(pending))

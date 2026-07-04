@@ -26,31 +26,14 @@ import (
 
 func newTestHTTPServerFull(t *testing.T) (*httptest.Server, *kernel.Kernel, *store.DB) {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "serve.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	return newFlowKernel(t, nil)
+}
 
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "serve-test-secret"
-	cfg.AllowLocalSources = true
-	logger := log.Discard()
-	// Credential encryption is mandatory (§8); production wires a box to both the kernel and
-	// the HTTP executor, so the test server does too.
-	box, err := newAESGCMBox(make([]byte, 32))
-	if err != nil {
-		t.Fatal(err)
-	}
-	k := kernel.New(db, nil, &httpActionExecutor{timeout: cfg.ScriptTimeout, secretBox: box}, nil, cfg, logger)
-	k.SetSecretBox(box)
-
+// bootstrapSigning installs the signing key and superuser config on an already-FirstBooted
+// kernel, returning the platform Ed25519 private key. Shared by the test server builders.
+func bootstrapSigning(t *testing.T, k *kernel.Kernel) ed25519.PrivateKey {
+	t.Helper()
 	ctx := context.Background()
-	if err := k.FirstBoot(ctx, "sys-pass"); err != nil {
-		t.Fatal(err)
-	}
-
 	sys, err := k.ReadUserByHandle(ctx, "@sys")
 	if err != nil {
 		t.Fatal(err)
@@ -68,22 +51,22 @@ func newTestHTTPServerFull(t *testing.T) (*httptest.Server, *kernel.Kernel, *sto
 	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
 		t.Fatal(err)
 	}
+	return priv
+}
 
-	srv := &server{kernel: k, log: logger}
+// mountFullRouter builds the chi router used by the full test servers: the unauthenticated
+// auth/user-creation routes (no rate limiting in tests) plus all registered routes.
+func mountFullRouter(srv *server) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(requestIDMiddleware)
-
-	// Auth and user-creation routes (no rate limiting in tests).
 	r.Post("/v1/auth/token", srv.postTokenMulti)
 	r.Post("/v1/auth/authorize", srv.postAuthorize)
 	r.Post("/v1/auth/refresh", srv.postRefresh)
 	r.Post("/v1/auth/logout", srv.postLogout)
 	r.Post("/v1/users", srv.postUser)
-
 	registerRoutes(r, srv)
-
-	return httptest.NewServer(r), k, db
+	return r
 }
 
 func newTestHTTPServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
