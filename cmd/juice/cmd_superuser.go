@@ -211,12 +211,8 @@ func peerInspectCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(out)
 			}
-			fp := out.PublicKey
-			if len(fp) > 16 {
-				fp = fp[:16] + "…"
-			}
 			fmt.Printf("Handle:       %s\n", out.Handle)
-			fmt.Printf("Public key:   %s\n", fp)
+			fmt.Printf("Public key:   %s\n", out.PublicKey)
 			fmt.Printf("Reachability: %s (%dms)\n", out.Reachability.Path, out.Reachability.RTTmillis)
 			if len(out.Actions) > 0 {
 				fmt.Printf("\nActive actions (%d):\n", len(out.Actions))
@@ -227,11 +223,7 @@ func peerInspectCmd() *cobra.Command {
 			if len(out.Friends) > 0 {
 				fmt.Printf("\nTransacted friends (%d):\n", len(out.Friends))
 				for _, f := range out.Friends {
-					k := f.PublicKey
-					if len(k) > 16 {
-						k = k[:16] + "…"
-					}
-					fmt.Printf("  %-20s %s\n", f.Handle, k)
+					fmt.Printf("  %-20s %s\n", f.Handle, f.PublicKey)
 				}
 			}
 			return nil
@@ -320,7 +312,7 @@ func peerListCmd() *cobra.Command {
 					if p.DeniedAt != nil {
 						denied = " [denied]"
 					}
-					fmt.Printf("%-20s %-36s %s%s\n", p.Handle, p.ID, shortKey(p.PublicKey), denied)
+					fmt.Printf("%-20s %-36s %s%s\n", p.Handle, p.ID, p.PublicKey, denied)
 				}
 			}
 			if showGossip {
@@ -331,15 +323,6 @@ func peerListCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&showGossip, "gossip", false, "Also show the known-network directory (discovery)")
 	return cmd
-}
-
-// shortKey truncates a base64url public key for display; a friend's ID stays legible while long
-// keys don't wrap the terminal.
-func shortKey(k string) string {
-	if len(k) > 16 {
-		return k[:16] + "…"
-	}
-	return k
 }
 
 // renderRoster prints the known-network directory (§13) grouped kernel → introducer → action, with
@@ -362,7 +345,7 @@ func renderRoster(roster []*kernel.KernelRoster, peers []*kernel.User) {
 	}
 	fmt.Println("\nKnown kernels (discovery):")
 	for _, kr := range roster {
-		fmt.Printf("\n%-20s %s\n", kr.Handle, shortKey(kr.PublicKey))
+		fmt.Printf("\n%-20s %s\n", kr.Handle, kr.PublicKey)
 		if len(kr.Own) > 0 {
 			fmt.Println("  you:")
 			printActions(kr.Own)
@@ -373,7 +356,7 @@ func renderRoster(roster []*kernel.KernelRoster, peers []*kernel.User) {
 				if h, ok := friendByKey[src.IntroducedBy]; ok {
 					label = "via " + h
 				} else {
-					label = "via " + shortKey(src.IntroducedBy)
+					label = "via " + src.IntroducedBy
 				}
 			}
 			fmt.Printf("  %s:\n", label)
