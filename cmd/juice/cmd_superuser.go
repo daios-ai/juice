@@ -20,9 +20,9 @@ func parseAmount(s string) (int64, error) {
 
 // admin holds the superuser-only supervisory verbs — the operations no ordinary user ever
 // performs: money (deposit/withdraw), access (suspend/unsuspend), federation trust
-// (friend/unfriend/peers/inspect), and the global roster (users/show). They are clients of
-// the local Unix control socket served by `juice serve` (ctlCall/ctlEmit route over it); the
-// server enforces superuser and is the only process that touches SQLite (§14).
+// (friend/unfriend/peers/inspect), and the global roster (users/show). They are ordinary TCP
+// clients like every other command (apiCall/apiEmit); the server gates the routes with
+// requireSuperuserMW, so authority is the @sys bearer token (§14).
 //
 // Everything that is merely "the same operation with wider reach" is NOT here: a superuser
 // sees all rows on `action/process/tx/step list` and may `action disable` any action, all
@@ -59,7 +59,7 @@ func identityCmd() *cobra.Command {
 				PublicKey string   `json:"public_key"`
 				Addrs     []string `json:"addrs"`
 			}
-			if err := ctlCall(context.Background(), "GET", "/control/identity", nil, &out); err != nil {
+			if err := apiCall(context.Background(), "GET", "/control/identity", nil, &out); err != nil {
 				return err
 			}
 			if flagJSON {
@@ -86,7 +86,7 @@ func adminUsersCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			var users []*kernel.User
-			if err := ctlCall(context.Background(), "GET", ctlPath("/control/users", limit, offset), nil, &users); err != nil {
+			if err := apiCall(context.Background(), "GET", ctlPath("/control/users", limit, offset), nil, &users); err != nil {
 				return err
 			}
 			if flagJSON {
@@ -113,7 +113,7 @@ func adminShowCmd() *cobra.Command {
 		Short: "Show user details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return ctlEmit("GET", "/control/users/"+url.PathEscape(args[0]), nil)
+			return apiEmit("GET", "/control/users/"+url.PathEscape(args[0]), nil)
 		},
 	}
 }
@@ -124,7 +124,7 @@ func adminSuspendCmd() *cobra.Command {
 		Short: "Suspend a user",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if err := ctlCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/suspend", nil, nil); err != nil {
+			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/suspend", nil, nil); err != nil {
 				return err
 			}
 			fmt.Printf("User %s suspended.\n", kernel.NormalizeHandle(args[0]))
@@ -139,7 +139,7 @@ func adminUnsuspendCmd() *cobra.Command {
 		Short: "Unsuspend a user",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if err := ctlCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/unsuspend", nil, nil); err != nil {
+			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/unsuspend", nil, nil); err != nil {
 				return err
 			}
 			fmt.Printf("User %s unsuspended.\n", kernel.NormalizeHandle(args[0]))
@@ -160,7 +160,7 @@ func adjustCmd(use, short, path string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return ctlEmit("POST", path, map[string]any{
+			return apiEmit("POST", path, map[string]any{
 				"handle": args[0], "amount": amount, "reason": reason, "external_key": externalKey,
 			})
 		},
@@ -205,7 +205,7 @@ func peerInspectCmd() *cobra.Command {
 					RTTmillis int64  `json:"rtt_millis"`
 				} `json:"reachability"`
 			}
-			if err := ctlCall(context.Background(), "GET", "/control/peers/inspect?key="+url.QueryEscape(args[0]), nil, &out); err != nil {
+			if err := apiCall(context.Background(), "GET", "/control/peers/inspect?key="+url.QueryEscape(args[0]), nil, &out); err != nil {
 				return err
 			}
 			if flagJSON {
@@ -250,7 +250,7 @@ func peerFriendCmd() *cobra.Command {
 				Imported int    `json:"imported"`
 				Skipped  int    `json:"skipped"`
 			}
-			if err := ctlCall(context.Background(), "POST", "/control/peers/friend",
+			if err := apiCall(context.Background(), "POST", "/control/peers/friend",
 				map[string]any{"key": args[0]}, &out); err != nil {
 				return err
 			}
@@ -280,7 +280,7 @@ func peerUnfriendCmd() *cobra.Command {
 				Handle string `json:"handle"`
 			}
 			// Pass the identifier raw (a key must not become an @handle); the server resolves either.
-			if err := ctlCall(context.Background(), "POST", "/control/peers/unfriend",
+			if err := apiCall(context.Background(), "POST", "/control/peers/unfriend",
 				map[string]any{"handle": args[0]}, &out); err != nil {
 				return err
 			}
@@ -305,7 +305,7 @@ func peerListCmd() *cobra.Command {
 				Peers      []*kernel.User             `json:"peers"`
 				Discovered []*kernel.DiscoveredKernel `json:"discovered"`
 			}
-			if err := ctlCall(context.Background(), "GET", path, nil, &out); err != nil {
+			if err := apiCall(context.Background(), "GET", path, nil, &out); err != nil {
 				return err
 			}
 			if flagJSON {

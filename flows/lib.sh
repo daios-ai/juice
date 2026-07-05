@@ -40,8 +40,8 @@ declare -A SERVER_PID=()   # db path -> serve pid
 track_pid() { _PIDS+=("$1"); }
 
 # reap: kill everything spawned so far (SIGKILL for fast, deterministic teardown — test DBs
-# are disposable) and clear this flow's temp dirs. SIGKILL means a server's own cleanup (e.g.
-# its control socket) never runs, so wiping the run root is what clears those artifacts.
+# are disposable) and clear this flow's temp dirs. SIGKILL means a server's own cleanup never
+# runs, so wiping the run root is what clears any leftover artifacts.
 reap() {
     local p
     for p in "${_PIDS[@]:-}"; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null; done
@@ -153,7 +153,8 @@ stop_server() {
 
 # ---------------------------------------------------------------------------
 # CLI wrappers — always the built binary, targeting the db's server.
-# admin/peer commands ignore JUICE_SERVER and run locally against --db (correct).
+# admin/peer commands are TCP clients too now: they use JUICE_SERVER (set below) and hit
+# superuser-gated routes on the same public API as user commands.
 # ---------------------------------------------------------------------------
 j()  { local db="$1" home="$2"; shift 2; HOME="$home" JUICE_SERVER="${SERVER_URL[$db]:-}" "$JUICE" --db "$db" "$@" 2>&1; }
 jj() { local db="$1" home="$2"; shift 2; HOME="$home" JUICE_SERVER="${SERVER_URL[$db]:-}" "$JUICE" --db "$db" --json "$@" 2>/dev/null; }

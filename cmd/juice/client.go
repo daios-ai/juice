@@ -53,29 +53,15 @@ func apiDo(ctx context.Context, method, path string, body, out any, retry bool) 
 	if tok, err := loadToken(); err == nil {
 		headers["Authorization"] = "Bearer " + tok
 	}
-	// admin/peer commands put the control-socket path in ctx and route over the local Unix
-	// control socket (superuser supervision, §14); user-facing commands use TCP.
-	var respBody []byte
-	var status int
-	var err error
-	if sock := controlSockFromCtx(ctx); sock != "" {
-		respBody, status, err = doControlHTTP(ctx, sock, method, path, headers, rdr)
-		if err != nil && status == 0 {
-			return kernel.ErrInvalidState.
-				Wrap("cannot reach control socket (is `juice serve` running?)").Because(err)
-		}
-	} else {
-		base := serverBaseURL()
-		respBody, status, err = doHTTP(ctx, method, base+path, headers, rdr, 0, true)
-		if err != nil && status == 0 {
-			return errUnreachable(base, err)
-		}
+	base := serverBaseURL()
+	respBody, status, err := doHTTP(ctx, method, base+path, headers, rdr, 0, true)
+	if err != nil && status == 0 {
+		return errUnreachable(base, err)
 	}
 	if err != nil {
 		return err
 	}
-	// Token refresh needs the TCP auth endpoints; over the control socket a 401 just surfaces.
-	if status == 401 && retry && controlSockFromCtx(ctx) == "" && refreshToken(ctx) {
+	if status == 401 && retry && refreshToken(ctx) {
 		return apiDo(ctx, method, path, body, out, false)
 	}
 	if status < 200 || status >= 300 {

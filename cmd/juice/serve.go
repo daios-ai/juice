@@ -119,14 +119,6 @@ func runServer(addr string) error {
 	}
 	logger.Info("server.ready", readyFields...)
 
-	// Superuser supervision (admin/peer) is served on a local Unix socket, never TCP, so
-	// `serve` is the sole process that opens the DB (§14).
-	if control, cerr := startControlPlane(srv, flagDB); cerr != nil {
-		logger.Error("control.start_failed", "error", cerr)
-	} else {
-		defer control.Close()
-	}
-
 	httpSrv := &http.Server{Handler: r}
 
 	serveErr := make(chan error, 1)
@@ -311,6 +303,23 @@ func registerRoutes(r chi.Router, srv *server) {
 		// Current user.
 		r.Get("/v1/me", srv.getMe)
 		r.Put("/v1/me", srv.putMe)
+	})
+
+	// Superuser supervision (money, access, federation trust, roster) — same TCP API, gated
+	// per-route by requireSuperuserMW (§14). Not a separate surface; authority is the @sys bearer.
+	r.Group(func(r chi.Router) {
+		r.Use(srv.authMiddleware, srv.requireSuperuserMW)
+		r.Get("/control/users", srv.ctlListUsers)
+		r.Get("/control/users/{handle}", srv.ctlShowUser)
+		r.Post("/control/users/{handle}/suspend", srv.ctlSetSuspended(true))
+		r.Post("/control/users/{handle}/unsuspend", srv.ctlSetSuspended(false))
+		r.Post("/control/deposit", srv.ctlAdjust(kernel.DirectionCredit))
+		r.Post("/control/withdraw", srv.ctlAdjust(kernel.DirectionDebit))
+		r.Get("/control/peers", srv.ctlListPeers)
+		r.Get("/control/peers/inspect", srv.ctlInspectPeer)
+		r.Post("/control/peers/friend", srv.ctlFriendPeer)
+		r.Post("/control/peers/unfriend", srv.ctlUnfriendPeer)
+		r.Get("/control/identity", srv.ctlIdentity)
 	})
 }
 

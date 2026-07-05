@@ -3,91 +3,27 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 	"github.com/go-chi/chi/v5"
 )
 
-// The superuser control plane. admin/peer supervision runs over a local Unix-domain socket
-// served by `juice serve`, never the public TCP API — so `serve` is the only process that
-// opens SQLite (no second-writer contention), while authority stays filesystem-based: a
-// 0600 socket next to the DB, plus a valid @sys bearer token (§14). The socket path is
-// derived from --db so the client needs no configuration.
+// Superuser supervision (admin/peer verbs — money, access, federation trust, roster) is served
+// on the ordinary public TCP API, gated per-route by requireSuperuserMW (an IsSuperuser check),
+// exactly as the widened list/disable scope already is (§14). There is no separate control
+// surface: authority is the @sys bearer token, so keep it secret and run `serve` behind TLS or
+// on loopback. The route registrations live in registerRoutes (serve.go); this file holds the
+// superuser handlers and the federation-import helpers they call.
 
 // allowLocalPeers reports whether outbound federation-import HTTP fetches may reach
 // local/private addresses. Federation transport itself is libp2p (§13); this remains
 // only for the action-import fetch paths, gated by the action-source dev escape hatch.
 func allowLocalPeers() bool {
 	return globalCfg.AllowLocalSources
-}
-
-func controlSocketPath(dbPath string) string {
-	abs, err := filepath.Abs(dbPath)
-	if err != nil {
-		abs = dbPath
-	}
-	return filepath.Join(filepath.Dir(abs), "juice-control.sock")
-}
-
-// ---------------------------------------------------------------------------
-// Server: control listener + router
-// ---------------------------------------------------------------------------
-
-// startControlPlane binds the control socket and serves the superuser router on it. The
-// returned closer stops the server and removes the socket.
-func startControlPlane(srv *server, dbPath string) (io.Closer, error) {
-	path := controlSocketPath(dbPath)
-	_ = os.Remove(path) // clear a stale socket left by a crashed server
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		_ = ln.Close()
-		return nil, err
-	}
-	httpSrv := &http.Server{Handler: srv.controlRouter()}
-	go func() { _ = httpSrv.Serve(ln) }()
-	return &controlPlane{httpSrv: httpSrv, path: path}, nil
-}
-
-type controlPlane struct {
-	httpSrv *http.Server
-	path    string
-}
-
-func (c *controlPlane) Close() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := c.httpSrv.Shutdown(ctx)
-	_ = os.Remove(c.path)
-	return err
-}
-
-func (s *server) controlRouter() http.Handler {
-	r := chi.NewRouter()
-	r.Use(s.authMiddleware, s.requireSuperuserMW)
-	r.Get("/control/users", s.ctlListUsers)
-	r.Get("/control/users/{handle}", s.ctlShowUser)
-	r.Post("/control/users/{handle}/suspend", s.ctlSetSuspended(true))
-	r.Post("/control/users/{handle}/unsuspend", s.ctlSetSuspended(false))
-	r.Post("/control/deposit", s.ctlAdjust(kernel.DirectionCredit))
-	r.Post("/control/withdraw", s.ctlAdjust(kernel.DirectionDebit))
-	r.Get("/control/peers", s.ctlListPeers)
-	r.Get("/control/peers/inspect", s.ctlInspectPeer)
-	r.Post("/control/peers/friend", s.ctlFriendPeer)
-	r.Post("/control/peers/unfriend", s.ctlUnfriendPeer)
-	r.Get("/control/identity", s.ctlIdentity)
-	return r
 }
 
 // requireSuperuserMW rejects any caller whose handle is not the configured superuser. It runs
@@ -356,57 +292,8 @@ func bulkImportPeerActionsFed(ctx context.Context, tr manifestFetcher, k *kernel
 }
 
 // ---------------------------------------------------------------------------
-// Client: HTTP over the control socket
+// Client helpers
 // ---------------------------------------------------------------------------
-
-// A context carrying the control-socket path routes apiDo over the Unix socket instead of
-// TCP. admin/peer commands attach it via ctlCall/ctlEmit; user-facing commands never do, so
-// the transport choice is per-call and cannot leak between commands.
-type ctlCtxKey struct{}
-
-func withControlSocket(ctx context.Context) context.Context {
-	return context.WithValue(ctx, ctlCtxKey{}, controlSocketPath(flagDB))
-}
-
-func controlSockFromCtx(ctx context.Context) string {
-	s, _ := ctx.Value(ctlCtxKey{}).(string)
-	return s
-}
-
-func ctlCall(ctx context.Context, method, path string, body, out any) error {
-	return apiCall(withControlSocket(ctx), method, path, body, out)
-}
-
-func ctlEmit(method, path string, body any) error {
-	return apiEmitCtx(withControlSocket(context.Background()), method, path, body)
-}
-
-// doControlHTTP performs one request over the control socket. The URL host is a placeholder;
-// the dialer ignores it and connects to the socket.
-func doControlHTTP(ctx context.Context, sock, method, path string, headers map[string]string, body io.Reader) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, method, "http://unix"+path, body)
-	if err != nil {
-		return nil, 0, kernel.ErrInvalidInput.Wrapf("invalid request: %v", err)
-	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	client := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
-		},
-	}}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-	if err != nil {
-		return nil, resp.StatusCode, err
-	}
-	return respBody, resp.StatusCode, nil
-}
 
 // ctlPath appends limit/offset query parameters when set.
 func ctlPath(path string, limit, offset int) string {

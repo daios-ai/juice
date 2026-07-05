@@ -154,8 +154,8 @@ func TestAdminDeposit(t *testing.T) {
 	}
 }
 
-// Superuser enforcement now lives in the control plane (requireSuperuserMW); it is covered
-// end-to-end over the socket in control_test.go (TestControlPlaneRejectsNonSuperuser).
+// Superuser enforcement lives in requireSuperuserMW on the TCP admin routes; it is covered
+// end-to-end in control_test.go (TestAdminSuperuserGate).
 
 func TestAdminListAllActions(t *testing.T) {
 	ctx := context.Background()

@@ -71,8 +71,8 @@ The step completer is identified by a user handle at creation time. The server r
 **C12 — Diagnostic output goes to stderr; resource data goes to stdout.**  
 Log lines, progress messages, and error text go to stderr. The only content written to stdout is the resource payload: human-readable summaries, `--json` bodies, and `--quiet` IDs. This makes every command pipeable and keeps `$(juice ... --quiet)` capture reliable.
 
-**C13 — User-facing commands are TCP clients; `admin` is a control-socket client.**  
-Every user-facing command runs by calling the server over HTTP; the base URL resolves from `--server`, then `JUICE_SERVER`, then `server_url` in config, defaulting to `http://localhost:4040`. `admin *` are superuser supervision served over a local `0600` Unix control socket next to the DB (bearer token + filesystem access), never the public TCP API. `juice serve` is the sole process that opens the database. Supervision over ordinary resources is **scope**, not a separate surface: a superuser sees all rows on `action/process/tx/step list` and may `action disable`/`enable` any action, all over the normal TCP API.
+**C13 — All commands are TCP clients; `admin` verbs are superuser-gated routes.**  
+Every command runs by calling the server over HTTP; the base URL resolves from `--server`, then `JUICE_SERVER`, then `server_url` in config, defaulting to `http://localhost:4040`. `admin *` are superuser supervision served on that same public TCP API, on routes gated by an `IsSuperuser` check — authority is the `@sys` bearer token (keep it secret; expose `serve` only behind TLS or on loopback), not a separate socket or filesystem access. `juice serve` is the sole process that opens the database. Supervision over ordinary resources is **scope**, not a separate surface: a superuser sees all rows on `action/process/tx/step list` and may `action disable`/`enable` any action, all over the normal TCP API.
 
 ---
 
@@ -189,9 +189,9 @@ Native actions registered at bootstrap, owned by `@sys`, public, runnable like a
 
 Friending a peer imports its actions owner-qualified, so a peer action is addressed `@peer/owner/name` and is called through `POST /v1/run` like any local action; there are no federation HTTP endpoints. Trust and peering are managed via the admin commands below. The cross-kernel transport is an implementation detail (§13).
 
-### Admin (control-socket, superuser)
+### Admin (superuser-gated TCP routes)
 
-The operator verbs no ordinary user performs — money, access, federation trust, and the global roster. Served over the local control socket, not the public TCP API. Everything else a superuser does (see all actions/processes/txs/steps, disable any action) is *scope* on the normal commands above, not an admin command.
+The operator verbs no ordinary user performs — money, access, federation trust, and the global roster. Served on the public TCP API, on routes gated by an `IsSuperuser` check (authority is the `@sys` bearer token). Everything else a superuser does (see all actions/processes/txs/steps, disable any action) is *scope* on the normal commands above, not an admin command.
 
 | Operation | CLI |
 |-----------|-----|
