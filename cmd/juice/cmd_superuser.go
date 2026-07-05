@@ -28,7 +28,7 @@ func parseAmount(s string) (int64, error) {
 // sees all rows on `action/process/tx/step list` and may `action disable` any action, all
 // over the normal TCP API (supervision is scope, not a separate surface).
 func init() {
-	adminCmd := &cobra.Command{Use: "admin", Short: "Superuser supervision"}
+	adminCmd := &cobra.Command{Use: "admin", Short: "Superuser commands"}
 	adminCmd.AddCommand(
 		adminUsersCmd(),
 		adminShowCmd(),
