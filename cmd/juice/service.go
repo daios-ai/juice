@@ -15,31 +15,56 @@ import (
 
 // ---- Types ----
 
-// stepWithAction enriches a step with a computed @owner/name action field. waiting_on_peer flags a
-// waiting step whose required caller is a peer (proxy) user — work parked on someone who may be
-// offline (§13); its age is the step's created_at.
+// A user id is never a consumable CLI input — users are addressed by @handle everywhere — so the
+// output views below render the party's @handle and drop the raw user UUID. The UUID lives on an
+// embedded kernel struct, so to omit it we redeclare a same-JSON-named empty field with
+// `,omitempty` at the outer level: the shallower field dominates the promoted one and, being empty,
+// is omitted. (A plain `json:"-"` would NOT work — it only removes the outer field, leaving the
+// promoted one to render.) Resolution is server-side, so HTTP and CLI stay in parity (§14).
+
+// stepWithAction enriches a step with a computed @owner/name action field and the required caller's
+// @handle. waiting_on_peer flags a waiting step whose required caller is a peer (proxy) user — work
+// parked on someone who may be offline (§13); its age is the step's created_at.
 type stepWithAction struct {
 	*kernel.Step
-	Action        string `json:"action,omitempty"`
-	WaitingOnPeer bool   `json:"waiting_on_peer,omitempty"`
+	RequiredCallerUserID string `json:"required_caller_user_id,omitempty"`
+	Action               string `json:"action,omitempty"`
+	RequiredCallerHandle string `json:"required_caller_handle,omitempty"`
+	WaitingOnPeer        bool   `json:"waiting_on_peer,omitempty"`
 }
 
-// processView enriches a process with its awaiting-receipt state and age (§13): a process holding a
-// remote-proxy call still waiting for its signed receipt, and when the earliest such call started —
-// so an operator can see funds parked on an unreachable peer and for how long.
+// processView enriches a process with its owner @handle and awaiting-receipt state and age (§13): a
+// process holding a remote-proxy call still waiting for its signed receipt, and when the earliest
+// such call started — so an operator can see funds parked on an unreachable peer and for how long.
 type processView struct {
 	*kernel.Process
+	OwnerUserID          string     `json:"owner_user_id,omitempty"`
+	OwnerHandle          string     `json:"owner_handle"`
 	AwaitingReceipt      bool       `json:"awaiting_receipt"`
 	AwaitingReceiptSince *time.Time `json:"awaiting_receipt_since,omitempty"`
+}
+
+// txView enriches a transaction with the @handles of its three parties (payer, caller, payee),
+// replacing the raw user UUIDs which no command consumes.
+type txView struct {
+	*kernel.TransactionView
+	OwnerUserID  string `json:"owner_user_id,omitempty"`
+	CallerUserID string `json:"caller_user_id,omitempty"`
+	TargetUserID string `json:"target_user_id,omitempty"`
+	OwnerHandle  string `json:"owner_handle"`
+	CallerHandle string `json:"caller_handle"`
+	TargetHandle string `json:"target_handle"`
 }
 
 // actionResp wraps an action with the computed @owner/name reference field and,
 // for kind=http, a decomposed view of the request shape so manual and
 // OpenAPI-imported actions read identically and round-trip with create/update.
+// owner_user_id is shadow-dropped: owner_handle + action (@owner/name) already identify the owner.
 type actionResp struct {
 	*kernel.Action
-	ActionRef string    `json:"action"`
-	HTTP      *httpView `json:"http,omitempty"`
+	OwnerUserID string    `json:"owner_user_id,omitempty"`
+	ActionRef   string    `json:"action"`
+	HTTP        *httpView `json:"http,omitempty"`
 }
 
 // httpView is the read-side decomposition of an action's HTTPSource. It carries
@@ -52,18 +77,58 @@ type httpView struct {
 
 // ---- Enrichment helpers ----
 
-func enrichStep(step *kernel.Step, action *kernel.Action, waitingOnPeer bool) *stepWithAction {
-	v := &stepWithAction{Step: step, WaitingOnPeer: waitingOnPeer}
+// userCache resolves user IDs to display info within one request, reading each user at most once
+// (transaction lists reference few distinct users across many rows). handle() falls back to the raw
+// id only when the row is truly gone (a purged peer, §13), so an immutable ledger stays legible.
+type userCache struct {
+	k   *kernel.Kernel
+	ctx context.Context
+	m   map[string]*kernel.User
+}
+
+func newUserCache(k *kernel.Kernel, ctx context.Context) *userCache {
+	return &userCache{k: k, ctx: ctx, m: map[string]*kernel.User{}}
+}
+
+func (c *userCache) get(id string) *kernel.User {
+	if u, ok := c.m[id]; ok {
+		return u
+	}
+	u, _ := c.k.ReadUser(c.ctx, id) // nil on error; cached so a bad id isn't re-read
+	c.m[id] = u
+	return u
+}
+
+func (c *userCache) handle(id string) string {
+	if id == "" {
+		return ""
+	}
+	if u := c.get(id); u != nil && u.Handle != "" {
+		return u.Handle
+	}
+	return id
+}
+
+func (c *userCache) isPeer(id string) bool {
+	u := c.get(id)
+	return u != nil && u.PublicKey != ""
+}
+
+func enrichStep(step *kernel.Step, action *kernel.Action, uc *userCache) *stepWithAction {
+	v := &stepWithAction{Step: step, RequiredCallerHandle: uc.handle(step.RequiredCallerUserID)}
 	if action != nil {
 		v.Action = action.OwnerHandle + "/" + action.Name
+	}
+	if step.Status == kernel.StepWaiting {
+		v.WaitingOnPeer = uc.isPeer(step.RequiredCallerUserID)
 	}
 	return v
 }
 
-// enrichProcess flags a process awaiting a remote receipt, with the earliest such call's start time
-// from the awaiting-receipt map (kernel.AwaitingReceiptSince).
-func enrichProcess(p *kernel.Process, since map[string]time.Time) *processView {
-	v := &processView{Process: p}
+// enrichProcess resolves the owner @handle and flags a process awaiting a remote receipt, with the
+// earliest such call's start time from the awaiting-receipt map (kernel.AwaitingReceiptSince).
+func enrichProcess(p *kernel.Process, since map[string]time.Time, uc *userCache) *processView {
+	v := &processView{Process: p, OwnerHandle: uc.handle(p.OwnerUserID)}
 	if t, ok := since[p.ID]; ok {
 		tt := t
 		v.AwaitingReceipt = true
@@ -72,19 +137,46 @@ func enrichProcess(p *kernel.Process, since map[string]time.Time) *processView {
 	return v
 }
 
-// waitingOnPeer reports whether a waiting step's required caller is a peer (proxy) user. A read
-// error is treated as "not a peer" — this is an advisory annotation, never a gate.
-func waitingOnPeer(k *kernel.Kernel, ctx context.Context, step *kernel.Step, cache map[string]bool) bool {
-	if step.Status != kernel.StepWaiting {
-		return false
+// adjustmentView renders a deposit/withdrawal with the operator and target @handles instead of raw
+// user UUIDs; the record's own id is dropped too (no command consumes it — external_key is the
+// out-of-band idempotency handle).
+type adjustmentView struct {
+	*kernel.Adjustment
+	ID             string `json:"id,omitempty"`
+	OperatorUserID string `json:"operator_user_id,omitempty"`
+	TargetUserID   string `json:"target_user_id,omitempty"`
+	OperatorHandle string `json:"operator_handle"`
+	TargetHandle   string `json:"target_handle"`
+}
+
+func enrichAdjustment(a *kernel.Adjustment, uc *userCache) *adjustmentView {
+	return &adjustmentView{
+		Adjustment:     a,
+		OperatorHandle: uc.handle(a.OperatorUserID),
+		TargetHandle:   uc.handle(a.TargetUserID),
 	}
-	if v, ok := cache[step.RequiredCallerUserID]; ok {
-		return v
+}
+
+// peerViews projects proxy-peer users into handle+key+balance views, dropping their internal ids.
+func peerViews(peers []*kernel.User) []*kernel.PeerView {
+	out := make([]*kernel.PeerView, len(peers))
+	for i, p := range peers {
+		out[i] = &kernel.PeerView{
+			Handle: p.Handle, PublicKey: p.PublicKey,
+			Available: p.Available, Locked: p.Locked, DeniedAt: p.DeniedAt,
+		}
 	}
-	u, _ := k.ReadUser(ctx, step.RequiredCallerUserID)
-	isPeer := u != nil && u.PublicKey != ""
-	cache[step.RequiredCallerUserID] = isPeer
-	return isPeer
+	return out
+}
+
+// enrichTx resolves the @handles of a transaction's three parties (payer, caller, payee).
+func enrichTx(tv *kernel.TransactionView, uc *userCache) *txView {
+	return &txView{
+		TransactionView: tv,
+		OwnerHandle:     uc.handle(tv.OwnerUserID),
+		CallerHandle:    uc.handle(tv.CallerUserID),
+		TargetHandle:    uc.handle(tv.TargetUserID),
+	}
 }
 
 func enrichAction(a *kernel.Action) actionResp {
@@ -336,9 +428,10 @@ func listProcesses(k *kernel.Kernel, ctx context.Context, callerID string, limit
 	if err != nil {
 		return nil, err
 	}
+	uc := newUserCache(k, ctx)
 	views := make([]*processView, len(processes))
 	for i, p := range processes {
-		views[i] = enrichProcess(p, since)
+		views[i] = enrichProcess(p, since, uc)
 	}
 	return views, nil
 }
@@ -352,7 +445,7 @@ func getProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) (*pr
 	if err != nil {
 		return nil, err
 	}
-	return enrichProcess(p, since), nil
+	return enrichProcess(p, since, newUserCache(k, ctx)), nil
 }
 
 func endProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) error {
@@ -388,7 +481,9 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 	if err != nil {
 		return nil, err
 	}
-	return enrichStep(step, action, callerUser.PublicKey != "" && step.Status == kernel.StepWaiting), nil
+	uc := newUserCache(k, ctx)
+	uc.m[callerUser.ID] = callerUser // already resolved; avoid a redundant read
+	return enrichStep(step, action, uc), nil
 }
 
 func listSteps(k *kernel.Kernel, ctx context.Context, callerID, processID, status string) ([]*stepWithAction, error) {
@@ -397,10 +492,10 @@ func listSteps(k *kernel.Kernel, ctx context.Context, callerID, processID, statu
 		return nil, err
 	}
 	views := make([]*stepWithAction, len(steps))
-	peerCache := map[string]bool{}
+	uc := newUserCache(k, ctx)
 	for i, step := range steps {
 		action, _ := k.ReadAction(ctx, step.ActionID)
-		views[i] = enrichStep(step, action, waitingOnPeer(k, ctx, step, peerCache))
+		views[i] = enrichStep(step, action, uc)
 	}
 	return views, nil
 }
@@ -411,7 +506,7 @@ func getStep(k *kernel.Kernel, ctx context.Context, callerID, id string) (*stepW
 		return nil, err
 	}
 	action, _ := k.ReadAction(ctx, step.ActionID)
-	return enrichStep(step, action, waitingOnPeer(k, ctx, step, map[string]bool{})), nil
+	return enrichStep(step, action, newUserCache(k, ctx)), nil
 }
 
 func completeStep(k *kernel.Kernel, ctx context.Context, callerID, id string, args json.RawMessage) (*kernel.StepReply, error) {
@@ -420,12 +515,25 @@ func completeStep(k *kernel.Kernel, ctx context.Context, callerID, id string, ar
 
 // ---- Transaction operations ----
 
-func listTransactions(k *kernel.Kernel, ctx context.Context, callerID string, f kernel.TxFilter) ([]*kernel.TransactionView, error) {
-	return k.ListTransactions(ctx, callerID, f)
+func listTransactions(k *kernel.Kernel, ctx context.Context, callerID string, f kernel.TxFilter) ([]*txView, error) {
+	txs, err := k.ListTransactions(ctx, callerID, f)
+	if err != nil {
+		return nil, err
+	}
+	uc := newUserCache(k, ctx)
+	views := make([]*txView, len(txs))
+	for i, tv := range txs {
+		views[i] = enrichTx(tv, uc)
+	}
+	return views, nil
 }
 
-func getTransaction(k *kernel.Kernel, ctx context.Context, callerID, id string) (*kernel.TransactionView, error) {
-	return k.ReadTransaction(ctx, callerID, id)
+func getTransaction(k *kernel.Kernel, ctx context.Context, callerID, id string) (*txView, error) {
+	tv, err := k.ReadTransaction(ctx, callerID, id)
+	if err != nil {
+		return nil, err
+	}
+	return enrichTx(tv, newUserCache(k, ctx)), nil
 }
 
 // validateRating returns ErrInvalidInput if v is not 0 or 1.

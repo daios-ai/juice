@@ -294,7 +294,7 @@ func peerListCmd() *cobra.Command {
 				path += "?gossip=1"
 			}
 			var out struct {
-				Peers  []*kernel.User         `json:"peers"`
+				Peers  []*kernel.PeerView     `json:"peers"`
 				Roster []*kernel.KernelRoster `json:"roster"`
 			}
 			if err := apiCall(context.Background(), "GET", path, nil, &out); err != nil {
@@ -306,13 +306,13 @@ func peerListCmd() *cobra.Command {
 			if len(out.Peers) == 0 {
 				fmt.Println("No peers registered.")
 			} else {
-				fmt.Printf("%-20s %-36s %s\n", "HANDLE", "ID", "PUBLIC_KEY")
+				fmt.Printf("%-20s %10s %8s  %s\n", "HANDLE", "AVAILABLE", "LOCKED", "PUBLIC_KEY")
 				for _, p := range out.Peers {
 					denied := ""
 					if p.DeniedAt != nil {
 						denied = " [denied]"
 					}
-					fmt.Printf("%-20s %-36s %s%s\n", p.Handle, p.ID, p.PublicKey, denied)
+					fmt.Printf("%-20s %10d %8d  %s%s\n", p.Handle, p.Available, p.Locked, p.PublicKey, denied)
 				}
 			}
 			if showGossip {
@@ -327,7 +327,7 @@ func peerListCmd() *cobra.Command {
 
 // renderRoster prints the known-network directory (§13) grouped kernel → introducer → action, with
 // our own earned stats first (ground truth) and each introducer flagged self-reported or hearsay.
-func renderRoster(roster []*kernel.KernelRoster, peers []*kernel.User) {
+func renderRoster(roster []*kernel.KernelRoster, peers []*kernel.PeerView) {
 	if len(roster) == 0 {
 		fmt.Println("\nNo known kernels yet (discovery seeds from bootstrap peers).")
 		return

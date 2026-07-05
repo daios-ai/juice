@@ -402,10 +402,14 @@ const (
 	CallerStep = "step"
 )
 
-// PeerView is a peer kernel in the friendship list.
+// PeerView is a peer kernel in the friendship list — identified by handle and public key (the
+// global name), with its bilateral balance. It carries no internal user id: a peer is never
+// addressed by one.
 type PeerView struct {
 	Handle    string     `json:"handle"`
 	PublicKey string     `json:"public_key"`
+	Available int64      `json:"available"`
+	Locked    int64      `json:"locked"`
 	DeniedAt  *time.Time `json:"denied_at,omitempty"`
 }
 

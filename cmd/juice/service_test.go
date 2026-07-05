@@ -131,7 +131,8 @@ func TestEnrichStep(t *testing.T) {
 	step := &kernel.Step{ID: "s1"}
 	action := &kernel.Action{OwnerHandle: "@alice", Name: "greet"}
 
-	v := enrichStep(step, action, false)
+	// No required caller and not waiting, so the resolver is never dialed (nil kernel is safe here).
+	v := enrichStep(step, action, newUserCache(nil, context.Background()))
 	if v.Action != "@alice/greet" {
 		t.Errorf("enrichStep: Action = %q, want @alice/greet", v.Action)
 	}
@@ -142,13 +143,20 @@ func TestEnrichStep(t *testing.T) {
 		t.Error("enrichStep: WaitingOnPeer should be false")
 	}
 
-	// Nil action → empty action field; waiting-on-peer flag flows through.
-	v2 := enrichStep(step, nil, true)
+	// Nil action → empty action field; a waiting step to a peer caller flags waiting_on_peer and
+	// resolves the required-caller handle from the (pre-seeded) cache.
+	peerStep := &kernel.Step{ID: "s2", Status: kernel.StepWaiting, RequiredCallerUserID: "peer1"}
+	uc := newUserCache(nil, context.Background())
+	uc.m["peer1"] = &kernel.User{Handle: "@peer", PublicKey: "pk"}
+	v2 := enrichStep(peerStep, nil, uc)
 	if v2.Action != "" {
 		t.Errorf("enrichStep(nil action): Action = %q, want empty", v2.Action)
 	}
 	if !v2.WaitingOnPeer {
 		t.Error("enrichStep: WaitingOnPeer should be true")
+	}
+	if v2.RequiredCallerHandle != "@peer" {
+		t.Errorf("enrichStep: RequiredCallerHandle = %q, want @peer", v2.RequiredCallerHandle)
 	}
 }
 
@@ -156,17 +164,24 @@ func TestEnrichProcess(t *testing.T) {
 	p := &kernel.Process{ID: "p1", Status: kernel.ProcessOpen}
 	when := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 
+	uc := newUserCache(nil, context.Background())
+	uc.m["owner1"] = &kernel.User{Handle: "@owner"}
+	p.OwnerUserID = "owner1"
+
 	// Not awaiting: no entry in the since map.
-	v := enrichProcess(p, map[string]time.Time{})
+	v := enrichProcess(p, map[string]time.Time{}, uc)
 	if v.AwaitingReceipt || v.AwaitingReceiptSince != nil {
 		t.Errorf("expected not awaiting, got %+v", v)
 	}
 	if v.ID != "p1" {
 		t.Errorf("embedded Process.ID = %q, want p1", v.ID)
 	}
+	if v.OwnerHandle != "@owner" {
+		t.Errorf("owner_handle = %q, want @owner", v.OwnerHandle)
+	}
 
 	// Awaiting: since map carries this process → flag + timestamp surface.
-	v2 := enrichProcess(p, map[string]time.Time{"p1": when})
+	v2 := enrichProcess(p, map[string]time.Time{"p1": when}, uc)
 	if !v2.AwaitingReceipt || v2.AwaitingReceiptSince == nil || !v2.AwaitingReceiptSince.Equal(when) {
 		t.Errorf("expected awaiting since %v, got %+v", when, v2)
 	}
@@ -518,5 +533,52 @@ func TestManualHTTPActionRoundTrip(t *testing.T) {
 	}
 	if len(got.HTTP.Params) != 1 || got.HTTP.Params[0].In != "path" {
 		t.Errorf("read-back params: %+v", got.HTTP.Params)
+	}
+}
+
+// userCache.handle returns the @handle, falling back to the raw id only when the user row is gone
+// (a purged peer, §13), and empty for an empty id.
+func TestUserCacheHandleFallback(t *testing.T) {
+	uc := newUserCache(nil, context.Background())
+	uc.m["u1"] = &kernel.User{Handle: "@alice"}
+	uc.m["gone"] = nil // cached miss (purged/unknown) → fall back to the id
+	if got := uc.handle("u1"); got != "@alice" {
+		t.Errorf("handle(u1) = %q, want @alice", got)
+	}
+	if got := uc.handle("gone"); got != "gone" {
+		t.Errorf("handle(gone) = %q, want raw-id fallback", got)
+	}
+	if got := uc.handle(""); got != "" {
+		t.Errorf("handle(empty) = %q, want empty", got)
+	}
+}
+
+// enrichTx resolves the three party handles and — critically — the raw *_user_id UUIDs must not
+// survive to the JSON (the omitempty-shadow drop, where a plain json:"-" would fail).
+func TestEnrichTxDropsUUIDs(t *testing.T) {
+	tv := &kernel.TransactionView{Transaction: &kernel.Transaction{
+		ID: "tx1", OwnerUserID: "o", CallerUserID: "c", TargetUserID: "t",
+	}}
+	uc := newUserCache(nil, context.Background())
+	uc.m["o"] = &kernel.User{Handle: "@owner"}
+	uc.m["c"] = &kernel.User{Handle: "@caller"}
+	uc.m["t"] = &kernel.User{Handle: "@target"}
+
+	v := enrichTx(tv, uc)
+	if v.OwnerHandle != "@owner" || v.CallerHandle != "@caller" || v.TargetHandle != "@target" {
+		t.Fatalf("handles: %q/%q/%q", v.OwnerHandle, v.CallerHandle, v.TargetHandle)
+	}
+	b, _ := json.Marshal(v)
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"owner_user_id", "caller_user_id", "target_user_id"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("%s must be dropped from tx JSON, got %v", k, m[k])
+		}
+	}
+	if m["owner_handle"] != "@owner" || m["id"] != "tx1" {
+		t.Errorf("expected owner_handle=@owner and id=tx1, got %v / %v", m["owner_handle"], m["id"])
 	}
 }

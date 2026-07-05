@@ -137,7 +137,7 @@ Federation has no HTTP surface: peer identity, gossip, manifests, the friend han
 | Operation | HTTP | CLI |
 |-----------|------|-----|
 | List processes | `GET /v1/processes` → process[]; own processes, or **all for a superuser** | `juice process list` |
-| Show process | `GET /v1/processes/{id}` → process (`available`, `locked`, `status`, `awaiting_receipt`, `awaiting_receipt_since?`) | `juice process show <id>` |
+| Show process | `GET /v1/processes/{id}` → process (`owner_handle`, `available`, `locked`, `status`, `awaiting_receipt`, `awaiting_receipt_since?`) | `juice process show <id>` |
 | End process | `POST /v1/processes/{id}/end` → 204 | `juice process end <id>` |
 
 Processes are created only by `run` and close automatically. `end` is the forced abort: it fails running calls, cancels waiting steps with their parked prices refunded, and returns remaining funds to the owner. An in-flight remote call is not force-failed by restart recovery and settles on its receipt.
@@ -151,7 +151,7 @@ Processes are created only by `run` and close automatically. `end` is the forced
 | Rate transaction | `POST /v1/transactions/{id}/rate` `{rating, note?}` → rating | `juice tx rate <id> <0\|1> [--note]` |
 | Verify remote receipt | `GET /v1/transactions/{id}/receipt-verification` → verification | `juice tx verify <id>` |
 
-A caller reads transactions where it is a captured party: payer (`owner_user_id`), caller (`caller_user_id`), or payee (`target_user_id`); a superuser reads all. `rating` must be 0 (bad) or 1 (good); `note` is an optional string. Transaction and list responses include a `rating` field — `{"value": 0|1, "note": string|null}` when rated, `null` when unrated. Transaction `args` and `result` fields are inline JSON objects. `gross` is the call's full allocation; `fee + net` is the value added paid out at settlement.
+A caller reads transactions where it is a captured party: payer, caller, or payee; a superuser reads all. Responses render each party as a `@handle` — `owner_handle` (payer), `caller_handle` (caller), `target_handle` (payee); the raw `*_user_id` UUIDs are not returned, since a user is addressed by handle, never an id (a purged party falls back to its raw id). `rating` must be 0 (bad) or 1 (good); `note` is an optional string. Transaction and list responses include a `rating` field — `{"value": 0|1, "note": string|null}` when rated, `null` when unrated. Transaction `args` and `result` fields are inline JSON objects. `gross` is the call's full allocation; `fee + net` is the value added paid out at settlement.
 
 Remote-proxy transactions include `remote_receipt_hash` and `remote_receipt_json`. `receipt-verification` verifies entirely from local data, in two parts: **receipt integrity** (signature against the peer's public key, stored JSON against its stored hash, `action_id` against the proxy) and **settlement consistency** (local outcome matches `receipt.status`; payment to the proxy user equals `receipt.charge`; the local refund arithmetic checks out). The receipt's own `gross/net/fee` are the remote kernel's economics and are reported, not compared. Returns `ErrInvalidState` for non-remote-proxy transactions.
 
@@ -164,7 +164,7 @@ Remote-proxy transactions include `remote_receipt_hash` and `remote_receipt_json
 | Show step | `GET /v1/steps/{id}` → step | `juice step show <id>` |
 | Complete step | `POST /v1/steps/{id}/complete` `{args}` → `{result, tx_id, trace_id, step_id}` | `juice step complete <id> [json]` |
 
-A step is a funded continuation: creation snapshots the action's price as `step.price` and parks it from `trace_id`; the process is derived from `Trace(trace_id).process_id`. Completion spends the parked price — no funds check occurs, and the completion's allocation and transaction `gross` are `step.price`. `required_caller` is a `@handle`; the server resolves it to `required_caller_user_id`. Step listing returns the caller's own steps (as process owner or required caller), or all of them for a superuser. `status` filter accepts `waiting`, `running`, `done`, or `cancelled`. The `args` field in the complete request is merged with the step's `partial_args` (completion `args` overwrites on key collision); the allowed completion input is derived as `action.input_schema \ keys(partial_args)` — a violation rejects the completion and leaves the step `waiting`, never recorded as an action failure. Step read and list responses include `price`, `action_id`, a computed `action` field (`@owner/name`), and `waiting_on_peer` on a waiting step whose required caller is a peer. An outstanding step keeps its process open.
+A step is a funded continuation: creation snapshots the action's price as `step.price` and parks it from `trace_id`; the process is derived from `Trace(trace_id).process_id`. Completion spends the parked price — no funds check occurs, and the completion's allocation and transaction `gross` are `step.price`. `required_caller` is a `@handle`; the server resolves it to `required_caller_user_id`. Step listing returns the caller's own steps (as process owner or required caller), or all of them for a superuser. `status` filter accepts `waiting`, `running`, `done`, or `cancelled`. The `args` field in the complete request is merged with the step's `partial_args` (completion `args` overwrites on key collision); the allowed completion input is derived as `action.input_schema \ keys(partial_args)` — a violation rejects the completion and leaves the step `waiting`, never recorded as an action failure. Step read and list responses include `price`, `action_id`, a computed `action` field (`@owner/name`), `required_caller_handle` (the required caller as a `@handle`, not the raw `required_caller_user_id`), and `waiting_on_peer` on a waiting step whose required caller is a peer. An outstanding step keeps its process open.
 
 ### System Actions
 
@@ -203,7 +203,7 @@ The operator verbs no ordinary user performs — money, access, federation trust
 | Withdraw credits | `juice admin withdraw <user\|key> <amount> [--reason --external-key]` |
 | Friend a kernel | `juice admin friend <key>` |
 | Unfriend a kernel | `juice admin unfriend <user\|key>` |
-| List peers | `juice admin peers [--gossip]` — friends; `--gossip` adds the known-network directory roster |
+| List peers | `juice admin peers [--gossip]` — friends (`handle`, `public_key`, `available`, `locked`; no internal id); `--gossip` adds the known-network directory roster |
 | Inspect a kernel | `juice admin inspect <key\|user>` — by key, or `@handle` if already friended; identity, public actions, transacted friends, and reachability |
 | Show own identity | `juice admin identity` — this kernel's public key, handle, listen addresses |
 

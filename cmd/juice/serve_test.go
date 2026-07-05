@@ -393,7 +393,7 @@ func TestServeCreateAndGetAction(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	userID, tok := makeUser(t, k, "@srv-actowner")
+	_, tok := makeUser(t, k, "@srv-actowner")
 
 	resp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "http-action", "kind": "http",
@@ -403,13 +403,20 @@ func TestServeCreateAndGetAction(t *testing.T) {
 		resp.Body.Close()
 		t.Fatalf("create action: expected 201, got %d", resp.StatusCode)
 	}
-	var action kernel.Action
+	var action struct {
+		kernel.Action
+		ActionRef string `json:"action"`
+	}
 	decodeResponse(t, resp, &action)
 	if action.ID == "" {
 		t.Error("expected action with ID")
 	}
-	if action.OwnerUserID != userID {
-		t.Errorf("action owner: got %q, want %q", action.OwnerUserID, userID)
+	// The owner is identified by @handle (owner_handle / action=@owner/name), never the raw UUID.
+	if action.OwnerHandle != "@srv-actowner" || action.ActionRef != "@srv-actowner/"+action.Name {
+		t.Errorf("action owner: got handle=%q ref=%q, want @srv-actowner", action.OwnerHandle, action.ActionRef)
+	}
+	if action.OwnerUserID != "" {
+		t.Error("action response should not expose owner_user_id")
 	}
 
 	resp2 := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, tok)
@@ -1540,17 +1547,21 @@ func TestWaitingOnPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cache := map[string]bool{}
+	uc := newUserCache(k, ctx)
 	peerStep := &kernel.Step{Status: kernel.StepWaiting, RequiredCallerUserID: peer.ID}
-	if !waitingOnPeer(k, ctx, peerStep, cache) {
+	pv := enrichStep(peerStep, nil, uc)
+	if !pv.WaitingOnPeer {
 		t.Error("step addressed to a peer should be waiting_on_peer")
 	}
+	if pv.RequiredCallerHandle != "@peer-caller" {
+		t.Errorf("required_caller_handle: got %q, want @peer-caller", pv.RequiredCallerHandle)
+	}
 	localStep := &kernel.Step{Status: kernel.StepWaiting, RequiredCallerUserID: localID}
-	if waitingOnPeer(k, ctx, localStep, cache) {
+	if enrichStep(localStep, nil, uc).WaitingOnPeer {
 		t.Error("step addressed to a local user should not be waiting_on_peer")
 	}
 	doneStep := &kernel.Step{Status: kernel.StepDone, RequiredCallerUserID: peer.ID}
-	if waitingOnPeer(k, ctx, doneStep, cache) {
+	if enrichStep(doneStep, nil, uc).WaitingOnPeer {
 		t.Error("a non-waiting step should never be waiting_on_peer")
 	}
 }

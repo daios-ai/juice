@@ -590,10 +590,13 @@ func TestFlow_WebhookCompleteStep(t *testing.T) {
 		txResp.Body.Close()
 		t.Fatalf("get tx: expected 200, got %d", txResp.StatusCode)
 	}
-	var tx kernel.Transaction
+	var tx struct {
+		kernel.Transaction
+		CallerHandle string `json:"caller_handle"`
+	}
 	decodeResponse(t, txResp, &tx)
-	if tx.CallerUserID != webhookID {
-		t.Errorf("tx caller_user_id: got %s, want %s (webhook)", tx.CallerUserID, webhookID)
+	if tx.CallerHandle != "@wh-webhook-sys" {
+		t.Errorf("tx caller_handle: got %s, want @wh-webhook-sys (webhook)", tx.CallerHandle)
 	}
 	if tx.Status != kernel.TxSuccess {
 		t.Errorf("tx status: got %s, want success", tx.Status)
@@ -1716,7 +1719,7 @@ func TestFlow_Message(t *testing.T) {
 
 // TestFlow_ThreePartyRoleLaw: P ≠ C ≠ A — process owner P creates a step for bot C to
 // call provider A's action. All three parties independently read the transaction and the
-// role fields (owner_user_id, caller_user_id, target_user_id) are distinct and correct.
+// role handles (owner_handle, caller_handle, target_handle) are distinct and correct.
 func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1729,7 +1732,7 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 
 	ctx := context.Background()
 	pID, pTok := makeUser(t, k, "@3p-owner")
-	cID, cTok := makeUser(t, k, "@3p-caller")
+	_, cTok := makeUser(t, k, "@3p-caller")
 	_, aTok := makeUser(t, k, "@3p-provider")
 
 	giveCredits(t, k, pID, 500)
@@ -1781,7 +1784,6 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 	}
 
 	// All three parties can read the transaction.
-	aUser, _ := k.ReadUserByHandle(ctx, "@3p-provider")
 	for _, tok := range []string{pTok, cTok, aTok} {
 		r := httpDo(t, srv, "GET", "/v1/transactions/"+txID, nil, tok)
 		if r.StatusCode != http.StatusOK {
@@ -1791,14 +1793,18 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 		}
 		var tx map[string]any
 		decodeResponse(t, r, &tx)
-		if tx["owner_user_id"] != pID {
-			t.Errorf("tx.owner_user_id: got %v, want %s", tx["owner_user_id"], pID)
+		if tx["owner_handle"] != "@3p-owner" {
+			t.Errorf("tx.owner_handle: got %v, want @3p-owner", tx["owner_handle"])
 		}
-		if tx["caller_user_id"] != cID {
-			t.Errorf("tx.caller_user_id: got %v, want %s", tx["caller_user_id"], cID)
+		if tx["caller_handle"] != "@3p-caller" {
+			t.Errorf("tx.caller_handle: got %v, want @3p-caller", tx["caller_handle"])
 		}
-		if tx["target_user_id"] != aUser.ID {
-			t.Errorf("tx.target_user_id: got %v, want %s", tx["target_user_id"], aUser.ID)
+		if tx["target_handle"] != "@3p-provider" {
+			t.Errorf("tx.target_handle: got %v, want @3p-provider", tx["target_handle"])
+		}
+		// The raw party UUIDs are no longer exposed (a user is addressed by @handle, §14).
+		if _, ok := tx["owner_user_id"]; ok {
+			t.Error("tx response should not expose owner_user_id")
 		}
 	}
 }

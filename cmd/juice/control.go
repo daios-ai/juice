@@ -99,7 +99,11 @@ func (s *server) ctlAdjust(direction string) http.HandlerFunc {
 		} else {
 			adj, err = s.kernel.Withdraw(r.Context(), callerFrom(r), u.ID, req.Amount, req.Reason, req.ExternalKey)
 		}
-		writeOr(w, adj, err)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, enrichAdjustment(adj, newUserCache(s.kernel, r.Context())))
 	}
 }
 
@@ -109,7 +113,7 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	out := map[string]any{"peers": peers}
+	out := map[string]any{"peers": peerViews(peers)}
 	if r.URL.Query().Get("gossip") == "1" {
 		roster, err := s.kernel.DiscoveryRoster(r.Context())
 		if err != nil {

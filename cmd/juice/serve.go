@@ -820,7 +820,7 @@ func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if txs == nil {
-		txs = []*kernel.TransactionView{}
+		txs = []*txView{}
 	}
 	writeJSON(w, http.StatusOK, txs)
 }
