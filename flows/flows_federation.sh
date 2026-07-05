@@ -249,7 +249,7 @@ flow_fed_gossip_discovery() {
         sleep 0.2
     done
     assert_nonempty "fed_gossip.r_in_gossip" "$rkey"
-    local guses; guses=$(python3 -c "import sys,json;print(next((a.get('uses',0) for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','') for a in f.get('actions',[]) if a.get('name')=='sys/greet'),0))" "$ldoc" 2>/dev/null)
+    local guses; guses=$(python3 -c "import sys,json;print(next((a.get('uses',0) for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','') for a in f.get('actions',[]) if a.get('name')=='@sys/greet'),0))" "$ldoc" 2>/dev/null)
     assert_eq "fed_gossip.earned_stats" yes "$([ "${guses:-0}" -ge 1 ] && echo yes || echo no)"
 
     assert_eq "fed_gossip.t_friends_r" 0 "$(j "$dbt" "$ht" admin friend "$rkey" >/dev/null 2>&1; echo $?)"
@@ -261,4 +261,46 @@ flow_fed_gossip_discovery() {
     # T's own call accumulates T's own stats.
     assert_nonempty "fed_gossip.t_call_succeeds" "$(strfield "$(jj "$dbt" "$ht" run @kernel-r/sys/greet '{}')" tx_id)"
     assert_jnum "fed_gossip.t_stats_accumulate" "$(jj "$dbt" "$ht" action stats "$tp")" uses 1
+}
+
+# flow_fed_discovery: cold-start discovery. L boots with R as its only bootstrap peer and must learn
+# R into its known network automatically — no `admin friend` — via the startup discovery pass that
+# advertises and pulls gossip from bootstrap peers. Proves the two-network split: the known network
+# (global, by key) grows without friending (which stays deliberate and local).
+flow_fed_discovery() {
+    echo "=== FLOW fed_discovery ==="
+    local dir; dir=$(new_dir)
+    local dbr="$dir/r/juice.db" hr="$dir/rsys" dbl="$dir/l/juice.db" hl="$dir/lsys"
+    mkdir -p "$dir/r" "$dir/l" "$hr/.juice" "$hl/.juice"
+
+    local bport; bport=$(backend_port); start_backend "$bport" 200 '{"greeting":"hi"}'
+    start_server "$dbr" "$hr" kernel_handle=@kernel-r discovery_interval_seconds=2 \
+        || { fail "fed_discovery.setup" "R did not start"; return; }
+    local boot; boot=$(kernel_fed_addr "$dbr")
+    [ -n "$boot" ] || { fail "fed_discovery.boot" "no R fed addr"; return; }
+    j "$dbr" "$hr" auth login @sys --password syspass >/dev/null 2>&1
+    local rkey; rkey=$(kernel_key "$dbr" "$hr")
+    [ -n "$rkey" ] || { fail "fed_discovery.rkey" "no R key"; return; }
+
+    # R publishes a public action so its gossip carries something to display.
+    local rid; rid=$(strfield "$(jj "$dbr" "$hr" action create greet --kind http --source "http://127.0.0.1:$bport" --description greet --price 0)" id)
+    j "$dbr" "$hr" action enable "$rid" >/dev/null 2>&1
+    j "$dbr" "$hr" action update "$rid" --public >/dev/null 2>&1
+
+    # L joins with R as its ONLY bootstrap peer; it must discover R without friending it.
+    start_server "$dbl" "$hl" kernel_handle=@kernel-l bootstrap_peers="$boot" discovery_interval_seconds=2 \
+        || { fail "fed_discovery.l" "L did not start"; return; }
+    j "$dbl" "$hl" auth login @sys --password syspass >/dev/null 2>&1
+
+    # Poll L's known network until R appears — a discovery pass runs at startup, then every 2s.
+    local found=no i
+    for i in $(seq 1 20); do
+        if jj "$dbl" "$hl" admin peers --gossip | grep -q "$rkey"; then found=yes; break; fi
+        sleep 1
+    done
+    assert_eq "fed_discovery.r_discovered_without_friend" yes "$found"
+    # The roster names actions owner-qualified (@sys/greet), not a bare "greet".
+    assert_contains "fed_discovery.qualified_action" "@sys/greet" "$(jj "$dbl" "$hl" admin peers --gossip)"
+    # L never friended R: its friend list (proxy users) holds no R.
+    assert_eq "fed_discovery.no_friend" 0 "$(jj "$dbl" "$hl" admin peers | grep -c "$rkey")"
 }

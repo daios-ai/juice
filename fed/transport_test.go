@@ -69,6 +69,44 @@ func TestPeerIDKeyRoundTrip(t *testing.T) {
 	}
 }
 
+// BootstrapKeys derives the base64url Ed25519 key of each configured bootstrap peer, so the
+// discovery loop can seed from — and an operator can inspect — a node given only its multiaddr.
+func TestBootstrapKeys(t *testing.T) {
+	var want []string
+	var infos []peer.AddrInfo
+	for i := 0; i < 3; i++ {
+		pub, _, _ := ed25519.GenerateKey(rand.Reader)
+		k := base64.RawURLEncoding.EncodeToString(pub)
+		id, err := PeerIDFromKey(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, k)
+		infos = append(infos, peer.AddrInfo{ID: id})
+	}
+	tr := &Transport{bootstrap: infos}
+	got := tr.BootstrapKeys()
+	if len(got) != len(want) {
+		t.Fatalf("got %d keys, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("key %d: got %q want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// The discovery rendezvous CID is deterministic — every kernel must derive the same key with no
+// coordination, or provider records never meet.
+func TestDiscoveryCIDStable(t *testing.T) {
+	if !juiceDiscoveryCID.Defined() {
+		t.Fatal("discovery cid undefined")
+	}
+	if juiceDiscoveryCID.String() != mustDiscoveryCID().String() {
+		t.Fatal("discovery cid not deterministic")
+	}
+}
+
 func TestPeerIDFromKeyRejectsGarbage(t *testing.T) {
 	if _, err := PeerIDFromKey("not-base64url!!"); err == nil {
 		t.Error("expected error for non-base64url key")

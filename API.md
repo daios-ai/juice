@@ -84,7 +84,7 @@ Every command runs by calling the server over HTTP; the base URL resolves from `
 |-----------|------|-----|
 | Health check | `GET /health` (open) → `{status}` | `juice health [--url]` |
 
-Federation has no HTTP surface: peer identity, gossip, manifests, the friend handshake, and inbound calls travel over the cross-kernel transport (§13), not over this API. Gossip is surfaced locally by `admin peers --gossip`; a remote kernel is inspected with `admin inspect <key>`.
+Federation has no HTTP surface: peer identity, gossip, manifests, the friend handshake, and inbound calls travel over the cross-kernel transport (§13), not over this API. The known network (discovered kernels) is seeded automatically at `serve` from the bootstrap peers and grown by DHT provider-record enumeration; `admin peers --gossip` renders it as a grouped roster (kernel → introducer → action, with your own earned stats shown distinctly), and a remote kernel is inspected with `admin inspect <key>`.
 
 ### Authentication
 
@@ -203,7 +203,7 @@ The operator verbs no ordinary user performs — money, access, federation trust
 | Withdraw credits | `juice admin withdraw <user\|key> <amount> [--reason --external-key]` |
 | Friend a kernel | `juice admin friend <key>` |
 | Unfriend a kernel | `juice admin unfriend <user\|key>` |
-| List peers | `juice admin peers [--gossip]` |
+| List peers | `juice admin peers [--gossip]` — friends; `--gossip` adds the known-network directory roster |
 | Inspect a kernel | `juice admin inspect <key\|user>` — by key, or `@handle` if already friended; identity, public actions, transacted friends, and reachability |
 | Show own identity | `juice admin identity` — this kernel's public key, handle, listen addresses |
 

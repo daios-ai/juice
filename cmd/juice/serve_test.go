@@ -8,11 +8,14 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2323,4 +2326,86 @@ func containsProcess(t *testing.T, resp *http.Response, id string) bool {
 		}
 	}
 	return false
+}
+
+// ---- discovery ----
+
+// fakeDiscoverer stands in for *fed.Transport so the discovery pass is exercised without libp2p.
+type fakeDiscoverer struct {
+	bootstrap  []string
+	providers  []string
+	gossip     map[string]json.RawMessage
+	advertised int
+	gossiped   []string
+}
+
+func (f *fakeDiscoverer) Advertise(context.Context) error                 { f.advertised++; return nil }
+func (f *fakeDiscoverer) BootstrapKeys() []string                         { return f.bootstrap }
+func (f *fakeDiscoverer) DiscoverProviders(context.Context, int) []string { return f.providers }
+func (f *fakeDiscoverer) Gossip(_ context.Context, key string) (json.RawMessage, error) {
+	f.gossiped = append(f.gossiped, key)
+	if raw, ok := f.gossip[key]; ok {
+		return raw, nil
+	}
+	return nil, fmt.Errorf("offline")
+}
+
+// discoverOnce advertises once, dedups bootstrap ∪ providers, pulls gossip from each reachable key,
+// and accumulates it introduced-by the kernel's own key (self-report). Offline peers are skipped.
+func TestDiscoverOnce(t *testing.T) {
+	mkGossip := func(pk string) json.RawMessage {
+		b, _ := json.Marshal(kernel.GossipResponse{PublicKey: pk, Handle: "@" + pk})
+		return b
+	}
+	f := &fakeDiscoverer{
+		bootstrap: []string{"A"},
+		providers: []string{"A", "B", "C"}, // A duplicates bootstrap; C is offline (no gossip)
+		gossip:    map[string]json.RawMessage{"A": mkGossip("A"), "B": mkGossip("B")},
+	}
+	var got []string
+	acc := func(_ context.Context, g *kernel.GossipResponse, introducer string) error {
+		if introducer != g.PublicKey {
+			t.Errorf("introducer %q must equal own key %q (self-report)", introducer, g.PublicKey)
+		}
+		got = append(got, g.PublicKey)
+		return nil
+	}
+	discoverOnce(context.Background(), f, acc, log.Discard())
+
+	if f.advertised != 1 {
+		t.Errorf("advertised %d times, want 1", f.advertised)
+	}
+	sort.Strings(got)
+	if strings.Join(got, ",") != "A,B" {
+		t.Errorf("accumulated %v, want [A B] (dup deduped, offline C skipped)", got)
+	}
+}
+
+// startDiscoveryLoop runs one pass immediately, then ticks, and stops when ctx is cancelled.
+func TestStartDiscoveryLoop(t *testing.T) {
+	var mu sync.Mutex
+	passes := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		startDiscoveryLoop(ctx, 5*time.Millisecond, func(context.Context) {
+			mu.Lock()
+			passes++
+			mu.Unlock()
+		})
+		close(done)
+	}()
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("loop did not stop on ctx cancel")
+	}
+	mu.Lock()
+	p := passes
+	mu.Unlock()
+	if p < 2 {
+		t.Errorf("expected >= 2 passes (startup + ticks), got %d", p)
+	}
 }

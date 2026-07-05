@@ -111,12 +111,12 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{"peers": peers}
 	if r.URL.Query().Get("gossip") == "1" {
-		discovered, err := s.kernel.ListDiscoveredKernels(r.Context())
+		roster, err := s.kernel.DiscoveryRoster(r.Context())
 		if err != nil {
 			writeErr(w, err)
 			return
 		}
-		out["discovered"] = discovered
+		out["roster"] = roster
 	}
 	writeJSON(w, http.StatusOK, out)
 }

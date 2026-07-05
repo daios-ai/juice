@@ -46,6 +46,23 @@ func TestPeerRetention(t *testing.T) {
 	}
 }
 
+func TestDiscoveryInterval(t *testing.T) {
+	// Configured positive value converts seconds → duration.
+	if got := (ServerConfig{DiscoveryIntervalSeconds: 42}).discoveryInterval(); got != 42*time.Second {
+		t.Errorf("configured: got %v, want 42s", got)
+	}
+	// Zero and negative fall back to the default (discovery works out of the box).
+	if got := (ServerConfig{DiscoveryIntervalSeconds: 0}).discoveryInterval(); got != 300*time.Second {
+		t.Errorf("zero: got %v, want 300s", got)
+	}
+	if got := (ServerConfig{DiscoveryIntervalSeconds: -1}).discoveryInterval(); got != 300*time.Second {
+		t.Errorf("negative: got %v, want 300s", got)
+	}
+	if DefaultServerConfig().discoveryInterval() != 300*time.Second {
+		t.Errorf("default config discovery = %v, want 300s", DefaultServerConfig().discoveryInterval())
+	}
+}
+
 func TestDefaultServerConfig(t *testing.T) {
 	cfg := DefaultServerConfig()
 	if cfg.Native.LLM.URL == "" {

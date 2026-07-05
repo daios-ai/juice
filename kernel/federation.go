@@ -550,6 +550,64 @@ func (k *Kernel) ListDiscoveredKernels(ctx context.Context) ([]*DiscoveredKernel
 	return k.store.ListDiscoveredKernels(ctx)
 }
 
+// DiscoveryRoster groups the raw discovered_kernels rows into the known-network directory view
+// (§13): one entry per kernel, each carrying every introducer's gossiped action stats (self-report
+// when the introducer is the kernel itself, hearsay otherwise) and, for kernels we have friended
+// and transacted with, our own earned stats as ground truth. Enrichment lives here (not the CLI)
+// so both the CLI and any HTTP client get the same shape. Display only — never callability.
+func (k *Kernel) DiscoveryRoster(ctx context.Context) ([]*KernelRoster, error) {
+	rows, err := k.store.ListDiscoveredKernels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byKey := map[string]*KernelRoster{}
+	var order []string
+	for _, d := range rows {
+		r := byKey[d.PublicKey]
+		if r == nil {
+			r = &KernelRoster{PublicKey: d.PublicKey, Handle: d.Handle}
+			byKey[d.PublicKey] = r
+			order = append(order, d.PublicKey)
+		}
+		if r.Handle == "" {
+			r.Handle = d.Handle
+		}
+		var actions []GossipAction
+		_ = json.Unmarshal(d.StatsJSON, &actions)
+		r.Sources = append(r.Sources, RosterSource{
+			IntroducedBy: d.IntroducedBy,
+			SelfReported: d.IntroducedBy == d.PublicKey,
+			Actions:      actions,
+		})
+	}
+	// Attach our own earned stats for any discovered kernel we have a local proxy user for.
+	for _, key := range order {
+		proxy, err := k.store.ReadUserByPublicKey(ctx, key)
+		if err != nil || proxy == nil {
+			continue
+		}
+		stats, err := k.store.ListStatsByOwner(ctx, proxy.ID)
+		if err != nil {
+			continue
+		}
+		for _, s := range stats {
+			act, err := k.store.ReadAction(ctx, s.ActionID)
+			if err != nil || act == nil {
+				continue
+			}
+			byKey[key].Own = append(byKey[key].Own, GossipAction{
+				ActionID: s.ActionID, Name: qualifiedActionName(act), Price: act.Price,
+				Uses: s.Uses, Rating: s.RatingEstimate,
+			})
+		}
+	}
+	out := make([]*KernelRoster, 0, len(order))
+	for _, key := range order {
+		out = append(out, byKey[key])
+	}
+	return out, nil
+}
+
 // PurgeIdlePeers reaps peers idle past PeerRetention at zero balance (§13 Retention): it deletes
 // each such peer's proxy actions, stats, stat_tags, and discovered_kernels rows and forgets the
 // peer identity, keeping the transaction ledger intact. Internal maintenance (like
@@ -578,6 +636,22 @@ func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 	return purged, nil
 }
 
+// qualifiedActionName renders an action as @owner/name — the address form used everywhere else —
+// so gossip and roster views name actions consistently (@sys/message, @alice/greet) rather than as
+// bare names. For a remote proxy the local Name already encodes the remote owner (owner/name), and
+// the OwnerHandle is only our private mount alias for the peer; naming it in the peer's own
+// namespace (a leading @) keeps the name portable — the same action reads identically whether the
+// peer self-reports it or we vouch for it. Falls back to the bare name if OwnerHandle wasn't loaded.
+func qualifiedActionName(a *Action) string {
+	if a.Kind == KindRemoteProxy {
+		return "@" + a.Name
+	}
+	if a.OwnerHandle != "" {
+		return a.OwnerHandle + "/" + a.Name
+	}
+	return a.Name
+}
+
 // GetGossip returns this kernel's gossip payload: identity, public active actions, and peer list.
 func (k *Kernel) GetGossip(ctx context.Context) (*GossipResponse, error) {
 	var pubKeyB64 string
@@ -599,7 +673,7 @@ func (k *Kernel) GetGossip(ctx context.Context) (*GossipResponse, error) {
 		stats, _ := k.store.ReadStats(ctx, a.ID)
 		ga := GossipAction{
 			ActionID:    a.ID,
-			Name:        a.Name,
+			Name:        qualifiedActionName(a),
 			Description: a.Description,
 			Price:       a.Price,
 		}
@@ -628,7 +702,7 @@ func (k *Kernel) GetGossip(ctx context.Context) (*GossipResponse, error) {
 			}
 			fActions = append(fActions, GossipAction{
 				ActionID:    s.ActionID,
-				Name:        act.Name,
+				Name:        qualifiedActionName(act),
 				Description: act.Description,
 				Price:       act.Price,
 				Uses:        s.Uses,

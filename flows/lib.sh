@@ -67,7 +67,7 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 # Keys: fee_bps script_timeout_ms kernel_handle make_max_steps bootstrap_peers.
 write_config() {
     local db="$1"; shift
-    local fee_bps=0 script_timeout_ms=10000 kernel_handle="@test-kernel" make_max_steps=5 bootstrap_peers="" remote_retry_interval_seconds=60
+    local fee_bps=0 script_timeout_ms=10000 kernel_handle="@test-kernel" make_max_steps=5 bootstrap_peers="" remote_retry_interval_seconds=60 discovery_interval_seconds=300
     local a
     for a in "$@"; do case "$a" in
         fee_bps=*)                       fee_bps=${a#*=} ;;
@@ -76,6 +76,7 @@ write_config() {
         make_max_steps=*)                make_max_steps=${a#*=} ;;
         bootstrap_peers=*)               bootstrap_peers=${a#*=} ;;
         remote_retry_interval_seconds=*) remote_retry_interval_seconds=${a#*=} ;;
+        discovery_interval_seconds=*)    discovery_interval_seconds=${a#*=} ;;
     esac; done
     local bp_json="[]"
     [ -n "$bootstrap_peers" ] && bp_json="[\"$bootstrap_peers\"]"
@@ -92,7 +93,8 @@ write_config() {
   "server_url": "",
   "kernel_handle": "$kernel_handle",
   "bootstrap_peers": $bp_json,
-  "remote_retry_interval_seconds": $remote_retry_interval_seconds
+  "remote_retry_interval_seconds": $remote_retry_interval_seconds,
+  "discovery_interval_seconds": $discovery_interval_seconds
 }
 EOF
 }

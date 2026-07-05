@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p"
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -22,6 +23,7 @@ import (
 	relayv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/multiformats/go-multiaddr"
+	"github.com/multiformats/go-multihash"
 )
 
 // This file is the libp2p transport implementation behind the fed.go seam: identity derivation,
@@ -273,6 +275,72 @@ func (t *Transport) resolve(ctx context.Context, peerKey string) (peer.ID, error
 		lastErr = fmt.Errorf("not found")
 	}
 	return "", fmt.Errorf("fed: cannot resolve peer %s: %w", pid, lastErr)
+}
+
+// ---- Discovery (the known-network directory engine, §13) ----
+//
+// Discovery is separate from gossip: gossip carries trade-backed reputation, while the DHT
+// provider-record rendezvous below is the fast, broad directory. Every kernel advertises itself
+// under one fixed content key and enumerates the same key to learn who else is online. Learning a
+// kernel this way grants nothing (§13) — it only fills the address book; calling still needs a
+// friendship and a deposit.
+
+const discoveryRendezvous = "juice/kernel/discovery/1"
+
+// juiceDiscoveryCID is the fixed content key every kernel provides and looks up to find peers. It
+// is a pure function of discoveryRendezvous, so every kernel computes the same value with no
+// coordination.
+var juiceDiscoveryCID = mustDiscoveryCID()
+
+func mustDiscoveryCID() cid.Cid {
+	mh, err := multihash.Sum([]byte(discoveryRendezvous), multihash.SHA2_256, -1)
+	if err != nil {
+		panic(fmt.Sprintf("fed: discovery cid: %v", err))
+	}
+	return cid.NewCidV1(cid.Raw, mh)
+}
+
+// BootstrapKeys returns the base64url Ed25519 keys of the configured bootstrap peers — the same
+// key format friend/inspect/gossip take. The libp2p peer ID inlines the Ed25519 key
+// (KeyFromPeerID), so this is the whole peer-ID→key bridge: the discovery loop can seed from, and
+// an operator can inspect, a bootstrap node addressed only by its multiaddr.
+func (t *Transport) BootstrapKeys() []string {
+	var out []string
+	for _, ai := range t.bootstrap {
+		if k, err := KeyFromPeerID(ai.ID); err == nil {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// Advertise announces this kernel under the fixed juice discovery key so peers enumerating it find
+// us. Provider records expire, so the discovery loop re-advertises each pass. Best effort: an
+// unreachable DHT returns an error the caller logs and ignores.
+func (t *Transport) Advertise(ctx context.Context) error {
+	return t.dht.Provide(ctx, juiceDiscoveryCID, true)
+}
+
+// DiscoverProviders enumerates kernels advertising the juice discovery key and returns their
+// base64url keys (up to limit), excluding ourselves. This is the directory pull: it grows the
+// known network at the rate kernels come online, independent of who we have friended or traded
+// with.
+func (t *Transport) DiscoverProviders(ctx context.Context, limit int) []string {
+	self := t.host.ID()
+	seen := map[string]bool{}
+	var out []string
+	for ai := range t.dht.FindProvidersAsync(ctx, juiceDiscoveryCID, limit) {
+		if ai.ID == self {
+			continue
+		}
+		k, err := KeyFromPeerID(ai.ID)
+		if err != nil || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	return out
 }
 
 func parseAddrInfos(addrs []string) ([]peer.AddrInfo, error) {

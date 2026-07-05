@@ -99,6 +99,22 @@ func runServer(addr string) error {
 		retryCtx, retryCancel := context.WithCancel(context.Background())
 		defer retryCancel()
 		go startRemoteRetryLoop(retryCtx, k.PendingRemoteTraces, k.RetryRemoteTrace, globalCfg.remoteRetryInterval())
+
+		// Grow the known network (§13): advertise under the discovery rendezvous and pull gossip
+		// from the bootstrap seeds + enumerated DHT providers into discovered_kernels, so a fresh
+		// box has a directory to friend from without already knowing anyone. Empty bootstrap_peers
+		// means neither announce nor discover, so skip the loop entirely. Best-effort; stops with
+		// runServer.
+		if len(globalCfg.BootstrapPeers) > 0 {
+			discCtx, discCancel := context.WithCancel(context.Background())
+			defer discCancel()
+			disc := fedTransport
+			go startDiscoveryLoop(discCtx, globalCfg.discoveryInterval(), func(c context.Context) {
+				pctx, cancel := context.WithTimeout(c, discoveryPassTimeout)
+				defer cancel()
+				discoverOnce(pctx, disc, k.AccumulateGossip, logger)
+			})
+		}
 	}
 
 	// Reap peers idle past peer_retention_days (§13 Retention) on a slow timer, plus one pass now.
@@ -187,6 +203,69 @@ func startPeerRetentionSweep(ctx context.Context, purge func(context.Context) (i
 			return
 		case <-ticker.C:
 			_, _ = purge(ctx)
+		}
+	}
+}
+
+// discoveryFanout caps how many DHT-enumerated provider keys one pass pulls gossip from, and
+// discoveryPassTimeout bounds a whole pass so a slow DHT or an unreachable peer can't stall the
+// ticker. The directory keeps filling across passes, so a per-pass cap costs only latency.
+const (
+	discoveryFanout      = 25
+	discoveryPassTimeout = 30 * time.Second
+)
+
+// fedDiscoverer is the transport capability the discovery pass needs; *fed.Transport satisfies it,
+// and tests supply a fake so the pass logic is exercised without libp2p.
+type fedDiscoverer interface {
+	Advertise(ctx context.Context) error
+	BootstrapKeys() []string
+	DiscoverProviders(ctx context.Context, limit int) []string
+	Gossip(ctx context.Context, peerKey string) (json.RawMessage, error)
+}
+
+// discoverOnce runs one known-network refresh (§13): advertise under the discovery rendezvous, then
+// pull gossip from the bootstrap seeds plus enumerated DHT providers and accumulate each into the
+// discovered-kernels table. Best-effort throughout — an offline DHT or peer is skipped, never fatal.
+// The introducer is the pulled kernel's own key (a first-party self-report); AccumulateGossip records
+// that kernel's transacted friends introduced-by it.
+func discoverOnce(ctx context.Context, d fedDiscoverer, accumulate func(context.Context, *kernel.GossipResponse, string) error, logger *log.Logger) {
+	if err := d.Advertise(ctx); err != nil {
+		logger.Debug("discovery.advertise_failed", "error", err)
+	}
+	keys := map[string]bool{}
+	for _, k := range d.BootstrapKeys() {
+		keys[k] = true
+	}
+	for _, k := range d.DiscoverProviders(ctx, discoveryFanout) {
+		keys[k] = true
+	}
+	for key := range keys {
+		raw, err := d.Gossip(ctx, key)
+		if err != nil {
+			continue // peer offline or unreachable; a later pass retries
+		}
+		var g kernel.GossipResponse
+		if json.Unmarshal(raw, &g) != nil || g.PublicKey == "" {
+			continue
+		}
+		_ = accumulate(ctx, &g, g.PublicKey)
+	}
+}
+
+// startDiscoveryLoop refreshes the known network (§13) once immediately, then every interval until
+// ctx is cancelled. Mirrors startPeerRetentionSweep; the pass is injected so the loop is testable
+// without libp2p. Runs are sequential (a tick never overlaps the previous pass).
+func startDiscoveryLoop(ctx context.Context, interval time.Duration, pass func(context.Context)) {
+	pass(ctx) // one pass at startup
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pass(ctx)
 		}
 	}
 }

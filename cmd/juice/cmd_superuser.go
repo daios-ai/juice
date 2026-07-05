@@ -302,14 +302,14 @@ func peerListCmd() *cobra.Command {
 				path += "?gossip=1"
 			}
 			var out struct {
-				Peers      []*kernel.User             `json:"peers"`
-				Discovered []*kernel.DiscoveredKernel `json:"discovered"`
+				Peers  []*kernel.User         `json:"peers"`
+				Roster []*kernel.KernelRoster `json:"roster"`
 			}
 			if err := apiCall(context.Background(), "GET", path, nil, &out); err != nil {
 				return err
 			}
 			if flagJSON {
-				return printJSON(out.Peers)
+				return printJSON(out)
 			}
 			if len(out.Peers) == 0 {
 				fmt.Println("No peers registered.")
@@ -320,40 +320,64 @@ func peerListCmd() *cobra.Command {
 					if p.DeniedAt != nil {
 						denied = " [denied]"
 					}
-					k := p.PublicKey
-					if len(k) > 16 {
-						k = k[:16] + "…"
-					}
-					fmt.Printf("%-20s %-36s %s%s\n", p.Handle, p.ID, k, denied)
+					fmt.Printf("%-20s %-36s %s%s\n", p.Handle, p.ID, shortKey(p.PublicKey), denied)
 				}
 			}
-			if showGossip && len(out.Discovered) > 0 {
-				peerHandle := map[string]string{}
-				for _, p := range out.Peers {
-					if len(p.PublicKey) >= 16 {
-						peerHandle[p.PublicKey[:16]] = p.Handle
-					}
-				}
-				fmt.Println("\nDiscovered via gossip:")
-				for _, d := range out.Discovered {
-					fp := d.IntroducedBy
-					if len(fp) > 16 {
-						fp = fp[:16]
-					}
-					via := fp
-					if h, ok := peerHandle[fp]; ok {
-						via = fp + " (" + h + ")"
-					}
-					dk := d.PublicKey
-					if len(dk) > 16 {
-						dk = dk[:16] + "…"
-					}
-					fmt.Printf("  %-20s %-20s (via %s)\n", d.Handle, dk, via)
-				}
+			if showGossip {
+				renderRoster(out.Roster, out.Peers)
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&showGossip, "gossip", false, "Also show gossip-discovered kernels")
+	cmd.Flags().BoolVar(&showGossip, "gossip", false, "Also show the known-network directory (discovery)")
 	return cmd
+}
+
+// shortKey truncates a base64url public key for display; a friend's ID stays legible while long
+// keys don't wrap the terminal.
+func shortKey(k string) string {
+	if len(k) > 16 {
+		return k[:16] + "…"
+	}
+	return k
+}
+
+// renderRoster prints the known-network directory (§13) grouped kernel → introducer → action, with
+// our own earned stats first (ground truth) and each introducer flagged self-reported or hearsay.
+func renderRoster(roster []*kernel.KernelRoster, peers []*kernel.User) {
+	if len(roster) == 0 {
+		fmt.Println("\nNo known kernels yet (discovery seeds from bootstrap peers).")
+		return
+	}
+	friendByKey := map[string]string{}
+	for _, p := range peers {
+		if p.PublicKey != "" {
+			friendByKey[p.PublicKey] = p.Handle
+		}
+	}
+	printActions := func(as []kernel.GossipAction) {
+		for _, a := range as {
+			fmt.Printf("      %-24s uses %-5d rating %.2f  price %d\n", a.Name, a.Uses, a.Rating, a.Price)
+		}
+	}
+	fmt.Println("\nKnown kernels (discovery):")
+	for _, kr := range roster {
+		fmt.Printf("\n%-20s %s\n", kr.Handle, shortKey(kr.PublicKey))
+		if len(kr.Own) > 0 {
+			fmt.Println("  you:")
+			printActions(kr.Own)
+		}
+		for _, src := range kr.Sources {
+			label := "self-reported"
+			if !src.SelfReported {
+				if h, ok := friendByKey[src.IntroducedBy]; ok {
+					label = "via " + h
+				} else {
+					label = "via " + shortKey(src.IntroducedBy)
+				}
+			}
+			fmt.Printf("  %s:\n", label)
+			printActions(src.Actions)
+		}
+	}
 }

@@ -1716,3 +1716,68 @@ func TestGetGossipOnlyIncludesTransactedFriends(t *testing.T) {
 		t.Errorf("expected Uses=2, got %d", gossip.Friends[0].Actions[0].Uses)
 	}
 }
+
+// DiscoveryRoster groups discovered_kernels by kernel and lists each introducer's report:
+// self-reported (introduced by the kernel itself) vs hearsay (introduced by a third party). Action
+// names stay owner-qualified (@owner/name), never bare.
+func TestDiscoveryRoster(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	setupSys(t, k, st)
+
+	keyFor := func() string {
+		pub, _, _ := ed25519.GenerateKey(rand.Reader)
+		return base64.RawURLEncoding.EncodeToString(pub)
+	}
+	pubA, pubB, pubC := keyFor(), keyFor(), keyFor()
+
+	// A self-reports an owner-qualified action and a transacted friend B.
+	gA := &kernel.GossipResponse{
+		PublicKey: pubA, Handle: "@a",
+		Actions: []kernel.GossipAction{{ActionID: "a1", Name: "@sys/greet", Uses: 40, Rating: 0.8, Price: 5}},
+		Friends: []kernel.GossipFriendView{{Handle: "@b", PublicKey: pubB,
+			Actions: []kernel.GossipAction{{ActionID: "b1", Name: "@bob/translate", Uses: 3}}}},
+	}
+	if err := k.AccumulateGossip(ctx, gA, pubA); err != nil {
+		t.Fatal(err)
+	}
+	// C introduces A too (third-party hearsay).
+	gC := &kernel.GossipResponse{
+		PublicKey: pubC, Handle: "@c",
+		Friends: []kernel.GossipFriendView{{Handle: "@a", PublicKey: pubA,
+			Actions: []kernel.GossipAction{{ActionID: "a1", Name: "@sys/greet", Uses: 41}}}},
+	}
+	if err := k.AccumulateGossip(ctx, gC, pubC); err != nil {
+		t.Fatal(err)
+	}
+
+	roster, err := k.DiscoveryRoster(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var a *kernel.KernelRoster
+	for _, r := range roster {
+		if r.PublicKey == pubA {
+			a = r
+		}
+	}
+	if a == nil {
+		t.Fatal("kernel A missing from roster")
+	}
+	var selfReported, viaC bool
+	for _, s := range a.Sources {
+		if s.SelfReported && s.IntroducedBy == pubA {
+			selfReported = true
+			if len(s.Actions) == 0 || s.Actions[0].Name != "@sys/greet" {
+				t.Errorf("self-report actions = %+v, want first name @sys/greet", s.Actions)
+			}
+		}
+		if !s.SelfReported && s.IntroducedBy == pubC {
+			viaC = true
+		}
+	}
+	if !selfReported || !viaC {
+		t.Errorf("A sources: selfReported=%v viaC=%v (sources=%+v)", selfReported, viaC, a.Sources)
+	}
+}

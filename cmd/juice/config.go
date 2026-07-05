@@ -95,6 +95,7 @@ type ServerConfig struct {
 	CredentialsKey             string       `json:"credentials_key,omitempty"`     // base64url AES-256 key; generated on first boot
 	RemoteRetryIntervalSeconds int64        `json:"remote_retry_interval_seconds"` // seconds between retry passes for pending remote calls (§13); <=0 → default
 	PeerRetentionDays          int64        `json:"peer_retention_days"`           // days a peer may stay idle at zero balance before purge (§13); <=0 → disabled
+	DiscoveryIntervalSeconds   int64        `json:"discovery_interval_seconds"`    // seconds between known-network discovery passes (§13); <=0 → default
 }
 
 // remoteRetryInterval is how often the running server re-drives pending remote-proxy calls so a
@@ -105,6 +106,17 @@ func (c ServerConfig) remoteRetryInterval() time.Duration {
 		return 60 * time.Second
 	}
 	return time.Duration(c.RemoteRetryIntervalSeconds) * time.Second
+}
+
+// discoveryInterval is how often the running server refreshes the known network (§13): advertise
+// under the discovery rendezvous, enumerate providers, and pull gossip from bootstrap + discovered
+// peers. Like remoteRetryInterval, a non-positive value falls back to the default so discovery
+// works out of the box; the kill switch is an empty bootstrap_peers (no announce, no discover).
+func (c ServerConfig) discoveryInterval() time.Duration {
+	if c.DiscoveryIntervalSeconds <= 0 {
+		return 300 * time.Second
+	}
+	return time.Duration(c.DiscoveryIntervalSeconds) * time.Second
 }
 
 // peerRetention is how long a peer may stay idle at zero balance before it is purged (§13).
@@ -150,6 +162,7 @@ func DefaultServerConfig() ServerConfig {
 		BootstrapPeers:             []string{"/dns4/daios.ai/tcp/31313/p2p/12D3KooWJ5ZwPSAV17q2hv6ttZ8J3hHsTMNaSC61kbVbvxvtArjK"},
 		RemoteRetryIntervalSeconds: 60,
 		PeerRetentionDays:          30,
+		DiscoveryIntervalSeconds:   300,
 	}
 }
 

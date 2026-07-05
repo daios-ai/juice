@@ -435,6 +435,23 @@ type GossipResponse struct {
 	Friends   []GossipFriendView `json:"friends"`
 }
 
+// KernelRoster is one entry of the known-network directory (§13): a discovered kernel grouped with
+// every introducer's report of it and, when we have friended and transacted with it, our own earned
+// stats. Display only — the known network grants no callability, pricing, or settlement.
+type KernelRoster struct {
+	PublicKey string         `json:"public_key"`
+	Handle    string         `json:"handle"`
+	Own       []GossipAction `json:"own,omitempty"` // our own earned stats (ground truth), if transacted
+	Sources   []RosterSource `json:"sources"`       // one per introducer, self-report or hearsay
+}
+
+// RosterSource is one introducer's gossiped view of a kernel's actions, namespaced by who told us.
+type RosterSource struct {
+	IntroducedBy string         `json:"introduced_by"`
+	SelfReported bool           `json:"self_reported"` // IntroducedBy == the kernel's own key
+	Actions      []GossipAction `json:"actions"`
+}
+
 // FederationResult is the return value of ExecuteFederation.
 // ReceiptJSON is non-empty when the remote kernel included a receipt in its response
 // (at any HTTP status — rejection and failure receipts arrive on non-200).
