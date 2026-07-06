@@ -550,6 +550,35 @@ func (k *Kernel) ListDiscoveredKernels(ctx context.Context) ([]*DiscoveredKernel
 	return k.store.ListDiscoveredKernels(ctx)
 }
 
+// PeerLocalView returns the locally-held view of a friended peer — its handle, public key, and the
+// active proxy actions imported from it — for the offline-inspect fallback (§13). The identifier is
+// an `@handle` or a base64url key. ErrNotFound when no local proxy user matches.
+func (k *Kernel) PeerLocalView(ctx context.Context, ident string) (handle, publicKey string, actions []GossipAction, err error) {
+	var u *User
+	if !strings.HasPrefix(ident, "@") {
+		u, _ = k.store.ReadUserByPublicKey(ctx, ident)
+	}
+	if u == nil {
+		u, _ = k.store.ReadUserByHandle(ctx, NormalizeHandle(ident))
+	}
+	if u == nil || u.PublicKey == "" {
+		return "", "", nil, ErrNotFound.Wrapf("no friended peer %q", ident)
+	}
+	acts, _ := k.store.ListActionsByOwner(ctx, u.ID, 500, 0)
+	for _, a := range acts {
+		if !a.Active || a.Kind != KindRemoteProxy {
+			continue
+		}
+		ga := GossipAction{ActionID: a.ID, Name: qualifiedActionName(a), Description: a.Description, Price: a.Price}
+		if s, _ := k.store.ReadStats(ctx, a.ID); s != nil {
+			ga.Uses = s.Uses
+			ga.Rating = s.RatingEstimate
+		}
+		actions = append(actions, ga)
+	}
+	return u.Handle, u.PublicKey, actions, nil
+}
+
 // DiscoveryRoster groups the raw discovered_kernels rows into the known-network directory view
 // (§13): one entry per kernel, each carrying every introducer's gossiped action stats (self-report
 // when the introducer is the kernel itself, hearsay otherwise) and, for kernels we have friended

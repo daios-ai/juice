@@ -67,6 +67,6 @@ run_flows \
     flow_federation_import_execute flow_federation_changed_reimport flow_federation_unfriend \
     flow_fed_verify_receipt flow_fed_all_receipt_checks flow_fed_denial_unfriended \
     flow_fed_denial_underfunded flow_fed_disabled_action_rejection flow_fed_import_duty flow_fed_failed_action_refund \
-    flow_fed_gossip_discovery flow_fed_discovery \
+    flow_fed_gossip_discovery flow_fed_discovery flow_fed_offline \
     flow_transaction_access flow_admin_supervision flow_time flow_message flow_grant
 exit $?

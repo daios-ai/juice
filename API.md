@@ -214,7 +214,7 @@ The operator verbs no ordinary user performs — money, access, federation trust
 | Friend a kernel | `juice admin friend <key>` |
 | Unfriend a kernel | `juice admin unfriend <user\|key>` |
 | List peers | `juice admin peers [--gossip]` — friends (`handle`, `public_key`, `available`, `locked`; no internal id); `--gossip` adds the known-network directory roster |
-| Inspect a kernel | `juice admin inspect <key\|user>` — by key, or `@handle` if already friended; identity, public actions, transacted friends, and reachability |
+| Inspect a kernel | `juice admin inspect <key\|user>` — identity, public actions, transacted friends, reachability. `source` is `live`/`local`/`none`: an offline but friended peer degrades to last-known local data (`online:false`) |
 | Show own identity | `juice admin identity` — this kernel's public key, handle, listen addresses |
 
 `<user>` is a `@handle` — or, for a peer, its base64url public key (the global name); `<action>` is `@owner/name` (or an id); `<key>` is a peer's base64url public key. `withdraw` requires `target.available ≥ amount`; it redeems credits and obliges the out-of-band payout. `admin friend <key>` on a denied key clears the denial and restarts the handshake. `admin unfriend` deny-lists the key, deactivates the peer's proxies, cancels steps addressed to it (parked prices refunded), and preserves balance and history.

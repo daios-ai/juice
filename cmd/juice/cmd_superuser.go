@@ -204,6 +204,8 @@ func peerInspectCmd() *cobra.Command {
 					Path      string `json:"path"`
 					RTTmillis int64  `json:"rtt_millis"`
 				} `json:"reachability"`
+				Source string `json:"source"`
+				Online bool   `json:"online"`
 			}
 			if err := apiCall(context.Background(), "GET", "/control/peers/inspect?key="+url.QueryEscape(args[0]), nil, &out); err != nil {
 				return err
@@ -213,9 +215,21 @@ func peerInspectCmd() *cobra.Command {
 			}
 			fmt.Printf("Handle:       %s\n", out.Handle)
 			fmt.Printf("Public key:   %s\n", out.PublicKey)
-			fmt.Printf("Reachability: %s (%dms)\n", out.Reachability.Path, out.Reachability.RTTmillis)
+			reachLabel := out.Reachability.Path
+			if !out.Online {
+				reachLabel = "offline"
+			}
+			fmt.Printf("Reachability: %s (%dms)\n", reachLabel, out.Reachability.RTTmillis)
+			if out.Source == "none" {
+				fmt.Println("This peer is offline and not known locally (never friended).")
+				return nil
+			}
 			if len(out.Actions) > 0 {
-				fmt.Printf("\nActive actions (%d):\n", len(out.Actions))
+				label := "Active actions"
+				if out.Source == "local" {
+					label = "Actions (last imported — peer offline)"
+				}
+				fmt.Printf("\n%s (%d):\n", label, len(out.Actions))
 				for _, a := range out.Actions {
 					fmt.Printf("  %-30s  %d credits  (uses: %d)\n", a.Name, a.Price, a.Uses)
 				}

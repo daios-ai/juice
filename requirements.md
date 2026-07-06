@@ -613,6 +613,8 @@ juice admin inspect <key|user>  view remote identity, public actions, transacted
 
 Federation trust is superuser supervision, so these live under `admin`, served on the public TCP API as superuser-gated routes (§14). The inbound friend handshake is the `/juice/fed/friend/1` protocol, authenticated by federation signature — not a local API. `admin inspect <key>` is the operator's window into a remote kernel (there is no browser-reachable federation endpoint): it reports the peer's identity, public actions, and transacted friends, plus reachability diagnostics (direct / hole-punched / relayed, latency, protocol versions).
 
+Federation commands are defined for an offline peer and bounded so they fail promptly: `admin friend` fails as unreachable, `admin inspect` degrades to the last-known local data with reachability `unreachable`, and `admin unfriend`/`peers`/`identity` are local and always work.
+
 `admin identity` prints this kernel's own federation identity — its public key (the value peers friend it by, since there is no `.well-known`), handle, and libp2p listen addresses. Every kernel runs a circuit-relay service and joins the discovery DHT, so a **publicly-reachable `juice serve` automatically acts as the network's bootstrap + relay** — the meeting point NAT-bound kernels announce to and are reached through; there is no separate seed process. A public node binds the standard federation port `31313` for a stable address (a NAT-bound node uses an OS-assigned port and is found by key). `friend` opens an authenticated stream to `<key>` and sends a signed request; the peer's self-reported handle arrives over the protocol. By default kernels **auto-accept** (`peer_auto_accept = true`): the proxy user is created with balance 0 and a reciprocal request completes the pair. With manual mode, requests sit pending until the operator friends back. Friend requests are subject to the §13 transport resource limits.
 
 Friendship by itself grants nothing: a zero-balance friend's calls are all rejected. The trust decision is the **deposit** — an operator credits a friend's proxy user only after real money moved out of band (§12). Friendship exchanges keys; funding expresses trust.
@@ -984,6 +986,7 @@ unfriend sets denied_at, deactivates proxies, cancels steps addressed to peer; b
 denied key's friend request rejected; own friend clears denial
 gossip lists only transacted friends with stats, keyed by public key with no URLs; non-transacted friends absent
 friending a peer does not import that peer's own imports (no transitive re-export); manifests and gossip exclude remote_proxy actions
+offline peer: inspect degrades to local data + unreachable, friend fails as unreachable, unfriend/peers/identity work locally
 gossip results stored per (kernel, introducer); StatTag namespaced by source
 proxy call locks mp+maxduty; success settles charge+duty on actual charge and refunds difference
 remote failure with charge refunds (mp+maxduty)−charge; duty is zero; settled remote work stays paid

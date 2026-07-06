@@ -125,37 +125,49 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// ctlInspectPeer has defined behavior whether the peer is up or down (§13). It always reports
+// reachability; a reachable peer yields live identity/actions/friends; an unreachable but
+// previously-friended peer degrades to the last-known local data; a stranger that is unreachable
+// yields an empty view with source="none". Every remote call is bounded by fedOpTimeout so an
+// offline peer fails in seconds, not on the client timeout.
 func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	peerKey := strings.TrimSpace(r.URL.Query().Get("key"))
-	// Accept an @handle for an already-friended peer, not just its key; a stranger's raw key
-	// (no local account yet) falls through unchanged.
-	if u, err := resolveHandle(s.kernel, ctx, peerKey); err == nil && u.PublicKey != "" {
+	ident := strings.TrimSpace(r.URL.Query().Get("key"))
+	peerKey := ident
+	if u, err := resolveHandle(s.kernel, ctx, ident); err == nil && u.PublicKey != "" {
 		peerKey = u.PublicKey
 	}
 	if s.fed == nil {
 		writeErr(w, kernel.ErrInvalidState.Wrap("federation transport not running"))
 		return
 	}
-	iRaw, err := s.fed.Inspect(ctx, peerKey)
-	if err != nil {
-		writeErr(w, kernel.ErrExecutionFailed.Wrapf("cannot reach peer: %v", err))
-		return
+	octx, cancel := context.WithTimeout(ctx, fedOpTimeout)
+	defer cancel()
+
+	reach := s.fed.Probe(octx, peerKey)
+	resp := map[string]any{"reachability": reach, "online": reach.Path != "unreachable"}
+
+	// Live view when the peer answers.
+	if iRaw, err := s.fed.Inspect(octx, peerKey); err == nil {
+		var g kernel.GossipResponse
+		if json.Unmarshal(iRaw, &g) == nil {
+			resp["handle"], resp["public_key"] = g.Handle, g.PublicKey
+			resp["actions"], resp["friends"] = g.Actions, g.Friends
+			resp["source"] = "live"
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
 	}
-	var g kernel.GossipResponse
-	if json.Unmarshal(iRaw, &g) != nil {
-		writeErr(w, kernel.ErrExecutionFailed.Wrap("could not parse peer inspect document"))
-		return
+	// Offline (or unparseable): fall back to what we hold locally about a friended peer.
+	if handle, pk, actions, err := s.kernel.PeerLocalView(ctx, ident); err == nil {
+		resp["handle"], resp["public_key"], resp["actions"] = handle, pk, actions
+		resp["friends"], resp["source"] = []kernel.GossipFriendView{}, "local"
+	} else {
+		resp["handle"], resp["public_key"] = "", peerKey
+		resp["actions"], resp["friends"] = []kernel.GossipAction{}, []kernel.GossipFriendView{}
+		resp["source"] = "none"
 	}
-	// Reachability diagnostics replace the browser-reachable endpoint that no longer exists.
-	reach := s.fed.Probe(ctx, peerKey)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"handle":       g.Handle,
-		"public_key":   g.PublicKey,
-		"actions":      g.Actions,
-		"friends":      g.Friends,
-		"reachability": reach,
-	})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *server) ctlFriendPeer(w http.ResponseWriter, r *http.Request) {
@@ -172,12 +184,14 @@ func (s *server) ctlFriendPeer(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	peerKey := strings.TrimSpace(req.Key)
 
-	// Resolve the peer by key and read its gossip (identity + actions + friends). The gossip's
-	// public_key must match the key we dialed — the transport authenticated the connection by
-	// key, so this is a consistency check, not the trust boundary.
-	gRaw, err := s.fed.Gossip(ctx, peerKey)
+	// Resolve the peer by key and read its gossip (identity + actions + friends). Bounded by
+	// fedOpTimeout so an offline peer fails promptly and clearly — you cannot friend a kernel you
+	// cannot reach. The gossip's public_key must match the key we dialed (a consistency check).
+	octx, cancel := context.WithTimeout(ctx, fedOpTimeout)
+	defer cancel()
+	gRaw, err := s.fed.Gossip(octx, peerKey)
 	if err != nil {
-		writeErr(w, kernel.ErrExecutionFailed.Wrapf("cannot reach peer: %v", err))
+		writeErr(w, kernel.ErrExecutionFailed.Wrapf("cannot friend %s: peer is unreachable (offline?)", peerKey))
 		return
 	}
 	var g kernel.GossipResponse
@@ -221,10 +235,11 @@ func (s *server) ctlUnfriendPeer(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	// Accept @handle or the peer's key (the global name it was friended by).
+	// Accept @handle or the peer's key. Purely local (no transport), so it works whether or not the
+	// peer is reachable. A clear not-found when the identifier names no friended peer.
 	u, err := resolveHandle(s.kernel, r.Context(), req.Handle)
 	if err != nil {
-		writeErr(w, err)
+		writeErr(w, kernel.ErrNotFound.Wrapf("no friended peer %q", req.Handle))
 		return
 	}
 	err = s.kernel.DenyPeer(r.Context(), callerFrom(r), u.Handle)

@@ -330,9 +330,26 @@ func (b *backoffScheduler) due(traces []*kernel.Trace, now time.Time) []*kernel.
 type server struct {
 	kernel *kernel.Kernel
 	log    *log.Logger
-	fed    *fed.Transport // federation transport (§13); nil until runServer starts it
-	oauth  *grantBroker   // delegated-OAuth consent broker (§8); nil when no credentials box
+	fed    fedClient    // federation transport (§13); nil until runServer starts it
+	oauth  *grantBroker // delegated-OAuth consent broker (§8); nil when no credentials box
 }
+
+// fedClient is the outbound half of the libp2p transport the admin handlers need. *fed.Transport
+// satisfies it; keeping it an interface lets tests supply a fake to exercise online/offline paths
+// without a real network.
+type fedClient interface {
+	Inspect(ctx context.Context, peerKey string) (json.RawMessage, error)
+	Gossip(ctx context.Context, peerKey string) (json.RawMessage, error)
+	Manifests(ctx context.Context, peerKey string) ([]json.RawMessage, error)
+	Friend(ctx context.Context, peerKey string, req fed.FriendRequest) (fed.FriendResponse, error)
+	Probe(ctx context.Context, peerKey string) fed.Reachability
+	ListenAddrs() []string
+	Close() error
+}
+
+// fedOpTimeout bounds any single outbound federation call an admin command makes, so an offline
+// peer fails promptly (§13) rather than stalling on the DHT resolve/dial up to the client timeout.
+const fedOpTimeout = 8 * time.Second
 
 // registerRoutes mounts all application routes onto r for the given server.
 // Rate-limited routes (auth, user creation) are registered by the caller before this call.

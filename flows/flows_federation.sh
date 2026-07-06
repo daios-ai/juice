@@ -304,3 +304,31 @@ flow_fed_discovery() {
     # L never friended R: its friend list (proxy users) holds no R.
     assert_eq "fed_discovery.no_friend" 0 "$(jj "$dbl" "$hl" admin peers | grep -c "$rkey")"
 }
+
+# flow_fed_offline — every federation command has defined behavior when the peer is DOWN (§13):
+# inspect degrades to local last-known data + offline reachability; friend fails clearly;
+# unfriend/peers/identity are local and keep working; nothing hangs (bounded by fedOpTimeout).
+flow_fed_offline() {
+    echo "=== FLOW fed_offline ==="
+    local dir; dir=$(new_dir)
+    _fed_setup "$dir" || { fail "fed_offline.setup" "setup failed"; return; }
+
+    # Take R offline.
+    stop_server "$FED_DBR"
+
+    # inspect: still works, shows the last-imported action and marks the peer offline.
+    local doc; doc=$(jj "$FED_DBL" "$FED_HL" admin inspect @kernel-r)
+    assert_json "fed_offline.inspect_source_local" "$doc" source local
+    assert_json "fed_offline.inspect_offline" "$doc" online False
+    assert_contains "fed_offline.inspect_shows_action" "greet" "$doc"
+
+    # friend a down peer: clear, prompt failure (no hang, mentions unreachable).
+    assert_fails "fed_offline.friend_unreachable" "unreachable" -- j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY"
+
+    # unfriend is local: works with the peer down.
+    assert_contains "fed_offline.unfriend_local" "nfriended" "$(j "$FED_DBL" "$FED_HL" admin unfriend @kernel-r 2>&1)"
+
+    # peers and identity are local: succeed with the peer down.
+    assert_eq "fed_offline.peers_ok"    0 "$(j "$FED_DBL" "$FED_HL" admin peers    >/dev/null 2>&1; echo $?)"
+    assert_eq "fed_offline.identity_ok" 0 "$(j "$FED_DBL" "$FED_HL" admin identity >/dev/null 2>&1; echo $?)"
+}
