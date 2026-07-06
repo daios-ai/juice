@@ -156,12 +156,13 @@ func currentHandle(ctx context.Context) (string, error) {
 // so errors.Is checks and exit codes behave exactly as they did in-process.
 func errorFromResponse(status int, body []byte) error {
 	var e struct {
-		Error string `json:"error"`
-		Code  string `json:"code"`
+		Error string            `json:"error"`
+		Code  string            `json:"code"`
+		Meta  map[string]string `json:"meta"`
 	}
 	_ = json.Unmarshal(body, &e)
 	if e.Code != "" {
-		return &kernel.KernelError{Code: e.Code, HTTP: kernel.HTTPStatusFromCode(e.Code), Message: e.Error}
+		return &kernel.KernelError{Code: e.Code, HTTP: kernel.HTTPStatusFromCode(e.Code), Message: e.Error, Meta: e.Meta}
 	}
 	msg := strings.TrimSpace(string(body))
 	if msg == "" {

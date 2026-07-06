@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -15,7 +17,32 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
+
+// grantActionRef returns the action a grant_required error names (from its structured Meta),
+// falling back to fallback when absent.
+func grantActionRef(err error, fallback string) string {
+	var ke *kernel.KernelError
+	if errors.As(err, &ke) && ke.Meta["action"] != "" {
+		return ke.Meta["action"]
+	}
+	return fallback
+}
+
+// interactiveTTY reports whether a human is driving: stdin readable and stderr a terminal.
+// Prompts and progress go to stderr so stdout stays payload-only (§14).
+func interactiveTTY() bool {
+	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
+}
+
+// promptYesNo asks a yes/no question on stderr (default yes) and reads one line from stdin.
+func promptYesNo(msg string) bool {
+	fmt.Fprintf(os.Stderr, "%s [Y/n] ", msg)
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line = strings.ToLower(strings.TrimSpace(line))
+	return line == "" || line == "y" || line == "yes"
+}
 
 // ---- output helpers ----
 
@@ -905,9 +932,28 @@ func runCmd() *cobra.Command {
 			if err != nil {
 				return kernel.ErrInvalidInput.Wrapf("invalid args: %v", err)
 			}
+			reqBody := map[string]any{"action": cmdArgs[0], "args": args}
 			var raw json.RawMessage
-			if err := apiCall(context.Background(), "POST", "/v1/run",
-				map[string]any{"action": cmdArgs[0], "args": args}, &raw); err != nil {
+			err = apiCall(context.Background(), "POST", "/v1/run", reqBody, &raw)
+			// A delegated-OAuth action needs a one-time consent (§8). At an interactive terminal,
+			// offer it inline and re-run once, so the user issues a single `juice run`. Non-TTY
+			// callers (scripts, agents) get the structured error + hint instead — no browser.
+			if errors.Is(err, kernel.ErrGrantRequired) {
+				action := grantActionRef(err, cmdArgs[0])
+				if interactiveTTY() && promptYesNo(fmt.Sprintf("This action needs your authorization. Authorize %s now?", action)) {
+					if cerr := runConsentFlow(action); cerr != nil {
+						return cerr
+					}
+					err = apiCall(context.Background(), "POST", "/v1/run", reqBody, &raw)
+				} else {
+					fmt.Fprintf(os.Stderr, "\nAuthorize with:\n  juice grant add %s\n", action)
+					return err
+				}
+			}
+			if err != nil {
+				if errors.Is(err, kernel.ErrGrantRequired) {
+					fmt.Fprintf(os.Stderr, "\nAuthorize with:\n  juice grant add %s\n", grantActionRef(err, cmdArgs[0]))
+				}
 				return err
 			}
 			if flagQuiet {

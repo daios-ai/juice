@@ -848,7 +848,6 @@ func TestCreateHTTPActionRejectsSSRFURL(t *testing.T) {
 	}
 }
 
-
 func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
@@ -1855,7 +1854,6 @@ func TestCreateActionSubjectMismatchRejected(t *testing.T) {
 	}
 }
 
-
 // ---- OpenAPI well-known ownership proof tests ----
 
 // fakeURLFetcher implements both HTTPExecutor and URLFetcher for testing ownership proof.
@@ -1863,7 +1861,7 @@ type fakeURLFetcher struct {
 	wellKnown map[string]string // URL -> response body
 }
 
-func (f *fakeURLFetcher) Execute(_ context.Context, _ *kernel.Action, _ map[string]any) (map[string]any, error) {
+func (f *fakeURLFetcher) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ string) (map[string]any, error) {
 	return nil, kernel.ErrInvalidState.Wrap("not used in tests")
 }
 
@@ -1889,7 +1887,7 @@ func newTestKernelWithHTTP(st kernel.Store, http kernel.HTTPExecutor) *kernel.Ke
 // fakeSuccessHTTP is a minimal HTTPExecutor that returns an empty result for any Execute call.
 type fakeSuccessHTTP struct{}
 
-func (f *fakeSuccessHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any) (map[string]any, error) {
+func (f *fakeSuccessHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ string) (map[string]any, error) {
 	return map[string]any{}, nil
 }
 
@@ -1898,7 +1896,7 @@ type fakeFederationHTTP struct {
 	receiptJSON string
 }
 
-func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any) (map[string]any, error) {
+func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ string) (map[string]any, error) {
 	return nil, kernel.ErrInvalidState.Wrap("not used in federation tests")
 }
 
@@ -2349,5 +2347,206 @@ func TestListProcessesSuperuserWidening(t *testing.T) {
 	}
 	if _, err := k.ReadProcess(ctx, bob.ID, proc.ID); err == nil {
 		t.Error("@bob ReadProcess of @alice's process should fail")
+	}
+}
+
+// ---- Delegated OAuth grants (§8) ----
+
+// createDelegatedAction creates and activates a private kind=http action using the oauth_delegated
+// scheme, owned by ownerID. The kernel must have a SecretBox installed.
+func createDelegatedAction(t *testing.T, k *kernel.Kernel, ownerID, name string, price int64) *kernel.Action {
+	t.Helper()
+	ctx := context.Background()
+	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
+		OwnerUserID:  ownerID,
+		Name:         name,
+		Kind:         kernel.KindHTTP,
+		Price:        price,
+		Source:       "https://provider.example/api",
+		Description:  "delegated svc",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		Auth: &kernel.AuthInput{
+			Scheme: kernel.AuthSchemeOAuthDelegated,
+			Config: map[string]any{
+				"auth_url":  "https://provider.example/auth",
+				"token_url": "https://provider.example/token",
+				"client_id": "cid",
+				"scopes":    "read",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create delegated action: %v", err)
+	}
+	if err := k.SetActive(ctx, ownerID, a.ID, true); err != nil {
+		t.Fatalf("activate delegated action: %v", err)
+	}
+	full, _ := k.ReadAction(ctx, a.ID)
+	return full
+}
+
+// TestValidateAuthInputSchemes: CreateAction rejects an unknown scheme and missing required keys
+// (fail closed at write time, §8), and accepts a well-formed oauth_delegated config.
+func TestValidateAuthInputSchemes(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "@authcfg", 0)
+
+	base := func(auth *kernel.AuthInput) kernel.CreateActionRequest {
+		return kernel.CreateActionRequest{
+			OwnerUserID: owner.ID, Name: "svc-" + auth.Scheme, Kind: kernel.KindHTTP,
+			Source: "https://provider.example/api", Description: "d",
+			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+			Auth: auth,
+		}
+	}
+
+	// Unknown scheme.
+	if _, err := k.CreateAction(ctx, owner.ID, base(&kernel.AuthInput{Scheme: "totp"})); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("unknown scheme: got %v, want ErrInvalidInput", err)
+	}
+	// client-credentials missing client_secret.
+	if _, err := k.CreateAction(ctx, owner.ID, base(&kernel.AuthInput{
+		Scheme: kernel.AuthSchemeOAuthClientCreds,
+		Config: map[string]any{"token_url": "https://p.example/t", "client_id": "c"},
+	})); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("client-creds missing secret: got %v, want ErrInvalidInput", err)
+	}
+	// delegated missing token_url.
+	if _, err := k.CreateAction(ctx, owner.ID, base(&kernel.AuthInput{
+		Scheme: kernel.AuthSchemeOAuthDelegated,
+		Config: map[string]any{"auth_url": "https://p.example/a", "client_id": "c"},
+	})); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("delegated missing token_url: got %v, want ErrInvalidInput", err)
+	}
+	// Valid delegated config.
+	if _, err := k.CreateAction(ctx, owner.ID, base(&kernel.AuthInput{
+		Scheme: kernel.AuthSchemeOAuthDelegated,
+		Config: map[string]any{"auth_url": "https://p.example/a", "token_url": "https://p.example/t", "client_id": "c"},
+	})); err != nil {
+		t.Errorf("valid delegated config: unexpected error %v", err)
+	}
+}
+
+// TestGrantRequiredRejectsBeforeLock: running an oauth_delegated action with no grant is rejected
+// before any funds are locked and before any transaction/process exists (§8 lazy consent).
+func TestGrantRequiredRejectsBeforeLock(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "@dlg-owner", 1000)
+
+	a := createDelegatedAction(t, k, owner.ID, "inbox", 100)
+
+	_, err := k.Run(ctx, owner.ID, owner.Handle+"/"+a.Name, map[string]any{})
+	if !errors.Is(err, kernel.ErrGrantRequired) {
+		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
+	}
+	var ke *kernel.KernelError
+	if !errors.As(err, &ke) || ke.Meta["action"] != owner.Handle+"/"+a.Name {
+		t.Errorf("error does not carry structured action meta: %+v", err)
+	}
+	// No funds locked, no process created.
+	u, _ := k.ReadUser(ctx, owner.ID)
+	if u.Available != 1000 || u.Locked != 0 {
+		t.Errorf("balance moved: available=%d locked=%d, want 1000/0", u.Available, u.Locked)
+	}
+	procs, _ := k.ListProcesses(ctx, owner.ID, 100, 0)
+	if len(procs) != 0 {
+		t.Errorf("process created despite pre-lock rejection: %d", len(procs))
+	}
+}
+
+// TestCreateGrantListAndRevoke: a grant is created token-free-visible and revocable (§8).
+func TestCreateGrantListAndRevoke(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "@grantsvc", 0)
+	a := createDelegatedAction(t, k, owner.ID, "svc", 0)
+
+	if _, err := k.CreateGrant(ctx, owner.ID, a.ID, "refresh-xyz"); err != nil {
+		t.Fatalf("CreateGrant: %v", err)
+	}
+	views, err := k.ListGrantViews(ctx, owner.ID)
+	if err != nil || len(views) != 1 {
+		t.Fatalf("ListGrantViews: %v, n=%d", err, len(views))
+	}
+	if views[0].Action != owner.Handle+"/"+a.Name {
+		t.Errorf("view action = %q, want %q", views[0].Action, owner.Handle+"/"+a.Name)
+	}
+	if views[0].Scopes != "read" {
+		t.Errorf("view scopes = %v, want read", views[0].Scopes)
+	}
+	// The refresh token never surfaces in the view (marshal it and check).
+	if b, _ := json.Marshal(views[0]); strings.Contains(string(b), "refresh-xyz") {
+		t.Errorf("grant view leaked the refresh token: %s", b)
+	}
+
+	if err := k.RevokeGrant(ctx, owner.ID, a.ID); err != nil {
+		t.Fatalf("RevokeGrant: %v", err)
+	}
+	if views, _ := k.ListGrantViews(ctx, owner.ID); len(views) != 0 {
+		t.Errorf("grant survived revoke: %d", len(views))
+	}
+}
+
+// TestDeactivatingUpdateRevokesGrants: a deactivating update (price change) drops standing grants,
+// while a plain disable keeps them — consent binds to the contract, not the enabled bit (§8).
+func TestDeactivatingUpdateRevokesGrants(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "@revsvc", 0)
+	a := createDelegatedAction(t, k, owner.ID, "svc", 0)
+
+	mkGrant := func() {
+		if _, err := k.CreateGrant(ctx, owner.ID, a.ID, "refresh"); err != nil {
+			t.Fatalf("CreateGrant: %v", err)
+		}
+	}
+	grantCount := func() int { v, _ := k.ListGrantViews(ctx, owner.ID); return len(v) }
+
+	// Plain disable keeps the grant.
+	mkGrant()
+	if err := k.SetActive(ctx, owner.ID, a.ID, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if grantCount() != 1 {
+		t.Errorf("plain disable dropped the grant; want kept")
+	}
+	_ = k.SetActive(ctx, owner.ID, a.ID, true)
+
+	// A deactivating update (price change) revokes it.
+	newPrice := int64(50)
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Price: &newPrice}); err != nil {
+		t.Fatalf("UpdateAction: %v", err)
+	}
+	if grantCount() != 0 {
+		t.Errorf("deactivating update did not revoke the grant")
+	}
+}
+
+// TestManifestExcludesDelegatedAction: an oauth_delegated action is never served as a manifest,
+// since a remote peer can never complete a browser consent (§8/§13).
+func TestManifestExcludesDelegatedAction(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "@mfsvc", 0)
+	a := createDelegatedAction(t, k, owner.ID, "svc", 0)
+	pub := true
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pub}); err != nil {
+		t.Fatalf("make public: %v", err)
+	}
+	if _, err := k.GetActionManifest(ctx, a.ID); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("delegated action served a manifest: got %v, want ErrUnauthorized", err)
 	}
 }

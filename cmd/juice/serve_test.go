@@ -2420,3 +2420,25 @@ func TestStartDiscoveryLoop(t *testing.T) {
 		t.Errorf("expected >= 2 passes (startup + ticks), got %d", p)
 	}
 }
+
+// TestGrantRoutesRequireAuth: the delegated-OAuth grant routes are behind authentication (§8/§14).
+func TestGrantRoutesRequireAuth(t *testing.T) {
+	srv, _ := newTestHTTPServer(t)
+	defer srv.Close()
+
+	cases := []struct {
+		method, path string
+		body         any
+	}{
+		{"POST", "/v1/grants/start", map[string]any{"action": "@x/y"}},
+		{"POST", "/v1/grants/complete", map[string]any{"state": "s"}},
+		{"DELETE", "/v1/grants?action=@x/y", nil},
+	}
+	for _, c := range cases {
+		resp := httpDo(t, srv, c.method, c.path, c.body, "")
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s without token: got %d, want 401", c.method, c.path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+}

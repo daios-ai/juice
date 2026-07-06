@@ -310,8 +310,11 @@ func (s *DB) DenyPeerCascade(ctx context.Context, userID string) error {
 // ListPurgeablePeers returns peer users (public_key set) idle past cutoff at zero balance (§13).
 // last_active = max(created_at, latest transaction naming the peer, latest deposit/withdrawal to
 // the peer, latest gossip mention of the peer's key). Timestamps are compared via julianday() so
-// the variable-width RFC3339Nano text (timeLayout) can't misorder near a second boundary. A peer
-// with any waiting/running step addressed to it or to one of its actions is still in use and skipped.
+// the variable-width RFC3339Nano text (timeLayout) can't misorder near a second boundary. The
+// comparison is `<=`: julianday() returns a float64 whose resolution near today's epoch is only
+// ~tens of microseconds, so last_active and a cutoff a hair later can round equal; since seeds
+// always precede the cutoff and julianday is monotonic, `<=` is deterministic where `<` flaked.
+// A peer with any waiting/running step addressed to it or to one of its actions is still in use and skipped.
 func (s *DB) ListPurgeablePeers(ctx context.Context, cutoff time.Time) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT u.id FROM users u
@@ -323,7 +326,7 @@ WHERE u.public_key IS NOT NULL AND u.public_key != ''
                     WHERE owner_user_id=u.id OR caller_user_id=u.id OR target_user_id=u.id), julianday(u.created_at)),
         COALESCE((SELECT MAX(julianday(created_at)) FROM adjustments WHERE target_user_id=u.id), julianday(u.created_at)),
         COALESCE((SELECT MAX(julianday(updated_at)) FROM discovered_kernels WHERE public_key=u.public_key), julianday(u.created_at))
-      ) < julianday(?)
+      ) <= julianday(?)
   AND NOT EXISTS (
         SELECT 1 FROM steps s
          WHERE s.status IN ('waiting','running')
@@ -2003,6 +2006,79 @@ func (s *DB) RevokeRefreshToken(ctx context.Context, token string) error {
 		return kernel.ErrUnauthenticated.Wrap("invalid or already revoked refresh token")
 	}
 	return nil
+}
+
+// ---- Grants (delegated upstream OAuth, §8) ----
+
+// CreateOrReplaceGrant upserts on (grantor_user_id, action_id): a re-consent overwrites the
+// row's id, refresh_token, and created_at, so a user holds at most one grant per action.
+func (s *DB) CreateOrReplaceGrant(ctx context.Context, g *kernel.Grant) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO grants (id,grantor_user_id,action_id,refresh_token,created_at)
+		 VALUES (?,?,?,?,?)
+		 ON CONFLICT(grantor_user_id,action_id) DO UPDATE SET
+		   id=excluded.id, refresh_token=excluded.refresh_token, created_at=excluded.created_at`,
+		g.ID, g.GrantorUserID, g.ActionID, g.RefreshToken, timeToStr(g.CreatedAt),
+	)
+	return dbErr(err, "create grant")
+}
+
+func (s *DB) ReadGrant(ctx context.Context, grantorUserID, actionID string) (*kernel.Grant, error) {
+	var g kernel.Grant
+	var createdAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id,grantor_user_id,action_id,refresh_token,created_at
+		 FROM grants WHERE grantor_user_id=? AND action_id=?`, grantorUserID, actionID,
+	).Scan(&g.ID, &g.GrantorUserID, &g.ActionID, &g.RefreshToken, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("grant not found")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read grant")
+	}
+	g.CreatedAt = strToTime(createdAt)
+	return &g, nil
+}
+
+func (s *DB) ListGrantsByUser(ctx context.Context, grantorUserID string) ([]*kernel.Grant, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,grantor_user_id,action_id,refresh_token,created_at
+		 FROM grants WHERE grantor_user_id=? ORDER BY created_at DESC`, grantorUserID)
+	if err != nil {
+		return nil, dbErr(err, "list grants")
+	}
+	defer rows.Close()
+	return queryList(rows, "list grants", func(scan func(...any) error) (*kernel.Grant, error) {
+		var g kernel.Grant
+		var createdAt string
+		if err := scan(&g.ID, &g.GrantorUserID, &g.ActionID, &g.RefreshToken, &createdAt); err != nil {
+			return nil, err
+		}
+		g.CreatedAt = strToTime(createdAt)
+		return &g, nil
+	})
+}
+
+func (s *DB) UpdateGrantRefreshToken(ctx context.Context, id, sealedToken string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE grants SET refresh_token=? WHERE id=?`, sealedToken, id)
+	return dbErr(err, "update grant refresh token")
+}
+
+func (s *DB) DeleteGrant(ctx context.Context, grantorUserID, actionID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM grants WHERE grantor_user_id=? AND action_id=?`, grantorUserID, actionID)
+	if err != nil {
+		return dbErr(err, "delete grant")
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return kernel.ErrNotFound.Wrap("grant not found")
+	}
+	return nil
+}
+
+func (s *DB) DeleteGrantsForAction(ctx context.Context, actionID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM grants WHERE action_id=?`, actionID)
+	return dbErr(err, "delete grants for action")
 }
 
 // ---- Config ----

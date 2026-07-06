@@ -151,6 +151,208 @@ func (k *Kernel) sealAuthJSON(a *Action, auth *AuthInput) error {
 	return nil
 }
 
+// openAuthInput decrypts and parses an action's stored auth payload. Returns (nil, nil) when the
+// action carries no auth or no credential box is configured — callers treat that as "no auth".
+func (k *Kernel) openAuthInput(a *Action) (*AuthInput, error) {
+	if a.AuthJSON == "" || k.secretBox == nil {
+		return nil, nil
+	}
+	plaintext, err := k.secretBox.Open(a.ID, a.AuthJSON)
+	if err != nil {
+		return nil, ErrInvalidState.Wrap("upstream auth credentials could not be decrypted")
+	}
+	var auth AuthInput
+	if err := json.Unmarshal([]byte(plaintext), &auth); err != nil {
+		return nil, ErrInvalidState.Wrap("upstream auth credentials could not be parsed")
+	}
+	return &auth, nil
+}
+
+// authConfigString reads a string field from an AuthInput's Config (or Secrets) map.
+func authField(m map[string]any, key string) string {
+	s, _ := m[key].(string)
+	return s
+}
+
+// validateAuthInput rejects an upstream auth payload with an unknown scheme or missing required
+// config/secret keys at action create/update — so a malformed OAuth config never reaches dispatch
+// and every URL it names is SSRF-checked up front (§8). Fails closed: unknown scheme is an error.
+func (k *Kernel) validateAuthInput(ctx context.Context, auth *AuthInput) error {
+	if auth == nil {
+		return nil
+	}
+	req := func(m map[string]any, keys ...string) error {
+		for _, key := range keys {
+			if authField(m, key) == "" {
+				return ErrInvalidInput.Wrapf("auth scheme %q requires %q", auth.Scheme, key)
+			}
+		}
+		return nil
+	}
+	checkURL := func(keys ...string) error {
+		for _, key := range keys {
+			raw := authField(auth.Config, key)
+			if raw == "" {
+				continue
+			}
+			if err := k.validateHTTPSource(ctx, raw, k.cfg.AllowLocalSources); err != nil {
+				return ErrInvalidInput.Wrapf("auth %q: %v", key, err)
+			}
+		}
+		return nil
+	}
+	switch auth.Scheme {
+	case AuthSchemeHeader, AuthSchemeQuery:
+		if err := req(auth.Config, "name"); err != nil {
+			return err
+		}
+		return req(auth.Secrets, "value")
+	case AuthSchemeBearer:
+		return req(auth.Secrets, "token")
+	case AuthSchemeBasic:
+		return req(auth.Secrets, "username", "password")
+	case AuthSchemeOAuthClientCreds:
+		if err := req(auth.Config, "token_url", "client_id"); err != nil {
+			return err
+		}
+		if err := req(auth.Secrets, "client_secret"); err != nil {
+			return err
+		}
+		return checkURL("token_url")
+	case AuthSchemeOAuthJWTBearer:
+		if err := req(auth.Config, "token_url", "client_id"); err != nil {
+			return err
+		}
+		if err := req(auth.Secrets, "private_key"); err != nil {
+			return err
+		}
+		return checkURL("token_url")
+	case AuthSchemeOAuthDelegated:
+		if err := req(auth.Config, "auth_url", "token_url", "client_id"); err != nil {
+			return err
+		}
+		return checkURL("auth_url", "token_url", "device_auth_url")
+	default:
+		return ErrInvalidInput.Wrapf("unknown upstream auth scheme %q", auth.Scheme)
+	}
+}
+
+// isDelegatedAuth reports whether an action uses the oauth_delegated scheme, so federation can
+// exclude it from manifests (a remote peer can never complete a browser consent, §8/§13).
+func (k *Kernel) isDelegatedAuth(a *Action) bool {
+	if a.Kind != KindHTTP || a.AuthJSON == "" {
+		return false
+	}
+	auth, err := k.openAuthInput(a)
+	return err == nil && auth != nil && auth.Scheme == AuthSchemeOAuthDelegated
+}
+
+// CreateGrant records a user's delegated OAuth consent for one action: the refresh token is sealed
+// with the same box as auth_json (AAD = grantor|action) and upserted, so a re-consent overwrites.
+// The action must be a kind=http action whose scheme is oauth_delegated.
+func (k *Kernel) CreateGrant(ctx context.Context, callerID, actionID, refreshToken string) (*Grant, error) {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+		return nil, err
+	}
+	if refreshToken == "" {
+		return nil, ErrInvalidInput.Wrap("refresh token is required")
+	}
+	a, err := k.store.ReadAction(ctx, actionID)
+	if err != nil {
+		return nil, err
+	}
+	if a.Kind != KindHTTP {
+		return nil, ErrInvalidInput.Wrap("grants apply only to http actions")
+	}
+	auth, err := k.openAuthInput(a)
+	if err != nil {
+		return nil, err
+	}
+	if auth == nil || auth.Scheme != AuthSchemeOAuthDelegated {
+		return nil, ErrInvalidInput.Wrap("action does not use delegated OAuth")
+	}
+	if k.secretBox == nil {
+		return nil, ErrInvalidState.Wrap("credential encryption is not configured")
+	}
+	sealed, err := k.secretBox.Seal(callerID+"|"+actionID, refreshToken)
+	if err != nil {
+		return nil, ErrInternal.Wrapf("seal refresh token: %v", err)
+	}
+	g := &Grant{
+		ID:            uuid.New().String(),
+		GrantorUserID: callerID,
+		ActionID:      actionID,
+		RefreshToken:  sealed,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := k.store.CreateOrReplaceGrant(ctx, g); err != nil {
+		return nil, err
+	}
+	k.log.With(ctx).Info("grant.created", "action_id", actionID, "grantor", callerID, "status", "success")
+	return g, nil
+}
+
+// ListGrantViews returns the caller's grants as token-free views for GET /v1/me, resolving each
+// action to @owner/name and surfacing the scopes its auth config requests.
+func (k *Kernel) ListGrantViews(ctx context.Context, callerID string) ([]*GrantView, error) {
+	grants, err := k.store.ListGrantsByUser(ctx, callerID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*GrantView, 0, len(grants))
+	for _, g := range grants {
+		v := &GrantView{Action: g.ActionID, CreatedAt: g.CreatedAt}
+		if a, err := k.store.ReadAction(ctx, g.ActionID); err == nil && a != nil {
+			if h := k.callerHandle(ctx, a.OwnerUserID); h != "" {
+				v.Action = h + "/" + a.Name
+			} else {
+				v.Action = a.Name
+			}
+			if auth, err := k.openAuthInput(a); err == nil && auth != nil {
+				v.Scopes = auth.Config["scopes"]
+			}
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// DelegatedAuthConfig returns the decrypted provider config for a delegated-OAuth action the
+// caller may use, to drive the consent flow (§8). Internal consent helper, never a read path:
+// the returned AuthInput may carry the client_secret and is used only server-side.
+func (k *Kernel) DelegatedAuthConfig(ctx context.Context, callerID, actionID string) (*AuthInput, error) {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+		return nil, err
+	}
+	a, err := k.store.ReadAction(ctx, actionID)
+	if err != nil {
+		return nil, err
+	}
+	if !canCall(callerID, a) {
+		return nil, ErrUnauthorized.Wrap("cannot grant for an action you may not call")
+	}
+	auth, err := k.openAuthInput(a)
+	if err != nil {
+		return nil, err
+	}
+	if auth == nil || auth.Scheme != AuthSchemeOAuthDelegated {
+		return nil, ErrInvalidInput.Wrap("action does not use delegated OAuth")
+	}
+	return auth, nil
+}
+
+// RevokeGrant deletes the caller's grant for an action (self-service; §8).
+func (k *Kernel) RevokeGrant(ctx context.Context, callerID, actionID string) error {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+		return err
+	}
+	if err := k.store.DeleteGrant(ctx, callerID, actionID); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("grant.revoked", "action_id", actionID, "grantor", callerID, "status", "success")
+	return nil
+}
+
 // SetSigningKey stores the Ed25519 signing key and issuer user ID after bootstrap completes.
 func (k *Kernel) SetSigningKey(priv ed25519.PrivateKey, issuerUserID string) {
 	k.cfg.SigningKey = priv
@@ -721,6 +923,9 @@ func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateAc
 	}
 
 	if req.Auth != nil {
+		if err := k.validateAuthInput(ctx, req.Auth); err != nil {
+			return nil, err
+		}
 		if err := k.sealAuthJSON(a, req.Auth); err != nil {
 			return nil, err
 		}
@@ -1003,6 +1208,7 @@ func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateAc
 	if err := k.requireAdmin(ctx, callerID, a); err != nil {
 		return nil, err
 	}
+	wasActive := a.Active
 
 	if req.Price != nil {
 		if *req.Price < 0 {
@@ -1054,6 +1260,9 @@ func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateAc
 		}
 	}
 	if req.Auth != nil {
+		if err := k.validateAuthInput(ctx, req.Auth); err != nil {
+			return nil, err
+		}
 		if err := k.sealAuthJSON(a, req.Auth); err != nil {
 			return nil, err
 		}
@@ -1062,6 +1271,14 @@ func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateAc
 
 	if err := k.store.UpdateAction(ctx, a); err != nil {
 		return nil, err
+	}
+	// Revoke standing delegated grants when the update deactivates the action (a contract change,
+	// §7) or replaces its auth: consent must not silently carry over to changed code or credentials
+	// (§8). A plain enable/disable via SetActive leaves the contract intact and keeps grants.
+	if (wasActive && !a.Active) || req.Auth != nil {
+		if err := k.store.DeleteGrantsForAction(ctx, a.ID); err != nil {
+			k.log.With(ctx).Warn("action.grant_revoke_failed", "action_id", a.ID, "error", err)
+		}
 	}
 	if req.Description != nil {
 		k.storeEmbedding(ctx, a.ID, a.Description)
@@ -1165,6 +1382,10 @@ func (k *Kernel) DeleteAction(ctx context.Context, callerID, actionID string) er
 	if err := k.store.DeleteAction(ctx, actionID); err != nil {
 		return err
 	}
+	// A deleted action can never be called again; drop any delegated grants pointing at it (§8).
+	if err := k.store.DeleteGrantsForAction(ctx, actionID); err != nil {
+		k.log.With(ctx).Warn("action.grant_revoke_failed", "action_id", actionID, "error", err)
+	}
 	k.log.With(ctx).Info("action.deleted", "action_id", actionID, "status", "success")
 	return nil
 }
@@ -1181,7 +1402,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	// Pre-funding validity gate: Call re-runs checkCallPreconditions authoritatively, but a
 	// rejection must not leave a funded process behind (a rejected call creates no transaction,
 	// §6), so the same check runs here before BeginRun parks funds.
-	if err := k.checkCallPreconditions(caller.ID, action, args); err != nil {
+	if err := k.checkCallPreconditions(ctx, caller.ID, action, args); err != nil {
 		return nil, err
 	}
 	if err := k.requireReceiptSigningReady(); err != nil {

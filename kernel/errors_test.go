@@ -65,7 +65,7 @@ func TestKernelErrorBecauseUnwrap(t *testing.T) {
 
 func TestHTTPStatus(t *testing.T) {
 	cases := []struct {
-		err    error
+		err        error
 		wantStatus int
 	}{
 		{ErrUnauthenticated, 401},
@@ -87,4 +87,28 @@ func TestHTTPStatus(t *testing.T) {
 	if HTTPStatus(ErrNotFound.Wrap("x")) != 404 {
 		t.Error("HTTPStatus should work on wrapped errors")
 	}
+}
+
+func TestGrantRequiredCodeAndMeta(t *testing.T) {
+	if HTTPStatusFromCode("grant_required") != 403 {
+		t.Errorf("grant_required status = %d, want 403", HTTPStatusFromCode("grant_required"))
+	}
+	// WithMeta attaches structured context and Wrapf preserves it (chaining must not drop it).
+	e := ErrGrantRequired.Wrapf("grant required for %s", "@a/b").WithMeta("action", "@a/b")
+	if e.Meta["action"] != "@a/b" {
+		t.Errorf("Meta[action] = %q, want @a/b", e.Meta["action"])
+	}
+	if !errorsIs(e, ErrGrantRequired) {
+		t.Error("WithMeta lost the error identity")
+	}
+	// WithMeta copies: the sentinel is not mutated.
+	if ErrGrantRequired.Meta != nil {
+		t.Error("WithMeta mutated the sentinel")
+	}
+}
+
+func errorsIs(err, target error) bool {
+	ke, ok := err.(*KernelError)
+	tk, ok2 := target.(*KernelError)
+	return ok && ok2 && ke.Code == tk.Code
 }

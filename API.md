@@ -101,10 +101,20 @@ Federation has no HTTP surface: peer identity, gossip, manifests, the friend han
 | Operation | HTTP | CLI |
 |-----------|------|-----|
 | Create user | `POST /v1/users` `{handle, email, password}` → 201 user | `juice user create <user> <email> [--password]` |
-| Get self | `GET /v1/me` → user (`id`, `handle`, `email`, `available`, `locked`) | `juice user me` |
+| Get self | `GET /v1/me` → user (`id`, `handle`, `email`, `available`, `locked`, `grants`) | `juice user me` |
 | Update self | `PUT /v1/me` `{[email], [current_password, password]}` → user | `juice user update [--email] [--password]` |
 
 `handle` is immutable. `email` and `password` are updatable by the authenticated user; `password` change requires `current_password` to verify the existing credential. At least one of `email` or `password` must be provided. Proxy users (federation peers) cannot be created here, cannot log in, and hold no tokens; they exist only through peer acceptance, authenticate per request by federation signature, and cannot use `PUT /v1/me`.
+
+### Grants (delegated OAuth)
+
+| Operation | HTTP | CLI |
+|-----------|------|-----|
+| Start consent | `POST /v1/grants/start` `{action, [redirect_uri], [flow]}` → `{state, authorize_url}` (code) or `{state, verification_uri, user_code, interval, expires_in}` (device) | `juice grant add <action> [--device]` |
+| Complete consent | `POST /v1/grants/complete` `{state, [code]}` → `{status, action, created_at}` or `{status: "pending"}` | (driven by `grant add`) |
+| Revoke grant | `DELETE /v1/grants?action=@owner/name` → `{revoked, action}` | `juice grant revoke <action>` |
+
+A `Grant` delegates the caller's upstream OAuth identity to one `oauth_delegated` action (§8). The client hosts the redirect target — a loopback listener for local clients (CLI/desktop), a registered callback for hosted ones — and the server holds only in-memory PKCE/device state and performs the token exchange, so the refresh token never transits the client. Running an action that lacks a grant returns `grant_required` (403) with the action in `meta`, so a client can offer consent inline; the CLI (`juice run`) does exactly that on an interactive terminal and otherwise prints a `juice grant add` hint. Grants are listed token-free under `grants` in `GET /v1/me` and are never otherwise readable.
 
 ### Actions
 

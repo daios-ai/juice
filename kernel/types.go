@@ -35,24 +35,24 @@ const (
 // (session) and/or a PublicKey (federation signature); there is no "kind". A key makes it a peer
 // kernel here, its live path resolved from the key by the transport (§13).
 type User struct {
-	ID            string     `json:"id"`
-	Handle        string     `json:"handle"`
-	Email         string     `json:"email"`
-	PasswordHash  string     `json:"-"`
-	Available     int64      `json:"available"`
-	Locked        int64      `json:"locked"`
-	SuspendedAt   *time.Time `json:"suspended_at,omitempty"`
-	DeniedAt      *time.Time `json:"denied_at,omitempty"`
-	PublicKey     string     `json:"public_key,omitempty"` // Ed25519 public key, base64url; empty = no signature credential
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID           string     `json:"id"`
+	Handle       string     `json:"handle"`
+	Email        string     `json:"email"`
+	PasswordHash string     `json:"-"`
+	Available    int64      `json:"available"`
+	Locked       int64      `json:"locked"`
+	SuspendedAt  *time.Time `json:"suspended_at,omitempty"`
+	DeniedAt     *time.Time `json:"denied_at,omitempty"`
+	PublicKey    string     `json:"public_key,omitempty"` // Ed25519 public key, base64url; empty = no signature credential
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // Action is a callable capability.
 type Action struct {
 	ID             string         `json:"id"`
 	OwnerUserID    string         `json:"owner_user_id"`
-	OwnerHandle    string         `json:"owner_handle,omitempty"` // populated via JOIN; empty if not loaded
+	OwnerHandle    string         `json:"owner_handle,omitempty"`    // populated via JOIN; empty if not loaded
 	OwnerSuspended bool           `json:"owner_suspended,omitempty"` // populated via JOIN; true when the owner is suspended (§12)
 	Name           string         `json:"name"`
 	Kind           ActionKind     `json:"kind"`
@@ -72,12 +72,46 @@ type Action struct {
 	DeletedAt      *time.Time     `json:"deleted_at,omitempty"`
 }
 
+// Upstream auth schemes (§8). Owner-held schemes carry their secret in auth_json; the
+// oauth_delegated scheme carries only provider config there and binds the per-user credential
+// to a Grant row. An unknown scheme is rejected at create/update and fails closed at dispatch.
+const (
+	AuthSchemeHeader           = "header"
+	AuthSchemeQuery            = "query"
+	AuthSchemeBearer           = "bearer"
+	AuthSchemeBasic            = "basic"
+	AuthSchemeOAuthClientCreds = "oauth_client_credentials"
+	AuthSchemeOAuthJWTBearer   = "oauth_jwt_bearer"
+	AuthSchemeOAuthDelegated   = "oauth_delegated"
+)
+
 // AuthInput is a write-only upstream auth payload for action create/update.
 // It is marshaled to JSON and stored encrypted in auth_json. Never returned by any API.
+// For oauth_delegated, Config holds provider endpoints (auth_url, token_url, optional
+// device_auth_url, client_id, scopes) and Secrets holds only an optional client_secret —
+// the per-user refresh token lives in a Grant (§3), never here.
 type AuthInput struct {
-	Scheme  string         `json:"scheme"`           // "header", "query", "bearer", "basic"
-	Config  map[string]any `json:"config,omitempty"` // scheme-specific config (e.g. header name)
+	Scheme  string         `json:"scheme"`
+	Config  map[string]any `json:"config,omitempty"` // scheme-specific config (e.g. header name, token_url)
 	Secrets map[string]any `json:"secrets"`          // credentials (never logged or returned)
+}
+
+// Grant is a user's delegated upstream OAuth credential for exactly one action (§8).
+// RefreshToken is AES-256-GCM sealed and write-only: never serialized by any read path.
+type Grant struct {
+	ID            string    `json:"id"`
+	GrantorUserID string    `json:"grantor_user_id"`
+	ActionID      string    `json:"action_id"`
+	RefreshToken  string    `json:"-"` // sealed; never returned
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// GrantView is the token-free read shape for GET /v1/me: the action reference, the scopes the
+// action requests (from its auth config), and when the grant was created.
+type GrantView struct {
+	Action    string    `json:"action"` // @owner/name
+	Scopes    any       `json:"scopes,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Process is a budgeted execution context.
@@ -320,8 +354,8 @@ type IdempotencyRecord struct {
 type ImportResult struct {
 	Created     []*Action
 	Unchanged   []*Action
-	Updated     []*Action   // deactivated: contract changed
-	Deactivated []*Action   // deactivated: removed from spec
+	Updated     []*Action // deactivated: contract changed
+	Deactivated []*Action // deactivated: removed from spec
 	Rejected    []ImportRejection
 }
 
@@ -466,4 +500,3 @@ type FederationResult struct {
 	ReceiptJSON string
 	HTTPStatus  int
 }
-

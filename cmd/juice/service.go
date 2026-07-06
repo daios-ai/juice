@@ -275,7 +275,75 @@ func getMe(k *kernel.Kernel, ctx context.Context, callerID string) (map[string]a
 	if err != nil {
 		return nil, err
 	}
-	return userView(u), nil
+	view := userView(u)
+	// Grants are token-free: action ref, requested scopes, created_at (§8). Always present.
+	grants, err := k.ListGrantViews(ctx, callerID)
+	if err != nil {
+		return nil, err
+	}
+	if grants == nil {
+		grants = []*kernel.GrantView{}
+	}
+	view["grants"] = grants
+	return view, nil
+}
+
+// startGrant begins a delegated-OAuth consent for an action the caller may use. It resolves the
+// action, requires it to be a callable oauth_delegated action, and drives the broker (§8).
+func startGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, callerID, actionRef, redirectURI, flow string) (*startResult, error) {
+	if broker == nil {
+		return nil, kernel.ErrInvalidState.Wrap("OAuth consent is not configured on this server")
+	}
+	a, err := resolveActionRef(k, ctx, actionRef)
+	if err != nil {
+		return nil, err
+	}
+	auth, err := k.DelegatedAuthConfig(ctx, callerID, a.ID)
+	if err != nil {
+		return nil, err
+	}
+	if flow == "" {
+		flow = "code"
+	}
+	return broker.start(ctx, callerID, a.ID, auth, redirectURI, flow)
+}
+
+// completeGrant finishes a consent and, on success, seals+stores the refresh token via CreateGrant.
+func completeGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, callerID, state, code string) (map[string]any, error) {
+	if broker == nil {
+		return nil, kernel.ErrInvalidState.Wrap("OAuth consent is not configured on this server")
+	}
+	res, err := broker.complete(ctx, state, callerID, code)
+	if err != nil {
+		return nil, err
+	}
+	if res.Status == "pending" {
+		return map[string]any{"status": "pending"}, nil
+	}
+	g, err := k.CreateGrant(ctx, callerID, res.ActionID, res.Refresh)
+	if err != nil {
+		return nil, err
+	}
+	views, _ := k.ListGrantViews(ctx, callerID)
+	action := res.ActionID
+	for _, v := range views {
+		if v.CreatedAt.Equal(g.CreatedAt) {
+			action = v.Action
+			break
+		}
+	}
+	return map[string]any{"status": "complete", "action": action, "created_at": g.CreatedAt}, nil
+}
+
+func revokeGrant(k *kernel.Kernel, ctx context.Context, callerID, actionRef string) (map[string]any, error) {
+	a, err := resolveActionRef(k, ctx, actionRef)
+	if err != nil {
+		return nil, err
+	}
+	if err := k.RevokeGrant(ctx, callerID, a.ID); err != nil {
+		return nil, err
+	}
+	return map[string]any{"revoked": true, "action": actionRef}, nil
 }
 
 func updateMe(k *kernel.Kernel, ctx context.Context, callerID, email, currentPwd, newPwd string) (map[string]any, error) {

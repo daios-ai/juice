@@ -187,3 +187,30 @@ flow_output_schema_failure() {
     local tx_id; tx_id=$(python3 -c "import sys,json;print(json.loads(sys.argv[1])[0]['id'])" "$txs" 2>/dev/null)
     assert_json "output_schema_failure.tx_status_failure" "$(jj "$db" "$hb" tx show "$tx_id")" status failure
 }
+
+# flow_grant — delegated-OAuth consent gating (§8), CLI surface.
+# Covers action-create with an oauth_delegated auth config, reject-before-lock when no grant
+# exists, and grant revoke. The full consent+run happy path needs a live provider and is
+# covered by the Go flow suite (TestFlow_OAuthDelegated); here we assert the CLI gating.
+flow_grant() {
+    echo "=== FLOW grant ==="
+    local dir db hs ha aid
+    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    start_server "$db" "$hs" || { fail "grant.boot" "server did not start"; return; }
+    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" @alice
+    deposit "$db" "$hs" @alice 1000
+
+    # A delegated-OAuth action; provider endpoints are loopback stubs (never dialed on the
+    # reject path — consent is required before any funds lock).
+    aid=$(strfield "$(jj "$db" "$ha" action create inbox --kind http --source "http://127.0.0.1:9/api" --price 100 --description "delegated inbox" --auth '{"scheme":"oauth_delegated","config":{"auth_url":"http://127.0.0.1:9/auth","token_url":"http://127.0.0.1:9/token","client_id":"cid","scopes":"read"}}')" id)
+    assert_nonempty "grant.action_created" "$aid"
+    j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
+
+    # Running without a grant is rejected before any charge, with the consent hint surfaced.
+    assert_fails "grant.reject_before_consent" "grant" -- j "$db" "$ha" run @alice/inbox '{}'
+    assert_jnum "grant.no_charge" "$(jj "$db" "$ha" user me)" available 1000
+
+    # No grant exists yet, so revoke reports not-found.
+    assert_fails "grant.revoke_absent" "not found\|error" -- j "$db" "$ha" grant revoke @alice/inbox
+}

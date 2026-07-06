@@ -33,10 +33,20 @@ type ScriptExecutor interface {
 	Execute(ctx context.Context, artifact []byte, input []byte, host HostFunctions) ([]byte, error)
 }
 
-// HTTPExecutor calls an external HTTP action endpoint.
-// kernel/ defines this interface; cmd/juice provides the concrete implementation.
+// HTTPExecutor calls an external HTTP action endpoint. ownerUserID is the process owner (the
+// payer): the executor needs it to resolve a delegated OAuth grant (§8), whose binding rule is
+// grant.grantor_user_id == ownerUserID. kernel/ defines this interface; cmd/juice implements it.
 type HTTPExecutor interface {
-	Execute(ctx context.Context, action *Action, args map[string]any) (map[string]any, error)
+	Execute(ctx context.Context, action *Action, args map[string]any, ownerUserID string) (map[string]any, error)
+}
+
+// GrantStore is the executor-facing subset of Store for the delegated-token lifecycle (§8).
+// The concrete store implements it; cmd/juice injects it into the HTTP executor so token
+// exchange (which lives outside kernel/) can read grants and persist refresh-token rotation.
+type GrantStore interface {
+	ReadGrant(ctx context.Context, grantorUserID, actionID string) (*Grant, error)
+	UpdateGrantRefreshToken(ctx context.Context, id, sealedToken string) error
+	DeleteGrant(ctx context.Context, grantorUserID, actionID string) error
 }
 
 // URLFetcher retrieves the body of a URL. Used for OpenAPI ownership proof (well-known challenge).
@@ -323,6 +333,20 @@ type Store interface {
 	CreateRefreshToken(ctx context.Context, t *RefreshToken) error
 	RotateRefreshToken(ctx context.Context, oldToken string) (*RefreshToken, error)
 	RevokeRefreshToken(ctx context.Context, token string) error
+
+	// ---- Grants (delegated upstream OAuth, §8) ----
+
+	// CreateOrReplaceGrant upserts on (grantor_user_id, action_id); re-consent overwrites.
+	CreateOrReplaceGrant(ctx context.Context, g *Grant) error
+	// ReadGrant returns the grant for (grantor, action), or ErrNotFound.
+	ReadGrant(ctx context.Context, grantorUserID, actionID string) (*Grant, error)
+	ListGrantsByUser(ctx context.Context, grantorUserID string) ([]*Grant, error)
+	// UpdateGrantRefreshToken replaces the sealed refresh token (provider rotation).
+	UpdateGrantRefreshToken(ctx context.Context, id, sealedToken string) error
+	// DeleteGrant removes one grant (revoke / invalid_grant); ErrNotFound if absent.
+	DeleteGrant(ctx context.Context, grantorUserID, actionID string) error
+	// DeleteGrantsForAction removes every grant on an action (deactivating update / delete).
+	DeleteGrantsForAction(ctx context.Context, actionID string) error
 
 	// ---- Config ----
 

@@ -670,6 +670,9 @@ func (k *Kernel) GetGossip(ctx context.Context) (*GossipResponse, error) {
 		if !a.Active {
 			continue
 		}
+		if k.isDelegatedAuth(a) {
+			continue // never advertised to peers (§8/§13)
+		}
 		stats, _ := k.store.ReadStats(ctx, a.ID)
 		ga := GossipAction{
 			ActionID:    a.ID,
@@ -1016,6 +1019,11 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 	}
 	if !a.Active || !a.Public {
 		return nil, ErrUnauthorized.Wrap("manifest only available for public active actions")
+	}
+	// Delegated-OAuth actions are never advertised: a remote peer's proxy user cannot complete a
+	// browser consent, so importing one could only ever produce grant-required failures (§8/§13).
+	if k.isDelegatedAuth(a) {
+		return nil, ErrUnauthorized.Wrap("delegated-OAuth actions are not served as manifests")
 	}
 	owner, err := k.store.ReadUser(ctx, a.OwnerUserID)
 	if err != nil {

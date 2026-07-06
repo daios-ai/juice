@@ -62,6 +62,9 @@ func runServer(addr string) error {
 	r.Use(maxBytesMiddleware) // request body limit (path-aware; see maxBytesMiddleware)
 
 	srv := &server{kernel: k, log: logger}
+	if httpExec.oauth != nil {
+		srv.oauth = newGrantBroker(httpExec.oauth)
+	}
 
 	// Auth — rate limited: 5 requests/minute per IP, burst of 10.
 	authLimiter := ipRateLimiter(5.0/60, 10)
@@ -328,6 +331,7 @@ type server struct {
 	kernel *kernel.Kernel
 	log    *log.Logger
 	fed    *fed.Transport // federation transport (§13); nil until runServer starts it
+	oauth  *grantBroker   // delegated-OAuth consent broker (§8); nil when no credentials box
 }
 
 // registerRoutes mounts all application routes onto r for the given server.
@@ -382,6 +386,12 @@ func registerRoutes(r chi.Router, srv *server) {
 		// Current user.
 		r.Get("/v1/me", srv.getMe)
 		r.Put("/v1/me", srv.putMe)
+
+		// Delegated-OAuth grants (§8). The client hosts the loopback redirect; the kernel holds
+		// only in-memory PKCE/device state and performs the token exchange itself.
+		r.Post("/v1/grants/start", srv.postGrantStart)
+		r.Post("/v1/grants/complete", srv.postGrantComplete)
+		r.Delete("/v1/grants", srv.deleteGrant)
 	})
 
 	// Superuser supervision (money, access, federation trust, roster) — same TCP API, gated
@@ -1051,6 +1061,43 @@ func (s *server) putMe(w http.ResponseWriter, r *http.Request) {
 	})(w, r)
 }
 
+// ---- delegated-OAuth grants (§8) ----
+
+func (s *server) postGrantStart(w http.ResponseWriter, r *http.Request) {
+	handle(func(r *http.Request, body struct {
+		Action      string `json:"action"`
+		RedirectURI string `json:"redirect_uri"`
+		Flow        string `json:"flow"`
+	}) (any, int, error) {
+		res, err := startGrant(s.kernel, s.oauth, r.Context(), callerFrom(r), body.Action, body.RedirectURI, body.Flow)
+		return res, http.StatusOK, err
+	})(w, r)
+}
+
+func (s *server) postGrantComplete(w http.ResponseWriter, r *http.Request) {
+	handle(func(r *http.Request, body struct {
+		State string `json:"state"`
+		Code  string `json:"code"`
+	}) (any, int, error) {
+		res, err := completeGrant(s.kernel, s.oauth, r.Context(), callerFrom(r), body.State, body.Code)
+		return res, http.StatusOK, err
+	})(w, r)
+}
+
+func (s *server) deleteGrant(w http.ResponseWriter, r *http.Request) {
+	action := r.URL.Query().Get("action")
+	if action == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("action query parameter is required"))
+		return
+	}
+	res, err := revokeGrant(s.kernel, r.Context(), callerFrom(r), action)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // ---- health command ----
 
 func healthCmd() *cobra.Command {
@@ -1122,10 +1169,16 @@ func writeErr(w http.ResponseWriter, err error) {
 	status := kernel.HTTPStatus(err)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{
+	body := map[string]any{
 		"error": fmt.Sprintf("%v", err),
 		"code":  kernel.KernelErrorCode(err),
-	})
+	}
+	// Structured, machine-actionable context (e.g. the action a grant is required for),
+	// so clients act on fields rather than parsing the message (§8).
+	if ke, ok := err.(*kernel.KernelError); ok && len(ke.Meta) > 0 {
+		body["meta"] = ke.Meta
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // ---- Federation transport wiring ----

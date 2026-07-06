@@ -2671,3 +2671,83 @@ func TestListPurgeablePeers(t *testing.T) {
 		t.Fatalf("purgeable = %v, want exactly [%s (@idle)]", ids, idle.ID)
 	}
 }
+
+// ---- Grants (delegated upstream OAuth, §8) ----
+
+func TestGrantCRUDAndUpsert(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@grantor", 0)
+	_ = db.CreateUser(ctx, user)
+	a := newAction(user.ID, "/oauth-svc", 0, true)
+	_ = db.CreateAction(ctx, a)
+
+	g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: user.ID, ActionID: a.ID, RefreshToken: "sealed-1", CreatedAt: time.Now().UTC()}
+	if err := db.CreateOrReplaceGrant(ctx, g); err != nil {
+		t.Fatalf("CreateOrReplaceGrant: %v", err)
+	}
+	got, err := db.ReadGrant(ctx, user.ID, a.ID)
+	if err != nil {
+		t.Fatalf("ReadGrant: %v", err)
+	}
+	if got.RefreshToken != "sealed-1" {
+		t.Errorf("refresh token = %q, want sealed-1", got.RefreshToken)
+	}
+
+	// Re-consent overwrites in place: still one row, new token, new id.
+	g2 := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: user.ID, ActionID: a.ID, RefreshToken: "sealed-2", CreatedAt: time.Now().UTC()}
+	if err := db.CreateOrReplaceGrant(ctx, g2); err != nil {
+		t.Fatalf("re-consent: %v", err)
+	}
+	list, _ := db.ListGrantsByUser(ctx, user.ID)
+	if len(list) != 1 {
+		t.Fatalf("grant count = %d, want 1 (upsert)", len(list))
+	}
+	if list[0].RefreshToken != "sealed-2" {
+		t.Errorf("after upsert token = %q, want sealed-2", list[0].RefreshToken)
+	}
+
+	// Rotation persists a new sealed token.
+	if err := db.UpdateGrantRefreshToken(ctx, list[0].ID, "sealed-3"); err != nil {
+		t.Fatalf("UpdateGrantRefreshToken: %v", err)
+	}
+	got, _ = db.ReadGrant(ctx, user.ID, a.ID)
+	if got.RefreshToken != "sealed-3" {
+		t.Errorf("after rotation token = %q, want sealed-3", got.RefreshToken)
+	}
+
+	if err := db.DeleteGrant(ctx, user.ID, a.ID); err != nil {
+		t.Fatalf("DeleteGrant: %v", err)
+	}
+	if _, err := db.ReadGrant(ctx, user.ID, a.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("after delete: got %v, want ErrNotFound", err)
+	}
+	if err := db.DeleteGrant(ctx, user.ID, a.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("delete absent grant: got %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteGrantsForAction(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	u1 := newUser("@g1", 0)
+	u2 := newUser("@g2", 0)
+	_ = db.CreateUser(ctx, u1)
+	_ = db.CreateUser(ctx, u2)
+	a := newAction(u1.ID, "/multi", 0, true)
+	_ = db.CreateAction(ctx, a)
+
+	for _, u := range []*kernel.User{u1, u2} {
+		_ = db.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: u.ID, ActionID: a.ID, RefreshToken: "s", CreatedAt: time.Now().UTC()})
+	}
+	if err := db.DeleteGrantsForAction(ctx, a.ID); err != nil {
+		t.Fatalf("DeleteGrantsForAction: %v", err)
+	}
+	for _, u := range []*kernel.User{u1, u2} {
+		if _, err := db.ReadGrant(ctx, u.ID, a.ID); !errors.Is(err, kernel.ErrNotFound) {
+			t.Errorf("grant for %s survived action-wide delete", u.Handle)
+		}
+	}
+}

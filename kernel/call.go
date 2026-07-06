@@ -171,7 +171,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// path (root, step, subcall). The pre-resolved snapshot (req.Action) is validated, so root
 	// calls are checked here too with no extra DB read and no TOCTOU window — Call is the single
 	// validity function; no entry path bypasses it (beginRun runs the same check before funding).
-	if err := k.checkCallPreconditions(process.OwnerUserID, action, req.Args); err != nil {
+	if err := k.checkCallPreconditions(ctx, process.OwnerUserID, action, req.Args); err != nil {
 		return nil, err
 	}
 
@@ -405,7 +405,7 @@ func canCall(ownerID string, action *Action) bool {
 // the single validity function — Call runs it unconditionally for every entry path, and
 // beginRun runs it once before funding so an invalid root call never creates a funded process
 // (a precondition rejection must create no transaction, §6).
-func (k *Kernel) checkCallPreconditions(ownerID string, action *Action, args map[string]any) error {
+func (k *Kernel) checkCallPreconditions(ctx context.Context, ownerID string, action *Action, args map[string]any) error {
 	if !canCall(ownerID, action) {
 		if !action.Active {
 			return ErrInvalidState.Wrap("action is inactive")
@@ -415,7 +415,36 @@ func (k *Kernel) checkCallPreconditions(ownerID string, action *Action, args map
 		}
 		return ErrUnauthorized.Wrap("call permission denied")
 	}
-	return ValidateInput(action.InputSchema, args)
+	if err := ValidateInput(action.InputSchema, args); err != nil {
+		return err
+	}
+	return k.checkGrantRequired(ctx, ownerID, action)
+}
+
+// checkGrantRequired implements §8 lazy consent: a call to an oauth_delegated http action whose
+// process owner holds no matching grant is rejected here — before any funds are locked and before
+// any transaction exists (a precondition rejection creates no transaction, §6, and does not dent
+// the provider's failure stats, §9). Non-delegated actions pass through untouched. An undecryptable
+// or malformed auth payload is left for the executor's fail-closed path, not treated as consent.
+func (k *Kernel) checkGrantRequired(ctx context.Context, ownerID string, action *Action) error {
+	if action.Kind != KindHTTP || action.AuthJSON == "" || k.secretBox == nil {
+		return nil
+	}
+	auth, err := k.openAuthInput(action)
+	if err != nil || auth == nil || auth.Scheme != AuthSchemeOAuthDelegated {
+		return nil
+	}
+	if _, gerr := k.store.ReadGrant(ctx, ownerID, action.ID); gerr != nil {
+		if errors.Is(gerr, ErrNotFound) {
+			ref := action.Name
+			if h := k.callerHandle(ctx, action.OwnerUserID); h != "" {
+				ref = h + "/" + action.Name
+			}
+			return ErrGrantRequired.Wrapf("grant required for %s", ref).WithMeta("action", ref)
+		}
+		return gerr
+	}
+	return nil
 }
 
 // execute dispatches to the correct execution backend for HTTP, WASM, and native actions.
@@ -426,7 +455,7 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 		if k.http == nil {
 			return nil, "", ErrInvalidState.Wrap("HTTP executor not configured")
 		}
-		res, err := k.http.Execute(ctx, action, args)
+		res, err := k.http.Execute(ctx, action, args, ownerUserID)
 		return res, "", err
 	case KindWasm:
 		res, err := k.executeWasm(ctx, action, args, trace, targetID)

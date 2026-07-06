@@ -175,6 +175,8 @@ func exitCodeFor(err error) int {
 		return 6
 	case "timeout":
 		return 7
+	case "grant_required":
+		return 8
 	default:
 		return 1
 	}
@@ -259,6 +261,9 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 			if box, err := newAESGCMBox(keyBytes); err == nil {
 				k.SetSecretBox(box)
 				httpExec.secretBox = box
+				// The OAuth token engine shares the box (to open sealed grant refresh tokens) and
+				// reads/rotates grants through the store (§8).
+				httpExec.oauth = newOAuthEngine(box, db, cfg.AllowLocalSources, cfg.ScriptTimeout)
 			}
 		}
 	}

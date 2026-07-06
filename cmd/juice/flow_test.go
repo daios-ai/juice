@@ -884,10 +884,10 @@ func TestFlow_OpenAPIImportActivateRun(t *testing.T) {
 
 	// Minimal OpenAPI 3.0 spec.
 	spec := map[string]any{
-		"openapi": "3.0.0",
+		"openapi":       "3.0.0",
 		"x-juice-owner": ownerHandle,
-		"info":    map[string]any{"title": "Test API", "version": "1.0"},
-		"servers": []any{map[string]any{"url": apiBackend.URL}},
+		"info":          map[string]any{"title": "Test API", "version": "1.0"},
+		"servers":       []any{map[string]any{"url": apiBackend.URL}},
 		"paths": map[string]any{
 			"/fetch": map[string]any{
 				"post": map[string]any{
@@ -2472,3 +2472,178 @@ func TestFlow_AuthenticatedActionList(t *testing.T) {
 	}
 }
 
+// ---- Delegated OAuth flow (§8) ----
+
+// newOAuthFlowServer mirrors newFlowKernel but wires the OAuth token engine and consent broker,
+// returning the executor so the test can point it at fake endpoints.
+func newOAuthFlowServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "flow.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "flow-test-secret"
+	cfg.AllowLocalSources = true
+	logger := log.Discard()
+	box, err := newAESGCMBox(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true, secretBox: box}
+	httpExec.oauth = newOAuthEngine(box, db, true, cfg.ScriptTimeout)
+	k := kernel.New(db, &flowScriptExec{}, httpExec, nil, cfg, logger)
+	k.SetSecretBox(box)
+	if err := k.FirstBoot(context.Background(), "sys-pass"); err != nil {
+		t.Fatal(err)
+	}
+	bootstrapSigning(t, k)
+
+	srv := &server{kernel: k, log: logger, oauth: newGrantBroker(httpExec.oauth)}
+	return httptest.NewServer(mountFullRouter(srv)), k
+}
+
+// createDelegatedActionHTTP creates, enables (private), and returns the ID of an oauth_delegated
+// http action pointing at upstreamURL, using providerURL as its OAuth endpoints.
+func createDelegatedActionHTTP(t *testing.T, srv *httptest.Server, ownerTok, name, upstreamURL, providerURL string) string {
+	t.Helper()
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": name, "kind": "http", "price": 0, "source": upstreamURL,
+		"description":   "delegated inbox",
+		"input_schema":  minSchema,
+		"output_schema": minSchema,
+		"auth": map[string]any{
+			"scheme": kernel.AuthSchemeOAuthDelegated,
+			"config": map[string]any{
+				"auth_url":  providerURL + "/auth",
+				"token_url": providerURL + "/token",
+				"client_id": "cid",
+				"scopes":    "gmail.readonly",
+			},
+		},
+	}, ownerTok)
+	if cr.StatusCode != http.StatusCreated {
+		var b map[string]any
+		json.NewDecoder(cr.Body).Decode(&b)
+		cr.Body.Close()
+		t.Fatalf("create delegated action: got %d — %v", cr.StatusCode, b)
+	}
+	var act map[string]any
+	decodeResponse(t, cr, &act)
+	id := act["id"].(string)
+	httpDo(t, srv, "POST", "/v1/actions/"+id+"/enable", nil, ownerTok).Body.Close()
+	return id
+}
+
+func TestFlow_OAuthDelegated(t *testing.T) {
+	// Fake OAuth provider: authorization_code → access+refresh; refresh_token → a live token.
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Form.Get("grant_type") {
+		case "authorization_code":
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "acc-init", "refresh_token": "ref-1", "expires_in": 3600})
+		case "refresh_token":
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "acc-live", "expires_in": 3600})
+		default:
+			http.Error(w, `{"error":"unsupported_grant_type"}`, http.StatusBadRequest)
+		}
+	}))
+	defer provider.Close()
+
+	// Fake upstream API that records the bearer it saw.
+	var sawAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer upstream.Close()
+
+	srv, k := newOAuthFlowServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@oauth-owner")
+	createDelegatedActionHTTP(t, srv, ownerTok, "inbox", upstream.URL, provider.URL)
+	const ref = "@oauth-owner/inbox"
+
+	// 1. Run without a grant: rejected before any charge with the structured grant_required
+	// outcome — a machine-detectable code plus the action in meta (§8).
+	rejectRun := func() {
+		resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{"action": ref, "args": map[string]any{}}, ownerTok)
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			t.Fatal("run without grant unexpectedly succeeded")
+		}
+		var body struct {
+			Code string            `json:"code"`
+			Meta map[string]string `json:"meta"`
+		}
+		json.NewDecoder(resp.Body).Decode(&body)
+		if body.Code != "grant_required" {
+			t.Fatalf("run rejection code = %q, want grant_required", body.Code)
+		}
+		if body.Meta["action"] != ref {
+			t.Fatalf("run rejection meta.action = %q, want %q", body.Meta["action"], ref)
+		}
+	}
+	rejectRun()
+
+	// 2. Consent: start the code flow, then complete it (the provider issues the refresh token).
+	var start map[string]any
+	sr := httpDo(t, srv, "POST", "/v1/grants/start", map[string]any{
+		"action": ref, "redirect_uri": "http://127.0.0.1:5555/callback", "flow": "code",
+	}, ownerTok)
+	decodeResponse(t, sr, &start)
+	state, _ := start["state"].(string)
+	if state == "" || start["authorize_url"] == "" {
+		t.Fatalf("grants/start returned no state/authorize_url: %v", start)
+	}
+	var done map[string]any
+	cr := httpDo(t, srv, "POST", "/v1/grants/complete", map[string]any{"state": state, "code": "the-code"}, ownerTok)
+	decodeResponse(t, cr, &done)
+	if done["status"] != "complete" {
+		t.Fatalf("grants/complete status = %v, want complete", done["status"])
+	}
+
+	// 3. Run now succeeds and the upstream saw the refreshed bearer.
+	reply := runAction(t, srv, ownerTok, ref, map[string]any{})
+	if reply.Result["ok"] != true {
+		t.Errorf("run result = %v, want ok=true", reply.Result)
+	}
+	if sawAuth != "Bearer acc-live" {
+		t.Errorf("upstream saw Authorization %q, want Bearer acc-live", sawAuth)
+	}
+
+	// 4. /v1/me lists the grant with no token material.
+	meResp := httpDo(t, srv, "GET", "/v1/me", nil, ownerTok)
+	meBody, _ := readAll(t, meResp)
+	if !strings.Contains(meBody, ref) {
+		t.Errorf("/v1/me does not list the grant: %s", meBody)
+	}
+	for _, secret := range []string{"ref-1", "acc-live", "acc-init"} {
+		if strings.Contains(meBody, secret) {
+			t.Errorf("/v1/me leaked token material %q: %s", secret, meBody)
+		}
+	}
+
+	// 5. Revoke → run is rejected again.
+	rev := httpDo(t, srv, "DELETE", "/v1/grants?action="+ref, nil, ownerTok)
+	if rev.StatusCode != http.StatusOK {
+		t.Fatalf("revoke: got %d", rev.StatusCode)
+	}
+	rev.Body.Close()
+	rejectRun()
+}
+
+// readAll returns a response body as a string.
+func readAll(t *testing.T, resp *http.Response) (string, error) {
+	t.Helper()
+	defer resp.Body.Close()
+	var buf bytes.Buffer
+	_, err := buf.ReadFrom(resp.Body)
+	return buf.String(), err
+}
