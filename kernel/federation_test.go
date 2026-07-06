@@ -1781,3 +1781,75 @@ func TestDiscoveryRoster(t *testing.T) {
 		t.Errorf("A sources: selfReported=%v viaC=%v (sources=%+v)", selfReported, viaC, a.Sources)
 	}
 }
+
+// TestFriendDoesNotReexportImportedProxies pins §13 non-transitivity: a kernel serves manifests and
+// gossips only its OWN actions. An imported remote_proxy — even active+public — is never re-served,
+// so a peer friending this kernel cannot reach a third kernel's actions through it.
+func TestFriendDoesNotReexportImportedProxies(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	// Our own active+public action.
+	owner := setupUser(t, st, "@localprov", 0)
+	own := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "mine", Kind: kernel.KindHTTP,
+		Active: true, Public: true, Price: 10, Description: "own action",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		Source:    `{"type":"http","base_url":"https://api.example.com","method":"POST","path":"/"}`,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, own); err != nil {
+		t.Fatal(err)
+	}
+
+	// An imported proxy from peer C, made active+public exactly as the bulk friend-import does.
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	peerC, err := k.AddPeer(ctx, sys.ID, "@peer-c", base64.RawURLEncoding.EncodeToString(pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := kernel.ActionManifest{
+		ActionID: "c-act-1", OwnerHandle: "@peer-c", Name: "sum", Description: "c sum",
+		Kind: kernel.KindHTTP, Price: 50, InputSchema: map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "sha256-c", Stats: &kernel.Stats{},
+		UpdatedAt: time.Now(),
+	}
+	sig, _ := kernel.SignManifest(priv, &m)
+	m.Signature = sig
+	res, err := k.ImportRemoteAction(ctx, sys.ID, peerC.ID, m)
+	if err != nil || len(res.Created) != 1 {
+		t.Fatalf("ImportRemoteAction: %v (created %d)", err, len(res.Created))
+	}
+	proxy := res.Created[0]
+	proxy.Active, proxy.Public = true, true
+	if err := st.UpdateAction(ctx, proxy); err != nil {
+		t.Fatal(err)
+	}
+
+	// The imported proxy must NOT be re-exported as a manifest.
+	if _, err := k.GetActionManifest(ctx, proxy.ID); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("proxy manifest: got %v, want ErrUnauthorized", err)
+	}
+	// Our own action still is (didn't over-filter).
+	if _, err := k.GetActionManifest(ctx, own.ID); err != nil {
+		t.Errorf("own manifest should succeed: %v", err)
+	}
+	// Gossip lists our own action, never the imported proxy as one of ours.
+	g, err := k.GetGossip(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawOwn, sawProxy bool
+	for _, ga := range g.Actions {
+		sawOwn = sawOwn || ga.ActionID == own.ID
+		sawProxy = sawProxy || ga.ActionID == proxy.ID
+	}
+	if !sawOwn {
+		t.Error("gossip should include our own action")
+	}
+	if sawProxy {
+		t.Error("gossip must NOT advertise an imported proxy as our own action")
+	}
+}

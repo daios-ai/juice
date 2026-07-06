@@ -325,7 +325,7 @@ action_id owner_handle name description input_schema output_schema price kind
 artifact_hash stats updated_at signature
 ```
 
-Only active public remote actions have manifests; an action using the `oauth_delegated` auth scheme (§8) is never served as a manifest and never gossiped, because a remote peer's proxy user can never complete a browser consent. Manifest descriptions and schemas are the canonical interface used by importing kernels for lookup and LLM function calling. `signature` is the remote platform Ed25519 signature over canonical JSON excluding `signature`, verified against the remote peer's `public_key`. Match key:
+Only active public remote actions have manifests; an action using the `oauth_delegated` auth scheme (§8) is never served as a manifest and never gossiped, because a remote peer's proxy user can never complete a browser consent. A kernel serves manifests and gossips (as its own exposed actions) only actions it owns — `kind ∈ {http, wasm, native}`; an imported `kind=remote_proxy` action is never re-served, so friendship stays non-transitive: reaching a peer's imported action requires friending its true owner directly. Manifest descriptions and schemas are the canonical interface used by importing kernels for lookup and LLM function calling. `signature` is the remote platform Ed25519 signature over canonical JSON excluding `signature`, verified against the remote peer's `public_key`. Match key:
 
 ```text
 proxy.owner_user_id + proxy.remote_action_id
@@ -983,6 +983,7 @@ inbound call to a known-but-non-executable action (inactive, non-public, suspend
 unfriend sets denied_at, deactivates proxies, cancels steps addressed to peer; balance survives
 denied key's friend request rejected; own friend clears denial
 gossip lists only transacted friends with stats, keyed by public key with no URLs; non-transacted friends absent
+friending a peer does not import that peer's own imports (no transitive re-export); manifests and gossip exclude remote_proxy actions
 gossip results stored per (kernel, introducer); StatTag namespaced by source
 proxy call locks mp+maxduty; success settles charge+duty on actual charge and refunds difference
 remote failure with charge refunds (mp+maxduty)−charge; duty is zero; settled remote work stays paid

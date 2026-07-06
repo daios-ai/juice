@@ -197,7 +197,7 @@ Native actions registered at bootstrap, owned by `@sys`, public, runnable like a
 
 ### Federation
 
-Friending a peer imports its actions owner-qualified, so a peer action is addressed `@peer/owner/name` and is called through `POST /v1/run` like any local action; there are no federation HTTP endpoints. Trust and peering are managed via the admin commands below. The cross-kernel transport is an implementation detail (§13).
+Friending a peer imports its actions owner-qualified, so a peer action is addressed `@peer/owner/name` and is called through `POST /v1/run` like any local action; there are no federation HTTP endpoints. A kernel exposes only its **own** actions to peers — a peer's own imports are never re-advertised, so friendship is non-transitive (reach a peer's imported action by friending its true owner). Trust and peering are managed via the admin commands below. The cross-kernel transport is an implementation detail (§13).
 
 ### Admin (superuser-gated TCP routes)
 

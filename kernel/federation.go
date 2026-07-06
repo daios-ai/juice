@@ -673,6 +673,9 @@ func (k *Kernel) GetGossip(ctx context.Context) (*GossipResponse, error) {
 		if k.isDelegatedAuth(a) {
 			continue // never advertised to peers (§8/§13)
 		}
+		if a.Kind == KindRemoteProxy {
+			continue // imports are not our own actions; peers reach them only by friending the owner directly (§13)
+		}
 		stats, _ := k.store.ReadStats(ctx, a.ID)
 		ga := GossipAction{
 			ActionID:    a.ID,
@@ -1024,6 +1027,12 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 	// browser consent, so importing one could only ever produce grant-required failures (§8/§13).
 	if k.isDelegatedAuth(a) {
 		return nil, ErrUnauthorized.Wrap("delegated-OAuth actions are not served as manifests")
+	}
+	// Imported (remote_proxy) actions are never re-exported: a kernel serves manifests only for its
+	// own actions, so friendship stays non-transitive — reaching a peer's imported action requires
+	// friending its true owner directly (§13).
+	if a.Kind == KindRemoteProxy {
+		return nil, ErrUnauthorized.Wrap("imported (remote-proxy) actions are not re-exported to peers")
 	}
 	owner, err := k.store.ReadUser(ctx, a.OwnerUserID)
 	if err != nil {
