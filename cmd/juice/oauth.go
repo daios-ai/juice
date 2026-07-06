@@ -85,14 +85,24 @@ func parseOAuthConfig(auth *kernel.AuthInput) oauthConfig {
 	}
 }
 
+// form seeds a token-endpoint request with the grant type, client id, and (when present) the
+// client secret — the fields common to the client-credentials, refresh, and auth-code exchanges.
+func (cfg oauthConfig) form(grantType string) url.Values {
+	f := url.Values{}
+	f.Set("grant_type", grantType)
+	f.Set("client_id", cfg.clientID)
+	if cfg.clientSecret != "" {
+		f.Set("client_secret", cfg.clientSecret)
+	}
+	return f
+}
+
 // tokenResponse is the standard OAuth 2.0 token-endpoint payload.
 type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	ExpiresIn    int64  `json:"expires_in"`
-	TokenType    string `json:"token_type"`
 	Error        string `json:"error"`
-	ErrorDesc    string `json:"error_description"`
 }
 
 // token returns a bearer access token for the action's OAuth scheme. When refresh is true any
@@ -187,12 +197,7 @@ func (e *oauthEngine) exchangeDelegated(ctx context.Context, action *kernel.Acti
 }
 
 func (e *oauthEngine) exchangeClientCredentials(ctx context.Context, cfg oauthConfig) (*tokenResponse, error) {
-	form := url.Values{}
-	form.Set("grant_type", "client_credentials")
-	form.Set("client_id", cfg.clientID)
-	if cfg.clientSecret != "" {
-		form.Set("client_secret", cfg.clientSecret)
-	}
+	form := cfg.form("client_credentials")
 	if cfg.scopes != "" {
 		form.Set("scope", cfg.scopes)
 	}
@@ -200,27 +205,17 @@ func (e *oauthEngine) exchangeClientCredentials(ctx context.Context, cfg oauthCo
 }
 
 func (e *oauthEngine) exchangeRefresh(ctx context.Context, cfg oauthConfig, refreshToken string) (*tokenResponse, error) {
-	form := url.Values{}
-	form.Set("grant_type", "refresh_token")
+	form := cfg.form("refresh_token")
 	form.Set("refresh_token", refreshToken)
-	form.Set("client_id", cfg.clientID)
-	if cfg.clientSecret != "" {
-		form.Set("client_secret", cfg.clientSecret)
-	}
 	return e.postToken(ctx, cfg.tokenURL, form)
 }
 
 // exchangeAuthCode completes the authorization-code flow (called by the consent broker).
 func (e *oauthEngine) exchangeAuthCode(ctx context.Context, cfg oauthConfig, code, redirectURI, verifier string) (*tokenResponse, error) {
-	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
+	form := cfg.form("authorization_code")
 	form.Set("code", code)
 	form.Set("redirect_uri", redirectURI)
 	form.Set("code_verifier", verifier)
-	form.Set("client_id", cfg.clientID)
-	if cfg.clientSecret != "" {
-		form.Set("client_secret", cfg.clientSecret)
-	}
 	return e.postToken(ctx, cfg.tokenURL, form)
 }
 

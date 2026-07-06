@@ -324,15 +324,7 @@ func completeGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, c
 	if err != nil {
 		return nil, err
 	}
-	views, _ := k.ListGrantViews(ctx, callerID)
-	action := res.ActionID
-	for _, v := range views {
-		if v.CreatedAt.Equal(g.CreatedAt) {
-			action = v.Action
-			break
-		}
-	}
-	return map[string]any{"status": "complete", "action": action, "created_at": g.CreatedAt}, nil
+	return map[string]any{"status": "complete", "action": k.ActionRef(ctx, res.ActionID), "created_at": g.CreatedAt}, nil
 }
 
 func revokeGrant(k *kernel.Kernel, ctx context.Context, callerID, actionRef string) (map[string]any, error) {

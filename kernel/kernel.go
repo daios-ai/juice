@@ -101,6 +101,19 @@ func (k *Kernel) callerHandle(ctx context.Context, id string) string {
 	return u.Handle
 }
 
+// ActionRef resolves an action id to its "@owner/name" reference, falling back to the bare name
+// or the id when the action or its owner handle can't be resolved.
+func (k *Kernel) ActionRef(ctx context.Context, actionID string) string {
+	a, err := k.store.ReadAction(ctx, actionID)
+	if err != nil || a == nil {
+		return actionID
+	}
+	if h := k.callerHandle(ctx, a.OwnerUserID); h != "" {
+		return h + "/" + a.Name
+	}
+	return a.Name
+}
+
 // SetSecretBox installs the credential encryption adapter. Must be called before any
 // CreateAction/UpdateAction calls that include an Auth payload.
 func (k *Kernel) SetSecretBox(box SecretBox) { k.secretBox = box }
@@ -174,6 +187,18 @@ func authField(m map[string]any, key string) string {
 	return s
 }
 
+// authSchemeSpec lists, per upstream auth scheme (§8), the required config and secret keys and the
+// config keys that must be safe URLs. A scheme absent from the table is rejected as unknown.
+var authSchemeSpec = map[string]struct{ config, secrets, urls []string }{
+	AuthSchemeHeader:           {config: []string{"name"}, secrets: []string{"value"}},
+	AuthSchemeQuery:            {config: []string{"name"}, secrets: []string{"value"}},
+	AuthSchemeBearer:           {secrets: []string{"token"}},
+	AuthSchemeBasic:            {secrets: []string{"username", "password"}},
+	AuthSchemeOAuthClientCreds: {config: []string{"token_url", "client_id"}, secrets: []string{"client_secret"}, urls: []string{"token_url"}},
+	AuthSchemeOAuthJWTBearer:   {config: []string{"token_url", "client_id"}, secrets: []string{"private_key"}, urls: []string{"token_url"}},
+	AuthSchemeOAuthDelegated:   {config: []string{"auth_url", "token_url", "client_id"}, urls: []string{"auth_url", "token_url", "device_auth_url"}},
+}
+
 // validateAuthInput rejects an upstream auth payload with an unknown scheme or missing required
 // config/secret keys at action create/update — so a malformed OAuth config never reaches dispatch
 // and every URL it names is SSRF-checked up front (§8). Fails closed: unknown scheme is an error.
@@ -181,60 +206,30 @@ func (k *Kernel) validateAuthInput(ctx context.Context, auth *AuthInput) error {
 	if auth == nil {
 		return nil
 	}
-	req := func(m map[string]any, keys ...string) error {
-		for _, key := range keys {
-			if authField(m, key) == "" {
+	spec, ok := authSchemeSpec[auth.Scheme]
+	if !ok {
+		return ErrInvalidInput.Wrapf("unknown upstream auth scheme %q", auth.Scheme)
+	}
+	for _, m := range []struct {
+		fields []string
+		vals   map[string]any
+	}{{spec.config, auth.Config}, {spec.secrets, auth.Secrets}} {
+		for _, key := range m.fields {
+			if authField(m.vals, key) == "" {
 				return ErrInvalidInput.Wrapf("auth scheme %q requires %q", auth.Scheme, key)
 			}
 		}
-		return nil
 	}
-	checkURL := func(keys ...string) error {
-		for _, key := range keys {
-			raw := authField(auth.Config, key)
-			if raw == "" {
-				continue
-			}
-			if err := k.validateHTTPSource(ctx, raw, k.cfg.AllowLocalSources); err != nil {
-				return ErrInvalidInput.Wrapf("auth %q: %v", key, err)
-			}
+	for _, key := range spec.urls {
+		raw := authField(auth.Config, key)
+		if raw == "" {
+			continue
 		}
-		return nil
+		if err := k.validateHTTPSource(ctx, raw, k.cfg.AllowLocalSources); err != nil {
+			return ErrInvalidInput.Wrapf("auth %q: %v", key, err)
+		}
 	}
-	switch auth.Scheme {
-	case AuthSchemeHeader, AuthSchemeQuery:
-		if err := req(auth.Config, "name"); err != nil {
-			return err
-		}
-		return req(auth.Secrets, "value")
-	case AuthSchemeBearer:
-		return req(auth.Secrets, "token")
-	case AuthSchemeBasic:
-		return req(auth.Secrets, "username", "password")
-	case AuthSchemeOAuthClientCreds:
-		if err := req(auth.Config, "token_url", "client_id"); err != nil {
-			return err
-		}
-		if err := req(auth.Secrets, "client_secret"); err != nil {
-			return err
-		}
-		return checkURL("token_url")
-	case AuthSchemeOAuthJWTBearer:
-		if err := req(auth.Config, "token_url", "client_id"); err != nil {
-			return err
-		}
-		if err := req(auth.Secrets, "private_key"); err != nil {
-			return err
-		}
-		return checkURL("token_url")
-	case AuthSchemeOAuthDelegated:
-		if err := req(auth.Config, "auth_url", "token_url", "client_id"); err != nil {
-			return err
-		}
-		return checkURL("auth_url", "token_url", "device_auth_url")
-	default:
-		return ErrInvalidInput.Wrapf("unknown upstream auth scheme %q", auth.Scheme)
-	}
+	return nil
 }
 
 // isDelegatedAuth reports whether an action uses the oauth_delegated scheme, so federation can
@@ -247,6 +242,23 @@ func (k *Kernel) isDelegatedAuth(a *Action) bool {
 	return err == nil && auth != nil && auth.Scheme == AuthSchemeOAuthDelegated
 }
 
+// readDelegatedAction reads an action and its decrypted auth, requiring the oauth_delegated
+// scheme (§8). Shared by the grant operations and the consent-config lookup.
+func (k *Kernel) readDelegatedAction(ctx context.Context, actionID string) (*Action, *AuthInput, error) {
+	a, err := k.store.ReadAction(ctx, actionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	auth, err := k.openAuthInput(a)
+	if err != nil {
+		return nil, nil, err
+	}
+	if auth == nil || auth.Scheme != AuthSchemeOAuthDelegated {
+		return nil, nil, ErrInvalidInput.Wrap("action does not use delegated OAuth")
+	}
+	return a, auth, nil
+}
+
 // CreateGrant records a user's delegated OAuth consent for one action: the refresh token is sealed
 // with the same box as auth_json (AAD = grantor|action) and upserted, so a re-consent overwrites.
 // The action must be a kind=http action whose scheme is oauth_delegated.
@@ -257,19 +269,12 @@ func (k *Kernel) CreateGrant(ctx context.Context, callerID, actionID, refreshTok
 	if refreshToken == "" {
 		return nil, ErrInvalidInput.Wrap("refresh token is required")
 	}
-	a, err := k.store.ReadAction(ctx, actionID)
+	a, _, err := k.readDelegatedAction(ctx, actionID)
 	if err != nil {
 		return nil, err
 	}
 	if a.Kind != KindHTTP {
 		return nil, ErrInvalidInput.Wrap("grants apply only to http actions")
-	}
-	auth, err := k.openAuthInput(a)
-	if err != nil {
-		return nil, err
-	}
-	if auth == nil || auth.Scheme != AuthSchemeOAuthDelegated {
-		return nil, ErrInvalidInput.Wrap("action does not use delegated OAuth")
 	}
 	if k.secretBox == nil {
 		return nil, ErrInvalidState.Wrap("credential encryption is not configured")
@@ -324,19 +329,12 @@ func (k *Kernel) DelegatedAuthConfig(ctx context.Context, callerID, actionID str
 	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return nil, err
 	}
-	a, err := k.store.ReadAction(ctx, actionID)
+	a, auth, err := k.readDelegatedAction(ctx, actionID)
 	if err != nil {
 		return nil, err
 	}
 	if !canCall(callerID, a) {
 		return nil, ErrUnauthorized.Wrap("cannot grant for an action you may not call")
-	}
-	auth, err := k.openAuthInput(a)
-	if err != nil {
-		return nil, err
-	}
-	if auth == nil || auth.Scheme != AuthSchemeOAuthDelegated {
-		return nil, ErrInvalidInput.Wrap("action does not use delegated OAuth")
 	}
 	return auth, nil
 }
