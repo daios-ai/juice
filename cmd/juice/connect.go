@@ -35,21 +35,17 @@ func openBrowser(url string) bool {
 	return true
 }
 
-func init() {
-	grantCmd := &cobra.Command{Use: "grant", Short: "Manage delegated upstream OAuth grants"}
-	grantCmd.AddCommand(grantAddCmd(), grantRevokeCmd())
-	rootCmd.AddCommand(grantCmd)
-}
-
-func grantAddCmd() *cobra.Command {
+// userConnectCmd and userDisconnectCmd are registered under the `user` group in cmd.go, next to
+// `user me` (which lists your connections). Connecting is also offered inline by `juice run`.
+func userConnectCmd() *cobra.Command {
 	var device bool
 	cmd := &cobra.Command{
-		Use:   "add <action>",
-		Short: "Authorize an action to act on your behalf against its upstream API",
+		Use:   "connect <action>",
+		Short: "Connect your account so an action can act on your behalf against its upstream API",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if device {
-				return grantAddDevice(args[0])
+				return connectDevice(args[0])
 			}
 			return runConsentFlow(args[0])
 		},
@@ -77,7 +73,7 @@ type grantCompleteResp struct {
 
 // runConsentFlow runs the authorization-code + PKCE flow, hosting the loopback redirect listener
 // locally (the browser reaches it even behind NAT — the provider never contacts the kernel).
-// Shared by `grant add` and by `run`'s inline consent offer.
+// Shared by `user connect` and by `run`'s inline consent offer.
 func runConsentFlow(actionRef string) error {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -124,13 +120,13 @@ func runConsentFlow(actionRef string) error {
 	}, &done); err != nil {
 		return err
 	}
-	fmt.Printf("Granted %s.\n", done.Action)
+	fmt.Printf("Connected %s.\n", done.Action)
 	return nil
 }
 
-// grantAddDevice runs the device-code flow: the server polls the provider, the CLI polls the
-// server's /complete until the grant lands.
-func grantAddDevice(actionRef string) error {
+// connectDevice runs the device-code flow: the server polls the provider, the CLI polls the
+// server's /complete until the connection lands.
+func connectDevice(actionRef string) error {
 	var start grantStartResp
 	if err := apiCall(context.Background(), "POST", "/v1/grants/start", map[string]string{
 		"action": actionRef, "flow": "device",
@@ -156,17 +152,17 @@ func grantAddDevice(actionRef string) error {
 			return err
 		}
 		if done.Status == "complete" {
-			fmt.Printf("Granted %s.\n", done.Action)
+			fmt.Printf("Connected %s.\n", done.Action)
 			return nil
 		}
 	}
 	return kernel.ErrTimeout.Wrap("timed out waiting for device authorization")
 }
 
-func grantRevokeCmd() *cobra.Command {
+func userDisconnectCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "revoke <action>",
-		Short: "Revoke a delegated OAuth grant",
+		Use:   "disconnect <action>",
+		Short: "Disconnect your account from an action (revoke its delegated access)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return apiEmit("DELETE", "/v1/grants?action="+url.QueryEscape(args[0]), nil)

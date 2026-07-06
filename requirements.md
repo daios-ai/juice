@@ -691,7 +691,8 @@ Required commands:
 ```text
 juice serve
 juice user create <user> <email>          juice user me
-juice user update
+juice user update                          juice user connect <action>
+juice user disconnect <action>
 juice auth login <user>                    juice auth logout
 juice action create <name>                 juice action update <action>
 juice action delete <action>              juice action enable <action>
@@ -704,7 +705,6 @@ juice step create <action>                juice step list
 juice step show <id>                      juice step complete <id> [json]
 juice tx list                             juice tx show <id>
 juice tx rate <id> <0|1>                  juice tx verify <id>
-juice grant add <action>                  juice grant revoke <action>
 juice health
 juice admin users                         juice admin show <user>
 juice admin suspend <user>                juice admin unsuspend <user>

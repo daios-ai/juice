@@ -164,7 +164,7 @@ func emit(v any) error {
 
 func init() {
 	userCmd := &cobra.Command{Use: "user", Short: "Manage your account"}
-	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd())
+	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd(), userConnectCmd(), userDisconnectCmd())
 	rootCmd.AddCommand(userCmd)
 }
 
@@ -946,13 +946,13 @@ func runCmd() *cobra.Command {
 					}
 					err = apiCall(context.Background(), "POST", "/v1/run", reqBody, &raw)
 				} else {
-					fmt.Fprintf(os.Stderr, "\nAuthorize with:\n  juice grant add %s\n", action)
+					fmt.Fprintf(os.Stderr, "\nAuthorize with:\n  juice user connect %s\n", action)
 					return err
 				}
 			}
 			if err != nil {
 				if errors.Is(err, kernel.ErrGrantRequired) {
-					fmt.Fprintf(os.Stderr, "\nAuthorize with:\n  juice grant add %s\n", grantActionRef(err, cmdArgs[0]))
+					fmt.Fprintf(os.Stderr, "\nAuthorize with:\n  juice user connect %s\n", grantActionRef(err, cmdArgs[0]))
 				}
 				return err
 			}

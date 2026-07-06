@@ -190,7 +190,7 @@ flow_output_schema_failure() {
 
 # flow_grant — delegated-OAuth consent gating (§8), CLI surface.
 # Covers action-create with an oauth_delegated auth config, reject-before-lock when no grant
-# exists, and grant revoke. The full consent+run happy path needs a live provider and is
+# exists, and user disconnect. The full consent+run happy path needs a live provider and is
 # covered by the Go flow suite (TestFlow_OAuthDelegated); here we assert the CLI gating.
 flow_grant() {
     echo "=== FLOW grant ==="
@@ -211,6 +211,6 @@ flow_grant() {
     assert_fails "grant.reject_before_consent" "grant" -- j "$db" "$ha" run @alice/inbox '{}'
     assert_jnum "grant.no_charge" "$(jj "$db" "$ha" user me)" available 1000
 
-    # No grant exists yet, so revoke reports not-found.
-    assert_fails "grant.revoke_absent" "not found\|error" -- j "$db" "$ha" grant revoke @alice/inbox
+    # No connection exists yet, so disconnect reports not-found.
+    assert_fails "grant.revoke_absent" "not found\|error" -- j "$db" "$ha" user disconnect @alice/inbox
 }

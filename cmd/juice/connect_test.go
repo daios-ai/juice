@@ -30,23 +30,23 @@ func createDelegatedCLIAction(t *testing.T, k *kernel.Kernel, ownerID, name stri
 	return a.ID
 }
 
-// TestGrantCommandTree pins the CLI surface: `grant add <action>` (with --device) and
-// `grant revoke <action>`.
-func TestGrantCommandTree(t *testing.T) {
-	add := grantAddCmd()
-	if add.Use != "add <action>" {
-		t.Errorf("add Use = %q", add.Use)
+// TestUserConnectCommandTree pins the CLI surface: `user connect <action>` (with --device) and
+// `user disconnect <action>`.
+func TestUserConnectCommandTree(t *testing.T) {
+	c := userConnectCmd()
+	if c.Use != "connect <action>" {
+		t.Errorf("connect Use = %q", c.Use)
 	}
-	if add.Flags().Lookup("device") == nil {
-		t.Error("grant add missing --device flag")
+	if c.Flags().Lookup("device") == nil {
+		t.Error("user connect missing --device flag")
 	}
-	if grantRevokeCmd().Use != "revoke <action>" {
-		t.Errorf("revoke Use = %q", grantRevokeCmd().Use)
+	if userDisconnectCmd().Use != "disconnect <action>" {
+		t.Errorf("disconnect Use = %q", userDisconnectCmd().Use)
 	}
 }
 
-// TestGrantRevokeCLI drives `juice grant revoke` end-to-end through the DELETE /v1/grants route.
-func TestGrantRevokeCLI(t *testing.T) {
+// TestUserDisconnectCLI drives `juice user disconnect` end-to-end through the DELETE /v1/grants route.
+func TestUserDisconnectCLI(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 	uid, tok := makeUser(t, env.k, "@grant-cli")
@@ -58,8 +58,8 @@ func TestGrantRevokeCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := execTestCmd(t, grantRevokeCmd(), "@grant-cli/inbox"); err != nil {
-		t.Fatalf("grant revoke: %v", err)
+	if _, err := execTestCmd(t, userDisconnectCmd(), "@grant-cli/inbox"); err != nil {
+		t.Fatalf("user disconnect: %v", err)
 	}
 	if views, _ := env.k.ListGrantViews(ctx, uid); len(views) != 0 {
 		t.Errorf("grant survived CLI revoke: %d", len(views))
