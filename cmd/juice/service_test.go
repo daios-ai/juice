@@ -313,7 +313,7 @@ func TestListPublicActions_FilterAndStrip(t *testing.T) {
 	}
 
 	// List all public — should appear.
-	resps, err := listPublicActions(k, ctx, "", "", "", 50, 0)
+	resps, err := listPublicActions(k, ctx, "", "", "", false, 50, 0)
 	if err != nil {
 		t.Fatalf("listPublicActions: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestListPublicActions_FilterAndStrip(t *testing.T) {
 	}
 
 	// Filter by owner handle.
-	byOwner, err := listPublicActions(k, ctx, "", "@svc-lpa", "", 50, 0)
+	byOwner, err := listPublicActions(k, ctx, "", "@svc-lpa", "", false, 50, 0)
 	if err != nil {
 		t.Fatalf("listPublicActions by owner: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestListPublicActions_FilterAndStrip(t *testing.T) {
 	}
 
 	// Filter by name.
-	byName, err := listPublicActions(k, ctx, "", "", "svc-pub", 50, 0)
+	byName, err := listPublicActions(k, ctx, "", "", "svc-pub", false, 50, 0)
 	if err != nil {
 		t.Fatalf("listPublicActions by name: %v", err)
 	}
@@ -580,5 +580,48 @@ func TestEnrichTxDropsUUIDs(t *testing.T) {
 	}
 	if m["owner_handle"] != "@owner" || m["id"] != "tx1" {
 		t.Errorf("expected owner_handle=@owner and id=tx1, got %v / %v", m["owner_handle"], m["id"])
+	}
+}
+
+// TestListActionsActiveOnlyByDefault: the superuser's default action list is active-only (so a
+// deactivated proxy disappears, like after unfriend); includeInactive brings inactive rows back.
+func TestListActionsActiveOnlyByDefault(t *testing.T) {
+	_, k, _ := newTestHTTPServerFull(t)
+	ctx := context.Background()
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerID, _ := makeUser(t, k, "@svc-inact")
+	backend := newStepBackend(t)
+	a, err := createAction(k, ctx, ownerID, kernel.CreateActionRequest{
+		OwnerUserID: ownerID, Name: "dead", Kind: kernel.KindHTTP, Source: backend.URL,
+		Description: "inactive action", InputSchema: map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := updateAction(k, ctx, ownerID, kernel.UpdateActionRequest{ID: a.ID, Public: boolPtr(true)}); err != nil {
+		t.Fatal(err)
+	}
+	// Left inactive (never enabled).
+
+	has := func(resps []actionResp) bool {
+		for _, r := range resps {
+			if r.ID == a.ID {
+				return true
+			}
+		}
+		return false
+	}
+	def, _ := listPublicActions(k, ctx, sys.ID, "", "", false, 50, 0)
+	if has(def) {
+		t.Error("superuser default list must exclude an inactive action")
+	}
+	all, _ := listPublicActions(k, ctx, sys.ID, "", "", true, 50, 0)
+	if !has(all) {
+		t.Error("superuser --all list must include the inactive action")
 	}
 }

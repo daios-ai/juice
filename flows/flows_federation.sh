@@ -88,6 +88,9 @@ flow_federation_unfriend() {
 
     assert_contains "fed_unfriend.unfriended" "nfriended" "$(j "$FED_DBL" "$FED_HL" admin unfriend @kernel-r 2>&1)"
     assert_json "fed_unfriend.proxy_inactive" "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" active False
+    # The deactivated proxy drops out of the default action list (active-only), but --all still shows it.
+    assert_not_contains "fed_unfriend.list_hides_inactive" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list)"
+    assert_contains "fed_unfriend.all_shows_inactive" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list --all)"
     # L's unfriend only affects L; R's original action stays active.
     assert_json "fed_unfriend.remote_still_active" "$(jj "$FED_DBR" "$FED_HR" action show "$FED_RID")" active True
     assert_fails "fed_unfriend.call_rejected" "" -- j "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}'

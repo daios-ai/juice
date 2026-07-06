@@ -386,9 +386,11 @@ func updateAction(k *kernel.Kernel, ctx context.Context, callerID string, req ke
 // Authenticated (no owner filter): active+public union caller's own active actions, deduplicated.
 // Authenticated with owner filter resolving to caller: all their actions regardless of active/public.
 // Source and ArtifactHash are stripped from all results.
-func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHandle, name string, limit, offset int) ([]actionResp, error) {
-	// The superuser sees every action (supervision is scope on the normal endpoint, §14);
-	// everyone else starts from the public+active set and unions their own below.
+func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHandle, name string, includeInactive bool, limit, offset int) ([]actionResp, error) {
+	// The superuser sees every owner's rows (supervision is scope on the normal endpoint, §14);
+	// everyone else starts from the public+active set and unions their own below. Inactive rows are
+	// dropped at the end unless includeInactive (the `all` param / `--all`) is set — so the default
+	// list is active-only for everyone, like `docker ps`.
 	superuser := callerID != "" && k.IsSuperuser(ctx, callerID)
 	var actions []*kernel.Action
 	var err error
@@ -406,10 +408,12 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 			return []actionResp{}, nil
 		}
 		if !superuser && callerID != "" && callerID == u.ID {
+			// §3: an owner may list all their own actions regardless of active/public.
 			actions, err = k.ListOwnedActions(ctx, u.ID, limit, offset)
 			if err != nil {
 				return nil, err
 			}
+			includeInactive = true
 		} else {
 			filtered := actions[:0]
 			for _, a := range actions {
@@ -418,6 +422,11 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 				}
 			}
 			actions = filtered
+			if superuser {
+				// Scoping supervision to one owner is an explicit request for that owner's
+				// full picture (§3), so inactive rows show without needing `--all`.
+				includeInactive = true
+			}
 		}
 	} else if !superuser && callerID != "" {
 		owned, err := k.ListOwnedActions(ctx, callerID, limit, offset)
@@ -429,10 +438,19 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 			seen[a.ID] = true
 		}
 		for _, a := range owned {
-			if a.Active && !seen[a.ID] {
+			if (a.Active || includeInactive) && !seen[a.ID] {
 				actions = append(actions, a)
 			}
 		}
+	}
+	if !includeInactive {
+		kept := actions[:0]
+		for _, a := range actions {
+			if a.Active {
+				kept = append(kept, a)
+			}
+		}
+		actions = kept
 	}
 	if name != "" {
 		filtered := actions[:0]

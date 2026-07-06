@@ -159,17 +159,6 @@ func resolveActionID(ctx context.Context, ref string) (string, error) {
 	return actions[0].ID, nil
 }
 
-// currentHandle returns the authenticated user's handle (GET /v1/me).
-func currentHandle(ctx context.Context) (string, error) {
-	var me struct {
-		Handle string `json:"handle"`
-	}
-	if err := apiCall(ctx, "GET", "/v1/me", nil, &me); err != nil {
-		return "", err
-	}
-	return me.Handle, nil
-}
-
 // errorFromResponse reconstructs a typed KernelError from the server's {error, code} body
 // so errors.Is checks and exit codes behave exactly as they did in-process.
 func errorFromResponse(status int, body []byte) error {

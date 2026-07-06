@@ -716,7 +716,7 @@ juice admin peers                         juice admin inspect <key>
 juice admin identity
 ```
 
-`admin` holds only the operator verbs no ordinary user performs — money, access, federation trust, and the global roster (`users`/`show`). Supervision over everything else is **scope on the normal commands**: a superuser sees all rows on `action list`, `process list`, `tx list`, and `step list`, and may `action disable`/`enable` any action, all over the public TCP API. There is no `admin actions/disable/processes/txs/steps` — those were duplicates of the base commands with wider reach.
+`admin` holds only the operator verbs no ordinary user performs — money, access, federation trust, and the global roster (`users`/`show`). Supervision over everything else is **scope on the normal commands**: a superuser sees all owners' rows on `action list`, `process list`, `tx list`, and `step list`, and may `action disable`/`enable` any action, all over the public TCP API. As for everyone, `action list` is active-only by default; inactive/private rows appear only with `--all` (`?all=1`), so a deactivated action — e.g. an unfriended peer's proxies — drops out of the default list. There is no `admin actions/disable/processes/txs/steps` — those were duplicates of the base commands with wider reach.
 
 OpenAPI commands (the OpenAPI spec URL is the positional argument):
 
@@ -735,7 +735,7 @@ Endpoint rules (notable rules only; the complete HTTP endpoint list is in `API.m
 | Endpoint                                         | Rule                                                                                                            |
 | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
 | `GET /health`                                    | unauthenticated                                                                                                 |
-| `GET /v1/actions[?owner=&name=]`                 | unauthenticated → active public actions; authenticated → active public actions plus caller's own active actions (union, deduplicated); a suspended owner's actions are excluded (§12); `?owner=` further filters by that owner's handle; `?name=` filters by name |
+| `GET /v1/actions[?owner=&name=&all=]`             | unauthenticated → active public actions; authenticated → active public actions plus caller's own active actions (union, deduplicated); superuser → all owners' active actions; a suspended owner's actions are excluded (§12); `?all=1` includes inactive/private rows in the caller's scope; `?owner=` further filters by that owner's handle; `?name=` filters by name |
 | `GET /v1/me`                                     | authenticated `id`, `handle`, `email`, `available`, `locked`, and `grants` (each: action `@owner/name`, requested scopes, `created_at`; no token material); suspended rejected before handler |
 | `POST /v1/grants/start`                          | authenticated; `{action, [redirect_uri], [flow]}` begins delegated-OAuth consent (§8); `redirect_uri` is any http(s) target the client will receive the code at (loopback for local clients, a registered callback for hosted ones); code flow returns `{state, authorize_url}`, device flow `{state, verification_uri, user_code, interval, expires_in}` |
 | `POST /v1/grants/complete`                       | authenticated as the grantor; `{state, [code]}`; exchanges the code (or reports device-poll `pending`) and stores the grant; foreign/expired state rejected |

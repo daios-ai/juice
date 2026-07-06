@@ -623,8 +623,9 @@ func (s *server) postUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
+	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
 	resps, err := listPublicActions(s.kernel, r.Context(), s.optionalAuth(r),
-		r.URL.Query().Get("owner"), r.URL.Query().Get("name"), 200, 0)
+		r.URL.Query().Get("owner"), r.URL.Query().Get("name"), all, 200, 0)
 	if err != nil {
 		writeErr(w, err)
 		return

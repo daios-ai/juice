@@ -483,14 +483,10 @@ func actionListCmd() *cobra.Command {
 			ctx := context.Background()
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
-			// --all lists the caller's own actions regardless of active/public via the
-			// self-owner filter (§3); it needs the caller's handle.
+			// Default is active-only (like `docker ps`); --all includes inactive/private rows in
+			// the caller's scope (own for a normal user, all owners for the superuser).
 			if all {
-				h, err := currentHandle(ctx)
-				if err != nil {
-					return err
-				}
-				q.Set("owner", h)
+				q.Set("all", "1")
 			}
 			var actions []actionResp
 			if err := apiCall(ctx, "GET", "/v1/actions?"+q.Encode(), nil, &actions); err != nil {
