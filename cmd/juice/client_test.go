@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -202,3 +203,26 @@ func TestErrorFromResponseNonJSON(t *testing.T) {
 		t.Fatalf("msg %q", err.Error())
 	}
 }
+
+func TestIsTimeoutErr(t *testing.T) {
+	// A client-side timeout (context deadline) is classified as a timeout, even after the KernelError
+	// wrapping doHTTP applies (message + Because cause).
+	wrapped := kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", context.DeadlineExceeded).Because(context.DeadlineExceeded)
+	if !isTimeoutErr(wrapped) {
+		t.Error("context.DeadlineExceeded should classify as timeout")
+	}
+	// A net.Error whose Timeout() is true also classifies.
+	if !isTimeoutErr(&net.OpError{Op: "dial", Err: timeoutError{}}) {
+		t.Error("net timeout should classify as timeout")
+	}
+	// A plain connection error does not.
+	if isTimeoutErr(errors.New("connection refused")) {
+		t.Error("connection refused must NOT classify as timeout")
+	}
+}
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "i/o timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }

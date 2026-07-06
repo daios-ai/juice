@@ -281,7 +281,9 @@ func doHTTP(ctx context.Context, method, rawURL string, headers map[string]strin
 	}
 	resp, err := newHTTPClient(timeout, allowLocal).Do(req)
 	if err != nil {
-		return nil, 0, kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
+		// Keep the detailed message and attach the typed cause (via Because) so callers can tell
+		// a client-side timeout apart from a connection failure (client.go isTimeoutErr).
+		return nil, 0, kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err).Because(err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))

@@ -4,14 +4,27 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"strings"
 
 	"github.com/daios-ai/juice/kernel"
 )
+
+// isTimeoutErr reports whether a transport error is a client-side timeout — the server was
+// reachable but too slow to respond — rather than a hard connection failure (server down or
+// refused). Used to give an accurate CLI message instead of "is serve running?".
+func isTimeoutErr(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
 
 // serverBaseURL resolves the Juice server base URL for user-facing (client) commands:
 // --server, then JUICE_SERVER, then server_url in config, else http://localhost:4040.
@@ -56,6 +69,11 @@ func apiDo(ctx context.Context, method, path string, body, out any, retry bool) 
 	base := serverBaseURL()
 	respBody, status, err := doHTTP(ctx, method, base+path, headers, rdr, 0, true)
 	if err != nil && status == 0 {
+		// The server was reachable but too slow (e.g. a slow upstream during OAuth consent) vs.
+		// genuinely down — report each accurately rather than always blaming a missing server.
+		if isTimeoutErr(err) {
+			return kernel.ErrTimeout.Wrapf("juice server at %s did not respond in time (timed out)", base).Because(err)
+		}
 		return errUnreachable(base, err)
 	}
 	if err != nil {
