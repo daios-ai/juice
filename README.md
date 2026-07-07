@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/juice-logo.svg" alt="Juice logo" width="110" />
+</p>
+
 # Juice
 
 Juice is a Go kernel and research platform for **callable actions**. An action is a named,
