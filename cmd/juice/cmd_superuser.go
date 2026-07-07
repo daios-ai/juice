@@ -297,15 +297,22 @@ func peerUnfriendCmd() *cobra.Command {
 }
 
 func peerListCmd() *cobra.Command {
-	var showGossip bool
+	var showGossip, showAll bool
 	cmd := &cobra.Command{
 		Use:   "peers",
 		Short: "List peers",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			path := "/control/peers"
+			q := url.Values{}
 			if showGossip {
-				path += "?gossip=1"
+				q.Set("gossip", "1")
+			}
+			if showAll {
+				q.Set("all", "1")
+			}
+			path := "/control/peers"
+			if e := q.Encode(); e != "" {
+				path += "?" + e
 			}
 			var out struct {
 				Peers  []*kernel.PeerView     `json:"peers"`
@@ -336,6 +343,7 @@ func peerListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&showGossip, "gossip", false, "Also show the known-network directory (discovery)")
+	cmd.Flags().BoolVar(&showAll, "all", false, "Include denied (unfriended) peers")
 	return cmd
 }
 

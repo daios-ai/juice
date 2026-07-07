@@ -213,7 +213,7 @@ The operator verbs no ordinary user performs — money, access, federation trust
 | Withdraw credits | `juice admin withdraw <user\|key> <amount> [--reason --external-key]` |
 | Friend a kernel | `juice admin friend <key>` |
 | Unfriend a kernel | `juice admin unfriend <user\|key>` |
-| List peers | `juice admin peers [--gossip]` — friends (`handle`, `public_key`, `available`, `locked`; no internal id); `--gossip` adds the known-network directory roster |
+| List peers | `juice admin peers [--gossip] [--all]` — friended peers by default (`handle`, `public_key`, `available`, `locked`; no internal id); `--all` (`?all=1`) also lists denied/unfriended peers; `--gossip` adds the known-network directory roster |
 | Inspect a kernel | `juice admin inspect <key\|user>` — identity, public actions, transacted friends, reachability. `source` is `live`/`local`/`none`: an offline but friended peer degrades to last-known local data (`online:false`) |
 | Show own identity | `juice admin identity` — this kernel's public key, handle, listen addresses |
 

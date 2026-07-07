@@ -95,6 +95,52 @@ func inspectResp(t *testing.T, srv *server, ident string) map[string]any {
 	return out
 }
 
+func listPeersResp(t *testing.T, srv *server, all bool) []map[string]any {
+	t.Helper()
+	path := "/control/peers"
+	if all {
+		path += "?all=1"
+	}
+	req := httptest.NewRequest("GET", path, nil)
+	rec := httptest.NewRecorder()
+	srv.ctlListPeers(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("peers status %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Peers []map[string]any `json:"peers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Peers
+}
+
+// TestListPeersHidesDenied: admin peers lists friended peers by default and hides denied
+// (unfriended) ones, like action list hides inactive; --all (?all=1) shows them.
+func TestListPeersHidesDenied(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	ctx := context.Background()
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedFriendedPeer(t, k, "@peer-live")
+	denied, _ := seedFriendedPeer(t, k, "@peer-gone")
+	if err := k.DenyPeer(ctx, sys.ID, denied); err != nil {
+		t.Fatal(err)
+	}
+	srv := &server{kernel: k, log: log.Discard()}
+
+	def := listPeersResp(t, srv, false)
+	if len(def) != 1 || def[0]["handle"] != "@peer-live" {
+		t.Fatalf("default peers should list only the friended peer, got %v", def)
+	}
+	if all := listPeersResp(t, srv, true); len(all) != 2 {
+		t.Fatalf("--all should list both peers, got %d", len(all))
+	}
+}
+
 // TestInspectOfflineFriendedShowsLocalData: a friended peer that is offline still inspects — local
 // last-known actions plus reachability=unreachable, not an opaque failure (§13).
 func TestInspectOfflineFriendedShowsLocalData(t *testing.T) {

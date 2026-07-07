@@ -607,7 +607,7 @@ Two kernels transact only as **friends**: a reciprocal relation with the proxy-u
 ```text
 juice admin friend <key>      register peer by public key + bulk-import all their active public actions
 juice admin unfriend <user>   end the relation; deny future requests; deactivate all proxies (user is @handle or key)
-juice admin peers             known peers and balances
+juice admin peers             friended peers and balances (--all also shows denied/unfriended)
 juice admin inspect <key|user>  view remote identity, public actions, transacted friends, and reachability (key, or @handle if already friended; no DB write)
 ```
 

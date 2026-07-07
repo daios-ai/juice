@@ -113,6 +113,18 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Friended peers by default; denied (unfriended) peers are hidden unless ?all=1, like
+	// action list hides inactive rows. The row still exists — this is display scope only.
+	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
+	if !all {
+		kept := peers[:0]
+		for _, p := range peers {
+			if p.DeniedAt == nil {
+				kept = append(kept, p)
+			}
+		}
+		peers = kept
+	}
 	out := map[string]any{"peers": peerViews(peers)}
 	if r.URL.Query().Get("gossip") == "1" {
 		roster, err := s.kernel.DiscoveryRoster(r.Context())
