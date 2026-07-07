@@ -200,12 +200,20 @@ func (s *server) ctlFriendPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register the peer locally (clears any prior denial), send a signed friend handshake so it
-	// registers + reciprocates, import its active public actions, then accumulate its gossip.
+	// Register the peer locally, send a signed friend handshake so it registers + reciprocates,
+	// import its active public actions, then accumulate its gossip.
 	u, err := s.kernel.CreateOrUpdateProxyPeer(ctx, g.Handle, peerKey)
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	// An explicit friend re-establishes trust: clear any prior denial (unfriend sets it). The
+	// inbound handshake path (OnFriend) deliberately does NOT — a denied peer can't un-deny itself.
+	if u.DeniedAt != nil {
+		if err := s.kernel.UndenyPeer(ctx, callerFrom(r), u.Handle); err != nil {
+			writeErr(w, err)
+			return
+		}
 	}
 	s.announcePeerFed(ctx, peerKey)
 	imported, skipped := bulkImportPeerActionsFed(ctx, s.fed, s.kernel, callerFrom(r), peerKey, u)

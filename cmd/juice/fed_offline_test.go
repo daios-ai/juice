@@ -181,6 +181,46 @@ func TestUnfriendWorksWithNoTransport(t *testing.T) {
 	}
 }
 
+// TestFriendClearsDenial: an explicit admin friend of a previously-unfriended (denied) peer must
+// clear denied_at, or the peer stays [denied] — hidden restore, inbound calls still rejected.
+func TestFriendClearsDenial(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	ctx := context.Background()
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed a peer, then deny it exactly as unfriend does.
+	handle, key := seedFriendedPeer(t, k, "@peer-den")
+	if err := k.DenyPeer(ctx, sys.ID, handle); err != nil {
+		t.Fatal(err)
+	}
+	if before, _ := k.ReadUserByPublicKey(ctx, key); before == nil || before.DeniedAt == nil {
+		t.Fatal("peer should be denied after DenyPeer")
+	}
+
+	// Drive the outbound friend handler with a gossip doc matching the peer key.
+	gdoc, _ := json.Marshal(kernel.GossipResponse{PublicKey: key, Handle: handle})
+	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{inspectDoc: gdoc, reachPath: "direct"}}
+	body, _ := json.Marshal(map[string]string{"key": key})
+	req := httptest.NewRequest("POST", "/control/peers/friend", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), ctxCallerID, sys.ID))
+	rec := httptest.NewRecorder()
+	srv.ctlFriendPeer(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("friend: status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	after, _ := k.ReadUserByPublicKey(ctx, key)
+	if after == nil {
+		t.Fatal("peer vanished after friend")
+	}
+	if after.DeniedAt != nil {
+		t.Fatalf("friend must clear denial; DeniedAt=%v", *after.DeniedAt)
+	}
+}
+
 // TestRefriendReactivatesProxy: after unfriend deactivates a proxy, friending again must
 // reactivate it. The re-friend sees a byte-identical manifest, so reconcileImport files it
 // under Unchanged — which the friend activation loop must still enable, or the proxy stays
