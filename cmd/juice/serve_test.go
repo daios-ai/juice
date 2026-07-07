@@ -1568,7 +1568,7 @@ func TestWaitingOnPeer(t *testing.T) {
 
 	uc := newUserCache(k, ctx)
 	peerStep := &kernel.Step{Status: kernel.StepWaiting, RequiredCallerUserID: peer.ID}
-	pv := enrichStep(peerStep, nil, uc)
+	pv := enrichStep(k, ctx, peerStep, nil, uc)
 	if !pv.WaitingOnPeer {
 		t.Error("step addressed to a peer should be waiting_on_peer")
 	}
@@ -1576,11 +1576,11 @@ func TestWaitingOnPeer(t *testing.T) {
 		t.Errorf("required_caller_handle: got %q, want @peer-caller", pv.RequiredCallerHandle)
 	}
 	localStep := &kernel.Step{Status: kernel.StepWaiting, RequiredCallerUserID: localID}
-	if enrichStep(localStep, nil, uc).WaitingOnPeer {
+	if enrichStep(k, ctx, localStep, nil, uc).WaitingOnPeer {
 		t.Error("step addressed to a local user should not be waiting_on_peer")
 	}
 	doneStep := &kernel.Step{Status: kernel.StepDone, RequiredCallerUserID: peer.ID}
-	if enrichStep(doneStep, nil, uc).WaitingOnPeer {
+	if enrichStep(k, ctx, doneStep, nil, uc).WaitingOnPeer {
 		t.Error("a non-waiting step should never be waiting_on_peer")
 	}
 }

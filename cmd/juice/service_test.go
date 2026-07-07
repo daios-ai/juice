@@ -131,10 +131,14 @@ func TestEnrichStep(t *testing.T) {
 	step := &kernel.Step{ID: "s1"}
 	action := &kernel.Action{OwnerHandle: "@alice", Name: "greet"}
 
-	// No required caller and not waiting, so the resolver is never dialed (nil kernel is safe here).
-	v := enrichStep(step, action, newUserCache(nil, context.Background()))
+	// No parent trace and not waiting, so neither the ref resolver nor the peer check is dialed
+	// (nil kernel is safe here).
+	v := enrichStep(nil, context.Background(), step, action, newUserCache(nil, context.Background()))
 	if v.Action != "@alice/greet" {
 		t.Errorf("enrichStep: Action = %q, want @alice/greet", v.Action)
+	}
+	if v.CreatedBy != "" {
+		t.Errorf("enrichStep: CreatedBy = %q, want empty for a nil parent trace", v.CreatedBy)
 	}
 	if v.ID != "s1" {
 		t.Errorf("enrichStep: embedded Step.ID = %q, want s1", v.ID)
@@ -148,7 +152,7 @@ func TestEnrichStep(t *testing.T) {
 	peerStep := &kernel.Step{ID: "s2", Status: kernel.StepWaiting, RequiredCallerUserID: "peer1"}
 	uc := newUserCache(nil, context.Background())
 	uc.m["peer1"] = &kernel.User{Handle: "@peer", PublicKey: "pk"}
-	v2 := enrichStep(peerStep, nil, uc)
+	v2 := enrichStep(nil, context.Background(), peerStep, nil, uc)
 	if v2.Action != "" {
 		t.Errorf("enrichStep(nil action): Action = %q, want empty", v2.Action)
 	}

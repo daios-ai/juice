@@ -26,6 +26,10 @@ flow_process_lifecycle() {
     assert_jnum "process_lifecycle.process_available" "$ps" available 0
     assert_json "process_lifecycle.status_open" "$ps" status open
 
+    # The step's meaning comes from its creating action (@sys/message), not its sink target.
+    assert_eq "process_lifecycle.step_created_by" "@sys/message" \
+        "$(jj "$db" "$ha" step list | python3 -c "import sys,json;print(next((s.get('created_by','') for s in json.load(sys.stdin) if s.get('id')=='$step_id'),''))" 2>/dev/null)"
+
     # End the process: waiting step cancelled, funds returned, process closed.
     j "$db" "$ha" process end "$proc" >/dev/null 2>&1
     assert_jnum "process_lifecycle.funds_restored" "$(jj "$db" "$ha" user me)" available 1000

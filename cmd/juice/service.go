@@ -29,6 +29,7 @@ type stepWithAction struct {
 	*kernel.Step
 	RequiredCallerUserID string `json:"required_caller_user_id,omitempty"`
 	Action               string `json:"action,omitempty"`
+	CreatedBy            string `json:"created_by,omitempty"` // creating action @owner/name (from parent trace)
 	RequiredCallerHandle string `json:"required_caller_handle,omitempty"`
 	WaitingOnPeer        bool   `json:"waiting_on_peer,omitempty"`
 }
@@ -114,10 +115,17 @@ func (c *userCache) isPeer(id string) bool {
 	return u != nil && u.PublicKey != ""
 }
 
-func enrichStep(step *kernel.Step, action *kernel.Action, uc *userCache) *stepWithAction {
+func enrichStep(k *kernel.Kernel, ctx context.Context, step *kernel.Step, action *kernel.Action, uc *userCache) *stepWithAction {
 	v := &stepWithAction{Step: step, RequiredCallerHandle: uc.handle(step.RequiredCallerUserID)}
 	if action != nil {
 		v.Action = action.OwnerHandle + "/" + action.Name
+	}
+	// The creating action (what produced this step) carries its meaning; the target action can be a
+	// generic sink (e.g. @sys/message parks a @sys/sink step). Resolve it from the parent trace.
+	if step.ParentTraceID != nil {
+		if tr, err := k.ReadTrace(ctx, *step.ParentTraceID); err == nil {
+			v.CreatedBy = k.ActionRef(ctx, tr.ActionID)
+		}
 	}
 	if step.Status == kernel.StepWaiting {
 		v.WaitingOnPeer = uc.isPeer(step.RequiredCallerUserID)
@@ -561,7 +569,7 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 	}
 	uc := newUserCache(k, ctx)
 	uc.m[callerUser.ID] = callerUser // already resolved; avoid a redundant read
-	return enrichStep(step, action, uc), nil
+	return enrichStep(k, ctx, step, action, uc), nil
 }
 
 func listSteps(k *kernel.Kernel, ctx context.Context, callerID, processID, status string) ([]*stepWithAction, error) {
@@ -573,7 +581,7 @@ func listSteps(k *kernel.Kernel, ctx context.Context, callerID, processID, statu
 	uc := newUserCache(k, ctx)
 	for i, step := range steps {
 		action, _ := k.ReadAction(ctx, step.ActionID)
-		views[i] = enrichStep(step, action, uc)
+		views[i] = enrichStep(k, ctx, step, action, uc)
 	}
 	return views, nil
 }
@@ -584,7 +592,7 @@ func getStep(k *kernel.Kernel, ctx context.Context, callerID, id string) (*stepW
 		return nil, err
 	}
 	action, _ := k.ReadAction(ctx, step.ActionID)
-	return enrichStep(step, action, newUserCache(k, ctx)), nil
+	return enrichStep(k, ctx, step, action, newUserCache(k, ctx)), nil
 }
 
 func completeStep(k *kernel.Kernel, ctx context.Context, callerID, id string, args json.RawMessage) (*kernel.StepReply, error) {

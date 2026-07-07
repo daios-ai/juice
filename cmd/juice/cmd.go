@@ -768,7 +768,11 @@ func stepListCmd() *cobra.Command {
 				if s.WaitingOnPeer {
 					marker = "  waiting-on-peer"
 				}
-				fmt.Printf("%s  %-7s  %s%s\n", s.ID, s.Status, s.Action, marker)
+				label := s.Action
+				if s.CreatedBy != "" {
+					label = s.CreatedBy + " → " + s.Action
+				}
+				fmt.Printf("%s  %-7s  %s%s\n", s.ID, s.Status, label, marker)
 			}
 			return nil
 		},
