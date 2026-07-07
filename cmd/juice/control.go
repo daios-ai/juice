@@ -300,8 +300,11 @@ func bulkImportPeerActionsFed(ctx context.Context, tr manifestFetcher, k *kernel
 			skipped++
 			continue
 		}
+		// Friending is an explicit trust act: activate every one of the peer's proxies, including
+		// Unchanged ones. A re-friend after unfriend sees byte-identical manifests (→ Unchanged) whose
+		// Active was cleared by the unfriend cascade; without this they'd stay dead and uncallable.
 		t := true
-		for _, act := range append(result.Created, result.Updated...) {
+		for _, act := range append(append(result.Created, result.Updated...), result.Unchanged...) {
 			_ = enableAction(k, ctx, subjectID, act.ID)
 			_, _ = k.UpdateAction(ctx, subjectID, kernel.UpdateActionRequest{ID: act.ID, Public: &t})
 		}

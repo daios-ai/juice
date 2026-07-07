@@ -96,6 +96,32 @@ flow_federation_unfriend() {
     assert_fails "fed_unfriend.call_rejected" "" -- j "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}'
 }
 
+flow_federation_refriend() {
+    echo "=== FLOW federation_refriend ==="
+    local dir; dir=$(new_dir)
+    _fed_setup "$dir" || { fail "fed_refriend.setup" "setup failed"; return; }
+
+    # Baseline: friend (done by setup) → proxy is listed and callable.
+    assert_contains "fed_refriend.listed_before" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list)"
+    assert_nonempty "fed_refriend.call_before" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}')" tx_id)"
+
+    # Unfriend deactivates the proxy; it drops out of the default list.
+    j "$FED_DBL" "$FED_HL" admin unfriend @kernel-r >/dev/null 2>&1
+    assert_not_contains "fed_refriend.gone_after_unfriend" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list)"
+
+    # Friend again must reactivate the SAME proxy (unchanged manifest ⇒ reconcile Unchanged).
+    assert_eq "fed_refriend.refriend_ok" 0 "$(j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1; echo $?)"
+    local proxy2; proxy2=$(strfield "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/sys/greet)" id)
+    assert_eq "fed_refriend.id_preserved" "$FED_PROXY" "$proxy2"
+    assert_json "fed_refriend.active_again" "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" active True
+    assert_contains "fed_refriend.listed_again" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list)"
+
+    # And it's callable again, producing a fresh remote receipt.
+    local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}')" tx_id)
+    assert_nonempty "fed_refriend.call_again" "$tx_id"
+    assert_nonempty "fed_refriend.remote_receipt" "$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" remote_receipt_hash)"
+}
+
 flow_fed_verify_receipt() {
     echo "=== FLOW fed_verify_receipt ==="
     local dir; dir=$(new_dir)

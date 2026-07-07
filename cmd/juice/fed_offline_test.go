@@ -180,3 +180,62 @@ func TestUnfriendWorksWithNoTransport(t *testing.T) {
 		t.Fatalf("unfriend with no transport: status %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestRefriendReactivatesProxy: after unfriend deactivates a proxy, friending again must
+// reactivate it. The re-friend sees a byte-identical manifest, so reconcileImport files it
+// under Unchanged — which the friend activation loop must still enable, or the proxy stays
+// dead and uncallable (the bug this guards).
+func TestRefriendReactivatesProxy(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	ctx := context.Background()
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	key := base64.RawURLEncoding.EncodeToString(pub)
+	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, err := k.AddPeer(ctx, sys.ID, "@peer-rf", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := kernel.ActionManifest{
+		ActionID: "act-1", OwnerHandle: "@peer-rf", Name: "greet", Description: "greet",
+		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "sha256-x", Stats: &kernel.Stats{},
+		UpdatedAt: time.Now(),
+	}
+	sig, _ := kernel.SignManifest(priv, &m)
+	m.Signature = sig
+	mBytes, _ := json.Marshal(m)
+	fetch := &fakeManifestFetcher{frames: []json.RawMessage{mBytes}}
+
+	// First friend: import and activate.
+	if imp, _ := bulkImportPeerActionsFed(ctx, fetch, k, sys.ID, key, peer); imp != 1 {
+		t.Fatalf("first import: got %d, want 1", imp)
+	}
+	owned, err := k.ListOwnedActions(ctx, peer.ID, 100, 0)
+	if err != nil || len(owned) != 1 {
+		t.Fatalf("owned after friend: %v (err %v)", owned, err)
+	}
+	proxy := owned[0]
+	if !proxy.Active {
+		t.Fatal("proxy should be active after first friend")
+	}
+
+	// Unfriend cascade deactivates the proxy.
+	if err := k.SetActive(ctx, sys.ID, proxy.ID, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-friend with the identical manifest → Unchanged → must be reactivated.
+	bulkImportPeerActionsFed(ctx, fetch, k, sys.ID, key, peer)
+	owned, err = k.ListOwnedActions(ctx, peer.ID, 100, 0)
+	if err != nil || len(owned) != 1 {
+		t.Fatalf("owned after re-friend: %v (err %v)", owned, err)
+	}
+	if !owned[0].Active {
+		t.Fatal("proxy should be reactivated after re-friend")
+	}
+}
