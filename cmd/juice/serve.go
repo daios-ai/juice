@@ -1146,13 +1146,9 @@ func healthCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(body)
 			}
-			// Text mode: identify the kernel by handle when it reports one, so you can see which
-			// kernel you're pointed at. Full identity (public key) is in --json.
-			if h, _ := body["handle"].(string); h != "" {
-				fmt.Printf("ok  %s\n", h)
-			} else {
-				fmt.Println("ok")
-			}
+			h, _ := body["handle"].(string)
+			pk, _ := body["public_key"].(string)
+			fmt.Printf("ok  %s  %s\n", h, pk)
 			return nil
 		},
 	}
