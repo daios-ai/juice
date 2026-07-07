@@ -354,9 +354,16 @@ const fedOpTimeout = 8 * time.Second
 // registerRoutes mounts all application routes onto r for the given server.
 // Rate-limited routes (auth, user creation) are registered by the caller before this call.
 func registerRoutes(r chi.Router, srv *server) {
-	// Health (unauthenticated).
-	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// Health (unauthenticated). Doubles as an identity banner so someone can see which kernel
+	// they're pointed at before logging in: the handle and public key are the kernel's advertised
+	// federation identity (§13), not secrets — only the private key is withheld.
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		pub, _ := srv.kernel.GetConfig(r.Context(), configKeySigningPublic)
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":     "ok",
+			"handle":     globalCfg.KernelHandle,
+			"public_key": pub,
+		})
 	})
 
 	// Federation has no HTTP surface: peer identity, the friend handshake, inbound calls,
@@ -1139,7 +1146,13 @@ func healthCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(body)
 			}
-			fmt.Println("ok")
+			// Text mode: identify the kernel by handle when it reports one, so you can see which
+			// kernel you're pointed at. Full identity (public key) is in --json.
+			if h, _ := body["handle"].(string); h != "" {
+				fmt.Printf("ok  %s\n", h)
+			} else {
+				fmt.Println("ok")
+			}
 			return nil
 		},
 	}

@@ -260,10 +260,29 @@ func TestServeHealth(t *testing.T) {
 	srv, _ := newTestHTTPServer(t)
 	defer srv.Close()
 
+	saved := globalCfg.KernelHandle
+	t.Cleanup(func() { globalCfg.KernelHandle = saved })
+	globalCfg.KernelHandle = "@kernel-test"
+
 	resp := httpDo(t, srv, "GET", "/health", nil, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	// Unauthenticated health doubles as an identity banner: status plus the kernel's advertised
+	// federation identity (handle + public key), so a client can see which kernel it's on.
+	if body["status"] != "ok" {
+		t.Errorf("status = %q, want ok", body["status"])
+	}
+	if body["handle"] != "@kernel-test" {
+		t.Errorf("handle = %q, want @kernel-test", body["handle"])
+	}
+	if body["public_key"] == "" {
+		t.Error("public_key should be present in the health banner")
 	}
 }
 
