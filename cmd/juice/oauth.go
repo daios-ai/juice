@@ -40,9 +40,18 @@ type oauthEngine struct {
 	grants     kernel.GrantStore
 	allowLocal bool
 	timeout    time.Duration
+	refFn      func(context.Context, string) string // actionID → @owner/name; wired after bootstrap
 
 	mu    sync.Mutex
 	cache map[string]cachedToken
+}
+
+// actionRef gives grant-required errors the same qualified @owner/name the kernel emits.
+func (e *oauthEngine) actionRef(ctx context.Context, action *kernel.Action) string {
+	if e.refFn != nil {
+		return e.refFn(ctx, action.ID)
+	}
+	return action.Name
 }
 
 type cachedToken struct {
@@ -168,7 +177,7 @@ func (e *oauthEngine) exchangeDelegated(ctx context.Context, action *kernel.Acti
 	g, err := e.grants.ReadGrant(ctx, ownerUserID, action.ID)
 	if err != nil {
 		if errors.Is(err, kernel.ErrNotFound) {
-			return nil, kernel.ErrGrantRequired.Wrapf("grant required for %s", action.Name).WithMeta("action", action.Name)
+			return nil, kernel.GrantRequiredError(e.actionRef(ctx, action))
 		}
 		return nil, err
 	}
@@ -183,7 +192,7 @@ func (e *oauthEngine) exchangeDelegated(ctx context.Context, action *kernel.Acti
 	if err != nil {
 		if errors.Is(err, oauthErrInvalidGrant) {
 			_ = e.grants.DeleteGrant(ctx, ownerUserID, action.ID)
-			return nil, kernel.ErrGrantRequired.Wrapf("grant required for %s", action.Name).WithMeta("action", action.Name)
+			return nil, kernel.GrantRequiredError(e.actionRef(ctx, action))
 		}
 		return nil, err
 	}

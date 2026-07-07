@@ -108,6 +108,12 @@ func (k *Kernel) ActionRef(ctx context.Context, actionID string) string {
 	if err != nil || a == nil {
 		return actionID
 	}
+	return k.actionRefOf(ctx, a)
+}
+
+// actionRefOf builds "@owner/name" for an already-read action (no redundant read); ActionRef and
+// callers that already hold the action share it.
+func (k *Kernel) actionRefOf(ctx context.Context, a *Action) string {
 	if h := k.callerHandle(ctx, a.OwnerUserID); h != "" {
 		return h + "/" + a.Name
 	}
@@ -308,11 +314,7 @@ func (k *Kernel) ListGrantViews(ctx context.Context, callerID string) ([]*GrantV
 	for _, g := range grants {
 		v := &GrantView{Action: g.ActionID, CreatedAt: g.CreatedAt}
 		if a, err := k.store.ReadAction(ctx, g.ActionID); err == nil && a != nil {
-			if h := k.callerHandle(ctx, a.OwnerUserID); h != "" {
-				v.Action = h + "/" + a.Name
-			} else {
-				v.Action = a.Name
-			}
+			v.Action = k.actionRefOf(ctx, a)
 			if auth, err := k.openAuthInput(a); err == nil && auth != nil {
 				v.Scopes = auth.Config["scopes"]
 			}

@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -93,13 +94,17 @@ func TestGrantRequiredCodeAndMeta(t *testing.T) {
 	if HTTPStatusFromCode("grant_required") != 403 {
 		t.Errorf("grant_required status = %d, want 403", HTTPStatusFromCode("grant_required"))
 	}
-	// WithMeta attaches structured context and Wrapf preserves it (chaining must not drop it).
-	e := ErrGrantRequired.Wrapf("grant required for %s", "@a/b").WithMeta("action", "@a/b")
+	// The single constructor attaches the ref both in the message and as Meta["action"], and
+	// preserves the sentinel identity (chaining must not drop it).
+	e := GrantRequiredError("@a/b").(*KernelError)
 	if e.Meta["action"] != "@a/b" {
 		t.Errorf("Meta[action] = %q, want @a/b", e.Meta["action"])
 	}
+	if !strings.Contains(e.Message, "@a/b") {
+		t.Errorf("message = %q, want it to contain @a/b", e.Message)
+	}
 	if !errorsIs(e, ErrGrantRequired) {
-		t.Error("WithMeta lost the error identity")
+		t.Error("GrantRequiredError lost the error identity")
 	}
 	// WithMeta copies: the sentinel is not mutated.
 	if ErrGrantRequired.Meta != nil {

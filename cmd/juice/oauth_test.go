@@ -173,6 +173,9 @@ func TestDelegatedTokenBinding(t *testing.T) {
 	defer provider.Close()
 
 	eng := newOAuthEngine(box, gs, true, time.Second)
+	// refFn is wired in main from k.ActionRef; stub it so the grant-required error carries the
+	// qualified @owner/name (the bug being guarded: dispatch sites used the bare action name).
+	eng.refFn = func(context.Context, string) string { return "@sys/inbox" }
 	auth := &kernel.AuthInput{Scheme: kernel.AuthSchemeOAuthDelegated,
 		Config: map[string]any{"token_url": provider.URL, "auth_url": provider.URL + "/a", "client_id": "c"}}
 	ctx := context.Background()
@@ -181,9 +184,11 @@ func TestDelegatedTokenBinding(t *testing.T) {
 	if tok, err := eng.token(ctx, action, "ownerA", auth, false); err != nil || tok != "acc" {
 		t.Fatalf("ownerA token: %q %v", tok, err)
 	}
-	// Binding mismatch: ownerB has no grant → grant-required error.
+	// Binding mismatch: ownerB has no grant → grant-required error carrying the qualified ref.
 	if _, err := eng.token(ctx, action, "ownerB", auth, true); err == nil || !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("ownerB: got %v, want grant-required", err)
+	} else if got := grantMeta(err); got != "@sys/inbox" {
+		t.Errorf("ownerB grant-required meta[action] = %q, want @sys/inbox", got)
 	}
 
 	// Rotation persists the new refresh token.
@@ -201,10 +206,21 @@ func TestDelegatedTokenBinding(t *testing.T) {
 	gs.grants["ownerC|"+action.ID] = &kernel.Grant{ID: "g2", GrantorUserID: "ownerC", ActionID: action.ID, RefreshToken: sealedBad}
 	if _, err := eng.token(ctx, action, "ownerC", auth, true); err == nil || !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("invalid_grant: got %v, want grant-required", err)
+	} else if got := grantMeta(err); got != "@sys/inbox" {
+		t.Errorf("invalid_grant grant-required meta[action] = %q, want @sys/inbox", got)
 	}
 	if !gs.deleted["ownerC|"+action.ID] {
 		t.Error("invalid_grant did not delete the grant")
 	}
+}
+
+// grantMeta extracts Meta["action"] from a grant-required error.
+func grantMeta(err error) string {
+	var ke *kernel.KernelError
+	if errors.As(err, &ke) {
+		return ke.Meta["action"]
+	}
+	return ""
 }
 
 // TestGrantBrokerCodeFlow: authorize URL carries PKCE + state; foreign callers are rejected;

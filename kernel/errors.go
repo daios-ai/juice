@@ -107,3 +107,9 @@ var (
 	// Meta["action"] names the action so any client can drive consent by field, not substring.
 	ErrGrantRequired = &KernelError{Code: "grant_required", HTTP: 403}
 )
+
+// GrantRequiredError is the one lazy-consent rejection (§8): ref in both the message and
+// Meta["action"], so every mint site is identical and clients always get a qualified @owner/name.
+func GrantRequiredError(ref string) error {
+	return ErrGrantRequired.Wrapf("grant required for %s", ref).WithMeta("action", ref)
+}

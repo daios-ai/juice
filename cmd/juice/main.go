@@ -264,6 +264,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 				// The OAuth token engine shares the box (to open sealed grant refresh tokens) and
 				// reads/rotates grants through the store (§8).
 				httpExec.oauth = newOAuthEngine(box, db, cfg.AllowLocalSources, cfg.ScriptTimeout)
+				httpExec.oauth.refFn = k.ActionRef // qualified @owner/name in grant-required errors
 			}
 		}
 	}

@@ -436,11 +436,7 @@ func (k *Kernel) checkGrantRequired(ctx context.Context, ownerID string, action 
 	}
 	if _, gerr := k.store.ReadGrant(ctx, ownerID, action.ID); gerr != nil {
 		if errors.Is(gerr, ErrNotFound) {
-			ref := action.Name
-			if h := k.callerHandle(ctx, action.OwnerUserID); h != "" {
-				ref = h + "/" + action.Name
-			}
-			return ErrGrantRequired.Wrapf("grant required for %s", ref).WithMeta("action", ref)
+			return GrantRequiredError(k.actionRefOf(ctx, action))
 		}
 		return gerr
 	}
