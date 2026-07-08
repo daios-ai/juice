@@ -7,11 +7,11 @@ flow_pkce_auth() {
     local dir db hs base v ch code
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
     start_server "$db" "$hs" || { fail "pkce_auth.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$(home "$dir" alice)" @alice
     base=$(url "$db")
 
-    v=$(pkce_verifier); ch=$(pkce_challenge "$v"); code=$(pkce_code "$base" @alice pw "$ch")
+    v=$(pkce_verifier); ch=$(pkce_challenge "$v"); code=$(pkce_code "$base" @alice userpass "$ch")
     # authorization_code + correct verifier → access_token.
     local tok; tok=$(strfield "$(curl -sf -X POST "$base/v1/auth/token" -H 'Content-Type: application/json' \
         -d "{\"grant_type\":\"authorization_code\",\"code\":\"$code\",\"code_verifier\":\"$v\"}" 2>/dev/null)" access_token)
@@ -22,7 +22,7 @@ flow_pkce_auth() {
         "$(http_code POST "$base/v1/auth/token" "{\"grant_type\":\"authorization_code\",\"code\":\"$code\",\"code_verifier\":\"$v\"}")"
 
     # A fresh code with the wrong verifier → rejected.
-    local code2; code2=$(pkce_code "$base" @alice pw "$ch")
+    local code2; code2=$(pkce_code "$base" @alice userpass "$ch")
     assert_ne "pkce_auth.wrong_verifier_rejected" 200 \
         "$(http_code POST "$base/v1/auth/token" "{\"grant_type\":\"authorization_code\",\"code\":\"$code2\",\"code_verifier\":\"wrong\"}")"
 }
@@ -32,7 +32,7 @@ flow_refresh_rotation() {
     local dir db hs ha tdir
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "refresh_rotation.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice   # CLI login uses PKCE → stores a refresh token
     tdir=$(juice_token_dir "$ha" "$db")
 
@@ -57,7 +57,7 @@ flow_successful_receipt() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
     start_server "$db" "$hs" || { fail "successful_receipt.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
     deposit "$db" "$hs" @bob 100
@@ -77,7 +77,7 @@ flow_failed_receipt() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 500 '{"error":"backend error"}'
     start_server "$db" "$hs" || { fail "failed_receipt.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
     deposit "$db" "$hs" @bob 100
@@ -98,7 +98,7 @@ flow_lookup() {
     local dir db hs ha
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "lookup.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     # @sys/lookup requires "query"; missing it → schema violation.
     assert_fails "lookup.missing_query_rejected" "query\|required\|schema" -- j "$db" "$ha" run @sys/lookup '{}'
@@ -109,7 +109,7 @@ flow_chat() {
     local dir db hs ha
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "chat.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     # No chatter configured → ErrInvalidState (or a reply if one is); either is acceptable.
     local out; out=$(j "$db" "$ha" run @sys/llm/chat '{"messages":[{"role":"user","content":"hello"}]}' 2>&1)
@@ -138,7 +138,7 @@ flow_openapi_import_execute() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     aport=$(backend_port); _greet_spec "$aport" "$dir/spec.json"; start_api_server "$aport" "$dir/spec.json"
     start_server "$db" "$hs" || { fail "openapi_import.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
     deposit "$db" "$hs" @bob 50
@@ -162,7 +162,7 @@ flow_openapi_changed_reimport() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     aport=$(backend_port); _greet_spec "$aport" "$dir/spec.json" "hello v1"; start_api_server "$aport" "$dir/spec.json"
     start_server "$db" "$hs" || { fail "openapi_reimport.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
 
     local imp1; imp1=$(jj "$db" "$ha" action import "http://127.0.0.1:${aport}/")
@@ -193,7 +193,7 @@ json.dump({"openapi":"3.0.0","info":{"title":"T","version":"1"},"x-juice-owner":
 PY
     start_api_server "$aport" "$dir/spec.json"
     start_server "$db" "$hs" || { fail "openapi_unimport.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
 
     local imp; imp=$(jj "$db" "$ha" action import "http://127.0.0.1:${aport}/")

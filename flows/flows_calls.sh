@@ -7,7 +7,7 @@ flow_process_lifecycle() {
     local dir db hs ha
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "process_lifecycle.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     deposit "$db" "$hs" @alice 1000
 
@@ -43,7 +43,7 @@ flow_acl_public() {
     local dir db hs ha hb aid
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     start_server "$db" "$hs" || { fail "acl_public.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
 
@@ -70,7 +70,7 @@ flow_successful_paid_call() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"result":"ok"}'
     start_server "$db" "$hs" fee_bps=2000 || { fail "successful_paid_call.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
     deposit "$db" "$hs" @bob 500
@@ -99,7 +99,7 @@ flow_http_verbs() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     bport=$(backend_port); start_echo_backend "$bport" || { fail "http_verbs.backend" "echo backend failed"; return; }
     start_server "$db" "$hs" || { fail "http_verbs.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
 
     # A kind=http action fires the verb it was created with; the input reaches upstream
@@ -126,7 +126,7 @@ flow_failed_call_refund() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 500 '{"error":"backend error"}'
     start_server "$db" "$hs" || { fail "failed_call_refund.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
     deposit "$db" "$hs" @bob 500
@@ -150,7 +150,7 @@ flow_input_schema_failure() {
     local dir db hs ha hb
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     start_server "$db" "$hs" || { fail "input_schema_failure.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
     deposit "$db" "$hs" @bob 300
@@ -172,7 +172,7 @@ flow_output_schema_failure() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'   # missing required output "id"
     start_server "$db" "$hs" || { fail "output_schema_failure.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
     deposit "$db" "$hs" @bob 300
@@ -201,7 +201,7 @@ flow_grant() {
     local dir db hs ha aid
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "grant.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     deposit "$db" "$hs" @alice 1000
 

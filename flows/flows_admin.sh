@@ -12,7 +12,7 @@ flow_transaction_access() {
     dir=$(new_dir); db="$dir/juice.db"
     hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
     start_server "$db" "$hs" || { fail "tx_access.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
     make_user "$db" "$hs" "$hc" @carol
@@ -51,7 +51,7 @@ flow_admin_supervision() {
     local dir db hs ha bport
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "admin.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
 
     # admin users lists @sys and @alice; admin show returns @alice.
@@ -63,7 +63,7 @@ flow_admin_supervision() {
     j "$db" "$hs" admin suspend @alice >/dev/null 2>&1
     assert_fails "admin.suspend_blocks_alice" "suspended\|unauthenticated\|error" -- j "$db" "$ha" user me
     j "$db" "$hs" admin unsuspend @alice >/dev/null 2>&1
-    j "$db" "$ha" auth login @alice --password pw >/dev/null 2>&1
+    j "$db" "$ha" auth login @alice --password userpass >/dev/null 2>&1
     assert_json "admin.unsuspend_restores_alice" "$(jj "$db" "$ha" user me)" handle @alice
 
     # Supervision is scope on the normal commands: @sys sees any owner's actions/processes/txs
@@ -100,7 +100,7 @@ flow_time() {
     local dir db hs ha
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "time.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
 
     # @sys/time is registered active + public + free after bootstrap.
@@ -122,7 +122,7 @@ flow_message() {
     local dir db hs ha hb
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     start_server "$db" "$hs" || { fail "message.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
 
@@ -167,7 +167,7 @@ _make_field() { python3 -c "import sys,json; print(json.load(sys.stdin).get(sys.
 _make_setup() {
     MK_DB="$1/juice.db"; MK_HS=$(home "$1" sys); MK_HA=$(home "$1" alice)
     start_server "$MK_DB" "$MK_HS" make_max_steps=10 || return 1
-    j "$MK_DB" "$MK_HS" auth login @sys --password syspass >/dev/null 2>&1
+    j "$MK_DB" "$MK_HS" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$MK_DB" "$MK_HS" "$MK_HA" @alice
     deposit "$MK_DB" "$MK_HS" @alice 1000
 }

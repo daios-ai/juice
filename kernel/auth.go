@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"time"
+	"unicode/utf8"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -17,6 +18,24 @@ var bcryptCost = 12
 
 // SetBcryptCostForTesting overrides the bcrypt work factor. Call only from tests.
 func SetBcryptCostForTesting(cost int) { bcryptCost = cost }
+
+// minPasswordLen is the minimum length (in characters) for a user-chosen password,
+// enforced at every path that sets a password (NIST SP 800-63B: 8-char floor, no
+// composition rules).
+var minPasswordLen = 8
+
+// SetMinPasswordLenForTesting overrides the minimum password length. Call only from tests.
+func SetMinPasswordLenForTesting(n int) { minPasswordLen = n }
+
+// validatePassword rejects a password shorter than minPasswordLen. Rune count (not byte
+// length) so a handful of multibyte characters can't pass as if it were long. Subsumes the
+// non-empty check.
+func validatePassword(password string) error {
+	if utf8.RuneCountInString(password) < minPasswordLen {
+		return ErrInvalidInput.Wrapf("password must be at least %d characters", minPasswordLen)
+	}
+	return nil
+}
 
 // HashPassword returns a bcrypt hash of the plain-text password.
 func HashPassword(plain string) (string, error) {

@@ -125,7 +125,7 @@ start_server() {
     local db="$1" home="$2"; shift 2
     write_config "$db" "$@"
     local log; log="$(dirname "$db")/server.log"
-    JUICE_BOOTSTRAP_PASSWORD=syspass HOME="$home" \
+    JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$home" \
         "$JUICE" --db "$db" serve --addr 127.0.0.1:0 >"$log" 2>&1 &
     local pid=$!; track_pid "$pid"
     local addr deadline=$(( $(date +%s) + 20 ))
@@ -224,11 +224,11 @@ juice_token_dir() {
 # Fixtures — the repeated preambles, once.
 # ---------------------------------------------------------------------------
 # make_admin db home         — boot a server and log @sys in (home is @sys's home).
-make_admin() { start_server "$1" "$2" "${@:3}" && j "$1" "$2" auth login @sys --password syspass >/dev/null 2>&1; }
+make_admin() { start_server "$1" "$2" "${@:3}" && j "$1" "$2" auth login @sys --password sys-pass >/dev/null 2>&1; }
 # make_user db admin_home user_home handle [password]  — create @handle (as @sys) and log it
-# in under user_home. Default password is "pw" so curl-based checks can reference it.
+# in under user_home. Default password is "userpass" so curl-based checks can reference it.
 make_user() {
-    local db="$1" ah="$2" uh="$3" h="$4" pw="${5:-pw}"
+    local db="$1" ah="$2" uh="$3" h="$4" pw="${5:-userpass}"
     j "$db" "$ah" user create "$h" "${h#@}@test.com" --password "$pw" >/dev/null 2>&1
     j "$db" "$uh" auth login "$h" --password "$pw" >/dev/null 2>&1
 }

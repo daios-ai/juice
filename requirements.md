@@ -566,7 +566,7 @@ config.signing_private_key = base64url Ed25519 private key
 config.jwt_secret          = 32 random bytes, hex
 ```
 
-Private signing key and JWT secret are never logged or returned. Partial first boot is rerunnable. `JUICE_SECRET_KEY` overrides stored JWT secret at runtime only. First boot also **requires a `kernel_handle`** — the name this kernel presents to the network (§13): from config, else `JUICE_BOOTSTRAP_KERNEL_HANDLE`, else an interactive prompt that repeats until a non-empty name is given; a headless first boot with none set fails rather than name the kernel silently.
+A chosen password must be at least 8 characters, enforced server-side at user creation, first boot, and password update (no composition rules); a shorter one returns `ErrInvalidInput`. Private signing key and JWT secret are never logged or returned. Partial first boot is rerunnable. `JUICE_SECRET_KEY` overrides stored JWT secret at runtime only. First boot also **requires a `kernel_handle`** — the name this kernel presents to the network (§13): from config, else `JUICE_BOOTSTRAP_KERNEL_HANDLE`, else an interactive prompt that repeats until a non-empty name is given; a headless first boot with none set fails rather than name the kernel silently.
 
 The kernel's federation network identity is derived deterministically from this same Ed25519 signing key; there is no second identity or network key. The `public_key` is simultaneously the kernel's Juice identity (§13) and its address on the federation transport. The signature domains of the transport handshake and of Juice payloads (receipts, ratings, manifests, federation requests) must be disjoint: no byte string signed in one domain may verify as a valid message in the other. This disjointness is verified by test (§15).
 
@@ -834,6 +834,7 @@ user update password with correct current_password; old password rejected after 
 user update password with wrong current_password returns ErrUnauthenticated
 user update with neither email nor password returns ErrInvalidInput
 key-only account (no password) UpdateUser returns ErrInvalidState
+password below the minimum length rejected at user creation, first boot, and password update
 action create/update/delete
 action activation/deactivation
 public/private access control

@@ -12,7 +12,7 @@ flow_bootstrap() {
 
     start_server "$db" "$hs" || { fail "bootstrap.first_boot" "server did not start"; return; }
     ok "bootstrap.first_boot"
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
 
     assert_json "bootstrap.sys_user" "$(jj "$db" "$hs" user me)" handle @sys
 
@@ -28,7 +28,7 @@ flow_bootstrap() {
 
     # HTTP-only: the password-grant token endpoint (CLI login uses PKCE, not this path).
     local tok; tok=$(strfield "$(curl -sf -X POST "$(url "$db")/v1/auth/token" \
-        -H 'Content-Type: application/json' -d '{"handle":"@sys","password":"syspass"}' 2>/dev/null)" token)
+        -H 'Content-Type: application/json' -d '{"handle":"@sys","password":"sys-pass"}' 2>/dev/null)" token)
     assert_nonempty "bootstrap.http_password_grant" "$tok"
 }
 
@@ -37,7 +37,7 @@ flow_local_auth() {
     local dir db hs tdir
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
     start_server "$db" "$hs" || { fail "local_auth.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     tdir=$(juice_token_dir "$hs" "$db")
 
     assert_eq "local_auth.token_stored" yes "$([ -f "$tdir/token" ] && echo yes || echo no)"
@@ -70,7 +70,7 @@ flow_suspension() {
     local dir db hs ha
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "suspension.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
 
     assert_json "suspension.alice_active" "$(jj "$db" "$ha" user me)" handle @alice
@@ -89,7 +89,7 @@ flow_deposits() {
     local dir db hs ha hb
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     start_server "$db" "$hs" || { fail "deposits.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
 
@@ -108,7 +108,7 @@ flow_action_lifecycle() {
     local dir db hs ha hb bport
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     start_server "$db" "$hs" || { fail "action_lifecycle.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
 
@@ -157,7 +157,7 @@ flow_action_owner_visibility() {
     local dir db hs ha
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "action_owner_visibility.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
 
     # A private, inactive action (no enable, no --public).
@@ -169,7 +169,7 @@ flow_action_owner_visibility() {
     assert_eq "action_owner_visibility.unauthenticated_zero" 0 \
         "$(list_len "$(curl -sf "$base/v1/actions?owner=@alice" 2>/dev/null)")"
     local tok; tok=$(strfield "$(curl -sf -X POST "$base/v1/auth/token" -H 'Content-Type: application/json' \
-        -d '{"handle":"@alice","password":"pw"}' 2>/dev/null)" token)
+        -d '{"handle":"@alice","password":"userpass"}' 2>/dev/null)" token)
     local n; n=$(list_len "$(curl -sf -H "Authorization: Bearer $tok" "$base/v1/actions?owner=@alice" 2>/dev/null)")
     assert_eq "action_owner_visibility.owner_sees_private" yes "$([ "${n:-0}" -ge 1 ] && echo yes || echo no)"
 }

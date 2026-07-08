@@ -8,7 +8,7 @@ flow_wasm_execution() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     # Short script timeout so the infinite-loop action is killed quickly (echo is instant).
     start_server "$db" "$hs" script_timeout_ms=200 || { fail "wasm_execution.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
     deposit "$db" "$hs" @bob 200
@@ -36,7 +36,7 @@ flow_contractor_subcall() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
     start_server "$db" "$hs" || { fail "contractor_subcall.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
     make_user "$db" "$hs" "$hc" @carol
@@ -64,7 +64,7 @@ flow_contractor_failure() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
     start_server "$db" "$hs" || { fail "contractor_failure.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
     make_user "$db" "$hs" "$hc" @carol
@@ -89,7 +89,7 @@ flow_step_success() {
     local dir db hs ha hb
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     start_server "$db" "$hs" || { fail "step_success.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
 
@@ -114,7 +114,7 @@ flow_step_failure() {
     local dir db hs ha hb hc
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
     start_server "$db" "$hs" || { fail "step_failure.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
     make_user "$db" "$hs" "$hc" @carol
@@ -134,7 +134,7 @@ flow_step_restart() {
     local dir db hs ha hb
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     start_server "$db" "$hs" || { fail "step_restart.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
 
@@ -156,7 +156,7 @@ flow_locked_funds_recovery() {
     local dir db hs
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
     start_server "$db" "$hs" || { fail "locked_funds.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     j "$db" "$hs" admin deposit @sys 200 >/dev/null 2>&1
 
     # Inject (server stopped) an orphan process+trace: a root call for @sys/make (price 20)
@@ -181,7 +181,7 @@ PYEOF
     # Restart → Recover settles the orphan as an interrupted failure: refund flows up,
     # process closes, and @sys's balance is made whole (200).
     start_server "$db" "$hs" || { fail "locked_funds.reboot" "server did not restart"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     local ps; ps=$(jj "$db" "$hs" process show "$proc_id")
     assert_jnum "locked_funds.locked_cleared" "$ps" locked 0
     assert_json "locked_funds.process_closed" "$ps" status closed
@@ -194,7 +194,7 @@ flow_rating() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
     start_server "$db" "$hs" || { fail "rating.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     make_user "$db" "$hs" "$hb" @bob
     deposit "$db" "$hs" @bob 200
@@ -229,7 +229,7 @@ flow_tinygo_compile() {
     local dir db hs ha
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "tinygo_compile.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password syspass >/dev/null 2>&1
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
     deposit "$db" "$hs" @alice 200
 

@@ -410,8 +410,8 @@ func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*User, 
 	if req.Email == "" {
 		return nil, ErrInvalidInput.Wrap("email is required")
 	}
-	if req.Password == "" {
-		return nil, ErrInvalidInput.Wrap("password is required")
+	if err := validatePassword(req.Password); err != nil {
+		return nil, err
 	}
 
 	hash, err := HashPassword(req.Password)
@@ -461,6 +461,9 @@ func (k *Kernel) UpdateUser(ctx context.Context, callerID string, req UpdateUser
 		return nil, ErrInvalidInput.Wrap("at least one of email or password must be provided")
 	}
 	if req.NewPassword != "" {
+		if err := validatePassword(req.NewPassword); err != nil {
+			return nil, err
+		}
 		if !CheckPassword(req.CurrentPassword, u.PasswordHash) {
 			return nil, ErrUnauthenticated.Wrap("invalid current password")
 		}
@@ -1116,8 +1119,8 @@ func (k *Kernel) SetConfig(ctx context.Context, key, value string) error {
 // keypair, and stores all three config entries in a single SQLite transaction.
 // Safe to call on a database that was already initialized — user INSERT is skipped.
 func (k *Kernel) FirstBoot(ctx context.Context, password string) error {
-	if password == "" {
-		return ErrInvalidInput.Wrap("password cannot be empty")
+	if err := validatePassword(password); err != nil {
+		return err
 	}
 	hash, err := HashPassword(password)
 	if err != nil {

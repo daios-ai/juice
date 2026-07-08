@@ -19,8 +19,8 @@ _fed_setup() {
     FED_BOOT=$(kernel_fed_addr "$FED_DBR")
     [ -n "$FED_BOOT" ] || return 1
     start_server "$FED_DBL" "$FED_HL" kernel_handle=@kernel-l bootstrap_peers="$FED_BOOT" || return 1
-    j "$FED_DBR" "$FED_HR" auth login @sys --password syspass >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" auth login @sys --password syspass >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" auth login @sys --password sys-pass >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" auth login @sys --password sys-pass >/dev/null 2>&1
 
     # Learn each kernel's own public key (federation identity; no .well-known anymore).
     FED_RKEY=$(kernel_key "$FED_DBR" "$FED_HR")
@@ -272,7 +272,7 @@ flow_fed_gossip_discovery() {
     # Third kernel T discovers R by inspecting L's gossip over the transport, then friends R by key.
     local dbt ht; dbt="$dir/t/juice.db"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
     start_server "$dbt" "$ht" kernel_handle=@kernel-t bootstrap_peers="$FED_BOOT" || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
-    j "$dbt" "$ht" auth login @sys --password syspass >/dev/null 2>&1
+    j "$dbt" "$ht" auth login @sys --password sys-pass >/dev/null 2>&1
 
     # T inspects L (resolved by key via the seed); L's transacted-friends list carries R's key + stats.
     # Retry until the DHT lookup converges (loopback is usually instant, but slow under CPU load).
@@ -313,7 +313,7 @@ flow_fed_discovery() {
         || { fail "fed_discovery.setup" "R did not start"; return; }
     local boot; boot=$(kernel_fed_addr "$dbr")
     [ -n "$boot" ] || { fail "fed_discovery.boot" "no R fed addr"; return; }
-    j "$dbr" "$hr" auth login @sys --password syspass >/dev/null 2>&1
+    j "$dbr" "$hr" auth login @sys --password sys-pass >/dev/null 2>&1
     local rkey; rkey=$(kernel_key "$dbr" "$hr")
     [ -n "$rkey" ] || { fail "fed_discovery.rkey" "no R key"; return; }
 
@@ -325,7 +325,7 @@ flow_fed_discovery() {
     # L joins with R as its ONLY bootstrap peer; it must discover R without friending it.
     start_server "$dbl" "$hl" kernel_handle=@kernel-l bootstrap_peers="$boot" discovery_interval_seconds=2 \
         || { fail "fed_discovery.l" "L did not start"; return; }
-    j "$dbl" "$hl" auth login @sys --password syspass >/dev/null 2>&1
+    j "$dbl" "$hl" auth login @sys --password sys-pass >/dev/null 2>&1
 
     # Poll L's known network until R appears — a discovery pass runs at startup, then every 2s.
     local found=no i

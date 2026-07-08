@@ -28,6 +28,58 @@ func TestHashPassword(t *testing.T) {
 	}
 }
 
+// TestPasswordMinLength verifies the production 8-character floor. The suite runs with the
+// floor relaxed to 1 (TestMain), so this test restores it to 8 and asserts every password-setting
+// path rejects a short password and accepts an 8-character one.
+func TestPasswordMinLength(t *testing.T) {
+	kernel.SetMinPasswordLenForTesting(8)
+	defer kernel.SetMinPasswordLenForTesting(1)
+
+	ctx := context.Background()
+
+	// Direct helper via a public path: CreateUser rejects short, accepts >= 8.
+	st := newTestStore(t)
+	k := newTestKernel(st)
+
+	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@shorty", Email: "shorty@example.com", Password: "short12", // 7 chars
+	}); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("CreateUser short password: got %v, want ErrInvalidInput", err)
+	}
+	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@longy", Email: "longy@example.com", Password: "pass1234", // 8 chars
+	}); err != nil {
+		t.Errorf("CreateUser 8-char password: unexpected error %v", err)
+	}
+
+	// UpdateUser rejects a short new password and accepts an 8-char one.
+	if _, err := k.UpdateUser(ctx, userID(t, st, "@longy"), kernel.UpdateUserRequest{
+		CurrentPassword: "pass1234", NewPassword: "short12", // 7 chars
+	}); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("UpdateUser short new password: got %v, want ErrInvalidInput", err)
+	}
+	if _, err := k.UpdateUser(ctx, userID(t, st, "@longy"), kernel.UpdateUserRequest{
+		CurrentPassword: "pass1234", NewPassword: "newpass8", // 8 chars
+	}); err != nil {
+		t.Errorf("UpdateUser 8-char new password: unexpected error %v", err)
+	}
+
+	// FirstBoot rejects a short superuser password.
+	if err := newTestKernel(newTestStore(t)).FirstBoot(ctx, "short12"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("FirstBoot short password: got %v, want ErrInvalidInput", err)
+	}
+}
+
+// userID resolves a handle to its user ID via the store.
+func userID(t *testing.T, st kernel.Store, handle string) string {
+	t.Helper()
+	u, err := st.ReadUserByHandle(context.Background(), handle)
+	if err != nil {
+		t.Fatalf("userID %s: %v", handle, err)
+	}
+	return u.ID
+}
+
 func TestIssueAndVerifyToken(t *testing.T) {
 	secret := "test-secret"
 	id, err := kernel.IssueToken("user-1", secret, "", "", time.Hour)

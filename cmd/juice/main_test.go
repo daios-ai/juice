@@ -116,6 +116,7 @@ func TestUsageShownOnlyForParseErrors(t *testing.T) {
 
 func TestMain(m *testing.M) {
 	kernel.SetBcryptCostForTesting(4)
+	kernel.SetMinPasswordLenForTesting(1)
 	os.Exit(m.Run())
 }
 
