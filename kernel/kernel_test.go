@@ -702,6 +702,25 @@ func TestReadProcessUnauthorized(t *testing.T) {
 	}
 }
 
+func TestProcessOwnerID(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice-owner-id", 500)
+	p := setupProcess(t, st, alice.ID, 100)
+
+	// Resolves the owner id unauthorized (no caller argument) — the required-caller view path
+	// depends on this not enforcing process-read authority.
+	if got := k.ProcessOwnerID(ctx, p.ID); got != alice.ID {
+		t.Errorf("ProcessOwnerID: got %q, want %q", got, alice.ID)
+	}
+	// Unknown process → "".
+	if got := k.ProcessOwnerID(ctx, "no-such-process"); got != "" {
+		t.Errorf("ProcessOwnerID(unknown): got %q, want \"\"", got)
+	}
+}
+
 func TestProcessAvailablePlusLockedInvariant(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})

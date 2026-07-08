@@ -111,6 +111,16 @@ func (k *Kernel) ActionRef(ctx context.Context, actionID string) string {
 	return k.actionRefOf(ctx, a)
 }
 
+// ProcessOwnerID returns a process's owner user id, unauthorized — a display resolver like
+// ActionRef; "" if the process is unknown. The caller resolves the handle.
+func (k *Kernel) ProcessOwnerID(ctx context.Context, processID string) string {
+	p, err := k.store.ReadProcess(ctx, processID)
+	if err != nil || p == nil {
+		return ""
+	}
+	return p.OwnerUserID
+}
+
 // actionRefOf builds "@owner/name" for an already-read action (no redundant read); ActionRef and
 // callers that already hold the action share it.
 func (k *Kernel) actionRefOf(ctx context.Context, a *Action) string {

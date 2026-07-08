@@ -101,6 +101,9 @@ flow_step_success() {
     # Owner and required-caller both see it in their step list.
     assert_eq "step_success.owner_sees_step"  1 "$(jj "$db" "$ha" step list | python3 -c "import sys,json;print(sum(1 for s in json.load(sys.stdin) if s.get('id')=='$step_id'))" 2>/dev/null)"
     assert_eq "step_success.caller_sees_step" 1 "$(jj "$db" "$hb" step list | python3 -c "import sys,json;print(sum(1 for s in json.load(sys.stdin) if s.get('id')=='$step_id'))" 2>/dev/null)"
+    # The step carries owner_handle (the process owner / payer) — resolvable even to @bob, who is the
+    # required caller, not the owner. The step is the continuation that settles into @alice's transaction.
+    assert_json "step_success.owner_handle_from_caller" "$(jj "$db" "$hb" step show "$step_id")" owner_handle @alice
 
     # @bob (required caller) completes it → done.
     local comp; comp=$(jj "$db" "$hb" step complete "$step_id" '{}')

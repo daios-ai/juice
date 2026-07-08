@@ -423,6 +423,9 @@ func TestListSteps_Enriched(t *testing.T) {
 	if steps[0].Action != "@svc-ls/svc-ls-action" {
 		t.Errorf("listSteps: action field = %q, want @svc-ls/svc-ls-action", steps[0].Action)
 	}
+	if steps[0].OwnerHandle != "@svc-ls" {
+		t.Errorf("listSteps: owner_handle = %q, want @svc-ls (the process owner)", steps[0].OwnerHandle)
+	}
 }
 
 func TestGetStep_Enriched(t *testing.T) {
@@ -432,7 +435,7 @@ func TestGetStep_Enriched(t *testing.T) {
 	backend := newStepBackend(t)
 	ownerID, ownerTok := makeUser(t, k, "@svc-gs")
 	giveCredits(t, k, ownerID, 500)
-	makeUser(t, k, "@svc-gs-hook")
+	hookID, _ := makeUser(t, k, "@svc-gs-hook")
 
 	_, _ = createStepAction(t, srv, backend.URL, ownerTok, "@svc-gs", "svc-gs-action")
 
@@ -456,6 +459,18 @@ func TestGetStep_Enriched(t *testing.T) {
 	}
 	if got.ID != view.ID {
 		t.Errorf("getStep ID = %q, want %q", got.ID, view.ID)
+	}
+	if got.OwnerHandle != "@svc-gs" {
+		t.Errorf("getStep owner_handle = %q, want @svc-gs (the process owner)", got.OwnerHandle)
+	}
+	// The required caller is not the owner, yet must still see the owner_handle — the resolver
+	// is unauthorized, so a non-owner viewer of the step gets the owner without a process-read.
+	asHook, err := getStep(k, ctx, hookID, view.ID)
+	if err != nil {
+		t.Fatalf("getStep as required caller: %v", err)
+	}
+	if asHook.OwnerHandle != "@svc-gs" {
+		t.Errorf("getStep(required caller) owner_handle = %q, want @svc-gs", asHook.OwnerHandle)
 	}
 }
 

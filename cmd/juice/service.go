@@ -30,6 +30,7 @@ type stepWithAction struct {
 	RequiredCallerUserID string `json:"required_caller_user_id,omitempty"`
 	Action               string `json:"action,omitempty"`
 	CreatedBy            string `json:"created_by,omitempty"` // creating action @owner/name (from parent trace)
+	OwnerHandle          string `json:"owner_handle"`         // process owner (payer), like a transaction's owner_handle
 	RequiredCallerHandle string `json:"required_caller_handle,omitempty"`
 	WaitingOnPeer        bool   `json:"waiting_on_peer,omitempty"`
 	// AllowedInput is the derived completion schema (input_schema \ keys(partial_args), §10) for a
@@ -128,6 +129,8 @@ func enrichStep(k *kernel.Kernel, ctx context.Context, step *kernel.Step, action
 	if step.ParentTraceID != nil {
 		if tr, err := k.ReadTrace(ctx, *step.ParentTraceID); err == nil {
 			v.CreatedBy = k.ActionRef(ctx, tr.ActionID)
+			// The step's process owner is the payer of the transaction it will settle into (§10).
+			v.OwnerHandle = uc.handle(k.ProcessOwnerID(ctx, tr.ProcessID))
 		}
 	}
 	if step.Status == kernel.StepWaiting {
