@@ -77,6 +77,10 @@ On first boot the kernel prompts for a superuser password and atomically creates
 its signing keypair, and a JWT secret, then registers the native `@sys` actions. Subsequent boots
 are idempotent.
 
+State — the database (which holds the signing key), config, and auth tokens — lives under
+`~/.juice/` by default; the binary is separate, on your `PATH`. Point `--db` (or `JUICE_DB_PATH`)
+elsewhere to run several kernels, or use `--db ./juice.db` for a portable per-folder kernel.
+
 ## Quick start
 
 ```bash
