@@ -32,6 +32,9 @@ type stepWithAction struct {
 	CreatedBy            string `json:"created_by,omitempty"` // creating action @owner/name (from parent trace)
 	RequiredCallerHandle string `json:"required_caller_handle,omitempty"`
 	WaitingOnPeer        bool   `json:"waiting_on_peer,omitempty"`
+	// AllowedInput is the derived completion schema (input_schema \ keys(partial_args), §10) for a
+	// waiting step, so the required caller can complete it without reading a private target action.
+	AllowedInput map[string]any `json:"allowed_input,omitempty"`
 }
 
 // processView enriches a process with its owner @handle and awaiting-receipt state and age (§13): a
@@ -129,6 +132,9 @@ func enrichStep(k *kernel.Kernel, ctx context.Context, step *kernel.Step, action
 	}
 	if step.Status == kernel.StepWaiting {
 		v.WaitingOnPeer = uc.isPeer(step.RequiredCallerUserID)
+		if action != nil {
+			v.AllowedInput = kernel.DeriveAllowedSchema(action.InputSchema, step.PartialArgs)
+		}
 	}
 	return v
 }

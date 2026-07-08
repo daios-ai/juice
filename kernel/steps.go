@@ -235,7 +235,7 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 	if err := json.Unmarshal(input, &inputArgs); err != nil {
 		return nil, ErrInvalidInput.Wrap("input must be a JSON object")
 	}
-	allowedSchema := deriveAllowedSchema(action.InputSchema, step.PartialArgs)
+	allowedSchema := DeriveAllowedSchema(action.InputSchema, step.PartialArgs)
 	if len(allowedSchema) > 0 {
 		if err := ValidateInput(allowedSchema, inputArgs); err != nil {
 			return nil, err
@@ -244,7 +244,7 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 	// Enforce the allowed-input rule §10: allowed input = action.input_schema \ keys(partial_args).
 	// This only constrains keys when the schema declares properties; an unconstrained schema imposes
 	// no restriction (the merge rule governs collisions there). The derived-schema check above misses
-	// the all-bound case: when partial_args binds every declared property, deriveAllowedSchema reduces
+	// the all-bound case: when partial_args binds every declared property, DeriveAllowedSchema reduces
 	// properties to {}, which ValidateInput treats as accept-any — letting a completer supply an
 	// undeclared key or, worse, overwrite a creator-fixed value. Reject before any state mutation so
 	// the step stays waiting and no action failure is recorded.
@@ -342,9 +342,11 @@ func (k *Kernel) canReadStep(ctx context.Context, callerID string, step *Step) b
 	return false
 }
 
-// deriveAllowedSchema returns the subset of actionSchema that is not already covered by partialArgs.
-// Properties and required fields whose keys appear in partialArgs are removed.
-func deriveAllowedSchema(actionSchema map[string]any, partialArgs json.RawMessage) map[string]any {
+// DeriveAllowedSchema returns the subset of actionSchema that is not already covered by partialArgs.
+// Properties and required fields whose keys appear in partialArgs are removed. It is the completer's
+// allowed input (§10) and is surfaced on the step read view so a required caller can complete without
+// separately reading a private target action.
+func DeriveAllowedSchema(actionSchema map[string]any, partialArgs json.RawMessage) map[string]any {
 	if len(actionSchema) == 0 {
 		return actionSchema
 	}

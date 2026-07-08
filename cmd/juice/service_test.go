@@ -146,6 +146,10 @@ func TestEnrichStep(t *testing.T) {
 	if v.WaitingOnPeer {
 		t.Error("enrichStep: WaitingOnPeer should be false")
 	}
+	// A non-waiting step carries no allowed_input.
+	if v.AllowedInput != nil {
+		t.Errorf("enrichStep: AllowedInput = %v, want nil for a non-waiting step", v.AllowedInput)
+	}
 
 	// Nil action → empty action field; a waiting step to a peer caller flags waiting_on_peer and
 	// resolves the required-caller handle from the (pre-seeded) cache.
@@ -161,6 +165,35 @@ func TestEnrichStep(t *testing.T) {
 	}
 	if v2.RequiredCallerHandle != "@peer" {
 		t.Errorf("enrichStep: RequiredCallerHandle = %q, want @peer", v2.RequiredCallerHandle)
+	}
+
+	// A waiting step carries allowed_input = input_schema \ keys(partial_args): the target's declared
+	// property `units` is exposed for completion, while the pre-bound `city` is dropped. This lets a
+	// required caller who cannot read a private target action still see what to submit.
+	schemaAction := &kernel.Action{
+		OwnerHandle: "@alice", Name: "weather",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"city":  map[string]any{"type": "string"},
+				"units": map[string]any{"type": "string"},
+			},
+			"required": []any{"city", "units"},
+		},
+	}
+	waiting := &kernel.Step{ID: "s3", Status: kernel.StepWaiting, RequiredCallerUserID: "u9", PartialArgs: json.RawMessage(`{"city":"NYC"}`)}
+	uc3 := newUserCache(nil, context.Background())
+	uc3.m["u9"] = &kernel.User{Handle: "@carol"} // seeded so the peer check doesn't dial the nil kernel
+	v3 := enrichStep(nil, context.Background(), waiting, schemaAction, uc3)
+	props, ok := v3.AllowedInput["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("enrichStep: AllowedInput has no properties: %v", v3.AllowedInput)
+	}
+	if _, bound := props["city"]; bound {
+		t.Error("enrichStep: AllowedInput should not expose the pre-bound key `city`")
+	}
+	if _, open := props["units"]; !open {
+		t.Error("enrichStep: AllowedInput should expose the unbound key `units`")
 	}
 }
 
