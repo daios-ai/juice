@@ -218,6 +218,65 @@ func TestPromptNewPassword(t *testing.T) {
 	}
 }
 
+// TestDBPathResolution pins the DB-path precedence: explicit --db wins, then JUICE_DB_PATH,
+// then the fixed per-user default ~/.juice/juice.db (never the working directory). The fixed
+// default is what stops `juice serve` from silently minting a new kernel identity when run
+// from an unexpected folder. initConfig co-locates the config beside the DB and creates the
+// home directory, so it is exercised end-to-end here against a temp HOME.
+func TestDBPathResolution(t *testing.T) {
+	home := t.TempDir()
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", home)
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+
+	// defaultDBPath is ~/.juice/juice.db.
+	want := filepath.Join(home, ".juice", "juice.db")
+	if got := defaultDBPath(); got != want {
+		t.Fatalf("defaultDBPath: got %q, want %q", got, want)
+	}
+
+	// Save/restore the globals initConfig mutates.
+	origDB, origConfig, origResolved := flagDB, flagConfig, resolvedConfigPath
+	t.Cleanup(func() { flagDB, flagConfig, resolvedConfigPath = origDB, origConfig, origResolved })
+	os.Unsetenv("JUICE_CONFIG")
+	t.Cleanup(func() {
+		os.Unsetenv("JUICE_DB_PATH")
+		os.Unsetenv("JUICE_CONFIG")
+	})
+
+	cases := []struct {
+		name   string
+		flag   string
+		env    string
+		want   string
+		config string // expected co-located config path
+	}{
+		{"default", "", "", want, filepath.Join(home, ".juice", "juice.json")},
+		{"env override", "", filepath.Join(home, "env", "e.db"), filepath.Join(home, "env", "e.db"), filepath.Join(home, "env", "juice.json")},
+		{"flag wins over env", filepath.Join(home, "flag", "f.db"), filepath.Join(home, "env", "e.db"), filepath.Join(home, "flag", "f.db"), filepath.Join(home, "flag", "juice.json")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			flagDB, flagConfig = tc.flag, ""
+			if tc.env == "" {
+				os.Unsetenv("JUICE_DB_PATH")
+			} else {
+				os.Setenv("JUICE_DB_PATH", tc.env)
+			}
+			initConfig()
+			if flagDB != tc.want {
+				t.Errorf("flagDB: got %q, want %q", flagDB, tc.want)
+			}
+			if resolvedConfigPath != tc.config {
+				t.Errorf("config path: got %q, want %q", resolvedConfigPath, tc.config)
+			}
+			if _, err := os.Stat(filepath.Dir(tc.want)); err != nil {
+				t.Errorf("home dir not created: %v", err)
+			}
+		})
+	}
+}
+
 func TestRefreshTokenRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	origHome := os.Getenv("HOME")

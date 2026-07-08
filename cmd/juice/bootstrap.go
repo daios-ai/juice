@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/daios-ai/juice/kernel"
@@ -105,7 +106,14 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 }
 
 func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
-	fmt.Fprintln(os.Stderr, "First boot: no superuser configured.")
+	// Announce the location loudly: a first boot mints a NEW kernel identity and signing
+	// key, so an operator who launched against the wrong DB path (a fresh, unintended
+	// federation identity) sees it here — including in headless mode, before any prompt.
+	loc := flagDB
+	if abs, err := filepath.Abs(flagDB); err == nil {
+		loc = abs
+	}
+	fmt.Fprintf(os.Stderr, "First boot: creating a NEW kernel — new identity and signing key — at %s\n", loc)
 
 	password := os.Getenv("JUICE_BOOTSTRAP_PASSWORD")
 	if password == "" {

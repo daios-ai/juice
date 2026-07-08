@@ -17,4 +17,5 @@ clean:
 	rm -f $(BINARY)
 
 install: build
+	mkdir -p $(PREFIX)/bin
 	install -m 755 $(BINARY) $(PREFIX)/bin/$(BINARY)

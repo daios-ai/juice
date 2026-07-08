@@ -71,7 +71,7 @@ var globalCfg ServerConfig
 var resolvedConfigPath string
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&flagDB, "db", "juice.db", "SQLite database path")
+	rootCmd.PersistentFlags().StringVar(&flagDB, "db", "", "SQLite database path (default ~/.juice/juice.db)")
 	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", "", "Config file path")
 	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Output JSON instead of human-readable text")
 	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "Print only the created resource ID")
@@ -80,13 +80,31 @@ func init() {
 	cobra.OnInitialize(initConfig)
 }
 
+// defaultDBPath is the per-user default database location, ~/.juice/juice.db. This is the
+// juice home; tokens already live under ~/.juice (see tokenDir), so the DB, its config, and
+// tokens share one directory. It falls back to a CWD-relative path only when the home
+// directory cannot be determined, keeping the binary usable in minimal environments.
+func defaultDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "juice.db"
+	}
+	return filepath.Join(home, ".juice", "juice.db")
+}
+
 // initConfig loads the JSON config file and applies JUICE_* environment overrides.
-// The config path is the --config flag, else JUICE_CONFIG, else juice.json in the same
-// directory as --db so that both files stay co-located. JUICE_DB_PATH overrides the
-// --db flag default.
+// The DB path is the --db flag, else JUICE_DB_PATH, else the per-user default
+// ~/.juice/juice.db. A fixed default (like Geth's ~/.ethereum or IPFS's ~/.ipfs) means
+// `juice serve` attaches to the same kernel — and the same signing key / federation
+// identity — regardless of the working directory, instead of silently booting a fresh
+// identity from whatever folder it happens to run in. The config path is --config, else
+// JUICE_CONFIG, else juice.json co-located with the DB.
 func initConfig() {
-	if v := os.Getenv("JUICE_DB_PATH"); v != "" && flagDB == "juice.db" {
-		flagDB = v
+	if flagDB == "" {
+		flagDB = os.Getenv("JUICE_DB_PATH")
+	}
+	if flagDB == "" {
+		flagDB = defaultDBPath()
 	}
 	path := flagConfig
 	if path == "" {
@@ -96,6 +114,11 @@ func initConfig() {
 		path = filepath.Join(filepath.Dir(flagDB), "juice.json")
 	}
 	resolvedConfigPath = path
+	// The juice home holds the config (credentials key) and, alongside it, the DB
+	// (signing key) and tokens — create it 0700 so the default config can be written.
+	if dir := filepath.Dir(path); dir != "" {
+		_ = os.MkdirAll(dir, 0o700)
+	}
 	cfg, err := LoadOrCreateConfig(path)
 	if err != nil {
 		renderError(kernel.ErrInvalidInput.Wrapf("config: %v", err))
@@ -185,6 +208,9 @@ func exitCodeFor(err error) int {
 // openKernel opens the SQLite store and constructs a Kernel from globalCfg.
 // The caller is responsible for closing the store when done.
 func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, error) {
+	if dir := filepath.Dir(flagDB); dir != "" {
+		_ = os.MkdirAll(dir, 0o700)
+	}
 	db, err := store.Open(flagDB)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("open db: %w", err)
