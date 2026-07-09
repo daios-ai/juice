@@ -50,9 +50,13 @@ final and atomic with its transaction and receipt.
 - **Steps** — partially-applied future calls (`waiting → running → done | cancelled`) for
   human-in-the-loop and webhook completion.
 - **Upstream auth** — per-action, sealed at rest and never returned: static (`header`, `query`,
-  `bearer`, `basic`), owner-held OAuth (`oauth_client_credentials`, `oauth_jwt_bearer`), and
-  per-user `oauth_delegated` — each caller connects their own account once in a browser
-  (`juice user connect`) and the action then calls the API as them. See **[docs/oauth.md](docs/oauth.md)**.
+  `bearer`, `basic`), owner-held OAuth (`oauth_client_credentials`, `oauth_jwt_bearer`), and two
+  per-caller **delegated** schemes for wrapping multi-user APIs, where each caller connects their
+  own account once and the action then calls the upstream as them — `oauth_delegated` (browser
+  consent, `juice user connect`) and `delegated_bearer` (a pasted API key / personal access token,
+  `juice user connect --token`, applied into a configurable header). Reads expose only the
+  non-secret `auth_scheme` name and a `requires_grant` flag, never config or secrets. See
+  **[docs/oauth.md](docs/oauth.md)**.
 - **Native `@sys` actions** (the platform stdlib): `lookup`, `llm/chat`, `llm/embed`, `llm/json`,
   `llm/decide`, `make`, `tinygo/compile`, `time`, `sink`, `message`, `random`, `web`.
 - **Federation** — friend/unfriend peer kernels by public key, proxy users, prepaid credits, signed
