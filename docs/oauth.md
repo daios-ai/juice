@@ -1,8 +1,8 @@
-# OAuth actions: calling APIs as yourself
+# Delegated actions: calling APIs as yourself
 
 *Juice · Tutorial · v0.5*
 
-How to build Juice actions that reach an outside API on behalf of the person running them — where each user connects their own account once, and the token is applied safely, automatically, forever after.
+How to build Juice actions that reach an outside API on behalf of the person running them — where each user connects their own account once (an OAuth sign-in, or a pasted API key), and their credential is applied safely, automatically, forever after.
 
 ## Contents
 
@@ -25,7 +25,7 @@ How to build Juice actions that reach an outside API on behalf of the person run
 
 An action of kind `http` calls some outside API. That API needs credentials. Juice stores those credentials in the action's encrypted `auth_json` column and applies them automatically each time the action runs — the running code never touches the raw secret.
 
-Until now, every credential belonged to the *action's owner* and was shared by everyone who called it — a single API key for the whole world. The new capability lets a credential belong to **the individual person running the action**. That person connects their own account once, in a browser, and from then on the action calls the API *as them*. "Summarize **my** inbox" finally means *my* inbox.
+Until now, every credential belonged to the *action's owner* and was shared by everyone who called it — a single API key for the whole world. The new capability lets a credential belong to **the individual person running the action**. That person connects their own account once — with a browser sign-in, or by pasting a personal API key — and from then on the action calls the API *as them*. "Summarize **my** inbox" finally means *my* inbox.
 
 ## 2. Three ways to authenticate
 
@@ -35,15 +35,15 @@ The question that picks your scheme is always the same: **whose identity is the 
 |---|---|---|---|---|
 | **Static** | `bearer` `basic` `header` `query` | the owner's, shared | none | a plain API key or username/password you hold |
 | **Owner OAuth** | `oauth_client_credentials` `oauth_jwt_bearer` | the owner's app, shared | none | machine-to-machine APIs / service accounts |
-| **Delegated** | `oauth_delegated` | **each caller's own** | one-time consent | "act as me" APIs — mail, calendar, drive |
+| **Delegated** | `oauth_delegated` `delegated_bearer` | **each caller's own** | one-time connect | "act as me" APIs — mail, calendar, drive, and any per-user API key |
 
-The static schemes are unchanged. The two *owner OAuth* schemes are new but conceptually familiar: they still use one shared identity — Juice just fetches and refreshes the token for you instead of you pasting a static one. `oauth_delegated` is the genuinely new shape, and most of this tutorial is about it.
+The static schemes are unchanged. The two *owner OAuth* schemes are new but conceptually familiar: they still use one shared identity — Juice just fetches and refreshes the token for you instead of you pasting a static one. The **delegated** family is the genuinely new shape, and most of this tutorial is about it. It has two members: `oauth_delegated`, where the user signs in through the provider's browser flow, and `delegated_bearer`, its non-OAuth twin, where the user pastes their own personal access token / API key (the common case for GitHub, GitLab, Notion, Stripe, and the whole SaaS long tail that issues per-user keys rather than doing OAuth). Both bind a per-caller credential to a **grant**; they differ only in how that credential is obtained and applied.
 
-> **Rule of thumb** — Everyone should hit the API as the *same* account → static scheme or `oauth_client_credentials`. Everyone should hit the API as *themselves* → `oauth_delegated`.
+> **Rule of thumb** — Everyone should hit the API as the *same* account → a static scheme or `oauth_client_credentials`. Everyone should hit the API as *themselves* → a **delegated** scheme: `oauth_delegated` if the API does OAuth, `delegated_bearer` if it issues per-user API keys.
 
 ## 3. Before you start
 
-To publish a delegated action you (the action owner) need three things.
+To publish a delegated **OAuth** (`oauth_delegated`) action you (the action owner) need three things. *For a `delegated_bearer` action you need none of them* — there is no OAuth app and no provider endpoints; you only decide which header carries the token (§4) and keep the credentials key below. Skip ahead if that's your case.
 
 **An OAuth app registered with the provider.** Register an application in the provider's console (Google Cloud Console, GitHub Developer Settings, and so on). You get a `client_id` — and, for a confidential app, a `client_secret` — and you register the **redirect URL(s)** where your users' clients will receive the authorization code. For the Juice CLI that is a loopback address; for a hosted web client it is that client's own callback URL.
 
@@ -80,6 +80,22 @@ It is an ordinary `kind=http` action with three parts: where it calls (`source`)
 | `client_secret` | secrets | optional — only for confidential apps; sealed, never returned |
 
 > **Note** — The action carries the *contract* and the *OAuth app*, but zero user secrets. Each user's token lives in a separate **grant**, created only when that user consents.
+
+For **`delegated_bearer`** the auth block is far simpler — no provider, no OAuth app, because there's no OAuth. It holds only *where to put the token*, and even that is optional (the default is `Authorization: Bearer <token>`):
+
+```jsonc
+// auth block · delegated_bearer
+{
+  "scheme": "delegated_bearer",
+  "config": { "header": "Authorization", "template": "Bearer {token}" }
+  // config is optional; omit it for exactly the default above.
+  // GitHub:  {"template": "token {token}"}
+  // GitLab:  {"header": "Private-Token", "template": "{token}"}
+  // API key: {"header": "X-Api-Key",     "template": "{token}"}
+}
+```
+
+`{token}` is the placeholder the caller's pasted token is substituted into. There are **no `secrets`** here — the per-user token is again a grant, not owner config; putting a secret in a `delegated_bearer` block is rejected at create time, precisely so it can't become a single shared key.
 
 ## 5. Walkthrough: build one
 
@@ -127,6 +143,27 @@ $ juice user disconnect @owner/inbox
 
 > **Works behind a home router** — The provider redirects the user's *browser* back to the client — nothing has to reach the Juice server from outside. No port forwarding, no public address, no `.well-known`.
 
+### Variant: a pasted API key (`delegated_bearer`)
+
+Many multi-user APIs don't do OAuth — they let each user mint a personal access token in their settings (GitHub, GitLab, Notion, Linear, …). Same shape, minus the browser:
+
+```bash
+# owner: create + enable, pointing config at the header the API expects
+juice action create issues --kind http \
+  --source "https://api.github.com/issues" --price 0 \
+  --description "My GitHub issues" \
+  --auth '{"scheme":"delegated_bearer","config":{"template":"token {token}"}}'
+juice action enable <id>
+
+# each caller: paste their own token once (omit the value to be prompted without echo)
+juice user connect @owner/issues --token ghp_yourPersonalToken
+
+# then just run — the action calls GitHub with your token
+juice run @owner/issues
+```
+
+A call with no connection is still rejected up front with `grant_required`, so a client can prompt for the token inline. The difference from the OAuth flow: there's no browser round-trip and no refresh — the token you paste is applied to the header directly until you `disconnect` or paste a new one.
+
 ## 6. What happens under the hood
 
 ### Consent is a precondition, not an error
@@ -157,6 +194,8 @@ That single rule is the confused-deputy defense. A token never follows into a su
 - An **upstream 401** forces one token refresh and a single retry.
 - If the provider says the connection is dead (`invalid_grant`), the grant is deleted and the next run asks you to reconnect.
 - Access tokens live in memory only; only the refresh token is stored, sealed.
+
+The **consent precondition** and the **binding rule** above apply identically to `delegated_bearer` — a call with no matching grant is refused before any charge, and the pasted token is applied only when *you* run *that* action. What `delegated_bearer` skips is this self-maintenance: there is no token exchange and no refresh, so a rejected token simply fails the call like any other upstream error, and you fix it by reconnecting with a fresh token.
 
 ## 7. The owner-held OAuth schemes
 
@@ -195,12 +234,12 @@ Juice signs an **RS256** assertion with your stored private key and trades it fo
 
 - **See your connections:** `juice user me` lists your grants — action, scopes, and when you connected. Never any token material.
 - **Disconnect one:** `juice user disconnect @owner/inbox`. The next run asks to reconnect.
-- **Pre-connect:** `juice user connect @owner/inbox` connects ahead of time without running. Add `--device` for the headless code-entry flow.
+- **Pre-connect:** `juice user connect @owner/inbox` connects ahead of time without running. Add `--device` for the headless OAuth code-entry flow, or `--token <key>` to store a `delegated_bearer` API key (omit the value and you're prompted for it without echo, keeping it out of your shell history).
 - **Contract changes revoke consent:** if the owner changes the action's price, schema, source, or credentials — anything that deactivates it — every standing grant is dropped. Consent never silently carries over to changed code. A plain enable/disable does not touch grants.
 
 ## 9. Federation & delegated actions
 
-A delegated action needs a specific human at a browser, so a *remote* kernel — a machine account with a prepaid balance and no browser — can never call it. Juice therefore **never advertises delegated actions to peers**: they carry no manifest and are never gossiped. This keeps a provider's trade-backed reputation honest, since a peer can't rack up guaranteed failures against an action it could never complete. Owner-held OAuth actions (one shared identity) federate normally — only the per-human case is withheld.
+A delegated action needs a specific human's own credential — a browser sign-in (`oauth_delegated`) or a pasted key (`delegated_bearer`) — so a *remote* kernel — a machine account with a prepaid balance and no human to consent — can never hold one. Juice therefore **never advertises either delegated scheme to peers**: those actions carry no manifest and are never gossiped. This keeps a provider's trade-backed reputation honest, since a peer can't rack up guaranteed failures against an action it could never complete. Owner-held schemes (one shared identity) federate normally — only the per-human case is withheld.
 
 ## 10. Security properties
 
@@ -239,7 +278,7 @@ The client must be able to receive the redirect. For the CLI that means a local 
 | Command | Does |
 |---|---|
 | `juice run @owner/name` | run; offers inline consent if a grant is needed (on a terminal) |
-| `juice user connect @owner/name` | connect an account ahead of time; `--device` for headless |
+| `juice user connect @owner/name` | connect ahead of time; `--device` for headless OAuth, `--token <key>` to paste a `delegated_bearer` key (prompted without echo if omitted) |
 | `juice user disconnect @owner/name` | disconnect (delete the grant) |
 | `juice user me` | your account, including your `grants` |
 
@@ -249,6 +288,7 @@ The client must be able to receive the redirect. For the CLI that means a local 
 |---|---|
 | `POST /v1/grants/start` | `{action,[redirect_uri],[flow]}` → `{state, authorize_url}` (or device fields) |
 | `POST /v1/grants/complete` | `{state,[code]}` → `{status, action, created_at}` |
+| `POST /v1/grants` | `{action, token}` → `{status, action, created_at}` — the `delegated_bearer` direct token store (no browser) |
 | `DELETE /v1/grants?action=` | → `{revoked, action}` |
 | `GET /v1/me` | → user + `grants[]` (token-free) |
 | `POST /v1/run` | on a missing grant → `403 grant_required` with `meta.action` |
@@ -262,8 +302,9 @@ The client must be able to receive the redirect. For the CLI that means a local 
 | `basic` | owner | username + password |
 | `oauth_client_credentials` | owner | client id + secret |
 | `oauth_jwt_bearer` | owner | RSA private key (RS256) |
-| `oauth_delegated` | **each user** | app config only + a per-user grant |
+| `oauth_delegated` | **each user** | app config only + a per-user grant (OAuth refresh token) |
+| `delegated_bearer` | **each user** | optional header config + a per-user grant (static token) |
 
 ---
 
-*Juice v0.5 · delegated OAuth (§8) · a credential belongs to the person running the action.*
+*Juice v0.5 · delegated auth (§8) · a credential belongs to the person running the action.*

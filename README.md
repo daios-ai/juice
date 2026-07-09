@@ -193,5 +193,5 @@ startup behind ordinary Go interfaces. Every source file has a corresponding `_t
 
 - **[API.md](API.md)** — authoritative HTTP/CLI contract and design rules.
 - **[requirements.md](requirements.md)** — the kernel specification.
-- **[docs/oauth.md](docs/oauth.md)** — building actions that call APIs with delegated OAuth.
+- **[docs/oauth.md](docs/oauth.md)** — building actions that call APIs as the caller (delegated OAuth or a per-user API key).
 - **[flows/](flows/)** — runnable end-to-end shell flows (`flows_test.sh` drives the rest).
