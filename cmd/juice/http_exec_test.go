@@ -214,7 +214,7 @@ func TestHTTPActionAuthFailsClosed(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			exec := &httpActionExecutor{secretBox: tc.box}
+			exec := &httpActionExecutor{auth: newAuthenticator(tc.box, nil, false, 0)}
 			_, err := exec.Execute(context.Background(),
 				&kernel.Action{Source: httpSrc(srv.URL, "POST"), AuthJSON: "x"}, map[string]any{}, "")
 			if !errors.Is(err, kernel.ErrInvalidState) {
@@ -247,7 +247,7 @@ func TestHTTPActionValidAuthApplied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	exec := &httpActionExecutor{secretBox: box}
+	exec := &httpActionExecutor{auth: newAuthenticator(box, nil, false, 0)}
 	_, err = exec.Execute(context.Background(), action, map[string]any{}, "")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -572,7 +572,7 @@ func TestExecuteOAuthClientCredentials(t *testing.T) {
 	action := &kernel.Action{ID: "act-cc", Source: httpSrc(upstream.URL, "POST")}
 	action.AuthJSON, _ = box.Seal(action.ID, string(authJSON))
 
-	exec := &httpActionExecutor{secretBox: box, allowLocal: true, oauth: newOAuthEngine(box, newFakeGrantStore(), true, 0)}
+	exec := &httpActionExecutor{allowLocal: true, auth: newAuthenticator(box, newFakeGrantStore(), true, 0)}
 	if _, err := exec.Execute(context.Background(), action, map[string]any{}, ""); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -611,7 +611,7 @@ func TestExecuteOAuth401RefreshRetry(t *testing.T) {
 	action := &kernel.Action{ID: "act-401", Source: httpSrc(upstream.URL, "POST")}
 	action.AuthJSON, _ = box.Seal(action.ID, string(authJSON))
 
-	exec := &httpActionExecutor{secretBox: box, allowLocal: true, oauth: newOAuthEngine(box, newFakeGrantStore(), true, 0)}
+	exec := &httpActionExecutor{allowLocal: true, auth: newAuthenticator(box, newFakeGrantStore(), true, 0)}
 	if _, err := exec.Execute(context.Background(), action, map[string]any{}, ""); err != nil {
 		t.Fatalf("Execute with 401 retry: %v", err)
 	}

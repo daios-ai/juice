@@ -78,7 +78,7 @@ func TestOAuthClientCredentialsCached(t *testing.T) {
 	}))
 	defer provider.Close()
 
-	eng := newOAuthEngine(testBox(t), newFakeGrantStore(), true, time.Second)
+	eng := newAuthenticator(testBox(t), newFakeGrantStore(), true, time.Second)
 	auth := &kernel.AuthInput{
 		Scheme:  kernel.AuthSchemeOAuthClientCreds,
 		Config:  map[string]any{"token_url": provider.URL, "client_id": "c"},
@@ -130,7 +130,7 @@ func TestOAuthJWTBearer(t *testing.T) {
 	}))
 	defer provider.Close()
 
-	eng := newOAuthEngine(testBox(t), newFakeGrantStore(), true, time.Second)
+	eng := newAuthenticator(testBox(t), newFakeGrantStore(), true, time.Second)
 	auth := &kernel.AuthInput{
 		Scheme:  kernel.AuthSchemeOAuthJWTBearer,
 		Config:  map[string]any{"token_url": provider.URL, "client_id": "svc@acct"},
@@ -172,7 +172,7 @@ func TestDelegatedTokenBinding(t *testing.T) {
 	}))
 	defer provider.Close()
 
-	eng := newOAuthEngine(box, gs, true, time.Second)
+	eng := newAuthenticator(box, gs, true, time.Second)
 	// refFn is wired in main from k.ActionRef; stub it so the grant-required error carries the
 	// qualified @owner/name (the bug being guarded: dispatch sites used the bare action name).
 	eng.refFn = func(context.Context, string) string { return "@sys/inbox" }
@@ -214,6 +214,89 @@ func TestDelegatedTokenBinding(t *testing.T) {
 	}
 }
 
+// TestDelegatedBearerTokenApplied: a delegated_bearer action applies the process owner's stored
+// static token into the configured header, defaulting to Authorization: Bearer and covering the
+// GitHub `token`, GitLab Private-Token, and X-Api-Key placements (§8).
+func TestDelegatedBearerTokenApplied(t *testing.T) {
+	box := testBox(t)
+	cases := []struct{ name, header, template, readHeader, want string }{
+		{"default", "", "", "Authorization", "Bearer ghp_x"},
+		{"github", "", "token {token}", "Authorization", "token ghp_x"},
+		{"gitlab", "Private-Token", "{token}", "Private-Token", "ghp_x"},
+		{"apikey", "X-Api-Key", "{token}", "X-Api-Key", "ghp_x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get(tc.readHeader)
+				json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			}))
+			defer srv.Close()
+
+			cfg := map[string]any{}
+			if tc.header != "" {
+				cfg["header"] = tc.header
+			}
+			if tc.template != "" {
+				cfg["template"] = tc.template
+			}
+			auth := kernel.AuthInput{Scheme: kernel.AuthSchemeDelegatedBearer, Config: cfg}
+			authJSON, _ := json.Marshal(auth)
+			action := &kernel.Action{ID: "act-db-" + tc.name, Source: httpSrc(srv.URL, "POST")}
+			var err error
+			if action.AuthJSON, err = box.Seal(action.ID, string(authJSON)); err != nil {
+				t.Fatalf("seal auth: %v", err)
+			}
+			gs := newFakeGrantStore()
+			sealed, _ := box.Seal("ownerA|"+action.ID, "ghp_x")
+			gs.grants["ownerA|"+action.ID] = &kernel.Grant{ID: "g", GrantorUserID: "ownerA", ActionID: action.ID, RefreshToken: sealed}
+
+			eng := newAuthenticator(box, gs, true, time.Second)
+			exec := &httpActionExecutor{auth: eng}
+			if _, err := exec.Execute(context.Background(), action, map[string]any{}, "ownerA"); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("%s = %q, want %q", tc.readHeader, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDelegatedBearerBindingMismatch: a process owner without a grant is rejected with the typed
+// grant-required error at dispatch, and no static token is applied (§8 binding rule).
+func TestDelegatedBearerBindingMismatch(t *testing.T) {
+	box := testBox(t)
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer srv.Close()
+
+	auth := kernel.AuthInput{Scheme: kernel.AuthSchemeDelegatedBearer}
+	authJSON, _ := json.Marshal(auth)
+	action := &kernel.Action{ID: "act-db-mm", Source: httpSrc(srv.URL, "POST")}
+	action.AuthJSON, _ = box.Seal(action.ID, string(authJSON))
+
+	gs := newFakeGrantStore()
+	sealed, _ := box.Seal("ownerA|"+action.ID, "ghp_x")
+	gs.grants["ownerA|"+action.ID] = &kernel.Grant{ID: "g", GrantorUserID: "ownerA", ActionID: action.ID, RefreshToken: sealed}
+
+	eng := newAuthenticator(box, gs, true, time.Second)
+	eng.refFn = func(context.Context, string) string { return "@sys/x" }
+	exec := &httpActionExecutor{auth: eng}
+
+	// ownerB holds no grant → grant-required, request never sent.
+	if _, err := exec.Execute(context.Background(), action, map[string]any{}, "ownerB"); !errors.Is(err, kernel.ErrGrantRequired) {
+		t.Fatalf("ownerB: got %v, want ErrGrantRequired", err)
+	}
+	if reached {
+		t.Error("upstream was called despite missing grant")
+	}
+}
+
 // grantMeta extracts Meta["action"] from a grant-required error.
 func grantMeta(err error) string {
 	var ke *kernel.KernelError
@@ -237,7 +320,7 @@ func TestGrantBrokerCodeFlow(t *testing.T) {
 	}))
 	defer provider.Close()
 
-	eng := newOAuthEngine(testBox(t), newFakeGrantStore(), true, time.Second)
+	eng := newAuthenticator(testBox(t), newFakeGrantStore(), true, time.Second)
 	broker := newGrantBroker(eng)
 	auth := &kernel.AuthInput{Scheme: kernel.AuthSchemeOAuthDelegated,
 		Config: map[string]any{"auth_url": provider.URL + "/auth", "token_url": provider.URL, "client_id": "cid", "scopes": "read"}}
@@ -284,7 +367,7 @@ func TestGrantBrokerCodeFlow(t *testing.T) {
 
 // TestBrokerExpiredState: a consent past its TTL is not found.
 func TestBrokerExpiredState(t *testing.T) {
-	broker := newGrantBroker(newOAuthEngine(testBox(t), newFakeGrantStore(), true, time.Second))
+	broker := newGrantBroker(newAuthenticator(testBox(t), newFakeGrantStore(), true, time.Second))
 	auth := &kernel.AuthInput{Scheme: kernel.AuthSchemeOAuthDelegated,
 		Config: map[string]any{"auth_url": "https://p.example/a", "token_url": "https://p.example/t", "client_id": "c"}}
 	res, err := broker.start(context.Background(), "u1", "act", auth, "http://127.0.0.1:1/callback", "code")
@@ -319,7 +402,7 @@ func TestDeviceFlowPolling(t *testing.T) {
 	}))
 	defer provider.Close()
 
-	eng := newOAuthEngine(testBox(t), newFakeGrantStore(), true, time.Second)
+	eng := newAuthenticator(testBox(t), newFakeGrantStore(), true, time.Second)
 	cfg := oauthConfig{deviceAuthURL: provider.URL + "/device", tokenURL: provider.URL + "/token", clientID: "c"}
 	ctx := context.Background()
 
@@ -336,10 +419,10 @@ func TestDeviceFlowPolling(t *testing.T) {
 	}
 }
 
-// TestUnknownSchemeFailsClosed: applyStaticAuth errors on an unrecognized scheme rather than
+// TestUnknownSchemeFailsClosed: the authenticator errors on an unrecognized scheme rather than
 // sending the request unauthenticated (§8).
 func TestUnknownSchemeFailsClosed(t *testing.T) {
-	err := applyStaticAuth(&kernel.AuthInput{Scheme: "mystery"}, map[string]string{}, nil)
+	err := newAuthenticator(nil, nil, false, 0).applyStatic(&kernel.AuthInput{Scheme: "mystery"}, map[string]string{}, nil)
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("unknown scheme: got %v, want ErrInvalidState", err)
 	}

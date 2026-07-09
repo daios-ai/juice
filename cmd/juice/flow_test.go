@@ -73,7 +73,7 @@ func newFlowKernel(t *testing.T, exec kernel.ScriptExecutor) (*httptest.Server, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, secretBox: box}
+	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout)}
 	k := kernel.New(db, exec, httpExec, nil, cfg, logger)
 	k.SetSecretBox(box)
 
@@ -2493,8 +2493,8 @@ func newOAuthFlowServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true, secretBox: box}
-	httpExec.oauth = newOAuthEngine(box, db, true, cfg.ScriptTimeout)
+	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
+	httpExec.auth = newAuthenticator(box, db, true, cfg.ScriptTimeout)
 	k := kernel.New(db, &flowScriptExec{}, httpExec, nil, cfg, logger)
 	k.SetSecretBox(box)
 	if err := k.FirstBoot(context.Background(), "sys-pass"); err != nil {
@@ -2502,7 +2502,7 @@ func newOAuthFlowServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	}
 	bootstrapSigning(t, k)
 
-	srv := &server{kernel: k, log: logger, oauth: newGrantBroker(httpExec.oauth)}
+	srv := &server{kernel: k, log: logger, oauth: newGrantBroker(httpExec.auth)}
 	return httptest.NewServer(mountFullRouter(srv)), k
 }
 
@@ -2634,6 +2634,92 @@ func TestFlow_OAuthDelegated(t *testing.T) {
 	rev := httpDo(t, srv, "DELETE", "/v1/grants?action="+ref, nil, ownerTok)
 	if rev.StatusCode != http.StatusOK {
 		t.Fatalf("revoke: got %d", rev.StatusCode)
+	}
+	rev.Body.Close()
+	rejectRun()
+}
+
+func TestFlow_DelegatedBearer(t *testing.T) {
+	// Fake upstream API recording the credential header it saw (configured as X-Api-Key here to
+	// exercise non-default placement end-to-end).
+	var sawKey string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawKey = r.Header.Get("X-Api-Key")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer upstream.Close()
+
+	srv, k := newOAuthFlowServer(t)
+	defer srv.Close()
+
+	_, ownerTok := makeUser(t, k, "@bearer-owner")
+	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"name": "inbox", "kind": "http", "price": 0, "source": upstream.URL,
+		"description": "bearer inbox", "input_schema": minSchema, "output_schema": minSchema,
+		"auth": map[string]any{
+			"scheme": kernel.AuthSchemeDelegatedBearer,
+			"config": map[string]any{"header": "X-Api-Key", "template": "{token}"},
+		},
+	}, ownerTok)
+	if cr.StatusCode != http.StatusCreated {
+		t.Fatalf("create bearer action: got %d", cr.StatusCode)
+	}
+	var act map[string]any
+	decodeResponse(t, cr, &act)
+	httpDo(t, srv, "POST", "/v1/actions/"+act["id"].(string)+"/enable", nil, ownerTok).Body.Close()
+	const ref = "@bearer-owner/inbox"
+
+	rejectRun := func() {
+		resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{"action": ref, "args": map[string]any{}}, ownerTok)
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			t.Fatal("run without grant unexpectedly succeeded")
+		}
+		var body struct {
+			Code string            `json:"code"`
+			Meta map[string]string `json:"meta"`
+		}
+		json.NewDecoder(resp.Body).Decode(&body)
+		if body.Code != "grant_required" || body.Meta["action"] != ref {
+			t.Fatalf("run rejection = %+v, want grant_required for %s", body, ref)
+		}
+	}
+
+	// 1. No grant → rejected pre-lock.
+	rejectRun()
+
+	// 2. Attach the static token directly (no browser flow).
+	var done map[string]any
+	ar := httpDo(t, srv, "POST", "/v1/grants", map[string]any{"action": ref, "token": "ghp_secret"}, ownerTok)
+	decodeResponse(t, ar, &done)
+	if done["status"] != "connected" {
+		t.Fatalf("grants attach status = %v, want connected", done["status"])
+	}
+
+	// 3. Run succeeds and the upstream saw the token in the configured header.
+	reply := runAction(t, srv, ownerTok, ref, map[string]any{})
+	if reply.Result["ok"] != true {
+		t.Errorf("run result = %v, want ok=true", reply.Result)
+	}
+	if sawKey != "ghp_secret" {
+		t.Errorf("upstream saw X-Api-Key %q, want ghp_secret", sawKey)
+	}
+
+	// 4. /v1/me lists the grant without the token.
+	meResp := httpDo(t, srv, "GET", "/v1/me", nil, ownerTok)
+	meBody, _ := readAll(t, meResp)
+	if !strings.Contains(meBody, ref) {
+		t.Errorf("/v1/me does not list the grant: %s", meBody)
+	}
+	if strings.Contains(meBody, "ghp_secret") {
+		t.Errorf("/v1/me leaked the token: %s", meBody)
+	}
+
+	// 5. Disconnect → run rejected again.
+	rev := httpDo(t, srv, "DELETE", "/v1/grants?action="+ref, nil, ownerTok)
+	if rev.StatusCode != http.StatusOK {
+		t.Fatalf("disconnect: got %d", rev.StatusCode)
 	}
 	rev.Body.Close()
 	rejectRun()

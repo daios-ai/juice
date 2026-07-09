@@ -1,17 +1,21 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // openBrowser best-effort launches the system browser at url (argv exec, no shell — no injection
@@ -39,11 +43,23 @@ func openBrowser(url string) bool {
 // `user me` (which lists your connections). Connecting is also offered inline by `juice run`.
 func userConnectCmd() *cobra.Command {
 	var device bool
+	var token string
 	cmd := &cobra.Command{
 		Use:   "connect <action>",
 		Short: "Connect your account so an action can act on your behalf against its upstream API",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// delegated_bearer: a paste-once static token, no browser flow. Prompt without echo
+			// when the flag is present but empty, so the secret stays out of argv/shell history.
+			if cmd.Flags().Changed("token") {
+				if token == "" {
+					var err error
+					if token, err = promptSecret("Paste token: "); err != nil {
+						return err
+					}
+				}
+				return connectToken(args[0], token)
+			}
 			if device {
 				return connectDevice(args[0])
 			}
@@ -51,7 +67,38 @@ func userConnectCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&device, "device", false, "Use the device-code flow (no local browser)")
+	cmd.Flags().StringVar(&token, "token", "", "Store a static token (personal access key) for a delegated_bearer action; empty value prompts without echo")
 	return cmd
+}
+
+// connectToken stores a static token for a delegated_bearer action via POST /v1/grants (§8).
+func connectToken(actionRef, token string) error {
+	var done grantCompleteResp
+	if err := apiCall(context.Background(), "POST", "/v1/grants",
+		map[string]string{"action": actionRef, "token": token}, &done); err != nil {
+		return err
+	}
+	fmt.Printf("Connected %s.\n", done.Action)
+	return nil
+}
+
+// promptSecret reads a secret from the terminal without echoing it; if stdin is not a terminal it
+// reads one trimmed line (so `echo $PAT | juice user connect … --token` works in scripts).
+func promptSecret(prompt string) (string, error) {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprint(os.Stderr, prompt)
+		b, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", kernel.ErrInvalidInput.Wrapf("could not read token: %v", err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	s := bufio.NewScanner(os.Stdin)
+	if s.Scan() {
+		return strings.TrimSpace(s.Text()), nil
+	}
+	return "", kernel.ErrInvalidInput.Wrap("no token provided")
 }
 
 // grantStartResp is the /v1/grants/start response (both flows).

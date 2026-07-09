@@ -72,9 +72,11 @@ type Action struct {
 	DeletedAt      *time.Time     `json:"deleted_at,omitempty"`
 }
 
-// Upstream auth schemes (§8). Owner-held schemes carry their secret in auth_json; the
-// oauth_delegated scheme carries only provider config there and binds the per-user credential
-// to a Grant row. An unknown scheme is rejected at create/update and fails closed at dispatch.
+// Upstream auth schemes (§8). Owner-held schemes carry their secret in auth_json; the delegated
+// schemes carry no per-caller secret there and bind the credential to a Grant row: oauth_delegated
+// via an OAuth refresh token obtained by browser consent, delegated_bearer via a static token the
+// caller supplies once (a personal access token / per-user API key). An unknown scheme is rejected
+// at create/update and fails closed at dispatch.
 const (
 	AuthSchemeHeader           = "header"
 	AuthSchemeQuery            = "query"
@@ -83,6 +85,7 @@ const (
 	AuthSchemeOAuthClientCreds = "oauth_client_credentials"
 	AuthSchemeOAuthJWTBearer   = "oauth_jwt_bearer"
 	AuthSchemeOAuthDelegated   = "oauth_delegated"
+	AuthSchemeDelegatedBearer  = "delegated_bearer"
 )
 
 // AuthInput is a write-only upstream auth payload for action create/update.

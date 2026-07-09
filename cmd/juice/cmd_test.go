@@ -66,7 +66,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	// Credential encryption is mandatory (§8): the production binary always wires a box,
 	// so tests do too. Without it, creating/activating an action with upstream auth fails closed.
 	box, _ := newAESGCMBox(make([]byte, 32))
-	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, secretBox: box, allowLocal: true}
+	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout), allowLocal: true}
 	exec := script.New(script.Config{TimeoutMS: cfg.ScriptTimeout.Milliseconds(), MemoryBytes: cfg.ScriptMemory})
 	k := kernel.New(db, exec, httpExec, nil, cfg, log.Discard())
 	k.SetSecretBox(box)

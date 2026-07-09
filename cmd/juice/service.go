@@ -344,6 +344,21 @@ func completeGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, c
 	return map[string]any{"status": "complete", "action": k.ActionRef(ctx, res.ActionID), "created_at": g.CreatedAt}, nil
 }
 
+// attachToken stores a caller-supplied static token for a delegated_bearer action (§8): the direct
+// non-OAuth twin of the start/complete consent flow. The kernel enforces the delegated_bearer scheme
+// and callability; the raw token never appears in any read path (R9).
+func attachToken(k *kernel.Kernel, ctx context.Context, callerID, actionRef, token string) (map[string]any, error) {
+	a, err := resolveActionRef(k, ctx, actionRef)
+	if err != nil {
+		return nil, err
+	}
+	g, err := k.AttachBearerGrant(ctx, callerID, a.ID, token)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "connected", "action": k.ActionRef(ctx, a.ID), "created_at": g.CreatedAt}, nil
+}
+
 func revokeGrant(k *kernel.Kernel, ctx context.Context, callerID, actionRef string) (map[string]any, error) {
 	a, err := resolveActionRef(k, ctx, actionRef)
 	if err != nil {

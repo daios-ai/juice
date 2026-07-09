@@ -77,95 +77,8 @@ func (b *aesGCMBox) Open(aad, ciphertext string) (string, error) {
 	return string(pt), nil
 }
 
-// ---- upstream auth application ----
-
-// parseAuth decrypts and parses an action's stored auth payload. Returns (nil, nil) when the
-// action carries no auth. Fails closed: credentials are always encrypted at rest (§8), so a
-// missing box, an undecryptable ciphertext, or malformed JSON is an error — never plaintext.
-func parseAuth(action *kernel.Action, box kernel.SecretBox) (*kernel.AuthInput, error) {
-	if action.AuthJSON == "" {
-		return nil, nil
-	}
-	if box == nil {
-		return nil, kernel.ErrInvalidState.Wrap("upstream auth credentials present but credential encryption is not configured")
-	}
-	plaintext, err := box.Open(action.ID, action.AuthJSON)
-	if err != nil {
-		return nil, kernel.ErrInvalidState.Wrap("upstream auth credentials could not be decrypted")
-	}
-	var auth kernel.AuthInput
-	if err := json.Unmarshal([]byte(plaintext), &auth); err != nil {
-		return nil, kernel.ErrInvalidState.Wrap("upstream auth credentials could not be parsed")
-	}
-	return &auth, nil
-}
-
-// isOAuthScheme reports whether a scheme obtains a bearer token via a token endpoint (§8).
-func isOAuthScheme(scheme string) bool {
-	switch scheme {
-	case kernel.AuthSchemeOAuthClientCreds, kernel.AuthSchemeOAuthJWTBearer, kernel.AuthSchemeOAuthDelegated:
-		return true
-	}
-	return false
-}
-
-// applyStaticAuth applies a non-OAuth scheme to the outbound request. headers must be non-nil;
-// rawURL is modified in place for the "query" scheme. Fails closed on an unknown scheme: a
-// request is never sent unauthenticated because its scheme was unrecognized (§8).
-func applyStaticAuth(auth *kernel.AuthInput, headers map[string]string, rawURL *string) error {
-	switch auth.Scheme {
-	case kernel.AuthSchemeHeader:
-		name, _ := auth.Config["name"].(string)
-		value, _ := auth.Secrets["value"].(string)
-		if name != "" {
-			headers[name] = value
-		}
-	case kernel.AuthSchemeQuery:
-		name, _ := auth.Config["name"].(string)
-		value, _ := auth.Secrets["value"].(string)
-		if name != "" && rawURL != nil {
-			u, err := url.Parse(*rawURL)
-			if err == nil {
-				q := u.Query()
-				q.Set(name, value)
-				u.RawQuery = q.Encode()
-				*rawURL = u.String()
-			}
-		}
-	case kernel.AuthSchemeBearer:
-		token, _ := auth.Secrets["token"].(string)
-		headers["Authorization"] = "Bearer " + token
-	case kernel.AuthSchemeBasic:
-		user, _ := auth.Secrets["username"].(string)
-		pass, _ := auth.Secrets["password"].(string)
-		headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
-	default:
-		return kernel.ErrInvalidState.Wrapf("unsupported upstream auth scheme %q", auth.Scheme)
-	}
-	return nil
-}
-
-// applyAuth applies the parsed auth to a request. Static schemes are set directly; OAuth schemes
-// obtain a bearer token from the engine (owner-held for client-credentials/jwt-bearer, the process
-// owner's grant for delegated). When refresh is true, any cached access token is discarded first
-// so a 401-driven retry re-fetches. A nil auth is a no-op.
-func (e *httpActionExecutor) applyAuth(ctx context.Context, action *kernel.Action, ownerUserID string, auth *kernel.AuthInput, headers map[string]string, rawURL *string, refresh bool) error {
-	if auth == nil {
-		return nil
-	}
-	if !isOAuthScheme(auth.Scheme) {
-		return applyStaticAuth(auth, headers, rawURL)
-	}
-	if e.oauth == nil {
-		return kernel.ErrInvalidState.Wrap("OAuth token engine not configured")
-	}
-	token, err := e.oauth.token(ctx, action, ownerUserID, auth, refresh)
-	if err != nil {
-		return err
-	}
-	headers["Authorization"] = "Bearer " + token
-	return nil
-}
+// Upstream auth application (§9) lives in the authenticator — see authenticator.go. The executor
+// holds one and calls Parse/Apply/Refreshable.
 
 func sha256HexBytes(b []byte) string {
 	h := sha256.Sum256(b)
@@ -355,8 +268,7 @@ func executeFederationOverTransport(ctx context.Context, tr federationTransport,
 type httpActionExecutor struct {
 	timeout      time.Duration
 	allowLocal   bool
-	secretBox    kernel.SecretBox
-	oauth        *oauthEngine        // OAuth token exchange + cache; nil when no credentials box
+	auth         *authenticator      // §9 upstream-auth adapter; nil when no credentials box
 	signerFn     signerFunc          // wired after bootstrap
 	fedTransport federationTransport // libp2p federation carrier; nil off the serving path
 	localPubKey  string              // this kernel's base64url Ed25519 public key
@@ -517,11 +429,17 @@ func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Act
 		contentType = "application/json"
 	}
 
-	// Parse the stored auth once, then send. OAuth schemes fetch a bearer token (per call, from
-	// the cache/grant) and are retried exactly once on a 401 after forcing a token refresh.
-	auth, err := parseAuth(action, e.secretBox)
-	if err != nil {
-		return nil, err
+	// Parse the stored auth once, then send. Refreshable (OAuth) schemes fetch a bearer token (per
+	// call, from the cache/grant) and are retried exactly once on a 401 after forcing a refresh.
+	var auth *kernel.AuthInput
+	if action.AuthJSON != "" {
+		if e.auth == nil {
+			return nil, kernel.ErrInvalidState.Wrap("upstream auth credentials present but credential encryption is not configured")
+		}
+		var perr error
+		if auth, perr = e.auth.Parse(action); perr != nil {
+			return nil, perr
+		}
 	}
 	send := func(refresh bool) ([]byte, int, error) {
 		reqHeaders := map[string]string{}
@@ -529,8 +447,10 @@ func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Act
 			reqHeaders["Content-Type"] = contentType
 		}
 		reqURL := rawURL
-		if err := e.applyAuth(ctx, action, ownerUserID, auth, reqHeaders, &reqURL, refresh); err != nil {
-			return nil, 0, err
+		if auth != nil {
+			if err := e.auth.Apply(ctx, action, ownerUserID, auth, reqHeaders, &reqURL, refresh); err != nil {
+				return nil, 0, err
+			}
 		}
 		var body io.Reader
 		if bodyBytes != nil {
@@ -543,7 +463,7 @@ func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Act
 	if err != nil {
 		return nil, err
 	}
-	if status == http.StatusUnauthorized && auth != nil && isOAuthScheme(auth.Scheme) {
+	if status == http.StatusUnauthorized && auth != nil && e.auth.Refreshable(auth.Scheme) {
 		respBody, status, err = send(true)
 		if err != nil {
 			return nil, err

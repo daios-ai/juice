@@ -421,17 +421,18 @@ func (k *Kernel) checkCallPreconditions(ctx context.Context, ownerID string, act
 	return k.checkGrantRequired(ctx, ownerID, action)
 }
 
-// checkGrantRequired implements §8 lazy consent: a call to an oauth_delegated http action whose
-// process owner holds no matching grant is rejected here — before any funds are locked and before
-// any transaction exists (a precondition rejection creates no transaction, §6, and does not dent
-// the provider's failure stats, §9). Non-delegated actions pass through untouched. An undecryptable
-// or malformed auth payload is left for the executor's fail-closed path, not treated as consent.
+// checkGrantRequired implements §8 lazy consent: a call to a delegated http action (oauth_delegated
+// or delegated_bearer) whose process owner holds no matching grant is rejected here — before any
+// funds are locked and before any transaction exists (a precondition rejection creates no
+// transaction, §6, and does not dent the provider's failure stats, §9). Non-delegated actions pass
+// through untouched. An undecryptable or malformed auth payload is left for the executor's
+// fail-closed path, not treated as consent.
 func (k *Kernel) checkGrantRequired(ctx context.Context, ownerID string, action *Action) error {
 	if action.Kind != KindHTTP || action.AuthJSON == "" || k.secretBox == nil {
 		return nil
 	}
 	auth, err := k.openAuthInput(action)
-	if err != nil || auth == nil || auth.Scheme != AuthSchemeOAuthDelegated {
+	if err != nil || auth == nil || !isDelegatedScheme(auth.Scheme) {
 		return nil
 	}
 	if _, gerr := k.store.ReadGrant(ctx, ownerID, action.ID); gerr != nil {

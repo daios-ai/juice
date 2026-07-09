@@ -213,6 +213,13 @@ var authSchemeSpec = map[string]struct{ config, secrets, urls []string }{
 	AuthSchemeOAuthClientCreds: {config: []string{"token_url", "client_id"}, secrets: []string{"client_secret"}, urls: []string{"token_url"}},
 	AuthSchemeOAuthJWTBearer:   {config: []string{"token_url", "client_id"}, secrets: []string{"private_key"}, urls: []string{"token_url"}},
 	AuthSchemeOAuthDelegated:   {config: []string{"auth_url", "token_url", "client_id"}, urls: []string{"auth_url", "token_url", "device_auth_url"}},
+	AuthSchemeDelegatedBearer:  {}, // optional config {header, template}; no owner-held secret — the per-caller token is a Grant
+}
+
+// isDelegatedScheme reports whether a scheme binds its per-caller credential to a Grant row (§8):
+// the token is not in auth_json but supplied per caller and applied under the binding rule.
+func isDelegatedScheme(scheme string) bool {
+	return scheme == AuthSchemeOAuthDelegated || scheme == AuthSchemeDelegatedBearer
 }
 
 // validateAuthInput rejects an upstream auth payload with an unknown scheme or missing required
@@ -245,21 +252,33 @@ func (k *Kernel) validateAuthInput(ctx context.Context, auth *AuthInput) error {
 			return ErrInvalidInput.Wrapf("auth %q: %v", key, err)
 		}
 	}
+	// delegated_bearer holds no owner-side secret (the token is per-caller, in a Grant); reject one
+	// so it is not silently used for every caller. Its optional value template must name the token.
+	if auth.Scheme == AuthSchemeDelegatedBearer {
+		if len(auth.Secrets) != 0 {
+			return ErrInvalidInput.Wrap(`auth scheme "delegated_bearer" takes no secrets; the per-caller token is supplied via grant consent`)
+		}
+		if tmpl := authField(auth.Config, "template"); tmpl != "" && !strings.Contains(tmpl, "{token}") {
+			return ErrInvalidInput.Wrap(`auth scheme "delegated_bearer" template must contain the {token} placeholder`)
+		}
+	}
 	return nil
 }
 
-// isDelegatedAuth reports whether an action uses the oauth_delegated scheme, so federation can
-// exclude it from manifests (a remote peer can never complete a browser consent, §8/§13).
+// isDelegatedAuth reports whether an action uses a delegated (per-caller Grant) scheme, so
+// federation can exclude it from manifests: a remote peer's single proxy user can never complete
+// a browser consent nor hold a per-caller token, so importing one could only fail (§8/§13).
 func (k *Kernel) isDelegatedAuth(a *Action) bool {
 	if a.Kind != KindHTTP || a.AuthJSON == "" {
 		return false
 	}
 	auth, err := k.openAuthInput(a)
-	return err == nil && auth != nil && auth.Scheme == AuthSchemeOAuthDelegated
+	return err == nil && auth != nil && isDelegatedScheme(auth.Scheme)
 }
 
-// readDelegatedAction reads an action and its decrypted auth, requiring the oauth_delegated
-// scheme (§8). Shared by the grant operations and the consent-config lookup.
+// readDelegatedAction reads an action and its decrypted auth, requiring a delegated (per-caller
+// Grant) scheme (§8). Shared by the grant operations; the OAuth-only consent-config lookup narrows
+// further to oauth_delegated itself.
 func (k *Kernel) readDelegatedAction(ctx context.Context, actionID string) (*Action, *AuthInput, error) {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
@@ -269,21 +288,43 @@ func (k *Kernel) readDelegatedAction(ctx context.Context, actionID string) (*Act
 	if err != nil {
 		return nil, nil, err
 	}
-	if auth == nil || auth.Scheme != AuthSchemeOAuthDelegated {
-		return nil, nil, ErrInvalidInput.Wrap("action does not use delegated OAuth")
+	if auth == nil || !isDelegatedScheme(auth.Scheme) {
+		return nil, nil, ErrInvalidInput.Wrap("action does not use a delegated auth scheme")
 	}
 	return a, auth, nil
 }
 
-// CreateGrant records a user's delegated OAuth consent for one action: the refresh token is sealed
-// with the same box as auth_json (AAD = grantor|action) and upserted, so a re-consent overwrites.
-// The action must be a kind=http action whose scheme is oauth_delegated.
-func (k *Kernel) CreateGrant(ctx context.Context, callerID, actionID, refreshToken string) (*Grant, error) {
+// AttachBearerGrant stores a caller-supplied static token for a delegated_bearer action (§8): the
+// direct, non-OAuth consent path. It requires the action to use delegated_bearer (an oauth_delegated
+// action must use the browser flow) and to be callable by the caller, then seals+stores the token
+// via CreateGrant. The raw token never appears in any read path (R9).
+func (k *Kernel) AttachBearerGrant(ctx context.Context, callerID, actionID, token string) (*Grant, error) {
 	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return nil, err
 	}
-	if refreshToken == "" {
-		return nil, ErrInvalidInput.Wrap("refresh token is required")
+	a, auth, err := k.readDelegatedAction(ctx, actionID)
+	if err != nil {
+		return nil, err
+	}
+	if auth.Scheme != AuthSchemeDelegatedBearer {
+		return nil, ErrInvalidInput.Wrap("action does not use delegated_bearer; connect via the consent flow instead")
+	}
+	if !canCall(callerID, a) {
+		return nil, ErrUnauthorized.Wrap("cannot grant for an action you may not call")
+	}
+	return k.CreateGrant(ctx, callerID, actionID, token)
+}
+
+// CreateGrant records a user's delegated consent for one action: the token — an OAuth refresh token
+// (oauth_delegated) or a static bearer/API-key token (delegated_bearer) — is sealed with the same
+// box as auth_json (AAD = grantor|action) and upserted, so a re-consent overwrites. The action must
+// be a kind=http action whose scheme is delegated.
+func (k *Kernel) CreateGrant(ctx context.Context, callerID, actionID, token string) (*Grant, error) {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+		return nil, err
+	}
+	if token == "" {
+		return nil, ErrInvalidInput.Wrap("token is required")
 	}
 	a, _, err := k.readDelegatedAction(ctx, actionID)
 	if err != nil {
@@ -295,9 +336,9 @@ func (k *Kernel) CreateGrant(ctx context.Context, callerID, actionID, refreshTok
 	if k.secretBox == nil {
 		return nil, ErrInvalidState.Wrap("credential encryption is not configured")
 	}
-	sealed, err := k.secretBox.Seal(callerID+"|"+actionID, refreshToken)
+	sealed, err := k.secretBox.Seal(callerID+"|"+actionID, token)
 	if err != nil {
-		return nil, ErrInternal.Wrapf("seal refresh token: %v", err)
+		return nil, ErrInternal.Wrapf("seal grant token: %v", err)
 	}
 	g := &Grant{
 		ID:            uuid.New().String(),
@@ -344,6 +385,9 @@ func (k *Kernel) DelegatedAuthConfig(ctx context.Context, callerID, actionID str
 	a, auth, err := k.readDelegatedAction(ctx, actionID)
 	if err != nil {
 		return nil, err
+	}
+	if auth.Scheme != AuthSchemeOAuthDelegated {
+		return nil, ErrInvalidInput.Wrap("action does not use delegated OAuth; supply its token via POST /v1/grants")
 	}
 	if !canCall(callerID, a) {
 		return nil, ErrUnauthorized.Wrap("cannot grant for an action you may not call")

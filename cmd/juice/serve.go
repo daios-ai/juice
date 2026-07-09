@@ -62,8 +62,8 @@ func runServer(addr string) error {
 	r.Use(maxBytesMiddleware) // request body limit (path-aware; see maxBytesMiddleware)
 
 	srv := &server{kernel: k, log: logger}
-	if httpExec.oauth != nil {
-		srv.oauth = newGrantBroker(httpExec.oauth)
+	if httpExec.auth != nil {
+		srv.oauth = newGrantBroker(httpExec.auth)
 	}
 
 	// Auth — rate limited: 5 requests/minute per IP, burst of 10.
@@ -415,6 +415,7 @@ func registerRoutes(r chi.Router, srv *server) {
 		// only in-memory PKCE/device state and performs the token exchange itself.
 		r.Post("/v1/grants/start", srv.postGrantStart)
 		r.Post("/v1/grants/complete", srv.postGrantComplete)
+		r.Post("/v1/grants", srv.postGrant)
 		r.Delete("/v1/grants", srv.deleteGrant)
 	})
 
@@ -1105,6 +1106,18 @@ func (s *server) postGrantComplete(w http.ResponseWriter, r *http.Request) {
 		Code  string `json:"code"`
 	}) (any, int, error) {
 		res, err := completeGrant(s.kernel, s.oauth, r.Context(), callerFrom(r), body.State, body.Code)
+		return res, http.StatusOK, err
+	})(w, r)
+}
+
+// postGrant is the direct token-store for delegated_bearer actions (§8): a paste-once static token,
+// no browser roundtrip. OAuth actions use start/complete instead.
+func (s *server) postGrant(w http.ResponseWriter, r *http.Request) {
+	handle(func(r *http.Request, body struct {
+		Action string `json:"action"`
+		Token  string `json:"token"`
+	}) (any, int, error) {
+		res, err := attachToken(s.kernel, r.Context(), callerFrom(r), body.Action, body.Token)
 		return res, http.StatusOK, err
 	})(w, r)
 }

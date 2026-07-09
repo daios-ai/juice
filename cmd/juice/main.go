@@ -286,11 +286,10 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 		if keyBytes, err := base64.RawURLEncoding.DecodeString(globalCfg.CredentialsKey); err == nil {
 			if box, err := newAESGCMBox(keyBytes); err == nil {
 				k.SetSecretBox(box)
-				httpExec.secretBox = box
-				// The OAuth token engine shares the box (to open sealed grant refresh tokens) and
-				// reads/rotates grants through the store (§8).
-				httpExec.oauth = newOAuthEngine(box, db, cfg.AllowLocalSources, cfg.ScriptTimeout)
-				httpExec.oauth.refFn = k.ActionRef // qualified @owner/name in grant-required errors
+				// The §9 authenticator shares the box (to open sealed auth configs and grant tokens)
+				// and reads/rotates grants through the store (§8).
+				httpExec.auth = newAuthenticator(box, db, cfg.AllowLocalSources, cfg.ScriptTimeout)
+				httpExec.auth.refFn = k.ActionRef // qualified @owner/name in grant-required errors
 			}
 		}
 	}

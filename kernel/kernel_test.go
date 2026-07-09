@@ -2570,3 +2570,159 @@ func TestManifestExcludesDelegatedAction(t *testing.T) {
 		t.Errorf("delegated action served a manifest: got %v, want ErrUnauthorized", err)
 	}
 }
+
+// ---- delegated_bearer: per-caller static token (§8) ----
+
+// createBearerAction creates and activates a private kind=http action using the delegated_bearer
+// scheme, owned by ownerID.
+func createBearerAction(t *testing.T, k *kernel.Kernel, ownerID, name string, price int64) *kernel.Action {
+	t.Helper()
+	ctx := context.Background()
+	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
+		OwnerUserID:  ownerID,
+		Name:         name,
+		Kind:         kernel.KindHTTP,
+		Price:        price,
+		Source:       "https://provider.example/api",
+		Description:  "bearer svc",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		Auth:         &kernel.AuthInput{Scheme: kernel.AuthSchemeDelegatedBearer},
+	})
+	if err != nil {
+		t.Fatalf("create bearer action: %v", err)
+	}
+	if err := k.SetActive(ctx, ownerID, a.ID, true); err != nil {
+		t.Fatalf("activate bearer action: %v", err)
+	}
+	full, _ := k.ReadAction(ctx, a.ID)
+	return full
+}
+
+// TestDelegatedBearerValidation: delegated_bearer takes no owner-side secret and, if a value
+// template is given, it must name the {token} placeholder; a header/template config is accepted and
+// the zero-config form is valid (§8).
+func TestDelegatedBearerValidation(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "@bearercfg", 0)
+
+	base := func(name string, auth *kernel.AuthInput) kernel.CreateActionRequest {
+		return kernel.CreateActionRequest{
+			OwnerUserID: owner.ID, Name: name, Kind: kernel.KindHTTP,
+			Source: "https://provider.example/api", Description: "d",
+			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+			Auth: auth,
+		}
+	}
+	// A secret is rejected: the per-caller token is a grant, not owner-held.
+	if _, err := k.CreateAction(ctx, owner.ID, base("db-sec", &kernel.AuthInput{
+		Scheme: kernel.AuthSchemeDelegatedBearer, Secrets: map[string]any{"token": "x"},
+	})); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("secret present: got %v, want ErrInvalidInput", err)
+	}
+	// A template without {token} is rejected.
+	if _, err := k.CreateAction(ctx, owner.ID, base("db-tmpl", &kernel.AuthInput{
+		Scheme: kernel.AuthSchemeDelegatedBearer, Config: map[string]any{"template": "Bearer nope"},
+	})); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("bad template: got %v, want ErrInvalidInput", err)
+	}
+	// A well-formed header/template config is accepted.
+	if _, err := k.CreateAction(ctx, owner.ID, base("db-ok", &kernel.AuthInput{
+		Scheme: kernel.AuthSchemeDelegatedBearer,
+		Config: map[string]any{"header": "Private-Token", "template": "{token}"},
+	})); err != nil {
+		t.Errorf("valid config: unexpected error %v", err)
+	}
+	// The zero-config form is valid (defaults to Authorization: Bearer).
+	if _, err := k.CreateAction(ctx, owner.ID, base("db-bare", &kernel.AuthInput{
+		Scheme: kernel.AuthSchemeDelegatedBearer,
+	})); err != nil {
+		t.Errorf("zero-config: unexpected error %v", err)
+	}
+}
+
+// TestBearerGrantRequiredBeforeLock: running a delegated_bearer action with no grant is rejected
+// before funds lock and before any transaction/process exists — same lazy consent as OAuth (§8).
+func TestBearerGrantRequiredBeforeLock(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "@br-owner", 1000)
+	a := createBearerAction(t, k, owner.ID, "inbox", 100)
+
+	_, err := k.Run(ctx, owner.ID, owner.Handle+"/"+a.Name, map[string]any{})
+	if !errors.Is(err, kernel.ErrGrantRequired) {
+		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
+	}
+	var ke *kernel.KernelError
+	if !errors.As(err, &ke) || ke.Meta["action"] != owner.Handle+"/"+a.Name {
+		t.Errorf("error does not carry structured action meta: %+v", err)
+	}
+	if u, _ := k.ReadUser(ctx, owner.ID); u.Available != 1000 || u.Locked != 0 {
+		t.Errorf("balance moved: available=%d locked=%d, want 1000/0", u.Available, u.Locked)
+	}
+	if procs, _ := k.ListProcesses(ctx, owner.ID, 100, 0); len(procs) != 0 {
+		t.Errorf("process created despite pre-lock rejection: %d", len(procs))
+	}
+}
+
+// TestAttachBearerGrant: the direct token-store creates a token-free-visible, revocable grant and
+// refuses an oauth_delegated action (which must use the browser flow) (§8).
+func TestAttachBearerGrant(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "@br-attach", 0)
+	bearer := createBearerAction(t, k, owner.ID, "svc", 0)
+
+	if _, err := k.AttachBearerGrant(ctx, owner.ID, bearer.ID, "ghp_secret"); err != nil {
+		t.Fatalf("AttachBearerGrant: %v", err)
+	}
+	views, err := k.ListGrantViews(ctx, owner.ID)
+	if err != nil || len(views) != 1 {
+		t.Fatalf("ListGrantViews: %v n=%d", err, len(views))
+	}
+	if views[0].Action != owner.Handle+"/"+bearer.Name {
+		t.Errorf("view action = %q, want %q", views[0].Action, owner.Handle+"/"+bearer.Name)
+	}
+	if b, _ := json.Marshal(views[0]); strings.Contains(string(b), "ghp_secret") {
+		t.Errorf("grant view leaked the token: %s", b)
+	}
+
+	// An oauth_delegated action cannot be connected with a raw token.
+	oauth := createDelegatedAction(t, k, owner.ID, "oauthsvc", 0)
+	if _, err := k.AttachBearerGrant(ctx, owner.ID, oauth.ID, "raw"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("attach to oauth_delegated: got %v, want ErrInvalidInput", err)
+	}
+
+	// Revocation drops it (the oauth action never gained a grant).
+	if err := k.RevokeGrant(ctx, owner.ID, bearer.ID); err != nil {
+		t.Fatalf("RevokeGrant: %v", err)
+	}
+	if views, _ := k.ListGrantViews(ctx, owner.ID); len(views) != 0 {
+		t.Errorf("bearer grant survived revoke: %d", len(views))
+	}
+}
+
+// TestManifestExcludesBearerAction: a delegated_bearer action is never served as a manifest — a
+// remote peer's proxy user can never hold a per-caller token (§8/§13).
+func TestManifestExcludesBearerAction(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "@br-mf", 0)
+	a := createBearerAction(t, k, owner.ID, "svc", 0)
+	pub := true
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pub}); err != nil {
+		t.Fatalf("make public: %v", err)
+	}
+	if _, err := k.GetActionManifest(ctx, a.ID); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("bearer action served a manifest: got %v, want ErrUnauthorized", err)
+	}
+}

@@ -21,21 +21,22 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// ---- OAuth token engine (§8) ----
+// ---- upstream authenticator (§9) ----
 //
-// The engine sits behind the upstream-auth seam. It fetches bearer tokens for the three OAuth
-// schemes and caches access tokens in memory only (never persisted). Owner-held schemes
-// (client-credentials, jwt-bearer) key their cache by action; the delegated scheme keys by
-// (grantor, action) and reads the process owner's Grant — that lookup IS the binding rule
-// (§8): the token applies only when grant.grantor_user_id == ownerUserID and the grant names
-// this exact action. Refresh-token rotation is persisted back through the GrantStore; a
-// provider `invalid_grant` deletes the Grant so the next call re-consents.
+// The authenticator is the replaceable §9 adapter that applies an action's stored auth to an
+// outbound HTTP request: Parse decrypts the auth config, Apply mutates the request per its scheme.
+// It owns every scheme so nothing else needs to know how any of them work — static header/query/
+// bearer/basic; the OAuth token exchanges (client-credentials, jwt-bearer, delegated) with an
+// in-memory access-token cache; and the two delegated schemes' per-caller Grant lookup, which IS
+// the binding rule (§8): a grant applies only when grant.grantor_user_id == ownerUserID and it
+// names this exact action. `kernel` must not import this (§2/§9); the executor holds one behind a
+// field and calls Parse/Apply.
 
 // oauthErrInvalidGrant marks a token-endpoint response whose `error` is `invalid_grant`
 // (the stored refresh token is dead). The delegated path deletes the Grant on this.
 var oauthErrInvalidGrant = errors.New("oauth: invalid_grant")
 
-type oauthEngine struct {
+type authenticator struct {
 	box        kernel.SecretBox
 	grants     kernel.GrantStore
 	allowLocal bool
@@ -47,7 +48,7 @@ type oauthEngine struct {
 }
 
 // actionRef gives grant-required errors the same qualified @owner/name the kernel emits.
-func (e *oauthEngine) actionRef(ctx context.Context, action *kernel.Action) string {
+func (e *authenticator) actionRef(ctx context.Context, action *kernel.Action) string {
 	if e.refFn != nil {
 		return e.refFn(ctx, action.ID)
 	}
@@ -60,8 +61,123 @@ type cachedToken struct {
 	fp        string // fingerprint of action.AuthJSON, so a credential change invalidates the entry
 }
 
-func newOAuthEngine(box kernel.SecretBox, grants kernel.GrantStore, allowLocal bool, timeout time.Duration) *oauthEngine {
-	return &oauthEngine{box: box, grants: grants, allowLocal: allowLocal, timeout: timeout, cache: map[string]cachedToken{}}
+func newAuthenticator(box kernel.SecretBox, grants kernel.GrantStore, allowLocal bool, timeout time.Duration) *authenticator {
+	return &authenticator{box: box, grants: grants, allowLocal: allowLocal, timeout: timeout, cache: map[string]cachedToken{}}
+}
+
+// ---- §9 seam: Parse + Apply ----
+
+// Parse decrypts and parses an action's stored auth payload (§8). Returns (nil, nil) when the action
+// carries no auth. Fails closed: a missing box, an undecryptable ciphertext, or malformed JSON is an
+// error — never plaintext.
+func (e *authenticator) Parse(action *kernel.Action) (*kernel.AuthInput, error) {
+	if action.AuthJSON == "" {
+		return nil, nil
+	}
+	if e.box == nil {
+		return nil, kernel.ErrInvalidState.Wrap("upstream auth credentials present but credential encryption is not configured")
+	}
+	plaintext, err := e.box.Open(action.ID, action.AuthJSON)
+	if err != nil {
+		return nil, kernel.ErrInvalidState.Wrap("upstream auth credentials could not be decrypted")
+	}
+	var auth kernel.AuthInput
+	if err := json.Unmarshal([]byte(plaintext), &auth); err != nil {
+		return nil, kernel.ErrInvalidState.Wrap("upstream auth credentials could not be parsed")
+	}
+	return &auth, nil
+}
+
+// Apply mutates an outbound request per the action's auth scheme (§9). Dispatch: delegated_bearer
+// places the process owner's static grant token into a configured header; the OAuth schemes fetch a
+// bearer (owner-held for client-credentials/jwt-bearer, the owner's grant for delegated) and set
+// Authorization; static schemes set their header/query directly. An unrecognized scheme fails closed
+// via applyStatic's default — a request is never sent unauthenticated (§8). A nil auth is a no-op.
+func (e *authenticator) Apply(ctx context.Context, action *kernel.Action, ownerUserID string, auth *kernel.AuthInput, headers map[string]string, rawURL *string, refresh bool) error {
+	switch {
+	case auth == nil:
+		return nil
+	case auth.Scheme == kernel.AuthSchemeDelegatedBearer:
+		return e.applyDelegatedBearer(ctx, action, ownerUserID, auth, headers)
+	case e.Refreshable(auth.Scheme):
+		token, err := e.token(ctx, action, ownerUserID, auth, refresh)
+		if err != nil {
+			return err
+		}
+		headers["Authorization"] = "Bearer " + token
+		return nil
+	default:
+		return e.applyStatic(auth, headers, rawURL)
+	}
+}
+
+// Refreshable reports whether a scheme obtains its bearer from a token endpoint, so a 401 can be
+// retried once by forcing a token refresh (§8). Static and delegated_bearer credentials are fixed
+// and never retried.
+func (e *authenticator) Refreshable(scheme string) bool {
+	switch scheme {
+	case kernel.AuthSchemeOAuthClientCreds, kernel.AuthSchemeOAuthJWTBearer, kernel.AuthSchemeOAuthDelegated:
+		return true
+	}
+	return false
+}
+
+// applyDelegatedBearer places the process owner's per-caller static token (a Grant, opened via the
+// binding rule) into a configured header (§8). Not OAuth: no token endpoint, no refresh — a rejected
+// token is an ordinary HTTP failure. Config is optional: header defaults to "Authorization" and
+// template to "Bearer {token}", so the common case needs none while GitHub ("token {token}"),
+// GitLab ("Private-Token" / "{token}"), and X-Api-Key styles are expressible.
+func (e *authenticator) applyDelegatedBearer(ctx context.Context, action *kernel.Action, ownerUserID string, auth *kernel.AuthInput, headers map[string]string) error {
+	_, token, err := e.openGrant(ctx, action, ownerUserID)
+	if err != nil {
+		return err
+	}
+	header := "Authorization"
+	if h, _ := auth.Config["header"].(string); h != "" {
+		header = h
+	}
+	template := "Bearer {token}"
+	if t, _ := auth.Config["template"].(string); t != "" {
+		template = t
+	}
+	headers[header] = strings.Replace(template, "{token}", token, 1)
+	return nil
+}
+
+// applyStatic applies an owner-held non-OAuth scheme (header/query/bearer/basic) to the request.
+// headers must be non-nil; rawURL is modified in place for "query". Fails closed on an unknown
+// scheme: a request is never sent unauthenticated because its scheme was unrecognized (§8).
+func (e *authenticator) applyStatic(auth *kernel.AuthInput, headers map[string]string, rawURL *string) error {
+	switch auth.Scheme {
+	case kernel.AuthSchemeHeader:
+		name, _ := auth.Config["name"].(string)
+		value, _ := auth.Secrets["value"].(string)
+		if name != "" {
+			headers[name] = value
+		}
+	case kernel.AuthSchemeQuery:
+		name, _ := auth.Config["name"].(string)
+		value, _ := auth.Secrets["value"].(string)
+		if name != "" && rawURL != nil {
+			u, err := url.Parse(*rawURL)
+			if err == nil {
+				q := u.Query()
+				q.Set(name, value)
+				u.RawQuery = q.Encode()
+				*rawURL = u.String()
+			}
+		}
+	case kernel.AuthSchemeBearer:
+		token, _ := auth.Secrets["token"].(string)
+		headers["Authorization"] = "Bearer " + token
+	case kernel.AuthSchemeBasic:
+		user, _ := auth.Secrets["username"].(string)
+		pass, _ := auth.Secrets["password"].(string)
+		headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
+	default:
+		return kernel.ErrInvalidState.Wrapf("unsupported upstream auth scheme %q", auth.Scheme)
+	}
+	return nil
 }
 
 // oauthConfig is the provider configuration parsed from an action's AuthInput.
@@ -117,7 +233,7 @@ type tokenResponse struct {
 // token returns a bearer access token for the action's OAuth scheme. When refresh is true any
 // cached token is discarded first (used on a 401 retry). Access tokens are cached with a 30s
 // safety margin on their expiry.
-func (e *oauthEngine) token(ctx context.Context, action *kernel.Action, ownerUserID string, auth *kernel.AuthInput, refresh bool) (string, error) {
+func (e *authenticator) token(ctx context.Context, action *kernel.Action, ownerUserID string, auth *kernel.AuthInput, refresh bool) (string, error) {
 	cfg := parseOAuthConfig(auth)
 	var key string
 	switch auth.Scheme {
@@ -167,26 +283,39 @@ func (e *oauthEngine) token(ctx context.Context, action *kernel.Action, ownerUse
 	return tr.AccessToken, nil
 }
 
-// exchangeDelegated resolves the process owner's grant (the binding rule), decrypts the refresh
-// token, and exchanges it. Rotation persists the new refresh token; invalid_grant deletes the
-// grant and returns the same typed grant-required error the pre-lock check uses.
-func (e *oauthEngine) exchangeDelegated(ctx context.Context, action *kernel.Action, ownerUserID string, cfg oauthConfig) (*tokenResponse, error) {
+// openGrant resolves the process owner's grant for a delegated action and opens its sealed secret —
+// the binding rule (§8): the grant must belong to ownerUserID and name this exact action. It is the
+// single grant-open shared by both delegated schemes; the caller decides what the secret is (an
+// OAuth refresh token for oauth_delegated, a static token for delegated_bearer). A missing grant
+// returns the typed grant-required error the pre-lock check normally raises first (defensive).
+func (e *authenticator) openGrant(ctx context.Context, action *kernel.Action, ownerUserID string) (*kernel.Grant, string, error) {
 	if e.grants == nil {
-		return nil, kernel.ErrInvalidState.Wrap("grant store not configured")
+		return nil, "", kernel.ErrInvalidState.Wrap("grant store not configured")
 	}
 	g, err := e.grants.ReadGrant(ctx, ownerUserID, action.ID)
 	if err != nil {
 		if errors.Is(err, kernel.ErrNotFound) {
-			return nil, kernel.GrantRequiredError(e.actionRef(ctx, action))
+			return nil, "", kernel.GrantRequiredError(e.actionRef(ctx, action))
 		}
-		return nil, err
+		return nil, "", err
 	}
 	if e.box == nil {
-		return nil, kernel.ErrInvalidState.Wrap("credential encryption not configured")
+		return nil, "", kernel.ErrInvalidState.Wrap("credential encryption not configured")
 	}
-	refreshToken, err := e.box.Open(ownerUserID+"|"+action.ID, g.RefreshToken)
+	secret, err := e.box.Open(ownerUserID+"|"+action.ID, g.RefreshToken)
 	if err != nil {
-		return nil, kernel.ErrInvalidState.Wrap("stored refresh token could not be decrypted")
+		return nil, "", kernel.ErrInvalidState.Wrap("stored credential could not be decrypted")
+	}
+	return g, secret, nil
+}
+
+// exchangeDelegated opens the process owner's grant (the binding rule, via openGrant) and exchanges
+// its refresh token. Rotation persists the new refresh token; invalid_grant deletes the grant and
+// returns the same typed grant-required error the pre-lock check uses.
+func (e *authenticator) exchangeDelegated(ctx context.Context, action *kernel.Action, ownerUserID string, cfg oauthConfig) (*tokenResponse, error) {
+	g, refreshToken, err := e.openGrant(ctx, action, ownerUserID)
+	if err != nil {
+		return nil, err
 	}
 	tr, err := e.exchangeRefresh(ctx, cfg, refreshToken)
 	if err != nil {
@@ -205,7 +334,7 @@ func (e *oauthEngine) exchangeDelegated(ctx context.Context, action *kernel.Acti
 	return tr, nil
 }
 
-func (e *oauthEngine) exchangeClientCredentials(ctx context.Context, cfg oauthConfig) (*tokenResponse, error) {
+func (e *authenticator) exchangeClientCredentials(ctx context.Context, cfg oauthConfig) (*tokenResponse, error) {
 	form := cfg.form("client_credentials")
 	if cfg.scopes != "" {
 		form.Set("scope", cfg.scopes)
@@ -213,14 +342,14 @@ func (e *oauthEngine) exchangeClientCredentials(ctx context.Context, cfg oauthCo
 	return e.postToken(ctx, cfg.tokenURL, form)
 }
 
-func (e *oauthEngine) exchangeRefresh(ctx context.Context, cfg oauthConfig, refreshToken string) (*tokenResponse, error) {
+func (e *authenticator) exchangeRefresh(ctx context.Context, cfg oauthConfig, refreshToken string) (*tokenResponse, error) {
 	form := cfg.form("refresh_token")
 	form.Set("refresh_token", refreshToken)
 	return e.postToken(ctx, cfg.tokenURL, form)
 }
 
 // exchangeAuthCode completes the authorization-code flow (called by the consent broker).
-func (e *oauthEngine) exchangeAuthCode(ctx context.Context, cfg oauthConfig, code, redirectURI, verifier string) (*tokenResponse, error) {
+func (e *authenticator) exchangeAuthCode(ctx context.Context, cfg oauthConfig, code, redirectURI, verifier string) (*tokenResponse, error) {
 	form := cfg.form("authorization_code")
 	form.Set("code", code)
 	form.Set("redirect_uri", redirectURI)
@@ -229,7 +358,7 @@ func (e *oauthEngine) exchangeAuthCode(ctx context.Context, cfg oauthConfig, cod
 }
 
 // exchangeJWTBearer builds an RS256 assertion and exchanges it (RFC 7523).
-func (e *oauthEngine) exchangeJWTBearer(ctx context.Context, cfg oauthConfig) (*tokenResponse, error) {
+func (e *authenticator) exchangeJWTBearer(ctx context.Context, cfg oauthConfig) (*tokenResponse, error) {
 	assertion, err := buildJWTAssertion(cfg)
 	if err != nil {
 		return nil, err
@@ -244,7 +373,7 @@ func (e *oauthEngine) exchangeJWTBearer(ctx context.Context, cfg oauthConfig) (*
 }
 
 // startDeviceAuth requests a device+user code from the provider's device-authorization endpoint.
-func (e *oauthEngine) startDeviceAuth(ctx context.Context, cfg oauthConfig) (*deviceAuthResponse, error) {
+func (e *authenticator) startDeviceAuth(ctx context.Context, cfg oauthConfig) (*deviceAuthResponse, error) {
 	form := url.Values{}
 	form.Set("client_id", cfg.clientID)
 	if cfg.scopes != "" {
@@ -269,7 +398,7 @@ func (e *oauthEngine) startDeviceAuth(ctx context.Context, cfg oauthConfig) (*de
 
 // pollDeviceToken performs one poll of the token endpoint for a device grant. It returns
 // (nil, nil) while authorization is still pending; a non-nil tokenResponse on success.
-func (e *oauthEngine) pollDeviceToken(ctx context.Context, cfg oauthConfig, deviceCode string) (*tokenResponse, error) {
+func (e *authenticator) pollDeviceToken(ctx context.Context, cfg oauthConfig, deviceCode string) (*tokenResponse, error) {
 	form := url.Values{}
 	form.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
 	form.Set("device_code", deviceCode)
@@ -300,7 +429,7 @@ type deviceAuthResponse struct {
 // postToken POSTs a form to the token endpoint and parses the standard token response. An OAuth
 // error response with `error: invalid_grant` is surfaced as oauthErrInvalidGrant; other explicit
 // errors (except the device pending states, handled by the caller) become ErrExecutionFailed.
-func (e *oauthEngine) postToken(ctx context.Context, tokenURL string, form url.Values) (*tokenResponse, error) {
+func (e *authenticator) postToken(ctx context.Context, tokenURL string, form url.Values) (*tokenResponse, error) {
 	body, status, err := e.postForm(ctx, tokenURL, form)
 	if err != nil {
 		return nil, err
@@ -319,7 +448,7 @@ func (e *oauthEngine) postToken(ctx context.Context, tokenURL string, form url.V
 }
 
 // postForm sends an application/x-www-form-urlencoded POST through the SSRF-guarded client.
-func (e *oauthEngine) postForm(ctx context.Context, endpoint string, form url.Values) ([]byte, int, error) {
+func (e *authenticator) postForm(ctx context.Context, endpoint string, form url.Values) ([]byte, int, error) {
 	if endpoint == "" {
 		return nil, 0, kernel.ErrInvalidState.Wrap("OAuth endpoint not configured")
 	}
@@ -421,7 +550,7 @@ func parseRSAPrivateKey(pemStr string) (*rsa.PrivateKey, error) {
 const consentTTL = 10 * time.Minute
 
 type grantBroker struct {
-	engine  *oauthEngine
+	engine  *authenticator
 	mu      sync.Mutex
 	pending map[string]*pendingConsent
 }
@@ -442,7 +571,7 @@ type pendingConsent struct {
 	pollErr error
 }
 
-func newGrantBroker(engine *oauthEngine) *grantBroker {
+func newGrantBroker(engine *authenticator) *grantBroker {
 	return &grantBroker{engine: engine, pending: map[string]*pendingConsent{}}
 }
 

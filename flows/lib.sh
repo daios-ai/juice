@@ -259,6 +259,25 @@ PYEOF
     track_pid $!
     _await_http "$port" POST
 }
+# start_header_echo_backend port header  — POST backend that reflects one request header as
+# {"seen": <value>}, so a flow can prove an auth credential actually reached the upstream.
+start_header_echo_backend() {
+    local port="$1" header="$2"
+    python3 - "$port" "$header" <<'PYEOF' &
+import sys, json, http.server
+port, header = int(sys.argv[1]), sys.argv[2]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        body = json.dumps({"seen": self.headers.get(header, "")}).encode()
+        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
+PYEOF
+    track_pid $!
+    _await_http "$port" POST
+}
 # start_echo_backend port  — reflects request method + echoed `v` (query or body) for every verb.
 start_echo_backend() {
     local port="$1"
