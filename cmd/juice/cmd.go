@@ -496,14 +496,18 @@ func actionListCmd() *cobra.Command {
 				return printJSON(actions)
 			}
 			for _, a := range actions {
+				grant := ""
+				if a.RequiresGrant {
+					grant = " [grant]" // caller must connect their own credential first (§8)
+				}
 				if all {
 					active := " "
 					if a.Active {
 						active = "*"
 					}
-					fmt.Printf("[%s] %s  %-30s  %d credits\n", active, a.ActionRef, a.Name, a.Price)
+					fmt.Printf("[%s] %s  %-30s  %d credits%s\n", active, a.ActionRef, a.Name, a.Price, grant)
 				} else {
-					fmt.Printf("  %-24s  %d credits\n", a.ActionRef, a.Price)
+					fmt.Printf("  %-24s  %d credits%s\n", a.ActionRef, a.Price, grant)
 				}
 			}
 			return nil

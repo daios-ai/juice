@@ -276,6 +276,18 @@ func (k *Kernel) isDelegatedAuth(a *Action) bool {
 	return err == nil && auth != nil && isDelegatedScheme(auth.Scheme)
 }
 
+// ActionAuthInfo reports an action's non-secret auth summary for read paths (§8): the scheme name
+// and whether calling it requires a per-caller grant. It never returns config or secrets — only the
+// scheme string, which is not a secret (R9 governs secrets, not the scheme). Returns ("", false)
+// when the action carries no upstream auth or the credential box is unconfigured or undecryptable.
+func (k *Kernel) ActionAuthInfo(a *Action) (scheme string, requiresGrant bool) {
+	auth, err := k.openAuthInput(a)
+	if err != nil || auth == nil {
+		return "", false
+	}
+	return auth.Scheme, isDelegatedScheme(auth.Scheme)
+}
+
 // readDelegatedAction reads an action and its decrypted auth, requiring a delegated (per-caller
 // Grant) scheme (§8). Shared by the grant operations; the OAuth-only consent-config lookup narrows
 // further to oauth_delegated itself.

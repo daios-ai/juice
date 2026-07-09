@@ -1609,7 +1609,7 @@ func captureStdout(t *testing.T, fn func() error) string {
 // checks that structured values are rendered as indented JSON.
 func TestPrintTextParity(t *testing.T) {
 	objects := []any{
-		enrichAction(&kernel.Action{
+		enrichAction(&kernel.Kernel{}, &kernel.Action{
 			ID: "a1", OwnerUserID: "u1", OwnerHandle: "@alice", Name: "weather",
 			Kind: kernel.KindHTTP, Active: true, Public: true, Price: 5,
 			Description:  "current weather",
@@ -1639,7 +1639,7 @@ func TestPrintTextParity(t *testing.T) {
 
 	// Structured values must appear as indented JSON, not be dropped.
 	text := captureStdout(t, func() error {
-		return printText(enrichAction(&kernel.Action{
+		return printText(enrichAction(&kernel.Kernel{}, &kernel.Action{
 			ID: "a1", Name: "x", Kind: kernel.KindHTTP,
 			InputSchema:  map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
 			OutputSchema: map[string]any{"type": "object"},

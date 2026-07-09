@@ -28,10 +28,10 @@ No envelope objects. `GET /v1/steps` returns `[…]` directly. Metadata such as 
 The handler rejects invalid inputs before calling the kernel. `rating` must be 0 or 1; returns `ErrInvalidInput` when violated.
 
 **R8 — Action responses include both `id` and `action`.**  
-Every read or list response for an action resource includes both `id` (UUID, for management operations) and a computed `action` field containing `@owner/name` (for running). Clients can copy the `action` value directly into run requests without a separate lookup. For `kind=http` actions, responses also include a decomposed `http` object `{method, url, params}` — identical in shape for manually-created and OpenAPI-imported actions — that round-trips with the `source`/`method`/`param` create and update inputs.
+Every read or list response for an action resource includes both `id` (UUID, for management operations) and a computed `action` field containing `@owner/name` (for running). Clients can copy the `action` value directly into run requests without a separate lookup. For `kind=http` actions, responses also include a decomposed `http` object `{method, url, params}` — identical in shape for manually-created and OpenAPI-imported actions — that round-trips with the `source`/`method`/`param` create and update inputs. Responses also carry the action's non-secret auth summary: `requires_grant` (always present — `true` iff a caller must connect a per-caller credential before calling, i.e. a delegated scheme) and, when the action has upstream auth, `auth_scheme` (the scheme name, e.g. `delegated_bearer`). These are the scheme and flag only, never config or secrets (R9).
 
 **R9 — Secrets never serialize.**  
-Auth configs (`Action.source` upstream credentials) are write-only: accepted on create and update, never present in any read, list, log, receipt, hash, or manifest response. There is no read path for a stored secret.
+Auth configs (`Action.source` upstream credentials) are write-only: accepted on create and update, never present in any read, list, log, receipt, hash, or manifest response. There is no read path for a stored secret. The non-secret `auth_scheme` name and `requires_grant` flag (R8) are not secrets and are exposed; the `config` and `secrets` of an auth are never returned.
 
 ### CLI
 
@@ -133,7 +133,7 @@ A `Grant` delegates the caller's upstream identity to one delegated action (§8)
 | Get stats | `GET /v1/stats/{action_id}` → stats | `juice action stats <action>` |
 | List ratings | `GET /v1/actions/{id}/ratings` → rating[] | — |
 
-`<action>` is `@owner/name` (a raw id is also accepted). Action responses (show and list) include a computed `action` field (`@owner/name`) alongside `id`, plus the full `input_schema` and `output_schema` — the CLI text view shows the same fields the JSON returns. `price` is the subtree bound: the maximum total cost of the action and everything it calls. `auth` is the upstream credential config `{scheme, config, secrets}` (R9: write-only, never returned).
+`<action>` is `@owner/name` (a raw id is also accepted). Action responses (show and list) include a computed `action` field (`@owner/name`) alongside `id`, plus the full `input_schema` and `output_schema` — the CLI text view shows the same fields the JSON returns. `price` is the subtree bound: the maximum total cost of the action and everything it calls. `auth` is the upstream credential config `{scheme, config, secrets}` (R9: write-only, never returned); reads instead expose only its non-secret summary — `auth_scheme` (scheme name, when present) and `requires_grant` (R8).
 
 The `auth` object is `{scheme, config, secrets}`; valid schemes and their keys (semantics in requirements.md §8):
 

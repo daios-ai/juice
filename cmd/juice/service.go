@@ -67,9 +67,11 @@ type txView struct {
 // owner_user_id is shadow-dropped: owner_handle + action (@owner/name) already identify the owner.
 type actionResp struct {
 	*kernel.Action
-	OwnerUserID string    `json:"owner_user_id,omitempty"`
-	ActionRef   string    `json:"action"`
-	HTTP        *httpView `json:"http,omitempty"`
+	OwnerUserID   string    `json:"owner_user_id,omitempty"`
+	ActionRef     string    `json:"action"`
+	HTTP          *httpView `json:"http,omitempty"`
+	AuthScheme    string    `json:"auth_scheme,omitempty"` // upstream auth scheme name (§8); present only when the action has auth; never config/secrets (R9)
+	RequiresGrant bool      `json:"requires_grant"`        // true iff a caller must connect a per-caller grant first (delegated schemes)
 }
 
 // httpView is the read-side decomposition of an action's HTTPSource. It carries
@@ -196,12 +198,13 @@ func enrichTx(tv *kernel.TransactionView, uc *userCache) *txView {
 	}
 }
 
-func enrichAction(a *kernel.Action) actionResp {
+func enrichAction(k *kernel.Kernel, a *kernel.Action) actionResp {
 	ref := ""
 	if a.OwnerHandle != "" && a.Name != "" {
 		ref = a.OwnerHandle + "/" + a.Name
 	}
-	return actionResp{Action: a, ActionRef: ref, HTTP: httpViewOf(a)}
+	scheme, requiresGrant := k.ActionAuthInfo(a)
+	return actionResp{Action: a, ActionRef: ref, HTTP: httpViewOf(a), AuthScheme: scheme, RequiresGrant: requiresGrant}
 }
 
 // httpViewOf decomposes a kind=http action's stored HTTPSource into a uniform
@@ -394,7 +397,7 @@ func createAction(k *kernel.Kernel, ctx context.Context, callerID string, req ke
 	if err != nil {
 		return actionResp{}, err
 	}
-	return enrichAction(full), nil
+	return enrichAction(k, full), nil
 }
 
 func getAction(k *kernel.Kernel, ctx context.Context, callerID, id string) (actionResp, error) {
@@ -402,7 +405,7 @@ func getAction(k *kernel.Kernel, ctx context.Context, callerID, id string) (acti
 	if err != nil {
 		return actionResp{}, err
 	}
-	return enrichAction(a), nil
+	return enrichAction(k, a), nil
 }
 
 func updateAction(k *kernel.Kernel, ctx context.Context, callerID string, req kernel.UpdateActionRequest) (actionResp, error) {
@@ -410,7 +413,7 @@ func updateAction(k *kernel.Kernel, ctx context.Context, callerID string, req ke
 	if err != nil {
 		return actionResp{}, err
 	}
-	return enrichAction(a), nil
+	return enrichAction(k, a), nil
 }
 
 // listPublicActions returns actions visible to the caller, optionally filtered by owner handle and name.
@@ -496,7 +499,7 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 	resps := make([]actionResp, len(actions))
 	for i, a := range actions {
 		cp := *a
-		r := enrichAction(&cp) // decompose http view before hiding the raw blob
+		r := enrichAction(k, &cp) // decompose http view before hiding the raw blob
 		cp.Source = ""
 		cp.ArtifactHash = ""
 		resps[i] = r

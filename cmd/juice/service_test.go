@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -226,14 +227,14 @@ func TestEnrichProcess(t *testing.T) {
 
 func TestEnrichAction(t *testing.T) {
 	a := &kernel.Action{ID: "a1", OwnerHandle: "@bob", Name: "ping"}
-	r := enrichAction(a)
+	r := enrichAction(&kernel.Kernel{}, a)
 	if r.ActionRef != "@bob/ping" {
 		t.Errorf("enrichAction: ActionRef = %q, want @bob/ping", r.ActionRef)
 	}
 
 	// Empty handle → empty ref.
 	a2 := &kernel.Action{ID: "a2"}
-	r2 := enrichAction(a2)
+	r2 := enrichAction(&kernel.Kernel{}, a2)
 	if r2.ActionRef != "" {
 		t.Errorf("enrichAction(no handle): ActionRef = %q, want empty", r2.ActionRef)
 	}
@@ -322,6 +323,50 @@ func TestGetAction_EnrichesRef(t *testing.T) {
 	}
 	if got.ActionRef != "@svc-ga/svc-lookup" {
 		t.Errorf("getAction ActionRef = %q, want @svc-ga/svc-lookup", got.ActionRef)
+	}
+}
+
+// TestActionAuthFieldsExposed: action reads surface the non-secret auth_scheme and requires_grant,
+// and never the config or secrets (§8/R9).
+func TestActionAuthFieldsExposed(t *testing.T) {
+	_, k, _ := newTestHTTPServerFull(t)
+	ctx := context.Background()
+	ownerID, _ := makeUser(t, k, "@svc-auth")
+	backend := newStepBackend(t)
+
+	mk := func(name string, auth *kernel.AuthInput) actionResp {
+		a, err := createAction(k, ctx, ownerID, kernel.CreateActionRequest{
+			OwnerUserID: ownerID, Name: name, Kind: kernel.KindHTTP, Source: backend.URL,
+			Description: "d", InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+			Auth: auth,
+		})
+		if err != nil {
+			t.Fatalf("createAction %s: %v", name, err)
+		}
+		got, err := getAction(k, ctx, ownerID, a.ID)
+		if err != nil {
+			t.Fatalf("getAction %s: %v", name, err)
+		}
+		return got
+	}
+
+	// delegated_bearer → scheme exposed, requires_grant true.
+	if r := mk("db-svc", &kernel.AuthInput{Scheme: kernel.AuthSchemeDelegatedBearer}); r.AuthScheme != "delegated_bearer" || !r.RequiresGrant {
+		t.Errorf("delegated_bearer: scheme=%q requires_grant=%v, want delegated_bearer/true", r.AuthScheme, r.RequiresGrant)
+	}
+
+	// basic (owner-held) → scheme exposed, no grant, and the secret never serializes.
+	basic := mk("basic-svc", &kernel.AuthInput{Scheme: kernel.AuthSchemeBasic, Secrets: map[string]any{"username": "u", "password": "topsecret"}})
+	if basic.AuthScheme != "basic" || basic.RequiresGrant {
+		t.Errorf("basic: scheme=%q requires_grant=%v, want basic/false", basic.AuthScheme, basic.RequiresGrant)
+	}
+	if b, _ := json.Marshal(basic); strings.Contains(string(b), "topsecret") {
+		t.Errorf("basic response leaked the secret: %s", b)
+	}
+
+	// no upstream auth → no scheme, no grant.
+	if r := mk("plain-svc", nil); r.AuthScheme != "" || r.RequiresGrant {
+		t.Errorf("no-auth: scheme=%q requires_grant=%v, want empty/false", r.AuthScheme, r.RequiresGrant)
 	}
 }
 

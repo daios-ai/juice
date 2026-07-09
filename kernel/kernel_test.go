@@ -2726,3 +2726,44 @@ func TestManifestExcludesBearerAction(t *testing.T) {
 		t.Errorf("bearer action served a manifest: got %v, want ErrUnauthorized", err)
 	}
 }
+
+// TestActionAuthInfo: the read-path accessor reports the scheme name and requires-grant flag for
+// every auth kind, and ("", false) for a no-auth action — never config or secrets (§8).
+func TestActionAuthInfo(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "@authinfo", 0)
+	read := func(id string) *kernel.Action { a, _ := k.ReadAction(ctx, id); return a }
+
+	mk := func(name string, auth *kernel.AuthInput) *kernel.Action {
+		a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+			OwnerUserID: owner.ID, Name: name, Kind: kernel.KindHTTP, Source: "https://provider.example/api",
+			Description: "d", InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+			Auth: auth,
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		return read(a.ID)
+	}
+
+	cases := []struct {
+		name       string
+		action     *kernel.Action
+		wantScheme string
+		wantGrant  bool
+	}{
+		{"delegated_bearer", mk("db", &kernel.AuthInput{Scheme: kernel.AuthSchemeDelegatedBearer}), "delegated_bearer", true},
+		{"oauth_delegated", createDelegatedAction(t, k, owner.ID, "od", 0), "oauth_delegated", true},
+		{"basic", mk("basic", &kernel.AuthInput{Scheme: kernel.AuthSchemeBasic, Secrets: map[string]any{"username": "u", "password": "p"}}), "basic", false},
+		{"no_auth", mk("plain", nil), "", false},
+	}
+	for _, tc := range cases {
+		s, g := k.ActionAuthInfo(tc.action)
+		if s != tc.wantScheme || g != tc.wantGrant {
+			t.Errorf("%s: ActionAuthInfo = (%q,%v), want (%q,%v)", tc.name, s, g, tc.wantScheme, tc.wantGrant)
+		}
+	}
+}
