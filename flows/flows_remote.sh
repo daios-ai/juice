@@ -102,6 +102,14 @@ flow_lookup() {
     make_user "$db" "$hs" "$ha" @alice
     # @sys/lookup requires "query"; missing it → schema violation.
     assert_fails "lookup.missing_query_rejected" "query\|required\|schema" -- j "$db" "$ha" run @sys/lookup '{}'
+
+    # Hybrid lookup degrades to the lexical (BM25) leg with no Ollama, so a distinctively-named
+    # action is discoverable by keyword — the offline happy path, untestable before.
+    local aid
+    aid=$(strfield "$(jj "$db" "$ha" action create zqxwvprobe --kind http --source "https://api.example/x" --price 0 --description "zqxwvprobe lexical lookup probe")" id)
+    assert_nonempty "lookup.action_created" "$aid"
+    j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
+    assert_contains "lookup.lexical_hit" "@alice/zqxwvprobe" "$(jj "$db" "$ha" run @sys/lookup '{"query":"zqxwvprobe"}')"
 }
 
 flow_chat() {

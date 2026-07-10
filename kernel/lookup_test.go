@@ -160,12 +160,121 @@ func TestLookupDemotesFailingBelowUntested(t *testing.T) {
 	}
 }
 
-func TestLookupNoEmbedder(t *testing.T) {
+// TestLookupLexicalDegradedMode: with no embedder configured, lookup falls back to the lexical
+// (BM25) leg instead of failing — and activation still populates the lexical index without an LLM
+// (indexForLookup calls UpsertLookupText regardless of the embedder). So a keyword query finds the
+// action on an LLM-less kernel.
+func TestLookupLexicalDegradedMode(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st) // no embedder
+	ctx := context.Background()
+	owner := setupUser(t, st, "@alice", 0)
+
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/weather",
+		Kind: kernel.KindHTTP, Active: false, Public: true,
+		Description:  "forecast temperature and rain",
+		Source:       "https://example.com/api",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "weather forecast", Limit: 10})
+	if err != nil {
+		t.Fatalf("lookup without an embedder should not error: %v", err)
+	}
+	if !containsAction(results, a.ID) {
+		t.Error("action should be found via the lexical leg with no embedder")
+	}
+}
+
+// TestLookupSkipsMismatchedEmbedding: a stored vector whose dimension differs from the query's
+// (e.g. after an embed-model change) is skipped, not panicked on — and the action stays findable
+// via the lexical leg.
+func TestLookupSkipsMismatchedEmbedding(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithEmbedder(st, &fakeEmbedder{}) // 8-dim
+	ctx := context.Background()
+	owner := setupUser(t, st, "@alice", 0)
+
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/x",
+		Kind: kernel.KindHTTP, Active: true, Public: true, Description: "unique widget",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	_ = st.UpsertEmbedding(ctx, a.ID, []float32{1, 2, 3, 4}) // 4 dims — mismatched
+	_ = st.UpsertLookupText(ctx, a.ID, "/x unique widget")
+
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "widget", Limit: 10})
+	if err != nil {
+		t.Fatalf("lookup with a mismatched-dimension vector must not error: %v", err)
+	}
+	if !containsAction(results, a.ID) {
+		t.Error("action should still be found lexically despite a bad embedding")
+	}
+}
+
+// TestLookupFillsPastUncallable: CanCall filtering happens before truncation, so a run of
+// uncallable (others' private) matches cannot starve the caller of a callable result.
+func TestLookupFillsPastUncallable(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st) // lexical-only, deterministic
+	ctx := context.Background()
+	alice := setupUser(t, st, "@alice", 0)
+	bob := setupUser(t, st, "@bob", 0)
+
+	mk := func(owner *kernel.User, name string, public bool) *kernel.Action {
+		a := &kernel.Action{
+			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: name,
+			Kind: kernel.KindHTTP, Active: true, Public: public, Description: "widget service",
+			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		}
+		_ = st.CreateAction(ctx, a)
+		_ = st.UpsertLookupText(ctx, a.ID, name+" widget service")
+		return a
+	}
+	_ = mk(bob, "/bobpriv", false)      // matches, NOT callable by alice
+	pub := mk(alice, "/alicepub", true) // matches, callable
+
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "widget service", Limit: 1, CallerID: alice.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Action.ID != pub.ID {
+		t.Fatalf("expected the callable action to fill the single slot past the uncallable one; got %d results", len(results))
+	}
+}
+
+// TestLookupQuerySanitized: a query containing FTS5 operators/quotes is treated as literal terms,
+// not a MATCH expression — so it never errors.
+func TestLookupQuerySanitized(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
-	_, err := k.Lookup(context.Background(), kernel.LookupRequest{Query: "test"})
-	if err == nil {
-		t.Error("expected error when no embedder configured")
+	ctx := context.Background()
+	owner := setupUser(t, st, "@alice", 0)
+
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/db",
+		Kind: kernel.KindHTTP, Active: true, Public: true, Description: "query AND filter",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	_ = st.UpsertLookupText(ctx, a.ID, "/db query AND filter")
+
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: `"AND OR (unbalanced`, Limit: 10})
+	if err != nil {
+		t.Fatalf("a malformed FTS query must be sanitized, not error: %v", err)
+	}
+	if !containsAction(results, a.ID) {
+		t.Error("expected the literal term AND to match after sanitization")
 	}
 }
 

@@ -739,13 +739,13 @@ func TestStatsInitializedOnActivation(t *testing.T) {
 	}
 }
 
-func TestLookupRequiresEmbedder(t *testing.T) {
+func TestLookupWithoutEmbedderDegrades(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
-	_, err := env.k.Lookup(ctx, kernel.LookupRequest{Query: "test", Limit: 5})
-	if err == nil {
-		t.Error("expected error when no embedder configured")
+	// With no embedder, lookup degrades to lexical ranking instead of erroring (§9).
+	if _, err := env.k.Lookup(ctx, kernel.LookupRequest{Query: "test", Limit: 5}); err != nil {
+		t.Errorf("lookup without an embedder should not error, got %v", err)
 	}
 }
 

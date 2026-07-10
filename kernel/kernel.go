@@ -1073,7 +1073,7 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 	if err := k.store.UpdateAction(ctx, a); err != nil {
 		return err
 	}
-	k.storeEmbedding(ctx, actionID, a.Description)
+	k.indexForLookup(ctx, a)
 	k.log.With(ctx).Info("action.native_enabled", "action_id", actionID)
 	return nil
 }
@@ -1350,7 +1350,7 @@ func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateAc
 		}
 	}
 	if req.Description != nil {
-		k.storeEmbedding(ctx, a.ID, a.Description)
+		k.indexForLookup(ctx, a)
 	}
 	k.log.With(ctx).Info("action.updated", "action_id", a.ID, "status", "success")
 	return a, nil
@@ -1426,7 +1426,7 @@ func (k *Kernel) SetActive(ctx context.Context, callerID, actionID string, activ
 		return err
 	}
 	if active {
-		k.storeEmbedding(ctx, actionID, a.Description)
+		k.indexForLookup(ctx, a)
 	}
 	event := "action.disabled"
 	if active {
@@ -1814,75 +1814,99 @@ type LookupResult struct {
 	Score       float32
 }
 
-// Lookup returns active actions ranked by semantic similarity to the query.
-// Embeddings are pre-stored at activation time; only actions with a stored vector
-// are ranked. Returns ErrInvalidState if no embedder is configured.
-func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult, error) {
-	if k.llm == nil {
-		return nil, ErrInvalidState.Wrap("lookup requires an embedding service")
-	}
-	qvec, err := k.llm.Embed(ctx, req.Query)
-	if err != nil {
-		return nil, ErrInternal.Wrapf("embedding failed: %v", err)
-	}
+// rrfK is the reciprocal-rank-fusion constant (standard default): score = Σ 1/(rrfK + rank).
+const rrfK = 60
 
+// Lookup ranks active actions the caller may call by a hybrid of lexical (BM25) and semantic
+// (cosine) relevance, fused by reciprocal-rank fusion and weighted by observed quality (§9). The
+// embedder is optional: with none configured (or on embed failure) ranking degrades to the lexical
+// leg alone, so lookup still works on a kernel with no LLM. The formula is a tested baseline over
+// replaceable storage (§9/§16); brute-force cosine is acceptable at this scale.
+func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult, error) {
 	limit := req.Limit
 	if limit <= 0 || limit > 50 {
 		limit = 10
 	}
+	oversample := limit * 10
 
-	embeddings, err := k.store.ListEmbeddings(ctx)
+	// Semantic leg: cosine over stored vectors, best first, capped at oversample. Skipped when no
+	// embedder is configured; on embed failure, log and degrade rather than fail the query. A vector
+	// whose dimension differs from the query's is skipped — a changed embed model can never panic
+	// cosine or score across incompatible spaces.
+	denseRank := map[string]int{}
+	if k.llm != nil {
+		if qvec, err := k.llm.Embed(ctx, req.Query); err != nil {
+			k.log.With(ctx).Warn("lookup.embed_failed", "error", err.Error())
+		} else if embeddings, err := k.store.ListEmbeddings(ctx); err != nil {
+			return nil, err
+		} else {
+			type sc struct {
+				id string
+				s  float32
+			}
+			cand := make([]sc, 0, len(embeddings))
+			for id, vec := range embeddings {
+				if len(vec) != len(qvec) {
+					continue
+				}
+				cand = append(cand, sc{id, cosine(qvec, vec)})
+			}
+			sort.Slice(cand, func(i, j int) bool { return cand[i].s > cand[j].s })
+			for i, c := range cand {
+				if i >= oversample {
+					break
+				}
+				denseRank[c.id] = i
+			}
+		}
+	}
+
+	// Lexical leg: BM25-ranked action IDs (already active/non-deleted and capped at oversample).
+	lexIDs, err := k.store.SearchActionsLexical(ctx, req.Query, oversample)
 	if err != nil {
 		return nil, err
 	}
 
-	type candidate struct {
-		actionID string
-		score    float32
+	// Reciprocal-rank fusion: scale-free (no normalization between cosine and BM25) and positive by
+	// construction, so the quality factor below can never invert the order of a match.
+	fused := map[string]float64{}
+	for id, rank := range denseRank {
+		fused[id] += 1.0 / float64(rrfK+rank)
 	}
-	scored := make([]candidate, 0, len(embeddings))
-	for actionID, vec := range embeddings {
-		scored = append(scored, candidate{actionID: actionID, score: cosine(qvec, vec)})
+	for rank, id := range lexIDs {
+		fused[id] += 1.0 / float64(rrfK+rank)
 	}
 
-	// Sort by cosine similarity and oversample for quality re-ranking.
-	sort.Slice(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
-	oversub := limit * 10
-	if oversub > len(scored) {
-		oversub = len(scored)
+	// Weight by quality: Laplace-smoothed success ratio (1+successes)/(2+uses) — an untested action
+	// sits at 0.5, observed failures pull it below, so a dead-but-active action is demoted past an
+	// untried one. Gossip StatTag prior is the fallback when there is no local experience. Stats are
+	// all-time (no recency) — a known limit, availability never gates callability, only rank.
+	type scored struct {
+		id    string
+		score float64
 	}
-	scored = scored[:oversub]
-
-	// Apply quality factor: local stats dominate; gossip StatTag prior as fallback.
-	// Local quality is the Laplace-smoothed success ratio (1+successes)/(2+uses): an untested
-	// action sits at 0.5, while observed failures pull it BELOW 0.5 toward 0 — so a dead-but-active
-	// action is demoted past an untried one instead of tying it. Known limit: stats are all-time
-	// (no recency), so a scar fades only as successes accumulate; time-windowed recency is future
-	// work (see docs/fedreport.md §6.4). Availability is still never a callability gate — only rank.
-	for i := range scored {
-		quality := float32(0.5)
-		if stats, _ := k.store.ReadStats(ctx, scored[i].actionID); stats != nil && stats.Uses > 0 {
-			quality = float32(float64(1+stats.Successes) / float64(2+stats.Uses))
-		} else if tags, _ := k.store.ListStatTagsByAction(ctx, scored[i].actionID); len(tags) > 0 {
-			quality = gossipQualityPrior(tags)
+	ranked := make([]scored, 0, len(fused))
+	for id, rel := range fused {
+		q := 0.5
+		if stats, _ := k.store.ReadStats(ctx, id); stats != nil && stats.Uses > 0 {
+			q = float64(1+stats.Successes) / float64(2+stats.Uses)
+		} else if tags, _ := k.store.ListStatTagsByAction(ctx, id); len(tags) > 0 {
+			q = float64(gossipQualityPrior(tags))
 		}
-		scored[i].score *= quality
+		ranked = append(ranked, scored{id, rel * q})
 	}
+	sort.Slice(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
 
-	sort.Slice(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
-	if len(scored) > limit {
-		scored = scored[:limit]
-	}
-
-	out := make([]*LookupResult, 0, len(scored))
-	ownerHandles := make(map[string]string)
-	for _, c := range scored {
-		a, err := k.store.ReadAction(ctx, c.actionID)
-		if err != nil {
-			continue
+	// Hydrate and filter by CanCall BEFORE truncating, so a run of others' private actions cannot
+	// starve the caller of results it may actually call.
+	out := make([]*LookupResult, 0, limit)
+	ownerHandles := map[string]string{}
+	for _, r := range ranked {
+		if len(out) >= limit {
+			break
 		}
-		// Only include actions the subject can call per CanCall rule.
-		if !canCall(req.CallerID, a) {
+		a, err := k.store.ReadAction(ctx, r.id)
+		if err != nil || !canCall(req.CallerID, a) {
 			continue
 		}
 		if _, cached := ownerHandles[a.OwnerUserID]; !cached {
@@ -1890,7 +1914,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 				ownerHandles[a.OwnerUserID] = u.Handle
 			}
 		}
-		out = append(out, &LookupResult{Action: a, OwnerHandle: ownerHandles[a.OwnerUserID], Score: c.score})
+		out = append(out, &LookupResult{Action: a, OwnerHandle: ownerHandles[a.OwnerUserID], Score: float32(r.score)})
 	}
 	return out, nil
 }
@@ -1911,6 +1935,43 @@ func gossipQualityPrior(tags []*StatTag) float32 {
 		}
 	}
 	return 0.5
+}
+
+// indexForLookup keeps an action's lookup entries current: the lexical FTS text (always — it needs
+// no LLM) and, when an embedder is configured, its description embedding. Best-effort: logs on
+// failure, never fails the caller.
+func (k *Kernel) indexForLookup(ctx context.Context, a *Action) {
+	if err := k.store.UpsertLookupText(ctx, a.ID, lookupText(a)); err != nil {
+		k.log.With(ctx).Warn("lookup.index_failed", "action_id", a.ID, "error", err.Error())
+	}
+	k.storeEmbedding(ctx, a.ID, a.Description)
+}
+
+// lookupText assembles an action's lexical-index text: name, description, and the property names +
+// descriptions from its input/output schemas (§3 requires those descriptions to be sufficient for
+// lookup). Unknown schema shapes simply contribute nothing.
+func lookupText(a *Action) string {
+	var b strings.Builder
+	b.WriteString(a.Name)
+	b.WriteByte(' ')
+	b.WriteString(a.Description)
+	schemaText(&b, a.InputSchema)
+	schemaText(&b, a.OutputSchema)
+	return b.String()
+}
+
+func schemaText(b *strings.Builder, schema map[string]any) {
+	props, _ := schema["properties"].(map[string]any)
+	for name, p := range props {
+		b.WriteByte(' ')
+		b.WriteString(name)
+		if pm, ok := p.(map[string]any); ok {
+			if d, ok := pm["description"].(string); ok {
+				b.WriteByte(' ')
+				b.WriteString(d)
+			}
+		}
+	}
 }
 
 // storeEmbedding embeds the description and persists the vector. Best-effort: logs on failure, never returns an error.

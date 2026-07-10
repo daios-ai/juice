@@ -378,6 +378,10 @@ type Store interface {
 	// ListEmbeddings returns stored embedding vectors keyed by action ID,
 	// filtered to active, public, non-deleted actions only.
 	ListEmbeddings(ctx context.Context) (map[string][]float32, error)
+	// UpsertLookupText replaces an action's lexical-index text (§9 hybrid lookup).
+	UpsertLookupText(ctx context.Context, actionID, text string) error
+	// SearchActionsLexical returns up to limit active action IDs matching query, BM25-ranked best-first.
+	SearchActionsLexical(ctx context.Context, query string, limit int) ([]string, error)
 
 	// ---- Users (extended) ----
 

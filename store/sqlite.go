@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/daios-ai/juice/kernel"
 	_ "modernc.org/sqlite"
@@ -2214,6 +2215,57 @@ func (s *DB) ListEmbeddings(ctx context.Context) (map[string][]float32, error) {
 		out[id] = vec
 	}
 	return out, rows.Err()
+}
+
+// UpsertLookupText replaces an action's lexical-index row (§9). Delete-then-insert keeps it
+// idempotent; the row is keyed by the UNINDEXED action_id.
+func (s *DB) UpsertLookupText(ctx context.Context, actionID, text string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM actions_fts WHERE action_id=?`, actionID); err != nil {
+		return dbErr(err, "upsert lookup text: delete")
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO actions_fts(action_id, text) VALUES (?, ?)`, actionID, text)
+	return dbErr(err, "upsert lookup text")
+}
+
+// SearchActionsLexical returns up to limit active, non-deleted action IDs matching query, BM25-ranked
+// (best first). The raw query is FTS5 *syntax*, so it is tokenized into quoted terms OR'd together —
+// user text is never passed through as an expression. A query with no word tokens yields nil.
+func (s *DB) SearchActionsLexical(ctx context.Context, query string, limit int) ([]string, error) {
+	match := ftsMatchQuery(query)
+	if match == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT action_id FROM actions_fts
+		 WHERE text MATCH ?
+		   AND action_id IN (SELECT id FROM actions WHERE active=1 AND deleted_at IS NULL)
+		 ORDER BY bm25(actions_fts) LIMIT ?`, match, limit)
+	if err != nil {
+		return nil, dbErr(err, "lexical search")
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, dbErr(err, "lexical search: scan")
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ftsMatchQuery turns free text into a safe FTS5 MATCH expression: each unicode word token is
+// double-quoted (so it is a literal phrase, not an operator) and the tokens are OR'd. Splitting on
+// non-alphanumerics means tokens never contain quotes or FTS5 metacharacters. Empty when tokenless.
+func ftsMatchQuery(query string) string {
+	terms := strings.FieldsFunc(query, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	})
+	for i, t := range terms {
+		terms[i] = `"` + t + `"`
+	}
+	return strings.Join(terms, " OR ")
 }
 
 // ---- Gossip / Discovered Kernels ----
