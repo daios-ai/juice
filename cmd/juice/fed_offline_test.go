@@ -160,6 +160,63 @@ func TestInspectOfflineFriendedShowsLocalData(t *testing.T) {
 	}
 }
 
+// TestInspectLocalUserRejected: a handle that names a LOCAL account (no public key) is not a
+// federation peer — inspect must reject it, not probe the handle as if it were a key. Regression:
+// `admin inspect @chat` used to report a local user as an offline unknown peer.
+func TestInspectLocalUserRejected(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	ctx := context.Background()
+	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@chat", Email: "c@x.local", Password: "pw"}); err != nil {
+		t.Fatal(err)
+	}
+	// fed is present so the guard, not a missing transport, is what rejects.
+	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{reachPath: "direct"}}
+
+	req := httptest.NewRequest("GET", "/control/peers/inspect?key="+url.QueryEscape("@chat"), nil)
+	rec := httptest.NewRecorder()
+	srv.ctlInspectPeer(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("inspect @chat: status %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "local user") {
+		t.Errorf("expected a 'local user, not a peer' message, got: %s", rec.Body.String())
+	}
+
+	// An @handle that names nothing at all is "no peer" (404), not a key to probe: a stranger is
+	// inspected by key, never by an unfriended handle.
+	req = httptest.NewRequest("GET", "/control/peers/inspect?key="+url.QueryEscape("@nope"), nil)
+	rec = httptest.NewRecorder()
+	srv.ctlInspectPeer(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("inspect @nope: status %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUnfriendLocalUserRejected: unfriend must never deny-list a local account (which would block
+// it). A handle with no public key is rejected and its denied_at stays nil.
+func TestUnfriendLocalUserRejected(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	ctx := context.Background()
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@chat", Email: "c@x.local", Password: "pw"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	srv := &server{kernel: k, log: log.Discard()}
+
+	body, _ := json.Marshal(map[string]string{"handle": "@chat"})
+	req := httptest.NewRequest("POST", "/control/peers/unfriend", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), ctxCallerID, sys.ID))
+	rec := httptest.NewRecorder()
+	srv.ctlUnfriendPeer(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unfriend @chat: status %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if got, _ := k.ReadUser(ctx, u.ID); got.DeniedAt != nil {
+		t.Error("a local user must not be deny-listed by unfriend")
+	}
+}
+
 // TestInspectOfflineStranger: an unreachable peer we never friended → empty view, source=none,
 // never a hang or opaque error.
 func TestInspectOfflineStranger(t *testing.T) {

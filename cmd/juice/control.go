@@ -146,8 +146,21 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ident := strings.TrimSpace(r.URL.Query().Get("key"))
 	peerKey := ident
-	if u, err := resolveHandle(s.kernel, ctx, ident); err == nil && u.PublicKey != "" {
+	// Resolve a local reference to its peer key. A reference that resolves to a local account with
+	// no public key is a plain user, not a federation peer: reject it rather than probe the handle
+	// as if it were a key (inspect is a peer-only window, §13). Only a reference that resolves to no
+	// local account at all is treated as a raw stranger key to probe (inspect <key> before friending).
+	if u, err := resolveHandle(s.kernel, ctx, ident); err == nil {
+		if u.PublicKey == "" {
+			writeErr(w, kernel.ErrInvalidInput.Wrapf("%q is a local user, not a federation peer", ident))
+			return
+		}
 		peerKey = u.PublicKey
+	} else if strings.HasPrefix(ident, "@") {
+		// An @handle that names no local account: there is no peer to inspect (a stranger is
+		// inspected by key, not by an unfriended handle). Don't probe the handle as if it were a key.
+		writeErr(w, kernel.ErrNotFound.Wrapf("no peer %q", ident))
+		return
 	}
 	if s.fed == nil {
 		writeErr(w, kernel.ErrInvalidState.Wrap("federation transport not running"))
@@ -260,6 +273,11 @@ func (s *server) ctlUnfriendPeer(w http.ResponseWriter, r *http.Request) {
 	u, err := resolveHandle(s.kernel, r.Context(), req.Handle)
 	if err != nil {
 		writeErr(w, kernel.ErrNotFound.Wrapf("no friended peer %q", req.Handle))
+		return
+	}
+	// A local account with no key is not a peer: never deny-list a plain user (which would block it).
+	if u.PublicKey == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrapf("%q is a local user, not a federation peer", req.Handle))
 		return
 	}
 	err = s.kernel.DenyPeer(r.Context(), callerFrom(r), u.Handle)
