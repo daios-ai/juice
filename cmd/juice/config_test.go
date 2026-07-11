@@ -90,7 +90,7 @@ func TestDefaultServerConfig(t *testing.T) {
 
 func TestLoadOrCreateConfig_CreatesFile(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "juice.json")
+	path := filepath.Join(dir, "config.json")
 
 	cfg, err := LoadOrCreateConfig(path)
 	if err != nil {
@@ -106,7 +106,7 @@ func TestLoadOrCreateConfig_CreatesFile(t *testing.T) {
 
 func TestLoadOrCreateConfig_ReadsExisting(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "juice.json")
+	path := filepath.Join(dir, "config.json")
 
 	want := DefaultServerConfig()
 	want.Native.LLM.URL = "http://custom:11434"
@@ -130,7 +130,7 @@ func TestLoadOrCreateConfig_ReadsExisting(t *testing.T) {
 
 func TestLoadOrCreateConfig_MissingFieldsUseDefaults(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "juice.json")
+	path := filepath.Join(dir, "config.json")
 
 	// Write partial config — only one nested field
 	if err := os.WriteFile(path, []byte(`{"native":{"llm":{"url":"http://custom:11434"}}}`), 0o644); err != nil {
@@ -151,7 +151,7 @@ func TestLoadOrCreateConfig_MissingFieldsUseDefaults(t *testing.T) {
 
 func TestLoadOrCreateConfig_BadJSON(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "juice.json")
+	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{bad json`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestLoadOrCreateConfig_BadJSON(t *testing.T) {
 
 func TestApplyEnvOverrides(t *testing.T) {
 	// Only the spec-documented runtime overrides remain (§14): JUICE_LOG_LEVEL and the
-	// runtime-only JUICE_CREDENTIALS_KEY. Everything else is configured via juice.json.
+	// runtime-only JUICE_CREDENTIALS_KEY. Everything else is configured via config.json.
 	t.Run("overrides log level", func(t *testing.T) {
 		t.Setenv("JUICE_LOG_LEVEL", "debug")
 		cfg := DefaultServerConfig()

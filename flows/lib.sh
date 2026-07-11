@@ -61,7 +61,7 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-# write_config db [key=value ...]  — juice.json next to db. server_url is intentionally
+# write_config db [key=value ...]  — config.json next to db. server_url is intentionally
 # empty (CLI dials the real bound address). log_format is json so `server.ready` is
 # machine-readable. bootstrap_peers seeds the federation transport (§13); empty = no discovery.
 # Keys: fee_bps script_timeout_ms kernel_handle make_max_steps bootstrap_peers.
@@ -80,7 +80,7 @@ write_config() {
     esac; done
     local bp_json="[]"
     [ -n "$bootstrap_peers" ] && bp_json="[\"$bootstrap_peers\"]"
-    cat > "$(dirname "$db")/juice.json" <<EOF
+    cat > "$(dirname "$db")/config.json" <<EOF
 {
   "script_timeout_ms": $script_timeout_ms,
   "script_memory_bytes": 67108864,
@@ -215,9 +215,9 @@ http_code() {
 }
 
 # juice_token_dir home db — mirrors tokenDir() in cmd/juice/main.go:
-# $HOME/.juice/tokens/{sha256(abs(db))[:12]}
+# $HOME/.juice/kernel/tokens/{sha256(abs(db))[:12]}
 juice_token_dir() {
-    python3 -c "import hashlib,os,sys; print(os.path.join(sys.argv[1],'.juice','tokens',hashlib.sha256(os.path.abspath(sys.argv[2]).encode()).hexdigest()[:12]))" "$1" "$2"
+    python3 -c "import hashlib,os,sys; print(os.path.join(sys.argv[1],'.juice','kernel','tokens',hashlib.sha256(os.path.abspath(sys.argv[2]).encode()).hexdigest()[:12]))" "$1" "$2"
 }
 
 # ---------------------------------------------------------------------------

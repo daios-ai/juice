@@ -3,7 +3,7 @@
 /cmd/juice/juice
 
 # Runtime config (generated with defaults on first run)
-juice.json
+config.json
 
 # SQLite database files
 *.db

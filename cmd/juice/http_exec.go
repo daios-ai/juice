@@ -92,7 +92,7 @@ func validateResolvedIP(ipStr string) error {
 		return fmt.Errorf("invalid resolved IP %q", ipStr)
 	}
 	if kernel.UnsafeIP(ip) {
-		return kernel.ErrInvalidInput.Wrap("resolved address is private or loopback — for local/dev use, set allow_local_sources in juice.json")
+		return kernel.ErrInvalidInput.Wrap("resolved address is private or loopback — for local/dev use, set allow_local_sources in config.json")
 	}
 	return nil
 }

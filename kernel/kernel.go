@@ -32,8 +32,8 @@ type Config struct {
 	AllowLocalSources bool               // permit loopback/private URLs as action sources (tests only)
 	SigningKey        ed25519.PrivateKey // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
 	IssuerUserID      string             // @sys user ID, set during bootstrap
-	AuthIssuer        string             // juice.json auth_issuer — iss claim in JWTs; empty = no claim
-	AuthAudience      string             // juice.json auth_audience — aud claim in JWTs; empty = no validation
+	AuthIssuer        string             // config.json auth_issuer — iss claim in JWTs; empty = no claim
+	AuthAudience      string             // config.json auth_audience — aud claim in JWTs; empty = no validation
 	// RemotePendingMaxAge bounds how long a remote-proxy call may stay pending before it settles
 	// as a failure with full refund, so a silent peer can't pin a process open. 0 = default 24h.
 	RemotePendingMaxAge time.Duration
