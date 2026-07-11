@@ -103,21 +103,21 @@ func runServer(addr string) error {
 		defer retryCancel()
 		go startRemoteRetryLoop(retryCtx, k.PendingRemoteTraces, k.RetryRemoteTrace, globalCfg.remoteRetryInterval())
 
-		// Grow the known network (§13): advertise under the discovery rendezvous and pull gossip
-		// from the bootstrap seeds + enumerated DHT providers into discovered_kernels, so a fresh
-		// box has a directory to friend from without already knowing anyone. Empty bootstrap_peers
-		// means neither announce nor discover, so skip the loop entirely. Best-effort; stops with
-		// runServer.
-		if len(globalCfg.BootstrapPeers) > 0 {
-			discCtx, discCancel := context.WithCancel(context.Background())
-			defer discCancel()
-			disc := fedTransport
-			go startDiscoveryLoop(discCtx, globalCfg.discoveryInterval(), func(c context.Context) {
-				pctx, cancel := context.WithTimeout(c, discoveryPassTimeout)
-				defer cancel()
-				discoverOnce(pctx, disc, k.AccumulateGossip, logger)
-			})
-		}
+		// Grow the known network and keep friends synced (§13). Two engines share the timer: the
+		// DHT directory (advertise + enumerate providers) fills the roster from bootstrap seeds, and
+		// friend sync pulls gossip directly from each friended peer to cache its liveness and our
+		// credit there. Directory runs only with bootstrap_peers (empty = neither announce nor
+		// discover); friend sync always runs, so a kernel with imported proxies but no bootstrap still
+		// learns its peers' state. Best-effort; stops with runServer.
+		discCtx, discCancel := context.WithCancel(context.Background())
+		defer discCancel()
+		disc := fedTransport
+		directory := len(globalCfg.BootstrapPeers) > 0
+		go startDiscoveryLoop(discCtx, globalCfg.discoveryInterval(), func(c context.Context) {
+			pctx, cancel := context.WithTimeout(c, discoveryPassTimeout)
+			defer cancel()
+			discoverOnce(pctx, disc, directory, k.FriendKeys, k.AccumulateGossip, k.RecordPeerSync, logger)
+		})
 	}
 
 	// Reap peers idle past peer_retention_days (§13 Retention) on a slow timer, plus one pass now.
@@ -227,21 +227,34 @@ type fedDiscoverer interface {
 	Gossip(ctx context.Context, peerKey string) (json.RawMessage, error)
 }
 
-// discoverOnce runs one known-network refresh (§13): advertise under the discovery rendezvous, then
-// pull gossip from the bootstrap seeds plus enumerated DHT providers and accumulate each into the
-// discovered-kernels table. Best-effort throughout — an offline DHT or peer is skipped, never fatal.
-// The introducer is the pulled kernel's own key (a first-party self-report); AccumulateGossip records
-// that kernel's transacted friends introduced-by it.
-func discoverOnce(ctx context.Context, d fedDiscoverer, accumulate func(context.Context, *kernel.GossipResponse, string) error, logger *log.Logger) {
-	if err := d.Advertise(ctx); err != nil {
-		logger.Debug("discovery.advertise_failed", "error", err)
-	}
+// discoverOnce runs one known-network refresh plus friend sync (§13). When directory is set, it
+// advertises under the discovery rendezvous and pulls gossip from the bootstrap seeds plus enumerated
+// DHT providers, accumulating each into the discovered-kernels table (introducer = the pulled kernel's
+// own key, a first-party self-report). Friend sync always runs: it pulls gossip directly from each
+// friended peer and, on success, persists that peer's liveness and reported credit via recordSync.
+// Best-effort throughout — an offline DHT or peer is skipped, never fatal.
+func discoverOnce(ctx context.Context, d fedDiscoverer, directory bool,
+	friendKeys func(context.Context) []string,
+	accumulate func(context.Context, *kernel.GossipResponse, string) error,
+	recordSync func(context.Context, string, *int64) error,
+	logger *log.Logger) {
+
 	keys := map[string]bool{}
-	for _, k := range d.BootstrapKeys() {
+	friends := map[string]bool{}
+	for _, k := range friendKeys(ctx) {
 		keys[k] = true
+		friends[k] = true
 	}
-	for _, k := range d.DiscoverProviders(ctx, discoveryFanout) {
-		keys[k] = true
+	if directory {
+		if err := d.Advertise(ctx); err != nil {
+			logger.Debug("discovery.advertise_failed", "error", err)
+		}
+		for _, k := range d.BootstrapKeys() {
+			keys[k] = true
+		}
+		for _, k := range d.DiscoverProviders(ctx, discoveryFanout) {
+			keys[k] = true
+		}
 	}
 	for key := range keys {
 		raw, err := d.Gossip(ctx, key)
@@ -253,6 +266,10 @@ func discoverOnce(ctx context.Context, d fedDiscoverer, accumulate func(context.
 			continue
 		}
 		_ = accumulate(ctx, &g, g.PublicKey)
+		if friends[key] {
+			// A friend answered: cache last_seen and, when it reported one, our credit there (§13).
+			_ = recordSync(ctx, key, g.CounterpartyBalance)
+		}
 	}
 }
 
@@ -1328,9 +1345,10 @@ func (h *fedHandlers) OnManifest(ctx context.Context, _ string) ([]json.RawMessa
 	return out, nil
 }
 
-// OnGossip returns the gossip document (§13).
-func (h *fedHandlers) OnGossip(ctx context.Context, _ string) (json.RawMessage, error) {
-	g, err := h.kernel.GetGossip(ctx)
+// OnGossip returns the gossip document (§13). peerKey is the connection's authenticated public key;
+// GetGossip uses it to report the requesting friend its credit here (counterparty_balance, §13 peer sync).
+func (h *fedHandlers) OnGossip(ctx context.Context, peerKey string) (json.RawMessage, error) {
+	g, err := h.kernel.GetGossip(ctx, peerKey)
 	if err != nil {
 		return nil, err
 	}

@@ -30,6 +30,16 @@ func grantActionRef(err error, fallback string) string {
 	return fallback
 }
 
+// peerMetaHandle returns the peer handle a peer_unreachable/peer_unfunded error names (§13),
+// stripped of a leading '@' since the caller re-adds it, or "peer" when absent.
+func peerMetaHandle(err error) string {
+	var ke *kernel.KernelError
+	if errors.As(err, &ke) && ke.Meta["peer"] != "" {
+		return strings.TrimPrefix(ke.Meta["peer"], "@")
+	}
+	return "peer"
+}
+
 // interactiveTTY reports whether a human is driving: stdin readable and stderr a terminal.
 // Prompts and progress go to stderr so stdout stays payload-only (§14).
 func interactiveTTY() bool {
@@ -500,6 +510,12 @@ func actionListCmd() *cobra.Command {
 				if a.RequiresGrant {
 					grant = " [grant]" // caller must connect their own credential first (§8)
 				}
+				switch a.PeerState { // remote_proxy liveness/funding from the §13 sync cache
+				case "offline":
+					grant += " [peer offline]"
+				case "unfunded":
+					grant += " [peer unfunded]"
+				}
 				if all {
 					active := " "
 					if a.Active {
@@ -957,6 +973,14 @@ func runCmd() *cobra.Command {
 			if err != nil {
 				if errors.Is(err, kernel.ErrGrantRequired) {
 					fmt.Fprintf(os.Stderr, "\nAuthorize with:\n  juice user connect %s\n", grantActionRef(err, cmdArgs[0]))
+				}
+				// Federation-relationship failures (§13): the caller's own balance is fine — say so,
+				// and point at the operator remedy instead of a caller one.
+				if errors.Is(err, kernel.ErrPeerUnreachable) {
+					fmt.Fprintf(os.Stderr, "\nThe peer is offline; your funds were not charged. Try again when it is online.\n")
+				}
+				if errors.Is(err, kernel.ErrPeerUnfunded) {
+					fmt.Fprintf(os.Stderr, "\nYour balance is fine; this kernel's credit with peer @%s is exhausted.\nOperator remedy: pay the peer out of band and have its operator run `admin deposit`.\n", peerMetaHandle(err))
 				}
 				return err
 			}

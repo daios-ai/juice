@@ -1912,8 +1912,10 @@ func (f *fakeSuccessHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[str
 }
 
 type fakeFederationHTTP struct {
-	result      map[string]any
-	receiptJSON string
+	result        map[string]any
+	receiptJSON   string
+	httpStatus    int  // 0 → 200 (kept so existing tests read as success)
+	notDispatched bool // simulate a provably-never-sent dispatch (§13)
 }
 
 func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ string) (map[string]any, error) {
@@ -1921,11 +1923,18 @@ func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[
 }
 
 func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, _, _ string, _ map[string]any) (kernel.FederationResult, error) {
+	if f.notDispatched {
+		return kernel.FederationResult{NotDispatched: true}, nil
+	}
 	result := f.result
 	if result == nil {
 		result = map[string]any{}
 	}
-	return kernel.FederationResult{Result: result, ReceiptJSON: f.receiptJSON, HTTPStatus: 200}, nil
+	status := f.httpStatus
+	if status == 0 {
+		status = 200
+	}
+	return kernel.FederationResult{Result: result, ReceiptJSON: f.receiptJSON, HTTPStatus: status}, nil
 }
 
 func contains(s, substr string) bool {

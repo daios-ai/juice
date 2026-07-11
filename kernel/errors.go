@@ -82,6 +82,7 @@ func HTTPStatusFromCode(code string) int {
 		ErrUnauthenticated, ErrUnauthorized, ErrNotFound, ErrInvalidInput,
 		ErrInvalidState, ErrInsufficientFunds, ErrExecutionFailed,
 		ErrSchemaViolation, ErrTimeout, ErrInternal, ErrGrantRequired,
+		ErrPeerUnreachable, ErrPeerUnfunded,
 	} {
 		if sentinel.Code == code {
 			return sentinel.HTTP
@@ -106,10 +107,30 @@ var (
 	// action can run (§8). A precondition with a one-time remedy, like ErrInsufficientFunds;
 	// Meta["action"] names the action so any client can drive consent by field, not substring.
 	ErrGrantRequired = &KernelError{Code: "grant_required", HTTP: 403}
+	// ErrPeerUnreachable: the first dispatch of a remote-proxy call provably never reached the
+	// peer (§13 never-dispatched); the call is settled locally with a full refund. 502 (bad
+	// gateway), distinct from ErrTimeout's 504 (parked, awaiting a receipt). Meta["peer"] names it.
+	ErrPeerUnreachable = &KernelError{Code: "peer_unreachable", HTTP: 502}
+	// ErrPeerUnfunded: this kernel's prepaid credit on the peer is exhausted (§13); the peer
+	// signed a zero-charge rejection. An operator condition (out-of-band payment + admin deposit),
+	// never the caller's own balance — hence a distinct code carrying Meta["peer"], HTTP 402.
+	ErrPeerUnfunded = &KernelError{Code: "peer_unfunded", HTTP: 402}
 )
 
 // GrantRequiredError is the one lazy-consent rejection (§8): ref in both the message and
 // Meta["action"], so every mint site is identical and clients always get a qualified @owner/name.
 func GrantRequiredError(ref string) error {
 	return ErrGrantRequired.Wrapf("grant required for %s", ref).WithMeta("action", ref)
+}
+
+// PeerUnreachableError attributes a never-dispatched remote call to the peer (§13): handle in
+// both the message and Meta["peer"], mirroring GrantRequiredError.
+func PeerUnreachableError(handle string) *KernelError {
+	return ErrPeerUnreachable.Wrapf("peer %s is unreachable; the call was not sent and has been refunded", handle).WithMeta("peer", handle)
+}
+
+// PeerUnfundedError attributes a 402 signed rejection to this kernel's exhausted credit on the
+// peer (§13): handle in the message and Meta["peer"]. An operator condition, not the caller's.
+func PeerUnfundedError(handle string) *KernelError {
+	return ErrPeerUnfunded.Wrapf("this kernel's credit with peer %s is exhausted; the operator must top up", handle).WithMeta("peer", handle)
 }

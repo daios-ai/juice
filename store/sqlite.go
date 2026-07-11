@@ -208,7 +208,7 @@ func strVal(s *string) string {
 
 // ---- Users ----
 
-const userCols = `id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,created_at,updated_at`
+const userCols = `id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,peer_last_seen,peer_credit,created_at,updated_at`
 
 func (s *DB) CreateUser(ctx context.Context, u *kernel.User) error {
 	_, err := s.db.ExecContext(ctx,
@@ -381,7 +381,7 @@ func (s *DB) PurgePeerCascade(ctx context.Context, userID string) error {
 			}
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE users SET public_key=NULL, denied_at=NULL, updated_at=? WHERE id=?`,
+			`UPDATE users SET public_key=NULL, denied_at=NULL, peer_last_seen=NULL, peer_credit=NULL, updated_at=? WHERE id=?`,
 			timeToStr(time.Now().UTC()), userID); err != nil {
 			return dbErr(err, "anonymize peer")
 		}
@@ -488,14 +488,17 @@ func (s *DB) ListStatsByOwner(ctx context.Context, ownerUserID string) ([]*kerne
 func scanUserFn(scan func(...any) error) (*kernel.User, error) {
 	var u kernel.User
 	var createdAt, updatedAt string
-	var suspendedAt, deniedAt, publicKey *string
+	var suspendedAt, deniedAt, publicKey, peerLastSeen *string
+	var peerCredit *int64
 	if err := scan(&u.ID, &u.Handle, &u.Email, &u.PasswordHash,
-		&u.Available, &u.Locked, &suspendedAt, &deniedAt, &publicKey, &createdAt, &updatedAt); err != nil {
+		&u.Available, &u.Locked, &suspendedAt, &deniedAt, &publicKey, &peerLastSeen, &peerCredit, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	u.SuspendedAt = strToNullTime(suspendedAt)
 	u.DeniedAt = strToNullTime(deniedAt)
 	u.PublicKey = strVal(publicKey)
+	u.PeerLastSeen = strToNullTime(peerLastSeen)
+	u.PeerCredit = peerCredit
 	u.CreatedAt = strToTime(createdAt)
 	u.UpdatedAt = strToTime(updatedAt)
 	return &u, nil
@@ -534,6 +537,20 @@ func (s *DB) UnsuspendUser(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE users SET suspended_at=NULL WHERE id=?`, id)
 	return dbErr(err, "unsuspend user")
+}
+
+// UpdatePeerSync writes the friend-sync cache (§13). COALESCE keeps the prior peer_credit when the
+// pull reported none (nil), so a reachable-but-silent friend still refreshes last_seen. updated_at
+// is intentionally untouched: sync is a display cache, not peer activity for retention (§13).
+func (s *DB) UpdatePeerSync(ctx context.Context, id string, lastSeen time.Time, credit *int64) error {
+	var cr any
+	if credit != nil {
+		cr = *credit
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET peer_last_seen=?, peer_credit=COALESCE(?, peer_credit) WHERE id=?`,
+		timeToStr(lastSeen), cr, id)
+	return dbErr(err, "update peer sync")
 }
 
 func (s *DB) UpdateUser(ctx context.Context, u *kernel.User) error {

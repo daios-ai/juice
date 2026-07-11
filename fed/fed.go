@@ -13,7 +13,15 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 )
+
+// ErrNotDispatched marks a transport failure where the request provably never left this host:
+// resolving/connecting to the peer failed before any request byte was written (§13 never-dispatched).
+// The caller (cmd/juice) translates it into FederationResult.NotDispatched so the kernel — which
+// never imports fed — can fail-fast a first dispatch. Post-connection failures (stream negotiation,
+// write, read) are NOT wrapped: bytes may have reached the peer, so the call stays pending for retry.
+var ErrNotDispatched = errors.New("fed: request not dispatched")
 
 // Protocol IDs are versioned libp2p streams. The version suffix lets the protocol evolve
 // without silent incompatibility — HTTP+JSON was implicitly versionless; libp2p makes it explicit.

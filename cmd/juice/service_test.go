@@ -240,6 +240,48 @@ func TestEnrichAction(t *testing.T) {
 	}
 }
 
+// peerStateFor derives a remote proxy's §13 liveness/funding annotation from the peer's sync cache:
+// offline (missing/stale last_seen) takes precedence over unfunded (cached credit below mp); healthy
+// yields "". A zero-value kernel has ImportBPS 0, so RemoteManifestPrice(p) == p.
+func TestPeerStateFor(t *testing.T) {
+	k := &kernel.Kernel{}
+	stale := time.Hour
+	fresh := time.Now().Add(-time.Minute)
+	old := time.Now().Add(-2 * time.Hour)
+	credit := func(v int64) *int64 { return &v }
+
+	cases := []struct {
+		name  string
+		owner *kernel.User
+		price int64
+		want  string
+	}{
+		{"nil owner", nil, 10, ""},
+		{"never synced", &kernel.User{}, 10, "offline"},
+		{"stale last_seen", &kernel.User{PeerLastSeen: &old}, 10, "offline"},
+		{"fresh underfunded", &kernel.User{PeerLastSeen: &fresh, PeerCredit: credit(5)}, 10, "unfunded"},
+		{"fresh funded", &kernel.User{PeerLastSeen: &fresh, PeerCredit: credit(20)}, 10, ""},
+		{"fresh unknown credit", &kernel.User{PeerLastSeen: &fresh}, 10, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := peerStateFor(k, tc.owner, tc.price, stale); got != tc.want {
+				t.Errorf("peerStateFor = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// peerViews carries the §13 sync cache (our credit on the peer, last_seen) into the projection.
+func TestPeerViewsCarrySyncCache(t *testing.T) {
+	seen := time.Now()
+	credit := int64(64)
+	views := peerViews([]*kernel.User{{Handle: "@b", PublicKey: "k", PeerCredit: &credit, PeerLastSeen: &seen}})
+	if len(views) != 1 || views[0].PeerCredit == nil || *views[0].PeerCredit != 64 || views[0].LastSeen == nil {
+		t.Errorf("peerViews dropped the sync cache: %+v", views[0])
+	}
+}
+
 func TestValidateRating(t *testing.T) {
 	for _, v := range []float64{0, 1} {
 		if err := validateRating(v); err != nil {

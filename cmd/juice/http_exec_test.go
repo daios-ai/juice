@@ -130,14 +130,38 @@ func TestExecuteFederationNon200(t *testing.T) {
 }
 
 // A transport error yields a zero result so the kernel keeps the call pending for retry (§13).
+// A plain (post-connect) error is NOT NotDispatched: the request may have executed remotely.
 func TestExecuteFederationTransportError(t *testing.T) {
 	fc := &fakeFedCaller{err: fmt.Errorf("unreachable")}
 	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", "@o/a", "key-y", map[string]any{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if fr.HTTPStatus != 0 || fr.ReceiptJSON != "" {
-		t.Errorf("transport error should be pending, got %+v", fr)
+	if fr.HTTPStatus != 0 || fr.ReceiptJSON != "" || fr.NotDispatched {
+		t.Errorf("plain transport error should be pending (not NotDispatched), got %+v", fr)
+	}
+}
+
+// A never-dispatched transport error (resolve/connect failed) sets NotDispatched so a first
+// dispatch can fail fast (§13). The nil-transport executor is the same provably-never-sent case.
+func TestExecuteFederationNotDispatched(t *testing.T) {
+	fc := &fakeFedCaller{err: fmt.Errorf("%w: cannot resolve", fed.ErrNotDispatched)}
+	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", "@o/a", "key-z", map[string]any{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !fr.NotDispatched {
+		t.Errorf("ErrNotDispatched should set NotDispatched, got %+v", fr)
+	}
+
+	// nil transport → provably never sent.
+	e := &httpActionExecutor{}
+	fr2, err := e.ExecuteFederation(context.Background(), "peer", "@o/a", "key-w", map[string]any{})
+	if err != nil {
+		t.Fatalf("nil-transport ExecuteFederation: %v", err)
+	}
+	if !fr2.NotDispatched {
+		t.Errorf("nil transport should set NotDispatched, got %+v", fr2)
 	}
 }
 

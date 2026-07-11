@@ -2400,7 +2400,9 @@ func TestDiscoverOnce(t *testing.T) {
 		got = append(got, g.PublicKey)
 		return nil
 	}
-	discoverOnce(context.Background(), f, acc, log.Discard())
+	noFriends := func(context.Context) []string { return nil }
+	noSync := func(context.Context, string, *int64) error { return nil }
+	discoverOnce(context.Background(), f, true, noFriends, acc, noSync, log.Discard())
 
 	if f.advertised != 1 {
 		t.Errorf("advertised %d times, want 1", f.advertised)
@@ -2408,6 +2410,34 @@ func TestDiscoverOnce(t *testing.T) {
 	sort.Strings(got)
 	if strings.Join(got, ",") != "A,B" {
 		t.Errorf("accumulated %v, want [A B] (dup deduped, offline C skipped)", got)
+	}
+}
+
+// discoverOnce runs friend sync even with directory disabled (empty bootstrap_peers, §13): it pulls
+// gossip from each friended key and records last_seen + the reported counterparty_balance, without
+// advertising or enumerating providers.
+func TestDiscoverOnceFriendSync(t *testing.T) {
+	bal := int64(42)
+	g, _ := json.Marshal(kernel.GossipResponse{PublicKey: "F", Handle: "@F", CounterpartyBalance: &bal})
+	f := &fakeDiscoverer{
+		bootstrap: []string{"A"}, // must be ignored when directory=false
+		providers: []string{"B"}, // must be ignored when directory=false
+		gossip:    map[string]json.RawMessage{"F": g},
+	}
+	friends := func(context.Context) []string { return []string{"F"} }
+	var syncedKey string
+	var syncedCredit *int64
+	rec := func(_ context.Context, key string, credit *int64) error {
+		syncedKey, syncedCredit = key, credit
+		return nil
+	}
+	discoverOnce(context.Background(), f, false, friends, func(context.Context, *kernel.GossipResponse, string) error { return nil }, rec, log.Discard())
+
+	if f.advertised != 0 {
+		t.Errorf("advertised %d times with directory disabled, want 0", f.advertised)
+	}
+	if syncedKey != "F" || syncedCredit == nil || *syncedCredit != 42 {
+		t.Errorf("recordSync got (%q,%v), want (F, 42)", syncedKey, syncedCredit)
 	}
 }
 

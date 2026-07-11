@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -215,6 +216,27 @@ func TestProbeUnreachable(t *testing.T) {
 	}
 	if r.Path != "unreachable" {
 		t.Errorf("path: got %q, want unreachable", r.Path)
+	}
+}
+
+// A Call whose peer cannot be resolved fails before any byte is written, so it wraps
+// ErrNotDispatched (§13 never-dispatched); a Call to a reachable peer succeeds without it.
+func TestCallUnresolvableIsNotDispatched(t *testing.T) {
+	a := newTestTransport(t, &fakeHandlers{}, nil)
+	unknown := a.PublicKey()[:len(a.PublicKey())-2] + "ZZ" // valid form, unroutable
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := a.Call(ctx, unknown, CallRequest{Action: "@x/y", IdempotencyKey: "k"})
+	if !errors.Is(err, ErrNotDispatched) {
+		t.Fatalf("unresolvable Call: expected ErrNotDispatched, got %v", err)
+	}
+
+	// A reachable peer round-trips without the sentinel.
+	b := newTestTransport(t, &fakeHandlers{callBody: json.RawMessage(`{}`)}, nil)
+	a2 := newTestTransport(t, &fakeHandlers{}, b.ListenAddrs())
+	if _, err := a2.Call(ctx, b.PublicKey(), CallRequest{Action: "@x/y", IdempotencyKey: "k"}); errors.Is(err, ErrNotDispatched) {
+		t.Errorf("reachable Call must not report ErrNotDispatched: %v", err)
 	}
 }
 

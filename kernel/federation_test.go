@@ -1697,7 +1697,7 @@ func TestGetGossipOnlyIncludesTransactedFriends(t *testing.T) {
 		t.Fatalf("UpsertStats: %v", err)
 	}
 
-	gossip, err := k.GetGossip(ctx)
+	gossip, err := k.GetGossip(ctx, "")
 	if err != nil {
 		t.Fatalf("GetGossip: %v", err)
 	}
@@ -1837,7 +1837,7 @@ func TestFriendDoesNotReexportImportedProxies(t *testing.T) {
 		t.Errorf("own manifest should succeed: %v", err)
 	}
 	// Gossip lists our own action, never the imported proxy as one of ours.
-	g, err := k.GetGossip(ctx)
+	g, err := k.GetGossip(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1851,5 +1851,242 @@ func TestFriendDoesNotReexportImportedProxies(t *testing.T) {
 	}
 	if sawProxy {
 		t.Error("gossip must NOT advertise an imported proxy as our own action")
+	}
+}
+
+// TestRemoteCallNotDispatchedFailsFast: a first dispatch the transport provably never sent (§13
+// never-dispatched) settles immediately as ErrPeerUnreachable with a full refund — a settled failure
+// transaction, no pending trace left to retry.
+func TestRemoteCallNotDispatchedFailsFast(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+
+	fake := &fakeFederationHTTP{notDispatched: true} // resolve/connect failed: provably never sent
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+
+	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "nd-action", 1000)
+	before, _ := st.ReadUser(ctx, caller.ID)
+
+	_, err := k.Run(ctx, caller.ID, "@settle-peer/settle-peer/settleact", map[string]any{})
+	if !errors.Is(err, kernel.ErrPeerUnreachable) {
+		t.Fatalf("Run: expected ErrPeerUnreachable, got %v", err)
+	}
+	var ke *kernel.KernelError
+	if !errors.As(err, &ke) || ke.Meta["peer"] != "@settle-peer" {
+		t.Errorf("expected Meta[peer]=@settle-peer, got %+v", err)
+	}
+	// Settled as a failure, not parked: no pending trace, exactly one failure transaction.
+	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 0 {
+		t.Fatalf("expected 0 pending traces (settled, not parked), got %d", len(pend))
+	}
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{})
+	if len(txs) != 1 || txs[0].Status != kernel.TxFailure {
+		t.Fatalf("expected 1 failure transaction, got %+v", txs)
+	}
+	// Full refund: the root failure auto-closes the process and returns the caller's funds.
+	after, _ := st.ReadUser(ctx, caller.ID)
+	if after.Available != before.Available || after.Locked != 0 {
+		t.Errorf("expected full refund to %d/0, got %d/%d", before.Available, after.Available, after.Locked)
+	}
+}
+
+// TestRetryNeverFailsFastOnNotDispatched: the retry path must NOT fail-fast on a connection failure
+// (§13) — a parked trace's request may already have executed remotely, so only a signed receipt (or
+// the max-age bound) may settle it. A NotDispatched retry leaves the trace pending.
+func TestRetryNeverFailsFastOnNotDispatched(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	bps := kernel.DefaultConfig().ImportBPS
+
+	fake := &fakeFederationHTTP{} // first dispatch: offline (no receipt) → parked pending
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+
+	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "retry-nd-action", 1000)
+	mp := a.Price * 10000 / (10000 + bps)
+
+	if _, err := k.Run(ctx, caller.ID, "@settle-peer/settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("Run: expected ErrTimeout (parked), got %v", err)
+	}
+	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
+		t.Fatalf("expected 1 pending trace, got %d", len(pend))
+	}
+
+	// The retrier runs while the transport still can't connect (NotDispatched). It must NOT settle.
+	fake.notDispatched = true
+	k.RetryPendingRemoteDispatches(ctx)
+	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
+		t.Fatalf("retry fail-fasted a parked trace: expected 1 pending, got %d", len(pend))
+	}
+	if txs, _ := st.ListTransactions(ctx, kernel.TxFilter{}); len(txs) != 0 {
+		t.Fatalf("expected no settled transaction, got %d", len(txs))
+	}
+
+	// The peer finally answers with a valid receipt → the parked call settles.
+	fake.notDispatched = false
+	now := time.Now().UTC()
+	r := &kernel.Receipt{
+		ID: uuid.New().String(), TxID: "rtx", ActionID: "retry-nd-action",
+		ArgsHash: jcsHashForTest(t, `{}`), ReplyHash: jcsHashForTest(t, `{}`),
+		Status: kernel.TxSuccess, Charge: mp, StartedAt: now, CreatedAt: now,
+	}
+	r.Signature = signReceiptForTest(t, priv, r)
+	b, _ := json.Marshal(r)
+	fake.receiptJSON = string(b)
+	k.RetryPendingRemoteDispatches(ctx)
+	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 0 {
+		t.Fatalf("expected 0 pending after the receipt settled, got %d", len(pend))
+	}
+}
+
+// TestSettleRemoteCallPeerUnfunded: a signed zero-charge rejection carried on transport status 402
+// (the remote's ErrInsufficientFunds: our credit there is exhausted) settles as ErrPeerUnfunded with
+// the peer handle in meta; a rejection on 422 stays a plain ErrExecutionFailed.
+func TestSettleRemoteCallPeerUnfunded(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		unfunded bool
+	}{
+		{"402_is_peer_unfunded", 402, true},
+		{"422_is_execution_failed", 422, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestStore(t)
+			ctx := context.Background()
+			pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+			fake := &fakeFederationHTTP{httpStatus: tc.status}
+			k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "unfunded-action", 1000)
+			_, tr := beginTestRun(t, st, caller.ID, a)
+
+			// A validly-signed zero-charge rejection (status=failure), the remote's refusal.
+			now := time.Now().UTC()
+			r := &kernel.Receipt{
+				ID: uuid.New().String(), TxID: "rtx", ActionID: "unfunded-action",
+				ArgsHash: jcsHashForTest(t, `{}`), Status: kernel.TxFailure, Charge: 0,
+				Reason: "insufficient balance", StartedAt: now, CreatedAt: now,
+			}
+			r.Signature = signReceiptForTest(t, priv, r)
+			b, _ := json.Marshal(r)
+			fake.receiptJSON = string(b)
+
+			_, err := k.Call(ctx, kernel.CallRequest{
+				CallerID: caller.ID, ExistingTraceID: tr.ID,
+				TargetUserID: "@settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
+			})
+			if tc.unfunded {
+				if !errors.Is(err, kernel.ErrPeerUnfunded) {
+					t.Fatalf("expected ErrPeerUnfunded on 402, got %v", err)
+				}
+				var ke *kernel.KernelError
+				if !errors.As(err, &ke) || ke.Meta["peer"] != "@settle-peer" {
+					t.Errorf("expected Meta[peer]=@settle-peer, got %+v", err)
+				}
+			} else {
+				if !errors.Is(err, kernel.ErrExecutionFailed) {
+					t.Fatalf("expected ErrExecutionFailed on 422, got %v", err)
+				}
+				if errors.Is(err, kernel.ErrPeerUnfunded) {
+					t.Error("422 rejection must not be attributed to peer_unfunded")
+				}
+			}
+		})
+	}
+}
+
+// TestGetGossipCounterpartyBalance: gossip reports the requester's credit here only for a friended,
+// non-denied key; nil for strangers, denied keys, and anonymous pulls (§13 peer sync).
+func TestGetGossipCounterpartyBalance(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	sys := setupSys(t, k, st)
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	friendKey := base64.RawURLEncoding.EncodeToString(pub)
+	friend, err := k.AddPeer(ctx, sys.ID, "@a-friend", friendKey)
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	if _, err := k.Deposit(ctx, sys.ID, friend.ID, 777, "", ""); err != nil {
+		t.Fatalf("Deposit: %v", err)
+	}
+
+	g, err := k.GetGossip(ctx, friendKey)
+	if err != nil {
+		t.Fatalf("GetGossip: %v", err)
+	}
+	if g.CounterpartyBalance == nil || *g.CounterpartyBalance != 777 {
+		t.Errorf("friend: expected counterparty_balance 777, got %v", g.CounterpartyBalance)
+	}
+
+	// Anonymous, stranger, and denied all omit the field.
+	if g, _ := k.GetGossip(ctx, ""); g.CounterpartyBalance != nil {
+		t.Error("anonymous pull must not carry counterparty_balance")
+	}
+	strangerPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	if g, _ := k.GetGossip(ctx, base64.RawURLEncoding.EncodeToString(strangerPub)); g.CounterpartyBalance != nil {
+		t.Error("stranger must not carry counterparty_balance")
+	}
+	if err := k.DenyPeer(ctx, sys.ID, friend.Handle); err != nil {
+		t.Fatalf("DenyPeer: %v", err)
+	}
+	if g, _ := k.GetGossip(ctx, friendKey); g.CounterpartyBalance != nil {
+		t.Error("denied peer must not carry counterparty_balance")
+	}
+}
+
+// TestRecordPeerSync: a friend sync persists last_seen and the reported credit; unknown and denied
+// keys are no-ops (§13 peer sync).
+func TestRecordPeerSync(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	sys := setupSys(t, k, st)
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	key := base64.RawURLEncoding.EncodeToString(pub)
+	friend, err := k.AddPeer(ctx, sys.ID, "@sync-friend", key)
+	if err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+
+	credit := int64(555)
+	if err := k.RecordPeerSync(ctx, key, &credit); err != nil {
+		t.Fatalf("RecordPeerSync: %v", err)
+	}
+	got, _ := st.ReadUser(ctx, friend.ID)
+	if got.PeerLastSeen == nil {
+		t.Error("expected peer_last_seen set after sync")
+	}
+	if got.PeerCredit == nil || *got.PeerCredit != 555 {
+		t.Errorf("expected peer_credit 555, got %v", got.PeerCredit)
+	}
+
+	// A nil credit refreshes last_seen but keeps the prior credit (COALESCE).
+	if err := k.RecordPeerSync(ctx, key, nil); err != nil {
+		t.Fatalf("RecordPeerSync nil: %v", err)
+	}
+	got, _ = st.ReadUser(ctx, friend.ID)
+	if got.PeerCredit == nil || *got.PeerCredit != 555 {
+		t.Errorf("nil credit must keep prior 555, got %v", got.PeerCredit)
+	}
+
+	// Unknown key is a no-op (no error).
+	strangerPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	if err := k.RecordPeerSync(ctx, base64.RawURLEncoding.EncodeToString(strangerPub), &credit); err != nil {
+		t.Errorf("unknown key should be a no-op, got %v", err)
 	}
 }

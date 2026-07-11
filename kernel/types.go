@@ -44,6 +44,11 @@ type User struct {
 	SuspendedAt  *time.Time `json:"suspended_at,omitempty"`
 	DeniedAt     *time.Time `json:"denied_at,omitempty"`
 	PublicKey    string     `json:"public_key,omitempty"` // Ed25519 public key, base64url; empty = no signature credential
+	// PeerLastSeen and PeerCredit are the friend-sync cache (§13 peer sync): null except on peer
+	// rows. Display-only — never callability, pricing, or settlement. PeerCredit is our cached
+	// credit *on* the peer, valid as of PeerLastSeen.
+	PeerLastSeen *time.Time `json:"peer_last_seen,omitempty"`
+	PeerCredit   *int64     `json:"peer_credit,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
 }
@@ -448,6 +453,10 @@ type PeerView struct {
 	Available int64      `json:"available"`
 	Locked    int64      `json:"locked"`
 	DeniedAt  *time.Time `json:"denied_at,omitempty"`
+	// PeerCredit and LastSeen are the friend-sync cache (§13 peer sync): our credit on the peer
+	// and when we last reached it. Display-only.
+	PeerCredit *int64     `json:"peer_credit,omitempty"`
+	LastSeen   *time.Time `json:"last_seen,omitempty"`
 }
 
 // GossipAction is an action entry in a gossip response.
@@ -474,6 +483,9 @@ type GossipResponse struct {
 	Handle    string             `json:"handle"`
 	Actions   []GossipAction     `json:"actions"`
 	Friends   []GossipFriendView `json:"friends"`
+	// CounterpartyBalance is the requesting peer's credit on this kernel (§13 peer sync),
+	// set only for a friended, non-denied requester; nil otherwise. Information, never authority.
+	CounterpartyBalance *int64 `json:"counterparty_balance,omitempty"`
 }
 
 // KernelRoster is one entry of the known-network directory (§13): a discovered kernel grouped with
@@ -502,4 +514,8 @@ type FederationResult struct {
 	Result      map[string]any
 	ReceiptJSON string
 	HTTPStatus  int
+	// NotDispatched is true when the transport provably never sent the request (resolve/connect
+	// failed before any byte was written). Only the first dispatch may act on it (§13 never-
+	// dispatched); the retry path ignores it. Set by the executor, so kernel never imports fed.
+	NotDispatched bool
 }

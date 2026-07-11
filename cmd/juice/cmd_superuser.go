@@ -5,10 +5,38 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
 )
+
+// peerCreditStr renders the §13 sync cache "our credit on the peer": a dash when unsynced (nil).
+func peerCreditStr(c *int64) string {
+	if c == nil {
+		return "-"
+	}
+	return strconv.FormatInt(*c, 10)
+}
+
+// lastSeenStr renders when a peer was last reached by friend sync (§13): "never" when unsynced,
+// else a coarse relative age.
+func lastSeenStr(t *time.Time) string {
+	if t == nil {
+		return "never"
+	}
+	d := time.Since(*t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
 
 func parseAmount(s string) (int64, error) {
 	amount, err := strconv.ParseInt(s, 10, 64)
@@ -327,13 +355,14 @@ func peerListCmd() *cobra.Command {
 			if len(out.Peers) == 0 {
 				fmt.Println("No peers registered.")
 			} else {
-				fmt.Printf("%-20s %10s %8s  %s\n", "HANDLE", "AVAILABLE", "LOCKED", "PUBLIC_KEY")
+				fmt.Printf("%-20s %10s %8s %12s %10s  %s\n", "HANDLE", "AVAILABLE", "LOCKED", "CREDIT_THERE", "LAST_SEEN", "PUBLIC_KEY")
 				for _, p := range out.Peers {
 					denied := ""
 					if p.DeniedAt != nil {
 						denied = " [denied]"
 					}
-					fmt.Printf("%-20s %10d %8d  %s%s\n", p.Handle, p.Available, p.Locked, p.PublicKey, denied)
+					fmt.Printf("%-20s %10d %8d %12s %10s  %s%s\n",
+						p.Handle, p.Available, p.Locked, peerCreditStr(p.PeerCredit), lastSeenStr(p.LastSeen), p.PublicKey, denied)
 				}
 			}
 			if showGossip {

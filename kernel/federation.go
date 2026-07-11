@@ -28,6 +28,12 @@ func (k *Kernel) remoteManifestPrice(proxyPrice int64) int64 {
 	return proxyPrice * 10000 / (10000 + k.cfg.ImportBPS)
 }
 
+// RemoteManifestPrice is the exported form of remoteManifestPrice, used by the service layer to
+// compare a peer's cached credit against a proxy action's underlying manifest price (§13 peer_state).
+func (k *Kernel) RemoteManifestPrice(proxyPrice int64) int64 {
+	return k.remoteManifestPrice(proxyPrice)
+}
+
 // dispatchPayload is the persisted remote-proxy dispatch record, stored on Trace.DispatchJSON
 // so a pending remote call can be replayed verbatim by RetryPendingRemoteDispatches after restart.
 type dispatchPayload struct {
@@ -305,9 +311,19 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	if reason == "" {
 		reason = "remote call failed"
 	}
+	failErr := error(ErrExecutionFailed.Wrap(reason))
+	// A signed zero-charge rejection carried on transport status 402 is the remote's structured
+	// ErrInsufficientFunds (the inbound handler's 402 mapping): OUR prepaid credit there is
+	// exhausted, not the caller's balance. Surface it as the operator-actionable ErrPeerUnfunded
+	// so a client never renders it as the caller's own insufficient_funds. Gated on the receipt
+	// being settleable (charge == 0 with a preserved remote reason), so a quarantined invalid
+	// receipt — which also forces charge 0 — never takes this branch.
+	if fr.HTTPStatus == 402 && charge == 0 && ktx.Reason == r.Reason {
+		failErr = PeerUnfundedError(target.Handle)
+	}
 	// Return the committed local receipt alongside the error so an inbound caller can settle
 	// the real charge (a re-proxied remote subcall may have settled with charge > 0).
-	return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID}, ErrExecutionFailed.Wrap(reason)
+	return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID}, failErr
 }
 
 // RetryPendingRemoteDispatches retries all in-flight remote proxy traces that have an
@@ -390,6 +406,9 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 
 	req := CallRequest{StepID: dispatch.StepID}
 
+	// fr.NotDispatched is deliberately ignored on the retry path: a parked trace's request may
+	// already have executed remotely, so §13 forbids fail-fast here — only a signed receipt or the
+	// max-pending-age bound below settles it. Never-dispatched fail-fast lives solely in Call (§6).
 	fr, _ := fe.ExecuteFederation(ctx, target.PublicKey, action.Source, *trace.IdempotencyKey, dispatch.Args)
 	if fr.ReceiptJSON != "" {
 		_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, 0)
@@ -517,6 +536,22 @@ func (k *Kernel) ListPeers(ctx context.Context) ([]*User, error) {
 		}
 	}
 	return peers, nil
+}
+
+// FriendKeys returns the public keys of all friended, non-denied peers — the friend-sync pull set
+// for the discovery loop (§13 peer sync).
+func (k *Kernel) FriendKeys(ctx context.Context) []string {
+	peers, err := k.ListPeers(ctx)
+	if err != nil {
+		return nil
+	}
+	var keys []string
+	for _, p := range peers {
+		if p.DeniedAt == nil && p.PublicKey != "" {
+			keys = append(keys, p.PublicKey)
+		}
+	}
+	return keys
 }
 
 // DenyPeer atomically denies a peer: sets denied_at, deactivates all their proxy actions,
@@ -682,7 +717,10 @@ func qualifiedActionName(a *Action) string {
 }
 
 // GetGossip returns this kernel's gossip payload: identity, public active actions, and peer list.
-func (k *Kernel) GetGossip(ctx context.Context) (*GossipResponse, error) {
+// When requesterKey names a friended, non-denied peer, the response also carries that peer's credit
+// on this kernel (CounterpartyBalance, §13 peer sync); it is nil for strangers, denied keys, and
+// anonymous pulls (requesterKey == "").
+func (k *Kernel) GetGossip(ctx context.Context, requesterKey string) (*GossipResponse, error) {
 	var pubKeyB64 string
 	if len(k.cfg.SigningKey) == ed25519.PrivateKeySize {
 		pub := k.cfg.SigningKey.Public().(ed25519.PublicKey)
@@ -751,12 +789,31 @@ func (k *Kernel) GetGossip(ctx context.Context) (*GossipResponse, error) {
 		})
 	}
 
-	return &GossipResponse{
+	resp := &GossipResponse{
 		PublicKey: pubKeyB64,
 		Handle:    handle,
 		Actions:   gossipActions,
 		Friends:   friendViews,
-	}, nil
+	}
+	// Report the requester's credit here only if it is a friended, non-denied peer (§13 peer sync).
+	if requesterKey != "" {
+		if u, _ := k.store.ReadUserByPublicKey(ctx, requesterKey); u != nil && u.DeniedAt == nil {
+			bal := u.Available
+			resp.CounterpartyBalance = &bal
+		}
+	}
+	return resp, nil
+}
+
+// RecordPeerSync persists a successful friend gossip pull (§13 peer sync) keyed by public key:
+// last_seen=now and, when the peer reported one, our cached credit on it. A no-op for unknown or
+// denied keys — sync is a friend-only relation. Display-only cache; never a money path.
+func (k *Kernel) RecordPeerSync(ctx context.Context, publicKey string, credit *int64) error {
+	u, err := k.store.ReadUserByPublicKey(ctx, publicKey)
+	if err != nil || u == nil || u.DeniedAt != nil {
+		return nil
+	}
+	return k.store.UpdatePeerSync(ctx, u.ID, time.Now().UTC(), credit)
 }
 
 // CreateSignedRejectionReceipt produces a signed Receipt (status=failure, gross=0) for an inbound

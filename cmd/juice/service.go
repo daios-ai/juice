@@ -72,6 +72,7 @@ type actionResp struct {
 	HTTP          *httpView `json:"http,omitempty"`
 	AuthScheme    string    `json:"auth_scheme,omitempty"` // upstream auth scheme name (§8); present only when the action has auth; never config/secrets (R9)
 	RequiresGrant bool      `json:"requires_grant"`        // true iff a caller must connect a per-caller grant first (delegated schemes)
+	PeerState     string    `json:"peer_state,omitempty"`  // remote_proxy only: "offline" | "unfunded" from the §13 sync cache; omitted when healthy. Display-only.
 }
 
 // httpView is the read-side decomposition of an action's HTTPSource. It carries
@@ -176,13 +177,15 @@ func enrichAdjustment(a *kernel.Adjustment, uc *userCache) *adjustmentView {
 	}
 }
 
-// peerViews projects proxy-peer users into handle+key+balance views, dropping their internal ids.
+// peerViews projects proxy-peer users into handle+key+balance views (plus the §13 sync cache:
+// our credit on the peer and when we last reached it), dropping their internal ids.
 func peerViews(peers []*kernel.User) []*kernel.PeerView {
 	out := make([]*kernel.PeerView, len(peers))
 	for i, p := range peers {
 		out[i] = &kernel.PeerView{
 			Handle: p.Handle, PublicKey: p.PublicKey,
 			Available: p.Available, Locked: p.Locked, DeniedAt: p.DeniedAt,
+			PeerCredit: p.PeerCredit, LastSeen: p.PeerLastSeen,
 		}
 	}
 	return out
@@ -205,6 +208,28 @@ func enrichAction(k *kernel.Kernel, a *kernel.Action) actionResp {
 	}
 	scheme, requiresGrant := k.ActionAuthInfo(a)
 	return actionResp{Action: a, ActionRef: ref, HTTP: httpViewOf(a), AuthScheme: scheme, RequiresGrant: requiresGrant}
+}
+
+// peerStateStaleAfter is how old a peer's last sync may be before its proxies read as offline (§13):
+// 3× the discovery interval tolerates a couple of missed passes before flagging.
+func peerStateStaleAfter() time.Duration { return 3 * globalCfg.discoveryInterval() }
+
+// peerStateFor annotates a remote_proxy action with its peer's cached liveness/funding (§13),
+// display-only. "offline": the peer's last successful gossip sync is missing or older than
+// staleAfter. "unfunded": our cached credit on the peer is below the action's remote manifest price.
+// "offline" takes precedence — a stale credit figure is not actionable. "" when healthy or the
+// owner row is gone.
+func peerStateFor(k *kernel.Kernel, owner *kernel.User, price int64, staleAfter time.Duration) string {
+	if owner == nil {
+		return ""
+	}
+	if owner.PeerLastSeen == nil || time.Since(*owner.PeerLastSeen) > staleAfter {
+		return "offline"
+	}
+	if owner.PeerCredit != nil && *owner.PeerCredit < k.RemoteManifestPrice(price) {
+		return "unfunded"
+	}
+	return ""
 }
 
 // httpViewOf decomposes a kind=http action's stored HTTPSource into a uniform
@@ -405,7 +430,12 @@ func getAction(k *kernel.Kernel, ctx context.Context, callerID, id string) (acti
 	if err != nil {
 		return actionResp{}, err
 	}
-	return enrichAction(k, a), nil
+	r := enrichAction(k, a)
+	if a.Kind == kernel.KindRemoteProxy {
+		owner, _ := k.ReadUser(ctx, a.OwnerUserID)
+		r.PeerState = peerStateFor(k, owner, a.Price, peerStateStaleAfter())
+	}
+	return r, nil
 }
 
 func updateAction(k *kernel.Kernel, ctx context.Context, callerID string, req kernel.UpdateActionRequest) (actionResp, error) {
@@ -497,9 +527,14 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 		actions = filtered
 	}
 	resps := make([]actionResp, len(actions))
+	uc := newUserCache(k, ctx) // shared so listing is O(distinct peer owners), not O(rows)
+	staleAfter := peerStateStaleAfter()
 	for i, a := range actions {
 		cp := *a
 		r := enrichAction(k, &cp) // decompose http view before hiding the raw blob
+		if cp.Kind == kernel.KindRemoteProxy {
+			r.PeerState = peerStateFor(k, uc.get(cp.OwnerUserID), cp.Price, staleAfter)
+		}
 		cp.Source = ""
 		cp.ArtifactHash = ""
 		resps[i] = r

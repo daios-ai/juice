@@ -182,7 +182,12 @@ flow_fed_denial_underfunded() {
     j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit @sys 1000 >/dev/null 2>&1
 
-    j "$FED_DBL" "$FED_HL" run @kernel-r/sys/paid-svc '{}' >/dev/null 2>&1 || true
+    # The CLI attributes it to THIS kernel's exhausted credit on the peer (operator remedy), with a
+    # distinct exit code — never the caller's own insufficient_funds (§13 peer_unfunded).
+    local run_out rc
+    run_out=$(j "$FED_DBL" "$FED_HL" run @kernel-r/sys/paid-svc '{}' 2>&1); rc=$?
+    assert_eq "fed_denial_underfunded.run_exit_peer_unfunded" 10 "$rc"
+    assert_contains "fed_denial_underfunded.run_says_exhausted" "exhausted" "$run_out"
     local tx_id; tx_id=$(python3 -c "import sys,json;print(next((t['id'] for t in json.loads(sys.argv[1]) if t.get('action_name')=='sys/paid-svc'),''))" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
     assert_nonempty "fed_denial_underfunded.tx_recorded" "$tx_id"
     assert_json "fed_denial_underfunded.tx_status_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
@@ -340,6 +345,45 @@ flow_fed_discovery() {
     assert_eq "fed_discovery.no_friend" 0 "$(jj "$dbl" "$hl" admin peers | grep -c "$rkey")"
 }
 
+# flow_fed_peer_sync: the discovery timer also pulls gossip from friended peers (§13 peer sync),
+# caching each peer's liveness (last_seen) and OUR credit on it (peer_credit, from the peer's reported
+# counterparty_balance). Proves the "better sync" surfacing: after R deposits L's proxy, L's own
+# `admin peers` learns that credit without L ever calling R.
+flow_fed_peer_sync() {
+    echo "=== FLOW fed_peer_sync ==="
+    local dir; dir=$(new_dir)
+    local dbr="$dir/r/juice.db" hr="$dir/rsys" dbl="$dir/l/juice.db" hl="$dir/lsys"
+    mkdir -p "$dir/r" "$dir/l" "$hr/.juice" "$hl/.juice"
+
+    start_server "$dbr" "$hr" kernel_handle=@kernel-r discovery_interval_seconds=2 \
+        || { fail "fed_peer_sync.setup" "R did not start"; return; }
+    local boot; boot=$(kernel_fed_addr "$dbr")
+    [ -n "$boot" ] || { fail "fed_peer_sync.boot" "no R fed addr"; return; }
+    start_server "$dbl" "$hl" kernel_handle=@kernel-l bootstrap_peers="$boot" discovery_interval_seconds=2 \
+        || { fail "fed_peer_sync.l" "L did not start"; return; }
+    j "$dbr" "$hr" auth login @sys --password sys-pass >/dev/null 2>&1
+    j "$dbl" "$hl" auth login @sys --password sys-pass >/dev/null 2>&1
+    local rkey; rkey=$(kernel_key "$dbr" "$hr")
+    [ -n "$rkey" ] || { fail "fed_peer_sync.rkey" "no R key"; return; }
+
+    # L friends R (auto-accept forms the reciprocal proxy pair), then R funds L's proxy on R.
+    j "$dbl" "$hl" admin friend "$rkey" >/dev/null 2>&1 || { fail "fed_peer_sync.friend" "friend failed"; return; }
+    j "$dbr" "$hr" admin deposit @kernel-l 250 >/dev/null 2>&1
+
+    # A friend-sync pass runs at startup, then every 2s. Poll L's own peer list until it has cached
+    # the credit R reports for us — no call to R involved.
+    local credit=""
+    local i
+    for i in $(seq 1 20); do
+        credit=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]).get('peers',[]);p=next((x for x in ps if x.get('handle')=='@kernel-r'),{});print(p.get('peer_credit') if p.get('peer_credit') is not None else '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
+        [ "$credit" = "250" ] && break
+        sleep 1
+    done
+    assert_eq "fed_peer_sync.credit_cached" 250 "$credit"
+    local seen; seen=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]).get('peers',[]);p=next((x for x in ps if x.get('handle')=='@kernel-r'),{});print(p.get('last_seen') or '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
+    assert_nonempty "fed_peer_sync.last_seen_cached" "$seen"
+}
+
 # flow_fed_offline — every federation command has defined behavior when the peer is DOWN (§13):
 # inspect degrades to local last-known data + offline reachability; friend fails clearly;
 # unfriend/peers/identity are local and keep working; nothing hangs (bounded by fedOpTimeout).
@@ -356,6 +400,17 @@ flow_fed_offline() {
     assert_json "fed_offline.inspect_source_local" "$doc" source local
     assert_json "fed_offline.inspect_offline" "$doc" online False
     assert_contains "fed_offline.inspect_shows_action" "greet" "$doc"
+
+    # A call to the down peer FAILS FAST (§13 never-dispatched): the request provably never left L,
+    # so it settles immediately as a failure with a full refund and a distinct exit code — not parked
+    # pending. (greet is price 0; the assertion is the fail-fast, not the amount.)
+    local run_out rc
+    run_out=$(j "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}' 2>&1); rc=$?
+    assert_eq "fed_offline.run_exit_unreachable" 9 "$rc"
+    assert_contains "fed_offline.run_says_unreachable" "unreachable" "$run_out"
+    local tx_id; tx_id=$(python3 -c "import sys,json;print(next((t['id'] for t in json.loads(sys.argv[1]) if t.get('action_name')=='sys/greet'),''))" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
+    assert_nonempty "fed_offline.run_settled_not_pending" "$tx_id"
+    assert_json "fed_offline.run_tx_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
 
     # friend a down peer: clear, prompt failure (no hang, mentions unreachable).
     assert_fails "fed_offline.friend_unreachable" "unreachable" -- j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY"

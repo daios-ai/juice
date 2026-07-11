@@ -389,6 +389,10 @@ type Store interface {
 	DenyUser(ctx context.Context, id string) error
 	// UndenyUser clears denied_at on the user.
 	UndenyUser(ctx context.Context, id string) error
+	// UpdatePeerSync records a successful friend gossip pull (§13 peer sync): peer_last_seen=now
+	// and, when the peer reported one, peer_credit=credit (nil leaves the prior value). Display-only
+	// cache; never a money path.
+	UpdatePeerSync(ctx context.Context, id string, lastSeen time.Time, credit *int64) error
 
 	// ---- Gossip / Federation ----
 

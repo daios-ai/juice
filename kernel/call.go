@@ -298,6 +298,22 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		fr, _ := fe.ExecuteFederation(ctx, target.PublicKey, action.Source, ikey, req.Args)
 		latency := time.Since(started).Seconds()
 		ktx.EndedAt = time.Now().UTC()
+		if fr.NotDispatched {
+			// First dispatch, provably never sent (§13 never-dispatched): settle as an ordinary
+			// local failure with a full refund now, rather than parking the allocation for a retry
+			// that would repeat a request the peer never received. Only here — retryRemoteTrace
+			// never fail-fasts, since a parked request may already have executed. Mirrors the
+			// executor-not-configured settlement above (a funded trace must never be stranded).
+			unreach := ErrPeerUnreachable.Wrapf("peer @%s is unreachable; the call was not sent and has been refunded", target.Handle).WithMeta("peer", target.Handle)
+			ktx.Status = TxFailure
+			ktx.Reason = unreach.Error()
+			receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, unreach)
+			if sErr != nil {
+				return nil, sErr
+			}
+			logger.Warn("remote.unreachable", "action", action.Name, "peer", target.Handle)
+			return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID}, unreach
+		}
 		return k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, latency)
 	}
 

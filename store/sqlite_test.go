@@ -2663,12 +2663,48 @@ func TestListPurgeablePeers(t *testing.T) {
 	local.CreatedAt = old
 	_ = db.CreateUser(ctx, local)
 
+	// The §13 sync cache must NOT count as activity: a fresh peer_last_seen on the idle peer keeps
+	// it purgeable, or answering gossip would immortalize a zombie peer.
+	if err := db.UpdatePeerSync(ctx, idle.ID, now, nil); err != nil {
+		t.Fatalf("UpdatePeerSync: %v", err)
+	}
+
 	ids, err := db.ListPurgeablePeers(ctx, cutoff)
 	if err != nil {
 		t.Fatalf("ListPurgeablePeers: %v", err)
 	}
 	if len(ids) != 1 || ids[0] != idle.ID {
 		t.Fatalf("purgeable = %v, want exactly [%s (@idle)]", ids, idle.ID)
+	}
+}
+
+// TestUpdatePeerSync round-trips the §13 friend-sync cache and checks the COALESCE keep-prior rule.
+func TestUpdatePeerSync(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	peer := newPeer(t, db, "@synced", "k-synced", 0, 0, now)
+
+	credit := int64(900)
+	if err := db.UpdatePeerSync(ctx, peer.ID, now, &credit); err != nil {
+		t.Fatalf("UpdatePeerSync: %v", err)
+	}
+	got, _ := db.ReadUser(ctx, peer.ID)
+	if got.PeerLastSeen == nil {
+		t.Error("expected peer_last_seen set")
+	}
+	if got.PeerCredit == nil || *got.PeerCredit != 900 {
+		t.Errorf("peer_credit = %v, want 900", got.PeerCredit)
+	}
+
+	// A nil credit refreshes last_seen but keeps the prior value (COALESCE).
+	later := now.Add(time.Hour)
+	if err := db.UpdatePeerSync(ctx, peer.ID, later, nil); err != nil {
+		t.Fatalf("UpdatePeerSync nil: %v", err)
+	}
+	got, _ = db.ReadUser(ctx, peer.ID)
+	if got.PeerCredit == nil || *got.PeerCredit != 900 {
+		t.Errorf("nil credit must keep prior 900, got %v", got.PeerCredit)
 	}
 }
 

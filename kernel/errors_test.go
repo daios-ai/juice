@@ -112,6 +112,26 @@ func TestGrantRequiredCodeAndMeta(t *testing.T) {
 	}
 }
 
+func TestPeerErrorsCodesAndMeta(t *testing.T) {
+	if HTTPStatusFromCode("peer_unreachable") != 502 {
+		t.Errorf("peer_unreachable status = %d, want 502", HTTPStatusFromCode("peer_unreachable"))
+	}
+	if HTTPStatusFromCode("peer_unfunded") != 402 {
+		t.Errorf("peer_unfunded status = %d, want 402", HTTPStatusFromCode("peer_unfunded"))
+	}
+	for _, e := range []*KernelError{PeerUnreachableError("@b"), PeerUnfundedError("@b")} {
+		if e.Meta["peer"] != "@b" {
+			t.Errorf("Meta[peer] = %q, want @b", e.Meta["peer"])
+		}
+	}
+	if !errorsIs(PeerUnreachableError("@b"), ErrPeerUnreachable) {
+		t.Error("PeerUnreachableError lost the error identity")
+	}
+	if !errorsIs(PeerUnfundedError("@b"), ErrPeerUnfunded) {
+		t.Error("PeerUnfundedError lost the error identity")
+	}
+}
+
 func errorsIs(err, target error) bool {
 	ke, ok := err.(*KernelError)
 	tk, ok2 := target.(*KernelError)

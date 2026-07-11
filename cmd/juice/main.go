@@ -210,6 +210,10 @@ func exitCodeFor(err error) int {
 		return 7
 	case "grant_required":
 		return 8
+	case "peer_unreachable":
+		return 9
+	case "peer_unfunded":
+		return 10
 	default:
 		return 1
 	}

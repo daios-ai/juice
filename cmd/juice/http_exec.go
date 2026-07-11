@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -215,7 +216,8 @@ type signerFunc = func(action, counterparty, idempotencyKey, argsHash string) (s
 // returns a zero FederationResult so the kernel keeps the call pending for retry.
 func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, peerPublicKey, actionRef, idempotencyKey string, args map[string]any) (kernel.FederationResult, error) {
 	if e.fedTransport == nil {
-		return kernel.FederationResult{HTTPStatus: 0}, nil
+		// No transport at all: the request provably cannot have been sent (§13 never-dispatched).
+		return kernel.FederationResult{NotDispatched: true}, nil
 	}
 	return executeFederationOverTransport(ctx, e.fedTransport, e.signerFn, e.localPubKey,
 		peerPublicKey, actionRef, idempotencyKey, args)
@@ -251,8 +253,10 @@ func executeFederationOverTransport(ctx context.Context, tr federationTransport,
 	}
 	resp, err := tr.Call(ctx, peerPublicKey, req)
 	if err != nil {
-		// Transport error: no receipt → the kernel keeps the call pending for retry (§13).
-		return kernel.FederationResult{HTTPStatus: 0}, nil
+		// Provably-never-sent (resolve/connect failed) → NotDispatched, so a first dispatch may
+		// fail fast (§13). Any other transport error stays pending: the request may have executed
+		// remotely, so only a signed receipt (or the max-age bound) may settle it.
+		return kernel.FederationResult{NotDispatched: errors.Is(err, fed.ErrNotDispatched)}, nil
 	}
 	var envelope struct {
 		Result  map[string]any  `json:"result"`

@@ -485,7 +485,8 @@ func (t *Transport) handleManifest(s network.Stream) {
 func (t *Transport) openStream(ctx context.Context, peerKey, proto string) (network.Stream, error) {
 	pid, err := t.resolve(ctx, peerKey)
 	if err != nil {
-		return nil, err
+		// Resolve/connect failed before any request byte was written: provably never sent (§13).
+		return nil, fmt.Errorf("%w: %v", ErrNotDispatched, err)
 	}
 	// Allow dialing a relayed connection when no direct path exists.
 	sctx := network.WithAllowLimitedConn(ctx, "juice-fed")
