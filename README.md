@@ -82,8 +82,10 @@ its signing keypair, and a JWT secret, then registers the native `@sys` actions.
 are idempotent.
 
 State — the database (which holds the signing key), config, and auth tokens — lives under
-`~/.juice/` by default; the binary is separate, on your `PATH`. Point `--db` (or `JUICE_DB_PATH`)
-elsewhere to run several kernels, or use `--db ./juice.db` for a portable per-folder kernel.
+`$JUICE_HOME/kernel/` (default `~/.juice/kernel/`); the binary is separate, on your `PATH`.
+Set `JUICE_HOME` to relocate the whole juice suite, or point `--db` elsewhere to run several
+kernels, or use `--db ./juice.db` for a portable per-folder kernel. The `kernel/cache/`
+subdirectory holds regenerable data and is safe to delete.
 
 ## Quick start
 
@@ -91,7 +93,7 @@ elsewhere to run several kernels, or use `--db ./juice.db` for a portable per-fo
 # Start the server (first run prompts for the @sys password)
 ./juice serve --addr :4040
 
-# Create a user and log in (token stored under ~/.juice)
+# Create a user and log in (token stored under $JUICE_HOME/kernel/)
 ./juice user create @alice alice@example.com
 ./juice auth login @alice
 
@@ -153,7 +155,7 @@ route table — with request/response shapes and the R1–R9 / C1–C12 design r
 
 ## Configuration
 
-Configuration is a `juice.json` file, auto-created next to the database (override with `--config`).
+Configuration is a `config.json` file, auto-created next to the database (override with `--config`).
 Key groups:
 
 | Key | Purpose |
@@ -168,9 +170,10 @@ Key groups:
 | `credentials_key` | Auto-generated AES-256 key sealing action upstream credentials and delegated-OAuth grant refresh tokens |
 
 Environment variables are bootstrap and overrides only (everything else is configured
-through `juice.json`): `JUICE_CONFIG`, `JUICE_DB_PATH`, `JUICE_SECRET_KEY`,
-`JUICE_LOG_LEVEL`, `JUICE_CREDENTIALS_KEY`, `JUICE_BOOTSTRAP_PASSWORD`,
-`JUICE_BOOTSTRAP_KERNEL_HANDLE`, and `JUICE_ALLOW_LOCAL_SOURCES`. The HTTP listen address is
+through `config.json`): `JUICE_HOME` (root for all juice state, default `~/.juice`; the kernel
+uses `$JUICE_HOME/kernel/`), `JUICE_SECRET_KEY`, `JUICE_LOG_LEVEL`, `JUICE_CREDENTIALS_KEY`,
+`JUICE_BOOTSTRAP_PASSWORD`, `JUICE_BOOTSTRAP_KERNEL_HANDLE`, and `JUICE_ALLOW_LOCAL_SOURCES`.
+The database and config paths are the `--db` / `--config` flags; the HTTP listen address is
 the `--addr` flag.
 
 ## Architecture

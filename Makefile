@@ -20,6 +20,6 @@ install: build
 	mkdir -p $(PREFIX)/bin
 	install -m 755 $(BINARY) $(PREFIX)/bin/$(BINARY)
 
-# Removes the installed binary only; ~/.juice data (signing key, config) is left intact.
+# Removes the installed binary only; $JUICE_HOME/kernel/ data (signing key, config) is left intact.
 uninstall:
 	rm -f $(PREFIX)/bin/$(BINARY)

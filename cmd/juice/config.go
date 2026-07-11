@@ -188,7 +188,7 @@ func LoadOrCreateConfig(path string) (ServerConfig, error) {
 }
 
 // applyEnvOverrides applies the spec-documented runtime overrides (§14). Everything
-// else is configured through juice.json; environment variables are bootstrap and
+// else is configured through config.json; environment variables are bootstrap and
 // overrides only. JUICE_LOG_LEVEL overrides the log level; JUICE_CREDENTIALS_KEY is a
 // runtime-only override of the §8 AES credentials key that never overwrites the config
 // file. Missing env vars are silently skipped.

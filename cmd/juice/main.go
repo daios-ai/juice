@@ -71,7 +71,7 @@ var globalCfg ServerConfig
 var resolvedConfigPath string
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&flagDB, "db", "", "SQLite database path (default ~/.juice/juice.db)")
+	rootCmd.PersistentFlags().StringVar(&flagDB, "db", "", "SQLite database path (default $JUICE_HOME/kernel/juice.db)")
 	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", "", "Config file path")
 	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Output JSON instead of human-readable text")
 	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "Print only the created resource ID")
@@ -80,38 +80,48 @@ func init() {
 	cobra.OnInitialize(initConfig)
 }
 
-// defaultDBPath is the per-user default database location, ~/.juice/juice.db. This is the
-// juice home; tokens already live under ~/.juice (see tokenDir), so the DB, its config, and
-// tokens share one directory. It falls back to a CWD-relative path only when the home
-// directory cannot be determined, keeping the binary usable in minimal environments.
-func defaultDBPath() string {
+// juiceHome is the single root under which every juice-family binary keeps its state:
+// $JUICE_HOME if set, else ~/.juice. It is fixed and absolute — never cwd-relative — so
+// the kernel attaches to the same identity and signing key wherever it is launched, like
+// Geth's ~/.ethereum or IPFS's ~/.ipfs. The fallback used when the home directory cannot
+// be determined stays absolute (system temp) rather than the working directory, preserving
+// that invariant in minimal environments.
+func juiceHome() string {
+	if h := os.Getenv("JUICE_HOME"); h != "" {
+		return h
+	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return "juice.db"
+		return filepath.Join(os.TempDir(), "juice")
 	}
-	return filepath.Join(home, ".juice", "juice.db")
+	return filepath.Join(home, ".juice")
 }
 
-// initConfig loads the JSON config file and applies JUICE_* environment overrides.
-// The DB path is the --db flag, else JUICE_DB_PATH, else the per-user default
-// ~/.juice/juice.db. A fixed default (like Geth's ~/.ethereum or IPFS's ~/.ipfs) means
-// `juice serve` attaches to the same kernel — and the same signing key / federation
-// identity — regardless of the working directory, instead of silently booting a fresh
-// identity from whatever folder it happens to run in. The config path is --config, else
-// JUICE_CONFIG, else juice.json co-located with the DB.
+// kernelHome is this component's subdirectory under the shared root, $JUICE_HOME/kernel.
+// One subdirectory per component (kernel/, ui/, …) lets the whole suite back up and
+// relocate as a unit while each binary owns its own namespace.
+func kernelHome() string { return filepath.Join(juiceHome(), "kernel") }
+
+// defaultDBPath is the per-user default database location, $JUICE_HOME/kernel/juice.db.
+// Its config (config.json) and tokens share this directory.
+func defaultDBPath() string { return filepath.Join(kernelHome(), "juice.db") }
+
+// cacheDir is the reserved purgeable subdirectory for regenerable data (indexes, compiled
+// artifacts, scratch). It is safe to delete; writers MkdirAll it on demand.
+func cacheDir() string { return filepath.Join(kernelHome(), "cache") }
+
+// initConfig loads the JSON config file. The DB path is the --db flag, else the per-user
+// default $JUICE_HOME/kernel/juice.db; a fixed default means `juice serve` attaches to the
+// same kernel — and the same signing key / federation identity — regardless of the working
+// directory, instead of silently booting a fresh identity from whatever folder it happens
+// to run in. The config path is --config, else config.json co-located with the DB.
 func initConfig() {
-	if flagDB == "" {
-		flagDB = os.Getenv("JUICE_DB_PATH")
-	}
 	if flagDB == "" {
 		flagDB = defaultDBPath()
 	}
 	path := flagConfig
 	if path == "" {
-		path = os.Getenv("JUICE_CONFIG")
-	}
-	if path == "" {
-		path = filepath.Join(filepath.Dir(flagDB), "juice.json")
+		path = filepath.Join(filepath.Dir(flagDB), "config.json")
 	}
 	resolvedConfigPath = path
 	// The juice home holds the config (credentials key) and, alongside it, the DB
@@ -211,6 +221,8 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	if dir := filepath.Dir(flagDB); dir != "" {
 		_ = os.MkdirAll(dir, 0o700)
 	}
+	// Reserve the purgeable cache subdir so the component layout exists for any writer.
+	_ = os.MkdirAll(cacheDir(), 0o700)
 	db, err := store.Open(flagDB)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("open db: %w", err)
@@ -340,10 +352,9 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 // path keeps it stable regardless of which server address the client talks to, and lets
 // the local admin path and the HTTP client share one token for the same --db.
 func tokenDir() string {
-	home, _ := os.UserHomeDir()
 	abs, _ := filepath.Abs(flagDB)
 	h := sha256.Sum256([]byte(abs))
-	return filepath.Join(home, ".juice", "tokens", fmt.Sprintf("%x", h[:6]))
+	return filepath.Join(kernelHome(), "tokens", fmt.Sprintf("%x", h[:6]))
 }
 
 func tokenPath() string        { return filepath.Join(tokenDir(), "token") }
