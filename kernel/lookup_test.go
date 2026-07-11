@@ -349,3 +349,37 @@ func TestLookupEmbeddingStoredOnActivate(t *testing.T) {
 		t.Error("activated action should appear in lookup results via stored embedding")
 	}
 }
+
+// TestLookupMatchesOwnerHandle: an action's real name is @owner/name, so a query naming the owner
+// must find it via the lexical leg even though the handle appears nowhere in its description. No
+// embedder, so the only possible match is the owner handle folded into the lexical index text.
+func TestLookupMatchesOwnerHandle(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "@alice", 0)
+
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/translate",
+		Kind: kernel.KindHTTP, Active: false, Public: true,
+		Description:  "convert text between languages",
+		Source:       "https://example.com/api",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err != nil { // indexes via lookupText
+		t.Fatalf("SetActive: %v", err)
+	}
+
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "alice", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAction(results, a.ID) {
+		t.Error("action should be found by its owner handle")
+	}
+}

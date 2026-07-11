@@ -1947,11 +1947,16 @@ func (k *Kernel) indexForLookup(ctx context.Context, a *Action) {
 	k.storeEmbedding(ctx, a.ID, a.Description)
 }
 
-// lookupText assembles an action's lexical-index text: name, description, and the property names +
-// descriptions from its input/output schemas (§3 requires those descriptions to be sufficient for
-// lookup). Unknown schema shapes simply contribute nothing.
+// lookupText assembles an action's lexical-index text: owner handle, name, description, and the
+// property names + descriptions from its input/output schemas (§3 requires those descriptions to be
+// sufficient for lookup). The owner handle is included because an action's real name is @owner/name.
+// Unknown schema shapes simply contribute nothing.
 func lookupText(a *Action) string {
 	var b strings.Builder
+	if a.OwnerHandle != "" {
+		b.WriteString(a.OwnerHandle)
+		b.WriteByte(' ')
+	}
 	b.WriteString(a.Name)
 	b.WriteByte(' ')
 	b.WriteString(a.Description)
