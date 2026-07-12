@@ -39,29 +39,10 @@ func openBrowser(url string) bool {
 	return true
 }
 
-// ---- consent plan wire shapes (§8) ----
-
-type consentAction struct {
-	ActionID string `json:"action_id"`
-	Action   string `json:"action"`
-	Granted  bool   `json:"granted"`
-}
-
-type consentGroup struct {
-	ProviderKey string          `json:"provider_key"`
-	Provider    string          `json:"provider"`
-	Scheme      string          `json:"scheme"`
-	Scopes      []string        `json:"scopes"`
-	Connected   bool            `json:"connected"`
-	Covered     bool            `json:"covered"`
-	Actions     []consentAction `json:"actions"`
-}
-
-type consentPlan struct {
-	Groups            []consentGroup `json:"groups"`
-	SkippedLoginless  int            `json:"skipped_loginless"`
-	SkippedUncallable int            `json:"skipped_uncallable"`
-}
+// ---- grant/consent wire shapes (§8) ----
+//
+// The consent plan is decoded straight into kernel.ConsentPlan (single source of truth); only the
+// start/complete/attach responses, which the service layer returns as ad-hoc JSON, are local here.
 
 type grantStartResp struct {
 	Status                  string   `json:"status"` // "granted" when already covered
@@ -120,11 +101,11 @@ func userConnectCmd() *cobra.Command {
 // connectSelector fetches the consent plan, shows the delta, and covers each group needing work
 // with one gesture: a token paste per bearer group, one browser consent per OAuth group (§8).
 func connectSelector(selector string, device, yes bool) error {
-	var plan consentPlan
+	var plan kernel.ConsentPlan
 	if err := apiCall(context.Background(), "GET", "/v1/grants/plan?selector="+url.QueryEscape(selector), nil, &plan); err != nil {
 		return err
 	}
-	var todo []consentGroup
+	var todo []kernel.ConsentGroup
 	for _, g := range plan.Groups {
 		if groupNeedsWork(g) {
 			todo = append(todo, g)
@@ -161,7 +142,7 @@ func connectSelector(selector string, device, yes bool) error {
 
 // groupNeedsWork reports whether a plan group has anything to connect: an uncovered account, or a
 // covered account with an action not yet granted (a later sibling to instant-grant).
-func groupNeedsWork(g consentGroup) bool {
+func groupNeedsWork(g kernel.ConsentGroup) bool {
 	if !g.Covered {
 		return true
 	}
@@ -173,7 +154,7 @@ func groupNeedsWork(g consentGroup) bool {
 	return false
 }
 
-func printDelta(todo []consentGroup) {
+func printDelta(todo []kernel.ConsentGroup) {
 	fmt.Println("The following will be connected:")
 	for _, g := range todo {
 		how := "paste a token"

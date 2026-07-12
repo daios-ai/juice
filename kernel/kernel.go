@@ -437,12 +437,9 @@ func hostOf(raw string) string {
 	return raw
 }
 
-// ProviderLabel renders a provider_key for display (§14). Exported for the service/CLI layer.
-func ProviderLabel(providerKey string) string { return providerLabel(providerKey) }
-
-// providerLabel renders a provider_key for display (§14): the bare host for bearer, the token
-// endpoint's host for oauth.
-func providerLabel(providerKey string) string {
+// ProviderLabel renders a provider_key for display (§14): the bare host for bearer, the token
+// endpoint's host for oauth. Used by the kernel plan/views and the service/CLI layer.
+func ProviderLabel(providerKey string) string {
 	if rest, ok := strings.CutPrefix(providerKey, "bearer:"); ok {
 		return rest
 	}
@@ -649,7 +646,7 @@ func (k *Kernel) ConsentPlan(ctx context.Context, callerID, sel string) (*Consen
 		}
 		sort.Strings(scopes)
 
-		grp := ConsentGroup{ProviderKey: pk, Provider: providerLabel(pk), Scheme: ms[0].auth.Scheme, Scopes: scopes}
+		grp := ConsentGroup{ProviderKey: pk, Provider: ProviderLabel(pk), Scheme: ms[0].auth.Scheme, Scopes: scopes}
 		if conn, cerr := k.store.ReadConnectionByUserProvider(ctx, callerID, pk); cerr == nil {
 			grp.Connected = true
 			if ms[0].auth.Scheme == AuthSchemeDelegatedBearer {
@@ -856,7 +853,7 @@ func (k *Kernel) ListConnectionViews(ctx context.Context, callerID string) ([]*C
 	out := make([]*ConnectionView, 0, len(conns))
 	for _, c := range conns {
 		n := counts[c.ID]
-		out = append(out, &ConnectionView{Provider: providerLabel(c.ProviderKey), Actions: n, Unused: n == 0, CreatedAt: c.CreatedAt})
+		out = append(out, &ConnectionView{Provider: ProviderLabel(c.ProviderKey), Actions: n, Unused: n == 0, CreatedAt: c.CreatedAt})
 	}
 	return out, nil
 }
@@ -876,28 +873,30 @@ func (k *Kernel) BackfillGrantConnections(ctx context.Context) error {
 		return err
 	}
 	for _, g := range legacy {
+		// A legacy grant we cannot re-home (action gone, no longer delegated, token unrecoverable,
+		// or no derivable provider) is dropped — consent binds to a contract that no longer holds.
+		drop := func(reason string) {
+			_ = k.store.DeleteGrant(ctx, g.GrantorUserID, g.ActionID)
+			k.log.With(ctx).Warn("grant.backfill.dropped", "grant_id", g.ID, "reason", reason)
+		}
 		a, aerr := k.store.ReadAction(ctx, g.ActionID)
 		if aerr != nil || a == nil {
-			_ = k.store.DeleteGrant(ctx, g.GrantorUserID, g.ActionID)
-			k.log.With(ctx).Warn("grant.backfill.dropped", "grant_id", g.ID, "reason", "action_missing")
+			drop("action_missing")
 			continue
 		}
 		auth, autherr := k.openAuthInput(a)
 		if autherr != nil || auth == nil || !isDelegatedScheme(auth.Scheme) {
-			_ = k.store.DeleteGrant(ctx, g.GrantorUserID, g.ActionID)
-			k.log.With(ctx).Warn("grant.backfill.dropped", "grant_id", g.ID, "reason", "not_delegated")
+			drop("not_delegated")
 			continue
 		}
 		plain, oerr := k.secretBox.Open(g.GrantorUserID+"|"+g.ActionID, g.RefreshToken)
 		if oerr != nil {
-			_ = k.store.DeleteGrant(ctx, g.GrantorUserID, g.ActionID)
-			k.log.With(ctx).Warn("grant.backfill.dropped", "grant_id", g.ID, "reason", "token_unrecoverable")
+			drop("token_unrecoverable")
 			continue
 		}
 		pk, perr := connectionKey(a, auth)
 		if perr != nil {
-			_ = k.store.DeleteGrant(ctx, g.GrantorUserID, g.ActionID)
-			k.log.With(ctx).Warn("grant.backfill.dropped", "grant_id", g.ID, "reason", "no_provider_key")
+			drop("no_provider_key")
 			continue
 		}
 		connID, createdAt, existingScopes := uuid.New().String(), g.CreatedAt, ""
