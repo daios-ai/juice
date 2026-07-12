@@ -395,6 +395,88 @@ func TestParseOpenAPISpecRejectsAmbiguous2xxSchemas(t *testing.T) {
 	}
 }
 
+func TestConnectionKeyDerivation(t *testing.T) {
+	bearer := &Action{Kind: KindHTTP, Source: `{"base_url":"https://api.github.com","path":"/x"}`}
+	pk, err := connectionKey(bearer, &AuthInput{Scheme: AuthSchemeDelegatedBearer})
+	if err != nil || pk != "bearer:api.github.com" {
+		t.Errorf("bearer key = %q, %v; want bearer:api.github.com", pk, err)
+	}
+	oauth := &Action{Kind: KindHTTP, Source: `{"base_url":"https://api.x.com"}`}
+	auth := &AuthInput{Scheme: AuthSchemeOAuthDelegated, Config: map[string]any{"token_url": "https://x.com/token", "client_id": "cid"}}
+	pk, err = connectionKey(oauth, auth)
+	if err != nil || pk != "oauth:https://x.com/token|cid" {
+		t.Errorf("oauth key = %q, %v; want oauth:https://x.com/token|cid", pk, err)
+	}
+	// The key derives from facts, never the name: two actions with the same source+scheme but
+	// different names share a key.
+	other := &Action{Kind: KindHTTP, Name: "different/name", Source: bearer.Source}
+	if pk2, _ := connectionKey(other, &AuthInput{Scheme: AuthSchemeDelegatedBearer}); pk2 != "bearer:api.github.com" {
+		t.Errorf("name must not affect provider_key: got %q", pk2)
+	}
+	// Non-delegated scheme and non-http kind are rejected.
+	if _, err := connectionKey(bearer, &AuthInput{Scheme: AuthSchemeBearer}); err == nil {
+		t.Error("non-delegated scheme should not derive a provider_key")
+	}
+	if _, err := connectionKey(&Action{Kind: KindWasm}, &AuthInput{Scheme: AuthSchemeDelegatedBearer}); err == nil {
+		t.Error("non-http action should not derive a provider_key")
+	}
+}
+
+func TestSelectorParsingAndSegmentMatch(t *testing.T) {
+	cases := []struct{ sel, owner, path string }{
+		{"@tom", "@tom", ""},
+		{"@tom/brief", "@tom", "brief"},
+		{"@tom/brief/eu", "@tom", "brief/eu"},
+		{"@tom/*", "@tom", ""},
+		{"@tom/brief/*", "@tom", "brief"},
+		{"tom/brief", "@tom", "brief"}, // missing @ tolerated
+	}
+	for _, c := range cases {
+		o, p, err := ParseGrantSelector(c.sel)
+		if err != nil || o != c.owner || p != c.path {
+			t.Errorf("ParseGrantSelector(%q) = (%q,%q,%v), want (%q,%q,nil)", c.sel, o, p, err, c.owner, c.path)
+		}
+	}
+	if _, _, err := ParseGrantSelector("@"); err == nil {
+		t.Error("bare @ should be rejected")
+	}
+	// Segment matching: brief matches brief and brief/x, never briefing.
+	if !selectorPathMatches("brief", "brief") || !selectorPathMatches("brief", "brief/eu") {
+		t.Error("segment match should accept exact and sub-path")
+	}
+	if selectorPathMatches("brief", "briefing") {
+		t.Error("segment match must reject a prefix that is not a full segment (briefing)")
+	}
+	if !selectorPathMatches("", "anything/at/all") {
+		t.Error("empty path (whole-owner) should match every action")
+	}
+}
+
+func TestUnionScopesCoverage(t *testing.T) {
+	// Empty existing: nothing is covered unless the request is also empty.
+	j, covered := unionScopes("", []string{"read", "write"})
+	if covered {
+		t.Error("request should not be covered by an empty connection")
+	}
+	if j != `["read","write"]` {
+		t.Errorf("union = %q, want sorted array", j)
+	}
+	// Requesting a subset of the stored set is covered and widens nothing.
+	j2, covered2 := unionScopes(`["read","write"]`, []string{"read"})
+	if !covered2 || j2 != `["read","write"]` {
+		t.Errorf("subset should be covered without widening: %q %v", j2, covered2)
+	}
+	// A new scope is not covered and widens the union.
+	j3, covered3 := unionScopes(`["read"]`, []string{"admin"})
+	if covered3 || j3 != `["admin","read"]` {
+		t.Errorf("new scope should widen and not be covered: %q %v", j3, covered3)
+	}
+	// Empty request against empty existing is trivially covered.
+	if _, c := unionScopes("", nil); !c {
+		t.Error("empty request should be covered (bearer case)")
+	}
+}
+
 func TestParseOpenAPISpecRejectsInvalidPrice(t *testing.T) {
 	opTpl := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/op":{"get":{"operationId":"getOp","description":"an op","x-juice-price":%s,"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 	for _, tc := range []struct{ price, reason string }{

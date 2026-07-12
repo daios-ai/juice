@@ -2479,9 +2479,12 @@ func TestGrantRoutesRequireAuth(t *testing.T) {
 		method, path string
 		body         any
 	}{
-		{"POST", "/v1/grants/start", map[string]any{"action": "@x/y"}},
+		{"GET", "/v1/grants/plan?selector=@x", nil},
+		{"POST", "/v1/grants/start", map[string]any{"selector": "@x/y"}},
 		{"POST", "/v1/grants/complete", map[string]any{"state": "s"}},
-		{"DELETE", "/v1/grants?action=@x/y", nil},
+		{"POST", "/v1/grants", map[string]any{"selector": "@x/y", "token": "t"}},
+		{"DELETE", "/v1/grants?selector=@x/y", nil},
+		{"DELETE", "/v1/grants?account=bearer:x", nil},
 	}
 	for _, c := range cases {
 		resp := httpDo(t, srv, c.method, c.path, c.body, "")

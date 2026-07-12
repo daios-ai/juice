@@ -219,33 +219,42 @@ flow_grant() {
     assert_fails "grant.revoke_absent" "not found\|error" -- j "$db" "$ha" user disconnect @alice/inbox
 }
 
-# flow_grant_bearer — delegated_bearer per-caller static token (§8), full user story.
-# A provider exposes an action that calls an upstream API on the caller's behalf; the caller runs it
-# (rejected until they consent), connects their own API key, runs it successfully — and the live
-# upstream confirms it received exactly that token — then disconnects and is rejected again.
+# flow_grant_bearer — delegated_bearer per-caller static token, directory batch (§8), full user story.
+# A provider exposes two actions under one directory that call an upstream API on the caller's behalf.
+# The caller connects the whole directory with ONE pasted token (one connection, two grants), runs
+# both — the live upstream confirms each received exactly that token — sees one connection covering
+# two actions in `user me` (token-free), then disconnects the whole account and is rejected again.
 flow_grant_bearer() {
     echo "=== FLOW grant_bearer ==="
-    local dir db hs ha aid bport
+    local dir db hs ha a1 a2 bport
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     bport=$(backend_port); start_header_echo_backend "$bport" "X-Api-Key" || { fail "grant_bearer.backend" "backend failed"; return; }
     start_server "$db" "$hs" || { fail "grant_bearer.boot" "server did not start"; return; }
     j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
 
-    aid=$(strfield "$(jj "$db" "$ha" action create inbox --kind http --source "http://127.0.0.1:${bport}/api" --price 0 --description "bearer inbox" --auth '{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}')" id)
-    assert_nonempty "grant_bearer.action_created" "$aid"
-    j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
+    # Two actions under the inbox/ directory sharing one upstream host → one connection.
+    a1=$(strfield "$(jj "$db" "$ha" action create inbox/send --kind http --source "http://127.0.0.1:${bport}/api" --price 0 --description "bearer send" --auth '{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}')" id)
+    a2=$(strfield "$(jj "$db" "$ha" action create inbox/read --kind http --source "http://127.0.0.1:${bport}/api" --price 0 --description "bearer read" --auth '{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}')" id)
+    assert_nonempty "grant_bearer.a1_created" "$a1"
+    assert_nonempty "grant_bearer.a2_created" "$a2"
+    j "$db" "$ha" action enable "$a1" >/dev/null 2>&1
+    j "$db" "$ha" action enable "$a2" >/dev/null 2>&1
 
-    # No grant yet: run is rejected before consent.
-    assert_fails "grant_bearer.reject_before_consent" "grant" -- j "$db" "$ha" run @alice/inbox '{}'
+    # No grant yet: both rejected before consent.
+    assert_fails "grant_bearer.reject_send" "grant" -- j "$db" "$ha" run @alice/inbox/send '{}'
+    assert_fails "grant_bearer.reject_read" "grant" -- j "$db" "$ha" run @alice/inbox/read '{}'
 
-    # Connect a static token, run — and the upstream received exactly that token in its header.
+    # One command connects the whole directory; both actions then see the token upstream.
     j "$db" "$ha" user connect @alice/inbox --token ghp_secret >/dev/null 2>&1
-    assert_eq "grant_bearer.upstream_saw_token" "ghp_secret" "$(resultf "$(jj "$db" "$ha" run @alice/inbox '{}')" seen)"
-    assert_contains "grant_bearer.listed" "@alice/inbox" "$(j "$db" "$ha" user me)"
+    assert_eq "grant_bearer.send_saw_token" "ghp_secret" "$(resultf "$(jj "$db" "$ha" run @alice/inbox/send '{}')" seen)"
+    assert_eq "grant_bearer.read_saw_token" "ghp_secret" "$(resultf "$(jj "$db" "$ha" run @alice/inbox/read '{}')" seen)"
+    assert_contains "grant_bearer.listed_send" "@alice/inbox/send" "$(j "$db" "$ha" user me)"
+    assert_contains "grant_bearer.listed_read" "@alice/inbox/read" "$(j "$db" "$ha" user me)"
     assert_not_contains "grant_bearer.no_leak" "ghp_secret" "$(j "$db" "$ha" user me)"
 
-    # Disconnect drops it; the next run is rejected again.
-    j "$db" "$ha" user disconnect @alice/inbox >/dev/null 2>&1
-    assert_fails "grant_bearer.reject_after_revoke" "grant" -- j "$db" "$ha" run @alice/inbox '{}'
+    # Disconnect the whole upstream account (--account) → connection + both grants cascade away.
+    j "$db" "$ha" user disconnect --account "bearer:127.0.0.1:${bport}" >/dev/null 2>&1
+    assert_fails "grant_bearer.reject_send_after" "grant" -- j "$db" "$ha" run @alice/inbox/send '{}'
+    assert_fails "grant_bearer.reject_read_after" "grant" -- j "$db" "$ha" run @alice/inbox/read '{}'
 }

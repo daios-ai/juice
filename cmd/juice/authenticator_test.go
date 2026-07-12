@@ -21,16 +21,31 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// fakeGrantStore is an in-memory kernel.GrantStore for engine tests.
+// fakeGrantStore is an in-memory kernel.GrantStore for engine tests: grants point at connections
+// that hold the sealed secret (§8), matching the dispatch-time resolution grant → connection → token.
 type fakeGrantStore struct {
-	mu      sync.Mutex
-	grants  map[string]*kernel.Grant // key: grantor|action
-	rotated map[string]string        // grant id → new sealed token
-	deleted map[string]bool          // key: grantor|action
+	mu           sync.Mutex
+	grants       map[string]*kernel.Grant      // key: grantor|action
+	conns        map[string]*kernel.Connection // key: connection id
+	rotated      map[string]string             // connection id → new sealed secret
+	deletedConns map[string]bool               // connection id (cascade)
+	deleted      map[string]bool               // key: grantor|action
 }
 
 func newFakeGrantStore() *fakeGrantStore {
-	return &fakeGrantStore{grants: map[string]*kernel.Grant{}, rotated: map[string]string{}, deleted: map[string]bool{}}
+	return &fakeGrantStore{grants: map[string]*kernel.Grant{}, conns: map[string]*kernel.Connection{}, rotated: map[string]string{}, deletedConns: map[string]bool{}, deleted: map[string]bool{}}
+}
+
+// seed installs a connection holding `secret` (sealed under the new AAD grantor|connID) and a grant
+// binding actionID to it; returns the connection id so a test can assert rotation/cascade.
+func (f *fakeGrantStore) seed(box *aesGCMBox, grantor, actionID, secret string) string {
+	connID := "conn-" + grantor + "-" + actionID
+	sealed, _ := box.Seal(grantor+"|"+connID, secret)
+	f.mu.Lock()
+	f.conns[connID] = &kernel.Connection{ID: connID, UserID: grantor, ProviderKey: "p:" + actionID, SealedSecret: sealed}
+	f.grants[grantor+"|"+actionID] = &kernel.Grant{ID: "g-" + actionID, GrantorUserID: grantor, ActionID: actionID, ConnectionID: connID}
+	f.mu.Unlock()
+	return connID
 }
 func (f *fakeGrantStore) ReadGrant(_ context.Context, grantor, action string) (*kernel.Grant, error) {
 	f.mu.Lock()
@@ -40,17 +55,34 @@ func (f *fakeGrantStore) ReadGrant(_ context.Context, grantor, action string) (*
 	}
 	return nil, kernel.ErrNotFound.Wrap("no grant")
 }
-func (f *fakeGrantStore) UpdateGrantRefreshToken(_ context.Context, id, sealed string) error {
+func (f *fakeGrantStore) ReadConnection(_ context.Context, id string) (*kernel.Connection, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c := f.conns[id]; c != nil {
+		return c, nil
+	}
+	return nil, kernel.ErrNotFound.Wrap("no connection")
+}
+func (f *fakeGrantStore) UpdateConnectionSecret(_ context.Context, id, sealed string) error {
 	f.mu.Lock()
 	f.rotated[id] = sealed
+	if c := f.conns[id]; c != nil {
+		c.SealedSecret = sealed
+	}
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeGrantStore) DeleteGrant(_ context.Context, grantor, action string) error {
+func (f *fakeGrantStore) DeleteConnectionCascade(_ context.Context, id string) error {
 	f.mu.Lock()
-	f.deleted[grantor+"|"+action] = true
-	delete(f.grants, grantor+"|"+action)
-	f.mu.Unlock()
+	defer f.mu.Unlock()
+	f.deletedConns[id] = true
+	delete(f.conns, id)
+	for k, g := range f.grants {
+		if g.ConnectionID == id {
+			f.deleted[k] = true
+			delete(f.grants, k)
+		}
+	}
 	return nil
 }
 
@@ -152,9 +184,8 @@ func TestDelegatedTokenBinding(t *testing.T) {
 	gs := newFakeGrantStore()
 	action := &kernel.Action{ID: "act-d", Name: "inbox", AuthJSON: "s"}
 
-	// ownerA has a grant; its refresh token is sealed with AAD grantor|action.
-	sealed, _ := box.Seal("ownerA|"+action.ID, "ref-plain")
-	gs.grants["ownerA|"+action.ID] = &kernel.Grant{ID: "g1", GrantorUserID: "ownerA", ActionID: action.ID, RefreshToken: sealed}
+	// ownerA has a grant pointing at a connection whose secret is sealed with AAD grantor|connID.
+	connA := gs.seed(box, "ownerA", action.ID, "ref-plain")
 
 	var rotate bool
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -191,26 +222,27 @@ func TestDelegatedTokenBinding(t *testing.T) {
 		t.Errorf("ownerB grant-required meta[action] = %q, want @sys/inbox", got)
 	}
 
-	// Rotation persists the new refresh token.
+	// Rotation persists the new refresh token onto the connection (siblings unaffected).
 	rotate = true
 	if _, err := eng.token(ctx, action, "ownerA", auth, true); err != nil {
 		t.Fatalf("rotation token: %v", err)
 	}
-	if gs.rotated["g1"] == "" {
-		t.Error("rotation was not persisted")
+	if gs.rotated[connA] == "" {
+		t.Error("rotation was not persisted to the connection")
 	}
 
-	// invalid_grant deletes the grant.
-	delete(gs.grants, "ownerA|"+action.ID)
-	sealedBad, _ := box.Seal("ownerC|"+action.ID, "wrong")
-	gs.grants["ownerC|"+action.ID] = &kernel.Grant{ID: "g2", GrantorUserID: "ownerC", ActionID: action.ID, RefreshToken: sealedBad}
+	// invalid_grant deletes the connection and cascades its grant.
+	connC := gs.seed(box, "ownerC", action.ID, "wrong")
 	if _, err := eng.token(ctx, action, "ownerC", auth, true); err == nil || !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("invalid_grant: got %v, want grant-required", err)
 	} else if got := grantMeta(err); got != "@sys/inbox" {
 		t.Errorf("invalid_grant grant-required meta[action] = %q, want @sys/inbox", got)
 	}
+	if !gs.deletedConns[connC] {
+		t.Error("invalid_grant did not delete the connection")
+	}
 	if !gs.deleted["ownerC|"+action.ID] {
-		t.Error("invalid_grant did not delete the grant")
+		t.Error("invalid_grant did not cascade the grant")
 	}
 }
 
@@ -249,8 +281,7 @@ func TestDelegatedBearerTokenApplied(t *testing.T) {
 				t.Fatalf("seal auth: %v", err)
 			}
 			gs := newFakeGrantStore()
-			sealed, _ := box.Seal("ownerA|"+action.ID, "ghp_x")
-			gs.grants["ownerA|"+action.ID] = &kernel.Grant{ID: "g", GrantorUserID: "ownerA", ActionID: action.ID, RefreshToken: sealed}
+			gs.seed(box, "ownerA", action.ID, "ghp_x")
 
 			eng := newAuthenticator(box, gs, true, time.Second)
 			exec := &httpActionExecutor{auth: eng}
@@ -281,8 +312,7 @@ func TestDelegatedBearerBindingMismatch(t *testing.T) {
 	action.AuthJSON, _ = box.Seal(action.ID, string(authJSON))
 
 	gs := newFakeGrantStore()
-	sealed, _ := box.Seal("ownerA|"+action.ID, "ghp_x")
-	gs.grants["ownerA|"+action.ID] = &kernel.Grant{ID: "g", GrantorUserID: "ownerA", ActionID: action.ID, RefreshToken: sealed}
+	gs.seed(box, "ownerA", action.ID, "ghp_x")
 
 	eng := newAuthenticator(box, gs, true, time.Second)
 	eng.refFn = func(context.Context, string) string { return "@sys/x" }
@@ -294,6 +324,72 @@ func TestDelegatedBearerBindingMismatch(t *testing.T) {
 	}
 	if reached {
 		t.Error("upstream was called despite missing grant")
+	}
+}
+
+// TestDelegatedConnectionShared: two oauth_delegated actions pointing at one connection share the
+// cached access token (a single token exchange), and a refresh-token rotation triggered by one
+// action persists onto the connection so the sibling keeps working with the new secret (§8).
+func TestDelegatedConnectionShared(t *testing.T) {
+	box := testBox(t)
+	gs := newFakeGrantStore()
+	const grantor, connID = "ownerA", "shared-conn"
+	actionA := &kernel.Action{ID: "act-a", Name: "mail/read", AuthJSON: "s"}
+	actionB := &kernel.Action{ID: "act-b", Name: "mail/send", AuthJSON: "s"}
+
+	// One connection (secret "ref-1"), two grants pointing at it.
+	sealed, _ := box.Seal(grantor+"|"+connID, "ref-1")
+	gs.conns[connID] = &kernel.Connection{ID: connID, UserID: grantor, ProviderKey: "oauth:p|c", SealedSecret: sealed}
+	gs.grants[grantor+"|"+actionA.ID] = &kernel.Grant{ID: "gA", GrantorUserID: grantor, ActionID: actionA.ID, ConnectionID: connID}
+	gs.grants[grantor+"|"+actionB.ID] = &kernel.Grant{ID: "gB", GrantorUserID: grantor, ActionID: actionB.ID, ConnectionID: connID}
+
+	var refreshCalls int
+	rotate := false
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		refreshCalls++
+		switch r.Form.Get("refresh_token") {
+		case "ref-1":
+			out := map[string]any{"access_token": "acc1", "expires_in": 3600}
+			if rotate {
+				out["refresh_token"] = "ref-2"
+			}
+			json.NewEncoder(w).Encode(out)
+		case "ref-2":
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "acc2", "expires_in": 3600})
+		default:
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]any{"error": "invalid_grant"})
+		}
+	}))
+	defer provider.Close()
+
+	eng := newAuthenticator(box, gs, true, time.Second)
+	auth := &kernel.AuthInput{Scheme: kernel.AuthSchemeOAuthDelegated,
+		Config: map[string]any{"token_url": provider.URL, "auth_url": provider.URL + "/a", "client_id": "c"}}
+	ctx := context.Background()
+
+	// Action A exchanges once; action B shares the connection's cached access token (no 2nd exchange).
+	if tok, err := eng.token(ctx, actionA, grantor, auth, false); err != nil || tok != "acc1" {
+		t.Fatalf("A token: %q %v", tok, err)
+	}
+	if tok, err := eng.token(ctx, actionB, grantor, auth, false); err != nil || tok != "acc1" {
+		t.Fatalf("B token (should be cached): %q %v", tok, err)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("sibling did not share the cached token: %d exchanges, want 1", refreshCalls)
+	}
+
+	// A forced refresh rotates the connection's secret; the sibling B then works with the new secret.
+	rotate = true
+	if _, err := eng.token(ctx, actionA, grantor, auth, true); err != nil {
+		t.Fatalf("A forced refresh: %v", err)
+	}
+	if gs.rotated[connID] == "" {
+		t.Fatal("rotation was not persisted onto the shared connection")
+	}
+	if tok, err := eng.token(ctx, actionB, grantor, auth, true); err != nil || tok != "acc2" {
+		t.Fatalf("sibling B after rotation: %q %v (want acc2 via ref-2)", tok, err)
 	}
 }
 
@@ -328,16 +424,16 @@ func TestGrantBrokerCodeFlow(t *testing.T) {
 
 	// A bad-scheme redirect is rejected; a hosted https redirect is accepted (the provider, not
 	// the kernel, validates redirect targets).
-	if _, err := broker.start(ctx, "u1", "act", auth, "ftp://nope/cb", "code"); err == nil {
+	if _, err := broker.start(ctx, "u1", []string{"act"}, "prov", `["read"]`, auth, "ftp://nope/cb", "code"); err == nil {
 		t.Error("bad-scheme redirect_uri accepted")
 	}
-	if res, err := broker.start(ctx, "u1", "act", auth, "https://app.example/callback", "code"); err != nil {
+	if res, err := broker.start(ctx, "u1", []string{"act"}, "prov", `["read"]`, auth, "https://app.example/callback", "code"); err != nil {
 		t.Errorf("hosted https redirect rejected: %v", err)
 	} else if !strings.Contains(res.AuthorizeURL, "redirect_uri=https%3A%2F%2Fapp.example%2Fcallback") {
 		t.Errorf("hosted redirect not embedded in authorize_url: %s", res.AuthorizeURL)
 	}
 
-	res, err := broker.start(ctx, "u1", "act", auth, "http://127.0.0.1:9999/callback", "code")
+	res, err := broker.start(ctx, "u1", []string{"act"}, "prov", `["read"]`, auth, "http://127.0.0.1:9999/callback", "code")
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -356,7 +452,7 @@ func TestGrantBrokerCodeFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
-	if cr.Status != "complete" || cr.ActionID != "act" || cr.Refresh != "ref-1" {
+	if cr.Status != "complete" || len(cr.ActionIDs) != 1 || cr.ActionIDs[0] != "act" || cr.ProviderKey != "prov" || cr.Refresh != "ref-1" {
 		t.Fatalf("complete result = %+v", cr)
 	}
 	// State is single-use.
@@ -370,7 +466,7 @@ func TestBrokerExpiredState(t *testing.T) {
 	broker := newGrantBroker(newAuthenticator(testBox(t), newFakeGrantStore(), true, time.Second))
 	auth := &kernel.AuthInput{Scheme: kernel.AuthSchemeOAuthDelegated,
 		Config: map[string]any{"auth_url": "https://p.example/a", "token_url": "https://p.example/t", "client_id": "c"}}
-	res, err := broker.start(context.Background(), "u1", "act", auth, "http://127.0.0.1:1/callback", "code")
+	res, err := broker.start(context.Background(), "u1", []string{"act"}, "prov", `["read"]`, auth, "http://127.0.0.1:1/callback", "code")
 	if err != nil {
 		t.Fatal(err)
 	}

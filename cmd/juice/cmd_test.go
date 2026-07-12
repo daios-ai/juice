@@ -1649,3 +1649,18 @@ func TestPrintTextParity(t *testing.T) {
 		t.Errorf("input_schema not rendered as indented JSON:\n%s", text)
 	}
 }
+
+// TestDirectorySelector: the run grant-required hint groups an action by its directory (§8).
+func TestDirectorySelector(t *testing.T) {
+	cases := map[string]string{
+		"@alice/mail/send": "@alice/mail",
+		"@alice/send":      "@alice/send",
+		"@a/x/y/z":         "@a/x/y",
+		"noslash":          "noslash",
+	}
+	for in, want := range cases {
+		if got := directorySelector(in); got != want {
+			t.Errorf("directorySelector(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

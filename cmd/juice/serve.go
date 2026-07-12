@@ -428,8 +428,9 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Get("/v1/me", srv.getMe)
 		r.Put("/v1/me", srv.putMe)
 
-		// Delegated-OAuth grants (§8). The client hosts the loopback redirect; the kernel holds
-		// only in-memory PKCE/device state and performs the token exchange itself.
+		// Delegated-auth grants and connections (§8). The client hosts the loopback redirect; the
+		// kernel holds only in-memory PKCE/device state and performs the token exchange itself.
+		r.Get("/v1/grants/plan", srv.getGrantPlan)
 		r.Post("/v1/grants/start", srv.postGrantStart)
 		r.Post("/v1/grants/complete", srv.postGrantComplete)
 		r.Post("/v1/grants", srv.postGrant)
@@ -1106,13 +1107,29 @@ func (s *server) putMe(w http.ResponseWriter, r *http.Request) {
 
 // ---- delegated-OAuth grants (§8) ----
 
+// getGrantPlan expands a selector into the consent plan user connect walks (§8).
+func (s *server) getGrantPlan(w http.ResponseWriter, r *http.Request) {
+	selector := r.URL.Query().Get("selector")
+	if selector == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("selector query parameter is required"))
+		return
+	}
+	res, err := planGrants(s.kernel, r.Context(), callerFrom(r), selector)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 func (s *server) postGrantStart(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, body struct {
-		Action      string `json:"action"`
+		Selector    string `json:"selector"`
+		Provider    string `json:"provider"`
 		RedirectURI string `json:"redirect_uri"`
 		Flow        string `json:"flow"`
 	}) (any, int, error) {
-		res, err := startGrant(s.kernel, s.oauth, r.Context(), callerFrom(r), body.Action, body.RedirectURI, body.Flow)
+		res, err := startGrant(s.kernel, s.oauth, r.Context(), callerFrom(r), body.Selector, body.Provider, body.RedirectURI, body.Flow)
 		return res, http.StatusOK, err
 	})(w, r)
 }
@@ -1127,25 +1144,41 @@ func (s *server) postGrantComplete(w http.ResponseWriter, r *http.Request) {
 	})(w, r)
 }
 
-// postGrant is the direct token-store for delegated_bearer actions (§8): a paste-once static token,
-// no browser roundtrip. OAuth actions use start/complete instead.
+// postGrant is the direct token-store for a delegated_bearer group (§8): a paste-once static token,
+// no browser roundtrip. OAuth groups use start/complete instead.
 func (s *server) postGrant(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, body struct {
-		Action string `json:"action"`
-		Token  string `json:"token"`
+		Selector string `json:"selector"`
+		Provider string `json:"provider"`
+		Token    string `json:"token"`
 	}) (any, int, error) {
-		res, err := attachToken(s.kernel, r.Context(), callerFrom(r), body.Action, body.Token)
+		res, err := attachToken(s.kernel, r.Context(), callerFrom(r), body.Selector, body.Provider, body.Token)
 		return res, http.StatusOK, err
 	})(w, r)
 }
 
+// deleteGrant revokes by selector (grants only) or by account (connection + cascade), §8. A legacy
+// ?action= is accepted as the degenerate single-action selector.
 func (s *server) deleteGrant(w http.ResponseWriter, r *http.Request) {
-	action := r.URL.Query().Get("action")
-	if action == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("action query parameter is required"))
+	q := r.URL.Query()
+	if account := q.Get("account"); account != "" {
+		res, err := revokeConnection(s.kernel, r.Context(), callerFrom(r), account)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
 		return
 	}
-	res, err := revokeGrant(s.kernel, r.Context(), callerFrom(r), action)
+	selector := q.Get("selector")
+	if selector == "" {
+		selector = q.Get("action") // legacy alias: the degenerate single-action selector
+	}
+	if selector == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("selector or account query parameter is required"))
+		return
+	}
+	res, err := revokeGrantsBySelector(s.kernel, r.Context(), callerFrom(r), selector)
 	if err != nil {
 		writeErr(w, err)
 		return

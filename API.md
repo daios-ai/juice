@@ -101,21 +101,23 @@ Federation has no HTTP surface: peer identity, gossip, manifests, the friend han
 | Operation | HTTP | CLI |
 |-----------|------|-----|
 | Create user | `POST /v1/users` `{handle, email, password}` → 201 user | `juice user create <user> <email> [--password]` |
-| Get self | `GET /v1/me` → user (`id`, `handle`, `email`, `available`, `locked`, `grants`) | `juice user me` |
+| Get self | `GET /v1/me` → user (`id`, `handle`, `email`, `available`, `locked`, `grants`, `connections`) | `juice user me` |
 | Update self | `PUT /v1/me` `{[email], [current_password, password]}` → user | `juice user update [--email] [--password]` |
 
 `handle` is immutable. `email` and `password` are updatable by the authenticated user; `password` change requires `current_password` to verify the existing credential. At least one of `email` or `password` must be provided. Proxy users (federation peers) cannot be created here, cannot log in, and hold no tokens; they exist only through peer acceptance, authenticate per request by federation signature, and cannot use `PUT /v1/me`.
 
-### Grants (delegated OAuth)
+### Grants and connections (delegated auth)
 
 | Operation | HTTP | CLI |
 |-----------|------|-----|
-| Start consent | `POST /v1/grants/start` `{action, [redirect_uri], [flow]}` → `{state, authorize_url}` (code) or `{state, verification_uri, user_code, interval, expires_in}` (device) | `juice user connect <action> [--device]` |
-| Complete consent | `POST /v1/grants/complete` `{state, [code]}` → `{status, action, created_at}` or `{status: "pending"}` | (driven by `user connect`) |
-| Attach token | `POST /v1/grants` `{action, token}` → `{status, action, created_at}` | `juice user connect <action> --token <pat>` |
-| Disconnect | `DELETE /v1/grants?action=@owner/name` → `{revoked, action}` | `juice user disconnect <action>` |
+| Plan consent | `GET /v1/grants/plan?selector=` → `{groups: [{provider, scheme, scopes, connected, covered, actions: [{action, granted}]}], skipped}` | (driven by `user connect`) |
+| Start consent | `POST /v1/grants/start` `{selector, provider, [redirect_uri], [flow]}` → `{status:"granted", actions}` (already covered) or `{state, authorize_url}` (code) or `{state, verification_uri, user_code, interval, expires_in}` (device) | `juice user connect <selector> [--device]` |
+| Complete consent | `POST /v1/grants/complete` `{state, [code]}` → `{status, provider, actions, created_at}` or `{status: "pending"}` | (driven by `user connect`) |
+| Attach token | `POST /v1/grants` `{selector, [provider], token}` → `{status, provider, actions, created_at}` | `juice user connect <selector> --token <pat>` |
+| Disconnect grants | `DELETE /v1/grants?selector=` → `{revoked: [actions]}` (legacy `?action=` accepted) | `juice user disconnect <selector>` |
+| Disconnect account | `DELETE /v1/grants?account=<provider_key>` → `{revoked: [actions], connection}` | `juice user disconnect --account <provider>` |
 
-A `Grant` delegates the caller's upstream identity to one delegated action (§8). For an `oauth_delegated` action the client hosts the redirect target — a loopback listener for local clients (CLI/desktop), a registered callback for hosted ones — and the server holds only in-memory PKCE/device state and performs the token exchange, so the refresh token never transits the client. For a `delegated_bearer` action there is no browser roundtrip: the caller supplies a static token (a personal access token / per-user API key) once via `POST /v1/grants`, and the CLI's `--token` reads it without echo when the flag value is empty (keeping it out of shell history). Running an action that lacks a grant returns `grant_required` (403) with the action in `meta`, so a client can offer consent inline; the CLI (`juice run`) does exactly that on an interactive terminal and otherwise prints a `juice user connect` hint. Grants are listed token-free under `grants` in `GET /v1/me` and are never otherwise readable.
+A `Grant` is per-action consent (§8): a pointer binding one action to a `Connection` — the caller's upstream account credential, stored once per `(user, provider)` and shared by every grant that points at it. A **selector** (`@owner`, `@owner/path`, or a full `@owner/name`; path-segment matched, trailing `/*` stripped) names a set of delegated actions; `user connect` fetches the plan, groups them by upstream account, shows the delta, and covers each group with one gesture: one browser consent (requesting the union of the group's scopes) for `oauth_delegated`, or one token paste for `delegated_bearer`. Connecting an action whose account is already connected with covering scopes grants instantly with no browser. For `oauth_delegated` the client hosts the redirect target — a loopback listener for local clients (CLI/desktop), a registered callback for hosted ones — and the server holds only in-memory PKCE/device state and performs the token exchange, so the refresh token never transits the client. The CLI's `--token` reads without echo when the flag value is empty (keeping it out of shell history). Running an action that lacks a grant returns `grant_required` (403) with the action in `meta`; the CLI (`juice run`) offers consent inline on an interactive terminal and otherwise prints a `juice user connect <directory>` hint. Grants and connections are listed token-free under `grants`/`connections` in `GET /v1/me` and are never otherwise readable.
 
 ### Actions
 

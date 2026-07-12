@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -2567,40 +2568,45 @@ func TestFlow_OAuthDelegated(t *testing.T) {
 	defer srv.Close()
 
 	_, ownerTok := makeUser(t, k, "@oauth-owner")
-	createDelegatedActionHTTP(t, srv, ownerTok, "inbox", upstream.URL, provider.URL)
-	const ref = "@oauth-owner/inbox"
+	// Two oauth actions under one directory sharing one provider app — they group into one
+	// connection, so a single consent covers both (§8).
+	createDelegatedActionHTTP(t, srv, ownerTok, "mail/read", upstream.URL, provider.URL)
+	createDelegatedActionHTTP(t, srv, ownerTok, "mail/send", upstream.URL, provider.URL)
+	const readRef, sendRef, selector = "@oauth-owner/mail/read", "@oauth-owner/mail/send", "@oauth-owner/mail"
 
-	// 1. Run without a grant: rejected before any charge with the structured grant_required
-	// outcome — a machine-detectable code plus the action in meta (§8).
-	rejectRun := func() {
+	rejectRun := func(ref string) {
 		resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{"action": ref, "args": map[string]any{}}, ownerTok)
 		defer resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
-			t.Fatal("run without grant unexpectedly succeeded")
+			t.Fatalf("run %s without grant unexpectedly succeeded", ref)
 		}
 		var body struct {
 			Code string            `json:"code"`
 			Meta map[string]string `json:"meta"`
 		}
 		json.NewDecoder(resp.Body).Decode(&body)
-		if body.Code != "grant_required" {
-			t.Fatalf("run rejection code = %q, want grant_required", body.Code)
-		}
-		if body.Meta["action"] != ref {
-			t.Fatalf("run rejection meta.action = %q, want %q", body.Meta["action"], ref)
+		if body.Code != "grant_required" || body.Meta["action"] != ref {
+			t.Fatalf("run %s rejection = %+v, want grant_required", ref, body)
 		}
 	}
-	rejectRun()
+	// 1. Neither action is connected: both rejected pre-lock.
+	rejectRun(readRef)
+	rejectRun(sendRef)
 
-	// 2. Consent: start the code flow, then complete it (the provider issues the refresh token).
+	// 2. One consent for the directory covers both actions (the authorize URL requests the union
+	// of their scopes).
 	var start map[string]any
 	sr := httpDo(t, srv, "POST", "/v1/grants/start", map[string]any{
-		"action": ref, "redirect_uri": "http://127.0.0.1:5555/callback", "flow": "code",
+		"selector": selector, "redirect_uri": "http://127.0.0.1:5555/callback", "flow": "code",
 	}, ownerTok)
 	decodeResponse(t, sr, &start)
 	state, _ := start["state"].(string)
-	if state == "" || start["authorize_url"] == "" {
+	au, _ := start["authorize_url"].(string)
+	if state == "" || au == "" {
 		t.Fatalf("grants/start returned no state/authorize_url: %v", start)
+	}
+	if !strings.Contains(au, "scope=gmail.readonly") {
+		t.Errorf("authorize_url missing the group's scope union: %s", au)
 	}
 	var done map[string]any
 	cr := httpDo(t, srv, "POST", "/v1/grants/complete", map[string]any{"state": state, "code": "the-code"}, ownerTok)
@@ -2608,21 +2614,26 @@ func TestFlow_OAuthDelegated(t *testing.T) {
 	if done["status"] != "complete" {
 		t.Fatalf("grants/complete status = %v, want complete", done["status"])
 	}
+	if acts, _ := done["actions"].([]any); len(acts) != 2 {
+		t.Fatalf("one consent should mint two grants, got %v", done["actions"])
+	}
 
-	// 3. Run now succeeds and the upstream saw the refreshed bearer.
-	reply := runAction(t, srv, ownerTok, ref, map[string]any{})
-	if reply.Result["ok"] != true {
-		t.Errorf("run result = %v, want ok=true", reply.Result)
+	// 3. Both actions now run, the upstream seeing the refreshed bearer.
+	for _, ref := range []string{readRef, sendRef} {
+		reply := runAction(t, srv, ownerTok, ref, map[string]any{})
+		if reply.Result["ok"] != true {
+			t.Errorf("run %s result = %v, want ok=true", ref, reply.Result)
+		}
 	}
 	if sawAuth != "Bearer acc-live" {
 		t.Errorf("upstream saw Authorization %q, want Bearer acc-live", sawAuth)
 	}
 
-	// 4. /v1/me lists the grant with no token material.
+	// 4. /v1/me lists one connection covering two actions, with no token material.
 	meResp := httpDo(t, srv, "GET", "/v1/me", nil, ownerTok)
 	meBody, _ := readAll(t, meResp)
-	if !strings.Contains(meBody, ref) {
-		t.Errorf("/v1/me does not list the grant: %s", meBody)
+	if !strings.Contains(meBody, readRef) || !strings.Contains(meBody, `"connections"`) {
+		t.Errorf("/v1/me does not list the grant/connections: %s", meBody)
 	}
 	for _, secret := range []string{"ref-1", "acc-live", "acc-init"} {
 		if strings.Contains(meBody, secret) {
@@ -2630,13 +2641,14 @@ func TestFlow_OAuthDelegated(t *testing.T) {
 		}
 	}
 
-	// 5. Revoke → run is rejected again.
-	rev := httpDo(t, srv, "DELETE", "/v1/grants?action="+ref, nil, ownerTok)
+	// 5. Disconnect the directory by selector → both rejected again.
+	rev := httpDo(t, srv, "DELETE", "/v1/grants?selector="+selector, nil, ownerTok)
 	if rev.StatusCode != http.StatusOK {
 		t.Fatalf("revoke: got %d", rev.StatusCode)
 	}
 	rev.Body.Close()
-	rejectRun()
+	rejectRun(readRef)
+	rejectRun(sendRef)
 }
 
 func TestFlow_DelegatedBearer(t *testing.T) {
@@ -2654,27 +2666,31 @@ func TestFlow_DelegatedBearer(t *testing.T) {
 	defer srv.Close()
 
 	_, ownerTok := makeUser(t, k, "@bearer-owner")
-	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "inbox", "kind": "http", "price": 0, "source": upstream.URL,
-		"description": "bearer inbox", "input_schema": minSchema, "output_schema": minSchema,
-		"auth": map[string]any{
-			"scheme": kernel.AuthSchemeDelegatedBearer,
-			"config": map[string]any{"header": "X-Api-Key", "template": "{token}"},
-		},
-	}, ownerTok)
-	if cr.StatusCode != http.StatusCreated {
-		t.Fatalf("create bearer action: got %d", cr.StatusCode)
+	// Two bearer actions under one directory, sharing one upstream host → one connection, one paste.
+	for _, name := range []string{"inbox/send", "inbox/read"} {
+		cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+			"name": name, "kind": "http", "price": 0, "source": upstream.URL,
+			"description": "bearer " + name, "input_schema": minSchema, "output_schema": minSchema,
+			"auth": map[string]any{
+				"scheme": kernel.AuthSchemeDelegatedBearer,
+				"config": map[string]any{"header": "X-Api-Key", "template": "{token}"},
+			},
+		}, ownerTok)
+		if cr.StatusCode != http.StatusCreated {
+			t.Fatalf("create bearer action %s: got %d", name, cr.StatusCode)
+		}
+		var act map[string]any
+		decodeResponse(t, cr, &act)
+		httpDo(t, srv, "POST", "/v1/actions/"+act["id"].(string)+"/enable", nil, ownerTok).Body.Close()
 	}
-	var act map[string]any
-	decodeResponse(t, cr, &act)
-	httpDo(t, srv, "POST", "/v1/actions/"+act["id"].(string)+"/enable", nil, ownerTok).Body.Close()
-	const ref = "@bearer-owner/inbox"
+	const sendRef, readRef, selector = "@bearer-owner/inbox/send", "@bearer-owner/inbox/read", "@bearer-owner/inbox"
+	providerKey := "bearer:" + strings.TrimPrefix(upstream.URL, "http://")
 
-	rejectRun := func() {
+	rejectRun := func(ref string) {
 		resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{"action": ref, "args": map[string]any{}}, ownerTok)
 		defer resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
-			t.Fatal("run without grant unexpectedly succeeded")
+			t.Fatalf("run %s without grant unexpectedly succeeded", ref)
 		}
 		var body struct {
 			Code string            `json:"code"`
@@ -2682,47 +2698,54 @@ func TestFlow_DelegatedBearer(t *testing.T) {
 		}
 		json.NewDecoder(resp.Body).Decode(&body)
 		if body.Code != "grant_required" || body.Meta["action"] != ref {
-			t.Fatalf("run rejection = %+v, want grant_required for %s", body, ref)
+			t.Fatalf("run %s rejection = %+v, want grant_required", ref, body)
 		}
 	}
 
-	// 1. No grant → rejected pre-lock.
-	rejectRun()
+	// 1. No grant → both rejected pre-lock.
+	rejectRun(sendRef)
+	rejectRun(readRef)
 
-	// 2. Attach the static token directly (no browser flow).
+	// 2. One token paste across the directory (no browser flow) mints a grant for each action.
 	var done map[string]any
-	ar := httpDo(t, srv, "POST", "/v1/grants", map[string]any{"action": ref, "token": "ghp_secret"}, ownerTok)
+	ar := httpDo(t, srv, "POST", "/v1/grants", map[string]any{"selector": selector, "token": "ghp_secret"}, ownerTok)
 	decodeResponse(t, ar, &done)
 	if done["status"] != "connected" {
 		t.Fatalf("grants attach status = %v, want connected", done["status"])
 	}
-
-	// 3. Run succeeds and the upstream saw the token in the configured header.
-	reply := runAction(t, srv, ownerTok, ref, map[string]any{})
-	if reply.Result["ok"] != true {
-		t.Errorf("run result = %v, want ok=true", reply.Result)
-	}
-	if sawKey != "ghp_secret" {
-		t.Errorf("upstream saw X-Api-Key %q, want ghp_secret", sawKey)
+	if acts, _ := done["actions"].([]any); len(acts) != 2 {
+		t.Fatalf("one paste should connect two actions, got %v", done["actions"])
 	}
 
-	// 4. /v1/me lists the grant without the token.
+	// 3. Both run and the upstream saw the token in the configured header.
+	for _, ref := range []string{sendRef, readRef} {
+		reply := runAction(t, srv, ownerTok, ref, map[string]any{})
+		if reply.Result["ok"] != true {
+			t.Errorf("run %s result = %v, want ok=true", ref, reply.Result)
+		}
+		if sawKey != "ghp_secret" {
+			t.Errorf("upstream saw X-Api-Key %q, want ghp_secret", sawKey)
+		}
+	}
+
+	// 4. /v1/me lists one connection covering two actions, without the token.
 	meResp := httpDo(t, srv, "GET", "/v1/me", nil, ownerTok)
 	meBody, _ := readAll(t, meResp)
-	if !strings.Contains(meBody, ref) {
-		t.Errorf("/v1/me does not list the grant: %s", meBody)
+	if !strings.Contains(meBody, sendRef) || !strings.Contains(meBody, `"connections"`) {
+		t.Errorf("/v1/me does not list the grant/connections: %s", meBody)
 	}
 	if strings.Contains(meBody, "ghp_secret") {
 		t.Errorf("/v1/me leaked the token: %s", meBody)
 	}
 
-	// 5. Disconnect → run rejected again.
-	rev := httpDo(t, srv, "DELETE", "/v1/grants?action="+ref, nil, ownerTok)
+	// 5. Disconnect the whole account (--account) → connection + both grants cascade, both rejected.
+	rev := httpDo(t, srv, "DELETE", "/v1/grants?account="+url.QueryEscape(providerKey), nil, ownerTok)
 	if rev.StatusCode != http.StatusOK {
-		t.Fatalf("disconnect: got %d", rev.StatusCode)
+		t.Fatalf("disconnect --account: got %d", rev.StatusCode)
 	}
 	rev.Body.Close()
-	rejectRun()
+	rejectRun(sendRef)
+	rejectRun(readRef)
 }
 
 // readAll returns a response body as a string.

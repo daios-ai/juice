@@ -30,6 +30,21 @@ func grantActionRef(err error, fallback string) string {
 	return fallback
 }
 
+// directorySelector turns an action ref (@owner/name) into the selector that connects its whole
+// directory in one gesture (§8): drop the last name segment when the name has ≥2 segments, else the
+// ref itself. So @a/mail/send → @a/mail, and @a/send → @a/send.
+func directorySelector(ref string) string {
+	at := strings.Index(ref, "/")
+	if at < 0 {
+		return ref
+	}
+	owner, name := ref[:at], ref[at+1:]
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		return owner + "/" + name[:i]
+	}
+	return ref
+}
+
 // peerMetaHandle returns the peer handle a peer_unreachable/peer_unfunded error names (§13),
 // stripped of a leading '@' since the caller re-adds it, or "peer" when absent.
 func peerMetaHandle(err error) string {
@@ -961,18 +976,18 @@ func runCmd() *cobra.Command {
 			if errors.Is(err, kernel.ErrGrantRequired) {
 				action := grantActionRef(err, cmdArgs[0])
 				if interactiveTTY() && promptYesNo(fmt.Sprintf("This action needs your authorization. Authorize %s now?", action)) {
-					if cerr := runConsentFlow(action); cerr != nil {
+					if cerr := connectSelector(action, false, true); cerr != nil {
 						return cerr
 					}
 					err = apiCall(context.Background(), "POST", "/v1/run", reqBody, &raw)
 				} else {
-					fmt.Fprintf(os.Stderr, "\nAuthorize with:\n  juice user connect %s\n", action)
+					fmt.Fprintf(os.Stderr, "\nAuthorize with:\n  juice user connect %s\n", directorySelector(action))
 					return err
 				}
 			}
 			if err != nil {
 				if errors.Is(err, kernel.ErrGrantRequired) {
-					fmt.Fprintf(os.Stderr, "\nAuthorize with:\n  juice user connect %s\n", grantActionRef(err, cmdArgs[0]))
+					fmt.Fprintf(os.Stderr, "\nAuthorize with:\n  juice user connect %s\n", directorySelector(grantActionRef(err, cmdArgs[0])))
 				}
 				// Federation-relationship failures (§13): the caller's own balance is fine — say so,
 				// and point at the operator remedy instead of a caller one.

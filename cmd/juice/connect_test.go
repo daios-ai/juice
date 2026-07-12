@@ -30,18 +30,24 @@ func createDelegatedCLIAction(t *testing.T, k *kernel.Kernel, ownerID, name stri
 	return a.ID
 }
 
-// TestUserConnectCommandTree pins the CLI surface: `user connect <action>` (with --device) and
-// `user disconnect <action>`.
+// TestUserConnectCommandTree pins the CLI surface: `user connect <selector>` (with --device,
+// --token, --yes) and `user disconnect [selector]` (with --account).
 func TestUserConnectCommandTree(t *testing.T) {
 	c := userConnectCmd()
-	if c.Use != "connect <action>" {
+	if c.Use != "connect <selector>" {
 		t.Errorf("connect Use = %q", c.Use)
 	}
-	if c.Flags().Lookup("device") == nil {
-		t.Error("user connect missing --device flag")
+	for _, f := range []string{"device", "token", "yes"} {
+		if c.Flags().Lookup(f) == nil {
+			t.Errorf("user connect missing --%s flag", f)
+		}
 	}
-	if userDisconnectCmd().Use != "disconnect <action>" {
-		t.Errorf("disconnect Use = %q", userDisconnectCmd().Use)
+	d := userDisconnectCmd()
+	if d.Use != "disconnect [selector]" {
+		t.Errorf("disconnect Use = %q", d.Use)
+	}
+	if d.Flags().Lookup("account") == nil {
+		t.Error("user disconnect missing --account flag")
 	}
 }
 
@@ -63,6 +69,55 @@ func TestUserDisconnectCLI(t *testing.T) {
 	}
 	if views, _ := env.k.ListGrantViews(ctx, uid); len(views) != 0 {
 		t.Errorf("grant survived CLI revoke: %d", len(views))
+	}
+}
+
+// createBearerCLIAction creates and activates a delegated_bearer http action owned by ownerID.
+func createBearerCLIAction(t *testing.T, k *kernel.Kernel, ownerID, name, source string) {
+	t.Helper()
+	ctx := context.Background()
+	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
+		OwnerUserID: ownerID, Name: name, Kind: kernel.KindHTTP, Price: 0,
+		Source: source, Description: "bearer", InputSchema: minSchema, OutputSchema: minSchema,
+		Auth: &kernel.AuthInput{Scheme: kernel.AuthSchemeDelegatedBearer},
+	})
+	if err != nil {
+		t.Fatalf("create bearer action %s: %v", name, err)
+	}
+	if err := k.SetActive(ctx, ownerID, a.ID, true); err != nil {
+		t.Fatalf("activate %s: %v", name, err)
+	}
+}
+
+// TestUserConnectTokenBatchCLI: `user connect @owner/dir --token` connects a directory of
+// delegated_bearer actions in one command into one connection; disconnect by selector clears them.
+func TestUserConnectTokenBatchCLI(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	uid, tok := makeUser(t, env.k, "@chatcli")
+	createBearerCLIAction(t, env.k, uid, "chat/send", "https://api.chat.example/x")
+	createBearerCLIAction(t, env.k, uid, "chat/history", "https://api.chat.example/x")
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := execTestCmd(t, userConnectCmd(), "@chatcli/chat", "--token", "ghp_x"); err != nil {
+		t.Fatalf("user connect --token: %v", err)
+	}
+	conns, _ := env.k.ListConnectionViews(ctx, uid)
+	if len(conns) != 1 || conns[0].Actions != 2 {
+		t.Fatalf("expected one connection with two actions, got %+v", conns)
+	}
+
+	// Disconnect by selector removes both grants; the connection remains (now unused).
+	if _, err := execTestCmd(t, userDisconnectCmd(), "@chatcli/chat"); err != nil {
+		t.Fatalf("user disconnect: %v", err)
+	}
+	if views, _ := env.k.ListGrantViews(ctx, uid); len(views) != 0 {
+		t.Errorf("grants survived selector disconnect: %d", len(views))
+	}
+	if conns, _ := env.k.ListConnectionViews(ctx, uid); len(conns) != 1 || !conns[0].Unused {
+		t.Errorf("connection should remain and be unused after selector disconnect, got %+v", conns)
 	}
 }
 

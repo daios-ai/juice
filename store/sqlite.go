@@ -2029,57 +2029,57 @@ func (s *DB) RevokeRefreshToken(ctx context.Context, token string) error {
 // ---- Grants (delegated upstream OAuth, §8) ----
 
 // CreateOrReplaceGrant upserts on (grantor_user_id, action_id): a re-consent overwrites the
-// row's id, refresh_token, and created_at, so a user holds at most one grant per action.
+// row's id, connection_id, and created_at, so a user holds at most one grant per action. A
+// live grant carries connection_id (NULL only on an unbackfilled legacy row); refresh_token is
+// written NULL by all live paths and set only by the migration seed.
 func (s *DB) CreateOrReplaceGrant(ctx context.Context, g *kernel.Grant) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO grants (id,grantor_user_id,action_id,refresh_token,created_at)
-		 VALUES (?,?,?,?,?)
+		`INSERT INTO grants (id,grantor_user_id,action_id,connection_id,refresh_token,created_at)
+		 VALUES (?,?,?,?,?,?)
 		 ON CONFLICT(grantor_user_id,action_id) DO UPDATE SET
-		   id=excluded.id, refresh_token=excluded.refresh_token, created_at=excluded.created_at`,
-		g.ID, g.GrantorUserID, g.ActionID, g.RefreshToken, timeToStr(g.CreatedAt),
+		   id=excluded.id, connection_id=excluded.connection_id, refresh_token=excluded.refresh_token, created_at=excluded.created_at`,
+		g.ID, g.GrantorUserID, g.ActionID, nullStr(g.ConnectionID), nullStr(g.RefreshToken), timeToStr(g.CreatedAt),
 	)
 	return dbErr(err, "create grant")
 }
 
-func (s *DB) ReadGrant(ctx context.Context, grantorUserID, actionID string) (*kernel.Grant, error) {
+func scanGrant(scan func(...any) error) (*kernel.Grant, error) {
 	var g kernel.Grant
+	var connID, refresh sql.NullString
 	var createdAt string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id,grantor_user_id,action_id,refresh_token,created_at
-		 FROM grants WHERE grantor_user_id=? AND action_id=?`, grantorUserID, actionID,
-	).Scan(&g.ID, &g.GrantorUserID, &g.ActionID, &g.RefreshToken, &createdAt)
+	if err := scan(&g.ID, &g.GrantorUserID, &g.ActionID, &connID, &refresh, &createdAt); err != nil {
+		return nil, err
+	}
+	g.ConnectionID = connID.String
+	g.RefreshToken = refresh.String
+	g.CreatedAt = strToTime(createdAt)
+	return &g, nil
+}
+
+func (s *DB) ReadGrant(ctx context.Context, grantorUserID, actionID string) (*kernel.Grant, error) {
+	g, err := scanGrant(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx,
+			`SELECT id,grantor_user_id,action_id,connection_id,refresh_token,created_at
+			 FROM grants WHERE grantor_user_id=? AND action_id=?`, grantorUserID, actionID).Scan(dest...)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("grant not found")
 	}
 	if err != nil {
 		return nil, dbErr(err, "read grant")
 	}
-	g.CreatedAt = strToTime(createdAt)
-	return &g, nil
+	return g, nil
 }
 
 func (s *DB) ListGrantsByUser(ctx context.Context, grantorUserID string) ([]*kernel.Grant, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,grantor_user_id,action_id,refresh_token,created_at
+		`SELECT id,grantor_user_id,action_id,connection_id,refresh_token,created_at
 		 FROM grants WHERE grantor_user_id=? ORDER BY created_at DESC`, grantorUserID)
 	if err != nil {
 		return nil, dbErr(err, "list grants")
 	}
 	defer rows.Close()
-	return queryList(rows, "list grants", func(scan func(...any) error) (*kernel.Grant, error) {
-		var g kernel.Grant
-		var createdAt string
-		if err := scan(&g.ID, &g.GrantorUserID, &g.ActionID, &g.RefreshToken, &createdAt); err != nil {
-			return nil, err
-		}
-		g.CreatedAt = strToTime(createdAt)
-		return &g, nil
-	})
-}
-
-func (s *DB) UpdateGrantRefreshToken(ctx context.Context, id, sealedToken string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE grants SET refresh_token=? WHERE id=?`, sealedToken, id)
-	return dbErr(err, "update grant refresh token")
+	return queryList(rows, "list grants", scanGrant)
 }
 
 func (s *DB) DeleteGrant(ctx context.Context, grantorUserID, actionID string) error {
@@ -2097,6 +2097,123 @@ func (s *DB) DeleteGrant(ctx context.Context, grantorUserID, actionID string) er
 func (s *DB) DeleteGrantsForAction(ctx context.Context, actionID string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM grants WHERE action_id=?`, actionID)
 	return dbErr(err, "delete grants for action")
+}
+
+// ---- Connections (shared upstream credential, §8) ----
+
+func scanConnection(scan func(...any) error) (*kernel.Connection, error) {
+	var c kernel.Connection
+	var scopes sql.NullString
+	var createdAt, updatedAt string
+	if err := scan(&c.ID, &c.UserID, &c.ProviderKey, &c.SealedSecret, &scopes, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	c.ScopesJSON = scopes.String
+	c.CreatedAt = strToTime(createdAt)
+	c.UpdatedAt = strToTime(updatedAt)
+	return &c, nil
+}
+
+const connectionCols = `id,user_id,provider_key,sealed_secret,scopes_json,created_at,updated_at`
+
+// CreateOrUpdateConnection upserts on (user_id, provider_key): a conflict keeps the existing id
+// and created_at (so the AAD the caller sealed with stays valid) and refreshes only the secret,
+// scopes, and updated_at.
+func (s *DB) CreateOrUpdateConnection(ctx context.Context, c *kernel.Connection) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO connections (`+connectionCols+`)
+		 VALUES (?,?,?,?,?,?,?)
+		 ON CONFLICT(user_id,provider_key) DO UPDATE SET
+		   sealed_secret=excluded.sealed_secret, scopes_json=excluded.scopes_json, updated_at=excluded.updated_at`,
+		c.ID, c.UserID, c.ProviderKey, c.SealedSecret, nullStr(c.ScopesJSON), timeToStr(c.CreatedAt), timeToStr(c.UpdatedAt),
+	)
+	return dbErr(err, "create connection")
+}
+
+func (s *DB) ReadConnection(ctx context.Context, id string) (*kernel.Connection, error) {
+	c, err := scanConnection(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, `SELECT `+connectionCols+` FROM connections WHERE id=?`, id).Scan(dest...)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("connection not found")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read connection")
+	}
+	return c, nil
+}
+
+func (s *DB) ReadConnectionByUserProvider(ctx context.Context, userID, providerKey string) (*kernel.Connection, error) {
+	c, err := scanConnection(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx,
+			`SELECT `+connectionCols+` FROM connections WHERE user_id=? AND provider_key=?`, userID, providerKey).Scan(dest...)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("connection not found")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read connection by provider")
+	}
+	return c, nil
+}
+
+func (s *DB) ListConnectionsByUser(ctx context.Context, userID string) ([]*kernel.Connection, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+connectionCols+` FROM connections WHERE user_id=? ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, dbErr(err, "list connections")
+	}
+	defer rows.Close()
+	return queryList(rows, "list connections", scanConnection)
+}
+
+// UpdateConnectionSecret replaces the sealed secret (provider refresh-token rotation), leaving
+// every grant that points at the connection untouched.
+func (s *DB) UpdateConnectionSecret(ctx context.Context, id, sealedSecret string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE connections SET sealed_secret=?, updated_at=? WHERE id=?`, sealedSecret, timeToStr(time.Now().UTC()), id)
+	return dbErr(err, "update connection secret")
+}
+
+// DeleteConnectionCascade removes a connection and every grant that points at it, atomically
+// (provider invalid_grant / disconnect --account).
+func (s *DB) DeleteConnectionCascade(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dbErr(err, "delete connection")
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM grants WHERE connection_id=?`, id); err != nil {
+		return dbErr(err, "delete connection grants")
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM connections WHERE id=?`, id)
+	if err != nil {
+		return dbErr(err, "delete connection")
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return kernel.ErrNotFound.Wrap("connection not found")
+	}
+	return dbErr(tx.Commit(), "delete connection")
+}
+
+// ListLegacyTokenGrants returns grants still holding a legacy sealed token (refresh_token not
+// null), oldest first, for the one-time backfill (§8). Retired with the legacy column.
+func (s *DB) ListLegacyTokenGrants(ctx context.Context) ([]*kernel.Grant, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,grantor_user_id,action_id,connection_id,refresh_token,created_at
+		 FROM grants WHERE refresh_token IS NOT NULL ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, dbErr(err, "list legacy grants")
+	}
+	defer rows.Close()
+	return queryList(rows, "list legacy grants", scanGrant)
+}
+
+// LinkGrantConnection points a grant at a connection and clears its legacy token (backfill).
+func (s *DB) LinkGrantConnection(ctx context.Context, grantID, connectionID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE grants SET connection_id=?, refresh_token=NULL WHERE id=?`, connectionID, grantID)
+	return dbErr(err, "link grant connection")
 }
 
 // ---- Config ----

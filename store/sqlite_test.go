@@ -2744,15 +2744,6 @@ func TestGrantCRUDAndUpsert(t *testing.T) {
 		t.Errorf("after upsert token = %q, want sealed-2", list[0].RefreshToken)
 	}
 
-	// Rotation persists a new sealed token.
-	if err := db.UpdateGrantRefreshToken(ctx, list[0].ID, "sealed-3"); err != nil {
-		t.Fatalf("UpdateGrantRefreshToken: %v", err)
-	}
-	got, _ = db.ReadGrant(ctx, user.ID, a.ID)
-	if got.RefreshToken != "sealed-3" {
-		t.Errorf("after rotation token = %q, want sealed-3", got.RefreshToken)
-	}
-
 	if err := db.DeleteGrant(ctx, user.ID, a.ID); err != nil {
 		t.Fatalf("DeleteGrant: %v", err)
 	}
@@ -2785,5 +2776,116 @@ func TestDeleteGrantsForAction(t *testing.T) {
 		if _, err := db.ReadGrant(ctx, u.ID, a.ID); !errors.Is(err, kernel.ErrNotFound) {
 			t.Errorf("grant for %s survived action-wide delete", u.Handle)
 		}
+	}
+}
+
+func TestConnectionCRUDAndCascade(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	u := newUser("@conn", 0)
+	_ = db.CreateUser(ctx, u)
+	a1 := newAction(u.ID, "inbox/send", 0, true)
+	a2 := newAction(u.ID, "inbox/read", 0, true)
+	_ = db.CreateAction(ctx, a1)
+	_ = db.CreateAction(ctx, a2)
+
+	c := &kernel.Connection{
+		ID: uuid.New().String(), UserID: u.ID, ProviderKey: "bearer:api.test.com",
+		SealedSecret: "sealed-1", ScopesJSON: "", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := db.CreateOrUpdateConnection(ctx, c); err != nil {
+		t.Fatalf("CreateOrUpdateConnection: %v", err)
+	}
+
+	// Upsert on (user, provider_key) keeps id + created_at, refreshes secret + scopes.
+	c2 := &kernel.Connection{
+		ID: uuid.New().String(), UserID: u.ID, ProviderKey: "bearer:api.test.com",
+		SealedSecret: "sealed-2", ScopesJSON: `["read"]`, CreatedAt: time.Now().UTC().Add(time.Hour), UpdatedAt: time.Now().UTC().Add(time.Hour),
+	}
+	if err := db.CreateOrUpdateConnection(ctx, c2); err != nil {
+		t.Fatalf("upsert connection: %v", err)
+	}
+	got, err := db.ReadConnectionByUserProvider(ctx, u.ID, "bearer:api.test.com")
+	if err != nil {
+		t.Fatalf("ReadConnectionByUserProvider: %v", err)
+	}
+	if got.ID != c.ID {
+		t.Errorf("id changed on upsert: got %s want %s (created_at must be preserved)", got.ID, c.ID)
+	}
+	if got.SealedSecret != "sealed-2" || got.ScopesJSON != `["read"]` {
+		t.Errorf("upsert did not refresh secret/scopes: %+v", got)
+	}
+	if !got.CreatedAt.Equal(c.CreatedAt) {
+		// created_at is preserved from the original row, not overwritten by the upsert.
+		t.Errorf("created_at = %v, want original %v", got.CreatedAt, c.CreatedAt)
+	}
+
+	// Rotation replaces the secret only.
+	if err := db.UpdateConnectionSecret(ctx, got.ID, "sealed-3"); err != nil {
+		t.Fatalf("UpdateConnectionSecret: %v", err)
+	}
+	if r, _ := db.ReadConnection(ctx, got.ID); r.SealedSecret != "sealed-3" {
+		t.Errorf("after rotation secret = %q, want sealed-3", r.SealedSecret)
+	}
+
+	// Two grants point at the connection; cascade removes both and the connection.
+	for _, a := range []*kernel.Action{a1, a2} {
+		_ = db.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: u.ID, ActionID: a.ID, ConnectionID: got.ID, CreatedAt: time.Now().UTC()})
+	}
+	if list, _ := db.ListConnectionsByUser(ctx, u.ID); len(list) != 1 {
+		t.Fatalf("connection count = %d, want 1", len(list))
+	}
+	if err := db.DeleteConnectionCascade(ctx, got.ID); err != nil {
+		t.Fatalf("DeleteConnectionCascade: %v", err)
+	}
+	if _, err := db.ReadConnection(ctx, got.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("connection survived cascade: %v", err)
+	}
+	for _, a := range []*kernel.Action{a1, a2} {
+		if _, err := db.ReadGrant(ctx, u.ID, a.ID); !errors.Is(err, kernel.ErrNotFound) {
+			t.Errorf("grant on %s survived connection cascade", a.Name)
+		}
+	}
+	if err := db.DeleteConnectionCascade(ctx, got.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("cascade absent connection: got %v, want ErrNotFound", err)
+	}
+}
+
+func TestLegacyTokenBackfillHelpers(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	u := newUser("@legacy", 0)
+	_ = db.CreateUser(ctx, u)
+	a := newAction(u.ID, "svc", 0, true)
+	_ = db.CreateAction(ctx, a)
+
+	// A legacy grant carries a sealed token and no connection.
+	g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: u.ID, ActionID: a.ID, RefreshToken: "legacy-sealed", CreatedAt: time.Now().UTC()}
+	_ = db.CreateOrReplaceGrant(ctx, g)
+
+	legacy, err := db.ListLegacyTokenGrants(ctx)
+	if err != nil {
+		t.Fatalf("ListLegacyTokenGrants: %v", err)
+	}
+	if len(legacy) != 1 || legacy[0].RefreshToken != "legacy-sealed" || legacy[0].ConnectionID != "" {
+		t.Fatalf("legacy grants = %+v, want one unlinked token", legacy)
+	}
+
+	c := &kernel.Connection{ID: uuid.New().String(), UserID: u.ID, ProviderKey: "oauth:t|c", SealedSecret: "resealed", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	_ = db.CreateOrUpdateConnection(ctx, c)
+	if err := db.LinkGrantConnection(ctx, g.ID, c.ID); err != nil {
+		t.Fatalf("LinkGrantConnection: %v", err)
+	}
+
+	// After linking, the grant points at the connection and holds no token; the backfill
+	// predicate is now empty (idempotent: a second pass finds nothing).
+	got, _ := db.ReadGrant(ctx, u.ID, a.ID)
+	if got.ConnectionID != c.ID || got.RefreshToken != "" {
+		t.Errorf("after link: connection=%q token=%q, want linked and empty", got.ConnectionID, got.RefreshToken)
+	}
+	if again, _ := db.ListLegacyTokenGrants(ctx); len(again) != 0 {
+		t.Errorf("legacy predicate not cleared after link: %d rows", len(again))
 	}
 }

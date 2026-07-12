@@ -330,30 +330,97 @@ func getMe(k *kernel.Kernel, ctx context.Context, callerID string) (map[string]a
 		grants = []*kernel.GrantView{}
 	}
 	view["grants"] = grants
+	// Connections group the caller's grants by upstream account (§8), token-free.
+	conns, err := k.ListConnectionViews(ctx, callerID)
+	if err != nil {
+		return nil, err
+	}
+	if conns == nil {
+		conns = []*kernel.ConnectionView{}
+	}
+	view["connections"] = conns
 	return view, nil
 }
 
-// startGrant begins a delegated-OAuth consent for an action the caller may use. It resolves the
-// action, requires it to be a callable oauth_delegated action, and drives the broker (§8).
-func startGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, callerID, actionRef, redirectURI, flow string) (*startResult, error) {
+// planGrants expands a selector into the consent plan user connect walks (§8).
+func planGrants(k *kernel.Kernel, ctx context.Context, callerID, selector string) (*kernel.ConsentPlan, error) {
+	return k.ConsentPlan(ctx, callerID, selector)
+}
+
+// grantGroup finds the plan group for a provider_key; when provider is empty it must resolve to a
+// single group.
+func grantGroup(plan *kernel.ConsentPlan, provider string) (*kernel.ConsentGroup, error) {
+	if provider == "" {
+		if len(plan.Groups) != 1 {
+			return nil, kernel.ErrInvalidInput.Wrap("selector resolves to multiple providers; specify one")
+		}
+		return &plan.Groups[0], nil
+	}
+	for i := range plan.Groups {
+		if plan.Groups[i].ProviderKey == provider {
+			return &plan.Groups[i], nil
+		}
+	}
+	return nil, kernel.ErrNotFound.Wrap("no connectable actions for that provider in the selector")
+}
+
+func groupActionIDs(g *kernel.ConsentGroup) []string {
+	ids := make([]string, len(g.Actions))
+	for i, a := range g.Actions {
+		ids[i] = a.ActionID
+	}
+	return ids
+}
+
+func grantRefs(k *kernel.Kernel, ctx context.Context, grants []*kernel.Grant) []string {
+	refs := make([]string, len(grants))
+	for i, g := range grants {
+		refs[i] = k.ActionRef(ctx, g.ActionID)
+	}
+	return refs
+}
+
+// startGrant begins delegated-OAuth consent for one provider group of a selector (§8). When the
+// caller's connection already covers the group's scope union, it mints the grants instantly and
+// returns {status:"granted"}; otherwise it drives the broker's browser/device flow.
+func startGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, callerID, selector, provider, redirectURI, flow string) (any, error) {
 	if broker == nil {
 		return nil, kernel.ErrInvalidState.Wrap("OAuth consent is not configured on this server")
 	}
-	a, err := resolveActionRef(k, ctx, actionRef)
+	plan, err := k.ConsentPlan(ctx, callerID, selector)
 	if err != nil {
 		return nil, err
 	}
-	auth, err := k.DelegatedAuthConfig(ctx, callerID, a.ID)
+	g, err := grantGroup(plan, provider)
 	if err != nil {
 		return nil, err
 	}
+	ids := groupActionIDs(g)
+	scopesJSON, _ := json.Marshal(g.Scopes)
+	if g.Covered {
+		grants, err := k.CreateGrants(ctx, callerID, g.ProviderKey, ids, "", string(scopesJSON))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"status": "granted", "provider": g.Provider, "actions": grantRefs(k, ctx, grants)}, nil
+	}
+	auth, err := k.DelegatedAuthConfig(ctx, callerID, ids[0])
+	if err != nil {
+		return nil, err
+	}
+	// Request the union of the group's scopes in the single browser step.
+	if auth.Config == nil {
+		auth.Config = map[string]any{}
+	}
+	auth.Config["scopes"] = strings.Join(g.Scopes, " ")
 	if flow == "" {
 		flow = "code"
 	}
-	return broker.start(ctx, callerID, a.ID, auth, redirectURI, flow)
+	return broker.start(ctx, callerID, ids, g.ProviderKey, string(scopesJSON), auth, redirectURI, flow)
 }
 
-// completeGrant finishes a consent and, on success, seals+stores the refresh token via CreateGrant.
+// completeGrant finishes a consent and, on success, homes the refresh token on the group's
+// connection and mints one grant per action (§8).
 func completeGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, callerID, state, code string) (map[string]any, error) {
 	if broker == nil {
 		return nil, kernel.ErrInvalidState.Wrap("OAuth consent is not configured on this server")
@@ -365,37 +432,40 @@ func completeGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, c
 	if res.Status == "pending" {
 		return map[string]any{"status": "pending"}, nil
 	}
-	g, err := k.CreateGrant(ctx, callerID, res.ActionID, res.Refresh)
+	grants, err := k.CreateGrants(ctx, callerID, res.ProviderKey, res.ActionIDs, res.Refresh, res.ScopesJSON)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"status": "complete", "action": k.ActionRef(ctx, res.ActionID), "created_at": g.CreatedAt}, nil
+	return map[string]any{"status": "complete", "provider": kernel.ProviderLabel(res.ProviderKey), "actions": grantRefs(k, ctx, grants), "created_at": grants[0].CreatedAt}, nil
 }
 
-// attachToken stores a caller-supplied static token for a delegated_bearer action (§8): the direct
-// non-OAuth twin of the start/complete consent flow. The kernel enforces the delegated_bearer scheme
-// and callability; the raw token never appears in any read path (R9).
-func attachToken(k *kernel.Kernel, ctx context.Context, callerID, actionRef, token string) (map[string]any, error) {
-	a, err := resolveActionRef(k, ctx, actionRef)
+// attachToken stores a caller-supplied static token across a selector's delegated_bearer group
+// (§8): the direct non-OAuth twin of the start/complete consent flow, minting one grant per action
+// against one connection. The raw token never appears in any read path.
+func attachToken(k *kernel.Kernel, ctx context.Context, callerID, selector, provider, token string) (map[string]any, error) {
+	grants, err := k.AttachBearerGrants(ctx, callerID, selector, provider, token)
 	if err != nil {
 		return nil, err
 	}
-	g, err := k.AttachBearerGrant(ctx, callerID, a.ID, token)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"status": "connected", "action": k.ActionRef(ctx, a.ID), "created_at": g.CreatedAt}, nil
+	return map[string]any{"status": "connected", "provider": kernel.ProviderLabel(provider), "actions": grantRefs(k, ctx, grants), "created_at": grants[0].CreatedAt}, nil
 }
 
-func revokeGrant(k *kernel.Kernel, ctx context.Context, callerID, actionRef string) (map[string]any, error) {
-	a, err := resolveActionRef(k, ctx, actionRef)
+// revokeGrantsBySelector deletes the caller's grants matching a selector (grants only, §8).
+func revokeGrantsBySelector(k *kernel.Kernel, ctx context.Context, callerID, selector string) (map[string]any, error) {
+	revoked, err := k.RevokeGrantsBySelector(ctx, callerID, selector)
 	if err != nil {
 		return nil, err
 	}
-	if err := k.RevokeGrant(ctx, callerID, a.ID); err != nil {
+	return map[string]any{"revoked": revoked}, nil
+}
+
+// revokeConnection deletes the caller's connection for a provider and cascades its grants (§8).
+func revokeConnection(k *kernel.Kernel, ctx context.Context, callerID, providerKey string) (map[string]any, error) {
+	revoked, err := k.RevokeConnection(ctx, callerID, providerKey)
+	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"revoked": true, "action": actionRef}, nil
+	return map[string]any{"revoked": revoked, "connection": kernel.ProviderLabel(providerKey)}, nil
 }
 
 func updateMe(k *kernel.Kernel, ctx context.Context, callerID, email, currentPwd, newPwd string) (map[string]any, error) {

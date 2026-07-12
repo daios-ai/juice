@@ -39,18 +39,66 @@ func openBrowser(url string) bool {
 	return true
 }
 
+// ---- consent plan wire shapes (§8) ----
+
+type consentAction struct {
+	ActionID string `json:"action_id"`
+	Action   string `json:"action"`
+	Granted  bool   `json:"granted"`
+}
+
+type consentGroup struct {
+	ProviderKey string          `json:"provider_key"`
+	Provider    string          `json:"provider"`
+	Scheme      string          `json:"scheme"`
+	Scopes      []string        `json:"scopes"`
+	Connected   bool            `json:"connected"`
+	Covered     bool            `json:"covered"`
+	Actions     []consentAction `json:"actions"`
+}
+
+type consentPlan struct {
+	Groups            []consentGroup `json:"groups"`
+	SkippedLoginless  int            `json:"skipped_loginless"`
+	SkippedUncallable int            `json:"skipped_uncallable"`
+}
+
+type grantStartResp struct {
+	Status                  string   `json:"status"` // "granted" when already covered
+	Actions                 []string `json:"actions"`
+	State                   string   `json:"state"`
+	AuthorizeURL            string   `json:"authorize_url"`
+	VerificationURI         string   `json:"verification_uri"`
+	VerificationURIComplete string   `json:"verification_uri_complete"`
+	UserCode                string   `json:"user_code"`
+	Interval                int      `json:"interval"`
+	ExpiresIn               int      `json:"expires_in"`
+}
+
+type grantCompleteResp struct {
+	Status   string   `json:"status"`
+	Provider string   `json:"provider"`
+	Actions  []string `json:"actions"`
+	Created  string   `json:"created_at"`
+}
+
 // userConnectCmd and userDisconnectCmd are registered under the `user` group in cmd.go, next to
 // `user me` (which lists your connections). Connecting is also offered inline by `juice run`.
+//
+// connect walks a consent plan: one selector, one gesture per upstream account (§8). A trailing
+// /* on the selector is accepted. --token connects a delegated_bearer group with a pasted token.
 func userConnectCmd() *cobra.Command {
 	var device bool
 	var token string
+	var yes bool
 	cmd := &cobra.Command{
-		Use:   "connect <action>",
-		Short: "Connect your account so an action can act on your behalf against its upstream API",
+		Use:   "connect <selector>",
+		Short: "Connect your account so a group of actions can act on your behalf against their upstream APIs",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// delegated_bearer: a paste-once static token, no browser flow. Prompt without echo
-			// when the flag is present but empty, so the secret stays out of argv/shell history.
+			selector := args[0]
+			// --token: connect the selector's delegated_bearer group with a pasted static token
+			// (prompt without echo if the flag is present but empty, keeping it out of argv/history).
 			if cmd.Flags().Changed("token") {
 				if token == "" {
 					var err error
@@ -58,27 +106,125 @@ func userConnectCmd() *cobra.Command {
 						return err
 					}
 				}
-				return connectToken(args[0], token)
+				return connectToken(selector, "", token)
 			}
-			if device {
-				return connectDevice(args[0])
-			}
-			return runConsentFlow(args[0])
+			return connectSelector(selector, device, yes)
 		},
 	}
-	cmd.Flags().BoolVar(&device, "device", false, "Use the device-code flow (no local browser)")
-	cmd.Flags().StringVar(&token, "token", "", "Store a static token (personal access key) for a delegated_bearer action; empty value prompts without echo")
+	cmd.Flags().BoolVar(&device, "device", false, "Use the device-code flow for OAuth groups (no local browser)")
+	cmd.Flags().StringVar(&token, "token", "", "Store a static token for a delegated_bearer group; empty value prompts without echo")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt (accept the shown consent plan)")
 	return cmd
 }
 
-// connectToken stores a static token for a delegated_bearer action via POST /v1/grants (§8).
-func connectToken(actionRef, token string) error {
-	var done grantCompleteResp
-	if err := apiCall(context.Background(), "POST", "/v1/grants",
-		map[string]string{"action": actionRef, "token": token}, &done); err != nil {
+// connectSelector fetches the consent plan, shows the delta, and covers each group needing work
+// with one gesture: a token paste per bearer group, one browser consent per OAuth group (§8).
+func connectSelector(selector string, device, yes bool) error {
+	var plan consentPlan
+	if err := apiCall(context.Background(), "GET", "/v1/grants/plan?selector="+url.QueryEscape(selector), nil, &plan); err != nil {
 		return err
 	}
-	fmt.Printf("Connected %s.\n", done.Action)
+	var todo []consentGroup
+	for _, g := range plan.Groups {
+		if groupNeedsWork(g) {
+			todo = append(todo, g)
+		}
+	}
+	if len(todo) == 0 {
+		fmt.Println("Already connected.")
+		return nil
+	}
+	printDelta(todo)
+	if err := confirmProceed(yes); err != nil {
+		return err
+	}
+	for _, g := range todo {
+		if g.Scheme == kernel.AuthSchemeDelegatedBearer {
+			tok := ""
+			if !g.Connected {
+				var err error
+				if tok, err = promptSecret(fmt.Sprintf("Paste token for %s: ", g.Provider)); err != nil {
+					return err
+				}
+			}
+			if err := connectToken(selector, g.ProviderKey, tok); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := connectOAuthGroup(selector, g.ProviderKey, device); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// groupNeedsWork reports whether a plan group has anything to connect: an uncovered account, or a
+// covered account with an action not yet granted (a later sibling to instant-grant).
+func groupNeedsWork(g consentGroup) bool {
+	if !g.Covered {
+		return true
+	}
+	for _, a := range g.Actions {
+		if !a.Granted {
+			return true
+		}
+	}
+	return false
+}
+
+func printDelta(todo []consentGroup) {
+	fmt.Println("The following will be connected:")
+	for _, g := range todo {
+		how := "paste a token"
+		if g.Scheme == kernel.AuthSchemeOAuthDelegated {
+			how = "one browser sign-in"
+		} else if g.Connected {
+			how = "already connected"
+		}
+		fmt.Printf("  %s (%s):\n", g.Provider, how)
+		for _, a := range g.Actions {
+			mark := " "
+			if a.Granted {
+				mark = "✓"
+			}
+			fmt.Printf("    [%s] %s\n", mark, a.Action)
+		}
+	}
+}
+
+// confirmProceed returns nil to proceed. With --yes it always proceeds; on a terminal it asks; off
+// a terminal without --yes it refuses (the shown plan is the consent act — never auto-confirm).
+func confirmProceed(yes bool) error {
+	if yes {
+		return nil
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return kernel.ErrInvalidInput.Wrap("re-run with --yes to accept the consent plan (no terminal to confirm)")
+	}
+	fmt.Print("Proceed? [Y/n] ")
+	s := bufio.NewScanner(os.Stdin)
+	if s.Scan() {
+		ans := strings.ToLower(strings.TrimSpace(s.Text()))
+		if ans != "" && ans != "y" && ans != "yes" {
+			return kernel.ErrInvalidInput.Wrap("aborted")
+		}
+	}
+	return nil
+}
+
+// connectToken stores a static token for a delegated_bearer group via POST /v1/grants (§8). An
+// empty token instant-grants against an already-connected account.
+func connectToken(selector, provider, token string) error {
+	body := map[string]string{"selector": selector, "token": token}
+	if provider != "" {
+		body["provider"] = provider
+	}
+	var done grantCompleteResp
+	if err := apiCall(context.Background(), "POST", "/v1/grants", body, &done); err != nil {
+		return err
+	}
+	fmt.Printf("Connected %s.\n", strings.Join(done.Actions, ", "))
 	return nil
 }
 
@@ -101,27 +247,18 @@ func promptSecret(prompt string) (string, error) {
 	return "", kernel.ErrInvalidInput.Wrap("no token provided")
 }
 
-// grantStartResp is the /v1/grants/start response (both flows).
-type grantStartResp struct {
-	State                   string `json:"state"`
-	AuthorizeURL            string `json:"authorize_url"`
-	VerificationURI         string `json:"verification_uri"`
-	VerificationURIComplete string `json:"verification_uri_complete"`
-	UserCode                string `json:"user_code"`
-	Interval                int    `json:"interval"`
-	ExpiresIn               int    `json:"expires_in"`
+// connectOAuthGroup connects one oauth_delegated provider group: an already-covered account grants
+// instantly (no browser); otherwise the loopback code flow (or device flow) drives one consent.
+func connectOAuthGroup(selector, provider string, device bool) error {
+	if device {
+		return connectOAuthDevice(selector, provider)
+	}
+	return connectOAuthCode(selector, provider)
 }
 
-type grantCompleteResp struct {
-	Status  string `json:"status"`
-	Action  string `json:"action"`
-	Created string `json:"created_at"`
-}
-
-// runConsentFlow runs the authorization-code + PKCE flow, hosting the loopback redirect listener
+// connectOAuthCode runs the authorization-code + PKCE flow, hosting the loopback redirect listener
 // locally (the browser reaches it even behind NAT — the provider never contacts the kernel).
-// Shared by `user connect` and by `run`'s inline consent offer.
-func runConsentFlow(actionRef string) error {
+func connectOAuthCode(selector, provider string) error {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return kernel.ErrInternal.Wrapf("could not start loopback server: %v", err)
@@ -144,9 +281,13 @@ func runConsentFlow(actionRef string) error {
 
 	var start grantStartResp
 	if err := apiCall(context.Background(), "POST", "/v1/grants/start", map[string]string{
-		"action": actionRef, "redirect_uri": redirectURI, "flow": "code",
+		"selector": selector, "provider": provider, "redirect_uri": redirectURI, "flow": "code",
 	}, &start); err != nil {
 		return err
+	}
+	if start.Status == "granted" {
+		fmt.Printf("Connected %s.\n", strings.Join(start.Actions, ", "))
+		return nil
 	}
 	fmt.Printf("Open this URL to authorize:\n\n  %s\n\n", start.AuthorizeURL)
 	openBrowser(start.AuthorizeURL)
@@ -167,18 +308,22 @@ func runConsentFlow(actionRef string) error {
 	}, &done); err != nil {
 		return err
 	}
-	fmt.Printf("Connected %s.\n", done.Action)
+	fmt.Printf("Connected %s.\n", strings.Join(done.Actions, ", "))
 	return nil
 }
 
-// connectDevice runs the device-code flow: the server polls the provider, the CLI polls the
+// connectOAuthDevice runs the device-code flow: the server polls the provider, the CLI polls the
 // server's /complete until the connection lands.
-func connectDevice(actionRef string) error {
+func connectOAuthDevice(selector, provider string) error {
 	var start grantStartResp
 	if err := apiCall(context.Background(), "POST", "/v1/grants/start", map[string]string{
-		"action": actionRef, "flow": "device",
+		"selector": selector, "provider": provider, "flow": "device",
 	}, &start); err != nil {
 		return err
+	}
+	if start.Status == "granted" {
+		fmt.Printf("Connected %s.\n", strings.Join(start.Actions, ", "))
+		return nil
 	}
 	target := start.VerificationURIComplete
 	if target == "" {
@@ -199,20 +344,31 @@ func connectDevice(actionRef string) error {
 			return err
 		}
 		if done.Status == "complete" {
-			fmt.Printf("Connected %s.\n", done.Action)
+			fmt.Printf("Connected %s.\n", strings.Join(done.Actions, ", "))
 			return nil
 		}
 	}
 	return kernel.ErrTimeout.Wrap("timed out waiting for device authorization")
 }
 
+// userDisconnectCmd revokes by selector (grants only) or, with --account, a whole upstream account
+// and all its grants (§8).
 func userDisconnectCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "disconnect <action>",
-		Short: "Disconnect your account from an action (revoke its delegated access)",
-		Args:  cobra.ExactArgs(1),
+	var account string
+	cmd := &cobra.Command{
+		Use:   "disconnect [selector]",
+		Short: "Disconnect actions (by selector) or a whole upstream account (--account)",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("DELETE", "/v1/grants?action="+url.QueryEscape(args[0]), nil)
+			if account != "" {
+				return apiEmit("DELETE", "/v1/grants?account="+url.QueryEscape(account), nil)
+			}
+			if len(args) != 1 {
+				return kernel.ErrInvalidInput.Wrap("a selector or --account is required")
+			}
+			return apiEmit("DELETE", "/v1/grants?selector="+url.QueryEscape(args[0]), nil)
 		},
 	}
+	cmd.Flags().StringVar(&account, "account", "", "Disconnect a whole upstream account (provider) and all its grants")
+	return cmd
 }

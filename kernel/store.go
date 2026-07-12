@@ -42,11 +42,13 @@ type HTTPExecutor interface {
 
 // GrantStore is the executor-facing subset of Store for the delegated-token lifecycle (§8).
 // The concrete store implements it; cmd/juice injects it into the HTTP executor so token
-// exchange (which lives outside kernel/) can read grants and persist refresh-token rotation.
+// exchange (which lives outside kernel/) can resolve a grant to its Connection, persist a
+// rotated refresh token on that connection, and cascade-delete it on invalid_grant.
 type GrantStore interface {
 	ReadGrant(ctx context.Context, grantorUserID, actionID string) (*Grant, error)
-	UpdateGrantRefreshToken(ctx context.Context, id, sealedToken string) error
-	DeleteGrant(ctx context.Context, grantorUserID, actionID string) error
+	ReadConnection(ctx context.Context, id string) (*Connection, error)
+	UpdateConnectionSecret(ctx context.Context, id, sealedSecret string) error
+	DeleteConnectionCascade(ctx context.Context, id string) error
 }
 
 // URLFetcher retrieves the body of a URL. Used for OpenAPI ownership proof (well-known challenge).
@@ -341,12 +343,29 @@ type Store interface {
 	// ReadGrant returns the grant for (grantor, action), or ErrNotFound.
 	ReadGrant(ctx context.Context, grantorUserID, actionID string) (*Grant, error)
 	ListGrantsByUser(ctx context.Context, grantorUserID string) ([]*Grant, error)
-	// UpdateGrantRefreshToken replaces the sealed refresh token (provider rotation).
-	UpdateGrantRefreshToken(ctx context.Context, id, sealedToken string) error
 	// DeleteGrant removes one grant (revoke / invalid_grant); ErrNotFound if absent.
 	DeleteGrant(ctx context.Context, grantorUserID, actionID string) error
 	// DeleteGrantsForAction removes every grant on an action (deactivating update / delete).
 	DeleteGrantsForAction(ctx context.Context, actionID string) error
+
+	// ---- Connections (shared upstream credential, §8) ----
+
+	// CreateOrUpdateConnection upserts on (user_id, provider_key); a conflict keeps the
+	// existing id and created_at and refreshes secret/scopes/updated_at.
+	CreateOrUpdateConnection(ctx context.Context, c *Connection) error
+	// ReadConnection returns the connection by id, or ErrNotFound.
+	ReadConnection(ctx context.Context, id string) (*Connection, error)
+	// ReadConnectionByUserProvider returns a user's connection for a provider_key, or ErrNotFound.
+	ReadConnectionByUserProvider(ctx context.Context, userID, providerKey string) (*Connection, error)
+	ListConnectionsByUser(ctx context.Context, userID string) ([]*Connection, error)
+	// UpdateConnectionSecret replaces the sealed secret (provider rotation).
+	UpdateConnectionSecret(ctx context.Context, id, sealedSecret string) error
+	// DeleteConnectionCascade removes a connection and all its grants atomically.
+	DeleteConnectionCascade(ctx context.Context, id string) error
+	// ListLegacyTokenGrants returns grants still holding a legacy token, oldest first (backfill).
+	ListLegacyTokenGrants(ctx context.Context) ([]*Grant, error)
+	// LinkGrantConnection points a grant at a connection and clears its legacy token (backfill).
+	LinkGrantConnection(ctx context.Context, grantID, connectionID string) error
 
 	// ---- Config ----
 

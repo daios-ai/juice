@@ -2776,3 +2776,259 @@ func TestActionAuthInfo(t *testing.T) {
 		}
 	}
 }
+
+// createBearerActionSrc creates and activates a delegated_bearer action with a custom source, so
+// tests can place actions on distinct provider hosts (distinct connection provider_keys, §8).
+func createBearerActionSrc(t *testing.T, k *kernel.Kernel, ownerID, name, source string) *kernel.Action {
+	t.Helper()
+	ctx := context.Background()
+	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
+		OwnerUserID: ownerID, Name: name, Kind: kernel.KindHTTP, Source: source,
+		Description: "bearer svc", InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		Auth: &kernel.AuthInput{Scheme: kernel.AuthSchemeDelegatedBearer},
+	})
+	if err != nil {
+		t.Fatalf("create bearer action: %v", err)
+	}
+	if err := k.SetActive(ctx, ownerID, a.ID, true); err != nil {
+		t.Fatalf("activate bearer action: %v", err)
+	}
+	full, _ := k.ReadAction(ctx, a.ID)
+	return full
+}
+
+// createOAuthActionScopes creates and activates an oauth_delegated action sharing one provider app
+// (same token_url + client_id) but with the given scopes, so a directory groups into one connection.
+func createOAuthActionScopes(t *testing.T, k *kernel.Kernel, ownerID, name, scopes string) *kernel.Action {
+	t.Helper()
+	ctx := context.Background()
+	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
+		OwnerUserID: ownerID, Name: name, Kind: kernel.KindHTTP, Source: "https://provider.example/api",
+		Description: "oauth svc", InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		Auth: &kernel.AuthInput{Scheme: kernel.AuthSchemeOAuthDelegated, Config: map[string]any{
+			"auth_url": "https://provider.example/auth", "token_url": "https://provider.example/token",
+			"client_id": "cid", "scopes": scopes,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create oauth action: %v", err)
+	}
+	if err := k.SetActive(ctx, ownerID, a.ID, true); err != nil {
+		t.Fatalf("activate oauth action: %v", err)
+	}
+	full, _ := k.ReadAction(ctx, a.ID)
+	return full
+}
+
+// TestConnectBearerSelectorBatch: a directory of delegated_bearer actions sharing one provider host
+// connects with one token into one connection and N grants; a later sibling instant-grants (§8).
+func TestConnectBearerSelectorBatch(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "@chatco", 0)
+	_ = createBearerAction(t, k, owner.ID, "chat/send", 0)
+	_ = createBearerAction(t, k, owner.ID, "chat/history", 0)
+
+	plan, err := k.ConsentPlan(ctx, owner.ID, "@chatco/chat")
+	if err != nil {
+		t.Fatalf("ConsentPlan: %v", err)
+	}
+	if len(plan.Groups) != 1 || len(plan.Groups[0].Actions) != 2 {
+		t.Fatalf("plan groups = %+v, want one group of two", plan.Groups)
+	}
+	if plan.Groups[0].Connected {
+		t.Error("group should not be connected before consent")
+	}
+
+	grants, err := k.AttachBearerGrants(ctx, owner.ID, "@chatco/chat", "", "ghp_x")
+	if err != nil || len(grants) != 2 {
+		t.Fatalf("AttachBearerGrants: %v n=%d", err, len(grants))
+	}
+	conns, _ := k.ListConnectionViews(ctx, owner.ID)
+	if len(conns) != 1 || conns[0].Actions != 2 {
+		t.Fatalf("connections = %+v, want one with two actions", conns)
+	}
+
+	plan, _ = k.ConsentPlan(ctx, owner.ID, "@chatco/chat")
+	g := plan.Groups[0]
+	if !g.Connected || !g.Covered {
+		t.Error("group should be connected and covered after consent")
+	}
+	for _, a := range g.Actions {
+		if !a.Granted {
+			t.Errorf("%s not granted", a.Action)
+		}
+	}
+
+	// A later sibling: instant-grant with no token (bearer covered because the connection exists).
+	react := createBearerAction(t, k, owner.ID, "chat/react", 0)
+	if _, err := k.CreateGrants(ctx, owner.ID, "bearer:provider.example", []string{react.ID}, "", ""); err != nil {
+		t.Fatalf("instant bearer grant: %v", err)
+	}
+	plan, _ = k.ConsentPlan(ctx, owner.ID, "@chatco/chat")
+	if len(plan.Groups[0].Actions) != 3 {
+		t.Fatalf("expected 3 actions after adding react, got %d", len(plan.Groups[0].Actions))
+	}
+	for _, a := range plan.Groups[0].Actions {
+		if !a.Granted {
+			t.Errorf("after instant grant %s still ungranted", a.Action)
+		}
+	}
+}
+
+// TestConnectOAuthUnionScopes: two oauth actions sharing one app group into one connection whose
+// scopes are the union; a sibling within the union instant-grants, one outside it does not (§8).
+func TestConnectOAuthUnionScopes(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "@gco", 0)
+	a1 := createOAuthActionScopes(t, k, owner.ID, "g/read", "read")
+	a2 := createOAuthActionScopes(t, k, owner.ID, "g/write", "write")
+	const pk = "oauth:https://provider.example/token|cid"
+
+	plan, err := k.ConsentPlan(ctx, owner.ID, "@gco/g")
+	if err != nil {
+		t.Fatalf("ConsentPlan: %v", err)
+	}
+	if len(plan.Groups) != 1 || strings.Join(plan.Groups[0].Scopes, ",") != "read,write" {
+		t.Fatalf("group scopes = %+v, want [read write] union", plan.Groups)
+	}
+
+	// One consent covering the union grants both actions against one connection.
+	grants, err := k.CreateGrants(ctx, owner.ID, pk, []string{a1.ID, a2.ID}, "refresh-tok", `["read","write"]`)
+	if err != nil || len(grants) != 2 {
+		t.Fatalf("CreateGrants union: %v n=%d", err, len(grants))
+	}
+	if conns, _ := k.ListConnectionViews(ctx, owner.ID); len(conns) != 1 || conns[0].Actions != 2 {
+		t.Fatalf("connections = %+v, want one with two actions", conns)
+	}
+
+	// A sibling needing only "read" is covered → instant grant, no token.
+	a3 := createOAuthActionScopes(t, k, owner.ID, "g/peek", "read")
+	if _, err := k.CreateGrants(ctx, owner.ID, pk, []string{a3.ID}, "", `["read"]`); err != nil {
+		t.Errorf("covered sibling should instant-grant: %v", err)
+	}
+	// A sibling needing "admin" is not covered → instant grant refused.
+	a4 := createOAuthActionScopes(t, k, owner.ID, "g/admin", "admin")
+	if _, err := k.CreateGrants(ctx, owner.ID, pk, []string{a4.ID}, "", `["admin"]`); err == nil {
+		t.Error("uncovered sibling instant-grant should be refused")
+	}
+}
+
+// TestRevokeSelectorAndAccount: disconnect by selector removes only matching grants (connections
+// survive, listed unused); disconnect by account cascades the connection and its grants (§8).
+func TestRevokeSelectorAndAccount(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "@multi", 0)
+	_ = createBearerAction(t, k, owner.ID, "chat/send", 0)                             // bearer:provider.example
+	_ = createBearerActionSrc(t, k, owner.ID, "mail/inbox", "https://mail.example/api") // bearer:mail.example
+
+	if _, err := k.AttachBearerGrants(ctx, owner.ID, "@multi/chat", "", "t1"); err != nil {
+		t.Fatalf("connect chat: %v", err)
+	}
+	if _, err := k.AttachBearerGrants(ctx, owner.ID, "@multi/mail", "", "t2"); err != nil {
+		t.Fatalf("connect mail: %v", err)
+	}
+
+	// Disconnect chat by selector: chat grant gone, mail grant survives, both connections remain.
+	revoked, err := k.RevokeGrantsBySelector(ctx, owner.ID, "@multi/chat")
+	if err != nil || len(revoked) != 1 {
+		t.Fatalf("RevokeGrantsBySelector: %v n=%d", err, len(revoked))
+	}
+	mailPlan, _ := k.ConsentPlan(ctx, owner.ID, "@multi/mail")
+	if !mailPlan.Groups[0].Actions[0].Granted {
+		t.Error("mail grant should survive a chat-selector revoke")
+	}
+	conns, _ := k.ListConnectionViews(ctx, owner.ID)
+	if len(conns) != 2 {
+		t.Fatalf("both connections should survive grant revoke, got %d", len(conns))
+	}
+	unused := 0
+	for _, c := range conns {
+		if c.Unused {
+			unused++
+		}
+	}
+	if unused != 1 {
+		t.Errorf("exactly one connection (chat) should be unused, got %d", unused)
+	}
+
+	// Disconnect mail by account: connection and its grant cascade away.
+	refs, err := k.RevokeConnection(ctx, owner.ID, "bearer:mail.example")
+	if err != nil || len(refs) != 1 {
+		t.Fatalf("RevokeConnection: %v n=%d", err, len(refs))
+	}
+	if _, err := k.RevokeConnection(ctx, owner.ID, "bearer:mail.example"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("re-revoking absent connection: got %v, want ErrNotFound", err)
+	}
+}
+
+// TestBackfillGrantConnections: the one-time migration re-homes a legacy per-grant token onto its
+// derived connection (reseal + link), is idempotent, deletes an unrecoverable token, and no-ops
+// with no credential box (§8).
+func TestBackfillGrantConnections(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	box := b64Box{}
+	k.SetSecretBox(box)
+	owner := setupUser(t, st, "@legacyco", 0)
+	a := createBearerAction(t, k, owner.ID, "svc", 0)
+
+	// Seed a legacy grant directly: sealed token under the old AAD grantor|action, no connection.
+	sealed, _ := box.Seal(owner.ID+"|"+a.ID, "legacy-secret")
+	if err := st.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: owner.ID, ActionID: a.ID, RefreshToken: sealed, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("seed legacy grant: %v", err)
+	}
+	if err := k.BackfillGrantConnections(ctx); err != nil {
+		t.Fatalf("BackfillGrantConnections: %v", err)
+	}
+	g, _ := st.ReadGrant(ctx, owner.ID, a.ID)
+	if g.ConnectionID == "" || g.RefreshToken != "" {
+		t.Fatalf("grant not re-homed: %+v", g)
+	}
+	conn, err := st.ReadConnectionByUserProvider(ctx, owner.ID, "bearer:provider.example")
+	if err != nil {
+		t.Fatalf("connection not created: %v", err)
+	}
+	if plain, _ := box.Open(owner.ID+"|"+conn.ID, conn.SealedSecret); plain != "legacy-secret" {
+		t.Errorf("resealed secret = %q, want legacy-secret", plain)
+	}
+
+	// Idempotent: the predicate is now empty, a second run changes nothing.
+	if err := k.BackfillGrantConnections(ctx); err != nil {
+		t.Fatalf("second backfill: %v", err)
+	}
+	if legacy, _ := st.ListLegacyTokenGrants(ctx); len(legacy) != 0 {
+		t.Errorf("legacy rows remain after backfill: %d", len(legacy))
+	}
+
+	// An unrecoverable token deletes its grant.
+	b := createBearerAction(t, k, owner.ID, "svc2", 0)
+	_ = st.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: owner.ID, ActionID: b.ID, RefreshToken: "!!!not-base64!!!", CreatedAt: time.Now().UTC()})
+	if err := k.BackfillGrantConnections(ctx); err != nil {
+		t.Fatalf("backfill (bad token): %v", err)
+	}
+	if _, err := st.ReadGrant(ctx, owner.ID, b.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("grant with unrecoverable token should be deleted, got %v", err)
+	}
+
+	// No credential box: backfill no-ops, leaving a legacy row for a later boot.
+	c := createBearerAction(t, k, owner.ID, "svc3", 0)
+	sealed3, _ := box.Seal(owner.ID+"|"+c.ID, "keep")
+	_ = st.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: owner.ID, ActionID: c.ID, RefreshToken: sealed3, CreatedAt: time.Now().UTC()})
+	kNoBox := newTestKernel(st)
+	if err := kNoBox.BackfillGrantConnections(ctx); err != nil {
+		t.Fatalf("no-box backfill: %v", err)
+	}
+	if gc, _ := st.ReadGrant(ctx, owner.ID, c.ID); gc.ConnectionID != "" || gc.RefreshToken == "" {
+		t.Errorf("no-box backfill should leave the legacy row untouched: %+v", gc)
+	}
+}

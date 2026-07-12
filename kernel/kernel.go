@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -306,64 +307,42 @@ func (k *Kernel) readDelegatedAction(ctx context.Context, actionID string) (*Act
 	return a, auth, nil
 }
 
-// AttachBearerGrant stores a caller-supplied static token for a delegated_bearer action (§8): the
+// AttachBearerGrant stores a caller-supplied static token for one delegated_bearer action (§8): the
 // direct, non-OAuth consent path. It requires the action to use delegated_bearer (an oauth_delegated
-// action must use the browser flow) and to be callable by the caller, then seals+stores the token
-// via CreateGrant. The raw token never appears in any read path (R9).
+// action must use the browser flow), then routes through CreateGrant, which homes the token on the
+// action's Connection and mints the per-action consent. The raw token never appears in any read path.
 func (k *Kernel) AttachBearerGrant(ctx context.Context, callerID, actionID, token string) (*Grant, error) {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
-		return nil, err
-	}
-	a, auth, err := k.readDelegatedAction(ctx, actionID)
+	_, auth, err := k.readDelegatedAction(ctx, actionID)
 	if err != nil {
 		return nil, err
 	}
 	if auth.Scheme != AuthSchemeDelegatedBearer {
 		return nil, ErrInvalidInput.Wrap("action does not use delegated_bearer; connect via the consent flow instead")
 	}
-	if !canCall(callerID, a) {
-		return nil, ErrUnauthorized.Wrap("cannot grant for an action you may not call")
-	}
 	return k.CreateGrant(ctx, callerID, actionID, token)
 }
 
-// CreateGrant records a user's delegated consent for one action: the token — an OAuth refresh token
-// (oauth_delegated) or a static bearer/API-key token (delegated_bearer) — is sealed with the same
-// box as auth_json (AAD = grantor|action) and upserted, so a re-consent overwrites. The action must
-// be a kind=http action whose scheme is delegated.
+// CreateGrant records a user's delegated consent for one action (§8): the token — an OAuth refresh
+// token (oauth_delegated) or a static bearer/API-key token (delegated_bearer) — is homed on the
+// action's Connection (shared per upstream account) and the grant points at it. Single-action twin
+// of CreateGrants.
 func (k *Kernel) CreateGrant(ctx context.Context, callerID, actionID, token string) (*Grant, error) {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
-		return nil, err
-	}
 	if token == "" {
 		return nil, ErrInvalidInput.Wrap("token is required")
 	}
-	a, _, err := k.readDelegatedAction(ctx, actionID)
+	a, auth, err := k.readDelegatedAction(ctx, actionID)
 	if err != nil {
 		return nil, err
 	}
-	if a.Kind != KindHTTP {
-		return nil, ErrInvalidInput.Wrap("grants apply only to http actions")
-	}
-	if k.secretBox == nil {
-		return nil, ErrInvalidState.Wrap("credential encryption is not configured")
-	}
-	sealed, err := k.secretBox.Seal(callerID+"|"+actionID, token)
+	pk, err := connectionKey(a, auth)
 	if err != nil {
-		return nil, ErrInternal.Wrapf("seal grant token: %v", err)
-	}
-	g := &Grant{
-		ID:            uuid.New().String(),
-		GrantorUserID: callerID,
-		ActionID:      actionID,
-		RefreshToken:  sealed,
-		CreatedAt:     time.Now().UTC(),
-	}
-	if err := k.store.CreateOrReplaceGrant(ctx, g); err != nil {
 		return nil, err
 	}
-	k.log.With(ctx).Info("grant.created", "action_id", actionID, "grantor", callerID, "status", "success")
-	return g, nil
+	grants, err := k.CreateGrants(ctx, callerID, pk, []string{actionID}, token, actionScopesJSON(auth))
+	if err != nil {
+		return nil, err
+	}
+	return grants[0], nil
 }
 
 // ListGrantViews returns the caller's grants as token-free views for GET /v1/me, resolving each
@@ -407,7 +386,8 @@ func (k *Kernel) DelegatedAuthConfig(ctx context.Context, callerID, actionID str
 	return auth, nil
 }
 
-// RevokeGrant deletes the caller's grant for an action (self-service; §8).
+// RevokeGrant deletes the caller's grant for an action (self-service; §8). The Connection it
+// pointed at survives — a shared upstream account outlives any one action's consent.
 func (k *Kernel) RevokeGrant(ctx context.Context, callerID, actionID string) error {
 	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return err
@@ -416,6 +396,532 @@ func (k *Kernel) RevokeGrant(ctx context.Context, callerID, actionID string) err
 		return err
 	}
 	k.log.With(ctx).Info("grant.revoked", "action_id", actionID, "grantor", callerID, "status", "success")
+	return nil
+}
+
+// ---- Connections, selectors, and consent plans (§8) ----
+
+// connectionKey derives a Connection's provider_key from an action's verified facts, never from
+// names (§8): the pinned base-URL host for delegated_bearer, token_url|client_id for oauth_delegated.
+func connectionKey(a *Action, auth *AuthInput) (string, error) {
+	if a.Kind != KindHTTP {
+		return "", ErrInvalidInput.Wrap("grants apply only to http actions")
+	}
+	switch auth.Scheme {
+	case AuthSchemeDelegatedBearer:
+		host := hostOf(httpSourceBaseURL(a.Source))
+		if host == "" {
+			return "", ErrInvalidState.Wrap("action has no resolvable upstream host")
+		}
+		return "bearer:" + host, nil
+	case AuthSchemeOAuthDelegated:
+		tokenURL := authField(auth.Config, "token_url")
+		clientID := authField(auth.Config, "client_id")
+		if tokenURL == "" || clientID == "" {
+			return "", ErrInvalidState.Wrap("oauth action missing token_url or client_id")
+		}
+		return "oauth:" + tokenURL + "|" + clientID, nil
+	}
+	return "", ErrInvalidInput.Wrap("action does not use a delegated auth scheme")
+}
+
+// hostOf returns the host[:port] of a URL, falling back to a scheme-less host string.
+func hostOf(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		return u.Host
+	}
+	raw = strings.TrimPrefix(raw, "//")
+	if i := strings.IndexAny(raw, "/?#"); i >= 0 {
+		raw = raw[:i]
+	}
+	return raw
+}
+
+// ProviderLabel renders a provider_key for display (§14). Exported for the service/CLI layer.
+func ProviderLabel(providerKey string) string { return providerLabel(providerKey) }
+
+// providerLabel renders a provider_key for display (§14): the bare host for bearer, the token
+// endpoint's host for oauth.
+func providerLabel(providerKey string) string {
+	if rest, ok := strings.CutPrefix(providerKey, "bearer:"); ok {
+		return rest
+	}
+	if rest, ok := strings.CutPrefix(providerKey, "oauth:"); ok {
+		if i := strings.LastIndex(rest, "|"); i >= 0 {
+			return hostOf(rest[:i])
+		}
+		return hostOf(rest)
+	}
+	return providerKey
+}
+
+// splitScopes splits an OAuth scope string on whitespace and commas.
+func splitScopes(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == ','
+	})
+}
+
+// parseScopeJSON reads a stored scopes_json (a JSON array), tolerating a legacy space-separated form.
+func parseScopeJSON(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var arr []string
+	if json.Unmarshal([]byte(s), &arr) == nil {
+		return arr
+	}
+	return splitScopes(s)
+}
+
+// actionScopesJSON returns an action's requested scopes as a JSON array string.
+func actionScopesJSON(auth *AuthInput) string {
+	sc := splitScopes(authField(auth.Config, "scopes"))
+	if len(sc) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(sc)
+	return string(b)
+}
+
+// unionScopes merges requested scopes into an existing stored set, returning the widened JSON and
+// whether the requested scopes were already covered (requested ⊆ existing).
+func unionScopes(existingJSON string, requested []string) (string, bool) {
+	set := map[string]bool{}
+	for _, s := range parseScopeJSON(existingJSON) {
+		set[s] = true
+	}
+	covered := true
+	for _, s := range requested {
+		if !set[s] {
+			covered = false
+			set[s] = true
+		}
+	}
+	if len(set) == 0 {
+		return "", covered
+	}
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	b, _ := json.Marshal(out)
+	return string(b), covered
+}
+
+// ParseGrantSelector splits a consent selector into owner handle and path (§8). A selector is
+// @owner or @owner/path; a trailing "/*" is an accepted alias for the whole-owner form.
+func ParseGrantSelector(sel string) (ownerHandle, path string, err error) {
+	sel = strings.TrimSpace(sel)
+	sel = strings.TrimSuffix(sel, "/*")
+	if !strings.HasPrefix(sel, "@") {
+		sel = "@" + sel
+	}
+	if len(sel) <= 1 {
+		return "", "", ErrInvalidInput.Wrap("selector must be @owner or @owner/path")
+	}
+	idx := strings.Index(sel[1:], "/")
+	if idx < 0 {
+		return sel, "", nil
+	}
+	owner := sel[:idx+1]
+	if owner == "@" {
+		return "", "", ErrInvalidInput.Wrap("selector must be @owner or @owner/path")
+	}
+	return owner, sel[idx+2:], nil
+}
+
+// selectorPathMatches implements path-segment matching (§8): the empty path matches all of an
+// owner's actions; otherwise an action name matches iff it equals the path or lies beneath it
+// (path + "/…") — so "brief" matches "brief" and "brief/x" but never "briefing".
+func selectorPathMatches(path, name string) bool {
+	return path == "" || name == path || strings.HasPrefix(name, path+"/")
+}
+
+// delegatedMatch is one delegated action selected by a selector, with its provider grouping.
+type delegatedMatch struct {
+	action      *Action
+	auth        *AuthInput
+	providerKey string
+	scopes      []string
+}
+
+// maxOwnerActions bounds a selector's owner-action enumeration (ListActionsByOwner needs a limit).
+const maxOwnerActions = 100000
+
+// expandSelector resolves a selector to the caller-callable delegated actions it names, grouped by
+// provider (§8). It applies the CanCall gate (§4) exactly as a single grant does, and reports how
+// many name-matched actions were skipped for needing no login (non-delegated) or being uncallable.
+func (k *Kernel) expandSelector(ctx context.Context, callerID, sel string) (matches []delegatedMatch, skippedLoginless, skippedUncallable int, ownerID string, err error) {
+	ownerHandle, path, err := ParseGrantSelector(sel)
+	if err != nil {
+		return nil, 0, 0, "", err
+	}
+	owner, err := k.store.ReadUserByHandle(ctx, NormalizeHandle(ownerHandle))
+	if err != nil {
+		return nil, 0, 0, "", ErrNotFound.Wrap("selector owner not found")
+	}
+	ownerID = owner.ID
+	actions, err := k.store.ListActionsByOwner(ctx, owner.ID, maxOwnerActions, 0)
+	if err != nil {
+		return nil, 0, 0, "", err
+	}
+	for _, a := range actions {
+		if a.Kind != KindHTTP || !a.Active || !selectorPathMatches(path, a.Name) {
+			continue
+		}
+		auth, aerr := k.openAuthInput(a)
+		if aerr != nil || auth == nil || !isDelegatedScheme(auth.Scheme) {
+			skippedLoginless++
+			continue
+		}
+		if !canCall(callerID, a) {
+			skippedUncallable++
+			continue
+		}
+		pk, perr := connectionKey(a, auth)
+		if perr != nil {
+			skippedUncallable++
+			continue
+		}
+		matches = append(matches, delegatedMatch{action: a, auth: auth, providerKey: pk, scopes: splitScopes(authField(auth.Config, "scopes"))})
+	}
+	return matches, skippedLoginless, skippedUncallable, ownerID, nil
+}
+
+// ConsentGroup is one provider account within a consent plan (§8).
+type ConsentGroup struct {
+	ProviderKey string          `json:"provider_key"`
+	Provider    string          `json:"provider"`
+	Scheme      string          `json:"scheme"`
+	Scopes      []string        `json:"scopes"`
+	Connected   bool            `json:"connected"`
+	Covered     bool            `json:"covered"`
+	Actions     []ConsentAction `json:"actions"`
+}
+
+// ConsentAction is one action within a consent group, with its current grant status.
+type ConsentAction struct {
+	ActionID string `json:"action_id"`
+	Action   string `json:"action"`
+	Granted  bool   `json:"granted"`
+}
+
+// ConsentPlan is the grouped, per-provider result of expanding a selector — what user connect walks.
+type ConsentPlan struct {
+	Groups            []ConsentGroup `json:"groups"`
+	SkippedLoginless  int            `json:"skipped_loginless"`
+	SkippedUncallable int            `json:"skipped_uncallable"`
+}
+
+// ConsentPlan expands a selector and groups the caller's connectable delegated actions by provider
+// account, marking each group connected/covered and each action granted (§8).
+func (k *Kernel) ConsentPlan(ctx context.Context, callerID, sel string) (*ConsentPlan, error) {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+		return nil, err
+	}
+	matches, loginless, uncallable, _, err := k.expandSelector(ctx, callerID, sel)
+	if err != nil {
+		return nil, err
+	}
+	var order []string
+	byPK := map[string][]delegatedMatch{}
+	for _, m := range matches {
+		if _, ok := byPK[m.providerKey]; !ok {
+			order = append(order, m.providerKey)
+		}
+		byPK[m.providerKey] = append(byPK[m.providerKey], m)
+	}
+	plan := &ConsentPlan{SkippedLoginless: loginless, SkippedUncallable: uncallable}
+	for _, pk := range order {
+		ms := byPK[pk]
+		scopeSet := map[string]bool{}
+		for _, m := range ms {
+			for _, s := range m.scopes {
+				scopeSet[s] = true
+			}
+		}
+		scopes := make([]string, 0, len(scopeSet))
+		for s := range scopeSet {
+			scopes = append(scopes, s)
+		}
+		sort.Strings(scopes)
+
+		grp := ConsentGroup{ProviderKey: pk, Provider: providerLabel(pk), Scheme: ms[0].auth.Scheme, Scopes: scopes}
+		if conn, cerr := k.store.ReadConnectionByUserProvider(ctx, callerID, pk); cerr == nil {
+			grp.Connected = true
+			if ms[0].auth.Scheme == AuthSchemeDelegatedBearer {
+				grp.Covered = true
+			} else {
+				_, grp.Covered = unionScopes(conn.ScopesJSON, scopes)
+			}
+		}
+		for _, m := range ms {
+			granted := false
+			if _, gerr := k.store.ReadGrant(ctx, callerID, m.action.ID); gerr == nil {
+				granted = true
+			}
+			grp.Actions = append(grp.Actions, ConsentAction{ActionID: m.action.ID, Action: k.actionRefOf(ctx, m.action), Granted: granted})
+		}
+		plan.Groups = append(plan.Groups, grp)
+	}
+	return plan, nil
+}
+
+// CreateGrants homes a secret on a user's Connection for one provider account and mints one grant
+// per action against it (§8). All actions are validated (delegated scheme, CanCall, matching
+// provider_key) before any write. A non-empty secret is sealed under AAD callerID|connectionID and
+// widens the connection's scopes; an empty secret is the instant-grant path, valid only when a
+// covering connection already exists. Per-action binding at dispatch is unchanged.
+func (k *Kernel) CreateGrants(ctx context.Context, callerID, providerKey string, actionIDs []string, secret, scopesJSON string) ([]*Grant, error) {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+		return nil, err
+	}
+	if k.secretBox == nil {
+		return nil, ErrInvalidState.Wrap("credential encryption is not configured")
+	}
+	if len(actionIDs) == 0 {
+		return nil, ErrInvalidInput.Wrap("no actions to grant")
+	}
+	// Validate every action before any write.
+	for _, aid := range actionIDs {
+		a, auth, err := k.readDelegatedAction(ctx, aid)
+		if err != nil {
+			return nil, err
+		}
+		if !canCall(callerID, a) {
+			return nil, ErrUnauthorized.Wrap("cannot grant for an action you may not call")
+		}
+		pk, err := connectionKey(a, auth)
+		if err != nil {
+			return nil, err
+		}
+		if pk != providerKey {
+			return nil, ErrInvalidInput.Wrap("action does not belong to this provider group")
+		}
+	}
+	// Resolve or mint the connection.
+	connID, createdAt, existingScopes, sealed := "", time.Now().UTC(), "", ""
+	if existing, err := k.store.ReadConnectionByUserProvider(ctx, callerID, providerKey); err == nil {
+		connID, createdAt, existingScopes, sealed = existing.ID, existing.CreatedAt, existing.ScopesJSON, existing.SealedSecret
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	unionJSON, covered := unionScopes(existingScopes, parseScopeJSON(scopesJSON))
+	if secret != "" {
+		if connID == "" {
+			connID = uuid.New().String()
+		}
+		s, serr := k.secretBox.Seal(callerID+"|"+connID, secret)
+		if serr != nil {
+			return nil, ErrInternal.Wrapf("seal connection secret: %v", serr)
+		}
+		sealed = s
+	} else {
+		if connID == "" {
+			return nil, ErrInvalidState.Wrap("no connection to grant against; supply a token")
+		}
+		if !covered {
+			return nil, ErrInvalidState.Wrap("connection does not cover the requested scopes")
+		}
+	}
+	if err := k.store.CreateOrUpdateConnection(ctx, &Connection{
+		ID: connID, UserID: callerID, ProviderKey: providerKey,
+		SealedSecret: sealed, ScopesJSON: unionJSON, CreatedAt: createdAt, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		return nil, err
+	}
+	out := make([]*Grant, 0, len(actionIDs))
+	for _, aid := range actionIDs {
+		g := &Grant{ID: uuid.New().String(), GrantorUserID: callerID, ActionID: aid, ConnectionID: connID, CreatedAt: time.Now().UTC()}
+		if err := k.store.CreateOrReplaceGrant(ctx, g); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	k.log.With(ctx).Info("grant.created", "provider", providerKey, "grantor", callerID, "count", len(out), "status", "success")
+	return out, nil
+}
+
+// AttachBearerGrants stores one static token across a selector's delegated_bearer group (§8): the
+// batch twin of AttachBearerGrant. providerKey is optional when the selector resolves to exactly
+// one bearer group.
+func (k *Kernel) AttachBearerGrants(ctx context.Context, callerID, sel, providerKey, token string) ([]*Grant, error) {
+	matches, _, _, _, err := k.expandSelector(ctx, callerID, sel)
+	if err != nil {
+		return nil, err
+	}
+	groups := map[string][]string{}
+	for _, m := range matches {
+		if m.auth.Scheme == AuthSchemeDelegatedBearer {
+			groups[m.providerKey] = append(groups[m.providerKey], m.action.ID)
+		}
+	}
+	if len(groups) == 0 {
+		return nil, ErrNotFound.Wrap("no connectable delegated_bearer actions for selector")
+	}
+	pk := providerKey
+	if pk == "" {
+		if len(groups) > 1 {
+			return nil, ErrInvalidInput.Wrap("selector spans multiple bearer providers; specify one")
+		}
+		for g := range groups {
+			pk = g
+		}
+	}
+	ids, ok := groups[pk]
+	if !ok {
+		return nil, ErrNotFound.Wrap("no bearer actions for that provider in the selector")
+	}
+	return k.CreateGrants(ctx, callerID, pk, ids, token, "")
+}
+
+// RevokeGrantsBySelector deletes the caller's grants whose action matches the selector (§8): grants
+// only — connections survive. Returns the revoked action refs.
+func (k *Kernel) RevokeGrantsBySelector(ctx context.Context, callerID, sel string) ([]string, error) {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+		return nil, err
+	}
+	ownerHandle, path, err := ParseGrantSelector(sel)
+	if err != nil {
+		return nil, err
+	}
+	owner, err := k.store.ReadUserByHandle(ctx, NormalizeHandle(ownerHandle))
+	if err != nil {
+		return nil, ErrNotFound.Wrap("selector owner not found")
+	}
+	grants, err := k.store.ListGrantsByUser(ctx, callerID)
+	if err != nil {
+		return nil, err
+	}
+	var revoked []string
+	for _, g := range grants {
+		a, aerr := k.store.ReadAction(ctx, g.ActionID)
+		if aerr != nil || a == nil || a.OwnerUserID != owner.ID || !selectorPathMatches(path, a.Name) {
+			continue
+		}
+		if derr := k.store.DeleteGrant(ctx, callerID, g.ActionID); derr == nil {
+			revoked = append(revoked, k.actionRefOf(ctx, a))
+		}
+	}
+	if len(revoked) == 0 {
+		return nil, ErrNotFound.Wrap("no matching grants to revoke")
+	}
+	return revoked, nil
+}
+
+// RevokeConnection deletes the caller's Connection for a provider and cascades its grants (§8):
+// disconnect --account. Returns the affected action refs.
+func (k *Kernel) RevokeConnection(ctx context.Context, callerID, providerKey string) ([]string, error) {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+		return nil, err
+	}
+	conn, err := k.store.ReadConnectionByUserProvider(ctx, callerID, providerKey)
+	if err != nil {
+		return nil, err
+	}
+	grants, _ := k.store.ListGrantsByUser(ctx, callerID)
+	var refs []string
+	for _, g := range grants {
+		if g.ConnectionID == conn.ID {
+			refs = append(refs, k.ActionRef(ctx, g.ActionID))
+		}
+	}
+	if err := k.store.DeleteConnectionCascade(ctx, conn.ID); err != nil {
+		return nil, err
+	}
+	k.log.With(ctx).Info("connection.revoked", "provider", providerKey, "grantor", callerID, "count", len(refs), "status", "success")
+	return refs, nil
+}
+
+// ListConnectionViews returns the caller's connections as token-free views for GET /v1/me (§8),
+// each with the number of actions consented against it and whether it is currently unused.
+func (k *Kernel) ListConnectionViews(ctx context.Context, callerID string) ([]*ConnectionView, error) {
+	conns, err := k.store.ListConnectionsByUser(ctx, callerID)
+	if err != nil {
+		return nil, err
+	}
+	grants, err := k.store.ListGrantsByUser(ctx, callerID)
+	if err != nil {
+		return nil, err
+	}
+	counts := map[string]int{}
+	for _, g := range grants {
+		if g.ConnectionID != "" {
+			counts[g.ConnectionID]++
+		}
+	}
+	out := make([]*ConnectionView, 0, len(conns))
+	for _, c := range conns {
+		n := counts[c.ID]
+		out = append(out, &ConnectionView{Provider: providerLabel(c.ProviderKey), Actions: n, Unused: n == 0, CreatedAt: c.CreatedAt})
+	}
+	return out, nil
+}
+
+// BackfillGrantConnections is the one-time migration to the Connection model (§8): it re-homes each
+// legacy per-grant token onto its derived Connection and reseals it under the new AAD. Idempotent —
+// linking clears the legacy token, so a second pass finds nothing. Processing oldest-first means the
+// latest grant wins the connection's secret on a provider collision. A grant whose action is gone,
+// non-delegated, or whose token cannot be recovered is deleted. With no credential box configured it
+// no-ops, leaving legacy rows for a later boot rather than destroying recoverable tokens.
+func (k *Kernel) BackfillGrantConnections(ctx context.Context) error {
+	if k.secretBox == nil {
+		return nil
+	}
+	legacy, err := k.store.ListLegacyTokenGrants(ctx)
+	if err != nil {
+		return err
+	}
+	for _, g := range legacy {
+		a, aerr := k.store.ReadAction(ctx, g.ActionID)
+		if aerr != nil || a == nil {
+			_ = k.store.DeleteGrant(ctx, g.GrantorUserID, g.ActionID)
+			k.log.With(ctx).Warn("grant.backfill.dropped", "grant_id", g.ID, "reason", "action_missing")
+			continue
+		}
+		auth, autherr := k.openAuthInput(a)
+		if autherr != nil || auth == nil || !isDelegatedScheme(auth.Scheme) {
+			_ = k.store.DeleteGrant(ctx, g.GrantorUserID, g.ActionID)
+			k.log.With(ctx).Warn("grant.backfill.dropped", "grant_id", g.ID, "reason", "not_delegated")
+			continue
+		}
+		plain, oerr := k.secretBox.Open(g.GrantorUserID+"|"+g.ActionID, g.RefreshToken)
+		if oerr != nil {
+			_ = k.store.DeleteGrant(ctx, g.GrantorUserID, g.ActionID)
+			k.log.With(ctx).Warn("grant.backfill.dropped", "grant_id", g.ID, "reason", "token_unrecoverable")
+			continue
+		}
+		pk, perr := connectionKey(a, auth)
+		if perr != nil {
+			_ = k.store.DeleteGrant(ctx, g.GrantorUserID, g.ActionID)
+			k.log.With(ctx).Warn("grant.backfill.dropped", "grant_id", g.ID, "reason", "no_provider_key")
+			continue
+		}
+		connID, createdAt, existingScopes := uuid.New().String(), g.CreatedAt, ""
+		if existing, cerr := k.store.ReadConnectionByUserProvider(ctx, g.GrantorUserID, pk); cerr == nil {
+			connID, createdAt, existingScopes = existing.ID, existing.CreatedAt, existing.ScopesJSON
+		}
+		sealed, serr := k.secretBox.Seal(g.GrantorUserID+"|"+connID, plain)
+		if serr != nil {
+			return ErrInternal.Wrapf("reseal backfilled token: %v", serr)
+		}
+		unionJSON, _ := unionScopes(existingScopes, splitScopes(authField(auth.Config, "scopes")))
+		if err := k.store.CreateOrUpdateConnection(ctx, &Connection{
+			ID: connID, UserID: g.GrantorUserID, ProviderKey: pk,
+			SealedSecret: sealed, ScopesJSON: unionJSON, CreatedAt: createdAt, UpdatedAt: time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+		if err := k.store.LinkGrantConnection(ctx, g.ID, connID); err != nil {
+			return err
+		}
+	}
+	if len(legacy) > 0 {
+		k.log.With(ctx).Info("grant.backfill.done", "processed", len(legacy))
+	}
 	return nil
 }
 

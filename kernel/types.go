@@ -104,14 +104,31 @@ type AuthInput struct {
 	Secrets map[string]any `json:"secrets"`          // credentials (never logged or returned)
 }
 
-// Grant is a user's delegated upstream OAuth credential for exactly one action (§8).
-// RefreshToken is AES-256-GCM sealed and write-only: never serialized by any read path.
+// Grant is a user's per-action delegated consent (§8): a pointer binding one action to the
+// Connection (ConnectionID) whose credential it may wield. It holds no token of its own.
+// RefreshToken is populated only on legacy rows awaiting the backfill (§8) and is otherwise
+// empty; it is AES-256-GCM sealed and write-only, never serialized by any read path.
 type Grant struct {
 	ID            string    `json:"id"`
 	GrantorUserID string    `json:"grantor_user_id"`
 	ActionID      string    `json:"action_id"`
-	RefreshToken  string    `json:"-"` // sealed; never returned
+	ConnectionID  string    `json:"-"` // FK to Connection (empty on unbackfilled legacy rows)
+	RefreshToken  string    `json:"-"` // legacy sealed token, backfill-only; cleared once linked
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+// Connection is a user's upstream account credential, stored once per (user, provider_key)
+// and shared by every Grant that points at it (§8). SealedSecret (the OAuth refresh token or
+// static bearer token) is AES-256-GCM sealed with AAD user_id|connection_id and write-only:
+// never serialized by any read path. ScopesJSON is the requested-scope union consented so far.
+type Connection struct {
+	ID           string    `json:"id"`
+	UserID       string    `json:"user_id"`
+	ProviderKey  string    `json:"provider_key"`
+	SealedSecret string    `json:"-"` // sealed; never returned
+	ScopesJSON   string    `json:"-"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // GrantView is the token-free read shape for GET /v1/me: the action reference, the scopes the
@@ -119,6 +136,16 @@ type Grant struct {
 type GrantView struct {
 	Action    string    `json:"action"` // @owner/name
 	Scopes    any       `json:"scopes,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ConnectionView is the token-free read shape for GET /v1/me: the provider label, how many of
+// the caller's actions are consented against it, whether it is currently unused (§8), and when
+// it was created.
+type ConnectionView struct {
+	Provider  string    `json:"provider"`
+	Actions   int       `json:"actions"`
+	Unused    bool      `json:"unused"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
