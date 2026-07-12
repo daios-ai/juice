@@ -77,6 +77,26 @@ func (s *server) ctlSetSuspended(suspend bool) http.HandlerFunc {
 	}
 }
 
+func (s *server) ctlRenameUser(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		NewHandle string `json:"new_handle"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	u, err := resolveHandle(s.kernel, r.Context(), chi.URLParam(r, "handle"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	out, err := s.kernel.RenameUser(r.Context(), callerFrom(r), u.ID, req.NewHandle)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"handle": out.Handle})
+}
+
 func (s *server) ctlAdjust(direction string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

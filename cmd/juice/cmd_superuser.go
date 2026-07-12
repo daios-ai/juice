@@ -62,6 +62,7 @@ func init() {
 		adminShowCmd(),
 		adminSuspendCmd(),
 		adminUnsuspendCmd(),
+		adminRenameCmd(),
 		adminDepositCmd(),
 		adminWithdrawCmd(),
 		peerFriendCmd(),
@@ -171,6 +172,22 @@ func adminUnsuspendCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("User %s unsuspended.\n", kernel.NormalizeHandle(args[0]))
+			return nil
+		},
+	}
+}
+
+func adminRenameCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "rename <user> <new-handle>",
+		Short: "Rename a user's handle (frees the old handle for reuse)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			body := map[string]any{"new_handle": args[1]}
+			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/rename", body, nil); err != nil {
+				return err
+			}
+			fmt.Printf("User %s renamed to %s.\n", kernel.NormalizeHandle(args[0]), kernel.NormalizeHandle(args[1]))
 			return nil
 		},
 	}

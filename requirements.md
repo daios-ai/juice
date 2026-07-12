@@ -150,7 +150,7 @@ Money paths (each commits a monetary transition + its audit record atomically):
   CreateAdjustment    out-of-band credit grant / redemption with its audit record
   CreateRatingAndUpdateStats  rating record + rating stats
 Reads / supervision (no monetary mutation):
-  CreateUser ReadUser ReadUserByHandle ReadUserByPublicKey ListUsers SuspendUser UnsuspendUser UpdateUser
+  CreateUser ReadUser ReadUserByHandle ReadUserByPublicKey ListUsers SuspendUser UnsuspendUser UpdateUser RenameUser
   CreateAction ReadAction ReadActionByOwnerName UpdateAction UpdateActionAndResetStats DeleteAction ListAllActions
   ReadProcess ListProcesses ListAllProcesses
   ReadTrace ReadRootTrace ListTraces
@@ -587,7 +587,9 @@ The superuser may suspend or unsuspend users. Suspension preserves data and make
 
 `Kernel.Withdraw(operator_user_id,target_user_id,amount,reason)` is admin-CLI-only supervision: the mirror of `Deposit`. It requires configured superuser, positive amount, and `target.available ≥ amount`, then atomically debits `user.available` with an immutable debit adjustment record — the user's credits are redeemed and the operator owes the out-of-band payout. The operation is idempotent over `external_key` when supplied: a replay returns the existing adjustment record before the `target.available ≥ amount` check runs, so a replayed withdrawal never fails on a balance that has since dropped. It is served on the public TCP API (§14) as a superuser-gated route: authority is the `@sys` bearer token, not filesystem access.
 
-`Kernel.UpdateUser(callerUserID, email, currentPassword, newPassword)` is user self-service: only the authenticated, non-suspended local user may update their own account. `email` and `newPassword` are both optional; at least one must be provided. When `newPassword` is non-empty, `currentPassword` must match the stored hash; mismatch returns `ErrUnauthenticated`. An account with no password credential (a key-only account) cannot use this operation (`ErrInvalidState`). `handle` is immutable. The update is atomic.
+`Kernel.UpdateUser(callerUserID, email, currentPassword, newPassword)` is user self-service: only the authenticated, non-suspended local user may update their own account. `email` and `newPassword` are both optional; at least one must be provided. When `newPassword` is non-empty, `currentPassword` must match the stored hash; mismatch returns `ErrUnauthenticated`. An account with no password credential (a key-only account) cannot use this operation (`ErrInvalidState`). `handle` is immutable except by superuser rename. The update is atomic.
+
+`Kernel.RenameUser(operatorID, targetID, newHandle)` is superuser-only supervision, the sole path that changes a `handle`: it validates `newHandle` (unique, no `/`) and writes it atomically, vacating the old handle for reuse. The superuser's own account cannot be renamed (`ErrInvalidInput`), as its handle is bound to `config.superuser_handle`. Served on the public TCP API (§14) as a superuser-gated route.
 
 ## 13. Federation
 
@@ -731,6 +733,7 @@ juice tx rate <id> <0|1>                  juice tx verify <id>
 juice health
 juice admin users                         juice admin show <user>
 juice admin suspend <user>                juice admin unsuspend <user>
+juice admin rename <user> <new-handle>
 juice admin deposit <user> <amount>       juice admin withdraw <user> <amount>
 juice admin friend <key>                  juice admin unfriend <user>
 juice admin peers                         juice admin inspect <key>

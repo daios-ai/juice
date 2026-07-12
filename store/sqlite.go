@@ -561,6 +561,14 @@ func (s *DB) UpdateUser(ctx context.Context, u *kernel.User) error {
 	return dbErr(err, "update user")
 }
 
+// RenameUser changes a user's handle. The UNIQUE constraint is the backstop against a
+// concurrent collision the kernel's pre-check missed (§12).
+func (s *DB) RenameUser(ctx context.Context, id, handle string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET handle=?, updated_at=datetime('now') WHERE id=?`, handle, id)
+	return dbErr(err, "rename user")
+}
+
 // ---- Actions ----
 
 func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {

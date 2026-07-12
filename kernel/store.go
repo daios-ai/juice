@@ -168,6 +168,7 @@ type Store interface {
 	SuspendUser(ctx context.Context, id string) error
 	UnsuspendUser(ctx context.Context, id string) error
 	UpdateUser(ctx context.Context, u *User) error
+	RenameUser(ctx context.Context, id, handle string) error
 
 	// ---- Actions ----
 

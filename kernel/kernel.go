@@ -1163,6 +1163,36 @@ func (k *Kernel) UnsuspendUser(ctx context.Context, operatorID, targetID string)
 	return k.setSuspended(ctx, operatorID, targetID, false)
 }
 
+// RenameUser changes a user's handle, the sole path that mutates it (self-service UpdateUser
+// never touches it). Superuser-only. The superuser's own account is refused, since its handle is
+// bound to config.superuser_handle; a rename onto a handle another account holds is refused too.
+// Renaming a defunct account vacates its old handle for reuse (§12).
+func (k *Kernel) RenameUser(ctx context.Context, operatorID, targetID, newHandle string) (*User, error) {
+	if err := k.requireSuperuser(ctx, operatorID); err != nil {
+		return nil, err
+	}
+	newHandle = NormalizeHandle(newHandle)
+	if err := validateHandle(newHandle); err != nil {
+		return nil, err
+	}
+	target, err := k.store.ReadUser(ctx, targetID)
+	if err != nil {
+		return nil, err
+	}
+	if k.isUserSuperuser(ctx, target) {
+		return nil, ErrInvalidInput.Wrap("the superuser handle cannot be renamed")
+	}
+	if existing, _ := k.store.ReadUserByHandle(ctx, newHandle); existing != nil && existing.ID != target.ID {
+		return nil, ErrInvalidInput.Wrapf("handle %s is already taken", newHandle)
+	}
+	if err := k.store.RenameUser(ctx, targetID, newHandle); err != nil {
+		return nil, err
+	}
+	target.Handle = newHandle
+	k.log.With(ctx).Info("user.renamed", "user_id", targetID, "handle", newHandle)
+	return target, nil
+}
+
 // requireSuperuser returns ErrUnauthorized if operatorID is not the configured superuser.
 func (k *Kernel) requireSuperuser(ctx context.Context, operatorID string) error {
 	u, err := k.requireActiveUser(ctx, operatorID)

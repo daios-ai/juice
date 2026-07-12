@@ -1069,6 +1069,49 @@ func TestDepositNonSuperuserRejected(t *testing.T) {
 	}
 }
 
+func TestRenameUser(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	su := setupUser(t, st, "@sys", 0)
+	regular := setupUser(t, st, "@regular", 0)
+	bob := setupUser(t, st, "@bob", 0)
+
+	// Non-superuser cannot rename.
+	if _, err := k.RenameUser(ctx, regular.ID, bob.ID, "@x"); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("non-superuser rename: got %v, want ErrUnauthorized", err)
+	}
+	// The superuser's own handle cannot be renamed (bound to config.superuser_handle).
+	if _, err := k.RenameUser(ctx, su.ID, su.ID, "@root"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("rename superuser: got %v, want ErrInvalidInput", err)
+	}
+	// A rename onto a handle another account already holds is rejected.
+	if _, err := k.RenameUser(ctx, su.ID, bob.ID, "@regular"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("rename onto taken handle: got %v, want ErrInvalidInput", err)
+	}
+
+	// Superuser renames bob aside, vacating @bob.
+	out, err := k.RenameUser(ctx, su.ID, bob.ID, "@bob-retired")
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if out.Handle != "@bob-retired" {
+		t.Errorf("returned handle: got %q, want @bob-retired", out.Handle)
+	}
+	if got, err := k.ReadUserByHandle(ctx, "@bob-retired"); err != nil || got.ID != bob.ID {
+		t.Errorf("new handle does not resolve to bob: %v", err)
+	}
+	// The freed @bob is reusable by a fresh account, which inherits nothing of bob's identity.
+	fresh, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@bob", Email: "b@e.com", Password: "password"})
+	if err != nil {
+		t.Fatalf("reuse freed handle: %v", err)
+	}
+	if fresh.ID == bob.ID {
+		t.Errorf("reused handle must be a distinct account, got same id %s", fresh.ID)
+	}
+}
+
 func TestAdjustmentExternalKeyIdempotent(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)

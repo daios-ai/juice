@@ -192,6 +192,25 @@ func TestUserCRUD(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for missing user")
 	}
+
+	// RenameUser moves the handle: the old one frees, the new one resolves.
+	if err := db.RenameUser(ctx, u.ID, "@alice2"); err != nil {
+		t.Fatalf("RenameUser: %v", err)
+	}
+	if got, err := db.ReadUserByHandle(ctx, "@alice2"); err != nil || got.ID != u.ID {
+		t.Errorf("renamed handle does not resolve: %v", err)
+	}
+	if _, err := db.ReadUserByHandle(ctx, "@alice"); err == nil {
+		t.Error("old handle should be free after rename")
+	}
+	// The UNIQUE constraint is the backstop against a colliding rename.
+	other := newUser("@carol", 0)
+	if err := db.CreateUser(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RenameUser(ctx, other.ID, "@alice2"); err == nil {
+		t.Error("rename onto a taken handle should fail on the UNIQUE constraint")
+	}
 }
 
 // ---- Action CRUD ----

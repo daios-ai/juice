@@ -118,6 +118,39 @@ func TestAdminDepositByKey(t *testing.T) {
 	}
 }
 
+// TestAdminRenameOverTCP: a superuser rename over the public TCP API vacates the old handle,
+// which a fresh account then reuses.
+func TestAdminRenameOverTCP(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	suTok := bootSuperuser(t, env)
+
+	bob, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@bob", Email: "b@example.com", Password: "pw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, status := tcpDo(t, suTok, "POST", "/control/users/@bob/rename",
+		map[string]any{"new_handle": "@bob-retired"})
+	if status != http.StatusOK {
+		t.Fatalf("rename status %d: %s", status, body)
+	}
+	if got, err := env.k.ReadUserByHandle(ctx, "@bob-retired"); err != nil || got.ID != bob.ID {
+		t.Errorf("renamed handle does not resolve to bob: %v", err)
+	}
+	// The freed @bob is reusable by a distinct fresh account.
+	fresh, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@bob", Email: "b2@example.com", Password: "pw",
+	})
+	if err != nil {
+		t.Fatalf("reuse freed handle: %v", err)
+	}
+	if fresh.ID == bob.ID {
+		t.Errorf("reused handle must be a distinct account")
+	}
+}
+
 // TestAdminSuperuserGate proves the two-factor gate on the TCP routes: no bearer token is
 // rejected (authMiddleware), and a valid but non-superuser token is rejected (requireSuperuserMW).
 func TestAdminSuperuserGate(t *testing.T) {

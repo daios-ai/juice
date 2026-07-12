@@ -445,6 +445,7 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Get("/control/users/{handle}", srv.ctlShowUser)
 		r.Post("/control/users/{handle}/suspend", srv.ctlSetSuspended(true))
 		r.Post("/control/users/{handle}/unsuspend", srv.ctlSetSuspended(false))
+		r.Post("/control/users/{handle}/rename", srv.ctlRenameUser)
 		r.Post("/control/deposit", srv.ctlAdjust(kernel.DirectionCredit))
 		r.Post("/control/withdraw", srv.ctlAdjust(kernel.DirectionDebit))
 		r.Get("/control/peers", srv.ctlListPeers)
