@@ -856,6 +856,15 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 	if gossip.PublicKey == "" {
 		return ErrInvalidInput.Wrap("gossip missing public_key")
 	}
+	// gossip.Actions/Friends are peer-controlled and each drives a DB write; cap the fan-out so one
+	// gossip pull cannot force an unbounded write amplification (§13 information, not authority).
+	const maxGossipElements = 10000
+	if len(gossip.Actions) > maxGossipElements {
+		gossip.Actions = gossip.Actions[:maxGossipElements]
+	}
+	if len(gossip.Friends) > maxGossipElements {
+		gossip.Friends = gossip.Friends[:maxGossipElements]
+	}
 	statsJSON, _ := json.Marshal(gossip.Actions)
 	now := time.Now().UTC()
 	if err := k.store.CreateOrUpdateDiscoveredKernel(ctx, &DiscoveredKernel{

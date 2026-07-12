@@ -1287,7 +1287,7 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 	if err != nil || len(privBytes) != ed25519.PrivateKeySize {
 		return nil, kernel.ErrInvalidState.Wrap("signing key unavailable for federation transport")
 	}
-	handlers := &fedHandlers{kernel: k, log: logger}
+	handlers := &fedHandlers{kernel: k, log: logger, callLimiter: newKeyLimiter(50, 100)}
 	tr, err := fed.New(ctx, fed.Config{
 		SigningKey:        ed25519.PrivateKey(privBytes),
 		BootstrapPeers:    globalCfg.BootstrapPeers,
@@ -1304,13 +1304,57 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 
 // fedHandlers answers inbound federation protocol streams.
 type fedHandlers struct {
-	kernel    *kernel.Kernel
-	log       *log.Logger
-	transport *fed.Transport // set after New so reciprocal friend requests can go out
+	kernel      *kernel.Kernel
+	log         *log.Logger
+	transport   *fed.Transport // set after New so reciprocal friend requests can go out
+	callLimiter *keyLimiter    // per-peer inbound call rate limit (§13; friend-set-bounded)
+}
+
+// keyLimiter is a per-key token-bucket rate limiter. Keyed by peer public key on the federation
+// call path — peer identities are free to mint (§13), but inbound calls only come from friended
+// peers, so the key set is operator-bounded and needs no eviction. Complements the transport's
+// frame/deadline caps and the economic (prepaid-balance) backstop with a call-rate ceiling.
+type keyLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*rate.Limiter
+	rate    rate.Limit
+	burst   int
+}
+
+func newKeyLimiter(ratePerSec float64, burst int) *keyLimiter {
+	return &keyLimiter{entries: map[string]*rate.Limiter{}, rate: rate.Limit(ratePerSec), burst: burst}
+}
+
+func (kl *keyLimiter) allow(key string) bool {
+	kl.mu.Lock()
+	defer kl.mu.Unlock()
+	l, ok := kl.entries[key]
+	if !ok {
+		l = rate.NewLimiter(kl.rate, kl.burst)
+		kl.entries[key] = l
+	}
+	return l.Allow()
 }
 
 // OnCall verifies and executes an inbound federation call, returning the settlement envelope.
-func (h *fedHandlers) OnCall(ctx context.Context, _ string, req fed.CallRequest) fed.CallResponse {
+func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRequest) fed.CallResponse {
+	// Defense in depth (§13): the payload signature already authenticates the counterparty, but the
+	// Noise-authenticated connection key must also match, so a validly-signed request cannot be
+	// relayed or replayed over a connection authenticated as a different peer. Fail open only when
+	// the transport supplied no key (the signature remains the authority).
+	if peerKey != "" && peerKey != req.Counterparty {
+		code := kernel.KernelErrorCode(kernel.ErrUnauthenticated)
+		b, _ := json.Marshal(map[string]string{"error": "counterparty does not match the authenticated connection", "code": code})
+		return fed.CallResponse{Status: kernel.HTTPStatusFromCode(code), Body: b}
+	}
+	limitKey := peerKey
+	if limitKey == "" {
+		limitKey = req.Counterparty
+	}
+	if h.callLimiter != nil && !h.callLimiter.allow(limitKey) {
+		b, _ := json.Marshal(map[string]string{"error": "rate limit exceeded", "code": kernel.KernelErrorCode(kernel.ErrInvalidState)})
+		return fed.CallResponse{Status: http.StatusTooManyRequests, Body: b}
+	}
 	status, body, err := handleFederationCall(h.kernel, ctx, req.Counterparty, req.Timestamp,
 		req.IdempotencyKey, req.Action, req.Signature, []byte(req.Args))
 	if err != nil {

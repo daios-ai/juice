@@ -19,6 +19,7 @@ import (
 
 	"github.com/daios-ai/juice/log"
 	"github.com/google/uuid"
+	"golang.org/x/net/publicsuffix"
 )
 
 // Config holds kernel-level configuration.
@@ -420,9 +421,27 @@ func connectionKey(a *Action, auth *AuthInput) (string, error) {
 		if tokenURL == "" || clientID == "" {
 			return "", ErrInvalidState.Wrap("oauth action missing token_url or client_id")
 		}
-		return "oauth:" + tokenURL + "|" + clientID, nil
+		// Bind the resource server (source registrable domain) into the key, not just the token
+		// issuer — otherwise a malicious action with a legitimate provider's token_url|client_id
+		// (client_id is public) but an attacker-controlled source host could ride a victim's
+		// existing connection and have the minted access token delivered to the attacker (§8
+		// confused-deputy defense). A different destination domain is a distinct connection.
+		return "oauth:" + tokenURL + "|" + clientID + "|" + sourceDomain(a), nil
 	}
 	return "", ErrInvalidInput.Wrap("action does not use a delegated auth scheme")
+}
+
+// sourceDomain returns the registrable domain (eTLD+1) of an action's source host — the resource
+// server an oauth token is delivered to (§8). Falls back to the bare host for IPs / unlisted TLDs.
+func sourceDomain(a *Action) string {
+	host := hostOf(httpSourceBaseURL(a.Source))
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if d, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
+		return d
+	}
+	return host
 }
 
 // hostOf returns the host[:port] of a URL, falling back to a scheme-less host string.
@@ -588,15 +607,18 @@ func (k *Kernel) expandSelector(ctx context.Context, callerID, sel string) (matc
 	return matches, skippedLoginless, skippedUncallable, ownerID, nil
 }
 
-// ConsentGroup is one provider account within a consent plan (§8).
+// ConsentGroup is one provider account within a consent plan (§8). Destinations lists the upstream
+// hosts the group's actions send the credential to — surfaced at consent so the recipient is visible
+// (a delegated token goes to the action's own source host, which need not be the token issuer, §8).
 type ConsentGroup struct {
-	ProviderKey string          `json:"provider_key"`
-	Provider    string          `json:"provider"`
-	Scheme      string          `json:"scheme"`
-	Scopes      []string        `json:"scopes"`
-	Connected   bool            `json:"connected"`
-	Covered     bool            `json:"covered"`
-	Actions     []ConsentAction `json:"actions"`
+	ProviderKey  string          `json:"provider_key"`
+	Provider     string          `json:"provider"`
+	Scheme       string          `json:"scheme"`
+	Scopes       []string        `json:"scopes"`
+	Destinations []string        `json:"destinations"`
+	Connected    bool            `json:"connected"`
+	Covered      bool            `json:"covered"`
+	Actions      []ConsentAction `json:"actions"`
 }
 
 // ConsentAction is one action within a consent group, with its current grant status.
@@ -646,7 +668,17 @@ func (k *Kernel) ConsentPlan(ctx context.Context, callerID, sel string) (*Consen
 		}
 		sort.Strings(scopes)
 
-		grp := ConsentGroup{ProviderKey: pk, Provider: ProviderLabel(pk), Scheme: ms[0].auth.Scheme, Scopes: scopes}
+		destSet := map[string]bool{}
+		for _, m := range ms {
+			destSet[hostOf(httpSourceBaseURL(m.action.Source))] = true
+		}
+		dests := make([]string, 0, len(destSet))
+		for d := range destSet {
+			dests = append(dests, d)
+		}
+		sort.Strings(dests)
+
+		grp := ConsentGroup{ProviderKey: pk, Provider: ProviderLabel(pk), Scheme: ms[0].auth.Scheme, Scopes: scopes, Destinations: dests}
 		if conn, cerr := k.store.ReadConnectionByUserProvider(ctx, callerID, pk); cerr == nil {
 			grp.Connected = true
 			if ms[0].auth.Scheme == AuthSchemeDelegatedBearer {
@@ -1244,11 +1276,17 @@ type CreateActionRequest struct {
 	Auth         *AuthInput  // upstream credentials; sealed into auth_json at rest; write-only
 }
 
-// UnsafeIP reports whether ip is loopback, RFC 1918 private, or link-local — the addresses an
-// outbound fetch, redirect, or peer URL must not target (SSRF discipline, §7/§9). This is the
-// single source of truth for that predicate; do not re-inline the three checks elsewhere.
+// cgnatRange is RFC 6598 shared address space (100.64.0.0/10) — routable-looking but not covered by
+// net.IP.IsPrivate, so a fetch could otherwise reach a carrier-internal host.
+var _, cgnatRange, _ = net.ParseCIDR("100.64.0.0/10")
+
+// UnsafeIP reports whether ip is loopback, RFC 1918 private, link-local, unspecified (0.0.0.0 / ::,
+// which routes to localhost on Linux), or CGNAT shared space — the addresses an outbound fetch,
+// redirect, or peer URL must not target (SSRF discipline, §7/§9). This is the single source of truth
+// for that predicate; do not re-inline the checks elsewhere.
 func UnsafeIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsUnspecified() || cgnatRange.Contains(ip)
 }
 
 // UnsafeHost reports whether host (a hostname or literal IP) is empty, localhost, or a literal

@@ -164,6 +164,11 @@ func printDelta(todo []kernel.ConsentGroup) {
 			how = "already connected"
 		}
 		fmt.Printf("  %s (%s):\n", g.Provider, how)
+		if len(g.Destinations) > 0 {
+			// The recipient of your credential — for OAuth this is the action's own upstream host,
+			// which need not be the login provider. Shown so the destination is never hidden (§8).
+			fmt.Printf("    → sends your credential to: %s\n", strings.Join(g.Destinations, ", "))
+		}
 		for _, a := range g.Actions {
 			mark := " "
 			if a.Granted {

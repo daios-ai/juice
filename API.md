@@ -110,7 +110,7 @@ Federation has no HTTP surface: peer identity, gossip, manifests, the friend han
 
 | Operation | HTTP | CLI |
 |-----------|------|-----|
-| Plan consent | `GET /v1/grants/plan?selector=` → `{groups: [{provider, scheme, scopes, connected, covered, actions: [{action, granted}]}], skipped}` | (driven by `user connect`) |
+| Plan consent | `GET /v1/grants/plan?selector=` → `{groups: [{provider, scheme, scopes, destinations, connected, covered, actions: [{action, granted}]}], skipped}` | (driven by `user connect`) |
 | Start consent | `POST /v1/grants/start` `{selector, provider, [redirect_uri], [flow]}` → `{status:"granted", actions}` (already covered) or `{state, authorize_url}` (code) or `{state, verification_uri, user_code, interval, expires_in}` (device) | `juice user connect <selector> [--device]` |
 | Complete consent | `POST /v1/grants/complete` `{state, [code]}` → `{status, provider, actions, created_at}` or `{status: "pending"}` | (driven by `user connect`) |
 | Attach token | `POST /v1/grants` `{selector, [provider], token}` → `{status, provider, actions, created_at}` | `juice user connect <selector> --token <pat>` |

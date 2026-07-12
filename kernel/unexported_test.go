@@ -90,6 +90,9 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 		"http://192.168.1.1/router",
 		"http://172.16.0.1/internal",
 		"http://169.254.169.254/latest/meta-data/",
+		"http://0.0.0.0/admin",         // unspecified → localhost on Linux
+		"http://[::]/admin",            // IPv6 unspecified
+		"http://100.64.0.1/internal",   // CGNAT shared space (RFC 6598)
 		"ftp://example.com/file",
 		"file:///etc/passwd",
 		"://broken",
@@ -401,11 +404,21 @@ func TestConnectionKeyDerivation(t *testing.T) {
 	if err != nil || pk != "bearer:api.github.com" {
 		t.Errorf("bearer key = %q, %v; want bearer:api.github.com", pk, err)
 	}
+	// oauth key binds the token issuer AND the resource-server registrable domain (eTLD+1 of the
+	// source host) — the §8 confused-deputy defense.
 	oauth := &Action{Kind: KindHTTP, Source: `{"base_url":"https://api.x.com"}`}
 	auth := &AuthInput{Scheme: AuthSchemeOAuthDelegated, Config: map[string]any{"token_url": "https://x.com/token", "client_id": "cid"}}
 	pk, err = connectionKey(oauth, auth)
-	if err != nil || pk != "oauth:https://x.com/token|cid" {
-		t.Errorf("oauth key = %q, %v; want oauth:https://x.com/token|cid", pk, err)
+	if err != nil || pk != "oauth:https://x.com/token|cid|x.com" {
+		t.Errorf("oauth key = %q, %v; want oauth:https://x.com/token|cid|x.com", pk, err)
+	}
+	// Same token issuer + client_id but a DIFFERENT source domain must NOT collide — an attacker
+	// cannot reuse a legit provider's token_url|client_id to ride a victim's connection.
+	evil := &Action{Kind: KindHTTP, Source: `{"base_url":"https://evil.attacker.com"}`}
+	if evilPK, _ := connectionKey(evil, auth); evilPK == pk {
+		t.Errorf("different source domain must yield a different provider_key: both %q", evilPK)
+	} else if evilPK != "oauth:https://x.com/token|cid|attacker.com" {
+		t.Errorf("evil oauth key = %q, want …|attacker.com", evilPK)
 	}
 	// The key derives from facts, never the name: two actions with the same source+scheme but
 	// different names share a key.

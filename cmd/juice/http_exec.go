@@ -384,7 +384,9 @@ func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Act
 			pathParams[param] = struct{}{}
 			val := ""
 			if v, ok := args[param]; ok {
-				val = fmt.Sprintf("%v", v)
+				// Escape like the explicit-param branch (:365), so an arg value cannot inject extra
+				// path segments or a query/fragment on the owner's upstream host.
+				val = url.PathEscape(fmt.Sprintf("%v", v))
 			}
 			path = path[:start] + val + path[start+end+1:]
 		}

@@ -2800,10 +2800,17 @@ func createBearerActionSrc(t *testing.T, k *kernel.Kernel, ownerID, name, source
 // createOAuthActionScopes creates and activates an oauth_delegated action sharing one provider app
 // (same token_url + client_id) but with the given scopes, so a directory groups into one connection.
 func createOAuthActionScopes(t *testing.T, k *kernel.Kernel, ownerID, name, scopes string) *kernel.Action {
+	return createOAuthActionSrc(t, k, ownerID, name, scopes, "https://provider.example/api")
+}
+
+// createOAuthActionSrc creates an oauth_delegated action sharing one provider app (token_url +
+// client_id) but with a caller-chosen source (resource server) host — used to exercise the §8
+// destination binding.
+func createOAuthActionSrc(t *testing.T, k *kernel.Kernel, ownerID, name, scopes, source string) *kernel.Action {
 	t.Helper()
 	ctx := context.Background()
 	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
-		OwnerUserID: ownerID, Name: name, Kind: kernel.KindHTTP, Source: "https://provider.example/api",
+		OwnerUserID: ownerID, Name: name, Kind: kernel.KindHTTP, Source: source,
 		Description: "oauth svc", InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		Auth: &kernel.AuthInput{Scheme: kernel.AuthSchemeOAuthDelegated, Config: map[string]any{
 			"auth_url": "https://provider.example/auth", "token_url": "https://provider.example/token",
@@ -2818,6 +2825,47 @@ func createOAuthActionScopes(t *testing.T, k *kernel.Kernel, ownerID, name, scop
 	}
 	full, _ := k.ReadAction(ctx, a.ID)
 	return full
+}
+
+// TestOAuthDestinationBindingBlocksConfusedDeputy: an action with a legitimate provider's
+// token_url|client_id but an attacker-controlled source host derives a DISTINCT provider_key, so it
+// cannot ride a victim's existing connection via the instant-grant path, and the consent plan
+// surfaces the true destination host (§8 confused-deputy defense, F1).
+func TestOAuthDestinationBindingBlocksConfusedDeputy(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	victim := setupUser(t, st, "@victim", 0)
+	good := createOAuthActionSrc(t, k, victim.ID, "good/read", "read", "https://api.provider.example/v1")
+	evil := createOAuthActionSrc(t, k, victim.ID, "evil/read", "read", "https://evil.attacker.com/x")
+
+	// Victim legitimately connects the good action → a covering connection for the provider's domain.
+	const goodPK = "oauth:https://provider.example/token|cid|provider.example"
+	if _, err := k.CreateGrants(ctx, victim.ID, goodPK, []string{good.ID}, "refresh", `["read"]`); err != nil {
+		t.Fatalf("connect good: %v", err)
+	}
+
+	// The malicious action derives a different provider_key (attacker.com) → not covered → the
+	// silent instant-grant (no-token) path is refused. Without this bind it would have ridden the
+	// victim's connection and exfiltrated the minted token to evil.attacker.com.
+	const evilPK = "oauth:https://provider.example/token|cid|attacker.com"
+	if _, err := k.CreateGrants(ctx, victim.ID, evilPK, []string{evil.ID}, "", `["read"]`); err == nil {
+		t.Fatal("malicious action rode the victim's connection via instant-grant (confused deputy!)")
+	}
+
+	// The consent plan for the malicious action reveals where the credential would actually go.
+	plan, err := k.ConsentPlan(ctx, victim.ID, "@victim/evil")
+	if err != nil {
+		t.Fatalf("ConsentPlan: %v", err)
+	}
+	shown := ""
+	for _, g := range plan.Groups {
+		shown += strings.Join(g.Destinations, ",")
+	}
+	if !strings.Contains(shown, "evil.attacker.com") {
+		t.Errorf("consent plan did not surface the destination host: %q", shown)
+	}
 }
 
 // TestConnectBearerSelectorBatch: a directory of delegated_bearer actions sharing one provider host
@@ -2888,7 +2936,7 @@ func TestConnectOAuthUnionScopes(t *testing.T) {
 	owner := setupUser(t, st, "@gco", 0)
 	a1 := createOAuthActionScopes(t, k, owner.ID, "g/read", "read")
 	a2 := createOAuthActionScopes(t, k, owner.ID, "g/write", "write")
-	const pk = "oauth:https://provider.example/token|cid"
+	const pk = "oauth:https://provider.example/token|cid|provider.example"
 
 	plan, err := k.ConsentPlan(ctx, owner.ID, "@gco/g")
 	if err != nil {

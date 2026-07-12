@@ -371,6 +371,7 @@ func parseAddrInfos(addrs []string) ([]peer.AddrInfo, error) {
 const (
 	maxFrameBytes  = 8 << 20 // 8 MiB per frame — a call+receipt or one action manifest fits comfortably
 	streamDeadline = 60 * time.Second
+	maxManifests   = 100000 // upper bound on a peer-declared manifest chunk count (anti-OOM)
 )
 
 func writeFrame(s io.Writer, v any) error {
@@ -537,6 +538,16 @@ func (t *Transport) Inspect(ctx context.Context, peerKey string) (json.RawMessag
 }
 
 // Manifests fetches the peer's action manifests, one JSON frame per action.
+// boundManifestCount rejects a peer-declared manifest chunk count that is negative or past the
+// anti-OOM cap, before it is used to size an allocation. A count past the cap is a hostile or
+// broken peer, not a real catalog.
+func boundManifestCount(n int) error {
+	if n < 0 || n > maxManifests {
+		return fmt.Errorf("peer declared %d manifests, exceeds max %d", n, maxManifests)
+	}
+	return nil
+}
+
 func (t *Transport) Manifests(ctx context.Context, peerKey string) ([]json.RawMessage, error) {
 	s, err := t.openStream(ctx, peerKey, ProtocolManifest)
 	if err != nil {
@@ -547,6 +558,10 @@ func (t *Transport) Manifests(ctx context.Context, peerKey string) ([]json.RawMe
 		Count int `json:"count"`
 	}
 	if err := readFrame(s, &head); err != nil {
+		return nil, err
+	}
+	// head.Count is peer-controlled; bound it before it sizes an allocation (anti-OOM).
+	if err := boundManifestCount(head.Count); err != nil {
 		return nil, err
 	}
 	out := make([]json.RawMessage, 0, head.Count)

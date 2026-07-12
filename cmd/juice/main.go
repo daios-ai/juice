@@ -290,12 +290,17 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
 	k := kernel.New(db, exec, httpExec, embedder, cfg, logger)
 
-	// Wire credential encryption. Generate a key on first use (stored in config file).
+	// Wire credential encryption. Generate a key on first use and persist it. Fail loudly if the
+	// key cannot be persisted: an in-memory-only key would silently render every credential sealed
+	// this run undecryptable after a restart (availability, not confidentiality).
 	if globalCfg.CredentialsKey == "" {
 		raw := make([]byte, 32)
-		if _, err := rand.Read(raw); err == nil {
-			globalCfg.CredentialsKey = base64.RawURLEncoding.EncodeToString(raw)
-			_ = writeConfig(resolvedConfigPath, globalCfg) // best-effort persist
+		if _, err := rand.Read(raw); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("generate credentials key: %w", err)
+		}
+		globalCfg.CredentialsKey = base64.RawURLEncoding.EncodeToString(raw)
+		if err := writeConfig(resolvedConfigPath, globalCfg); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("persist generated credentials key to %s: %w", resolvedConfigPath, err)
 		}
 	}
 	if globalCfg.CredentialsKey != "" {

@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daios-ai/juice/fed"
+
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
 	"github.com/daios-ai/juice/store"
@@ -2492,5 +2494,32 @@ func TestGrantRoutesRequireAuth(t *testing.T) {
 			t.Errorf("%s %s without token: got %d, want 401", c.method, c.path, resp.StatusCode)
 		}
 		resp.Body.Close()
+	}
+}
+
+// TestKeyLimiter: the per-peer federation limiter allows a burst then throttles, per key (F4).
+func TestKeyLimiter(t *testing.T) {
+	kl := newKeyLimiter(1, 2) // 1/s, burst 2
+	if !kl.allow("a") || !kl.allow("a") {
+		t.Fatal("a burst of 2 should pass")
+	}
+	if kl.allow("a") {
+		t.Error("the third immediate call for the same key should be throttled")
+	}
+	if !kl.allow("b") {
+		t.Error("a different key must have its own bucket")
+	}
+}
+
+// TestOnCallRejectsPeerKeyMismatch: an inbound call whose signed Counterparty does not match the
+// Noise-authenticated connection key is rejected before execution (F4 defense-in-depth). The
+// mismatch check precedes any kernel work, so a nil-kernel handler is sufficient.
+func TestOnCallRejectsPeerKeyMismatch(t *testing.T) {
+	h := &fedHandlers{callLimiter: newKeyLimiter(50, 100)}
+	resp := h.OnCall(context.Background(), "peerA", fed.CallRequest{
+		Counterparty: "peerB", Timestamp: "t", IdempotencyKey: "k", Action: "@x/y", Signature: "s", Args: json.RawMessage("{}"),
+	})
+	if resp.Status != http.StatusUnauthorized {
+		t.Errorf("mismatched peer key: status %d, want 401", resp.Status)
 	}
 }
