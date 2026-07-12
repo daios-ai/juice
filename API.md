@@ -227,6 +227,7 @@ The operator verbs no ordinary user performs — money, access, federation trust
 | Show user | `juice admin show <user>` |
 | Suspend user | `juice admin suspend <user>` |
 | Unsuspend user | `juice admin unsuspend <user>` |
+| Rename user handle | `juice admin rename <user> <new-handle>` — frees the old handle for reuse |
 | Deposit credits | `juice admin deposit <user\|key> <amount> [--reason --external-key]` |
 | Withdraw credits | `juice admin withdraw <user\|key> <amount> [--reason --external-key]` |
 | Friend a kernel | `juice admin friend <key>` |
