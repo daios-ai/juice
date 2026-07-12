@@ -2,10 +2,13 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"math"
+	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -210,6 +213,126 @@ func TestUserCRUD(t *testing.T) {
 	}
 	if err := db.RenameUser(ctx, other.ID, "@alice2"); err == nil {
 		t.Error("rename onto a taken handle should fail on the UNIQUE constraint")
+	}
+}
+
+// TestEmailNotUnique proves migration 018 dropped the email UNIQUE constraint while preserving
+// the rest of the users table (handle uniqueness and its role as an FK anchor).
+func TestEmailNotUnique(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	// Two distinct accounts may now share an email (previously the second insert failed).
+	a := newUser("@alice", 0)
+	b := newUser("@bob", 0)
+	b.Email = a.Email
+	if err := db.CreateUser(ctx, a); err != nil {
+		t.Fatalf("create @alice: %v", err)
+	}
+	if err := db.CreateUser(ctx, b); err != nil {
+		t.Fatalf("shared email should be allowed after migration 018: %v", err)
+	}
+
+	// The rebuild kept handle uniqueness.
+	if err := db.CreateUser(ctx, newUser("@alice", 0)); err == nil {
+		t.Error("duplicate handle should still fail (handle UNIQUE preserved)")
+	}
+
+	// The rebuilt users table still anchors child foreign keys: an action owned by @alice, then
+	// PRAGMA foreign_key_check must report no violations.
+	if err := db.CreateAction(ctx, newAction(a.ID, "act", 0, true)); err != nil {
+		t.Fatalf("create action: %v", err)
+	}
+	rows, err := db.db.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatalf("foreign_key_check: %v", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Error("foreign_key_check reported a violation after the users rebuild")
+	}
+}
+
+// TestMigration018PreservesExistingRows exercises the real upgrade path: it applies every
+// migration strictly before 018, seeds a user plus a child action under the old (email-unique)
+// schema, then applies 018 through the runner and asserts the pre-existing rows survive the
+// users-table rebuild with their FK graph intact — the one thing a fresh-DB test cannot cover.
+func TestMigration018PreservesExistingRows(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "up.db") +
+		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
+	raw, err := sql.Open(driverName, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw.SetMaxOpenConns(1) // mirror Open(): the FK-off pragma and the rebuild tx share one conn
+	defer raw.Close()
+	s := &DB{db: raw}
+	if _, err := raw.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := migrationFileNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply := func(file string) {
+		version := strings.TrimSuffix(path.Base(file), ".sql")
+		b, err := migrationFS.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.applyMigration(version, string(b)); err != nil {
+			t.Fatalf("apply %s: %v", version, err)
+		}
+	}
+	var file018 string
+	for _, f := range files {
+		if strings.HasPrefix(path.Base(f), "018_") {
+			file018 = f
+			continue // hold 018 back until after seeding
+		}
+		apply(f)
+	}
+	if file018 == "" {
+		t.Fatal("migration 018 not found")
+	}
+
+	// Seed under the old schema: a user and a child action that REFERENCES users(id).
+	ctx := context.Background()
+	u := newUser("@old", 42)
+	if err := s.CreateUser(ctx, u); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if err := s.CreateAction(ctx, newAction(u.ID, "act", 0, true)); err != nil {
+		t.Fatalf("seed action: %v", err)
+	}
+	// Old schema still enforces email uniqueness.
+	dup := newUser("@old2", 0)
+	dup.Email = u.Email
+	if err := s.CreateUser(ctx, dup); err == nil {
+		t.Fatal("pre-018: a duplicate email should still be rejected")
+	}
+
+	// Apply 018: rebuild users, dropping the email UNIQUE.
+	apply(file018)
+
+	// The pre-existing user survived the rebuild with its data.
+	got, err := s.ReadUser(ctx, u.ID)
+	if err != nil || got.Handle != "@old" || got.Available != 42 {
+		t.Fatalf("user lost or altered by rebuild: err=%v got=%+v", err, got)
+	}
+	// The child action's FK still resolves — no dangling references after DROP/RENAME.
+	fkRows, err := raw.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fkRows.Close()
+	if fkRows.Next() {
+		t.Error("foreign_key_check reported a violation after the upgrade")
+	}
+	// And the previously-rejected duplicate email is now accepted.
+	if err := s.CreateUser(ctx, dup); err != nil {
+		t.Fatalf("post-018: shared email should be allowed: %v", err)
 	}
 }
 

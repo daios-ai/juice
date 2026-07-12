@@ -73,9 +73,9 @@ flow_admin_supervision() {
     j "$db" "$hs" admin rename @bob @bob-retired >/dev/null 2>&1
     assert_json "admin.rename_new_handle" "$(jj "$db" "$hs" admin show @bob-retired)" handle @bob-retired
     assert_fails "admin.rename_frees_old" "not found\|error" -- j "$db" "$hs" admin show @bob
-    # The freed handle is reusable by a fresh account (with its own email — rename frees the
-    # handle, not the retired account's still-unique email).
-    j "$db" "$hs" user create @bob bob-fresh@test.com --password userpass >/dev/null 2>&1
+    # The freed handle is reusable by a fresh account. make_user reuses @bob's original email,
+    # which the retired account still holds — allowed now that email is no longer unique.
+    make_user "$db" "$hs" "$hb" @bob
     assert_json "admin.rename_handle_reused" "$(jj "$db" "$hs" admin show @bob)" handle @bob
     assert_fails "admin.rename_sys_rejected" "cannot be renamed\|error" -- j "$db" "$hs" admin rename @sys @root
 
