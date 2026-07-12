@@ -132,7 +132,7 @@ juice run <action> [json]
 juice process list | show <id> | end <id>
 juice step create <action> | list | show <id> | complete <id> [json]
 juice tx list | show <id> | rate <id> <0|1> | verify <id>
-juice admin users | show | suspend | unsuspend | deposit | withdraw
+juice admin users | show | suspend | unsuspend | rename | deposit | withdraw
 juice admin friend <key> | unfriend <user> | peers | inspect <key|handle> | identity
 ```
 
