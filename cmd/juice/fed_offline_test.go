@@ -248,6 +248,38 @@ func TestInspectOnlineLive(t *testing.T) {
 	}
 }
 
+// TestInspectPersistsPeerSync: a live inspect of a friended peer persists the freshness it just
+// fetched — last_seen and our credit there — so peer_state refreshes on demand rather than only on
+// the 5-minute discovery timer (§13 peer sync). The stranger-live case (no proxy row) is covered by
+// TestInspectOnlineLive, whose inspectDoc key has no user: RecordPeerSync no-ops without erroring.
+func TestInspectPersistsPeerSync(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	ctx := context.Background()
+	handle, key := seedFriendedPeer(t, k, "@peer-sync")
+
+	// A freshly seeded peer has no sync cache yet (its proxies read offline).
+	before, _ := k.ReadUserByPublicKey(ctx, key)
+	if before == nil || before.PeerLastSeen != nil {
+		t.Fatalf("seeded peer should start with no last_seen, got %+v", before)
+	}
+
+	bal := int64(777)
+	doc, _ := json.Marshal(kernel.GossipResponse{Handle: handle, PublicKey: key, CounterpartyBalance: &bal})
+	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{inspectDoc: doc, reachPath: "direct"}}
+
+	if out := inspectResp(t, srv, key); out["source"] != "live" {
+		t.Fatalf("source = %v, want live", out["source"])
+	}
+
+	after, _ := k.ReadUserByPublicKey(ctx, key)
+	if after == nil || after.PeerLastSeen == nil {
+		t.Fatal("inspect must persist last_seen for a friended peer")
+	}
+	if after.PeerCredit == nil || *after.PeerCredit != bal {
+		t.Fatalf("inspect must persist peer_credit; got %v, want %d", after.PeerCredit, bal)
+	}
+}
+
 // TestFriendOfflineClearError: friending an unreachable peer fails clearly (not a hang), mentioning
 // unreachable.
 func TestFriendOfflineClearError(t *testing.T) {

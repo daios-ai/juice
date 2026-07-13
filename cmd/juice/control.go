@@ -199,6 +199,10 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 			resp["handle"], resp["public_key"] = g.Handle, g.PublicKey
 			resp["actions"], resp["friends"] = g.Actions, g.Friends
 			resp["source"] = "live"
+			// On-demand peer sync: the live inspect just learned this peer is up and (for a friend)
+			// our credit there. Persist it so peer_state / last_seen refresh immediately instead of
+			// waiting for the discovery timer. RecordPeerSync no-ops for strangers/denied peers (§13).
+			_ = s.kernel.RecordPeerSync(ctx, g.PublicKey, g.CounterpartyBalance)
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
