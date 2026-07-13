@@ -1052,6 +1052,42 @@ func TestServeListSteps(t *testing.T) {
 			t.Errorf("list with status=waiting returned step with status=%v", s["status"])
 		}
 	}
+
+	// limit bounds the step page (previously GET /v1/steps was unbounded at every layer).
+	resp4 := httpDo(t, srv, "GET", "/v1/steps?limit=1", nil, ownerTok)
+	if resp4.StatusCode != http.StatusOK {
+		resp4.Body.Close()
+		t.Fatalf("GET /v1/steps?limit=1: expected 200, got %d", resp4.StatusCode)
+	}
+	var limited []map[string]any
+	decodeResponse(t, resp4, &limited)
+	if len(limited) != 1 {
+		t.Errorf("limit=1: want 1 step, got %d", len(limited))
+	}
+}
+
+// TestCLIListPaginationFlags is the thin-wire guard that `process list` and `step list`
+// register and forward --limit/--offset (a missing flag would make cobra error).
+func TestCLIListPaginationFlags(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
+		Handle: "@page-cli", Email: "page-cli@example.com", Password: "pass",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := env.k.Login(ctx, "@page-cli", "pass")
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := execTestCmd(t, processListCmd(), "--limit", "1", "--offset", "0"); err != nil {
+		t.Errorf("process list --limit/--offset: %v", err)
+	}
+	if _, err := execTestCmd(t, stepListCmd(), "--limit", "1", "--offset", "0"); err != nil {
+		t.Errorf("step list --limit/--offset: %v", err)
+	}
 }
 
 func TestServeGetStep(t *testing.T) {

@@ -1588,6 +1588,64 @@ func TestListRatings(t *testing.T) {
 	}
 }
 
+func TestListStepsPagination(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("@ls-owner", 1000)
+	_ = db.CreateUser(ctx, user)
+	caller := newUser("@ls-caller", 0)
+	_ = db.CreateUser(ctx, caller)
+
+	p := newProcess(user.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, user.ID, 100); err != nil {
+		t.Fatal(err)
+	}
+	act := newAction(user.ID, "ls-act", 10, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+
+	// Park three waiting steps from the root trace (3 * 10 = 30 <= 100).
+	ptID := root.ID
+	for i := 0; i < 3; i++ {
+		step := &kernel.Step{
+			ID:                   uuid.New().String(),
+			ParentTraceID:        &ptID,
+			RequiredCallerUserID: caller.ID,
+			ActionID:             act.ID,
+			Price:                10,
+			Status:               kernel.StepWaiting,
+			CreatedAt:            time.Now().UTC().Add(time.Duration(i) * time.Second),
+		}
+		if err := db.CreateStep(ctx, step); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The process owner sees all three; limit bounds the page.
+	page1, err := db.ListSteps(ctx, user.ID, "", "", false, 2, 0)
+	if err != nil {
+		t.Fatalf("ListSteps: %v", err)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("limit=2: want 2 steps, got %d", len(page1))
+	}
+
+	// Offset skips the first page.
+	page2, _ := db.ListSteps(ctx, user.ID, "", "", false, 2, 2)
+	if len(page2) != 1 {
+		t.Fatalf("limit=2 offset=2: want 1 step, got %d", len(page2))
+	}
+
+	// A non-positive limit falls back to the default (50), returning all three.
+	all, _ := db.ListSteps(ctx, user.ID, "", "", false, 0, 0)
+	if len(all) != 3 {
+		t.Fatalf("limit=0 fallback: want all 3 steps, got %d", len(all))
+	}
+}
+
 func TestListTransactionsByParty(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

@@ -651,8 +651,9 @@ func (s *server) postUser(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
+	limit, offset := listBounds(r)
 	resps, err := listPublicActions(s.kernel, r.Context(), s.optionalAuth(r),
-		r.URL.Query().Get("owner"), r.URL.Query().Get("name"), all, 200, 0)
+		r.URL.Query().Get("owner"), r.URL.Query().Get("name"), all, limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -757,7 +758,8 @@ func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
-	ratings, err := s.kernel.ListRatings(r.Context(), pathID(r), 50, 0)
+	limit, offset := listBounds(r)
+	ratings, err := s.kernel.ListRatings(r.Context(), pathID(r), limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -821,7 +823,8 @@ func (s *server) deleteAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listProcesses(w http.ResponseWriter, r *http.Request) {
-	processes, err := listProcesses(s.kernel, r.Context(), callerFrom(r), 100, 0)
+	limit, offset := listBounds(r)
+	processes, err := listProcesses(s.kernel, r.Context(), callerFrom(r), limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -866,9 +869,11 @@ func (s *server) postRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
+	limit, offset := listBounds(r)
 	txs, err := listTransactions(s.kernel, r.Context(), callerFrom(r), kernel.TxFilter{
 		ProcessID: r.URL.Query().Get("process_id"),
-		Limit:     50,
+		Limit:     limit,
+		Offset:    offset,
 	})
 	if err != nil {
 		writeErr(w, err)
@@ -1010,8 +1015,9 @@ func (s *server) postTokenMulti(w http.ResponseWriter, r *http.Request) {
 // ---- Step handlers ----
 
 func (s *server) listSteps(w http.ResponseWriter, r *http.Request) {
+	limit, offset := listBounds(r)
 	views, err := listSteps(s.kernel, r.Context(), callerFrom(r),
-		r.URL.Query().Get("process_id"), r.URL.Query().Get("status"))
+		r.URL.Query().Get("process_id"), r.URL.Query().Get("status"), limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return

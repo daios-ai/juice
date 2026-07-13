@@ -1659,10 +1659,13 @@ func (s *DB) ReadStep(ctx context.Context, id string) (*kernel.Step, error) {
 	return &step, nil
 }
 
-func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status string, isSuperuser bool) ([]*kernel.Step, error) {
+func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status string, isSuperuser bool, limit, offset int) ([]*kernel.Step, error) {
 	superInt := 0
 	if isSuperuser {
 		superInt = 1
+	}
+	if limit <= 0 {
+		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+stepCols+`
@@ -1674,10 +1677,11 @@ func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status stri
 		        OR ?)
 		   AND (?='' OR parent_trace_id IN (SELECT id FROM traces WHERE process_id=?))
 		   AND (?='' OR status=?)
-		 ORDER BY created_at DESC`,
+		 ORDER BY created_at DESC LIMIT ? OFFSET ?`,
 		callerUserID, callerUserID, superInt,
 		processID, processID,
 		status, status,
+		limit, offset,
 	)
 	if err != nil {
 		return nil, dbErr(err, "list steps")

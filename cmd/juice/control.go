@@ -47,12 +47,31 @@ func qInt(r *http.Request, key string, def int) int {
 	return def
 }
 
+// listBounds parses the standard limit/offset query params for every list endpoint:
+// default limit 50, ceiling 200, offset floored at 0. The ceiling bounds any single
+// response so no request pulls an unbounded result set.
+func listBounds(r *http.Request) (limit, offset int) {
+	limit = qInt(r, "limit", 50)
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset = qInt(r, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+	return
+}
+
 // ---------------------------------------------------------------------------
 // Server: handlers (thin wires over the same kernel calls the CLI used in-process)
 // ---------------------------------------------------------------------------
 
 func (s *server) ctlListUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := s.kernel.ListUsers(r.Context(), qInt(r, "limit", 50), qInt(r, "offset", 0))
+	limit, offset := listBounds(r)
+	users, err := s.kernel.ListUsers(r.Context(), limit, offset)
 	writeOr(w, users, err)
 }
 

@@ -676,13 +676,16 @@ func init() {
 }
 
 func processListCmd() *cobra.Command {
-	return &cobra.Command{
+	var limit, offset int
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List processes",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			q := url.Values{}
+			setLimitOffset(q, limit, offset)
 			var processes []*processView
-			if err := apiCall(context.Background(), "GET", "/v1/processes", nil, &processes); err != nil {
+			if err := apiCall(context.Background(), "GET", "/v1/processes?"+q.Encode(), nil, &processes); err != nil {
 				return err
 			}
 			if flagJSON {
@@ -699,6 +702,9 @@ func processListCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
+	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	return cmd
 }
 
 func processEndCmd() *cobra.Command {
@@ -779,6 +785,7 @@ func stepCreateCmd() *cobra.Command {
 
 func stepListCmd() *cobra.Command {
 	var processID, status string
+	var limit, offset int
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List steps",
@@ -791,6 +798,7 @@ func stepListCmd() *cobra.Command {
 			if status != "" {
 				q.Set("status", status)
 			}
+			setLimitOffset(q, limit, offset)
 			var steps []stepWithAction
 			if err := apiCall(context.Background(), "GET", "/v1/steps?"+q.Encode(), nil, &steps); err != nil {
 				return err
@@ -814,6 +822,8 @@ func stepListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (waiting, running, done)")
+	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
+	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
 	return cmd
 }
 

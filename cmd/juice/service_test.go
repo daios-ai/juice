@@ -500,7 +500,7 @@ func TestListSteps_Enriched(t *testing.T) {
 		t.Fatalf("createStep: %v", err)
 	}
 
-	steps, err := listSteps(k, ctx, ownerID, p.ID, "")
+	steps, err := listSteps(k, ctx, ownerID, p.ID, "", 50, 0)
 	if err != nil {
 		t.Fatalf("listSteps: %v", err)
 	}

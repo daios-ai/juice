@@ -503,6 +503,48 @@ func TestServeListActions(t *testing.T) {
 	}
 }
 
+// TestServeListPagination proves the limit/offset query params are honored across the
+// list surface (previously getActions/listSteps discarded them).
+func TestServeListPagination(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "@page-owner")
+
+	for i := 0; i < 3; i++ {
+		cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+			"name": fmt.Sprintf("page-%d", i), "kind": "http", "price": 0,
+			"source": "http://x.example", "description": "test action",
+			"input_schema": minSchema, "output_schema": minSchema, "public": true,
+		}, tok)
+		var a kernel.Action
+		decodeResponse(t, cr, &a)
+		httpDo(t, srv, "POST", "/v1/actions/"+a.ID+"/enable", nil, tok).Body.Close()
+	}
+
+	listLen := func(query string) int {
+		resp := httpDo(t, srv, "GET", "/v1/actions"+query, nil, tok)
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			t.Fatalf("GET /v1/actions%s: expected 200, got %d", query, resp.StatusCode)
+		}
+		var out []kernel.Action
+		decodeResponse(t, resp, &out)
+		return len(out)
+	}
+
+	if n := listLen("?limit=2"); n != 2 {
+		t.Fatalf("limit=2: want 2 actions, got %d", n)
+	}
+	if n := listLen("?limit=2&offset=2"); n != 1 {
+		t.Fatalf("limit=2&offset=2: want 1 action, got %d", n)
+	}
+	// A ceiling-exceeding limit is clamped, not rejected; all three still return.
+	if n := listLen("?limit=100000"); n != 3 {
+		t.Fatalf("limit clamp: want 3 actions, got %d", n)
+	}
+}
+
 // TestServeListActionsExcludesSuspendedOwner proves GET /v1/actions hides a suspended
 // owner's active public action (§12 hide+disable).
 func TestServeListActionsExcludesSuspendedOwner(t *testing.T) {

@@ -761,8 +761,8 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 	return enrichStep(k, ctx, step, action, uc), nil
 }
 
-func listSteps(k *kernel.Kernel, ctx context.Context, callerID, processID, status string) ([]*stepWithAction, error) {
-	steps, err := k.ListSteps(ctx, callerID, processID, status)
+func listSteps(k *kernel.Kernel, ctx context.Context, callerID, processID, status string, limit, offset int) ([]*stepWithAction, error) {
+	steps, err := k.ListSteps(ctx, callerID, processID, status, limit, offset)
 	if err != nil {
 		return nil, err
 	}

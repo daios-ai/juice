@@ -181,12 +181,12 @@ func (k *Kernel) ReadStep(ctx context.Context, callerID, stepID string) (*Step, 
 }
 
 // ListSteps returns steps visible to the caller.
-func (k *Kernel) ListSteps(ctx context.Context, callerID, processID, status string) ([]*Step, error) {
+func (k *Kernel) ListSteps(ctx context.Context, callerID, processID, status string, limit, offset int) ([]*Step, error) {
 	u, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
 	}
-	return k.store.ListSteps(ctx, callerID, processID, status, k.isUserSuperuser(ctx, u))
+	return k.store.ListSteps(ctx, callerID, processID, status, k.isUserSuperuser(ctx, u), limit, offset)
 }
 
 // CompleteStep resumes a waiting step by merging caller input with partial_args and executing the next call.

@@ -342,7 +342,7 @@ func TestCanListStepProcessOwnerSeesOwnStep(t *testing.T) {
 		t.Fatalf("CreateStep: %v", err)
 	}
 
-	steps, err := k.ListSteps(ctx, owner.ID, "", "")
+	steps, err := k.ListSteps(ctx, owner.ID, "", "", 50, 0)
 	if err != nil {
 		t.Fatalf("ListSteps: %v", err)
 	}
@@ -373,7 +373,7 @@ func TestCanListStepRequiredCallerSeesStep(t *testing.T) {
 		t.Fatalf("CreateStep: %v", err)
 	}
 
-	steps, err := k.ListSteps(ctx, caller.ID, "", "")
+	steps, err := k.ListSteps(ctx, caller.ID, "", "", 50, 0)
 	if err != nil {
 		t.Fatalf("ListSteps by caller: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestCanListStepUnrelatedUserDenied(t *testing.T) {
 		t.Fatalf("CreateStep: %v", err)
 	}
 
-	steps, err := k.ListSteps(ctx, unrelated.ID, "", "")
+	steps, err := k.ListSteps(ctx, unrelated.ID, "", "", 50, 0)
 	if err != nil {
 		t.Fatalf("ListSteps for unrelated: %v", err)
 	}
