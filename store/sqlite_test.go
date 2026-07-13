@@ -253,6 +253,55 @@ func TestEmailNotUnique(t *testing.T) {
 	}
 }
 
+// TestSuspendDenyStampRealTime guards the write/read timestamp round-trip: SuspendUser and
+// DenyUser must store a real, recent time — not the zero value that a datetime('now')/RFC3339Nano
+// format mismatch used to produce (displayed "00000").
+func TestSuspendDenyStampRealTime(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	u := newUser("@stamp", 0)
+	if err := db.CreateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now().Add(-2 * time.Second)
+
+	if err := db.SuspendUser(ctx, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.ReadUser(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SuspendedAt == nil || got.SuspendedAt.IsZero() || got.SuspendedAt.Before(before) {
+		t.Fatalf("suspended_at should be a real, recent time, got %v", got.SuspendedAt)
+	}
+
+	if err := db.DenyUser(ctx, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err = db.ReadUser(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DeniedAt == nil || got.DeniedAt.IsZero() || got.DeniedAt.Before(before) {
+		t.Fatalf("denied_at should be a real, recent time, got %v", got.DeniedAt)
+	}
+}
+
+// TestStrToTimeAcceptsLegacyLayout guards the read-side heal: values already stored by the old
+// SQLite datetime('now') path ("YYYY-MM-DD HH:MM:SS", UTC) must still parse, not zero out.
+func TestStrToTimeAcceptsLegacyLayout(t *testing.T) {
+	got := strToTime("2026-07-13 12:34:56")
+	want := time.Date(2026, 7, 13, 12, 34, 56, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Errorf("legacy SQLite-layout timestamp parsed to %v, want %v", got, want)
+	}
+	// The primary RFC3339Nano path still parses.
+	if strToTime("2026-07-13T12:34:56.5Z").IsZero() {
+		t.Error("RFC3339Nano timestamp should parse on the primary path")
+	}
+}
+
 // TestMigration018PreservesExistingRows exercises the real upgrade path: it applies every
 // migration strictly before 018, seeds a user plus a child action under the old (email-unique)
 // schema, then applies 018 through the runner and asserts the pre-existing rows survive the

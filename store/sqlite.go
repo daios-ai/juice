@@ -179,7 +179,11 @@ const timeLayout = time.RFC3339Nano
 
 func timeToStr(t time.Time) string { return t.UTC().Format(timeLayout) }
 func strToTime(s string) time.Time {
-	t, _ := time.Parse(timeLayout, s)
+	if t, err := time.Parse(timeLayout, s); err == nil {
+		return t
+	}
+	// Legacy rows written with SQLite datetime('now') use "2006-01-02 15:04:05" (UTC, no zone).
+	t, _ := time.Parse("2006-01-02 15:04:05", s)
 	return t
 }
 
@@ -245,7 +249,7 @@ func (s *DB) ReadUserByPublicKey(ctx context.Context, publicKey string) (*kernel
 
 func (s *DB) DenyUser(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE users SET denied_at=datetime('now') WHERE id=?`, id)
+		`UPDATE users SET denied_at=? WHERE id=?`, timeToStr(time.Now().UTC()), id)
 	return dbErr(err, "deny user")
 }
 
@@ -263,7 +267,7 @@ func (s *DB) DeactivateActionsOwnedBy(ctx context.Context, ownerUserID string) e
 
 func (s *DB) DenyPeerCascade(ctx context.Context, userID string) error {
 	return s.withTx(ctx, "deny peer cascade", func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `UPDATE users SET denied_at=datetime('now') WHERE id=?`, userID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE users SET denied_at=? WHERE id=?`, timeToStr(time.Now().UTC()), userID); err != nil {
 			return dbErr(err, "deny user")
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE actions SET active=FALSE WHERE owner_user_id=? AND deleted_at IS NULL`, userID); err != nil {
@@ -529,7 +533,7 @@ func (s *DB) ListUsers(ctx context.Context, limit, offset int) ([]*kernel.User, 
 
 func (s *DB) SuspendUser(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE users SET suspended_at=datetime('now') WHERE id=?`, id)
+		`UPDATE users SET suspended_at=? WHERE id=?`, timeToStr(time.Now().UTC()), id)
 	return dbErr(err, "suspend user")
 }
 
@@ -565,7 +569,7 @@ func (s *DB) UpdateUser(ctx context.Context, u *kernel.User) error {
 // concurrent collision the kernel's pre-check missed (§12).
 func (s *DB) RenameUser(ctx context.Context, id, handle string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE users SET handle=?, updated_at=datetime('now') WHERE id=?`, handle, id)
+		`UPDATE users SET handle=?, updated_at=? WHERE id=?`, handle, timeToStr(time.Now().UTC()), id)
 	return dbErr(err, "rename user")
 }
 
@@ -1023,8 +1027,8 @@ func (s *DB) closeProcessTx(ctx context.Context, tx *sql.Tx, processID string) e
 		}
 	}
 	_, err = tx.ExecContext(ctx,
-		`UPDATE processes SET status='closed', available=0, locked=0, ended_at=datetime('now') WHERE id=?`,
-		processID)
+		`UPDATE processes SET status='closed', available=0, locked=0, ended_at=? WHERE id=?`,
+		timeToStr(time.Now().UTC()), processID)
 	return dbErr(err, "close process: close")
 }
 
