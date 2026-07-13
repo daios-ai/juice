@@ -2451,7 +2451,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	}
 
 	// Reciprocal-rank fusion: scale-free (no normalization between cosine and BM25) and positive by
-	// construction, so the quality factor below can never invert the order of a match.
+	// construction.
 	fused := map[string]float64{}
 	for id, rank := range denseRank {
 		fused[id] += 1.0 / float64(rrfK+rank)
@@ -2460,23 +2460,19 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		fused[id] += 1.0 / float64(rrfK+rank)
 	}
 
-	// Weight by quality: Laplace-smoothed success ratio (1+successes)/(2+uses) — an untested action
-	// sits at 0.5, observed failures pull it below, so a dead-but-active action is demoted past an
-	// untried one. Gossip StatTag prior is the fallback when there is no local experience. Stats are
-	// all-time (no recency) — a known limit, availability never gates callability, only rank.
+	// UNDER REVISION: the stats-based quality multiplier is temporarily removed. It multiplied each
+	// action's fused relevance by a Laplace-smoothed success ratio (1+successes)/(2+uses) — with a
+	// gossip prior on cold start — which is unbounded below, so a persistently-failing action could
+	// sink far beneath weakly-relevant matches. Until the redesign lands (see ranking.md) the score
+	// is relevance alone; fold the quality signal back in here when it does. gossipQualityPrior is
+	// deliberately kept for that reinstatement.
 	type scored struct {
 		id    string
 		score float64
 	}
 	ranked := make([]scored, 0, len(fused))
 	for id, rel := range fused {
-		q := 0.5
-		if stats, _ := k.store.ReadStats(ctx, id); stats != nil && stats.Uses > 0 {
-			q = float64(1+stats.Successes) / float64(2+stats.Uses)
-		} else if tags, _ := k.store.ListStatTagsByAction(ctx, id); len(tags) > 0 {
-			q = float64(gossipQualityPrior(tags))
-		}
-		ranked = append(ranked, scored{id, rel * q})
+		ranked = append(ranked, scored{id, rel})
 	}
 	sort.Slice(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
 

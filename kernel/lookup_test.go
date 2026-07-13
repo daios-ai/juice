@@ -83,45 +83,46 @@ func TestLookupRanking(t *testing.T) {
 	}
 }
 
-func TestLookupRankingWithStats(t *testing.T) {
+// TestLookupRankingWithFakeEmbeddings: ranking is by fused lexical (BM25) + semantic (cosine)
+// relevance, using the fake embedder for the semantic leg. A description that matches the query
+// outranks an unrelated one.
+func TestLookupRankingWithFakeEmbeddings(t *testing.T) {
 	st := newTestStore(t)
 	emb := &fakeEmbedder{}
 	k := newTestKernelWithEmbedder(st, emb)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@alice", 0)
-	ids := map[string]string{}
-	for _, name := range []string{"/reliable", "/unreliable"} {
+	descs := map[string]string{"/match": "compute data results", "/other": "unrelated banana topic"}
+	for name, desc := range descs {
 		a := &kernel.Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: name,
-			Kind: kernel.KindHTTP, Active: true, Public: true, Description: "compute data results",
+			Kind: kernel.KindHTTP, Active: true, Public: true, Description: desc,
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)
-		ids[name] = a.ID
-		vec, _ := emb.Embed(ctx, a.Description)
+		vec, _ := emb.Embed(ctx, desc)
 		_ = st.UpsertEmbedding(ctx, a.ID, vec)
 	}
-	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/reliable"], Uses: 10, Successes: 10, LastUsedAt: time.Now()})
-	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/unreliable"], Uses: 10, Successes: 2, LastUsedAt: time.Now()})
 
 	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "compute data", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) < 2 {
-		t.Fatal("expected at least 2 results")
+	if len(results) < 1 {
+		t.Fatal("expected at least 1 result")
 	}
-	if results[0].Action.Name != "/reliable" {
-		t.Errorf("reliable action should rank first; got %s", results[0].Action.Name)
+	if results[0].Action.Name != "/match" {
+		t.Errorf("more relevant action should rank first; got %s", results[0].Action.Name)
 	}
 }
 
-// TestLookupDemotesFailingBelowUntested: with the Laplace-smoothed quality (1+S)/(2+U), an action
-// that always fails ranks BELOW an untested one (which ties an unproven action at 0.5) — where the
-// old 0.5-floor formula tied them. All three share a description so cosine similarity is equal and
-// quality alone orders them: reliable (11/12) > untested (1/2) > failing (1/12).
-func TestLookupDemotesFailingBelowUntested(t *testing.T) {
+// TestLookupIgnoresStatsWhileQualityUnderRevision: the stats-based quality multiplier is temporarily
+// removed (UNDER REVISION — see ranking.md / kernel.go Lookup). Each action's score now depends only
+// on relevance, so flipping which action holds the good vs bad success record leaves every score
+// unchanged. Before the removal each score moved with its own (1+S)/(2+U). Distinct descriptions give
+// the two actions stable, distinct relevance ranks so any score change is attributable to stats.
+func TestLookupIgnoresStatsWhileQualityUnderRevision(t *testing.T) {
 	st := newTestStore(t)
 	emb := &fakeEmbedder{}
 	k := newTestKernelWithEmbedder(st, emb)
@@ -129,33 +130,44 @@ func TestLookupDemotesFailingBelowUntested(t *testing.T) {
 
 	owner := setupUser(t, st, "@alice", 0)
 	ids := map[string]string{}
-	for _, name := range []string{"/reliable", "/untested", "/failing"} {
+	descs := map[string]string{"/a": "compute data results", "/b": "compute data metrics"}
+	for name, desc := range descs {
 		a := &kernel.Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: name,
-			Kind: kernel.KindHTTP, Active: true, Public: true, Description: "compute data results",
+			Kind: kernel.KindHTTP, Active: true, Public: true, Description: desc,
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)
 		ids[name] = a.ID
-		vec, _ := emb.Embed(ctx, a.Description)
+		vec, _ := emb.Embed(ctx, desc)
 		_ = st.UpsertEmbedding(ctx, a.ID, vec)
 	}
-	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/reliable"], Uses: 10, Successes: 10, LastUsedAt: time.Now()})
-	// /untested has NO stats row (quality 0.5).
-	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/failing"], Uses: 10, Successes: 0, LastUsedAt: time.Now()})
 
-	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "compute data", Limit: 10})
-	if err != nil {
-		t.Fatal(err)
+	scores := func() map[string]float32 {
+		results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "compute data", Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]float32{}
+		for _, r := range results {
+			m[r.Action.Name] = r.Score
+		}
+		return m
 	}
-	if len(results) < 3 {
-		t.Fatalf("expected 3 results, got %d", len(results))
-	}
-	order := []string{results[0].Action.Name, results[1].Action.Name, results[2].Action.Name}
-	want := []string{"/reliable", "/untested", "/failing"}
-	for i := range want {
-		if order[i] != want[i] {
-			t.Fatalf("ranking = %v, want %v (failing must rank below untested)", order, want)
+
+	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/a"], Uses: 10, Successes: 10, LastUsedAt: time.Now()})
+	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/b"], Uses: 10, Successes: 0, LastUsedAt: time.Now()})
+	before := scores()
+
+	// Swap the success records; relevance is unchanged, so scores must not move.
+	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/a"], Uses: 10, Successes: 0, LastUsedAt: time.Now()})
+	_ = st.UpsertStats(ctx, &kernel.Stats{ActionID: ids["/b"], Uses: 10, Successes: 10, LastUsedAt: time.Now()})
+	after := scores()
+
+	for _, name := range []string{"/a", "/b"} {
+		if before[name] != after[name] {
+			t.Fatalf("score of %s changed with stats (%v→%v); quality must be inert while under revision",
+				name, before[name], after[name])
 		}
 	}
 }
