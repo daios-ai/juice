@@ -2559,6 +2559,18 @@ func TestCreateGrantListAndRevoke(t *testing.T) {
 	if b, _ := json.Marshal(views[0]); strings.Contains(string(b), "refresh-xyz") {
 		t.Errorf("grant view leaked the refresh token: %s", b)
 	}
+	// The grant carries the oauth-prefixed provider_key of its backing connection, and it equals
+	// the connection view's key — the join a client uses to group grants by account (§8).
+	if !strings.HasPrefix(views[0].ProviderKey, "oauth:") {
+		t.Errorf("grant provider_key = %q, want oauth: prefix", views[0].ProviderKey)
+	}
+	conns, err := k.ListConnectionViews(ctx, owner.ID)
+	if err != nil || len(conns) != 1 {
+		t.Fatalf("ListConnectionViews: %v, n=%d", err, len(conns))
+	}
+	if conns[0].ProviderKey != views[0].ProviderKey {
+		t.Errorf("join broken: connection key %q != grant key %q", conns[0].ProviderKey, views[0].ProviderKey)
+	}
 
 	if err := k.RevokeGrant(ctx, owner.ID, a.ID); err != nil {
 		t.Fatalf("RevokeGrant: %v", err)
@@ -2744,6 +2756,13 @@ func TestAttachBearerGrant(t *testing.T) {
 	}
 	if b, _ := json.Marshal(views[0]); strings.Contains(string(b), "ghp_secret") {
 		t.Errorf("grant view leaked the token: %s", b)
+	}
+	// A delegated_bearer grant carries a bearer-prefixed provider_key equal to its connection's key.
+	if !strings.HasPrefix(views[0].ProviderKey, "bearer:") {
+		t.Errorf("bearer grant provider_key = %q, want bearer: prefix", views[0].ProviderKey)
+	}
+	if conns, err := k.ListConnectionViews(ctx, owner.ID); err != nil || len(conns) != 1 || conns[0].ProviderKey != views[0].ProviderKey {
+		t.Errorf("join broken: conns=%v err=%v grant key=%q", conns, err, views[0].ProviderKey)
 	}
 
 	// An oauth_delegated action cannot be connected with a raw token.
@@ -3018,7 +3037,7 @@ func TestRevokeSelectorAndAccount(t *testing.T) {
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
 	owner := setupUser(t, st, "@multi", 0)
-	_ = createBearerAction(t, k, owner.ID, "chat/send", 0)                             // bearer:provider.example
+	_ = createBearerAction(t, k, owner.ID, "chat/send", 0)                              // bearer:provider.example
 	_ = createBearerActionSrc(t, k, owner.ID, "mail/inbox", "https://mail.example/api") // bearer:mail.example
 
 	if _, err := k.AttachBearerGrants(ctx, owner.ID, "@multi/chat", "", "t1"); err != nil {

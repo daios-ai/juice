@@ -2728,14 +2728,42 @@ func TestFlow_DelegatedBearer(t *testing.T) {
 		}
 	}
 
-	// 4. /v1/me lists one connection covering two actions, without the token.
+	// 4. /v1/me returns a directory-grouped tree: one @bearer-owner connector node holds both
+	//    actions and the single backing connection, and no token leaks.
 	meResp := httpDo(t, srv, "GET", "/v1/me", nil, ownerTok)
 	meBody, _ := readAll(t, meResp)
-	if !strings.Contains(meBody, sendRef) || !strings.Contains(meBody, `"connections"`) {
-		t.Errorf("/v1/me does not list the grant/connections: %s", meBody)
-	}
 	if strings.Contains(meBody, "ghp_secret") {
 		t.Errorf("/v1/me leaked the token: %s", meBody)
+	}
+	var me struct {
+		Connectors []struct {
+			Directory   string `json:"directory"`
+			Connections []struct {
+				ProviderKey string `json:"provider_key"`
+			} `json:"connections"`
+			Actions []struct {
+				Action      string `json:"action"`
+				ProviderKey string `json:"provider_key"`
+			} `json:"actions"`
+		} `json:"connectors"`
+	}
+	if err := json.Unmarshal([]byte(meBody), &me); err != nil {
+		t.Fatalf("decode /v1/me: %v", err)
+	}
+	if len(me.Connectors) != 1 || me.Connectors[0].Directory != "@bearer-owner/inbox" {
+		t.Fatalf("connectors tree = %+v, want one @bearer-owner/inbox node", me.Connectors)
+	}
+	node := me.Connectors[0]
+	if len(node.Actions) != 2 {
+		t.Errorf("connector actions = %d, want 2 nested under the directory", len(node.Actions))
+	}
+	if len(node.Connections) != 1 || node.Connections[0].ProviderKey != providerKey {
+		t.Errorf("connector connections = %+v, want one backing %q", node.Connections, providerKey)
+	}
+	for _, a := range node.Actions {
+		if a.ProviderKey != providerKey {
+			t.Errorf("action %s provider_key = %q, want %q", a.Action, a.ProviderKey, providerKey)
+		}
 	}
 
 	// 5. Disconnect the whole account (--account) → connection + both grants cascade, both rejected.

@@ -134,19 +134,21 @@ type Connection struct {
 // GrantView is the token-free read shape for GET /v1/me: the action reference, the scopes the
 // action requests (from its auth config), and when the grant was created.
 type GrantView struct {
-	Action    string    `json:"action"` // @owner/name
-	Scopes    any       `json:"scopes,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	Action      string    `json:"action"` // @owner/name
+	Scopes      any       `json:"scopes,omitempty"`
+	ProviderKey string    `json:"provider_key,omitempty"` // key of the backing Connection (§8); empty on unbackfilled legacy grants
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // ConnectionView is the token-free read shape for GET /v1/me: the provider label, how many of
 // the caller's actions are consented against it, whether it is currently unused (§8), and when
 // it was created.
 type ConnectionView struct {
-	Provider  string    `json:"provider"`
-	Actions   int       `json:"actions"`
-	Unused    bool      `json:"unused"`
-	CreatedAt time.Time `json:"created_at"`
+	Provider    string    `json:"provider"`
+	Actions     int       `json:"actions"`
+	Unused      bool      `json:"unused"`
+	ProviderKey string    `json:"provider_key,omitempty"` // stable account key (§8); the value DELETE /v1/grants?account= accepts
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // Process is a budgeted execution context.

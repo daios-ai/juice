@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -315,22 +316,39 @@ func createUser(k *kernel.Kernel, ctx context.Context, req kernel.CreateUserRequ
 	return userView(u), nil
 }
 
+// connectorView is one directory in the GET /v1/me tree (§8): the actions the caller has granted
+// under one folder (the action ref up to its last "/", e.g. @chat or @chat/inbox), grouped with the
+// upstream account(s) whose credential backs them. The directory is a display grouping only — it
+// never gates a credential; the token binding stays per-action and fact-derived (§8 confused-deputy
+// defense), so grouping by it changes nothing about which credential dispatch applies.
+type connectorView struct {
+	Directory   string                   `json:"directory"`   // the folder the actions live in (@owner or @owner/path)
+	Connections []*kernel.ConnectionView `json:"connections"` // upstream account(s) backing this directory (usually one)
+	Actions     []*kernel.GrantView      `json:"actions"`     // token-free granted actions under this directory
+}
+
+// directoryOf returns the folder a granted action belongs to: its ref up to the LAST "/", so
+// @chat/inbox/send and @chat/inbox/read both group under @chat/inbox (not a flat @chat). A
+// top-level action like @chat/create-room groups under @chat. Falls back to the whole ref when the
+// action did not resolve to @owner/name (an unbackfilled legacy grant showing a raw id).
+func directoryOf(actionRef string) string {
+	if i := strings.LastIndexByte(actionRef, '/'); i >= 0 {
+		return actionRef[:i]
+	}
+	return actionRef
+}
+
 func getMe(k *kernel.Kernel, ctx context.Context, callerID string) (map[string]any, error) {
 	u, err := k.ReadUser(ctx, callerID)
 	if err != nil {
 		return nil, err
 	}
 	view := userView(u)
-	// Grants are token-free: action ref, requested scopes, created_at (§8). Always present.
+
 	grants, err := k.ListGrantViews(ctx, callerID)
 	if err != nil {
 		return nil, err
 	}
-	if grants == nil {
-		grants = []*kernel.GrantView{}
-	}
-	view["grants"] = grants
-	// Connections group the caller's grants by upstream account (§8), token-free.
 	conns, err := k.ListConnectionViews(ctx, callerID)
 	if err != nil {
 		return nil, err
@@ -338,6 +356,45 @@ func getMe(k *kernel.Kernel, ctx context.Context, callerID string) (map[string]a
 	if conns == nil {
 		conns = []*kernel.ConnectionView{}
 	}
+	connByKey := make(map[string]*kernel.ConnectionView, len(conns))
+	for _, c := range conns {
+		connByKey[c.ProviderKey] = c
+	}
+
+	// Group grants into a directory tree: one node per connector (owner namespace), each carrying
+	// the account(s) that back it. Grants are token-free (§8); grouping is display only.
+	order := []string{}
+	byDir := map[string]*connectorView{}
+	for _, g := range grants {
+		dir := directoryOf(g.Action)
+		node := byDir[dir]
+		if node == nil {
+			node = &connectorView{Directory: dir, Connections: []*kernel.ConnectionView{}, Actions: []*kernel.GrantView{}}
+			byDir[dir] = node
+			order = append(order, dir)
+		}
+		node.Actions = append(node.Actions, g)
+	}
+	for _, node := range byDir {
+		sort.Slice(node.Actions, func(i, j int) bool { return node.Actions[i].Action < node.Actions[j].Action })
+		seen := map[string]bool{}
+		for _, g := range node.Actions {
+			if g.ProviderKey == "" || seen[g.ProviderKey] {
+				continue
+			}
+			seen[g.ProviderKey] = true
+			if c := connByKey[g.ProviderKey]; c != nil {
+				node.Connections = append(node.Connections, c)
+			}
+		}
+	}
+	sort.Strings(order)
+	connectors := make([]*connectorView, 0, len(order))
+	for _, dir := range order {
+		connectors = append(connectors, byDir[dir])
+	}
+	view["connectors"] = connectors
+	// The full account inventory, so a connection with zero grants still surfaces as unused (§8/§14).
 	view["connections"] = conns
 	return view, nil
 }

@@ -353,9 +353,19 @@ func (k *Kernel) ListGrantViews(ctx context.Context, callerID string) ([]*GrantV
 	if err != nil {
 		return nil, err
 	}
+	// Resolve each grant's backing Connection to its stable provider_key from the stored FK (§8),
+	// never by recomputing connectionKey — so the key always matches its connection's read view.
+	conns, err := k.store.ListConnectionsByUser(ctx, callerID)
+	if err != nil {
+		return nil, err
+	}
+	connKey := make(map[string]string, len(conns))
+	for _, c := range conns {
+		connKey[c.ID] = c.ProviderKey
+	}
 	out := make([]*GrantView, 0, len(grants))
 	for _, g := range grants {
-		v := &GrantView{Action: g.ActionID, CreatedAt: g.CreatedAt}
+		v := &GrantView{Action: g.ActionID, ProviderKey: connKey[g.ConnectionID], CreatedAt: g.CreatedAt}
 		if a, err := k.store.ReadAction(ctx, g.ActionID); err == nil && a != nil {
 			v.Action = k.actionRefOf(ctx, a)
 			if auth, err := k.openAuthInput(a); err == nil && auth != nil {
@@ -885,7 +895,7 @@ func (k *Kernel) ListConnectionViews(ctx context.Context, callerID string) ([]*C
 	out := make([]*ConnectionView, 0, len(conns))
 	for _, c := range conns {
 		n := counts[c.ID]
-		out = append(out, &ConnectionView{Provider: ProviderLabel(c.ProviderKey), Actions: n, Unused: n == 0, CreatedAt: c.CreatedAt})
+		out = append(out, &ConnectionView{Provider: ProviderLabel(c.ProviderKey), Actions: n, Unused: n == 0, ProviderKey: c.ProviderKey, CreatedAt: c.CreatedAt})
 	}
 	return out, nil
 }
