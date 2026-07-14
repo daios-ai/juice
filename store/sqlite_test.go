@@ -3138,3 +3138,37 @@ func TestLegacyTokenBackfillHelpers(t *testing.T) {
 		t.Errorf("legacy predicate not cleared after link: %d rows", len(again))
 	}
 }
+
+func TestListNativeActions(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@sys", 0)
+	_ = db.CreateUser(ctx, owner)
+
+	// A live native, an http action (wrong kind), and a soft-deleted native.
+	live := newAction(owner.ID, "time", 0, true)
+	live.Kind = kernel.KindNative
+	_ = db.CreateAction(ctx, live)
+
+	httpAct := newAction(owner.ID, "weather", 0, true) // kind=http
+	_ = db.CreateAction(ctx, httpAct)
+
+	deleted := newAction(owner.ID, "make", 0, true)
+	deleted.Kind = kernel.KindNative
+	_ = db.CreateAction(ctx, deleted)
+	if err := db.DeleteAction(ctx, deleted.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	natives, err := db.ListNativeActions(ctx)
+	if err != nil {
+		t.Fatalf("ListNativeActions: %v", err)
+	}
+	if len(natives) != 1 {
+		t.Fatalf("want 1 live native, got %d: %v", len(natives), natives)
+	}
+	if natives[0].Name != "time" || natives[0].Kind != kernel.KindNative {
+		t.Errorf("unexpected native: name=%q kind=%q", natives[0].Name, natives[0].Kind)
+	}
+}

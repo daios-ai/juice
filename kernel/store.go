@@ -188,6 +188,9 @@ type Store interface {
 	// inactive and private ones. Used to give an owner their full private view.
 	ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Action, error)
 	ListAllActions(ctx context.Context, limit, offset int) ([]*Action, error)
+	// ListNativeActions returns all non-deleted kind=native actions (the platform stdlib rows).
+	// Used at startup to prune natives whose handler the build no longer registers.
+	ListNativeActions(ctx context.Context) ([]*Action, error)
 
 	// ---- Processes ----
 

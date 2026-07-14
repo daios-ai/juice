@@ -251,6 +251,83 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 	}
 }
 
+// TestBootstrapReRegistersPrunedNative proves the prune is clean: after a native is soft-deleted
+// (its handler removed from the build), re-introducing it (handler + spec) re-registers it under the
+// SAME desired name, active — the lingering soft-deleted row does not block it (partial unique index).
+// Distinct kernel instances over one shared DB simulate successive builds (registered handlers differ).
+func TestBootstrapReRegistersPrunedNative(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "reintro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "bootstrap-test-secret"
+	newBuild := func(withWidget bool) *kernel.Kernel {
+		k := kernel.New(db, nil, nil, nil, cfg, log.Discard())
+		if withWidget {
+			k.RegisterNativeHandler("widget", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+				return map[string]any{}, nil
+			})
+		}
+		return k
+	}
+	schema := map[string]any{"type": "object"}
+	spec := sysNativeSpec{name: "widget", price: 7, description: "a widget native", inputSchema: schema, outputSchema: schema}
+
+	// Build 1 ships "widget".
+	k := newBuild(true)
+	if err := k.FirstBoot(ctx, "secret"); err != nil {
+		t.Fatalf("FirstBoot: %v", err)
+	}
+	su, err := k.ReadUserByHandle(ctx, "@sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSysNative(ctx, k, "@sys", spec); err != nil {
+		t.Fatalf("ensureSysNative (build 1): %v", err)
+	}
+	first, err := k.ReadActionByOwnerName(ctx, su.ID, "widget")
+	if err != nil {
+		t.Fatalf("widget missing after build 1: %v", err)
+	}
+	oldID := first.ID
+
+	// Build 2 DROPPED "widget": a kernel over the same DB with no widget handler → prune soft-deletes it.
+	pruned, err := newBuild(false).PruneOrphanedNativeActions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pruned) != 1 || pruned[0] != "widget" {
+		t.Fatalf("prune = %v, want [widget]", pruned)
+	}
+	if _, err := k.ReadActionByOwnerName(ctx, su.ID, "widget"); err == nil {
+		t.Fatal("widget should be soft-deleted after prune")
+	}
+
+	// Build 3 RE-INTRODUCES "widget": handler back, ensure again → re-registers under the same name.
+	kBack := newBuild(true)
+	if err := ensureSysNative(ctx, kBack, "@sys", spec); err != nil {
+		t.Fatalf("ensureSysNative (reintroduce): %v", err)
+	}
+	again, err := kBack.ReadActionByOwnerName(ctx, su.ID, "widget")
+	if err != nil {
+		t.Fatalf("widget not re-registered after reintroduction: %v", err)
+	}
+	if again.Name != "widget" || !again.Active || again.Kind != kernel.KindNative {
+		t.Errorf("reintroduced widget: name=%q active=%v kind=%q, want widget/active/native", again.Name, again.Active, again.Kind)
+	}
+	if again.ID == oldID {
+		t.Error("expected a fresh row id after reintroduction (soft-deleted row is not reused)")
+	}
+	// Its handler is registered again, so a subsequent prune must leave it alone.
+	if p2, err := kBack.PruneOrphanedNativeActions(ctx); err != nil || len(p2) != 0 {
+		t.Errorf("prune after reintroduction should be a no-op, got %v err=%v", p2, err)
+	}
+}
+
 func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)

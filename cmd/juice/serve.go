@@ -51,6 +51,14 @@ func runServer(addr string) error {
 	if err := bootstrap(k, globalCfg.Native); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
+	// Prune natives the build no longer ships (e.g. after a native action is removed): a
+	// kind=native row with no registered handler is soft-deleted so it stops being listed and
+	// callable on an existing database. Non-fatal — a leftover orphan is not corruption.
+	if pruned, err := k.PruneOrphanedNativeActions(context.Background()); err != nil {
+		logger.Warn("native.prune_failed", "error", err.Error())
+	} else if len(pruned) > 0 {
+		logger.Info("native.pruned", "actions", strings.Join(pruned, ","))
+	}
 	if err := k.ValidateFeeRecipient(context.Background()); err != nil {
 		return fmt.Errorf("startup: %w", err)
 	}

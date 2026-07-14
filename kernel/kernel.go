@@ -164,6 +164,30 @@ func (k *Kernel) RegisterNativeHandler(name string, fn NativeFunc) {
 	k.nativeHandlers[name] = fn
 }
 
+// PruneOrphanedNativeActions soft-deletes every kind=native action whose handler is no longer
+// registered in this build — self-healing after a native is dropped from the platform stdlib, so a
+// removed native does not linger as a listed-but-uncallable row. Run at startup after all native
+// handlers are registered. Soft delete disables discovery and preserves history (§7); it removes the
+// row from every listing, lookup, and callability. Returns the pruned action names.
+func (k *Kernel) PruneOrphanedNativeActions(ctx context.Context) ([]string, error) {
+	natives, err := k.store.ListNativeActions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var pruned []string
+	for _, a := range natives {
+		if _, ok := k.nativeHandlers[a.Name]; ok {
+			continue
+		}
+		if err := k.store.DeleteAction(ctx, a.ID); err != nil {
+			return pruned, err
+		}
+		k.log.With(ctx).Info("native.pruned", "action_id", a.ID, "name", a.Name)
+		pruned = append(pruned, a.Name)
+	}
+	return pruned, nil
+}
+
 // sealAuthJSON encrypts auth with the configured SecretBox into a.AuthJSON. Fails closed with no
 // box: credentials are encrypted at rest (§8), never stored as plaintext.
 func (k *Kernel) sealAuthJSON(a *Action, auth *AuthInput) error {

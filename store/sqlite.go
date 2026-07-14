@@ -680,6 +680,16 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 	return queryList(rows, "list all actions", scanActionFn)
 }
 
+func (s *DB) ListNativeActions(ctx context.Context) ([]*kernel.Action, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
+		 WHERE a.kind='native' AND a.deleted_at IS NULL ORDER BY a.name`)
+	if err != nil {
+		return nil, dbErr(err, "list native actions")
+	}
+	return queryList(rows, "list native actions", scanActionFn)
+}
+
 func (s *DB) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL string) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id

@@ -428,6 +428,66 @@ func TestActivateNativeActionBootstrapPath(t *testing.T) {
 	}
 }
 
+func TestPruneOrphanedNativeActions(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@sys", 0)
+
+	// Only "keep" has a registered handler.
+	k.RegisterNativeHandler("keep", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+		return map[string]any{}, nil
+	})
+
+	in := map[string]any{"type": "object"}
+	out := map[string]any{"type": "object"}
+	register := func(name string) string {
+		a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{OwnerUserID: owner.ID, Name: name, Kind: kernel.KindNative})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := k.ActivateNativeAction(ctx, a.ID, name+" native", in, out, 0); err != nil {
+			t.Fatal(err)
+		}
+		return a.ID
+	}
+	keepID := register("keep")
+	register("gone") // handler-less orphan (e.g. a native removed from the build)
+
+	// A non-native (http) action with no handler must never be touched by the native prune.
+	httpAct := &kernel.Action{
+		ID: "http-weather-1", OwnerUserID: owner.ID, Name: "weather", Kind: kernel.KindHTTP,
+		Active: true, Source: "http://x.example", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, httpAct); err != nil {
+		t.Fatal(err)
+	}
+
+	pruned, err := k.PruneOrphanedNativeActions(ctx)
+	if err != nil {
+		t.Fatalf("PruneOrphanedNativeActions: %v", err)
+	}
+	if len(pruned) != 1 || pruned[0] != "gone" {
+		t.Fatalf("pruned = %v, want [gone]", pruned)
+	}
+	// "gone" is soft-deleted; "keep" survives active; "weather" (non-native) is untouched.
+	if _, err := k.ReadActionByOwnerName(ctx, owner.ID, "gone"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("gone should be soft-deleted (ErrNotFound), got %v", err)
+	}
+	if a, err := k.ReadAction(ctx, keepID); err != nil || !a.Active {
+		t.Errorf("keep should survive active, err=%v", err)
+	}
+	if _, err := k.ReadActionByOwnerName(ctx, owner.ID, "weather"); err != nil {
+		t.Errorf("non-native weather must be untouched, got %v", err)
+	}
+
+	// Idempotent: a second prune removes nothing (soft-deleted rows drop out of ListNativeActions).
+	if again, err := k.PruneOrphanedNativeActions(ctx); err != nil || len(again) != 0 {
+		t.Errorf("second prune should be a no-op, got %v err=%v", again, err)
+	}
+}
+
 func TestActivateNativeActionReconcilesSchema(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)

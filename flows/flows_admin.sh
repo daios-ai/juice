@@ -154,3 +154,34 @@ flow_message() {
     assert_fails "message.missing_to_rejected" "to\|required\|invalid" -- j "$db" "$ha" run @sys/message '{"message":"hi"}'
     assert_fails "message.unknown_recipient_rejected" "not found\|invalid\|unknown" -- j "$db" "$ha" run @sys/message '{"to":"@nobody","message":"hi"}'
 }
+
+flow_native_orphan_purge() {
+    echo "=== FLOW native_orphan_purge ==="
+    local dir db hs
+    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
+    start_server "$db" "$hs" || { fail "orphan.boot" "server did not start"; return; }
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
+
+    # Baseline: a real native is present.
+    assert_eq "orphan.time_present" yes "$(has_action "$(jj "$db" "$hs" action list)" time)"
+
+    # Inject (server stopped) a kind=native row whose name no build registers a handler for —
+    # simulating a native left over in an existing DB after it was removed from the stdlib.
+    stop_server "$db"
+    python3 - "$db" <<'PYEOF'
+import sqlite3, uuid, sys
+c = sqlite3.connect(sys.argv[1])
+owner = c.execute("SELECT id FROM users WHERE handle='@sys' LIMIT 1").fetchone()[0]
+c.execute("""INSERT INTO actions
+  (id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,auth_json,created_at,updated_at)
+  VALUES (?,?,?,'native',1,1,0,'obsolete',?,?,'','','','','',datetime('now'),datetime('now'))""",
+  [str(uuid.uuid4()), owner, 'obsolete-native', '{"type":"object"}', '{"type":"object"}'])
+c.commit()
+PYEOF
+
+    # Restart → startup prune soft-deletes the handler-less native; real natives survive.
+    start_server "$db" "$hs" || { fail "orphan.reboot" "server did not restart"; return; }
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
+    assert_eq "orphan.pruned"        no  "$(has_action "$(jj "$db" "$hs" action list --all)" obsolete-native)"
+    assert_eq "orphan.real_survives" yes "$(has_action "$(jj "$db" "$hs" action list)" time)"
+}
