@@ -83,6 +83,21 @@ type Kernel struct {
 	secretBox      SecretBox
 	lookupHost     func(context.Context, string) ([]string, error)
 	userHandles    sync.Map // user ID → handle, cached for readable logging
+	// traceStripes serialize a trace's fund-spends against that trace's settlement (§9): with
+	// out-of-kernel capability composition, callbacks mutate a live trace concurrently with the
+	// settlement that reads its taxable available, so the two must be mutually exclusive.
+	traceStripes [64]sync.Mutex
+}
+
+// traceLock returns the striped mutex guarding a trace's spend/settlement exclusivity (§9).
+// Keyed by trace id: the same trace always maps to the same stripe; distinct traces rarely
+// collide and, if they do, merely serialize harmlessly. Fixed size, no per-trace cleanup.
+func (k *Kernel) traceLock(traceID string) *sync.Mutex {
+	var h uint32 = 2166136261
+	for i := 0; i < len(traceID); i++ { // FNV-1a
+		h = (h ^ uint32(traceID[i])) * 16777619
+	}
+	return &k.traceStripes[h%uint32(len(k.traceStripes))]
 }
 
 // callerHandle returns a user's handle for logging, caching id→handle lookups.

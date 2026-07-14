@@ -1984,7 +1984,7 @@ type fakeURLFetcher struct {
 	wellKnown map[string]string // URL -> response body
 }
 
-func (f *fakeURLFetcher) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ string) (map[string]any, error) {
+func (f *fakeURLFetcher) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _, _ string) (map[string]any, error) {
 	return nil, kernel.ErrInvalidState.Wrap("not used in tests")
 }
 
@@ -2010,7 +2010,7 @@ func newTestKernelWithHTTP(st kernel.Store, http kernel.HTTPExecutor) *kernel.Ke
 // fakeSuccessHTTP is a minimal HTTPExecutor that returns an empty result for any Execute call.
 type fakeSuccessHTTP struct{}
 
-func (f *fakeSuccessHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ string) (map[string]any, error) {
+func (f *fakeSuccessHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _, _ string) (map[string]any, error) {
 	return map[string]any{}, nil
 }
 
@@ -2021,7 +2021,7 @@ type fakeFederationHTTP struct {
 	notDispatched bool // simulate a provably-never-sent dispatch (§13)
 }
 
-func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ string) (map[string]any, error) {
+func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _, _ string) (map[string]any, error) {
 	return nil, kernel.ErrInvalidState.Wrap("not used in federation tests")
 }
 

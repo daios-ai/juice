@@ -92,6 +92,14 @@ func runServer(addr string) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
+	// Callback base URL for capability composition (§9): configured value, else derived from the
+	// bound port as a loopback URL — enough for the co-located (same-machine) endpoint.
+	httpExec.callbackURL = globalCfg.HTTPCallbackURL
+	if httpExec.callbackURL == "" {
+		if _, port, perr := net.SplitHostPort(ln.Addr().String()); perr == nil {
+			httpExec.callbackURL = "http://127.0.0.1:" + port
+		}
+	}
 	// Start the federation transport (§13): peers addressed by key, no HTTP endpoints. The
 	// libp2p identity is the platform signing key, so the transport IS this kernel's identity.
 	fedTransport, ferr := startFedTransport(context.Background(), k, logger)
@@ -426,11 +434,9 @@ func registerRoutes(r chi.Router, srv *server) {
 		// Stats.
 		r.Get("/v1/stats/{action_id}", srv.getStats)
 
-		// Steps.
+		// Steps (reads are JWT-only; the POSTs accept a capability too — see below).
 		r.Get("/v1/steps", srv.listSteps)
-		r.Post("/v1/steps", srv.postStep)
 		r.Get("/v1/steps/{id}", srv.getStep)
-		r.Post("/v1/steps/{id}/complete", srv.postCompleteStep)
 
 		// Current user.
 		r.Get("/v1/me", srv.getMe)
@@ -444,6 +450,12 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Post("/v1/grants", srv.postGrant)
 		r.Delete("/v1/grants", srv.deleteGrant)
 	})
+
+	// Composition surface (§9): step creation/completion accept a user JWT or a trace-scoped
+	// capability; /v1/call is the capability-only HTTP twin of juice.call (a subcall, no wallet path).
+	r.With(srv.authOrCapability).Post("/v1/steps", srv.postStep)
+	r.With(srv.authOrCapability).Post("/v1/steps/{id}/complete", srv.postCompleteStep)
+	r.With(srv.capabilityOnly).Post("/v1/call", srv.postCall)
 
 	// Superuser supervision (money, access, federation trust, roster) — same TCP API, gated
 	// per-route by requireSuperuserMW (§14). Not a separate surface; authority is the @sys bearer.
@@ -468,7 +480,11 @@ func registerRoutes(r chi.Router, srv *server) {
 
 type ctxKey string
 
-const ctxCallerID ctxKey = "caller_id"
+const (
+	ctxCallerID ctxKey = "caller_id"
+	ctxCapTrace ctxKey = "cap_trace"
+	ctxCapOwner ctxKey = "cap_owner"
+)
 
 // ipRateLimiter returns a middleware that limits requests per IP using a token bucket.
 // Entries not seen for 5 minutes are evicted by a background goroutine.
@@ -609,6 +625,63 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 
 func callerFrom(r *http.Request) string {
 	return callerFromContext(r.Context())
+}
+
+// verifyCap reads and verifies the trace-scoped composition capability (§9), returning the
+// named trace and its action owner, and stashing them on the context.
+func (s *server) verifyCap(r *http.Request) (context.Context, error) {
+	tok := r.Header.Get(capabilityHeader)
+	if tok == "" {
+		return r.Context(), nil // no capability presented
+	}
+	trace, owner, err := s.kernel.VerifyCapability(r.Context(), tok)
+	if err != nil {
+		return nil, err
+	}
+	ctx := context.WithValue(r.Context(), ctxCapTrace, trace)
+	ctx = context.WithValue(ctx, ctxCapOwner, owner)
+	return ctx, nil
+}
+
+// capFromContext returns the capability's trace and action owner, and whether one is present.
+func capFromContext(r *http.Request) (trace, owner string, ok bool) {
+	trace, _ = r.Context().Value(ctxCapTrace).(string)
+	owner, _ = r.Context().Value(ctxCapOwner).(string)
+	return trace, owner, trace != ""
+}
+
+// capabilityOnly authorizes a route by capability alone (no user JWT) — used by /v1/call, which
+// has no wallet path and must never run as a user.
+func (s *server) capabilityOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(capabilityHeader) == "" {
+			writeErr(w, kernel.ErrUnauthenticated.Wrap("capability required"))
+			return
+		}
+		ctx, err := s.verifyCap(r)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// authOrCapability accepts either a capability (§9) or a user JWT — used by the step routes,
+// which a user or a composing endpoint may both drive.
+func (s *server) authOrCapability(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(capabilityHeader) != "" {
+			ctx, err := s.verifyCap(r)
+			if err != nil {
+				writeErr(w, err)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+		s.authMiddleware(next).ServeHTTP(w, r)
+	})
 }
 
 func callerFromContext(ctx context.Context) string {
@@ -1045,7 +1118,16 @@ func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	if req.TraceID == "" {
+	// A capability supplies the trace (the cap IS the trace, §9); a JWT caller supplies trace_id.
+	capTrace, capOwner, isCap := capFromContext(r)
+	traceID, callerID := req.TraceID, callerFrom(r)
+	if isCap {
+		if req.TraceID != "" {
+			writeErr(w, kernel.ErrInvalidInput.Wrap("trace_id must not be sent with a capability"))
+			return
+		}
+		traceID, callerID = capTrace, capOwner
+	} else if req.TraceID == "" {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("trace_id is required"))
 		return
 	}
@@ -1062,15 +1144,12 @@ func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.RequiredCaller = kernel.NormalizeHandle(req.RequiredCaller)
-	if req.RequiredCaller == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("required_caller is required"))
-		return
-	}
-	view, err := createStep(s.kernel, r.Context(), callerFrom(r), createStepParams{
-		TraceID:        req.TraceID,
+	view, err := createStep(s.kernel, r.Context(), callerID, createStepParams{
+		TraceID:        traceID,
 		ActionRef:      req.ActionID,
 		RequiredCaller: req.RequiredCaller,
 		PartialArgs:    req.PartialArgs,
+		ViaCapability:  isCap,
 	})
 	if err != nil {
 		writeErr(w, err)
@@ -1095,7 +1174,40 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 		if req.Args == nil {
 			return nil, 0, kernel.ErrInvalidInput.Wrap("args is required")
 		}
-		reply, err := completeStep(s.kernel, r.Context(), callerFrom(r), pathID(r), *req.Args)
+		// Under a capability the caller is the executing action's owner (§9); CompleteStep still
+		// enforces caller == step.required_caller (§10), so the cap only completes its own steps.
+		callerID := callerFrom(r)
+		if _, owner, ok := capFromContext(r); ok {
+			callerID = owner
+		}
+		reply, err := completeStep(s.kernel, r.Context(), callerID, pathID(r), *req.Args)
+		return reply, http.StatusOK, err
+	})(w, r)
+}
+
+// postCall is the capability-only HTTP twin of juice.call (§9): a subcall on the capability's
+// trace. There is no wallet/BeginRun path here, making C3's wallet-exclusion structural.
+func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
+	handle(func(r *http.Request, req struct {
+		Action string          `json:"action"`
+		Args   *map[string]any `json:"args"`
+	}) (any, int, error) {
+		if req.Action == "" {
+			return nil, 0, kernel.ErrInvalidInput.Wrap("action is required")
+		}
+		if req.Args == nil {
+			return nil, 0, kernel.ErrInvalidInput.Wrap("args is required")
+		}
+		trace, owner, ok := capFromContext(r)
+		if !ok {
+			return nil, 0, kernel.ErrUnauthenticated.Wrap("capability required")
+		}
+		reply, err := s.kernel.Call(r.Context(), kernel.CallRequest{
+			CallerID:      owner,
+			ParentTraceID: trace,
+			ActionRef:     req.Action,
+			Args:          *req.Args,
+		})
 		return reply, http.StatusOK, err
 	})(w, r)
 }

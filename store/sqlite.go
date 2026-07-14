@@ -1472,6 +1472,17 @@ func (s *DB) ReadRootTrace(ctx context.Context, processID string) (*kernel.Trace
 	return &t, nil
 }
 
+// TraceHasTransaction reports whether a transaction row exists for the trace (settled).
+func (s *DB) TraceHasTransaction(ctx context.Context, traceID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM transactions WHERE trace_id=?)`, traceID).Scan(&exists)
+	if err != nil {
+		return false, dbErr(err, "trace has transaction")
+	}
+	return exists, nil
+}
+
 // ---- Transactions ----
 
 const txColumns = `id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,` +

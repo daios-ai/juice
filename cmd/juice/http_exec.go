@@ -178,6 +178,12 @@ func newHTTPClient(timeout time.Duration, allowLocal bool) *http.Client {
 		Timeout:   timeout,
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Never carry the composition capability across a host-changing redirect (§9):
+			// Go strips Authorization automatically but not our custom headers.
+			if len(via) > 0 && req.URL.Hostname() != via[len(via)-1].URL.Hostname() {
+				req.Header.Del(capabilityHeader)
+				req.Header.Del(callbackHeader)
+			}
 			return validateRedirectHost(req.URL.Hostname(), allowLocal)
 		},
 	}
@@ -269,9 +275,17 @@ func executeFederationOverTransport(ctx context.Context, tr federationTransport,
 	return kernel.FederationResult{Result: envelope.Result, ReceiptJSON: receiptJSON, HTTPStatus: resp.Status}, nil
 }
 
+// Trace-scoped composition capability headers (§9): the token and the base URL the endpoint
+// calls back on. Distinct from the user Authorization header so routes disambiguate the credential.
+const (
+	capabilityHeader = "X-Juice-Capability"
+	callbackHeader   = "X-Juice-Callback"
+)
+
 type httpActionExecutor struct {
 	timeout      time.Duration
 	allowLocal   bool
+	callbackURL  string              // §9 base URL advertised to dispatched endpoints for callbacks; "" disables composition
 	auth         *authenticator      // §9 upstream-auth adapter; nil when no credentials box
 	signerFn     signerFunc          // wired after bootstrap
 	fedTransport federationTransport // libp2p federation carrier; nil off the serving path
@@ -341,15 +355,15 @@ func defaultScheme(rawURL string) string {
 // Execute fires a kind=http action. The source is the canonical HTTPSource JSON
 // (manual and OpenAPI-imported actions share one representation); executeHTTP
 // applies its method, path templating, and parameter binding uniformly.
-func (e *httpActionExecutor) Execute(ctx context.Context, action *kernel.Action, args map[string]any, ownerUserID string) (map[string]any, error) {
+func (e *httpActionExecutor) Execute(ctx context.Context, action *kernel.Action, args map[string]any, ownerUserID, capability string) (map[string]any, error) {
 	var src kernel.HTTPSource
 	if err := json.Unmarshal([]byte(action.Source), &src); err != nil {
 		return nil, kernel.ErrInvalidState.Wrap("http action source is not valid HTTPSource JSON")
 	}
-	return e.executeHTTP(ctx, action, &src, args, ownerUserID)
+	return e.executeHTTP(ctx, action, &src, args, ownerUserID, capability)
 }
 
-func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Action, src *kernel.HTTPSource, args map[string]any, ownerUserID string) (map[string]any, error) {
+func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Action, src *kernel.HTTPSource, args map[string]any, ownerUserID, capability string) (map[string]any, error) {
 	path := src.Path
 	queryVals := url.Values{}
 	bodyArgs := map[string]any{}
@@ -451,6 +465,12 @@ func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Act
 		reqHeaders := map[string]string{}
 		if contentType != "" {
 			reqHeaders["Content-Type"] = contentType
+		}
+		// Trace-scoped composition capability (§9): delivered as headers, never in the payload
+		// (R9). Sent only when this kernel has a callback address; a leaf endpoint ignores them.
+		if capability != "" && e.callbackURL != "" {
+			reqHeaders[capabilityHeader] = capability
+			reqHeaders[callbackHeader] = e.callbackURL
 		}
 		reqURL := rawURL
 		if auth != nil {

@@ -281,7 +281,13 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		trace.ID = req.ExistingTraceID
 		lockPrice = applyPrefundedSnapshot(trace, preReadExisting)
 	default:
-		if err := k.store.BeginSubcall(ctx, req.ParentTraceID, trace, lockPrice); err != nil {
+		// Lock the parent trace so a subcall's fund-move cannot interleave with that trace's
+		// settlement taxable-read→commit (§9 capability composition fence).
+		pmu := k.traceLock(req.ParentTraceID)
+		pmu.Lock()
+		err := k.store.BeginSubcall(ctx, req.ParentTraceID, trace, lockPrice)
+		pmu.Unlock()
+		if err != nil {
 			if errors.Is(err, ErrInsufficientFunds) {
 				return nil, err
 			}
@@ -396,8 +402,14 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 
 	// 11. Read trace.available post-execution — this is the taxable amount.
 	// trace.available decreases with each subcall (BeginSubcall) and step park (CreateStep).
+	// The taxable read and the commit that zeroes it must be atomic against a concurrent
+	// capability spend (§9), so both run under this trace's lock; error paths release it
+	// before delegating to settleFailedCall (which re-acquires it).
+	mu := k.traceLock(trace.ID)
+	mu.Lock()
 	postTrace, readErr := k.store.ReadTrace(ctx, trace.ID)
 	if readErr != nil {
+		mu.Unlock()
 		// If we can't read the trace, settle as failure to avoid fund loss.
 		ktx.Status = TxFailure
 		ktx.Reason = "could not read trace post-execution"
@@ -415,6 +427,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
 	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross) // success: charge = gross
 	if receiptErr != nil {
+		mu.Unlock()
 		ktx.Status = TxFailure
 		ktx.Reason = "could not build receipt"
 		_, _ = k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, receiptErr)
@@ -424,7 +437,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// (payout + lock release + audit record) is never aborted mid-flight (§5).
 	sctx, cancel := settlementContext(ctx)
 	defer cancel()
-	if err := k.store.CommitCall(sctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.StepID); err != nil {
+	commitErr := k.store.CommitCall(sctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.StepID)
+	mu.Unlock()
+	if commitErr != nil {
 		return nil, ErrInternal.Wrap("could not commit transaction")
 	}
 
@@ -519,7 +534,11 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 		if k.http == nil {
 			return nil, "", ErrInvalidState.Wrap("HTTP executor not configured")
 		}
-		res, err := k.http.Execute(ctx, action, args, ownerUserID)
+		// Mint a trace-scoped capability so the endpoint can compose within this call (§9).
+		// Signing is ready by dispatch (requireReceiptSigningReady, checked in Call); on the
+		// off chance it is not, an empty capability just disables composition for this call.
+		capability, _ := k.IssueCapability(trace.ID)
+		res, err := k.http.Execute(ctx, action, args, ownerUserID, capability)
 		return res, "", err
 	case KindWasm:
 		res, err := k.executeWasm(ctx, action, args, trace, targetID)

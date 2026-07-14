@@ -183,7 +183,7 @@ func TestHTTPActionExecutorSuccess(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{"msg": "hello"}, "")
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{"msg": "hello"}, "", "")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestHTTPActionExecutorNon200(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	_, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, "")
+	_, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, "", "")
 	if err == nil {
 		t.Fatal("expected error for non-200 response")
 	}
@@ -212,7 +212,7 @@ func TestHTTPActionExecutorInvalidJSON(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	_, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, "")
+	_, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, "", "")
 	if err == nil {
 		t.Fatal("expected error for non-JSON response")
 	}
@@ -246,7 +246,7 @@ func TestHTTPActionAuthFailsClosed(t *testing.T) {
 
 			exec := &httpActionExecutor{auth: newAuthenticator(tc.box, nil, false, 0)}
 			_, err := exec.Execute(context.Background(),
-				&kernel.Action{Source: httpSrc(srv.URL, "POST"), AuthJSON: "x"}, map[string]any{}, "")
+				&kernel.Action{Source: httpSrc(srv.URL, "POST"), AuthJSON: "x"}, map[string]any{}, "", "")
 			if !errors.Is(err, kernel.ErrInvalidState) {
 				t.Fatalf("got %v, want ErrInvalidState", err)
 			}
@@ -278,7 +278,7 @@ func TestHTTPActionValidAuthApplied(t *testing.T) {
 		t.Fatalf("seal: %v", err)
 	}
 	exec := &httpActionExecutor{auth: newAuthenticator(box, nil, false, 0)}
-	_, err = exec.Execute(context.Background(), action, map[string]any{}, "")
+	_, err = exec.Execute(context.Background(), action, map[string]any{}, "", "")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestExecuteOpenAPIGet(t *testing.T) {
 	srcJSON, _ := json.Marshal(src)
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"name": "world"}, "")
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"name": "world"}, "", "")
 	if err != nil {
 		t.Fatalf("Execute OpenAPI GET: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestExecuteOpenAPIPost(t *testing.T) {
 	srcJSON, _ := json.Marshal(src)
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"msg": "hello"}, "")
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"msg": "hello"}, "", "")
 	if err != nil {
 		t.Fatalf("Execute OpenAPI POST: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestExecuteOpenAPIPathParam(t *testing.T) {
 	srcJSON, _ := json.Marshal(src)
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"id": "42", "filter": "active"}, "")
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"id": "42", "filter": "active"}, "", "")
 	if err != nil {
 		t.Fatalf("Execute OpenAPI path param: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestExecuteOpenAPIPostQueryParam(t *testing.T) {
 	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{
 		"format": "json",
 		"data":   "hello",
-	}, "")
+	}, "", "")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestExecuteHTTPManualGet(t *testing.T) {
 
 	exec := &httpActionExecutor{}
 	result, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: httpSrc(srv.URL, "GET")}, map[string]any{"q": "hi"}, "")
+		&kernel.Action{Source: httpSrc(srv.URL, "GET")}, map[string]any{"q": "hi"}, "", "")
 	if err != nil {
 		t.Fatalf("Execute manual GET: %v", err)
 	}
@@ -455,7 +455,7 @@ func TestExecuteHTTPManualPathTemplate(t *testing.T) {
 
 	exec := &httpActionExecutor{}
 	result, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: httpSrc(srv.URL+"/items/{id}", "GET")}, map[string]any{"id": "42"}, "")
+		&kernel.Action{Source: httpSrc(srv.URL+"/items/{id}", "GET")}, map[string]any{"id": "42"}, "", "")
 	if err != nil {
 		t.Fatalf("Execute manual path template: %v", err)
 	}
@@ -468,7 +468,7 @@ func TestExecuteHTTPManualPathTemplate(t *testing.T) {
 func TestExecuteHTTPInvalidSource(t *testing.T) {
 	exec := &httpActionExecutor{}
 	_, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: "https://not-json.example.com"}, map[string]any{}, "")
+		&kernel.Action{Source: "https://not-json.example.com"}, map[string]any{}, "", "")
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("got %v, want ErrInvalidState", err)
 	}
@@ -603,7 +603,7 @@ func TestExecuteOAuthClientCredentials(t *testing.T) {
 	action.AuthJSON, _ = box.Seal(action.ID, string(authJSON))
 
 	exec := &httpActionExecutor{allowLocal: true, auth: newAuthenticator(box, newFakeGrantStore(), true, 0)}
-	if _, err := exec.Execute(context.Background(), action, map[string]any{}, ""); err != nil {
+	if _, err := exec.Execute(context.Background(), action, map[string]any{}, "", ""); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if sawAuth != "Bearer cc-tok" {
@@ -642,10 +642,69 @@ func TestExecuteOAuth401RefreshRetry(t *testing.T) {
 	action.AuthJSON, _ = box.Seal(action.ID, string(authJSON))
 
 	exec := &httpActionExecutor{allowLocal: true, auth: newAuthenticator(box, newFakeGrantStore(), true, 0)}
-	if _, err := exec.Execute(context.Background(), action, map[string]any{}, ""); err != nil {
+	if _, err := exec.Execute(context.Background(), action, map[string]any{}, "", ""); err != nil {
 		t.Fatalf("Execute with 401 retry: %v", err)
 	}
 	if issued < 2 {
 		t.Errorf("expected a token refresh on 401; provider issued %d tokens", issued)
+	}
+}
+
+// TestExecuteInjectsCapabilityHeaders proves the capability + callback headers ride on the
+// dispatch request when a callback URL is configured, and are absent otherwise (§9, C2).
+func TestExecuteInjectsCapabilityHeaders(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	exec := &httpActionExecutor{allowLocal: true, callbackURL: "http://cb.example:9999"}
+	if _, err := exec.Execute(context.Background(),
+		&kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, "", "captoken.sig"); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get(capabilityHeader) != "captoken.sig" {
+		t.Errorf("capability header = %q, want captoken.sig", got.Get(capabilityHeader))
+	}
+	if got.Get(callbackHeader) != "http://cb.example:9999" {
+		t.Errorf("callback header = %q", got.Get(callbackHeader))
+	}
+
+	// With no callback URL, a leaf endpoint receives neither header.
+	exec2 := &httpActionExecutor{allowLocal: true}
+	if _, err := exec2.Execute(context.Background(),
+		&kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, "", "captoken.sig"); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get(capabilityHeader) != "" || got.Get(callbackHeader) != "" {
+		t.Errorf("headers sent with no callback URL: cap=%q cb=%q", got.Get(capabilityHeader), got.Get(callbackHeader))
+	}
+}
+
+// TestCapabilityHeaderStrippedOnCrossHostRedirect proves the capability header does not follow a
+// host-changing redirect (§9, C2) — Go strips Authorization automatically but not our headers.
+func TestCapabilityHeaderStrippedOnCrossHostRedirect(t *testing.T) {
+	var endHeaders http.Header
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/end" {
+			endHeaders = r.Header.Clone()
+			w.Write([]byte(`{}`))
+			return
+		}
+		// Redirect to the same server via a different hostname (localhost) → a host change.
+		http.Redirect(w, r, strings.Replace(srv.URL, "127.0.0.1", "localhost", 1)+"/end", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	exec := &httpActionExecutor{allowLocal: true, callbackURL: "http://cb:1"}
+	if _, err := exec.Execute(context.Background(),
+		&kernel.Action{Source: httpSrc(srv.URL+"/start", "GET")}, map[string]any{}, "", "captoken.sig"); err != nil {
+		t.Fatal(err)
+	}
+	if endHeaders.Get(capabilityHeader) != "" {
+		t.Errorf("capability leaked across host-changing redirect: %q", endHeaders.Get(capabilityHeader))
 	}
 }

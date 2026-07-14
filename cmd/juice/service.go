@@ -713,6 +713,10 @@ type createStepParams struct {
 	ActionRef      string
 	RequiredCaller string
 	PartialArgs    json.RawMessage
+	// ViaCapability skips the precondition-4 trace-use check: a capability's trace authority is
+	// the executing action owning that trace (§9), matching the WASM juice.step_create path, which
+	// calls CreateStep directly without an external authorization check.
+	ViaCapability bool
 }
 
 // createStep resolves ActionRef and RequiredCaller, enforces precondition-4 for the trace,
@@ -727,9 +731,12 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 	if err != nil {
 		return nil, fmt.Errorf("required_caller not found: %w", err)
 	}
-	// Precondition-4: external caller must be authorized to use the trace.
-	if err := k.AuthorizeTraceUse(ctx, callerID, p.TraceID); err != nil {
-		return nil, err
+	// Precondition-4: external (JWT) caller must be authorized to use the trace; a capability
+	// carries that authority in the token itself.
+	if !p.ViaCapability {
+		if err := k.AuthorizeTraceUse(ctx, callerID, p.TraceID); err != nil {
+			return nil, err
+		}
 	}
 	step, err := k.CreateStep(ctx, p.TraceID, action.ID, p.PartialArgs, callerUser.ID)
 	if err != nil {

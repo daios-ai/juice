@@ -285,7 +285,7 @@ func TestDelegatedBearerTokenApplied(t *testing.T) {
 
 			eng := newAuthenticator(box, gs, true, time.Second)
 			exec := &httpActionExecutor{auth: eng}
-			if _, err := exec.Execute(context.Background(), action, map[string]any{}, "ownerA"); err != nil {
+			if _, err := exec.Execute(context.Background(), action, map[string]any{}, "ownerA", ""); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 			if got != tc.want {
@@ -319,7 +319,7 @@ func TestDelegatedBearerBindingMismatch(t *testing.T) {
 	exec := &httpActionExecutor{auth: eng}
 
 	// ownerB holds no grant → grant-required, request never sent.
-	if _, err := exec.Execute(context.Background(), action, map[string]any{}, "ownerB"); !errors.Is(err, kernel.ErrGrantRequired) {
+	if _, err := exec.Execute(context.Background(), action, map[string]any{}, "ownerB", ""); !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("ownerB: got %v, want ErrGrantRequired", err)
 	}
 	if reached {

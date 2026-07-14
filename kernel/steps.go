@@ -161,7 +161,13 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 		Status:               StepWaiting,
 		CreatedAt:            now,
 	}
-	if err := k.store.CreateStep(ctx, step); err != nil {
+	// The park moves action.Price from the funding trace's available into locked; lock the trace
+	// so it cannot interleave with that trace's settlement taxable-read (§9 composition fence).
+	mu := k.traceLock(traceID)
+	mu.Lock()
+	err = k.store.CreateStep(ctx, step)
+	mu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 	k.log.With(ctx).Info("step.created", "step_id", step.ID, "trace_id", traceID, "status", "success")

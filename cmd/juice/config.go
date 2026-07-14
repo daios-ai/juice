@@ -81,7 +81,8 @@ type ServerConfig struct {
 	LogFile                    string       `json:"log_file"`
 	LogFormat                  string       `json:"log_format"`
 	AllowLocalSources          bool         `json:"allow_local_sources"`
-	ServerURL                  string       `json:"server_url"` // local base URL the CLI dials; never a federation identity (§14)
+	ServerURL                  string       `json:"server_url"`        // local base URL the CLI dials; never a federation identity (§14)
+	HTTPCallbackURL            string       `json:"http_callback_url"` // base URL advertised to dispatched kind=http endpoints for capability callbacks (§9); "" ⇒ derive from listen address
 	PeerAutoAccept             bool         `json:"peer_auto_accept"`
 	KernelHandle               string       `json:"kernel_handle"`                 // handle this kernel presents in friend handshakes and gossip (§13)
 	BootstrapPeers             []string     `json:"bootstrap_peers"`               // seed multiaddrs; sole seed source; empty = no announce/discovery (§13)

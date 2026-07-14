@@ -35,9 +35,11 @@ type ScriptExecutor interface {
 
 // HTTPExecutor calls an external HTTP action endpoint. ownerUserID is the process owner (the
 // payer): the executor needs it to resolve a delegated OAuth grant (§8), whose binding rule is
-// grant.grantor_user_id == ownerUserID. kernel/ defines this interface; cmd/juice implements it.
+// grant.grantor_user_id == ownerUserID. capability is the trace-scoped composition token (§9)
+// the executor delivers as a header so the endpoint can call back; empty disables composition.
+// kernel/ defines this interface; cmd/juice implements it.
 type HTTPExecutor interface {
-	Execute(ctx context.Context, action *Action, args map[string]any, ownerUserID string) (map[string]any, error)
+	Execute(ctx context.Context, action *Action, args map[string]any, ownerUserID, capability string) (map[string]any, error)
 }
 
 // GrantStore is the executor-facing subset of Store for the delegated-token lifecycle (§8).
@@ -240,6 +242,9 @@ type Store interface {
 	ReadTrace(ctx context.Context, id string) (*Trace, error)
 	// ReadRootTrace returns the root trace (ParentTraceID IS NULL) for the given process.
 	ReadRootTrace(ctx context.Context, processID string) (*Trace, error)
+	// TraceHasTransaction reports whether the trace has settled, i.e. a transaction row exists
+	// for it (the settled-once predicate; §9 capability validity, §11 unique trace transaction).
+	TraceHasTransaction(ctx context.Context, traceID string) (bool, error)
 
 	// ---- Transactions ----
 
