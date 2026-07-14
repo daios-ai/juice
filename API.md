@@ -39,7 +39,7 @@ Auth configs (`Action.source` upstream credentials) are write-only: accepted on 
 The thing a command acts on is positional, not a flag. A second mandatory value (amount, rating) is the second positional. Only optional inputs use `--flag` style.
 
 **C2 — Positional identifiers are natural keys.**  
-A user is `@handle` (never a UUID — handles are unique). An action is `@owner/name` (a raw id is also accepted). Processes, steps, and transactions, which have no human-readable name, are ids. The CLI never asks the user to type a user UUID.
+A user is `@handle`, a public key, or a raw id — the shapes are disjoint, so one resolver disambiguates. An action is `@owner/name` (a raw id is also accepted). Processes, steps, and transactions, which have no human-readable name, are ids. Outputs still render users as `@handle`, never a raw id.
 
 **C3 — `--source` is reserved for URLs and file paths.**  
 `--source` is used for action source URLs and script paths (`action create --source`). For `kind=http`, `--method` sets the verb (default `POST`; GET/POST/PUT/PATCH/DELETE) and the repeatable `--param name:in` (`in` = `path`/`query`/`body`) binds input fields; omitting `--param` uses implicit routing (`{name}` placeholders in the URL become path params, remaining args go to the query for GET/DELETE or the JSON body otherwise). User-handle inputs use descriptively named flags: `--required-caller @handle` in `step create`.
@@ -123,10 +123,10 @@ A `Grant` is per-action consent (§8): a pointer binding one action to a `Connec
 
 | Operation | HTTP | CLI |
 |-----------|------|-----|
-| Create action | `POST /v1/actions` `{name, kind, [source, method, params, description, price, input_schema, output_schema, auth]}` → 201 action | `juice action create <name> --kind [--source --method --param --description --price --input-schema --output-schema --auth]` |
+| Create action | `POST /v1/actions` `{name, kind, [source, wasm_artifact, method, params, description, price, input_schema, output_schema, auth]}` → 201 action | `juice action create <name> --kind [--source --artifact --method --param --description --price --input-schema --output-schema --auth]` |
 | List actions | `GET /v1/actions[?owner=&name=&all=&limit=&offset=]` → action[]; active-only by default (unauthenticated → active public; authenticated → + own active; superuser → all owners' active); `?all=1` includes inactive/private in scope; `?owner=`/`?name=` filter | `juice action list [--all --limit --offset]` |
 | Show action | `GET /v1/actions/{id}` → action | `juice action show <action>` |
-| Update action | `PUT /v1/actions/{id}` `{[price, description, source, method, params, input_schema, output_schema, public, auth]}` → action | `juice action update <action> [--price --description --source --method --param --input-schema --output-schema --public --auth]` |
+| Update action | `PUT /v1/actions/{id}` `{[price, description, source, wasm_artifact, method, params, input_schema, output_schema, public, auth]}` → action | `juice action update <action> [--price --description --source --artifact --method --param --input-schema --output-schema --public --auth]` |
 | Enable action | `POST /v1/actions/{id}/enable` → `{active:true}` | `juice action enable <action>` |
 | Disable action | `POST /v1/actions/{id}/disable` → `{active:false}` | `juice action disable <action>` |
 | Delete action | `DELETE /v1/actions/{id}` → 204 | `juice action delete <action>` |
