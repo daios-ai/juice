@@ -2,6 +2,7 @@ package kernel_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -1788,5 +1789,199 @@ func TestRunFederatedFailureReturnsCommittedReceiptWithCharge(t *testing.T) {
 	// inner settled for 100, so the failed outer charge = gross(150) − refund(50) = 100, not 0.
 	if rcpt.Charge != 100 {
 		t.Errorf("expected committed charge 100 (settled descendant), got %d", rcpt.Charge)
+	}
+}
+
+// ---- Canonical resolvers (ResolveAction / ResolveUser) ----
+
+func TestResolveAction(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	bob := setupUser(t, st, "@bob", 0)
+	a := setupAction(t, st, bob.ID, "greet", 0)
+
+	for _, ref := range []string{"@bob/greet", "bob/greet", a.ID} {
+		got, err := k.ResolveAction(ctx, ref)
+		if err != nil {
+			t.Fatalf("ResolveAction(%q): %v", ref, err)
+		}
+		if got.ID != a.ID {
+			t.Errorf("ResolveAction(%q): got %s, want %s", ref, got.ID, a.ID)
+		}
+	}
+
+	if _, err := k.ResolveAction(ctx, "@bob/missing"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("ResolveAction(missing): want ErrNotFound, got %v", err)
+	}
+	if _, err := k.ResolveAction(ctx, uuid.New().String()); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("ResolveAction(unknown id): want ErrNotFound, got %v", err)
+	}
+}
+
+func TestResolveUser(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 0)
+	// A key account, to exercise public-key resolution.
+	pub := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	peer := &kernel.User{
+		ID:        uuid.New().String(),
+		Handle:    "@peer",
+		Email:     "peer@example.com",
+		PublicKey: pub,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateUser(ctx, peer); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		ident string
+		want  string
+	}{
+		{"@alice", alice.ID},
+		{"alice", alice.ID},
+		{alice.ID, alice.ID},
+		{pub, peer.ID},
+		{"@peer", peer.ID},
+	}
+	for _, c := range cases {
+		got, err := k.ResolveUser(ctx, c.ident)
+		if err != nil {
+			t.Fatalf("ResolveUser(%q): %v", c.ident, err)
+		}
+		if got.ID != c.want {
+			t.Errorf("ResolveUser(%q): got %s, want %s", c.ident, got.ID, c.want)
+		}
+	}
+
+	if _, err := k.ResolveUser(ctx, "@nobody"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("ResolveUser(missing): want ErrNotFound, got %v", err)
+	}
+}
+
+// stepCreateHostExec drives the WASM host StepCreate with name references, proving the host
+// resolves @owner/name and @handle just like juice.call (previously it required raw UUIDs).
+type stepCreateHostExec struct {
+	requiredCaller string
+	action         string
+	stepID         string
+	err            error
+}
+
+func (e *stepCreateHostExec) Compile(_ context.Context, src []byte) ([]byte, string, error) {
+	return src, "fakehash", nil
+}
+
+func (e *stepCreateHostExec) Execute(ctx context.Context, _ []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
+	e.stepID, e.err = host.StepCreate(ctx, []byte(`{"message":"hi"}`), e.requiredCaller, e.action)
+	if e.err != nil {
+		return nil, e.err
+	}
+	return []byte(`{"ok":true}`), nil
+}
+
+func TestHostStepCreateResolvesNames(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 1000) // process owner, wasm action owner
+	bob := setupUser(t, st, "@bob", 0)        // onward action owner + required caller
+
+	approve := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "approve",
+		Kind: kernel.KindNative, Source: "native", Active: true, Public: true, Price: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, approve); err != nil {
+		t.Fatal(err)
+	}
+	orch := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "orchestrate",
+		Kind: kernel.KindWasm, Source: "x", Active: true, Public: true, Price: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, orch); err != nil {
+		t.Fatal(err)
+	}
+
+	exec := &stepCreateHostExec{requiredCaller: "@bob", action: "@bob/approve"}
+	k := newTestKernelWithScripts(st, exec)
+
+	_, tr := beginTestRun(t, st, alice.ID, orch)
+	if _, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: alice.ID, ExistingTraceID: tr.ID,
+		TargetUserID: alice.ID, ActionName: "orchestrate", Args: map[string]any{},
+	}); err != nil {
+		t.Fatalf("run orchestrate: %v", err)
+	}
+	if exec.err != nil {
+		t.Fatalf("host StepCreate: %v", exec.err)
+	}
+
+	step, err := st.ReadStep(ctx, exec.stepID)
+	if err != nil {
+		t.Fatalf("ReadStep: %v", err)
+	}
+	if step.ActionID != approve.ID {
+		t.Errorf("action ref not resolved: got %s, want %s", step.ActionID, approve.ID)
+	}
+	if step.RequiredCallerUserID != bob.ID {
+		t.Errorf("required caller handle not resolved: got %s, want %s", step.RequiredCallerUserID, bob.ID)
+	}
+	if step.Status != kernel.StepWaiting {
+		t.Errorf("step status: got %s, want waiting", step.Status)
+	}
+}
+
+// ---- Symmetric wasm-artifact update (item 2) ----
+
+func TestUpdateActionAcceptsWasmArtifact(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@owner", 0)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "mod",
+		Kind: kernel.KindWasm, Source: "old text source", Active: true, Price: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	artifact := base64.StdEncoding.EncodeToString([]byte{0x00, 0x61, 0x73, 0x6d})
+	updated, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, WasmArtifact: artifact})
+	if err != nil {
+		t.Fatalf("UpdateAction with artifact: %v", err)
+	}
+	if updated.WasmArtifact != artifact {
+		t.Errorf("WasmArtifact not stored: got %q, want %q", updated.WasmArtifact, artifact)
+	}
+	if updated.ArtifactHash == "" {
+		t.Error("ArtifactHash not recomputed from artifact")
+	}
+	if updated.Active {
+		t.Error("artifact update must deactivate (re-activation required, §7)")
+	}
+
+	// Updating with text source clears the stale precompiled artifact so the source is authoritative.
+	src := "new text source"
+	cleared, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Source: &src})
+	if err != nil {
+		t.Fatalf("UpdateAction with source: %v", err)
+	}
+	if cleared.WasmArtifact != "" {
+		t.Errorf("text-source update should clear WasmArtifact, got %q", cleared.WasmArtifact)
+	}
+
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, WasmArtifact: "!!! not base64 !!!"}); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("invalid artifact: want ErrInvalidInput, got %v", err)
 	}
 }

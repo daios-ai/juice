@@ -23,7 +23,7 @@ func executeMessage(ctx context.Context, args map[string]any, ownerUserID, paren
 		return nil, kernel.ErrInvalidInput.Wrap("message requires message")
 	}
 
-	recipient, err := k.ReadUserByHandle(ctx, to)
+	recipient, err := k.ResolveUser(ctx, to)
 	if err != nil {
 		return nil, kernel.ErrInvalidInput.Wrapf("to %q not found", to)
 	}

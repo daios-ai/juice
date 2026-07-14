@@ -277,33 +277,12 @@ func userView(u *kernel.User) map[string]any {
 // resolveHandle resolves an account by its @handle (kernel-local name) or public key (global name):
 // an @-prefixed string is a handle, a bare string is tried as a key first, then a handle.
 func resolveHandle(k *kernel.Kernel, ctx context.Context, ident string) (*kernel.User, error) {
-	if !strings.HasPrefix(ident, "@") {
-		if u, err := k.ReadUserByPublicKey(ctx, ident); err == nil {
-			return u, nil
-		}
-	}
-	return k.ReadUserByHandle(ctx, kernel.NormalizeHandle(ident))
+	return k.ResolveUser(ctx, ident)
 }
 
-// resolveActionRef resolves "owner/name" (with or without a leading "@") or a raw action
-// ID to a *kernel.Action. Raw action IDs are UUIDs and contain no "/", so any ref with a
-// "/" is an action reference whose owner handle is canonicalized before lookup.
+// resolveActionRef resolves "@owner/name" (with or without a leading "@") or a raw action ID.
 func resolveActionRef(k *kernel.Kernel, ctx context.Context, ref string) (*kernel.Action, error) {
-	if strings.Contains(ref, "/") {
-		if !strings.HasPrefix(ref, "@") {
-			ref = "@" + ref
-		}
-		ownerHandle, actionName, err := kernel.ParseActionRef(ref)
-		if err != nil {
-			return nil, err
-		}
-		owner, err := k.ReadUserByHandle(ctx, ownerHandle)
-		if err != nil {
-			return nil, fmt.Errorf("action owner not found: %w", err)
-		}
-		return k.ReadActionByOwnerName(ctx, owner.ID, actionName)
-	}
-	return k.ReadAction(ctx, ref)
+	return k.ResolveAction(ctx, ref)
 }
 
 // ---- User operations ----

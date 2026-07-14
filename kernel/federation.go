@@ -560,7 +560,7 @@ func (k *Kernel) DenyPeer(ctx context.Context, subjectID, handle string) error {
 	if err := k.requireSuperuser(ctx, subjectID); err != nil {
 		return err
 	}
-	u, err := k.store.ReadUserByHandle(ctx, handle)
+	u, err := k.ResolveUser(ctx, handle)
 	if err != nil {
 		return ErrNotFound.Wrapf("peer %q not found", handle)
 	}
@@ -573,7 +573,7 @@ func (k *Kernel) UndenyPeer(ctx context.Context, subjectID, handle string) error
 	if err := k.requireSuperuser(ctx, subjectID); err != nil {
 		return err
 	}
-	u, err := k.store.ReadUserByHandle(ctx, handle)
+	u, err := k.ResolveUser(ctx, handle)
 	if err != nil {
 		return ErrNotFound.Wrapf("peer %q not found", handle)
 	}
@@ -589,13 +589,7 @@ func (k *Kernel) ListDiscoveredKernels(ctx context.Context) ([]*DiscoveredKernel
 // active proxy actions imported from it — for the offline-inspect fallback (§13). The identifier is
 // an `@handle` or a base64url key. ErrNotFound when no local proxy user matches.
 func (k *Kernel) PeerLocalView(ctx context.Context, ident string) (handle, publicKey string, actions []GossipAction, err error) {
-	var u *User
-	if !strings.HasPrefix(ident, "@") {
-		u, _ = k.store.ReadUserByPublicKey(ctx, ident)
-	}
-	if u == nil {
-		u, _ = k.store.ReadUserByHandle(ctx, NormalizeHandle(ident))
-	}
+	u, _ := k.ResolveUser(ctx, ident)
 	if u == nil || u.PublicKey == "" {
 		return "", "", nil, ErrNotFound.Wrapf("no friended peer %q", ident)
 	}

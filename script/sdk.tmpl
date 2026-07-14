@@ -82,8 +82,9 @@ func JuiceCall(action string, args []byte) ([]byte, error) {
 }
 
 // JuiceStepCreate creates a waiting step bound to the current process and trace,
-// returning the new step id. partialArgs is JSON; requiredCaller and actionID are
-// the @handle of the allowed completer and the onward action id.
+// returning the new step id. partialArgs is JSON; requiredCaller is the allowed
+// completer as an @handle (or id) and actionID is the onward action as @owner/name
+// (or id) — resolved kernel-side just like JuiceCall.
 func JuiceStepCreate(partialArgs []byte, requiredCaller, actionID string) string {
 	pPtr, pLen := _ptrLen(partialArgs)
 	cPtr, cLen := _strPtrLen(requiredCaller)

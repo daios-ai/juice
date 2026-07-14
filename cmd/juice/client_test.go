@@ -194,6 +194,31 @@ func TestActionCreateBinaryWasmRoutesToArtifact(t *testing.T) {
 	}
 }
 
+// TestActionUpdateSendsArtifact verifies `action update --artifact` carries the base64 artifact
+// via wasm_artifact on the PUT, symmetric with create (item 2).
+func TestActionUpdateSendsArtifact(t *testing.T) {
+	artifactB64 := base64.StdEncoding.EncodeToString([]byte{0x00, 0x61, 0x73, 0x6d})
+	var gotMethod, gotPath, gotArtifact string
+	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		var req struct {
+			WasmArtifact string `json:"wasm_artifact"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotArtifact = req.WasmArtifact
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "act1", "action": "@a/m"})
+	})
+	if _, err := execTestCmd(t, actionUpdateCmd(), "act1", "--artifact", artifactB64); err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != "PUT" || gotPath != "/v1/actions/act1" {
+		t.Fatalf("got %s %s, want PUT /v1/actions/act1", gotMethod, gotPath)
+	}
+	if gotArtifact != artifactB64 {
+		t.Fatalf("wasm_artifact = %q, want %q", gotArtifact, artifactB64)
+	}
+}
+
 func TestErrorFromResponseNonJSON(t *testing.T) {
 	err := errorFromResponse(500, []byte("boom"))
 	if kernel.KernelErrorCode(err) != "internal" {

@@ -93,7 +93,7 @@ func validateResolvedIP(ipStr string) error {
 		return fmt.Errorf("invalid resolved IP %q", ipStr)
 	}
 	if kernel.UnsafeIP(ip) {
-		return kernel.ErrInvalidInput.Wrap("resolved address is private or loopback — for local/dev use, set allow_local_sources in config.json")
+		return kernel.ErrUnsafeSourceURL("resolved address is private or loopback")
 	}
 	return nil
 }
@@ -113,17 +113,17 @@ func validatePublicURL(rawURL string, allowLocal bool) error {
 	}
 	// Bracketless IPv6 (e.g. "::1") is malformed and may be an SSRF probe.
 	if strings.Count(u.Host, ":") > 1 && !strings.HasPrefix(u.Host, "[") {
-		return kernel.ErrInvalidInput.Wrap("unsafe URL: private or reserved address")
+		return kernel.ErrUnsafeSourceURL("unsafe URL: private or reserved address")
 	}
 	if allowLocal {
 		return nil
 	}
 	host := u.Hostname()
 	if strings.EqualFold(host, "localhost") || host == "" {
-		return kernel.ErrInvalidInput.Wrap("unsafe URL: localhost not allowed")
+		return kernel.ErrUnsafeSourceURL("unsafe URL: localhost not allowed")
 	}
 	if ip := net.ParseIP(host); ip != nil && kernel.UnsafeIP(ip) {
-		return kernel.ErrInvalidInput.Wrap("unsafe URL: private/loopback host")
+		return kernel.ErrUnsafeSourceURL("unsafe URL: private/loopback host")
 	}
 	return nil
 }
@@ -134,7 +134,7 @@ func validateRedirectHost(hostname string, allowLocal bool) error {
 		return nil
 	}
 	if kernel.UnsafeHost(hostname) {
-		return kernel.ErrInvalidInput.Wrap("unsafe redirect target: private/loopback host")
+		return kernel.ErrUnsafeSourceURL("unsafe redirect target: private/loopback host")
 	}
 	return nil
 }

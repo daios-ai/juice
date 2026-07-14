@@ -40,8 +40,14 @@ func httpSrc(rawURL, method string, params ...kernel.HTTPParam) string {
 func TestValidateResolvedIPBlocked(t *testing.T) {
 	blocked := []string{"127.0.0.1", "::1", "192.168.1.1", "10.0.0.1", "172.16.0.1", "169.254.1.1"}
 	for _, ip := range blocked {
-		if err := validateResolvedIP(ip); err == nil {
+		err := validateResolvedIP(ip)
+		if err == nil {
 			t.Errorf("validateResolvedIP(%q): expected error, got nil", ip)
+			continue
+		}
+		// Every SSRF rejection names the escape hatch uniformly (item 3).
+		if !strings.Contains(err.Error(), "allow_local_sources") {
+			t.Errorf("validateResolvedIP(%q): message %q should name allow_local_sources", ip, err.Error())
 		}
 	}
 }

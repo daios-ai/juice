@@ -70,6 +70,53 @@ func ParseActionRef(ref string) (ownerHandle, actionName string, err error) {
 	return ref[:idx+1], ref[idx+2:], nil
 }
 
+// ResolveAction resolves an action reference to an Action. It accepts "@owner/name"
+// (with or without a leading "@") or a raw action ID, disambiguated by the "/" that a
+// UUID never contains. This is the single action-resolution entry point shared by Call,
+// Run, the WASM host, and the service layer; do not re-inline the lookup elsewhere.
+func (k *Kernel) ResolveAction(ctx context.Context, ref string) (*Action, error) {
+	if i := strings.Index(ref, "/"); i >= 0 {
+		ownerRef, name := ref[:i], ref[i+1:]
+		if ownerRef == "" || name == "" {
+			return nil, ErrInvalidInput.Wrap("action ref must be @owner/name")
+		}
+		// The owner segment is itself a user reference, resolved uniformly (@handle, key, or id).
+		owner, err := k.ResolveUser(ctx, ownerRef)
+		if err != nil || owner == nil {
+			return nil, ErrNotFound.Wrapf("action %s not found", ref)
+		}
+		a, err := k.store.ReadActionByOwnerName(ctx, owner.ID, name)
+		if err != nil || a == nil {
+			return nil, ErrNotFound.Wrapf("action %s not found", ref)
+		}
+		return a, nil
+	}
+	a, err := k.store.ReadAction(ctx, ref)
+	if err != nil || a == nil {
+		return nil, ErrNotFound.Wrapf("action %s not found", ref)
+	}
+	return a, nil
+}
+
+// ResolveUser resolves a user reference to a User. It accepts "@handle" (or a bare
+// handle), a base64url public key, or a raw user ID — the shapes are disjoint, so a
+// single lookup disambiguates. This is the single user-resolution entry point shared by
+// Call, Run, the WASM host, native actions, federation, and the service layer.
+func (k *Kernel) ResolveUser(ctx context.Context, ident string) (*User, error) {
+	if !strings.HasPrefix(ident, "@") {
+		if u, err := k.store.ReadUserByPublicKey(ctx, ident); err == nil && u != nil {
+			return u, nil
+		}
+	}
+	if u, err := k.store.ReadUserByHandle(ctx, NormalizeHandle(ident)); err == nil && u != nil {
+		return u, nil
+	}
+	if u, err := k.store.ReadUser(ctx, ident); err == nil && u != nil {
+		return u, nil
+	}
+	return nil, ErrNotFound.Wrapf("user %s not found", ident)
+}
+
 // Call executes the central kernel transition.
 // Preconditions are checked in order per §5.1 of the requirements.
 // For root calls (req.ExistingTraceID), the process and trace must already have been created by Run().
@@ -148,22 +195,26 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 	} else {
 		if req.ActionRef != "" {
-			var parseErr error
-			req.TargetUserID, req.ActionName, parseErr = ParseActionRef(req.ActionRef)
-			if parseErr != nil {
-				return nil, parseErr
+			action, err = k.ResolveAction(ctx, req.ActionRef)
+			if err != nil || action == nil {
+				return nil, ErrNotFound.Wrapf("action %s not found", req.ActionRef)
 			}
-		}
-		target, err = k.store.ReadUserByHandle(ctx, req.TargetUserID)
-		if err != nil || target == nil {
-			target, err = k.store.ReadUser(ctx, req.TargetUserID)
+		} else {
+			target, err = k.ResolveUser(ctx, req.TargetUserID)
 			if err != nil || target == nil {
 				return nil, ErrNotFound.Wrap("target user not found")
 			}
+			action, err = k.store.ReadActionByOwnerName(ctx, target.ID, req.ActionName)
+			if err != nil || action == nil {
+				return nil, ErrNotFound.Wrapf("action %s/%s not found", req.TargetUserID, req.ActionName)
+			}
 		}
-		action, err = k.store.ReadActionByOwnerName(ctx, target.ID, req.ActionName)
-		if err != nil || action == nil {
-			return nil, ErrNotFound.Wrapf("action %s/%s not found", req.TargetUserID, req.ActionName)
+		// The ActionRef path resolves the action directly; load its owner for the role law below.
+		if target == nil {
+			target, err = k.store.ReadUser(ctx, action.OwnerUserID)
+			if err != nil || target == nil {
+				return nil, ErrNotFound.Wrap("target user not found")
+			}
 		}
 	}
 
@@ -571,10 +622,6 @@ type kernelHostFunctions struct {
 }
 
 func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJSON []byte) ([]byte, error) {
-	parts := strings.SplitN(actionName, "/", 2)
-	if len(parts) != 2 {
-		return nil, ErrInvalidInput.Wrap("actionName must be handle/name")
-	}
 	var args map[string]any
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
 		return nil, ErrInvalidInput.Wrap("args must be a JSON object")
@@ -582,8 +629,7 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	reply, err := h.kernel.Call(ctx, CallRequest{
 		CallerID:      h.targetID,
 		ParentTraceID: h.traceID,
-		TargetUserID:  parts[0],
-		ActionName:    parts[1],
+		ActionRef:     actionName,
 		Args:          args,
 	})
 	if err != nil {
@@ -592,9 +638,20 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	return json.Marshal(reply.Result)
 }
 
-func (h *kernelHostFunctions) StepCreate(ctx context.Context, partialArgs []byte, requiredCallerUserID, actionID string) (string, error) {
-	step, err := h.kernel.CreateStep(ctx, h.traceID, actionID,
-		json.RawMessage(partialArgs), requiredCallerUserID)
+// StepCreate resolves the onward action and required caller through the canonical resolvers
+// (§ ResolveAction/ResolveUser), so a script may name them by @owner/name and @handle — or id —
+// exactly like juice.call. CreateStep itself stays an id-only primitive.
+func (h *kernelHostFunctions) StepCreate(ctx context.Context, partialArgs []byte, requiredCaller, action string) (string, error) {
+	act, err := h.kernel.ResolveAction(ctx, action)
+	if err != nil {
+		return "", err
+	}
+	caller, err := h.kernel.ResolveUser(ctx, requiredCaller)
+	if err != nil {
+		return "", err
+	}
+	step, err := h.kernel.CreateStep(ctx, h.traceID, act.ID,
+		json.RawMessage(partialArgs), caller.ID)
 	if err != nil {
 		return "", err
 	}

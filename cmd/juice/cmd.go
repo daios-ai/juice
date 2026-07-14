@@ -30,6 +30,41 @@ func grantActionRef(err error, fallback string) string {
 	return fallback
 }
 
+// prepareSourceArtifact reads the --source and --artifact values (each may be a file path or a
+// literal), returning the source text and base64 artifact to send. A compiled WASM module is
+// binary and cannot ride losslessly in a JSON string; only a binary wasm source is ever
+// non-UTF-8 (URLs and TinyGo text are UTF-8), so such a source is routed into the base64
+// wasm_artifact field. Shared by `action create` and `action update` for symmetric behavior.
+func prepareSourceArtifact(source, artifact string) (srcData, artData string, err error) {
+	srcData = source
+	if source != "" {
+		if _, statErr := os.Stat(source); statErr == nil {
+			data, readErr := os.ReadFile(source)
+			if readErr != nil {
+				return "", "", kernel.ErrInvalidInput.Wrapf("reading source file: %v", readErr)
+			}
+			srcData = string(data)
+		}
+	}
+	artData = artifact
+	if artifact != "" {
+		if _, statErr := os.Stat(artifact); statErr == nil {
+			data, readErr := os.ReadFile(artifact)
+			if readErr != nil {
+				return "", "", kernel.ErrInvalidInput.Wrapf("reading artifact file: %v", readErr)
+			}
+			artData = strings.TrimSpace(string(data))
+		}
+	}
+	if srcData != "" && !utf8.ValidString(srcData) {
+		if artData == "" {
+			artData = base64.StdEncoding.EncodeToString([]byte(srcData))
+		}
+		srcData = ""
+	}
+	return srcData, artData, nil
+}
+
 // directorySelector turns an action ref (@owner/name) into the selector that connects its whole
 // directory in one gesture (§8): drop the last name segment when the name has ≥2 segments, else the
 // ref itself. So @a/mail/send → @a/mail, and @a/send → @a/send.
@@ -314,40 +349,13 @@ func actionCreateCmd() *cobra.Command {
 					return kernel.ErrInvalidInput.Wrapf("invalid --auth: %v", err)
 				}
 			}
-			srcData := source
-			if source != "" {
-				if _, err := os.Stat(source); err == nil {
-					data, err := os.ReadFile(source)
-					if err != nil {
-						return kernel.ErrInvalidInput.Wrapf("reading source file: %v", err)
-					}
-					srcData = string(data)
-				}
-			}
-			// --artifact carries a pre-compiled base64 WASM artifact (e.g. the
-			// output of @sys/tinygo/compile); a file path is read for its contents.
-			artData := artifact
-			if artifact != "" {
-				if _, err := os.Stat(artifact); err == nil {
-					data, err := os.ReadFile(artifact)
-					if err != nil {
-						return kernel.ErrInvalidInput.Wrapf("reading artifact file: %v", err)
-					}
-					artData = strings.TrimSpace(string(data))
-				}
+			srcData, artData, err := prepareSourceArtifact(source, artifact)
+			if err != nil {
+				return err
 			}
 			httpParams, err := parseParams(params)
 			if err != nil {
 				return err
-			}
-			// A compiled WASM module is binary and cannot ride losslessly in a JSON string
-			// (invalid UTF-8 is replaced with U+FFFD). Route a binary wasm source through the
-			// base64 wasm_artifact field instead; TinyGo text source stays in source.
-			if kind == "wasm" && srcData != "" && !utf8.ValidString(srcData) {
-				if artData == "" {
-					artData = base64.StdEncoding.EncodeToString([]byte(srcData))
-				}
-				srcData = ""
 			}
 			body := map[string]any{
 				"name": name, "kind": kind, "price": price, "description": description,
@@ -380,7 +388,7 @@ func actionCreateCmd() *cobra.Command {
 }
 
 func actionUpdateCmd() *cobra.Command {
-	var description, source, method string
+	var description, source, method, artifact string
 	var params []string
 	var price int64
 	var public bool
@@ -399,8 +407,17 @@ func actionUpdateCmd() *cobra.Command {
 			if c.Flags().Changed("description") {
 				req["description"] = description
 			}
-			if c.Flags().Changed("source") {
-				req["source"] = source
+			if c.Flags().Changed("source") || c.Flags().Changed("artifact") {
+				srcData, artData, err := prepareSourceArtifact(source, artifact)
+				if err != nil {
+					return err
+				}
+				if srcData != "" {
+					req["source"] = srcData
+				}
+				if artData != "" {
+					req["wasm_artifact"] = artData
+				}
 			}
 			if c.Flags().Changed("method") {
 				req["method"] = method
@@ -444,6 +461,7 @@ func actionUpdateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&description, "description", "", "New description")
 	cmd.Flags().StringVar(&source, "source", "", "New source URL or file path")
+	cmd.Flags().StringVar(&artifact, "artifact", "", "New base64 WASM artifact or file path")
 	cmd.Flags().StringVar(&method, "method", "", "New HTTP verb")
 	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (path|query|body); repeatable")
 	cmd.Flags().Int64Var(&price, "price", 0, "New price in credits")

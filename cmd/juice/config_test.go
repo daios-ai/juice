@@ -192,6 +192,24 @@ func TestApplyEnvOverrides(t *testing.T) {
 			t.Errorf("CredentialsKey not overridden, got %q", cfg.CredentialsKey)
 		}
 	})
+
+	t.Run("JUICE_ALLOW_LOCAL_SOURCES truthy enables the escape hatch", func(t *testing.T) {
+		t.Setenv("JUICE_ALLOW_LOCAL_SOURCES", "1")
+		cfg := DefaultServerConfig()
+		applyEnvOverrides(&cfg)
+		if !cfg.AllowLocalSources {
+			t.Error("AllowLocalSources should be enabled by JUICE_ALLOW_LOCAL_SOURCES=1")
+		}
+	})
+
+	t.Run("JUICE_ALLOW_LOCAL_SOURCES absent leaves config value", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.AllowLocalSources = true // from config.json
+		applyEnvOverrides(&cfg)
+		if !cfg.AllowLocalSources {
+			t.Error("absent env must not override the config-file value")
+		}
+	})
 }
 
 func TestAESGCMBox(t *testing.T) {

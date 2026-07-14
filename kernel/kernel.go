@@ -1366,6 +1366,15 @@ func UnsafeHost(host string) bool {
 	return false
 }
 
+// ErrUnsafeSourceURL is the single SSRF rejection for a source/redirect/peer URL that targets a
+// loopback, private, reserved, or link-local address (§7/§9). detail names the specific condition;
+// the message always points at the allow_local_sources escape hatch (§14) so a local/dev caller
+// learns the one setting that permits it. This is the single source of truth for that message; do
+// not phrase the rejection elsewhere. (The scheme/host-shape errors are not escape-hatch cases.)
+func ErrUnsafeSourceURL(detail string) error {
+	return ErrInvalidInput.Wrapf("%s; set allow_local_sources to permit local/dev URLs", detail)
+}
+
 // validateHTTPSource rejects URLs that could be used for SSRF attacks.
 // Allowed: http and https schemes with public hostnames or literal public IPs.
 // Rejected: other schemes, localhost, loopback, RFC 1918 private, and link-local addresses.
@@ -1383,7 +1392,7 @@ func (k *Kernel) validateHTTPSource(ctx context.Context, source string, allowLoc
 	// Go 1.25's url.splitHostPort misparses "::1" as host=":" port="1", so we
 	// must catch this before calling Hostname().
 	if strings.Count(u.Host, ":") > 1 && !strings.HasPrefix(u.Host, "[") {
-		return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
+		return ErrUnsafeSourceURL("URL must not target private or reserved addresses")
 	}
 	host := u.Hostname()
 	if host == "" {
@@ -1391,18 +1400,18 @@ func (k *Kernel) validateHTTPSource(ctx context.Context, source string, allowLoc
 	}
 	if !allowLocal {
 		if strings.EqualFold(host, "localhost") {
-			return ErrInvalidInput.Wrap("URL must not target localhost")
+			return ErrUnsafeSourceURL("URL must not target localhost")
 		}
 		if ip := net.ParseIP(host); ip != nil {
 			if UnsafeIP(ip) {
-				return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
+				return ErrUnsafeSourceURL("URL must not target private or reserved addresses")
 			}
 		} else {
 			// Resolve the hostname and reject if any address is private/loopback/link-local.
 			if addrs, err := k.lookupHost(ctx, host); err == nil {
 				for _, a := range addrs {
 					if ip := net.ParseIP(a); ip != nil && UnsafeIP(ip) {
-						return ErrInvalidInput.Wrap("URL must not target private or reserved addresses")
+						return ErrUnsafeSourceURL("URL must not target private or reserved addresses")
 					}
 				}
 			}
@@ -1529,6 +1538,35 @@ func httpSourceBaseURL(source string) string {
 	return source
 }
 
+// deriveWasmArtifact populates a.WasmArtifact and a.ArtifactHash for a wasm action from either a
+// pre-compiled base64 artifact (stored verbatim, decoded for the hash) or TinyGo source text
+// (compiled). Shared by CreateAction and UpdateAction so both register a precompiled artifact
+// identically (§7). wasmArtifact is authoritative: a non-empty value pins the artifact, an empty
+// value clears any stale one so updated source text takes effect at activation. No-op without a
+// configured script executor, matching the pre-existing create behavior.
+func (k *Kernel) deriveWasmArtifact(ctx context.Context, a *Action, source, wasmArtifact string) error {
+	if k.scripts == nil {
+		return nil
+	}
+	a.WasmArtifact = wasmArtifact
+	wasmBytes := []byte(source)
+	if wasmArtifact != "" {
+		decoded, err := base64.StdEncoding.DecodeString(wasmArtifact)
+		if err != nil {
+			return ErrInvalidInput.Wrapf("wasm artifact invalid: %v", err)
+		}
+		wasmBytes = decoded
+	}
+	if len(wasmBytes) > 0 {
+		_, hash, err := k.scripts.Compile(ctx, wasmBytes)
+		if err != nil {
+			return ErrInvalidInput.Wrapf("wasm compilation failed: %v", err)
+		}
+		a.ArtifactHash = hash
+	}
+	return nil
+}
+
 func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateActionRequest) (*Action, error) {
 	if err := k.requireSelf(ctx, callerID, req.OwnerUserID); err != nil {
 		return nil, err
@@ -1579,22 +1617,9 @@ func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateAc
 		UpdatedAt:    now,
 	}
 
-	if req.Kind == KindWasm && k.scripts != nil {
-		wasmBytes := []byte(req.Source)
-		if req.WasmArtifact != "" {
-			decoded, err := base64.StdEncoding.DecodeString(req.WasmArtifact)
-			if err != nil {
-				return nil, ErrInvalidInput.Wrapf("wasm artifact invalid: %v", err)
-			}
-			wasmBytes = decoded
-			a.WasmArtifact = req.WasmArtifact
-		}
-		if len(wasmBytes) > 0 {
-			_, hash, err := k.scripts.Compile(ctx, wasmBytes)
-			if err != nil {
-				return nil, ErrInvalidInput.Wrapf("wasm compilation failed: %v", err)
-			}
-			a.ArtifactHash = hash
+	if req.Kind == KindWasm {
+		if err := k.deriveWasmArtifact(ctx, a, req.Source, req.WasmArtifact); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1862,7 +1887,8 @@ type UpdateActionRequest struct {
 	Description  *string
 	InputSchema  map[string]any
 	OutputSchema map[string]any
-	Source       *string      // http: new upstream URL (merged into existing HTTPSource)
+	Source       *string      // http: new upstream URL (merged into existing HTTPSource); wasm: new TinyGo source
+	WasmArtifact string       // wasm: new pre-compiled base64 artifact (symmetric with CreateActionRequest)
 	Method       *string      // http: new verb (merged into existing HTTPSource)
 	Params       *[]HTTPParam // http: new explicit bindings (merged into existing HTTPSource)
 	Public       *bool
@@ -1918,15 +1944,15 @@ func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateAc
 		a.Source = srcJSON
 		a.Active = false
 	}
-	if req.Source != nil && a.Kind != KindHTTP {
-		a.Source = *req.Source
+	if (req.Source != nil || req.WasmArtifact != "") && a.Kind != KindHTTP {
+		if req.Source != nil {
+			a.Source = *req.Source
+		}
 		a.Active = false
-		if a.Kind == KindWasm && k.scripts != nil {
-			_, hash, err := k.scripts.Compile(ctx, []byte(*req.Source))
-			if err != nil {
-				return nil, ErrInvalidInput.Wrapf("wasm compilation failed: %v", err)
+		if a.Kind == KindWasm {
+			if err := k.deriveWasmArtifact(ctx, a, a.Source, req.WasmArtifact); err != nil {
+				return nil, err
 			}
-			a.ArtifactHash = hash
 		}
 	}
 	if req.Public != nil {
@@ -2128,18 +2154,11 @@ func (k *Kernel) Run(ctx context.Context, callerID, actionRef string, args map[s
 	if err != nil {
 		return nil, err
 	}
-	ownerHandle, actionName, err := ParseActionRef(actionRef)
+	action, err := k.ResolveAction(ctx, actionRef)
 	if err != nil {
 		return nil, err
 	}
-	target, err := k.store.ReadUserByHandle(ctx, ownerHandle)
-	if err != nil || target == nil {
-		target, err = k.store.ReadUser(ctx, ownerHandle)
-		if err != nil || target == nil {
-			return nil, ErrNotFound.Wrapf("user %s not found", ownerHandle)
-		}
-	}
-	return k.beginRun(ctx, caller, target.ID, actionName, args, "")
+	return k.beginRun(ctx, caller, action.OwnerUserID, action.Name, args, "")
 }
 
 // RunFederated is like Run but accepts an idempotencyRecordID for federation calls.

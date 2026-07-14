@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -182,13 +183,28 @@ func LoadOrCreateConfig(path string) (ServerConfig, error) {
 // else is configured through config.json; environment variables are bootstrap and
 // overrides only. JUICE_LOG_LEVEL overrides the log level; JUICE_CREDENTIALS_KEY is a
 // runtime-only override of the §8 AES credentials key that never overwrites the config
-// file. Missing env vars are silently skipped.
+// file; JUICE_ALLOW_LOCAL_SOURCES is the dev-only override of the §7 SSRF escape hatch
+// (truthy "1"/"true" enables it, mirroring the allow_local_sources config key). Missing
+// env vars are silently skipped.
 func applyEnvOverrides(cfg *ServerConfig) {
 	if v := os.Getenv("JUICE_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
 	}
 	if v := os.Getenv("JUICE_CREDENTIALS_KEY"); v != "" {
 		cfg.CredentialsKey = v
+	}
+	if v := os.Getenv("JUICE_ALLOW_LOCAL_SOURCES"); v != "" {
+		cfg.AllowLocalSources = isTruthyEnv(v)
+	}
+}
+
+// isTruthyEnv reads a boolean-ish env value: "1", "true", "yes", "on" (case-insensitive) are true.
+func isTruthyEnv(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 

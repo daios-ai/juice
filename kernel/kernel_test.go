@@ -2434,6 +2434,10 @@ func TestUnsafeHostAndIP(t *testing.T) {
 	if !kernel.UnsafeIP(net.ParseIP("127.0.0.1")) {
 		t.Error("UnsafeIP(127.0.0.1) = false, want true")
 	}
+	// The single SSRF rejection error always names the escape hatch (item 3).
+	if msg := kernel.ErrUnsafeSourceURL("x").Error(); !strings.Contains(msg, "allow_local_sources") {
+		t.Errorf("ErrUnsafeSourceURL message %q should name allow_local_sources", msg)
+	}
 }
 
 // Ensure fmt is used.

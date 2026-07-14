@@ -783,6 +783,7 @@ func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 		Price        *int64              `json:"price"`
 		Description  *string             `json:"description"`
 		Source       *string             `json:"source"`
+		WasmArtifact string              `json:"wasm_artifact"`
 		Method       *string             `json:"method"`
 		Params       *[]kernel.HTTPParam `json:"params"`
 		InputSchema  map[string]any      `json:"input_schema"`
@@ -795,6 +796,7 @@ func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 			Price:        body.Price,
 			Description:  body.Description,
 			Source:       body.Source,
+			WasmArtifact: body.WasmArtifact,
 			Method:       body.Method,
 			Params:       body.Params,
 			InputSchema:  body.InputSchema,
