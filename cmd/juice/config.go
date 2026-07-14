@@ -15,13 +15,6 @@ type NativeLLMConfig struct {
 	Price      int64  `json:"price"`
 }
 
-// NativeMakeConfig holds configuration for the @sys/make native action.
-type NativeMakeConfig struct {
-	Compiler string `json:"compiler"`
-	MaxSteps int    `json:"max_steps"`
-	Price    int64  `json:"price"`
-}
-
 // NativeLookupConfig holds configuration for the @sys/lookup native action.
 type NativeLookupConfig struct {
 	DefaultLimit int   `json:"default_limit"`
@@ -62,7 +55,6 @@ type NativeWebConfig struct {
 // NativeConfig holds per-action configuration for all native actions.
 type NativeConfig struct {
 	LLM     NativeLLMConfig     `json:"llm"`
-	Make    NativeMakeConfig    `json:"make"`
 	Lookup  NativeLookupConfig  `json:"lookup"`
 	Time    NativeTimeConfig    `json:"time"`
 	Sink    NativeSinkConfig    `json:"sink"`
@@ -134,7 +126,6 @@ func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
 		Native: NativeConfig{
 			LLM:     NativeLLMConfig{URL: "http://localhost:11434", ChatModel: "gemma4:26b", EmbedModel: "nomic-embed-text", Price: 0},
-			Make:    NativeMakeConfig{Compiler: "tinygo", MaxSteps: 5, Price: 20},
 			Lookup:  NativeLookupConfig{DefaultLimit: 10, Price: 0},
 			Time:    NativeTimeConfig{Price: 0},
 			Sink:    NativeSinkConfig{Price: 0},

@@ -162,20 +162,20 @@ flow_locked_funds_recovery() {
     j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     j "$db" "$hs" admin deposit @sys 200 >/dev/null 2>&1
 
-    # Inject (server stopped) an orphan process+trace: a root call for @sys/make (price 20)
-    # that crashed before settling — 20 parked in user.locked and process.locked, trace has
+    # Inject (server stopped) an orphan process+trace: a root call for @sys/tinygo/compile (price 5)
+    # that crashed before settling — 5 parked in user.locked and process.locked, trace has
     # no tx (idempotency_key NULL). Not producible through the public API.
     stop_server "$db"
     local proc_id; proc_id=$(python3 - "$db" <<'PYEOF'
 import sqlite3, uuid, sys
 c = sqlite3.connect(sys.argv[1])
 owner = c.execute("SELECT id FROM users WHERE handle='@sys' LIMIT 1").fetchone()[0]
-act   = c.execute("SELECT id FROM actions WHERE name='make' LIMIT 1").fetchone()[0]
+act   = c.execute("SELECT id FROM actions WHERE name='tinygo/compile' LIMIT 1").fetchone()[0]
 proc, trace = str(uuid.uuid4()), str(uuid.uuid4())
-c.execute("UPDATE users SET available=available-20, locked=locked+20 WHERE id=?", [owner])
-c.execute("INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at) VALUES (?,?,0,20,'open',datetime('now'),NULL)", [proc, owner])
+c.execute("UPDATE users SET available=available-5, locked=locked+5 WHERE id=?", [owner])
+c.execute("INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at) VALUES (?,?,0,5,'open',datetime('now'),NULL)", [proc, owner])
 c.execute("""INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,created_at)
-             VALUES (?,?,NULL,?,?,?,20,0,NULL,NULL,datetime('now'))""", [trace, proc, owner, act, owner])
+             VALUES (?,?,NULL,?,?,?,5,0,NULL,NULL,datetime('now'))""", [trace, proc, owner, act, owner])
 c.commit(); print(proc)
 PYEOF
 )

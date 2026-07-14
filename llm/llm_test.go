@@ -9,7 +9,7 @@ import (
 
 // TestOllamaClientTimeoutGenerous guards the HTTP timeout used for all Ollama calls:
 // it must be generous enough for a large local model (e.g. the default 26B chat
-// model) to generate long completions for @sys/make, which 120s was not.
+// model) to generate long completions, which 120s was not.
 func TestOllamaClientTimeoutGenerous(t *testing.T) {
 	if ollamaClient.Timeout < 300*time.Second {
 		t.Errorf("ollamaClient.Timeout = %v, want >= 300s for large local models", ollamaClient.Timeout)

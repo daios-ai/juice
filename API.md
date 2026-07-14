@@ -205,7 +205,6 @@ Native actions registered at bootstrap, owned by `@sys`, public, runnable like a
 | `@sys/llm/embed` | 0 | Text embedding vector |
 | `@sys/llm/json`  | 0 | Structured JSON output from LLM, locally validated |
 | `@sys/llm/decide` | 0 | LLM-driven action selection; returns chosen action and args without executing |
-| `@sys/make` | 20 (configurable, `native.make`) | Synthesize a WASM action from a description |
 | `@sys/time` | 0 | Current time |
 | `@sys/sink` | 0 | Universal no-op step target |
 | `@sys/message` | 0 | Message a user by creating a step they acknowledge |

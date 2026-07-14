@@ -322,12 +322,6 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	native.RegisterEmbedHandler(k, embedder)
 	native.RegisterJSONHandler(k, ollamaChatter)
 	native.RegisterDecideHandler(k, ollamaChatter)
-	native.RegisterMakeHandler(k, native.MakeDeps{
-		Scripts:  exec,
-		Compiler: compiler,
-		Chatter:  chatter,
-		Embedder: embedder,
-	}, script.TinyGoSDK, globalCfg.Native.Make.MaxSteps)
 	native.RegisterTimeHandler(k)
 	native.RegisterSinkHandler(k)
 	native.RegisterMessageHandler(k)

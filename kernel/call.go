@@ -538,8 +538,8 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 	}
 	// The SDK reports a Handle error as the reserved sole-key object
 	// {WasmErrorKey:"<message>"} rather than trapping, so the failure reason reaches
-	// the caller (and @sys/make's repair loop). The sole-key guard keeps legitimate
-	// output that happens to contain the key from being misclassified.
+	// the caller. The sole-key guard keeps legitimate output that happens to contain
+	// the key from being misclassified.
 	if msg, ok := WasmHandleError(result); ok {
 		return nil, ErrExecutionFailed.Wrap(msg)
 	}
@@ -548,8 +548,7 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 
 // WasmErrorKey is the reserved sole key the WASM SDK uses to report a Handle error
 // as JSON output (see script/sdk.tmpl) instead of trapping the module. Every consumer
-// of raw SDK output must recognize it: kernel.executeWasm maps it to ErrExecutionFailed,
-// and @sys/make's smoke test reports it as the real failure reason.
+// of raw SDK output must recognize it: kernel.executeWasm maps it to ErrExecutionFailed.
 const WasmErrorKey = "__juice_error__"
 
 // WasmHandleError reports whether a decoded WASM output object is the SDK's error
@@ -569,17 +568,6 @@ type kernelHostFunctions struct {
 	kernel   *Kernel
 	traceID  string
 	targetID string // action owner; used as CallerID for subcalls
-}
-
-// HostFunctionsForTrace returns HostFunctions whose subcalls and steps run through
-// the kernel on the given trace, attributed to targetID (the subcall caller — it
-// must equal the trace's action owner to satisfy process-use authority, §4). It lets
-// @sys/make smoke-test a synthesized artifact against the REAL platform actions
-// (e.g. @sys/llm/chat) on its own funded make trace before registering it: a stub
-// host that returns empty results is rejected by the Handle error contract, so the
-// only faithful validation is to run the real subcalls.
-func (k *Kernel) HostFunctionsForTrace(traceID, targetID string) HostFunctions {
-	return &kernelHostFunctions{kernel: k, traceID: traceID, targetID: targetID}
 }
 
 func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJSON []byte) ([]byte, error) {

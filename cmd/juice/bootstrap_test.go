@@ -195,50 +195,6 @@ func TestBootstrapRejectsKeyMismatch(t *testing.T) {
 	}
 }
 
-func TestEnsureSysMakeIdempotent(t *testing.T) {
-	ctx := context.Background()
-	k := newTestKernel(t)
-
-	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@sys", Email: "sys@sys", Password: "pass",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := k.SetConfig(ctx, configKeySuperuser, u.Handle); err != nil {
-		t.Fatal(err)
-	}
-
-	spec := sysSpec("make")
-	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
-		t.Fatalf("first ensureSysNative(make): %v", err)
-	}
-	a, err := k.ReadActionByOwnerName(ctx, u.ID, "make")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !a.Active {
-		t.Fatal("@sys/make should be active after ensureSysNative")
-	}
-	if a.Price != 20 {
-		t.Errorf("@sys/make price = %d, want 20", a.Price)
-	}
-
-	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
-		t.Fatalf("second ensureSysNative(make): %v", err)
-	}
-	a2, err := k.ReadActionByOwnerName(ctx, u.ID, "make")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a.ID != a2.ID {
-		t.Error("idempotent ensureSysMake must not create a second action")
-	}
-	if !a2.Public {
-		t.Error("@sys/make should be public after idempotent ensureSysMake")
-	}
-}
-
 func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)
@@ -276,7 +232,7 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// ensureSysNative must correct drift for all specs, not just @sys/make.
+	// ensureSysNative must correct drift for all specs.
 	spec := sysSpec("lookup")
 	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
 		t.Fatalf("ensureSysNative: %v", err)
@@ -292,42 +248,6 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 	props, _ := got.InputSchema["properties"].(map[string]any)
 	if props == nil || props["query"] == nil {
 		t.Error("input schema not reconciled: missing 'query' property")
-	}
-}
-
-func TestBootstrapRegistersMake(t *testing.T) {
-	ctx := context.Background()
-	k := newTestKernel(t)
-
-	if err := k.FirstBoot(ctx, "secret"); err != nil {
-		t.Fatalf("FirstBoot: %v", err)
-	}
-	if err := bootstrap(k, DefaultServerConfig().Native); err != nil {
-		t.Fatalf("bootstrap: %v", err)
-	}
-
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, err := k.ReadActionByOwnerName(ctx, sys.ID, "make")
-	if err != nil {
-		t.Fatalf("@sys/make not registered after bootstrap: %v", err)
-	}
-	if !a.Active {
-		t.Error("@sys/make should be active after bootstrap")
-	}
-	if !a.Public {
-		t.Error("@sys/make should be public after bootstrap")
-	}
-	if a.Kind != kernel.KindNative {
-		t.Errorf("@sys/make kind = %q, want native", a.Kind)
-	}
-	if a.Price != 20 {
-		t.Errorf("@sys/make price = %d, want 20", a.Price)
-	}
-	if a.OwnerUserID != sys.ID {
-		t.Errorf("@sys/make owner = %q, want sys ID", a.OwnerUserID)
 	}
 }
 

@@ -12,7 +12,6 @@
 #   FLOW=flow_time JUICE=/tmp/juice bash flows/flows_test.sh   # one flow (debugging)
 #
 # Opt-in suites (excluded from the default run; each needs a heavy external toolchain):
-#   JUICE_MAKE_FLOWS=1   ... — @sys/make synthesis (real TinyGo + live Ollama; minutes/flow)
 #   JUICE_TINYGO_FLOWS=1 ... — @sys/tinygo/compile (real TinyGo toolchain on PATH)
 #
 # Via the Go suite:  go test -tags integration ./cmd/juice/ -run TestFlowsIntegration
@@ -38,13 +37,6 @@ if [ "${JUICE_NETWORK_FLOWS:-0}" = "1" ]; then
     exit $?
 fi
 
-# Opt-in: @sys/make synthesis only (real TinyGo + live Ollama).
-if [ "${JUICE_MAKE_FLOWS:-0}" = "1" ]; then
-    echo "=== @sys/make flows ONLY (JUICE_MAKE_FLOWS=1) ==="
-    run_flows flow_make flow_make_calculator flow_make_translator flow_make_natural_language_calc
-    exit $?
-fi
-
 # Opt-in: @sys/tinygo/compile only (real TinyGo toolchain on PATH).
 if [ "${JUICE_TINYGO_FLOWS:-0}" = "1" ]; then
     echo "=== @sys/tinygo/compile flow ONLY (JUICE_TINYGO_FLOWS=1) ==="
@@ -52,7 +44,7 @@ if [ "${JUICE_TINYGO_FLOWS:-0}" = "1" ]; then
     exit $?
 fi
 
-# Default suite. Excludes flow_tinygo_compile and the flow_make* flows (opt-in above).
+# Default suite. Excludes flow_tinygo_compile (opt-in above).
 run_flows \
     flow_bootstrap flow_local_auth flow_suspension flow_deposits \
     flow_action_lifecycle flow_action_owner_visibility \

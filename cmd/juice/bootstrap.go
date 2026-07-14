@@ -176,18 +176,6 @@ func ensureSysNative(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 	return nil
 }
 
-var makeOutputSchema = map[string]any{
-	"type": "object",
-	"properties": map[string]any{
-		"status":      map[string]any{"type": "string", "description": "success or failure"},
-		"action_id":   map[string]any{"type": "string", "description": "Registered action ID, present on success"},
-		"action_name": map[string]any{"type": "string", "description": "Registered action name, present on success"},
-		"diagnostics": map[string]any{"type": "array", "description": "Synthesis diagnostics", "items": map[string]any{"type": "string"}},
-		"tests":       map[string]any{"type": "array", "description": "Test results from smoke-test execution", "items": map[string]any{"type": "object"}},
-	},
-	"required": []string{"status", "diagnostics"},
-}
-
 var msgItemSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
@@ -315,13 +303,6 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 			},
 			"required": []string{"action", "args"},
 		},
-	},
-	{
-		name:         "make",
-		price:        cfg.Make.Price,
-		description:  "Generate a WASM action from a natural-language description",
-		inputSchema:  map[string]any{"type": "object", "properties": map[string]any{"description": map[string]any{"type": "string", "description": "Natural-language description of the action to generate"}}, "required": []string{"description"}},
-		outputSchema: makeOutputSchema,
 	},
 	{
 		name:        "time",

@@ -58,7 +58,7 @@ final and atomic with its transaction and receipt.
   non-secret `auth_scheme` name and a `requires_grant` flag, never config or secrets. See
   **[docs/oauth.md](docs/oauth.md)**.
 - **Native `@sys` actions** (the platform stdlib): `lookup`, `llm/chat`, `llm/embed`, `llm/json`,
-  `llm/decide`, `make`, `tinygo/compile`, `time`, `sink`, `message`, `random`, `web`.
+  `llm/decide`, `tinygo/compile`, `time`, `sink`, `message`, `random`, `web`.
 - **Federation** — friend/unfriend peer kernels by public key, proxy users, prepaid credits, signed
   manifests, and gossip-based discovery; `juice tx verify` checks a remote receipt locally.
 - **OpenAPI import** — register representable HTTP operations as actions.
@@ -160,7 +160,7 @@ Key groups:
 
 | Key | Purpose |
 |---|---|
-| `native.*` | Per-action prices plus LLM URL/models (`native.llm`) and `@sys/make` settings |
+| `native.*` | Per-action prices plus LLM URL/models (`native.llm`) |
 | `fee_bps` | Platform fee in basis points (default `2000` = 20%; recipient is fixed to `@sys`) |
 | `import_bps` | Federation import duty in basis points (default `500`) |
 | `token_ttl` | Access-token lifetime (e.g. `15m`) |
@@ -184,7 +184,7 @@ kernel/      Core types, interfaces, auth, call/settlement semantics, federation
 store/       SQLite implementation of kernel.Store (migrations, WAL)
 script/      WebAssembly execution via wazero
 llm/         Language and embedding adapter (Ollama) for lookup, chat, json, decide
-native/      Native @sys action handlers (lookup, llm/*, make, time, sink, message, random, web, tinygo)
+native/      Native @sys action handlers (lookup, llm/*, time, sink, message, random, web, tinygo)
 log/         Structured logger (slog + tint, text + JSON)
 ```
 

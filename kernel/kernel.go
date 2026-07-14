@@ -1986,7 +1986,7 @@ func (k *Kernel) SetActive(ctx context.Context, callerID, actionID string, activ
 			}
 			wasmBytes := []byte(a.Source)
 			if a.WasmArtifact != "" {
-				// Artifact pre-stored (e.g. by @sys/make); compile it for the hash, not the TinyGo source.
+				// Artifact pre-stored (e.g. via action create --artifact); compile it for the hash, not the TinyGo source.
 				decoded, decErr := base64.StdEncoding.DecodeString(a.WasmArtifact)
 				if decErr != nil {
 					return ErrInvalidState.Wrapf("wasm artifact decode failed: %v", decErr)

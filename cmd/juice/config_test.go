@@ -77,12 +77,6 @@ func TestDefaultServerConfig(t *testing.T) {
 	if cfg.TokenTTL == "" {
 		t.Error("TokenTTL should have a default")
 	}
-	if cfg.Native.Make.MaxSteps <= 0 {
-		t.Error("Native.Make.MaxSteps should be positive")
-	}
-	if cfg.Native.Make.Price != 20 {
-		t.Errorf("Native.Make.Price default = %d, want 20", cfg.Native.Make.Price)
-	}
 	if cfg.Native.TinyGo.Price != 5 {
 		t.Errorf("Native.TinyGo.Price default = %d, want 5", cfg.Native.TinyGo.Price)
 	}
@@ -110,7 +104,6 @@ func TestLoadOrCreateConfig_ReadsExisting(t *testing.T) {
 
 	want := DefaultServerConfig()
 	want.Native.LLM.URL = "http://custom:11434"
-	want.Native.Make.MaxSteps = 3
 	b, _ := json.MarshalIndent(want, "", "  ")
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatal(err)
@@ -122,9 +115,6 @@ func TestLoadOrCreateConfig_ReadsExisting(t *testing.T) {
 	}
 	if cfg.Native.LLM.URL != "http://custom:11434" {
 		t.Errorf("expected custom Native.LLM.URL, got %q", cfg.Native.LLM.URL)
-	}
-	if cfg.Native.Make.MaxSteps != 3 {
-		t.Errorf("expected Native.Make.MaxSteps=3, got %d", cfg.Native.Make.MaxSteps)
 	}
 }
 
@@ -144,8 +134,8 @@ func TestLoadOrCreateConfig_MissingFieldsUseDefaults(t *testing.T) {
 	if cfg.Native.LLM.URL != "http://custom:11434" {
 		t.Errorf("expected custom Native.LLM.URL, got %q", cfg.Native.LLM.URL)
 	}
-	if cfg.Native.Make.MaxSteps != DefaultServerConfig().Native.Make.MaxSteps {
-		t.Errorf("expected default Native.Make.MaxSteps, got %d", cfg.Native.Make.MaxSteps)
+	if cfg.Native.TinyGo.Price != DefaultServerConfig().Native.TinyGo.Price {
+		t.Errorf("expected default Native.TinyGo.Price, got %d", cfg.Native.TinyGo.Price)
 	}
 }
 

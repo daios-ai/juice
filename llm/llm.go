@@ -14,8 +14,8 @@ import (
 
 // ollamaClient is a shared HTTP client with a generous timeout so a hung Ollama
 // server cannot block a juice call indefinitely. The timeout must accommodate large
-// local models (e.g. the default 26B chat model) generating long completions for
-// @sys/make codegen and example generation — 120s was too tight and surfaced as
+// local models (e.g. the default 26B chat model) generating long completions —
+// 120s was too tight and surfaced as
 // "context deadline exceeded (Client.Timeout exceeded while awaiting headers)".
 var ollamaClient = &http.Client{Timeout: 300 * time.Second}
 
