@@ -82,7 +82,7 @@ Every command runs by calling the server over HTTP; the base URL resolves from `
 
 | Operation | HTTP | CLI |
 |-----------|------|-----|
-| Health check | `GET /health` (open) → `{status, handle, public_key}`; identity banner — see which kernel you're on before login | `juice health [--url]` |
+| Health check | `GET /health` (open) → `{status, handle, public_key}`; identity banner — see which kernel you're on before login | `juice health` |
 
 Federation has no HTTP surface: peer identity, gossip, manifests, the friend handshake, and inbound calls travel over the cross-kernel transport (§13), not over this API. The known network (discovered kernels) is seeded automatically at `serve` from the bootstrap peers and grown by DHT provider-record enumeration; `admin peers --gossip` renders it as a grouped roster (kernel → introducer → action, with your own earned stats shown distinctly), and a remote kernel is inspected with `admin inspect <key>`.
 

@@ -1206,16 +1206,16 @@ func (s *server) deleteGrant(w http.ResponseWriter, r *http.Request) {
 // ---- health command ----
 
 func healthCmd() *cobra.Command {
-	var healthURL string
 	cmd := &cobra.Command{
 		Use:   "health",
 		Short: "Check server health",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			resp, err := http.Get(healthURL + "/health") //nolint:noctx
+			// Resolve the target through the single client resolver (§14: --server / JUICE_SERVER /
+			// server_url), like every other command — no bespoke URL that could hit another kernel.
+			base := serverBaseURL()
+			resp, err := http.Get(base + "/health") //nolint:noctx
 			if err != nil {
-				return kernel.ErrInvalidState.
-					Wrapf("cannot reach juice server at %s (is `juice serve` running?)", healthURL).
-					Because(err)
+				return errUnreachable(base, err)
 			}
 			defer resp.Body.Close()
 			var body map[string]any
@@ -1232,7 +1232,6 @@ func healthCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&healthURL, "url", "http://localhost:4040", "Server base URL")
 	return cmd
 }
 

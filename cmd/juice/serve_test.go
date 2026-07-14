@@ -1908,10 +1908,36 @@ func TestHealthCmd(t *testing.T) {
 	srv, _ := newTestHTTPServer(t)
 	defer srv.Close()
 
-	t.Setenv("JUICE_URL", srv.URL)
-	_, err := execTestCmd(t, healthCmd(), "--url", srv.URL)
-	if err != nil {
+	// health must resolve the target through serverBaseURL like every other command, so --server
+	// (here via flagServer, set by stubServer) is honored and it never falls back to another kernel.
+	old := flagServer
+	flagServer = srv.URL
+	t.Cleanup(func() { flagServer = old })
+
+	if _, err := execTestCmd(t, healthCmd()); err != nil {
 		t.Fatalf("health: unexpected error: %v", err)
+	}
+}
+
+// TestHealthCmdHonorsServer proves health hits the --server target, not the localhost:4040 default:
+// it points flagServer at a live stub and a bogus default, and the live stub must receive /health.
+func TestHealthCmdHonorsServer(t *testing.T) {
+	var hit string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "handle": "@k", "public_key": "pk"})
+	}))
+	defer srv.Close()
+
+	old := flagServer
+	flagServer = srv.URL
+	t.Cleanup(func() { flagServer = old })
+
+	if _, err := execTestCmd(t, healthCmd()); err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	if hit != "/health" {
+		t.Fatalf("health did not hit the --server target (got path %q)", hit)
 	}
 }
 
