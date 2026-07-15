@@ -103,8 +103,12 @@ Federation has no HTTP surface: peer identity, gossip, manifests, the friend han
 | Create user | `POST /v1/users` `{handle, email, password}` → 201 user | `juice user create <user> <email> [--password]` |
 | Get self | `GET /v1/me` → user (`id`, `handle`, `email`, `available`, `locked`, `connectors` the directory-grouped tree each `{directory, connections, actions:[{action, scopes, provider_key, created_at}]}`, `connections` the account inventory each `{provider, actions, unused, provider_key, created_at}`) | `juice user me` |
 | Update self | `PUT /v1/me` `{[email], [current_password, password]}` → user | `juice user update [--email] [--password]` |
+| Transfer credits | `POST /v1/transfers` `{recipient, amount, [reason], [external_key]}` → ledger entry | `juice user transfer <recipient> <amount> [--reason --external-key]` |
+| List ledger | `GET /v1/ledger[?limit=&offset=]` → ledger entry[] | `juice user ledger [--limit --offset]` |
 
 `handle` is immutable. `email` and `password` are updatable by the authenticated user; `password` change requires `current_password` to verify the existing credential. At least one of `email` or `password` must be provided. Proxy users (federation peers) cannot be created here, cannot log in, and hold no tokens; they exist only through peer acceptance, authenticate per request by federation signature, and cannot use `PUT /v1/me`.
+
+`user transfer` debits the caller and credits a local recipient in one fee-free ledger entry (rejects self-transfer, non-positive amount, and a suspended or peer recipient; `insufficient_funds` on low balance). `GET /v1/ledger` lists the caller's own movements — deposits, withdrawals, transfers — newest first, paginated, each with `operator_handle` plus `from_handle`/`to_handle` (null side omitted).
 
 ### Grants and connections (delegated auth)
 
