@@ -103,6 +103,35 @@ flow_deposits() {
     assert_jnum "deposits.other_user_unaffected" "$(jj "$db" "$hb" user me)" available 0
 }
 
+flow_transfers() {
+    echo "=== FLOW transfers ==="
+    local dir db hs ha hb
+    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    start_server "$db" "$hs" || { fail "transfers.boot" "server did not start"; return; }
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" @alice
+    make_user "$db" "$hs" "$hb" @bob
+    j "$db" "$hs" admin deposit @alice 500 >/dev/null 2>&1
+
+    # Alice transfers 200 to bob by @handle; balances move by exactly the amount.
+    j "$db" "$ha" user transfer @bob 200 --reason gift >/dev/null 2>&1
+    assert_jnum "transfers.sender_debited" "$(jj "$db" "$ha" user me)" available 300
+    assert_jnum "transfers.recipient_credited" "$(jj "$db" "$hb" user me)" available 200
+
+    # Both parties see the transfer in their ledger (alice also sees her deposit).
+    assert_contains "transfers.sender_ledger" "@bob" "$(jj "$db" "$ha" user ledger)"
+    assert_contains "transfers.recipient_ledger" "@alice" "$(jj "$db" "$hb" user ledger)"
+
+    # Pagination: alice has 2 ledger entries (deposit + transfer); --limit 1 returns one.
+    assert_eq "transfers.ledger_paginated" 1 \
+        "$(jj "$db" "$ha" user ledger --limit 1 | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
+
+    # Over-balance and self transfers are rejected; balance unchanged.
+    assert_fails "transfers.overdraw_rejected" "insufficient\|error" -- j "$db" "$ha" user transfer @bob 100000
+    assert_fails "transfers.self_rejected" "yourself\|invalid\|error" -- j "$db" "$ha" user transfer @alice 10
+    assert_jnum "transfers.balance_unchanged" "$(jj "$db" "$ha" user me)" available 300
+}
+
 flow_action_lifecycle() {
     echo "=== FLOW action_lifecycle ==="
     local dir db hs ha hb bport

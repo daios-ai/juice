@@ -116,7 +116,7 @@ func (s *server) ctlRenameUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"handle": out.Handle})
 }
 
-func (s *server) ctlAdjust(direction string) http.HandlerFunc {
+func (s *server) ctlAdjust(credit bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Handle      string `json:"handle"`
@@ -132,17 +132,17 @@ func (s *server) ctlAdjust(direction string) http.HandlerFunc {
 			writeErr(w, err)
 			return
 		}
-		var adj *kernel.Adjustment
-		if direction == kernel.DirectionCredit {
-			adj, err = s.kernel.Deposit(r.Context(), callerFrom(r), u.ID, req.Amount, req.Reason, req.ExternalKey)
+		var e *kernel.LedgerEntry
+		if credit {
+			e, err = s.kernel.Deposit(r.Context(), callerFrom(r), u.ID, req.Amount, req.Reason, req.ExternalKey)
 		} else {
-			adj, err = s.kernel.Withdraw(r.Context(), callerFrom(r), u.ID, req.Amount, req.Reason, req.ExternalKey)
+			e, err = s.kernel.Withdraw(r.Context(), callerFrom(r), u.ID, req.Amount, req.Reason, req.ExternalKey)
 		}
 		if err != nil {
 			writeErr(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, enrichAdjustment(adj, newUserCache(s.kernel, r.Context())))
+		writeJSON(w, http.StatusOK, enrichLedger(e, newUserCache(s.kernel, r.Context())))
 	}
 }
 

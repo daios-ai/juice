@@ -224,7 +224,7 @@ func emit(v any) error {
 
 func init() {
 	userCmd := &cobra.Command{Use: "user", Short: "Manage your account"}
-	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd(), userConnectCmd(), userDisconnectCmd())
+	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd(), userTransferCmd(), userLedgerCmd(), userConnectCmd(), userDisconnectCmd())
 	rootCmd.AddCommand(userCmd)
 }
 
@@ -297,6 +297,63 @@ func userUpdateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&email, "email", "", "New email address")
 	cmd.Flags().BoolVar(&changePassword, "password", false, "Change your password")
+	return cmd
+}
+
+func userTransferCmd() *cobra.Command {
+	var reason, externalKey string
+	cmd := &cobra.Command{
+		Use:   "transfer <recipient> <amount>",
+		Short: "Send credits to another user",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			amount, err := parseAmount(args[1])
+			if err != nil {
+				return err
+			}
+			return apiEmit("POST", "/v1/transfers", map[string]any{
+				"recipient": args[0], "amount": amount, "reason": reason, "external_key": externalKey,
+			})
+		},
+	}
+	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
+	cmd.Flags().StringVar(&externalKey, "external-key", "", "Optional idempotency token")
+	return cmd
+}
+
+func userLedgerCmd() *cobra.Command {
+	var limit, offset int
+	cmd := &cobra.Command{
+		Use:   "ledger",
+		Short: "List your credit movements (deposits, withdrawals, transfers)",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			q := url.Values{}
+			setLimitOffset(q, limit, offset)
+			var entries []*ledgerView
+			if err := apiCall(context.Background(), "GET", "/v1/ledger?"+q.Encode(), nil, &entries); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(entries)
+			}
+			for _, e := range entries {
+				from, to := e.FromHandle, e.ToHandle
+				if from == "" {
+					from = "—"
+				}
+				if to == "" {
+					to = "—"
+				}
+				fmt.Printf("[%s] amount:%-6d  from:%-12s  to:%-12s  %s\n",
+					e.CreatedAt.Format("2006-01-02T15:04:05"),
+					e.Amount, from, to, e.Reason)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
+	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
 	return cmd
 }
 

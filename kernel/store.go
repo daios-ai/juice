@@ -390,14 +390,19 @@ type Store interface {
 	// ReadReceipt returns the receipt with the given ID.
 	ReadReceipt(ctx context.Context, id string) (*Receipt, error)
 
-	// ---- Adjustments ----
+	// ---- Ledger ----
 
-	// CreateAdjustment atomically applies a.Direction to target.available and records the
-	// adjustment. A credit adds amount; a debit subtracts it and returns ErrInsufficientFunds
-	// if target.available < amount. When a.ExternalKey is set and already present, the existing
-	// record is returned (loaded into a) and no balance change is applied — the idempotency
-	// check runs before the debit's available-balance guard.
-	CreateAdjustment(ctx context.Context, a *Adjustment) error
+	// CreateLedgerEntry atomically debits e.FromUserID (when set) and credits e.ToUserID
+	// (when set), recording the entry. The debit subtracts amount and returns
+	// ErrInsufficientFunds if that user's available < amount; the credit adds it. When
+	// e.ExternalKey is set and already present, the existing record is returned (loaded
+	// into e) and no balance change is applied — the idempotency check runs before the
+	// debit's available-balance guard.
+	CreateLedgerEntry(ctx context.Context, e *LedgerEntry) error
+
+	// ListLedgerByUser returns ledger entries where userID is the source or the
+	// destination, most recent first, bounded by limit/offset.
+	ListLedgerByUser(ctx context.Context, userID string, limit, offset int) ([]*LedgerEntry, error)
 
 	// ---- Embeddings ----
 

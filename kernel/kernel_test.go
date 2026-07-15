@@ -1247,6 +1247,127 @@ func TestAdjustmentExternalKeyIdempotent(t *testing.T) {
 	}
 }
 
+func TestTransfer(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 100)
+	bob := setupUser(t, st, "@bob", 0)
+
+	// Happy path: debit sender, credit recipient, one ledger entry from→to.
+	e, err := k.Transfer(ctx, alice.ID, bob.ID, 30, "gift", "")
+	if err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+	if e.FromUserID != alice.ID || e.ToUserID != bob.ID || e.OperatorUserID != alice.ID || e.Amount != 30 {
+		t.Errorf("ledger entry: got %+v, want from=%s to=%s operator=%s amount=30", e, alice.ID, bob.ID, alice.ID)
+	}
+	assertUserBalance(t, st, alice.ID, 70, 0)
+	assertUserBalance(t, st, bob.ID, 30, 0)
+
+	// Insufficient funds: rejected, balances unchanged.
+	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 1000, "", ""); !errors.Is(err, kernel.ErrInsufficientFunds) {
+		t.Errorf("over-balance transfer: got %v, want ErrInsufficientFunds", err)
+	}
+	assertUserBalance(t, st, alice.ID, 70, 0)
+	assertUserBalance(t, st, bob.ID, 30, 0)
+
+	// Non-positive amount and self-transfer rejected.
+	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 0, "", ""); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("zero amount: got %v, want ErrInvalidInput", err)
+	}
+	if _, err := k.Transfer(ctx, alice.ID, alice.ID, 10, "", ""); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("self-transfer: got %v, want ErrInvalidInput", err)
+	}
+
+	// Peer/proxy recipient (public_key set) rejected.
+	peer := &kernel.User{
+		ID: uuid.New().String(), Handle: "@peer", Email: "p@e.com",
+		PublicKey: "cGVlci1rZXk", Available: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateUser(ctx, peer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Transfer(ctx, alice.ID, peer.ID, 10, "", ""); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("transfer to peer: got %v, want ErrInvalidInput", err)
+	}
+
+	// Suspended recipient rejected; suspended caller rejected (ErrUnauthenticated).
+	carol := setupUser(t, st, "@carol", 0)
+	if err := st.SuspendUser(ctx, carol.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Transfer(ctx, alice.ID, carol.ID, 10, "", ""); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("transfer to suspended recipient: got %v, want ErrInvalidInput", err)
+	}
+	if err := st.SuspendUser(ctx, alice.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 10, "", ""); !errors.Is(err, kernel.ErrUnauthenticated) {
+		t.Errorf("suspended caller: got %v, want ErrUnauthenticated", err)
+	}
+}
+
+func TestTransferIdempotent(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 100)
+	bob := setupUser(t, st, "@bob", 0)
+
+	first, err := k.Transfer(ctx, alice.ID, bob.ID, 40, "invoice", "inv-1")
+	if err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+	replay, err := k.Transfer(ctx, alice.ID, bob.ID, 40, "invoice", "inv-1")
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if replay.ID != first.ID {
+		t.Errorf("replay returned a new record: got %s, want %s", replay.ID, first.ID)
+	}
+	// Moved once, not twice.
+	assertUserBalance(t, st, alice.ID, 60, 0)
+	assertUserBalance(t, st, bob.ID, 40, 0)
+}
+
+func TestListLedger(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	su := setupUser(t, st, "@sys", 0)
+	alice := setupUser(t, st, "@alice", 0)
+	bob := setupUser(t, st, "@bob", 0)
+
+	if _, err := k.Deposit(ctx, su.ID, alice.ID, 100, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 30, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Alice sees her deposit (to) and her outbound transfer (from): two entries.
+	aliceLedger, err := k.ListLedger(ctx, alice.ID, 50, 0)
+	if err != nil {
+		t.Fatalf("list ledger: %v", err)
+	}
+	if len(aliceLedger) != 2 {
+		t.Fatalf("alice ledger: got %d entries, want 2", len(aliceLedger))
+	}
+	// Bob sees only the inbound transfer (to): one entry.
+	bobLedger, err := k.ListLedger(ctx, bob.ID, 50, 0)
+	if err != nil {
+		t.Fatalf("list ledger: %v", err)
+	}
+	if len(bobLedger) != 1 || bobLedger[0].ToUserID != bob.ID || bobLedger[0].FromUserID != alice.ID {
+		t.Errorf("bob ledger: got %+v, want one from-alice→to-bob entry", bobLedger)
+	}
+}
+
 // ---- Receipt tests ----
 
 func TestReceiptCreatedWithCall(t *testing.T) {

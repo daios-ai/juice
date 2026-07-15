@@ -442,6 +442,11 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Get("/v1/me", srv.getMe)
 		r.Put("/v1/me", srv.putMe)
 
+		// Peer-to-peer credit transfer and the caller's own ledger (§12). Not superuser:
+		// the caller moves their own funds, gated by authMiddleware alone.
+		r.Post("/v1/transfers", srv.postTransfer)
+		r.Get("/v1/ledger", srv.getLedger)
+
 		// Delegated-auth grants and connections (§8). The client hosts the loopback redirect; the
 		// kernel holds only in-memory PKCE/device state and performs the token exchange itself.
 		r.Get("/v1/grants/plan", srv.getGrantPlan)
@@ -466,8 +471,8 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Post("/control/users/{handle}/suspend", srv.ctlSetSuspended(true))
 		r.Post("/control/users/{handle}/unsuspend", srv.ctlSetSuspended(false))
 		r.Post("/control/users/{handle}/rename", srv.ctlRenameUser)
-		r.Post("/control/deposit", srv.ctlAdjust(kernel.DirectionCredit))
-		r.Post("/control/withdraw", srv.ctlAdjust(kernel.DirectionDebit))
+		r.Post("/control/deposit", srv.ctlAdjust(true))
+		r.Post("/control/withdraw", srv.ctlAdjust(false))
 		r.Get("/control/peers", srv.ctlListPeers)
 		r.Get("/control/peers/inspect", srv.ctlInspectPeer)
 		r.Post("/control/peers/friend", srv.ctlFriendPeer)
@@ -1232,6 +1237,42 @@ func (s *server) putMe(w http.ResponseWriter, r *http.Request) {
 		view, err := updateMe(s.kernel, r.Context(), callerFrom(r), body.Email, body.CurrentPassword, body.Password)
 		return view, http.StatusOK, err
 	})(w, r)
+}
+
+// postTransfer moves credits from the authenticated caller to a nominated local recipient (§12).
+func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
+	handle(func(r *http.Request, body struct {
+		Recipient   string `json:"recipient"`
+		Amount      int64  `json:"amount"`
+		Reason      string `json:"reason"`
+		ExternalKey string `json:"external_key"`
+	}) (any, int, error) {
+		recipient, err := resolveHandle(s.kernel, r.Context(), body.Recipient)
+		if err != nil {
+			return nil, 0, err
+		}
+		e, err := s.kernel.Transfer(r.Context(), callerFrom(r), recipient.ID, body.Amount, body.Reason, body.ExternalKey)
+		if err != nil {
+			return nil, 0, err
+		}
+		return enrichLedger(e, newUserCache(s.kernel, r.Context())), http.StatusOK, nil
+	})(w, r)
+}
+
+// getLedger returns the caller's own ledger entries (deposits, withdrawals, transfers).
+func (s *server) getLedger(w http.ResponseWriter, r *http.Request) {
+	limit, offset := listBounds(r)
+	entries, err := s.kernel.ListLedger(r.Context(), callerFrom(r), limit, offset)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	uc := newUserCache(s.kernel, r.Context())
+	views := make([]*ledgerView, len(entries))
+	for i, e := range entries {
+		views[i] = enrichLedger(e, uc)
+	}
+	writeJSON(w, http.StatusOK, views)
 }
 
 // ---- delegated-OAuth grants (§8) ----

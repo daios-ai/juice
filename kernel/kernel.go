@@ -1272,7 +1272,7 @@ func (k *Kernel) ValidateFeeRecipient(ctx context.Context) error {
 	return nil
 }
 
-func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, amount int64, reason, externalKey string) (*Adjustment, error) {
+func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, amount int64, reason, externalKey string) (*LedgerEntry, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
 	logger.Info("deposit.start", "target_user_id", targetUserID, "amount", amount)
@@ -1286,26 +1286,25 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 	if _, err := k.store.ReadUser(ctx, targetUserID); err != nil {
 		return nil, err
 	}
-	a := &Adjustment{
+	e := &LedgerEntry{
 		ID:             uuid.New().String(),
 		OperatorUserID: operatorID,
-		TargetUserID:   targetUserID,
-		Direction:      DirectionCredit,
+		ToUserID:       targetUserID,
 		Amount:         amount,
 		Reason:         reason,
 		ExternalKey:    externalKey,
 		CreatedAt:      time.Now().UTC(),
 	}
-	if err := k.store.CreateAdjustment(ctx, a); err != nil {
+	if err := k.store.CreateLedgerEntry(ctx, e); err != nil {
 		logger.Warn("deposit.failed", "target_user_id", targetUserID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, err
 	}
-	logger.Info("deposit.created", "deposit_id", a.ID, "target_user_id", targetUserID, "amount", amount, "status", "success", "duration_ms", time.Since(start).Milliseconds())
-	return a, nil
+	logger.Info("deposit.created", "deposit_id", e.ID, "target_user_id", targetUserID, "amount", amount, "status", "success", "duration_ms", time.Since(start).Milliseconds())
+	return e, nil
 }
 
 // Withdraw deducts credits from a user's available balance. Superuser only.
-func (k *Kernel) Withdraw(ctx context.Context, operatorID, targetUserID string, amount int64, reason, externalKey string) (*Adjustment, error) {
+func (k *Kernel) Withdraw(ctx context.Context, operatorID, targetUserID string, amount int64, reason, externalKey string) (*LedgerEntry, error) {
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
 		return nil, err
 	}
@@ -1315,21 +1314,79 @@ func (k *Kernel) Withdraw(ctx context.Context, operatorID, targetUserID string, 
 	if _, err := k.store.ReadUser(ctx, targetUserID); err != nil {
 		return nil, err
 	}
-	a := &Adjustment{
+	e := &LedgerEntry{
 		ID:             uuid.New().String(),
 		OperatorUserID: operatorID,
-		TargetUserID:   targetUserID,
-		Direction:      DirectionDebit,
+		FromUserID:     targetUserID,
 		Amount:         amount,
 		Reason:         reason,
 		ExternalKey:    externalKey,
 		CreatedAt:      time.Now().UTC(),
 	}
-	if err := k.store.CreateAdjustment(ctx, a); err != nil {
+	if err := k.store.CreateLedgerEntry(ctx, e); err != nil {
 		return nil, err
 	}
-	k.log.With(ctx).Info("withdrawal.created", "withdrawal_id", a.ID, "target_user_id", targetUserID, "amount", amount)
-	return a, nil
+	k.log.With(ctx).Info("withdrawal.created", "withdrawal_id", e.ID, "target_user_id", targetUserID, "amount", amount)
+	return e, nil
+}
+
+// Transfer moves credits from the caller's own available balance to another local
+// user, recording one ledger entry (from caller, to recipient). It is user self-service
+// — the self-authorized sibling of Deposit/Withdraw — not superuser supervision, and it
+// never routes through Call(), so it has no composition surface. The recipient must be a
+// local account (a peer/proxy user is rejected, as crediting it would corrupt the
+// bilateral federation account, §13). Sufficient-funds is enforced atomically at the
+// store debit, so a concurrent spend cannot overdraw.
+func (k *Kernel) Transfer(ctx context.Context, callerID, recipientID string, amount int64, reason, externalKey string) (*LedgerEntry, error) {
+	start := time.Now()
+	logger := k.log.With(ctx)
+	logger.Info("transfer.start", "recipient_user_id", recipientID, "amount", amount)
+	caller, err := k.requireActiveUser(ctx, callerID)
+	if err != nil {
+		return nil, err
+	}
+	if amount <= 0 {
+		return nil, ErrInvalidInput.Wrap("amount must be positive")
+	}
+	if callerID == recipientID {
+		return nil, ErrInvalidInput.Wrap("cannot transfer to yourself")
+	}
+	recipient, err := k.store.ReadUser(ctx, recipientID)
+	if err != nil {
+		return nil, err
+	}
+	if recipient.PublicKey != "" {
+		return nil, ErrInvalidInput.Wrap("cannot transfer to a peer user")
+	}
+	if recipient.SuspendedAt != nil {
+		return nil, ErrInvalidInput.Wrap("recipient is suspended")
+	}
+	e := &LedgerEntry{
+		ID:             uuid.New().String(),
+		OperatorUserID: caller.ID,
+		FromUserID:     caller.ID,
+		ToUserID:       recipient.ID,
+		Amount:         amount,
+		Reason:         reason,
+		ExternalKey:    externalKey,
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := k.store.CreateLedgerEntry(ctx, e); err != nil {
+		logger.Warn("transfer.failed", "recipient_user_id", recipientID, "error", err, "duration_ms", time.Since(start).Milliseconds())
+		return nil, err
+	}
+	logger.Info("transfer.created", "transfer_id", e.ID, "recipient_user_id", recipientID, "amount", amount, "status", "success", "duration_ms", time.Since(start).Milliseconds())
+	return e, nil
+}
+
+// ListLedger returns the authenticated caller's own ledger entries (deposits,
+// withdrawals, and transfers where they are the source or destination), most recent
+// first, bounded by limit/offset.
+func (k *Kernel) ListLedger(ctx context.Context, callerID string, limit, offset int) ([]*LedgerEntry, error) {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+		return nil, err
+	}
+	return k.store.ListLedgerByUser(ctx, callerID, limit, offset)
 }
 
 // VerifyToken validates a bearer token and returns the subject user ID.

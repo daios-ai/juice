@@ -158,24 +158,30 @@ func enrichProcess(p *kernel.Process, since map[string]time.Time, uc *userCache)
 	return v
 }
 
-// adjustmentView renders a deposit/withdrawal with the operator and target @handles instead of raw
-// user UUIDs; the record's own id is dropped too (no command consumes it — external_key is the
-// out-of-band idempotency handle).
-type adjustmentView struct {
-	*kernel.Adjustment
+// ledgerView renders a ledger entry (deposit, withdrawal, or transfer) with the operator,
+// source, and destination @handles instead of raw user UUIDs; the record's own id is dropped
+// too (no command consumes it — external_key is the idempotency handle). from_handle is absent
+// on a deposit (no source) and to_handle on a withdrawal (no destination).
+type ledgerView struct {
+	*kernel.LedgerEntry
 	ID             string `json:"id,omitempty"`
 	OperatorUserID string `json:"operator_user_id,omitempty"`
-	TargetUserID   string `json:"target_user_id,omitempty"`
+	FromUserID     string `json:"from_user_id,omitempty"`
+	ToUserID       string `json:"to_user_id,omitempty"`
 	OperatorHandle string `json:"operator_handle"`
-	TargetHandle   string `json:"target_handle"`
+	FromHandle     string `json:"from_handle,omitempty"`
+	ToHandle       string `json:"to_handle,omitempty"`
 }
 
-func enrichAdjustment(a *kernel.Adjustment, uc *userCache) *adjustmentView {
-	return &adjustmentView{
-		Adjustment:     a,
-		OperatorHandle: uc.handle(a.OperatorUserID),
-		TargetHandle:   uc.handle(a.TargetUserID),
+func enrichLedger(e *kernel.LedgerEntry, uc *userCache) *ledgerView {
+	v := &ledgerView{LedgerEntry: e, OperatorHandle: uc.handle(e.OperatorUserID)}
+	if e.FromUserID != "" {
+		v.FromHandle = uc.handle(e.FromUserID)
 	}
+	if e.ToUserID != "" {
+		v.ToHandle = uc.handle(e.ToUserID)
+	}
+	return v
 }
 
 // peerViews projects proxy-peer users into handle+key+balance views (plus the §13 sync cache:

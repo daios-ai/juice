@@ -1066,8 +1066,8 @@ func TestServeListSteps(t *testing.T) {
 	}
 }
 
-// TestCLIListPaginationFlags is the thin-wire guard that `process list` and `step list`
-// register and forward --limit/--offset (a missing flag would make cobra error).
+// TestCLIListPaginationFlags is the thin-wire guard that `process list`, `step list`, and
+// `user ledger` register and forward --limit/--offset (a missing flag would make cobra error).
 func TestCLIListPaginationFlags(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
@@ -1087,6 +1087,9 @@ func TestCLIListPaginationFlags(t *testing.T) {
 	}
 	if _, err := execTestCmd(t, stepListCmd(), "--limit", "1", "--offset", "0"); err != nil {
 		t.Errorf("step list --limit/--offset: %v", err)
+	}
+	if _, err := execTestCmd(t, userLedgerCmd(), "--limit", "1", "--offset", "0"); err != nil {
+		t.Errorf("user ledger --limit/--offset: %v", err)
 	}
 }
 

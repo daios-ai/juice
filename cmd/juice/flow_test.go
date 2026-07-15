@@ -1973,6 +1973,72 @@ func TestFlow_DepositSpendWithdraw(t *testing.T) {
 	}
 }
 
+// getLedgerEntries returns the caller's ledger via GET /v1/ledger.
+func getLedgerEntries(t *testing.T, srv *httptest.Server, tok string) []map[string]any {
+	t.Helper()
+	resp := httpDo(t, srv, "GET", "/v1/ledger", nil, tok)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("GET /v1/ledger: got %d", resp.StatusCode)
+	}
+	var out []map[string]any
+	decodeResponse(t, resp, &out)
+	return out
+}
+
+// TestFlow_Transfer: a funded user transfers credits to another over the real HTTP
+// endpoint; balances move by exactly the amount, both parties see it in their ledger,
+// and an over-balance transfer is rejected with 402.
+func TestFlow_Transfer(t *testing.T) {
+	srv, k, _ := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	aliceID, aliceTok := makeUser(t, k, "@xfer-alice")
+	_, bobTok := makeUser(t, k, "@xfer-bob")
+
+	if _, err := k.Deposit(ctx, sys.ID, aliceID, 100, "seed", ""); err != nil {
+		t.Fatalf("deposit: %v", err)
+	}
+
+	// Alice transfers 30 to bob by @handle.
+	resp := httpDo(t, srv, "POST", "/v1/transfers", map[string]any{"recipient": "@xfer-bob", "amount": 30}, aliceTok)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /v1/transfers: got %d", resp.StatusCode)
+	}
+	var entry map[string]any
+	decodeResponse(t, resp, &entry)
+	if entry["from_handle"] != "@xfer-alice" || entry["to_handle"] != "@xfer-bob" {
+		t.Errorf("transfer response handles: got from=%v to=%v", entry["from_handle"], entry["to_handle"])
+	}
+
+	if got := getBalance(t, srv, aliceTok); got != 70 {
+		t.Errorf("alice balance: got %d, want 70", got)
+	}
+	if got := getBalance(t, srv, bobTok); got != 30 {
+		t.Errorf("bob balance: got %d, want 30", got)
+	}
+
+	// Alice's ledger has her deposit and her outbound transfer; bob's has the inbound one.
+	if n := len(getLedgerEntries(t, srv, aliceTok)); n != 2 {
+		t.Errorf("alice ledger: got %d entries, want 2", n)
+	}
+	if n := len(getLedgerEntries(t, srv, bobTok)); n != 1 {
+		t.Errorf("bob ledger: got %d entries, want 1", n)
+	}
+
+	// Over-balance transfer rejected (402), balance unchanged.
+	resp = httpDo(t, srv, "POST", "/v1/transfers", map[string]any{"recipient": "@xfer-bob", "amount": 1000}, aliceTok)
+	if resp.StatusCode != http.StatusPaymentRequired {
+		t.Errorf("over-balance transfer: got %d, want 402", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if got := getBalance(t, srv, aliceTok); got != 70 {
+		t.Errorf("alice balance after rejected transfer: got %d, want 70", got)
+	}
+}
+
 // TestFlow_ActionUpdateLive: provider updates a live action's price (which deactivates it),
 // caller is rejected, provider reactivates, caller runs again at new price, historical
 // transaction remains visible with original gross.

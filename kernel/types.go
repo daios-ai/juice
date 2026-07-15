@@ -273,21 +273,18 @@ type StatTag struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// Adjustment direction values.
-const (
-	DirectionCredit = "credit"
-	DirectionDebit  = "debit"
-)
-
-// Adjustment is an immutable audit record of a superuser balance change: a credit
-// grants out-of-band funds, a debit redeems them obliging an out-of-band payout.
-// ExternalKey is an optional opaque idempotency token from the out-of-band system;
-// when present it is globally unique and a replay re-applies no balance change.
-type Adjustment struct {
+// LedgerEntry is an immutable audit record of one direct balance movement, with a
+// nullable source and destination: a deposit credits (FromUserID empty, ToUserID set),
+// a withdrawal debits (FromUserID set, ToUserID empty), and a user transfer moves
+// between two local users (both set). OperatorUserID is the authorizer — @sys for a
+// deposit/withdrawal, the sender for a transfer. ExternalKey is an optional opaque
+// idempotency token; when present it is globally unique and a replay re-applies no
+// balance change.
+type LedgerEntry struct {
 	ID             string    `json:"id"`
 	OperatorUserID string    `json:"operator_user_id"`
-	TargetUserID   string    `json:"target_user_id"`
-	Direction      string    `json:"direction"`
+	FromUserID     string    `json:"from_user_id,omitempty"`
+	ToUserID       string    `json:"to_user_id,omitempty"`
 	Amount         int64     `json:"amount"`
 	Reason         string    `json:"reason"`
 	ExternalKey    string    `json:"external_key,omitempty"`

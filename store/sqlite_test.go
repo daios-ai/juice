@@ -59,16 +59,17 @@ func TestMigrationsAreFileBackedAndRecorded(t *testing.T) {
 		{"traces", "dispatch_json"},
 		{"steps", "completion_trace_id"},
 		{"actions", "auth_json"},
-		{"adjustments", "direction"},
-		{"adjustments", "external_key"},
+		{"ledger", "from_user_id"},
+		{"ledger", "to_user_id"},
+		{"ledger", "external_key"},
 	} {
 		if !db.columnExists(tc.table, tc.column) {
 			t.Fatalf("expected %s.%s to exist after migrations", tc.table, tc.column)
 		}
 	}
-	// The unified ledger replaced the per-direction tables.
-	if db.columnExists("deposits", "id") || db.columnExists("withdrawals", "id") {
-		t.Fatal("deposits/withdrawals tables should be dropped after the adjustments migration")
+	// The from/to ledger replaced the per-direction tables and then the adjustments table.
+	if db.columnExists("deposits", "id") || db.columnExists("withdrawals", "id") || db.columnExists("adjustments", "id") {
+		t.Fatal("deposits/withdrawals/adjustments tables should be dropped after the ledger migration")
 	}
 }
 
@@ -3170,5 +3171,81 @@ func TestListNativeActions(t *testing.T) {
 	}
 	if natives[0].Name != "time" || natives[0].Kind != kernel.KindNative {
 		t.Errorf("unexpected native: name=%q kind=%q", natives[0].Name, natives[0].Kind)
+	}
+}
+
+func TestCreateLedgerEntry(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	sys := newUser("@sys", 0)
+	alice := newUser("@alice", 100)
+	bob := newUser("@bob", 0)
+	for _, u := range []*kernel.User{sys, alice, bob} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mustEntry := func(e *kernel.LedgerEntry) {
+		t.Helper()
+		if err := db.CreateLedgerEntry(ctx, e); err != nil {
+			t.Fatalf("create ledger entry: %v", err)
+		}
+	}
+	avail := func(id string) int64 {
+		u, err := db.ReadUser(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u.Available
+	}
+
+	// Credit-only (deposit): only to is set.
+	mustEntry(&kernel.LedgerEntry{ID: uuid.New().String(), OperatorUserID: sys.ID, ToUserID: alice.ID, Amount: 50, CreatedAt: time.Now().UTC()})
+	if avail(alice.ID) != 150 {
+		t.Errorf("alice after credit: got %d, want 150", avail(alice.ID))
+	}
+	// Debit-only (withdraw): only from is set.
+	mustEntry(&kernel.LedgerEntry{ID: uuid.New().String(), OperatorUserID: sys.ID, FromUserID: alice.ID, Amount: 20, CreatedAt: time.Now().UTC()})
+	if avail(alice.ID) != 130 {
+		t.Errorf("alice after debit: got %d, want 130", avail(alice.ID))
+	}
+	// Both (transfer): from and to set, one commit.
+	mustEntry(&kernel.LedgerEntry{ID: uuid.New().String(), OperatorUserID: alice.ID, FromUserID: alice.ID, ToUserID: bob.ID, Amount: 30, CreatedAt: time.Now().UTC()})
+	if avail(alice.ID) != 100 || avail(bob.ID) != 30 {
+		t.Errorf("after transfer: alice=%d bob=%d, want 100/30", avail(alice.ID), avail(bob.ID))
+	}
+	// Insufficient funds on the debit leg returns ErrInsufficientFunds and moves nothing.
+	err := db.CreateLedgerEntry(ctx, &kernel.LedgerEntry{ID: uuid.New().String(), OperatorUserID: alice.ID, FromUserID: alice.ID, ToUserID: bob.ID, Amount: 1000, CreatedAt: time.Now().UTC()})
+	if !errors.Is(err, kernel.ErrInsufficientFunds) {
+		t.Errorf("overdraw: got %v, want ErrInsufficientFunds", err)
+	}
+	if avail(alice.ID) != 100 || avail(bob.ID) != 30 {
+		t.Errorf("after failed transfer: alice=%d bob=%d, want 100/30 (unchanged)", avail(alice.ID), avail(bob.ID))
+	}
+
+	// ListLedgerByUser: alice is party to the credit, debit, and transfer = 3 committed rows;
+	// the failed transfer rolled back and wrote nothing. Bob only to the transfer = 1.
+	aliceEntries, err := db.ListLedgerByUser(ctx, alice.ID, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aliceEntries) != 3 {
+		t.Errorf("alice ledger entries: got %d, want 3", len(aliceEntries))
+	}
+	bobEntries, err := db.ListLedgerByUser(ctx, bob.ID, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bobEntries) != 1 {
+		t.Errorf("bob ledger entries: got %d, want 1", len(bobEntries))
+	}
+
+	// Pagination bounds the result set (alice has 3 committed entries).
+	if got, _ := db.ListLedgerByUser(ctx, alice.ID, 1, 0); len(got) != 1 {
+		t.Errorf("limit=1: got %d entries, want 1", len(got))
+	}
+	if got, _ := db.ListLedgerByUser(ctx, alice.ID, 2, 1); len(got) != 2 {
+		t.Errorf("limit=2 offset=1: got %d entries, want 2 of 3", len(got))
 	}
 }
