@@ -100,13 +100,13 @@ func TestSubCostNotIncrementedOnFailedSubCall(t *testing.T) {
 
 	inner := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
-		Kind: kernel.KindWasm, Source: "inner", Active: true, Public: true, Price: 100,
+		Kind: kernel.KindWasm, Source: "inner", Active: true, Visibility: kernel.VisibilityPublic, Price: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, inner)
 	outer := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "outer",
-		Kind: kernel.KindWasm, Source: "outer", Active: true, Public: true, Price: 50,
+		Kind: kernel.KindWasm, Source: "outer", Active: true, Visibility: kernel.VisibilityPublic, Price: 50,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, outer)
@@ -212,7 +212,6 @@ func TestCallInactiveActionDeniedForNonOwner(t *testing.T) {
 	}
 }
 
-
 func TestCallPrivateDenied(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
@@ -246,7 +245,7 @@ func TestCallPublicActionAnyOwner(t *testing.T) {
 		Name:        "svc",
 		Kind:        kernel.KindWasm,
 		Active:      true,
-		Public:      true,
+		Visibility:  kernel.VisibilityPublic,
 		Price:       0,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
@@ -279,7 +278,7 @@ func TestCallPrivateActionOwnerOnly(t *testing.T) {
 		Name:        "priv",
 		Kind:        kernel.KindWasm,
 		Active:      true,
-		Public:      false,
+		Visibility:  kernel.VisibilityPrivate,
 		Price:       0,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
@@ -314,7 +313,7 @@ func TestCallInactiveActionBlocked(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 1000)
 	_ = st.CreateAction(ctx, &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "inactive",
-		Kind: kernel.KindWasm, Active: false, Public: true, Price: 0,
+		Kind: kernel.KindWasm, Active: false, Visibility: kernel.VisibilityPublic, Price: 0,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	})
 
@@ -336,7 +335,7 @@ func TestCallSuspendedOwnerActionBlocked(t *testing.T) {
 	bob := setupUser(t, st, "@bob", 0)        // action owner (provider)
 	_ = st.CreateAction(ctx, &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "svc",
-		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0,
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	})
 
@@ -446,10 +445,10 @@ func TestCallCreatesExactlyOneTransaction(t *testing.T) {
 	before := len(beforeTxs)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:        alice.ID,		ExistingTraceID: tr.ID,
-		TargetUserID:    alice.ID,
-		ActionName:      "svc",
-		Args:            map[string]any{},
+		CallerID: alice.ID, ExistingTraceID: tr.ID,
+		TargetUserID: alice.ID,
+		ActionName:   "svc",
+		Args:         map[string]any{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -891,6 +890,76 @@ func TestWasmHostCallPrivateActionDenied(t *testing.T) {
 	}
 }
 
+// TestSubcallProviderPrivateHelper: a provider's public composite subcalls the provider's OWN
+// private helper while a *customer* funds the process. Caller-scoping (§4) makes the subcall's
+// caller the composite's owner, so a provider may keep its internals private and still sell a
+// composite over them. Under the old process-owner scoping this was denied.
+func TestSubcallProviderPrivateHelper(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 0) // provider
+	bob := setupUser(t, st, "@bob", 1000)  // customer funds the process
+
+	helper := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "helper",
+		Kind: kernel.KindWasm, Source: "inner", Active: true, Visibility: kernel.VisibilityPrivate, Price: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, helper)
+	composite := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "composite",
+		Kind: kernel.KindWasm, Source: "outer", Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, composite)
+
+	exec := &subcallExec{targetUser: alice.ID, targetAction: "helper"}
+	k := newTestKernelWithScripts(st, exec)
+	_, tr := beginTestRun(t, st, bob.ID, composite)
+
+	if _, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: bob.ID, ExistingTraceID: tr.ID, Action: composite, Args: map[string]any{},
+	}); err != nil {
+		t.Errorf("provider's public composite should reach its own private helper: %v", err)
+	}
+}
+
+// TestSubcallConfusedDeputyDenied: foreign code the process owner funds must NOT reach the process
+// owner's private actions. bob funds alice's public composite, which tries to subcall bob's private
+// action; caller-scoping denies it (caller = alice ≠ owner of the private action). Under the old
+// process-owner scoping this was allowed — the confused-deputy bug this change closes.
+func TestSubcallConfusedDeputyDenied(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "@alice", 0) // composite author
+	bob := setupUser(t, st, "@bob", 1000)  // process owner with a private action
+
+	secret := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "secret",
+		Kind: kernel.KindWasm, Source: "inner", Active: true, Visibility: kernel.VisibilityPrivate, Price: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, secret)
+	composite := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "composite",
+		Kind: kernel.KindWasm, Source: "outer", Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, composite)
+
+	exec := &subcallExec{targetUser: bob.ID, targetAction: "secret"}
+	k := newTestKernelWithScripts(st, exec)
+	_, tr := beginTestRun(t, st, bob.ID, composite)
+
+	if _, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: bob.ID, ExistingTraceID: tr.ID, Action: composite, Args: map[string]any{},
+	}); err == nil {
+		t.Error("foreign composite must not reach the process owner's private action (confused deputy)")
+	}
+}
+
 type hostCallExec struct {
 	targetUser   string
 	targetAction string
@@ -941,7 +1010,7 @@ func TestProcessFundedSubCallSpendsSameProcess(t *testing.T) {
 
 	inner := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
-		Kind: kernel.KindWasm, Source: "inner", Active: true, Public: true, Price: 100,
+		Kind: kernel.KindWasm, Source: "inner", Active: true, Visibility: kernel.VisibilityPublic, Price: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, inner)
@@ -992,7 +1061,7 @@ func TestProcessFundedSubCallInsufficientFundsFails(t *testing.T) {
 
 	inner := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
-		Kind: kernel.KindWasm, Source: "inner", Active: true, Public: true, Price: 100,
+		Kind: kernel.KindWasm, Source: "inner", Active: true, Visibility: kernel.VisibilityPublic, Price: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, inner)
@@ -1036,7 +1105,7 @@ func TestProcessFundedSubCallTraceHasSameProcess(t *testing.T) {
 
 	inner := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
-		Kind: kernel.KindWasm, Source: "inner", Active: true, Public: true, Price: 0,
+		Kind: kernel.KindWasm, Source: "inner", Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, inner)
@@ -1176,7 +1245,7 @@ func TestCommitCallAtomicOnFailure(t *testing.T) {
 	caller := setupUser(t, base, "@caller", 1000)
 	actionOwner := setupUser(t, base, "@owner", 0)
 	a := setupAction(t, base, actionOwner.ID, "echo", 100)
-	a.Public = true
+	a.Visibility = kernel.VisibilityPublic
 	_ = base.UpdateAction(ctx, a)
 
 	p, tr := beginTestRun(t, base, caller.ID, a)
@@ -1222,10 +1291,10 @@ func TestCallInvalidParentTraceDoesNotLockFunds(t *testing.T) {
 	p := setupProcess(t, st, alice.ID, 500)
 
 	_, err := k.Call(ctx, kernel.CallRequest{
-		CallerID:      alice.ID,		ParentTraceID: "nonexistent-trace-id",
-		TargetUserID:  alice.ID,
-		ActionName:    "svc",
-		Args:          map[string]any{},
+		CallerID: alice.ID, ParentTraceID: "nonexistent-trace-id",
+		TargetUserID: alice.ID,
+		ActionName:   "svc",
+		Args:         map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for bad parent trace, got %v", err)
@@ -1286,12 +1355,12 @@ func TestCallCrossProcessParentTraceRejectedForNonOwner(t *testing.T) {
 	actionOwner := setupUser(t, st, "@f2-action-owner", 0)
 	targetAction := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: procOwner.ID, Name: "f2-target",
-		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0,
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	callerAction := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: actionOwner.ID, Name: "f2-caller",
-		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0,
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, targetAction)
@@ -1608,7 +1677,7 @@ func TestZeroPriceCallOnClosedProcessReturnsErrInvalidState(t *testing.T) {
 		Kind:         kernel.KindHTTP,
 		Active:       true,
 		Price:        0,
-		Public:       true,
+		Visibility:   kernel.VisibilityPublic,
 		Source:       "http://example.com",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -1651,7 +1720,7 @@ func TestCallRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 	remoteAct := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID,
 		Name: "rpme-action", Kind: kernel.KindRemoteProxy,
-		Active: true, Public: true, Price: 50,
+		Active: true, Visibility: kernel.VisibilityPublic, Price: 50,
 		Source:    "https://remote.example.com/v1/federation/call?action=@rpme-owner/rpme-action&counterparty=us",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -1691,18 +1760,18 @@ func TestCallRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 
 func TestParseActionRef(t *testing.T) {
 	cases := []struct {
-		input       string
-		wantOwner   string
-		wantName    string
-		wantErr     bool
+		input     string
+		wantOwner string
+		wantName  string
+		wantErr   bool
 	}{
 		{"@alice/greet", "@alice", "greet", false},
 		{"@alice/greet/subname", "@alice", "greet/subname", false}, // names may contain /
-		{"@bob/", "", "", true},                                     // empty name
-		{"alice/greet", "", "", true},                               // missing @
-		{"@alice", "", "", true},                                    // missing /
-		{"@/greet", "", "", true},                                   // empty owner
-		{"", "", "", true},                                          // empty string
+		{"@bob/", "", "", true},                                    // empty name
+		{"alice/greet", "", "", true},                              // missing @
+		{"@alice", "", "", true},                                   // missing /
+		{"@/greet", "", "", true},                                  // empty owner
+		{"", "", "", true},                                         // empty string
 	}
 	for _, c := range cases {
 		owner, name, err := kernel.ParseActionRef(c.input)
@@ -1754,7 +1823,7 @@ func TestRunFederatedFailureReturnsCommittedReceiptWithCharge(t *testing.T) {
 
 	inner := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "inner",
-		Kind: kernel.KindWasm, Source: "inner", Active: true, Public: true, Price: 100,
+		Kind: kernel.KindWasm, Source: "inner", Active: true, Visibility: kernel.VisibilityPublic, Price: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(ctx, inner); err != nil {
@@ -1762,7 +1831,7 @@ func TestRunFederatedFailureReturnsCommittedReceiptWithCharge(t *testing.T) {
 	}
 	outer := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "outer",
-		Kind: kernel.KindWasm, Source: "outer", Active: true, Public: true, Price: 150,
+		Kind: kernel.KindWasm, Source: "outer", Active: true, Visibility: kernel.VisibilityPublic, Price: 150,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(ctx, outer); err != nil {
@@ -1895,7 +1964,7 @@ func TestHostStepCreateResolvesNames(t *testing.T) {
 
 	approve := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "approve",
-		Kind: kernel.KindNative, Source: "native", Active: true, Public: true, Price: 0,
+		Kind: kernel.KindNative, Source: "native", Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(ctx, approve); err != nil {
@@ -1903,7 +1972,7 @@ func TestHostStepCreateResolvesNames(t *testing.T) {
 	}
 	orch := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "orchestrate",
-		Kind: kernel.KindWasm, Source: "x", Active: true, Public: true, Price: 0,
+		Kind: kernel.KindWasm, Source: "x", Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(ctx, orch); err != nil {

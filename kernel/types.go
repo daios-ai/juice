@@ -53,28 +53,50 @@ type User struct {
 	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
+// IsPeer reports whether u is a remote-kernel proxy user, identified by a set public_key (§13).
+// A peer authenticates by federation signature and is denied local-visibility actions (§4).
+func (u *User) IsPeer() bool { return u != nil && u.PublicKey != "" }
+
+// ActionVisibility is the callability scope of an action (§4). It replaces the earlier boolean
+// public flag with three levels, controlling the direct dependency surface, not reachability.
+type ActionVisibility string
+
+const (
+	// VisibilityPrivate: callable only when the caller is the action owner.
+	VisibilityPrivate ActionVisibility = "private"
+	// VisibilityLocal: callable by any local (non-peer) caller; never served in manifests or gossip.
+	VisibilityLocal ActionVisibility = "local"
+	// VisibilityPublic: callable by anyone including peers; served in manifests/gossip (§13).
+	VisibilityPublic ActionVisibility = "public"
+)
+
+// ValidActionVisibility reports whether v is one of the three defined visibility levels.
+func ValidActionVisibility(v ActionVisibility) bool {
+	return v == VisibilityPrivate || v == VisibilityLocal || v == VisibilityPublic
+}
+
 // Action is a callable capability.
 type Action struct {
-	ID             string         `json:"id"`
-	OwnerUserID    string         `json:"owner_user_id"`
-	OwnerHandle    string         `json:"owner_handle,omitempty"`    // populated via JOIN; empty if not loaded
-	OwnerSuspended bool           `json:"owner_suspended,omitempty"` // populated via JOIN; true when the owner is suspended (§12)
-	Name           string         `json:"name"`
-	Kind           ActionKind     `json:"kind"`
-	Active         bool           `json:"active"`
-	Public         bool           `json:"public"`
-	Price          int64          `json:"price"`
-	Description    string         `json:"description"`
-	InputSchema    map[string]any `json:"input_schema"`
-	OutputSchema   map[string]any `json:"output_schema"`
-	Source         string         `json:"source,omitempty"`           // structured HTTPSource JSON for http; TinyGo source for wasm; federation URL for remote_proxy
-	ArtifactHash   string         `json:"artifact_hash,omitempty"`    // content-addressed compiled WASM artifact
-	WasmArtifact   string         `json:"wasm_artifact,omitempty"`    // base64-encoded compiled WASM bytes (wasm only); Source holds the TinyGo text
-	RemoteActionID string         `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
-	AuthJSON       string         `json:"-"`                          // AES-256-GCM encrypted upstream auth credentials; never serialized
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
-	DeletedAt      *time.Time     `json:"deleted_at,omitempty"`
+	ID             string           `json:"id"`
+	OwnerUserID    string           `json:"owner_user_id"`
+	OwnerHandle    string           `json:"owner_handle,omitempty"`    // populated via JOIN; empty if not loaded
+	OwnerSuspended bool             `json:"owner_suspended,omitempty"` // populated via JOIN; true when the owner is suspended (§12)
+	Name           string           `json:"name"`
+	Kind           ActionKind       `json:"kind"`
+	Active         bool             `json:"active"`
+	Visibility     ActionVisibility `json:"visibility"`
+	Price          int64            `json:"price"`
+	Description    string           `json:"description"`
+	InputSchema    map[string]any   `json:"input_schema"`
+	OutputSchema   map[string]any   `json:"output_schema"`
+	Source         string           `json:"source,omitempty"`           // structured HTTPSource JSON for http; TinyGo source for wasm; federation URL for remote_proxy
+	ArtifactHash   string           `json:"artifact_hash,omitempty"`    // content-addressed compiled WASM artifact
+	WasmArtifact   string           `json:"wasm_artifact,omitempty"`    // base64-encoded compiled WASM bytes (wasm only); Source holds the TinyGo text
+	RemoteActionID string           `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
+	AuthJSON       string           `json:"-"`                          // AES-256-GCM encrypted upstream auth credentials; never serialized
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+	DeletedAt      *time.Time       `json:"deleted_at,omitempty"`
 }
 
 // Upstream auth schemes (§8). Owner-held schemes carry their secret in auth_json; the delegated

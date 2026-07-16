@@ -491,6 +491,41 @@ func TestImportRemoteActionRejectsMissingRequiredFields(t *testing.T) {
 	}
 }
 
+// TestLocalActionNotExported: a local-visibility action is never served as a manifest nor gossiped
+// (§13); only public actions cross the kernel boundary. This keeps friendship non-transitive and is
+// how an imported proxy (set local) stays unreachable by peers.
+func TestLocalActionNotExported(t *testing.T) {
+	st := newTestStore(t)
+	su := setupUser(t, st, "@sys", 0)
+	k := newTestKernel(st)
+	k.SetSigningKey(testSigningKey(), su.ID)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@local-owner", 0)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "localonly",
+		Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityLocal,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		Source: "https://example.com/call", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := k.GetActionManifest(ctx, a.ID); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("local action manifest: want ErrUnauthorized, got %v", err)
+	}
+	g, err := k.GetGossip(ctx, "")
+	if err != nil {
+		t.Fatalf("GetGossip: %v", err)
+	}
+	for _, ga := range g.Actions {
+		if ga.ActionID == a.ID {
+			t.Error("local action must not appear in gossip")
+		}
+	}
+}
+
 func TestGetActionManifestIncludesActionID(t *testing.T) {
 	st := newTestStore(t)
 	su := setupUser(t, st, "@sys", 0)
@@ -505,7 +540,7 @@ func TestGetActionManifestIncludesActionID(t *testing.T) {
 		Name:         "manifest2",
 		Kind:         kernel.KindHTTP,
 		Active:       true,
-		Public:       true,
+		Visibility:   kernel.VisibilityPublic,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		Source:       "https://example.com/call",
@@ -588,8 +623,8 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
-	pubFed := true
-	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubFed}); err != nil {
+	pubFed := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed}); err != nil {
 		t.Fatalf("UpdateAction public: %v", err)
 	}
 
@@ -670,8 +705,8 @@ func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel,
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	pubFed := true
-	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubFed}); err != nil {
+	pubFed := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed}); err != nil {
 		t.Fatal(err)
 	}
 	// Fund the caller with exactly the proxy price so a full refund restores the original balance.
@@ -1228,8 +1263,8 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	pubFed2 := true
-	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubFed2}); err != nil {
+	pubFed2 := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed2}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1304,8 +1339,8 @@ func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	pubFed3 := true
-	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubFed3}); err != nil {
+	pubFed3 := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed3}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1352,8 +1387,8 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	result, _ := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
 	a := result.Created[0]
 	_ = k.SetActive(ctx, sys.ID, a.ID, true)
-	pubFed4 := true
-	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubFed4})
+	pubFed4 := kernel.VisibilityPublic
+	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed4})
 
 	remoteReceipt := &kernel.Receipt{
 		ID: uuid.New().String(), IssuerUserID: "rs",
@@ -1417,8 +1452,8 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	pubFed := true
-	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubFed}); err != nil {
+	pubFed := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1795,7 +1830,7 @@ func TestFriendDoesNotReexportImportedProxies(t *testing.T) {
 	owner := setupUser(t, st, "@localprov", 0)
 	own := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "mine", Kind: kernel.KindHTTP,
-		Active: true, Public: true, Price: 10, Description: "own action",
+		Active: true, Visibility: kernel.VisibilityPublic, Price: 10, Description: "own action",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		Source:    `{"type":"http","base_url":"https://api.example.com","method":"POST","path":"/"}`,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -1823,7 +1858,7 @@ func TestFriendDoesNotReexportImportedProxies(t *testing.T) {
 		t.Fatalf("ImportRemoteAction: %v (created %d)", err, len(res.Created))
 	}
 	proxy := res.Created[0]
-	proxy.Active, proxy.Public = true, true
+	proxy.Active, proxy.Visibility = true, kernel.VisibilityPublic
 	if err := st.UpdateAction(ctx, proxy); err != nil {
 		t.Fatal(err)
 	}

@@ -722,7 +722,7 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey string) (*GossipRes
 	}
 	handle, _ := k.store.GetConfig(ctx, "kernel_handle")
 
-	actions, err := k.store.ListPublicActions(ctx, 100, 0)
+	actions, err := k.store.ListVisibleActions(ctx, false, 100, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -1027,6 +1027,7 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 				Name:           name,
 				Kind:           KindRemoteProxy,
 				Active:         false,
+				Visibility:     VisibilityPrivate, // promoted to local when the peer is friended (§13)
 				Price:          proxyPrice,
 				Description:    m.Description,
 				InputSchema:    m.InputSchema,
@@ -1109,7 +1110,7 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 	if err != nil {
 		return nil, err
 	}
-	if !a.Active || !a.Public {
+	if !a.Active || a.Visibility != VisibilityPublic {
 		return nil, ErrUnauthorized.Wrap("manifest only available for public active actions")
 	}
 	// Delegated-OAuth actions are never advertised: a remote peer's proxy user cannot complete a

@@ -136,14 +136,17 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 	if err != nil {
 		return nil, ErrNotFound.Wrap("action not found")
 	}
-	if !canCall(process.OwnerUserID, action) {
+	// The completion call's caller is the required caller, so callability is checked against them
+	// (§4 caller-scoping): a step may only be parked for a caller who could actually complete it.
+	requiredCaller, err := k.store.ReadUser(ctx, requiredCallerID)
+	if err != nil {
+		return nil, ErrNotFound.Wrap("required_caller_user_id not found")
+	}
+	if !canCall(requiredCaller, action) {
 		if !action.Active {
 			return nil, ErrInvalidState.Wrap("action is inactive")
 		}
-		return nil, ErrUnauthorized.Wrap("process owner cannot call action")
-	}
-	if _, err := k.store.ReadUser(ctx, requiredCallerID); err != nil {
-		return nil, ErrNotFound.Wrap("required_caller_user_id not found")
+		return nil, ErrUnauthorized.Wrap("required caller cannot call action")
 	}
 	var normErr error
 	partialArgs, normErr = normalizeJSONObject(partialArgs, "partial_args")

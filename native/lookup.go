@@ -8,8 +8,8 @@ import (
 
 // RegisterLookupHandler registers the @sys/lookup native action handler on k.
 func RegisterLookupHandler(k *kernel.Kernel) {
-	k.RegisterNativeHandler("lookup", func(ctx context.Context, args map[string]any, _, _, ownerUserID, _, _ string) (map[string]any, error) {
-		return executeLookup(ctx, args, ownerUserID, k)
+	k.RegisterNativeHandler("lookup", func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
+		return executeLookup(ctx, args, callerID, k)
 	})
 }
 

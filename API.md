@@ -128,9 +128,9 @@ A `Grant` is per-action consent (§8): a pointer binding one action to a `Connec
 | Operation | HTTP | CLI |
 |-----------|------|-----|
 | Create action | `POST /v1/actions` `{name, kind, [source, wasm_artifact, method, params, description, price, input_schema, output_schema, auth]}` → 201 action | `juice action create <name> --kind [--source --artifact --method --param --description --price --input-schema --output-schema --auth]` |
-| List actions | `GET /v1/actions[?owner=&name=&all=&limit=&offset=]` → action[]; active-only by default (unauthenticated → active public; authenticated → + own active; superuser → all owners' active); `?all=1` includes inactive/private in scope; `?owner=`/`?name=` filter | `juice action list [--all --limit --offset]` |
+| List actions | `GET /v1/actions[?owner=&name=&all=&limit=&offset=]` → action[]; active-only by default (unauthenticated → active public; authenticated → active public + local + own active; superuser → all owners' active); `?all=1` includes inactive/private in scope; `?owner=`/`?name=` filter | `juice action list [--all --limit --offset]` |
 | Show action | `GET /v1/actions/{id}` → action | `juice action show <action>` |
-| Update action | `PUT /v1/actions/{id}` `{[price, description, source, wasm_artifact, method, params, input_schema, output_schema, public, auth]}` → action | `juice action update <action> [--price --description --source --artifact --method --param --input-schema --output-schema --public --auth]` |
+| Update action | `PUT /v1/actions/{id}` `{[price, description, source, wasm_artifact, method, params, input_schema, output_schema, visibility, auth]}` → action | `juice action update <action> [--price --description --source --artifact --method --param --input-schema --output-schema --visibility --auth]` |
 | Enable action | `POST /v1/actions/{id}/enable` → `{active:true}` | `juice action enable <action>` |
 | Disable action | `POST /v1/actions/{id}/disable` → `{active:false}` | `juice action disable <action>` |
 | Delete action | `DELETE /v1/actions/{id}` → 204 | `juice action delete <action>` |
@@ -139,7 +139,7 @@ A `Grant` is per-action consent (§8): a pointer binding one action to a `Connec
 | Get stats | `GET /v1/stats/{action_id}` → stats | `juice action stats <action>` |
 | List ratings | `GET /v1/actions/{id}/ratings[?limit=&offset=]` → rating[] | — |
 
-`<action>` is `@owner/name` (a raw id is also accepted). Action responses (show and list) include a computed `action` field (`@owner/name`) alongside `id`, plus the full `input_schema` and `output_schema` — the CLI text view shows the same fields the JSON returns. `price` is the subtree bound: the maximum total cost of the action and everything it calls. `auth` is the upstream credential config `{scheme, config, secrets}` (R9: write-only, never returned); reads instead expose only its non-secret summary — `auth_scheme` (scheme name, when present) and `requires_grant` (R8).
+`<action>` is `@owner/name` (a raw id is also accepted). Action responses (show and list) include a computed `action` field (`@owner/name`) alongside `id`, plus the full `input_schema` and `output_schema` — the CLI text view shows the same fields the JSON returns. `visibility` is `private` (owner only), `local` (any local caller of this kernel, never peers), or `public` (anyone, and the only value served in manifests/gossip, §13); it is caller-scoped callability (requirements.md §4), settable only via update, and defaults to `private`. Widening beyond `private` on an OpenAPI-imported action requires verified ownership. `price` is the subtree bound: the maximum total cost of the action and everything it calls. `auth` is the upstream credential config `{scheme, config, secrets}` (R9: write-only, never returned); reads instead expose only its non-secret summary — `auth_scheme` (scheme name, when present) and `requires_grant` (R8).
 
 The `auth` object is `{scheme, config, secrets}`; valid schemes and their keys (semantics in requirements.md §8):
 
@@ -220,7 +220,7 @@ Native actions registered at bootstrap, owned by `@sys`, public, runnable like a
 
 ### Federation
 
-Friending a peer imports its actions owner-qualified, so a peer action is addressed `@peer/owner/name` and is called through `POST /v1/run` like any local action; there are no federation HTTP endpoints. A kernel exposes only its **own** actions to peers — a peer's own imports are never re-advertised, so friendship is non-transitive (reach a peer's imported action by friending its true owner). Trust and peering are managed via the admin commands below. The cross-kernel transport is an implementation detail (§13).
+Friending a peer imports its actions owner-qualified, so a peer action is addressed `@peer/owner/name` and is called through `POST /v1/run` like any local action; there are no federation HTTP endpoints. Imported proxies are enabled with `visibility = local`, so a kernel exposes only its **own** `public` actions to peers — a peer's own imports are never re-advertised *and* an inbound peer call to one is denied by `CanCall` (a peer caller fails the `local` branch, §4), so friendship is non-transitive at both the manifest and the call layer (reach a peer's imported action by friending its true owner). Trust and peering are managed via the admin commands below. The cross-kernel transport is an implementation detail (§13).
 
 ### Admin (superuser-gated TCP routes)
 

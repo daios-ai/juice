@@ -691,10 +691,10 @@ func TestActionListActive(t *testing.T) {
 		OutputSchema: minSchema,
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
-	pub := true
-	_, _ = env.k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pub})
+	pub := kernel.VisibilityPublic
+	_, _ = env.k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub})
 
-	actions, err := env.k.ListPublicActions(ctx, 10, 0)
+	actions, err := env.k.ListVisibleActions(ctx, false, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -945,7 +945,7 @@ func createStepAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, 
 	if er.StatusCode != http.StatusOK {
 		t.Fatalf("enable action %s: expected 200, got %d", name, er.StatusCode)
 	}
-	httpDo(t, srv, "PUT", "/v1/actions/"+id, map[string]any{"public": true}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+id, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 	return id, handle + "/" + name
 }
 
@@ -964,8 +964,8 @@ func TestServeCreateStep(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, pid)
 
 	resp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-		"trace_id": traceID,
-		"action_id": actionID,
+		"trace_id":        traceID,
+		"action_id":       actionID,
 		"required_caller": "@cs-create-caller",
 		"partial_args":    map[string]any{"preset": "val"},
 	}, ownerTok)
@@ -1003,11 +1003,11 @@ func TestServeListSteps(t *testing.T) {
 
 	for range 2 {
 		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-			"trace_id": traceID,
-			"action_id": actionID,
+			"trace_id":        traceID,
+			"action_id":       actionID,
 			"required_caller": "@sl-steps-caller",
 			"partial_args":    map[string]any{},
-			}, ownerTok)
+		}, ownerTok)
 		if r.StatusCode != http.StatusCreated {
 			r.Body.Close()
 			t.Fatalf("create step: expected 201, got %d", r.StatusCode)
@@ -1109,8 +1109,8 @@ func TestServeGetStep(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, pid)
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-		"trace_id": traceID,
-		"action_id": actionID,
+		"trace_id":        traceID,
+		"action_id":       actionID,
 		"required_caller": "@gs-steps-caller",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
@@ -1168,8 +1168,8 @@ func TestServeCompleteStepMissingArgs(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, pid)
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-		"trace_id": traceID,
-		"action_id": actionID,
+		"trace_id":        traceID,
+		"action_id":       actionID,
 		"required_caller": "@csmiss-caller",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
@@ -1205,8 +1205,8 @@ func TestServeCompleteStep(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, pid)
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
-		"trace_id": traceID,
-		"action_id": actionID,
+		"trace_id":        traceID,
+		"action_id":       actionID,
 		"required_caller": "@cs2-caller",
 		"partial_args":    map[string]any{"from_partial": "A"},
 	}, ownerTok)
@@ -1650,7 +1650,7 @@ func TestPrintTextParity(t *testing.T) {
 	objects := []any{
 		enrichAction(&kernel.Kernel{}, &kernel.Action{
 			ID: "a1", OwnerUserID: "u1", OwnerHandle: "@alice", Name: "weather",
-			Kind: kernel.KindHTTP, Active: true, Public: true, Price: 5,
+			Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPublic, Price: 5,
 			Description:  "current weather",
 			InputSchema:  map[string]any{"type": "object"},
 			OutputSchema: map[string]any{"type": "object"},

@@ -76,7 +76,7 @@ func seedAction(t *testing.T, st kernel.Store, ownerID, name, desc string) *kern
 	t.Helper()
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: ownerID, Name: name,
-		Kind: kernel.KindHTTP, Active: true, Public: true, Description: desc,
+		Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPublic, Description: desc,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(context.Background(), a); err != nil {

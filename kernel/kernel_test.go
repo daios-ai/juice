@@ -142,6 +142,19 @@ func setupAction(t *testing.T, st kernel.Store, ownerID, name string, price int6
 	return a
 }
 
+// setupLocalAction is setupAction with local visibility, so a step parked for any local required
+// caller can be completed (caller-scoped CanCall, §4). setupAction stays private for tests that
+// assert a non-owner cannot call it.
+func setupLocalAction(t *testing.T, st kernel.Store, ownerID, name string, price int64) *kernel.Action {
+	t.Helper()
+	a := setupAction(t, st, ownerID, name, price)
+	a.Visibility = kernel.VisibilityLocal
+	if err := st.UpdateAction(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
 // setupSys creates the @sys superuser.
 // Call this in any test that invokes RegisterRemoteKernel or ImportRemoteAction.
 func setupSys(t *testing.T, _ *kernel.Kernel, st kernel.Store) *kernel.User {
@@ -941,7 +954,7 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 		Name:        "rate-svc",
 		Kind:        kernel.KindWasm,
 		Active:      true,
-		Public:      true,
+		Visibility:  kernel.VisibilityPublic,
 		Price:       0,
 		Source:      "wat",
 		CreatedAt:   time.Now().UTC(),
@@ -991,7 +1004,7 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 		Name:        "rerate-svc",
 		Kind:        kernel.KindWasm,
 		Active:      true,
-		Public:      true,
+		Visibility:  kernel.VisibilityPublic,
 		Price:       0,
 		Source:      "wat",
 		CreatedAt:   time.Now().UTC(),
@@ -1477,7 +1490,7 @@ func TestReadTransactionPartyAccess(t *testing.T) {
 	other := setupUser(t, st, "@other", 500)    // non-party
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pvd-svc",
-		Kind: kernel.KindWasm, Active: true, Public: true, Price: 10, Source: "wat",
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 10, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -1559,7 +1572,7 @@ func TestManifestSigningRequiresConfiguredKey(t *testing.T) {
 		Name:         "manifest",
 		Kind:         kernel.KindHTTP,
 		Active:       true,
-		Public:       true,
+		Visibility:   kernel.VisibilityPublic,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		Source:       "https://example.com/call",
@@ -1587,7 +1600,7 @@ func TestRatingRecordCreated(t *testing.T) {
 	provider := setupUser(t, st, "@rr-provider", 0)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "rr-svc",
-		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0, Source: "wat",
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -1634,7 +1647,7 @@ func TestRatingDuplicateRejected(t *testing.T) {
 	provider := setupUser(t, st, "@dup-provider", 0)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "dup-svc",
-		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0, Source: "wat",
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -1667,7 +1680,7 @@ func TestTransactionViewEmbeddedRating(t *testing.T) {
 	provider := setupUser(t, st, "@tv-provider", 0)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "tv-svc",
-		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0, Source: "wat",
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -1746,7 +1759,7 @@ func TestListAllTransactionViewsAttachesRating(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 1000)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "svc",
-		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0, Source: "wat",
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -2213,7 +2226,7 @@ func TestSuperuserListTransactions(t *testing.T) {
 	provider := setupUser(t, st, "@su-provider", 0)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "su-svc",
-		Kind: kernel.KindWasm, Active: true, Public: true, Price: 0, Source: "wat",
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0, Source: "wat",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -2265,14 +2278,14 @@ func TestReadCallableAction(t *testing.T) {
 
 	pubAction := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pub-action",
-		Kind: kernel.KindNative, Active: true, Public: true,
+		Kind: kernel.KindNative, Active: true, Visibility: kernel.VisibilityPublic,
 		Description: "public", Source: "native",
 		InputSchema: baseSchema, OutputSchema: baseSchema,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	privAction := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "priv-action",
-		Kind: kernel.KindNative, Active: true, Public: false,
+		Kind: kernel.KindNative, Active: true, Visibility: kernel.VisibilityPrivate,
 		Description: "private", Source: "native",
 		InputSchema: baseSchema, OutputSchema: baseSchema,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -2424,7 +2437,7 @@ func TestRunFederatedDoesNotCreateProcessOnInsufficientBalance(t *testing.T) {
 	caller := setupUser(t, st, "@caller-fed-bal", 50) // balance < action price
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: target.ID, Name: "fed-bal-act",
-		Kind: kernel.KindWasm, Active: true, Public: true, Price: 100,
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 100,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -2445,6 +2458,46 @@ func TestRunFederatedDoesNotCreateProcessOnInsufficientBalance(t *testing.T) {
 	procs, _ := st.ListProcesses(ctx, caller.ID, 10, 0)
 	if len(procs) != 0 {
 		t.Errorf("expected no processes after insufficient balance, got %d", len(procs))
+	}
+}
+
+// TestRunFederatedLocalActionDenied: an inbound peer call to a local-visibility action is denied
+// (§4/§13), the twin of the public-only manifest rule — a peer authenticates as a key account, so
+// canCall's local branch rejects it. The denial is a precondition failure (no process/transaction),
+// which the federation handler turns into a signed zero-charge rejection receipt.
+func TestRunFederatedLocalActionDenied(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
+	ctx := context.Background()
+
+	target := setupUser(t, st, "@target-local-fed", 0)
+	// A peer proxy user: a set public_key makes it a key account (a peer), funded so the denial is
+	// on visibility, not balance.
+	peer := &kernel.User{
+		ID: uuid.New().String(), Handle: "@peer-local-fed", Email: "p@example.com",
+		PublicKey: "cGVlci1sb2NhbC1mZWQ", Available: 1000,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateUser(ctx, peer); err != nil {
+		t.Fatal(err)
+	}
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: target.ID, Name: "local-fed-act",
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityLocal, Price: 10,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := k.RunFederated(ctx, peer.ID, target.ID, a.Name, map[string]any{}, "")
+	if !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("peer calling a local action: want ErrUnauthorized, got %v", err)
+	}
+	procs, _ := st.ListProcesses(ctx, peer.ID, 10, 0)
+	if len(procs) != 0 {
+		t.Errorf("expected no process for a denied inbound local call, got %d", len(procs))
 	}
 }
 
@@ -2802,6 +2855,41 @@ func TestDeactivatingUpdateRevokesGrants(t *testing.T) {
 	}
 }
 
+// TestUpdateActionVisibility: an invalid visibility value is rejected, and a valid visibility change
+// does not deactivate the action (§4/§7 — only source/schema/price/kind changes deactivate).
+func TestUpdateActionVisibility(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	owner := setupUser(t, st, "@vis-owner", 0)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "vis",
+		Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPrivate, Price: 0,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		Source: "https://example.com/x", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	bad := kernel.ActionVisibility("banana")
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &bad}); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Fatalf("invalid visibility: want ErrInvalidInput, got %v", err)
+	}
+
+	local := kernel.VisibilityLocal
+	got, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &local})
+	if err != nil {
+		t.Fatalf("valid visibility change: %v", err)
+	}
+	if got.Visibility != kernel.VisibilityLocal {
+		t.Errorf("visibility: got %q, want local", got.Visibility)
+	}
+	if !got.Active {
+		t.Error("a visibility change must not deactivate the action")
+	}
+}
+
 // TestManifestExcludesDelegatedAction: an oauth_delegated action is never served as a manifest,
 // since a remote peer can never complete a browser consent (§8/§13).
 func TestManifestExcludesDelegatedAction(t *testing.T) {
@@ -2811,8 +2899,8 @@ func TestManifestExcludesDelegatedAction(t *testing.T) {
 	k.SetSecretBox(b64Box{})
 	owner := setupUser(t, st, "@mfsvc", 0)
 	a := createDelegatedAction(t, k, owner.ID, "svc", 0)
-	pub := true
-	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pub}); err != nil {
+	pub := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
 		t.Fatalf("make public: %v", err)
 	}
 	if _, err := k.GetActionManifest(ctx, a.ID); !errors.Is(err, kernel.ErrUnauthorized) {
@@ -2974,8 +3062,8 @@ func TestManifestExcludesBearerAction(t *testing.T) {
 	k.SetSecretBox(b64Box{})
 	owner := setupUser(t, st, "@br-mf", 0)
 	a := createBearerAction(t, k, owner.ID, "svc", 0)
-	pub := true
-	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pub}); err != nil {
+	pub := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
 		t.Fatalf("make public: %v", err)
 	}
 	if _, err := k.GetActionManifest(ctx, a.ID); !errors.Is(err, kernel.ErrUnauthorized) {

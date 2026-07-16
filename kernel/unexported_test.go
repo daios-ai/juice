@@ -16,6 +16,51 @@ import (
 	"time"
 )
 
+// TestCanCallVisibilityMatrix exercises the caller-scoped, three-level visibility predicate (§4):
+// public is callable by anyone; local by any local (non-peer) caller but not a peer; private only
+// by the owner; and inactive/suspended-owner actions are never callable regardless of visibility.
+func TestCanCallVisibilityMatrix(t *testing.T) {
+	owner := &User{ID: "owner"}
+	other := &User{ID: "other"}
+	peer := &User{ID: "peer", PublicKey: "cGVlcg"}
+
+	mk := func(vis ActionVisibility) *Action {
+		return &Action{OwnerUserID: "owner", Active: true, Visibility: vis}
+	}
+	cases := []struct {
+		name    string
+		action  *Action
+		caller  *User
+		canCall bool
+	}{
+		{"public/owner", mk(VisibilityPublic), owner, true},
+		{"public/other", mk(VisibilityPublic), other, true},
+		{"public/peer", mk(VisibilityPublic), peer, true},
+		{"local/owner", mk(VisibilityLocal), owner, true},
+		{"local/other", mk(VisibilityLocal), other, true},
+		{"local/peer", mk(VisibilityLocal), peer, false},
+		{"local/nil", mk(VisibilityLocal), nil, false},
+		{"private/owner", mk(VisibilityPrivate), owner, true},
+		{"private/other", mk(VisibilityPrivate), other, false},
+		{"private/peer", mk(VisibilityPrivate), peer, false},
+	}
+	for _, c := range cases {
+		if got := canCall(c.caller, c.action); got != c.canCall {
+			t.Errorf("%s: canCall = %v, want %v", c.name, got, c.canCall)
+		}
+	}
+
+	// Inactive and suspended-owner actions are never callable, even by the owner.
+	inactive := &Action{OwnerUserID: "owner", Active: false, Visibility: VisibilityPublic}
+	if canCall(owner, inactive) {
+		t.Error("inactive action must not be callable")
+	}
+	suspended := &Action{OwnerUserID: "owner", Active: true, OwnerSuspended: true, Visibility: VisibilityPublic}
+	if canCall(owner, suspended) {
+		t.Error("suspended-owner action must not be callable")
+	}
+}
+
 // TestVerifyRemoteReceiptSignatureFailsClosedOnEmptyKey: an empty peer public key must make
 // signature verification fail, never be silently skipped — a missing key cannot authenticate
 // a receipt, so it must never let an unverified receipt pass as valid (§13).
@@ -90,9 +135,9 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 		"http://192.168.1.1/router",
 		"http://172.16.0.1/internal",
 		"http://169.254.169.254/latest/meta-data/",
-		"http://0.0.0.0/admin",         // unspecified → localhost on Linux
-		"http://[::]/admin",            // IPv6 unspecified
-		"http://100.64.0.1/internal",   // CGNAT shared space (RFC 6598)
+		"http://0.0.0.0/admin",       // unspecified → localhost on Linux
+		"http://[::]/admin",          // IPv6 unspecified
+		"http://100.64.0.1/internal", // CGNAT shared space (RFC 6598)
 		"ftp://example.com/file",
 		"file:///etc/passwd",
 		"://broken",

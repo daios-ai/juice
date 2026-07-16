@@ -572,11 +572,11 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 			key:  raw.key,
 			hash: raw.hash,
 			apply: func(a *Action) {
-				a.Description  = raw.description
-				a.Price        = raw.price
-				a.InputSchema  = raw.inputSchema
+				a.Description = raw.description
+				a.Price = raw.price
+				a.InputSchema = raw.inputSchema
 				a.OutputSchema = raw.outputSchema
-				a.Source       = sourceJSON
+				a.Source = sourceJSON
 			},
 			new: func() *Action {
 				now := time.Now().UTC()
@@ -586,6 +586,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 					Name:         name,
 					Kind:         KindHTTP,
 					Active:       false,
+					Visibility:   VisibilityPrivate,
 					Description:  raw.description,
 					Price:        raw.price,
 					InputSchema:  raw.inputSchema,

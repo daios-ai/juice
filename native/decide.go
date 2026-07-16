@@ -9,8 +9,8 @@ import (
 
 // RegisterDecideHandler registers the @sys/llm/decide native action handler on k.
 func RegisterDecideHandler(k *kernel.Kernel, chatter kernel.DecideChatter) {
-	k.RegisterNativeHandler("llm/decide", func(ctx context.Context, args map[string]any, _, _, ownerUserID, _, _ string) (map[string]any, error) {
-		return executeDecide(ctx, args, chatter, k.ReadCallableAction, ownerUserID)
+	k.RegisterNativeHandler("llm/decide", func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
+		return executeDecide(ctx, args, chatter, k.ReadCallableAction, callerID)
 	})
 }
 
@@ -18,8 +18,8 @@ func executeDecide(
 	ctx context.Context,
 	args map[string]any,
 	chatter kernel.DecideChatter,
-	lookup func(ctx context.Context, ownerHandle, actionName, processOwnerID string) (*kernel.Action, error),
-	processOwnerID string,
+	lookup func(ctx context.Context, ownerHandle, actionName, callerID string) (*kernel.Action, error),
+	callerID string,
 ) (map[string]any, error) {
 	if chatter == nil {
 		return nil, kernel.ErrInvalidState.Wrap("decide chat service not configured")
@@ -77,7 +77,7 @@ func executeDecide(
 		ownerHandle := ref[:idx]
 		actionName := ref[idx+1:]
 
-		a, err := lookup(ctx, ownerHandle, actionName, processOwnerID)
+		a, err := lookup(ctx, ownerHandle, actionName, callerID)
 		if err != nil {
 			return nil, err
 		}

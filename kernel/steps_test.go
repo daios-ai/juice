@@ -26,7 +26,7 @@ func setupWasmAction(t *testing.T, st kernel.Store, ownerID, name, inputSchemaJS
 		Name:        name,
 		Kind:        kernel.KindWasm,
 		Active:      true,
-		Public:      true,
+		Visibility:  kernel.VisibilityPublic,
 		Price:       price,
 		Source:      "fake-wasm",
 		InputSchema: schema,
@@ -66,7 +66,7 @@ func TestStepCreateReturnsWaitingStep(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "@sc-owner", 500)
-	action := setupAction(t, st, owner.ID, "sc-action", 0)
+	action := setupLocalAction(t, st, owner.ID, "sc-action", 0)
 	caller := setupUser(t, st, "@sc-caller", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
@@ -147,7 +147,7 @@ func TestStepCompleteWrongCallerReturnsErrUnauthorized(t *testing.T) {
 	owner := setupUser(t, st, "@wrong-owner", 500)
 	rightCaller := setupUser(t, st, "@wrong-right-caller", 0)
 	wrongCaller := setupUser(t, st, "@wrong-wrong-caller", 0)
-	action := setupAction(t, st, owner.ID, "wrong-action", 0)
+	action := setupLocalAction(t, st, owner.ID, "wrong-action", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
@@ -198,7 +198,7 @@ func TestStepCompleteSetsDoneOnExecutionFailure(t *testing.T) {
 
 	owner := setupUser(t, st, "@reset-owner", 500)
 	caller := setupUser(t, st, "@reset-caller", 0)
-	action := setupAction(t, st, owner.ID, "reset-action", 0)
+	action := setupLocalAction(t, st, owner.ID, "reset-action", 0)
 	action.Kind = kernel.KindWasm
 	_ = st.UpdateAction(ctx, action)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
@@ -325,7 +325,6 @@ func TestStepCompletionTraceParentTraceID(t *testing.T) {
 	}
 }
 
-
 func TestCanListStepProcessOwnerSeesOwnStep(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
@@ -333,7 +332,7 @@ func TestCanListStepProcessOwnerSeesOwnStep(t *testing.T) {
 
 	owner := setupUser(t, st, "@list-owner", 500)
 	caller := setupUser(t, st, "@list-caller", 0)
-	action := setupAction(t, st, owner.ID, "list-action", 0)
+	action := setupLocalAction(t, st, owner.ID, "list-action", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
@@ -364,7 +363,7 @@ func TestCanListStepRequiredCallerSeesStep(t *testing.T) {
 
 	owner := setupUser(t, st, "@caller-list-owner", 500)
 	caller := setupUser(t, st, "@caller-list-caller", 0)
-	action := setupAction(t, st, owner.ID, "caller-list-action", 0)
+	action := setupLocalAction(t, st, owner.ID, "caller-list-action", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
@@ -396,7 +395,7 @@ func TestCanListStepUnrelatedUserDenied(t *testing.T) {
 	owner := setupUser(t, st, "@unrel-owner", 500)
 	caller := setupUser(t, st, "@unrel-caller", 0)
 	unrelated := setupUser(t, st, "@unrelated", 0)
-	action := setupAction(t, st, owner.ID, "unrel-action", 0)
+	action := setupLocalAction(t, st, owner.ID, "unrel-action", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
@@ -424,7 +423,7 @@ func TestCanReadStepSameRulesAsCanListStep(t *testing.T) {
 	owner := setupUser(t, st, "@read-step-owner", 500)
 	caller := setupUser(t, st, "@read-step-caller", 0)
 	unrelated := setupUser(t, st, "@read-step-unrelated", 0)
-	action := setupAction(t, st, owner.ID, "read-step-action", 0)
+	action := setupLocalAction(t, st, owner.ID, "read-step-action", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
@@ -455,7 +454,7 @@ func TestBootstrapResetsRunningStepsToWaiting(t *testing.T) {
 
 	owner := setupUser(t, st, "@reset-bs-owner", 100)
 	caller := setupUser(t, st, "@reset-bs-caller", 0)
-	action := setupAction(t, st, owner.ID, "reset-bs-action", 0)
+	action := setupLocalAction(t, st, owner.ID, "reset-bs-action", 0)
 	p, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
@@ -492,7 +491,7 @@ func TestWaitingStepOnClosedProcessIsNonCompletable(t *testing.T) {
 
 	owner := setupUser(t, st, "@closed-owner", 500)
 	caller := setupUser(t, st, "@closed-caller", 0)
-	action := setupAction(t, st, owner.ID, "closed-action", 0)
+	action := setupLocalAction(t, st, owner.ID, "closed-action", 0)
 	p, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
@@ -526,7 +525,7 @@ func TestStepWithoutTxIDIsNeverDone(t *testing.T) {
 
 	owner := setupUser(t, st, "@notxid-owner", 100)
 	caller := setupUser(t, st, "@notxid-caller", 0)
-	action := setupAction(t, st, owner.ID, "notxid-action", 0)
+	action := setupLocalAction(t, st, owner.ID, "notxid-action", 0)
 
 	// Use a real trace (FK constraint) — orphan trace gives us a valid parent.
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
@@ -737,7 +736,7 @@ func TestCreateStepTraceAuthority(t *testing.T) {
 	nextUser := setupUser(t, st, "@trace-next-user", 0)
 
 	// Next action the step will invoke.
-	nextAction := setupAction(t, st, processOwner.ID, "trace-next-action", 0)
+	nextAction := setupLocalAction(t, st, processOwner.ID, "trace-next-action", 0)
 
 	// Create an orphan trace owned by actionOwner (action_owner_id = actionOwner.ID).
 	_, orphan := setupOrphanTrace(t, st, processOwner.ID, actionOwner.ID, processOwner.ID)
@@ -765,7 +764,7 @@ func TestCreateStepTraceAuthorityWrongProcess(t *testing.T) {
 	nextUser := setupUser(t, st, "@xproc-step-next", 0)
 
 	action := setupWasmAction(t, st, actionOwner.ID, "xproc-step-action", "", 0)
-	nextAction := setupAction(t, st, procOwner.ID, "xproc-step-next-action", 0)
+	nextAction := setupLocalAction(t, st, procOwner.ID, "xproc-step-next-action", 0)
 
 	_, tr1 := beginTestRun(t, st, procOwner.ID, action)
 
@@ -796,7 +795,7 @@ func TestCreateStepRejectsNonObjectPartialArgs(t *testing.T) {
 
 	owner := setupUser(t, st, "@pa-owner", 500)
 	caller := setupUser(t, st, "@pa-caller", 0)
-	action := setupAction(t, st, owner.ID, "pa-action", 0)
+	action := setupLocalAction(t, st, owner.ID, "pa-action", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
@@ -814,7 +813,7 @@ func TestCreateStepEmptyTraceIDReturnsErrInvalidInput(t *testing.T) {
 
 	owner := setupUser(t, st, "@nil-pt-owner", 500)
 	caller := setupUser(t, st, "@nil-pt-caller", 0)
-	action := setupAction(t, st, owner.ID, "nil-pt-action", 0)
+	action := setupLocalAction(t, st, owner.ID, "nil-pt-action", 0)
 
 	_, err := k.CreateStep(ctx, "", action.ID, nil, caller.ID)
 	if !errors.Is(err, kernel.ErrInvalidInput) {
@@ -828,7 +827,7 @@ func TestCreateStepEmptyTraceIDReturnsErrInvalidInput(t *testing.T) {
 func setupStepWithCompletionTrace(t *testing.T, st kernel.Store, k *kernel.Kernel, ownerID string, price int64) (*kernel.Step, *kernel.Trace) {
 	t.Helper()
 	ctx := context.Background()
-	action := setupAction(t, st, ownerID, "recovery-action-"+uuid.New().String(), price)
+	action := setupLocalAction(t, st, ownerID, "recovery-action-"+uuid.New().String(), price)
 	caller := setupUser(t, st, "@recovery-caller-"+uuid.New().String(), 0)
 
 	p := &kernel.Process{
@@ -1100,7 +1099,7 @@ func TestStepCompleteRemoteProxyPersistsIdempotencyKey(t *testing.T) {
 	remoteAction := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID,
 		Name: "rp-idem-action", Kind: kernel.KindRemoteProxy,
-		Active: true, Public: true, Price: 0,
+		Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
 		Source:    "https://remote.example.com/v1/federation/call?action=@owner/rp-idem-action&counterparty=us",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -1152,7 +1151,7 @@ func TestStepCompleteRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 	remoteAct := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: procOwner.ID,
 		Name: "rpme2-action", Kind: kernel.KindRemoteProxy,
-		Active: true, Public: true, Price: 50,
+		Active: true, Visibility: kernel.VisibilityPublic, Price: 50,
 		Source:    "https://remote.example.com/v1/federation/call?action=@rpme2-procowner/rpme2-action&counterparty=us",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -1209,7 +1208,7 @@ func TestSettleFailedCallWithPendingRemoteChild(t *testing.T) {
 	remoteAct := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID,
 		Name: "psc-remote-act", Kind: kernel.KindRemoteProxy,
-		Active: true, Public: true, Price: childPrice,
+		Active: true, Visibility: kernel.VisibilityPublic, Price: childPrice,
 		Source:    "https://remote.example.com/v1/federation/call?action=@owner/psc-remote-act&counterparty=us",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -1219,7 +1218,7 @@ func TestSettleFailedCallWithPendingRemoteChild(t *testing.T) {
 
 	// Set up an open process+root trace funded with parentPrice.
 	caller := setupUser(t, st, "@psc-caller", parentPrice)
-	parentAct := setupAction(t, st, owner.ID, "psc-parent-act", parentPrice)
+	parentAct := setupLocalAction(t, st, owner.ID, "psc-parent-act", parentPrice)
 	p, root := beginTestRun(t, st, caller.ID, parentAct)
 
 	// Simulate: parent trace makes a subcall to the remote proxy → BeginSubcall.
@@ -1287,7 +1286,7 @@ func TestRecoverWithOrphanParentAndPendingChild(t *testing.T) {
 	remoteAct := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID,
 		Name: "roppc-remote-act", Kind: kernel.KindRemoteProxy,
-		Active: true, Public: true, Price: childPrice,
+		Active: true, Visibility: kernel.VisibilityPublic, Price: childPrice,
 		Source:    "https://remote.example.com/v1/federation/call?action=@owner/roppc-remote-act&counterparty=us",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -1296,7 +1295,7 @@ func TestRecoverWithOrphanParentAndPendingChild(t *testing.T) {
 	}
 
 	caller := setupUser(t, st, "@roppc-caller", parentPrice)
-	parentAct := setupAction(t, st, owner.ID, "roppc-parent-act", parentPrice)
+	parentAct := setupLocalAction(t, st, owner.ID, "roppc-parent-act", parentPrice)
 	p, root := beginTestRun(t, st, caller.ID, parentAct)
 
 	// Child remote-proxy subcall in pending state.
@@ -1352,7 +1351,7 @@ func TestStepCompleteRemoteProxyTimeoutLeavesStepRunning(t *testing.T) {
 	remoteAction := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID,
 		Name: "rp-running-action", Kind: kernel.KindRemoteProxy,
-		Active: true, Public: true, Price: 0,
+		Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
 		Source:    "https://remote.example.com/v1/federation/call?action=@owner/rp-running-action&counterparty=us",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}

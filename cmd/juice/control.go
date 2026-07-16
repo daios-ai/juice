@@ -364,7 +364,9 @@ type manifestFetcher interface {
 }
 
 // bulkImportPeerActionsFed fetches a peer's manifests over the transport and imports them as
-// enabled, public remote_proxy actions. Returns the counts imported and skipped.
+// enabled, local remote_proxy actions. Local (not public) keeps friendship non-transitive: a peer
+// cannot reach this kernel's imports even by name, and they are never re-served in manifests/gossip
+// (§13). Returns the counts imported and skipped.
 func bulkImportPeerActionsFed(ctx context.Context, tr manifestFetcher, k *kernel.Kernel, subjectID, peerKey string, peer *kernel.User) (imported, skipped int) {
 	manifests, err := tr.Manifests(ctx, peerKey)
 	if err != nil {
@@ -384,10 +386,10 @@ func bulkImportPeerActionsFed(ctx context.Context, tr manifestFetcher, k *kernel
 		// Friending is an explicit trust act: activate every one of the peer's proxies, including
 		// Unchanged ones. A re-friend after unfriend sees byte-identical manifests (→ Unchanged) whose
 		// Active was cleared by the unfriend cascade; without this they'd stay dead and uncallable.
-		t := true
+		local := kernel.VisibilityLocal
 		for _, act := range append(append(result.Created, result.Updated...), result.Unchanged...) {
 			_ = enableAction(k, ctx, subjectID, act.ID)
-			_, _ = k.UpdateAction(ctx, subjectID, kernel.UpdateActionRequest{ID: act.ID, Public: &t})
+			_, _ = k.UpdateAction(ctx, subjectID, kernel.UpdateActionRequest{ID: act.ID, Visibility: &local})
 		}
 		imported += len(result.Created) + len(result.Unchanged)
 	}

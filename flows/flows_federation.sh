@@ -30,7 +30,7 @@ _fed_setup() {
     FED_RID=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create greet --kind http --source "http://127.0.0.1:$FED_BPORT" --description "greet" --price 0)" id)
     [ -n "$FED_RID" ] || return 1
     j "$FED_DBR" "$FED_HR" action enable "$FED_RID" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" action update "$FED_RID" --public >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" action update "$FED_RID" --visibility public >/dev/null 2>&1
 
     # L friends R by key alone; the transport resolves the key via the seed.
     j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1 || return 1
@@ -71,7 +71,7 @@ flow_federation_changed_reimport() {
     # Add a new action on R; re-friend must pick it up while leaving greet (unchanged) alone.
     local wid; wid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create wave --kind http --source "http://127.0.0.1:$FED_BPORT" --description "wave" --price 0)" id)
     j "$FED_DBR" "$FED_HR" action enable "$wid" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" action update "$wid" --public >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" action update "$wid" --visibility public >/dev/null 2>&1
     assert_eq "fed_reimport.refriend" 0 "$(j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1; echo $?)"
 
     assert_json "fed_reimport.wave_proxy_active" "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/sys/wave)" active True
@@ -178,7 +178,7 @@ flow_fed_denial_underfunded() {
     # Paid action on R; L imports it but is NOT funded on R → underfunded → 402 denial receipt.
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create paid-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 100)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" action update "$pid" --public >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" action update "$pid" --visibility public >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit @sys 1000 >/dev/null 2>&1
 
@@ -218,7 +218,7 @@ flow_fed_import_duty() {
     # Paid action on R (1000); proxy price = 1000 + ceil(1000*500/10000) = 1050 (5% duty).
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create duty-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "duty" --price 1000)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" action update "$pid" --public >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" action update "$pid" --visibility public >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1
     assert_jnum "fed_import_duty.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/sys/duty-svc)" price 1050
 
@@ -248,7 +248,7 @@ flow_fed_failed_action_refund() {
     # Paid action on R backed by a 500 backend; proxy price = 100 + ceil(100*5%) = 105.
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create fail-svc --kind http --source "http://127.0.0.1:$fport" --description "fails" --price 100)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" action update "$pid" --public >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" action update "$pid" --visibility public >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" admin deposit @kernel-l 5000 >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit @sys 1000 >/dev/null 2>&1
@@ -325,7 +325,7 @@ flow_fed_discovery() {
     # R publishes a public action so its gossip carries something to display.
     local rid; rid=$(strfield "$(jj "$dbr" "$hr" action create greet --kind http --source "http://127.0.0.1:$bport" --description greet --price 0)" id)
     j "$dbr" "$hr" action enable "$rid" >/dev/null 2>&1
-    j "$dbr" "$hr" action update "$rid" --public >/dev/null 2>&1
+    j "$dbr" "$hr" action update "$rid" --visibility public >/dev/null 2>&1
 
     # L joins with R as its ONLY bootstrap peer; it must discover R without friending it.
     start_server "$dbl" "$hl" kernel_handle=@kernel-l bootstrap_peers="$boot" discovery_interval_seconds=2 \

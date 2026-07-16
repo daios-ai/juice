@@ -490,7 +490,7 @@ func TestServeListActions(t *testing.T) {
 		t.Fatal("private action should not appear in unauthenticated list")
 	}
 
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, tok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, tok).Body.Close()
 	resp3 := httpDo(t, srv, "GET", "/v1/actions", nil, tok)
 	if resp3.StatusCode != http.StatusOK {
 		resp3.Body.Close()
@@ -515,7 +515,7 @@ func TestServeListPagination(t *testing.T) {
 		cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 			"name": fmt.Sprintf("page-%d", i), "kind": "http", "price": 0,
 			"source": "http://x.example", "description": "test action",
-			"input_schema": minSchema, "output_schema": minSchema, "public": true,
+			"input_schema": minSchema, "output_schema": minSchema, "visibility": "public",
 		}, tok)
 		var a kernel.Action
 		decodeResponse(t, cr, &a)
@@ -559,7 +559,7 @@ func TestServeListActionsExcludesSuspendedOwner(t *testing.T) {
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, tok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, tok).Body.Close()
 
 	var before []kernel.Action
 	decodeResponse(t, httpDo(t, srv, "GET", "/v1/actions", nil, ""), &before)
@@ -825,7 +825,7 @@ func TestServeCall(t *testing.T) {
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 
 	// Make the call via /v1/run (new API — price=0, caller needs no credits).
 	callResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
@@ -898,7 +898,7 @@ func TestServeListAndGetTransaction(t *testing.T) {
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "@tx-owner/tx-action", "args": map[string]any{},
@@ -955,7 +955,7 @@ func TestServeRateTransaction(t *testing.T) {
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "@rate-owner/rate-action", "args": map[string]any{},
@@ -1009,7 +1009,7 @@ func TestServeListActionRatings(t *testing.T) {
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "@list-ratings-owner/list-ratings-action", "args": map[string]any{},
@@ -1080,7 +1080,7 @@ func TestServeGetStats(t *testing.T) {
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
 	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 
 	// Make one call to generate stats.
 	httpDo(t, srv, "POST", "/v1/run", map[string]any{
@@ -1413,7 +1413,7 @@ func TestGetActionReadPermission(t *testing.T) {
 	}
 
 	// Making the action public allows anyone to read it.
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"public": true}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 	r3 := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, strangerTok)
 	r3.Body.Close()
 	if r3.StatusCode != http.StatusOK {
@@ -1468,8 +1468,8 @@ func TestFederationCall(t *testing.T) {
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	pubAll := true
-	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubAll}); err != nil {
+	pubAll := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1789,8 +1789,8 @@ func TestFederationCallAuth(t *testing.T) {
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	pubAll := true
-	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubAll}); err != nil {
+	pubAll := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1876,8 +1876,8 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 		OutputSchema: map[string]any{"type": "object"},
 	})
 	_ = k.SetActive(ctx, sys.ID, a.ID, true)
-	pubAll := true
-	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubAll})
+	pubAll := kernel.VisibilityPublic
+	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
 	// First call: must return a non-nil receipt.
 	r1 := fedCall(t, k, priv, "@sys/replay-ping", "replay-idem-1", map[string]any{})
@@ -2039,8 +2039,8 @@ func TestFederationReplay(t *testing.T) {
 		t.Fatalf("CreateAction: %v", err)
 	}
 	_ = k.SetActive(ctx, sys.ID, a.ID, true)
-	pubAll := true
-	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubAll})
+	pubAll := kernel.VisibilityPublic
+	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
@@ -2114,8 +2114,8 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	pubAll := true
-	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubAll}); err != nil {
+	pubAll := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2168,8 +2168,8 @@ func TestFederationIdempotencyCommittedFailureHasReceipt(t *testing.T) {
 		OutputSchema: map[string]any{"type": "object"},
 	})
 	k.SetActive(ctx, sys.ID, a.ID, true)
-	pubAll := true
-	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubAll})
+	pubAll := kernel.VisibilityPublic
+	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
 	ikey := uuid.New().String()
 	r1 := fedCall(t, k, priv, "@sys/fail-exec", ikey, map[string]any{})
@@ -2218,8 +2218,8 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	})
 	k.SetActive(ctx, sys.ID, a.ID, true)
-	pubAll := true
-	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubAll})
+	pubAll := kernel.VisibilityPublic
+	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
 	// Sign over the empty body {} but deliver a different body — the receiver hashes the bytes
 	// it actually got, so the signature no longer matches and the call is rejected (401).
@@ -2257,8 +2257,8 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	})
 	k.SetActive(ctx, sys.ID, a.ID, true)
-	pubAll := true
-	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pubAll})
+	pubAll := kernel.VisibilityPublic
+	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
 	callResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "@sys/vrr-http", "args": map[string]any{},

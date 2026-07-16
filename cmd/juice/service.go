@@ -559,9 +559,9 @@ func updateAction(k *kernel.Kernel, ctx context.Context, callerID string, req ke
 }
 
 // listPublicActions returns actions visible to the caller, optionally filtered by owner handle and name.
-// Unauthenticated: active+public actions only.
-// Authenticated (no owner filter): active+public union caller's own active actions, deduplicated.
-// Authenticated with owner filter resolving to caller: all their actions regardless of active/public.
+// Unauthenticated: active public actions only.
+// Authenticated (no owner filter): active public+local actions union caller's own active actions, deduplicated.
+// Authenticated with owner filter resolving to caller: all their actions regardless of active/visibility.
 // Source and ArtifactHash are stripped from all results.
 func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHandle, name string, includeInactive bool, limit, offset int) ([]actionResp, error) {
 	// The superuser sees every owner's rows (supervision is scope on the normal endpoint, §14);
@@ -574,7 +574,9 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 	if superuser {
 		actions, err = k.ListAllActions(ctx, limit, offset)
 	} else {
-		actions, err = k.ListPublicActions(ctx, limit, offset)
+		// Authenticated (session) callers are local users, so they see local actions too; an
+		// unauthenticated listing sees public only (§4/§14).
+		actions, err = k.ListVisibleActions(ctx, callerID != "", limit, offset)
 	}
 	if err != nil {
 		return nil, err

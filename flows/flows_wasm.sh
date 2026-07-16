@@ -16,7 +16,7 @@ flow_wasm_execution() {
     make_echo_wasm "$dir/echo.wasm"
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create echo --kind wasm --source "$dir/echo.wasm" --price 10 --description "echo")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
     assert_nonempty "wasm_execution.artifact_hash" "$(strfield "$(jj "$db" "$ha" action show "$aid")" artifact_hash)"
 
     assert_nonempty "wasm_execution.echo_call_succeeds" "$(strfield "$(jj "$db" "$hb" run @alice/echo '{"msg":"hello"}')" tx_id)"
@@ -25,7 +25,7 @@ flow_wasm_execution() {
     make_infinite_loop_wasm "$dir/loop.wasm"
     local lid; lid=$(strfield "$(jj "$db" "$ha" action create loop --kind wasm --source "$dir/loop.wasm" --price 10 --description "loop")" id)
     j "$db" "$ha" action enable "$lid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$lid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$lid" --visibility public >/dev/null 2>&1
     assert_fails "wasm_execution.infinite_loop_timeout" "timeout\|timed\|execution" -- j "$db" "$hb" run @alice/loop '{}'
     assert_jnum "wasm_execution.loop_refunded" "$(jj "$db" "$hb" user me)" available 190
 }
@@ -45,11 +45,11 @@ flow_contractor_subcall() {
     # @bob's HTTP sub-target (price 50); @alice's WASM contractor (price 50) sub-calls it.
     local sub; sub=$(strfield "$(jj "$db" "$hb" action create sub-target --kind http --source "http://127.0.0.1:${bport}/sub" --price 50 --description "sub")" id)
     j "$db" "$hb" action enable "$sub" >/dev/null 2>&1
-    j "$db" "$hb" action update "$sub" --public >/dev/null 2>&1
+    j "$db" "$hb" action update "$sub" --visibility public >/dev/null 2>&1
     make_contractor_wasm "$dir/contractor.wasm" "@bob/sub-target"
     local cid; cid=$(strfield "$(jj "$db" "$ha" action create contractor --kind wasm --source "$dir/contractor.wasm" --price 50 --description "contractor")" id)
     j "$db" "$ha" action enable "$cid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$cid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$cid" --visibility public >/dev/null 2>&1
 
     # @carol funds the process with 50; the whole budget flows to @bob via the sub-call.
     assert_nonempty "contractor_subcall.call_succeeds" "$(strfield "$(jj "$db" "$hc" run @alice/contractor '{}')" tx_id)"
@@ -72,11 +72,11 @@ flow_contractor_failure() {
 
     local sub; sub=$(strfield "$(jj "$db" "$hb" action create sub-target --kind http --source "http://127.0.0.1:${bport}/sub" --price 50 --description "sub")" id)
     j "$db" "$hb" action enable "$sub" >/dev/null 2>&1
-    j "$db" "$hb" action update "$sub" --public >/dev/null 2>&1
+    j "$db" "$hb" action update "$sub" --visibility public >/dev/null 2>&1
     make_contractor_wasm "$dir/contractor.wasm" "@bob/sub-target"
     local cid; cid=$(strfield "$(jj "$db" "$ha" action create contractor --kind wasm --source "$dir/contractor.wasm" --price 50 --description "contractor")" id)
     j "$db" "$ha" action enable "$cid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$cid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$cid" --visibility public >/dev/null 2>&1
 
     # @carol (30) < contractor price (50) → rejected at the funds check, nothing charged.
     assert_fails "contractor_failure.error_returned" "insufficient\|balance\|funds\|credits\|costs" -- j "$db" "$hc" run @alice/contractor '{}'
@@ -204,7 +204,7 @@ flow_rating() {
 
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create rate-me --kind http --source "http://127.0.0.1:${bport}/rate" --price 10 --description "rateable")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
     local tx_id; tx_id=$(strfield "$(jj "$db" "$hb" run @alice/rate-me '{}')" tx_id)
     # Unrated → rating field is null (strfield renders JSON null as Python None).
@@ -261,7 +261,7 @@ flow_tinygo_compile() {
     local act_id; act_id=$(python3 -c "import json;print(json.load(open('$dir/create.json')).get('id',''))" 2>/dev/null)
     assert_nonempty "tinygo_compile.register_artifact" "$act_id"
     j "$db" "$ha" action enable "$act_id" >/dev/null 2>&1
-    j "$db" "$ha" action update "$act_id" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$act_id" --visibility public >/dev/null 2>&1
     jj "$db" "$ha" run @alice/doubler '{"n":21}' > "$dir/run.json"
     local doubled; doubled=$(python3 -c "import json;print(json.load(open('$dir/run.json')).get('result',{}).get('doubled',''))" 2>/dev/null)
     assert_eq "tinygo_compile.run_compiled_action" 42 "${doubled%.*}"

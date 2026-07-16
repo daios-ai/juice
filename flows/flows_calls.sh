@@ -53,14 +53,18 @@ flow_acl_public() {
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
 
     assert_fails "acl_public.private_denied" "unauthorized\|permission\|error" -- j "$db" "$hb" run @alice/target '{}'
-    assert_fails "acl_public.update_public_owner_only" "unauthorized\|error" -- j "$db" "$hb" action update "$aid" --public
+    assert_fails "acl_public.update_owner_only" "unauthorized\|error" -- j "$db" "$hb" action update "$aid" --visibility public
 
-    # Public: @bob passes the permission check (then fails at the unreachable backend, NOT on permission).
-    j "$db" "$ha" action update "$aid" --public >/dev/null 2>&1
+    # Local: @bob (a local user) passes the permission check (then fails at the unreachable backend, NOT on permission).
+    j "$db" "$ha" action update "$aid" --visibility local >/dev/null 2>&1
+    assert_not_contains "acl_public.local_passes_for_local_user" "permission" "$(j "$db" "$hb" run @alice/target '{}')"
+
+    # Public: @bob passes too.
+    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
     assert_not_contains "acl_public.public_passes" "permission" "$(j "$db" "$hb" run @alice/target '{}')"
 
     # Private again: permission enforced.
-    j "$db" "$ha" action update "$aid" --public=false >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --visibility private >/dev/null 2>&1
     assert_fails "acl_public.private_enforced" "unauthorized\|permission\|error" -- j "$db" "$hb" run @alice/target '{}'
 }
 
@@ -77,7 +81,7 @@ flow_successful_paid_call() {
 
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create pay --kind http --source "http://127.0.0.1:${bport}/pay" --price 100 --description "paid")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
     local sys_start; sys_start=$(numfield "$(jj "$db" "$hs" admin show @sys)" available)
 
     # fee_bps=2000 → on gross=100: fee=20, net=80.
@@ -133,7 +137,7 @@ flow_failed_call_refund() {
 
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create fail --kind http --source "http://127.0.0.1:${bport}/fail" --price 100 --description "failing")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
     # Backend 500 → execution failure; full refund, @alice credited nothing, failure tx recorded.
     j "$db" "$hb" run @alice/fail '{}' >/dev/null 2>&1 || true
@@ -158,7 +162,7 @@ flow_input_schema_failure() {
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create schema-in --kind http --source "http://127.0.0.1:1/x" --price 0 --description "schema" \
         --input-schema '{"type":"object","properties":{"x":{"type":"string","description":"the x parameter"}},"required":["x"]}')" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
     # Missing required "x" → schema error BEFORE any trace/charge.
     assert_fails "input_schema_failure.error_returned" "schema\|invalid\|required\|error" -- j "$db" "$hb" run @alice/schema-in '{}'
@@ -180,7 +184,7 @@ flow_output_schema_failure() {
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create schema-out --kind http --source "http://127.0.0.1:${bport}/schema-out" --price 50 --description "schema out" \
         --output-schema '{"type":"object","properties":{"id":{"type":"string","description":"the record id"}},"required":["id"]}')" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
     # Execution succeeds but output fails validation → CommitFailedCall: refund + failure tx.
     assert_fails "output_schema_failure.error_returned" "schema\|invalid\|error" -- j "$db" "$hb" run @alice/schema-out '{}'

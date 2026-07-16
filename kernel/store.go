@@ -185,7 +185,9 @@ type Store interface {
 	// Used during import reconciliation to ensure contract changes and stat resets are coherent.
 	UpdateActionAndResetStats(ctx context.Context, a *Action) error
 	DeleteAction(ctx context.Context, id string) error
-	ListPublicActions(ctx context.Context, limit, offset int) ([]*Action, error)
+	// ListVisibleActions returns active non-deleted actions with a non-suspended owner, network-wide
+	// (visibility=public) and, when includeLocal is set, also kernel-local ones (§4/§14).
+	ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*Action, error)
 	// ListActionsByOwner returns all non-deleted actions owned by ownerID, including
 	// inactive and private ones. Used to give an owner their full private view.
 	ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Action, error)
@@ -408,8 +410,8 @@ type Store interface {
 
 	// UpsertEmbedding stores a pre-computed embedding vector for an action.
 	UpsertEmbedding(ctx context.Context, actionID string, vec []float32) error
-	// ListEmbeddings returns stored embedding vectors keyed by action ID,
-	// filtered to active, public, non-deleted actions only.
+	// ListEmbeddings returns stored embedding vectors keyed by action ID, filtered to active,
+	// non-deleted actions; visibility is enforced by the caller-scoped canCall post-filter in Lookup.
 	ListEmbeddings(ctx context.Context) (map[string][]float32, error)
 	// UpsertLookupText replaces an action's lexical-index text (§9 hybrid lookup).
 	UpsertLookupText(ctx context.Context, actionID, text string) error

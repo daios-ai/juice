@@ -267,8 +267,8 @@ func TestBulkImportPeerActions(t *testing.T) {
 	if !found.Active {
 		t.Error("imported action should be enabled (active=true) after bulk import")
 	}
-	if !found.Public {
-		t.Error("imported action should be public after bulk import")
+	if found.Visibility != kernel.VisibilityLocal {
+		t.Error("imported action should be local after bulk import (non-transitive: never re-served to peers, §13)")
 	}
 }
 

@@ -448,7 +448,7 @@ func actionUpdateCmd() *cobra.Command {
 	var description, source, method, artifact string
 	var params []string
 	var price int64
-	var public bool
+	var visibility string
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
 		Use:   "update <action>",
@@ -489,8 +489,8 @@ func actionUpdateCmd() *cobra.Command {
 			if c.Flags().Changed("price") {
 				req["price"] = price
 			}
-			if c.Flags().Changed("public") {
-				req["public"] = public
+			if c.Flags().Changed("visibility") {
+				req["visibility"] = visibility
 			}
 			if inputSchemaStr != "" {
 				m := map[string]any{}
@@ -522,7 +522,7 @@ func actionUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&method, "method", "", "New HTTP verb")
 	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (path|query|body); repeatable")
 	cmd.Flags().Int64Var(&price, "price", 0, "New price in credits")
-	cmd.Flags().BoolVar(&public, "public", false, "Make action public or private")
+	cmd.Flags().StringVar(&visibility, "visibility", "", "Set visibility: private|local|public")
 	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "New JSON Schema for inputs (or @file.json)")
 	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "New JSON Schema for outputs (or @file.json)")
 	cmd.Flags().StringVar(&authStr, "auth", "", "Upstream auth config JSON (or @file.json)")

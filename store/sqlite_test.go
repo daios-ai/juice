@@ -475,9 +475,9 @@ func TestListActions(t *testing.T) {
 	_ = db.CreateUser(ctx, owner)
 
 	active := newAction(owner.ID, "/active", 0, true)
-	active.Public = true
+	active.Visibility = kernel.VisibilityPublic
 	inactive := newAction(owner.ID, "/inactive", 0, false)
-	inactive.Public = true
+	inactive.Visibility = kernel.VisibilityPublic
 	private := newAction(owner.ID, "/private", 0, true)
 	_ = db.CreateAction(ctx, active)
 	_ = db.CreateAction(ctx, inactive)
@@ -491,7 +491,7 @@ func TestListActions(t *testing.T) {
 		t.Errorf("ListAllActions: got %d, want 3", len(all))
 	}
 
-	publicActive, err := db.ListPublicActions(ctx, 100, 0)
+	publicActive, err := db.ListVisibleActions(ctx, false, 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,10 +509,10 @@ func TestListPublicActionsExcludesSuspendedOwner(t *testing.T) {
 	owner := newUser("@owner", 0)
 	_ = db.CreateUser(ctx, owner)
 	a := newAction(owner.ID, "/svc", 0, true)
-	a.Public = true
+	a.Visibility = kernel.VisibilityPublic
 	_ = db.CreateAction(ctx, a)
 
-	before, err := db.ListPublicActions(ctx, 100, 0)
+	before, err := db.ListVisibleActions(ctx, false, 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -523,7 +523,7 @@ func TestListPublicActionsExcludesSuspendedOwner(t *testing.T) {
 	if err := db.SuspendUser(ctx, owner.ID); err != nil {
 		t.Fatal(err)
 	}
-	after, err := db.ListPublicActions(ctx, 100, 0)
+	after, err := db.ListVisibleActions(ctx, false, 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2098,12 +2098,12 @@ func TestUpsertAndListEmbeddings(t *testing.T) {
 
 	active := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/active",
-		Kind: kernel.KindHTTP, Active: true, Public: true,
+		Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPublic,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	inactive := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/inactive",
-		Kind: kernel.KindHTTP, Active: false, Public: true,
+		Kind: kernel.KindHTTP, Active: false, Visibility: kernel.VisibilityPublic,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = db.CreateAction(ctx, active)

@@ -125,7 +125,7 @@ func createEnabledPublicAction(t *testing.T, srv *httptest.Server, ownerTok, nam
 	decodeResponse(t, cr, &act)
 	id := act["id"].(string)
 	httpDo(t, srv, "POST", "/v1/actions/"+id+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+id, map[string]any{"public": true}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+id, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 	return id
 }
 
@@ -321,7 +321,7 @@ func TestFlow_WASMSubcallProviderMargin(t *testing.T) {
 	decodeResponse(t, cr, &act)
 	actID := act["id"].(string)
 	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, mainProvTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"public": true}, mainProvTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, mainProvTok).Body.Close()
 
 	// Caller runs the orchestrated action.
 	callerID, callerTok := makeUser(t, k, "@flow-orch-caller")
@@ -406,7 +406,7 @@ func TestFlow_FailMidTree(t *testing.T) {
 	decodeResponse(t, cr, &act)
 	actID := act["id"].(string)
 	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, mainProvTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"public": true}, mainProvTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, mainProvTok).Body.Close()
 
 	callerID, callerTok := makeUser(t, k, "@flow-fail-caller")
 	giveCredits(t, k, callerID, 500)
@@ -870,7 +870,7 @@ func TestFlow_OpenAPIImportActivateRun(t *testing.T) {
 	} else {
 		r.Body.Close()
 	}
-	if r := httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"public": true}, ownerTok); r.StatusCode != http.StatusOK {
+	if r := httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, ownerTok); r.StatusCode != http.StatusOK {
 		r.Body.Close()
 		t.Fatalf("make public: expected 200, got %d", r.StatusCode)
 	} else {
@@ -990,7 +990,7 @@ func TestFlow_OpenAPIReimport(t *testing.T) {
 
 	// Activate the action and run it once to generate a tx.
 	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"public": true}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 
 	callerID, callerTok := makeUser(t, k, "@reimp-caller")
 	giveCredits(t, k, callerID, 100)
@@ -1101,7 +1101,7 @@ func TestFlow_OpenAPIUnimport(t *testing.T) {
 
 	// Enable and run once to generate history.
 	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"public": true}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 	callerID, callerTok := makeUser(t, k, "@unimp-caller")
 	giveCredits(t, k, callerID, 100)
 	runRep := runAction(t, srv, callerTok, ownerHandle+"/goSomething", map[string]any{})
@@ -1371,8 +1371,8 @@ func TestFlow_UpstreamAuthSecrecy(t *testing.T) {
 	actionID := actionBody["id"].(string)
 
 	// Activate the action and make it public.
-	pubTrue := true
-	if _, err := k.UpdateAction(context.Background(), ownerID, kernel.UpdateActionRequest{ID: actionID, Public: &pubTrue}); err != nil {
+	pubTrue := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(context.Background(), ownerID, kernel.UpdateActionRequest{ID: actionID, Visibility: &pubTrue}); err != nil {
 		t.Fatalf("make public: %v", err)
 	}
 	if err := k.SetActive(context.Background(), ownerID, actionID, true); err != nil {
@@ -1519,8 +1519,8 @@ func TestFlow_LookupAndRun(t *testing.T) {
 	decodeResponse(t, cr, &act)
 	actID := act["id"].(string)
 	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, providerTok).Body.Close()
-	pubTrue := true
-	if _, err := k.UpdateAction(ctx, providerID, kernel.UpdateActionRequest{ID: actID, Public: &pubTrue}); err != nil {
+	pubTrue := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, providerID, kernel.UpdateActionRequest{ID: actID, Visibility: &pubTrue}); err != nil {
 		t.Fatalf("make public: %v", err)
 	}
 
@@ -2210,7 +2210,7 @@ func TestFlow_OpenAPIOwnershipProof(t *testing.T) {
 	}
 
 	// Making it public without ownership proof is rejected.
-	pubResp1 := httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"public": true}, ownerTok)
+	pubResp1 := httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, ownerTok)
 	pubResp1.Body.Close()
 	if pubResp1.StatusCode == http.StatusOK {
 		t.Error("making public without ownership proof should be rejected")
@@ -2232,7 +2232,7 @@ func TestFlow_OpenAPIOwnershipProof(t *testing.T) {
 	en2Resp.Body.Close()
 
 	// Now making it public succeeds.
-	pubResp2 := httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"public": true}, ownerTok)
+	pubResp2 := httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, ownerTok)
 	pubResp2.Body.Close()
 	if pubResp2.StatusCode != http.StatusOK {
 		t.Fatalf("making public after ownership proof: expected 200, got %d", pubResp2.StatusCode)
@@ -2375,7 +2375,7 @@ func TestFlow_AuthenticatedActionList(t *testing.T) {
 	decodeResponse(t, pubResp, &pubAct)
 	pubID := pubAct["id"].(string)
 	httpDo(t, srv, "POST", "/v1/actions/"+pubID+"/enable", nil, providerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+pubID, map[string]any{"public": true}, providerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions/"+pubID, map[string]any{"visibility": "public"}, providerTok).Body.Close()
 	httpDo(t, srv, "POST", "/v1/actions/"+pubID+"/enable", nil, providerTok).Body.Close()
 
 	// Create private+active action (public defaults to false).

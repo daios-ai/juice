@@ -237,8 +237,8 @@ func TestMakePublicOpenAPIRequiresOwnershipVerified(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pub := true
-	_, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pub})
+	pub := kernel.VisibilityPublic
+	_, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub})
 	if err == nil {
 		t.Fatal("expected error making OpenAPI action public without ownership verification, got nil")
 	}
@@ -264,8 +264,8 @@ func TestMakePublicOpenAPIWithOwnershipVerified(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pub := true
-	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Public: &pub}); err != nil {
+	pub := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
 		t.Errorf("UpdateAction with OwnershipVerified=true: unexpected error: %v", err)
 	}
 }
@@ -280,7 +280,7 @@ func TestSetActivePublicOpenAPIRequiresOwnershipVerified(t *testing.T) {
 	srcBytes, _ := json.Marshal(src)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "@oapi-setactive-owner/sayHello",
-		Kind: kernel.KindHTTP, Active: false, Public: true, Description: "test", Source: string(srcBytes),
+		Kind: kernel.KindHTTP, Active: false, Visibility: kernel.VisibilityPublic, Description: "test", Source: string(srcBytes),
 		InputSchema:  map[string]any{"type": "object", "properties": map[string]any{}},
 		OutputSchema: map[string]any{"type": "object"},
 		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),

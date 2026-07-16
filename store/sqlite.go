@@ -576,13 +576,18 @@ func (s *DB) RenameUser(ctx context.Context, id, handle string) error {
 // ---- Actions ----
 
 func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
+	// Honor the schema's DEFAULT 'private': a zero-value visibility persists as private (the
+	// old public=0 semantics), so the CHECK constraint never sees an empty string.
+	if a.Visibility == "" {
+		a.Visibility = kernel.VisibilityPrivate
+	}
 	inJSON, _ := json.Marshal(a.InputSchema)
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO actions
-		 (id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,auth_json,created_at,updated_at)
+		 (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,auth_json,created_at,updated_at)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.OwnerUserID, a.Name, string(a.Kind), boolInt(a.Active), boolInt(a.Public), a.Price,
+		a.ID, a.OwnerUserID, a.Name, string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price,
 		a.Description, string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact, a.RemoteActionID,
 		a.AuthJSON, timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
 	)
@@ -591,7 +596,7 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 
 // actionCols is the canonical column list for action SELECT statements.
 // Must stay in sync with scanAction/scanActionFn/finishAction.
-const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),(u.suspended_at IS NOT NULL),a.name,a.kind,a.active,a.public,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,a.auth_json,a.created_at,a.updated_at,a.deleted_at`
+const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),(u.suspended_at IS NOT NULL),a.name,a.kind,a.active,a.visibility,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,a.auth_json,a.created_at,a.updated_at,a.deleted_at`
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
@@ -607,9 +612,9 @@ func (s *DB) updateActionTx(ctx context.Context, tx *sql.Tx, a *kernel.Action) e
 	inJSON, _ := json.Marshal(a.InputSchema)
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := tx.ExecContext(ctx,
-		`UPDATE actions SET kind=?,active=?,public=?,price=?,description=?,input_schema=?,output_schema=?,
+		`UPDATE actions SET kind=?,active=?,visibility=?,price=?,description=?,input_schema=?,output_schema=?,
 		 source=?,artifact_hash=?,wasm_artifact=?,auth_json=?,updated_at=? WHERE id=?`,
-		string(a.Kind), boolInt(a.Active), boolInt(a.Public), a.Price, a.Description,
+		string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price, a.Description,
 		string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact,
 		a.AuthJSON, timeToStr(a.UpdatedAt), a.ID,
 	)
@@ -646,15 +651,21 @@ func (s *DB) DeleteAction(ctx context.Context, id string) error {
 	return dbErr(err, "delete action")
 }
 
-func (s *DB) ListPublicActions(ctx context.Context, limit, offset int) ([]*kernel.Action, error) {
+func (s *DB) ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*kernel.Action, error) {
+	// Public always; local only when the caller is local (§4/§14). Peers never reach this via a
+	// session, so includeLocal is safe to key on session presence upstream.
+	visFilter := `a.visibility='public'`
+	if includeLocal {
+		visFilter = `a.visibility IN ('public','local')`
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+actionCols+` FROM actions a LEFT JOIN users u ON u.id=a.owner_user_id
-		 WHERE a.active=1 AND a.public=1 AND a.deleted_at IS NULL AND u.suspended_at IS NULL
+		 WHERE a.active=1 AND `+visFilter+` AND a.deleted_at IS NULL AND u.suspended_at IS NULL
 		 ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
-		return nil, dbErr(err, "list public actions")
+		return nil, dbErr(err, "list visible actions")
 	}
-	return queryList(rows, "list public actions", scanActionFn)
+	return queryList(rows, "list visible actions", scanActionFn)
 }
 
 func (s *DB) ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Action, error) {
@@ -707,16 +718,16 @@ func (s *DB) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL
 
 func scanActionFn(scan func(...any) error) (*kernel.Action, error) {
 	var a kernel.Action
-	var kind, inJSON, outJSON, createdAt, updatedAt string
+	var kind, visibility, inJSON, outJSON, createdAt, updatedAt string
 	var deletedAt sql.NullString
-	var active, public, ownerSuspended int
-	if err := scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &ownerSuspended, &a.Name, &kind, &active, &public, &a.Price,
+	var active, ownerSuspended int
+	if err := scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &ownerSuspended, &a.Name, &kind, &active, &visibility, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.WasmArtifact, &a.RemoteActionID,
 		&a.AuthJSON, &createdAt, &updatedAt, &deletedAt); err != nil {
 		return nil, err
 	}
 	a.OwnerSuspended = ownerSuspended != 0
-	return finishAction(&a, kind, active, public, inJSON, outJSON, createdAt, updatedAt, deletedAt)
+	return finishAction(&a, kind, visibility, active, inJSON, outJSON, createdAt, updatedAt, deletedAt)
 }
 
 func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
@@ -736,10 +747,10 @@ func (s *DB) ReadActionByOwnerRemoteID(ctx context.Context, ownerID, remoteActio
 		ownerID, remoteActionID))
 }
 
-func finishAction(a *kernel.Action, kind string, active, public int, inJSON, outJSON, createdAt, updatedAt string, deletedAt sql.NullString) (*kernel.Action, error) {
+func finishAction(a *kernel.Action, kind, visibility string, active int, inJSON, outJSON, createdAt, updatedAt string, deletedAt sql.NullString) (*kernel.Action, error) {
 	a.Kind = kernel.ActionKind(kind)
 	a.Active = active != 0
-	a.Public = public != 0
+	a.Visibility = kernel.ActionVisibility(visibility)
 	a.CreatedAt = strToTime(createdAt)
 	a.UpdatedAt = strToTime(updatedAt)
 	if deletedAt.Valid {

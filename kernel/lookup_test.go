@@ -52,7 +52,7 @@ func TestLookupRanking(t *testing.T) {
 	} {
 		a := &kernel.Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: desc.name,
-			Kind: kernel.KindHTTP, Active: true, Public: true, Description: desc.text,
+			Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPublic, Description: desc.text,
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)
@@ -97,7 +97,7 @@ func TestLookupRankingWithFakeEmbeddings(t *testing.T) {
 	for name, desc := range descs {
 		a := &kernel.Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: name,
-			Kind: kernel.KindHTTP, Active: true, Public: true, Description: desc,
+			Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPublic, Description: desc,
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)
@@ -134,7 +134,7 @@ func TestLookupIgnoresStatsWhileQualityUnderRevision(t *testing.T) {
 	for name, desc := range descs {
 		a := &kernel.Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: name,
-			Kind: kernel.KindHTTP, Active: true, Public: true, Description: desc,
+			Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPublic, Description: desc,
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)
@@ -184,7 +184,7 @@ func TestLookupLexicalDegradedMode(t *testing.T) {
 
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/weather",
-		Kind: kernel.KindHTTP, Active: false, Public: true,
+		Kind: kernel.KindHTTP, Active: false, Visibility: kernel.VisibilityPublic,
 		Description:  "forecast temperature and rain",
 		Source:       "https://example.com/api",
 		InputSchema:  map[string]any{"type": "object"},
@@ -218,7 +218,7 @@ func TestLookupSkipsMismatchedEmbedding(t *testing.T) {
 
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/x",
-		Kind: kernel.KindHTTP, Active: true, Public: true, Description: "unique widget",
+		Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPublic, Description: "unique widget",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
@@ -243,18 +243,18 @@ func TestLookupFillsPastUncallable(t *testing.T) {
 	alice := setupUser(t, st, "@alice", 0)
 	bob := setupUser(t, st, "@bob", 0)
 
-	mk := func(owner *kernel.User, name string, public bool) *kernel.Action {
+	mk := func(owner *kernel.User, name string, vis kernel.ActionVisibility) *kernel.Action {
 		a := &kernel.Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: name,
-			Kind: kernel.KindHTTP, Active: true, Public: public, Description: "widget service",
+			Kind: kernel.KindHTTP, Active: true, Visibility: vis, Description: "widget service",
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		_ = st.CreateAction(ctx, a)
 		_ = st.UpsertLookupText(ctx, a.ID, name+" widget service")
 		return a
 	}
-	_ = mk(bob, "/bobpriv", false)      // matches, NOT callable by alice
-	pub := mk(alice, "/alicepub", true) // matches, callable
+	_ = mk(bob, "/bobpriv", kernel.VisibilityPrivate)      // matches, NOT callable by alice
+	pub := mk(alice, "/alicepub", kernel.VisibilityPublic) // matches, callable
 
 	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "widget service", Limit: 1, CallerID: alice.ID})
 	if err != nil {
@@ -275,7 +275,7 @@ func TestLookupQuerySanitized(t *testing.T) {
 
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/db",
-		Kind: kernel.KindHTTP, Active: true, Public: true, Description: "query AND filter",
+		Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPublic, Description: "query AND filter",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
@@ -310,7 +310,6 @@ func TestLookupInactiveActionsExcluded(t *testing.T) {
 	}
 }
 
-
 func containsAction(results []*kernel.LookupResult, actionID string) bool {
 	for _, r := range results {
 		if r.Action.ID == actionID {
@@ -331,12 +330,12 @@ func TestLookupEmbeddingStoredOnActivate(t *testing.T) {
 
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/svc",
-		Kind: kernel.KindHTTP, Active: false, Public: true,
-		Description: "unique service description for lookup",
-		Source:      "https://example.com/api",
-		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string", "description": "query"}}},
+		Kind: kernel.KindHTTP, Active: false, Visibility: kernel.VisibilityPublic,
+		Description:  "unique service description for lookup",
+		Source:       "https://example.com/api",
+		InputSchema:  map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string", "description": "query"}}},
 		OutputSchema: map[string]any{"type": "object", "properties": map[string]any{"r": map[string]any{"type": "string", "description": "result"}}},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(ctx, a); err != nil {
 		t.Fatal(err)
@@ -373,7 +372,7 @@ func TestLookupMatchesOwnerHandle(t *testing.T) {
 
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/translate",
-		Kind: kernel.KindHTTP, Active: false, Public: true,
+		Kind: kernel.KindHTTP, Active: false, Visibility: kernel.VisibilityPublic,
 		Description:  "convert text between languages",
 		Source:       "https://example.com/api",
 		InputSchema:  map[string]any{"type": "object"},

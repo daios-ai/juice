@@ -420,7 +420,8 @@ func (k *Kernel) ListGrantViews(ctx context.Context, callerID string) ([]*GrantV
 // caller may use, to drive the consent flow (§8). Internal consent helper, never a read path:
 // the returned AuthInput may carry the client_secret and is used only server-side.
 func (k *Kernel) DelegatedAuthConfig(ctx context.Context, callerID, actionID string) (*AuthInput, error) {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+	caller, err := k.requireActiveUser(ctx, callerID)
+	if err != nil {
 		return nil, err
 	}
 	a, auth, err := k.readDelegatedAction(ctx, actionID)
@@ -430,7 +431,7 @@ func (k *Kernel) DelegatedAuthConfig(ctx context.Context, callerID, actionID str
 	if auth.Scheme != AuthSchemeOAuthDelegated {
 		return nil, ErrInvalidInput.Wrap("action does not use delegated OAuth; supply its token via POST /v1/grants")
 	}
-	if !canCall(callerID, a) {
+	if !canCall(caller, a) {
 		return nil, ErrUnauthorized.Wrap("cannot grant for an action you may not call")
 	}
 	return auth, nil
@@ -629,6 +630,7 @@ func (k *Kernel) expandSelector(ctx context.Context, callerID, sel string) (matc
 		return nil, 0, 0, "", ErrNotFound.Wrap("selector owner not found")
 	}
 	ownerID = owner.ID
+	caller, _ := k.store.ReadUser(ctx, callerID)
 	actions, err := k.store.ListActionsByOwner(ctx, owner.ID, maxOwnerActions, 0)
 	if err != nil {
 		return nil, 0, 0, "", err
@@ -642,7 +644,7 @@ func (k *Kernel) expandSelector(ctx context.Context, callerID, sel string) (matc
 			skippedLoginless++
 			continue
 		}
-		if !canCall(callerID, a) {
+		if !canCall(caller, a) {
 			skippedUncallable++
 			continue
 		}
@@ -754,7 +756,8 @@ func (k *Kernel) ConsentPlan(ctx context.Context, callerID, sel string) (*Consen
 // widens the connection's scopes; an empty secret is the instant-grant path, valid only when a
 // covering connection already exists. Per-action binding at dispatch is unchanged.
 func (k *Kernel) CreateGrants(ctx context.Context, callerID, providerKey string, actionIDs []string, secret, scopesJSON string) ([]*Grant, error) {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+	caller, err := k.requireActiveUser(ctx, callerID)
+	if err != nil {
 		return nil, err
 	}
 	if k.secretBox == nil {
@@ -769,7 +772,7 @@ func (k *Kernel) CreateGrants(ctx context.Context, callerID, providerKey string,
 		if err != nil {
 			return nil, err
 		}
-		if !canCall(callerID, a) {
+		if !canCall(caller, a) {
 			return nil, ErrUnauthorized.Wrap("cannot grant for an action you may not call")
 		}
 		pk, err := connectionKey(a, auth)
@@ -1680,6 +1683,7 @@ func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateAc
 		Name:         req.Name,
 		Kind:         req.Kind,
 		Active:       false,
+		Visibility:   VisibilityPrivate,
 		Price:        req.Price,
 		Description:  req.Description,
 		InputSchema:  req.InputSchema,
@@ -1720,6 +1724,7 @@ func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionReque
 		Name:         req.Name,
 		Kind:         KindNative,
 		Active:       false,
+		Visibility:   VisibilityPrivate, // promoted to public by ActivateNativeAction
 		Price:        req.Price,
 		Description:  req.Description,
 		InputSchema:  req.InputSchema,
@@ -1768,7 +1773,7 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 	a.Description = description
 	a.InputSchema = inputSchema
 	a.OutputSchema = outputSchema
-	a.Public = true
+	a.Visibility = VisibilityPublic
 	if err := k.validateAndInitActivation(ctx, a); err != nil {
 		return err
 	}
@@ -1789,14 +1794,25 @@ func (k *Kernel) ReadAction(ctx context.Context, id string) (*Action, error) {
 }
 
 // ReadActionForSubject returns an action only if the subject has read access.
-// Public actions are readable by anyone; private actions only by their owner or the superuser.
+// Public actions are readable by anyone; local actions by any authenticated user; private actions
+// only by their owner or the superuser. This endpoint is session-authenticated, so a non-empty
+// callerID is a local user (peers hold no session).
 func (k *Kernel) ReadActionForSubject(ctx context.Context, callerID, actionID string) (*Action, error) {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return nil, err
 	}
-	if a.Public || a.OwnerUserID == callerID {
+	switch a.Visibility {
+	case VisibilityPublic:
 		return a, nil
+	case VisibilityLocal:
+		if callerID != "" {
+			return a, nil
+		}
+	default: // private
+		if a.OwnerUserID == callerID {
+			return a, nil
+		}
 	}
 	if u, err := k.store.ReadUser(ctx, callerID); err == nil && k.isUserSuperuser(ctx, u) {
 		return a, nil
@@ -1810,9 +1826,10 @@ func (k *Kernel) ReadActionByOwnerName(ctx context.Context, ownerID, name string
 }
 
 // ReadCallableAction resolves an @owner/name reference and returns the action only if
-// canCall(processOwnerID, action) is satisfied. Used by native actions to discover
-// composable actions without bypassing the kernel's access-control layer.
-func (k *Kernel) ReadCallableAction(ctx context.Context, ownerHandle, actionName, processOwnerID string) (*Action, error) {
+// canCall(caller, action) is satisfied. Used by native actions (§9 composition) to discover
+// composable actions without bypassing the kernel's access-control layer; the subject is the
+// immediate caller, matching subcall dispatch (§4).
+func (k *Kernel) ReadCallableAction(ctx context.Context, ownerHandle, actionName, callerID string) (*Action, error) {
 	owner, err := k.store.ReadUserByHandle(ctx, ownerHandle)
 	if err != nil {
 		return nil, ErrNotFound.Wrap("action owner not found")
@@ -1821,15 +1838,18 @@ func (k *Kernel) ReadCallableAction(ctx context.Context, ownerHandle, actionName
 	if err != nil {
 		return nil, ErrNotFound.Wrap("action not found")
 	}
-	if !canCall(processOwnerID, a) {
-		return nil, ErrUnauthorized.Wrap("action not callable by this process")
+	caller, _ := k.store.ReadUser(ctx, callerID)
+	if !canCall(caller, a) {
+		return nil, ErrUnauthorized.Wrap("action not callable by this caller")
 	}
 	return a, nil
 }
 
-// ListPublicActions returns public active actions.
-func (k *Kernel) ListPublicActions(ctx context.Context, limit, offset int) ([]*Action, error) {
-	return k.store.ListPublicActions(ctx, limit, offset)
+// ListVisibleActions returns active actions visible network-wide (public) and, when includeLocal is
+// set, also kernel-local ones. Manifests and gossip pass false (public only); an authenticated local
+// listing passes true (§14).
+func (k *Kernel) ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*Action, error) {
+	return k.store.ListVisibleActions(ctx, includeLocal, limit, offset)
 }
 
 // ListOwnedActions returns all non-deleted actions owned by ownerID, including inactive
@@ -1959,12 +1979,12 @@ type UpdateActionRequest struct {
 	Description  *string
 	InputSchema  map[string]any
 	OutputSchema map[string]any
-	Source       *string      // http: new upstream URL (merged into existing HTTPSource); wasm: new TinyGo source
-	WasmArtifact string       // wasm: new pre-compiled base64 artifact (symmetric with CreateActionRequest)
-	Method       *string      // http: new verb (merged into existing HTTPSource)
-	Params       *[]HTTPParam // http: new explicit bindings (merged into existing HTTPSource)
-	Public       *bool
-	Auth         *AuthInput // upstream credentials; sealed into auth_json at rest; write-only
+	Source       *string           // http: new upstream URL (merged into existing HTTPSource); wasm: new TinyGo source
+	WasmArtifact string            // wasm: new pre-compiled base64 artifact (symmetric with CreateActionRequest)
+	Method       *string           // http: new verb (merged into existing HTTPSource)
+	Params       *[]HTTPParam      // http: new explicit bindings (merged into existing HTTPSource)
+	Visibility   *ActionVisibility // private | local | public (§4)
+	Auth         *AuthInput        // upstream credentials; sealed into auth_json at rest; write-only
 }
 
 // UpdateAction modifies an action and deactivates it (schema/source changes require re-activation).
@@ -2027,9 +2047,12 @@ func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateAc
 			}
 		}
 	}
-	if req.Public != nil {
-		a.Public = *req.Public
-		if err := requireOpenAPIOwnershipIfPublic(a); err != nil {
+	if req.Visibility != nil {
+		if !ValidActionVisibility(*req.Visibility) {
+			return nil, ErrInvalidInput.Wrap("visibility must be private, local, or public")
+		}
+		a.Visibility = *req.Visibility
+		if err := requireOpenAPIOwnershipIfVisible(a); err != nil {
 			return nil, err
 		}
 	}
@@ -2121,7 +2144,7 @@ func (k *Kernel) SetActive(ctx context.Context, callerID, actionID string, activ
 			}
 			a.ArtifactHash = hash
 		}
-		if err := requireOpenAPIOwnershipIfPublic(a); err != nil {
+		if err := requireOpenAPIOwnershipIfVisible(a); err != nil {
 			return err
 		}
 	}
@@ -2176,7 +2199,9 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	// Pre-funding validity gate: Call re-runs checkCallPreconditions authoritatively, but a
 	// rejection must not leave a funded process behind (a rejected call creates no transaction,
 	// §6), so the same check runs here before BeginRun parks funds.
-	if err := k.checkCallPreconditions(ctx, caller.ID, action, args); err != nil {
+	// Root/federated runs have C = P (the caller owns the process), so one identity feeds both the
+	// caller-scoped visibility check and the process-owner-scoped grant check.
+	if err := k.checkCallPreconditions(ctx, caller, caller.ID, action, args); err != nil {
 		return nil, err
 	}
 	if err := k.requireReceiptSigningReady(); err != nil {
@@ -2592,7 +2617,12 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	sort.Slice(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
 
 	// Hydrate and filter by CanCall BEFORE truncating, so a run of others' private actions cannot
-	// starve the caller of results it may actually call.
+	// starve the caller of results it may actually call. Visibility is caller-scoped (§4), so load
+	// the caller once; a nil caller (anonymous lookup) sees public actions only.
+	var caller *User
+	if req.CallerID != "" {
+		caller, _ = k.store.ReadUser(ctx, req.CallerID)
+	}
 	out := make([]*LookupResult, 0, limit)
 	ownerHandles := map[string]string{}
 	for _, r := range ranked {
@@ -2600,7 +2630,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 			break
 		}
 		a, err := k.store.ReadAction(ctx, r.id)
-		if err != nil || !canCall(req.CallerID, a) {
+		if err != nil || !canCall(caller, a) {
 			continue
 		}
 		if _, cached := ownerHandles[a.OwnerUserID]; !cached {
@@ -2760,10 +2790,11 @@ func (k *Kernel) requireSelf(ctx context.Context, callerID, ownerID string) erro
 	return ErrUnauthorized.Wrap("cannot act on behalf of another user")
 }
 
-// requireOpenAPIOwnershipIfPublic returns ErrUnauthorized if a is a public OpenAPI action
-// whose ownership has not been verified. This prevents making unverified API imports public.
-func requireOpenAPIOwnershipIfPublic(a *Action) error {
-	if !a.Public {
+// requireOpenAPIOwnershipIfVisible returns ErrUnauthorized if a is an OpenAPI action exposed beyond
+// its owner (local or public) whose ownership has not been verified. This prevents exposing an
+// unverified API import to any other caller.
+func requireOpenAPIOwnershipIfVisible(a *Action) error {
+	if a.Visibility == VisibilityPrivate {
 		return nil
 	}
 	if !strings.HasPrefix(strings.TrimSpace(a.Source), "{") {

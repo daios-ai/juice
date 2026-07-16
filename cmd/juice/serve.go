@@ -866,9 +866,14 @@ func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 		Params       *[]kernel.HTTPParam `json:"params"`
 		InputSchema  map[string]any      `json:"input_schema"`
 		OutputSchema map[string]any      `json:"output_schema"`
-		Public       *bool               `json:"public"`
+		Visibility   *string             `json:"visibility"`
 		Auth         *kernel.AuthInput   `json:"auth"`
 	}) (any, int, error) {
+		var vis *kernel.ActionVisibility
+		if body.Visibility != nil {
+			v := kernel.ActionVisibility(*body.Visibility)
+			vis = &v
+		}
 		a, err := updateAction(s.kernel, r.Context(), callerFrom(r), kernel.UpdateActionRequest{
 			ID:           pathID(r),
 			Price:        body.Price,
@@ -879,7 +884,7 @@ func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
 			Params:       body.Params,
 			InputSchema:  body.InputSchema,
 			OutputSchema: body.OutputSchema,
-			Public:       body.Public,
+			Visibility:   vis,
 			Auth:         body.Auth,
 		})
 		return a, http.StatusOK, err
@@ -1569,7 +1574,7 @@ func (h *fedHandlers) OnFriend(ctx context.Context, _ string, req fed.FriendRequ
 
 // OnManifest returns one signed manifest per active public action (chunked, relay-safe).
 func (h *fedHandlers) OnManifest(ctx context.Context, _ string) ([]json.RawMessage, error) {
-	actions, err := h.kernel.ListPublicActions(ctx, 200, 0)
+	actions, err := h.kernel.ListVisibleActions(ctx, false, 200, 0)
 	if err != nil {
 		return nil, err
 	}

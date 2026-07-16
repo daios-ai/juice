@@ -64,7 +64,7 @@ flow_successful_receipt() {
 
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create receipt-action --kind http --source "http://127.0.0.1:${bport}/act" --price 10 --description "receipt")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
     local out; out=$(jj "$db" "$hb" run @alice/receipt-action '{}')
     assert_nonempty "successful_receipt.call_succeeded" "$(strfield "$out" tx_id)"
@@ -84,7 +84,7 @@ flow_failed_receipt() {
 
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create fail-action --kind http --source "http://127.0.0.1:${bport}/fail" --price 10 --description "fail")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
     j "$db" "$hb" run @alice/fail-action '{}' >/dev/null 2>&1 || true
     local txs; txs=$(jj "$db" "$hb" tx list)
@@ -160,7 +160,7 @@ flow_openapi_import_execute() {
     assert_eq "openapi_import.action_name" greet "$name"
 
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
     assert_nonempty "openapi_import.call_succeeds" "$(strfield "$(jj "$db" "$hb" run "@alice/$name" '{}')" tx_id)"
 }
 

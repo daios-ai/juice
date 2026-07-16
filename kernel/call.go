@@ -125,11 +125,13 @@ func (k *Kernel) ResolveUser(ctx context.Context, ident string) (*User, error) {
 func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) {
 	logger := k.log.With(ctx)
 
-	// 1. Subject must be authenticated.
+	// 1. Subject must be authenticated. The caller User is retained for the §4 precondition-6
+	// visibility check (canCall is caller-scoped).
 	if req.CallerID == "" {
 		return nil, ErrUnauthenticated.Wrap("subject is required")
 	}
-	if _, err := k.requireActiveUser(ctx, req.CallerID); err != nil {
+	caller, err := k.requireActiveUser(ctx, req.CallerID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -222,7 +224,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// path (root, step, subcall). The pre-resolved snapshot (req.Action) is validated, so root
 	// calls are checked here too with no extra DB read and no TOCTOU window — Call is the single
 	// validity function; no entry path bypasses it (beginRun runs the same check before funding).
-	if err := k.checkCallPreconditions(ctx, process.OwnerUserID, action, req.Args); err != nil {
+	if err := k.checkCallPreconditions(ctx, caller, process.OwnerUserID, action, req.Args); err != nil {
 		return nil, err
 	}
 
@@ -476,19 +478,35 @@ func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
 	return dbTrace.Available
 }
 
-// canCall returns true iff the action is callable by a process owned by ownerID.
-// CanCall(ownerID, a) := active(a) ∧ (public(a) ∨ ownerID = a.OwnerUserID)
-func canCall(ownerID string, action *Action) bool {
-	return action.Active && !action.OwnerSuspended && (action.Public || ownerID == action.OwnerUserID)
+// canCall returns true iff the action is callable by the immediate caller (§4). Visibility is
+// scoped to the caller, not the process owner, so a provider's public action may subcall the
+// provider's own private helpers in anyone's process, while foreign code funded by a process owner
+// cannot reach that owner's private actions.
+// CanCall(C, a) := active(a) ∧ ¬suspended(a.owner) ∧
+//
+//	(public(a) ∨ (local(a) ∧ ¬IsPeer(C)) ∨ C = a.OwnerUserID)
+func canCall(caller *User, action *Action) bool {
+	if !action.Active || action.OwnerSuspended {
+		return false
+	}
+	switch action.Visibility {
+	case VisibilityPublic:
+		return true
+	case VisibilityLocal:
+		return caller != nil && !caller.IsPeer()
+	default: // private
+		return caller != nil && caller.ID == action.OwnerUserID
+	}
 }
 
 // checkCallPreconditions enforces the §4 semantic call-validity rules (steps 6 and 7) for a
-// resolved action: CanCall by the process owner, and input against the action's schema. It is
+// resolved action: CanCall by the immediate caller, and input against the action's schema. It is
 // the single validity function — Call runs it unconditionally for every entry path, and
 // beginRun runs it once before funding so an invalid root call never creates a funded process
-// (a precondition rejection must create no transaction, §6).
-func (k *Kernel) checkCallPreconditions(ctx context.Context, ownerID string, action *Action, args map[string]any) error {
-	if !canCall(ownerID, action) {
+// (a precondition rejection must create no transaction, §6). The grant check stays keyed on the
+// process owner: delegated consent binds to the paying human, never the caller (§8).
+func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *User, processOwnerID string, action *Action, args map[string]any) error {
+	if !canCall(caller, action) {
 		if !action.Active {
 			return ErrInvalidState.Wrap("action is inactive")
 		}
@@ -500,7 +518,7 @@ func (k *Kernel) checkCallPreconditions(ctx context.Context, ownerID string, act
 	if err := ValidateInput(action.InputSchema, args); err != nil {
 		return err
 	}
-	return k.checkGrantRequired(ctx, ownerID, action)
+	return k.checkGrantRequired(ctx, processOwnerID, action)
 }
 
 // checkGrantRequired implements §8 lazy consent: a call to a delegated http action (oauth_delegated

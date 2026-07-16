@@ -131,7 +131,7 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !a.Public {
+	if a.Visibility != kernel.VisibilityPublic {
 		t.Error("lookup should be public after idempotent ensureSysNative")
 	}
 }
@@ -169,7 +169,7 @@ func TestEnsureSysLLMChatIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !a.Public {
+	if a.Visibility != kernel.VisibilityPublic {
 		t.Error("llm/chat should be public after idempotent ensureSysNative")
 	}
 }
@@ -347,8 +347,8 @@ func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("@sys/tinygo/compile not registered after bootstrap: %v", err)
 	}
-	if !a.Active || !a.Public {
-		t.Errorf("@sys/tinygo/compile should be active and public, got active=%v public=%v", a.Active, a.Public)
+	if !a.Active || a.Visibility != kernel.VisibilityPublic {
+		t.Errorf("@sys/tinygo/compile should be active and public, got active=%v visibility=%v", a.Active, a.Visibility)
 	}
 	if a.Kind != kernel.KindNative {
 		t.Errorf("@sys/tinygo/compile kind = %q, want native", a.Kind)

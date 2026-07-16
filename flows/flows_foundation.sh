@@ -175,7 +175,7 @@ flow_action_lifecycle() {
     local tid tx_id
     tid=$(strfield "$(jj "$db" "$ha" action create callable --kind http --source "http://127.0.0.1:${bport}/call" --description "tx test" --price 0)" id)
     j "$db" "$ha" action enable "$tid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$tid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$tid" --visibility public >/dev/null 2>&1
     tx_id=$(strfield "$(jj "$db" "$hb" run @alice/callable '{}')" tx_id)
     j "$db" "$ha" action delete "$tid" >/dev/null 2>&1
     assert_json "action_lifecycle.action_name_in_tx_after_delete" "$(jj "$db" "$hb" tx show "$tx_id")" action_name callable
@@ -189,7 +189,7 @@ flow_action_owner_visibility() {
     j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
     make_user "$db" "$hs" "$ha" @alice
 
-    # A private, inactive action (no enable, no --public).
+    # A private, inactive action (no enable, no --visibility public).
     j "$db" "$ha" action create secret-op --kind http --source "http://127.0.0.1:1/secret" --description "private" >/dev/null 2>&1
 
     # Unauthenticated listing must NOT include the owner's private action; the owner's does.

@@ -25,7 +25,7 @@ flow_transaction_access() {
     aid=$(strfield "$(jj "$db" "$ha" action create pvd-action --kind http \
         --source "http://127.0.0.1:${bport}/pvd" --price 10 --description "tx access test")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
     # @bob (buyer) calls it 3 times.
     local i last_tx
@@ -86,7 +86,7 @@ flow_admin_supervision() {
     aid=$(strfield "$(jj "$db" "$ha" action create test --kind http \
         --source "http://127.0.0.1:$bport" --description "alice's action" --price 0)" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --public >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
     # @sys `action list` shows @alice's action (system-wide scope).
     assert_contains "admin.action_list_scope" "$aid" "$(jj "$db" "$hs" action list)"
 
@@ -173,8 +173,8 @@ import sqlite3, uuid, sys
 c = sqlite3.connect(sys.argv[1])
 owner = c.execute("SELECT id FROM users WHERE handle='@sys' LIMIT 1").fetchone()[0]
 c.execute("""INSERT INTO actions
-  (id,owner_user_id,name,kind,active,public,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,auth_json,created_at,updated_at)
-  VALUES (?,?,?,'native',1,1,0,'obsolete',?,?,'','','','','',datetime('now'),datetime('now'))""",
+  (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,auth_json,created_at,updated_at)
+  VALUES (?,?,?,'native',1,'public',0,'obsolete',?,?,'','','','','',datetime('now'),datetime('now'))""",
   [str(uuid.uuid4()), owner, 'obsolete-native', '{"type":"object"}', '{"type":"object"}'])
 c.commit()
 PYEOF
