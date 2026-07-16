@@ -42,8 +42,8 @@ final and atomic with its transaction and receipt.
 ## Features
 
 - **Actions** — `http`, `wasm`, `native`, and `remote_proxy` kinds, with JSON Schema validation on
-  inputs and outputs. Visibility is two booleans, `active` and `public`:
-  `CanCall(P, a) = active(a) ∧ (public(a) ∨ P = a.owner)`. (No per-user ACLs.)
+  inputs and outputs. Each action is `active` or not and has a visibility of `private` (owner only),
+  `local` (any user on this kernel), or `public` (also callable by federated peers). (No per-user ACLs.)
 - **Funded processes & traces** — budgeted execution contexts; funds locked per call, settled on
   success, refunded on failure; a full trace tree per process.
 - **Immutable transactions** with signed **Ed25519 receipts** and signed **ratings** (`0`/`1`).
