@@ -98,11 +98,11 @@ func validateResolvedIP(ipStr string) error {
 	return nil
 }
 
-// validatePublicURL rejects URLs unsafe for an outbound fetch: non-http(s) schemes
-// and, unless allowLocal, localhost / loopback / RFC 1918 / link-local literal hosts.
-// Hostname (non-literal-IP) targets are re-validated against DNS by newHTTPClient's
-// dial guard at call time; this catches the literal-IP and localhost cases the dialer
-// deliberately skips ("validated at URL parse time").
+// validatePublicURL rejects URLs unsafe for an outbound fetch: non-http(s) schemes and, unless
+// allowLocal, RFC 1918 / link-local / reserved literal hosts (loopback is allowed by default).
+// Hostname (non-literal-IP) targets are re-validated against DNS by newHTTPClient's dial guard at
+// call time; this catches the literal-IP cases the dialer deliberately skips ("validated at URL
+// parse time").
 func validatePublicURL(rawURL string, allowLocal bool) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -115,15 +115,15 @@ func validatePublicURL(rawURL string, allowLocal bool) error {
 	if strings.Count(u.Host, ":") > 1 && !strings.HasPrefix(u.Host, "[") {
 		return kernel.ErrUnsafeSourceURL("unsafe URL: private or reserved address")
 	}
+	host := u.Hostname()
+	if host == "" {
+		return kernel.ErrInvalidInput.Wrap("URL must have a host")
+	}
 	if allowLocal {
 		return nil
 	}
-	host := u.Hostname()
-	if strings.EqualFold(host, "localhost") || host == "" {
-		return kernel.ErrUnsafeSourceURL("unsafe URL: localhost not allowed")
-	}
 	if ip := net.ParseIP(host); ip != nil && kernel.UnsafeIP(ip) {
-		return kernel.ErrUnsafeSourceURL("unsafe URL: private/loopback host")
+		return kernel.ErrUnsafeSourceURL("unsafe URL: private/reserved host")
 	}
 	return nil
 }

@@ -128,9 +128,7 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 		return []string{"203.0.113.1"}, nil // TEST-NET, always public
 	})
 	rejected := []string{
-		"http://localhost/api",
-		"http://127.0.0.1/secret",
-		"http://::1/secret",
+		"http://::1/secret", // malformed bracketless IPv6 (must be [::1]); rejected as a probe, not by loopback policy
 		"http://10.0.0.1/internal",
 		"http://192.168.1.1/router",
 		"http://172.16.0.1/internal",
@@ -153,6 +151,10 @@ func TestValidateHTTPSourceSSRF(t *testing.T) {
 		"https://example.com/api",
 		"http://example.com/webhook",
 		"https://api.stripe.com/v1/charges",
+		// Loopback is permitted by default: a service on this same host (§7/§9).
+		"http://127.0.0.1/secret",
+		"http://[::1]/secret",
+		"http://localhost/api", // resolves public here; localhost is no longer hard-rejected
 		// Unresolvable hostnames are allowed through; the runtime dialer re-validates at call time.
 		"https://this-does-not-exist.invalid/api",
 		"https://api.example.com/v2",
@@ -184,16 +186,17 @@ func TestValidateHTTPSourceDNSResolvesToPrivate(t *testing.T) {
 	ctx := context.Background()
 	for _, u := range []string{
 		"https://internal.corp/api",
-		"https://loopback.example/api",
 		"https://linklocal.example/api",
 	} {
 		if err := k.validateHTTPSource(ctx, u, false); err == nil {
 			t.Errorf("validateHTTPSource(%q): expected rejection for private-resolving hostname, got nil", u)
 		}
 	}
-	// Public-resolving hostname must be accepted.
-	if err := k.validateHTTPSource(ctx, "https://public.example/api", false); err != nil {
-		t.Errorf("validateHTTPSource(public.example): unexpected error: %v", err)
+	// Public-resolving and loopback-resolving hostnames must be accepted (loopback is permitted).
+	for _, u := range []string{"https://public.example/api", "https://loopback.example/api"} {
+		if err := k.validateHTTPSource(ctx, u, false); err != nil {
+			t.Errorf("validateHTTPSource(%q): unexpected error: %v", u, err)
+		}
 	}
 	// DNS failure (empty result, no error) must be allowed through.
 	if err := k.validateHTTPSource(ctx, "https://unresolvable.invalid/api", false); err != nil {

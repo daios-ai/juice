@@ -2590,13 +2590,14 @@ func TestCallLogsTxID(t *testing.T) {
 
 // TestUnsafeHostAndIP covers the single-source-of-truth SSRF predicate (§7/§9).
 func TestUnsafeHostAndIP(t *testing.T) {
-	unsafe := []string{"", "localhost", "LocalHost", "127.0.0.1", "::1", "10.0.0.1", "192.168.1.1", "169.254.0.1", "172.16.0.1"}
+	unsafe := []string{"", "10.0.0.1", "192.168.1.1", "169.254.0.1", "172.16.0.1"}
 	for _, h := range unsafe {
 		if !kernel.UnsafeHost(h) {
 			t.Errorf("UnsafeHost(%q) = false, want true", h)
 		}
 	}
-	safe := []string{"example.com", "8.8.8.8", "1.1.1.1", "api.stripe.com"}
+	// Loopback is permitted by default (§7/§9), so it is no longer unsafe.
+	safe := []string{"example.com", "8.8.8.8", "1.1.1.1", "api.stripe.com", "localhost", "127.0.0.1", "::1"}
 	for _, h := range safe {
 		if kernel.UnsafeHost(h) {
 			t.Errorf("UnsafeHost(%q) = true, want false", h)
@@ -2605,8 +2606,11 @@ func TestUnsafeHostAndIP(t *testing.T) {
 	if kernel.UnsafeIP(net.ParseIP("8.8.8.8")) {
 		t.Error("UnsafeIP(8.8.8.8) = true, want false")
 	}
-	if !kernel.UnsafeIP(net.ParseIP("127.0.0.1")) {
-		t.Error("UnsafeIP(127.0.0.1) = false, want true")
+	if kernel.UnsafeIP(net.ParseIP("127.0.0.1")) {
+		t.Error("UnsafeIP(127.0.0.1) = true, want false (loopback permitted by default)")
+	}
+	if !kernel.UnsafeIP(net.ParseIP("192.168.1.1")) {
+		t.Error("UnsafeIP(192.168.1.1) = false, want true")
 	}
 	// The single SSRF rejection error always names the escape hatch (item 3).
 	if msg := kernel.ErrUnsafeSourceURL("x").Error(); !strings.Contains(msg, "allow_local_sources") {

@@ -31,7 +31,7 @@ type Config struct {
 	TokenTTL          time.Duration // token validity window
 	ScriptTimeout     time.Duration
 	ScriptMemory      int64              // bytes
-	AllowLocalSources bool               // permit loopback/private URLs as action sources (tests only)
+	AllowLocalSources bool               // permit private/LAN/reserved URLs as action sources (loopback is allowed by default)
 	SigningKey        ed25519.PrivateKey // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
 	IssuerUserID      string             // @sys user ID, set during bootstrap
 	AuthIssuer        string             // config.json auth_issuer — iss claim in JWTs; empty = no claim
@@ -63,7 +63,8 @@ func ceilDiv(a, b int64) int64 {
 	return (a + b - 1) / b
 }
 
-// AllowsLocalSources reports whether the kernel is configured to permit loopback/private source URLs.
+// AllowsLocalSources reports whether the kernel is configured to permit private/LAN/reserved source
+// URLs (loopback is permitted regardless).
 func (k *Kernel) AllowsLocalSources() bool { return k.cfg.AllowLocalSources }
 
 // NativeFunc is the signature for a registered native action handler.
@@ -1419,20 +1420,22 @@ type CreateActionRequest struct {
 // net.IP.IsPrivate, so a fetch could otherwise reach a carrier-internal host.
 var _, cgnatRange, _ = net.ParseCIDR("100.64.0.0/10")
 
-// UnsafeIP reports whether ip is loopback, RFC 1918 private, link-local, unspecified (0.0.0.0 / ::,
-// which routes to localhost on Linux), or CGNAT shared space — the addresses an outbound fetch,
-// redirect, or peer URL must not target (SSRF discipline, §7/§9). This is the single source of truth
-// for that predicate; do not re-inline the checks elsewhere.
+// UnsafeIP reports whether ip is RFC 1918 private, link-local (incl. cloud metadata 169.254.169.254),
+// unspecified (0.0.0.0 / ::), or CGNAT shared space — the addresses an outbound fetch, redirect, or
+// peer URL must not target unless allow_local_sources is set (SSRF discipline, §7/§9). Loopback is
+// deliberately NOT unsafe: a service on this same host (a local LLM, the §9 co-located callback) is
+// permitted by default; only the LAN and metadata classes stay gated. This is the single source of
+// truth for that predicate; do not re-inline the checks elsewhere.
 func UnsafeIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+	return ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsUnspecified() || cgnatRange.Contains(ip)
 }
 
-// UnsafeHost reports whether host (a hostname or literal IP) is empty, localhost, or a literal
-// private/loopback/link-local IP. Non-IP hostnames return false — callers that resolve DNS must
-// check the resolved addresses with UnsafeIP separately.
+// UnsafeHost reports whether host (a hostname or literal IP) is empty or a literal private/
+// link-local/reserved IP (see UnsafeIP; loopback is permitted). Non-IP hostnames return false —
+// callers that resolve DNS must check the resolved addresses with UnsafeIP separately.
 func UnsafeHost(host string) bool {
-	if host == "" || strings.EqualFold(host, "localhost") {
+	if host == "" {
 		return true
 	}
 	if ip := net.ParseIP(host); ip != nil {
@@ -1451,10 +1454,11 @@ func ErrUnsafeSourceURL(detail string) error {
 }
 
 // validateHTTPSource rejects URLs that could be used for SSRF attacks.
-// Allowed: http and https schemes with public hostnames or literal public IPs.
-// Rejected: other schemes, localhost, loopback, RFC 1918 private, and link-local addresses.
-// For hostname (non-literal-IP) sources, DNS is resolved to catch SSRF via private hostnames.
-// DNS failures are allowed through; the runtime dialer re-validates at call time.
+// Allowed: http and https schemes with public hostnames, literal public IPs, or loopback.
+// Rejected: other schemes, RFC 1918 private, link-local, and reserved addresses (unless allowLocal).
+// For hostname (non-literal-IP) sources, DNS is resolved to catch SSRF via private hostnames — so a
+// hostname (incl. localhost) that resolves to loopback is allowed, but one resolving to a private IP
+// is not. DNS failures are allowed through; the runtime dialer re-validates at call time.
 func (k *Kernel) validateHTTPSource(ctx context.Context, source string, allowLocal bool) error {
 	u, err := url.Parse(source)
 	if err != nil {
@@ -1474,9 +1478,6 @@ func (k *Kernel) validateHTTPSource(ctx context.Context, source string, allowLoc
 		return ErrInvalidInput.Wrap("URL must have a host")
 	}
 	if !allowLocal {
-		if strings.EqualFold(host, "localhost") {
-			return ErrUnsafeSourceURL("URL must not target localhost")
-		}
 		if ip := net.ParseIP(host); ip != nil {
 			if UnsafeIP(ip) {
 				return ErrUnsafeSourceURL("URL must not target private or reserved addresses")

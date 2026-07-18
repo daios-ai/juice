@@ -27,7 +27,6 @@ func newCapabilityKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store
 
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "cap-test-secret"
-	cfg.AllowLocalSources = true // loopback endpoint + loopback callback
 	logger := log.Discard()
 	box, err := newAESGCMBox(make([]byte, 32))
 	if err != nil {

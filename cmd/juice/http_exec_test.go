@@ -21,8 +21,10 @@ import (
 // (wrong key, key rotation, corrupted ciphertext).
 type erroringBox struct{}
 
-func (erroringBox) Seal(aad, plaintext string) (string, error)  { return plaintext, nil }
-func (erroringBox) Open(aad, ciphertext string) (string, error) { return "", fmt.Errorf("decrypt failed") }
+func (erroringBox) Seal(aad, plaintext string) (string, error) { return plaintext, nil }
+func (erroringBox) Open(aad, ciphertext string) (string, error) {
+	return "", fmt.Errorf("decrypt failed")
+}
 
 // httpSrc builds canonical HTTPSource JSON for a full URL + method (path split
 // from the URL), mirroring what the kernel stores for a manual kind=http action.
@@ -38,7 +40,7 @@ func httpSrc(rawURL, method string, params ...kernel.HTTPParam) string {
 }
 
 func TestValidateResolvedIPBlocked(t *testing.T) {
-	blocked := []string{"127.0.0.1", "::1", "192.168.1.1", "10.0.0.1", "172.16.0.1", "169.254.1.1"}
+	blocked := []string{"192.168.1.1", "10.0.0.1", "172.16.0.1", "169.254.1.1"}
 	for _, ip := range blocked {
 		err := validateResolvedIP(ip)
 		if err == nil {
@@ -53,7 +55,8 @@ func TestValidateResolvedIPBlocked(t *testing.T) {
 }
 
 func TestValidateResolvedIPAllowed(t *testing.T) {
-	allowed := []string{"8.8.8.8", "1.1.1.1", "93.184.216.34"}
+	// Loopback is permitted by default (127.0.0.1 / ::1); public IPs always are.
+	allowed := []string{"8.8.8.8", "1.1.1.1", "93.184.216.34", "127.0.0.1", "::1"}
 	for _, ip := range allowed {
 		if err := validateResolvedIP(ip); err != nil {
 			t.Errorf("validateResolvedIP(%q): unexpected error: %v", ip, err)
@@ -62,7 +65,7 @@ func TestValidateResolvedIPAllowed(t *testing.T) {
 }
 
 func TestValidateRedirectHostBlocked(t *testing.T) {
-	cases := []string{"localhost", "127.0.0.1", "::1", "192.168.1.1", "10.0.0.1", "169.254.1.1"}
+	cases := []string{"192.168.1.1", "10.0.0.1", "169.254.1.1"}
 	for _, h := range cases {
 		if err := validateRedirectHost(h, false); err == nil {
 			t.Errorf("validateRedirectHost(%q, false): expected error, got nil", h)
@@ -71,8 +74,13 @@ func TestValidateRedirectHostBlocked(t *testing.T) {
 }
 
 func TestValidateRedirectHostAllowed(t *testing.T) {
-	cases := []string{"localhost", "127.0.0.1", "10.0.0.1"}
-	for _, h := range cases {
+	// Loopback redirect targets are permitted by default (no flag); the LAN needs allowLocal.
+	for _, h := range []string{"localhost", "127.0.0.1", "::1"} {
+		if err := validateRedirectHost(h, false); err != nil {
+			t.Errorf("validateRedirectHost(%q, false): unexpected error: %v", h, err)
+		}
+	}
+	for _, h := range []string{"192.168.1.1", "10.0.0.1"} {
 		if err := validateRedirectHost(h, true); err != nil {
 			t.Errorf("validateRedirectHost(%q, true): unexpected error: %v", h, err)
 		}
@@ -525,10 +533,11 @@ func TestFetchWebReturnsNon2xxStatus(t *testing.T) {
 	}
 }
 
-func TestFetchWebRejectsLoopbackWhenLocalDisallowed(t *testing.T) {
-	// allowLocal defaults to false: a literal loopback IP must be rejected at parse time.
+func TestFetchWebRejectsPrivateWhenLocalDisallowed(t *testing.T) {
+	// allowLocal defaults to false: a private/LAN address must be rejected at parse time.
+	// (Loopback is permitted by default, so it is no longer rejected here.)
 	exec := &httpActionExecutor{}
-	_, _, _, _, err := exec.fetchWeb(context.Background(), "http://127.0.0.1:11434/", "")
+	_, _, _, _, err := exec.fetchWeb(context.Background(), "http://192.168.1.1/", "")
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("got %v, want ErrInvalidInput", err)
 	}
@@ -544,12 +553,12 @@ func TestFetchWebRejectsNonHTTPScheme(t *testing.T) {
 
 func TestFetchWebSchemelessDefaultsToHTTPS(t *testing.T) {
 	// A scheme-less URL is upgraded to https before the SSRF guard runs. Pointing it
-	// at a loopback host with allowLocal=false proves the https:// prefix was applied:
+	// at a private host with allowLocal=false proves the https:// prefix was applied:
 	// the guard rejects the resolved private address rather than failing to parse.
 	exec := &httpActionExecutor{}
-	_, _, _, _, err := exec.fetchWeb(context.Background(), "127.0.0.1:11434/path", "")
+	_, _, _, _, err := exec.fetchWeb(context.Background(), "192.168.1.1/path", "")
 	if !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Fatalf("got %v, want ErrInvalidInput (guard on https-upgraded loopback)", err)
+		t.Fatalf("got %v, want ErrInvalidInput (guard on https-upgraded private host)", err)
 	}
 }
 

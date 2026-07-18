@@ -491,8 +491,31 @@ const (
 	ctxCapOwner ctxKey = "cap_owner"
 )
 
-// ipRateLimiter returns a middleware that limits requests per IP using a token bucket.
-// Entries not seen for 5 minutes are evicted by a background goroutine.
+// rateLimitKey resolves the client key for the rate limiter and whether to exempt it. A genuine
+// loopback client — the operator's own CLI talking to its own kernel, with no proxy header — is
+// exempt: it is already inside the trust boundary the limiter defends. Only a same-host process can
+// present a loopback RemoteAddr, so when one also carries X-Forwarded-For we are behind a co-located
+// reverse proxy; we then key on the real client (the last forwarded hop, which the trusted proxy
+// appended) so external callers are limited per-client rather than lumped into one loopback bucket.
+func rateLimitKey(r *http.Request) (key string, exempt bool) {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		ip = r.RemoteAddr
+	}
+	if parsed := net.ParseIP(ip); parsed != nil && parsed.IsLoopback() {
+		xff := r.Header.Get("X-Forwarded-For")
+		if xff == "" {
+			return "", true
+		}
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[len(parts)-1]), false
+	}
+	return ip, false
+}
+
+// ipRateLimiter returns a middleware that limits requests per client using a token bucket, keyed by
+// rateLimitKey (genuine loopback is exempt). Entries not seen for 5 minutes are evicted by a
+// background goroutine.
 func ipRateLimiter(ratePerSec, burst float64) func(http.Handler) http.Handler {
 	type entry struct {
 		lim      *rate.Limiter
@@ -516,15 +539,16 @@ func ipRateLimiter(ratePerSec, burst float64) func(http.Handler) http.Handler {
 	}()
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-			if ip == "" {
-				ip = r.RemoteAddr
+			key, exempt := rateLimitKey(r)
+			if exempt {
+				next.ServeHTTP(w, r)
+				return
 			}
 			mu.Lock()
-			e, ok := entries[ip]
+			e, ok := entries[key]
 			if !ok {
 				e = &entry{lim: rate.NewLimiter(rate.Limit(ratePerSec), int(burst))}
-				entries[ip] = e
+				entries[key] = e
 			}
 			e.lastSeen = time.Now()
 			allow := e.lim.Allow()

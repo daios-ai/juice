@@ -1243,16 +1243,30 @@ func TestRateLimitLogin(t *testing.T) {
 	defer ts.Close()
 
 	body := map[string]any{"handle": "@rlu", "password": "pass"}
+
+	// httptest requests originate from loopback. A genuine local client (no X-Forwarded-For) is
+	// exempt from rate limiting, so a burst well past the limit never 429s.
 	for i := 0; i < 5; i++ {
 		resp := httpDo(t, ts, "POST", "/v1/auth/token", body, "")
 		resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests {
+			t.Errorf("loopback request %d: unexpected 429 (genuine local client must be exempt)", i+1)
+		}
+	}
+
+	// Behind a same-host proxy (loopback RemoteAddr + X-Forwarded-For), the real client is limited:
+	// the resolved client is the last forwarded hop, so it is keyed and throttled per-client.
+	xff := map[string]string{"X-Forwarded-For": "203.0.113.7"}
+	for i := 0; i < 5; i++ {
+		resp := httpDoWithHeaders(t, ts, "POST", "/v1/auth/token", body, "", xff)
+		resp.Body.Close()
 		if i < 3 {
 			if resp.StatusCode == http.StatusTooManyRequests {
-				t.Errorf("request %d: unexpected 429 within burst", i+1)
+				t.Errorf("proxied request %d: unexpected 429 within burst", i+1)
 			}
 		} else {
 			if resp.StatusCode != http.StatusTooManyRequests {
-				t.Errorf("request %d: expected 429 after burst, got %d", i+1, resp.StatusCode)
+				t.Errorf("proxied request %d: expected 429 after burst, got %d", i+1, resp.StatusCode)
 			}
 		}
 	}

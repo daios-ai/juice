@@ -62,7 +62,6 @@ func newTestEnv(t *testing.T) *testEnv {
 	cfg.IssuerUserID = cmdTestIssuerID
 	cfg.FeeRecipientID = cmdTestIssuerID
 	cfg.SigningKey = signingKey
-	cfg.AllowLocalSources = true // CLI-command tests import specs from loopback httptest servers
 	// Credential encryption is mandatory (§8): the production binary always wires a box,
 	// so tests do too. Without it, creating/activating an action with upstream auth fails closed.
 	box, _ := newAESGCMBox(make([]byte, 32))
