@@ -229,7 +229,7 @@ flow_recovery() {
     j "$db" "$uh" auth logout >/dev/null 2>&1
 
     # Recover a lost password with the phrase; the old password is then rejected and the new works.
-    j "$db" "$uh" auth recover @recuser --phrase "$phrase" --new-password newpass1 >/dev/null 2>&1
+    j "$db" "$uh" auth recover @recuser --phrase "$phrase" --password newpass1 >/dev/null 2>&1
     assert_fails "recovery.old_password_rejected" "invalid\|error\|unauth" -- j "$db" "$uh" auth login @recuser --password origpass
     j "$db" "$uh" auth login @recuser --password newpass1 >/dev/null 2>&1
     assert_json "recovery.new_password_works" "$(jj "$db" "$uh" user me)" handle @recuser

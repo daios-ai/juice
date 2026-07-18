@@ -276,6 +276,6 @@ func recoverCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&phrase, "phrase", "", "Recovery phrase (prompted if omitted)")
-	cmd.Flags().StringVar(&newPassword, "new-password", "", "New password (prompted if omitted)")
+	cmd.Flags().StringVar(&newPassword, "password", "", "New password (prompted if omitted)")
 	return cmd
 }

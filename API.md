@@ -96,7 +96,7 @@ Federation has no HTTP surface: peer identity, gossip, manifests, the friend han
 | Refresh token | `POST /v1/auth/refresh` `{refresh_token}` → `{access_token, refresh_token}` | `juice auth refresh` |
 | Logout | `POST /v1/auth/logout` `{refresh_token}` → 204 | `juice auth logout` |
 | Recover (start) | `POST /v1/auth/recover/start` `{handle}` → `{nonce, expires_in_seconds}` | (part of `juice auth recover`) |
-| Recover (complete) | `POST /v1/auth/recover/complete` `{handle, nonce, signature, password}` → `{status}` | `juice auth recover <user> [--phrase] [--new-password]` |
+| Recover (complete) | `POST /v1/auth/recover/complete` `{handle, nonce, signature, password}` → `{status}` | `juice auth recover <user> [--phrase] [--password]` |
 
 ### Users
 
