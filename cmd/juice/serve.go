@@ -80,6 +80,8 @@ func runServer(addr string) error {
 	r.With(authLimiter).Post("/v1/auth/authorize", srv.postAuthorize)
 	r.With(authLimiter).Post("/v1/auth/refresh", srv.postRefresh)
 	r.With(authLimiter).Post("/v1/auth/logout", srv.postLogout)
+	r.With(authLimiter).Post("/v1/auth/recover/start", srv.postRecoverStart)
+	r.With(authLimiter).Post("/v1/auth/recover/complete", srv.postRecoverComplete)
 
 	// Users — rate limited: 3 requests/minute per IP, burst of 5.
 	r.With(ipRateLimiter(3.0/60, 5)).Post("/v1/users", srv.postUser)
@@ -740,23 +742,56 @@ func (s *server) optionalAuth(r *http.Request) string {
 
 func (s *server) postUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Handle   string `json:"handle"`
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Handle            string `json:"handle"`
+		Password          string `json:"password"`
+		RecoveryPublicKey string `json:"recovery_public_key"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
 	view, err := createUser(s.kernel, r.Context(), kernel.CreateUserRequest{
-		Handle:   req.Handle,
-		Email:    req.Email,
-		Password: req.Password,
+		Handle:            req.Handle,
+		Password:          req.Password,
+		RecoveryPublicKey: req.RecoveryPublicKey,
 	})
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, view)
+}
+
+func (s *server) postRecoverStart(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Handle string `json:"handle"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	view, err := startRecovery(s.kernel, r.Context(), req.Handle)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *server) postRecoverComplete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Handle    string `json:"handle"`
+		Nonce     string `json:"nonce"`
+		Signature string `json:"signature"`
+		Password  string `json:"password"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	view, err := completeRecovery(s.kernel, r.Context(), req.Handle, req.Nonce, req.Signature, req.Password)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
@@ -1259,11 +1294,11 @@ func (s *server) getMe(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) putMe(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, body struct {
-		Email           string `json:"email"`
-		CurrentPassword string `json:"current_password"`
-		Password        string `json:"password"`
+		Description     *string `json:"description"`
+		CurrentPassword string  `json:"current_password"`
+		Password        string  `json:"password"`
 	}) (any, int, error) {
-		view, err := updateMe(s.kernel, r.Context(), callerFrom(r), body.Email, body.CurrentPassword, body.Password)
+		view, err := updateMe(s.kernel, r.Context(), callerFrom(r), body.Description, body.CurrentPassword, body.Password)
 		return view, http.StatusOK, err
 	})(w, r)
 }

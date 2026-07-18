@@ -1900,7 +1900,6 @@ func TestResolveUser(t *testing.T) {
 	peer := &kernel.User{
 		ID:        uuid.New().String(),
 		Handle:    "@peer",
-		Email:     "peer@example.com",
 		PublicKey: pub,
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),

@@ -38,7 +38,7 @@ func TestFirstBootAtomic(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)
 
-	if err := k.FirstBoot(ctx, "secret"); err != nil {
+	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
 
@@ -63,7 +63,7 @@ func TestFirstBootAtomic(t *testing.T) {
 	}
 
 	// Second call must be a no-op (idempotent) and preserve the same secret.
-	if err := k.FirstBoot(ctx, "secret"); err != nil {
+	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
 		t.Errorf("second FirstBoot should be idempotent, got: %v", err)
 	}
 	jwtSecret2, _ := k.GetConfig(ctx, "jwt_secret")
@@ -100,7 +100,7 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 
 	// Create a superuser manually.
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@sys", Email: "sys@sys", Password: "pass",
+		Handle: "@sys", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestEnsureSysLLMChatIdempotent(t *testing.T) {
 	k := newTestKernel(t)
 
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@sys", Email: "sys@sys", Password: "pass",
+		Handle: "@sys", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -179,7 +179,7 @@ func TestBootstrapRejectsKeyMismatch(t *testing.T) {
 	k := newTestKernel(t)
 
 	// Run first boot to generate a valid key pair.
-	if err := k.FirstBoot(ctx, "pass"); err != nil {
+	if err := k.FirstBoot(ctx, "pass", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -200,7 +200,7 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 	k := newTestKernel(t)
 
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@sys", Email: "sys@sys", Password: "pass",
+		Handle: "@sys", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -279,7 +279,7 @@ func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 
 	// Build 1 ships "widget".
 	k := newBuild(true)
-	if err := k.FirstBoot(ctx, "secret"); err != nil {
+	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
 	su, err := k.ReadUserByHandle(ctx, "@sys")
@@ -332,7 +332,7 @@ func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)
 
-	if err := k.FirstBoot(ctx, "secret"); err != nil {
+	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
 	if err := bootstrap(k, DefaultServerConfig().Native); err != nil {
@@ -362,7 +362,7 @@ func TestEnsureSysNativeReconcilesPrice(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)
 
-	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@sys", Email: "sys@sys", Password: "pass"})
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@sys", Password: "pass"})
 	if err != nil {
 		t.Fatal(err)
 	}

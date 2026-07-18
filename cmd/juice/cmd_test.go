@@ -48,7 +48,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	// Seed the issuer user so receipt FK constraints pass and buildReceipt can sign.
 	hash, _ := kernel.HashPassword("issuer-pass")
 	issuer := &kernel.User{
-		ID: cmdTestIssuerID, Handle: "@_test_issuer", Email: "issuer@test.internal",
+		ID: cmdTestIssuerID, Handle: "@_test_issuer",
 		PasswordHash: hash, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := db.CreateUser(context.Background(), issuer); err != nil {
@@ -126,7 +126,7 @@ func TestUserCreateMismatchedPassword(t *testing.T) {
 	stubPasswordPrompts(t, "s3cret", "typo")
 
 	// No --password flag, so the command falls through to the interactive prompt.
-	_, err := execTestCmd(t, userCreateCmd(), "@newuser", "new@example.com")
+	_, err := execTestCmd(t, userCreateCmd(), "@newuser")
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("mismatch: want ErrInvalidInput, got %v", err)
 	}
@@ -141,7 +141,6 @@ func TestUserCreate(t *testing.T) {
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle:   "@testuser",
-		Email:    "test@example.com",
 		Password: "testpass",
 	})
 	if err != nil {
@@ -161,7 +160,6 @@ func TestUserReadByHandle(t *testing.T) {
 
 	_, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle:   "@readtest",
-		Email:    "read@example.com",
 		Password: "pass",
 	})
 	if err != nil {
@@ -172,8 +170,8 @@ func TestUserReadByHandle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.Email != "read@example.com" {
-		t.Errorf("email: got %q, want read@example.com", u.Email)
+	if u.Handle != "@readtest" {
+		t.Errorf("handle: got %q, want @readtest", u.Handle)
 	}
 }
 
@@ -181,11 +179,10 @@ func TestUserDuplicateHandleFails(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
-	req := kernel.CreateUserRequest{Handle: "@dup", Email: "a@b.com", Password: "p"}
+	req := kernel.CreateUserRequest{Handle: "@dup", Password: "p"}
 	if _, err := env.k.CreateUser(ctx, req); err != nil {
 		t.Fatal(err)
 	}
-	req.Email = "c@d.com"
 	if _, err := env.k.CreateUser(ctx, req); err == nil {
 		t.Error("expected error for duplicate handle")
 	}
@@ -196,7 +193,7 @@ func TestUserMe(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@meuser", Email: "me@example.com", Password: "pass",
+		Handle: "@meuser", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -209,36 +206,34 @@ func TestUserMe(t *testing.T) {
 	if got.Handle != "@meuser" {
 		t.Errorf("handle: got %q, want @meuser", got.Handle)
 	}
-	if got.Email != "me@example.com" {
-		t.Errorf("email: got %q, want me@example.com", got.Email)
-	}
 }
 
-func TestUserUpdateEmail(t *testing.T) {
+func TestUserUpdateDescription(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@updemail", Email: "old@example.com", Password: "pass",
+		Handle: "@upddesc", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := env.k.UpdateUser(ctx, u.ID, kernel.UpdateUserRequest{Email: "new@example.com"})
+	desc := "weather tools provider"
+	got, err := env.k.UpdateUser(ctx, u.ID, kernel.UpdateUserRequest{Description: &desc})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Email != "new@example.com" {
-		t.Errorf("email after update: got %q, want new@example.com", got.Email)
+	if got.Description != desc {
+		t.Errorf("description after update: got %q, want %q", got.Description, desc)
 	}
 
 	stored, err := env.k.ReadUser(ctx, u.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Email != "new@example.com" {
-		t.Errorf("stored email: got %q, want new@example.com", stored.Email)
+	if stored.Description != desc {
+		t.Errorf("stored description: got %q, want %q", stored.Description, desc)
 	}
 }
 
@@ -247,7 +242,7 @@ func TestUserUpdatePassword(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@updpass", Email: "updpass@example.com", Password: "oldpass",
+		Handle: "@updpass", Password: "oldpass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -273,7 +268,7 @@ func TestUserUpdatePasswordWrongCurrent(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@wrongpass", Email: "wrongpass@example.com", Password: "correct",
+		Handle: "@wrongpass", Password: "correct",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -296,7 +291,7 @@ func TestUserUpdateNoFields(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@nofields", Email: "nofields@example.com", Password: "pass",
+		Handle: "@nofields", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -318,7 +313,6 @@ func TestUserUpdateProxyUser(t *testing.T) {
 	proxy := &kernel.User{
 		ID:        "proxy-id-1",
 		Handle:    "@remote-peer",
-		Email:     "@remote-peer@remote",
 		PublicKey: "dGVzdGtleQ==",
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -327,7 +321,8 @@ func TestUserUpdateProxyUser(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := env.k.UpdateUser(ctx, proxy.ID, kernel.UpdateUserRequest{Email: "x@x.com"})
+	desc := "x"
+	_, err := env.k.UpdateUser(ctx, proxy.ID, kernel.UpdateUserRequest{Description: &desc})
 	if err == nil {
 		t.Fatal("expected error for proxy user")
 	}
@@ -345,7 +340,7 @@ func TestActionCreateAndToggle(t *testing.T) {
 	ctx := context.Background()
 
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@actowner", Email: "actowner@example.com", Password: "pass",
+		Handle: "@actowner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -389,7 +384,7 @@ func TestActionPriceUpdateDeactivates(t *testing.T) {
 	ctx := context.Background()
 
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@priceowner", Email: "price@example.com", Password: "pass",
+		Handle: "@priceowner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -432,7 +427,7 @@ func TestActionDelete(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@delowner", Email: "del@example.com", Password: "pass",
+		Handle: "@delowner", Password: "pass",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "to-delete",
@@ -451,10 +446,10 @@ func TestActionShowPrivate(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@show-owner", Email: "show-owner@example.com", Password: "pass",
+		Handle: "@show-owner", Password: "pass",
 	})
 	stranger, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@show-stranger", Email: "show-stranger@example.com", Password: "pass",
+		Handle: "@show-stranger", Password: "pass",
 	})
 	_ = stranger
 
@@ -487,7 +482,7 @@ func TestActionCreateSchemasAndAuthFromFile(t *testing.T) {
 	ctx := context.Background()
 
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@authowner", Email: "authowner@example.com", Password: "pass",
+		Handle: "@authowner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -539,7 +534,7 @@ func TestActionCreateFromArtifact(t *testing.T) {
 	ctx := context.Background()
 
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@wasmowner", Email: "wasmowner@example.com", Password: "pass",
+		Handle: "@wasmowner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -577,7 +572,7 @@ func TestActionCreateHTTPMethodParam(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@httpowner", Email: "httpowner@example.com", Password: "pass",
+		Handle: "@httpowner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -613,7 +608,7 @@ func TestActionImportOpenAPI(t *testing.T) {
 	t.Setenv("JUICE_ALLOW_LOCAL_SOURCES", "true")
 
 	_, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@cli-import-owner", Email: "cliimport@example.com", Password: "pass",
+		Handle: "@cli-import-owner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -654,7 +649,7 @@ func TestActionUnimportOpenAPI(t *testing.T) {
 	t.Setenv("JUICE_ALLOW_LOCAL_SOURCES", "true")
 
 	_, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@cli-unimport-owner", Email: "cliunimport@example.com", Password: "pass",
+		Handle: "@cli-unimport-owner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -678,7 +673,7 @@ func TestActionListActive(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@listowner", Email: "list@example.com", Password: "pass",
+		Handle: "@listowner", Password: "pass",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
@@ -713,7 +708,7 @@ func TestStatsInitializedOnActivation(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@statsowner", Email: "s@e.com", Password: "p",
+		Handle: "@statsowner", Password: "p",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
@@ -779,7 +774,6 @@ func TestProcessStartFundEnd(t *testing.T) {
 	owner := &kernel.User{
 		ID:        "user-proc-test",
 		Handle:    "@proctest",
-		Email:     "proc@example.com",
 		Available: 2000,
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -812,10 +806,10 @@ func TestProcessList(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@list-proc", Email: "lp@example.com", Password: "p",
+		Handle: "@list-proc", Password: "p",
 	})
 	other, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@list-proc-other", Email: "lpo@example.com", Password: "p",
+		Handle: "@list-proc-other", Password: "p",
 	})
 
 	setupProcessCmd(t, env, owner.ID, 0)
@@ -841,7 +835,7 @@ func TestProcessNegativeFundsFails(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@negfund", Email: "nf@example.com", Password: "p",
+		Handle: "@negfund", Password: "p",
 	})
 	p := &kernel.Process{
 		ID:          uuid.New().String(),
@@ -869,7 +863,6 @@ func TestProcessEndReturnsBalance(t *testing.T) {
 	owner := &kernel.User{
 		ID:        "balance-return-user",
 		Handle:    "@baltest",
-		Email:     "bal@example.com",
 		Available: 1000,
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -1072,7 +1065,7 @@ func TestCLIListPaginationFlags(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@page-cli", Email: "page-cli@example.com", Password: "pass",
+		Handle: "@page-cli", Password: "pass",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1249,7 +1242,7 @@ func TestStepCompleteFileArg(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@sc-caller", Email: "sc-caller@example.com", Password: "pass",
+		Handle: "@sc-caller", Password: "pass",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1272,7 +1265,7 @@ func TestTransactionListEmpty(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@txowner", Email: "tx@e.com", Password: "p",
+		Handle: "@txowner", Password: "p",
 	})
 
 	txs, err := env.k.ListTransactions(ctx, owner.ID, kernel.TxFilter{Limit: 10})
@@ -1289,7 +1282,7 @@ func TestTransactionRate(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@rateowner", Email: "ro@example.com", Password: "p",
+		Handle: "@rateowner", Password: "p",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "rateable",
@@ -1311,7 +1304,7 @@ func TestTransactionRating(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@rater", Email: "r@e.com", Password: "p",
+		Handle: "@rater", Password: "p",
 	})
 	p, _ := setupProcessCmd(t, env, owner.ID, 0)
 
@@ -1340,7 +1333,6 @@ func TestCallClosedProcess(t *testing.T) {
 	owner := &kernel.User{
 		ID:        uuid.New().String(),
 		Handle:    "@call-owner",
-		Email:     "co@example.com",
 		Available: 1000,
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -1375,7 +1367,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@poorowner", Email: "poor@example.com", Password: "p",
+		Handle: "@poorowner", Password: "p",
 	})
 
 	_, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
@@ -1421,7 +1413,7 @@ func newRemoteTestKernel(t *testing.T) (*kernel.Kernel, *store.DB) {
 	cfg.TokenSecret = "remote-test-secret"
 	k := kernel.New(db, nil, nil, nil, cfg, log.Discard())
 
-	if err := k.FirstBoot(t.Context(), "sys-pass"); err != nil {
+	if err := k.FirstBoot(t.Context(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
 	}
 

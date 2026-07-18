@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,11 +16,12 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
+	bip39 "github.com/tyler-smith/go-bip39"
 )
 
 func init() {
 	authCmd := &cobra.Command{Use: "auth", Short: "Manage authentication"}
-	authCmd.AddCommand(loginCmd(), logoutCmd(), refreshCmd())
+	authCmd.AddCommand(loginCmd(), logoutCmd(), refreshCmd(), recoverCmd())
 	rootCmd.AddCommand(authCmd)
 }
 
@@ -173,4 +177,105 @@ func refreshCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// ---- Seed-phrase recovery (§12) ----
+
+// promptMnemonic reads a recovery phrase (a full line, spaces included) from stdin. A package var so
+// tests can script it.
+var promptMnemonic = func(prompt string) (string, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+// deriveRecoveryKey turns a BIP-39 mnemonic into the account's Ed25519 recovery keypair. The seed's
+// first 32 bytes are the Ed25519 seed (no passphrase), so the same phrase always rederives the same
+// key; the server only ever stores the public half (§12).
+func deriveRecoveryKey(mnemonic string) (ed25519.PrivateKey, error) {
+	mnemonic = strings.TrimSpace(mnemonic)
+	if !bip39.IsMnemonicValid(mnemonic) {
+		return nil, kernel.ErrInvalidInput.Wrap("invalid recovery phrase")
+	}
+	seed := bip39.NewSeed(mnemonic, "")
+	return ed25519.NewKeyFromSeed(seed[:32]), nil
+}
+
+// generateRecovery creates a fresh 12-word mnemonic and returns it with the base64url public key to
+// enroll. The mnemonic is the master secret; it never leaves the client (§12).
+func generateRecovery() (mnemonic, recoveryPublicKey string, err error) {
+	entropy, err := bip39.NewEntropy(128) // 128 bits of entropy => 12 words
+	if err != nil {
+		return "", "", kernel.ErrInternal.Wrapf("generate entropy: %v", err)
+	}
+	mnemonic, err = bip39.NewMnemonic(entropy)
+	if err != nil {
+		return "", "", kernel.ErrInternal.Wrapf("generate mnemonic: %v", err)
+	}
+	priv, err := deriveRecoveryKey(mnemonic)
+	if err != nil {
+		return "", "", err
+	}
+	pub := priv.Public().(ed25519.PublicKey)
+	return mnemonic, base64.RawURLEncoding.EncodeToString(pub), nil
+}
+
+// signRecoveryChallenge signs the recovery nonce with the phrase-derived key, matching the kernel's
+// verification payload exactly (kernel.RecoveryChallenge, a disjoint signature domain).
+func signRecoveryChallenge(priv ed25519.PrivateKey, nonce string) (string, error) {
+	payload, err := kernel.CanonicalJSON(kernel.RecoveryChallenge{Challenge: nonce})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(priv, payload)), nil
+}
+
+func recoverCmd() *cobra.Command {
+	var phrase, newPassword string
+	cmd := &cobra.Command{
+		Use:   "recover <user>",
+		Short: "Reset a lost password using your recovery phrase",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			handle := args[0]
+			if phrase == "" {
+				p, err := promptMnemonic("Recovery phrase: ")
+				if err != nil {
+					return err
+				}
+				phrase = p
+			}
+			priv, err := deriveRecoveryKey(phrase)
+			if err != nil {
+				return err
+			}
+			if newPassword == "" {
+				p, err := promptNewPassword("New password: ")
+				if err != nil {
+					return err
+				}
+				newPassword = p
+			}
+			ctx := context.Background()
+			var started struct {
+				Nonce string `json:"nonce"`
+			}
+			if err := apiCall(ctx, "POST", "/v1/auth/recover/start", map[string]any{"handle": handle}, &started); err != nil {
+				return err
+			}
+			sig, err := signRecoveryChallenge(priv, started.Nonce)
+			if err != nil {
+				return err
+			}
+			return apiEmit("POST", "/v1/auth/recover/complete", map[string]any{
+				"handle": handle, "nonce": started.Nonce, "signature": sig, "password": newPassword,
+			})
+		},
+	}
+	cmd.Flags().StringVar(&phrase, "phrase", "", "Recovery phrase (prompted if omitted)")
+	cmd.Flags().StringVar(&newPassword, "new-password", "", "New password (prompted if omitted)")
+	return cmd
 }

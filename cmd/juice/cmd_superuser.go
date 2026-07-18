@@ -86,6 +86,7 @@ func identityCmd() *cobra.Command {
 			var out struct {
 				Handle    string   `json:"handle"`
 				PublicKey string   `json:"public_key"`
+				About     string   `json:"about"`
 				Addrs     []string `json:"addrs"`
 			}
 			if err := apiCall(context.Background(), "GET", "/control/identity", nil, &out); err != nil {
@@ -96,6 +97,9 @@ func identityCmd() *cobra.Command {
 			}
 			fmt.Printf("Handle:     %s\n", out.Handle)
 			fmt.Printf("Public key: %s\n", out.PublicKey)
+			if out.About != "" {
+				fmt.Printf("About:      %s\n", out.About)
+			}
 			if len(out.Addrs) > 0 {
 				fmt.Println("Listen addresses:")
 				for _, a := range out.Addrs {
@@ -126,7 +130,7 @@ func adminUsersCmd() *cobra.Command {
 				if u.SuspendedAt != nil {
 					suspended = " [SUSPENDED]"
 				}
-				fmt.Printf("%-20s  %s%s\n", u.Handle, u.Email, suspended)
+				fmt.Printf("%-20s  %s%s\n", u.Handle, u.Description, suspended)
 			}
 			return nil
 		},
@@ -232,10 +236,12 @@ func peerInspectCmd() *cobra.Command {
 			var out struct {
 				Handle    string `json:"handle"`
 				PublicKey string `json:"public_key"`
+				About     string `json:"about"`
 				Actions   []struct {
-					Name  string `json:"name"`
-					Price int64  `json:"price"`
-					Uses  int64  `json:"uses"`
+					Name        string `json:"name"`
+					Description string `json:"description"`
+					Price       int64  `json:"price"`
+					Uses        int64  `json:"uses"`
 				} `json:"actions"`
 				Friends []struct {
 					Handle    string `json:"handle"`
@@ -260,6 +266,9 @@ func peerInspectCmd() *cobra.Command {
 			}
 			fmt.Printf("Handle:       %s\n", out.Handle)
 			fmt.Printf("Public key:   %s\n", out.PublicKey)
+			if out.About != "" {
+				fmt.Printf("About:        %s\n", out.About)
+			}
 			reachLabel := out.Reachability.Path
 			if !out.Online {
 				reachLabel = "offline"
@@ -277,6 +286,9 @@ func peerInspectCmd() *cobra.Command {
 				fmt.Printf("\n%s (%d):\n", label, len(out.Actions))
 				for _, a := range out.Actions {
 					fmt.Printf("  %-30s  %d credits  (uses: %d)\n", a.Name, a.Price, a.Uses)
+					if a.Description != "" {
+						fmt.Printf("      %s\n", a.Description)
+					}
 				}
 			}
 			if len(out.Friends) > 0 {
@@ -292,17 +304,21 @@ func peerInspectCmd() *cobra.Command {
 
 func peerFriendCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "friend <key>",
+		Use:   "friend <key> [local-handle]",
 		Short: "Befriend a kernel and import its actions",
-		Args:  cobra.ExactArgs(1),
+		Long:  "Befriend a kernel by public key and import its actions. An optional local-handle mounts the peer under a name you choose (auto-suffixed on collision); by default the peer's self-reported handle is used.",
+		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
+			body := map[string]any{"key": args[0]}
+			if len(args) == 2 {
+				body["local_handle"] = args[1]
+			}
 			var out struct {
 				Handle   string `json:"handle"`
 				Imported int    `json:"imported"`
 				Skipped  int    `json:"skipped"`
 			}
-			if err := apiCall(context.Background(), "POST", "/control/peers/friend",
-				map[string]any{"key": args[0]}, &out); err != nil {
+			if err := apiCall(context.Background(), "POST", "/control/peers/friend", body, &out); err != nil {
 				return err
 			}
 			if flagJSON {

@@ -96,7 +96,6 @@ func newUser(handle string, balance int64) *kernel.User {
 	return &kernel.User{
 		ID:           uuid.New().String(),
 		Handle:       handle,
-		Email:        handle + "@test.com",
 		PasswordHash: "hash",
 		Available:    balance,
 		CreatedAt:    time.Now().UTC(),
@@ -217,21 +216,15 @@ func TestUserCRUD(t *testing.T) {
 	}
 }
 
-// TestEmailNotUnique proves migration 018 dropped the email UNIQUE constraint while preserving
-// the rest of the users table (handle uniqueness and its role as an FK anchor).
-func TestEmailNotUnique(t *testing.T) {
+// TestUsersTableConstraints proves the users table (rebuilt through migration 021, which dropped
+// email) still enforces handle uniqueness and anchors child foreign keys.
+func TestUsersTableConstraints(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	// Two distinct accounts may now share an email (previously the second insert failed).
 	a := newUser("@alice", 0)
-	b := newUser("@bob", 0)
-	b.Email = a.Email
 	if err := db.CreateUser(ctx, a); err != nil {
 		t.Fatalf("create @alice: %v", err)
-	}
-	if err := db.CreateUser(ctx, b); err != nil {
-		t.Fatalf("shared email should be allowed after migration 018: %v", err)
 	}
 
 	// The rebuild kept handle uniqueness.
@@ -303,11 +296,12 @@ func TestStrToTimeAcceptsLegacyLayout(t *testing.T) {
 	}
 }
 
-// TestMigration018PreservesExistingRows exercises the real upgrade path: it applies every
-// migration strictly before 018, seeds a user plus a child action under the old (email-unique)
-// schema, then applies 018 through the runner and asserts the pre-existing rows survive the
-// users-table rebuild with their FK graph intact — the one thing a fresh-DB test cannot cover.
-func TestMigration018PreservesExistingRows(t *testing.T) {
+// TestMigration021DropsEmailPreservesRows exercises the real upgrade path: it applies every
+// migration strictly before 021, seeds a user (with the then-required email column, via raw SQL)
+// plus a child action under the old schema, then applies 021 and asserts the pre-existing rows
+// survive the users-table rebuild with their FK graph intact — the one thing a fresh-DB test cannot
+// cover — while email is dropped and description defaults to "".
+func TestMigration021DropsEmailPreservesRows(t *testing.T) {
 	dsn := filepath.Join(t.TempDir(), "up.db") +
 		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
 	raw, err := sql.Open(driverName, dsn)
@@ -335,41 +329,43 @@ func TestMigration018PreservesExistingRows(t *testing.T) {
 			t.Fatalf("apply %s: %v", version, err)
 		}
 	}
-	var file018 string
+	var file021 string
 	for _, f := range files {
-		if strings.HasPrefix(path.Base(f), "018_") {
-			file018 = f
-			continue // hold 018 back until after seeding
+		if strings.HasPrefix(path.Base(f), "021_") {
+			file021 = f
+			continue // hold 021 back until after seeding
 		}
 		apply(f)
 	}
-	if file018 == "" {
-		t.Fatal("migration 018 not found")
+	if file021 == "" {
+		t.Fatal("migration 021 not found")
 	}
 
-	// Seed under the old schema: a user and a child action that REFERENCES users(id).
+	// Seed under the pre-021 schema, which still has the email column (NOT NULL). CreateUser no
+	// longer writes email, so seed via raw SQL to match the old column set.
 	ctx := context.Background()
-	u := newUser("@old", 42)
-	if err := s.CreateUser(ctx, u); err != nil {
+	uid := uuid.New().String()
+	now := timeToStr(time.Now().UTC())
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO users (id,handle,email,password_hash,available,locked,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		uid, "@old", "old@example.com", "hash", int64(42), int64(0), now, now); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	if err := s.CreateAction(ctx, newAction(u.ID, "act", 0, true)); err != nil {
+	if err := s.CreateAction(ctx, newAction(uid, "act", 0, true)); err != nil {
 		t.Fatalf("seed action: %v", err)
 	}
-	// Old schema still enforces email uniqueness.
-	dup := newUser("@old2", 0)
-	dup.Email = u.Email
-	if err := s.CreateUser(ctx, dup); err == nil {
-		t.Fatal("pre-018: a duplicate email should still be rejected")
-	}
 
-	// Apply 018: rebuild users, dropping the email UNIQUE.
-	apply(file018)
+	// Apply 021: rebuild users, dropping email and adding description + recovery_public_key.
+	apply(file021)
 
-	// The pre-existing user survived the rebuild with its data.
-	got, err := s.ReadUser(ctx, u.ID)
+	// The pre-existing user survived the rebuild with its data; description defaults to "".
+	got, err := s.ReadUser(ctx, uid)
 	if err != nil || got.Handle != "@old" || got.Available != 42 {
 		t.Fatalf("user lost or altered by rebuild: err=%v got=%+v", err, got)
+	}
+	if got.Description != "" || got.RecoveryPublicKey != "" {
+		t.Errorf("new columns should default empty, got description=%q recovery=%q", got.Description, got.RecoveryPublicKey)
 	}
 	// The child action's FK still resolves — no dangling references after DROP/RENAME.
 	fkRows, err := raw.QueryContext(ctx, `PRAGMA foreign_key_check`)
@@ -380,9 +376,9 @@ func TestMigration018PreservesExistingRows(t *testing.T) {
 	if fkRows.Next() {
 		t.Error("foreign_key_check reported a violation after the upgrade")
 	}
-	// And the previously-rejected duplicate email is now accepted.
-	if err := s.CreateUser(ctx, dup); err != nil {
-		t.Fatalf("post-018: shared email should be allowed: %v", err)
+	// The email column is gone: selecting it must error.
+	if _, err := raw.QueryContext(ctx, `SELECT email FROM users`); err == nil {
+		t.Error("email column should not exist after migration 021")
 	}
 }
 

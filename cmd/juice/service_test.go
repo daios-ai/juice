@@ -18,7 +18,7 @@ func TestResolveHandle(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@svc-bob", Email: "svc-bob@test.com", Password: "pass",
+		Handle: "@svc-bob", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -110,12 +110,11 @@ func TestUserView(t *testing.T) {
 	u := &kernel.User{
 		ID:        "u1",
 		Handle:    "@x",
-		Email:     "x@test.com",
 		Available: 100,
 		Locked:    50,
 	}
 	m := userView(u)
-	for _, key := range []string{"id", "handle", "email", "available", "locked"} {
+	for _, key := range []string{"id", "handle", "description", "available", "locked"} {
 		if _, ok := m[key]; !ok {
 			t.Errorf("userView missing key %q", key)
 		}
@@ -311,7 +310,7 @@ func TestGetMe(t *testing.T) {
 	if view["handle"] != "@svc-me" {
 		t.Errorf("getMe: handle = %v, want @svc-me", view["handle"])
 	}
-	for _, key := range []string{"id", "handle", "email", "available", "locked"} {
+	for _, key := range []string{"id", "handle", "description", "available", "locked"} {
 		if _, ok := view[key]; !ok {
 			t.Errorf("getMe: missing key %q", key)
 		}

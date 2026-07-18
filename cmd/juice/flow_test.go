@@ -78,7 +78,7 @@ func newFlowKernel(t *testing.T, exec kernel.ScriptExecutor) (*httptest.Server, 
 	k := kernel.New(db, exec, httpExec, nil, cfg, logger)
 	k.SetSecretBox(box)
 
-	if err := k.FirstBoot(context.Background(), "sys-pass"); err != nil {
+	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
 	}
 	bootstrapSigning(t, k)
@@ -1315,7 +1315,7 @@ func newFedKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store.DB, ed
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
 	k := kernel.New(db, nil, httpExec, nil, cfg, logger)
 
-	if err := k.FirstBoot(context.Background(), "sys-pass"); err != nil {
+	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
 	}
 	priv := bootstrapSigning(t, k)
@@ -1456,7 +1456,7 @@ func newFlowKernelFull(t *testing.T, exec kernel.ScriptExecutor, embedder kernel
 	logger := log.Discard()
 	k := kernel.New(db, exec, &httpActionExecutor{timeout: cfg.ScriptTimeout}, embedder, cfg, logger)
 
-	if err := k.FirstBoot(context.Background(), "sys-pass"); err != nil {
+	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
 	}
 	bootstrapSigning(t, k)
@@ -1869,7 +1869,7 @@ func TestFlow_SuspendUnsuspend(t *testing.T) {
 	}
 }
 
-// TestFlow_AccountSelfService: user updates email and changes password via PUT /v1/me;
+// TestFlow_AccountSelfService: user updates description and changes password via PUT /v1/me;
 // both changes are immediately reflected and the old password is rejected.
 func TestFlow_AccountSelfService(t *testing.T) {
 	srv, k, _ := newTestHTTPServerFull(t)
@@ -1878,19 +1878,19 @@ func TestFlow_AccountSelfService(t *testing.T) {
 	userID, userTok := makeUser(t, k, "@self-user")
 	_ = userID
 
-	// Update email.
-	putResp := httpDo(t, srv, "PUT", "/v1/me", map[string]any{"email": "updated@test.com"}, userTok)
+	// Update description.
+	putResp := httpDo(t, srv, "PUT", "/v1/me", map[string]any{"description": "self-service user"}, userTok)
 	putResp.Body.Close()
 	if putResp.StatusCode != http.StatusOK {
-		t.Fatalf("update email: expected 200, got %d", putResp.StatusCode)
+		t.Fatalf("update description: expected 200, got %d", putResp.StatusCode)
 	}
 
-	// Verify email via GET /v1/me.
+	// Verify description via GET /v1/me.
 	meResp := httpDo(t, srv, "GET", "/v1/me", nil, userTok)
 	var meBody map[string]any
 	decodeResponse(t, meResp, &meBody)
-	if meBody["email"] != "updated@test.com" {
-		t.Errorf("email after update: got %v, want updated@test.com", meBody["email"])
+	if meBody["description"] != "self-service user" {
+		t.Errorf("description after update: got %v, want 'self-service user'", meBody["description"])
 	}
 
 	// Change password.
@@ -2301,7 +2301,7 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 		httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
 		kB := kernel.New(db, nil, httpExec, nil, cfg, logger)
 
-		if err := kB.FirstBoot(ctx, "sys-pass"); err != nil {
+		if err := kB.FirstBoot(ctx, "sys-pass", ""); err != nil {
 			t.Fatal(err)
 		}
 		sysB, _ := kB.ReadUserByHandle(ctx, "@sys")
@@ -2465,7 +2465,7 @@ func newOAuthFlowServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	httpExec.auth = newAuthenticator(box, db, true, cfg.ScriptTimeout)
 	k := kernel.New(db, &flowScriptExec{}, httpExec, nil, cfg, logger)
 	k.SetSecretBox(box)
-	if err := k.FirstBoot(context.Background(), "sys-pass"); err != nil {
+	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
 	}
 	bootstrapSigning(t, k)

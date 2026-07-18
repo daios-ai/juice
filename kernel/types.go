@@ -33,17 +33,23 @@ const (
 
 // User is an account with balances, distinguished only by the credentials it holds — a password
 // (session) and/or a PublicKey (federation signature); there is no "kind". A key makes it a peer
-// kernel here, its live path resolved from the key by the transport (§13).
+// kernel here, its live path resolved from the key by the transport (§13). RecoveryPublicKey is a
+// distinct recovery credential (§12): an account's own key for signing a password-reset challenge,
+// never a federation identity, so it must not be confused with PublicKey (which sets IsPeer).
 type User struct {
 	ID           string     `json:"id"`
 	Handle       string     `json:"handle"`
-	Email        string     `json:"email"`
+	Description  string     `json:"description"` // free-text "about"; @sys's is the kernel's about (§13)
 	PasswordHash string     `json:"-"`
 	Available    int64      `json:"available"`
 	Locked       int64      `json:"locked"`
 	SuspendedAt  *time.Time `json:"suspended_at,omitempty"`
 	DeniedAt     *time.Time `json:"denied_at,omitempty"`
 	PublicKey    string     `json:"public_key,omitempty"` // Ed25519 public key, base64url; empty = no signature credential
+	// RecoveryPublicKey is the account's own Ed25519 recovery key (base64url), enrolled at
+	// creation from a client-held seed phrase; the server stores only the public half and never
+	// the mnemonic (§12). Distinct from PublicKey: it does not make the account a peer.
+	RecoveryPublicKey string `json:"-"`
 	// PeerLastSeen and PeerCredit are the friend-sync cache (§13 peer sync): null except on peer
 	// rows. Display-only — never callability, pricing, or settlement. PeerCredit is our cached
 	// credit *on* the peer, valid as of PeerLastSeen.
@@ -529,6 +535,7 @@ type GossipFriendView struct {
 type GossipResponse struct {
 	PublicKey string             `json:"public_key"`
 	Handle    string             `json:"handle"`
+	About     string             `json:"about,omitempty"` // @sys's description: the kernel's self-description (§13)
 	Actions   []GossipAction     `json:"actions"`
 	Friends   []GossipFriendView `json:"friends"`
 	// CounterpartyBalance is the requesting peer's credit on this kernel (§13 peer sync),

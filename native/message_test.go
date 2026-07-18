@@ -15,7 +15,7 @@ func seedUserWithBalance(t *testing.T, st kernel.Store, handle string, balance i
 	t.Helper()
 	hash, _ := kernel.HashPassword("pw")
 	u := &kernel.User{
-		ID: uuid.New().String(), Handle: handle, Email: handle + "@test",
+		ID: uuid.New().String(), Handle: handle,
 		PasswordHash: hash, Available: balance,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}

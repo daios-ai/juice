@@ -35,7 +35,6 @@ func TestAdminListUsers(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		_, err := k.CreateUser(ctx, kernel.CreateUserRequest{
 			Handle:   "@user" + string(rune('a'+i)),
-			Email:    "user" + string(rune('a'+i)) + "@example.com",
 			Password: "pass",
 		})
 		if err != nil {
@@ -56,7 +55,7 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 	ctx := context.Background()
 	k := newAdminTestKernel(t)
 
-	if err := k.FirstBoot(ctx, "pass"); err != nil {
+	if err := k.FirstBoot(ctx, "pass", ""); err != nil {
 		t.Fatal(err)
 	}
 	admin, err := k.ReadUserByHandle(ctx, "@sys")
@@ -64,7 +63,7 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 		t.Fatal(err)
 	}
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@target", Email: "target@example.com", Password: "pass",
+		Handle: "@target", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +94,7 @@ func TestAdminDeposit(t *testing.T) {
 	ctx := context.Background()
 	k := newAdminTestKernel(t)
 
-	if err := k.FirstBoot(ctx, "pass"); err != nil {
+	if err := k.FirstBoot(ctx, "pass", ""); err != nil {
 		t.Fatal(err)
 	}
 	admin, err := k.ReadUserByHandle(ctx, "@sys")
@@ -103,7 +102,7 @@ func TestAdminDeposit(t *testing.T) {
 		t.Fatal(err)
 	}
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@recipient", Email: "r@example.com", Password: "pass",
+		Handle: "@recipient", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -162,7 +161,7 @@ func TestAdminListAllActions(t *testing.T) {
 	k := newAdminTestKernel(t)
 
 	u, _ := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@owner", Email: "owner@example.com", Password: "pass",
+		Handle: "@owner", Password: "pass",
 	})
 
 	for i := 0; i < 3; i++ {

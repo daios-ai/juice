@@ -240,7 +240,8 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) ctlFriendPeer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Key string `json:"key"`
+		Key         string `json:"key"`
+		LocalHandle string `json:"local_handle"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -268,9 +269,15 @@ func (s *server) ctlFriendPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register the peer locally, send a signed friend handshake so it registers + reciprocates,
-	// import its active public actions, then accumulate its gossip.
-	u, err := s.kernel.CreateOrUpdateProxyPeer(ctx, g.Handle, peerKey)
+	// Register the peer locally under the operator's chosen alias (falling back to the peer's
+	// self-reported handle), send a signed friend handshake so it registers + reciprocates, import
+	// its active public actions, then accumulate its gossip. The alias is only a local mount name;
+	// CreateOrUpdateProxyPeer still auto-suffixes on collision.
+	localHandle := strings.TrimSpace(req.LocalHandle)
+	if localHandle == "" {
+		localHandle = g.Handle
+	}
+	u, err := s.kernel.CreateOrUpdateProxyPeer(ctx, localHandle, peerKey)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -297,11 +304,15 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
 	handle := globalCfg.KernelHandle
+	var about string
+	if sys, err := s.kernel.ReadUserByHandle(ctx, "@sys"); err == nil && sys != nil {
+		about = sys.Description
+	}
 	var addrs []string
 	if s.fed != nil {
 		addrs = s.fed.ListenAddrs()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"handle": handle, "public_key": pub, "addrs": addrs})
+	writeJSON(w, http.StatusOK, map[string]any{"handle": handle, "public_key": pub, "about": about, "addrs": addrs})
 }
 
 func (s *server) ctlUnfriendPeer(w http.ResponseWriter, r *http.Request) {

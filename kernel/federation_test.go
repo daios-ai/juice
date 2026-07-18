@@ -526,6 +526,28 @@ func TestLocalActionNotExported(t *testing.T) {
 	}
 }
 
+// TestGossipAboutFromSysDescription: the kernel's "about" in gossip is @sys's user description (§13),
+// so an operator sets it with the ordinary user-update path rather than a config key.
+func TestGossipAboutFromSysDescription(t *testing.T) {
+	st := newTestStore(t)
+	su := setupUser(t, st, "@sys", 0)
+	k := newTestKernel(st)
+	k.SetSigningKey(testSigningKey(), su.ID)
+	ctx := context.Background()
+
+	su.Description = "the neighbourhood kernel"
+	if err := st.UpdateUser(ctx, su); err != nil {
+		t.Fatal(err)
+	}
+	g, err := k.GetGossip(ctx, "")
+	if err != nil {
+		t.Fatalf("GetGossip: %v", err)
+	}
+	if g.About != "the neighbourhood kernel" {
+		t.Errorf("gossip about: got %q, want @sys's description", g.About)
+	}
+}
+
 func TestGetActionManifestIncludesActionID(t *testing.T) {
 	st := newTestStore(t)
 	su := setupUser(t, st, "@sys", 0)

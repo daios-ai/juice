@@ -270,11 +270,11 @@ func parseParams(specs []string) ([]kernel.HTTPParam, error) {
 
 func userView(u *kernel.User) map[string]any {
 	return map[string]any{
-		"id":        u.ID,
-		"handle":    u.Handle,
-		"email":     u.Email,
-		"available": u.Available,
-		"locked":    u.Locked,
+		"id":          u.ID,
+		"handle":      u.Handle,
+		"description": u.Description,
+		"available":   u.Available,
+		"locked":      u.Locked,
 	}
 }
 
@@ -510,9 +510,9 @@ func revokeConnection(k *kernel.Kernel, ctx context.Context, callerID, providerK
 	return map[string]any{"revoked": revoked, "connection": kernel.ProviderLabel(providerKey)}, nil
 }
 
-func updateMe(k *kernel.Kernel, ctx context.Context, callerID, email, currentPwd, newPwd string) (map[string]any, error) {
+func updateMe(k *kernel.Kernel, ctx context.Context, callerID string, description *string, currentPwd, newPwd string) (map[string]any, error) {
 	u, err := k.UpdateUser(ctx, callerID, kernel.UpdateUserRequest{
-		Email:           email,
+		Description:     description,
 		CurrentPassword: currentPwd,
 		NewPassword:     newPwd,
 	})
@@ -520,6 +520,23 @@ func updateMe(k *kernel.Kernel, ctx context.Context, callerID, email, currentPwd
 		return nil, err
 	}
 	return userView(u), nil
+}
+
+// startRecovery issues a password-recovery challenge nonce (§12).
+func startRecovery(k *kernel.Kernel, ctx context.Context, handle string) (map[string]any, error) {
+	nonce, err := k.StartRecovery(ctx, handle)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"nonce": nonce, "expires_in_seconds": 600}, nil
+}
+
+// completeRecovery verifies the signed challenge and resets the password (§12).
+func completeRecovery(k *kernel.Kernel, ctx context.Context, handle, nonce, signature, newPwd string) (map[string]any, error) {
+	if err := k.CompleteRecovery(ctx, handle, nonce, signature, newPwd); err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "ok"}, nil
 }
 
 // ---- Action operations ----

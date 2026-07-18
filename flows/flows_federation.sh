@@ -6,9 +6,11 @@
 # resolve each other by key through R's DHT and friend by key — no URL anywhere. This is the
 # loopback analogue of home kernels finding each other with no dialable address. FED_RKEY holds R's key.
 
-# Globals set by _fed_setup: FED_DBL FED_DBR FED_HL FED_HR FED_BPORT FED_RID FED_PROXY FED_RKEY FED_LKEY FED_BOOT.
+# Globals set by _fed_setup: FED_DBL FED_DBR FED_HL FED_HR FED_BPORT FED_RID FED_PROXY FED_RKEY FED_LKEY FED_BOOT FED_MOUNT.
+# Optional second arg: a local alias (bare handle, no @) to mount R under instead of its self-reported @kernel-r.
 _fed_setup() {
-    local dir="$1"
+    local dir="$1" alias="${2:-}"
+    FED_MOUNT="@kernel-r"; [ -n "$alias" ] && FED_MOUNT="@$alias"
     FED_DBL="$dir/l/juice.db"; FED_DBR="$dir/r/juice.db"
     FED_HL="$dir/lsys"; FED_HR="$dir/rsys"
     mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
@@ -32,11 +34,22 @@ _fed_setup() {
     j "$FED_DBR" "$FED_HR" action enable "$FED_RID" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$FED_RID" --visibility public >/dev/null 2>&1
 
-    # L friends R by key alone; the transport resolves the key via the seed.
-    j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1 || return 1
-    FED_PROXY=$(strfield "$(jj "$FED_DBL" "$FED_HL" action show "@kernel-r/sys/greet")" id)
+    # L friends R by key alone; the transport resolves the key via the seed. An optional alias
+    # mounts R under an operator-chosen local handle instead of its self-reported @kernel-r.
+    j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" $alias >/dev/null 2>&1 || return 1
+    FED_PROXY=$(strfield "$(jj "$FED_DBL" "$FED_HL" action show "$FED_MOUNT/sys/greet")" id)
     [ -n "$FED_PROXY" ] || return 1
     return 0
+}
+
+flow_fed_friend_alias() {
+    echo "=== FLOW fed_friend_alias ==="
+    local dir; dir=$(new_dir)
+    _fed_setup "$dir" myremote || { fail "fed_alias.setup" "setup failed"; return; }
+
+    # R is mounted under the chosen alias @myremote, and its action is addressable and callable there.
+    assert_json "fed_alias.proxy_mounted" "$(jj "$FED_DBL" "$FED_HL" action show @myremote/sys/greet)" id "$FED_PROXY"
+    assert_nonempty "fed_alias.callable_under_alias" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run @myremote/sys/greet '{}')" tx_id)"
 }
 
 # _all_receipt_checks vr_json — "OK" iff valid=true and all 9 receipt checks are true.

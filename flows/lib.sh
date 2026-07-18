@@ -227,7 +227,7 @@ make_admin() { start_server "$1" "$2" "${@:3}" && j "$1" "$2" auth login @sys --
 # in under user_home. Default password is "userpass" so curl-based checks can reference it.
 make_user() {
     local db="$1" ah="$2" uh="$3" h="$4" pw="${5:-userpass}"
-    j "$db" "$ah" user create "$h" "${h#@}@test.com" --password "$pw" >/dev/null 2>&1
+    j "$db" "$ah" user create "$h" --password "$pw" >/dev/null 2>&1
     j "$db" "$uh" auth login "$h" --password "$pw" >/dev/null 2>&1
 }
 # deposit db sys_home handle amount

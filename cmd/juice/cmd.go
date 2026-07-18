@@ -231,11 +231,11 @@ func init() {
 func userCreateCmd() *cobra.Command {
 	var password string
 	cmd := &cobra.Command{
-		Use:   "create <user> <email>",
+		Use:   "create <user>",
 		Short: "Create a user account",
-		Args:  cobra.ExactArgs(2),
+		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			user, email := args[0], args[1]
+			user := args[0]
 			if password == "" {
 				p, err := promptNewPassword("Password: ")
 				if err != nil {
@@ -243,9 +243,21 @@ func userCreateCmd() *cobra.Command {
 				}
 				password = p
 			}
-			return apiEmit("POST", "/v1/users", map[string]any{
-				"handle": user, "email": email, "password": password,
-			})
+			// Enroll a recovery phrase (§12): generate it client-side, send only the public key,
+			// and show the phrase once. It is the sole recovery credential — the server never sees it.
+			mnemonic, recoveryPub, err := generateRecovery()
+			if err != nil {
+				return err
+			}
+			var view json.RawMessage
+			if err := apiCall(context.Background(), "POST", "/v1/users", map[string]any{
+				"handle": user, "password": password, "recovery_public_key": recoveryPub,
+			}, &view); err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stderr, "Recovery phrase (write this down; it is shown only once and cannot be recovered):")
+			fmt.Fprintln(os.Stderr, "  "+mnemonic)
+			return emitRaw(view)
 		},
 	}
 	cmd.Flags().StringVar(&password, "password", "", "Password (prompted if omitted)")
@@ -264,15 +276,17 @@ func userMeCmd() *cobra.Command {
 }
 
 func userUpdateCmd() *cobra.Command {
-	var email string
+	var description string
+	var setDescription bool
 	var changePassword bool
 	cmd := &cobra.Command{
 		Use:   "update",
-		Short: "Update your email or password",
+		Short: "Update your description or password",
 		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if email == "" && !changePassword {
-				return kernel.ErrInvalidInput.Wrap("at least one of --email or --password must be specified")
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			setDescription = cmd.Flags().Changed("description")
+			if !setDescription && !changePassword {
+				return kernel.ErrInvalidInput.Wrap("at least one of --description or --password must be specified")
 			}
 			var currentPassword, newPassword string
 			if changePassword {
@@ -285,8 +299,8 @@ func userUpdateCmd() *cobra.Command {
 				}
 			}
 			body := map[string]any{}
-			if email != "" {
-				body["email"] = email
+			if setDescription {
+				body["description"] = description // may be "" to clear
 			}
 			if changePassword {
 				body["current_password"] = currentPassword
@@ -295,7 +309,7 @@ func userUpdateCmd() *cobra.Command {
 			return apiEmit("PUT", "/v1/me", body)
 		},
 	}
-	cmd.Flags().StringVar(&email, "email", "", "New email address")
+	cmd.Flags().StringVar(&description, "description", "", "New profile description (about); pass empty to clear")
 	cmd.Flags().BoolVar(&changePassword, "password", false, "Change your password")
 	return cmd
 }

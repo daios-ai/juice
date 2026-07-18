@@ -48,7 +48,7 @@ func newLookupTestKernel(t *testing.T) (*kernel.Kernel, kernel.Store) {
 	issuerID := uuid.New().String()
 	hash, _ := kernel.HashPassword("pw")
 	_ = db.CreateUser(context.Background(), &kernel.User{
-		ID: issuerID, Handle: "@_issuer", Email: "issuer@test",
+		ID: issuerID, Handle: "@_issuer",
 		PasswordHash: hash, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	})
 
@@ -63,7 +63,7 @@ func seedOwner(t *testing.T, st kernel.Store, handle string) *kernel.User {
 	t.Helper()
 	hash, _ := kernel.HashPassword("pw")
 	u := &kernel.User{
-		ID: uuid.New().String(), Handle: handle, Email: handle + "@test",
+		ID: uuid.New().String(), Handle: handle,
 		PasswordHash: hash, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateUser(context.Background(), u); err != nil {

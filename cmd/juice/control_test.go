@@ -21,7 +21,7 @@ import (
 func bootSuperuser(t *testing.T, env *testEnv) string {
 	t.Helper()
 	ctx := context.Background()
-	if err := env.k.FirstBoot(ctx, "sys-pass"); err != nil {
+	if err := env.k.FirstBoot(ctx, "sys-pass", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := env.k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
@@ -66,7 +66,7 @@ func TestAdminDepositOverTCP(t *testing.T) {
 	suTok := bootSuperuser(t, env)
 
 	recipient, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@rcpt", Email: "r@example.com", Password: "pw",
+		Handle: "@rcpt", Password: "pw",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -126,7 +126,7 @@ func TestAdminRenameOverTCP(t *testing.T) {
 	suTok := bootSuperuser(t, env)
 
 	bob, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@bob", Email: "b@example.com", Password: "pw",
+		Handle: "@bob", Password: "pw",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestAdminRenameOverTCP(t *testing.T) {
 	}
 	// The freed @bob is reusable by a distinct fresh account.
 	fresh, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@bob", Email: "b2@example.com", Password: "pw",
+		Handle: "@bob", Password: "pw",
 	})
 	if err != nil {
 		t.Fatalf("reuse freed handle: %v", err)
@@ -163,7 +163,7 @@ func TestAdminSuperuserGate(t *testing.T) {
 	}
 
 	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@regular", Email: "reg@example.com", Password: "pw",
+		Handle: "@regular", Password: "pw",
 	}); err != nil {
 		t.Fatal(err)
 	}

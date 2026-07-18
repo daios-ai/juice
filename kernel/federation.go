@@ -492,11 +492,10 @@ func (k *Kernel) CreateOrUpdateProxyPeer(ctx context.Context, handle, publicKey 
 		return nil, ErrInvalidInput.Wrapf("no free handle for %s (tried 99 variants)", handle)
 	}
 	now := time.Now().UTC()
-	// A key-only account: no password, a placeholder email for the unique-email column. Same insert.
+	// A key-only account: no password, authenticates by federation signature. Same insert.
 	u := &User{
 		ID:        uuid.New().String(),
 		Handle:    resolvedHandle,
-		Email:     resolvedHandle + "@remote",
 		PublicKey: publicKey,
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -721,6 +720,11 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey string) (*GossipRes
 		pubKeyB64 = base64.RawURLEncoding.EncodeToString(pub)
 	}
 	handle, _ := k.store.GetConfig(ctx, "kernel_handle")
+	// The kernel's self-description is @sys's user description (§13): one primitive, not a config key.
+	var about string
+	if sys, err := k.store.ReadUserByHandle(ctx, "@sys"); err == nil && sys != nil {
+		about = sys.Description
+	}
 
 	actions, err := k.store.ListVisibleActions(ctx, false, 100, 0)
 	if err != nil {
@@ -786,6 +790,7 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey string) (*GossipRes
 	resp := &GossipResponse{
 		PublicKey: pubKeyB64,
 		Handle:    handle,
+		About:     about,
 		Actions:   gossipActions,
 		Friends:   friendViews,
 	}

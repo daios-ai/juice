@@ -78,7 +78,9 @@ make build        # or: go build -o juice ./cmd/juice/
 Requires Go 1.25+. Module path is `github.com/daios-ai/juice`.
 
 On first boot the kernel prompts for a superuser password and atomically creates the `@sys` user,
-its signing keypair, and a JWT secret, then registers the native `@sys` actions. Subsequent boots
+its signing keypair, and a JWT secret, then registers the native `@sys` actions. It also prints a
+one-time 12-word recovery phrase for `@sys` — write it down; it is the only way to reset the
+superuser password (`juice auth recover @sys`) and cannot be recovered if lost. Subsequent boots
 are idempotent.
 
 State — the database (which holds the signing key), config, and auth tokens — lives under
@@ -94,7 +96,8 @@ subdirectory holds regenerable data and is safe to delete.
 ./juice serve --addr :4040
 
 # Create a user and log in (token stored under $JUICE_HOME/kernel/)
-./juice user create @alice alice@example.com
+# `user create` prints a one-time recovery phrase — write it down.
+./juice user create @alice
 ./juice auth login @alice
 
 # Register an action and activate it
@@ -124,8 +127,8 @@ transactions are ids.
 
 ```text
 juice serve | health
-juice user create <user> <email> | me | update | connect <action> | disconnect <action>
-juice auth login <user> | logout | refresh
+juice user create <user> | me | update | connect <action> | disconnect <action>
+juice auth login <user> | logout | refresh | recover <user>
 juice action create <name> | update <action> | enable/disable <action> | list | show <action>
 juice action delete <action> | import <spec-url> | unimport <spec-url> | stats <action>
 juice run <action> [json]
@@ -133,7 +136,7 @@ juice process list | show <id> | end <id>
 juice step create <action> | list | show <id> | complete <id> [json]
 juice tx list | show <id> | rate <id> <0|1> | verify <id>
 juice admin users | show | suspend | unsuspend | rename | deposit | withdraw
-juice admin friend <key> | unfriend <user> | peers | inspect <key|handle> | identity
+juice admin friend <key> [local-handle] | unfriend <user> | peers | inspect <key|handle> | identity
 ```
 
 Global flags: `--db <path>`, `--config <path>`, `--json`, `--quiet`. `admin` commands (including

@@ -212,15 +212,15 @@ func strVal(s *string) string {
 
 // ---- Users ----
 
-const userCols = `id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,peer_last_seen,peer_credit,created_at,updated_at`
+const userCols = `id,handle,description,password_hash,available,locked,suspended_at,denied_at,public_key,recovery_public_key,peer_last_seen,peer_credit,created_at,updated_at`
 
 func (s *DB) CreateUser(ctx context.Context, u *kernel.User) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO users (id,handle,email,password_hash,available,locked,suspended_at,denied_at,public_key,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		u.ID, u.Handle, u.Email, u.PasswordHash, u.Available, u.Locked,
+		`INSERT INTO users (id,handle,description,password_hash,available,locked,suspended_at,denied_at,public_key,recovery_public_key,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Handle, u.Description, u.PasswordHash, u.Available, u.Locked,
 		nullTimeToStr(u.SuspendedAt), nullTimeToStr(u.DeniedAt),
-		nullStr(u.PublicKey),
+		nullStr(u.PublicKey), nullStr(u.RecoveryPublicKey),
 		timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
 	)
 	if err != nil {
@@ -492,15 +492,16 @@ func (s *DB) ListStatsByOwner(ctx context.Context, ownerUserID string) ([]*kerne
 func scanUserFn(scan func(...any) error) (*kernel.User, error) {
 	var u kernel.User
 	var createdAt, updatedAt string
-	var suspendedAt, deniedAt, publicKey, peerLastSeen *string
+	var suspendedAt, deniedAt, publicKey, recoveryPublicKey, peerLastSeen *string
 	var peerCredit *int64
-	if err := scan(&u.ID, &u.Handle, &u.Email, &u.PasswordHash,
-		&u.Available, &u.Locked, &suspendedAt, &deniedAt, &publicKey, &peerLastSeen, &peerCredit, &createdAt, &updatedAt); err != nil {
+	if err := scan(&u.ID, &u.Handle, &u.Description, &u.PasswordHash,
+		&u.Available, &u.Locked, &suspendedAt, &deniedAt, &publicKey, &recoveryPublicKey, &peerLastSeen, &peerCredit, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	u.SuspendedAt = strToNullTime(suspendedAt)
 	u.DeniedAt = strToNullTime(deniedAt)
 	u.PublicKey = strVal(publicKey)
+	u.RecoveryPublicKey = strVal(recoveryPublicKey)
 	u.PeerLastSeen = strToNullTime(peerLastSeen)
 	u.PeerCredit = peerCredit
 	u.CreatedAt = strToTime(createdAt)
@@ -559,8 +560,8 @@ func (s *DB) UpdatePeerSync(ctx context.Context, id string, lastSeen time.Time, 
 
 func (s *DB) UpdateUser(ctx context.Context, u *kernel.User) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE users SET email=?, password_hash=?, updated_at=? WHERE id=?`,
-		u.Email, u.PasswordHash, timeToStr(u.UpdatedAt), u.ID,
+		`UPDATE users SET description=?, password_hash=?, updated_at=? WHERE id=?`,
+		u.Description, u.PasswordHash, timeToStr(u.UpdatedAt), u.ID,
 	)
 	return dbErr(err, "update user")
 }
@@ -2287,10 +2288,10 @@ func (s *DB) SetConfig(ctx context.Context, key, value string) error {
 func (s *DB) InitFirstBoot(ctx context.Context, u *kernel.User, configs map[string]string) error {
 	return s.withTx(ctx, "init first boot", func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO users (id,handle,email,password_hash,available,locked,created_at,updated_at)
-			 VALUES (?,?,?,?,?,?,?,?)`,
-			u.ID, u.Handle, u.Email, u.PasswordHash,
-			u.Available, u.Locked, timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
+			`INSERT OR IGNORE INTO users (id,handle,description,password_hash,available,locked,recovery_public_key,created_at,updated_at)
+			 VALUES (?,?,?,?,?,?,?,?,?)`,
+			u.ID, u.Handle, u.Description, u.PasswordHash,
+			u.Available, u.Locked, nullStr(u.RecoveryPublicKey), timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
 		); err != nil {
 			return dbErr(err, "init first boot: insert user")
 		}
@@ -2691,6 +2692,35 @@ func (s *DB) CompleteIdempotencyRecordIfPending(ctx context.Context, id, resultJ
 		resultJSON, receiptJSON, id,
 	)
 	return dbErr(err, "complete idempotency record if pending")
+}
+
+// ---- Recovery challenges ----
+
+// CreateRecoveryChallenge stores a single-use nonce for a password-recovery attempt (§12).
+func (s *DB) CreateRecoveryChallenge(ctx context.Context, nonce, userID string, expiresAt time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO recovery_challenge (nonce,user_id,expires_at) VALUES (?,?,?)`,
+		nonce, userID, timeToStr(expiresAt),
+	)
+	return dbErr(err, "create recovery challenge")
+}
+
+// ConsumeRecoveryChallenge atomically deletes an unexpired nonce and returns its user_id. The
+// single DELETE ... RETURNING makes consumption single-use — a replay finds no row — so a captured
+// recovery request cannot be replayed. Returns ErrNotFound when unknown, already consumed, or expired.
+func (s *DB) ConsumeRecoveryChallenge(ctx context.Context, nonce string) (string, error) {
+	var userID string
+	err := s.db.QueryRowContext(ctx,
+		`DELETE FROM recovery_challenge WHERE nonce=? AND datetime(expires_at) > datetime('now') RETURNING user_id`,
+		nonce,
+	).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", kernel.ErrNotFound.Wrap("recovery challenge not found or expired")
+	}
+	if err != nil {
+		return "", dbErr(err, "consume recovery challenge")
+	}
+	return userID, nil
 }
 
 func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*kernel.IdempotencyRecord, error) {

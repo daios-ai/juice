@@ -166,7 +166,7 @@ func TestInspectOfflineFriendedShowsLocalData(t *testing.T) {
 func TestInspectLocalUserRejected(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
-	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@chat", Email: "c@x.local", Password: "pw"}); err != nil {
+	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@chat", Password: "pw"}); err != nil {
 		t.Fatal(err)
 	}
 	// fed is present so the guard, not a missing transport, is what rejects.
@@ -197,7 +197,7 @@ func TestInspectLocalUserRejected(t *testing.T) {
 func TestUnfriendLocalUserRejected(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
-	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@chat", Email: "c@x.local", Password: "pw"})
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@chat", Password: "pw"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -48,7 +48,6 @@ func newTestStore(t testing.TB) kernel.Store {
 	issuer := &kernel.User{
 		ID:           testIssuerUserID,
 		Handle:       "@_test_issuer",
-		Email:        "issuer@test.internal",
 		PasswordHash: hash,
 		CreatedAt:    time.Now().UTC(),
 		UpdatedAt:    time.Now().UTC(),
@@ -94,7 +93,6 @@ func setupUser(t *testing.T, st kernel.Store, handle string, balance int64) *ker
 	u := &kernel.User{
 		ID:           uuid.New().String(),
 		Handle:       handle,
-		Email:        handle + "@example.com",
 		PasswordHash: hash,
 		Available:    balance,
 		CreatedAt:    time.Now().UTC(),
@@ -601,7 +599,6 @@ func TestCreateUser(t *testing.T) {
 
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle:   "@alice",
-		Email:    "alice@example.com",
 		Password: "secret",
 	})
 	if err != nil {
@@ -638,7 +635,7 @@ func TestCreateUserNormalizesHandle(t *testing.T) {
 
 	// Created without a leading "@": stored canonically as "@carol".
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "carol", Email: "carol@example.com", Password: "secret",
+		Handle: "carol", Password: "secret",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -657,7 +654,7 @@ func TestCreateUserNormalizesHandle(t *testing.T) {
 	// A bare "@" and an empty handle are rejected.
 	for _, bad := range []string{"@", "  ", ""} {
 		if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-			Handle: bad, Email: "x@example.com", Password: "secret",
+			Handle: bad, Password: "secret",
 		}); err == nil {
 			t.Errorf("CreateUser(handle=%q) should be rejected", bad)
 		}
@@ -671,7 +668,6 @@ func TestLogin(t *testing.T) {
 
 	_, err := k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle:   "@bob",
-		Email:    "bob@example.com",
 		Password: "mypass",
 	})
 	if err != nil {
@@ -1176,7 +1172,7 @@ func TestRenameUser(t *testing.T) {
 		t.Errorf("new handle does not resolve to bob: %v", err)
 	}
 	// The freed @bob is reusable by a fresh account, which inherits nothing of bob's identity.
-	fresh, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@bob", Email: "b@e.com", Password: "password"})
+	fresh, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@bob", Password: "password"})
 	if err != nil {
 		t.Fatalf("reuse freed handle: %v", err)
 	}
@@ -1296,7 +1292,7 @@ func TestTransfer(t *testing.T) {
 
 	// Peer/proxy recipient (public_key set) rejected.
 	peer := &kernel.User{
-		ID: uuid.New().String(), Handle: "@peer", Email: "p@e.com",
+		ID: uuid.New().String(), Handle: "@peer",
 		PublicKey: "cGVlci1rZXk", Available: 0,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -2474,7 +2470,7 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 	// A peer proxy user: a set public_key makes it a key account (a peer), funded so the denial is
 	// on visibility, not balance.
 	peer := &kernel.User{
-		ID: uuid.New().String(), Handle: "@peer-local-fed", Email: "p@example.com",
+		ID: uuid.New().String(), Handle: "@peer-local-fed",
 		PublicKey: "cGVlci1sb2NhbC1mZWQ", Available: 1000,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}

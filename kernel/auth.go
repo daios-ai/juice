@@ -274,3 +274,74 @@ func (k *Kernel) LoginWithRefresh(ctx context.Context, handle, password string) 
 	k.log.With(ctx).Info("user.login", "user_id", u.ID)
 	return accessToken, rt.Token, nil
 }
+
+// ---- Seed-phrase password recovery (§12) ----
+
+const recoveryTTL = 10 * time.Minute
+
+// RecoveryChallenge is the payload a recovery key signs to authorize a password reset. Its singleton
+// key-set is a signature domain disjoint from every other signed Juice payload (peer requests,
+// capabilities, receipts, ratings, manifests), so a signature made here verifies nowhere else.
+type RecoveryChallenge struct {
+	Challenge string `json:"recovery_challenge"`
+}
+
+// StartRecovery issues a single-use nonce for a password-recovery attempt. The account must have a
+// recovery key enrolled (§12); otherwise recovery is unavailable. The nonce is stored with a short
+// TTL and returned to the client, which signs it with the seed-phrase-derived key.
+func (k *Kernel) StartRecovery(ctx context.Context, handle string) (string, error) {
+	u, err := k.store.ReadUserByHandle(ctx, handle)
+	if err != nil {
+		return "", err
+	}
+	if u.RecoveryPublicKey == "" {
+		return "", ErrInvalidState.Wrap("no recovery key enrolled for this account")
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", ErrInternal.Wrap("failed to generate recovery challenge")
+	}
+	nonce := base64.RawURLEncoding.EncodeToString(raw)
+	if err := k.store.CreateRecoveryChallenge(ctx, nonce, u.ID, time.Now().UTC().Add(recoveryTTL)); err != nil {
+		return "", err
+	}
+	return nonce, nil
+}
+
+// CompleteRecovery consumes the nonce, verifies the client's signature against the account's stored
+// recovery key, and resets the password. It bypasses the current-password check (the whole point is
+// that the user has lost it). The nonce is consumed first, so a failed or replayed attempt burns it.
+func (k *Kernel) CompleteRecovery(ctx context.Context, handle, nonce, signatureB64, newPassword string) error {
+	if err := validatePassword(newPassword); err != nil {
+		return err
+	}
+	u, err := k.store.ReadUserByHandle(ctx, handle)
+	if err != nil {
+		return err
+	}
+	if u.RecoveryPublicKey == "" {
+		return ErrInvalidState.Wrap("no recovery key enrolled for this account")
+	}
+	challengedUserID, err := k.store.ConsumeRecoveryChallenge(ctx, nonce)
+	if err != nil || challengedUserID != u.ID {
+		return ErrUnauthorized.Wrap("recovery challenge invalid or expired")
+	}
+	pub, err := decodeRemotePublicKey(u.RecoveryPublicKey)
+	if err != nil {
+		return ErrInvalidState.Wrap("stored recovery key is invalid")
+	}
+	if err := verifyJCS(pub, RecoveryChallenge{Challenge: nonce}, signatureB64); err != nil {
+		return ErrUnauthorized.Wrap("recovery signature is invalid")
+	}
+	hash, err := HashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	u.PasswordHash = hash
+	u.UpdatedAt = time.Now().UTC()
+	if err := k.store.UpdateUser(ctx, u); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("user.recover", "user_id", u.ID)
+	return nil
+}

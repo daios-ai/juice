@@ -95,18 +95,20 @@ Federation has no HTTP surface: peer identity, gossip, manifests, the friend han
 | PKCE token exchange | `POST /v1/auth/token` `{grant_type:"authorization_code", code, code_verifier, [redirect_uri]}` → `{access_token, refresh_token}` | (handled internally by `--pkce` login) |
 | Refresh token | `POST /v1/auth/refresh` `{refresh_token}` → `{access_token, refresh_token}` | `juice auth refresh` |
 | Logout | `POST /v1/auth/logout` `{refresh_token}` → 204 | `juice auth logout` |
+| Recover (start) | `POST /v1/auth/recover/start` `{handle}` → `{nonce, expires_in_seconds}` | (part of `juice auth recover`) |
+| Recover (complete) | `POST /v1/auth/recover/complete` `{handle, nonce, signature, password}` → `{status}` | `juice auth recover <user> [--phrase] [--new-password]` |
 
 ### Users
 
 | Operation | HTTP | CLI |
 |-----------|------|-----|
-| Create user | `POST /v1/users` `{handle, email, password}` → 201 user | `juice user create <user> <email> [--password]` |
-| Get self | `GET /v1/me` → user (`id`, `handle`, `email`, `available`, `locked`, `connectors` the directory-grouped tree each `{directory, connections, actions:[{action, scopes, provider_key, created_at}]}`, `connections` the account inventory each `{provider, actions, unused, provider_key, created_at}`) | `juice user me` |
-| Update self | `PUT /v1/me` `{[email], [current_password, password]}` → user | `juice user update [--email] [--password]` |
+| Create user | `POST /v1/users` `{handle, password, [recovery_public_key]}` → 201 user | `juice user create <user> [--password]` |
+| Get self | `GET /v1/me` → user (`id`, `handle`, `description`, `available`, `locked`, `connectors` the directory-grouped tree each `{directory, connections, actions:[{action, scopes, provider_key, created_at}]}`, `connections` the account inventory each `{provider, actions, unused, provider_key, created_at}`) | `juice user me` |
+| Update self | `PUT /v1/me` `{[description], [current_password, password]}` → user | `juice user update [--description] [--password]` |
 | Transfer credits | `POST /v1/transfers` `{recipient, amount, [reason], [external_key]}` → ledger entry | `juice user transfer <recipient> <amount> [--reason --external-key]` |
 | List ledger | `GET /v1/ledger[?limit=&offset=]` → ledger entry[] | `juice user ledger [--limit --offset]` |
 
-`handle` is immutable. `email` and `password` are updatable by the authenticated user; `password` change requires `current_password` to verify the existing credential. At least one of `email` or `password` must be provided. Proxy users (federation peers) cannot be created here, cannot log in, and hold no tokens; they exist only through peer acceptance, authenticate per request by federation signature, and cannot use `PUT /v1/me`.
+`handle` is immutable. `description` and `password` are updatable by the authenticated user; `password` change requires `current_password` to verify the existing credential. At least one of `description` or `password` must be provided (`description` may be `""` to clear). There is no email; account recovery is by seed phrase (§12): `user create` generates a 12-word BIP-39 mnemonic client-side, sends only the derived `recovery_public_key`, and prints the phrase once; `juice auth recover <user>` resets a lost password by signing a server nonce with the phrase-derived key. Proxy users (federation peers) cannot be created here, cannot log in, and hold no tokens; they exist only through peer acceptance, authenticate per request by federation signature, and cannot use `PUT /v1/me`.
 
 `user transfer` debits the caller and credits a local recipient in one fee-free ledger entry (rejects self-transfer, non-positive amount, and a suspended or peer recipient; `insufficient_funds` on low balance). `GET /v1/ledger` lists the caller's own movements — deposits, withdrawals, transfers — newest first, paginated, each with `operator_handle` plus `from_handle`/`to_handle` (null side omitted).
 
@@ -235,10 +237,10 @@ The operator verbs no ordinary user performs — money, access, federation trust
 | Rename user handle | `juice admin rename <user> <new-handle>` — frees the old handle for reuse |
 | Deposit credits | `juice admin deposit <user\|key> <amount> [--reason --external-key]` |
 | Withdraw credits | `juice admin withdraw <user\|key> <amount> [--reason --external-key]` |
-| Friend a kernel | `juice admin friend <key>` |
+| Friend a kernel | `juice admin friend <key> [local-handle]` — optional `local-handle` mounts the peer under an operator-chosen alias (auto-suffixed on collision); defaults to the peer's self-reported handle |
 | Unfriend a kernel | `juice admin unfriend <user\|key>` |
 | List peers | `juice admin peers [--gossip] [--all]` — friended peers by default (`handle`, `public_key`, `available`, `locked`, plus the §13 sync cache `peer_credit` (our credit on the peer) and `last_seen`; no internal id); `--all` (`?all=1`) also lists denied/unfriended peers; `--gossip` adds the known-network directory roster |
-| Inspect a kernel | `juice admin inspect <key\|user>` — identity, public actions, transacted friends, reachability. `source` is `live`/`local`/`none`: an offline but friended peer degrades to last-known local data (`online:false`) |
-| Show own identity | `juice admin identity` — this kernel's public key, handle, listen addresses |
+| Inspect a kernel | `juice admin inspect <key\|user>` — identity (incl. its `about`), public actions (with descriptions), transacted friends, reachability. `source` is `live`/`local`/`none`: an offline but friended peer degrades to last-known local data (`online:false`) |
+| Show own identity | `juice admin identity` — this kernel's public key, handle, `about` (`@sys`'s description), listen addresses |
 
-`<user>` is a `@handle` — or, for a peer, its base64url public key (the global name); `<action>` is `@owner/name` (or an id); `<key>` is a peer's base64url public key. `withdraw` requires `target.available ≥ amount`; it redeems credits and obliges the out-of-band payout. `admin friend <key>` on a denied key clears the denial and restarts the handshake. `admin unfriend` deny-lists the key, deactivates the peer's proxies, cancels steps addressed to it (parked prices refunded), and preserves balance and history.
+`<user>` is a `@handle` — or, for a peer, its base64url public key (the global name); `<action>` is `@owner/name` (or an id); `<key>` is a peer's base64url public key. `withdraw` requires `target.available ≥ amount`; it redeems credits and obliges the out-of-band payout. `admin friend <key> [local-handle]` on a denied key clears the denial and restarts the handshake; the `about` shown by `identity`/`inspect` is `@sys`'s user description, set with `juice user update --description`. `admin unfriend` deny-lists the key, deactivates the peer's proxies, cancels steps addressed to it (parked prices refunded), and preserves balance and history.

@@ -1023,11 +1023,13 @@ func (k *Kernel) SetTokenSecret(secret string) {
 
 // ---- User operations ----
 
-// CreateUserRequest holds validated input for user creation.
+// CreateUserRequest holds validated input for user creation. RecoveryPublicKey is the account's
+// own base64url Ed25519 recovery key, derived client-side from a seed phrase (§12); optional so a
+// programmatic/webhook registrant may omit it, but the CLI always supplies it.
 type CreateUserRequest struct {
-	Handle   string
-	Email    string
-	Password string
+	Handle            string
+	Password          string
+	RecoveryPublicKey string
 }
 
 // NormalizeHandle canonicalizes a user handle to start with "@". It trims surrounding
@@ -1063,11 +1065,13 @@ func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*User, 
 	if err := validateHandle(req.Handle); err != nil {
 		return nil, err
 	}
-	if req.Email == "" {
-		return nil, ErrInvalidInput.Wrap("email is required")
-	}
 	if err := validatePassword(req.Password); err != nil {
 		return nil, err
+	}
+	if req.RecoveryPublicKey != "" {
+		if _, err := decodeRemotePublicKey(req.RecoveryPublicKey); err != nil {
+			return nil, ErrInvalidInput.Wrap("invalid recovery public key")
+		}
 	}
 
 	hash, err := HashPassword(req.Password)
@@ -1077,12 +1081,12 @@ func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*User, 
 
 	now := time.Now().UTC()
 	u := &User{
-		ID:           uuid.New().String(),
-		Handle:       req.Handle,
-		Email:        req.Email,
-		PasswordHash: hash,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:                uuid.New().String(),
+		Handle:            req.Handle,
+		PasswordHash:      hash,
+		RecoveryPublicKey: req.RecoveryPublicKey,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 
 	if err := k.store.CreateUser(ctx, u); err != nil {
@@ -1093,14 +1097,15 @@ func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*User, 
 	return u, nil
 }
 
-// UpdateUserRequest holds validated input for user self-service update.
+// UpdateUserRequest holds validated input for user self-service update. Description is a pointer so
+// a nil value means "don't change" while a non-nil "" clears it.
 type UpdateUserRequest struct {
-	Email           string // empty = don't change
-	CurrentPassword string // required when NewPassword is set
-	NewPassword     string // empty = don't change
+	Description     *string // nil = don't change
+	CurrentPassword string  // required when NewPassword is set
+	NewPassword     string  // empty = don't change
 }
 
-// UpdateUser lets an authenticated password account update its own email and/or password.
+// UpdateUser lets an authenticated password account update its own description and/or password.
 func (k *Kernel) UpdateUser(ctx context.Context, callerID string, req UpdateUserRequest) (*User, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
@@ -1113,8 +1118,8 @@ func (k *Kernel) UpdateUser(ctx context.Context, callerID string, req UpdateUser
 	if u.PasswordHash == "" {
 		return nil, ErrInvalidState.Wrap("account has no password to update")
 	}
-	if req.Email == "" && req.NewPassword == "" {
-		return nil, ErrInvalidInput.Wrap("at least one of email or password must be provided")
+	if req.Description == nil && req.NewPassword == "" {
+		return nil, ErrInvalidInput.Wrap("at least one of description or password must be provided")
 	}
 	if req.NewPassword != "" {
 		if err := validatePassword(req.NewPassword); err != nil {
@@ -1129,8 +1134,8 @@ func (k *Kernel) UpdateUser(ctx context.Context, callerID string, req UpdateUser
 		}
 		u.PasswordHash = hash
 	}
-	if req.Email != "" {
-		u.Email = req.Email
+	if req.Description != nil {
+		u.Description = *req.Description
 	}
 	u.UpdatedAt = time.Now().UTC()
 	if err := k.store.UpdateUser(ctx, u); err != nil {
@@ -1909,9 +1914,16 @@ func (k *Kernel) SetConfig(ctx context.Context, key, value string) error {
 // FirstBoot atomically creates the @sys superuser account, generates an Ed25519 signing
 // keypair, and stores all three config entries in a single SQLite transaction.
 // Safe to call on a database that was already initialized — user INSERT is skipped.
-func (k *Kernel) FirstBoot(ctx context.Context, password string) error {
+// recoveryPublicKey is @sys's own recovery key (§12), enrolled from the operator's seed phrase;
+// optional (empty leaves @sys unrecoverable, as before).
+func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey string) error {
 	if err := validatePassword(password); err != nil {
 		return err
+	}
+	if recoveryPublicKey != "" {
+		if _, err := decodeRemotePublicKey(recoveryPublicKey); err != nil {
+			return ErrInvalidInput.Wrap("invalid recovery public key")
+		}
 	}
 	hash, err := HashPassword(password)
 	if err != nil {
@@ -1923,12 +1935,12 @@ func (k *Kernel) FirstBoot(ctx context.Context, password string) error {
 	}
 	now := time.Now().UTC()
 	u := &User{
-		ID:           uuid.New().String(),
-		Handle:       "@sys",
-		Email:        "sys@sys",
-		PasswordHash: hash,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:                uuid.New().String(),
+		Handle:            "@sys",
+		PasswordHash:      hash,
+		RecoveryPublicKey: recoveryPublicKey,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	jwtRaw := make([]byte, 32)
 	if _, err := rand.Read(jwtRaw); err != nil {

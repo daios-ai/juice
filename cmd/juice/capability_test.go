@@ -35,7 +35,7 @@ func newCapabilityKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout)}
 	k := kernel.New(db, nil, httpExec, nil, cfg, logger)
 	k.SetSecretBox(box)
-	if err := k.FirstBoot(context.Background(), "sys-pass"); err != nil {
+	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
 	}
 	bootstrapSigning(t, k)

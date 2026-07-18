@@ -202,3 +202,35 @@ flow_action_owner_visibility() {
     local n; n=$(list_len "$(curl -sf -H "Authorization: Bearer $tok" "$base/v1/actions?owner=@alice" 2>/dev/null)")
     assert_eq "action_owner_visibility.owner_sees_private" yes "$([ "${n:-0}" -ge 1 ] && echo yes || echo no)"
 }
+
+# flow_recovery: seed-phrase password recovery (§12), plus user/kernel descriptions (§13).
+# A created account prints a one-time recovery phrase; losing the password, the user recovers it by
+# signing the server challenge with that phrase. Also: a user sets its own description, and @sys's
+# description is the kernel "about" surfaced by admin identity.
+flow_recovery() {
+    echo "=== FLOW recovery ==="
+    local dir db hs uh phrase
+    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); uh=$(home "$dir" rec)
+    start_server "$db" "$hs" || { fail "recovery.boot" "server did not start"; return; }
+    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
+
+    # @sys's description is the kernel "about" (surfaced by admin identity).
+    j "$db" "$hs" user update --description "the neighbourhood kernel" >/dev/null 2>&1
+    assert_contains "recovery.kernel_about" "neighbourhood" "$(j "$db" "$hs" admin identity)"
+
+    # Create a user and capture the one-time recovery phrase (printed to stderr, merged by j()).
+    phrase=$(j "$db" "$uh" user create @recuser --password origpass | grep -oE '([a-z]+ ){11}[a-z]+' | head -1)
+    assert_ne "recovery.phrase_printed" "" "$phrase"
+
+    # A user sets and reads back its own description.
+    j "$db" "$uh" auth login @recuser --password origpass >/dev/null 2>&1
+    j "$db" "$uh" user update --description "weather tools" >/dev/null 2>&1
+    assert_json "recovery.user_description" "$(jj "$db" "$uh" user me)" description "weather tools"
+    j "$db" "$uh" auth logout >/dev/null 2>&1
+
+    # Recover a lost password with the phrase; the old password is then rejected and the new works.
+    j "$db" "$uh" auth recover @recuser --phrase "$phrase" --new-password newpass1 >/dev/null 2>&1
+    assert_fails "recovery.old_password_rejected" "invalid\|error\|unauth" -- j "$db" "$uh" auth login @recuser --password origpass
+    j "$db" "$uh" auth login @recuser --password newpass1 >/dev/null 2>&1
+    assert_json "recovery.new_password_works" "$(jj "$db" "$uh" user me)" handle @recuser
+}

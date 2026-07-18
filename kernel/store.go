@@ -280,6 +280,14 @@ type Store interface {
 	// (e.g. CommitFailedCall already ran), this is a no-op.
 	CompleteIdempotencyRecordIfPending(ctx context.Context, id, resultJSON, receiptJSON string) error
 
+	// ---- Recovery challenges (§12) ----
+
+	// CreateRecoveryChallenge stores a single-use, TTL-bound nonce for a password-recovery attempt.
+	CreateRecoveryChallenge(ctx context.Context, nonce, userID string, expiresAt time.Time) error
+	// ConsumeRecoveryChallenge atomically deletes an unexpired nonce and returns its user_id;
+	// single-use, so a replay returns ErrNotFound.
+	ConsumeRecoveryChallenge(ctx context.Context, nonce string) (string, error)
+
 	// ---- Stats ----
 
 	ReadStats(ctx context.Context, actionID string) (*Stats, error)

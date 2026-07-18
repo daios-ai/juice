@@ -118,7 +118,7 @@ func setupTraceForProcess(t *testing.T, db *store.DB, processID string) string {
 func makeUser(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	t.Helper()
 	u, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: handle, Email: handle + "@test.com", Password: "pass",
+		Handle: handle, Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -317,7 +317,7 @@ func TestServeAuthToken(t *testing.T) {
 	defer srv.Close()
 
 	_, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@http-bob", Email: "bob@example.com", Password: "pass",
+		Handle: "@http-bob", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1229,7 +1229,7 @@ func TestRateLimitLogin(t *testing.T) {
 	logger := log.Discard()
 	k := kernel.New(db, nil, nil, nil, cfg, logger)
 	if _, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@rlu", Email: "rlu@example.com", Password: "pass",
+		Handle: "@rlu", Password: "pass",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1302,8 +1302,8 @@ func TestServeGetMe(t *testing.T) {
 	if got["handle"] != "@metest" {
 		t.Errorf("handle: got %v, want @metest", got["handle"])
 	}
-	if got["email"] != "@metest@test.com" {
-		t.Errorf("email: got %v, want @metest@test.com", got["email"])
+	if _, ok := got["description"]; !ok {
+		t.Errorf("description key missing from /v1/me")
 	}
 	if got["available"].(float64) != 500 {
 		t.Errorf("available: got %v, want 500", got["available"])
@@ -1323,25 +1323,25 @@ func TestPutMe(t *testing.T) {
 
 	_, tok := makeUser(t, k, "@putmetest")
 
-	// Update email only.
-	resp := httpDo(t, srv, "PUT", "/v1/me", map[string]any{"email": "new@example.com"}, tok)
+	// Update description only.
+	resp := httpDo(t, srv, "PUT", "/v1/me", map[string]any{"description": "hi there"}, tok)
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		t.Fatalf("update email: want 200, got %d: %s", resp.StatusCode, body)
+		t.Fatalf("update description: want 200, got %d: %s", resp.StatusCode, body)
 	}
 	var got map[string]any
 	decodeResponse(t, resp, &got)
-	if got["email"] != "new@example.com" {
-		t.Errorf("email in response: got %v, want new@example.com", got["email"])
+	if got["description"] != "hi there" {
+		t.Errorf("description in response: got %v, want 'hi there'", got["description"])
 	}
 
 	// Confirm via GET /v1/me.
 	resp2 := httpDo(t, srv, "GET", "/v1/me", nil, tok)
 	var me map[string]any
 	decodeResponse(t, resp2, &me)
-	if me["email"] != "new@example.com" {
-		t.Errorf("GET /v1/me email: got %v, want new@example.com", me["email"])
+	if me["description"] != "hi there" {
+		t.Errorf("GET /v1/me description: got %v, want 'hi there'", me["description"])
 	}
 
 	// Change password with correct current password.
@@ -1391,7 +1391,7 @@ func TestPutMe(t *testing.T) {
 	}
 
 	// Unauthenticated returns 401.
-	resp6 := httpDo(t, srv, "PUT", "/v1/me", map[string]any{"email": "x@x.com"}, "")
+	resp6 := httpDo(t, srv, "PUT", "/v1/me", map[string]any{"description": "x"}, "")
 	resp6.Body.Close()
 	if resp6.StatusCode != http.StatusUnauthorized {
 		t.Errorf("unauthenticated: want 401, got %d", resp6.StatusCode)
