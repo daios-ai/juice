@@ -443,15 +443,24 @@ func (k *Kernel) SignFederation(action, counterparty, idempotencyKey, argsHash s
 	return
 }
 
-// SignPeerRequestNow signs a peer friend request with the platform key and returns
-// (signature, timestamp). Returns an error if the signing key is not configured.
-func (k *Kernel) SignPeerRequestNow(handle, publicKey string) (sig, ts string, err error) {
+// SignStep signs a step-completion payload with the platform key and returns
+// (signature, timestamp). recipient is the peer being addressed. Returns an error if the signing
+// key is not configured.
+func (k *Kernel) SignStep(stepID, counterparty, recipient, idempotencyKey, inputHash string) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = SignPeerRequest(k.cfg.SigningKey, handle, publicKey, ts)
+	sig, err = SignStepPayload(k.cfg.SigningKey, stepID, counterparty, recipient, idempotencyKey, ts, inputHash)
 	return
 }
 
-// ---- Peer / friendship operations ----
+// SignStepList signs a step-list request with the platform key and returns
+// (signature, timestamp). recipient is the peer being addressed.
+func (k *Kernel) SignStepList(counterparty, recipient string) (sig, ts string, err error) {
+	ts = time.Now().UTC().Format(time.RFC3339)
+	sig, err = SignStepListPayload(k.cfg.SigningKey, counterparty, recipient, ts)
+	return
+}
+
+// ---- Peer operations ----
 
 // CreateOrUpdateProxyPeer creates or updates a local user record representing a remote kernel peer,
 // addressed by Ed25519 public key. Location is not stored — the federation transport resolves the
@@ -1198,26 +1207,69 @@ func SignFederationPayload(key ed25519.PrivateKey, action, counterparty, idempot
 	})
 }
 
-// SignPeerRequest creates a base64url Ed25519 signature over JCS({handle, public_key, timestamp}).
-// Used when sending a friend request over the /juice/fed/friend/1 transport protocol (§13).
-func SignPeerRequest(key ed25519.PrivateKey, handle, publicKey, timestamp string) (string, error) {
-	return signJCS(key, map[string]string{
-		"handle":     handle,
-		"public_key": publicKey,
-		"timestamp":  timestamp,
-	})
+// Step payloads name their `recipient` — the serving kernel's public key. Every other signed
+// payload in the system identifies only its sender, so a captured request is replayable to any
+// kernel that would accept it; for a step list that would let one kernel enumerate another's
+// parked steps on a third kernel. Binding the recipient closes that here. The call payload has
+// the same weakness, but adding a field there breaks the wire for every existing peer, which §12
+// assigns to a federation-protocol version bump.
+
+// SignStepPayload creates a base64url Ed25519 signature over the canonical step-completion payload
+// JCS({counterparty, idempotency_key, input_hash, recipient, step_id, timestamp}) — a key-set
+// disjoint from every other signed Juice payload (§12, §13).
+func SignStepPayload(key ed25519.PrivateKey, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash string) (string, error) {
+	return signJCS(key, stepPayload(stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash))
 }
 
-// VerifyPeerRequestSignature verifies a friend-request signature: Ed25519 over
-// JCS({handle, public_key, timestamp}) by the key embedded in the request.
-func VerifyPeerRequestSignature(pubKeyB64, handle, publicKey, timestamp, sigB64 string) error {
+// VerifyStepSignature verifies an Ed25519 signature over the canonical step-completion payload.
+// recipient must be the verifying kernel's own public key.
+func VerifyStepSignature(pubKeyB64, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash, sigB64 string) error {
 	pub, err := decodeRemotePublicKey(pubKeyB64)
 	if err != nil {
-		return ErrUnauthorized.Wrap("invalid public key in peer request")
+		return ErrUnauthenticated.Wrap("invalid counterparty public key")
 	}
-	return verifyJCS(pub, map[string]string{
-		"handle":     handle,
-		"public_key": publicKey,
-		"timestamp":  timestamp,
-	}, sigB64)
+	if err := verifyJCS(pub, stepPayload(stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash), sigB64); err != nil {
+		return ErrUnauthenticated.Wrap("step signature is invalid")
+	}
+	return nil
+}
+
+func stepPayload(stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash string) map[string]string {
+	return map[string]string{
+		"counterparty":    counterparty,
+		"idempotency_key": idempotencyKey,
+		"input_hash":      inputHash,
+		"recipient":       recipient,
+		"step_id":         stepID,
+		"timestamp":       timestamp,
+	}
+}
+
+// SignStepListPayload creates a base64url Ed25519 signature over
+// JCS({counterparty, recipient, scope, timestamp}). The fixed scope value keeps this key-set
+// disjoint from every other signed payload (§12, §13).
+func SignStepListPayload(key ed25519.PrivateKey, counterparty, recipient, timestamp string) (string, error) {
+	return signJCS(key, stepListPayload(counterparty, recipient, timestamp))
+}
+
+// VerifyStepListSignature verifies an Ed25519 signature over the canonical step-list payload.
+// recipient must be the verifying kernel's own public key.
+func VerifyStepListSignature(pubKeyB64, counterparty, recipient, timestamp, sigB64 string) error {
+	pub, err := decodeRemotePublicKey(pubKeyB64)
+	if err != nil {
+		return ErrUnauthenticated.Wrap("invalid counterparty public key")
+	}
+	if err := verifyJCS(pub, stepListPayload(counterparty, recipient, timestamp), sigB64); err != nil {
+		return ErrUnauthenticated.Wrap("step signature is invalid")
+	}
+	return nil
+}
+
+func stepListPayload(counterparty, recipient, timestamp string) map[string]string {
+	return map[string]string{
+		"counterparty": counterparty,
+		"recipient":    recipient,
+		"scope":        "step_list",
+		"timestamp":    timestamp,
+	}
 }

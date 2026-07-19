@@ -30,6 +30,7 @@ const (
 	ProtocolManifest = "/juice/fed/manifest/1"
 	ProtocolGossip   = "/juice/fed/gossip/1"
 	ProtocolInspect  = "/juice/fed/inspect/1"
+	ProtocolStep     = "/juice/fed/step/1"
 )
 
 // CallRequest is the wire form of an inbound federation call (§13). Args carries the exact
@@ -51,6 +52,28 @@ type CallResponse struct {
 	Body   json.RawMessage `json:"body"`
 }
 
+// StepRequest is the wire form of a /juice/fed/step/1 request (§13). Kind selects the operation:
+// "list" enumerates the waiting steps this peer is the required caller of, "complete" resumes one.
+// Input carries the exact bytes the caller hashed and signed, so input_hash matches byte-for-byte.
+type StepRequest struct {
+	Kind           string          `json:"kind"`                      // "list" | "complete"
+	Counterparty   string          `json:"counterparty"`              // caller's base64url Ed25519 public key
+	Timestamp      string          `json:"timestamp"`                 // RFC3339
+	Signature      string          `json:"signature"`                 // Ed25519 over the kind's canonical payload
+	StepID         string          `json:"step_id,omitempty"`         // complete only
+	IdempotencyKey string          `json:"idempotency_key,omitempty"` // complete only
+	Input          json.RawMessage `json:"input,omitempty"`           // complete only; exact request bytes
+	Offset         int             `json:"offset,omitempty"`          // list only; page start
+}
+
+// StepResponse mirrors CallResponse: a status plus an opaque JSON body. Unlike a call, a step
+// completion parks nothing on the requester, so failures are plain typed errors — there is no
+// local trace awaiting a signed rejection receipt (§13).
+type StepResponse struct {
+	Status int             `json:"status"`
+	Body   json.RawMessage `json:"body"`
+}
+
 // Handlers is implemented by cmd/juice to answer inbound protocol streams. Each method
 // receives the peer's verified public key (from the authenticated libp2p connection) plus
 // the request, and returns opaque JSON. The transport applies no Juice semantics itself.
@@ -64,6 +87,9 @@ type Handlers interface {
 	OnGossip(ctx context.Context, peerKey string) (json.RawMessage, error)
 	// OnInspect returns the inspect document (identity + public actions + transacted peers) as JSON.
 	OnInspect(ctx context.Context, peerKey string) (json.RawMessage, error)
+	// OnStep handles an inbound /juice/fed/step/1 request: listing or completing the waiting
+	// steps this peer is the required caller of (§10, §13).
+	OnStep(ctx context.Context, peerKey string, req StepRequest) StepResponse
 }
 
 // Config configures a transport host.

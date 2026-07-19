@@ -422,10 +422,11 @@ func (t *Transport) registerHandlers() {
 	t.host.SetStreamHandler(protocol.ID(ProtocolManifest), t.handleManifest)
 	t.host.SetStreamHandler(protocol.ID(ProtocolGossip), t.handleGossip)
 	t.host.SetStreamHandler(protocol.ID(ProtocolInspect), t.handleInspect)
+	t.host.SetStreamHandler(protocol.ID(ProtocolStep), t.handleStep)
 }
 
 // serveReq reads one typed request frame, runs handle, and writes its response frame. Used by the
-// request/response protocols (call, friend).
+// request/response protocols (call, step).
 func serveReq[Req any](s network.Stream, handle func(string, Req) any) {
 	defer s.Close()
 	_ = s.SetDeadline(time.Now().Add(streamDeadline))
@@ -450,6 +451,10 @@ func serveDoc(s network.Stream, fetch func(string) (json.RawMessage, error)) {
 
 func (t *Transport) handleCall(s network.Stream) {
 	serveReq(s, func(key string, req CallRequest) any { return t.cfg.Handlers.OnCall(context.Background(), key, req) })
+}
+
+func (t *Transport) handleStep(s network.Stream) {
+	serveReq(s, func(key string, req StepRequest) any { return t.cfg.Handlers.OnStep(context.Background(), key, req) })
 }
 
 func (t *Transport) handleGossip(s network.Stream) {
@@ -515,6 +520,11 @@ func roundTrip[Req, Resp any](ctx context.Context, t *Transport, peerKey, proto 
 // Call sends a federation call to the peer and returns its settlement envelope.
 func (t *Transport) Call(ctx context.Context, peerKey string, req CallRequest) (CallResponse, error) {
 	return roundTrip[CallRequest, CallResponse](ctx, t, peerKey, ProtocolCall, req)
+}
+
+// Step sends a step list/complete request to the peer (§13).
+func (t *Transport) Step(ctx context.Context, peerKey string, req StepRequest) (StepResponse, error) {
+	return roundTrip[StepRequest, StepResponse](ctx, t, peerKey, ProtocolStep, req)
 }
 
 // Gossip fetches the peer's gossip document.

@@ -1751,6 +1751,71 @@ func (s *DB) ResetRunningSteps(ctx context.Context) error {
 	return dbErr(err, "reset running steps")
 }
 
+// IncrementStepGate records one contribution toward the barrier on stepID and returns the running
+// count plus the stored threshold. The first contribution fixes `need`; a later contribution
+// naming a different threshold is a programming error in the workflow, not a race, so it is
+// rejected rather than silently re-basing the barrier. State for the @sys/step/join native (§9):
+// not part of the kernel.Store interface — the kernel never reads it.
+func (s *DB) IncrementStepGate(ctx context.Context, stepID string, need int) (int, int, error) {
+	var have, storedNeed int
+	err := s.withTx(ctx, "increment step gate", func(tx *sql.Tx) error {
+		row := tx.QueryRowContext(ctx, `SELECT need, have FROM step_gates WHERE step_id=?`, stepID)
+		switch err := row.Scan(&storedNeed, &have); {
+		case err == sql.ErrNoRows:
+			storedNeed, have = need, 0
+		case err != nil:
+			return dbErr(err, "read step gate")
+		case storedNeed != need:
+			return kernel.ErrInvalidInput.Wrapf("step gate already opened with need=%d", storedNeed)
+		}
+		have++
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO step_gates (step_id,need,have,updated_at) VALUES (?,?,?,?)
+			 ON CONFLICT(step_id) DO UPDATE SET have=excluded.have, updated_at=excluded.updated_at`,
+			stepID, storedNeed, have, timeToStr(time.Now().UTC()))
+		return dbErr(err, "write step gate")
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return have, storedNeed, nil
+}
+
+// ListStepsAwaitingCaller returns the waiting steps a given user is the required caller of,
+// oldest first. Deliberately narrow: ListSteps' visibility predicate is a disjunction that also
+// matches every step inside a process the caller owns, so filtering it in Go after the query's
+// row cap can discard the whole page — and for a peer, the steps it can actually complete are
+// exactly the ones its own inbound calls would crowd out (§13). Oldest-first because the longest
+// stranded are the ones an operator needs to see. No superuser widening: this answers "what awaits
+// me", which is never wider than one user.
+func (s *DB) ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID string, limit, offset int) ([]*kernel.Step, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+stepCols+`
+		 FROM steps
+		 WHERE required_caller_user_id=? AND status='waiting'
+		 ORDER BY created_at ASC LIMIT ? OFFSET ?`,
+		requiredCallerUserID, limit, offset)
+	if err != nil {
+		return nil, dbErr(err, "list steps awaiting caller")
+	}
+	return queryList(rows, "list steps awaiting caller", func(scan func(...any) error) (*kernel.Step, error) {
+		var step kernel.Step
+		if err := scanStep(&step, scan); err != nil {
+			return nil, err
+		}
+		return &step, nil
+	})
+}
+
+// DeleteStepGate drops a fired or abandoned barrier's row.
+func (s *DB) DeleteStepGate(ctx context.Context, stepID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM step_gates WHERE step_id=?`, stepID)
+	return dbErr(err, "delete step gate")
+}
+
 // nullStr converts an empty string to nil for nullable TEXT columns.
 func nullStr(s string) *string {
 	if s == "" {

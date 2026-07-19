@@ -377,7 +377,7 @@ Callbacks reuse the execution API, mirroring the host surface: `juice.call` ≡ 
 
 Upstream authentication is a replaceable adapter: `Authenticator.Apply(request, auth) -> request` transforms an outbound HTTP request using the action's stored auth config (§8); schemes are implementations behind this interface, including the OAuth token exchange and in-memory token cache (§8), and `kernel` must not import them. Tests use fakes.
 
-Native actions are standard actions shipped alongside the kernel as a platform stdlib. They have no special kernel privileges — any provider could have supplied equivalent actions as HTTP or WASM actions. They are registered at bootstrap under `@sys`, interact with the platform only through injected dependencies and the same `Call()` / `CreateStep()` entry points available to all actions, and never extend the kernel's internal interfaces on their own behalf.
+Native actions are standard actions shipped alongside the kernel as a platform stdlib. They have no special kernel privileges — any provider could have supplied equivalent actions as HTTP or WASM actions. They are registered at bootstrap under `@sys`, interact with the platform only through injected dependencies and the same `Call()` / `CreateStep()` / `CompleteStep()` entry points available to all actions, and never extend the kernel's internal interfaces on their own behalf.
 
 | Action          | Rules                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -391,6 +391,8 @@ Native actions are standard actions shipped alongside the kernel as a platform s
 | `@sys/message`  | Public; action owner `@sys`; price 0 (configurable, `native.message`, §14); callable through `Call()`. Sends a message to another platform user by creating a Step they must acknowledge. Input: required `to` (`@handle` of recipient), required `message`. Output: `step_id`. The Step sets `required_caller_user_id` to the resolved target user and `partial_args` to `{"message":"..."}` so the recipient can read it via `step list`. Uses `@sys/sink` as the step's `action`. `ErrInvalidInput` if `to` cannot be resolved. |
 | `@sys/random`   | Public; action owner `@sys`; price 0 (configurable, `native.random`, §14); callable through `Call()`. No input required. Output: `value` (float in `[0, 1)`). Exists to provide randomness to WASM scripts, which have no ambient access to the OS random source. |
 | `@sys/web`      | Public; action owner `@sys`; price 0 (configurable, `native.web`, §14); callable through `Call()`. Read-only fetch of a public web page. Input: required `url` (string); a scheme-less `url` defaults to `https` (HTTPS-first, like a browser), and an explicit `http`/`https` scheme is respected and never silently downgraded. Output: `status` (HTTP status integer), `body` (response body string), `content_type` (response `Content-Type` string), `final_url` (the URL actually fetched, after scheme defaulting and redirects). GET only; no caller-supplied headers or auth, so nothing sensitive enters args/receipts/logs. A fixed, configurable descriptive `User-Agent` is set by the action itself. Same SSRF discipline as `kind=http` (§7): RFC 1918 private, link-local `169.254.x.x`, and reserved hosts are rejected with `ErrInvalidInput` unless `allow_local_sources` is set; loopback is permitted by default like any other fetch. Non-2xx statuses are returned in `status`, not raised as errors, so crawlers can react to them; 10 MiB response cap. `ErrInvalidInput` for empty `url`; `ErrInvalidState` if the fetcher is unconfigured; `ErrExecutionFailed` on transport failure. The mediated path by which WASM scripts read the network: scripts still receive no ambient sockets — they reach the web only by calling this action through `Call()`, charged and SSRF-restricted to public hosts (§9). |
+| `@sys/step/race` | Public; action owner `@sys`; price 0 (configurable, `native.step`, §14); callable through `Call()`. Completes an *onward* step on behalf of whichever contributor arrives first — the "wait for any of N" combinator over §10's one-shot continuations. Input: required `step_id` (the onward step), optional `input` (object) passed to its completion. Output: `fired` (boolean), plus `tx_id`/`trace_id` when fired. Stateless: the store's atomic `waiting→running` claim (§5 `BeginStepCall`) *is* the test-and-set, so exactly one contributor can win. Losing is the normal outcome for all but one contributor and is reported as `fired:false`, not an error; a genuine failure — nothing resumed the step and it is still `waiting` — is raised. **Confinement:** the onward step must have been created by *the same trace that invoked this gate*, else `ErrUnauthorized`. Process scope is not enough: subcalls share a process (§6), so a process-wide rule would let anyone executing there — including the process owner — resume a continuation another provider's action parked, with input of their choosing, spending funds that provider reserved. That is the confused deputy caller-scoped `CanCall` exists to exclude (§4). Binding to the creating trace ties both steps to one workflow, and implies same-process. A consequence: a top-level `run` of a gate can never fire anything, since a root trace has no parent — gates are reachable only from inside the workflow that created the onward step. The onward step names `@sys` as its required caller, and its price is parked once, not once per contributor. |
+| `@sys/step/join` | Public; action owner `@sys`; price 0 (configurable, `native.step`, §14); callable through `Call()`. Counts contributions and completes the onward step once `need` of them arrive — the "wait for all of N" combinator, and the one place a barrier's inherently shared state lives. Input: required `step_id`, required `need` (positive integer, fixed by the first contribution; a later contribution naming a different threshold is `ErrInvalidInput`), optional `value` recorded with the contribution. Output: `fired`, `have`, `need`, plus `tx_id`/`trace_id` when fired. Fires at `have ≥ need` (not `==`, so a crash between counting and firing is healed by the next contribution) and completes the onward step with `{}` — its arguments were bound in `partial_args` at creation, and an author-chosen schema cannot be assumed to accept a contributions blob. Same creating-trace confinement as `@sys/step/race`. Counter state is native-owned, held in a `step_gates` row keyed by the onward step and reached through an injected dependency, never through the kernel's store interface; the row is deleted on every outcome — fired, lost, or failed — and cascades if the step is deleted. A failed fire leaves the onward step waiting, recovered by process closure like any failed continuation (§6). |
 | `@sys/tinygo/compile` | Public; action owner `@sys`; price 5 (configurable, `native.tinygo`, §14); callable through `Call()`. Compiles author-supplied TinyGo to a WASM artifact using the platform TinyGo compiler, prepending the Juice WASM SDK so the author writes only `func Handle(in map[string]any) (map[string]any, error)` (the SDK owns `package`, imports, `alloc`, `run`, `main`). Input: required `source`. Output: `status` (`success`/`failure`), `artifact` (base64 WASM, on success), `artifact_hash` (SHA-256 hex, on success), `diagnostics` (array). Empty `source` gives `ErrInvalidInput`; an unavailable compiler toolchain gives `ErrInvalidState` (platform misconfiguration — the call fails and is not charged). Author compile errors and import/export-validation failures use output failure status, not kernel errors (so the attempt is charged). Registration is separate supervision: pass the returned artifact to `action create --kind wasm --artifact` (§14). |
 
 Stats use:
@@ -431,7 +433,9 @@ A step is funded at creation: `action.price` is snapshotted as `step.price` and 
 
 `partial_args ⊕ input` is a shallow object merge. Keys in `input` overwrite keys in `partial_args`. The completer's allowed input is `action.input_schema \ keys(partial_args)` — the action's input keys not already bound — derived live rather than stored; only those keys may appear in `input`. Final arguments are validated against `action.input_schema` by the underlying `Call`. Live derivation is safe because an action's schema cannot change under an active step: a schema change deactivates the action (§7), and a completion against a deactivated or contract-changed action resets the step to `waiting` (below).
 
-`required_caller_user_id` is mandatory. Open completion is not supported.
+`required_caller_user_id` is mandatory. Open completion is not supported. It may name a peer's proxy user, in which case the step is completed over `/juice/fed/step/1` (§13) — a key account holds no session token, so the federation protocol is its only completion path.
+
+Waiting on several things at once is composed from this one primitive rather than added to it: `@sys/step/race` and `@sys/step/join` (§9) are ordinary actions parked into as contributor steps, each resuming a shared onward step — any-of via the atomic claim, all-of via a counter. The kernel supplies funded, attributed, one-shot resumption; the coordination policy lives in actions above it.
 
 Status states:
 
@@ -586,7 +590,7 @@ A chosen password must be at least 8 characters, enforced server-side at user cr
 
 The kernel's federation network identity is derived deterministically from this same Ed25519 signing key; there is no second identity or network key. The `public_key` is simultaneously the kernel's Juice identity (§13) and its address on the federation transport. The signature domains of the transport handshake and of Juice payloads (receipts, ratings, manifests, federation requests) must be disjoint: no byte string signed in one domain may verify as a valid message in the other. This disjointness is verified by test (§15). *Open item:* disjointness is today emergent (distinct JCS key-sets + libp2p's handshake prefix), not constructive; adding explicit per-domain signing prefixes changes every signed payload, so it is deferred to a federation-protocol version bump.
 
-Every startup reads `config.superuser_handle` to confirm first boot and identify `@sys`; it verifies signing keys and aborts if either is absent. It then registers, enables, and makes public `@sys/lookup`, `@sys/llm/chat`, `@sys/llm/embed`, `@sys/llm/json`, `@sys/llm/decide`, `@sys/time`, `@sys/sink`, `@sys/message`, `@sys/random`, `@sys/web`, and `@sys/tinygo/compile` if absent, and reconciles their configurable fields (price and action-specific settings) from config on every startup. It also **soft-deletes any `kind=native` action whose handler is not registered in the running build** (disabling discovery, preserving history, §7): a native action removed from the platform stdlib stops being listed and callable on an existing database, self-healingly and for any native. It then runs recovery (§5).
+Every startup reads `config.superuser_handle` to confirm first boot and identify `@sys`; it verifies signing keys and aborts if either is absent. It then registers, enables, and makes public `@sys/lookup`, `@sys/llm/chat`, `@sys/llm/embed`, `@sys/llm/json`, `@sys/llm/decide`, `@sys/time`, `@sys/sink`, `@sys/message`, `@sys/random`, `@sys/web`, `@sys/step/race`, `@sys/step/join`, and `@sys/tinygo/compile` if absent, and reconciles their configurable fields (price and action-specific settings) from config on every startup. It also **soft-deletes any `kind=native` action whose handler is not registered in the running build** (disabling discovery, preserving history, §7): a native action removed from the platform stdlib stops being listed and callable on an existing database, self-healingly and for any native. It then runs recovery (§5).
 
 Bootstrap is idempotent. Supervision operations are not native actions.
 
@@ -610,7 +614,7 @@ Federation has exactly one carrier: a peer-to-peer transport (libp2p) behind the
 
 On startup the kernel announces its key to the discovery network (DHT / rendezvous), bootstrapped from `bootstrap_peers` in `config.json` (§14). A bootstrap peer is just a publicly-reachable kernel (every kernel runs the DHT and a relay); the shipped default points at the project's public node, so a fresh `juice serve` joins out of the box. An empty list disables the DHT directory engine (the kernel neither announces nor discovers), but peer sync still runs (§13 peer sync), so a kernel with imported proxies keeps its peers' cached state fresh. `bootstrap_peers` is also the **seed of the known network** (§13 Gossip): on a timer (`discovery_interval_seconds`, §14) the kernel advertises itself as a provider under a fixed discovery key, enumerates that key to learn other online kernels, and pulls gossip from the seeds plus enumerated providers into `DiscoveredKernel` — so a fresh box has a directory to subscribe from. This directory pull is separate from gossip's reputation role and from subscribing: learning a kernel this way grants nothing (calling still requires a subscription and a deposit, §13). Because a libp2p peer ID inlines its Ed25519 key, a bootstrap peer supplied only as a multiaddr is addressable and inspectable by the same base64url key every federation command takes. Publicly-addressed and NAT-bound kernels federate identically — a home kernel behind a router needs no advertised address, port-forwarding, or `.well-known` document of any kind (the local `server_url` in §14 is only the loopback URL the CLI dials to drive your own kernel, never a federation address).
 
-Federation protocols are versioned libp2p streams: `/juice/fed/call/1` (inbound proxy call), `/juice/fed/manifest/1` (manifest serving, chunked per action so a large-catalog sync survives bandwidth-capped relayed connections), `/juice/fed/gossip/1`, and `/juice/fed/inspect/1`. There is no subscribe handshake — subscription is a local manifest import (below). Payloads and verification are exactly the settlement rules below; only the carrier is libp2p.
+Federation protocols are versioned libp2p streams: `/juice/fed/call/1` (inbound proxy call), `/juice/fed/step/1` (step listing and completion, below), `/juice/fed/manifest/1` (manifest serving, chunked per action so a large-catalog sync survives bandwidth-capped relayed connections), `/juice/fed/gossip/1`, and `/juice/fed/inspect/1`. The first two carry the calculus's two eliminators — `Call` enters a computation, `CompleteStep` resumes one (§10) — and a wire carrying only the first would strand every continuation addressed across a boundary. There is no subscribe handshake — subscription is a local manifest import (below). Payloads and verification are exactly the settlement rules below; only the carrier is libp2p.
 
 Inbound federation traffic is resource-limited at the transport: per-source-address limits where an address is visible, per-peer stream and byte budgets, a global inbound cap, and stricter budgets for relayed (address-less) traffic. Peer identities are self-issued and free to mint, so per-key limits alone are never sufficient against Sybil flooding. These transport limits replace §14's per-IP peer-request rate limit.
 
@@ -632,6 +636,8 @@ juice admin unsuspend <user>            lift a suspension
 juice admin rename <user> <new-handle>  rename an account's local handle, including a peer's local mount
 juice admin peers                       known peers and balances (--all also shows suspended)
 juice admin inspect <key|user>          view remote identity, public actions, transacted peers, and reachability (no DB write)
+juice admin steps <user>                list waiting steps a peer holds for this kernel
+juice admin complete <user> <step-id> [json]  complete a step a peer holds for this kernel
 ```
 
 Federation trust is superuser supervision, so these live under `admin`, served on the public TCP API as superuser-gated routes (§14). `admin inspect <key>` is the operator's window into a remote kernel (there is no browser-reachable federation endpoint): it reports the peer's identity, public actions, and transacted peers, plus reachability diagnostics (direct / hole-punched / relayed, latency, protocol versions).
@@ -715,6 +721,41 @@ Inbound: calls sign `JCS({action, counterparty, idempotency_key, timestamp, args
 
 `VerifyRemoteReceipt(caller_id, tx_id)` requires `CanReadTransaction` and verifies entirely locally, in two parts. **Receipt integrity:** signature against the peer's `public_key`, stored JSON against its stored SHA-256, `receipt.action_id == proxy.remote_action_id`. **Settlement consistency:** the local transaction's outcome matches `receipt.status`; the amount paid to the proxy user equals `receipt.charge`; the local refund equals `(mp + maxduty) − receipt.charge − duty` with duty per this section (zero on failure); `args_hash` and `reply_hash` match the local record. The receipt's own `gross/net/fee` are the remote kernel's economics and are reported, not compared. Returns per-check results and top-level `valid`; non-proxy transactions give `ErrInvalidState`.
 
+### Steps across the wire
+
+A Step's `required_caller_user_id` may be a peer's proxy user: `CreateStep` resolves it like any other account and `CanCall(required_caller, action)` is checked at creation (§10), so a peer may be parked only for a `public` action. `/juice/fed/step/1` is what makes such a step completable — a key account holds no session token, so it can never reach the HTTP route (§12). Without it the step waits forever with its price parked and no actor able to free it, since the process owner is that same keyless account and `EndProcess` is process-owner-only (§10).
+
+The protocol has two request kinds, each signed under its own canonical payload, both key-sets disjoint from every other signed payload (§12):
+
+```text
+list:      JCS({counterparty, recipient, scope: "step_list", timestamp})
+           → the serving kernel's waiting steps whose required_caller is the requesting peer,
+             oldest first, each with its action ref, partial_args, derived allowed_input (§10),
+             price, and age; bounded per page, and a full page sets `truncated` with `next_offset`
+complete:  JCS({counterparty, idempotency_key, input_hash, recipient, step_id, timestamp})
+           input_hash = SHA-256(input bytes); the request carries exactly those bytes
+           → CompleteStep as the peer's proxy user; returns {result, tx_id, trace_id, receipt}
+```
+
+`recipient` is the **serving** kernel's public key. Every other signed payload names only its
+sender, so a captured request is replayable to any kernel that would accept it — for a step list,
+one kernel could replay another's request to a third and enumerate the steps parked there. Binding
+the recipient closes that. The call payload has the same weakness and is deliberately left alone:
+adding a field there breaks the wire for every existing peer, which §12 assigns to a
+federation-protocol version bump. The step list is scoped to the required caller **in the query**,
+never by filtering a capped page afterwards: the peer's own inbound-call processes are visible to
+it under `CanListStep` and would otherwise crowd out precisely the steps it can complete.
+
+Both verify the signature and a timestamp age ≤ 5 minutes, and the connection's authenticated key must match `counterparty`, exactly as an inbound call does. A suspended peer is refused on both (§12 — suspension is the one moderation axis for peers too). `list` is a pure read: an unknown key gets an empty list and is **not** lazily provisioned, since provisioning belongs to a call, which is what opens a billing relationship. `complete` refuses an unknown key outright — a stranger can hold no step here, because `CreateStep` resolves its required caller to an existing account.
+
+`complete` reuses the cross-kernel idempotency record (`(idempotency_key, counterparty_user_id)`, §3): pending before execution, completed with the stored result, a completed replay returning that result and a pending replay 409. The key is **derived from the request** — `SHA-256(protocol | peer key | step_id | input_hash)` — not minted per attempt, so a retry after a network failure presents the same key and recovers the stored outcome; a step completion has no local trace to persist a key on, unlike a remote-proxy call (§13 outbound). On error the rule matches an inbound call: **complete-with-error whenever something settled, delete only when nothing did.** `CompleteStep` can fail after committing a failure transaction, and a replay must then return that outcome rather than re-executing; the step's own status is the witness (`done` ⇒ settled, back to `waiting` ⇒ nothing did).
+
+An outbound completion distinguishes *never dispatched* from *no reply* exactly as an outbound call does (§13): only a provably-unsent request is `ErrPeerUnreachable`; any other transport failure may already have executed remotely and is reported as `ErrTimeout`, recoverable by retrying under the derived key.
+
+Unlike a proxy call, a step completion moves **no money on the requesting kernel**: the step's price was parked on the serving kernel at creation, and completion never checks funds (§10). The requester therefore parks nothing, creates no local trace or transaction, and needs no settlement — so failures are ordinary typed errors, not signed rejection receipts, and a timeout pins nothing. The completion settles wholly on the serving kernel under §6, with the role law giving `caller_user_id` = the peer's proxy user. That settled call is ordinary peer activity for retention (below).
+
+Driving the protocol is superuser supervision, like every other federation verb: `admin steps <peer>` lists what a peer holds for this kernel and `admin complete <peer> <step-id> [json]` resumes one (§14).
+
 ### Retention
 
 A peer is kept only while it holds value or has been used recently. Its activity is the most recent settled call (either direction), gossip mention, or deposit/withdrawal; a nonzero balance or funds locked in flight always count as live. A peer idle past `peer_retention_days` (§14) — reachable only at zero balance with nothing locked — has its accumulated data purged: its proxy actions, their stats, its `StatTag` rows, and its `DiscoveredKernel` rows, and its identity is forgotten (its `public_key` is cleared, so re-subscribing starts fresh). The immutable transaction and receipt ledger is preserved — its party ids carry no foreign key, so a now-dangling peer id is harmless and every local counterparty's credits stay reconstructible (§11); the anonymized user row remains as a legible ledger anchor. Purge is reachable only through zero value, so it never deletes funds or a still-reconstructible credit.
@@ -753,6 +794,7 @@ juice admin rename <user> <new-handle>
 juice admin deposit <user> <amount>       juice admin withdraw <user> <amount>
 juice admin subscribe <key>               juice admin unsubscribe <user>
 juice admin peers                         juice admin inspect <key>
+juice admin steps <user>                  juice admin complete <user> <step-id> [json]
 juice admin identity
 ```
 
@@ -842,6 +884,7 @@ Config lives in `config.json` under the kernel's home directory. Juice-family bi
     "message": { "price": 0 },
     "random":  { "price": 0 },
     "web":     { "price": 0, "user_agent": "juice-kernel/0.4 (+https://github.com/daios-ai/juice)" },
+    "step":    { "price": 0 },
     "tinygo":  { "price": 5 }
   }
 }
@@ -1101,6 +1144,21 @@ signed zero-charge 402 rejection settles as ErrPeerUnfunded with the peer handle
 gossip response carries counterparty_balance only for an authenticated known non-suspended peer; absent for strangers, suspended keys, and anonymous pulls
 successful peer gossip pull persists peer_last_seen and peer_credit; peer sync runs with empty bootstrap_peers; admin peers surfaces both
 action listings annotate remote proxies with peer_state offline/unfunded from the sync cache; the annotation never gates a call
+peer step list returns only steps whose required caller is the requesting peer; another peer sees none; an unknown key gets an empty list and is NOT provisioned an account
+peer step complete resumes the step as the peer's proxy user (role law: caller_user_id = proxy user), settles on the serving kernel, and is idempotent over (idempotency_key, counterparty): a replay returns the stored result and re-executes nothing
+peer step complete rejects a bad signature, a stale timestamp, an input body that does not match input_hash, a non-required-caller peer, an unknown key, and a suspended peer
+step-payload signature domains are disjoint: a call, step-list, and step-complete signature each verify only in their own domain
+a step payload signed for another kernel's recipient does not verify here (cross-kernel replay)
+the peer step list is scoped in the query: 60 steps in processes the peer owns do not crowd out the one step addressed to it, and results are oldest first
+a store failure on the peer step list propagates rather than reading as an empty list
+the outbound completion normalizes its input to the bytes the transport sends, so a pretty-printed body's input_hash still verifies at the peer
+the outbound completion's idempotency key is derived: a retry reuses it (returning the stored result), while different input or a different step derives a different key
+a mid-stream outbound failure is ErrTimeout (may have executed), not ErrPeerUnreachable; only a never-dispatched request is unreachable
+admin steps/complete resolve a peer by @handle or key, reject a local (non-peer) account, sign the exact input bytes, fail an offline peer as ErrPeerUnreachable, and propagate the peer's typed error code
+@sys/step/race fires exactly once under concurrent contributors (the waiting→running claim is the test-and-set); losers report fired:false; a step in another process is refused
+@sys/step/join fires at have >= need with {} and deletes its gate row; a changed need is rejected; an already-resolved onward step reports fired:false and clears the gate
+a gate refuses an onward step created by a different trace in the SAME process (confused deputy: foreign code funded by the process cannot fire another provider's parked continuation), leaving that step waiting
+step_gates rows hang off their step with ON DELETE CASCADE; deleting an absent gate is a no-op
 ```
 
 Direct invariant tests:
@@ -1159,6 +1217,9 @@ action parks an approval step addressed to a human and returns; process stays op
 external system (webhook) registers as a user, a purchase flow pre-creates a step addressed to it,
   the system POSTs the payload to /v1/steps/{id}/complete; transaction obeys role law
 owner force-ends a process with waiting steps; steps cancelled, parked prices refunded, balances reconcile
+workflow parks one onward step plus several contributor steps into @sys/step/race and @sys/step/join;
+  exactly one racer fires the onward step and the rest report fired:false, the join fires only on its
+  Nth contribution, and a gate naming a step in another process is refused
 kernel restarts mid-flight: interrupted calls fail as interrupted with refunds; waiting steps survive
   and remain completable after restart
 
@@ -1206,6 +1267,9 @@ A unsubscribes from B: B's proxies deactivate on A; A re-subscribes and traffic 
 inbound call from an underfunded peer yields a signed rejection receipt the caller settles on
 caller runs a NAT-bound peer's action, the peer goes offline mid-call; the caller's allocation stays
   locked and the process stays open until the peer returns and a signed receipt settles it (no timeout settle)
+A parks a step addressed to B (via @sys/message to B's key); B lists it with `admin steps`, sees its
+  derived allowed_input, and completes it with `admin complete`; the step settles on A, a second
+  completion is refused, and a suspended B is refused until unsuspended
 
 — Federation (real-network release gate; excluded from `go test ./...`) —
 from a machine behind a real NAT, subscribe to a remote peer by key, call it both directions with the path

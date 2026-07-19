@@ -478,3 +478,58 @@ flow_fed_offline() {
     assert_eq "fed_offline.peers_ok"    0 "$(j "$FED_DBL" "$FED_HL" admin peers    >/dev/null 2>&1; echo $?)"
     assert_eq "fed_offline.identity_ok" 0 "$(j "$FED_DBL" "$FED_HL" admin identity >/dev/null 2>&1; echo $?)"
 }
+
+# flow_fed_step_complete — the peer-step trap, closed (§10, §13). A step addressed to a peer used to
+# be uncompletable: a key account holds no session token, and the wire carried `run` but not
+# `complete`, so its parked funds were stranded with no actor able even to force-close the process
+# (the process owner IS the keyless proxy user). /juice/fed/step/1 supplies the missing verb.
+flow_fed_step_complete() {
+    echo "=== FLOW fed_step_complete ==="
+    local dir; dir=$(new_dir)
+    _fed_setup "$dir" || { fail "fed_step_complete.setup" "setup failed"; return; }
+
+    # On R: @sys messages L's proxy user, parking a @sys/sink step whose required caller is @kernel-l.
+    # R must know L as a peer for the address to resolve; a deposit both provisions and funds it.
+    j "$FED_DBR" "$FED_HR" admin deposit "$FED_LKEY" 100 >/dev/null 2>&1
+    local step_id
+    step_id=$(resultf "$(jj "$FED_DBR" "$FED_HR" run @sys/message "{\"to\":\"$FED_LKEY\",\"message\":\"approve the shipment\"}")" step_id)
+    assert_nonempty "fed_step_complete.step_parked" "$step_id"
+    assert_json "fed_step_complete.step_waiting" "$(jj "$FED_DBR" "$FED_HR" step show "$step_id")" status waiting
+
+    # R flags it as waiting on a peer — the operator can see the parked funds (§14).
+    assert_contains "fed_step_complete.waiting_on_peer" "waiting_on_peer" "$(jj "$FED_DBR" "$FED_HR" step list)"
+
+    # On L: the step is visible over the wire, carrying its derived completion schema.
+    local listed; listed=$(jj "$FED_DBL" "$FED_HL" admin steps "$FED_RKEY")
+    assert_contains "fed_step_complete.peer_lists_step" "$step_id" "$listed"
+    assert_contains "fed_step_complete.allowed_input" "allowed_input" "$listed"
+
+    # L completes it. The completion runs on R, funded by the price parked there at creation.
+    local first_tx
+    first_tx=$(strfield "$(jj "$FED_DBL" "$FED_HL" admin complete "$FED_RKEY" "$step_id" '{}')" tx_id)
+    assert_nonempty "fed_step_complete.completed" "$first_tx"
+    assert_json "fed_step_complete.step_done" "$(jj "$FED_DBR" "$FED_HR" step show "$step_id")" status done
+    assert_not_contains "fed_step_complete.queue_drained" "$step_id" "$(jj "$FED_DBL" "$FED_HL" admin steps "$FED_RKEY")"
+
+    # Repeating the SAME completion derives the same idempotency key, so R returns its STORED
+    # result instead of re-executing — this is how a completion that timed out on the wire but
+    # succeeded remotely is recovered. A fresh key per attempt would lose that tx and receipt.
+    local retry_tx
+    retry_tx=$(strfield "$(jj "$FED_DBL" "$FED_HL" admin complete "$FED_RKEY" "$step_id" '{}')" tx_id)
+    assert_eq "fed_step_complete.retry_replays_stored_result" "$first_tx" "$retry_tx"
+
+    # A genuinely different request is not a replay: it reaches CompleteStep and is refused,
+    # because the step is one-shot and no longer waiting.
+    assert_fails "fed_step_complete.different_input_refused" "waiting\|invalid\|state" -- \
+        j "$FED_DBL" "$FED_HL" admin complete "$FED_RKEY" "$step_id" '{"different":true}'
+
+    # A suspended peer cannot complete: suspension is the one moderation axis for peers too (§13).
+    local step2
+    step2=$(resultf "$(jj "$FED_DBR" "$FED_HR" run @sys/message "{\"to\":\"$FED_LKEY\",\"message\":\"second\"}")" step_id)
+    j "$FED_DBR" "$FED_HR" admin suspend "$FED_LKEY" >/dev/null 2>&1
+    assert_fails "fed_step_complete.suspended_refused" "suspend\|unauth" -- \
+        j "$FED_DBL" "$FED_HL" admin complete "$FED_RKEY" "$step2" '{}'
+    j "$FED_DBR" "$FED_HR" admin unsuspend "$FED_LKEY" >/dev/null 2>&1
+    assert_contains "fed_step_complete.unsuspend_restores" tx_id \
+        "$(jj "$FED_DBL" "$FED_HL" admin complete "$FED_RKEY" "$step2" '{}')"
+}

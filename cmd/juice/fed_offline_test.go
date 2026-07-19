@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -23,8 +24,12 @@ import (
 // fakeFed is a fedClient whose reachability and live-fetch outcome are controlled per test, so the
 // admin handlers' online/offline paths are exercisable without a real network.
 type fakeFed struct {
-	inspectDoc json.RawMessage // non-nil → Inspect/Gossip succeed with this; nil → they fail (offline)
-	reachPath  string          // "direct" | "relayed" | "unreachable" (default unreachable)
+	inspectDoc    json.RawMessage // non-nil → Inspect/Gossip succeed with this; nil → they fail (offline)
+	reachPath     string          // "direct" | "relayed" | "unreachable" (default unreachable)
+	stepBody      json.RawMessage // non-nil → Step succeeds with this; nil → offline
+	stepStatus    int             // status Step returns alongside stepBody
+	stepMidStream bool            // Step fails after dispatch (may have executed remotely)
+	lastStep      fed.StepRequest // the last outbound step request, for assertions
 }
 
 func (f *fakeFed) Inspect(context.Context, string) (json.RawMessage, error) {
@@ -37,6 +42,19 @@ func (f *fakeFed) Gossip(ctx context.Context, s string) (json.RawMessage, error)
 	return f.Inspect(ctx, s)
 }
 func (f *fakeFed) Manifests(context.Context, string) ([]json.RawMessage, error) { return nil, nil }
+func (f *fakeFed) Step(_ context.Context, _ string, req fed.StepRequest) (fed.StepResponse, error) {
+	f.lastStep = req
+	// stepMidStream models a failure AFTER bytes may have reached the peer (a stream error, or a
+	// timeout while it runs the resumed call) — distinct from an unresolvable peer, which provably
+	// never sent anything. Only the latter is ErrNotDispatched (§13).
+	if f.stepMidStream {
+		return fed.StepResponse{}, errors.New("fed: stream closed mid-request")
+	}
+	if f.stepBody == nil {
+		return fed.StepResponse{}, fmt.Errorf("%w: cannot resolve peer (offline)", fed.ErrNotDispatched)
+	}
+	return fed.StepResponse{Status: f.stepStatus, Body: f.stepBody}, nil
+}
 func (f *fakeFed) Probe(context.Context, string) fed.Reachability {
 	p := f.reachPath
 	if p == "" {
@@ -369,5 +387,197 @@ func TestResubscribeReactivatesProxy(t *testing.T) {
 	}
 	if !owned[0].Active {
 		t.Fatal("proxy should be reactivated after re-subscribe")
+	}
+}
+
+// ---- Peer step commands (§13) ----
+
+// The driving side signs with this kernel's platform key and forwards the peer's reply verbatim.
+func TestPeerStepsListForwardsPeerReply(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	handle, key := seedPeer(t, k, "@peer-steps")
+	f := &fakeFed{stepBody: json.RawMessage(`{"steps":[{"id":"s1","action":"@sys/sink"}]}`), stepStatus: 200}
+	srv := &server{kernel: k, log: log.Discard(), fed: f}
+
+	req := httptest.NewRequest("GET", "/control/peers/steps?key="+url.QueryEscape(handle), nil)
+	rec := httptest.NewRecorder()
+	srv.ctlPeerSteps(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"s1"`) {
+		t.Errorf("expected the peer's step list to be forwarded, got %s", rec.Body.String())
+	}
+	// The @handle was resolved to the peer's key, and the request is a signed list.
+	if f.lastStep.Kind != "list" || f.lastStep.Signature == "" || f.lastStep.Counterparty == "" {
+		t.Errorf("expected a signed list request, got %+v", f.lastStep)
+	}
+	_ = key
+}
+
+func TestPeerStepCompleteSignsExactInput(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	handle, _ := seedPeer(t, k, "@peer-steps")
+	f := &fakeFed{stepBody: json.RawMessage(`{"tx_id":"tx-9"}`), stepStatus: 200}
+	srv := &server{kernel: k, log: log.Discard(), fed: f}
+
+	body := `{"key":"` + handle + `","step_id":"s1","input":{"approve":true}}`
+	req := httptest.NewRequest("POST", "/control/peers/steps/complete", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.ctlCompletePeerStep(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if f.lastStep.Kind != "complete" || f.lastStep.StepID != "s1" {
+		t.Fatalf("unexpected request %+v", f.lastStep)
+	}
+	if f.lastStep.IdempotencyKey == "" {
+		t.Error("expected an idempotency key so a retry is safe")
+	}
+	// The signature must cover the exact bytes sent, so the peer's input_hash check matches.
+	peerKey, _ := srv.resolvePeerKey(context.Background(), handle)
+	if err := kernel.VerifyStepSignature(f.lastStep.Counterparty, f.lastStep.StepID, f.lastStep.Counterparty,
+		peerKey, f.lastStep.IdempotencyKey, f.lastStep.Timestamp, sha256HexBytes(f.lastStep.Input), f.lastStep.Signature); err != nil {
+		t.Errorf("signature must verify over the exact input bytes: %v", err)
+	}
+}
+
+// An offline peer fails promptly with the typed peer error, not an opaque 500 (§13).
+func TestPeerStepsOfflineIsPeerUnreachable(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	handle, _ := seedPeer(t, k, "@peer-off")
+	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{}}
+
+	req := httptest.NewRequest("GET", "/control/peers/steps?key="+url.QueryEscape(handle), nil)
+	rec := httptest.NewRecorder()
+	srv.ctlPeerSteps(rec, req)
+	if rec.Code != kernel.ErrPeerUnreachable.HTTP {
+		t.Errorf("status %d, want %d; body=%s", rec.Code, kernel.ErrPeerUnreachable.HTTP, rec.Body.String())
+	}
+}
+
+// A peer's typed rejection survives the hop: an already-claimed step reads as invalid_state here,
+// not as a generic failure.
+func TestPeerStepCompletePropagatesPeerErrorCode(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	handle, _ := seedPeer(t, k, "@peer-steps")
+	f := &fakeFed{stepBody: json.RawMessage(`{"error":"step is not waiting","code":"invalid_state"}`), stepStatus: 409}
+	srv := &server{kernel: k, log: log.Discard(), fed: f}
+
+	body := `{"key":"` + handle + `","step_id":"s1"}`
+	req := httptest.NewRequest("POST", "/control/peers/steps/complete", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.ctlCompletePeerStep(rec, req)
+	if rec.Code != kernel.ErrInvalidState.HTTP {
+		t.Errorf("status %d, want %d; body=%s", rec.Code, kernel.ErrInvalidState.HTTP, rec.Body.String())
+	}
+}
+
+// A local (non-peer) account is not a federation counterparty.
+func TestPeerStepsRejectsLocalUser(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	if _, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{Handle: "@localu", Password: "pw12345678"}); err != nil {
+		t.Fatal(err)
+	}
+	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{stepBody: json.RawMessage(`{}`), stepStatus: 200}}
+
+	req := httptest.NewRequest("GET", "/control/peers/steps?key="+url.QueryEscape("@localu"), nil)
+	rec := httptest.NewRecorder()
+	srv.ctlPeerSteps(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// Regression: input_hash must cover the bytes the transport actually sends. Marshaling the outer
+// StepRequest compacts and HTML-escapes an embedded RawMessage, so hashing a caller's raw body
+// would sign bytes the peer never sees — and every non-CLI client would be permanently unable to
+// complete a step. Drives the handler with a pretty-printed body, the case the CLI never produces.
+func TestPeerStepCompleteNormalizesInputBeforeHashing(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	handle, _ := seedPeer(t, k, "@peer-steps")
+	f := &fakeFed{stepBody: json.RawMessage(`{"tx_id":"tx-9"}`), stepStatus: 200}
+	srv := &server{kernel: k, log: log.Discard(), fed: f}
+
+	pretty := "{\n  \"city\": \"Rio\",\n  \"note\": \"a<b&c\"\n}"
+	body := `{"key":"` + handle + `","step_id":"s1","input":` + pretty + `}`
+	req := httptest.NewRequest("POST", "/control/peers/steps/complete", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.ctlCompletePeerStep(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// What the peer receives after the transport re-encodes the request must hash to what was
+	// signed — i.e. the sent Input must already be a marshal fixed point.
+	wire, err := json.Marshal(f.lastStep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded fed.StepRequest
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded.Input, f.lastStep.Input) {
+		t.Fatalf("input is not a marshal fixed point:\n sent:     %s\n received: %s", f.lastStep.Input, decoded.Input)
+	}
+	peerKey, _ := srv.resolvePeerKey(context.Background(), handle)
+	if err := kernel.VerifyStepSignature(decoded.Counterparty, decoded.StepID, decoded.Counterparty,
+		peerKey, decoded.IdempotencyKey, decoded.Timestamp, sha256HexBytes(decoded.Input), decoded.Signature); err != nil {
+		t.Errorf("signature must verify over the bytes the peer receives: %v", err)
+	}
+}
+
+// The idempotency key must be derived, not minted per attempt: a retry after a timeout has to
+// present the SAME key or the peer cannot recognize it as a duplicate, and an already-executed
+// completion's tx_id and receipt are lost.
+func TestPeerStepCompleteIdempotencyKeyIsDerived(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	handle, _ := seedPeer(t, k, "@peer-steps")
+	f := &fakeFed{stepBody: json.RawMessage(`{"tx_id":"tx-9"}`), stepStatus: 200}
+	srv := &server{kernel: k, log: log.Discard(), fed: f}
+
+	post := func(bodyJSON string) string {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/control/peers/steps/complete", strings.NewReader(bodyJSON))
+		rec := httptest.NewRecorder()
+		srv.ctlCompletePeerStep(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+		return f.lastStep.IdempotencyKey
+	}
+
+	same := `{"key":"` + handle + `","step_id":"s1","input":{"ok":true}}`
+	first, second := post(same), post(same)
+	if first != second {
+		t.Errorf("a retry must reuse the key: %s vs %s", first, second)
+	}
+	// Different input is a different request and must not collide with the stored result.
+	if other := post(`{"key":"` + handle + `","step_id":"s1","input":{"ok":false}}`); other == first {
+		t.Error("different input must derive a different key")
+	}
+	if other := post(`{"key":"` + handle + `","step_id":"s2","input":{"ok":true}}`); other == first {
+		t.Error("a different step must derive a different key")
+	}
+}
+
+// A failure that may have executed remotely must not be reported as "peer offline" — only a
+// provably-never-dispatched request is unreachable (§13).
+func TestPeerStepCompleteMidStreamFailureIsNotUnreachable(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	handle, _ := seedPeer(t, k, "@peer-steps")
+	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{stepMidStream: true}}
+
+	body := `{"key":"` + handle + `","step_id":"s1"}`
+	req := httptest.NewRequest("POST", "/control/peers/steps/complete", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.ctlCompletePeerStep(rec, req)
+	if rec.Code != kernel.ErrTimeout.HTTP {
+		t.Errorf("status %d, want %d (timeout, may have executed); body=%s",
+			rec.Code, kernel.ErrTimeout.HTTP, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "offline") {
+		t.Errorf("a mid-stream failure must not claim the peer is offline: %s", rec.Body.String())
 	}
 }

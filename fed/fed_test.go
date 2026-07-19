@@ -17,6 +17,9 @@ type fakeHandlers struct {
 	callBody     json.RawMessage
 	gossip       json.RawMessage
 	manifests    []json.RawMessage
+	lastStepPeer string
+	lastStep     StepRequest
+	stepBody     json.RawMessage
 }
 
 func (f *fakeHandlers) OnCall(_ context.Context, peerKey string, req CallRequest) CallResponse {
@@ -32,6 +35,11 @@ func (f *fakeHandlers) OnGossip(_ context.Context, _ string) (json.RawMessage, e
 }
 func (f *fakeHandlers) OnInspect(_ context.Context, _ string) (json.RawMessage, error) {
 	return f.gossip, nil
+}
+func (f *fakeHandlers) OnStep(_ context.Context, peerKey string, req StepRequest) StepResponse {
+	f.lastStepPeer = peerKey
+	f.lastStep = req
+	return StepResponse{Status: 200, Body: f.stepBody}
 }
 
 func newTestTransport(t *testing.T, h Handlers, bootstrap []string) *Transport {
@@ -58,6 +66,7 @@ func TestTransportRoundTrip(t *testing.T) {
 		callBody:  json.RawMessage(`{"result":{"ok":true},"receipt":null}`),
 		gossip:    json.RawMessage(`{"public_key":"srv","handle":"@srv"}`),
 		manifests: []json.RawMessage{json.RawMessage(`{"name":"a"}`), json.RawMessage(`{"name":"b"}`)},
+		stepBody:  json.RawMessage(`{"result":{},"tx_id":"tx-1"}`),
 	}
 	a := newTestTransport(t, srv, nil)
 
@@ -99,6 +108,24 @@ func TestTransportRoundTrip(t *testing.T) {
 	}
 	if len(ms) != 2 || string(ms[0]) != `{"name":"a"}` || string(ms[1]) != `{"name":"b"}` {
 		t.Fatalf("Manifests: got %v", ms)
+	}
+
+	// Step (§13): the completion verb carries the exact input bytes, like Call's args.
+	sResp, err := b.Step(ctx, a.PublicKey(), StepRequest{
+		Kind: "complete", Counterparty: b.PublicKey(), Timestamp: "2026-07-02T00:00:00Z",
+		Signature: "sig", StepID: "step-1", IdempotencyKey: "idem-2", Input: json.RawMessage(`{"approve":true}`),
+	})
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	if sResp.Status != 200 || string(sResp.Body) != `{"result":{},"tx_id":"tx-1"}` {
+		t.Fatalf("Step response: status=%d body=%s", sResp.Status, sResp.Body)
+	}
+	if srv.lastStepPeer != b.PublicKey() {
+		t.Errorf("server saw step peer %q, want %q", srv.lastStepPeer, b.PublicKey())
+	}
+	if string(srv.lastStep.Input) != `{"approve":true}` || srv.lastStep.StepID != "step-1" {
+		t.Errorf("server saw step %+v", srv.lastStep)
 	}
 
 	// Reachability probe reports a live path.

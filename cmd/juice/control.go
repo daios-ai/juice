@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 	"github.com/go-chi/chi/v5"
 )
@@ -199,21 +202,13 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ident := strings.TrimSpace(r.URL.Query().Get("key"))
-	peerKey := ident
-	// Resolve a local reference to its peer key. A reference that resolves to a local account with
-	// no public key is a plain user, not a federation peer: reject it rather than probe the handle
-	// as if it were a key (inspect is a peer-only window, §13). Only a reference that resolves to no
-	// local account at all is treated as a raw stranger key to probe (inspect <key> before friending).
-	if u, err := resolveHandle(s.kernel, ctx, ident); err == nil {
-		if u.PublicKey == "" {
-			writeErr(w, kernel.ErrInvalidInput.Wrapf("%q is a local user, not a federation peer", ident))
-			return
-		}
-		peerKey = u.PublicKey
-	} else if strings.HasPrefix(ident, "@") {
-		// An @handle that names no local account: there is no peer to inspect (a stranger is
-		// inspected by key, not by an unfriended handle). Don't probe the handle as if it were a key.
-		writeErr(w, kernel.ErrNotFound.Wrapf("no peer %q", ident))
+	// A local account with no public key is a plain user, not a federation peer, and an @handle
+	// naming no account is not a peer either — resolvePeerKey rejects both rather than probing the
+	// handle as if it were a key (inspect is a peer-only window, §13). An unresolvable non-@
+	// identifier is a raw stranger key, which is exactly the inspect-before-subscribing case.
+	peerKey, err := s.resolvePeerKey(ctx, ident)
+	if err != nil {
+		writeErr(w, err)
 		return
 	}
 	if s.fed == nil {
@@ -294,6 +289,147 @@ func (s *server) ctlSubscribePeer(w http.ResponseWriter, r *http.Request) {
 	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
 	_ = s.kernel.AccumulateGossip(ctx, &g, pub)
 	writeJSON(w, http.StatusOK, map[string]any{"handle": u.Handle, "imported": imported, "skipped": skipped})
+}
+
+// resolvePeerKey maps an @handle / key / id reference to a peer's public key, rejecting a local
+// account that is not a federation peer. Shared by the peer commands.
+func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, error) {
+	if ident == "" {
+		return "", kernel.ErrInvalidInput.Wrap("a peer @handle or public key is required")
+	}
+	if u, err := resolveHandle(s.kernel, ctx, ident); err == nil {
+		if u.PublicKey == "" {
+			return "", kernel.ErrInvalidInput.Wrapf("%q is a local user, not a federation peer", ident)
+		}
+		return u.PublicKey, nil
+	}
+	if strings.HasPrefix(ident, "@") {
+		return "", kernel.ErrNotFound.Wrapf("no peer %q", ident)
+	}
+	// An unresolvable non-@ identifier is treated as a raw stranger key (inspecting or addressing a
+	// peer before it is known locally) — the transport reports it unreachable if it is not one.
+	return ident, nil
+}
+
+// stepRoundTrip signs, dispatches, and unwraps one outbound /juice/fed/step/1 request.
+func (s *server) stepRoundTrip(ctx context.Context, peerKey string, req fed.StepRequest, timeout time.Duration) (map[string]any, error) {
+	if s.fed == nil {
+		return nil, kernel.ErrInvalidState.Wrap("federation transport not running")
+	}
+	octx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	resp, err := s.fed.Step(octx, peerKey, req)
+	if err != nil {
+		// Preserve the §13 dispatch distinction, as the call path does. Only a provably-never-sent
+		// request is "unreachable"; anything else (a timeout while the peer runs the resumed call,
+		// a mid-stream failure) may already have executed and settled there, so it must not be
+		// reported as if nothing happened. Retrying is safe and is how the real result is recovered:
+		// the idempotency key is derived from the request, so a repeat returns the stored outcome.
+		if errors.Is(err, fed.ErrNotDispatched) {
+			return nil, kernel.ErrPeerUnreachable.Wrapf("cannot reach %s (offline?)", peerKey).WithMeta("peer", peerKey)
+		}
+		return nil, kernel.ErrTimeout.Wrapf(
+			"no reply from %s; the request may have executed there — retry to recover its result", peerKey).WithMeta("peer", peerKey)
+	}
+	var body map[string]any
+	if json.Unmarshal(resp.Body, &body) != nil {
+		return nil, kernel.ErrExecutionFailed.Wrap("malformed peer response")
+	}
+	if resp.Status >= 300 {
+		msg, _ := body["error"].(string)
+		if msg == "" {
+			msg = "peer rejected the step request"
+		}
+		code, _ := body["code"].(string)
+		return nil, kernel.ErrorFromCode(code).Wrap(msg)
+	}
+	return body, nil
+}
+
+// ctlPeerSteps lists the waiting steps a peer holds for this kernel (§13). These are the
+// continuations a peer parked for us — invisible before /juice/fed/step/1 existed.
+func (s *server) ctlPeerSteps(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	peerKey, err := s.resolvePeerKey(ctx, strings.TrimSpace(r.URL.Query().Get("key")))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	sig, ts, err := s.kernel.SignStepList(pub, peerKey)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	body, err := s.stepRoundTrip(ctx, peerKey, fed.StepRequest{
+		Kind: "list", Counterparty: pub, Timestamp: ts, Signature: sig,
+	}, fedOpTimeout)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// ctlCompletePeerStep completes a step a peer parked for this kernel (§10, §13). The reply's
+// receipt is displayed, not stored: the completion settles wholly on the peer, and this kernel
+// parked nothing that a local transaction would have to settle against.
+func (s *server) ctlCompletePeerStep(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Key    string          `json:"key"`
+		StepID string          `json:"step_id"`
+		Input  json.RawMessage `json:"input"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	ctx := r.Context()
+	peerKey, err := s.resolvePeerKey(ctx, strings.TrimSpace(req.Key))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if strings.TrimSpace(req.StepID) == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("step_id is required"))
+		return
+	}
+	// Normalize the input to exactly the bytes the transport will put on the wire before hashing
+	// it: marshaling the outer StepRequest compacts and HTML-escapes an embedded RawMessage, so
+	// hashing the caller's raw body would sign bytes the peer never sees. Marshaling a RawMessage
+	// is idempotent, so this is a fixed point — send and hash the same slice (the convention the
+	// federation call path follows, http_exec.go).
+	input := []byte(req.Input)
+	if len(input) == 0 {
+		input = []byte("{}")
+	}
+	input, err = json.Marshal(json.RawMessage(input))
+	if err != nil {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("input must be valid JSON"))
+		return
+	}
+	inputHash := sha256HexBytes(input)
+
+	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	// Derive the idempotency key from the request rather than minting a fresh UUID per attempt:
+	// a retry after a timeout must present the SAME key, or the peer cannot recognize it as a
+	// duplicate and the real tx_id/receipt of an already-executed completion is lost. Same peer +
+	// step + input ⇒ same key, with no state to persist (the remote-proxy path stores its key on
+	// the trace; a step completion has no local trace to hang one on).
+	idempotencyKey := sha256HexBytes([]byte("juice/fed/step/1|" + peerKey + "|" + req.StepID + "|" + inputHash))
+	sig, ts, err := s.kernel.SignStep(req.StepID, pub, peerKey, idempotencyKey, inputHash)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	body, err := s.stepRoundTrip(ctx, peerKey, fed.StepRequest{
+		Kind: "complete", Counterparty: pub, Timestamp: ts, Signature: sig,
+		StepID: req.StepID, IdempotencyKey: idempotencyKey, Input: json.RawMessage(input),
+	}, fedStepTimeout)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // ctlIdentity reports this kernel's federation identity: public key, handle, and libp2p listen

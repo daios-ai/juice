@@ -376,6 +376,7 @@ type fedClient interface {
 	Inspect(ctx context.Context, peerKey string) (json.RawMessage, error)
 	Gossip(ctx context.Context, peerKey string) (json.RawMessage, error)
 	Manifests(ctx context.Context, peerKey string) ([]json.RawMessage, error)
+	Step(ctx context.Context, peerKey string, req fed.StepRequest) (fed.StepResponse, error)
 	Probe(ctx context.Context, peerKey string) fed.Reachability
 	ListenAddrs() []string
 	Close() error
@@ -384,6 +385,11 @@ type fedClient interface {
 // fedOpTimeout bounds any single outbound federation call an admin command makes, so an offline
 // peer fails promptly (§13) rather than stalling on the DHT resolve/dial up to the client timeout.
 const fedOpTimeout = 8 * time.Second
+
+// fedStepTimeout bounds an outbound step completion. It is longer than fedOpTimeout because the
+// peer runs the resumed call synchronously before replying — this waits on execution, not just
+// on reachability.
+const fedStepTimeout = 60 * time.Second
 
 // registerRoutes mounts all application routes onto r for the given server.
 // Rate-limited routes (auth, user creation) are registered by the caller before this call.
@@ -478,6 +484,8 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Get("/control/peers/inspect", srv.ctlInspectPeer)
 		r.Post("/control/peers/subscribe", srv.ctlSubscribePeer)
 		r.Post("/control/peers/unsubscribe", srv.ctlUnsubscribePeer)
+		r.Get("/control/peers/steps", srv.ctlPeerSteps)
+		r.Post("/control/peers/steps/complete", srv.ctlCompletePeerStep)
 		r.Get("/control/identity", srv.ctlIdentity)
 	})
 }
@@ -1594,6 +1602,53 @@ func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRe
 	}
 	b, _ := json.Marshal(body)
 	return fed.CallResponse{Status: status, Body: b}
+}
+
+// OnStep lists or completes the waiting steps this peer is the required caller of (§10, §13).
+// The connection-key check and rate limit mirror OnCall: a step completion runs a funded call here.
+func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRequest) fed.StepResponse {
+	stepErr := func(err error) fed.StepResponse {
+		code := kernel.KernelErrorCode(err)
+		b, _ := json.Marshal(map[string]string{"error": err.Error(), "code": code})
+		return fed.StepResponse{Status: kernel.HTTPStatusFromCode(code), Body: b}
+	}
+	// Parity with OnCall, including its fail-open when the transport supplied no key. What makes
+	// that safe here is that the step payloads bind their `recipient` (§13): a request signed for
+	// another kernel does not verify against ours, so a captured request cannot be replayed across
+	// kernels even when the connection key is unavailable.
+	if peerKey != "" && peerKey != req.Counterparty {
+		return stepErr(kernel.ErrUnauthenticated.Wrap("counterparty does not match the authenticated connection"))
+	}
+	limitKey := peerKey
+	if limitKey == "" {
+		limitKey = req.Counterparty
+	}
+	if h.callLimiter != nil && !h.callLimiter.allow(limitKey) {
+		b, _ := json.Marshal(map[string]string{"error": "rate limit exceeded", "code": kernel.KernelErrorCode(kernel.ErrInvalidState)})
+		return fed.StepResponse{Status: http.StatusTooManyRequests, Body: b}
+	}
+
+	var status int
+	var body map[string]any
+	var err error
+	switch req.Kind {
+	case "list":
+		status, body, err = handleFederationStepList(h.kernel, ctx, req.Counterparty, req.Timestamp, req.Signature, req.Offset)
+	case "complete":
+		input := []byte(req.Input)
+		if len(input) == 0 {
+			input = []byte("{}")
+		}
+		status, body, err = handleFederationStepComplete(h.kernel, ctx, req.Counterparty, req.Timestamp,
+			req.IdempotencyKey, req.StepID, req.Signature, input)
+	default:
+		return stepErr(kernel.ErrInvalidInput.Wrap("unknown step request kind"))
+	}
+	if err != nil {
+		return stepErr(err)
+	}
+	b, _ := json.Marshal(body)
+	return fed.StepResponse{Status: status, Body: b}
 }
 
 // OnManifest returns one signed manifest per active public action (chunked, relay-safe).

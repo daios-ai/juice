@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -69,6 +70,8 @@ func init() {
 		peerUnsubscribeCmd(),
 		peerListCmd(),
 		peerInspectCmd(),
+		peerStepsCmd(),
+		peerCompleteCmd(),
 		identityCmd(),
 	)
 	rootCmd.AddCommand(adminCmd)
@@ -349,6 +352,69 @@ func peerUnsubscribeCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("Unsubscribed from %s.\n", out.Handle)
+			return nil
+		},
+	}
+}
+
+// peerStepsCmd lists the continuations a peer parked for this kernel. A step addressed to a peer
+// is completable only over /juice/fed/step/1 (§13) — a key account holds no session token — so
+// these two commands are the operator's only window onto them.
+func peerStepsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "steps <user>",
+		Short: "List waiting steps a peer (@handle or key) holds for this kernel",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			var out struct {
+				Steps []stepWithAction `json:"steps"`
+			}
+			if err := apiCall(context.Background(), "GET",
+				"/control/peers/steps?key="+url.QueryEscape(args[0]), nil, &out); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(out)
+			}
+			if len(out.Steps) == 0 {
+				fmt.Println("No waiting steps.")
+				return nil
+			}
+			for _, s := range out.Steps {
+				fmt.Printf("%s  %s  created_by=%s  created=%s\n", s.ID, s.Action, s.CreatedBy,
+					s.CreatedAt.Format(time.RFC3339))
+				if len(s.AllowedInput) > 0 {
+					b, _ := json.Marshal(s.AllowedInput)
+					fmt.Printf("  allowed_input: %s\n", b)
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func peerCompleteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "complete <user> <step-id> [json]",
+		Short: "Complete a step a peer (@handle or key) holds for this kernel",
+		Args:  cobra.RangeArgs(2, 3),
+		RunE: func(_ *cobra.Command, args []string) error {
+			input := json.RawMessage("{}")
+			if len(args) == 3 {
+				if !json.Valid([]byte(args[2])) {
+					return kernel.ErrInvalidInput.Wrap("input must be valid JSON")
+				}
+				input = json.RawMessage(args[2])
+			}
+			var out map[string]any
+			if err := apiCall(context.Background(), "POST", "/control/peers/steps/complete",
+				map[string]any{"key": args[0], "step_id": args[1], "input": input}, &out); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(out)
+			}
+			fmt.Printf("Completed step %s (tx %v).\n", args[1], out["tx_id"])
 			return nil
 		},
 	}

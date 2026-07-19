@@ -3175,3 +3175,128 @@ func TestCreateLedgerEntry(t *testing.T) {
 		t.Errorf("limit=2 offset=1: got %d entries, want 2 of 3", len(got))
 	}
 }
+
+// Step gates back the @sys/step/join native (§9). They are native-owned state — not part of the
+// kernel.Store interface — so they are exercised directly here.
+func TestStepGate_IncrementAndDelete(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	// A gate hangs off a real step (FK + ON DELETE CASCADE), so a cancelled or purged step takes
+	// its barrier with it rather than leaving an orphan row.
+	user := newUser("@gate-user", 100)
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: user.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, user.ID, 10); err != nil {
+		t.Fatal(err)
+	}
+	act := newAction(user.ID, "gate-act", 10, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	ptID := root.ID
+	step := &kernel.Step{
+		ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: user.ID,
+		ActionID: act.ID, Price: 10, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+	}
+	if err := db.CreateStep(ctx, step); err != nil {
+		t.Fatal(err)
+	}
+	stepID := step.ID
+
+	have, need, err := db.IncrementStepGate(ctx, stepID, 3)
+	if err != nil {
+		t.Fatalf("first increment: %v", err)
+	}
+	if have != 1 || need != 3 {
+		t.Fatalf("first increment: have=%d need=%d, want 1/3", have, need)
+	}
+
+	if have, _, err = db.IncrementStepGate(ctx, stepID, 3); err != nil || have != 2 {
+		t.Fatalf("second increment: have=%d err=%v, want 2", have, err)
+	}
+
+	// The threshold is fixed by the first contribution: a contributor naming a different one is a
+	// workflow bug, not a race, so it is rejected rather than silently re-basing the barrier.
+	if _, _, err := db.IncrementStepGate(ctx, stepID, 5); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("need mismatch: expected ErrInvalidInput, got %v", err)
+	}
+
+	if err := db.DeleteStepGate(ctx, stepID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if have, _, err = db.IncrementStepGate(ctx, stepID, 2); err != nil || have != 1 {
+		t.Errorf("after delete the gate reopens fresh: have=%d err=%v, want 1", have, err)
+	}
+	// Deleting a gate that was never opened is a no-op, so a losing join never errors on cleanup.
+	if err := db.DeleteStepGate(ctx, "never-opened"); err != nil {
+		t.Errorf("delete of an absent gate should be a no-op, got %v", err)
+	}
+}
+
+// ListStepsAwaitingCaller must be scoped in SQL and oldest-first: the federation step list (§13)
+// relies on it, and filtering ListSteps' disjunction in Go after its row cap discarded exactly the
+// steps a peer could complete.
+func TestListStepsAwaitingCaller(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@owner", 1000)
+	assignee := newUser("@assignee", 0)
+	other := newUser("@other", 0)
+	for _, u := range []*kernel.User{owner, assignee, other} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	act := newAction(owner.ID, "await-act", 0, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	mkStep := func(processOwner, requiredCaller string) string {
+		t.Helper()
+		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: processOwner, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
+		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+		if err := db.BeginRun(ctx, p, root, processOwner, 0); err != nil {
+			t.Fatal(err)
+		}
+		ptID := root.ID
+		st := &kernel.Step{
+			ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: requiredCaller,
+			ActionID: act.ID, Price: 0, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+		}
+		if err := db.CreateStep(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+		return st.ID
+	}
+
+	// The assignee's own step comes first in time; 60 steps in processes it owns follow. Under the
+	// old "cap then filter in Go" shape those 60 would fill the page and hide this one.
+	mine := mkStep(owner.ID, assignee.ID)
+	for i := 0; i < 60; i++ {
+		mkStep(assignee.ID, other.ID)
+	}
+
+	got, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 200, 0)
+	if err != nil {
+		t.Fatalf("ListStepsAwaitingCaller: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != mine {
+		t.Fatalf("expected only the assignee's own waiting step, got %d rows", len(got))
+	}
+
+	// Oldest first: the longest-stranded step is what an operator needs to see.
+	second := mkStep(owner.ID, assignee.ID)
+	got, _ = db.ListStepsAwaitingCaller(ctx, assignee.ID, 200, 0)
+	if len(got) != 2 || got[0].ID != mine || got[1].ID != second {
+		t.Errorf("expected oldest-first ordering, got %d rows in unexpected order", len(got))
+	}
+
+	if paged, _ := db.ListStepsAwaitingCaller(ctx, assignee.ID, 1, 1); len(paged) != 1 || paged[0].ID != second {
+		t.Errorf("offset paging failed, got %v", paged)
+	}
+}

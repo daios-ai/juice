@@ -849,18 +849,157 @@ func run(k *kernel.Kernel, ctx context.Context, callerID, actionRef string, args
 
 // ---- Federation ----
 
+// checkFederationTimestamp enforces the §13 ±5 minute freshness window on a signed request.
+func checkFederationTimestamp(tsStr string) error {
+	ts, err := time.Parse(time.RFC3339, tsStr)
+	if err != nil {
+		return kernel.ErrUnauthenticated.Wrap("timestamp must be RFC3339")
+	}
+	if diff := time.Since(ts); diff < -5*time.Minute || diff > 5*time.Minute {
+		return kernel.ErrUnauthenticated.Wrap("timestamp out of range")
+	}
+	return nil
+}
+
+// maxPeerStepPage bounds one step-list reply. Reaching it sets `truncated` rather than silently
+// dropping the tail: an operator must never read a capped page as "nothing is parked for you".
+const maxPeerStepPage = 200
+
+// handleFederationStepList returns the waiting steps whose required caller is the requesting peer
+// (§10, §13). Read-only: an unknown key gets an empty list rather than a lazily provisioned account
+// — provisioning is reserved for a call, which is what actually creates a billing relationship.
+func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, sigStr string, offset int) (int, map[string]any, error) {
+	if err := checkFederationTimestamp(tsStr); err != nil {
+		return 0, nil, err
+	}
+	self, err := k.GetConfig(ctx, configKeySigningPublic)
+	if err != nil || self == "" {
+		return 0, nil, kernel.ErrInvalidState.Wrap("signing key not configured")
+	}
+	if err := kernel.VerifyStepListSignature(cpPubKey, cpPubKey, self, tsStr, sigStr); err != nil {
+		return 0, nil, err
+	}
+	// A store failure must not read as "nothing is parked for you" — that is precisely the
+	// conclusion which leaves funds stranded. Only a genuinely absent key gets the empty list.
+	peer, err := k.ReadUserByPublicKey(ctx, cpPubKey)
+	if err != nil && !errors.Is(err, kernel.ErrNotFound) {
+		return 0, nil, err
+	}
+	if peer == nil || peer.PublicKey == "" {
+		return http.StatusOK, map[string]any{"steps": []*stepWithAction{}}, nil
+	}
+	// Scoped in SQL, oldest first: ListSteps' predicate also matches every step inside a process
+	// this peer owns (its own inbound calls), which would crowd the completable ones out of the
+	// page. A suspended peer is refused by requireActiveUser inside the kernel call.
+	steps, err := k.ListStepsAwaitingCaller(ctx, peer.ID, maxPeerStepPage, offset)
+	if err != nil {
+		return 0, nil, err
+	}
+	uc := newUserCache(k, ctx)
+	views := make([]*stepWithAction, len(steps))
+	for i, s := range steps {
+		action, _ := k.ReadAction(ctx, s.ActionID)
+		views[i] = enrichStep(k, ctx, s, action, uc)
+	}
+	body := map[string]any{"steps": views}
+	if len(views) == maxPeerStepPage {
+		body["truncated"] = true
+		body["next_offset"] = offset + len(views)
+	}
+	return http.StatusOK, body, nil
+}
+
+// handleFederationStepComplete resumes a waiting step on behalf of the requesting peer (§10, §13).
+// Unlike a call, the requester parks nothing locally — the step's price was parked here at creation
+// — so failures are plain typed errors: there is no remote trace awaiting a signed rejection.
+func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, stepID, sigStr string, rawInput []byte) (int, map[string]any, error) {
+	if err := checkFederationTimestamp(tsStr); err != nil {
+		return 0, nil, err
+	}
+	self, err := k.GetConfig(ctx, configKeySigningPublic)
+	if err != nil || self == "" {
+		return 0, nil, kernel.ErrInvalidState.Wrap("signing key not configured")
+	}
+	if err := kernel.VerifyStepSignature(cpPubKey, stepID, cpPubKey, self, idempotencyKey, tsStr, sha256HexBytes(rawInput), sigStr); err != nil {
+		return 0, nil, err
+	}
+	// A stranger can hold no step here: CreateStep resolves required_caller to an existing user,
+	// so an unknown key is necessarily not the required caller of anything.
+	peer, err := k.ReadUserByPublicKey(ctx, cpPubKey)
+	if err != nil && !errors.Is(err, kernel.ErrNotFound) {
+		return 0, nil, err
+	}
+	if peer == nil || peer.PublicKey == "" {
+		return 0, nil, kernel.ErrUnauthorized.Wrap("unknown peer")
+	}
+
+	now := time.Now().UTC()
+	rec := &kernel.IdempotencyRecord{
+		ID:                 uuid.New().String(),
+		IdempotencyKey:     idempotencyKey,
+		CounterpartyUserID: peer.ID,
+		CreatedAt:          now,
+		ExpiresAt:          now.Add(24 * time.Hour),
+	}
+	if insertErr := k.InsertPendingIdempotencyRecord(ctx, rec); insertErr != nil {
+		existing, readErr := k.GetIdempotencyRecord(ctx, idempotencyKey, peer.ID)
+		if readErr != nil {
+			return 0, nil, kernel.ErrInvalidState.Wrap("idempotency check failed")
+		}
+		if existing.Status != "complete" {
+			return http.StatusConflict, map[string]any{"error": "duplicate in flight"}, nil
+		}
+		var result map[string]any
+		_ = json.Unmarshal([]byte(existing.ResultJSON), &result)
+		return http.StatusOK, result, nil
+	}
+
+	reply, err := k.CompleteStep(ctx, peer.ID, stepID, rawInput)
+	if err != nil {
+		// Same rule as an inbound call: complete-with-error whenever something settled, delete only
+		// when nothing did. CompleteStep can fail *after* committing a failure transaction (the
+		// resumed action ran and failed), and a replay must then return that outcome rather than
+		// re-executing. The step's own status is the witness: `done` means a transaction committed;
+		// back to `waiting` means the completion was rejected before one existed (§10).
+		settled := false
+		if s, readErr := k.ReadStep(ctx, peer.ID, stepID); readErr == nil && s.Status == kernel.StepDone {
+			settled = true
+		}
+		if settled {
+			errJSON, _ := json.Marshal(map[string]string{"error": err.Error(), "code": kernel.KernelErrorCode(err)})
+			settleIdempotency(k, ctx, rec.ID, string(errJSON))
+		} else {
+			_ = k.DeleteIdempotencyRecord(ctx, rec.ID)
+		}
+		return 0, nil, err
+	}
+	body := map[string]any{"result": reply.Result, "tx_id": reply.TxID, "trace_id": reply.TraceID, "step_id": stepID}
+	if reply.ReceiptID != "" {
+		receipt, _ := k.GetReceiptByID(ctx, reply.ReceiptID)
+		body["receipt"] = receipt
+	}
+	resultJSON, _ := json.Marshal(body)
+	settleIdempotency(k, ctx, rec.ID, string(resultJSON))
+	return http.StatusOK, body, nil
+}
+
+// settleIdempotency marks a record complete, falling back to deleting it if that write fails.
+// A record stuck pending answers every retry with 409 "duplicate in flight" forever, with the
+// money already spent and the result unreachable; deleting it instead lets a retry through to an
+// honest ErrInvalidState ("step is not waiting"). Neither is good, but only one is a dead end.
+func settleIdempotency(k *kernel.Kernel, ctx context.Context, recID, resultJSON string) {
+	if err := k.CompleteIdempotencyRecordIfPending(ctx, recID, resultJSON, ""); err != nil {
+		_ = k.DeleteIdempotencyRecord(ctx, recID)
+	}
+}
+
 // handleFederationCall validates the inbound federation request (counterparty, timestamp,
 // signature) and executes the call. Returns (httpStatus, responseBody, err).
 func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, actionParam, sigStr string, rawBody []byte) (int, map[string]any, error) {
 	argsHash := sha256HexBytes(rawBody)
 
-	ts, err := time.Parse(time.RFC3339, tsStr)
-	if err != nil {
-		return 0, nil, kernel.ErrUnauthenticated.Wrap("X-Timestamp must be RFC3339")
-	}
-	diff := time.Since(ts)
-	if diff < -5*time.Minute || diff > 5*time.Minute {
-		return 0, nil, kernel.ErrUnauthenticated.Wrap("X-Timestamp out of range")
+	if err := checkFederationTimestamp(tsStr); err != nil {
+		return 0, nil, err
 	}
 	// cpPubKey is the transport-authenticated caller key (OnCall proved connection key == counterparty);
 	// verify the request signature against it before touching state.

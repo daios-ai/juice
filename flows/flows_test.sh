@@ -52,6 +52,7 @@ run_flows \
     flow_failed_call_refund flow_input_schema_failure flow_output_schema_failure \
     flow_wasm_execution flow_contractor_subcall flow_contractor_failure \
     flow_step_success flow_step_failure flow_step_restart flow_locked_funds_recovery \
+    flow_step_gates \
     flow_rating \
     flow_pkce_auth flow_refresh_rotation flow_successful_receipt flow_failed_receipt \
     flow_lookup flow_chat flow_openapi_import_execute flow_openapi_changed_reimport \
@@ -60,5 +61,6 @@ run_flows \
     flow_fed_verify_receipt flow_fed_all_receipt_checks flow_fed_suspend_blocks \
     flow_fed_denial_underfunded flow_fed_disabled_action_rejection flow_fed_import_duty flow_fed_failed_action_refund \
     flow_fed_gossip_discovery flow_fed_discovery flow_fed_offline flow_fed_peer_sync flow_fed_inspect_sync \
+    flow_fed_step_complete \
     flow_transaction_access flow_admin_supervision flow_native_orphan_purge flow_time flow_message flow_grant flow_grant_bearer
 exit $?

@@ -76,8 +76,10 @@ func KernelErrorCode(err error) string {
 	return "internal"
 }
 
-// HTTPStatusFromCode maps a stored error code back to an HTTP status.
-func HTTPStatusFromCode(code string) int {
+// ErrorFromCode maps a stored error code back to its sentinel, so a code that crossed a
+// process or kernel boundary can be re-raised as the same typed error. Unknown codes — an
+// older or newer peer — degrade to ErrExecutionFailed rather than being silently dropped.
+func ErrorFromCode(code string) *KernelError {
 	for _, sentinel := range []*KernelError{
 		ErrUnauthenticated, ErrUnauthorized, ErrNotFound, ErrInvalidInput,
 		ErrInvalidState, ErrInsufficientFunds, ErrExecutionFailed,
@@ -85,10 +87,16 @@ func HTTPStatusFromCode(code string) int {
 		ErrPeerUnreachable, ErrPeerUnfunded,
 	} {
 		if sentinel.Code == code {
-			return sentinel.HTTP
+			return sentinel
 		}
 	}
-	return 500
+	return ErrExecutionFailed
+}
+
+// HTTPStatusFromCode maps a stored error code back to an HTTP status. An unknown or empty code
+// yields ErrExecutionFailed's 500, matching the pre-lookup behavior.
+func HTTPStatusFromCode(code string) int {
+	return ErrorFromCode(code).HTTP
 }
 
 // Sentinel errors.

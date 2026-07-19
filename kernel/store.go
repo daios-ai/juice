@@ -301,6 +301,7 @@ type Store interface {
 	ReadStep(ctx context.Context, id string) (*Step, error)
 	// ListSteps returns steps visible to caller. processID and status are optional filters ("" = no filter).
 	ListSteps(ctx context.Context, callerUserID, processID, status string, isSuperuser bool, limit, offset int) ([]*Step, error)
+	ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID string, limit, offset int) ([]*Step, error)
 	// ResetStepAndRepark re-parks a step's price and resets to waiting. Used when the
 	// completion trace is empty (crash during execution) to prevent double-completion minting.
 	ResetStepAndRepark(ctx context.Context, stepID string) error
