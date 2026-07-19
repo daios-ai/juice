@@ -1569,63 +1569,53 @@ func TestCreateSignedRejectionReceipt(t *testing.T) {
 	}
 }
 
-func TestDenyPeerDeactivatesActionsAndCancelsSteps(t *testing.T) {
+// TestUnsubscribeDeactivatesActions: unsubscribing from a peer deactivates its imported proxy
+// catalog here, leaving the account (and its balance) intact. A re-import reactivates.
+func TestUnsubscribeDeactivatesActions(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 	sys := setupSys(t, k, st)
 
-	// Register peer B.
+	// Register peer B with a balance to prove unsubscribe leaves it untouched.
 	_, privB, _ := ed25519.GenerateKey(rand.Reader)
 	pubB := privB.Public().(ed25519.PublicKey)
 	pubBB64 := base64.RawURLEncoding.EncodeToString(pubB)
-	peerB, err := k.AddPeer(ctx, sys.ID, "@deny-peer-b", pubBB64)
+	peerB, err := k.AddPeer(ctx, sys.ID, "@sub-peer-b", pubBB64)
 	if err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
+	if _, err := k.Deposit(ctx, sys.ID, peerB.ID, 250, "seed", ""); err != nil {
+		t.Fatalf("Deposit: %v", err)
+	}
 
-	// Create an action owned by B's proxy user (simulates B sharing an action with A).
+	// An imported proxy action owned by B's account here.
 	act := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: peerB.ID, Name: "b-act",
 		Kind: kernel.KindRemoteProxy, Active: true, Price: 0,
-		Source:      "https://deny-b.example.com/v1/federation/call?action=@b/b-act&counterparty=x",
+		Source:      "https://sub-b.example.com/v1/federation/call?action=@b/b-act&counterparty=x",
 		InputSchema: map[string]any{}, OutputSchema: map[string]any{},
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(ctx, act); err != nil {
 		t.Fatalf("create action: %v", err)
 	}
-	// Verify it starts active.
 	before, _ := k.ReadAction(ctx, act.ID)
 	if !before.Active {
-		t.Fatal("action should be active before deny")
+		t.Fatal("action should be active before unsubscribe")
 	}
 
-	// DenyPeer should deactivate owned actions.
-	if err := k.DenyPeer(ctx, sys.ID, "@deny-peer-b"); err != nil {
-		t.Fatalf("DenyPeer: %v", err)
+	// Unsubscribe deactivates the imported catalog but not the account or its balance.
+	if err := k.Unsubscribe(ctx, sys.ID, "@sub-peer-b"); err != nil {
+		t.Fatalf("Unsubscribe: %v", err)
 	}
 	after, _ := k.ReadAction(ctx, act.ID)
 	if after.Active {
-		t.Error("action should be inactive after DenyPeer")
+		t.Error("action should be inactive after Unsubscribe")
 	}
 	peerBRead, _ := k.ReadUser(ctx, peerB.ID)
-	if peerBRead.DeniedAt == nil {
-		t.Error("peer B should have denied_at set")
-	}
-
-	// UndenyPeer clears the denial but does NOT reactivate proxy actions —
-	// proxies are re-enabled explicitly via remote import.
-	if err := k.UndenyPeer(ctx, sys.ID, "@deny-peer-b"); err != nil {
-		t.Fatalf("UndenyPeer: %v", err)
-	}
-	stillInactive, _ := k.ReadAction(ctx, act.ID)
-	if stillInactive.Active {
-		t.Error("action should remain inactive after UndenyPeer (must re-import to reactivate)")
-	}
-	peerBRead, _ = k.ReadUser(ctx, peerB.ID)
-	if peerBRead.DeniedAt != nil {
-		t.Error("peer B should have denied_at cleared after UndenyPeer")
+	if peerBRead.Available != 250 {
+		t.Errorf("peer B balance must survive unsubscribe, got %d", peerBRead.Available)
 	}
 }
 
@@ -2063,8 +2053,8 @@ func TestSettleRemoteCallPeerUnfunded(t *testing.T) {
 	}
 }
 
-// TestGetGossipCounterpartyBalance: gossip reports the requester's credit here only for a friended,
-// non-denied key; nil for strangers, denied keys, and anonymous pulls (§13 peer sync).
+// TestGetGossipCounterpartyBalance: gossip reports the requester's credit here only for a known,
+// non-suspended key; nil for strangers, suspended keys, and anonymous pulls (§13 peer sync).
 func TestGetGossipCounterpartyBalance(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -2089,7 +2079,7 @@ func TestGetGossipCounterpartyBalance(t *testing.T) {
 		t.Errorf("friend: expected counterparty_balance 777, got %v", g.CounterpartyBalance)
 	}
 
-	// Anonymous, stranger, and denied all omit the field.
+	// Anonymous, stranger, and suspended all omit the field.
 	if g, _ := k.GetGossip(ctx, ""); g.CounterpartyBalance != nil {
 		t.Error("anonymous pull must not carry counterparty_balance")
 	}
@@ -2097,15 +2087,15 @@ func TestGetGossipCounterpartyBalance(t *testing.T) {
 	if g, _ := k.GetGossip(ctx, base64.RawURLEncoding.EncodeToString(strangerPub)); g.CounterpartyBalance != nil {
 		t.Error("stranger must not carry counterparty_balance")
 	}
-	if err := k.DenyPeer(ctx, sys.ID, friend.Handle); err != nil {
-		t.Fatalf("DenyPeer: %v", err)
+	if err := k.SuspendUser(ctx, sys.ID, friend.ID); err != nil {
+		t.Fatalf("SuspendUser: %v", err)
 	}
 	if g, _ := k.GetGossip(ctx, friendKey); g.CounterpartyBalance != nil {
-		t.Error("denied peer must not carry counterparty_balance")
+		t.Error("suspended peer must not carry counterparty_balance")
 	}
 }
 
-// TestRecordPeerSync: a friend sync persists last_seen and the reported credit; unknown and denied
+// TestRecordPeerSync: a peer sync persists last_seen and the reported credit; unknown and suspended
 // keys are no-ops (§13 peer sync).
 func TestRecordPeerSync(t *testing.T) {
 	st := newTestStore(t)

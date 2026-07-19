@@ -3,14 +3,12 @@
 # _fed_setup boots two kernels on 127.0.0.1. R comes up first and acts as the bootstrap + relay
 # for the network (every kernel now serves the DHT and relay — no separate seed process). L
 # bootstraps to R's address, then the kernels are addressed only by Ed25519 public key: they
-# resolve each other by key through R's DHT and friend by key — no URL anywhere. This is the
-# loopback analogue of home kernels finding each other with no dialable address. FED_RKEY holds R's key.
+# resolve each other by key through R's DHT and L subscribes to R by key — no URL anywhere. This
+# is the loopback analogue of home kernels finding each other with no dialable address.
 
-# Globals set by _fed_setup: FED_DBL FED_DBR FED_HL FED_HR FED_BPORT FED_RID FED_PROXY FED_RKEY FED_LKEY FED_BOOT FED_MOUNT.
-# Optional second arg: a local alias (bare handle, no @) to mount R under instead of its self-reported @kernel-r.
+# Globals set by _fed_setup: FED_DBL FED_DBR FED_HL FED_HR FED_BPORT FED_RID FED_PROXY FED_RKEY FED_LKEY FED_BOOT.
 _fed_setup() {
-    local dir="$1" alias="${2:-}"
-    FED_MOUNT="@kernel-r"; [ -n "$alias" ] && FED_MOUNT="@$alias"
+    local dir="$1"
     FED_DBL="$dir/l/juice.db"; FED_DBR="$dir/r/juice.db"
     FED_HL="$dir/lsys"; FED_HR="$dir/rsys"
     mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
@@ -34,22 +32,24 @@ _fed_setup() {
     j "$FED_DBR" "$FED_HR" action enable "$FED_RID" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$FED_RID" --visibility public >/dev/null 2>&1
 
-    # L friends R by key alone; the transport resolves the key via the seed. An optional alias
-    # mounts R under an operator-chosen local handle instead of its self-reported @kernel-r.
-    j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" $alias >/dev/null 2>&1 || return 1
-    FED_PROXY=$(strfield "$(jj "$FED_DBL" "$FED_HL" action show "$FED_MOUNT/sys/greet")" id)
+    # L subscribes to R by key alone — a purely local import; the transport resolves the key via the
+    # seed. R mounts under its self-reported @kernel-r.
+    j "$FED_DBL" "$FED_HL" admin subscribe "$FED_RKEY" >/dev/null 2>&1 || return 1
+    FED_PROXY=$(strfield "$(jj "$FED_DBL" "$FED_HL" action show "@kernel-r/sys/greet")" id)
     [ -n "$FED_PROXY" ] || return 1
     return 0
 }
 
-flow_fed_friend_alias() {
-    echo "=== FLOW fed_friend_alias ==="
+flow_fed_rename() {
+    echo "=== FLOW fed_rename ==="
     local dir; dir=$(new_dir)
-    _fed_setup "$dir" myremote || { fail "fed_alias.setup" "setup failed"; return; }
+    _fed_setup "$dir" || { fail "fed_rename.setup" "setup failed"; return; }
 
-    # R is mounted under the chosen alias @myremote, and its action is addressable and callable there.
-    assert_json "fed_alias.proxy_mounted" "$(jj "$FED_DBL" "$FED_HL" action show @myremote/sys/greet)" id "$FED_PROXY"
-    assert_nonempty "fed_alias.callable_under_alias" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run @myremote/sys/greet '{}')" tx_id)"
+    # The local mount handle is chosen with admin rename (by peer key), not at subscribe time. After
+    # renaming @kernel-r to @myremote, R's action is addressable and callable under the new handle.
+    j "$FED_DBL" "$FED_HL" admin rename "$FED_RKEY" @myremote >/dev/null 2>&1 || { fail "fed_rename.rename" "rename failed"; return; }
+    assert_json "fed_rename.proxy_remounted" "$(jj "$FED_DBL" "$FED_HL" action show @myremote/sys/greet)" id "$FED_PROXY"
+    assert_nonempty "fed_rename.callable_under_new" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run @myremote/sys/greet '{}')" tx_id)"
 }
 
 # _all_receipt_checks vr_json — "OK" iff valid=true and all 9 receipt checks are true.
@@ -81,11 +81,11 @@ flow_federation_changed_reimport() {
     local dir; dir=$(new_dir)
     _fed_setup "$dir" || { fail "fed_reimport.setup" "setup failed"; return; }
 
-    # Add a new action on R; re-friend must pick it up while leaving greet (unchanged) alone.
+    # Add a new action on R; re-subscribe must pick it up while leaving greet (unchanged) alone.
     local wid; wid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create wave --kind http --source "http://127.0.0.1:$FED_BPORT" --description "wave" --price 0)" id)
     j "$FED_DBR" "$FED_HR" action enable "$wid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$wid" --visibility public >/dev/null 2>&1
-    assert_eq "fed_reimport.refriend" 0 "$(j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1; echo $?)"
+    assert_eq "fed_reimport.resubscribe" 0 "$(j "$FED_DBL" "$FED_HL" admin subscribe "$FED_RKEY" >/dev/null 2>&1; echo $?)"
 
     assert_json "fed_reimport.wave_proxy_active" "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/sys/wave)" active True
     local greet; greet=$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")
@@ -94,51 +94,47 @@ flow_federation_changed_reimport() {
     assert_nonempty "fed_reimport.wave_callable" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/wave '{}')" tx_id)"
 }
 
-flow_federation_unfriend() {
-    echo "=== FLOW federation_unfriend ==="
+flow_federation_unsubscribe() {
+    echo "=== FLOW federation_unsubscribe ==="
     local dir; dir=$(new_dir)
-    _fed_setup "$dir" || { fail "fed_unfriend.setup" "setup failed"; return; }
+    _fed_setup "$dir" || { fail "fed_unsubscribe.setup" "setup failed"; return; }
 
-    assert_contains "fed_unfriend.unfriended" "nfriended" "$(j "$FED_DBL" "$FED_HL" admin unfriend @kernel-r 2>&1)"
-    assert_json "fed_unfriend.proxy_inactive" "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" active False
+    assert_contains "fed_unsubscribe.unsubscribed" "nsubscribed" "$(j "$FED_DBL" "$FED_HL" admin unsubscribe @kernel-r 2>&1)"
+    assert_json "fed_unsubscribe.proxy_inactive" "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" active False
     # The deactivated proxy drops out of the default action list (active-only), but --all still shows it.
-    assert_not_contains "fed_unfriend.list_hides_inactive" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list)"
-    assert_contains "fed_unfriend.all_shows_inactive" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list --all)"
-    # L's unfriend only affects L; R's original action stays active.
-    assert_json "fed_unfriend.remote_still_active" "$(jj "$FED_DBR" "$FED_HR" action show "$FED_RID")" active True
-    assert_fails "fed_unfriend.call_rejected" "" -- j "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}'
+    assert_not_contains "fed_unsubscribe.list_hides_inactive" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list)"
+    assert_contains "fed_unsubscribe.all_shows_inactive" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list --all)"
+    # L's unsubscribe only affects L; R's original action stays active.
+    assert_json "fed_unsubscribe.remote_still_active" "$(jj "$FED_DBR" "$FED_HR" action show "$FED_RID")" active True
+    assert_fails "fed_unsubscribe.call_rejected" "" -- j "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}'
 }
 
-flow_federation_refriend() {
-    echo "=== FLOW federation_refriend ==="
+flow_federation_resubscribe() {
+    echo "=== FLOW federation_resubscribe ==="
     local dir; dir=$(new_dir)
-    _fed_setup "$dir" || { fail "fed_refriend.setup" "setup failed"; return; }
+    _fed_setup "$dir" || { fail "fed_resubscribe.setup" "setup failed"; return; }
 
-    # Baseline: friend (done by setup) → proxy is listed and callable.
-    assert_contains "fed_refriend.listed_before" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list)"
-    assert_nonempty "fed_refriend.call_before" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}')" tx_id)"
+    # Baseline: subscribe (done by setup) → proxy is listed and callable.
+    assert_contains "fed_resubscribe.listed_before" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list)"
+    assert_nonempty "fed_resubscribe.call_before" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}')" tx_id)"
 
-    # Unfriend deactivates the proxy and denies the peer. The denied peer drops out of the
-    # default admin peers list (like unfriend removing it); --all still shows it as [denied].
-    j "$FED_DBL" "$FED_HL" admin unfriend @kernel-r >/dev/null 2>&1
-    assert_not_contains "fed_refriend.gone_after_unfriend" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list)"
-    assert_not_contains "fed_refriend.peer_hidden_after_unfriend" "kernel-r" "$(j "$FED_DBL" "$FED_HL" admin peers)"
-    assert_contains "fed_refriend.peer_all_shows_denied" "[denied]" "$(j "$FED_DBL" "$FED_HL" admin peers --all)"
+    # Unsubscribe deactivates the imported catalog only. The peer account stays known (not suspended),
+    # so it remains in admin peers; only the proxy drops out of the default action list.
+    j "$FED_DBL" "$FED_HL" admin unsubscribe @kernel-r >/dev/null 2>&1
+    assert_not_contains "fed_resubscribe.gone_after_unsubscribe" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list)"
+    assert_contains "fed_resubscribe.peer_still_listed" "kernel-r" "$(j "$FED_DBL" "$FED_HL" admin peers)"
 
-    # Friend again must reactivate the SAME proxy (unchanged manifest ⇒ reconcile Unchanged)
-    # AND clear the denial — the peer is fully restored, back in the default peers list.
-    assert_eq "fed_refriend.refriend_ok" 0 "$(j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1; echo $?)"
+    # Subscribe again must reactivate the SAME proxy (unchanged manifest ⇒ reconcile Unchanged).
+    assert_eq "fed_resubscribe.resubscribe_ok" 0 "$(j "$FED_DBL" "$FED_HL" admin subscribe "$FED_RKEY" >/dev/null 2>&1; echo $?)"
     local proxy2; proxy2=$(strfield "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/sys/greet)" id)
-    assert_eq "fed_refriend.id_preserved" "$FED_PROXY" "$proxy2"
-    assert_json "fed_refriend.active_again" "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" active True
-    assert_contains "fed_refriend.listed_again" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list)"
-    assert_contains "fed_refriend.peer_back_after_refriend" "kernel-r" "$(j "$FED_DBL" "$FED_HL" admin peers)"
-    assert_not_contains "fed_refriend.no_denied_after_refriend" "[denied]" "$(j "$FED_DBL" "$FED_HL" admin peers)"
+    assert_eq "fed_resubscribe.id_preserved" "$FED_PROXY" "$proxy2"
+    assert_json "fed_resubscribe.active_again" "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" active True
+    assert_contains "fed_resubscribe.listed_again" "$FED_PROXY" "$(jj "$FED_DBL" "$FED_HL" action list)"
 
     # And it's callable again, producing a fresh remote receipt.
     local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}')" tx_id)
-    assert_nonempty "fed_refriend.call_again" "$tx_id"
-    assert_nonempty "fed_refriend.remote_receipt" "$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" remote_receipt_hash)"
+    assert_nonempty "fed_resubscribe.call_again" "$tx_id"
+    assert_nonempty "fed_resubscribe.remote_receipt" "$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" remote_receipt_hash)"
 }
 
 flow_fed_verify_receipt() {
@@ -168,19 +164,21 @@ flow_fed_all_receipt_checks() {
     assert_eq "fed_all_receipt.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
 }
 
-flow_fed_denial_unfriended() {
-    echo "=== FLOW fed_denial_unfriended ==="
+flow_fed_suspend_blocks() {
+    echo "=== FLOW fed_suspend_blocks ==="
     local dir; dir=$(new_dir)
-    _fed_setup "$dir" || { fail "fed_denial_unfriended.setup" "setup failed"; return; }
+    _fed_setup "$dir" || { fail "fed_suspend_blocks.setup" "setup failed"; return; }
 
-    # R unfriends L → R denies L's inbound calls; L's proxy is still active locally, so the
-    # call goes out and comes back as a signed 403 denial receipt (failure tx, all checks pass).
-    assert_contains "fed_denial_unfriended.unfriend" "nfriended" "$(j "$FED_DBR" "$FED_HR" admin unfriend @kernel-l 2>&1)"
+    # L's first call provisions L's billing account on R (handshake-free, §13). R then suspends L by
+    # key; L's proxy is still active locally, so the next call goes out and comes back as a signed
+    # rejection receipt (failure tx, all checks pass).
+    assert_nonempty "fed_suspend_blocks.first_call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}')" tx_id)"
+    assert_contains "fed_suspend_blocks.suspend" "uspended" "$(j "$FED_DBR" "$FED_HR" admin suspend "$FED_LKEY" 2>&1)"
     j "$FED_DBL" "$FED_HL" run @kernel-r/sys/greet '{}' >/dev/null 2>&1 || true
     local tx_id; tx_id=$(python3 -c "import sys,json;t=json.loads(sys.argv[1]);print(t[0]['id'] if t else '')" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
-    assert_nonempty "fed_denial_unfriended.tx_recorded" "$tx_id"
-    assert_json "fed_denial_unfriended.tx_status_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
-    assert_eq "fed_denial_unfriended.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
+    assert_nonempty "fed_suspend_blocks.tx_recorded" "$tx_id"
+    assert_json "fed_suspend_blocks.tx_status_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
+    assert_eq "fed_suspend_blocks.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
 }
 
 flow_fed_denial_underfunded() {
@@ -192,7 +190,7 @@ flow_fed_denial_underfunded() {
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create paid-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 100)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$pid" --visibility public >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin subscribe "$FED_RKEY" >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit @sys 1000 >/dev/null 2>&1
 
     # The CLI attributes it to THIS kernel's exhausted credit on the peer (operator remedy), with a
@@ -232,16 +230,17 @@ flow_fed_import_duty() {
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create duty-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "duty" --price 1000)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$pid" --visibility public >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin subscribe "$FED_RKEY" >/dev/null 2>&1
     assert_jnum "fed_import_duty.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show @kernel-r/sys/duty-svc)" price 1050
 
-    j "$FED_DBR" "$FED_HR" admin deposit @kernel-l 5000 >/dev/null 2>&1
+    # R deposits to L's account by key (handshake-free: this both provisions and funds it, §13).
+    j "$FED_DBR" "$FED_HR" admin deposit "$FED_LKEY" 5000 >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit @sys 5000 >/dev/null 2>&1
-    local ub pb; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available); pb=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show @kernel-l)" available)
+    local ub pb; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available); pb=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show "$FED_LKEY")" available)
 
     local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run @kernel-r/sys/duty-svc '{}')" tx_id)
     assert_nonempty "fed_import_duty.call_succeeded" "$tx_id"
-    local ua pa; ua=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available); pa=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show @kernel-l)" available)
+    local ua pa; ua=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available); pa=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show "$FED_LKEY")" available)
     # L's @sys is caller AND fee recipient: gross 1050 out, fee 50 back → net 1000.
     assert_eq "fed_import_duty.user_charged" 1000 "$(( ub - ua ))"
     assert_eq "fed_import_duty.peer_charged_base" 1000 "$(( pb - pa ))"
@@ -262,8 +261,8 @@ flow_fed_failed_action_refund() {
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create fail-svc --kind http --source "http://127.0.0.1:$fport" --description "fails" --price 100)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$pid" --visibility public >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" admin deposit @kernel-l 5000 >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin subscribe "$FED_RKEY" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit "$FED_LKEY" 5000 >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit @sys 1000 >/dev/null 2>&1
     local ub; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
@@ -305,7 +304,7 @@ flow_fed_gossip_discovery() {
     local guses; guses=$(python3 -c "import sys,json;print(next((a.get('uses',0) for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','') for a in f.get('actions',[]) if a.get('name')=='@sys/greet'),0))" "$ldoc" 2>/dev/null)
     assert_eq "fed_gossip.earned_stats" yes "$([ "${guses:-0}" -ge 1 ] && echo yes || echo no)"
 
-    assert_eq "fed_gossip.t_friends_r" 0 "$(j "$dbt" "$ht" admin friend "$rkey" >/dev/null 2>&1; echo $?)"
+    assert_eq "fed_gossip.t_subscribes_r" 0 "$(j "$dbt" "$ht" admin subscribe "$rkey" >/dev/null 2>&1; echo $?)"
 
     # T's greet proxy exists with default stats (uses=0, NOT inherited from gossip).
     local tp; tp=$(strfield "$(jj "$dbt" "$ht" action show @kernel-r/sys/greet)" id)
@@ -317,9 +316,9 @@ flow_fed_gossip_discovery() {
 }
 
 # flow_fed_discovery: cold-start discovery. L boots with R as its only bootstrap peer and must learn
-# R into its known network automatically — no `admin friend` — via the startup discovery pass that
+# R into its known network automatically — no `admin subscribe` — via the startup discovery pass that
 # advertises and pulls gossip from bootstrap peers. Proves the two-network split: the known network
-# (global, by key) grows without friending (which stays deliberate and local).
+# (global, by key) grows without subscribing (which stays deliberate and local).
 flow_fed_discovery() {
     echo "=== FLOW fed_discovery ==="
     local dir; dir=$(new_dir)
@@ -340,7 +339,7 @@ flow_fed_discovery() {
     j "$dbr" "$hr" action enable "$rid" >/dev/null 2>&1
     j "$dbr" "$hr" action update "$rid" --visibility public >/dev/null 2>&1
 
-    # L joins with R as its ONLY bootstrap peer; it must discover R without friending it.
+    # L joins with R as its ONLY bootstrap peer; it must discover R without subscribing to it.
     start_server "$dbl" "$hl" kernel_handle=@kernel-l bootstrap_peers="$boot" discovery_interval_seconds=2 \
         || { fail "fed_discovery.l" "L did not start"; return; }
     j "$dbl" "$hl" auth login @sys --password sys-pass >/dev/null 2>&1
@@ -351,14 +350,14 @@ flow_fed_discovery() {
         if jj "$dbl" "$hl" admin peers --gossip | grep -q "$rkey"; then found=yes; break; fi
         sleep 1
     done
-    assert_eq "fed_discovery.r_discovered_without_friend" yes "$found"
+    assert_eq "fed_discovery.r_discovered_without_subscribe" yes "$found"
     # The roster names actions owner-qualified (@sys/greet), not a bare "greet".
     assert_contains "fed_discovery.qualified_action" "@sys/greet" "$(jj "$dbl" "$hl" admin peers --gossip)"
-    # L never friended R: its friend list (proxy users) holds no R.
-    assert_eq "fed_discovery.no_friend" 0 "$(jj "$dbl" "$hl" admin peers | grep -c "$rkey")"
+    # L never subscribed to R: its peer list (proxy users) holds no R.
+    assert_eq "fed_discovery.no_subscription" 0 "$(jj "$dbl" "$hl" admin peers | grep -c "$rkey")"
 }
 
-# flow_fed_peer_sync: the discovery timer also pulls gossip from friended peers (§13 peer sync),
+# flow_fed_peer_sync: the discovery timer also pulls gossip from known peers (§13 peer sync),
 # caching each peer's liveness (last_seen) and OUR credit on it (peer_credit, from the peer's reported
 # counterparty_balance). Proves the "better sync" surfacing: after R deposits L's proxy, L's own
 # `admin peers` learns that credit without L ever calling R.
@@ -377,13 +376,14 @@ flow_fed_peer_sync() {
     j "$dbr" "$hr" auth login @sys --password sys-pass >/dev/null 2>&1
     j "$dbl" "$hl" auth login @sys --password sys-pass >/dev/null 2>&1
     local rkey; rkey=$(kernel_key "$dbr" "$hr")
-    [ -n "$rkey" ] || { fail "fed_peer_sync.rkey" "no R key"; return; }
+    local lkey; lkey=$(kernel_key "$dbl" "$hl")
+    [ -n "$rkey" ] && [ -n "$lkey" ] || { fail "fed_peer_sync.rkey" "no R/L key"; return; }
 
-    # L friends R (auto-accept forms the reciprocal proxy pair), then R funds L's proxy on R.
-    j "$dbl" "$hl" admin friend "$rkey" >/dev/null 2>&1 || { fail "fed_peer_sync.friend" "friend failed"; return; }
-    j "$dbr" "$hr" admin deposit @kernel-l 250 >/dev/null 2>&1
+    # L subscribes to R, then R funds L's proxy on R by key (handshake-free: deposit provisions it).
+    j "$dbl" "$hl" admin subscribe "$rkey" >/dev/null 2>&1 || { fail "fed_peer_sync.subscribe" "subscribe failed"; return; }
+    j "$dbr" "$hr" admin deposit "$lkey" 250 >/dev/null 2>&1
 
-    # A friend-sync pass runs at startup, then every 2s. Poll L's own peer list until it has cached
+    # A peer-sync pass runs at startup, then every 2s. Poll L's own peer list until it has cached
     # the credit R reports for us — no call to R involved.
     local credit=""
     local i
@@ -416,11 +416,12 @@ flow_fed_inspect_sync() {
     j "$dbr" "$hr" auth login @sys --password sys-pass >/dev/null 2>&1
     j "$dbl" "$hl" auth login @sys --password sys-pass >/dev/null 2>&1
     local rkey; rkey=$(kernel_key "$dbr" "$hr")
-    [ -n "$rkey" ] || { fail "fed_inspect_sync.rkey" "no R key"; return; }
+    local lkey; lkey=$(kernel_key "$dbl" "$hl")
+    [ -n "$rkey" ] && [ -n "$lkey" ] || { fail "fed_inspect_sync.rkey" "no R/L key"; return; }
 
-    # L friends R (auto-accept forms the reciprocal pair); R funds L's proxy so R reports our credit.
-    j "$dbl" "$hl" admin friend "$rkey" >/dev/null 2>&1 || { fail "fed_inspect_sync.friend" "friend failed"; return; }
-    j "$dbr" "$hr" admin deposit @kernel-l 250 >/dev/null 2>&1
+    # L subscribes to R; R funds L's proxy by key so R reports our credit.
+    j "$dbl" "$hl" admin subscribe "$rkey" >/dev/null 2>&1 || { fail "fed_inspect_sync.subscribe" "subscribe failed"; return; }
+    j "$dbr" "$hr" admin deposit "$lkey" 250 >/dev/null 2>&1
 
     local pc='import sys,json;ps=json.loads(sys.argv[1]).get("peers",[]);p=next((x for x in ps if x.get("handle")=="@kernel-r"),{});print(p.get("peer_credit") if p.get("peer_credit") is not None else "")'
     # Baseline: with the sync pass parked at 3600s and no inspect yet, L has NOT cached R's report.
@@ -440,8 +441,8 @@ flow_fed_inspect_sync() {
 }
 
 # flow_fed_offline — every federation command has defined behavior when the peer is DOWN (§13):
-# inspect degrades to local last-known data + offline reachability; friend fails clearly;
-# unfriend/peers/identity are local and keep working; nothing hangs (bounded by fedOpTimeout).
+# inspect degrades to local last-known data + offline reachability; subscribe fails clearly;
+# unsubscribe/peers/identity are local and keep working; nothing hangs (bounded by fedOpTimeout).
 flow_fed_offline() {
     echo "=== FLOW fed_offline ==="
     local dir; dir=$(new_dir)
@@ -467,11 +468,11 @@ flow_fed_offline() {
     assert_nonempty "fed_offline.run_settled_not_pending" "$tx_id"
     assert_json "fed_offline.run_tx_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
 
-    # friend a down peer: clear, prompt failure (no hang, mentions unreachable).
-    assert_fails "fed_offline.friend_unreachable" "unreachable" -- j "$FED_DBL" "$FED_HL" admin friend "$FED_RKEY"
+    # subscribe to a down peer: clear, prompt failure (no hang, mentions unreachable).
+    assert_fails "fed_offline.subscribe_unreachable" "unreachable" -- j "$FED_DBL" "$FED_HL" admin subscribe "$FED_RKEY"
 
-    # unfriend is local: works with the peer down.
-    assert_contains "fed_offline.unfriend_local" "nfriended" "$(j "$FED_DBL" "$FED_HL" admin unfriend @kernel-r 2>&1)"
+    # unsubscribe is local: works with the peer down.
+    assert_contains "fed_offline.unsubscribe_local" "nsubscribed" "$(j "$FED_DBL" "$FED_HL" admin unsubscribe @kernel-r 2>&1)"
 
     # peers and identity are local: succeed with the peer down.
     assert_eq "fed_offline.peers_ok"    0 "$(j "$FED_DBL" "$FED_HL" admin peers    >/dev/null 2>&1; echo $?)"

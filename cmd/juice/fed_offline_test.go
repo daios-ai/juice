@@ -37,9 +37,6 @@ func (f *fakeFed) Gossip(ctx context.Context, s string) (json.RawMessage, error)
 	return f.Inspect(ctx, s)
 }
 func (f *fakeFed) Manifests(context.Context, string) ([]json.RawMessage, error) { return nil, nil }
-func (f *fakeFed) Friend(context.Context, string, fed.FriendRequest) (fed.FriendResponse, error) {
-	return fed.FriendResponse{}, nil
-}
 func (f *fakeFed) Probe(context.Context, string) fed.Reachability {
 	p := f.reachPath
 	if p == "" {
@@ -50,9 +47,9 @@ func (f *fakeFed) Probe(context.Context, string) fed.Reachability {
 func (f *fakeFed) ListenAddrs() []string { return nil }
 func (f *fakeFed) Close() error          { return nil }
 
-// seedFriendedPeer creates a proxy peer with one active+public imported proxy action, returning its
+// seedPeer creates a proxy peer with one active+public imported proxy action, returning its
 // @handle and base64url key — the local state that offline inspect should surface.
-func seedFriendedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
+func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	t.Helper()
 	ctx := context.Background()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -116,25 +113,26 @@ func listPeersResp(t *testing.T, srv *server, all bool) []map[string]any {
 	return out.Peers
 }
 
-// TestListPeersHidesDenied: admin peers lists friended peers by default and hides denied
-// (unfriended) ones, like action list hides inactive; --all (?all=1) shows them.
-func TestListPeersHidesDenied(t *testing.T) {
+// TestListPeersHidesSuspended: admin peers lists active peers by default and hides suspended ones,
+// like action list hides inactive; --all (?all=1) shows them.
+func TestListPeersHidesSuspended(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
 	sys, err := k.ReadUserByHandle(ctx, "@sys")
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedFriendedPeer(t, k, "@peer-live")
-	denied, _ := seedFriendedPeer(t, k, "@peer-gone")
-	if err := k.DenyPeer(ctx, sys.ID, denied); err != nil {
+	seedPeer(t, k, "@peer-live")
+	_, goneKey := seedPeer(t, k, "@peer-gone")
+	gone, _ := k.ReadUserByPublicKey(ctx, goneKey)
+	if err := k.SuspendUser(ctx, sys.ID, gone.ID); err != nil {
 		t.Fatal(err)
 	}
 	srv := &server{kernel: k, log: log.Discard()}
 
 	def := listPeersResp(t, srv, false)
 	if len(def) != 1 || def[0]["handle"] != "@peer-live" {
-		t.Fatalf("default peers should list only the friended peer, got %v", def)
+		t.Fatalf("default peers should list only the active peer, got %v", def)
 	}
 	if all := listPeersResp(t, srv, true); len(all) != 2 {
 		t.Fatalf("--all should list both peers, got %d", len(all))
@@ -145,7 +143,7 @@ func TestListPeersHidesDenied(t *testing.T) {
 // last-known actions plus reachability=unreachable, not an opaque failure (§13).
 func TestInspectOfflineFriendedShowsLocalData(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
-	handle, _ := seedFriendedPeer(t, k, "@peer-off")
+	handle, _ := seedPeer(t, k, "@peer-off")
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{reachPath: "unreachable"}}
 
 	out := inspectResp(t, srv, handle)
@@ -192,28 +190,27 @@ func TestInspectLocalUserRejected(t *testing.T) {
 	}
 }
 
-// TestUnfriendLocalUserRejected: unfriend must never deny-list a local account (which would block
-// it). A handle with no public key is rejected and its denied_at stays nil.
-func TestUnfriendLocalUserRejected(t *testing.T) {
+// TestUnsubscribeLocalUserRejected: unsubscribe must never touch a local account (it has no
+// imported catalog). A handle with no public key is rejected as not-a-peer.
+func TestUnsubscribeLocalUserRejected(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
-	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@chat", Password: "pw"})
-	if err != nil {
+	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@chat", Password: "pw"}); err != nil {
 		t.Fatal(err)
 	}
 	sys, _ := k.ReadUserByHandle(ctx, "@sys")
 	srv := &server{kernel: k, log: log.Discard()}
 
 	body, _ := json.Marshal(map[string]string{"handle": "@chat"})
-	req := httptest.NewRequest("POST", "/control/peers/unfriend", bytes.NewReader(body))
+	req := httptest.NewRequest("POST", "/control/peers/unsubscribe", bytes.NewReader(body))
 	req = req.WithContext(context.WithValue(req.Context(), ctxCallerID, sys.ID))
 	rec := httptest.NewRecorder()
-	srv.ctlUnfriendPeer(rec, req)
+	srv.ctlUnsubscribePeer(rec, req)
 	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("unfriend @chat: status %d, want 422; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("unsubscribe @chat: status %d, want 422; body=%s", rec.Code, rec.Body.String())
 	}
-	if got, _ := k.ReadUser(ctx, u.ID); got.DeniedAt != nil {
-		t.Error("a local user must not be deny-listed by unfriend")
+	if !strings.Contains(rec.Body.String(), "local user") {
+		t.Errorf("expected a 'local user, not a peer' message, got: %s", rec.Body.String())
 	}
 }
 
@@ -255,7 +252,7 @@ func TestInspectOnlineLive(t *testing.T) {
 func TestInspectPersistsPeerSync(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
-	handle, key := seedFriendedPeer(t, k, "@peer-sync")
+	handle, key := seedPeer(t, k, "@peer-sync")
 
 	// A freshly seeded peer has no sync cache yet (its proxies read offline).
 	before, _ := k.ReadUserByPublicKey(ctx, key)
@@ -280,87 +277,47 @@ func TestInspectPersistsPeerSync(t *testing.T) {
 	}
 }
 
-// TestFriendOfflineClearError: friending an unreachable peer fails clearly (not a hang), mentioning
-// unreachable.
-func TestFriendOfflineClearError(t *testing.T) {
+// TestSubscribeOfflineClearError: subscribing to an unreachable peer fails clearly (not a hang),
+// mentioning unreachable.
+func TestSubscribeOfflineClearError(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{reachPath: "unreachable"}}
 
 	body, _ := json.Marshal(map[string]string{"key": "some-offline-key"})
-	req := httptest.NewRequest("POST", "/control/peers/friend", bytes.NewReader(body))
+	req := httptest.NewRequest("POST", "/control/peers/subscribe", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
-	srv.ctlFriendPeer(rec, req)
+	srv.ctlSubscribePeer(rec, req)
 	if rec.Code < 400 {
-		t.Fatalf("friend offline: status %d, want an error", rec.Code)
+		t.Fatalf("subscribe offline: status %d, want an error", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), "unreachable") {
-		t.Errorf("friend offline error should mention unreachable: %s", rec.Body.String())
+		t.Errorf("subscribe offline error should mention unreachable: %s", rec.Body.String())
 	}
 }
 
-// TestUnfriendWorksWithNoTransport: unfriend is purely local — it works even with the transport
-// absent (offline), proving it never depends on reaching the peer.
-func TestUnfriendWorksWithNoTransport(t *testing.T) {
+// TestUnsubscribeWorksWithNoTransport: unsubscribe is purely local — it works even with the
+// transport absent (offline), proving it never depends on reaching the peer.
+func TestUnsubscribeWorksWithNoTransport(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
-	handle, _ := seedFriendedPeer(t, k, "@peer-unf")
+	handle, _ := seedPeer(t, k, "@peer-unf")
 	sys, _ := k.ReadUserByHandle(context.Background(), "@sys")
 	srv := &server{kernel: k, log: log.Discard(), fed: nil} // transport down
 
 	body, _ := json.Marshal(map[string]string{"handle": handle})
-	req := httptest.NewRequest("POST", "/control/peers/unfriend", bytes.NewReader(body))
+	req := httptest.NewRequest("POST", "/control/peers/unsubscribe", bytes.NewReader(body))
 	req = req.WithContext(context.WithValue(req.Context(), ctxCallerID, sys.ID))
 	rec := httptest.NewRecorder()
-	srv.ctlUnfriendPeer(rec, req)
+	srv.ctlUnsubscribePeer(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("unfriend with no transport: status %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("unsubscribe with no transport: status %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-// TestFriendClearsDenial: an explicit admin friend of a previously-unfriended (denied) peer must
-// clear denied_at, or the peer stays [denied] — hidden restore, inbound calls still rejected.
-func TestFriendClearsDenial(t *testing.T) {
-	k, _ := newRemoteTestKernel(t)
-	ctx := context.Background()
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Seed a peer, then deny it exactly as unfriend does.
-	handle, key := seedFriendedPeer(t, k, "@peer-den")
-	if err := k.DenyPeer(ctx, sys.ID, handle); err != nil {
-		t.Fatal(err)
-	}
-	if before, _ := k.ReadUserByPublicKey(ctx, key); before == nil || before.DeniedAt == nil {
-		t.Fatal("peer should be denied after DenyPeer")
-	}
-
-	// Drive the outbound friend handler with a gossip doc matching the peer key.
-	gdoc, _ := json.Marshal(kernel.GossipResponse{PublicKey: key, Handle: handle})
-	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{inspectDoc: gdoc, reachPath: "direct"}}
-	body, _ := json.Marshal(map[string]string{"key": key})
-	req := httptest.NewRequest("POST", "/control/peers/friend", bytes.NewReader(body))
-	req = req.WithContext(context.WithValue(req.Context(), ctxCallerID, sys.ID))
-	rec := httptest.NewRecorder()
-	srv.ctlFriendPeer(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("friend: status %d: %s", rec.Code, rec.Body.String())
-	}
-
-	after, _ := k.ReadUserByPublicKey(ctx, key)
-	if after == nil {
-		t.Fatal("peer vanished after friend")
-	}
-	if after.DeniedAt != nil {
-		t.Fatalf("friend must clear denial; DeniedAt=%v", *after.DeniedAt)
-	}
-}
-
-// TestRefriendReactivatesProxy: after unfriend deactivates a proxy, friending again must
-// reactivate it. The re-friend sees a byte-identical manifest, so reconcileImport files it
-// under Unchanged — which the friend activation loop must still enable, or the proxy stays
-// dead and uncallable (the bug this guards).
-func TestRefriendReactivatesProxy(t *testing.T) {
+// TestResubscribeReactivatesProxy: after unsubscribe deactivates a proxy, subscribing again must
+// reactivate it. The re-subscribe sees a byte-identical manifest, so reconcileImport files it
+// under Unchanged — which the import activation loop must still enable, or the proxy stays dead
+// and uncallable (the bug this guards).
+func TestResubscribeReactivatesProxy(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
 
@@ -386,31 +343,31 @@ func TestRefriendReactivatesProxy(t *testing.T) {
 	mBytes, _ := json.Marshal(m)
 	fetch := &fakeManifestFetcher{frames: []json.RawMessage{mBytes}}
 
-	// First friend: import and activate.
+	// First subscribe: import and activate.
 	if imp, _ := bulkImportPeerActionsFed(ctx, fetch, k, sys.ID, key, peer); imp != 1 {
 		t.Fatalf("first import: got %d, want 1", imp)
 	}
 	owned, err := k.ListOwnedActions(ctx, peer.ID, 100, 0)
 	if err != nil || len(owned) != 1 {
-		t.Fatalf("owned after friend: %v (err %v)", owned, err)
+		t.Fatalf("owned after subscribe: %v (err %v)", owned, err)
 	}
 	proxy := owned[0]
 	if !proxy.Active {
-		t.Fatal("proxy should be active after first friend")
+		t.Fatal("proxy should be active after first subscribe")
 	}
 
-	// Unfriend cascade deactivates the proxy.
-	if err := k.SetActive(ctx, sys.ID, proxy.ID, false); err != nil {
+	// Unsubscribe deactivates the proxy.
+	if err := k.Unsubscribe(ctx, sys.ID, key); err != nil {
 		t.Fatal(err)
 	}
 
-	// Re-friend with the identical manifest → Unchanged → must be reactivated.
+	// Re-subscribe with the identical manifest → Unchanged → must be reactivated.
 	bulkImportPeerActionsFed(ctx, fetch, k, sys.ID, key, peer)
 	owned, err = k.ListOwnedActions(ctx, peer.ID, 100, 0)
 	if err != nil || len(owned) != 1 {
-		t.Fatalf("owned after re-friend: %v (err %v)", owned, err)
+		t.Fatalf("owned after re-subscribe: %v (err %v)", owned, err)
 	}
 	if !owned[0].Active {
-		t.Fatal("proxy should be reactivated after re-friend")
+		t.Fatal("proxy should be reactivated after re-subscribe")
 	}
 }

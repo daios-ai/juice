@@ -14,6 +14,7 @@ import (
 
 	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -21,7 +22,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	relayv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
-	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/multiformats/go-multihash"
 )
@@ -86,8 +86,8 @@ func KeyFromPeerID(id peer.ID) (string, error) {
 const StdPort = 31313
 
 // Transport is the running federation carrier: a libp2p host plus a Kademlia DHT for
-// resolve-by-key, with the five §13 protocols registered. It implements the outbound client
-// methods (Call/Friend/Manifests/Gossip/Inspect) and serves inbound streams via Config.Handlers.
+// resolve-by-key, with the §13 protocols registered. It implements the outbound client
+// methods (Call/Manifests/Gossip/Inspect) and serves inbound streams via Config.Handlers.
 type Transport struct {
 	host      host.Host
 	dht       *dht.IpfsDHT
@@ -419,7 +419,6 @@ func peerKeyOf(s network.Stream) string {
 
 func (t *Transport) registerHandlers() {
 	t.host.SetStreamHandler(protocol.ID(ProtocolCall), t.handleCall)
-	t.host.SetStreamHandler(protocol.ID(ProtocolFriend), t.handleFriend)
 	t.host.SetStreamHandler(protocol.ID(ProtocolManifest), t.handleManifest)
 	t.host.SetStreamHandler(protocol.ID(ProtocolGossip), t.handleGossip)
 	t.host.SetStreamHandler(protocol.ID(ProtocolInspect), t.handleInspect)
@@ -451,10 +450,6 @@ func serveDoc(s network.Stream, fetch func(string) (json.RawMessage, error)) {
 
 func (t *Transport) handleCall(s network.Stream) {
 	serveReq(s, func(key string, req CallRequest) any { return t.cfg.Handlers.OnCall(context.Background(), key, req) })
-}
-
-func (t *Transport) handleFriend(s network.Stream) {
-	serveReq(s, func(key string, req FriendRequest) any { return t.cfg.Handlers.OnFriend(context.Background(), key, req) })
 }
 
 func (t *Transport) handleGossip(s network.Stream) {
@@ -520,11 +515,6 @@ func roundTrip[Req, Resp any](ctx context.Context, t *Transport, peerKey, proto 
 // Call sends a federation call to the peer and returns its settlement envelope.
 func (t *Transport) Call(ctx context.Context, peerKey string, req CallRequest) (CallResponse, error) {
 	return roundTrip[CallRequest, CallResponse](ctx, t, peerKey, ProtocolCall, req)
-}
-
-// Friend sends a friend handshake to the peer.
-func (t *Transport) Friend(ctx context.Context, peerKey string, req FriendRequest) (FriendResponse, error) {
-	return roundTrip[FriendRequest, FriendResponse](ctx, t, peerKey, ProtocolFriend, req)
 }
 
 // Gossip fetches the peer's gossip document.

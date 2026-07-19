@@ -216,11 +216,17 @@ func TestUserCRUD(t *testing.T) {
 	}
 }
 
-// TestUsersTableConstraints proves the users table (rebuilt through migration 021, which dropped
-// email) still enforces handle uniqueness and anchors child foreign keys.
+// TestUsersTableConstraints proves the users table (rebuilt through migrations 021 and 022, which
+// dropped email and denied_at) still enforces handle uniqueness and anchors child foreign keys, and
+// no longer carries a denied_at column.
 func TestUsersTableConstraints(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
+
+	// Migration 022 dropped denied_at: the column must be gone.
+	if _, err := db.db.ExecContext(ctx, `SELECT denied_at FROM users LIMIT 0`); err == nil {
+		t.Error("denied_at column should no longer exist after migration 022")
+	}
 
 	a := newUser("@alice", 0)
 	if err := db.CreateUser(ctx, a); err != nil {
@@ -247,10 +253,10 @@ func TestUsersTableConstraints(t *testing.T) {
 	}
 }
 
-// TestSuspendDenyStampRealTime guards the write/read timestamp round-trip: SuspendUser and
-// DenyUser must store a real, recent time — not the zero value that a datetime('now')/RFC3339Nano
-// format mismatch used to produce (displayed "00000").
-func TestSuspendDenyStampRealTime(t *testing.T) {
+// TestSuspendStampRealTime guards the write/read timestamp round-trip: SuspendUser must store a
+// real, recent time — not the zero value that a datetime('now')/RFC3339Nano format mismatch used to
+// produce (displayed "00000").
+func TestSuspendStampRealTime(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	u := newUser("@stamp", 0)
@@ -268,17 +274,6 @@ func TestSuspendDenyStampRealTime(t *testing.T) {
 	}
 	if got.SuspendedAt == nil || got.SuspendedAt.IsZero() || got.SuspendedAt.Before(before) {
 		t.Fatalf("suspended_at should be a real, recent time, got %v", got.SuspendedAt)
-	}
-
-	if err := db.DenyUser(ctx, u.ID); err != nil {
-		t.Fatal(err)
-	}
-	got, err = db.ReadUser(ctx, u.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.DeniedAt == nil || got.DeniedAt.IsZero() || got.DeniedAt.Before(before) {
-		t.Fatalf("denied_at should be a real, recent time, got %v", got.DeniedAt)
 	}
 }
 
@@ -329,15 +324,15 @@ func TestMigration021DropsEmailPreservesRows(t *testing.T) {
 			t.Fatalf("apply %s: %v", version, err)
 		}
 	}
-	var file021 string
+	var held []string // 021 and everything after it: applied after seeding under the old schema
 	for _, f := range files {
-		if strings.HasPrefix(path.Base(f), "021_") {
-			file021 = f
-			continue // hold 021 back until after seeding
+		if path.Base(f) >= "021_" {
+			held = append(held, f)
+			continue
 		}
 		apply(f)
 	}
-	if file021 == "" {
+	if len(held) == 0 || !strings.HasPrefix(path.Base(held[0]), "021_") {
 		t.Fatal("migration 021 not found")
 	}
 
@@ -356,8 +351,11 @@ func TestMigration021DropsEmailPreservesRows(t *testing.T) {
 		t.Fatalf("seed action: %v", err)
 	}
 
-	// Apply 021: rebuild users, dropping email and adding description + recovery_public_key.
-	apply(file021)
+	// Apply 021 (rebuild dropping email, adding description + recovery_public_key) and everything
+	// after it (022 drops denied_at), in order.
+	for _, f := range held {
+		apply(f)
+	}
 
 	// The pre-existing user survived the rebuild with its data; description defaults to "".
 	got, err := s.ReadUser(ctx, uid)
@@ -2306,71 +2304,6 @@ func TestDeactivateActionsOwnedBy(t *testing.T) {
 	}
 }
 
-func TestCancelAndRefundStepsForCaller(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	// Set up user, process, root trace, and an action for the step.
-	user := newUser("@step-owner", 500)
-	if err := db.CreateUser(ctx, user); err != nil {
-		t.Fatal(err)
-	}
-	caller := newUser("@step-caller", 0)
-	if err := db.CreateUser(ctx, caller); err != nil {
-		t.Fatal(err)
-	}
-
-	p := newProcess(user.ID)
-	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, user.ID, 500); err != nil {
-		t.Fatal(err)
-	}
-
-	act := newAction(caller.ID, "step-act", 0, true)
-	if err := db.CreateAction(ctx, act); err != nil {
-		t.Fatal(err)
-	}
-	ptID := root.ID
-	step := &kernel.Step{
-		ID:                   uuid.New().String(),
-		ParentTraceID:        &ptID,
-		RequiredCallerUserID: caller.ID,
-		ActionID:             act.ID,
-		Price:                100,
-		Status:               kernel.StepWaiting,
-		CreatedAt:            time.Now().UTC(),
-	}
-	if err := db.CreateStep(ctx, step); err != nil {
-		t.Fatalf("CreateStep: %v", err)
-	}
-
-	// Trace should have available=400, locked=100 after step park.
-	tr, _ := db.ReadTrace(ctx, root.ID)
-	if tr.Available != 400 || tr.Locked != 100 {
-		t.Errorf("after CreateStep: trace available=%d locked=%d, want 400/100", tr.Available, tr.Locked)
-	}
-
-	// Cancel steps for the caller — should cancel the step and refund price to parent trace.
-	if err := db.CancelAndRefundStepsForCaller(ctx, caller.ID); err != nil {
-		t.Fatalf("CancelAndRefundStepsForCaller: %v", err)
-	}
-
-	// Trace available should be restored to 500.
-	tr, _ = db.ReadTrace(ctx, root.ID)
-	if tr.Available != 500 || tr.Locked != 0 {
-		t.Errorf("after cancel: trace available=%d locked=%d, want 500/0", tr.Available, tr.Locked)
-	}
-
-	// Step status should be cancelled.
-	s, err := db.ReadStep(ctx, step.ID)
-	if err != nil {
-		t.Fatalf("ReadStep: %v", err)
-	}
-	if s.Status != kernel.StepCancelled {
-		t.Errorf("step status = %s, want cancelled", s.Status)
-	}
-}
-
 func TestListStatsByOwner(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -2863,9 +2796,6 @@ func TestPurgePeerCascade(t *testing.T) {
 	}
 	if u.PublicKey != "" {
 		t.Errorf("peer public_key must be cleared, got %q", u.PublicKey)
-	}
-	if u.DeniedAt != nil {
-		t.Errorf("peer denied_at must be cleared")
 	}
 }
 

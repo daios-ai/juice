@@ -17,16 +17,12 @@ type fakeHandlers struct {
 	callBody     json.RawMessage
 	gossip       json.RawMessage
 	manifests    []json.RawMessage
-	friendStatus string
 }
 
 func (f *fakeHandlers) OnCall(_ context.Context, peerKey string, req CallRequest) CallResponse {
 	f.lastCallPeer = peerKey
 	f.lastCall = req
 	return CallResponse{Status: 200, Body: f.callBody}
-}
-func (f *fakeHandlers) OnFriend(_ context.Context, _ string, _ FriendRequest) FriendResponse {
-	return FriendResponse{Status: f.friendStatus}
 }
 func (f *fakeHandlers) OnManifest(_ context.Context, _ string) ([]json.RawMessage, error) {
 	return f.manifests, nil
@@ -59,10 +55,9 @@ func newTestTransport(t *testing.T, h Handlers, bootstrap []string) *Transport {
 // bootstrap connection) and every protocol returns the server's canned payload.
 func TestTransportRoundTrip(t *testing.T) {
 	srv := &fakeHandlers{
-		callBody:     json.RawMessage(`{"result":{"ok":true},"receipt":null}`),
-		gossip:       json.RawMessage(`{"public_key":"srv","handle":"@srv"}`),
-		manifests:    []json.RawMessage{json.RawMessage(`{"name":"a"}`), json.RawMessage(`{"name":"b"}`)},
-		friendStatus: "accepted",
+		callBody:  json.RawMessage(`{"result":{"ok":true},"receipt":null}`),
+		gossip:    json.RawMessage(`{"public_key":"srv","handle":"@srv"}`),
+		manifests: []json.RawMessage{json.RawMessage(`{"name":"a"}`), json.RawMessage(`{"name":"b"}`)},
 	}
 	a := newTestTransport(t, srv, nil)
 
@@ -89,12 +84,6 @@ func TestTransportRoundTrip(t *testing.T) {
 	}
 	if string(srv.lastCall.Args) != `{"x":1}` {
 		t.Errorf("server saw args %s, want {\"x\":1}", srv.lastCall.Args)
-	}
-
-	// Friend
-	fr, err := b.Friend(ctx, a.PublicKey(), FriendRequest{Handle: "@b", PublicKey: b.PublicKey(), Timestamp: "t", Signature: "s"})
-	if err != nil || fr.Status != "accepted" {
-		t.Fatalf("Friend: %v status=%q", err, fr.Status)
 	}
 
 	// Gossip

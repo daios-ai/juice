@@ -44,7 +44,6 @@ type User struct {
 	Available    int64      `json:"available"`
 	Locked       int64      `json:"locked"`
 	SuspendedAt  *time.Time `json:"suspended_at,omitempty"`
-	DeniedAt     *time.Time `json:"denied_at,omitempty"`
 	PublicKey    string     `json:"public_key,omitempty"` // Ed25519 public key, base64url; empty = no signature credential
 	// RecoveryPublicKey is the account's own Ed25519 recovery key (base64url), enrolled at
 	// creation from a client-held seed phrase; the server stores only the public half and never
@@ -498,16 +497,15 @@ const (
 	CallerStep = "step"
 )
 
-// PeerView is a peer kernel in the friendship list — identified by handle and public key (the
-// global name), with its bilateral balance. It carries no internal user id: a peer is never
-// addressed by one.
+// PeerView is a known peer kernel — identified by handle and public key (the global name), with
+// its bilateral balance. It carries no internal user id: a peer is never addressed by one.
 type PeerView struct {
-	Handle    string     `json:"handle"`
-	PublicKey string     `json:"public_key"`
-	Available int64      `json:"available"`
-	Locked    int64      `json:"locked"`
-	DeniedAt  *time.Time `json:"denied_at,omitempty"`
-	// PeerCredit and LastSeen are the friend-sync cache (§13 peer sync): our credit on the peer
+	Handle      string     `json:"handle"`
+	PublicKey   string     `json:"public_key"`
+	Available   int64      `json:"available"`
+	Locked      int64      `json:"locked"`
+	SuspendedAt *time.Time `json:"suspended_at,omitempty"`
+	// PeerCredit and LastSeen are the peer-sync cache (§13 peer sync): our credit on the peer
 	// and when we last reached it. Display-only.
 	PeerCredit *int64     `json:"peer_credit,omitempty"`
 	LastSeen   *time.Time `json:"last_seen,omitempty"`

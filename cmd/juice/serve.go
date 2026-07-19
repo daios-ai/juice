@@ -121,12 +121,12 @@ func runServer(addr string) error {
 		defer retryCancel()
 		go startRemoteRetryLoop(retryCtx, k.PendingRemoteTraces, k.RetryRemoteTrace, globalCfg.remoteRetryInterval())
 
-		// Grow the known network and keep friends synced (§13). Two engines share the timer: the
+		// Grow the known network and keep peers synced (§13). Two engines share the timer: the
 		// DHT directory (advertise + enumerate providers) fills the roster from bootstrap seeds, and
-		// friend sync pulls gossip directly from each friended peer to cache its liveness and our
-		// credit there. Directory runs only with bootstrap_peers (empty = neither announce nor
-		// discover); friend sync always runs, so a kernel with imported proxies but no bootstrap still
-		// learns its peers' state. Best-effort; stops with runServer.
+		// peer sync pulls gossip directly from each known peer to cache its liveness and our credit
+		// there. Directory runs only with bootstrap_peers (empty = neither announce nor discover);
+		// peer sync always runs, so a kernel with imported proxies but no bootstrap still learns its
+		// peers' state. Best-effort; stops with runServer.
 		discCtx, discCancel := context.WithCancel(context.Background())
 		defer discCancel()
 		disc := fedTransport
@@ -134,7 +134,7 @@ func runServer(addr string) error {
 		go startDiscoveryLoop(discCtx, globalCfg.discoveryInterval(), func(c context.Context) {
 			pctx, cancel := context.WithTimeout(c, discoveryPassTimeout)
 			defer cancel()
-			discoverOnce(pctx, disc, directory, k.FriendKeys, k.AccumulateGossip, k.RecordPeerSync, logger)
+			discoverOnce(pctx, disc, directory, k.PeerKeys, k.AccumulateGossip, k.RecordPeerSync, logger)
 		})
 	}
 
@@ -376,7 +376,6 @@ type fedClient interface {
 	Inspect(ctx context.Context, peerKey string) (json.RawMessage, error)
 	Gossip(ctx context.Context, peerKey string) (json.RawMessage, error)
 	Manifests(ctx context.Context, peerKey string) ([]json.RawMessage, error)
-	Friend(ctx context.Context, peerKey string, req fed.FriendRequest) (fed.FriendResponse, error)
 	Probe(ctx context.Context, peerKey string) fed.Reachability
 	ListenAddrs() []string
 	Close() error
@@ -477,8 +476,8 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Post("/control/withdraw", srv.ctlAdjust(false))
 		r.Get("/control/peers", srv.ctlListPeers)
 		r.Get("/control/peers/inspect", srv.ctlInspectPeer)
-		r.Post("/control/peers/friend", srv.ctlFriendPeer)
-		r.Post("/control/peers/unfriend", srv.ctlUnfriendPeer)
+		r.Post("/control/peers/subscribe", srv.ctlSubscribePeer)
+		r.Post("/control/peers/unsubscribe", srv.ctlUnsubscribePeer)
 		r.Get("/control/identity", srv.ctlIdentity)
 	})
 }
@@ -1530,8 +1529,6 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 	if err != nil {
 		return nil, err
 	}
-	// Back-reference so inbound auto-accept can reciprocate over the same transport.
-	handlers.transport = tr
 	return tr, nil
 }
 
@@ -1539,8 +1536,7 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 type fedHandlers struct {
 	kernel      *kernel.Kernel
 	log         *log.Logger
-	transport   *fed.Transport // set after New so reciprocal friend requests can go out
-	callLimiter *keyLimiter    // per-peer inbound call rate limit (§13; friend-set-bounded)
+	callLimiter *keyLimiter // per-peer inbound call rate limit (§13; known-peer-bounded)
 }
 
 // keyLimiter is a per-key token-bucket rate limiter. Keyed by peer public key on the federation
@@ -1600,37 +1596,6 @@ func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRe
 	return fed.CallResponse{Status: status, Body: b}
 }
 
-// OnFriend verifies and accepts (or holds pending) an inbound friend request.
-func (h *fedHandlers) OnFriend(ctx context.Context, _ string, req fed.FriendRequest) fed.FriendResponse {
-	ts, err := time.Parse(time.RFC3339, req.Timestamp)
-	if err != nil {
-		return fed.FriendResponse{Status: "rejected", Error: "timestamp must be RFC3339"}
-	}
-	if diff := time.Since(ts); diff < -5*time.Minute || diff > 5*time.Minute {
-		return fed.FriendResponse{Status: "rejected", Error: "timestamp out of range"}
-	}
-	if err := kernel.VerifyPeerRequestSignature(req.PublicKey, req.Handle, req.PublicKey, req.Timestamp, req.Signature); err != nil {
-		return fed.FriendResponse{Status: "rejected", Error: "invalid signature"}
-	}
-	existing, _ := h.kernel.ReadUserByPublicKey(ctx, req.PublicKey)
-	if existing != nil && existing.DeniedAt != nil {
-		return fed.FriendResponse{Status: "rejected", Error: "peer is denied"}
-	}
-	if !globalCfg.PeerAutoAccept {
-		_ = h.kernel.AccumulateGossip(ctx, &kernel.GossipResponse{PublicKey: req.PublicKey, Handle: req.Handle}, "friend-request")
-		return fed.FriendResponse{Status: "pending"}
-	}
-	if _, err := h.kernel.CreateOrUpdateProxyPeer(ctx, req.Handle, req.PublicKey); err != nil {
-		return fed.FriendResponse{Status: "rejected", Error: err.Error()}
-	}
-	// Reciprocate only for a previously-unknown peer, so two auto-accepting kernels don't
-	// ping-pong friend requests forever.
-	if existing == nil && h.transport != nil {
-		go h.sendReciprocal(req.PublicKey)
-	}
-	return fed.FriendResponse{Status: "accepted"}
-}
-
 // OnManifest returns one signed manifest per active public action (chunked, relay-safe).
 func (h *fedHandlers) OnManifest(ctx context.Context, _ string) ([]json.RawMessage, error) {
 	actions, err := h.kernel.ListVisibleActions(ctx, false, 200, 0)
@@ -1665,26 +1630,8 @@ func (h *fedHandlers) OnGossip(ctx context.Context, peerKey string) (json.RawMes
 	return json.Marshal(g)
 }
 
-// OnInspect returns identity + public actions + transacted friends. Gossip already carries all
-// three, so the inspect document is the gossip document viewed by a prospective friend.
+// OnInspect returns identity + public actions + transacted peers. Gossip already carries all
+// three, so the inspect document is the gossip document viewed by a prospective subscriber.
 func (h *fedHandlers) OnInspect(ctx context.Context, peerKey string) (json.RawMessage, error) {
 	return h.OnGossip(ctx, peerKey)
-}
-
-// sendReciprocal sends a signed friend request back to a peer by key over the transport.
-func (h *fedHandlers) sendReciprocal(peerKey string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	pubKeyB64, _ := h.kernel.GetConfig(ctx, configKeySigningPublic)
-	localHandle := globalCfg.KernelHandle
-	if pubKeyB64 == "" {
-		return
-	}
-	sig, ts, err := h.kernel.SignPeerRequestNow(localHandle, pubKeyB64)
-	if err != nil {
-		return
-	}
-	_, _ = h.transport.Friend(ctx, peerKey, fed.FriendRequest{
-		Handle: localHandle, PublicKey: pubKeyB64, Timestamp: ts, Signature: sig,
-	})
 }

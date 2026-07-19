@@ -14,7 +14,6 @@ func TestActionKindConstants(t *testing.T) {
 	}
 }
 
-
 func TestProcessStatusConstants(t *testing.T) {
 	if ProcessOpen != "open" {
 		t.Errorf("ProcessOpen: got %q", ProcessOpen)

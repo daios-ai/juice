@@ -212,14 +212,14 @@ func strVal(s *string) string {
 
 // ---- Users ----
 
-const userCols = `id,handle,description,password_hash,available,locked,suspended_at,denied_at,public_key,recovery_public_key,peer_last_seen,peer_credit,created_at,updated_at`
+const userCols = `id,handle,description,password_hash,available,locked,suspended_at,public_key,recovery_public_key,peer_last_seen,peer_credit,created_at,updated_at`
 
 func (s *DB) CreateUser(ctx context.Context, u *kernel.User) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO users (id,handle,description,password_hash,available,locked,suspended_at,denied_at,public_key,recovery_public_key,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO users (id,handle,description,password_hash,available,locked,suspended_at,public_key,recovery_public_key,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		u.ID, u.Handle, u.Description, u.PasswordHash, u.Available, u.Locked,
-		nullTimeToStr(u.SuspendedAt), nullTimeToStr(u.DeniedAt),
+		nullTimeToStr(u.SuspendedAt),
 		nullStr(u.PublicKey), nullStr(u.RecoveryPublicKey),
 		timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
 	)
@@ -247,69 +247,10 @@ func (s *DB) ReadUserByPublicKey(ctx context.Context, publicKey string) (*kernel
 		`SELECT `+userCols+` FROM users WHERE public_key=?`, publicKey))
 }
 
-func (s *DB) DenyUser(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE users SET denied_at=? WHERE id=?`, timeToStr(time.Now().UTC()), id)
-	return dbErr(err, "deny user")
-}
-
-func (s *DB) UndenyUser(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE users SET denied_at=NULL WHERE id=?`, id)
-	return dbErr(err, "undeny user")
-}
-
 func (s *DB) DeactivateActionsOwnedBy(ctx context.Context, ownerUserID string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE actions SET active=FALSE WHERE owner_user_id=? AND deleted_at IS NULL`, ownerUserID)
 	return dbErr(err, "deactivate actions by owner")
-}
-
-func (s *DB) DenyPeerCascade(ctx context.Context, userID string) error {
-	return s.withTx(ctx, "deny peer cascade", func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `UPDATE users SET denied_at=? WHERE id=?`, timeToStr(time.Now().UTC()), userID); err != nil {
-			return dbErr(err, "deny user")
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE actions SET active=FALSE WHERE owner_user_id=? AND deleted_at IS NULL`, userID); err != nil {
-			return dbErr(err, "deactivate actions")
-		}
-		rows, err := tx.QueryContext(ctx,
-			`SELECT id, price, parent_trace_id FROM steps WHERE required_caller_user_id=? AND status='waiting'`, userID)
-		if err != nil {
-			return dbErr(err, "query steps")
-		}
-		type stepRef struct {
-			id            string
-			price         int64
-			parentTraceID *string
-		}
-		var steps []stepRef
-		for rows.Next() {
-			var sr stepRef
-			if err := rows.Scan(&sr.id, &sr.price, &sr.parentTraceID); err != nil {
-				rows.Close()
-				return dbErr(err, "scan step")
-			}
-			steps = append(steps, sr)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return dbErr(err, "steps rows err")
-		}
-		for _, sr := range steps {
-			if _, err := tx.ExecContext(ctx, `UPDATE steps SET status='cancelled' WHERE id=?`, sr.id); err != nil {
-				return dbErr(err, "cancel step")
-			}
-			if sr.parentTraceID != nil && sr.price > 0 {
-				if _, err := tx.ExecContext(ctx,
-					`UPDATE traces SET available=available+?, locked=locked-? WHERE id=?`,
-					sr.price, sr.price, *sr.parentTraceID); err != nil {
-					return dbErr(err, "refund trace")
-				}
-			}
-		}
-		return nil
-	})
 }
 
 // ListPurgeablePeers returns peer users (public_key set) idle past cutoff at zero balance (§13).
@@ -355,8 +296,8 @@ ORDER BY u.id`, timeToStr(cutoff))
 
 // PurgePeerCascade deletes a purged peer's derived data and anonymizes the user row (§13 Retention).
 // It removes the peer's proxy actions and their stats/stat_tags, the peer's steps and any steps
-// bound to its actions, and its discovered_kernels rows; then clears public_key and denied_at so the
-// identity is forgotten (re-friending starts fresh). The transaction/receipt ledger is left intact —
+// bound to its actions, and its discovered_kernels rows; then clears public_key so the identity is
+// forgotten (re-subscribing starts fresh). The transaction/receipt ledger is left intact —
 // its party ids carry no foreign key, so a now-dangling peer id is harmless and local counterparties'
 // history stays reconstructible (§11). Deletes run children-before-parents so the RESTRICT foreign
 // keys (steps→actions, stats→actions) never block.
@@ -385,59 +326,12 @@ func (s *DB) PurgePeerCascade(ctx context.Context, userID string) error {
 			}
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE users SET public_key=NULL, denied_at=NULL, peer_last_seen=NULL, peer_credit=NULL, updated_at=? WHERE id=?`,
+			`UPDATE users SET public_key=NULL, peer_last_seen=NULL, peer_credit=NULL, updated_at=? WHERE id=?`,
 			timeToStr(time.Now().UTC()), userID); err != nil {
 			return dbErr(err, "anonymize peer")
 		}
 		return nil
 	})
-}
-
-func (s *DB) CancelAndRefundStepsForCaller(ctx context.Context, callerUserID string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return dbErr(err, "cancel steps for caller: begin tx")
-	}
-	defer tx.Rollback() //nolint
-
-	rows, err := tx.QueryContext(ctx,
-		`SELECT id, price, parent_trace_id FROM steps WHERE required_caller_user_id=? AND status='waiting'`,
-		callerUserID)
-	if err != nil {
-		return dbErr(err, "cancel steps for caller: query")
-	}
-	type stepRef struct {
-		id            string
-		price         int64
-		parentTraceID *string
-	}
-	var steps []stepRef
-	for rows.Next() {
-		var sr stepRef
-		if err := rows.Scan(&sr.id, &sr.price, &sr.parentTraceID); err != nil {
-			rows.Close()
-			return dbErr(err, "cancel steps for caller: scan")
-		}
-		steps = append(steps, sr)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return dbErr(err, "cancel steps for caller: rows err")
-	}
-
-	for _, sr := range steps {
-		if _, err := tx.ExecContext(ctx, `UPDATE steps SET status='cancelled' WHERE id=?`, sr.id); err != nil {
-			return dbErr(err, "cancel steps for caller: cancel step")
-		}
-		if sr.parentTraceID != nil && sr.price > 0 {
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE traces SET available=available+?, locked=locked-? WHERE id=?`,
-				sr.price, sr.price, *sr.parentTraceID); err != nil {
-				return dbErr(err, "cancel steps for caller: refund trace")
-			}
-		}
-	}
-	return dbErr(tx.Commit(), "cancel steps for caller: commit")
 }
 
 func (s *DB) UpsertStatTag(ctx context.Context, tag *kernel.StatTag) error {
@@ -492,14 +386,13 @@ func (s *DB) ListStatsByOwner(ctx context.Context, ownerUserID string) ([]*kerne
 func scanUserFn(scan func(...any) error) (*kernel.User, error) {
 	var u kernel.User
 	var createdAt, updatedAt string
-	var suspendedAt, deniedAt, publicKey, recoveryPublicKey, peerLastSeen *string
+	var suspendedAt, publicKey, recoveryPublicKey, peerLastSeen *string
 	var peerCredit *int64
 	if err := scan(&u.ID, &u.Handle, &u.Description, &u.PasswordHash,
-		&u.Available, &u.Locked, &suspendedAt, &deniedAt, &publicKey, &recoveryPublicKey, &peerLastSeen, &peerCredit, &createdAt, &updatedAt); err != nil {
+		&u.Available, &u.Locked, &suspendedAt, &publicKey, &recoveryPublicKey, &peerLastSeen, &peerCredit, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	u.SuspendedAt = strToNullTime(suspendedAt)
-	u.DeniedAt = strToNullTime(deniedAt)
 	u.PublicKey = strVal(publicKey)
 	u.RecoveryPublicKey = strVal(recoveryPublicKey)
 	u.PeerLastSeen = strToNullTime(peerLastSeen)

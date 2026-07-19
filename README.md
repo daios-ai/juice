@@ -59,7 +59,7 @@ final and atomic with its transaction and receipt.
   **[docs/oauth.md](docs/oauth.md)**.
 - **Native `@sys` actions** (the platform stdlib): `lookup`, `llm/chat`, `llm/embed`, `llm/json`,
   `llm/decide`, `tinygo/compile`, `time`, `sink`, `message`, `random`, `web`.
-- **Federation** — friend/unfriend peer kernels by public key, proxy users, prepaid credits, signed
+- **Federation** — subscribe to peer kernels by public key, proxy users, prepaid credits, signed
   manifests, and gossip-based discovery; `juice tx verify` checks a remote receipt locally.
 - **OpenAPI import** — register representable HTTP operations as actions.
 - **WASM via wazero** — sandboxed scripts with host functions `juice.call`, `juice.step_create`,
@@ -136,7 +136,7 @@ juice process list | show <id> | end <id>
 juice step create <action> | list | show <id> | complete <id> [json]
 juice tx list | show <id> | rate <id> <0|1> | verify <id>
 juice admin users | show | suspend | unsuspend | rename | deposit | withdraw
-juice admin friend <key> [local-handle] | unfriend <user> | peers | inspect <key|handle> | identity
+juice admin subscribe <key> | unsubscribe <user> | suspend <user> | peers | inspect <key|handle> | identity
 ```
 
 Global flags: `--db <path>`, `--config <path>`, `--json`, `--quiet`. `admin` commands (including
@@ -151,8 +151,8 @@ route reference.
 
 Most routes require `Authorization: Bearer <token>`. Public routes are `GET /health` (also an
 identity banner: handle + public key) and `GET /v1/actions`. The execution entry point is
-`POST /v1/run`. Federation has **no HTTP surface** — peers, manifests, gossip, the friend
-handshake, and inbound calls travel over the libp2p transport (§13), not this API. The complete
+`POST /v1/run`. Federation has **no HTTP surface** — peers, manifests, gossip,
+and inbound calls travel over the libp2p transport (§13), not this API. The complete
 route table — with request/response shapes and the R1–R9 / C1–C12 design rules — lives in
 **[API.md](API.md)**.
 
@@ -168,7 +168,7 @@ Key groups:
 | `import_bps` | Federation import duty in basis points (default `500`) |
 | `token_ttl` | Access-token lifetime (e.g. `15m`) |
 | `log_level` / `log_file` / `log_format` | Structured logging |
-| `kernel_handle` / `peer_auto_accept` / `bootstrap_peers` | Federation identity, friending behaviour, and the peers dialed to join the discovery network |
+| `kernel_handle` / `bootstrap_peers` | Federation identity and the peers dialed to join the discovery network |
 | `allow_local_sources` | Permit loopback/private URLs for action sources and OAuth endpoints (off by default) |
 | `credentials_key` | Auto-generated AES-256 key sealing action upstream credentials and delegated-OAuth grant refresh tokens |
 

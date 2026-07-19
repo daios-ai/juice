@@ -191,7 +191,7 @@ func peerViews(peers []*kernel.User) []*kernel.PeerView {
 	for i, p := range peers {
 		out[i] = &kernel.PeerView{
 			Handle: p.Handle, PublicKey: p.PublicKey,
-			Available: p.Available, Locked: p.Locked, DeniedAt: p.DeniedAt,
+			Available: p.Available, Locked: p.Locked, SuspendedAt: p.SuspendedAt,
 			PeerCredit: p.PeerCredit, LastSeen: p.PeerLastSeen,
 		}
 	}
@@ -854,10 +854,6 @@ func run(k *kernel.Kernel, ctx context.Context, callerID, actionRef string, args
 func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, actionParam, sigStr string, rawBody []byte) (int, map[string]any, error) {
 	argsHash := sha256HexBytes(rawBody)
 
-	counterparty, err := k.ReadUserByPublicKey(ctx, cpPubKey)
-	if err != nil || counterparty.PublicKey == "" {
-		return 0, nil, kernel.ErrUnauthenticated.Wrap("counterparty not a registered peer")
-	}
 	ts, err := time.Parse(time.RFC3339, tsStr)
 	if err != nil {
 		return 0, nil, kernel.ErrUnauthenticated.Wrap("X-Timestamp must be RFC3339")
@@ -866,26 +862,26 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 	if diff < -5*time.Minute || diff > 5*time.Minute {
 		return 0, nil, kernel.ErrUnauthenticated.Wrap("X-Timestamp out of range")
 	}
-	if err := kernel.VerifyFederationSignature(counterparty.PublicKey, actionParam, cpPubKey, idempotencyKey, tsStr, argsHash, sigStr); err != nil {
+	// cpPubKey is the transport-authenticated caller key (OnCall proved connection key == counterparty);
+	// verify the request signature against it before touching state.
+	if err := kernel.VerifyFederationSignature(cpPubKey, actionParam, cpPubKey, idempotencyKey, tsStr, argsHash, sigStr); err != nil {
 		return 0, nil, err
 	}
-	// §13.2: denied peers are rejected with a signed rejection receipt so the caller can settle.
-	if counterparty.DeniedAt != nil {
-		// Resolve the action UUID so VerifyRemoteReceipt can match receipt.action_id against
-		// the caller's stored RemoteActionID. Fall back to the ref string if lookup fails.
-		denialActionID := actionParam
-		if oh, an, parseErr := kernel.ParseActionRef(actionParam); parseErr == nil {
-			if denialOwner, ownerErr := k.ReadUserByHandle(ctx, oh); ownerErr == nil && denialOwner != nil {
-				if act, actErr := k.ReadActionByOwnerName(ctx, denialOwner.ID, an); actErr == nil && act != nil {
-					denialActionID = act.ID
-				}
-			}
+	// Resolve or lazily provision the caller's billing account (§13, handshake-free): a
+	// signature-valid caller with no account here gets a zero-balance one, so a price-0 call
+	// succeeds and a priced call hits the normal insufficient-funds rejection the provider clears
+	// with a deposit. A suspended counterparty needs no gate here — RunFederated rejects it via
+	// requireActiveUser and the pre-execution branch signs a zero-charge rejection receipt.
+	counterparty, err := k.ReadUserByPublicKey(ctx, cpPubKey)
+	if err != nil || counterparty == nil || counterparty.PublicKey == "" {
+		short := cpPubKey
+		if len(short) > 8 {
+			short = short[:8]
 		}
-		receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, denialActionID, argsHash, idempotencyKey, "counterparty denied")
-		if signErr != nil {
-			return 0, nil, kernel.ErrUnauthenticated.Wrap("counterparty is denied")
+		counterparty, err = k.CreateOrUpdateProxyPeer(ctx, "@k-"+short, cpPubKey)
+		if err != nil {
+			return 0, nil, err
 		}
-		return http.StatusForbidden, map[string]any{"error": "counterparty denied", "receipt": receipt}, nil
 	}
 
 	ownerHandle, actionName, err := kernel.ParseActionRef(actionParam)

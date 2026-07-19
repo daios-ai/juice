@@ -537,25 +537,26 @@ func (k *Kernel) ListPeers(ctx context.Context) ([]*User, error) {
 	return peers, nil
 }
 
-// FriendKeys returns the public keys of all friended, non-denied peers — the friend-sync pull set
-// for the discovery loop (§13 peer sync).
-func (k *Kernel) FriendKeys(ctx context.Context) []string {
+// PeerKeys returns the public keys of all known, non-suspended peers — the pull set for the
+// discovery loop's peer sync (§13 peer sync).
+func (k *Kernel) PeerKeys(ctx context.Context) []string {
 	peers, err := k.ListPeers(ctx)
 	if err != nil {
 		return nil
 	}
 	var keys []string
 	for _, p := range peers {
-		if p.DeniedAt == nil && p.PublicKey != "" {
+		if p.SuspendedAt == nil && p.PublicKey != "" {
 			keys = append(keys, p.PublicKey)
 		}
 	}
 	return keys
 }
 
-// DenyPeer atomically denies a peer: sets denied_at, deactivates all their proxy actions,
-// and cancels+refunds any waiting steps addressed to them as caller.
-func (k *Kernel) DenyPeer(ctx context.Context, subjectID, handle string) error {
+// Unsubscribe drops a peer's imported catalog here by deactivating all proxy actions it owns
+// (§13). The peer's billing account, balance, and history are untouched; a later subscribe
+// re-imports. Superuser-only.
+func (k *Kernel) Unsubscribe(ctx context.Context, subjectID, handle string) error {
 	if err := k.requireSuperuser(ctx, subjectID); err != nil {
 		return err
 	}
@@ -563,20 +564,7 @@ func (k *Kernel) DenyPeer(ctx context.Context, subjectID, handle string) error {
 	if err != nil {
 		return ErrNotFound.Wrapf("peer %q not found", handle)
 	}
-	return k.store.DenyPeerCascade(ctx, u.ID)
-}
-
-// UndenyPeer clears denied_at on the proxy user for the given handle.
-// Proxy actions are NOT automatically reactivated — use remote import to re-enable them.
-func (k *Kernel) UndenyPeer(ctx context.Context, subjectID, handle string) error {
-	if err := k.requireSuperuser(ctx, subjectID); err != nil {
-		return err
-	}
-	u, err := k.ResolveUser(ctx, handle)
-	if err != nil {
-		return ErrNotFound.Wrapf("peer %q not found", handle)
-	}
-	return k.store.UndenyUser(ctx, u.ID)
+	return k.store.DeactivateActionsOwnedBy(ctx, u.ID)
 }
 
 // ListDiscoveredKernels returns all kernels learned via gossip accumulation.
@@ -710,8 +698,8 @@ func qualifiedActionName(a *Action) string {
 }
 
 // GetGossip returns this kernel's gossip payload: identity, public active actions, and peer list.
-// When requesterKey names a friended, non-denied peer, the response also carries that peer's credit
-// on this kernel (CounterpartyBalance, §13 peer sync); it is nil for strangers, denied keys, and
+// When requesterKey names a known, non-suspended peer, the response also carries that peer's credit
+// on this kernel (CounterpartyBalance, §13 peer sync); it is nil for strangers, suspended keys, and
 // anonymous pulls (requesterKey == "").
 func (k *Kernel) GetGossip(ctx context.Context, requesterKey string) (*GossipResponse, error) {
 	var pubKeyB64 string
@@ -758,12 +746,12 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey string) (*GossipRes
 	peers, _ := k.ListPeers(ctx)
 	var friendViews []GossipFriendView
 	for _, p := range peers {
-		if p.DeniedAt != nil {
+		if p.SuspendedAt != nil {
 			continue
 		}
 		peerStats, _ := k.store.ListStatsByOwner(ctx, p.ID)
 		if len(peerStats) == 0 {
-			continue // not transacted; endorsement is earned by trade, not by friending
+			continue // not transacted; endorsement is earned by trade, not by subscribing
 		}
 		var fActions []GossipAction
 		for _, s := range peerStats {
@@ -794,9 +782,9 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey string) (*GossipRes
 		Actions:   gossipActions,
 		Friends:   friendViews,
 	}
-	// Report the requester's credit here only if it is a friended, non-denied peer (§13 peer sync).
+	// Report the requester's credit here only if it is a known, non-suspended peer (§13 peer sync).
 	if requesterKey != "" {
-		if u, _ := k.store.ReadUserByPublicKey(ctx, requesterKey); u != nil && u.DeniedAt == nil {
+		if u, _ := k.store.ReadUserByPublicKey(ctx, requesterKey); u != nil && u.SuspendedAt == nil {
 			bal := u.Available
 			resp.CounterpartyBalance = &bal
 		}
@@ -804,12 +792,12 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey string) (*GossipRes
 	return resp, nil
 }
 
-// RecordPeerSync persists a successful friend gossip pull (§13 peer sync) keyed by public key:
+// RecordPeerSync persists a successful peer gossip pull (§13 peer sync) keyed by public key:
 // last_seen=now and, when the peer reported one, our cached credit on it. A no-op for unknown or
-// denied keys — sync is a friend-only relation. Display-only cache; never a money path.
+// suspended keys. Display-only cache; never a money path.
 func (k *Kernel) RecordPeerSync(ctx context.Context, publicKey string, credit *int64) error {
 	u, err := k.store.ReadUserByPublicKey(ctx, publicKey)
-	if err != nil || u == nil || u.DeniedAt != nil {
+	if err != nil || u == nil || u.SuspendedAt != nil {
 		return nil
 	}
 	return k.store.UpdatePeerSync(ctx, u.ID, time.Now().UTC(), credit)
@@ -876,7 +864,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 	}); err != nil {
 		return err
 	}
-	// Store each transacted friend as a discovered kernel, introduced by the gossip source.
+	// Store each transacted peer as a discovered kernel, introduced by the gossip source.
 	for _, f := range gossip.Friends {
 		if f.PublicKey == "" {
 			continue

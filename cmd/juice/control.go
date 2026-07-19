@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 	"github.com/go-chi/chi/v5"
 )
@@ -129,8 +128,24 @@ func (s *server) ctlAdjust(credit bool) http.HandlerFunc {
 		}
 		u, err := resolveHandle(s.kernel, r.Context(), req.Handle)
 		if err != nil {
-			writeErr(w, err)
-			return
+			// Deposit-by-key opens the peer's billing account (§13): the provider's single deposit
+			// both provisions and funds a not-yet-known subscriber's account — this replaces the old
+			// friend handshake. Withdraw never auto-provisions (nothing to redeem from a fresh row).
+			if credit && !strings.HasPrefix(strings.TrimSpace(req.Handle), "@") {
+				kh := strings.TrimSpace(req.Handle)
+				short := kh
+				if len(short) > 8 {
+					short = short[:8]
+				}
+				if peer, aerr := s.kernel.AddPeer(r.Context(), callerFrom(r), "@k-"+short, kh); aerr == nil {
+					u = peer
+					err = nil
+				}
+			}
+			if err != nil {
+				writeErr(w, err)
+				return
+			}
 		}
 		var e *kernel.LedgerEntry
 		if credit {
@@ -152,13 +167,13 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	// Friended peers by default; denied (unfriended) peers are hidden unless ?all=1, like
-	// action list hides inactive rows. The row still exists — this is display scope only.
+	// Active peers by default; suspended peers are hidden unless ?all=1, like action list hides
+	// inactive rows. The row still exists — this is display scope only.
 	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
 	if !all {
 		kept := peers[:0]
 		for _, p := range peers {
-			if p.DeniedAt == nil {
+			if p.SuspendedAt == nil {
 				kept = append(kept, p)
 			}
 		}
@@ -238,10 +253,9 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *server) ctlFriendPeer(w http.ResponseWriter, r *http.Request) {
+func (s *server) ctlSubscribePeer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Key         string `json:"key"`
-		LocalHandle string `json:"local_handle"`
+		Key string `json:"key"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -253,14 +267,16 @@ func (s *server) ctlFriendPeer(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	peerKey := strings.TrimSpace(req.Key)
 
-	// Resolve the peer by key and read its gossip (identity + actions + friends). Bounded by
-	// fedOpTimeout so an offline peer fails promptly and clearly — you cannot friend a kernel you
-	// cannot reach. The gossip's public_key must match the key we dialed (a consistency check).
+	// Subscribe is a purely local import: read the peer's gossip (identity + actions), mount it
+	// under its self-reported handle, import its active public actions, and accumulate its gossip.
+	// Nothing is written to the peer — its billing account here is opened by a deposit, not a
+	// handshake. Bounded by fedOpTimeout so an offline peer fails promptly. The gossip's public_key
+	// must match the key we dialed (a consistency check).
 	octx, cancel := context.WithTimeout(ctx, fedOpTimeout)
 	defer cancel()
 	gRaw, err := s.fed.Gossip(octx, peerKey)
 	if err != nil {
-		writeErr(w, kernel.ErrExecutionFailed.Wrapf("cannot friend %s: peer is unreachable (offline?)", peerKey))
+		writeErr(w, kernel.ErrExecutionFailed.Wrapf("cannot subscribe to %s: peer is unreachable (offline?)", peerKey))
 		return
 	}
 	var g kernel.GossipResponse
@@ -269,28 +285,11 @@ func (s *server) ctlFriendPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register the peer locally under the operator's chosen alias (falling back to the peer's
-	// self-reported handle), send a signed friend handshake so it registers + reciprocates, import
-	// its active public actions, then accumulate its gossip. The alias is only a local mount name;
-	// CreateOrUpdateProxyPeer still auto-suffixes on collision.
-	localHandle := strings.TrimSpace(req.LocalHandle)
-	if localHandle == "" {
-		localHandle = g.Handle
-	}
-	u, err := s.kernel.CreateOrUpdateProxyPeer(ctx, localHandle, peerKey)
+	u, err := s.kernel.CreateOrUpdateProxyPeer(ctx, g.Handle, peerKey)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	// An explicit friend re-establishes trust: clear any prior denial (unfriend sets it). The
-	// inbound handshake path (OnFriend) deliberately does NOT — a denied peer can't un-deny itself.
-	if u.DeniedAt != nil {
-		if err := s.kernel.UndenyPeer(ctx, callerFrom(r), u.Handle); err != nil {
-			writeErr(w, err)
-			return
-		}
-	}
-	s.announcePeerFed(ctx, peerKey)
 	imported, skipped := bulkImportPeerActionsFed(ctx, s.fed, s.kernel, callerFrom(r), peerKey, u)
 	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
 	_ = s.kernel.AccumulateGossip(ctx, &g, pub)
@@ -315,7 +314,7 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"handle": handle, "public_key": pub, "about": about, "addrs": addrs})
 }
 
-func (s *server) ctlUnfriendPeer(w http.ResponseWriter, r *http.Request) {
+func (s *server) ctlUnsubscribePeer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Handle string `json:"handle"`
 	}
@@ -323,18 +322,18 @@ func (s *server) ctlUnfriendPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Accept @handle or the peer's key. Purely local (no transport), so it works whether or not the
-	// peer is reachable. A clear not-found when the identifier names no friended peer.
+	// peer is reachable. A clear not-found when the identifier names no known peer.
 	u, err := resolveHandle(s.kernel, r.Context(), req.Handle)
 	if err != nil {
-		writeErr(w, kernel.ErrNotFound.Wrapf("no friended peer %q", req.Handle))
+		writeErr(w, kernel.ErrNotFound.Wrapf("no peer %q", req.Handle))
 		return
 	}
-	// A local account with no key is not a peer: never deny-list a plain user (which would block it).
+	// A local account with no key is not a peer: there is no catalog to drop.
 	if u.PublicKey == "" {
 		writeErr(w, kernel.ErrInvalidInput.Wrapf("%q is a local user, not a federation peer", req.Handle))
 		return
 	}
-	err = s.kernel.DenyPeer(r.Context(), callerFrom(r), u.Handle)
+	err = s.kernel.Unsubscribe(r.Context(), callerFrom(r), u.Handle)
 	writeOr(w, map[string]string{"handle": u.Handle}, err)
 }
 
@@ -345,27 +344,6 @@ func writeOr(w http.ResponseWriter, v any, err error) {
 		return
 	}
 	writeJSON(w, http.StatusOK, v)
-}
-
-// ---------------------------------------------------------------------------
-// Server: peer outbound helpers (over the libp2p federation transport, §13)
-// ---------------------------------------------------------------------------
-
-// announcePeerFed sends a signed friend request to a peer by key so it registers + reciprocates.
-func (s *server) announcePeerFed(ctx context.Context, peerKey string) {
-	if s.fed == nil {
-		return
-	}
-	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	handle := globalCfg.KernelHandle
-	if pub == "" {
-		return
-	}
-	sig, ts, err := s.kernel.SignPeerRequestNow(handle, pub)
-	if err != nil {
-		return
-	}
-	_, _ = s.fed.Friend(ctx, peerKey, fed.FriendRequest{Handle: handle, PublicKey: pub, Timestamp: ts, Signature: sig})
 }
 
 // manifestFetcher is the transport capability bulk import needs; *fed.Transport satisfies it,

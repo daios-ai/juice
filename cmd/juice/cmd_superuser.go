@@ -19,7 +19,7 @@ func peerCreditStr(c *int64) string {
 	return strconv.FormatInt(*c, 10)
 }
 
-// lastSeenStr renders when a peer was last reached by friend sync (§13): "never" when unsynced,
+// lastSeenStr renders when a peer was last reached by peer sync (§13): "never" when unsynced,
 // else a coarse relative age.
 func lastSeenStr(t *time.Time) string {
 	if t == nil {
@@ -48,7 +48,7 @@ func parseAmount(s string) (int64, error) {
 
 // admin holds the superuser-only supervisory verbs — the operations no ordinary user ever
 // performs: money (deposit/withdraw), access (suspend/unsuspend), federation trust
-// (friend/unfriend/peers/inspect), and the global roster (users/show). They are ordinary TCP
+// (subscribe/unsubscribe/peers/inspect), and the global roster (users/show). They are ordinary TCP
 // clients like every other command (apiCall/apiEmit); the server gates the routes with
 // requireSuperuserMW, so authority is the @sys bearer token (§14).
 //
@@ -65,8 +65,8 @@ func init() {
 		adminRenameCmd(),
 		adminDepositCmd(),
 		adminWithdrawCmd(),
-		peerFriendCmd(),
-		peerUnfriendCmd(),
+		peerSubscribeCmd(),
+		peerUnsubscribeCmd(),
 		peerListCmd(),
 		peerInspectCmd(),
 		identityCmd(),
@@ -302,29 +302,26 @@ func peerInspectCmd() *cobra.Command {
 	}
 }
 
-func peerFriendCmd() *cobra.Command {
+func peerSubscribeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "friend <key> [local-handle]",
-		Short: "Befriend a kernel and import its actions",
-		Long:  "Befriend a kernel by public key and import its actions. An optional local-handle mounts the peer under a name you choose (auto-suffixed on collision); by default the peer's self-reported handle is used.",
-		Args:  cobra.RangeArgs(1, 2),
+		Use:   "subscribe <key>",
+		Short: "Subscribe to a kernel and import its actions",
+		Long:  "Subscribe to a kernel by public key and import its active public actions. The peer mounts under its self-reported handle (auto-suffixed on collision); rename the mount with `admin rename <key> <new-handle>`. Calls stay rejected until the peer holds credit here — fund it with `admin deposit <key> <amount>`.",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			body := map[string]any{"key": args[0]}
-			if len(args) == 2 {
-				body["local_handle"] = args[1]
-			}
 			var out struct {
 				Handle   string `json:"handle"`
 				Imported int    `json:"imported"`
 				Skipped  int    `json:"skipped"`
 			}
-			if err := apiCall(context.Background(), "POST", "/control/peers/friend", body, &out); err != nil {
+			if err := apiCall(context.Background(), "POST", "/control/peers/subscribe", body, &out); err != nil {
 				return err
 			}
 			if flagJSON {
 				return printJSON(out)
 			}
-			msg := fmt.Sprintf("Friended %s", out.Handle)
+			msg := fmt.Sprintf("Subscribed to %s", out.Handle)
 			if out.Imported > 0 {
 				msg += fmt.Sprintf(" — %d action(s) available", out.Imported)
 			}
@@ -337,21 +334,21 @@ func peerFriendCmd() *cobra.Command {
 	}
 }
 
-func peerUnfriendCmd() *cobra.Command {
+func peerUnsubscribeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "unfriend <user>",
-		Short: "Unfriend a peer (@handle or key)",
+		Use:   "unsubscribe <user>",
+		Short: "Unsubscribe from a peer (@handle or key), deactivating its imported actions",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			var out struct {
 				Handle string `json:"handle"`
 			}
 			// Pass the identifier raw (a key must not become an @handle); the server resolves either.
-			if err := apiCall(context.Background(), "POST", "/control/peers/unfriend",
+			if err := apiCall(context.Background(), "POST", "/control/peers/unsubscribe",
 				map[string]any{"handle": args[0]}, &out); err != nil {
 				return err
 			}
-			fmt.Printf("Unfriended %s.\n", out.Handle)
+			fmt.Printf("Unsubscribed from %s.\n", out.Handle)
 			return nil
 		},
 	}
@@ -390,12 +387,12 @@ func peerListCmd() *cobra.Command {
 			} else {
 				fmt.Printf("%-20s %10s %8s %12s %10s  %s\n", "HANDLE", "AVAILABLE", "LOCKED", "CREDIT_THERE", "LAST_SEEN", "PUBLIC_KEY")
 				for _, p := range out.Peers {
-					denied := ""
-					if p.DeniedAt != nil {
-						denied = " [denied]"
+					suspended := ""
+					if p.SuspendedAt != nil {
+						suspended = " [suspended]"
 					}
 					fmt.Printf("%-20s %10d %8d %12s %10s  %s%s\n",
-						p.Handle, p.Available, p.Locked, peerCreditStr(p.PeerCredit), lastSeenStr(p.LastSeen), p.PublicKey, denied)
+						p.Handle, p.Available, p.Locked, peerCreditStr(p.PeerCredit), lastSeenStr(p.LastSeen), p.PublicKey, suspended)
 				}
 			}
 			if showGossip {
@@ -405,7 +402,7 @@ func peerListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&showGossip, "gossip", false, "Also show the known-network directory (discovery)")
-	cmd.Flags().BoolVar(&showAll, "all", false, "Include denied (unfriended) peers")
+	cmd.Flags().BoolVar(&showAll, "all", false, "Include suspended peers")
 	return cmd
 }
 

@@ -1,5 +1,5 @@
 // Package fed is the federation transport: the sole carrier for cross-kernel calls,
-// friend handshakes, manifest serving, gossip, and inspection (§13). It is a replaceable
+// manifest serving, gossip, and inspection (§13). It is a replaceable
 // module behind an interface, exactly like store and llm; the kernel never imports it.
 //
 // Peers are addressed only by Ed25519 public key. The transport resolves a key to a live
@@ -27,7 +27,6 @@ var ErrNotDispatched = errors.New("fed: request not dispatched")
 // without silent incompatibility — HTTP+JSON was implicitly versionless; libp2p makes it explicit.
 const (
 	ProtocolCall     = "/juice/fed/call/1"
-	ProtocolFriend   = "/juice/fed/friend/1"
 	ProtocolManifest = "/juice/fed/manifest/1"
 	ProtocolGossip   = "/juice/fed/gossip/1"
 	ProtocolInspect  = "/juice/fed/inspect/1"
@@ -52,21 +51,6 @@ type CallResponse struct {
 	Body   json.RawMessage `json:"body"`
 }
 
-// FriendRequest is the wire form of the friend handshake (§13). No URL — v0.5 forbids URLs
-// in the federation protocol; the peer is identified and reachable by PublicKey alone.
-type FriendRequest struct {
-	Handle    string `json:"handle"`
-	PublicKey string `json:"public_key"` // requester's base64url Ed25519 public key
-	Timestamp string `json:"timestamp"`  // RFC3339
-	Signature string `json:"signature"`  // Ed25519 over JCS({handle,public_key,timestamp})
-}
-
-// FriendResponse reports acceptance ("accepted"/"pending") or a rejection reason.
-type FriendResponse struct {
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
-}
-
 // Handlers is implemented by cmd/juice to answer inbound protocol streams. Each method
 // receives the peer's verified public key (from the authenticated libp2p connection) plus
 // the request, and returns opaque JSON. The transport applies no Juice semantics itself.
@@ -74,13 +58,11 @@ type Handlers interface {
 	// OnCall handles an inbound /juice/fed/call/1 request. peerKey is the connection's
 	// authenticated public key; the handler still verifies req.Signature per §13.
 	OnCall(ctx context.Context, peerKey string, req CallRequest) CallResponse
-	// OnFriend handles an inbound /juice/fed/friend/1 request.
-	OnFriend(ctx context.Context, peerKey string, req FriendRequest) FriendResponse
 	// OnManifest returns one JSON frame per action manifest to serve (chunked, relay-safe).
 	OnManifest(ctx context.Context, peerKey string) ([]json.RawMessage, error)
 	// OnGossip returns the gossip document as JSON.
 	OnGossip(ctx context.Context, peerKey string) (json.RawMessage, error)
-	// OnInspect returns the inspect document (identity + public actions + transacted friends) as JSON.
+	// OnInspect returns the inspect document (identity + public actions + transacted peers) as JSON.
 	OnInspect(ctx context.Context, peerKey string) (json.RawMessage, error)
 }
 

@@ -1589,8 +1589,7 @@ func TestFederationCallSignsRejectionForNonExecutableAction(t *testing.T) {
 		if env.Receipt.Signature == "" {
 			t.Errorf("%s: rejection receipt is unsigned", label)
 		}
-		// The reason must reflect why the action wouldn't run, not the misleading "denied"
-		// (which means the peer was unfriended — a different thing).
+		// The reason must reflect why the action wouldn't run, not a misleading generic "denied".
 		if env.Receipt.Reason == "" || env.Receipt.Reason == "denied" || env.Receipt.Reason == "counterparty denied" {
 			t.Errorf("%s: reason = %q, want a specific non-executable reason", label, env.Receipt.Reason)
 		}
@@ -1819,12 +1818,17 @@ func TestFederationCallAuth(t *testing.T) {
 		t.Errorf("no counterparty: want 401, got %d", r1.StatusCode)
 	}
 
-	// Unknown public key (unregistered counterparty) → 401.
+	// Unknown but signature-valid counterparty → handshake-free subscription (§13): the caller's
+	// zero-balance billing account is lazily provisioned and the price-0 call succeeds.
 	_, unknownPriv, _ := ed25519.GenerateKey(rand.Reader)
+	unknownKey := base64.RawURLEncoding.EncodeToString(unknownPriv.Public().(ed25519.PublicKey))
 	r2 := fedCall(t, k, unknownPriv, action, "idem-auth-2", map[string]any{})
 	r2.Body.Close()
-	if r2.StatusCode != http.StatusUnauthorized {
-		t.Errorf("unknown counterparty: want 401, got %d", r2.StatusCode)
+	if r2.StatusCode != http.StatusOK {
+		t.Errorf("unknown counterparty: want 200 (lazily provisioned), got %d", r2.StatusCode)
+	}
+	if u, _ := k.ReadUserByPublicKey(ctx, unknownKey); u == nil || u.PublicKey != unknownKey {
+		t.Error("unknown caller should have been provisioned a proxy account")
 	}
 
 	// Missing timestamp → 401.

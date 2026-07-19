@@ -56,8 +56,8 @@ run_flows \
     flow_pkce_auth flow_refresh_rotation flow_successful_receipt flow_failed_receipt \
     flow_lookup flow_chat flow_openapi_import_execute flow_openapi_changed_reimport \
     flow_openapi_unimport \
-    flow_federation_import_execute flow_federation_changed_reimport flow_federation_unfriend flow_federation_refriend flow_fed_friend_alias \
-    flow_fed_verify_receipt flow_fed_all_receipt_checks flow_fed_denial_unfriended \
+    flow_federation_import_execute flow_federation_changed_reimport flow_federation_unsubscribe flow_federation_resubscribe flow_fed_rename \
+    flow_fed_verify_receipt flow_fed_all_receipt_checks flow_fed_suspend_blocks \
     flow_fed_denial_underfunded flow_fed_disabled_action_rejection flow_fed_import_duty flow_fed_failed_action_refund \
     flow_fed_gossip_discovery flow_fed_discovery flow_fed_offline flow_fed_peer_sync flow_fed_inspect_sync \
     flow_transaction_access flow_admin_supervision flow_native_orphan_purge flow_time flow_message flow_grant flow_grant_bearer

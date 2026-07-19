@@ -428,11 +428,7 @@ type Store interface {
 
 	// ---- Users (extended) ----
 
-	// DenyUser sets denied_at on the user (unfriend operation).
-	DenyUser(ctx context.Context, id string) error
-	// UndenyUser clears denied_at on the user.
-	UndenyUser(ctx context.Context, id string) error
-	// UpdatePeerSync records a successful friend gossip pull (§13 peer sync): peer_last_seen=now
+	// UpdatePeerSync records a successful peer gossip pull (§13 peer sync): peer_last_seen=now
 	// and, when the peer reported one, peer_credit=credit (nil leaves the prior value). Display-only
 	// cache; never a money path.
 	UpdatePeerSync(ctx context.Context, id string, lastSeen time.Time, credit *int64) error
@@ -446,9 +442,6 @@ type Store interface {
 
 	// ---- Peer lifecycle ----
 
-	// DenyPeerCascade atomically: sets denied_at on the user, deactivates all their proxy
-	// actions, and cancels+refunds all waiting steps addressed to them as caller.
-	DenyPeerCascade(ctx context.Context, userID string) error
 	// ListPurgeablePeers returns the IDs of peer users (public_key set) that are idle past
 	// cutoff at zero balance (§13 Retention): available=0, locked=0, last activity (max of
 	// created_at, latest transaction naming them, latest deposit/withdrawal, latest gossip
@@ -456,18 +449,16 @@ type Store interface {
 	ListPurgeablePeers(ctx context.Context, cutoff time.Time) ([]string, error)
 	// PurgePeerCascade atomically deletes a purged peer's derived data — its proxy actions,
 	// their stats and stat_tags, its steps, and its discovered_kernels rows — and forgets the
-	// peer identity by clearing public_key and denied_at on the user row. The immutable
-	// transaction/receipt ledger is preserved (party ids carry no FK), keeping local
-	// counterparties' credits reconstructible (§11); the anonymized user row stays as a ledger
-	// anchor so old history remains legible.
+	// peer identity by clearing public_key on the user row. The immutable transaction/receipt
+	// ledger is preserved (party ids carry no FK), keeping local counterparties' credits
+	// reconstructible (§11); the anonymized user row stays as a ledger anchor so old history
+	// remains legible.
 	PurgePeerCascade(ctx context.Context, userID string) error
 	// DeactivateActionsOwnedBy sets active=false for all non-deleted actions owned by ownerUserID.
+	// This is the unsubscribe operation: it drops a peer's imported proxy catalog here.
 	DeactivateActionsOwnedBy(ctx context.Context, ownerUserID string) error
-	// CancelAndRefundStepsForCaller cancels all waiting steps where required_caller_user_id=callerUserID,
-	// atomically refunding each step's parked price to its parent trace (available+=price, locked-=price).
-	CancelAndRefundStepsForCaller(ctx context.Context, callerUserID string) error
 	// ListStatsByOwner returns Stats rows for actions owned by ownerUserID that have uses > 0.
-	// Used by GetGossip to identify transacted friends.
+	// Used by GetGossip to identify transacted peers.
 	ListStatsByOwner(ctx context.Context, ownerUserID string) ([]*Stats, error)
 
 	// ---- StatTags (gossip endorsements) ----
