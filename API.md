@@ -98,6 +98,8 @@ Federation has no HTTP surface: peer identity, gossip, manifests, the friend han
 | Recover (start) | `POST /v1/auth/recover/start` `{handle}` → `{nonce, expires_in_seconds}` | (part of `juice auth recover`) |
 | Recover (complete) | `POST /v1/auth/recover/complete` `{handle, nonce, signature, password}` → `{status}` | `juice auth recover <user> [--phrase] [--password]` |
 
+`signature` is `base64url(Ed25519-sign(priv, JCS({"recovery_challenge": nonce})))`, where `priv = Ed25519 from seed[:32]`, `seed = BIP-39(phrase)`; `recovery_public_key` is `base64url(pub)`.
+
 ### Users
 
 | Operation | HTTP | CLI |
