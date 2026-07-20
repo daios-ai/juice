@@ -389,3 +389,109 @@ func TestResubscribeReactivatesProxy(t *testing.T) {
 		t.Fatal("proxy should be reactivated after re-subscribe")
 	}
 }
+
+// ---- completePeerStep: the failure paths the flow cannot reach ----
+//
+// flow_fed_step_complete exercises this code when everything works. These three cover what happens
+// when it does not, which on this path is what actually matters: whether a caller can retry
+// safely, and whether it is told the truth about what the peer did with its money.
+
+// peerStepServer builds a server with one seeded peer, returning its @handle.
+func peerStepServer(t *testing.T, f *fakeFed) (*server, string) {
+	t.Helper()
+	k, _ := newRemoteTestKernel(t)
+	handle, _ := seedPeer(t, k, "@peer-steps")
+	return &server{kernel: k, log: log.Discard(), fed: f}, handle
+}
+
+// A retry after a lost reply must present the SAME idempotency key, or the peer cannot recognise
+// it as a duplicate: it re-executes, and the transaction and receipt of the first completion are
+// unreachable. The key is derived from the request, so identical requests derive identical keys.
+func TestCompletePeerStep_DerivesTheIdempotencyKey(t *testing.T) {
+	f := &fakeFed{stepBody: json.RawMessage(`{"tx_id":"tx-9"}`), stepStatus: 200}
+	srv, handle := peerStepServer(t, f)
+	ctx := context.Background()
+
+	key := func(stepID string, input string) string {
+		t.Helper()
+		if _, err := srv.completePeerStep(ctx, handle, stepID, json.RawMessage(input)); err != nil {
+			t.Fatalf("completePeerStep: %v", err)
+		}
+		return f.lastStep.IdempotencyKey
+	}
+
+	first := key("s1", `{"ok":true}`)
+	if first == "" {
+		t.Fatal("no idempotency key was sent")
+	}
+	if retry := key("s1", `{"ok":true}`); retry != first {
+		t.Errorf("a retry must reuse the key: %s vs %s", first, retry)
+	}
+	// Genuinely different requests must not collide with the stored result of the first.
+	if other := key("s1", `{"ok":false}`); other == first {
+		t.Error("different input must derive a different key")
+	}
+	if other := key("s2", `{"ok":true}`); other == first {
+		t.Error("a different step must derive a different key")
+	}
+}
+
+// The signature covers a hash of the input, so the bytes hashed must be the bytes the peer
+// receives. Marshaling the outer StepRequest compacts and HTML-escapes an embedded RawMessage, so
+// hashing a caller's raw body would sign bytes the peer never sees and every completion from a
+// non-CLI client would fail verification. Driven with a pretty-printed body containing < and &.
+func TestCompletePeerStep_SignsTheBytesItSends(t *testing.T) {
+	f := &fakeFed{stepBody: json.RawMessage(`{"tx_id":"tx-9"}`), stepStatus: 200}
+	srv, handle := peerStepServer(t, f)
+
+	pretty := json.RawMessage("{\n  \"city\": \"Rio\",\n  \"note\": \"a<b&c\"\n}")
+	if _, err := srv.completePeerStep(context.Background(), handle, "s1", pretty); err != nil {
+		t.Fatalf("completePeerStep: %v", err)
+	}
+
+	// Round-trip the request as the transport does, then verify against what came out the far side.
+	wire, err := json.Marshal(f.lastStep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var received fed.StepRequest
+	if err := json.Unmarshal(wire, &received); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(received.Input, f.lastStep.Input) {
+		t.Fatalf("input is not a marshal fixed point:\n sent:     %s\n received: %s",
+			f.lastStep.Input, received.Input)
+	}
+	peerKey, _ := srv.resolvePeerKey(context.Background(), handle)
+	if err := kernel.VerifyStepSignature(received.Counterparty, received.StepID, received.Counterparty,
+		peerKey, received.IdempotencyKey, received.Timestamp,
+		sha256HexBytes(received.Input), received.Signature); err != nil {
+		t.Errorf("signature must verify over the bytes the peer receives: %v", err)
+	}
+}
+
+// Never-sent and may-have-run need opposite handling: the first is safe to retry, the second may
+// already have committed a transaction on the peer. Reporting a may-have-run as "offline" tells an
+// operator nothing happened while the caller has been charged.
+func TestCompletePeerStep_DistinguishesNeverSentFromMayHaveRun(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		fed       *fakeFed
+		want      *kernel.KernelError
+		forbidden string
+	}{
+		{"provably never sent", &fakeFed{}, kernel.ErrPeerUnreachable, ""},
+		{"failed after dispatch", &fakeFed{stepMidStream: true}, kernel.ErrTimeout, "offline"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, handle := peerStepServer(t, tc.fed)
+			_, err := srv.completePeerStep(context.Background(), handle, "s1", json.RawMessage(`{}`))
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("got %v, want %v", err, tc.want)
+			}
+			if tc.forbidden != "" && strings.Contains(err.Error(), tc.forbidden) {
+				t.Errorf("a request that may have executed must not claim %q: %v", tc.forbidden, err)
+			}
+		})
+	}
+}
