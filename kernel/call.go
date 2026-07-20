@@ -268,7 +268,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		mp = k.remoteManifestPrice(action.Price)
 		key := uuid.New().String()
 		trace.IdempotencyKey = &key
-		trace.DispatchJSON = marshalDispatch(req.Args, req.StepID, mp)
+		// Subcalls carry no inbound record: only a ROOT call serves a peer directly, and completing
+		// the inbound record from a settling subcall would answer the peer before its own call resolved.
+		trace.DispatchJSON = marshalDispatch(req.Args, req.StepID, mp, "")
 	}
 
 	callerWalletID, callerWalletKind := k.callerWallet(req, process, parentTrace)

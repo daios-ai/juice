@@ -1694,3 +1694,49 @@ func TestDirectorySelector(t *testing.T) {
 		}
 	}
 }
+
+// Scenario (round-4 review): ctlPeerSteps reports a mid-listing peer failure with a `warning`, but
+// the CLI decoded only {steps, truncated} — so a listing cut short by the PEER printed the same
+// benign "more pages than this command follows" note as a client-side cap. The operator reads a
+// plausible listing, does not retry, and the steps holding parked funds stay invisible: exactly
+// the failure this command exists to prevent.
+func TestRenderPeerStepsDistinguishesAPeerFailureFromAPageCap(t *testing.T) {
+	step := peerStepView{ID: "s1", CreatedAt: time.Now().UTC()}
+
+	var out, errOut bytes.Buffer
+	renderPeerSteps(&out, &errOut, peerStepsResponse{
+		Steps: []peerStepView{step}, Truncated: true,
+		Warning: "listing stopped after 1 page(s): peer unreachable",
+	})
+	if !strings.Contains(errOut.String(), "peer unreachable") {
+		t.Errorf("the peer's failure must reach the operator, got %q", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "INCOMPLETE") {
+		t.Errorf("a peer-truncated listing must be marked incomplete, got %q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "than this command follows") {
+		t.Error("a peer failure must not be reported as a mere client-side page cap")
+	}
+
+	// The client's own page bound is a different, benign message.
+	out.Reset()
+	errOut.Reset()
+	renderPeerSteps(&out, &errOut, peerStepsResponse{Steps: []peerStepView{step}, Truncated: true})
+	if !strings.Contains(errOut.String(), "than this command follows") {
+		t.Errorf("a client page cap should say so, got %q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "INCOMPLETE") {
+		t.Error("a client page cap is not a peer failure")
+	}
+
+	// A complete listing warns about nothing.
+	out.Reset()
+	errOut.Reset()
+	renderPeerSteps(&out, &errOut, peerStepsResponse{Steps: []peerStepView{step}})
+	if errOut.Len() != 0 {
+		t.Errorf("a complete listing must produce no diagnostics, got %q", errOut.String())
+	}
+	if !strings.Contains(out.String(), "s1") {
+		t.Errorf("the step must be listed, got %q", out.String())
+	}
+}

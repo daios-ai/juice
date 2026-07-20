@@ -2241,7 +2241,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	if action.Kind == KindRemoteProxy {
 		key := uuid.New().String()
 		t.IdempotencyKey = &key
-		t.DispatchJSON = marshalDispatch(args, "", k.remoteManifestPrice(action.Price))
+		t.DispatchJSON = marshalDispatch(args, "", k.remoteManifestPrice(action.Price), idempotencyRecordID)
 	}
 	if err := k.store.BeginRun(ctx, p, t, caller.ID, action.Price); err != nil {
 		return nil, err

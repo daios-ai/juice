@@ -40,11 +40,18 @@ type dispatchPayload struct {
 	Args        map[string]any `json:"args"`
 	StepID      string         `json:"step_id"`
 	RemotePrice int64          `json:"remote_price"`
+	// IdempotencyRecordID is the INBOUND cross-kernel record this dispatch is executing for, when
+	// the parked call is itself serving a peer (a federated call or step completion). Persisting it
+	// is what lets the settlement that finally resolves this dispatch — the retry loop, the
+	// max-age bound, or a forced closure — complete that record. Without it the requesting peer is
+	// answered "duplicate in flight" until the record expires and can never learn the outcome of
+	// work it paid for. Empty for subcalls and for locally-originated calls.
+	IdempotencyRecordID string `json:"idempotency_record_id,omitempty"`
 }
 
 // marshalDispatch serializes a dispatchPayload and returns a pointer suitable for Trace.DispatchJSON.
-func marshalDispatch(args map[string]any, stepID string, mp int64) *string {
-	b, _ := json.Marshal(dispatchPayload{Args: args, StepID: stepID, RemotePrice: mp})
+func marshalDispatch(args map[string]any, stepID string, mp int64, idempotencyRecordID string) *string {
+	b, _ := json.Marshal(dispatchPayload{Args: args, StepID: stepID, RemotePrice: mp, IdempotencyRecordID: idempotencyRecordID})
 	s := string(b)
 	return &s
 }
@@ -294,11 +301,32 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	if receiptErr != nil {
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
+	// Classify a failure BEFORE committing: the commit stores the error body a replaying peer will
+	// be served, so it needs this call's code. Computing it here also keeps one definition of the
+	// 402/unfunded predicate, reused for the returned error below.
+	var failErr error
+	if ktx.Status != TxSuccess {
+		reason := ktx.Reason
+		if reason == "" {
+			reason = "remote call failed"
+		}
+		failErr = ErrExecutionFailed.Wrap(reason)
+		// A signed zero-charge rejection carried on transport status 402 is the remote's structured
+		// ErrInsufficientFunds (the inbound handler's 402 mapping): OUR prepaid credit there is
+		// exhausted, not the caller's balance. Surface it as the operator-actionable ErrPeerUnfunded
+		// so a client never renders it as the caller's own insufficient_funds. Gated on the receipt
+		// being settleable (charge == 0 with a preserved remote reason), so a quarantined invalid
+		// receipt — which also forces charge 0 — never takes this branch.
+		if fr.HTTPStatus == 402 && charge == 0 && ktx.Reason == r.Reason {
+			failErr = PeerUnfundedError(target.Handle)
+		}
+	}
+
 	// Detach settlement from execution-scoped cancellation so the remote settlement
 	// (charge/duty/refund + audit record) always commits once the signed receipt is in.
 	sctx, cancel := settlementContext(ctx)
 	defer cancel()
-	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, charge, duty, stats, req.IdempotencyRecordID, req.StepID); err != nil {
+	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, charge, duty, stats, req.IdempotencyRecordID, req.StepID, KernelErrorCode(failErr)); err != nil {
 		return nil, ErrInternal.Wrap("could not commit remote settlement")
 	}
 
@@ -306,20 +334,6 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 
 	if ktx.Status == TxSuccess {
 		return &CallReply{Result: fr.Result, TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID}, nil
-	}
-	reason := ktx.Reason
-	if reason == "" {
-		reason = "remote call failed"
-	}
-	failErr := error(ErrExecutionFailed.Wrap(reason))
-	// A signed zero-charge rejection carried on transport status 402 is the remote's structured
-	// ErrInsufficientFunds (the inbound handler's 402 mapping): OUR prepaid credit there is
-	// exhausted, not the caller's balance. Surface it as the operator-actionable ErrPeerUnfunded
-	// so a client never renders it as the caller's own insufficient_funds. Gated on the receipt
-	// being settleable (charge == 0 with a preserved remote reason), so a quarantined invalid
-	// receipt — which also forces charge 0 — never takes this branch.
-	if fr.HTTPStatus == 402 && charge == 0 && ktx.Reason == r.Reason {
-		failErr = PeerUnfundedError(target.Handle)
 	}
 	// Return the committed local receipt alongside the error so an inbound caller can settle
 	// the real charge (a re-proxied remote subcall may have settled with charge > 0).
@@ -404,7 +418,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	argsJSON, _ := json.Marshal(dispatch.Args)
 	ktx.ArgsJSON = json.RawMessage(argsJSON)
 
-	req := CallRequest{StepID: dispatch.StepID}
+	req := CallRequest{StepID: dispatch.StepID, IdempotencyRecordID: dispatch.IdempotencyRecordID}
 
 	// fr.NotDispatched is deliberately ignored on the retry path: a parked trace's request may
 	// already have executed remotely, so §13 forbids fail-fast here — only a signed receipt or the

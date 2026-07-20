@@ -408,6 +408,8 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 				"type": "object",
 				"properties": map[string]any{
 					"fired":    map[string]any{"type": "boolean", "description": "True if this contributor completed the onward step, false if another already had"},
+					"status":   map[string]any{"type": "string", "description": "Outcome of the onward call, success or failure; present when fired"},
+					"error":    map[string]any{"type": "string", "description": "Failure message from the onward call, present when fired with status failure"},
 					"tx_id":    map[string]any{"type": "string", "description": "Transaction of the onward completion, present when fired"},
 					"trace_id": map[string]any{"type": "string", "description": "Trace of the onward completion, present when fired"},
 				},
@@ -433,6 +435,8 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 					"fired":    map[string]any{"type": "boolean", "description": "True if this contribution met the barrier and completed the onward step"},
 					"have":     map[string]any{"type": "integer", "description": "Contributions recorded so far, including this one"},
 					"need":     map[string]any{"type": "integer", "description": "Contributions required"},
+					"status":   map[string]any{"type": "string", "description": "Outcome of the onward call, success or failure; present when fired"},
+					"error":    map[string]any{"type": "string", "description": "Failure message from the onward call, present when fired with status failure"},
 					"tx_id":    map[string]any{"type": "string", "description": "Transaction of the onward completion, present when fired"},
 					"trace_id": map[string]any{"type": "string", "description": "Trace of the onward completion, present when fired"},
 				},

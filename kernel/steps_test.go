@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/store"
 	"github.com/google/uuid"
 )
 
@@ -1415,5 +1416,120 @@ func TestStepCompleteSuspendedCallerRejectedBeforeMutation(t *testing.T) {
 	got, _ := st.ReadStep(ctx, step.ID)
 	if got.Status != kernel.StepWaiting {
 		t.Errorf("step.status after suspended caller: got %s, want waiting", got.Status)
+	}
+}
+
+// CompleteStep's outcome contract (§10): callers must be able to tell "someone else claimed it"
+// from "my resumed call failed" from "nothing settled" WITHOUT re-reading the step's status, which
+// is racy and cannot see an in-flight dispatch. These assertions pin that contract.
+func TestCompleteStepClaimFailureIsMarkedAndStillInvalidState(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@claim-owner", 500)
+	caller := setupUser(t, st, "@claim-caller", 0)
+	action := setupWasmAction(t, st, owner.ID, "claim-action", "", 0)
+	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
+
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, caller.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+	if _, err := k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("first completion: %v", err)
+	}
+
+	// The second attempt never takes the step.
+	reply, err := k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected the second completion to fail")
+	}
+	if reply != nil {
+		t.Errorf("a completion that never claimed the step must return a nil reply, got %+v", reply)
+	}
+	if !errors.Is(err, kernel.ErrStepNotClaimed) {
+		t.Errorf("expected ErrStepNotClaimed, got %v", err)
+	}
+	// The marker must not change what crosses a process or kernel boundary.
+	if code := kernel.KernelErrorCode(err); code != kernel.ErrInvalidState.Code {
+		t.Errorf("code = %q, want %q", code, kernel.ErrInvalidState.Code)
+	}
+	if status := kernel.HTTPStatus(err); status != kernel.ErrInvalidState.HTTP {
+		t.Errorf("status = %d, want %d", status, kernel.ErrInvalidState.HTTP)
+	}
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Error("the outer error must still match ErrInvalidState")
+	}
+}
+
+// A rejection before anything settles is NOT a claim race: conflating the two would make a gate
+// silently swallow a genuine error as "someone else won".
+func TestCompleteStepRejectionIsNotAClaimFailure(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@rej-owner", 500)
+	caller := setupUser(t, st, "@rej-caller", 0)
+	stranger := setupUser(t, st, "@rej-stranger", 0)
+	action := setupWasmAction(t, st, owner.ID, "rej-action", "", 0)
+	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
+
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, caller.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+	reply, err := k.CompleteStep(ctx, stranger.ID, step.ID, json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected the wrong caller to be refused")
+	}
+	if reply != nil {
+		t.Errorf("nothing settled, so the reply must be nil, got %+v", reply)
+	}
+	if errors.Is(err, kernel.ErrStepNotClaimed) {
+		t.Error("a wrong-caller rejection is not a claim race and must not carry ErrStepNotClaimed")
+	}
+}
+
+// Scenario (review finding 4): BeginStepCall returns ErrInvalidState for three distinct
+// conditions, one of which — "step park invariant violated: parent trace locked < step price" —
+// is a LEDGER CORRUPTION, not a claim race. Blanket-marking the whole code as ErrStepNotClaimed
+// makes a gate report that corruption as a normal lost race and drop the contribution silently.
+// The marker must be attached only where a claim genuinely lost.
+func TestParkInvariantViolationIsNotAClaimFailure(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@inv-owner", 500)
+	caller := setupUser(t, st, "@inv-caller", 0)
+	action := setupWasmAction(t, st, owner.ID, "inv-action", "", 10)
+	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
+
+	db, ok := st.(*store.DB)
+	if !ok {
+		t.Skip("needs the concrete store to break the invariant")
+	}
+	if err := db.ExecForTest(ctx, `UPDATE traces SET available=100 WHERE id=?`, tr.ID); err != nil {
+		t.Fatalf("fund trace: %v", err)
+	}
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, caller.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+	// Break the parked-funds invariant behind the kernel's back: the step is still waiting, but
+	// its parent trace no longer holds the locked price.
+	_ = ok
+	if err := db.ExecForTest(ctx, `UPDATE traces SET locked=0 WHERE id=?`, tr.ID); err != nil {
+		t.Fatalf("corrupt trace locked: %v", err)
+	}
+
+	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected the park-invariant violation to fail the completion")
+	}
+	if errors.Is(err, kernel.ErrStepNotClaimed) {
+		t.Errorf("a park-invariant violation is corruption, not a lost claim: %v", err)
 	}
 }

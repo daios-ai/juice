@@ -1,6 +1,9 @@
 package kernel
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // KernelError is a typed error with a stable code and default HTTP status.
 // Meta carries structured, machine-actionable context (e.g. the action a grant is required
@@ -98,6 +101,16 @@ func ErrorFromCode(code string) *KernelError {
 func HTTPStatusFromCode(code string) int {
 	return ErrorFromCode(code).HTTP
 }
+
+// ErrStepNotClaimed marks a completion that never took the step: another completer already holds
+// it, or it was already resolved. It is a *cause* attached with Because(), not a new error code —
+// the outer error stays ErrInvalidState, so the wire status, KernelErrorCode, and the ErrorFromCode
+// table are all unchanged, while errors.Is can still tell "someone else got there first" apart from
+// "the resumed call failed". A distinct KernelError could not do this: KernelError.Is compares Code
+// alone, so two sentinels sharing invalid_state are indistinguishable.
+//
+// Note the construction order: Wrap() drops the cause, so it must be Wrap(...).Because(...).
+var ErrStepNotClaimed = errors.New("step not claimed by this completion")
 
 // Sentinel errors.
 var (

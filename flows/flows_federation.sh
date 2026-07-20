@@ -503,6 +503,11 @@ flow_fed_step_complete() {
     local listed; listed=$(jj "$FED_DBL" "$FED_HL" admin steps "$FED_RKEY")
     assert_contains "fed_step_complete.peer_lists_step" "$step_id" "$listed"
     assert_contains "fed_step_complete.allowed_input" "allowed_input" "$listed"
+    assert_contains "fed_step_complete.partial_args_visible" "approve the shipment" "$listed"
+    # A peer is served the request, not the requester (§13): no local identity crosses.
+    assert_not_contains "fed_step_complete.no_owner_handle" "owner_handle" "$listed"
+    assert_not_contains "fed_step_complete.no_created_by" "created_by" "$listed"
+    assert_not_contains "fed_step_complete.no_local_handle" "@kernel-r" "$listed"
 
     # L completes it. The completion runs on R, funded by the price parked there at creation.
     local first_tx

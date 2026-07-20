@@ -1257,8 +1257,28 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 			callerID = owner
 		}
 		reply, err := completeStep(s.kernel, r.Context(), callerID, pathID(r), *req.Args)
-		return reply, http.StatusOK, err
+		return reply, http.StatusOK, withSettlementMeta(err, reply)
 	})(w, r)
+}
+
+// withSettlementMeta attaches the settled transaction's ids to a completion error. A completion
+// can fail AFTER committing a transaction (the resumed action ran and failed, §10), and the caller
+// has been charged for it — but handle() writes only the error, so without this the response says
+// what went wrong and not where the transaction is. Meta is the one structured channel writeErr
+// and the CLI both carry, so the ids survive to a client that can act on them.
+func withSettlementMeta(err error, reply *kernel.StepReply) error {
+	if err == nil || reply == nil {
+		return err
+	}
+	ke, ok := err.(*kernel.KernelError)
+	if !ok {
+		ke = kernel.ErrExecutionFailed.Wrap(err.Error())
+	}
+	ke = ke.WithMeta("step_id", reply.StepID).WithMeta("tx_id", reply.TxID).WithMeta("trace_id", reply.TraceID)
+	if reply.ReceiptID != "" {
+		ke = ke.WithMeta("receipt_id", reply.ReceiptID)
+	}
+	return ke
 }
 
 // postCall is the capability-only HTTP twin of juice.call (§9): a subcall on the capability's
@@ -1609,7 +1629,14 @@ func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRe
 func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRequest) fed.StepResponse {
 	stepErr := func(err error) fed.StepResponse {
 		code := kernel.KernelErrorCode(err)
-		b, _ := json.Marshal(map[string]string{"error": err.Error(), "code": code})
+		body := map[string]any{"error": err.Error(), "code": code}
+		// Carry Meta across the wire: a completion that failed after committing puts the settled
+		// transaction's ids there, and dropping them would leave the peer charged with no way to
+		// find what it paid for.
+		if ke, ok := err.(*kernel.KernelError); ok && len(ke.Meta) > 0 {
+			body["meta"] = ke.Meta
+		}
+		b, _ := json.Marshal(body)
 		return fed.StepResponse{Status: kernel.HTTPStatusFromCode(code), Body: b}
 	}
 	// Parity with OnCall, including its fail-open when the transport supplied no key. What makes
@@ -1633,7 +1660,7 @@ func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRe
 	var err error
 	switch req.Kind {
 	case "list":
-		status, body, err = handleFederationStepList(h.kernel, ctx, req.Counterparty, req.Timestamp, req.Signature, req.Offset)
+		status, body, err = handleFederationStepList(h.kernel, ctx, req.Counterparty, req.Timestamp, req.Signature, req.Cursor)
 	case "complete":
 		input := []byte(req.Input)
 		if len(input) == 0 {

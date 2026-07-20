@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
+	"os"
 	"strconv"
 	"time"
 
@@ -357,6 +359,42 @@ func peerUnsubscribeCmd() *cobra.Command {
 	}
 }
 
+// peerStepsResponse is the reply from the peer-steps control route. peerStepView, not
+// stepWithAction: a peer serves only what the completer needs (§13), so there is no action ref,
+// created_by, or owner handle to print. `warning` names a PEER-side failure that cut the listing
+// short — distinct from `truncated` alone, which only means this command stopped at its own page
+// bound. Conflating them tells an operator "that's all there is" when it is not.
+type peerStepsResponse struct {
+	Steps     []peerStepView `json:"steps"`
+	Truncated bool           `json:"truncated"`
+	Warning   string         `json:"warning"`
+}
+
+// renderPeerSteps writes the human-readable listing. Diagnostics go to errw (C12), so a shortfall
+// is visible even when stdout is piped, and a peer failure exits non-zero via the caller.
+func renderPeerSteps(outw, errw io.Writer, out peerStepsResponse) {
+	if len(out.Steps) == 0 {
+		fmt.Fprintln(outw, "No waiting steps.")
+	}
+	for _, s := range out.Steps {
+		fmt.Fprintf(outw, "%s  price=%d  created=%s\n", s.ID, s.Price, s.CreatedAt.Format(time.RFC3339))
+		if len(s.PartialArgs) > 0 && string(s.PartialArgs) != "{}" {
+			fmt.Fprintf(outw, "  partial_args:  %s\n", s.PartialArgs)
+		}
+		if len(s.AllowedInput) > 0 {
+			b, _ := json.Marshal(s.AllowedInput)
+			fmt.Fprintf(outw, "  allowed_input: %s\n", b)
+		}
+	}
+	switch {
+	case out.Warning != "":
+		fmt.Fprintf(errw, "WARNING: the listing is INCOMPLETE — %s\n", out.Warning)
+		fmt.Fprintln(errw, "Steps not listed may still hold parked funds; re-run when the peer is reachable.")
+	case out.Truncated:
+		fmt.Fprintln(errw, "(more steps remain; the peer returned more pages than this command follows)")
+	}
+}
+
 // peerStepsCmd lists the continuations a peer parked for this kernel. A step addressed to a peer
 // is completable only over /juice/fed/step/1 (§13) — a key account holds no session token — so
 // these two commands are the operator's only window onto them.
@@ -366,9 +404,7 @@ func peerStepsCmd() *cobra.Command {
 		Short: "List waiting steps a peer (@handle or key) holds for this kernel",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			var out struct {
-				Steps []stepWithAction `json:"steps"`
-			}
+			var out peerStepsResponse
 			if err := apiCall(context.Background(), "GET",
 				"/control/peers/steps?key="+url.QueryEscape(args[0]), nil, &out); err != nil {
 				return err
@@ -376,18 +412,7 @@ func peerStepsCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(out)
 			}
-			if len(out.Steps) == 0 {
-				fmt.Println("No waiting steps.")
-				return nil
-			}
-			for _, s := range out.Steps {
-				fmt.Printf("%s  %s  created_by=%s  created=%s\n", s.ID, s.Action, s.CreatedBy,
-					s.CreatedAt.Format(time.RFC3339))
-				if len(s.AllowedInput) > 0 {
-					b, _ := json.Marshal(s.AllowedInput)
-					fmt.Printf("  allowed_input: %s\n", b)
-				}
-			}
+			renderPeerSteps(os.Stdout, os.Stderr, out)
 			return nil
 		},
 	}

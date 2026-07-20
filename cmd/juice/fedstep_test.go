@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,7 +113,7 @@ func fedStepList(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey) (int, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return handleFederationStepList(k, context.Background(), cp, ts, sig, 0)
+	return handleFederationStepList(k, context.Background(), cp, ts, sig, "")
 }
 
 func fedStepComplete(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, stepID, idempKey string, input []byte) (int, map[string]any, error) {
@@ -141,7 +142,7 @@ func TestFedStep_ListShowsOnlyOwnWaitingSteps(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d", status)
 	}
-	steps, _ := body["steps"].([]*stepWithAction)
+	steps, _ := body["steps"].([]*peerStepView)
 	if len(steps) != 1 || steps[0].ID != stepID {
 		t.Fatalf("expected exactly the parked step, got %+v", steps)
 	}
@@ -154,7 +155,7 @@ func TestFedStep_ListShowsOnlyOwnWaitingSteps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list for peer B: %v", err)
 	}
-	if stepsB, _ := bodyB["steps"].([]*stepWithAction); len(stepsB) != 0 {
+	if stepsB, _ := bodyB["steps"].([]*peerStepView); len(stepsB) != 0 {
 		t.Errorf("peer B must not see peer A's step, got %+v", stepsB)
 	}
 }
@@ -173,7 +174,7 @@ func TestFedStep_ListUnknownKeyIsEmptyAndProvisionsNothing(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d", status)
 	}
-	if steps, _ := body["steps"].([]*stepWithAction); len(steps) != 0 {
+	if steps, _ := body["steps"].([]*peerStepView); len(steps) != 0 {
 		t.Errorf("expected no steps for a stranger, got %+v", steps)
 	}
 	if u, _ := k.ReadUserByPublicKey(context.Background(), cp); u != nil {
@@ -189,7 +190,7 @@ func TestFedStep_BadSignatureAndStaleTimestampRejected(t *testing.T) {
 	stepID := parkStepForPeer(t, k, db, keyA)
 	ts := time.Now().UTC().Format(time.RFC3339)
 
-	if _, _, err := handleFederationStepList(k, context.Background(), keyA, ts, "bogus", 0); err == nil {
+	if _, _, err := handleFederationStepList(k, context.Background(), keyA, ts, "bogus", ""); err == nil {
 		t.Error("expected a bad list signature to be rejected")
 	}
 	if _, _, err := handleFederationStepComplete(k, context.Background(), keyA, ts, "idem-1", stepID, "bogus", []byte("{}")); err == nil {
@@ -198,7 +199,7 @@ func TestFedStep_BadSignatureAndStaleTimestampRejected(t *testing.T) {
 
 	stale := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
 	sig, _ := kernel.SignStepListPayload(privA, keyA, selfKey(t, k), stale)
-	if _, _, err := handleFederationStepList(k, context.Background(), keyA, stale, sig, 0); err == nil {
+	if _, _, err := handleFederationStepList(k, context.Background(), keyA, stale, sig, ""); err == nil {
 		t.Error("expected a stale timestamp to be rejected")
 	}
 }
@@ -385,7 +386,7 @@ func TestFedStep_RejectsPayloadSignedForAnotherKernel(t *testing.T) {
 	const otherKernel = "some-other-kernels-public-key"
 
 	listSig, _ := kernel.SignStepListPayload(privA, keyA, otherKernel, ts)
-	if _, _, err := handleFederationStepList(k, context.Background(), keyA, ts, listSig, 0); err == nil {
+	if _, _, err := handleFederationStepList(k, context.Background(), keyA, ts, listSig, ""); err == nil {
 		t.Error("a list signed for another kernel must not verify here")
 	}
 	compSig, _ := kernel.SignStepPayload(privA, stepID, keyA, otherKernel, "idem-x", ts, sha256HexBytes([]byte("{}")))
@@ -425,12 +426,102 @@ func TestFedStep_ListNotCrowdedOutByOwnProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	steps, _ := body["steps"].([]*stepWithAction)
+	steps, _ := body["steps"].([]*peerStepView)
 	if len(steps) != 1 || steps[0].ID != stepID {
 		ids := make([]string, len(steps))
 		for i, s := range steps {
 			ids[i] = s.ID
 		}
 		t.Fatalf("expected exactly the peer-addressed step %s, got %v", stepID, ids)
+	}
+}
+
+// The peer-facing view must carry the request and nothing about the requester. This asserts on the
+// serialized JSON rather than the struct, because the defect it guards against was reusing a type
+// whose EMBEDDED fields leaked — a field-by-field check on the wrong type would have passed.
+// owner_handle is the sharp one: a local user identity crossing a kernel boundary is what §5's
+// encapsulation exists to prevent.
+func TestFedStep_ListDisclosesRequestNotRequester(t *testing.T) {
+	srv, k, db := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	keyA, privA := fedPeer(t, k, "@peer-a")
+	stepID := parkStepForPeer(t, k, db, keyA)
+
+	_, body, err := fedStepList(t, k, privA)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	wire, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(wire)
+
+	// Present: what the completer needs.
+	for _, want := range []string{stepID, "allowed_input", "price", "created_at"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("peer view must carry %q; got %s", want, got)
+		}
+	}
+	// Absent: local composition and identity.
+	for _, leak := range []string{"owner_handle", "created_by", "required_caller", "parent_trace_id",
+		"action_id", "completion_trace_id", "waiting_on_peer"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("peer view leaks %q: %s", leak, got)
+		}
+	}
+	// The process owner's handle must not appear under any key at all.
+	if strings.Contains(got, "@sys") {
+		t.Errorf("peer view leaks a local handle: %s", got)
+	}
+}
+
+// A completion that settles as a FAILURE must replay as that failure, not as 200. Otherwise a
+// retry tells the operator the step succeeded when it did not.
+func TestFedStep_ReplayOfSettledFailureKeepsErrorStatus(t *testing.T) {
+	result := map[string]any{"error": "boom", "code": kernel.ErrExecutionFailed.Code}
+	if got := storedIdempotentStatus(result); got != kernel.ErrExecutionFailed.HTTP {
+		t.Errorf("stored error replays as %d, want %d", got, kernel.ErrExecutionFailed.HTTP)
+	}
+	if got := storedIdempotentStatus(map[string]any{"tx_id": "t1"}); got != http.StatusOK {
+		t.Errorf("stored success replays as %d, want 200", got)
+	}
+	// An unknown/missing code degrades to 500, never to 200.
+	if got := storedIdempotentStatus(map[string]any{"error": "boom"}); got == http.StatusOK {
+		t.Error("a stored error with no code must not replay as 200")
+	}
+	// The in-flight reply carries a code so the requester re-raises a typed error.
+	status, body, _ := duplicateInFlight()
+	if status != http.StatusConflict || body["code"] != kernel.ErrInvalidState.Code {
+		t.Errorf("duplicate-in-flight = (%d, %v), want 409 with an invalid_state code", status, body)
+	}
+}
+
+// Scenario (review finding 8): a completion that fails AFTER committing has charged the caller,
+// so the error must say where that transaction is. handle() writes only the error, and writeErr
+// carries just {error, code, meta} — so the ids have to ride in Meta or they are lost.
+func TestCompletion_ErrorCarriesTheSettledTransactionIDs(t *testing.T) {
+	reply := &kernel.StepReply{
+		CallReply: &kernel.CallReply{TxID: "tx-1", TraceID: "tr-1", ReceiptID: "rc-1"},
+		StepID:    "st-1",
+	}
+	err := withSettlementMeta(kernel.ErrExecutionFailed.Wrap("upstream exploded"), reply)
+	ke, ok := err.(*kernel.KernelError)
+	if !ok {
+		t.Fatalf("expected a KernelError, got %T", err)
+	}
+	for k, want := range map[string]string{"tx_id": "tx-1", "trace_id": "tr-1", "receipt_id": "rc-1", "step_id": "st-1"} {
+		if ke.Meta[k] != want {
+			t.Errorf("meta[%q] = %q, want %q", k, ke.Meta[k], want)
+		}
+	}
+	if ke.Code != kernel.ErrExecutionFailed.Code {
+		t.Errorf("code changed to %q; the error's own classification must survive", ke.Code)
+	}
+	// Nothing settled → nothing to point at, and the error must pass through untouched.
+	plain := kernel.ErrInvalidState.Wrap("step is not waiting")
+	if got := withSettlementMeta(plain, nil); got != error(plain) {
+		t.Errorf("an error with no settled reply must be returned unchanged, got %v", got)
 	}
 }

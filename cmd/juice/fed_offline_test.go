@@ -581,3 +581,159 @@ func TestPeerStepCompleteMidStreamFailureIsNotUnreachable(t *testing.T) {
 		t.Errorf("a mid-stream failure must not claim the peer is offline: %s", rec.Body.String())
 	}
 }
+
+// The server pages at 200; ctlPeerSteps must follow those pages itself. An operator who has to
+// paginate by hand to avoid stranding funds is the failure this protocol exists to prevent.
+func TestPeerStepsFollowsPages(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	handle, _ := seedPeer(t, k, "@peer-steps")
+
+	// A fake peer holding 250 steps, served 200 then 50 with truncated/next_offset.
+	f := &fakePagingFed{total: 250, pageSize: 200}
+	srv := &server{kernel: k, log: log.Discard(), fed: f}
+
+	req := httptest.NewRequest("GET", "/control/peers/steps?key="+url.QueryEscape(handle), nil)
+	rec := httptest.NewRecorder()
+	srv.ctlPeerSteps(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Steps     []map[string]any `json:"steps"`
+		Truncated bool             `json:"truncated"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Steps) != 250 {
+		t.Errorf("got %d steps, want all 250 across pages", len(out.Steps))
+	}
+	if out.Truncated {
+		t.Error("250 steps fit within the page bound; truncated must not be set")
+	}
+	if f.calls != 2 {
+		t.Errorf("expected 2 page requests, got %d", f.calls)
+	}
+	// The second request must echo the cursor the first reply handed back, verbatim.
+	if f.cursors[0] != "" || f.cursors[1] != "c200" {
+		t.Errorf("cursors = %v, want [\"\", \"c200\"]", f.cursors)
+	}
+}
+
+// Scenario (finding 3): a page failing mid-pagination must not discard the pages already in hand.
+// Losing them is worse than the offset bug this loop was added to fix: the operator sees an error
+// and zero parked steps where they previously saw the first page.
+func TestPeerStepsPartialPagesSurviveAMidPaginationFailure(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	handle, _ := seedPeer(t, k, "@peer-steps")
+	f := &fakePagingFed{total: 500, pageSize: 200, failOnPage: 2}
+	srv := &server{kernel: k, log: log.Discard(), fed: f}
+
+	req := httptest.NewRequest("GET", "/control/peers/steps?key="+url.QueryEscape(handle), nil)
+	rec := httptest.NewRecorder()
+	srv.ctlPeerSteps(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200 with partial results: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Steps     []map[string]any `json:"steps"`
+		Truncated bool             `json:"truncated"`
+		Warning   string           `json:"warning"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Steps) != 200 {
+		t.Errorf("got %d steps, want the 200 collected before the failure", len(out.Steps))
+	}
+	if !out.Truncated || out.Warning == "" {
+		t.Errorf("a partial listing must say so: truncated=%v warning=%q", out.Truncated, out.Warning)
+	}
+}
+
+// ...but a FIRST-page failure stays a hard error: 200 with an empty list reads as "nothing is
+// parked for you", the exact misreading that strands funds.
+func TestPeerStepsFirstPageFailureIsAnError(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	handle, _ := seedPeer(t, k, "@peer-steps")
+	srv := &server{kernel: k, log: log.Discard(), fed: &fakePagingFed{total: 500, pageSize: 200, failOnPage: 1}}
+
+	req := httptest.NewRequest("GET", "/control/peers/steps?key="+url.QueryEscape(handle), nil)
+	rec := httptest.NewRecorder()
+	srv.ctlPeerSteps(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Errorf("first-page failure must not return 200: %s", rec.Body.String())
+	}
+}
+
+// Scenario (finding 9): a peer claiming truncated=true while sending an empty page must be
+// reported as truncated, never as a complete list.
+func TestPeerStepsEmptyTruncatedPageReportsTruncated(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	handle, _ := seedPeer(t, k, "@peer-steps")
+	srv := &server{kernel: k, log: log.Discard(), fed: &fakePagingFed{total: 500, pageSize: 200, emptyTruncated: true}}
+
+	req := httptest.NewRequest("GET", "/control/peers/steps?key="+url.QueryEscape(handle), nil)
+	rec := httptest.NewRecorder()
+	srv.ctlPeerSteps(rec, req)
+	var out struct {
+		Steps     []map[string]any `json:"steps"`
+		Truncated bool             `json:"truncated"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if !out.Truncated {
+		t.Errorf("an empty page claiming more must report truncated; got %s", rec.Body.String())
+	}
+}
+
+// fakePagingFed serves `total` steps in pages of `pageSize`, mirroring the real server's
+// truncated/next_cursor contract. failOnPage (1-based, 0 = never) makes that page error, so the
+// partial-results contract is testable. emptyTruncated makes page 2 claim more while sending none.
+type fakePagingFed struct {
+	total, pageSize int
+	failOnPage      int
+	emptyTruncated  bool
+	calls           int
+	cursors         []string
+}
+
+func (f *fakePagingFed) Step(_ context.Context, _ string, req fed.StepRequest) (fed.StepResponse, error) {
+	f.calls++
+	f.cursors = append(f.cursors, req.Cursor)
+	if f.calls == f.failOnPage {
+		return fed.StepResponse{}, errors.New("fed: stream closed mid-request")
+	}
+	start := 0
+	if req.Cursor != "" {
+		fmt.Sscanf(req.Cursor, "c%d", &start)
+	}
+	if f.emptyTruncated && f.calls > 1 {
+		b, _ := json.Marshal(map[string]any{"steps": []any{}, "truncated": true, "next_cursor": "c999"})
+		return fed.StepResponse{Status: 200, Body: b}, nil
+	}
+	n := f.total - start
+	if n > f.pageSize {
+		n = f.pageSize
+	}
+	steps := make([]map[string]any, n)
+	for i := range steps {
+		steps[i] = map[string]any{"id": fmt.Sprintf("s%d", start+i)}
+	}
+	body := map[string]any{"steps": steps}
+	if n == f.pageSize && start+n < f.total {
+		body["truncated"] = true
+		body["next_cursor"] = fmt.Sprintf("c%d", start+n)
+	}
+	b, _ := json.Marshal(body)
+	return fed.StepResponse{Status: 200, Body: b}, nil
+}
+func (f *fakePagingFed) Inspect(context.Context, string) (json.RawMessage, error) { return nil, nil }
+func (f *fakePagingFed) Gossip(context.Context, string) (json.RawMessage, error)  { return nil, nil }
+func (f *fakePagingFed) Manifests(context.Context, string) ([]json.RawMessage, error) {
+	return nil, nil
+}
+func (f *fakePagingFed) Probe(context.Context, string) fed.Reachability {
+	return fed.Reachability{Path: "direct"}
+}
+func (f *fakePagingFed) ListenAddrs() []string { return nil }
+func (f *fakePagingFed) Close() error          { return nil }

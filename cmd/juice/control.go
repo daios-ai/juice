@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -341,7 +342,17 @@ func (s *server) stepRoundTrip(ctx context.Context, peerKey string, req fed.Step
 			msg = "peer rejected the step request"
 		}
 		code, _ := body["code"].(string)
-		return nil, kernel.ErrorFromCode(code).Wrap(msg)
+		out := kernel.ErrorFromCode(code).Wrap(msg)
+		// Preserve the peer's structured metadata (e.g. the settled tx a failed completion was
+		// charged for) so it reaches the operator instead of dying at the hop.
+		if meta, ok := body["meta"].(map[string]any); ok {
+			for k, v := range meta {
+				if sv, ok := v.(string); ok {
+					out = out.WithMeta(k, sv)
+				}
+			}
+		}
+		return nil, out
 	}
 	return body, nil
 }
@@ -356,19 +367,63 @@ func (s *server) ctlPeerSteps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	sig, ts, err := s.kernel.SignStepList(pub, peerKey)
-	if err != nil {
-		writeErr(w, err)
-		return
+
+	// Follow the peer's pages until exhausted rather than exposing an --offset flag. The whole
+	// point of this command is that no parked step stays invisible; an operator who has to
+	// paginate by hand to avoid stranding funds is the failure it exists to prevent. Bounded so a
+	// hostile or broken peer cannot spin us forever, and the bound is reported, never silent.
+	const maxPages = 10
+	all := []any{}
+	truncated, warning, cursor := false, "", ""
+	for page := 0; ; page++ {
+		sig, ts, err := s.kernel.SignStepList(pub, peerKey)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		body, err := s.stepRoundTrip(ctx, peerKey, fed.StepRequest{
+			Kind: "list", Counterparty: pub, Timestamp: ts, Signature: sig, Cursor: cursor,
+		}, fedOpTimeout)
+		if err != nil {
+			// Nothing collected yet: a hard error. Returning 200 with an empty list would read as
+			// "nothing is parked for you" — the precise misreading that strands funds.
+			if len(all) == 0 {
+				writeErr(w, err)
+				return
+			}
+			// Pages already in hand: report them with a warning rather than discarding them.
+			// Partial visibility of parked funds beats none, which is this command's whole purpose.
+			truncated = true
+			warning = fmt.Sprintf("listing stopped after %d page(s): %v", page, err)
+			break
+		}
+		steps, _ := body["steps"].([]any)
+		all = append(all, steps...)
+		more, _ := body["truncated"].(bool)
+		if !more {
+			break
+		}
+		// The peer claims more but sent nothing (or no cursor to advance by): stop, and say so —
+		// silently reporting a complete list here would hide whatever it is still holding.
+		next, _ := body["next_cursor"].(string)
+		if len(steps) == 0 || next == "" || next == cursor {
+			truncated = true
+			break
+		}
+		cursor = next
+		if page+1 >= maxPages {
+			truncated = true
+			break
+		}
 	}
-	body, err := s.stepRoundTrip(ctx, peerKey, fed.StepRequest{
-		Kind: "list", Counterparty: pub, Timestamp: ts, Signature: sig,
-	}, fedOpTimeout)
-	if err != nil {
-		writeErr(w, err)
-		return
+	out := map[string]any{"steps": all}
+	if truncated {
+		out["truncated"] = true
 	}
-	writeJSON(w, http.StatusOK, body)
+	if warning != "" {
+		out["warning"] = warning
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // ctlCompletePeerStep completes a step a peer parked for this kernel (§10, §13). The reply's

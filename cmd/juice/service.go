@@ -861,6 +861,33 @@ func checkFederationTimestamp(tsStr string) error {
 	return nil
 }
 
+// peerStepView is what a remote peer may see of a step parked for it: the request, not the
+// requester. Deliberately NOT stepWithAction — that is the local operator's view, and reusing it
+// shipped a peer the creating action's name, the process owner's @handle, and raw local ids.
+// A user identity crossing a kernel boundary is precisely what §5's encapsulation forbids, so the
+// peer-facing shape is a separate type whose fields must each be justified rather than inherited.
+//
+// Kept, because each is bound FOR the completer: partial_args is the payload channel (§14 has
+// @sys/message put its body there so the recipient can read it), and allowed_input is §14's
+// explicit substitute for reading a target action that may be private. Everything else — the
+// action ref (it names a local owner), created_by, owner_handle, and every trace/action/tx id —
+// is local composition detail the completer does not need in order to complete.
+type peerStepView struct {
+	ID           string          `json:"id"`
+	PartialArgs  json.RawMessage `json:"partial_args,omitempty"`
+	AllowedInput map[string]any  `json:"allowed_input,omitempty"`
+	Price        int64           `json:"price"`
+	CreatedAt    time.Time       `json:"created_at"`
+}
+
+func newPeerStepView(s *kernel.Step, action *kernel.Action) *peerStepView {
+	v := &peerStepView{ID: s.ID, PartialArgs: s.PartialArgs, Price: s.Price, CreatedAt: s.CreatedAt}
+	if action != nil {
+		v.AllowedInput = kernel.DeriveAllowedSchema(action.InputSchema, s.PartialArgs)
+	}
+	return v
+}
+
 // maxPeerStepPage bounds one step-list reply. Reaching it sets `truncated` rather than silently
 // dropping the tail: an operator must never read a capped page as "nothing is parked for you".
 const maxPeerStepPage = 200
@@ -868,7 +895,7 @@ const maxPeerStepPage = 200
 // handleFederationStepList returns the waiting steps whose required caller is the requesting peer
 // (§10, §13). Read-only: an unknown key gets an empty list rather than a lazily provisioned account
 // — provisioning is reserved for a call, which is what actually creates a billing relationship.
-func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, sigStr string, offset int) (int, map[string]any, error) {
+func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, sigStr, cursor string) (int, map[string]any, error) {
 	if err := checkFederationTimestamp(tsStr); err != nil {
 		return 0, nil, err
 	}
@@ -891,20 +918,19 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	// Scoped in SQL, oldest first: ListSteps' predicate also matches every step inside a process
 	// this peer owns (its own inbound calls), which would crowd the completable ones out of the
 	// page. A suspended peer is refused by requireActiveUser inside the kernel call.
-	steps, err := k.ListStepsAwaitingCaller(ctx, peer.ID, maxPeerStepPage, offset)
+	steps, nextCursor, err := k.ListStepsAwaitingCaller(ctx, peer.ID, maxPeerStepPage, cursor)
 	if err != nil {
 		return 0, nil, err
 	}
-	uc := newUserCache(k, ctx)
-	views := make([]*stepWithAction, len(steps))
+	views := make([]*peerStepView, len(steps))
 	for i, s := range steps {
 		action, _ := k.ReadAction(ctx, s.ActionID)
-		views[i] = enrichStep(k, ctx, s, action, uc)
+		views[i] = newPeerStepView(s, action)
 	}
 	body := map[string]any{"steps": views}
 	if len(views) == maxPeerStepPage {
 		body["truncated"] = true
-		body["next_offset"] = offset + len(views)
+		body["next_cursor"] = nextCursor
 	}
 	return http.StatusOK, body, nil
 }
@@ -947,28 +973,32 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 			return 0, nil, kernel.ErrInvalidState.Wrap("idempotency check failed")
 		}
 		if existing.Status != "complete" {
-			return http.StatusConflict, map[string]any{"error": "duplicate in flight"}, nil
+			return duplicateInFlight()
 		}
-		var result map[string]any
-		_ = json.Unmarshal([]byte(existing.ResultJSON), &result)
-		return http.StatusOK, result, nil
+		return replayStepRecord(existing, stepID)
 	}
 
-	reply, err := k.CompleteStep(ctx, peer.ID, stepID, rawInput)
+	// Federated: the record id rides into the kernel, so whichever commit finally settles this
+	// completion — here, or later via the remote-dispatch retry loop, the max-age bound, or a
+	// forced closure — completes the record atomically with the transaction (§5, §13). The service
+	// layer therefore disposes of the record only in the cases where NO commit will ever happen.
+	reply, err := k.CompleteStepFederated(ctx, peer.ID, stepID, rawInput, rec.ID)
 	if err != nil {
-		// Same rule as an inbound call: complete-with-error whenever something settled, delete only
-		// when nothing did. CompleteStep can fail *after* committing a failure transaction (the
-		// resumed action ran and failed), and a replay must then return that outcome rather than
-		// re-executing. The step's own status is the witness: `done` means a transaction committed;
-		// back to `waiting` means the completion was rejected before one existed (§10).
-		settled := false
-		if s, readErr := k.ReadStep(ctx, peer.ID, stepID); readErr == nil && s.Status == kernel.StepDone {
-			settled = true
-		}
-		if settled {
-			errJSON, _ := json.Marshal(map[string]string{"error": err.Error(), "code": kernel.KernelErrorCode(err)})
-			settleIdempotency(k, ctx, rec.ID, string(errJSON))
-		} else {
+		// Disposition follows CompleteStep's outcome contract (§10) — never a re-read of the step's
+		// status, which cannot distinguish these three cases:
+		switch {
+		case errors.Is(err, kernel.ErrTimeout):
+			// Claimed and dispatched to a peer; the receipt may still arrive and commit, and that
+			// commit now completes the record. Leave it PENDING so a replay honestly reports a
+			// duplicate in flight rather than claiming an outcome that has not happened yet.
+		case reply != nil:
+			// A transaction committed and then failed; the commit already completed the record.
+			// Hand the peer its ids so it can find the transaction it was charged for.
+			err = withSettlementMeta(err, reply)
+		default:
+			// Nothing settled and the step is waiting again: no commit will ever complete this
+			// record, so drop it — otherwise a corrected retry is locked out by a key that
+			// produced no result.
 			_ = k.DeleteIdempotencyRecord(ctx, rec.ID)
 		}
 		return 0, nil, err
@@ -978,17 +1008,59 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 		receipt, _ := k.GetReceiptByID(ctx, reply.ReceiptID)
 		body["receipt"] = receipt
 	}
-	resultJSON, _ := json.Marshal(body)
-	settleIdempotency(k, ctx, rec.ID, string(resultJSON))
 	return http.StatusOK, body, nil
 }
 
-// settleIdempotency marks a record complete, falling back to deleting it if that write fails.
-// A record stuck pending answers every retry with 409 "duplicate in flight" forever, with the
-// money already spent and the result unreachable; deleting it instead lets a retry through to an
-// honest ErrInvalidState ("step is not waiting"). Neither is good, but only one is a dead end.
-func settleIdempotency(k *kernel.Kernel, ctx context.Context, recID, resultJSON string) {
-	if err := k.CompleteIdempotencyRecordIfPending(ctx, recID, resultJSON, ""); err != nil {
+// replayStepRecord rebuilds a completion reply from a completed idempotency record. The kernel
+// stores the two halves the same way for every commit path — result_json is the bare action result
+// (or an {error,code} body), receipt_json the signed receipt — so success is discriminated on the
+// RECEIPT's status rather than by probing the result for an "error" key, which a legitimate result
+// carrying its own "error" field would trip.
+func replayStepRecord(rec *kernel.IdempotencyRecord, stepID string) (int, map[string]any, error) {
+	var result map[string]any
+	_ = json.Unmarshal([]byte(rec.ResultJSON), &result)
+	var receipt *kernel.Receipt
+	if rec.ReceiptJSON != "" {
+		_ = json.Unmarshal([]byte(rec.ReceiptJSON), &receipt)
+	}
+	if receipt == nil || receipt.Status != kernel.TxSuccess {
+		return storedIdempotentStatus(result), result, nil
+	}
+	return http.StatusOK, map[string]any{
+		"result": result, "tx_id": receipt.TxID, "trace_id": receipt.TraceID,
+		"step_id": stepID, "receipt": receipt,
+	}, nil
+}
+
+// storedIdempotentStatus is the HTTP status a replayed idempotency record must carry. A stored
+// error body replays as its own error status, never 200 — otherwise a retry of a completion that
+// settled as a FAILURE reports success, which is exactly backwards for the operator deciding
+// whether to act again.
+func storedIdempotentStatus(result map[string]any) int {
+	if _, isErr := result["error"]; !isErr {
+		return http.StatusOK
+	}
+	code, _ := result["code"].(string)
+	return kernel.HTTPStatusFromCode(code)
+}
+
+// duplicateInFlight is the §13 reply for a replay that arrives while the first attempt is still
+// running. It carries a code so the requesting kernel re-raises a typed error: without one,
+// ErrorFromCode("") degrades it to execution_failed and an operator reads a transient duplicate
+// as a hard failure and stops retrying.
+func duplicateInFlight() (int, map[string]any, error) {
+	return http.StatusConflict, map[string]any{
+		"error": "duplicate in flight",
+		"code":  kernel.ErrInvalidState.Code,
+	}, nil
+}
+
+// settleIdempotencyWithReceipt marks a record complete, falling back to deleting it if that write
+// fails. A record stuck pending answers every retry with 409 "duplicate in flight" forever, with
+// the money already spent and the result unreachable; deleting it instead lets a retry through to
+// an honest typed error. Neither is good, but only one is a dead end.
+func settleIdempotencyWithReceipt(k *kernel.Kernel, ctx context.Context, recID, resultJSON, receiptJSON string) {
+	if err := k.CompleteIdempotencyRecordIfPending(ctx, recID, resultJSON, receiptJSON); err != nil {
 		_ = k.DeleteIdempotencyRecord(ctx, recID)
 	}
 }
@@ -1066,13 +1138,9 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 				if existing.ReceiptJSON != "" {
 					_ = json.Unmarshal([]byte(existing.ReceiptJSON), &receipt)
 				}
-				if _, isErr := result["error"]; isErr {
-					code, _ := result["code"].(string)
-					return kernel.HTTPStatusFromCode(code), map[string]any{"result": result, "receipt": receipt}, nil
-				}
-				return http.StatusOK, map[string]any{"result": result, "receipt": receipt}, nil
+				return storedIdempotentStatus(result), map[string]any{"result": result, "receipt": receipt}, nil
 			}
-			return http.StatusConflict, map[string]any{"error": "duplicate in flight"}, nil
+			return duplicateInFlight()
 		}
 		return 0, nil, kernel.ErrInvalidState.Wrap("idempotency check failed")
 	}
@@ -1089,8 +1157,14 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 		if reply != nil && reply.ReceiptID != "" {
 			receipt, _ := k.GetReceiptByID(ctx, reply.ReceiptID)
 			receiptJSON, _ := json.Marshal(receipt)
-			_ = k.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), string(receiptJSON))
+			settleIdempotencyWithReceipt(k, ctx, rec.ID, string(errJSON), string(receiptJSON))
 			return http.StatusUnprocessableEntity, map[string]any{"error": callErr.Error(), "receipt": receipt}, nil
+		}
+		// A parked remote dispatch has committed nothing yet and may still settle with a real
+		// charge; its own settlement completes the record (§13). Signing a zero-charge rejection
+		// here would answer the peer with an outcome that has not happened.
+		if errors.Is(callErr, kernel.ErrTimeout) {
+			return 0, nil, callErr
 		}
 		// Pre-execution rejection (no transaction committed, e.g. insufficient funds): sign a
 		// zero-charge rejection receipt so the caller can settle locally without leaving the
@@ -1101,7 +1175,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 		}
 		if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey, msg); signErr == nil {
 			receiptJSON, _ := json.Marshal(receipt)
-			_ = k.CompleteIdempotencyRecordIfPending(ctx, rec.ID, string(errJSON), string(receiptJSON))
+			settleIdempotencyWithReceipt(k, ctx, rec.ID, string(errJSON), string(receiptJSON))
 			return status, map[string]any{"error": msg, "receipt": receipt}, nil
 		}
 		_ = k.DeleteIdempotencyRecord(ctx, rec.ID)

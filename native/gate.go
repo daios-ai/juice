@@ -3,6 +3,7 @@ package native
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/daios-ai/juice/kernel"
 )
@@ -20,11 +21,11 @@ import (
 //	join: each contributor increments a counter; the one that reaches `need` resumes it.
 //	      Needs the one small piece of state a barrier inherently is, held in a native-owned table.
 //
-// Confinement: a gate may only resume an onward step belonging to the process it is executing in.
-// Without that check any caller could fire any step whose id they learned, spending another
-// process's parked funds. A consequence worth knowing: a top-level `juice run @sys/step/race`
-// can never fire anything, because a root run mints a fresh process — gates are reachable only
-// from inside the workflow that created the onward step.
+// Confinement: a gate may only resume an onward step created by the trace that invoked it (see
+// gateTarget). Without that, any caller could fire any step whose id they learned, spending funds
+// another party reserved. A consequence worth knowing: a top-level `juice run @sys/step/race` can
+// never fire anything, because a root trace has no parent — gates are reachable only from inside
+// the workflow that created the onward step.
 
 // GateStore is the state @sys/step/join needs: a counter per onward step. Defined here and
 // implemented by the store so the kernel never learns about it — a native's state is the
@@ -78,32 +79,50 @@ func gateTarget(ctx context.Context, args map[string]any, sysID, traceID string,
 	if step.ParentTraceID == nil || *step.ParentTraceID != *self.ParentTraceID {
 		return nil, kernel.ErrUnauthorized.Wrap("step was not created by this gate's caller")
 	}
+	// A gate resumes the onward step as @sys, so @sys must be its required caller. Checking here
+	// names the actual mistake; without it the workflow author sees a bare "unauthorized" raised
+	// one layer down, from inside the completion, and attributed to the contributor.
+	if step.RequiredCallerUserID != sysID {
+		return nil, kernel.ErrUnauthorized.Wrap("a gate's onward step must have @sys as its required caller")
+	}
 	return step, nil
 }
 
-// fire resumes the onward step as @sys.
+// fire resumes the onward step as @sys, reporting whether THIS contributor was the one that
+// resumed it. It reads CompleteStep's outcome contract directly; re-reading the step's status
+// would be racy and could not tell a lost race from this gate's own dispatch still being in
+// flight — the two need opposite handling.
 //
-// Failure is classified by the step's state, not by the error code, because the same
-// ErrInvalidState can mean "another contributor already claimed it" or "the onward action itself
-// failed" — and only the former is a normal outcome. The rule: if the step is no longer waiting,
-// the continuation was resumed by someone (its own transaction carries the result, success or
-// failure), so this contributor simply reports fired=false. If it is still waiting, nothing
-// resumed it and the error is real — propagate it rather than silently dropping a contribution.
+//	resumed and settled            → fired, status success
+//	resumed, then the onward call
+//	  failed (reply non-nil)       → still fired, status failure + the message: the continuation
+//	                                 ran, so this contributor did its job, but reporting only
+//	                                 fired=true would read as success and the workflow would
+//	                                 proceed as though the continuation had worked
+//	another contributor won        → fired=false, not an error: that is the normal outcome for
+//	                                 every contributor but one
+//	anything else                  → propagate, including an in-flight ErrTimeout, so a dispatch
+//	                                 awaiting a peer's receipt is never mistaken for a lost race
 func fire(ctx context.Context, k *kernel.Kernel, sysID, stepID string, input json.RawMessage, extra map[string]any) (map[string]any, error) {
 	out := map[string]any{"fired": false}
 	for key, v := range extra {
 		out[key] = v
 	}
 	reply, err := k.CompleteStep(ctx, sysID, stepID, input)
-	if err != nil {
-		if s, readErr := k.ReadStep(ctx, sysID, stepID); readErr == nil && s.Status != kernel.StepWaiting {
-			return out, nil
-		}
+	switch {
+	case err != nil && errors.Is(err, kernel.ErrStepNotClaimed):
+		return out, nil
+	case err != nil && reply == nil:
 		return nil, err
 	}
 	out["fired"] = true
 	out["tx_id"] = reply.TxID
 	out["trace_id"] = reply.TraceID
+	out["status"] = string(kernel.TxSuccess)
+	if err != nil {
+		out["status"] = string(kernel.TxFailure)
+		out["error"] = err.Error()
+	}
 	return out, nil
 }
 
@@ -147,16 +166,25 @@ func executeJoin(ctx context.Context, args map[string]any, sysID, traceID string
 	}
 	// Threshold reached (>= not ==, so a crash between increment and fire is healed by the next
 	// contribution). The onward step is resumed with {} — its arguments were bound in partial_args
-	// at creation. The gate row is dropped on every outcome: it has served its purpose whether the
-	// barrier fired, lost to another resolver, or failed — nothing will read it again. A failed
-	// fire leaves the onward step waiting, recovered by process closure like any failed
-	// continuation; the alternative would be retry machinery for a contributor that no longer exists.
+	// at creation.
+	//
+	// On a genuine fire failure the row is deliberately KEPT: it still holds have >= need, so any
+	// later contribution re-attempts the fire. Deleting it would discard every accumulated
+	// contribution and guarantee the barrier could never complete. If no contributor remains, the
+	// onward step simply stays waiting and process closure refunds it, like any failed continuation.
 	out, err := fire(ctx, k, sysID, step.ID, json.RawMessage("{}"), counts)
 	if err != nil {
-		_ = gates.DeleteStepGate(ctx, step.ID)
 		return nil, err
 	}
-	_ = gates.DeleteStepGate(ctx, step.ID)
+	// The row is spent ONLY when this contribution actually resumed the step. Every other outcome
+	// keeps it, because every other outcome may still need the accumulated count: a failed fire so
+	// a later contribution can retry, and a not-claimable step because that also covers this
+	// barrier's own in-flight dispatch, which may yet leave the step re-completable. The cost of
+	// keeping it is one bounded-garbage row for an already-resolved step, cleaned up by the
+	// step_gates ON DELETE CASCADE; the cost of deleting it wrongly is every contribution lost.
+	if fired, _ := out["fired"].(bool); fired {
+		_ = gates.DeleteStepGate(ctx, step.ID)
+	}
 	return out, nil
 }
 

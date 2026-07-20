@@ -2137,3 +2137,117 @@ func TestRecordPeerSync(t *testing.T) {
 		t.Errorf("unknown key should be a no-op, got %v", err)
 	}
 }
+
+// Scenario (review finding 1): a federated call parked on a remote dispatch must have its INBOUND
+// idempotency record completed by whichever settlement finally resolves it. Before the dispatch
+// payload carried the record id, the retry loop settled the money but left the record pending, so
+// the requesting peer was answered "duplicate in flight" until expiry and could never learn the
+// outcome of work it had paid for.
+func TestParkedDispatchCompletesInboundIdempotencyRecordOnRetry(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	bps := kernel.DefaultConfig().ImportBPS
+
+	fake := &fakeFederationHTTP{} // no receipt yet → the dispatch parks
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+
+	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "inbound-rec", 1000)
+	mp := a.Price * 10000 / (10000 + bps)
+
+	// An inbound peer's record, exactly as the federation handler inserts before executing.
+	rec := &kernel.IdempotencyRecord{
+		ID: uuid.New().String(), IdempotencyKey: "inbound-key", CounterpartyUserID: caller.ID,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(24 * time.Hour),
+	}
+	if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run it as that peer's call: the remote is offline, so the dispatch parks.
+	if _, err := k.RunFederated(ctx, caller.ID, a.OwnerUserID, a.Name, map[string]any{}, rec.ID); !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("expected ErrTimeout (parked), got %v", err)
+	}
+	got, err := st.ReadIdempotencyRecord(ctx, "inbound-key", caller.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "pending" {
+		t.Fatalf("record should be pending while the dispatch is parked, got %q", got.Status)
+	}
+
+	// The peer returns with a valid signed receipt; the retry loop settles the parked dispatch.
+	now := time.Now().UTC()
+	r := &kernel.Receipt{
+		ID: uuid.New().String(), TxID: "rtx", ActionID: "inbound-rec",
+		ArgsHash: jcsHashForTest(t, `{}`), ReplyHash: jcsHashForTest(t, `{}`),
+		Status: kernel.TxSuccess, Charge: mp, StartedAt: now, CreatedAt: now,
+	}
+	r.Signature = signReceiptForTest(t, priv, r)
+	b, _ := json.Marshal(r)
+	fake.receiptJSON = string(b)
+	k.RetryPendingRemoteDispatches(ctx)
+
+	// The settlement that resolved the dispatch must also have completed the inbound record —
+	// otherwise the peer's replay is answered "duplicate in flight" forever.
+	got, err = st.ReadIdempotencyRecord(ctx, "inbound-key", caller.ID)
+	if err != nil {
+		t.Fatalf("ReadIdempotencyRecord after retry: %v", err)
+	}
+	if got.Status != "complete" {
+		t.Errorf("record status = %q, want complete: the peer can never learn the outcome otherwise", got.Status)
+	}
+	if got.ReceiptJSON == "" {
+		t.Error("a completed record must carry the signed receipt the peer settles on")
+	}
+}
+
+// Scenario (design review): forced closure is also a final settlement for a parked dispatch, so it
+// too must complete the inbound record. Without it, an operator ending a process strands the
+// requesting peer on "duplicate in flight" until expiry.
+func TestEndProcessCompletesInboundIdempotencyRecordOfAParkedDispatch(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+
+	fake := &fakeFederationHTTP{} // offline peer → the dispatch parks
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+
+	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "close-rec", 1000)
+	rec := &kernel.IdempotencyRecord{
+		ID: uuid.New().String(), IdempotencyKey: "close-key", CounterpartyUserID: caller.ID,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(24 * time.Hour),
+	}
+	if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.RunFederated(ctx, caller.ID, a.OwnerUserID, a.Name, map[string]any{}, rec.ID); !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("expected ErrTimeout (parked), got %v", err)
+	}
+
+	procs, _ := st.ListProcesses(ctx, caller.ID, 10, 0)
+	if len(procs) != 1 {
+		t.Fatalf("expected 1 open process, got %d", len(procs))
+	}
+	if err := k.EndProcess(ctx, caller.ID, procs[0].ID); err != nil {
+		t.Fatalf("EndProcess: %v", err)
+	}
+
+	got, err := st.ReadIdempotencyRecord(ctx, "close-key", caller.ID)
+	if err != nil {
+		t.Fatalf("ReadIdempotencyRecord after closure: %v", err)
+	}
+	if got.Status != "complete" {
+		t.Errorf("record status = %q, want complete after forced closure", got.Status)
+	}
+}

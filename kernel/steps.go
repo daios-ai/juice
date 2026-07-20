@@ -110,6 +110,16 @@ func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Tr
 
 	recoverErr := ErrInternal.Wrap(reason)
 	req := CallRequest{StepID: stepID}
+	// A parked remote dispatch carries the inbound cross-kernel record it is serving. Force-failing
+	// it here (EndProcess, or crash recovery) is that record's final settlement, so thread the id
+	// through: otherwise the peer that requested the work is answered "duplicate in flight" until
+	// the record expires and never learns the call resolved.
+	if trace.DispatchJSON != nil {
+		var dispatch dispatchPayload
+		if err := json.Unmarshal([]byte(*trace.DispatchJSON), &dispatch); err == nil {
+			req.IdempotencyRecordID = dispatch.IdempotencyRecordID
+		}
+	}
 	_, settleErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, recoverErr)
 	return settleErr
 }
@@ -202,16 +212,41 @@ func (k *Kernel) ListSteps(ctx context.Context, callerID, processID, status stri
 // first — "what awaits me". Unlike ListSteps it takes no superuser widening: the question is
 // scoped to one user by construction, and the federation step protocol (§13) answers it for a
 // peer, which must never be able to widen its view of another kernel's steps.
-func (k *Kernel) ListStepsAwaitingCaller(ctx context.Context, callerID string, limit, offset int) ([]*Step, error) {
+func (k *Kernel) ListStepsAwaitingCaller(ctx context.Context, callerID string, limit int, cursor string) ([]*Step, string, error) {
 	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return k.store.ListStepsAwaitingCaller(ctx, callerID, limit, offset)
+	return k.store.ListStepsAwaitingCaller(ctx, callerID, limit, cursor)
 }
 
 // CompleteStep resumes a waiting step by merging caller input with partial_args and executing the next call.
 // No superuser exception: only required_caller_user_id may complete the step.
+//
+// Outcome contract — callers must read these, never re-read the step's status, which is racy and
+// cannot distinguish "another completer claimed it" from "my own resumed call is still in flight":
+//
+//	err == nil                            the step was resumed and settled; reply is the result
+//	reply != nil (with err)               a transaction committed for THIS completion and then
+//	                                      failed; reply carries its TxID/ReceiptID (same contract
+//	                                      as Call and RunFederated)
+//	errors.Is(err, ErrStepNotClaimed)     this completion never took the step — already claimed
+//	                                      or already resolved by someone else; nothing happened
+//	errors.Is(err, ErrTimeout)            claimed, dispatched to a peer, and awaiting its receipt;
+//	                                      the step stays running for RetryPendingRemoteDispatches
+//	otherwise (reply == nil)              rejected before anything settled; the step is waiting again
 func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, input json.RawMessage) (*StepReply, error) {
+	return k.completeStep(ctx, callerID, stepID, input, "")
+}
+
+// CompleteStepFederated resumes a step on behalf of a peer, threading the inbound cross-kernel
+// idempotency record (§13) so the commit that settles the call completes that record atomically —
+// including a settlement that only happens later, via the remote-dispatch retry loop. Mirrors
+// RunFederated, which does the same for an inbound call.
+func (k *Kernel) CompleteStepFederated(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID string) (*StepReply, error) {
+	return k.completeStep(ctx, callerID, stepID, input, idempotencyRecordID)
+}
+
+func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID string) (*StepReply, error) {
 	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return nil, err
 	}
@@ -220,7 +255,7 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 		return nil, err
 	}
 	if step.Status != StepWaiting {
-		return nil, ErrInvalidState.Wrap("step is not waiting")
+		return nil, ErrInvalidState.Wrap("step is not waiting").Because(ErrStepNotClaimed)
 	}
 	// Derive process from the step's parent trace.
 	if step.ParentTraceID == nil {
@@ -309,32 +344,46 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 	if action.Kind == KindRemoteProxy {
 		key := uuid.New().String()
 		stepTrace.IdempotencyKey = &key
-		stepTrace.DispatchJSON = marshalDispatch(args, stepID, k.remoteManifestPrice(action.Price))
+		stepTrace.DispatchJSON = marshalDispatch(args, stepID, k.remoteManifestPrice(action.Price), idempotencyRecordID)
 	}
+	// A lost waiting→running CAS already carries ErrStepNotClaimed from the store, which marks
+	// only the two genuine claim races. Deliberately NOT relabelled here: BeginStepCall also
+	// reports a park-invariant violation as ErrInvalidState, and a blanket relabel would present
+	// that ledger corruption to a gate as an ordinary lost race and silently drop the contribution.
 	if err := k.store.BeginStepCall(ctx, stepID, stepTrace); err != nil {
 		return nil, err
 	}
 
 	reply, callErr := k.Call(ctx, CallRequest{
-		CallerID:        callerID,
-		ExistingTraceID: stepTrace.ID, // BeginStepCall pre-created and funded this completion trace
-		Action:          action,
-		Args:            args,
-		StepID:          stepID, // marks the step done at commit + selects CallerStep wallet
+		CallerID:            callerID,
+		ExistingTraceID:     stepTrace.ID, // BeginStepCall pre-created and funded this completion trace
+		Action:              action,
+		Args:                args,
+		StepID:              stepID, // marks the step done at commit + selects CallerStep wallet
+		IdempotencyRecordID: idempotencyRecordID,
 	})
 	if callErr != nil {
 		// Remote-proxy timeout: the completion trace has idempotency_key set and the
 		// remote dispatch may already be in flight. Leave the step running so that
 		// RetryPendingRemoteDispatches can recover it via ListPendingRemoteTraces.
 		// Do NOT re-park — that would delete the pending trace and lose retry state.
+		// Nothing has committed yet, so there is no reply to hand back; callers recognize this
+		// in-flight state by ErrTimeout, not by the nil reply.
 		if errors.Is(callErr, ErrTimeout) {
 			return nil, callErr
 		}
-		// Non-timeout: Call failed before creating a transaction. Re-park and reset to waiting so
-		// the step can be retried. A no-op if CommitFailedCall already ran (step done); a non-nil
-		// error is a genuine store failure worth logging (callErr is still returned).
+		// Non-timeout: re-park and reset to waiting so the step can be retried. A no-op if
+		// CommitFailedCall already ran (step done); a non-nil error is a genuine store failure
+		// worth logging (callErr is still returned).
 		if resetErr := k.store.ResetStepAndRepark(ctx, stepID); resetErr != nil {
 			k.log.With(ctx).Error("step.reset_failed", "step_id", stepID, "error", resetErr, "call_error", callErr)
+		}
+		// Pass Call's reply through rather than dropping it. Call returns a non-nil reply exactly
+		// when a transaction committed, so this preserves the one fact every caller needs — did
+		// anything settle? — instead of leaving them to re-read the step's status and guess. Same
+		// contract as Call and RunFederated, which handleFederationCall already relies on.
+		if reply != nil {
+			return &StepReply{CallReply: reply, StepID: stepID}, callErr
 		}
 		return nil, callErr
 	}

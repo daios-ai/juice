@@ -27,6 +27,8 @@ type gateFixture struct {
 	// siblingTrace is a child of a DIFFERENT trace in the SAME process: what foreign code funded
 	// by the same process owner looks like. It must not be able to fire the onward step.
 	siblingTrace string
+	// parentTrace is the trace that created the onward step — what gateTrace's parent must be.
+	parentTrace string
 }
 
 func newGateFixture(t *testing.T) *gateFixture {
@@ -84,7 +86,7 @@ func newGateFixture(t *testing.T) *gateFixture {
 	// step, different creator.
 	contractor := child(tr.ID)
 	return &gateFixture{
-		k: k, db: db, sysID: sys.ID, step: step,
+		k: k, db: db, sysID: sys.ID, step: step, parentTrace: tr.ID,
 		gateTrace:    child(tr.ID),
 		siblingTrace: child(contractor),
 	}
@@ -104,6 +106,9 @@ func TestRace_FirstContributorFiresOnce(t *testing.T) {
 	}
 	if first["tx_id"] == "" || first["tx_id"] == nil {
 		t.Errorf("expected a tx_id on the winning contribution, got %v", first["tx_id"])
+	}
+	if first["status"] != "success" {
+		t.Errorf("expected status=success on a clean fire, got %v", first["status"])
 	}
 
 	// The loser sees fired=false, not an error: losing a race is the normal outcome.
@@ -278,8 +283,9 @@ func TestJoin_InvalidNeed(t *testing.T) {
 }
 
 // A barrier whose onward step is already gone (cancelled, or won by something else) reports
-// fired=false and clears its row rather than erroring.
-func TestJoin_AlreadyResolvedStepClearsGate(t *testing.T) {
+// fired=false rather than erroring. The row is deliberately left in place — see
+// TestJoin_GateRowSurvivesWhenTheOnwardStepIsNotClaimable for why that state is not conclusive.
+func TestJoin_AlreadyResolvedStepReportsNotFired(t *testing.T) {
 	f := newGateFixture(t)
 	ctx := context.Background()
 	if _, err := executeRace(ctx, map[string]any{"step_id": f.step.ID}, f.sysID, f.gateTrace, f.k); err != nil {
@@ -312,5 +318,122 @@ func TestIntArg(t *testing.T) {
 		if ok != tc.ok || (ok && got != tc.want) {
 			t.Errorf("intArg(%#v) = (%d,%v), want (%d,%v)", tc.in, got, ok, tc.want, tc.ok)
 		}
+	}
+}
+
+// A contributor whose onward action FAILS still fired: it resumed the continuation, and the
+// failure is recorded in that continuation's own transaction. Reporting fired=false here would be
+// indistinguishable from losing the race, so the workflow could not tell "nobody ran it" from
+// "it ran and failed" — the misclassification the outcome contract exists to remove.
+func TestGates_FiredIsTrueWhenTheOnwardActionFails(t *testing.T) {
+	f := newGateFixture(t)
+	ctx := context.Background()
+
+	// Point the onward step at a native whose handler always fails, so the completion commits a
+	// FAILURE transaction rather than being rejected before one exists.
+	f.k.RegisterNativeHandler("boom", func(context.Context, map[string]any, string, string, string, string, string) (map[string]any, error) {
+		return nil, kernel.ErrExecutionFailed.Wrap("upstream exploded")
+	})
+	sys, _ := f.k.ReadUserByHandle(ctx, "@sys")
+	boom := seedAction(t, f.db, sys.ID, "boom", "always fails")
+	boom.Kind = kernel.KindNative
+	if err := f.db.UpdateAction(ctx, boom); err != nil {
+		t.Fatal(err)
+	}
+	step, err := f.k.CreateStep(ctx, f.parentTrace, boom.ID, json.RawMessage(`{}`), sys.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+
+	out, err := executeRace(ctx, map[string]any{"step_id": step.ID}, f.sysID, f.gateTrace, f.k)
+	if err != nil {
+		t.Fatalf("race over a failing onward action should not error: %v", err)
+	}
+	if out["fired"] != true {
+		t.Fatalf("expected fired=true (the continuation ran and failed), got %v", out)
+	}
+	if out["tx_id"] == nil || out["tx_id"] == "" {
+		t.Errorf("expected the onward failure transaction's id, got %v", out["tx_id"])
+	}
+	// Scenario (review finding 6): fired=true alone reads as success. The workflow must be able to
+	// see that the continuation FAILED without going and inspecting the transaction itself.
+	if out["status"] != "failure" {
+		t.Errorf("expected status=failure alongside fired=true, got %v", out)
+	}
+	if msg, _ := out["error"].(string); msg == "" {
+		t.Error("expected the onward failure message to be reported")
+	}
+}
+
+// A join whose fire fails keeps its row, so a later contribution can re-attempt the barrier.
+// Deleting it would discard every accumulated contribution and strand the onward step for good.
+func TestJoin_FailedFireKeepsTheGateRowForRetry(t *testing.T) {
+	f := newGateFixture(t)
+	ctx := context.Background()
+	sys, _ := f.k.ReadUserByHandle(ctx, "@sys")
+
+	// Deactivating the action after the step exists makes the completion fail CanCall — rejected
+	// BEFORE any transaction, so the step resets to waiting (§10) and fire propagates a genuine
+	// error. (An action that runs and fails would instead commit a transaction, which is the
+	// fired=true case covered above.)
+	target := seedAction(t, f.db, sys.ID, "later-disabled", "disabled after parking")
+	step, err := f.k.CreateStep(ctx, f.parentTrace, target.ID, json.RawMessage(`{}`), sys.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.Active = false
+	if err := f.db.UpdateAction(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+
+	args := map[string]any{"step_id": step.ID, "need": float64(1)}
+	if _, err := executeJoin(ctx, args, f.sysID, f.gateTrace, f.k, f.db); err == nil {
+		t.Fatal("expected the fire to fail")
+	}
+	// The row survives at have>=need, so the next contribution re-attempts rather than restarting
+	// the count from zero.
+	have, need, err := f.db.IncrementStepGate(ctx, step.ID, 1)
+	if err != nil {
+		t.Fatalf("IncrementStepGate: %v", err)
+	}
+	if have < need {
+		t.Errorf("gate row was discarded: have=%d need=%d, want the barrier still met", have, need)
+	}
+}
+
+// Scenario (review finding 5): a join whose own fire is still in flight (the onward step left
+// `running` by a remote dispatch) sees ErrStepNotClaimed on the NEXT contribution. Treating that
+// as "the barrier is spent" and deleting the row discards every accumulated contribution while
+// the dispatch may yet settle. The row must survive every non-fired outcome.
+func TestJoin_GateRowSurvivesWhenTheOnwardStepIsNotClaimable(t *testing.T) {
+	f := newGateFixture(t)
+	ctx := context.Background()
+	sys, _ := f.k.ReadUserByHandle(ctx, "@sys")
+
+	target := seedAction(t, f.db, sys.ID, "inflight-target", "claimed elsewhere")
+	step, err := f.k.CreateStep(ctx, f.parentTrace, target.ID, json.RawMessage(`{}`), sys.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Put the step beyond claiming, as an in-flight dispatch would: it is no longer `waiting`.
+	if err := f.db.ExecForTest(ctx, `UPDATE steps SET status='running' WHERE id=?`, step.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	args := map[string]any{"step_id": step.ID, "need": float64(1)}
+	out, err := executeJoin(ctx, args, f.sysID, f.gateTrace, f.k, f.db)
+	if err != nil {
+		t.Fatalf("a not-claimable onward step is not an error for the contributor: %v", err)
+	}
+	if out["fired"] != false {
+		t.Fatalf("expected fired=false, got %v", out)
+	}
+	// The barrier's count must still be there: only a fired gate spends the row.
+	have, need, err := f.db.IncrementStepGate(ctx, step.ID, 1)
+	if err != nil {
+		t.Fatalf("IncrementStepGate: %v", err)
+	}
+	if have < 2 || need != 1 {
+		t.Errorf("gate row was discarded: re-open gave have=%d need=%d, want the earlier contribution retained", have, need)
 	}
 }

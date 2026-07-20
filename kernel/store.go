@@ -301,7 +301,7 @@ type Store interface {
 	ReadStep(ctx context.Context, id string) (*Step, error)
 	// ListSteps returns steps visible to caller. processID and status are optional filters ("" = no filter).
 	ListSteps(ctx context.Context, callerUserID, processID, status string, isSuperuser bool, limit, offset int) ([]*Step, error)
-	ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID string, limit, offset int) ([]*Step, error)
+	ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID string, limit int, cursor string) ([]*Step, string, error)
 	// ResetStepAndRepark re-parks a step's price and resets to waiting. Used when the
 	// completion trace is empty (crash during execution) to prevent double-completion minting.
 	ResetStepAndRepark(ctx context.Context, stepID string) error
@@ -339,7 +339,7 @@ type Store interface {
 	// returns the refund (gross−charge−duty) to the caller wallet, decrements owner.locked by taxable,
 	// records the transaction+receipt, updates stats, marks step done (if stepID non-empty),
 	// completes the idempotency record (if idempotencyRecordID non-empty), and closes the process if quiescent.
-	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, proxyUserID, feeRecipientID string, charge, duty int64, stats *Stats, idempotencyRecordID, stepID string) error
+	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, proxyUserID, feeRecipientID string, charge, duty int64, stats *Stats, idempotencyRecordID, stepID, errorCode string) error
 
 	// ---- Traces (by process) ----
 

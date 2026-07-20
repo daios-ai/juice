@@ -746,7 +746,7 @@ func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace) 
 			stepID,
 		).Scan(&price, &parentTraceID)
 		if errors.Is(err, sql.ErrNoRows) {
-			return kernel.ErrInvalidState.Wrap("step not waiting")
+			return kernel.ErrInvalidState.Wrap("step not waiting").Because(kernel.ErrStepNotClaimed)
 		}
 		if err != nil {
 			return dbErr(err, "begin step call: read step")
@@ -779,7 +779,7 @@ func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace) 
 			return dbErr(err, "begin step call: claim step")
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			return kernel.ErrInvalidState.Wrap("step already claimed")
+			return kernel.ErrInvalidState.Wrap("step already claimed").Because(kernel.ErrStepNotClaimed)
 		}
 		return nil
 	})
@@ -1118,7 +1118,7 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 // the gross (= mp + maxduty) was locked; charge flows to the proxy, duty to @sys, and the
 // remainder (refund = gross−charge−duty) is returned to the caller wallet.
 // Unlike CommitCall, taxable = charge+duty (not gross), so the refund must be explicit.
-func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, proxyUserID, feeRecipientID string, charge, duty int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
+func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, proxyUserID, feeRecipientID string, charge, duty int64, stats *kernel.Stats, idempotencyRecordID, stepID, errorCode string) error {
 	return s.withTx(ctx, "commit remote settlement", func(tx *sql.Tx) error {
 		q := ktx.Gross // full locked amount (mp + maxduty)
 		taxable := charge + duty
@@ -1176,7 +1176,16 @@ func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction
 				return dbErr(err, "commit remote settlement: credit fee recipient")
 			}
 		}
-		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, rawJSONStr(ktx.ReplyJSON), stepID, "commit remote settlement"); err != nil {
+		// A remote FAILURE has no ReplyJSON (settleRemoteCall sets it only on success), so storing
+		// it verbatim would complete the record with "null" — and a replaying peer, finding no
+		// "error" key, would read a settled failure as a 200 success. Store the same error body a
+		// local failure stores, so both replay through one rule (§13).
+		idemResult := rawJSONStr(ktx.ReplyJSON)
+		if ktx.Status != kernel.TxSuccess {
+			errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
+			idemResult = string(errResult)
+		}
+		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, idemResult, stepID, "commit remote settlement"); err != nil {
 			return err
 		}
 		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
@@ -1788,26 +1797,69 @@ func (s *DB) IncrementStepGate(ctx context.Context, stepID string, need int) (in
 // exactly the ones its own inbound calls would crowd out (§13). Oldest-first because the longest
 // stranded are the ones an operator needs to see. No superuser widening: this answers "what awaits
 // me", which is never wider than one user.
-func (s *DB) ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID string, limit, offset int) ([]*kernel.Step, error) {
+// Paged by keyset, not offset: the result set is live, so a step settling between pages shifts an
+// offset window and silently skips a still-waiting step — under a listing that looks complete,
+// which is exactly the stranded-funds invisibility this query exists to remove. A cursor over
+// (created_at, id) is immutable per row, so pages neither skip nor duplicate. The id tiebreak is
+// required: two steps can share a created_at instant, and without it the comparator is not a
+// strict total order.
+//
+// The cursor carries the raw stored created_at TEXT, never a time.Time round-trip, so the
+// comparison in WHERE is byte-identical to the one in ORDER BY. That equality is what makes the
+// paging correct even where RFC3339Nano's variable width orders text differently from real time.
+func (s *DB) ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID string, limit int, cursor string) ([]*kernel.Step, string, error) {
 	if limit <= 0 {
 		limit = 50
 	}
+	afterAt, afterID, err := parseStepCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+stepCols+`
+		`SELECT `+stepCols+`, created_at
 		 FROM steps
 		 WHERE required_caller_user_id=? AND status='waiting'
-		 ORDER BY created_at ASC LIMIT ? OFFSET ?`,
-		requiredCallerUserID, limit, offset)
+		   AND (?='' OR created_at > ? OR (created_at = ? AND id > ?))
+		 ORDER BY created_at ASC, id ASC LIMIT ?`,
+		requiredCallerUserID, cursor, afterAt, afterAt, afterID, limit)
 	if err != nil {
-		return nil, dbErr(err, "list steps awaiting caller")
+		return nil, "", dbErr(err, "list steps awaiting caller")
 	}
-	return queryList(rows, "list steps awaiting caller", func(scan func(...any) error) (*kernel.Step, error) {
+	var lastAt, lastID string
+	steps, err := queryList(rows, "list steps awaiting caller", func(scan func(...any) error) (*kernel.Step, error) {
 		var step kernel.Step
-		if err := scanStep(&step, scan); err != nil {
+		// The trailing created_at is the raw column text, scanned alongside the parsed Step so the
+		// next cursor is built from stored bytes rather than a reformatted timestamp.
+		if err := scanStep(&step, func(dest ...any) error { return scan(append(dest, &lastAt)...) }); err != nil {
 			return nil, err
 		}
+		lastID = step.ID
 		return &step, nil
 	})
+	if err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(steps) > 0 {
+		next = lastAt + stepCursorSep + lastID
+	}
+	return steps, next, nil
+}
+
+const stepCursorSep = "|"
+
+// parseStepCursor splits "<created_at>|<id>". A malformed cursor is an error, never a silent
+// restart from the first page: a client accumulating pages would duplicate everything it holds.
+// The separator is safe — RFC3339Nano text and UUIDs contain no "|".
+func parseStepCursor(cursor string) (createdAt, id string, err error) {
+	if cursor == "" {
+		return "", "", nil
+	}
+	at, id, ok := strings.Cut(cursor, stepCursorSep)
+	if !ok || at == "" || id == "" {
+		return "", "", kernel.ErrInvalidInput.Wrap("malformed step cursor")
+	}
+	return at, id, nil
 }
 
 // DeleteStepGate drops a fired or abandoned barrier's row.
@@ -2701,4 +2753,12 @@ func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID 
 	r.CreatedAt = strToTime(createdAt)
 	r.ExpiresAt = strToTime(expiresAt)
 	return &r, nil
+}
+
+// ExecForTest runs a raw statement. It exists so tests can construct states the kernel's own API
+// deliberately cannot reach — notably breaking the step-park invariant to prove that a corrupted
+// ledger is reported as corruption rather than as a lost claim race. Not used in production.
+func (s *DB) ExecForTest(ctx context.Context, query string, args ...any) error {
+	_, err := s.db.ExecContext(ctx, query, args...)
+	return err
 }

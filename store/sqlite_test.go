@@ -3281,7 +3281,7 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 		mkStep(assignee.ID, other.ID)
 	}
 
-	got, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 200, 0)
+	got, _, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 200, "")
 	if err != nil {
 		t.Fatalf("ListStepsAwaitingCaller: %v", err)
 	}
@@ -3291,12 +3291,228 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 
 	// Oldest first: the longest-stranded step is what an operator needs to see.
 	second := mkStep(owner.ID, assignee.ID)
-	got, _ = db.ListStepsAwaitingCaller(ctx, assignee.ID, 200, 0)
+	got, _, _ = db.ListStepsAwaitingCaller(ctx, assignee.ID, 200, "")
 	if len(got) != 2 || got[0].ID != mine || got[1].ID != second {
 		t.Errorf("expected oldest-first ordering, got %d rows in unexpected order", len(got))
 	}
 
-	if paged, _ := db.ListStepsAwaitingCaller(ctx, assignee.ID, 1, 1); len(paged) != 1 || paged[0].ID != second {
-		t.Errorf("offset paging failed, got %v", paged)
+	// Keyset paging: page 1 of size 1, then follow the cursor to reach the second row.
+	first, cur, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 1, "")
+	if err != nil || len(first) != 1 || first[0].ID != mine {
+		t.Fatalf("page 1: got %v err=%v", first, err)
+	}
+	if paged, _, _ := db.ListStepsAwaitingCaller(ctx, assignee.ID, 1, cur); len(paged) != 1 || paged[0].ID != second {
+		t.Errorf("cursor paging failed, got %v", paged)
+	}
+}
+
+// Scenario (review finding 7): offset pagination over a LIVE query skips a step. A step settled
+// between pages shifts the window, so one still-waiting step is never listed — under a listing
+// that looks complete. Written from the failure scenario before the fix; must fail on offsets.
+func TestListStepsAwaitingCallerNoSkipWhenAStepSettlesMidPage(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@page-owner", 1000)
+	assignee := newUser("@page-assignee", 0)
+	for _, u := range []*kernel.User{owner, assignee} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	act := newAction(owner.ID, "page-act", 0, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	mk := func() string {
+		t.Helper()
+		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: owner.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
+		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+		if err := db.BeginRun(ctx, p, root, owner.ID, 0); err != nil {
+			t.Fatal(err)
+		}
+		ptID := root.ID
+		st := &kernel.Step{
+			ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: assignee.ID,
+			ActionID: act.ID, Price: 0, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+		}
+		if err := db.CreateStep(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+		return st.ID
+	}
+
+	const total = 6
+	created := make([]string, total)
+	for i := range created {
+		created[i] = mk()
+	}
+
+	// Page 1 of 3.
+	page1, cursor, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 3, "")
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	if len(page1) != 3 {
+		t.Fatalf("page 1: got %d rows, want 3", len(page1))
+	}
+
+	// A step from page 1 settles before page 2 is fetched — an offset cursor's window shifts.
+	if _, err := db.db.ExecContext(ctx, `UPDATE steps SET status='done' WHERE id=?`, page1[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	page2, _, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 3, cursor)
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, s := range append(append([]*kernel.Step{}, page1...), page2...) {
+		if seen[s.ID] {
+			t.Errorf("step %s listed twice", s.ID)
+		}
+		seen[s.ID] = true
+	}
+	// Every step that is still waiting must have been listed; none may be skipped.
+	for _, id := range created[1:] {
+		if !seen[id] {
+			t.Errorf("still-waiting step %s was skipped across the page boundary", id)
+		}
+	}
+}
+
+// A cursor must be stable when two steps share a created_at instant: the id tiebreak is what
+// keeps the comparator a strict total order.
+func TestListStepsAwaitingCallerTiebreaksOnID(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@tie-owner", 1000)
+	assignee := newUser("@tie-assignee", 0)
+	for _, u := range []*kernel.User{owner, assignee} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	act := newAction(owner.ID, "tie-act", 0, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	same := time.Now().UTC()
+	ids := []string{}
+	for i := 0; i < 4; i++ {
+		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: owner.ID, Status: kernel.ProcessOpen, CreatedAt: same}
+		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: same}
+		if err := db.BeginRun(ctx, p, root, owner.ID, 0); err != nil {
+			t.Fatal(err)
+		}
+		ptID := root.ID
+		st := &kernel.Step{
+			ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: assignee.ID,
+			ActionID: act.ID, Price: 0, Status: kernel.StepWaiting, CreatedAt: same, // identical instant
+		}
+		if err := db.CreateStep(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, st.ID)
+	}
+
+	seen := map[string]bool{}
+	cursor := ""
+	for page := 0; page < 4; page++ {
+		got, next, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 2, cursor)
+		if err != nil {
+			t.Fatalf("page %d: %v", page, err)
+		}
+		if len(got) == 0 {
+			break
+		}
+		for _, s := range got {
+			if seen[s.ID] {
+				t.Fatalf("step %s listed twice across identical timestamps", s.ID)
+			}
+			seen[s.ID] = true
+		}
+		cursor = next
+	}
+	if len(seen) != len(ids) {
+		t.Errorf("listed %d of %d steps sharing one instant", len(seen), len(ids))
+	}
+}
+
+func TestListStepsAwaitingCallerRejectsMalformedCursor(t *testing.T) {
+	db := openTestDB(t)
+	// A malformed cursor must be an error, never a silent restart from the first page: a client
+	// accumulating pages would otherwise duplicate everything it had already collected.
+	if _, _, err := db.ListStepsAwaitingCaller(context.Background(), "u1", 10, "not-a-cursor"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("expected ErrInvalidInput for a malformed cursor, got %v", err)
+	}
+}
+
+// Scenario (design review): CommitRemoteSettlement completes the idempotency record with
+// ktx.ReplyJSON, which settleRemoteCall sets only on SUCCESS. A remote FAILURE therefore stores
+// result_json "null", so a replaying peer reads no "error" key and gets HTTP 200 — a settled
+// failure replaying as success, which §15 forbids. Written from the scenario before the fix.
+func TestCommitRemoteSettlementStoresFailureResult(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("@rs-owner", 1000)
+	proxy := newUser("@rs-proxy", 0)
+	sys := newUser("@rs-sys", 0)
+	for _, u := range []*kernel.User{owner, proxy, sys} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	act := newAction(proxy.ID, "rs-act", 10, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: owner.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: proxy.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, owner.ID, 10); err != nil {
+		t.Fatal(err)
+	}
+	rec := &kernel.IdempotencyRecord{
+		ID: uuid.New().String(), IdempotencyKey: "k-rs", CounterpartyUserID: proxy.ID,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}
+	if err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	// A remote FAILURE settlement: ReplyJSON is unset, exactly as settleRemoteCall leaves it.
+	now := time.Now().UTC()
+	ktx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID,
+		OwnerUserID: owner.ID, CallerUserID: owner.ID, TargetUserID: proxy.ID,
+		ActionID: act.ID, ActionName: act.Name, Status: kernel.TxFailure,
+		Gross: 10, Reason: "remote call failed", StartedAt: now, EndedAt: now,
+	}
+	receipt := &kernel.Receipt{
+		ID: uuid.New().String(), IssuerUserID: sys.ID, TxID: ktx.ID, TraceID: root.ID,
+		ActionID: act.ID, CallerUserID: owner.ID, ProcessID: p.ID,
+		Status: "failure", Gross: 10, StartedAt: now, CreatedAt: now,
+	}
+	if err := db.CommitRemoteSettlement(ctx, ktx, receipt, root.ID, p.ID, kernel.CallerProcess,
+		proxy.ID, sys.ID, 0, 0, &kernel.Stats{ActionID: act.ID}, rec.ID, "", kernel.ErrExecutionFailed.Code); err != nil {
+		t.Fatalf("CommitRemoteSettlement: %v", err)
+	}
+
+	got, err := db.ReadIdempotencyRecord(ctx, "k-rs", proxy.ID)
+	if err != nil {
+		t.Fatalf("GetIdempotencyRecord: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(got.ResultJSON), &result); err != nil {
+		t.Fatalf("stored result_json %q is not an object: %v", got.ResultJSON, err)
+	}
+	if result["error"] == nil {
+		t.Errorf("a settled remote FAILURE must store an error body so a replay cannot report success; got %q", got.ResultJSON)
+	}
+	if result["code"] != kernel.ErrExecutionFailed.Code {
+		t.Errorf("stored code = %v, want %q", result["code"], kernel.ErrExecutionFailed.Code)
 	}
 }
