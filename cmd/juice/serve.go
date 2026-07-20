@@ -484,8 +484,6 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Get("/control/peers/inspect", srv.ctlInspectPeer)
 		r.Post("/control/peers/subscribe", srv.ctlSubscribePeer)
 		r.Post("/control/peers/unsubscribe", srv.ctlUnsubscribePeer)
-		r.Get("/control/peers/steps", srv.ctlPeerSteps)
-		r.Post("/control/peers/steps/complete", srv.ctlCompletePeerStep)
 		r.Get("/control/identity", srv.ctlIdentity)
 	})
 }
@@ -1246,9 +1244,20 @@ func (s *server) getStep(w http.ResponseWriter, r *http.Request) {
 func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, req struct {
 		Args *json.RawMessage `json:"args"`
+		Peer string           `json:"peer"`
 	}) (any, int, error) {
 		if req.Args == nil {
 			return nil, 0, kernel.ErrInvalidInput.Wrap("args is required")
+		}
+		// A peer-held step is completed over /juice/fed/step/1 (§13) — the same command, since a
+		// step is a step. It is superuser scope on a normal command (§14): the request is signed
+		// with this kernel's own federation identity, so it acts as the whole kernel, not as a user.
+		if req.Peer != "" {
+			if !s.kernel.IsSuperuser(r.Context(), callerFrom(r)) {
+				return nil, 0, kernel.ErrUnauthorized.Wrap("completing a peer's step is superuser supervision")
+			}
+			body, err := s.completePeerStep(r.Context(), req.Peer, pathID(r), *req.Args)
+			return body, http.StatusOK, err
 		}
 		// Under a capability the caller is the executing action's owner (§9); CompleteStep still
 		// enforces caller == step.required_caller (§10), so the cap only completes its own steps.
@@ -1257,15 +1266,10 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 			callerID = owner
 		}
 		reply, err := completeStep(s.kernel, r.Context(), callerID, pathID(r), *req.Args)
-		return reply, http.StatusOK, withSettlementMeta(err, reply)
+		return reply, http.StatusOK, err
 	})(w, r)
 }
 
-// withSettlementMeta attaches the settled transaction's ids to a completion error. A completion
-// can fail AFTER committing a transaction (the resumed action ran and failed, §10), and the caller
-// has been charged for it — but handle() writes only the error, so without this the response says
-// what went wrong and not where the transaction is. Meta is the one structured channel writeErr
-// and the CLI both carry, so the ids survive to a client that can act on them.
 func withSettlementMeta(err error, reply *kernel.StepReply) error {
 	if err == nil || reply == nil {
 		return err
@@ -1629,14 +1633,7 @@ func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRe
 func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRequest) fed.StepResponse {
 	stepErr := func(err error) fed.StepResponse {
 		code := kernel.KernelErrorCode(err)
-		body := map[string]any{"error": err.Error(), "code": code}
-		// Carry Meta across the wire: a completion that failed after committing puts the settled
-		// transaction's ids there, and dropping them would leave the peer charged with no way to
-		// find what it paid for.
-		if ke, ok := err.(*kernel.KernelError); ok && len(ke.Meta) > 0 {
-			body["meta"] = ke.Meta
-		}
-		b, _ := json.Marshal(body)
+		b, _ := json.Marshal(map[string]string{"error": err.Error(), "code": code})
 		return fed.StepResponse{Status: kernel.HTTPStatusFromCode(code), Body: b}
 	}
 	// Parity with OnCall, including its fail-open when the transport supplied no key. What makes
@@ -1660,7 +1657,7 @@ func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRe
 	var err error
 	switch req.Kind {
 	case "list":
-		status, body, err = handleFederationStepList(h.kernel, ctx, req.Counterparty, req.Timestamp, req.Signature, req.Cursor)
+		status, body, err = handleFederationStepList(h.kernel, ctx, req.Counterparty, req.Timestamp, req.Signature)
 	case "complete":
 		input := []byte(req.Input)
 		if len(input) == 0 {

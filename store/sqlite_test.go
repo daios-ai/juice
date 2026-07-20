@@ -3281,7 +3281,7 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 		mkStep(assignee.ID, other.ID)
 	}
 
-	got, _, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 200, "")
+	got, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 200)
 	if err != nil {
 		t.Fatalf("ListStepsAwaitingCaller: %v", err)
 	}
@@ -3291,19 +3291,11 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 
 	// Oldest first: the longest-stranded step is what an operator needs to see.
 	second := mkStep(owner.ID, assignee.ID)
-	got, _, _ = db.ListStepsAwaitingCaller(ctx, assignee.ID, 200, "")
+	got, _ = db.ListStepsAwaitingCaller(ctx, assignee.ID, 200)
 	if len(got) != 2 || got[0].ID != mine || got[1].ID != second {
 		t.Errorf("expected oldest-first ordering, got %d rows in unexpected order", len(got))
 	}
 
-	// Keyset paging: page 1 of size 1, then follow the cursor to reach the second row.
-	first, cur, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 1, "")
-	if err != nil || len(first) != 1 || first[0].ID != mine {
-		t.Fatalf("page 1: got %v err=%v", first, err)
-	}
-	if paged, _, _ := db.ListStepsAwaitingCaller(ctx, assignee.ID, 1, cur); len(paged) != 1 || paged[0].ID != second {
-		t.Errorf("cursor paging failed, got %v", paged)
-	}
 }
 
 // seedWaitingStep creates owner+assignee, an action, a funded process and root trace, and returns
@@ -3338,95 +3330,6 @@ func seedWaitingStep(t *testing.T, db *DB, prefix string) (assigneeID string, mk
 			t.Fatal(err)
 		}
 		return st.ID
-	}
-}
-
-// Scenario (review finding 7): offset pagination over a LIVE query skips a step. A step settled
-// between pages shifts the window, so one still-waiting step is never listed — under a listing
-// that looks complete. Written from the failure scenario before the fix; must fail on offsets.
-func TestListStepsAwaitingCallerNoSkipWhenAStepSettlesMidPage(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	assignee, mk := seedWaitingStep(t, db, "page")
-
-	const total = 6
-	created := make([]string, total)
-	for i := range created {
-		created[i] = mk()
-	}
-
-	page1, cursor, err := db.ListStepsAwaitingCaller(ctx, assignee, 3, "")
-	if err != nil || len(page1) != 3 {
-		t.Fatalf("page 1: got %d rows err=%v, want 3", len(page1), err)
-	}
-	// A step from page 1 settles before page 2 is fetched — an offset window would shift.
-	if err := db.ExecForTest(ctx, `UPDATE steps SET status='done' WHERE id=?`, page1[0].ID); err != nil {
-		t.Fatal(err)
-	}
-	page2, _, err := db.ListStepsAwaitingCaller(ctx, assignee, 3, cursor)
-	if err != nil {
-		t.Fatalf("page 2: %v", err)
-	}
-
-	seen := map[string]bool{}
-	for _, s := range append(append([]*kernel.Step{}, page1...), page2...) {
-		if seen[s.ID] {
-			t.Errorf("step %s listed twice", s.ID)
-		}
-		seen[s.ID] = true
-	}
-	for _, id := range created[1:] {
-		if !seen[id] {
-			t.Errorf("still-waiting step %s was skipped across the page boundary", id)
-		}
-	}
-}
-
-// A cursor must be stable when two steps share a created_at instant: the id tiebreak is what
-// keeps the comparator a strict total order.
-func TestListStepsAwaitingCallerTiebreaksOnID(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	assignee, mk := seedWaitingStep(t, db, "tie")
-
-	// Force every step onto one instant: without the id tiebreak the cursor is not a total order.
-	ids := []string{mk(), mk(), mk(), mk()}
-	same := timeToStr(time.Now().UTC())
-	for _, id := range ids {
-		if err := db.ExecForTest(ctx, `UPDATE steps SET created_at=? WHERE id=?`, same, id); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	seen := map[string]bool{}
-	cursor := ""
-	for page := 0; page < len(ids); page++ {
-		got, next, err := db.ListStepsAwaitingCaller(ctx, assignee, 2, cursor)
-		if err != nil {
-			t.Fatalf("page %d: %v", page, err)
-		}
-		if len(got) == 0 {
-			break
-		}
-		for _, s := range got {
-			if seen[s.ID] {
-				t.Fatalf("step %s listed twice across identical timestamps", s.ID)
-			}
-			seen[s.ID] = true
-		}
-		cursor = next
-	}
-	if len(seen) != len(ids) {
-		t.Errorf("listed %d of %d steps sharing one instant", len(seen), len(ids))
-	}
-}
-
-func TestListStepsAwaitingCallerRejectsMalformedCursor(t *testing.T) {
-	db := openTestDB(t)
-	// A malformed cursor must be an error, never a silent restart from the first page: a client
-	// accumulating pages would otherwise duplicate everything it had already collected.
-	if _, _, err := db.ListStepsAwaitingCaller(context.Background(), "u1", 10, "not-a-cursor"); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("expected ErrInvalidInput for a malformed cursor, got %v", err)
 	}
 }
 

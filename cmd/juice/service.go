@@ -895,7 +895,7 @@ const maxPeerStepPage = 200
 // handleFederationStepList returns the waiting steps whose required caller is the requesting peer
 // (§10, §13). Read-only: an unknown key gets an empty list rather than a lazily provisioned account
 // — provisioning is reserved for a call, which is what actually creates a billing relationship.
-func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, sigStr, cursor string) (int, map[string]any, error) {
+func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, sigStr string) (int, map[string]any, error) {
 	if err := checkFederationTimestamp(tsStr); err != nil {
 		return 0, nil, err
 	}
@@ -918,7 +918,7 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	// Scoped in SQL, oldest first: ListSteps' predicate also matches every step inside a process
 	// this peer owns (its own inbound calls), which would crowd the completable ones out of the
 	// page. A suspended peer is refused by requireActiveUser inside the kernel call.
-	steps, nextCursor, err := k.ListStepsAwaitingCaller(ctx, peer.ID, maxPeerStepPage, cursor)
+	steps, err := k.ListStepsAwaitingCaller(ctx, peer.ID, maxPeerStepPage)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -928,9 +928,10 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 		views[i] = newPeerStepView(s, action)
 	}
 	body := map[string]any{"steps": views}
+	// A full page means more may be waiting. One honest flag, no continuation: this queue holds
+	// pending cross-kernel approvals, not a corpus.
 	if len(views) == maxPeerStepPage {
 		body["truncated"] = true
-		body["next_cursor"] = nextCursor
 	}
 	return http.StatusOK, body, nil
 }
@@ -993,8 +994,6 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 			// duplicate in flight rather than claiming an outcome that has not happened yet.
 		case reply != nil:
 			// A transaction committed and then failed; the commit already completed the record.
-			// Hand the peer its ids so it can find the transaction it was charged for.
-			err = withSettlementMeta(err, reply)
 		default:
 			// Nothing settled and the step is waiting again: no commit will ever complete this
 			// record, so drop it — otherwise a corrected retry is locked out by a key that

@@ -113,7 +113,7 @@ func fedStepList(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey) (int, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return handleFederationStepList(k, context.Background(), cp, ts, sig, "")
+	return handleFederationStepList(k, context.Background(), cp, ts, sig)
 }
 
 func fedStepComplete(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, stepID, idempKey string, input []byte) (int, map[string]any, error) {
@@ -194,7 +194,7 @@ func TestFedStep_RequestsAreRejected(t *testing.T) {
 	}{
 		{"bad list signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ ed25519.PrivateKey, _ string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
-			_, _, err := handleFederationStepList(k, ctx, keyA, ts, "bogus", "")
+			_, _, err := handleFederationStepList(k, ctx, keyA, ts, "bogus")
 			return err
 		}},
 		{"bad complete signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ ed25519.PrivateKey, stepID string) error {
@@ -205,7 +205,7 @@ func TestFedStep_RequestsAreRejected(t *testing.T) {
 		{"stale timestamp", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, _ string) error {
 			stale := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
 			sig, _ := kernel.SignStepListPayload(privA, keyA, selfKey(t, k), stale)
-			_, _, err := handleFederationStepList(k, ctx, keyA, stale, sig, "")
+			_, _, err := handleFederationStepList(k, ctx, keyA, stale, sig)
 			return err
 		}},
 		{"input does not match input_hash", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error {
@@ -217,7 +217,7 @@ func TestFedStep_RequestsAreRejected(t *testing.T) {
 		{"signed for another kernel", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
 			sig, _ := kernel.SignStepListPayload(privA, keyA, "some-other-kernels-key", ts)
-			_, _, err := handleFederationStepList(k, ctx, keyA, ts, sig, "")
+			_, _, err := handleFederationStepList(k, ctx, keyA, ts, sig)
 			return err
 		}},
 		{"known peer that is not the required caller", func(t *testing.T, k *kernel.Kernel, _ string, _ ed25519.PrivateKey, stepID string) error {
@@ -428,34 +428,6 @@ func TestFedStep_ReplayOfSettledFailureKeepsErrorStatus(t *testing.T) {
 	status, body, _ := duplicateInFlight()
 	if status != http.StatusConflict || body["code"] != kernel.ErrInvalidState.Code {
 		t.Errorf("duplicate-in-flight = (%d, %v), want 409 with an invalid_state code", status, body)
-	}
-}
-
-// Scenario (review finding 8): a completion that fails AFTER committing has charged the caller,
-// so the error must say where that transaction is. handle() writes only the error, and writeErr
-// carries just {error, code, meta} — so the ids have to ride in Meta or they are lost.
-func TestCompletion_ErrorCarriesTheSettledTransactionIDs(t *testing.T) {
-	reply := &kernel.StepReply{
-		CallReply: &kernel.CallReply{TxID: "tx-1", TraceID: "tr-1", ReceiptID: "rc-1"},
-		StepID:    "st-1",
-	}
-	err := withSettlementMeta(kernel.ErrExecutionFailed.Wrap("upstream exploded"), reply)
-	ke, ok := err.(*kernel.KernelError)
-	if !ok {
-		t.Fatalf("expected a KernelError, got %T", err)
-	}
-	for k, want := range map[string]string{"tx_id": "tx-1", "trace_id": "tr-1", "receipt_id": "rc-1", "step_id": "st-1"} {
-		if ke.Meta[k] != want {
-			t.Errorf("meta[%q] = %q, want %q", k, ke.Meta[k], want)
-		}
-	}
-	if ke.Code != kernel.ErrExecutionFailed.Code {
-		t.Errorf("code changed to %q; the error's own classification must survive", ke.Code)
-	}
-	// Nothing settled → nothing to point at, and the error must pass through untouched.
-	plain := kernel.ErrInvalidState.Wrap("step is not waiting")
-	if got := withSettlementMeta(plain, nil); got != error(plain) {
-		t.Errorf("an error with no settled reply must be returned unchanged, got %v", got)
 	}
 }
 

@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/url"
-	"os"
 	"strconv"
 	"time"
 
@@ -72,8 +70,6 @@ func init() {
 		peerUnsubscribeCmd(),
 		peerListCmd(),
 		peerInspectCmd(),
-		peerStepsCmd(),
-		peerCompleteCmd(),
 		identityCmd(),
 	)
 	rootCmd.AddCommand(adminCmd)
@@ -262,6 +258,16 @@ func peerInspectCmd() *cobra.Command {
 				} `json:"reachability"`
 				Source string `json:"source"`
 				Online bool   `json:"online"`
+				// Steps this peer has parked for THIS kernel: work awaiting us, and the ids
+				// `step complete <id> --peer` takes (§13). A peer account holds no session token,
+				// so this is the only place an operator sees them.
+				Steps []struct {
+					ID           string          `json:"id"`
+					Price        int64           `json:"price"`
+					CreatedAt    time.Time       `json:"created_at"`
+					PartialArgs  json.RawMessage `json:"partial_args"`
+					AllowedInput json.RawMessage `json:"allowed_input"`
+				} `json:"steps"`
 			}
 			if err := apiCall(context.Background(), "GET", "/control/peers/inspect?key="+url.QueryEscape(args[0]), nil, &out); err != nil {
 				return err
@@ -300,6 +306,21 @@ func peerInspectCmd() *cobra.Command {
 				fmt.Printf("\nTransacted friends (%d):\n", len(out.Friends))
 				for _, f := range out.Friends {
 					fmt.Printf("  %-20s %s\n", f.Handle, f.PublicKey)
+				}
+			}
+			if len(out.Steps) > 0 {
+				fmt.Printf("\nSteps awaiting us (%d) — complete with: step complete <id> --peer %s\n",
+					len(out.Steps), args[0])
+				for _, st := range out.Steps {
+					fmt.Printf("  %s  price=%d  %s\n", st.ID, st.Price, st.CreatedAt.Format(time.RFC3339))
+					if len(st.PartialArgs) > 0 && string(st.PartialArgs) != "{}" {
+						fmt.Printf("      %s\n", st.PartialArgs)
+					}
+					// The derived completion schema (§14): what this kernel may supply, without
+					// having to read a target action it cannot see.
+					if len(st.AllowedInput) > 0 {
+						fmt.Printf("      allowed_input: %s\n", st.AllowedInput)
+					}
 				}
 			}
 			return nil
@@ -354,111 +375,6 @@ func peerUnsubscribeCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("Unsubscribed from %s.\n", out.Handle)
-			return nil
-		},
-	}
-}
-
-// peerStepsResponse is the reply from the peer-steps control route. peerStepView, not
-// stepWithAction: a peer serves only what the completer needs (§13), so there is no action ref,
-// created_by, or owner handle to print. `warning` names a PEER-side failure that cut the listing
-// short — distinct from `truncated` alone, which only means this command stopped at its own page
-// bound. Conflating them tells an operator "that's all there is" when it is not.
-type peerStepsResponse struct {
-	Steps      []peerStepView `json:"steps"`
-	Truncated  bool           `json:"truncated"`
-	Warning    string         `json:"warning"`
-	NextCursor string         `json:"next_cursor"`
-}
-
-// renderPeerSteps writes the human-readable listing. Diagnostics go to errw (C12), so a shortfall
-// is visible even when stdout is piped, and a peer failure exits non-zero via the caller.
-func renderPeerSteps(outw, errw io.Writer, out peerStepsResponse) {
-	if len(out.Steps) == 0 {
-		fmt.Fprintln(outw, "No waiting steps.")
-	}
-	for _, s := range out.Steps {
-		fmt.Fprintf(outw, "%s  price=%d  created=%s\n", s.ID, s.Price, s.CreatedAt.Format(time.RFC3339))
-		if len(s.PartialArgs) > 0 && string(s.PartialArgs) != "{}" {
-			fmt.Fprintf(outw, "  partial_args:  %s\n", s.PartialArgs)
-		}
-		if len(s.AllowedInput) > 0 {
-			b, _ := json.Marshal(s.AllowedInput)
-			fmt.Fprintf(outw, "  allowed_input: %s\n", b)
-		}
-	}
-	switch {
-	case out.Warning != "":
-		fmt.Fprintf(errw, "WARNING: the listing is INCOMPLETE — %s\n", out.Warning)
-		fmt.Fprintln(errw, "Steps not listed may still hold parked funds; re-run when the peer is reachable.")
-	case out.Truncated:
-		fmt.Fprintln(errw, "(more steps remain; this command stopped at its page bound)")
-	}
-	if out.NextCursor != "" {
-		fmt.Fprintf(errw, "Continue with: --after %s\n", out.NextCursor)
-	}
-}
-
-// peerStepsCmd lists the continuations a peer parked for this kernel. A step addressed to a peer
-// is completable only over /juice/fed/step/1 (§13) — a key account holds no session token — so
-// these two commands are the operator's only window onto them.
-func peerStepsCmd() *cobra.Command {
-	var after string
-	cmd := &cobra.Command{
-		Use:   "steps <user>",
-		Short: "List waiting steps a peer (@handle or key) holds for this kernel",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			var out peerStepsResponse
-			path := "/control/peers/steps?key=" + url.QueryEscape(args[0])
-			if after != "" {
-				path += "&after=" + url.QueryEscape(after)
-			}
-			if err := apiCall(context.Background(), "GET", path, nil, &out); err != nil {
-				return err
-			}
-			if flagJSON {
-				if err := printJSON(out); err != nil {
-					return err
-				}
-			} else {
-				renderPeerSteps(os.Stdout, os.Stderr, out)
-			}
-			// A listing cut short by the PEER is a failure, not a note: an operator scripting this
-			// to audit parked funds must not read a truncated list as the complete set. The page
-			// bound alone is benign and stays a zero exit, since --after continues from it.
-			if out.Warning != "" {
-				return kernel.ErrExecutionFailed.Wrapf("listing incomplete: %s", out.Warning)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&after, "after", "", "Resume listing from a next_cursor returned by a previous run")
-	return cmd
-}
-
-func peerCompleteCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "complete <user> <step-id> [json]",
-		Short: "Complete a step a peer (@handle or key) holds for this kernel",
-		Args:  cobra.RangeArgs(2, 3),
-		RunE: func(_ *cobra.Command, args []string) error {
-			input := json.RawMessage("{}")
-			if len(args) == 3 {
-				if !json.Valid([]byte(args[2])) {
-					return kernel.ErrInvalidInput.Wrap("input must be valid JSON")
-				}
-				input = json.RawMessage(args[2])
-			}
-			var out map[string]any
-			if err := apiCall(context.Background(), "POST", "/control/peers/steps/complete",
-				map[string]any{"key": args[0], "step_id": args[1], "input": input}, &out); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(out)
-			}
-			fmt.Printf("Completed step %s (tx %v).\n", args[1], out["tx_id"])
 			return nil
 		},
 	}

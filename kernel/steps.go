@@ -210,11 +210,11 @@ func (k *Kernel) ListSteps(ctx context.Context, callerID, processID, status stri
 // first — "what awaits me". Unlike ListSteps it takes no superuser widening: the question is
 // scoped to one user by construction, and the federation step protocol (§13) answers it for a
 // peer, which must never be able to widen its view of another kernel's steps.
-func (k *Kernel) ListStepsAwaitingCaller(ctx context.Context, callerID string, limit int, cursor string) ([]*Step, string, error) {
+func (k *Kernel) ListStepsAwaitingCaller(ctx context.Context, callerID string, limit int) ([]*Step, error) {
 	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	return k.store.ListStepsAwaitingCaller(ctx, callerID, limit, cursor)
+	return k.store.ListStepsAwaitingCaller(ctx, callerID, limit)
 }
 
 // CompleteStep resumes a waiting step by merging caller input with partial_args and executing the next call.

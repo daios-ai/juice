@@ -640,8 +640,6 @@ juice admin unsuspend <user>            lift a suspension
 juice admin rename <user> <new-handle>  rename an account's local handle, including a peer's local mount
 juice admin peers                       known peers and balances (--all also shows suspended)
 juice admin inspect <key|user>          view remote identity, public actions, transacted peers, and reachability (no DB write)
-juice admin steps <user>                list waiting steps a peer holds for this kernel
-juice admin complete <user> <step-id> [json]  complete a step a peer holds for this kernel
 ```
 
 Federation trust is superuser supervision, so these live under `admin`, served on the public TCP API as superuser-gated routes (§14). `admin inspect <key>` is the operator's window into a remote kernel (there is no browser-reachable federation endpoint): it reports the peer's identity, public actions, and transacted peers, plus reachability diagnostics (direct / hole-punched / relayed, latency, protocol versions).
@@ -735,8 +733,7 @@ The protocol has two request kinds, each signed under its own canonical payload,
 list:      JCS({counterparty, recipient, scope: "step_list", timestamp})
            → the serving kernel's waiting steps whose required_caller is the requesting peer,
              oldest first, each with its id, partial_args, derived allowed_input (§10), price,
-             and creation time; bounded per page, and a full page sets `truncated` with
-             `next_cursor`, which the requester follows until exhausted
+             and creation time; bounded, and a full page sets `truncated`
 complete:  JCS({counterparty, idempotency_key, input_hash, recipient, step_id, timestamp})
            input_hash = SHA-256(input bytes); the request carries exactly those bytes
            → CompleteStep as the peer's proxy user; returns {result, tx_id, trace_id, receipt}
@@ -759,13 +756,11 @@ A peer is served **the request, not the requester**. The reply carries only what
 
 A replayed record is rebuilt from its two stored halves — the result and the signed receipt — and discriminates success on the **receipt's** status, not by probing the result for an `error` key, which a legitimate result carrying its own `error` field would trip. A stored failure never replays as success, and the in-flight reply carries an error code so the requester re-raises a typed error instead of a generic failure.
 
-A paged list is followed to exhaustion by the requester. A page that fails **after** earlier pages were collected returns those pages with `truncated` and a warning rather than discarding them — partial visibility of parked funds beats none — while a failure on the very first page stays an error, since an empty success would read as "nothing is parked for you".
-
 An outbound completion distinguishes *never dispatched* from *no reply* exactly as an outbound call does (§13): only a provably-unsent request is `ErrPeerUnreachable`; any other transport failure may already have executed remotely and is reported as `ErrTimeout`, recoverable by retrying under the derived key.
 
 Unlike a proxy call, a step completion moves **no money on the requesting kernel**: the step's price was parked on the serving kernel at creation, and completion never checks funds (§10). The requester therefore parks nothing, creates no local trace or transaction, and needs no settlement — so failures are ordinary typed errors, not signed rejection receipts, and a timeout pins nothing. The completion settles wholly on the serving kernel under §6, with the role law giving `caller_user_id` = the peer's proxy user. That settled call is ordinary peer activity for retention (below).
 
-Driving the protocol is superuser supervision, like every other federation verb: `admin steps <peer>` lists what a peer holds for this kernel and `admin complete <peer> <step-id> [json]` resumes one (§14).
+An operator drives it through the commands that already exist (§14), not a second vocabulary: `admin inspect <key>` surfaces the steps a peer holds for this kernel, and `step complete <id> --peer <key>` resumes one — the same command that completes a local step, because a step is a step. Completing a peer's step is superuser scope on that command, since the request is signed with this kernel's own federation identity and so acts as the whole kernel.
 
 ### Retention
 
@@ -805,7 +800,6 @@ juice admin rename <user> <new-handle>
 juice admin deposit <user> <amount>       juice admin withdraw <user> <amount>
 juice admin subscribe <key>               juice admin unsubscribe <user>
 juice admin peers                         juice admin inspect <key>
-juice admin steps <user>                  juice admin complete <user> <step-id> [json]
 juice admin identity
 ```
 
@@ -1167,19 +1161,13 @@ the outbound completion's idempotency key is derived: a retry reuses it (returni
 a mid-stream outbound failure is ErrTimeout (may have executed), not ErrPeerUnreachable; only a never-dispatched request is unreachable
 a parked remote dispatch completes its inbound idempotency record when the retry loop settles it, and likewise when a forced process closure settles it; a peer replaying the same key then gets the outcome instead of a duplicate-in-flight answer
 a remote settlement that FAILED stores an error body, so a replay returns the failure status rather than 200 with a null result
-a step-list page cursor neither skips nor duplicates when a step settles between pages, tiebreaks on id when two steps share a created_at instant, and rejects a malformed cursor
-admin steps returns the pages already collected, with a warning, when a later page fails; a first-page failure stays an error; an empty page claiming more reports truncated
-a completion that failed after committing carries the settled tx/trace/receipt ids in the error's structured metadata, across the federation hop and to the CLI
 a park-invariant violation from BeginStepCall is NOT reported as a lost claim (only the two genuine claim races carry that marker)
 a settled failure returns its committed transaction to the caller even when post-settlement bookkeeping fails (the caller was charged); a WASM timeout completion is reported as settled, not as a parked dispatch
 a crashed federated call to a LOCAL action completes its inbound idempotency record on recovery, not only a remote-proxy one
 a settled-failure replay carries the receipt and the settled transaction ids, and a success whose result contains an "error" field still replays as success (the receipt decides, not the body)
 a join gate row is dropped once its onward step is terminally resolved, so a late contribution cannot leak a row that nothing removes
-admin steps exits non-zero when the listing is incomplete, and returns a next_cursor that --after resumes from
 the peer step list carries partial_args and allowed_input and withholds owner_handle, created_by, the target action ref, and every local trace/action id (§5 boundary)
 a replayed idempotency record returns the status its stored outcome implies: a settled failure never replays as 200, and the duplicate-in-flight reply carries an error code
-admin steps follows the peer's pages until exhausted: 250 parked steps are all returned
-admin steps/complete resolve a peer by @handle or key, reject a local (non-peer) account, sign the exact input bytes, fail an offline peer as ErrPeerUnreachable, and propagate the peer's typed error code
 @sys/step/race fires exactly once under concurrent contributors (the waiting→running claim is the test-and-set); losers report fired:false; a step in another process is refused
 @sys/step/join fires at have >= need with {} and deletes its gate row; a changed need is rejected; an already-resolved onward step reports fired:false and also clears the gate, while a failed fire or an in-flight onward step KEEPS it so a later contribution can retry
 a gate refuses an onward step created by a different trace in the SAME process (confused deputy: foreign code funded by the process cannot fire another provider's parked continuation), leaving that step waiting
@@ -1295,8 +1283,8 @@ A unsubscribes from B: B's proxies deactivate on A; A re-subscribes and traffic 
 inbound call from an underfunded peer yields a signed rejection receipt the caller settles on
 caller runs a NAT-bound peer's action, the peer goes offline mid-call; the caller's allocation stays
   locked and the process stays open until the peer returns and a signed receipt settles it (no timeout settle)
-A parks a step addressed to B (via @sys/message to B's key); B lists it with `admin steps`, sees its
-  derived allowed_input, and completes it with `admin complete`; the step settles on A, a second
+A parks a step addressed to B (via @sys/message to B's key); B sees it in `admin inspect`, with its
+  derived allowed_input, and completes it with `step complete <id> --peer`; the step settles on A, a second
   completion is refused, and a suspended B is refused until unsuspended
 
 — Federation (real-network release gate; excluded from `go test ./...`) —

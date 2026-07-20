@@ -928,6 +928,7 @@ func stepShowCmd() *cobra.Command {
 }
 
 func stepCompleteCmd() *cobra.Command {
+	var peer string
 	cmd := &cobra.Command{
 		Use:   "complete <id> [json]",
 		Short: "Complete a waiting step",
@@ -942,8 +943,12 @@ func stepCompleteCmd() *cobra.Command {
 				return kernel.ErrInvalidInput.Wrapf("invalid input: %v", err)
 			}
 			var reply json.RawMessage
+			body := map[string]any{"args": input}
+			if peer != "" {
+				body["peer"] = peer
+			}
 			if err := apiCall(context.Background(), "POST", "/v1/steps/"+args[0]+"/complete",
-				map[string]any{"args": input}, &reply); err != nil {
+				body, &reply); err != nil {
 				return err
 			}
 			if flagQuiet {
@@ -957,6 +962,7 @@ func stepCompleteCmd() *cobra.Command {
 			return emitRaw(reply)
 		},
 	}
+	cmd.Flags().StringVar(&peer, "peer", "", "Complete a step held by this peer (@handle or key), over federation")
 	return cmd
 }
 

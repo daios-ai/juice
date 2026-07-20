@@ -1800,69 +1800,32 @@ func (s *DB) IncrementStepGate(ctx context.Context, stepID string, need int) (in
 // exactly the ones its own inbound calls would crowd out (§13). Oldest-first because the longest
 // stranded are the ones an operator needs to see. No superuser widening: this answers "what awaits
 // me", which is never wider than one user.
-// Paged by keyset, not offset: the result set is live, so a step settling between pages shifts an
-// offset window and silently skips a still-waiting step — under a listing that looks complete,
-// which is exactly the stranded-funds invisibility this query exists to remove. A cursor over
-// (created_at, id) is immutable per row, so pages neither skip nor duplicate. The id tiebreak is
-// required: two steps can share a created_at instant, and without it the comparator is not a
-// strict total order.
-//
-// The cursor carries the raw stored created_at TEXT, never a time.Time round-trip, so the
-// comparison in WHERE is byte-identical to the one in ORDER BY. That equality is what makes the
-// paging correct even where RFC3339Nano's variable width orders text differently from real time.
-func (s *DB) ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID string, limit int, cursor string) ([]*kernel.Step, string, error) {
+// Steps a caller is the required completer of, oldest first. Deliberately narrow: ListSteps'
+// visibility predicate is a disjunction that also matches every step inside a process the caller
+// owns, so filtering it in Go after the query's row cap can discard the whole page — and for a
+// peer, the steps it can actually complete are exactly the ones its own inbound calls would crowd
+// out (§13). Oldest-first because the longest stranded are the ones an operator needs to see.
+// No superuser widening: this answers "what awaits me", which is never wider than one user.
+func (s *DB) ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID string, limit int) ([]*kernel.Step, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	afterAt, afterID, err := parseStepCursor(cursor)
-	if err != nil {
-		return nil, "", err
-	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+stepCols+`, created_at
+		`SELECT `+stepCols+`
 		 FROM steps
 		 WHERE required_caller_user_id=? AND status='waiting'
-		   AND (?='' OR created_at > ? OR (created_at = ? AND id > ?))
 		 ORDER BY created_at ASC, id ASC LIMIT ?`,
-		requiredCallerUserID, cursor, afterAt, afterAt, afterID, limit)
+		requiredCallerUserID, limit)
 	if err != nil {
-		return nil, "", dbErr(err, "list steps awaiting caller")
+		return nil, dbErr(err, "list steps awaiting caller")
 	}
-	var lastAt, lastID string
-	steps, err := queryList(rows, "list steps awaiting caller", func(scan func(...any) error) (*kernel.Step, error) {
+	return queryList(rows, "list steps awaiting caller", func(scan func(...any) error) (*kernel.Step, error) {
 		var step kernel.Step
-		// The trailing created_at is the raw column text, scanned alongside the parsed Step so the
-		// next cursor is built from stored bytes rather than a reformatted timestamp.
-		if err := scanStep(&step, func(dest ...any) error { return scan(append(dest, &lastAt)...) }); err != nil {
+		if err := scanStep(&step, scan); err != nil {
 			return nil, err
 		}
-		lastID = step.ID
 		return &step, nil
 	})
-	if err != nil {
-		return nil, "", err
-	}
-	next := ""
-	if len(steps) > 0 {
-		next = lastAt + stepCursorSep + lastID
-	}
-	return steps, next, nil
-}
-
-const stepCursorSep = "|"
-
-// parseStepCursor splits "<created_at>|<id>". A malformed cursor is an error, never a silent
-// restart from the first page: a client accumulating pages would duplicate everything it holds.
-// The separator is safe — RFC3339Nano text and UUIDs contain no "|".
-func parseStepCursor(cursor string) (createdAt, id string, err error) {
-	if cursor == "" {
-		return "", "", nil
-	}
-	at, id, ok := strings.Cut(cursor, stepCursorSep)
-	if !ok || at == "" || id == "" {
-		return "", "", kernel.ErrInvalidInput.Wrap("malformed step cursor")
-	}
-	return at, id, nil
 }
 
 // DeleteStepGate drops a fired or abandoned barrier's row.

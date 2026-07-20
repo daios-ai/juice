@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -229,6 +228,11 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 			resp["handle"], resp["public_key"] = g.Handle, g.PublicKey
 			resp["actions"], resp["friends"] = g.Actions, g.Friends
 			resp["source"] = "live"
+			// Steps this peer has parked for us: an operator-visible window onto work awaiting this
+			// kernel, and the ids `step complete --peer` takes (§13).
+			if steps, ok := s.peerStepsAwaitingUs(octx, peerKey); ok {
+				resp["steps"] = steps
+			}
 			// On-demand peer sync: the live inspect just learned this peer is up and (for a friend)
 			// our credit there. Persist it so peer_state / last_seen refresh immediately instead of
 			// waiting for the discovery timer. RecordPeerSync no-ops for strangers/denied peers (§13).
@@ -342,156 +346,63 @@ func (s *server) stepRoundTrip(ctx context.Context, peerKey string, req fed.Step
 			msg = "peer rejected the step request"
 		}
 		code, _ := body["code"].(string)
-		out := kernel.ErrorFromCode(code).Wrap(msg)
-		// Preserve the peer's structured metadata (e.g. the settled tx a failed completion was
-		// charged for) so it reaches the operator instead of dying at the hop.
-		if meta, ok := body["meta"].(map[string]any); ok {
-			for k, v := range meta {
-				if sv, ok := v.(string); ok {
-					out = out.WithMeta(k, sv)
-				}
-			}
-		}
-		return nil, out
+		return nil, kernel.ErrorFromCode(code).Wrap(msg)
 	}
 	return body, nil
 }
 
-// ctlPeerSteps lists the waiting steps a peer holds for this kernel (§13). These are the
-// continuations a peer parked for us — invisible before /juice/fed/step/1 existed.
-func (s *server) ctlPeerSteps(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	peerKey, err := s.resolvePeerKey(ctx, strings.TrimSpace(r.URL.Query().Get("key")))
+// completePeerStep resumes a step a peer parked for this kernel, over /juice/fed/step/1 (§13).
+// Reached from POST /v1/steps/{id}/complete when the request names a peer — the same command that
+// completes a local step, since a step is a step.
+func (s *server) completePeerStep(ctx context.Context, peerRef, stepID string, rawInput json.RawMessage) (map[string]any, error) {
+	peerKey, err := s.resolvePeerKey(ctx, strings.TrimSpace(peerRef))
 	if err != nil {
-		writeErr(w, err)
-		return
+		return nil, err
 	}
-	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	startCursor := strings.TrimSpace(r.URL.Query().Get("after"))
-
-	// Follow the peer's pages until exhausted rather than exposing an --offset flag. The whole
-	// point of this command is that no parked step stays invisible; an operator who has to
-	// paginate by hand to avoid stranding funds is the failure it exists to prevent. Bounded so a
-	// hostile or broken peer cannot spin us forever, and the bound is reported, never silent.
-	const maxPages = 10
-	all := []any{}
-	truncated, warning, cursor := false, "", startCursor
-	for page := 0; ; page++ {
-		sig, ts, err := s.kernel.SignStepList(pub, peerKey)
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		body, err := s.stepRoundTrip(ctx, peerKey, fed.StepRequest{
-			Kind: "list", Counterparty: pub, Timestamp: ts, Signature: sig, Cursor: cursor,
-		}, fedOpTimeout)
-		if err != nil {
-			// Nothing collected yet: a hard error. Returning 200 with an empty list would read as
-			// "nothing is parked for you" — the precise misreading that strands funds.
-			if len(all) == 0 {
-				writeErr(w, err)
-				return
-			}
-			// Pages already in hand: report them with a warning rather than discarding them.
-			// Partial visibility of parked funds beats none, which is this command's whole purpose.
-			truncated = true
-			warning = fmt.Sprintf("listing stopped after %d page(s): %v", page, err)
-			break
-		}
-		steps, _ := body["steps"].([]any)
-		all = append(all, steps...)
-		more, _ := body["truncated"].(bool)
-		if !more {
-			break
-		}
-		// The peer claims more but sent nothing (or no cursor to advance by): stop, and say so —
-		// silently reporting a complete list here would hide whatever it is still holding.
-		next, _ := body["next_cursor"].(string)
-		if len(steps) == 0 || next == "" || next == cursor {
-			truncated = true
-			break
-		}
-		cursor = next
-		if page+1 >= maxPages {
-			truncated = true
-			break
-		}
-	}
-	out := map[string]any{"steps": all}
-	if truncated {
-		out["truncated"] = true
-		// Hand back where to resume. Without it a listing stopped by the page bound or by a peer
-		// failure is a dead end: the remaining steps hold parked funds and no command could reach
-		// them. `admin steps --after <cursor>` continues from here.
-		if cursor != "" {
-			out["next_cursor"] = cursor
-		}
-	}
-	if warning != "" {
-		out["warning"] = warning
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-// ctlCompletePeerStep completes a step a peer parked for this kernel (§10, §13). The reply's
-// receipt is displayed, not stored: the completion settles wholly on the peer, and this kernel
-// parked nothing that a local transaction would have to settle against.
-func (s *server) ctlCompletePeerStep(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Key    string          `json:"key"`
-		StepID string          `json:"step_id"`
-		Input  json.RawMessage `json:"input"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	ctx := r.Context()
-	peerKey, err := s.resolvePeerKey(ctx, strings.TrimSpace(req.Key))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if strings.TrimSpace(req.StepID) == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("step_id is required"))
-		return
-	}
-	// Normalize the input to exactly the bytes the transport will put on the wire before hashing
-	// it: marshaling the outer StepRequest compacts and HTML-escapes an embedded RawMessage, so
+	// Normalize the input to exactly the bytes the transport will send before hashing it:
+	// marshaling the outer StepRequest compacts and HTML-escapes an embedded RawMessage, so
 	// hashing the caller's raw body would sign bytes the peer never sees. Marshaling a RawMessage
-	// is idempotent, so this is a fixed point — send and hash the same slice (the convention the
-	// federation call path follows, http_exec.go).
-	input := []byte(req.Input)
+	// is idempotent, so this is a fixed point — hash and send the same slice.
+	input := []byte(rawInput)
 	if len(input) == 0 {
 		input = []byte("{}")
 	}
-	input, err = json.Marshal(json.RawMessage(input))
-	if err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("input must be valid JSON"))
-		return
+	if input, err = json.Marshal(json.RawMessage(input)); err != nil {
+		return nil, kernel.ErrInvalidInput.Wrap("input must be valid JSON")
 	}
 	inputHash := sha256HexBytes(input)
 
 	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	// Derive the idempotency key from the request rather than minting a fresh UUID per attempt:
-	// a retry after a timeout must present the SAME key, or the peer cannot recognize it as a
-	// duplicate and the real tx_id/receipt of an already-executed completion is lost. Same peer +
-	// step + input ⇒ same key, with no state to persist (the remote-proxy path stores its key on
-	// the trace; a step completion has no local trace to hang one on).
-	idempotencyKey := sha256HexBytes([]byte("juice/fed/step/1|" + peerKey + "|" + req.StepID + "|" + inputHash))
-	sig, ts, err := s.kernel.SignStep(req.StepID, pub, peerKey, idempotencyKey, inputHash)
+	// Derive the idempotency key rather than minting a UUID per attempt: a retry must present the
+	// SAME key, or the peer cannot recognize it as a duplicate and the tx/receipt of an
+	// already-executed completion is lost. Same peer + step + input ⇒ same key, nothing persisted.
+	idempotencyKey := sha256HexBytes([]byte("juice/fed/step/1|" + peerKey + "|" + stepID + "|" + inputHash))
+	sig, ts, err := s.kernel.SignStep(stepID, pub, peerKey, idempotencyKey, inputHash)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return nil, err
+	}
+	return s.stepRoundTrip(ctx, peerKey, fed.StepRequest{
+		Kind: "complete", Counterparty: pub, Timestamp: ts, Signature: sig,
+		StepID: stepID, IdempotencyKey: idempotencyKey, Input: json.RawMessage(input),
+	}, fedStepTimeout)
+}
+
+// peerStepsAwaitingUs lists the steps a peer holds for this kernel, for admin inspect (§13).
+// One bounded fetch: the queue is a handful of pending cross-kernel approvals, not a corpus.
+func (s *server) peerStepsAwaitingUs(ctx context.Context, peerKey string) (any, bool) {
+	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	sig, ts, err := s.kernel.SignStepList(pub, peerKey)
+	if err != nil {
+		return nil, false
 	}
 	body, err := s.stepRoundTrip(ctx, peerKey, fed.StepRequest{
-		Kind: "complete", Counterparty: pub, Timestamp: ts, Signature: sig,
-		StepID: req.StepID, IdempotencyKey: idempotencyKey, Input: json.RawMessage(input),
-	}, fedStepTimeout)
+		Kind: "list", Counterparty: pub, Timestamp: ts, Signature: sig,
+	}, fedOpTimeout)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return nil, false
 	}
-	writeJSON(w, http.StatusOK, body)
+	steps, ok := body["steps"]
+	return steps, ok
 }
 
 // ctlIdentity reports this kernel's federation identity: public key, handle, and libp2p listen

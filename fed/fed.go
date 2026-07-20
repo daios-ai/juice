@@ -63,7 +63,6 @@ type StepRequest struct {
 	StepID         string          `json:"step_id,omitempty"`         // complete only
 	IdempotencyKey string          `json:"idempotency_key,omitempty"` // complete only
 	Input          json.RawMessage `json:"input,omitempty"`           // complete only; exact request bytes
-	Cursor         string          `json:"cursor,omitempty"`          // list only; keyset page cursor
 }
 
 // StepResponse mirrors CallResponse: a status plus an opaque JSON body. Unlike a call, a step
