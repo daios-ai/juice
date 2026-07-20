@@ -707,9 +707,9 @@ func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error
 
 func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTraceID *string, price int64) error {
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,created_at)
-		 VALUES (?,?,?,?,?,?,?,0,?,?,?)`,
-		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, timeToStr(t.CreatedAt),
+		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,created_at)
+		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?)`,
+		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, t.IdempotencyRecordID, timeToStr(t.CreatedAt),
 	)
 	return dbErr(err, "insert trace")
 }
@@ -1327,19 +1327,22 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 
 // ---- Traces ----
 
-const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,created_at`
+const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,created_at`
 
 func scanTrace(t *kernel.Trace, scanFn func(...any) error) error {
 	var createdAt string
-	var parentID, idempotencyKey, dispatchJSON sql.NullString
+	var parentID, idempotencyKey, dispatchJSON, recordID sql.NullString
 	err := scanFn(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.ActionID, &t.CallerUserID,
-		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &createdAt)
+		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &recordID, &createdAt)
 	if err != nil {
 		return err
 	}
 	t.CreatedAt = strToTime(createdAt)
 	if parentID.Valid {
 		t.ParentTraceID = &parentID.String
+	}
+	if recordID.Valid {
+		t.IdempotencyRecordID = &recordID.String
 	}
 	if idempotencyKey.Valid {
 		t.IdempotencyKey = &idempotencyKey.String

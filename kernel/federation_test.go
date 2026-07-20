@@ -2251,3 +2251,56 @@ func TestEndProcessCompletesInboundIdempotencyRecordOfAParkedDispatch(t *testing
 		t.Errorf("record status = %q, want complete after forced closure", got.Status)
 	}
 }
+
+// Scenario (review finding 2): the inbound record was persisted only inside dispatch_json, which
+// is written only for remote proxies — so a crash mid-execution of a federated call to a LOCAL
+// action left the record pending for 24h and every peer retry got "duplicate in flight". The
+// record now rides on the trace, so crash recovery settles it for every action kind.
+func TestCrashRecoveryCompletesInboundRecordForALocalAction(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	k := kernel.New(st, nil, &fakeSuccessHTTP{}, nil, cfg, log.Default())
+
+	owner := setupUser(t, st, "@local-owner", 0)
+	peer := setupUser(t, st, "@local-peer", 500)
+	// A LOCAL action — no remote proxy, so no dispatch payload is ever written.
+	action := setupLocalAction(t, st, owner.ID, "local-act", 0)
+
+	rec := &kernel.IdempotencyRecord{
+		ID: uuid.New().String(), IdempotencyKey: "local-key", CounterpartyUserID: peer.ID,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(24 * time.Hour),
+	}
+	if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a crash mid-execution: fund and open the call's trace exactly as beginRun does,
+	// then leave it orphaned (no transaction) for Recover to settle.
+	p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: peer.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
+	tr := &kernel.Trace{
+		ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, ActionID: action.ID,
+		CallerUserID: peer.ID, IdempotencyRecordID: &rec.ID, CreatedAt: time.Now().UTC(),
+	}
+	if err := st.BeginRun(ctx, p, tr, peer.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := k.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	got, err := st.ReadIdempotencyRecord(ctx, "local-key", peer.ID)
+	if err != nil {
+		t.Fatalf("ReadIdempotencyRecord after recovery: %v", err)
+	}
+	if got.Status != "complete" {
+		t.Errorf("record status = %q, want complete: a crashed federated call to a local action "+
+			"must not strand its peer until expiry", got.Status)
+	}
+}

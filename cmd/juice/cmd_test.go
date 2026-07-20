@@ -1714,7 +1714,7 @@ func TestRenderPeerStepsDistinguishesAPeerFailureFromAPageCap(t *testing.T) {
 	if !strings.Contains(errOut.String(), "INCOMPLETE") {
 		t.Errorf("a peer-truncated listing must be marked incomplete, got %q", errOut.String())
 	}
-	if strings.Contains(errOut.String(), "than this command follows") {
+	if strings.Contains(errOut.String(), "page bound") {
 		t.Error("a peer failure must not be reported as a mere client-side page cap")
 	}
 
@@ -1722,7 +1722,7 @@ func TestRenderPeerStepsDistinguishesAPeerFailureFromAPageCap(t *testing.T) {
 	out.Reset()
 	errOut.Reset()
 	renderPeerSteps(&out, &errOut, peerStepsResponse{Steps: []peerStepView{step}, Truncated: true})
-	if !strings.Contains(errOut.String(), "than this command follows") {
+	if !strings.Contains(errOut.String(), "page bound") {
 		t.Errorf("a client page cap should say so, got %q", errOut.String())
 	}
 	if strings.Contains(errOut.String(), "INCOMPLETE") {

@@ -268,9 +268,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		mp = k.remoteManifestPrice(action.Price)
 		key := uuid.New().String()
 		trace.IdempotencyKey = &key
-		// Subcalls carry no inbound record: only a ROOT call serves a peer directly, and completing
-		// the inbound record from a settling subcall would answer the peer before its own call resolved.
-		trace.DispatchJSON = marshalDispatch(req.Args, req.StepID, mp, "")
+		trace.DispatchJSON = marshalDispatch(req.Args, req.StepID, mp)
 	}
 
 	callerWalletID, callerWalletKind := k.callerWallet(req, process, parentTrace)
@@ -414,11 +412,17 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	postTrace, readErr := k.store.ReadTrace(ctx, trace.ID)
 	if readErr != nil {
 		mu.Unlock()
-		// If we can't read the trace, settle as failure to avoid fund loss.
+		// If we can't read the trace, settle as failure to avoid fund loss. The settlement commits
+		// a transaction and charges for it, so its receipt must be returned like every other
+		// settled-failure path below: a nil reply here would tell callers nothing happened while
+		// the caller has in fact been charged, and the idempotency record already completed.
 		ktx.Status = TxFailure
 		ktx.Reason = "could not read trace post-execution"
-		_, _ = k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, readErr)
-		return nil, ErrInternal.Wrap("could not read trace")
+		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, readErr)
+		if sErr != nil || receipt == nil {
+			return nil, ErrInternal.Wrap("could not read trace")
+		}
+		return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID}, ErrInternal.Wrap("could not read trace")
 	}
 	taxable := postTrace.Available
 	net, fee := ComputeFee(taxable, k.cfg.FeeBPS)
@@ -434,8 +438,13 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		mu.Unlock()
 		ktx.Status = TxFailure
 		ktx.Reason = "could not build receipt"
-		_, _ = k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, receiptErr)
-		return nil, ErrInternal.Wrap("could not build receipt")
+		// Same as the post-execution read failure above: the settlement committed, so its receipt
+		// is returned rather than discarded.
+		failReceipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, receiptErr)
+		if sErr != nil || failReceipt == nil {
+			return nil, ErrInternal.Wrap("could not build receipt")
+		}
+		return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: failReceipt.ID}, ErrInternal.Wrap("could not build receipt")
 	}
 	// Detach settlement from execution-scoped cancellation so the success commit
 	// (payout + lock release + audit record) is never aborted mid-flight (§5).

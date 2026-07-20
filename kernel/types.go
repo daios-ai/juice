@@ -240,17 +240,21 @@ type StepReply struct {
 // Step-completion traces may have a ParentTraceID that crosses process boundaries.
 // Available tracks funds remaining after subcalls and step parks; zeroed at settlement.
 type Trace struct {
-	ID             string    `json:"id"`
-	ProcessID      string    `json:"process_id"`
-	ParentTraceID  *string   `json:"parent_trace_id,omitempty"`
-	ActionOwnerID  string    `json:"action_owner_id"`
-	ActionID       string    `json:"action_id"`
-	CallerUserID   string    `json:"caller_user_id"`
-	Available      int64     `json:"available"`
-	Locked         int64     `json:"locked"`
-	IdempotencyKey *string   `json:"idempotency_key,omitempty"`
-	DispatchJSON   *string   `json:"dispatch_json,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID             string  `json:"id"`
+	ProcessID      string  `json:"process_id"`
+	ParentTraceID  *string `json:"parent_trace_id,omitempty"`
+	ActionOwnerID  string  `json:"action_owner_id"`
+	ActionID       string  `json:"action_id"`
+	CallerUserID   string  `json:"caller_user_id"`
+	Available      int64   `json:"available"`
+	Locked         int64   `json:"locked"`
+	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+	DispatchJSON   *string `json:"dispatch_json,omitempty"`
+	// IdempotencyRecordID is the inbound cross-kernel record this trace serves (§13), set only on a
+	// root call made on a peer's behalf. Whichever settlement resolves the trace completes that
+	// record, so a crashed or parked federated call never strands its requester.
+	IdempotencyRecordID *string   `json:"idempotency_record_id,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 // Transaction records one attempted call. Immutable after creation.

@@ -2238,10 +2238,16 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 		CallerUserID:  caller.ID,
 		CreatedAt:     now,
 	}
+	// Persist the inbound cross-kernel record on the trace, for every action kind: whichever
+	// settlement resolves this call — commit, retry, max-age, forced closure, crash recovery —
+	// then completes it, so a peer is never left waiting on a record nothing will finish (§13).
+	if idempotencyRecordID != "" {
+		t.IdempotencyRecordID = &idempotencyRecordID
+	}
 	if action.Kind == KindRemoteProxy {
 		key := uuid.New().String()
 		t.IdempotencyKey = &key
-		t.DispatchJSON = marshalDispatch(args, "", k.remoteManifestPrice(action.Price), idempotencyRecordID)
+		t.DispatchJSON = marshalDispatch(args, "", k.remoteManifestPrice(action.Price))
 	}
 	if err := k.store.BeginRun(ctx, p, t, caller.ID, action.Price); err != nil {
 		return nil, err

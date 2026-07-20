@@ -367,6 +367,7 @@ func (s *server) ctlPeerSteps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	startCursor := strings.TrimSpace(r.URL.Query().Get("after"))
 
 	// Follow the peer's pages until exhausted rather than exposing an --offset flag. The whole
 	// point of this command is that no parked step stays invisible; an operator who has to
@@ -374,7 +375,7 @@ func (s *server) ctlPeerSteps(w http.ResponseWriter, r *http.Request) {
 	// hostile or broken peer cannot spin us forever, and the bound is reported, never silent.
 	const maxPages = 10
 	all := []any{}
-	truncated, warning, cursor := false, "", ""
+	truncated, warning, cursor := false, "", startCursor
 	for page := 0; ; page++ {
 		sig, ts, err := s.kernel.SignStepList(pub, peerKey)
 		if err != nil {
@@ -419,6 +420,12 @@ func (s *server) ctlPeerSteps(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"steps": all}
 	if truncated {
 		out["truncated"] = true
+		// Hand back where to resume. Without it a listing stopped by the page bound or by a peer
+		// failure is a dead end: the remaining steps hold parked funds and no command could reach
+		// them. `admin steps --after <cursor>` continues from here.
+		if cursor != "" {
+			out["next_cursor"] = cursor
+		}
 	}
 	if warning != "" {
 		out["warning"] = warning

@@ -737,3 +737,43 @@ func (f *fakePagingFed) Probe(context.Context, string) fed.Reachability {
 }
 func (f *fakePagingFed) ListenAddrs() []string { return nil }
 func (f *fakePagingFed) Close() error          { return nil }
+
+// Scenario (review finding 8): a listing stopped by the page bound must hand back where to resume.
+// Without a cursor the tail is unreachable by any command, so those steps' parked funds stay
+// invisible — the condition this command exists to surface.
+func TestPeerStepsReturnsACursorWhenTruncated(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	handle, _ := seedPeer(t, k, "@peer-steps")
+	// More pages than ctlPeerSteps follows, so it stops at its bound.
+	f := &fakePagingFed{total: 100000, pageSize: 200}
+	srv := &server{kernel: k, log: log.Discard(), fed: f}
+
+	req := httptest.NewRequest("GET", "/control/peers/steps?key="+url.QueryEscape(handle), nil)
+	rec := httptest.NewRecorder()
+	srv.ctlPeerSteps(rec, req)
+
+	var out struct {
+		Truncated  bool   `json:"truncated"`
+		NextCursor string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Truncated {
+		t.Fatal("expected the page bound to be reported")
+	}
+	if out.NextCursor == "" {
+		t.Fatal("a truncated listing must say where to resume, or the tail is unreachable")
+	}
+
+	// And that cursor is honoured: resuming starts where the first listing stopped.
+	f2 := &fakePagingFed{total: 100000, pageSize: 200}
+	srv2 := &server{kernel: k, log: log.Discard(), fed: f2}
+	req2 := httptest.NewRequest("GET", "/control/peers/steps?key="+url.QueryEscape(handle)+
+		"&after="+url.QueryEscape(out.NextCursor), nil)
+	srv2.ctlPeerSteps(httptest.NewRecorder(), req2)
+	if len(f2.cursors) == 0 || f2.cursors[0] != out.NextCursor {
+		t.Errorf("resume must start from the returned cursor; first request used %q, want %q",
+			f2.cursors, out.NextCursor)
+	}
+}

@@ -1023,20 +1023,40 @@ func replayStepRecord(rec *kernel.IdempotencyRecord, stepID string) (int, map[st
 	if rec.ReceiptJSON != "" {
 		_ = json.Unmarshal([]byte(rec.ReceiptJSON), &receipt)
 	}
-	if receipt == nil || receipt.Status != kernel.TxSuccess {
-		return storedIdempotentStatus(result), result, nil
+	if receipt == nil {
+		// No transaction committed (a pre-execution rejection): there is nothing to point at.
+		return replayStatus(result, nil), result, nil
 	}
-	return http.StatusOK, map[string]any{
+	body := map[string]any{
 		"result": result, "tx_id": receipt.TxID, "trace_id": receipt.TraceID,
 		"step_id": stepID, "receipt": receipt,
-	}, nil
+	}
+	if receipt.Status != kernel.TxSuccess {
+		// A settled FAILURE still charged the caller, so the replay carries the same ids the fresh
+		// response did — otherwise a retry after a dropped connection loses the only pointer to the
+		// transaction it paid for, which is the loss withSettlementMeta exists to prevent.
+		body["error"], body["code"] = result["error"], result["code"]
+		body["meta"] = map[string]string{
+			"step_id": stepID, "tx_id": receipt.TxID,
+			"trace_id": receipt.TraceID, "receipt_id": receipt.ID,
+		}
+	}
+	return replayStatus(result, receipt), body, nil
 }
 
-// storedIdempotentStatus is the HTTP status a replayed idempotency record must carry. A stored
-// error body replays as its own error status, never 200 — otherwise a retry of a completion that
-// settled as a FAILURE reports success, which is exactly backwards for the operator deciding
-// whether to act again.
-func storedIdempotentStatus(result map[string]any) int {
+// replayStatus is the HTTP status a replayed idempotency record must carry. It reads the signed
+// RECEIPT's status, not the result body: a settled failure must never replay as success, and
+// probing the result for an "error" key misclassifies a successful action whose own output happens
+// to carry that field (e.g. a validator returning {"error": null}). The result body is consulted
+// only for records with no receipt — the pre-execution rejections, which never committed.
+func replayStatus(result map[string]any, receipt *kernel.Receipt) int {
+	if receipt != nil {
+		if receipt.Status == kernel.TxSuccess {
+			return http.StatusOK
+		}
+		code, _ := result["code"].(string)
+		return kernel.HTTPStatusFromCode(code)
+	}
 	if _, isErr := result["error"]; !isErr {
 		return http.StatusOK
 	}
@@ -1138,7 +1158,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 				if existing.ReceiptJSON != "" {
 					_ = json.Unmarshal([]byte(existing.ReceiptJSON), &receipt)
 				}
-				return storedIdempotentStatus(result), map[string]any{"result": result, "receipt": receipt}, nil
+				return replayStatus(result, receipt), map[string]any{"result": result, "receipt": receipt}, nil
 			}
 			return duplicateInFlight()
 		}

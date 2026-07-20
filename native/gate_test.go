@@ -437,3 +437,34 @@ func TestJoin_GateRowSurvivesWhenTheOnwardStepIsNotClaimable(t *testing.T) {
 		t.Errorf("gate row was discarded: re-open gave have=%d need=%d, want the earlier contribution retained", have, need)
 	}
 }
+
+// Scenario (review finding 6): deleting the row only on fired leaks. A late contribution to an
+// already-resolved barrier recreates the row via IncrementStepGate, and nothing removes it — the
+// ON DELETE CASCADE only fires if the step row is deleted, which normal operation never does.
+func TestJoin_GateRowIsNotLeakedByALateContribution(t *testing.T) {
+	f := newGateFixture(t)
+	ctx := context.Background()
+	args := map[string]any{"step_id": f.step.ID, "need": float64(1)}
+
+	// The barrier fires and its row is dropped.
+	out, err := executeJoin(ctx, args, f.sysID, f.gateTrace, f.k, f.db)
+	if err != nil || out["fired"] != true {
+		t.Fatalf("expected the barrier to fire, got %v err=%v", out, err)
+	}
+	// A late/retried contributor arrives after the onward step is already done.
+	late, err := executeJoin(ctx, args, f.sysID, f.gateTrace, f.k, f.db)
+	if err != nil {
+		t.Fatalf("a late contribution must not error: %v", err)
+	}
+	if late["fired"] != false {
+		t.Fatalf("expected fired=false for a resolved barrier, got %v", late)
+	}
+	// It must not have left a row behind: re-opening the gate starts from scratch.
+	have, _, err := f.db.IncrementStepGate(ctx, f.step.ID, 1)
+	if err != nil {
+		t.Fatalf("IncrementStepGate: %v", err)
+	}
+	if have != 1 {
+		t.Errorf("a resolved barrier leaked its row: re-open gave have=%d, want 1", have)
+	}
+}

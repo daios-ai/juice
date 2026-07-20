@@ -110,15 +110,13 @@ func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Tr
 
 	recoverErr := ErrInternal.Wrap(reason)
 	req := CallRequest{StepID: stepID}
-	// A parked remote dispatch carries the inbound cross-kernel record it is serving. Force-failing
-	// it here (EndProcess, or crash recovery) is that record's final settlement, so thread the id
-	// through: otherwise the peer that requested the work is answered "duplicate in flight" until
-	// the record expires and never learns the call resolved.
-	if trace.DispatchJSON != nil {
-		var dispatch dispatchPayload
-		if err := json.Unmarshal([]byte(*trace.DispatchJSON), &dispatch); err == nil {
-			req.IdempotencyRecordID = dispatch.IdempotencyRecordID
-		}
+	// Force-failing a trace here (EndProcess, or crash recovery) is the final settlement for any
+	// inbound cross-kernel record it serves, so thread the id through: otherwise the peer that
+	// requested the work is answered "duplicate in flight" until the record expires and never
+	// learns the call resolved. Read from the trace, so this holds for every action kind — not
+	// only remote proxies, which are the only traces carrying a dispatch payload.
+	if trace.IdempotencyRecordID != nil {
+		req.IdempotencyRecordID = *trace.IdempotencyRecordID
 	}
 	_, settleErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, recoverErr)
 	return settleErr
@@ -336,6 +334,11 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		CallerUserID:  callerID,
 		CreatedAt:     time.Now().UTC(),
 	}
+	// Same as a root call (kernel.go): the inbound record rides on the trace so any settlement
+	// completes it, for every action kind rather than only remote proxies.
+	if idempotencyRecordID != "" {
+		stepTrace.IdempotencyRecordID = &idempotencyRecordID
+	}
 	// For remote-proxy actions, generate and persist the idempotency key and dispatch
 	// payload atomically with the trace creation. BeginStepCall passes these through
 	// insertTraceTx so they land in the DB before any network dispatch. This ensures
@@ -344,7 +347,7 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 	if action.Kind == KindRemoteProxy {
 		key := uuid.New().String()
 		stepTrace.IdempotencyKey = &key
-		stepTrace.DispatchJSON = marshalDispatch(args, stepID, k.remoteManifestPrice(action.Price), idempotencyRecordID)
+		stepTrace.DispatchJSON = marshalDispatch(args, stepID, k.remoteManifestPrice(action.Price))
 	}
 	// A lost waiting→running CAS already carries ErrStepNotClaimed from the store, which marks
 	// only the two genuine claim races. Deliberately NOT relabelled here: BeginStepCall also
@@ -363,27 +366,25 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		IdempotencyRecordID: idempotencyRecordID,
 	})
 	if callErr != nil {
-		// Remote-proxy timeout: the completion trace has idempotency_key set and the
-		// remote dispatch may already be in flight. Leave the step running so that
-		// RetryPendingRemoteDispatches can recover it via ListPendingRemoteTraces.
-		// Do NOT re-park — that would delete the pending trace and lose retry state.
-		// Nothing has committed yet, so there is no reply to hand back; callers recognize this
-		// in-flight state by ErrTimeout, not by the nil reply.
+		// Order matters. A non-nil reply means Call committed a transaction, and that is decided
+		// BEFORE any error classification: ErrTimeout arrives from two unrelated places — a WASM
+		// execution timeout, which settles and charges like any other failure, and a parked remote
+		// dispatch, which commits nothing. Testing the error first (as this did) reports a settled,
+		// charged completion as though nothing had happened, losing its transaction ids and telling
+		// the federation handler to leave an already-completed idempotency record pending.
+		if reply != nil {
+			// Committed: the step is already done via CommitFailedCall, so no re-park.
+			return &StepReply{CallReply: reply, StepID: stepID}, callErr
+		}
+		// Nothing committed. A remote dispatch may still be in flight: leave the step running so
+		// RetryPendingRemoteDispatches can recover it via ListPendingRemoteTraces. Do NOT re-park —
+		// that would delete the pending trace and lose the retry state.
 		if errors.Is(callErr, ErrTimeout) {
 			return nil, callErr
 		}
-		// Non-timeout: re-park and reset to waiting so the step can be retried. A no-op if
-		// CommitFailedCall already ran (step done); a non-nil error is a genuine store failure
-		// worth logging (callErr is still returned).
+		// Rejected before anything settled: re-park and reset to waiting so the step can be retried.
 		if resetErr := k.store.ResetStepAndRepark(ctx, stepID); resetErr != nil {
 			k.log.With(ctx).Error("step.reset_failed", "step_id", stepID, "error", resetErr, "call_error", callErr)
-		}
-		// Pass Call's reply through rather than dropping it. Call returns a non-nil reply exactly
-		// when a transaction committed, so this preserves the one fact every caller needs — did
-		// anything settle? — instead of leaving them to re-read the step's status and guess. Same
-		// contract as Call and RunFederated, which handleFederationCall already relies on.
-		if reply != nil {
-			return &StepReply{CallReply: reply, StepID: stepID}, callErr
 		}
 		return nil, callErr
 	}

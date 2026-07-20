@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -1531,5 +1532,115 @@ func TestParkInvariantViolationIsNotAClaimFailure(t *testing.T) {
 	}
 	if errors.Is(err, kernel.ErrStepNotClaimed) {
 		t.Errorf("a park-invariant violation is corruption, not a lost claim: %v", err)
+	}
+}
+
+// failReadTraceStore fails ReadTrace once armed. Arming it from inside script execution puts the
+// failure exactly where the real one occurs: after the action ran, at the post-execution taxable
+// read — the point where Call settles a failure and used to discard the receipt.
+type failReadTraceStore struct {
+	kernel.Store
+	armed bool
+}
+
+func (s *failReadTraceStore) ReadTrace(ctx context.Context, id string) (*kernel.Trace, error) {
+	if s.armed {
+		return nil, errors.New("injected post-execution read failure")
+	}
+	return s.Store.ReadTrace(ctx, id)
+}
+
+// armingScriptExec runs the script, then arms the store so the NEXT ReadTrace fails.
+type armingScriptExec struct {
+	store  *failReadTraceStore
+	result string
+}
+
+func (a *armingScriptExec) Compile(_ context.Context, source []byte) ([]byte, string, error) {
+	return source, "fakehash", nil
+}
+
+func (a *armingScriptExec) Execute(_ context.Context, _ []byte, _ []byte, _ kernel.HostFunctions) ([]byte, error) {
+	a.store.armed = true
+	return []byte(a.result), nil
+}
+
+// Scenario (review finding 1, root cause): Call's post-execution ReadTrace failure settles a
+// FAILURE transaction — charging the caller and completing any idempotency record — and used to
+// return a nil reply. Everything built on "non-nil reply means a transaction committed" was
+// therefore wrong on this path: the federation handler deleted a record the kernel had already
+// completed, leaving a charged peer unable to retrieve its outcome. The contract must hold here.
+func TestCallReturnsTheCommittedReplyWhenPostExecutionReadFails(t *testing.T) {
+	raw := newTestStore(t)
+	st := &failReadTraceStore{Store: raw}
+	exec := &armingScriptExec{store: st, result: `{"ok":true}`}
+	k := newTestKernelWithScripts(st, exec)
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@fail-owner", 500)
+	caller := setupUser(t, st, "@fail-caller", 500)
+	action := setupWasmAction(t, st, owner.ID, "fail-action", "", 10)
+
+	reply, err := k.Run(ctx, caller.ID, "@fail-owner/fail-action", map[string]any{})
+	if err == nil {
+		t.Fatal("expected the injected read failure to surface")
+	}
+	if reply == nil {
+		t.Fatal("a settled failure must return its committed transaction, not nil")
+	}
+	if reply.TxID == "" || reply.ReceiptID == "" {
+		t.Errorf("expected tx and receipt ids on the committed reply, got %+v", reply)
+	}
+	// The transaction really is committed and charged — this is why the reply must carry it.
+	st.armed = false
+	txs, listErr := raw.ListTransactions(ctx, kernel.TxFilter{})
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(txs) != 1 || txs[0].ID != reply.TxID || txs[0].Status != kernel.TxFailure {
+		t.Errorf("expected exactly the reported failure transaction, got %+v", txs)
+	}
+	_ = action
+}
+
+// Scenario (review finding 3): ErrTimeout reaches completeStep from two unrelated places — a WASM
+// execution timeout, which settles and CHARGES like any other failure, and a parked remote
+// dispatch, which commits nothing. Classifying on the error before the reply conflated them, so a
+// settled, charged completion was reported as "nothing happened yet": its transaction ids were
+// lost, and the federation handler left an already-completed idempotency record pending.
+func TestCompleteStepReportsACommittedWasmTimeout(t *testing.T) {
+	st := newTestStore(t)
+	// Must wrap context.DeadlineExceeded: that is what executeScript classifies as ErrTimeout
+	// (call.go), and a bare ErrTimeout would be re-classified as ErrExecutionFailed and never
+	// reach the branch under test.
+	k := newTestKernelWithScripts(st, &fakeScriptExec{err: fmt.Errorf("run: %w", context.DeadlineExceeded)})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@to-owner", 500)
+	caller := setupUser(t, st, "@to-caller", 0)
+	action := setupWasmAction(t, st, owner.ID, "to-action", "", 0)
+	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
+
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, caller.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+	reply, err := k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected the timeout to surface")
+	}
+	if reply == nil {
+		t.Fatal("a WASM timeout commits a failure transaction, so its reply must be returned")
+	}
+	if reply.TxID == "" {
+		t.Errorf("expected the committed transaction's id, got %+v", reply)
+	}
+	// It is genuinely settled: the step is done, not left running for a retry that will never come.
+	done, err := k.ReadStep(ctx, owner.ID, step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != kernel.StepDone {
+		t.Errorf("step status = %s, want done", done.Status)
 	}
 }

@@ -176,16 +176,31 @@ func executeJoin(ctx context.Context, args map[string]any, sysID, traceID string
 	if err != nil {
 		return nil, err
 	}
-	// The row is spent ONLY when this contribution actually resumed the step. Every other outcome
-	// keeps it, because every other outcome may still need the accumulated count: a failed fire so
-	// a later contribution can retry, and a not-claimable step because that also covers this
-	// barrier's own in-flight dispatch, which may yet leave the step re-completable. The cost of
-	// keeping it is one bounded-garbage row for an already-resolved step, cleaned up by the
-	// step_gates ON DELETE CASCADE; the cost of deleting it wrongly is every contribution lost.
-	if fired, _ := out["fired"].(bool); fired {
+	// The row is spent once the onward step can never need it again: this contribution fired it, or
+	// the step is terminally resolved (done/cancelled) by someone else. It is KEPT while the step
+	// is still waiting — a failed fire that a later contribution can retry — and while it is
+	// running, which covers this barrier's own in-flight dispatch that may yet leave the step
+	// re-completable. Reading the status is safe here in a way it is not for reporting: it decides
+	// only whether to drop a spent row, never what this contributor is told.
+	//
+	// Deleting solely on `fired` would leak: a late contribution to an already-resolved barrier
+	// recreates the row via IncrementStepGate and nothing would ever remove it, since the cascade
+	// only fires if the step row itself is deleted, which normal operation never does.
+	if fired, _ := out["fired"].(bool); fired || gateStepIsResolved(ctx, k, sysID, step.ID) {
 		_ = gates.DeleteStepGate(ctx, step.ID)
 	}
 	return out, nil
+}
+
+// gateStepIsResolved reports whether the onward step has reached a terminal state, so its barrier
+// row is dead weight. An unreadable step is treated as unresolved: keeping a row costs one row,
+// dropping one wrongly costs every accumulated contribution.
+func gateStepIsResolved(ctx context.Context, k *kernel.Kernel, sysID, stepID string) bool {
+	s, err := k.ReadStep(ctx, sysID, stepID)
+	if err != nil {
+		return false
+	}
+	return s.Status == kernel.StepDone || s.Status == kernel.StepCancelled
 }
 
 // intArg accepts the numeric shapes JSON decoding produces (float64) plus the integer forms a

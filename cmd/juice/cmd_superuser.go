@@ -365,9 +365,10 @@ func peerUnsubscribeCmd() *cobra.Command {
 // short — distinct from `truncated` alone, which only means this command stopped at its own page
 // bound. Conflating them tells an operator "that's all there is" when it is not.
 type peerStepsResponse struct {
-	Steps     []peerStepView `json:"steps"`
-	Truncated bool           `json:"truncated"`
-	Warning   string         `json:"warning"`
+	Steps      []peerStepView `json:"steps"`
+	Truncated  bool           `json:"truncated"`
+	Warning    string         `json:"warning"`
+	NextCursor string         `json:"next_cursor"`
 }
 
 // renderPeerSteps writes the human-readable listing. Diagnostics go to errw (C12), so a shortfall
@@ -391,7 +392,10 @@ func renderPeerSteps(outw, errw io.Writer, out peerStepsResponse) {
 		fmt.Fprintf(errw, "WARNING: the listing is INCOMPLETE — %s\n", out.Warning)
 		fmt.Fprintln(errw, "Steps not listed may still hold parked funds; re-run when the peer is reachable.")
 	case out.Truncated:
-		fmt.Fprintln(errw, "(more steps remain; the peer returned more pages than this command follows)")
+		fmt.Fprintln(errw, "(more steps remain; this command stopped at its page bound)")
+	}
+	if out.NextCursor != "" {
+		fmt.Fprintf(errw, "Continue with: --after %s\n", out.NextCursor)
 	}
 }
 
@@ -399,23 +403,38 @@ func renderPeerSteps(outw, errw io.Writer, out peerStepsResponse) {
 // is completable only over /juice/fed/step/1 (§13) — a key account holds no session token — so
 // these two commands are the operator's only window onto them.
 func peerStepsCmd() *cobra.Command {
-	return &cobra.Command{
+	var after string
+	cmd := &cobra.Command{
 		Use:   "steps <user>",
 		Short: "List waiting steps a peer (@handle or key) holds for this kernel",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			var out peerStepsResponse
-			if err := apiCall(context.Background(), "GET",
-				"/control/peers/steps?key="+url.QueryEscape(args[0]), nil, &out); err != nil {
+			path := "/control/peers/steps?key=" + url.QueryEscape(args[0])
+			if after != "" {
+				path += "&after=" + url.QueryEscape(after)
+			}
+			if err := apiCall(context.Background(), "GET", path, nil, &out); err != nil {
 				return err
 			}
 			if flagJSON {
-				return printJSON(out)
+				if err := printJSON(out); err != nil {
+					return err
+				}
+			} else {
+				renderPeerSteps(os.Stdout, os.Stderr, out)
 			}
-			renderPeerSteps(os.Stdout, os.Stderr, out)
+			// A listing cut short by the PEER is a failure, not a note: an operator scripting this
+			// to audit parked funds must not read a truncated list as the complete set. The page
+			// bound alone is benign and stays a zero exit, since --after continues from it.
+			if out.Warning != "" {
+				return kernel.ErrExecutionFailed.Wrapf("listing incomplete: %s", out.Warning)
+			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&after, "after", "", "Resume listing from a next_cursor returned by a previous run")
+	return cmd
 }
 
 func peerCompleteCmd() *cobra.Command {

@@ -481,15 +481,21 @@ func TestFedStep_ListDisclosesRequestNotRequester(t *testing.T) {
 // retry tells the operator the step succeeded when it did not.
 func TestFedStep_ReplayOfSettledFailureKeepsErrorStatus(t *testing.T) {
 	result := map[string]any{"error": "boom", "code": kernel.ErrExecutionFailed.Code}
-	if got := storedIdempotentStatus(result); got != kernel.ErrExecutionFailed.HTTP {
-		t.Errorf("stored error replays as %d, want %d", got, kernel.ErrExecutionFailed.HTTP)
+	failed := &kernel.Receipt{Status: kernel.TxFailure}
+	if got := replayStatus(result, failed); got != kernel.ErrExecutionFailed.HTTP {
+		t.Errorf("settled failure replays as %d, want %d", got, kernel.ErrExecutionFailed.HTTP)
 	}
-	if got := storedIdempotentStatus(map[string]any{"tx_id": "t1"}); got != http.StatusOK {
-		t.Errorf("stored success replays as %d, want 200", got)
+	if got := replayStatus(map[string]any{"ok": true}, &kernel.Receipt{Status: kernel.TxSuccess}); got != http.StatusOK {
+		t.Errorf("settled success replays as %d, want 200", got)
 	}
-	// An unknown/missing code degrades to 500, never to 200.
-	if got := storedIdempotentStatus(map[string]any{"error": "boom"}); got == http.StatusOK {
-		t.Error("a stored error with no code must not replay as 200")
+	// The receipt decides, not the body: a successful action whose own output carries an "error"
+	// field (a validator returning {"error": null}) must still replay as success.
+	if got := replayStatus(map[string]any{"error": nil}, &kernel.Receipt{Status: kernel.TxSuccess}); got != http.StatusOK {
+		t.Errorf("a success whose result contains an error field replays as %d, want 200", got)
+	}
+	// With no receipt (a pre-execution rejection, nothing committed) the body is all there is.
+	if got := replayStatus(map[string]any{"error": "boom"}, nil); got == http.StatusOK {
+		t.Error("a stored rejection must not replay as 200")
 	}
 	// The in-flight reply carries a code so the requester re-raises a typed error.
 	status, body, _ := duplicateInFlight()
