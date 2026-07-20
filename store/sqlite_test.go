@@ -3306,25 +3306,23 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 	}
 }
 
-// Scenario (review finding 7): offset pagination over a LIVE query skips a step. A step settled
-// between pages shifts the window, so one still-waiting step is never listed — under a listing
-// that looks complete. Written from the failure scenario before the fix; must fail on offsets.
-func TestListStepsAwaitingCallerNoSkipWhenAStepSettlesMidPage(t *testing.T) {
-	db := openTestDB(t)
+// seedWaitingStep creates owner+assignee, an action, a funded process and root trace, and returns
+// a maker for waiting steps on that trace. Four paging/gate tests built this by hand.
+func seedWaitingStep(t *testing.T, db *DB, prefix string) (assigneeID string, mk func() string) {
+	t.Helper()
 	ctx := context.Background()
-
-	owner := newUser("@page-owner", 1000)
-	assignee := newUser("@page-assignee", 0)
+	owner := newUser("@"+prefix+"-owner", 1000)
+	assignee := newUser("@"+prefix+"-assignee", 0)
 	for _, u := range []*kernel.User{owner, assignee} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}
 	}
-	act := newAction(owner.ID, "page-act", 0, true)
+	act := newAction(owner.ID, prefix+"-act", 0, true)
 	if err := db.CreateAction(ctx, act); err != nil {
 		t.Fatal(err)
 	}
-	mk := func() string {
+	return assignee.ID, func() string {
 		t.Helper()
 		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: owner.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
 		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
@@ -3341,6 +3339,15 @@ func TestListStepsAwaitingCallerNoSkipWhenAStepSettlesMidPage(t *testing.T) {
 		}
 		return st.ID
 	}
+}
+
+// Scenario (review finding 7): offset pagination over a LIVE query skips a step. A step settled
+// between pages shifts the window, so one still-waiting step is never listed — under a listing
+// that looks complete. Written from the failure scenario before the fix; must fail on offsets.
+func TestListStepsAwaitingCallerNoSkipWhenAStepSettlesMidPage(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	assignee, mk := seedWaitingStep(t, db, "page")
 
 	const total = 6
 	created := make([]string, total)
@@ -3348,21 +3355,15 @@ func TestListStepsAwaitingCallerNoSkipWhenAStepSettlesMidPage(t *testing.T) {
 		created[i] = mk()
 	}
 
-	// Page 1 of 3.
-	page1, cursor, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 3, "")
-	if err != nil {
-		t.Fatalf("page 1: %v", err)
+	page1, cursor, err := db.ListStepsAwaitingCaller(ctx, assignee, 3, "")
+	if err != nil || len(page1) != 3 {
+		t.Fatalf("page 1: got %d rows err=%v, want 3", len(page1), err)
 	}
-	if len(page1) != 3 {
-		t.Fatalf("page 1: got %d rows, want 3", len(page1))
-	}
-
-	// A step from page 1 settles before page 2 is fetched — an offset cursor's window shifts.
-	if _, err := db.db.ExecContext(ctx, `UPDATE steps SET status='done' WHERE id=?`, page1[0].ID); err != nil {
+	// A step from page 1 settles before page 2 is fetched — an offset window would shift.
+	if err := db.ExecForTest(ctx, `UPDATE steps SET status='done' WHERE id=?`, page1[0].ID); err != nil {
 		t.Fatal(err)
 	}
-
-	page2, _, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 3, cursor)
+	page2, _, err := db.ListStepsAwaitingCaller(ctx, assignee, 3, cursor)
 	if err != nil {
 		t.Fatalf("page 2: %v", err)
 	}
@@ -3374,7 +3375,6 @@ func TestListStepsAwaitingCallerNoSkipWhenAStepSettlesMidPage(t *testing.T) {
 		}
 		seen[s.ID] = true
 	}
-	// Every step that is still waiting must have been listed; none may be skipped.
 	for _, id := range created[1:] {
 		if !seen[id] {
 			t.Errorf("still-waiting step %s was skipped across the page boundary", id)
@@ -3387,41 +3387,21 @@ func TestListStepsAwaitingCallerNoSkipWhenAStepSettlesMidPage(t *testing.T) {
 func TestListStepsAwaitingCallerTiebreaksOnID(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
+	assignee, mk := seedWaitingStep(t, db, "tie")
 
-	owner := newUser("@tie-owner", 1000)
-	assignee := newUser("@tie-assignee", 0)
-	for _, u := range []*kernel.User{owner, assignee} {
-		if err := db.CreateUser(ctx, u); err != nil {
+	// Force every step onto one instant: without the id tiebreak the cursor is not a total order.
+	ids := []string{mk(), mk(), mk(), mk()}
+	same := timeToStr(time.Now().UTC())
+	for _, id := range ids {
+		if err := db.ExecForTest(ctx, `UPDATE steps SET created_at=? WHERE id=?`, same, id); err != nil {
 			t.Fatal(err)
 		}
-	}
-	act := newAction(owner.ID, "tie-act", 0, true)
-	if err := db.CreateAction(ctx, act); err != nil {
-		t.Fatal(err)
-	}
-	same := time.Now().UTC()
-	ids := []string{}
-	for i := 0; i < 4; i++ {
-		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: owner.ID, Status: kernel.ProcessOpen, CreatedAt: same}
-		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: same}
-		if err := db.BeginRun(ctx, p, root, owner.ID, 0); err != nil {
-			t.Fatal(err)
-		}
-		ptID := root.ID
-		st := &kernel.Step{
-			ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: assignee.ID,
-			ActionID: act.ID, Price: 0, Status: kernel.StepWaiting, CreatedAt: same, // identical instant
-		}
-		if err := db.CreateStep(ctx, st); err != nil {
-			t.Fatal(err)
-		}
-		ids = append(ids, st.ID)
 	}
 
 	seen := map[string]bool{}
 	cursor := ""
-	for page := 0; page < 4; page++ {
-		got, next, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 2, cursor)
+	for page := 0; page < len(ids); page++ {
+		got, next, err := db.ListStepsAwaitingCaller(ctx, assignee, 2, cursor)
 		if err != nil {
 			t.Fatalf("page %d: %v", page, err)
 		}

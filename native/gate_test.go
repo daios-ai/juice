@@ -167,53 +167,6 @@ func TestRace_ConcurrentContributorsFireExactlyOnce(t *testing.T) {
 	}
 }
 
-func TestRace_RejectsStepFromAnotherProcess(t *testing.T) {
-	f := newGateFixture(t)
-	orphan := &kernel.Trace{ID: uuid.New().String()}
-	_, err := executeRace(context.Background(), map[string]any{"step_id": f.step.ID},
-		f.sysID, orphan.ID, f.k)
-	if !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("expected ErrInvalidState for an unknown gate trace, got %v", err)
-	}
-}
-
-// Regression, confused deputy: confinement is creator-scoped, not process-scoped. Subcalls share
-// a process, so a process-wide check would let anyone executing in the process — including the
-// process owner — fire a continuation someone else's contractor parked, with input of their
-// choosing, spending the funds that contractor reserved.
-func TestGates_RejectStepCreatedByAnotherTraceInSameProcess(t *testing.T) {
-	f := newGateFixture(t)
-	ctx := context.Background()
-	args := map[string]any{"step_id": f.step.ID, "input": map[string]any{"forged": true}}
-
-	_, err := executeRace(ctx, args, f.sysID, f.siblingTrace, f.k)
-	if !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("race: expected ErrUnauthorized for a foreign creator, got %v", err)
-	}
-	_, err = executeJoin(ctx, map[string]any{"step_id": f.step.ID, "need": float64(1)},
-		f.sysID, f.siblingTrace, f.k, f.db)
-	if !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("join: expected ErrUnauthorized for a foreign creator, got %v", err)
-	}
-
-	// The onward step is untouched: still waiting, still funded.
-	step, err := f.k.ReadStep(ctx, f.sysID, f.step.ID)
-	if err != nil {
-		t.Fatalf("ReadStep: %v", err)
-	}
-	if step.Status != kernel.StepWaiting {
-		t.Errorf("expected the onward step to remain waiting, got %s", step.Status)
-	}
-}
-
-func TestRace_MissingStepID(t *testing.T) {
-	f := newGateFixture(t)
-	_, err := executeRace(context.Background(), map[string]any{}, f.sysID, f.gateTrace, f.k)
-	if !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("expected ErrInvalidInput, got %v", err)
-	}
-}
-
 func TestJoin_FiresAtThreshold(t *testing.T) {
 	f := newGateFixture(t)
 	ctx := context.Background()
@@ -251,53 +204,6 @@ func TestJoin_FiresAtThreshold(t *testing.T) {
 	}
 	if have != 1 {
 		t.Errorf("expected gate row deleted after firing (have=1 on re-open), got have=%d", have)
-	}
-}
-
-func TestJoin_NeedMismatchRejected(t *testing.T) {
-	f := newGateFixture(t)
-	ctx := context.Background()
-	if _, err := executeJoin(ctx, map[string]any{"step_id": f.step.ID, "need": float64(3)},
-		f.sysID, f.gateTrace, f.k, f.db); err != nil {
-		t.Fatalf("first contribution: %v", err)
-	}
-	_, err := executeJoin(ctx, map[string]any{"step_id": f.step.ID, "need": float64(5)},
-		f.sysID, f.gateTrace, f.k, f.db)
-	if !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("expected ErrInvalidInput on a changed threshold, got %v", err)
-	}
-}
-
-func TestJoin_InvalidNeed(t *testing.T) {
-	f := newGateFixture(t)
-	for _, need := range []any{nil, float64(0), "three"} {
-		args := map[string]any{"step_id": f.step.ID}
-		if need != nil {
-			args["need"] = need
-		}
-		_, err := executeJoin(context.Background(), args, f.sysID, f.gateTrace, f.k, f.db)
-		if !errors.Is(err, kernel.ErrInvalidInput) {
-			t.Errorf("need=%v: expected ErrInvalidInput, got %v", need, err)
-		}
-	}
-}
-
-// A barrier whose onward step is already gone (cancelled, or won by something else) reports
-// fired=false rather than erroring. The row is deliberately left in place — see
-// TestJoin_GateRowSurvivesWhenTheOnwardStepIsNotClaimable for why that state is not conclusive.
-func TestJoin_AlreadyResolvedStepReportsNotFired(t *testing.T) {
-	f := newGateFixture(t)
-	ctx := context.Background()
-	if _, err := executeRace(ctx, map[string]any{"step_id": f.step.ID}, f.sysID, f.gateTrace, f.k); err != nil {
-		t.Fatalf("pre-fire via race: %v", err)
-	}
-	out, err := executeJoin(ctx, map[string]any{"step_id": f.step.ID, "need": float64(1)},
-		f.sysID, f.gateTrace, f.k, f.db)
-	if err != nil {
-		t.Fatalf("join on resolved step: %v", err)
-	}
-	if out["fired"] != false {
-		t.Errorf("expected fired=false on an already-resolved step, got %v", out)
 	}
 }
 
@@ -365,106 +271,161 @@ func TestGates_FiredIsTrueWhenTheOnwardActionFails(t *testing.T) {
 	}
 }
 
-// A join whose fire fails keeps its row, so a later contribution can re-attempt the barrier.
-// Deleting it would discard every accumulated contribution and strand the onward step for good.
-func TestJoin_FailedFireKeepsTheGateRowForRetry(t *testing.T) {
-	f := newGateFixture(t)
+// Every way a gate refuses to act, in one table. The confinement cases are the confused-deputy
+// regression: subcalls share a process, so a process-wide rule would let anyone executing there
+// resume a continuation another provider parked, with input of their choosing.
+func TestGates_RejectBadTargets(t *testing.T) {
 	ctx := context.Background()
-	sys, _ := f.k.ReadUserByHandle(ctx, "@sys")
-
-	// Deactivating the action after the step exists makes the completion fail CanCall — rejected
-	// BEFORE any transaction, so the step resets to waiting (§10) and fire propagates a genuine
-	// error. (An action that runs and fails would instead commit a transaction, which is the
-	// fired=true case covered above.)
-	target := seedAction(t, f.db, sys.ID, "later-disabled", "disabled after parking")
-	step, err := f.k.CreateStep(ctx, f.parentTrace, target.ID, json.RawMessage(`{}`), sys.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	target.Active = false
-	if err := f.db.UpdateAction(ctx, target); err != nil {
-		t.Fatal(err)
-	}
-
-	args := map[string]any{"step_id": step.ID, "need": float64(1)}
-	if _, err := executeJoin(ctx, args, f.sysID, f.gateTrace, f.k, f.db); err == nil {
-		t.Fatal("expected the fire to fail")
-	}
-	// The row survives at have>=need, so the next contribution re-attempts rather than restarting
-	// the count from zero.
-	have, need, err := f.db.IncrementStepGate(ctx, step.ID, 1)
-	if err != nil {
-		t.Fatalf("IncrementStepGate: %v", err)
-	}
-	if have < need {
-		t.Errorf("gate row was discarded: have=%d need=%d, want the barrier still met", have, need)
+	for _, tc := range []struct {
+		name  string
+		args  func(f *gateFixture) map[string]any
+		trace func(f *gateFixture) string // nil = the fixture's own gate trace
+		want  error
+	}{
+		{"missing step_id",
+			func(*gateFixture) map[string]any { return map[string]any{} },
+			nil, kernel.ErrInvalidInput},
+		{"unknown gate trace",
+			func(f *gateFixture) map[string]any { return map[string]any{"step_id": f.step.ID} },
+			func(*gateFixture) string { return uuid.New().String() }, kernel.ErrInvalidState},
+		{"step created by another trace in the same process",
+			func(f *gateFixture) map[string]any {
+				return map[string]any{"step_id": f.step.ID, "input": map[string]any{"forged": true}}
+			},
+			func(f *gateFixture) string { return f.siblingTrace }, kernel.ErrUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGateFixture(t)
+			trace := f.gateTrace
+			if tc.trace != nil {
+				trace = tc.trace(f)
+			}
+			args := tc.args(f)
+			if _, err := executeRace(ctx, args, f.sysID, trace, f.k); !errors.Is(err, tc.want) {
+				t.Errorf("race: got %v, want %v", err, tc.want)
+			}
+			args["need"] = float64(1)
+			if _, err := executeJoin(ctx, args, f.sysID, trace, f.k, f.db); !errors.Is(err, tc.want) {
+				t.Errorf("join: got %v, want %v", err, tc.want)
+			}
+			// A refused gate never touches the onward step.
+			if step, err := f.k.ReadStep(ctx, f.sysID, f.step.ID); err == nil && step.Status != kernel.StepWaiting {
+				t.Errorf("expected the onward step to remain waiting, got %s", step.Status)
+			}
+		})
 	}
 }
 
-// Scenario (review finding 5): a join whose own fire is still in flight (the onward step left
-// `running` by a remote dispatch) sees ErrStepNotClaimed on the NEXT contribution. Treating that
-// as "the barrier is spent" and deleting the row discards every accumulated contribution while
-// the dispatch may yet settle. The row must survive every non-fired outcome.
-func TestJoin_GateRowSurvivesWhenTheOnwardStepIsNotClaimable(t *testing.T) {
-	f := newGateFixture(t)
+// `need` must be a positive integer, and the first contribution fixes it.
+func TestJoin_RejectsBadNeed(t *testing.T) {
 	ctx := context.Background()
-	sys, _ := f.k.ReadUserByHandle(ctx, "@sys")
-
-	target := seedAction(t, f.db, sys.ID, "inflight-target", "claimed elsewhere")
-	step, err := f.k.CreateStep(ctx, f.parentTrace, target.ID, json.RawMessage(`{}`), sys.ID)
-	if err != nil {
-		t.Fatal(err)
+	for _, need := range []any{nil, float64(0), "three"} {
+		f := newGateFixture(t)
+		args := map[string]any{"step_id": f.step.ID}
+		if need != nil {
+			args["need"] = need
+		}
+		if _, err := executeJoin(ctx, args, f.sysID, f.gateTrace, f.k, f.db); !errors.Is(err, kernel.ErrInvalidInput) {
+			t.Errorf("need=%v: got %v, want ErrInvalidInput", need, err)
+		}
 	}
-	// Put the step beyond claiming, as an in-flight dispatch would: it is no longer `waiting`.
-	if err := f.db.ExecForTest(ctx, `UPDATE steps SET status='running' WHERE id=?`, step.ID); err != nil {
-		t.Fatal(err)
+	f := newGateFixture(t)
+	if _, err := executeJoin(ctx, map[string]any{"step_id": f.step.ID, "need": float64(3)},
+		f.sysID, f.gateTrace, f.k, f.db); err != nil {
+		t.Fatalf("first contribution: %v", err)
 	}
-
-	args := map[string]any{"step_id": step.ID, "need": float64(1)}
-	out, err := executeJoin(ctx, args, f.sysID, f.gateTrace, f.k, f.db)
-	if err != nil {
-		t.Fatalf("a not-claimable onward step is not an error for the contributor: %v", err)
-	}
-	if out["fired"] != false {
-		t.Fatalf("expected fired=false, got %v", out)
-	}
-	// The barrier's count must still be there: only a fired gate spends the row.
-	have, need, err := f.db.IncrementStepGate(ctx, step.ID, 1)
-	if err != nil {
-		t.Fatalf("IncrementStepGate: %v", err)
-	}
-	if have < 2 || need != 1 {
-		t.Errorf("gate row was discarded: re-open gave have=%d need=%d, want the earlier contribution retained", have, need)
+	if _, err := executeJoin(ctx, map[string]any{"step_id": f.step.ID, "need": float64(5)},
+		f.sysID, f.gateTrace, f.k, f.db); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("changed threshold: got %v, want ErrInvalidInput", err)
 	}
 }
 
-// Scenario (review finding 6): deleting the row only on fired leaks. A late contribution to an
-// already-resolved barrier recreates the row via IncrementStepGate, and nothing removes it — the
-// ON DELETE CASCADE only fires if the step row is deleted, which normal operation never does.
-func TestJoin_GateRowIsNotLeakedByALateContribution(t *testing.T) {
-	f := newGateFixture(t)
+// The gate row's whole lifecycle, by the onward step's state. The rule is one condition: the row
+// is spent only when the barrier can never need its count again. Keeping it wrongly costs one row;
+// dropping it wrongly costs every accumulated contribution, so every non-terminal state keeps it.
+func TestJoin_GateRowLifecycle(t *testing.T) {
 	ctx := context.Background()
-	args := map[string]any{"step_id": f.step.ID, "need": float64(1)}
+	for _, tc := range []struct {
+		name string
+		// setup returns the onward step the barrier targets, already in the state under test.
+		setup    func(t *testing.T, f *gateFixture) string
+		wantKept bool
+		reason   string
+	}{
+		{
+			name: "fire fails before anything settles",
+			setup: func(t *testing.T, f *gateFixture) string {
+				// Deactivating after parking makes the completion fail CanCall — rejected before
+				// any transaction, so the step resets to waiting and fire returns a real error.
+				sys, _ := f.k.ReadUserByHandle(ctx, "@sys")
+				target := seedAction(t, f.db, sys.ID, "later-disabled", "disabled after parking")
+				step, err := f.k.CreateStep(ctx, f.parentTrace, target.ID, json.RawMessage(`{}`), sys.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				target.Active = false
+				if err := f.db.UpdateAction(ctx, target); err != nil {
+					t.Fatal(err)
+				}
+				return step.ID
+			},
+			wantKept: true,
+			reason:   "a later contribution must be able to re-attempt the fire",
+		},
+		{
+			name: "onward step is in flight",
+			setup: func(t *testing.T, f *gateFixture) string {
+				sys, _ := f.k.ReadUserByHandle(ctx, "@sys")
+				target := seedAction(t, f.db, sys.ID, "inflight-target", "claimed elsewhere")
+				step, err := f.k.CreateStep(ctx, f.parentTrace, target.ID, json.RawMessage(`{}`), sys.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := f.db.ExecForTest(ctx, `UPDATE steps SET status='running' WHERE id=?`, step.ID); err != nil {
+					t.Fatal(err)
+				}
+				return step.ID
+			},
+			wantKept: true,
+			reason:   "this barrier's own dispatch may yet leave the step completable",
+		},
+		{
+			name: "onward step already resolved",
+			setup: func(t *testing.T, f *gateFixture) string {
+				// Fire it via race, so the join below arrives late to a done step.
+				if _, err := executeRace(ctx, map[string]any{"step_id": f.step.ID}, f.sysID, f.gateTrace, f.k); err != nil {
+					t.Fatal(err)
+				}
+				return f.step.ID
+			},
+			wantKept: false,
+			reason:   "nothing will read the row again; keeping it leaks one row per late contribution",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGateFixture(t)
+			stepID := tc.setup(t, f)
+			args := map[string]any{"step_id": stepID, "need": float64(1)}
 
-	// The barrier fires and its row is dropped.
-	out, err := executeJoin(ctx, args, f.sysID, f.gateTrace, f.k, f.db)
-	if err != nil || out["fired"] != true {
-		t.Fatalf("expected the barrier to fire, got %v err=%v", out, err)
-	}
-	// A late/retried contributor arrives after the onward step is already done.
-	late, err := executeJoin(ctx, args, f.sysID, f.gateTrace, f.k, f.db)
-	if err != nil {
-		t.Fatalf("a late contribution must not error: %v", err)
-	}
-	if late["fired"] != false {
-		t.Fatalf("expected fired=false for a resolved barrier, got %v", late)
-	}
-	// It must not have left a row behind: re-opening the gate starts from scratch.
-	have, _, err := f.db.IncrementStepGate(ctx, f.step.ID, 1)
-	if err != nil {
-		t.Fatalf("IncrementStepGate: %v", err)
-	}
-	if have != 1 {
-		t.Errorf("a resolved barrier leaked its row: re-open gave have=%d, want 1", have)
+			out, err := executeJoin(ctx, args, f.sysID, f.gateTrace, f.k, f.db)
+			if tc.wantKept && tc.name == "fire fails before anything settles" {
+				if err == nil {
+					t.Fatal("expected the fire to fail")
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			} else if fired, _ := out["fired"].(bool); fired {
+				t.Fatalf("expected fired=false for a non-completable step, got %v", out)
+			}
+
+			// Re-opening the gate reveals whether the row survived: have=2 means it was kept.
+			have, _, err := f.db.IncrementStepGate(ctx, stepID, 1)
+			if err != nil {
+				t.Fatalf("IncrementStepGate: %v", err)
+			}
+			if kept := have > 1; kept != tc.wantKept {
+				t.Errorf("row kept = %v, want %v — %s", kept, tc.wantKept, tc.reason)
+			}
+		})
 	}
 }

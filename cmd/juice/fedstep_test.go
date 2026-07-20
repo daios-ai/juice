@@ -182,25 +182,94 @@ func TestFedStep_ListUnknownKeyIsEmptyAndProvisionsNothing(t *testing.T) {
 	}
 }
 
-func TestFedStep_BadSignatureAndStaleTimestampRejected(t *testing.T) {
-	srv, k, db := newTestHTTPServerFull(t)
+// Every way a step request is refused, in one table. Each case starts from the same fixture — a
+// registered peer with one step parked for it — and mutates exactly one thing, so what is under
+// test is the mutation and not the setup. These were seven near-identical tests.
+func TestFedStep_RequestsAreRejected(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		// run performs the rejected request. keyA/privA are the peer the step is parked for.
+		run func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error
+	}{
+		{"bad list signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ ed25519.PrivateKey, _ string) error {
+			ts := time.Now().UTC().Format(time.RFC3339)
+			_, _, err := handleFederationStepList(k, ctx, keyA, ts, "bogus", "")
+			return err
+		}},
+		{"bad complete signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ ed25519.PrivateKey, stepID string) error {
+			ts := time.Now().UTC().Format(time.RFC3339)
+			_, _, err := handleFederationStepComplete(k, ctx, keyA, ts, "idem-1", stepID, "bogus", []byte("{}"))
+			return err
+		}},
+		{"stale timestamp", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, _ string) error {
+			stale := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+			sig, _ := kernel.SignStepListPayload(privA, keyA, selfKey(t, k), stale)
+			_, _, err := handleFederationStepList(k, ctx, keyA, stale, sig, "")
+			return err
+		}},
+		{"input does not match input_hash", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error {
+			ts := time.Now().UTC().Format(time.RFC3339)
+			sig, _ := kernel.SignStepPayload(privA, stepID, keyA, selfKey(t, k), "idem-t", ts, sha256HexBytes([]byte(`{"ok":true}`)))
+			_, _, err := handleFederationStepComplete(k, ctx, keyA, ts, "idem-t", stepID, sig, []byte(`{"ok":false}`))
+			return err
+		}},
+		{"signed for another kernel", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error {
+			ts := time.Now().UTC().Format(time.RFC3339)
+			sig, _ := kernel.SignStepListPayload(privA, keyA, "some-other-kernels-key", ts)
+			_, _, err := handleFederationStepList(k, ctx, keyA, ts, sig, "")
+			return err
+		}},
+		{"known peer that is not the required caller", func(t *testing.T, k *kernel.Kernel, _ string, _ ed25519.PrivateKey, stepID string) error {
+			_, privB := fedPeer(t, k, "@peer-b")
+			_, _, err := fedStepComplete(t, k, privB, stepID, "idem-b", []byte("{}"))
+			return err
+		}},
+		{"unknown key", func(t *testing.T, k *kernel.Kernel, _ string, _ ed25519.PrivateKey, stepID string) error {
+			_, privX, _ := ed25519.GenerateKey(rand.Reader)
+			_, _, err := fedStepComplete(t, k, privX, stepID, "idem-x", []byte("{}"))
+			return err
+		}},
+		{"suspended peer", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error {
+			sys, _ := k.ReadUserByHandle(ctx, "@sys")
+			peer, _ := k.ReadUserByPublicKey(ctx, keyA)
+			if err := k.SuspendUser(ctx, sys.ID, peer.ID); err != nil {
+				t.Fatalf("suspend: %v", err)
+			}
+			if _, _, err := fedStepList(t, k, privA); err == nil {
+				t.Error("a suspended peer's list must also be refused")
+			}
+			_, _, err := fedStepComplete(t, k, privA, stepID, "idem-s", []byte("{}"))
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, k, db := newTestHTTPServerFull(t)
+			defer srv.Close()
+			keyA, privA := fedPeer(t, k, "@peer-a")
+			stepID := parkStepForPeer(t, k, db, keyA)
+			if err := tc.run(t, k, keyA, privA, stepID); err == nil {
+				t.Error("expected the request to be rejected")
+			}
+		})
+	}
+}
+
+// Rejections handled by OnStep before any handler runs.
+func TestFedStep_OnStepRejects(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
+	h := &fedHandlers{kernel: k}
 
-	keyA, privA := fedPeer(t, k, "@peer-a")
-	stepID := parkStepForPeer(t, k, db, keyA)
-	ts := time.Now().UTC().Format(time.RFC3339)
-
-	if _, _, err := handleFederationStepList(k, context.Background(), keyA, ts, "bogus", ""); err == nil {
-		t.Error("expected a bad list signature to be rejected")
+	if got := h.OnStep(context.Background(), "", fed.StepRequest{Kind: "nonsense"}).Status; got != kernel.ErrInvalidInput.HTTP {
+		t.Errorf("unknown kind: got %d, want %d", got, kernel.ErrInvalidInput.HTTP)
 	}
-	if _, _, err := handleFederationStepComplete(k, context.Background(), keyA, ts, "idem-1", stepID, "bogus", []byte("{}")); err == nil {
-		t.Error("expected a bad complete signature to be rejected")
-	}
-
-	stale := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
-	sig, _ := kernel.SignStepListPayload(privA, keyA, selfKey(t, k), stale)
-	if _, _, err := handleFederationStepList(k, context.Background(), keyA, stale, sig, ""); err == nil {
-		t.Error("expected a stale timestamp to be rejected")
+	// Defense in depth: a validly-signed request may not be replayed over a connection
+	// authenticated as a different peer (mirrors OnCall).
+	resp := h.OnStep(context.Background(), "different-connection-key",
+		fed.StepRequest{Kind: "list", Counterparty: "claimed-key"})
+	if resp.Status != kernel.ErrUnauthenticated.HTTP {
+		t.Errorf("mismatched connection key: got %d, want %d", resp.Status, kernel.ErrUnauthenticated.HTTP)
 	}
 }
 
@@ -256,148 +325,6 @@ func TestFedStep_CompleteSettlesAndIsIdempotent(t *testing.T) {
 		t.Error("expected completing a done step to fail")
 	}
 }
-
-func TestFedStep_CompleteRejectsWrongPeerAndStranger(t *testing.T) {
-	srv, k, db := newTestHTTPServerFull(t)
-	defer srv.Close()
-
-	keyA, _ := fedPeer(t, k, "@peer-a")
-	_, privB := fedPeer(t, k, "@peer-b")
-	stepID := parkStepForPeer(t, k, db, keyA)
-
-	// Peer B is a known peer but not this step's required caller.
-	if _, _, err := fedStepComplete(t, k, privB, stepID, "idem-b", []byte("{}")); err == nil {
-		t.Error("expected a non-required-caller peer to be refused")
-	}
-
-	// A stranger holds no steps at all.
-	_, privX, _ := ed25519.GenerateKey(rand.Reader)
-	if _, _, err := fedStepComplete(t, k, privX, stepID, "idem-x", []byte("{}")); err == nil {
-		t.Error("expected an unknown key to be refused")
-	}
-}
-
-func TestFedStep_SuspendedPeerRefused(t *testing.T) {
-	srv, k, db := newTestHTTPServerFull(t)
-	defer srv.Close()
-
-	ctx := context.Background()
-	keyA, privA := fedPeer(t, k, "@peer-a")
-	stepID := parkStepForPeer(t, k, db, keyA)
-
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
-	peer, _ := k.ReadUserByPublicKey(ctx, keyA)
-	if err := k.SuspendUser(ctx, sys.ID, peer.ID); err != nil {
-		t.Fatalf("suspend: %v", err)
-	}
-
-	if _, _, err := fedStepList(t, k, privA); err == nil {
-		t.Error("expected a suspended peer's list to be refused")
-	}
-	if _, _, err := fedStepComplete(t, k, privA, stepID, "idem-s", []byte("{}")); err == nil {
-		t.Error("expected a suspended peer's completion to be refused")
-	}
-}
-
-// The step payloads must not verify as any other signed Juice payload, and vice versa (§12).
-func TestFedStep_SignatureDomainsAreDisjoint(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
-	ts := time.Now().UTC().Format(time.RFC3339)
-	const hash = "abc123"
-
-	const rcpt = "recipient-kernel-key"
-	stepSig, _ := kernel.SignStepPayload(priv, "step-1", cp, rcpt, "idem-1", ts, hash)
-	listSig, _ := kernel.SignStepListPayload(priv, cp, rcpt, ts)
-	callSig, _ := kernel.SignFederationPayload(priv, "@o/a", cp, "idem-1", ts, hash)
-
-	// A call signature must not pass as a step signature, nor either step kind as the other.
-	if err := kernel.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, callSig); err == nil {
-		t.Error("a federation call signature must not verify as a step completion")
-	}
-	if err := kernel.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, listSig); err == nil {
-		t.Error("a step list signature must not verify as a step completion")
-	}
-	if err := kernel.VerifyStepListSignature(cp, cp, rcpt, ts, stepSig); err == nil {
-		t.Error("a step completion signature must not verify as a step list")
-	}
-	if err := kernel.VerifyFederationSignature(cp, "@o/a", cp, "idem-1", ts, hash, stepSig); err == nil {
-		t.Error("a step signature must not verify as a federation call")
-	}
-	// Sanity: each verifies under its own domain.
-	if err := kernel.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, stepSig); err != nil {
-		t.Errorf("step signature should verify in its own domain: %v", err)
-	}
-	if err := kernel.VerifyStepListSignature(cp, cp, rcpt, ts, listSig); err != nil {
-		t.Errorf("list signature should verify in its own domain: %v", err)
-	}
-}
-
-// A tampered input is caught by input_hash even though the signature covers only the hash.
-func TestFedStep_TamperedInputRejected(t *testing.T) {
-	srv, k, db := newTestHTTPServerFull(t)
-	defer srv.Close()
-
-	keyA, privA := fedPeer(t, k, "@peer-a")
-	stepID := parkStepForPeer(t, k, db, keyA)
-
-	ts := time.Now().UTC().Format(time.RFC3339)
-	sig, _ := kernel.SignStepPayload(privA, stepID, keyA, selfKey(t, k), "idem-t", ts, sha256HexBytes([]byte(`{"ok":true}`)))
-	_, _, err := handleFederationStepComplete(k, context.Background(), keyA, ts, "idem-t", stepID, sig, []byte(`{"ok":false}`))
-	if err == nil {
-		t.Error("expected a body that does not match input_hash to be rejected")
-	}
-}
-
-func TestFedStep_UnknownKindRejected(t *testing.T) {
-	srv, k := newTestHTTPServer(t)
-	defer srv.Close()
-
-	h := &fedHandlers{kernel: k}
-	resp := h.OnStep(context.Background(), "", fed.StepRequest{Kind: "nonsense"})
-	if resp.Status != kernel.ErrInvalidInput.HTTP {
-		t.Errorf("expected %d for an unknown kind, got %d", kernel.ErrInvalidInput.HTTP, resp.Status)
-	}
-}
-
-// Defense in depth: a validly-signed request may not be replayed over a connection authenticated
-// as a different peer (mirrors OnCall).
-func TestFedStep_ConnectionKeyMustMatchCounterparty(t *testing.T) {
-	srv, k := newTestHTTPServer(t)
-	defer srv.Close()
-
-	h := &fedHandlers{kernel: k}
-	resp := h.OnStep(context.Background(), "different-connection-key",
-		fed.StepRequest{Kind: "list", Counterparty: "claimed-key"})
-	if resp.Status != kernel.ErrUnauthenticated.HTTP {
-		t.Errorf("expected %d when the connection key differs, got %d", kernel.ErrUnauthenticated.HTTP, resp.Status)
-	}
-}
-
-// A payload signed for a different kernel must not verify here. This is what closes cross-kernel
-// replay: without recipient binding, a request kernel B received from A could be replayed to C.
-func TestFedStep_RejectsPayloadSignedForAnotherKernel(t *testing.T) {
-	srv, k, db := newTestHTTPServerFull(t)
-	defer srv.Close()
-
-	keyA, privA := fedPeer(t, k, "@peer-a")
-	stepID := parkStepForPeer(t, k, db, keyA)
-	ts := time.Now().UTC().Format(time.RFC3339)
-	const otherKernel = "some-other-kernels-public-key"
-
-	listSig, _ := kernel.SignStepListPayload(privA, keyA, otherKernel, ts)
-	if _, _, err := handleFederationStepList(k, context.Background(), keyA, ts, listSig, ""); err == nil {
-		t.Error("a list signed for another kernel must not verify here")
-	}
-	compSig, _ := kernel.SignStepPayload(privA, stepID, keyA, otherKernel, "idem-x", ts, sha256HexBytes([]byte("{}")))
-	if _, _, err := handleFederationStepComplete(k, context.Background(), keyA, ts, "idem-x", stepID, compSig, []byte("{}")); err == nil {
-		t.Error("a completion signed for another kernel must not verify here")
-	}
-}
-
-// The list must be scoped in SQL, not filtered after a row cap: a peer's own inbound-call
-// processes would otherwise crowd out the steps it can actually complete — the exact rows this
-// protocol exists to surface. Regression for a 50-row cap applied before the filter.
 func TestFedStep_ListNotCrowdedOutByOwnProcesses(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
@@ -529,5 +456,39 @@ func TestCompletion_ErrorCarriesTheSettledTransactionIDs(t *testing.T) {
 	plain := kernel.ErrInvalidState.Wrap("step is not waiting")
 	if got := withSettlementMeta(plain, nil); got != error(plain) {
 		t.Errorf("an error with no settled reply must be returned unchanged, got %v", got)
+	}
+}
+
+// The step payloads must not verify as any other signed Juice payload, and vice versa (§12).
+func TestFedStep_SignatureDomainsAreDisjoint(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	ts := time.Now().UTC().Format(time.RFC3339)
+	const hash = "abc123"
+
+	const rcpt = "recipient-kernel-key"
+	stepSig, _ := kernel.SignStepPayload(priv, "step-1", cp, rcpt, "idem-1", ts, hash)
+	listSig, _ := kernel.SignStepListPayload(priv, cp, rcpt, ts)
+	callSig, _ := kernel.SignFederationPayload(priv, "@o/a", cp, "idem-1", ts, hash)
+
+	// A call signature must not pass as a step signature, nor either step kind as the other.
+	if err := kernel.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, callSig); err == nil {
+		t.Error("a federation call signature must not verify as a step completion")
+	}
+	if err := kernel.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, listSig); err == nil {
+		t.Error("a step list signature must not verify as a step completion")
+	}
+	if err := kernel.VerifyStepListSignature(cp, cp, rcpt, ts, stepSig); err == nil {
+		t.Error("a step completion signature must not verify as a step list")
+	}
+	if err := kernel.VerifyFederationSignature(cp, "@o/a", cp, "idem-1", ts, hash, stepSig); err == nil {
+		t.Error("a step signature must not verify as a federation call")
+	}
+	// Sanity: each verifies under its own domain.
+	if err := kernel.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, stepSig); err != nil {
+		t.Errorf("step signature should verify in its own domain: %v", err)
+	}
+	if err := kernel.VerifyStepListSignature(cp, cp, rcpt, ts, listSig); err != nil {
+		t.Errorf("list signature should verify in its own domain: %v", err)
 	}
 }
