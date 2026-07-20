@@ -1,6 +1,6 @@
 # Juice Kernel Requirements
 
-Version: 0.10.0
+Version: 0.10.1
 Status: implementation requirements
 Codename: `juice`
 
