@@ -393,57 +393,6 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 			},
 		},
 		{
-			name:        "step/race",
-			price:       cfg.Step.Price,
-			description: "Completes an onward step on behalf of the first contributor to arrive; later contributors report fired=false. The onward step must belong to the calling process and name @sys as its required caller",
-			inputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"step_id": map[string]any{"type": "string", "description": "ID of the onward step to complete when this contributor wins"},
-					"input":   map[string]any{"type": "object", "description": "Optional input to pass to the onward step's completion"},
-				},
-				"required": []string{"step_id"},
-			},
-			outputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"fired":    map[string]any{"type": "boolean", "description": "True if this contributor completed the onward step, false if another already had"},
-					"status":   map[string]any{"type": "string", "description": "Outcome of the onward call, success or failure; present when fired"},
-					"error":    map[string]any{"type": "string", "description": "Failure message from the onward call, present when fired with status failure"},
-					"tx_id":    map[string]any{"type": "string", "description": "Transaction of the onward completion, present when fired"},
-					"trace_id": map[string]any{"type": "string", "description": "Trace of the onward completion, present when fired"},
-				},
-				"required": []string{"fired"},
-			},
-		},
-		{
-			name:        "step/join",
-			price:       cfg.Step.Price,
-			description: "Counts contributions toward a barrier and completes an onward step once `need` of them have arrived. The onward step must belong to the calling process and name @sys as its required caller",
-			inputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"step_id": map[string]any{"type": "string", "description": "ID of the onward step to complete once the barrier is met"},
-					"need":    map[string]any{"type": "integer", "description": "Number of contributions required; fixed by the first contribution"},
-					"value":   map[string]any{"type": "object", "description": "Optional value recorded with this contribution"},
-				},
-				"required": []string{"step_id", "need"},
-			},
-			outputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"fired":    map[string]any{"type": "boolean", "description": "True if this contribution met the barrier and completed the onward step"},
-					"have":     map[string]any{"type": "integer", "description": "Contributions recorded so far, including this one"},
-					"need":     map[string]any{"type": "integer", "description": "Contributions required"},
-					"status":   map[string]any{"type": "string", "description": "Outcome of the onward call, success or failure; present when fired"},
-					"error":    map[string]any{"type": "string", "description": "Failure message from the onward call, present when fired with status failure"},
-					"tx_id":    map[string]any{"type": "string", "description": "Transaction of the onward completion, present when fired"},
-					"trace_id": map[string]any{"type": "string", "description": "Trace of the onward completion, present when fired"},
-				},
-				"required": []string{"fired", "have", "need"},
-			},
-		},
-		{
 			name:        "tinygo/compile",
 			price:       cfg.TinyGo.Price,
 			description: "Compiles TinyGo source (a Handle function written against the Juice SDK) to a WASM artifact, ready to register with action create --kind wasm --artifact",

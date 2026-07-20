@@ -3178,65 +3178,6 @@ func TestCreateLedgerEntry(t *testing.T) {
 
 // Step gates back the @sys/step/join native (§9). They are native-owned state — not part of the
 // kernel.Store interface — so they are exercised directly here.
-func TestStepGate_IncrementAndDelete(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	// A gate hangs off a real step (FK + ON DELETE CASCADE), so a cancelled or purged step takes
-	// its barrier with it rather than leaving an orphan row.
-	user := newUser("@gate-user", 100)
-	if err := db.CreateUser(ctx, user); err != nil {
-		t.Fatal(err)
-	}
-	p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: user.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
-	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, user.ID, 10); err != nil {
-		t.Fatal(err)
-	}
-	act := newAction(user.ID, "gate-act", 10, true)
-	if err := db.CreateAction(ctx, act); err != nil {
-		t.Fatal(err)
-	}
-	ptID := root.ID
-	step := &kernel.Step{
-		ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: user.ID,
-		ActionID: act.ID, Price: 10, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
-	}
-	if err := db.CreateStep(ctx, step); err != nil {
-		t.Fatal(err)
-	}
-	stepID := step.ID
-
-	have, need, err := db.IncrementStepGate(ctx, stepID, 3)
-	if err != nil {
-		t.Fatalf("first increment: %v", err)
-	}
-	if have != 1 || need != 3 {
-		t.Fatalf("first increment: have=%d need=%d, want 1/3", have, need)
-	}
-
-	if have, _, err = db.IncrementStepGate(ctx, stepID, 3); err != nil || have != 2 {
-		t.Fatalf("second increment: have=%d err=%v, want 2", have, err)
-	}
-
-	// The threshold is fixed by the first contribution: a contributor naming a different one is a
-	// workflow bug, not a race, so it is rejected rather than silently re-basing the barrier.
-	if _, _, err := db.IncrementStepGate(ctx, stepID, 5); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("need mismatch: expected ErrInvalidInput, got %v", err)
-	}
-
-	if err := db.DeleteStepGate(ctx, stepID); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	if have, _, err = db.IncrementStepGate(ctx, stepID, 2); err != nil || have != 1 {
-		t.Errorf("after delete the gate reopens fresh: have=%d err=%v, want 1", have, err)
-	}
-	// Deleting a gate that was never opened is a no-op, so a losing join never errors on cleanup.
-	if err := db.DeleteStepGate(ctx, "never-opened"); err != nil {
-		t.Errorf("delete of an absent gate should be a no-op, got %v", err)
-	}
-}
-
 // ListStepsAwaitingCaller must be scoped in SQL and oldest-first: the federation step list (§13)
 // relies on it, and filtering ListSteps' disjunction in Go after its row cap discarded exactly the
 // steps a peer could complete.

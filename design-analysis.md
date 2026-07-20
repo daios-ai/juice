@@ -1,8 +1,8 @@
 # Design analysis: users, visibility, and federation
 
 Status: discussion notes, not requirements. Nothing here is implemented, with one
-exception: §8 is resolved and shipped (`/juice/fed/step/1`, `@sys/step/race`,
-`@sys/step/join`) — see requirements.md §9, §10, §13 for the normative text.
+exception: §8 is resolved and shipped (`/juice/fed/step/1`) — see
+requirements.md §9, §10, §13 for the normative text.
 Focus: ergonomics and user empowerment. Mechanism is referenced only where it
 explains what a person can or cannot do.
 
@@ -296,13 +296,12 @@ Worth stating, since these are the real limits rather than the imagined one:
 - **External resumption only.** Suspended code cannot wake itself; every
   resumption is a paid, attributed event.
 
-The first is now *composed* rather than added: `@sys/step/race` and
-`@sys/step/join` (§9) are ordinary actions parked into as contributor steps, both
-resuming a shared onward step — any-of via the store's atomic claim, all-of via a
-counter. The continuation is parked once, not once per contributor, and both are
-confined to their own process so a leaked step id cannot spend another process's
-funds. The kernel supplies funded, attributed, one-shot resumption; coordination
-policy lives in actions above it, which is where a barrier's shared state belongs.
+The first stays out of the platform entirely. Coordination over several
+suspensions — first-of-N, all-of-N, quorum, deadline — is composed in user land
+by ordinary actions, with no stdlib entry and no kernel-adjacent state. Two such
+natives (`@sys/step/race`, `@sys/step/join`) were built and then withdrawn: they
+carried a counter table, a confinement rule, and a raw step id in a public input
+schema, all to serve coordination the kernel need not know about.
 
 A Step is best named a **defunctionalized one-shot continuation**: not a closure
 but a data structure naming a top-level action plus its saved environment

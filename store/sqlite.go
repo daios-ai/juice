@@ -1763,36 +1763,6 @@ func (s *DB) ResetRunningSteps(ctx context.Context) error {
 	return dbErr(err, "reset running steps")
 }
 
-// IncrementStepGate records one contribution toward the barrier on stepID and returns the running
-// count plus the stored threshold. The first contribution fixes `need`; a later contribution
-// naming a different threshold is a programming error in the workflow, not a race, so it is
-// rejected rather than silently re-basing the barrier. State for the @sys/step/join native (§9):
-// not part of the kernel.Store interface — the kernel never reads it.
-func (s *DB) IncrementStepGate(ctx context.Context, stepID string, need int) (int, int, error) {
-	var have, storedNeed int
-	err := s.withTx(ctx, "increment step gate", func(tx *sql.Tx) error {
-		row := tx.QueryRowContext(ctx, `SELECT need, have FROM step_gates WHERE step_id=?`, stepID)
-		switch err := row.Scan(&storedNeed, &have); {
-		case err == sql.ErrNoRows:
-			storedNeed, have = need, 0
-		case err != nil:
-			return dbErr(err, "read step gate")
-		case storedNeed != need:
-			return kernel.ErrInvalidInput.Wrapf("step gate already opened with need=%d", storedNeed)
-		}
-		have++
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO step_gates (step_id,need,have,updated_at) VALUES (?,?,?,?)
-			 ON CONFLICT(step_id) DO UPDATE SET have=excluded.have, updated_at=excluded.updated_at`,
-			stepID, storedNeed, have, timeToStr(time.Now().UTC()))
-		return dbErr(err, "write step gate")
-	})
-	if err != nil {
-		return 0, 0, err
-	}
-	return have, storedNeed, nil
-}
-
 // ListStepsAwaitingCaller returns the waiting steps a given user is the required caller of,
 // oldest first. Deliberately narrow: ListSteps' visibility predicate is a disjunction that also
 // matches every step inside a process the caller owns, so filtering it in Go after the query's

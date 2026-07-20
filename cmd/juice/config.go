@@ -42,12 +42,6 @@ type NativeRandomConfig struct {
 	Price int64 `json:"price"`
 }
 
-// NativeStepConfig holds configuration for the @sys/step/* gate natives (race, join), which
-// share one price like the @sys/llm/* family.
-type NativeStepConfig struct {
-	Price int64 `json:"price"`
-}
-
 // NativeTinyGoConfig holds configuration for the @sys/tinygo/compile native action.
 type NativeTinyGoConfig struct {
 	Price int64 `json:"price"`
@@ -68,7 +62,6 @@ type NativeConfig struct {
 	Message NativeMessageConfig `json:"message"`
 	Random  NativeRandomConfig  `json:"random"`
 	Web     NativeWebConfig     `json:"web"`
-	Step    NativeStepConfig    `json:"step"`
 	TinyGo  NativeTinyGoConfig  `json:"tinygo"`
 }
 
@@ -140,7 +133,6 @@ func DefaultServerConfig() ServerConfig {
 			Message: NativeMessageConfig{Price: 0},
 			Random:  NativeRandomConfig{Price: 0},
 			Web:     NativeWebConfig{Price: 0, UserAgent: "juice-kernel/0.4 (+https://github.com/daios-ai/juice)"},
-			Step:    NativeStepConfig{Price: 0},
 			TinyGo:  NativeTinyGoConfig{Price: 5},
 		},
 		ScriptTimeoutMS:   10000,

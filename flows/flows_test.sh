@@ -52,7 +52,6 @@ run_flows \
     flow_failed_call_refund flow_input_schema_failure flow_output_schema_failure \
     flow_wasm_execution flow_contractor_subcall flow_contractor_failure \
     flow_step_success flow_step_failure flow_step_restart flow_locked_funds_recovery \
-    flow_step_gates \
     flow_rating \
     flow_pkce_auth flow_refresh_rotation flow_successful_receipt flow_failed_receipt \
     flow_lookup flow_chat flow_openapi_import_execute flow_openapi_changed_reimport \
