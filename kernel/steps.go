@@ -144,17 +144,22 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 	if err != nil {
 		return nil, ErrNotFound.Wrap("action not found")
 	}
-	// The completion call's caller is the required caller, so callability is checked against them
-	// (§4 caller-scoping): a step may only be parked for a caller who could actually complete it.
-	requiredCaller, err := k.store.ReadUser(ctx, requiredCallerID)
+	// A step is a partially applied future Call: the creator names the target, so visibility binds
+	// here against the creating trace's action owner (§4 binding rule) — completion re-checks only
+	// liveness, never visibility, so the completer needs no sight of a target the creator captured.
+	creator, err := k.store.ReadUser(ctx, parent.ActionOwnerID)
 	if err != nil {
-		return nil, ErrNotFound.Wrap("required_caller_user_id not found")
+		return nil, ErrNotFound.Wrap("creator not found")
 	}
-	if !canCall(requiredCaller, action) {
+	if !canCall(creator, action) {
 		if !action.Active {
 			return nil, ErrInvalidState.Wrap("action is inactive")
 		}
-		return nil, ErrUnauthorized.Wrap("required caller cannot call action")
+		return nil, ErrUnauthorized.Wrap("creator cannot call action")
+	}
+	// The required caller must resolve to a real account so the step is completable (§10).
+	if _, err := k.store.ReadUser(ctx, requiredCallerID); err != nil {
+		return nil, ErrNotFound.Wrap("required_caller_user_id not found")
 	}
 	var normErr error
 	partialArgs, normErr = normalizeJSONObject(partialArgs, "partial_args")

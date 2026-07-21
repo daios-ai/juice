@@ -2214,7 +2214,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	// §6), so the same check runs here before BeginRun parks funds.
 	// Root/federated runs have C = P (the caller owns the process), so one identity feeds both the
 	// caller-scoped visibility check and the process-owner-scoped grant check.
-	if err := k.checkCallPreconditions(ctx, caller, caller.ID, action, args); err != nil {
+	if err := k.checkCallPreconditions(ctx, caller, caller.ID, action, args, true); err != nil {
 		return nil, err
 	}
 	if err := k.requireReceiptSigningReady(); err != nil {

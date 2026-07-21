@@ -42,7 +42,8 @@ func fedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, ed25519.Pri
 
 // parkStepForPeer parks a step whose required caller is the given peer — the exact shape
 // @sys/message produces when addressed across a kernel boundary, and the trap this protocol
-// closes. The target action must be public for CanCall(peer, action) to hold at creation (§4).
+// closes. Visibility binds against the creator (@sys) at creation, not the peer (§4 binding rule);
+// TestFedStep_PeerCompletesLocalAction covers the case the old rule forbade — a non-public target.
 func parkStepForPeer(t *testing.T, k *kernel.Kernel, db *store.DB, peerKey string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -325,6 +326,41 @@ func TestFedStep_CompleteSettlesAndIsIdempotent(t *testing.T) {
 		t.Error("expected completing a done step to fail")
 	}
 }
+
+// TestFedStep_PeerCompletesLocalAction: a peer completes a step whose target is a LOCAL action it
+// could never call directly (§4). Visibility bound against the creator (@sys) at creation (§10),
+// and completion re-checks only liveness — so the old rule's "a peer may be parked only for a
+// public action" restriction is gone, without a peer ever gaining reach to the local action.
+func TestFedStep_PeerCompletesLocalAction(t *testing.T) {
+	srv, k, db := newTestHTTPServerFull(t)
+	defer srv.Close()
+	ctx := context.Background()
+
+	keyA, privA := fedPeer(t, k, "@peer-a")
+	peer, _ := k.ReadUserByPublicKey(ctx, keyA)
+	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+
+	// A local action owned by @sys — the creator — and a step parked for the peer against it.
+	actionID := parkStepAction(t, k)
+	local := kernel.VisibilityLocal
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: actionID, Visibility: &local}); err != nil {
+		t.Fatal(err)
+	}
+	p := setupProcessHTTP(t, db, sys.ID, 0)
+	step, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), actionID, json.RawMessage(`{}`), peer.ID)
+	if err != nil {
+		t.Fatalf("CreateStep parking a local action for a peer: %v", err)
+	}
+
+	status, body, err := fedStepComplete(t, k, privA, step.ID, "idem-local", []byte("{}"))
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("peer complete of a local-target step: status=%d err=%v", status, err)
+	}
+	if body["tx_id"] == "" || body["tx_id"] == nil {
+		t.Fatalf("expected a settled completion, got %v", body)
+	}
+}
+
 func TestFedStep_ListNotCrowdedOutByOwnProcesses(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()

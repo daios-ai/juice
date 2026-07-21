@@ -823,6 +823,145 @@ func TestCreateStepEmptyTraceIDReturnsErrInvalidInput(t *testing.T) {
 	}
 }
 
+// setupPrivateWasmAction creates an active private WASM action owned by ownerID.
+func setupPrivateWasmAction(t *testing.T, st kernel.Store, ownerID, name string) *kernel.Action {
+	t.Helper()
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: ownerID, Name: name, Kind: kernel.KindWasm,
+		Active: true, Visibility: kernel.VisibilityPrivate, Price: 0, Source: "fake-wasm",
+		InputSchema: map[string]any{"type": "object"}, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// TestCreateStepChecksCreatorNotRequiredCaller: visibility is bound at creation against the
+// creating trace's action owner (§4 binding rule, §10), NOT the required caller. A provider may
+// park its own private action for a customer who could never call it directly; the customer then
+// completes it — visibility is not re-checked at completion, exactly as a closure over a private
+// function is invocable by whoever holds it.
+func TestCreateStepChecksCreatorNotRequiredCaller(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@creator-priv-owner", 500)
+	customer := setupUser(t, st, "@creator-priv-customer", 0)
+	action := setupPrivateWasmAction(t, st, owner.ID, "private-fulfillment")
+
+	// The creator is the trace's action owner (= owner), who CAN call the private action.
+	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
+
+	// canCall(customer, action) is false (private, non-owner) — the OLD rule rejected this.
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, customer.ID)
+	if err != nil {
+		t.Fatalf("CreateStep parking a private action for a non-owner: %v", err)
+	}
+
+	// The customer completes it despite being unable to see the target: completion re-checks
+	// only liveness, never visibility.
+	reply, err := k.CompleteStep(ctx, customer.ID, step.ID, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("CompleteStep by required caller who cannot see the target: %v", err)
+	}
+	if reply == nil || reply.TxID == "" {
+		t.Fatal("expected a settled completion")
+	}
+}
+
+// TestCreateStepRejectedWhenCreatorCannotCall: the binding check is real — a creator that cannot
+// see the target is rejected at creation, even if the required caller could.
+func TestCreateStepRejectedWhenCreatorCannotCall(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	actionOwner := setupUser(t, st, "@cc-action-owner", 0)
+	creator := setupUser(t, st, "@cc-creator", 500)
+	action := setupPrivateWasmAction(t, st, actionOwner.ID, "cc-private")
+
+	// The trace's action owner is `creator`, who is NOT the action owner — cannot see the private action.
+	// The required caller is the action owner, who could call it: irrelevant under the binding rule.
+	_, tr := setupOrphanTrace(t, st, creator.ID, creator.ID, creator.ID)
+
+	_, err := k.CreateStep(ctx, tr.ID, action.ID, nil, actionOwner.ID)
+	if !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized when the creator cannot call the action, got %v", err)
+	}
+}
+
+// TestStepCompletionIgnoresVisibilityNarrowing: narrowing an action to private after a step is
+// parked no longer bricks the step. The OLD rule reset it to waiting forever (funds parked, no
+// refund); the binding rule completes it, since the target was captured at creation.
+func TestStepCompletionIgnoresVisibilityNarrowing(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@narrow-owner", 500)
+	customer := setupUser(t, st, "@narrow-customer", 0)
+	action := setupWasmAction(t, st, owner.ID, "narrow-action", "", 0) // public
+
+	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, customer.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+
+	// Narrow to private after parking: the customer can no longer see it.
+	action.Visibility = kernel.VisibilityPrivate
+	if err := st.UpdateAction(ctx, action); err != nil {
+		t.Fatalf("UpdateAction: %v", err)
+	}
+
+	reply, err := k.CompleteStep(ctx, customer.ID, step.ID, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("CompleteStep after visibility narrowed: %v", err)
+	}
+	if reply == nil || reply.TxID == "" {
+		t.Fatal("expected a settled completion despite the narrowed visibility")
+	}
+}
+
+// TestStepCompletionResetsOnDeactivatedAction: liveness still gates completion. Deactivating the
+// target resets the step to waiting with its price parked (§5, §10) — the distinction the binding
+// rule preserves: visibility is bound once, liveness is checked at every dispatch.
+func TestStepCompletionResetsOnDeactivatedAction(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "@deact-owner", 500)
+	customer := setupUser(t, st, "@deact-customer", 0)
+	action := setupWasmAction(t, st, owner.ID, "deact-action", "", 0)
+
+	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, customer.ID)
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+
+	action.Active = false
+	if err := st.UpdateAction(ctx, action); err != nil {
+		t.Fatalf("UpdateAction: %v", err)
+	}
+
+	_, err = k.CompleteStep(ctx, customer.ID, step.ID, json.RawMessage(`{}`))
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("expected ErrInvalidState completing a deactivated action, got %v", err)
+	}
+	// The step is reset to waiting, price still parked.
+	got, err := k.ReadStep(ctx, owner.ID, step.ID)
+	if err != nil {
+		t.Fatalf("ReadStep: %v", err)
+	}
+	if got.Status != kernel.StepWaiting {
+		t.Errorf("step status = %q, want waiting (reset after a liveness failure)", got.Status)
+	}
+}
+
 // setupStepWithCompletionTrace sets up the state just after a BeginStepCall (step is running,
 // completion trace exists, no tx). Simulates a crash mid-execution.
 // Returns the step and its completion trace.

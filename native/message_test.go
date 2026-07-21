@@ -65,7 +65,7 @@ func TestExecuteMessage_CreatesStep(t *testing.T) {
 	k, st := newLookupTestKernel(t)
 	ctx := context.Background()
 
-	seedSysWithSink(t, st)
+	sink := seedSysWithSink(t, st)
 	caller := seedUserWithBalance(t, st, "@caller", 1000)
 	recipient := seedOwner(t, st, "@recipient")
 
@@ -76,10 +76,13 @@ func TestExecuteMessage_CreatesStep(t *testing.T) {
 		Status:      kernel.ProcessOpen,
 		CreatedAt:   time.Now().UTC(),
 	}
+	// The message action executes as @sys, so its trace's action owner — the step creator whose
+	// visibility is checked at CreateStep (§10 binding rule) — is @sys, the sink's owner.
 	rootTrace := &kernel.Trace{
-		ID:        uuid.New().String(),
-		ProcessID: p.ID,
-		CreatedAt: time.Now().UTC(),
+		ID:            uuid.New().String(),
+		ProcessID:     p.ID,
+		ActionOwnerID: sink.OwnerUserID,
+		CreatedAt:     time.Now().UTC(),
 	}
 	if err := st.BeginRun(ctx, p, rootTrace, caller.ID, 0); err != nil {
 		t.Fatalf("BeginRun: %v", err)

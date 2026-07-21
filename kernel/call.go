@@ -220,11 +220,12 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 	}
 
-	// 5 + 6. CanCall(process.owner, action) and input-schema validation, enforced for every
-	// path (root, step, subcall). The pre-resolved snapshot (req.Action) is validated, so root
-	// calls are checked here too with no extra DB read and no TOCTOU window — Call is the single
-	// validity function; no entry path bypasses it (beginRun runs the same check before funding).
-	if err := k.checkCallPreconditions(ctx, caller, process.OwnerUserID, action, req.Args); err != nil {
+	// 5 + 6. Liveness, visibility, and input-schema validation, enforced for every path (root,
+	// step, subcall). The pre-resolved snapshot (req.Action) is validated, so root calls are
+	// checked here too with no extra DB read and no TOCTOU window — Call is the single validity
+	// function; no entry path bypasses it (beginRun runs the same check before funding). A step
+	// completion (req.StepID != "") bound visibility at creation (§10), so it skips that check.
+	if err := k.checkCallPreconditions(ctx, caller, process.OwnerUserID, action, req.Args, req.StepID == ""); err != nil {
 		return nil, err
 	}
 
@@ -511,19 +512,20 @@ func canCall(caller *User, action *Action) bool {
 }
 
 // checkCallPreconditions enforces the §4 semantic call-validity rules (steps 6 and 7) for a
-// resolved action: CanCall by the immediate caller, and input against the action's schema. It is
-// the single validity function — Call runs it unconditionally for every entry path, and
-// beginRun runs it once before funding so an invalid root call never creates a funded process
-// (a precondition rejection must create no transaction, §6). The grant check stays keyed on the
-// process owner: delegated consent binds to the paying human, never the caller (§8).
-func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *User, processOwnerID string, action *Action, args map[string]any) error {
-	if !canCall(caller, action) {
-		if !action.Active {
-			return ErrInvalidState.Wrap("action is inactive")
-		}
-		if action.OwnerSuspended {
-			return ErrInvalidState.Wrap("action owner is suspended")
-		}
+// resolved action: liveness, visibility by the immediate caller, and input against the action's
+// schema. It is the single validity function — Call runs it unconditionally for every entry path,
+// and beginRun runs it once before funding so an invalid root call never creates a funded process
+// (§6). checkVisibility is false only for a step completion, which bound visibility at creation
+// (§10): a liveness failure still resets it to waiting, a later visibility change does not. The
+// grant check stays keyed on the process owner: delegated consent binds to the paying human (§8).
+func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *User, processOwnerID string, action *Action, args map[string]any, checkVisibility bool) error {
+	if !action.Active {
+		return ErrInvalidState.Wrap("action is inactive")
+	}
+	if action.OwnerSuspended {
+		return ErrInvalidState.Wrap("action owner is suspended")
+	}
+	if checkVisibility && !canCall(caller, action) {
 		return ErrUnauthorized.Wrap("call permission denied")
 	}
 	if err := ValidateInput(action.InputSchema, args); err != nil {
