@@ -30,7 +30,7 @@ func fedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, ed25519.Pri
 		t.Fatal(err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	sys, err := k.ReadUserByHandle(context.Background(), "@sys")
+	sys, err := k.ReadUserByHandle(context.Background(), "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func fedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, ed25519.Pri
 func parkStepForPeer(t *testing.T, k *kernel.Kernel, db *store.DB, peerKey string) string {
 	t.Helper()
 	ctx := context.Background()
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func parkStepForPeer(t *testing.T, k *kernel.Kernel, db *store.DB, peerKey strin
 		t.Fatal(err)
 	}
 	p := setupProcessHTTP(t, db, sys.ID, 0)
-	step, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), parkStepAction(t, k), json.RawMessage(`{}`), peer.ID)
+	step, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), parkStepAction(t, k), json.RawMessage(`{}`), peer.ID, "")
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -78,7 +78,7 @@ func selfKey(t *testing.T, k *kernel.Kernel) string {
 func parkStepAction(t *testing.T, k *kernel.Kernel) string {
 	t.Helper()
 	ctx := context.Background()
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,15 +125,15 @@ func fedStepComplete(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, st
 	if err != nil {
 		t.Fatal(err)
 	}
-	return handleFederationStepComplete(k, context.Background(), cp, ts, idempKey, stepID, sig, input)
+	return handleFederationStepComplete(k, context.Background(), cp, ts, idempKey, stepID, sig, input, "", "", "")
 }
 
 func TestFedStep_ListShowsOnlyOwnWaitingSteps(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	keyA, privA := fedPeer(t, k, "@peer-a")
-	_, privB := fedPeer(t, k, "@peer-b")
+	keyA, privA := fedPeer(t, k, "peer-a")
+	_, privB := fedPeer(t, k, "peer-b")
 	stepID := parkStepForPeer(t, k, db, keyA)
 
 	status, body, err := fedStepList(t, k, privA)
@@ -200,7 +200,7 @@ func TestFedStep_RequestsAreRejected(t *testing.T) {
 		}},
 		{"bad complete signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ ed25519.PrivateKey, stepID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
-			_, _, err := handleFederationStepComplete(k, ctx, keyA, ts, "idem-1", stepID, "bogus", []byte("{}"))
+			_, _, err := handleFederationStepComplete(k, ctx, keyA, ts, "idem-1", stepID, "bogus", []byte("{}"), "", "", "")
 			return err
 		}},
 		{"stale timestamp", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, _ string) error {
@@ -212,7 +212,7 @@ func TestFedStep_RequestsAreRejected(t *testing.T) {
 		{"input does not match input_hash", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
 			sig, _ := kernel.SignStepPayload(privA, stepID, keyA, selfKey(t, k), "idem-t", ts, sha256HexBytes([]byte(`{"ok":true}`)))
-			_, _, err := handleFederationStepComplete(k, ctx, keyA, ts, "idem-t", stepID, sig, []byte(`{"ok":false}`))
+			_, _, err := handleFederationStepComplete(k, ctx, keyA, ts, "idem-t", stepID, sig, []byte(`{"ok":false}`), "", "", "")
 			return err
 		}},
 		{"signed for another kernel", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error {
@@ -222,7 +222,7 @@ func TestFedStep_RequestsAreRejected(t *testing.T) {
 			return err
 		}},
 		{"known peer that is not the required caller", func(t *testing.T, k *kernel.Kernel, _ string, _ ed25519.PrivateKey, stepID string) error {
-			_, privB := fedPeer(t, k, "@peer-b")
+			_, privB := fedPeer(t, k, "peer-b")
 			_, _, err := fedStepComplete(t, k, privB, stepID, "idem-b", []byte("{}"))
 			return err
 		}},
@@ -232,7 +232,7 @@ func TestFedStep_RequestsAreRejected(t *testing.T) {
 			return err
 		}},
 		{"suspended peer", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error {
-			sys, _ := k.ReadUserByHandle(ctx, "@sys")
+			sys, _ := k.ReadUserByHandle(ctx, "sys")
 			peer, _ := k.ReadUserByPublicKey(ctx, keyA)
 			if err := k.SuspendUser(ctx, sys.ID, peer.ID); err != nil {
 				t.Fatalf("suspend: %v", err)
@@ -247,7 +247,7 @@ func TestFedStep_RequestsAreRejected(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, k, db := newTestHTTPServerFull(t)
 			defer srv.Close()
-			keyA, privA := fedPeer(t, k, "@peer-a")
+			keyA, privA := fedPeer(t, k, "peer-a")
 			stepID := parkStepForPeer(t, k, db, keyA)
 			if err := tc.run(t, k, keyA, privA, stepID); err == nil {
 				t.Error("expected the request to be rejected")
@@ -278,7 +278,7 @@ func TestFedStep_CompleteSettlesAndIsIdempotent(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	keyA, privA := fedPeer(t, k, "@peer-a")
+	keyA, privA := fedPeer(t, k, "peer-a")
 	stepID := parkStepForPeer(t, k, db, keyA)
 
 	status, body, err := fedStepComplete(t, k, privA, stepID, "idem-1", []byte("{}"))
@@ -295,7 +295,7 @@ func TestFedStep_CompleteSettlesAndIsIdempotent(t *testing.T) {
 
 	// The step is done, and the completion transaction obeys the role law: the peer is the caller.
 	ctx := context.Background()
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	step, err := k.ReadStep(ctx, sys.ID, stepID)
 	if err != nil {
 		t.Fatalf("ReadStep: %v", err)
@@ -336,9 +336,9 @@ func TestFedStep_PeerCompletesLocalAction(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 
-	keyA, privA := fedPeer(t, k, "@peer-a")
+	keyA, privA := fedPeer(t, k, "peer-a")
 	peer, _ := k.ReadUserByPublicKey(ctx, keyA)
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
 
 	// A local action owned by @sys — the creator — and a step parked for the peer against it.
 	actionID := parkStepAction(t, k)
@@ -347,7 +347,7 @@ func TestFedStep_PeerCompletesLocalAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := setupProcessHTTP(t, db, sys.ID, 0)
-	step, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), actionID, json.RawMessage(`{}`), peer.ID)
+	step, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), actionID, json.RawMessage(`{}`), peer.ID, "")
 	if err != nil {
 		t.Fatalf("CreateStep parking a local action for a peer: %v", err)
 	}
@@ -366,20 +366,20 @@ func TestFedStep_ListNotCrowdedOutByOwnProcesses(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 
-	keyA, privA := fedPeer(t, k, "@peer-a")
+	keyA, privA := fedPeer(t, k, "peer-a")
 	peer, _ := k.ReadUserByPublicKey(ctx, keyA)
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
 
 	// The step actually addressed to the peer, created FIRST so a newest-first cap would drop it.
 	stepID := parkStepForPeer(t, k, db, keyA)
 
 	// 60 steps inside processes the peer owns, awaiting a local user — visible to it via
 	// CanListStep, but not completable by it.
-	local, _ := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@local", Password: "pw12345678"})
+	local, _ := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "local", Password: "pw12345678"})
 	action := parkStepAction(t, k)
 	for i := 0; i < 60; i++ {
 		p := setupProcessHTTP(t, db, peer.ID, 0)
-		if _, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), action, json.RawMessage(`{}`), local.ID); err != nil {
+		if _, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), action, json.RawMessage(`{}`), local.ID, ""); err != nil {
 			t.Fatalf("seed step %d: %v", i, err)
 		}
 	}
@@ -408,7 +408,7 @@ func TestFedStep_ListDisclosesRequestNotRequester(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	keyA, privA := fedPeer(t, k, "@peer-a")
+	keyA, privA := fedPeer(t, k, "peer-a")
 	stepID := parkStepForPeer(t, k, db, keyA)
 
 	_, body, err := fedStepList(t, k, privA)
@@ -435,7 +435,7 @@ func TestFedStep_ListDisclosesRequestNotRequester(t *testing.T) {
 		}
 	}
 	// The process owner's handle must not appear under any key at all.
-	if strings.Contains(got, "@sys") {
+	if strings.Contains(got, "sys") {
 		t.Errorf("peer view leaks a local handle: %s", got)
 	}
 }
@@ -477,7 +477,7 @@ func TestFedStep_SignatureDomainsAreDisjoint(t *testing.T) {
 	const rcpt = "recipient-kernel-key"
 	stepSig, _ := kernel.SignStepPayload(priv, "step-1", cp, rcpt, "idem-1", ts, hash)
 	listSig, _ := kernel.SignStepListPayload(priv, cp, rcpt, ts)
-	callSig, _ := kernel.SignFederationPayload(priv, "@o/a", cp, "idem-1", ts, hash)
+	callSig, _ := kernel.SignFederationPayload(priv, "o/a", cp, "idem-1", ts, hash)
 
 	// A call signature must not pass as a step signature, nor either step kind as the other.
 	if err := kernel.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, callSig); err == nil {
@@ -489,7 +489,7 @@ func TestFedStep_SignatureDomainsAreDisjoint(t *testing.T) {
 	if err := kernel.VerifyStepListSignature(cp, cp, rcpt, ts, stepSig); err == nil {
 		t.Error("a step completion signature must not verify as a step list")
 	}
-	if err := kernel.VerifyFederationSignature(cp, "@o/a", cp, "idem-1", ts, hash, stepSig); err == nil {
+	if err := kernel.VerifyFederationSignature(cp, "o/a", cp, "idem-1", ts, hash, stepSig); err == nil {
 		t.Error("a step signature must not verify as a federation call")
 	}
 	// Sanity: each verifies under its own domain.

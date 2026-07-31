@@ -164,6 +164,42 @@ func (s *server) ctlAdjust(credit bool) http.HandlerFunc {
 	}
 }
 
+// ctlSetPeerCredit sets a peer's bilateral credit policy (§13). Given a raw key it provisions the
+// peer account first (like deposit-by-key), so credit can be extended before the peer's first call.
+func (s *server) ctlSetPeerCredit(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Handle            string `json:"handle"`
+		CreditMax         int64  `json:"credit_max"`
+		SettlementTrigger int64  `json:"settlement_trigger"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	u, err := resolveHandle(s.kernel, r.Context(), req.Handle)
+	if err != nil {
+		kh := strings.TrimPrefix(strings.TrimSpace(req.Handle), "@")
+		if kernel.IsPublicKey(kh) {
+			short := kh
+			if len(short) > 8 {
+				short = short[:8]
+			}
+			u, err = s.kernel.AddPeer(r.Context(), callerFrom(r), "k-"+short, kh)
+		}
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+	}
+	peer, err := s.kernel.SetPeerCredit(r.Context(), callerFrom(r), u.ID, req.CreditMax, req.SettlementTrigger)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"handle": peer.Handle, "credit_max": peer.CreditMax, "settlement_trigger": peer.SettlementTrigger,
+	})
+}
+
 func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 	peers, err := s.kernel.ListPeers(r.Context())
 	if err != nil {
@@ -308,12 +344,13 @@ func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, erro
 		}
 		return u.PublicKey, nil
 	}
-	if strings.HasPrefix(ident, "@") {
-		return "", kernel.ErrNotFound.Wrapf("no peer %q", ident)
+	// An unresolvable identifier with public-key shape is a raw stranger key (inspecting or addressing
+	// a peer before it is known locally) — the transport reports it unreachable if it is not real.
+	// Anything else is simply an unknown peer (§14 productions: a bare handle never means a key).
+	if kernel.IsPublicKey(strings.TrimPrefix(ident, "@")) {
+		return strings.TrimPrefix(ident, "@"), nil
 	}
-	// An unresolvable non-@ identifier is treated as a raw stranger key (inspecting or addressing a
-	// peer before it is known locally) — the transport reports it unreachable if it is not one.
-	return ident, nil
+	return "", kernel.ErrNotFound.Wrapf("no peer %q", ident)
 }
 
 // stepRoundTrip signs, dispatches, and unwraps one outbound /juice/fed/step/1 request.
@@ -354,7 +391,11 @@ func (s *server) stepRoundTrip(ctx context.Context, peerKey string, req fed.Step
 // completePeerStep resumes a step a peer parked for this kernel, over /juice/fed/step/1 (§13).
 // Reached from POST /v1/steps/{id}/complete when the request names a peer — the same command that
 // completes a local step, since a step is a step.
-func (s *server) completePeerStep(ctx context.Context, peerRef, stepID string, rawInput json.RawMessage) (map[string]any, error) {
+// completePeerStep drives an outbound step completion to the serving peer (§13). forUserID, when
+// non-empty, is the completing user's own stable id on THIS kernel: it attaches a step_auth
+// attestation so a remote-user-addressed step is completed as that specific user (an empty forUserID
+// is a kernel-level completion, superuser scope, for a kernel-addressed step).
+func (s *server) completePeerStep(ctx context.Context, peerRef, stepID string, rawInput json.RawMessage, forUserID string) (map[string]any, error) {
 	peerKey, err := s.resolvePeerKey(ctx, strings.TrimSpace(peerRef))
 	if err != nil {
 		return nil, err
@@ -381,10 +422,18 @@ func (s *server) completePeerStep(ctx context.Context, peerRef, stepID string, r
 	if err != nil {
 		return nil, err
 	}
-	return s.stepRoundTrip(ctx, peerKey, fed.StepRequest{
+	req := fed.StepRequest{
 		Kind: "complete", Counterparty: pub, Timestamp: ts, Signature: sig,
 		StepID: stepID, IdempotencyKey: idempotencyKey, Input: json.RawMessage(input),
-	}, fedStepTimeout)
+	}
+	if forUserID != "" {
+		asig, ats, aerr := s.kernel.SignStepAuth(pub, peerKey, forUserID, stepID)
+		if aerr != nil {
+			return nil, aerr
+		}
+		req.ForUserID, req.UserAttestation, req.UserTimestamp = forUserID, asig, ats
+	}
+	return s.stepRoundTrip(ctx, peerKey, req, fedStepTimeout)
 }
 
 // peerStepsAwaitingUs lists the steps a peer holds for this kernel, for admin inspect (§13).
@@ -413,7 +462,7 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
 	handle := globalCfg.KernelHandle
 	var about string
-	if sys, err := s.kernel.ReadUserByHandle(ctx, "@sys"); err == nil && sys != nil {
+	if sys, err := s.kernel.ReadUserByHandle(ctx, "sys"); err == nil && sys != nil {
 		about = sys.Description
 	}
 	var addrs []string

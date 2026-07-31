@@ -242,7 +242,7 @@ func TestRatingSigningRequiresConfiguredKey(t *testing.T) {
 func TestRemoteManifestHashIncludesKindAndArtifact(t *testing.T) {
 	base := ActionManifest{
 		ActionID:     "act-1",
-		OwnerHandle:  "@peer",
+		OwnerHandle:  "peer",
 		Name:         "svc",
 		Description:  "test",
 		Kind:         KindHTTP,
@@ -485,12 +485,12 @@ func TestConnectionKeyDerivation(t *testing.T) {
 
 func TestSelectorParsingAndSegmentMatch(t *testing.T) {
 	cases := []struct{ sel, owner, path string }{
-		{"@tom", "@tom", ""},
-		{"@tom/brief", "@tom", "brief"},
-		{"@tom/brief/eu", "@tom", "brief/eu"},
-		{"@tom/*", "@tom", ""},
-		{"@tom/brief/*", "@tom", "brief"},
-		{"tom/brief", "@tom", "brief"}, // missing @ tolerated
+		{"tom", "tom", ""},
+		{"tom/brief", "tom", "brief"},
+		{"tom/brief/eu", "tom", "brief/eu"},
+		{"tom/*", "tom", ""},
+		{"tom/brief/*", "tom", "brief"},
+		{"tom/brief", "tom", "brief"}, // missing @ tolerated
 	}
 	for _, c := range cases {
 		o, p, err := ParseGrantSelector(c.sel)

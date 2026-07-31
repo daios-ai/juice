@@ -212,7 +212,7 @@ func strVal(s *string) string {
 
 // ---- Users ----
 
-const userCols = `id,handle,description,password_hash,available,locked,suspended_at,public_key,recovery_public_key,peer_last_seen,peer_credit,created_at,updated_at`
+const userCols = `id,handle,description,password_hash,available,locked,suspended_at,public_key,recovery_public_key,peer_last_seen,peer_credit,peer_credit_max,peer_settlement_trigger,peer_settlement_due,created_at,updated_at`
 
 func (s *DB) CreateUser(ctx context.Context, u *kernel.User) error {
 	_, err := s.db.ExecContext(ctx,
@@ -388,8 +388,10 @@ func scanUserFn(scan func(...any) error) (*kernel.User, error) {
 	var createdAt, updatedAt string
 	var suspendedAt, publicKey, recoveryPublicKey, peerLastSeen *string
 	var peerCredit *int64
+	var settlementDue *int64
 	if err := scan(&u.ID, &u.Handle, &u.Description, &u.PasswordHash,
-		&u.Available, &u.Locked, &suspendedAt, &publicKey, &recoveryPublicKey, &peerLastSeen, &peerCredit, &createdAt, &updatedAt); err != nil {
+		&u.Available, &u.Locked, &suspendedAt, &publicKey, &recoveryPublicKey, &peerLastSeen, &peerCredit,
+		&u.CreditMax, &u.SettlementTrigger, &settlementDue, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	u.SuspendedAt = strToNullTime(suspendedAt)
@@ -397,6 +399,10 @@ func scanUserFn(scan func(...any) error) (*kernel.User, error) {
 	u.RecoveryPublicKey = strVal(recoveryPublicKey)
 	u.PeerLastSeen = strToNullTime(peerLastSeen)
 	u.PeerCredit = peerCredit
+	if settlementDue != nil {
+		b := *settlementDue != 0
+		u.SettlementDue = &b
+	}
 	u.CreatedAt = strToTime(createdAt)
 	u.UpdatedAt = strToTime(updatedAt)
 	return &u, nil
@@ -435,6 +441,14 @@ func (s *DB) UnsuspendUser(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE users SET suspended_at=NULL WHERE id=?`, id)
 	return dbErr(err, "unsuspend user")
+}
+
+// SetCreditPolicy sets a peer's provider-side bilateral credit policy (§13 credit).
+func (s *DB) SetCreditPolicy(ctx context.Context, userID string, creditMax, settlementTrigger int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET peer_credit_max=?, peer_settlement_trigger=?, updated_at=? WHERE id=?`,
+		creditMax, settlementTrigger, timeToStr(time.Now().UTC()), userID)
+	return dbErr(err, "set credit policy")
 }
 
 // UpdatePeerSync writes the friend-sync cache (§13). COALESCE keeps the prior peer_credit when the
@@ -479,18 +493,18 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO actions
-		 (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,auth_json,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,remote_owner_id,remote_bps,auth_json,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.OwnerUserID, a.Name, string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price,
 		a.Description, string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact, a.RemoteActionID,
-		a.AuthJSON, timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
+		a.RemoteOwnerID, a.RemoteBPS, a.AuthJSON, timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
 	)
 	return dbErr(err, "create action")
 }
 
 // actionCols is the canonical column list for action SELECT statements.
 // Must stay in sync with scanAction/scanActionFn/finishAction.
-const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),(u.suspended_at IS NOT NULL),a.name,a.kind,a.active,a.visibility,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,a.auth_json,a.created_at,a.updated_at,a.deleted_at`
+const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),(u.suspended_at IS NOT NULL),a.name,a.kind,a.active,a.visibility,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,COALESCE(a.remote_owner_id,''),a.remote_bps,a.auth_json,a.created_at,a.updated_at,a.deleted_at`
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
@@ -507,10 +521,10 @@ func (s *DB) updateActionTx(ctx context.Context, tx *sql.Tx, a *kernel.Action) e
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := tx.ExecContext(ctx,
 		`UPDATE actions SET kind=?,active=?,visibility=?,price=?,description=?,input_schema=?,output_schema=?,
-		 source=?,artifact_hash=?,wasm_artifact=?,auth_json=?,updated_at=? WHERE id=?`,
+		 source=?,artifact_hash=?,wasm_artifact=?,remote_owner_id=?,remote_bps=?,auth_json=?,updated_at=? WHERE id=?`,
 		string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price, a.Description,
 		string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact,
-		a.AuthJSON, timeToStr(a.UpdatedAt), a.ID,
+		a.RemoteOwnerID, a.RemoteBPS, a.AuthJSON, timeToStr(a.UpdatedAt), a.ID,
 	)
 	return dbErr(err, "update action")
 }
@@ -614,11 +628,16 @@ func scanActionFn(scan func(...any) error) (*kernel.Action, error) {
 	var a kernel.Action
 	var kind, visibility, inJSON, outJSON, createdAt, updatedAt string
 	var deletedAt sql.NullString
+	var remoteBPS sql.NullInt64
 	var active, ownerSuspended int
 	if err := scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &ownerSuspended, &a.Name, &kind, &active, &visibility, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.WasmArtifact, &a.RemoteActionID,
-		&a.AuthJSON, &createdAt, &updatedAt, &deletedAt); err != nil {
+		&a.RemoteOwnerID, &remoteBPS, &a.AuthJSON, &createdAt, &updatedAt, &deletedAt); err != nil {
 		return nil, err
+	}
+	if remoteBPS.Valid {
+		v := remoteBPS.Int64
+		a.RemoteBPS = &v
 	}
 	a.OwnerSuspended = ownerSuspended != 0
 	return finishAction(&a, kind, visibility, active, inJSON, outJSON, createdAt, updatedAt, deletedAt)
@@ -666,8 +685,12 @@ func finishAction(a *kernel.Action, kind, visibility string, active int, inJSON,
 // with available=0/locked=price, and creates the root trace with available=price.
 func (s *DB) BeginRun(ctx context.Context, p *kernel.Process, t *kernel.Trace, ownerID string, price int64) error {
 	return s.withTx(ctx, "begin run", func(tx *sql.Tx) error {
+		// Bilateral credit (§13): a peer account may go negative down to -peer_credit_max; an ordinary
+		// account has peer_credit_max=0, so this reduces to the classic available>=price guard. The DB
+		// CHECK enforces the same floor, but the WHERE clause turns an over-limit draw into a clean
+		// 0-rows rejection instead of a CHECK error.
 		res, err := tx.ExecContext(ctx,
-			`UPDATE users SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
+			`UPDATE users SET available=available-?, locked=locked+? WHERE id=? AND available-?>=-peer_credit_max`,
 			price, price, ownerID, price,
 		)
 		if err != nil {
@@ -1555,10 +1578,10 @@ func (s *DB) CreateStep(ctx context.Context, step *kernel.Step) error {
 			}
 		}
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO steps (id,parent_trace_id,required_caller_user_id,action_id,
+			`INSERT INTO steps (id,parent_trace_id,required_caller_user_id,required_caller_remote_id,action_id,
 			                    partial_args,price,status,created_at)
-			 VALUES (?,?,?,?,?,?,?,?)`,
-			step.ID, step.ParentTraceID, step.RequiredCallerUserID,
+			 VALUES (?,?,?,?,?,?,?,?,?)`,
+			step.ID, step.ParentTraceID, step.RequiredCallerUserID, step.RequiredCallerRemoteID,
 			step.ActionID, rawJSONStr(step.PartialArgs),
 			step.Price, string(step.Status), timeToStr(step.CreatedAt),
 		)
@@ -1566,15 +1589,16 @@ func (s *DB) CreateStep(ctx context.Context, step *kernel.Step) error {
 	})
 }
 
-const stepCols = `id,parent_trace_id,required_caller_user_id,action_id,partial_args,price,status,tx_id,completion_trace_id,created_at`
+const stepCols = `id,parent_trace_id,required_caller_user_id,required_caller_remote_id,action_id,partial_args,price,status,tx_id,completion_trace_id,created_at`
 
 func scanStep(step *kernel.Step, scanFn func(...any) error) error {
-	var parentTraceID, txID, completionTraceID *string
+	var parentTraceID, txID, completionTraceID, remoteID *string
 	var createdAt, partialArgs, status string
-	if err := scanFn(&step.ID, &parentTraceID, &step.RequiredCallerUserID,
+	if err := scanFn(&step.ID, &parentTraceID, &step.RequiredCallerUserID, &remoteID,
 		&step.ActionID, &partialArgs, &step.Price, &status, &txID, &completionTraceID, &createdAt); err != nil {
 		return err
 	}
+	step.RequiredCallerRemoteID = remoteID
 	step.ParentTraceID = parentTraceID
 	step.PartialArgs = strToRawJSON(partialArgs)
 	step.Status = kernel.StepStatus(status)

@@ -47,14 +47,14 @@ func TestAuthLoginLogout(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "@clitest",
+		Handle:   "clitest",
 		Password: "clipass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	tok, _, err := env.k.LoginWithRefresh(ctx, "@clitest", "clipass")
+	tok, _, err := env.k.LoginWithRefresh(ctx, "clitest", "clipass")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,13 +83,13 @@ func TestAuthWrongPassword(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "@wrongpass",
+		Handle:   "wrongpass",
 		Password: "correct",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := env.k.Login(ctx, "@wrongpass", "wrong"); err == nil {
+	if _, err := env.k.Login(ctx, "wrongpass", "wrong"); err == nil {
 		t.Error("expected error for wrong password")
 	}
 }
@@ -99,13 +99,13 @@ func TestRevokeRefreshToken(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@revoke-user", Password: "pass",
+		Handle: "revoke-user", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, rt, err := env.k.LoginWithRefresh(ctx, "@revoke-user", "pass")
+	_, rt, err := env.k.LoginWithRefresh(ctx, "revoke-user", "pass")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -66,6 +66,7 @@ func init() {
 		adminRenameCmd(),
 		adminDepositCmd(),
 		adminWithdrawCmd(),
+		adminCreditCmd(),
 		peerSubscribeCmd(),
 		peerUnsubscribeCmd(),
 		peerListCmd(),
@@ -226,6 +227,23 @@ func adminDepositCmd() *cobra.Command {
 
 func adminWithdrawCmd() *cobra.Command {
 	return adjustCmd("withdraw <user> <amount>", "Deduct credits from a user", "/control/withdraw")
+}
+
+func adminCreditCmd() *cobra.Command {
+	var max, settleAt int64
+	cmd := &cobra.Command{
+		Use:   "credit <peer>",
+		Short: "Set the bilateral credit this kernel extends a peer (§13)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return apiEmit("POST", "/control/peers/credit", map[string]any{
+				"handle": args[0], "credit_max": max, "settlement_trigger": settleAt,
+			})
+		},
+	}
+	cmd.Flags().Int64Var(&max, "max", 0, "Maximum bilateral debt to permit the peer")
+	cmd.Flags().Int64Var(&settleAt, "settle-at", 0, "Debt level at which settlement is flagged")
+	return cmd
 }
 
 func peerInspectCmd() *cobra.Command {

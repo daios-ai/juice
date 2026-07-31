@@ -114,7 +114,7 @@ func TestExecuteLookup_ReturnsMatchingAction(t *testing.T) {
 	k, st := newLookupTestKernel(t)
 	ctx := context.Background()
 
-	owner := seedOwner(t, st, "@alice")
+	owner := seedOwner(t, st, "alice")
 	seedAction(t, st, owner.ID, "weather", "weather forecast temperature rain")
 
 	result, err := executeLookup(ctx, map[string]any{"query": "weather forecast"}, "", k)
@@ -126,7 +126,7 @@ func TestExecuteLookup_ReturnsMatchingAction(t *testing.T) {
 		t.Fatalf("expected non-empty results, got %v", result)
 	}
 	first, _ := items[0].(map[string]any)
-	if first["action"] != "@alice/weather" {
+	if first["action"] != "alice/weather" {
 		t.Errorf("expected @alice/weather first, got %v", first["action"])
 	}
 	for _, required := range []string{"action_id", "score", "input_schema", "output_schema"} {
@@ -146,7 +146,7 @@ func TestExecuteLookup_DefaultLimitIsTen(t *testing.T) {
 	k, st := newLookupTestKernel(t)
 	ctx := context.Background()
 
-	owner := seedOwner(t, st, "@bob")
+	owner := seedOwner(t, st, "bob")
 	for i := 0; i < 15; i++ {
 		seedAction(t, st, owner.ID, fmt.Sprintf("/svc%d", i), "generic service endpoint")
 	}
@@ -165,7 +165,7 @@ func TestExecuteLookup_CustomLimit(t *testing.T) {
 	k, st := newLookupTestKernel(t)
 	ctx := context.Background()
 
-	owner := seedOwner(t, st, "@carol")
+	owner := seedOwner(t, st, "carol")
 	for i := 0; i < 5; i++ {
 		seedAction(t, st, owner.ID, fmt.Sprintf("/item%d", i), "query item result")
 	}

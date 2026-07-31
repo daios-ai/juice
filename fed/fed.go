@@ -28,10 +28,30 @@ var ErrNotDispatched = errors.New("fed: request not dispatched")
 const (
 	ProtocolCall     = "/juice/fed/call/1"
 	ProtocolManifest = "/juice/fed/manifest/1"
+	ProtocolResolve  = "/juice/fed/resolve/1"
 	ProtocolGossip   = "/juice/fed/gossip/1"
 	ProtocolInspect  = "/juice/fed/inspect/1"
 	ProtocolStep     = "/juice/fed/step/1"
 )
+
+// ResolveRequest is the wire form of a /juice/fed/resolve/1 request (§13): the open, read-only
+// single-action / single-principal resolution that makes calling need no prior subscription.
+// Kind "action" resolves one action (Owner handle + Name) to its signed manifest; kind "user"
+// resolves a user reference to its stable id and handle. The request carries no signature —
+// it is public directory information; the returned manifest is itself signed.
+type ResolveRequest struct {
+	Kind  string `json:"kind"`            // "action" | "user"
+	Owner string `json:"owner,omitempty"` // action owner handle (kind=action)
+	Name  string `json:"name,omitempty"`  // action name (kind=action)
+	User  string `json:"user,omitempty"`  // user reference: handle or id (kind=user)
+}
+
+// ResolveResponse mirrors CallResponse: a status plus an opaque JSON body. For kind "action" the
+// body is a signed ActionManifest; for kind "user" it is {"user_id","handle"}; on miss, an error.
+type ResolveResponse struct {
+	Status int             `json:"status"`
+	Body   json.RawMessage `json:"body"`
+}
 
 // CallRequest is the wire form of an inbound federation call (§13). Args carries the exact
 // bytes the caller hashed and signed, so the receiver's args_hash matches byte-for-byte.
@@ -60,9 +80,12 @@ type StepRequest struct {
 	Counterparty   string          `json:"counterparty"`              // caller's base64url Ed25519 public key
 	Timestamp      string          `json:"timestamp"`                 // RFC3339
 	Signature      string          `json:"signature"`                 // Ed25519 over the kind's canonical payload
-	StepID         string          `json:"step_id,omitempty"`         // complete only
-	IdempotencyKey string          `json:"idempotency_key,omitempty"` // complete only
-	Input          json.RawMessage `json:"input,omitempty"`           // complete only; exact request bytes
+	StepID         string          `json:"step_id,omitempty"`          // complete only
+	IdempotencyKey string          `json:"idempotency_key,omitempty"`  // complete only
+	Input          json.RawMessage `json:"input,omitempty"`            // complete only; exact request bytes
+	ForUserID      string          `json:"for_user_id,omitempty"`      // complete: the completing user's stable id on the requesting kernel (§13)
+	UserAttestation string         `json:"user_attestation,omitempty"` // complete: home-kernel step_auth signature over that id
+	UserTimestamp  string          `json:"user_timestamp,omitempty"`   // complete: attestation timestamp (own freshness window)
 }
 
 // StepResponse mirrors CallResponse: a status plus an opaque JSON body. Unlike a call, a step
@@ -82,6 +105,9 @@ type Handlers interface {
 	OnCall(ctx context.Context, peerKey string, req CallRequest) CallResponse
 	// OnManifest returns one JSON frame per action manifest to serve (chunked, relay-safe).
 	OnManifest(ctx context.Context, peerKey string) ([]json.RawMessage, error)
+	// OnResolve answers a /juice/fed/resolve/1 request: one action's signed manifest or one
+	// user's stable id+handle (§13). peerKey is informational; the reply is public directory data.
+	OnResolve(ctx context.Context, peerKey string, req ResolveRequest) ResolveResponse
 	// OnGossip returns the gossip document as JSON.
 	OnGossip(ctx context.Context, peerKey string) (json.RawMessage, error)
 	// OnInspect returns the inspect document (identity + public actions + transacted peers) as JSON.

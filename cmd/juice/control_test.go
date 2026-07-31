@@ -24,10 +24,10 @@ func bootSuperuser(t *testing.T, env *testEnv) string {
 	if err := env.k.FirstBoot(ctx, "sys-pass", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
+	if err := env.k.SetConfig(ctx, configKeySuperuser, "sys"); err != nil {
 		t.Fatal(err)
 	}
-	tok, err := env.k.Login(ctx, "@sys", "sys-pass")
+	tok, err := env.k.Login(ctx, "sys", "sys-pass")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,13 +66,13 @@ func TestAdminDepositOverTCP(t *testing.T) {
 	suTok := bootSuperuser(t, env)
 
 	recipient, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@rcpt", Password: "pw",
+		Handle: "rcpt", Password: "pw",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, status := tcpDo(t, suTok, "POST", "/control/deposit",
-		map[string]any{"handle": "@rcpt", "amount": 500})
+		map[string]any{"handle": "rcpt", "amount": 500})
 	if status != http.StatusOK {
 		t.Fatalf("deposit status %d: %s", status, body)
 	}
@@ -92,13 +92,13 @@ func TestAdminDepositByKey(t *testing.T) {
 	ctx := context.Background()
 	suTok := bootSuperuser(t, env)
 
-	sys, err := env.k.ReadUserByHandle(ctx, "@sys")
+	sys, err := env.k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	keyB64 := base64.RawURLEncoding.EncodeToString(pub)
-	peer, err := env.k.AddPeer(ctx, sys.ID, "@peerx", keyB64)
+	peer, err := env.k.AddPeer(ctx, sys.ID, "peerx", keyB64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,22 +126,22 @@ func TestAdminRenameOverTCP(t *testing.T) {
 	suTok := bootSuperuser(t, env)
 
 	bob, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@bob", Password: "pw",
+		Handle: "bob", Password: "pw",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, status := tcpDo(t, suTok, "POST", "/control/users/@bob/rename",
-		map[string]any{"new_handle": "@bob-retired"})
+		map[string]any{"new_handle": "bob-retired"})
 	if status != http.StatusOK {
 		t.Fatalf("rename status %d: %s", status, body)
 	}
-	if got, err := env.k.ReadUserByHandle(ctx, "@bob-retired"); err != nil || got.ID != bob.ID {
+	if got, err := env.k.ReadUserByHandle(ctx, "bob-retired"); err != nil || got.ID != bob.ID {
 		t.Errorf("renamed handle does not resolve to bob: %v", err)
 	}
 	// The freed @bob is reusable by a distinct fresh account.
 	fresh, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@bob", Password: "pw",
+		Handle: "bob", Password: "pw",
 	})
 	if err != nil {
 		t.Fatalf("reuse freed handle: %v", err)
@@ -163,16 +163,16 @@ func TestAdminSuperuserGate(t *testing.T) {
 	}
 
 	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@regular", Password: "pw",
+		Handle: "regular", Password: "pw",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	regTok, err := env.k.Login(ctx, "@regular", "pw")
+	regTok, err := env.k.Login(ctx, "regular", "pw")
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, status := tcpDo(t, regTok, "POST", "/control/deposit",
-		map[string]any{"handle": "@regular", "amount": 1})
+		map[string]any{"handle": "regular", "amount": 1})
 	if status == http.StatusOK {
 		t.Fatalf("non-superuser deposit should be rejected, got 200")
 	}

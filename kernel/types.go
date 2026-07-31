@@ -54,8 +54,14 @@ type User struct {
 	// credit *on* the peer, valid as of PeerLastSeen.
 	PeerLastSeen *time.Time `json:"peer_last_seen,omitempty"`
 	PeerCredit   *int64     `json:"peer_credit,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// CreditMax and SettlementTrigger are the provider-side bilateral credit policy for a peer
+	// (§13): the largest negative Available this kernel permits (0 ⇒ prepaid-only) and the debt at
+	// which it flags settlement. SettlementDue is a debtor-side sync-cache flag (display-only).
+	CreditMax         int64 `json:"credit_max,omitempty"`
+	SettlementTrigger int64 `json:"settlement_trigger,omitempty"`
+	SettlementDue     *bool `json:"settlement_due,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // IsPeer reports whether u is a remote-kernel proxy user, identified by a set public_key (§13).
@@ -98,6 +104,8 @@ type Action struct {
 	ArtifactHash   string           `json:"artifact_hash,omitempty"`    // content-addressed compiled WASM artifact
 	WasmArtifact   string           `json:"wasm_artifact,omitempty"`    // base64-encoded compiled WASM bytes (wasm only); Source holds the TinyGo text
 	RemoteActionID string           `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
+	RemoteOwnerID  string           `json:"remote_owner_id,omitempty"`  // stable owner user_id on the remote kernel (with peer key = PrincipalID, §13)
+	RemoteBPS      *int64           `json:"remote_bps,omitempty"`       // provider premium snapshot from the signed manifest; nil = pre-v0.12 proxy row
 	AuthJSON       string           `json:"-"`                          // AES-256-GCM encrypted upstream auth credentials; never serialized
 	CreatedAt      time.Time        `json:"created_at"`
 	UpdatedAt      time.Time        `json:"updated_at"`
@@ -207,6 +215,7 @@ type Step struct {
 	ID                   string          `json:"id"`
 	ParentTraceID        *string         `json:"parent_trace_id,omitempty"`
 	RequiredCallerUserID string          `json:"required_caller_user_id"`
+	RequiredCallerRemoteID *string       `json:"required_caller_remote_id,omitempty"` // stable remote user_id on the peer kernel (§13); nil = local required caller
 	ActionID             string          `json:"action_id"`
 	PartialArgs          json.RawMessage `json:"partial_args"`
 	Price                int64           `json:"price"`
@@ -456,8 +465,10 @@ type HTTPSource struct {
 // ActionManifest is a signed, exportable description of a public active action.
 type ActionManifest struct {
 	ActionID     string         `json:"action_id"`
-	OwnerHandle  string         `json:"owner_handle"`
+	OwnerID      string         `json:"owner_id"`     // stable owner user_id on the serving kernel (identity half of PrincipalID)
+	OwnerHandle  string         `json:"owner_handle"` // owner's current display handle (mutable metadata, not identity/contract)
 	Name         string         `json:"name"`
+	RemoteBPS    int64          `json:"remote_bps"` // provider premium (bps) on inbound remote calls (§13)
 	Description  string         `json:"description"`
 	InputSchema  map[string]any `json:"input_schema"`
 	OutputSchema map[string]any `json:"output_schema"`

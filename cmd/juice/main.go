@@ -247,10 +247,10 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 		return nil, nil, nil, nil, fmt.Errorf("fee_bps must be 0–10000")
 	}
 
-	cfg.ImportBPS = globalCfg.ImportBPS
-	if globalCfg.ImportBPS < 0 || globalCfg.ImportBPS > 10000 {
+	cfg.RemoteBPS = globalCfg.RemoteBPS
+	if globalCfg.RemoteBPS < 0 || globalCfg.RemoteBPS > 10000 {
 		db.Close()
-		return nil, nil, nil, nil, fmt.Errorf("import_bps must be 0–10000")
+		return nil, nil, nil, nil, fmt.Errorf("remote_bps must be 0–10000")
 	}
 
 	tokenTTL, err := time.ParseDuration(globalCfg.TokenTTL)
@@ -337,7 +337,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).
 	if privB64, _ := db.GetConfig(context.Background(), configKeySigningPrivate); privB64 != "" {
 		if privBytes, err := base64.RawURLEncoding.DecodeString(privB64); err == nil && len(privBytes) == ed25519.PrivateKeySize {
-			if su, err := db.ReadUserByHandle(context.Background(), "@sys"); err == nil {
+			if su, err := db.ReadUserByHandle(context.Background(), "sys"); err == nil {
 				k.SetSigningKey(ed25519.PrivateKey(privBytes), su.ID)
 			}
 		}

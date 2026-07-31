@@ -17,7 +17,7 @@ func TestImportOpenAPI(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@oapi-import-owner", 0)
+	owner := setupUser(t, st, "oapi-import-owner", 0)
 	specURL := "https://spec.example.com/api.json"
 
 	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec))
@@ -59,7 +59,7 @@ func TestUnimportOpenAPI(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@oapi-unimport-owner", 0)
+	owner := setupUser(t, st, "oapi-unimport-owner", 0)
 	specURL := "https://spec.example.com/api.json"
 
 	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec)); err != nil {
@@ -95,7 +95,7 @@ func TestUnimportOpenAPILeavesManualHTTPUntouched(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@oapi-isolation-owner", 0)
+	owner := setupUser(t, st, "oapi-isolation-owner", 0)
 	specURL := "https://spec.example.com/api.json"
 
 	// A manual http action with the same owner.
@@ -135,7 +135,7 @@ func TestOpenAPIActivation(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@oapi-activate-owner", 0)
+	owner := setupUser(t, st, "oapi-activate-owner", 0)
 	specURL := "https://spec.example.com/api.json"
 
 	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec))
@@ -162,7 +162,7 @@ func TestOpenAPIActivationRejectsPrivateBaseURL(t *testing.T) {
 	k := newTestKernel(st) // AllowLocalSources = false
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@oapi-private-owner", 0)
+	owner := setupUser(t, st, "oapi-private-owner", 0)
 
 	// Craft an HTTPSource with a private execution base URL.
 	src := kernel.HTTPSource{
@@ -178,7 +178,7 @@ func TestOpenAPIActivationRejectsPrivateBaseURL(t *testing.T) {
 	a := &kernel.Action{
 		ID:           uuid.New().String(),
 		OwnerUserID:  owner.ID,
-		Name:         "@oapi-private-owner/getSecret",
+		Name:         "oapi-private-owner/getSecret",
 		Kind:         kernel.KindHTTP,
 		Source:       string(srcBytes),
 		InputSchema:  map[string]any{"type": "object"},
@@ -200,9 +200,9 @@ func TestImportOpenAPISetsOwnershipVerified(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@oapi-owner-verified", 0)
+	owner := setupUser(t, st, "oapi-owner-verified", 0)
 	specURL := "https://spec.example.com/api.json"
-	specWithOwner := `{"openapi":"3.0.0","x-juice-owner":"@oapi-owner-verified","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	specWithOwner := `{"openapi":"3.0.0","x-juice-owner":"oapi-owner-verified","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
 	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(specWithOwner))
 	if err != nil {
@@ -225,11 +225,11 @@ func TestMakePublicOpenAPIRequiresOwnershipVerified(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@oapi-grant-owner", 0)
+	owner := setupUser(t, st, "oapi-grant-owner", 0)
 	src := kernel.HTTPSource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: false}
 	srcBytes, _ := json.Marshal(src)
 	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "@oapi-grant-owner/sayHello",
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "oapi-grant-owner/sayHello",
 		Kind: kernel.KindHTTP, Active: false, Description: "test", Source: string(srcBytes),
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -252,11 +252,11 @@ func TestMakePublicOpenAPIWithOwnershipVerified(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@oapi-grant-verified", 0)
+	owner := setupUser(t, st, "oapi-grant-verified", 0)
 	src := kernel.HTTPSource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: true}
 	srcBytes, _ := json.Marshal(src)
 	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "@oapi-grant-verified/sayHello",
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "oapi-grant-verified/sayHello",
 		Kind: kernel.KindHTTP, Active: false, Description: "test", Source: string(srcBytes),
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -275,11 +275,11 @@ func TestSetActivePublicOpenAPIRequiresOwnershipVerified(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@oapi-setactive-owner", 0)
+	owner := setupUser(t, st, "oapi-setactive-owner", 0)
 	src := kernel.HTTPSource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: false}
 	srcBytes, _ := json.Marshal(src)
 	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "@oapi-setactive-owner/sayHello",
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "oapi-setactive-owner/sayHello",
 		Kind: kernel.KindHTTP, Active: false, Visibility: kernel.VisibilityPublic, Description: "test", Source: string(srcBytes),
 		InputSchema:  map[string]any{"type": "object", "properties": map[string]any{}},
 		OutputSchema: map[string]any{"type": "object"},
@@ -303,8 +303,8 @@ func TestImportOpenAPISubjectMismatchRejected(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	userA := setupUser(t, st, "@user-a-imp", 0)
-	userB := setupUser(t, st, "@user-b-imp", 0)
+	userA := setupUser(t, st, "user-a-imp", 0)
+	userB := setupUser(t, st, "user-b-imp", 0)
 
 	_, err := k.ImportOpenAPI(ctx, userA.ID, userB.ID, "http://spec.example.com", []byte(minOpenAPISpec))
 	if !errors.Is(err, kernel.ErrUnauthorized) {
@@ -318,9 +318,9 @@ func TestImportOpenAPIWellKnownSetsOwnershipVerified(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@wk-owner", 0)
+	owner := setupUser(t, st, "wk-owner", 0)
 	fetcher := &fakeURLFetcher{wellKnown: map[string]string{
-		"http://api.example.com/.well-known/juice-owner.txt": "@wk-owner",
+		"http://api.example.com/.well-known/juice-owner.txt": "wk-owner",
 	}}
 	k := newTestKernelWithHTTP(st, fetcher)
 
@@ -347,10 +347,10 @@ func TestImportOpenAPIOwnershipStalenessFixed(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@stale-owner", 0)
+	owner := setupUser(t, st, "stale-owner", 0)
 	// First import: well-known returns owner handle → OwnershipVerified=true.
 	fetcher := &fakeURLFetcher{wellKnown: map[string]string{
-		"http://api.example.com/.well-known/juice-owner.txt": "@stale-owner",
+		"http://api.example.com/.well-known/juice-owner.txt": "stale-owner",
 	}}
 	k := newTestKernelWithHTTP(st, fetcher)
 
@@ -363,7 +363,7 @@ func TestImportOpenAPIOwnershipStalenessFixed(t *testing.T) {
 	}
 
 	// Second import: well-known now returns wrong handle → proof revoked.
-	fetcher.wellKnown["http://api.example.com/.well-known/juice-owner.txt"] = "@other-owner"
+	fetcher.wellKnown["http://api.example.com/.well-known/juice-owner.txt"] = "other-owner"
 	k2 := newTestKernelWithHTTP(st, fetcher)
 
 	result2, err := k2.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
@@ -394,7 +394,7 @@ func TestUnimportOpenAPIOwnerOnly(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@openapi-owner", 0)
+	owner := setupUser(t, st, "openapi-owner", 0)
 
 	specURL := "https://spec.example.com/admin-test.json"
 	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"adminHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
@@ -417,7 +417,7 @@ func TestUnimportOpenAPIOwnerOnly(t *testing.T) {
 	}
 
 	// Unrelated user should be rejected.
-	other := setupUser(t, st, "@openapi-other", 0)
+	other := setupUser(t, st, "openapi-other", 0)
 	// Re-import to have an action to unimport.
 	result2, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
 	if err != nil {
@@ -434,7 +434,7 @@ func TestOpenAPIRejectMissingName(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@oapi-no-name", 0)
+	owner := setupUser(t, st, "oapi-no-name", 0)
 	specURL := "https://spec.example.com/api.json"
 
 	// Operation has neither operationId nor x-juice-name.
@@ -466,7 +466,7 @@ func TestOpenAPIRejectMissingInputContract(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@oapi-no-input", 0)
+	owner := setupUser(t, st, "oapi-no-input", 0)
 	specURL := "https://spec.example.com/api.json"
 
 	// Operation has operationId and description but no parameters and no requestBody.
@@ -500,7 +500,7 @@ func TestOpenAPIBodyRefParamsIncluded(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@oapi-ref-body", 0)
+	owner := setupUser(t, st, "oapi-ref-body", 0)
 	specURL := "https://spec.example.com/api.json"
 
 	spec := `{

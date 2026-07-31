@@ -105,7 +105,7 @@ func TestUsageShownOnlyForParseErrors(t *testing.T) {
 
 	// Runtime error: body ran, so main would suppress usage.
 	root, entered = build()
-	root.SetArgs([]string{"deposit", "@alice", "5"})
+	root.SetArgs([]string{"deposit", "alice", "5"})
 	if _, err := root.ExecuteC(); err == nil {
 		t.Fatal("expected a runtime error")
 	}
@@ -163,7 +163,7 @@ func TestLoadJSONArg(t *testing.T) {
 
 	// @file reads and validates the file contents.
 	if got, err := loadJSONArg("@" + file); err != nil || string(got) != `{"x":1}` {
-		t.Errorf("@file: got %q, err %v", got, err)
+		t.Errorf("file: got %q, err %v", got, err)
 	}
 
 	// Missing file is an error.

@@ -24,12 +24,12 @@ func TestFirstBootRequiresKernelName(t *testing.T) {
 		t.Fatalf("headless boot with no name: want required-name error, got %v", err)
 	}
 
-	t.Setenv("JUICE_BOOTSTRAP_KERNEL_HANDLE", "@acme")
+	t.Setenv("JUICE_BOOTSTRAP_KERNEL_HANDLE", "acme")
 	globalCfg.KernelHandle = ""
 	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native); err != nil {
 		t.Fatalf("boot with name via env: %v", err)
 	}
-	if globalCfg.KernelHandle != "@acme" {
+	if globalCfg.KernelHandle != "acme" {
 		t.Errorf("kernel handle = %q, want @acme", globalCfg.KernelHandle)
 	}
 }
@@ -57,9 +57,9 @@ func TestFirstBootAtomic(t *testing.T) {
 	}
 
 	// @sys user must exist.
-	u, err := k.ReadUserByHandle(ctx, "@sys")
+	u, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil || u == nil {
-		t.Fatalf("@sys not found after FirstBoot: %v", err)
+		t.Fatalf("sys not found after FirstBoot: %v", err)
 	}
 
 	// Second call must be a no-op (idempotent) and preserve the same secret.
@@ -100,7 +100,7 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 
 	// Create a superuser manually.
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@sys", Password: "pass",
+		Handle: "sys", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestEnsureSysLLMChatIdempotent(t *testing.T) {
 	k := newTestKernel(t)
 
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@sys", Password: "pass",
+		Handle: "sys", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -200,7 +200,7 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 	k := newTestKernel(t)
 
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@sys", Password: "pass",
+		Handle: "sys", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -282,11 +282,11 @@ func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
-	su, err := k.ReadUserByHandle(ctx, "@sys")
+	su, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureSysNative(ctx, k, "@sys", spec); err != nil {
+	if err := ensureSysNative(ctx, k, "sys", spec); err != nil {
 		t.Fatalf("ensureSysNative (build 1): %v", err)
 	}
 	first, err := k.ReadActionByOwnerName(ctx, su.ID, "widget")
@@ -309,7 +309,7 @@ func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 
 	// Build 3 RE-INTRODUCES "widget": handler back, ensure again → re-registers under the same name.
 	kBack := newBuild(true)
-	if err := ensureSysNative(ctx, kBack, "@sys", spec); err != nil {
+	if err := ensureSysNative(ctx, kBack, "sys", spec); err != nil {
 		t.Fatalf("ensureSysNative (reintroduce): %v", err)
 	}
 	again, err := kBack.ReadActionByOwnerName(ctx, su.ID, "widget")
@@ -339,22 +339,22 @@ func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
 	a, err := k.ReadActionByOwnerName(ctx, sys.ID, "tinygo/compile")
 	if err != nil {
-		t.Fatalf("@sys/tinygo/compile not registered after bootstrap: %v", err)
+		t.Fatalf("sys/tinygo/compile not registered after bootstrap: %v", err)
 	}
 	if !a.Active || a.Visibility != kernel.VisibilityPublic {
-		t.Errorf("@sys/tinygo/compile should be active and public, got active=%v visibility=%v", a.Active, a.Visibility)
+		t.Errorf("sys/tinygo/compile should be active and public, got active=%v visibility=%v", a.Active, a.Visibility)
 	}
 	if a.Kind != kernel.KindNative {
-		t.Errorf("@sys/tinygo/compile kind = %q, want native", a.Kind)
+		t.Errorf("sys/tinygo/compile kind = %q, want native", a.Kind)
 	}
 	if a.Price != 5 {
-		t.Errorf("@sys/tinygo/compile price = %d, want 5", a.Price)
+		t.Errorf("sys/tinygo/compile price = %d, want 5", a.Price)
 	}
 }
 
@@ -362,7 +362,7 @@ func TestEnsureSysNativeReconcilesPrice(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)
 
-	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@sys", Password: "pass"})
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "sys", Password: "pass"})
 	if err != nil {
 		t.Fatal(err)
 	}

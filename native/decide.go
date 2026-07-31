@@ -2,7 +2,6 @@ package native
 
 import (
 	"context"
-	"strings"
 
 	"github.com/daios-ai/juice/kernel"
 )
@@ -70,12 +69,12 @@ func executeDecide(
 		if !ok {
 			return nil, kernel.ErrInvalidInput.Wrap("each action must be a string")
 		}
-		idx := strings.IndexByte(ref, '/')
-		if idx < 2 || ref[0] != '@' {
-			return nil, kernel.ErrInvalidInput.Wrapf("invalid action reference %q: expected @owner/name", ref)
+		r, err := kernel.ParseActionRef(ref)
+		if err != nil {
+			return nil, kernel.ErrInvalidInput.Wrapf("invalid action reference %q: expected owner/name", ref)
 		}
-		ownerHandle := ref[:idx]
-		actionName := ref[idx+1:]
+		ownerHandle := r.Owner
+		actionName := r.Name
 
 		a, err := lookup(ctx, ownerHandle, actionName, callerID)
 		if err != nil {

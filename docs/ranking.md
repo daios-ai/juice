@@ -1,6 +1,6 @@
-# How `@sys/lookup` ranks actions
+# How `sys/lookup` ranks actions
 
-This describes exactly what happens when someone runs `@sys/lookup` with a search
+This describes exactly what happens when someone runs `sys/lookup` with a search
 query, start to finish, in plain terms. It reflects the current code in
 `kernel/kernel.go` (`Kernel.Lookup`).
 
@@ -102,7 +102,7 @@ Lookup stops once it has collected `limit` allowed actions.
 
 ## The output
 
-For each returned action, lookup reports: its id, its reference as `@owner/name`,
+For each returned action, lookup reports: its id, its reference as `owner/name`,
 its description, its final score, and its input and output schemas — enough for a
 caller (human or language model) to understand and invoke it.
 

@@ -27,7 +27,7 @@ func seedUserWithBalance(t *testing.T, st kernel.Store, handle string, balance i
 
 func seedSysWithSink(t *testing.T, st kernel.Store) *kernel.Action {
 	t.Helper()
-	sys := seedOwner(t, st, "@sys")
+	sys := seedOwner(t, st, "sys")
 	return seedAction(t, st, sys.ID, "sink", "universal sink")
 }
 
@@ -44,7 +44,7 @@ func TestExecuteMessage_MissingTo(t *testing.T) {
 func TestExecuteMessage_MissingMessage(t *testing.T) {
 	k, _ := newLookupTestKernel(t)
 	_, err := executeMessage(context.Background(), map[string]any{
-		"to": "@alice",
+		"to": "alice",
 	}, "o", "", k)
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput, got %v", err)
@@ -54,7 +54,7 @@ func TestExecuteMessage_MissingMessage(t *testing.T) {
 func TestExecuteMessage_UnknownRecipient(t *testing.T) {
 	k, _ := newLookupTestKernel(t)
 	_, err := executeMessage(context.Background(), map[string]any{
-		"to": "@nobody", "message": "hello",
+		"to": "nobody", "message": "hello",
 	}, "o", "", k)
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput, got %v", err)
@@ -66,8 +66,8 @@ func TestExecuteMessage_CreatesStep(t *testing.T) {
 	ctx := context.Background()
 
 	sink := seedSysWithSink(t, st)
-	caller := seedUserWithBalance(t, st, "@caller", 1000)
-	recipient := seedOwner(t, st, "@recipient")
+	caller := seedUserWithBalance(t, st, "caller", 1000)
+	recipient := seedOwner(t, st, "recipient")
 
 	// Create process and root trace atomically via BeginRun (mirrors production).
 	p := &kernel.Process{
@@ -89,7 +89,7 @@ func TestExecuteMessage_CreatesStep(t *testing.T) {
 	}
 
 	result, err := executeMessage(ctx, map[string]any{
-		"to": "@recipient", "message": "hello",
+		"to": "recipient", "message": "hello",
 	}, caller.ID, rootTrace.ID, k)
 	if err != nil {
 		t.Fatalf("executeMessage: %v", err)

@@ -25,7 +25,7 @@ import (
 // Config holds kernel-level configuration.
 type Config struct {
 	FeeBPS            int64         // basis points, e.g. 2000 = 20%
-	ImportBPS         int64         // basis points import duty on remote-proxy calls, default 500
+	RemoteBPS         int64         // basis points provider premium on inbound remote calls, default 500
 	FeeRecipientID    string        // user ID that receives fees
 	TokenSecret       string        // HMAC secret for JWT signing
 	TokenTTL          time.Duration // token validity window
@@ -48,7 +48,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		FeeBPS:        2000,
-		ImportBPS:     500,
+		RemoteBPS:     500,
 		TokenTTL:      15 * time.Minute,
 		ScriptTimeout: 10 * time.Second,
 		ScriptMemory:  64 * 1024 * 1024, // 64 MiB
@@ -578,26 +578,22 @@ func unionScopes(existingJSON string, requested []string) (string, bool) {
 	return string(b), covered
 }
 
-// ParseGrantSelector splits a consent selector into owner handle and path (§8). A selector is
-// @owner or @owner/path; a trailing "/*" is an accepted alias for the whole-owner form.
+// ParseGrantSelector splits a consent selector into bare owner handle and path (§8). A selector is
+// owner or owner/path (a legacy leading "@" is tolerated); a trailing "/*" aliases the whole-owner form.
 func ParseGrantSelector(sel string) (ownerHandle, path string, err error) {
-	sel = strings.TrimSpace(sel)
+	sel = strings.TrimPrefix(strings.TrimSpace(sel), "@") // bare; legacy "@" tolerated
 	sel = strings.TrimSuffix(sel, "/*")
-	if !strings.HasPrefix(sel, "@") {
-		sel = "@" + sel
+	if sel == "" {
+		return "", "", ErrInvalidInput.Wrap("selector must be owner or owner/path")
 	}
-	if len(sel) <= 1 {
-		return "", "", ErrInvalidInput.Wrap("selector must be @owner or @owner/path")
+	if idx := strings.Index(sel, "/"); idx >= 0 {
+		owner := sel[:idx]
+		if owner == "" {
+			return "", "", ErrInvalidInput.Wrap("selector must be owner or owner/path")
+		}
+		return owner, sel[idx+1:], nil
 	}
-	idx := strings.Index(sel[1:], "/")
-	if idx < 0 {
-		return sel, "", nil
-	}
-	owner := sel[:idx+1]
-	if owner == "@" {
-		return "", "", ErrInvalidInput.Wrap("selector must be @owner or @owner/path")
-	}
-	return owner, sel[idx+2:], nil
+	return sel, "", nil
 }
 
 // selectorPathMatches implements path-segment matching (§8): the empty path matches all of an
@@ -1036,22 +1032,26 @@ type CreateUserRequest struct {
 // whitespace and prepends "@" when missing, so "bob" and "@bob" denote the same user.
 // Idempotent; leaves "" untouched (validateHandle rejects it).
 func NormalizeHandle(h string) string {
-	h = strings.TrimSpace(h)
-	if h == "" || strings.HasPrefix(h, "@") {
-		return h
-	}
-	return "@" + h
+	return strings.TrimPrefix(strings.TrimSpace(h), "@")
 }
 
 // validateHandle rejects empty handles, a bare "@", and handles containing /, enforcing
 // the invariant that @owner/name references are unambiguous (handles ≡ hostnames, no /).
 // Callers normalize with NormalizeHandle first, so a valid handle is "@" followed by ≥1 char.
 func validateHandle(handle string) error {
-	if handle == "" || handle == "@" {
+	if handle == "" {
 		return ErrInvalidInput.Wrap("handle is required")
 	}
-	if strings.Contains(handle, "/") {
-		return ErrInvalidInput.Wrap("handle must not contain /")
+	if strings.ContainsAny(handle, "@/") {
+		return ErrInvalidInput.Wrap("handle must not contain @ or /")
+	}
+	if len(handle) > 64 {
+		return ErrInvalidInput.Wrap("handle must be at most 64 characters")
+	}
+	// Handles must not collide with the other two account productions (§14), so one resolver
+	// disambiguates by shape without a sigil.
+	if looksLikeKey(handle) || looksLikeID(handle) {
+		return ErrInvalidInput.Wrap("handle must not look like a public key or id")
 	}
 	return nil
 }
@@ -1936,7 +1936,7 @@ func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey stri
 	now := time.Now().UTC()
 	u := &User{
 		ID:                uuid.New().String(),
-		Handle:            "@sys",
+		Handle:            SuperuserHandle,
 		PasswordHash:      hash,
 		RecoveryPublicKey: recoveryPublicKey,
 		CreatedAt:         now,
@@ -1947,7 +1947,7 @@ func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey stri
 		return ErrInternal.Wrapf("generate jwt secret: %v", err)
 	}
 	configs := map[string]string{
-		"superuser_handle":    "@sys",
+		"superuser_handle":    SuperuserHandle,
 		"signing_public_key":  base64.RawURLEncoding.EncodeToString(pub),
 		"signing_private_key": base64.RawURLEncoding.EncodeToString(priv),
 		"jwt_secret":          hex.EncodeToString(jwtRaw),
@@ -1955,7 +1955,7 @@ func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey stri
 	if err := k.store.InitFirstBoot(ctx, u, configs); err != nil {
 		return err
 	}
-	su, err := k.store.ReadUserByHandle(ctx, "@sys")
+	su, err := k.store.ReadUserByHandle(ctx, SuperuserHandle)
 	if err != nil {
 		return err
 	}
@@ -2220,7 +2220,10 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
-	if caller.Available < action.Price {
+	// Bilateral credit (§13): a peer caller may draw its Available negative down to -CreditMax; an
+	// ordinary caller has CreditMax=0, so this is the classic Available>=Price check. The atomic
+	// guard in store.BeginRun enforces the same bound against concurrent draws.
+	if caller.Available-action.Price < -caller.CreditMax {
 		return nil, ErrInsufficientFunds.Wrapf("user has %d credits, action costs %d", caller.Available, action.Price)
 	}
 	now := time.Now().UTC()
@@ -2769,8 +2772,12 @@ func (k *Kernel) requireActiveUser(ctx context.Context, userID string) (*User, e
 }
 
 // isUserSuperuser returns true if u is the platform superuser (@sys is fixed by the spec).
+// SuperuserHandle is the bare handle of the single privileged system account (§12): signing-key
+// owner, native-action owner, fee recipient, and gossip "about" source.
+const SuperuserHandle = "sys"
+
 func (k *Kernel) isUserSuperuser(_ context.Context, u *User) bool {
-	return u.Handle == "@sys"
+	return u.Handle == SuperuserHandle
 }
 
 // IsSuperuser reports whether userID is the configured superuser. Exported so the service

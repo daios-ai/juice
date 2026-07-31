@@ -57,17 +57,81 @@ type CallReply struct {
 	ReceiptID string         `json:"receipt_id"`
 }
 
-// ParseActionRef splits an "@owner/name" action reference into owner handle and action name.
-// Returns ErrInvalidInput if the format is invalid.
-func ParseActionRef(ref string) (ownerHandle, actionName string, err error) {
-	if !strings.HasPrefix(ref, "@") {
-		return "", "", ErrInvalidInput.Wrap("action ref must be @owner/name")
+// ActionRef is a parsed user[@kernel]/action reference (§13). Kernel is "" for a local action.
+type ActionRef struct {
+	Owner  string // bare owner handle
+	Kernel string // local kernel alias or raw key; "" = local
+	Name   string // action name (may itself contain "/")
+}
+
+// Local reports whether the reference names an action on this kernel.
+func (r ActionRef) Local() bool { return r.Kernel == "" }
+
+// String renders the canonical form owner[@kernel]/name.
+func (r ActionRef) String() string {
+	if r.Kernel == "" {
+		return r.Owner + "/" + r.Name
 	}
-	idx := strings.Index(ref[1:], "/")
-	if idx < 0 || ref[1:idx+1] == "" || ref[idx+2:] == "" {
-		return "", "", ErrInvalidInput.Wrap("action ref must be @owner/name")
+	return r.Owner + "@" + r.Kernel + "/" + r.Name
+}
+
+// ParseActionRef parses a "user[@kernel]/action" reference (§13, §14): `@` qualifies a kernel,
+// `/` namespaces the action, handles are bare. A leading `@` is accepted for one migration period
+// and stripped. Returns ErrInvalidInput if the format is invalid. A legacy "@mount/owner/name"
+// parses to {Owner: mount, Name: "owner/name"}, which still resolves against the local proxy cache.
+func ParseActionRef(ref string) (ActionRef, error) {
+	ref = strings.TrimPrefix(strings.TrimSpace(ref), "@") // legacy tolerance
+	i := strings.Index(ref, "/")
+	if i < 0 {
+		return ActionRef{}, ErrInvalidInput.Wrap("action ref must be owner[@kernel]/name")
 	}
-	return ref[:idx+1], ref[idx+2:], nil
+	head, name := ref[:i], ref[i+1:]
+	if head == "" || name == "" {
+		return ActionRef{}, ErrInvalidInput.Wrap("action ref must be owner[@kernel]/name")
+	}
+	owner, kernel, hasKernel := strings.Cut(head, "@")
+	if hasKernel && (owner == "" || kernel == "") {
+		return ActionRef{}, ErrInvalidInput.Wrap("action ref must be owner[@kernel]/name")
+	}
+	return ActionRef{Owner: owner, Kernel: kernel, Name: name}, nil
+}
+
+// FormatActionRef renders an action's canonical user[@kernel]/action reference. For a remote proxy
+// the stored Name is "remoteowner/rest" and OwnerHandle is the local mount alias, so it renders
+// "remoteowner@mount/rest"; a local action renders "ownerHandle/name". Falls back to the bare name
+// when OwnerHandle is not loaded. The single renderer shared by gossip, roster, and view enrichment.
+func FormatActionRef(a *Action) string {
+	if a.Kind == KindRemoteProxy && a.OwnerHandle != "" {
+		if ro, rest, ok := strings.Cut(a.Name, "/"); ok {
+			return ro + "@" + a.OwnerHandle + "/" + rest
+		}
+	}
+	if a.OwnerHandle != "" {
+		return a.OwnerHandle + "/" + a.Name
+	}
+	return a.Name
+}
+
+// IsPublicKey reports whether s has the syntactic form of a base64url Ed25519 public key. Exported
+// for the service/CLI layer's shape-based peer resolution (§14 productions).
+func IsPublicKey(s string) bool { return looksLikeKey(s) }
+
+// looksLikeKey reports whether s is a base64url Ed25519 public key (43 chars → 32 bytes).
+func looksLikeKey(s string) bool {
+	if len(s) != 43 {
+		return false
+	}
+	_, err := decodeRemotePublicKey(s)
+	return err == nil
+}
+
+// looksLikeID reports whether s is a hex UUID (8-4-4-4-12) — a raw object id.
+func looksLikeID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	_, err := uuid.Parse(s)
+	return err == nil
 }
 
 // ResolveAction resolves an action reference to an Action. It accepts "@owner/name"
@@ -75,19 +139,40 @@ func ParseActionRef(ref string) (ownerHandle, actionName string, err error) {
 // UUID never contains. This is the single action-resolution entry point shared by Call,
 // Run, the WASM host, and the service layer; do not re-inline the lookup elsewhere.
 func (k *Kernel) ResolveAction(ctx context.Context, ref string) (*Action, error) {
-	if i := strings.Index(ref, "/"); i >= 0 {
-		ownerRef, name := ref[:i], ref[i+1:]
-		if ownerRef == "" || name == "" {
-			return nil, ErrInvalidInput.Wrap("action ref must be @owner/name")
+	if strings.Contains(ref, "/") {
+		r, err := ParseActionRef(ref)
+		if err != nil {
+			return nil, err
 		}
-		// The owner segment is itself a user reference, resolved uniformly (@handle, key, or id).
-		owner, err := k.ResolveUser(ctx, ownerRef)
-		if err != nil || owner == nil {
+		if r.Local() {
+			owner, err := k.ResolveUser(ctx, r.Owner)
+			if err != nil || owner == nil {
+				return nil, ErrNotFound.Wrapf("action %s not found", ref)
+			}
+			a, err := k.store.ReadActionByOwnerName(ctx, owner.ID, r.Name)
+			if err != nil || a == nil {
+				return nil, ErrNotFound.Wrapf("action %s not found", ref)
+			}
+			return a, nil
+		}
+		// Kernel-qualified: the local proxy cache row is owned by the peer's mount user and named
+		// "owner/name" (§8). Resolve the mount by bound alias or raw key; a discovered label never
+		// resolves (§13). A cached row is the fast path; a miss triggers on-demand resolve (§13).
+		peerKey, mount, kerr := k.ResolveKernelKey(ctx, r.Kernel)
+		if kerr != nil {
 			return nil, ErrNotFound.Wrapf("action %s not found", ref)
 		}
-		a, err := k.store.ReadActionByOwnerName(ctx, owner.ID, name)
-		if err != nil || a == nil {
-			return nil, ErrNotFound.Wrapf("action %s not found", ref)
+		if mount != nil {
+			if a, aerr := k.store.ReadActionByOwnerName(ctx, mount.ID, r.Owner+"/"+r.Name); aerr == nil && a != nil {
+				return a, nil
+			}
+		}
+		a, lerr := k.lazyResolveRemote(ctx, peerKey, mount, r)
+		if lerr != nil {
+			if errors.Is(lerr, ErrNotFound) {
+				return nil, ErrNotFound.Wrapf("action %s not found", ref)
+			}
+			return nil, lerr
 		}
 		return a, nil
 	}
@@ -98,20 +183,57 @@ func (k *Kernel) ResolveAction(ctx context.Context, ref string) (*Action, error)
 	return a, nil
 }
 
+// lazyResolveRemote resolves a single remote action on demand and caches it as a local proxy row
+// (§13 subscription-free calls). It is invoked from ResolveAction's kernel-qualified miss branch, so
+// run, /v1/call, and WASM subcalls all reach unimported remote actions uniformly. Trust derives from
+// the manifest signature, not an operator act; a nil resolver (no transport) yields ErrNotFound.
+func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *User, r ActionRef) (*Action, error) {
+	resolver, ok := k.http.(RemoteResolver)
+	if !ok {
+		return nil, ErrNotFound.Wrapf("action %s not found", r.String())
+	}
+	m, err := resolver.ResolveRemoteAction(ctx, peerKey, r.Owner, r.Name)
+	if err != nil {
+		return nil, err // ErrPeerUnreachable / ErrNotFound already typed by the resolver
+	}
+	if m == nil {
+		return nil, ErrNotFound.Wrapf("action %s not found", r.String())
+	}
+	if err := VerifyManifestSignature(peerKey, m); err != nil {
+		return nil, ErrUnauthorized.Wrap("remote manifest signature is invalid")
+	}
+	if mount == nil {
+		// First contact by raw key: mechanical alias; a better label is a best-effort concern that
+		// must never fail the call (§13 first-meaningful-use naming).
+		handle := r.Kernel
+		if IsPublicKey(r.Kernel) && len(peerKey) >= 8 {
+			handle = "k-" + peerKey[:8]
+		}
+		mount, err = k.CreateOrUpdateProxyPeer(ctx, handle, peerKey)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return k.ImportPeerAction(ctx, mount.ID, *m)
+}
+
 // ResolveUser resolves a user reference to a User. It accepts "@handle" (or a bare
 // handle), a base64url public key, or a raw user ID — the shapes are disjoint, so a
 // single lookup disambiguates. This is the single user-resolution entry point shared by
 // Call, Run, the WASM host, native actions, federation, and the service layer.
 func (k *Kernel) ResolveUser(ctx context.Context, ident string) (*User, error) {
-	if !strings.HasPrefix(ident, "@") {
+	ident = strings.TrimPrefix(strings.TrimSpace(ident), "@") // legacy tolerance
+	if looksLikeKey(ident) {
 		if u, err := k.store.ReadUserByPublicKey(ctx, ident); err == nil && u != nil {
 			return u, nil
 		}
 	}
-	if u, err := k.store.ReadUserByHandle(ctx, NormalizeHandle(ident)); err == nil && u != nil {
-		return u, nil
+	if looksLikeID(ident) {
+		if u, err := k.store.ReadUser(ctx, ident); err == nil && u != nil {
+			return u, nil
+		}
 	}
-	if u, err := k.store.ReadUser(ctx, ident); err == nil && u != nil {
+	if u, err := k.store.ReadUserByHandle(ctx, ident); err == nil && u != nil {
 		return u, nil
 	}
 	return nil, ErrNotFound.Wrapf("user %s not found", ident)
@@ -265,7 +387,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	lockPrice := action.Price
 	var mp int64 = action.Price // for non-remote-proxy: mp unused; for remote-proxy: corrected below
 	if action.Kind == KindRemoteProxy {
-		// mp_original = floor(q * 10000 / (10000 + ImportBPS))
+		// mp_original = floor(q * 10000 / (10000 + RemoteBPS))
 		mp = k.remoteManifestPrice(action.Price)
 		key := uuid.New().String()
 		trace.IdempotencyKey = &key
@@ -696,12 +818,12 @@ func (h *kernelHostFunctions) StepCreate(ctx context.Context, partialArgs []byte
 	if err != nil {
 		return "", err
 	}
-	caller, err := h.kernel.ResolveUser(ctx, requiredCaller)
+	callerID, remoteID, err := h.kernel.ResolveRequiredCaller(ctx, requiredCaller)
 	if err != nil {
 		return "", err
 	}
 	step, err := h.kernel.CreateStep(ctx, h.traceID, act.ID,
-		json.RawMessage(partialArgs), caller.ID)
+		json.RawMessage(partialArgs), callerID, remoteID)
 	if err != nil {
 		return "", err
 	}

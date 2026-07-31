@@ -13,7 +13,7 @@ func TestCapabilityIssueVerify(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@owner", 1000)
+	owner := setupUser(t, st, "owner", 1000)
 	a := setupAction(t, st, owner.ID, "svc", 0)
 	_, tr := beginTestRun(t, st, owner.ID, a) // live, unsettled trace
 
@@ -55,7 +55,7 @@ func TestCapabilityRejectedAfterSettlement(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	sys := setupUser(t, st, "@sys", 0)
+	sys := setupUser(t, st, "sys", 0)
 	k.RegisterNativeHandler("echo", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
 		return map[string]any{}, nil
 	})
@@ -68,7 +68,7 @@ func TestCapabilityRejectedAfterSettlement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reply, err := k.Run(ctx, sys.ID, "@sys/echo", map[string]any{})
+	reply, err := k.Run(ctx, sys.ID, "sys/echo", map[string]any{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

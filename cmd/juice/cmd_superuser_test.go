@@ -34,7 +34,7 @@ func TestAdminListUsers(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		_, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-			Handle:   "@user" + string(rune('a'+i)),
+			Handle:   "user" + string(rune('a'+i)),
 			Password: "pass",
 		})
 		if err != nil {
@@ -58,12 +58,12 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 	if err := k.FirstBoot(ctx, "pass", ""); err != nil {
 		t.Fatal(err)
 	}
-	admin, err := k.ReadUserByHandle(ctx, "@sys")
+	admin, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@target", Password: "pass",
+		Handle: "target", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +75,7 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 	}
 
 	// Login should fail.
-	if _, err := k.Login(ctx, "@target", "pass"); err == nil {
+	if _, err := k.Login(ctx, "target", "pass"); err == nil {
 		t.Error("expected login to fail for suspended user")
 	}
 
@@ -85,7 +85,7 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 	}
 
 	// Login should succeed.
-	if _, err := k.Login(ctx, "@target", "pass"); err != nil {
+	if _, err := k.Login(ctx, "target", "pass"); err != nil {
 		t.Errorf("expected login to succeed after unsuspend, got: %v", err)
 	}
 }
@@ -97,12 +97,12 @@ func TestAdminDeposit(t *testing.T) {
 	if err := k.FirstBoot(ctx, "pass", ""); err != nil {
 		t.Fatal(err)
 	}
-	admin, err := k.ReadUserByHandle(ctx, "@sys")
+	admin, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@recipient", Password: "pass",
+		Handle: "recipient", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +161,7 @@ func TestAdminListAllActions(t *testing.T) {
 	k := newAdminTestKernel(t)
 
 	u, _ := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@owner", Password: "pass",
+		Handle: "owner", Password: "pass",
 	})
 
 	for i := 0; i < 3; i++ {
@@ -213,7 +213,7 @@ func TestBulkImportPeerActions(t *testing.T) {
 
 	m := kernel.ActionManifest{
 		ActionID:     "bulk-action-id",
-		OwnerHandle:  "@bulk-peer",
+		OwnerHandle:  "bulk-peer",
 		Name:         "hello",
 		Description:  "says hello",
 		Kind:         kernel.KindHTTP,
@@ -231,11 +231,11 @@ func TestBulkImportPeerActions(t *testing.T) {
 	mBytes, _ := json.Marshal(m)
 
 	ctx := t.Context()
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
-	peerUser, err := k.AddPeer(ctx, sys.ID, "@bulk-peer", pubB64)
+	peerUser, err := k.AddPeer(ctx, sys.ID, "bulk-peer", pubB64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,18 +283,18 @@ func TestBulkImportPeerActionsSkipsInvalidManifest(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
 	ctx := t.Context()
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
-	peerUser, err := k.AddPeer(ctx, sys.ID, "@skip-peer", pubB64)
+	peerUser, err := k.AddPeer(ctx, sys.ID, "skip-peer", pubB64)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// A manifest with an invalid signature (never signed) must be skipped, not imported.
 	bad := kernel.ActionManifest{
-		ActionID: "skip-id", OwnerHandle: "@skip-peer", Name: "broken", Description: "d",
+		ActionID: "skip-id", OwnerHandle: "skip-peer", Name: "broken", Description: "d",
 		Kind: kernel.KindHTTP, InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "x",
 		Stats: &kernel.Stats{}, UpdatedAt: time.Now(), Signature: "bad",

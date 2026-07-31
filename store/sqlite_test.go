@@ -167,7 +167,7 @@ func TestUserCRUD(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@alice", 0)
+	u := newUser("alice", 0)
 	if err := db.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
@@ -180,8 +180,8 @@ func TestUserCRUD(t *testing.T) {
 		t.Errorf("handle: got %q, want %q", got.Handle, u.Handle)
 	}
 
-	// ReadUserByHandle canonicalizes its argument, so both "@alice" and "alice" resolve.
-	for _, h := range []string{"@alice", "alice"} {
+	// ReadUserByHandle canonicalizes its argument, so both "alice" and "alice" resolve.
+	for _, h := range []string{"alice", "alice"} {
 		got2, err := db.ReadUserByHandle(ctx, h)
 		if err != nil {
 			t.Fatalf("ReadUserByHandle(%q): %v", h, err)
@@ -197,21 +197,21 @@ func TestUserCRUD(t *testing.T) {
 	}
 
 	// RenameUser moves the handle: the old one frees, the new one resolves.
-	if err := db.RenameUser(ctx, u.ID, "@alice2"); err != nil {
+	if err := db.RenameUser(ctx, u.ID, "alice2"); err != nil {
 		t.Fatalf("RenameUser: %v", err)
 	}
-	if got, err := db.ReadUserByHandle(ctx, "@alice2"); err != nil || got.ID != u.ID {
+	if got, err := db.ReadUserByHandle(ctx, "alice2"); err != nil || got.ID != u.ID {
 		t.Errorf("renamed handle does not resolve: %v", err)
 	}
-	if _, err := db.ReadUserByHandle(ctx, "@alice"); err == nil {
+	if _, err := db.ReadUserByHandle(ctx, "alice"); err == nil {
 		t.Error("old handle should be free after rename")
 	}
 	// The UNIQUE constraint is the backstop against a colliding rename.
-	other := newUser("@carol", 0)
+	other := newUser("carol", 0)
 	if err := db.CreateUser(ctx, other); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.RenameUser(ctx, other.ID, "@alice2"); err == nil {
+	if err := db.RenameUser(ctx, other.ID, "alice2"); err == nil {
 		t.Error("rename onto a taken handle should fail on the UNIQUE constraint")
 	}
 }
@@ -228,13 +228,13 @@ func TestUsersTableConstraints(t *testing.T) {
 		t.Error("denied_at column should no longer exist after migration 022")
 	}
 
-	a := newUser("@alice", 0)
+	a := newUser("alice", 0)
 	if err := db.CreateUser(ctx, a); err != nil {
 		t.Fatalf("create @alice: %v", err)
 	}
 
 	// The rebuild kept handle uniqueness.
-	if err := db.CreateUser(ctx, newUser("@alice", 0)); err == nil {
+	if err := db.CreateUser(ctx, newUser("alice", 0)); err == nil {
 		t.Error("duplicate handle should still fail (handle UNIQUE preserved)")
 	}
 
@@ -259,7 +259,7 @@ func TestUsersTableConstraints(t *testing.T) {
 func TestSuspendStampRealTime(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
-	u := newUser("@stamp", 0)
+	u := newUser("stamp", 0)
 	if err := db.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
@@ -344,10 +344,15 @@ func TestMigration021DropsEmailPreservesRows(t *testing.T) {
 	if _, err := raw.ExecContext(ctx,
 		`INSERT INTO users (id,handle,email,password_hash,available,locked,created_at,updated_at)
 		 VALUES (?,?,?,?,?,?,?,?)`,
-		uid, "@old", "old@example.com", "hash", int64(42), int64(0), now, now); err != nil {
+		uid, "old", "old@example.com", "hash", int64(42), int64(0), now, now); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	if err := s.CreateAction(ctx, newAction(uid, "act", 0, true)); err != nil {
+	// Seed the child action via raw SQL under the pre-021 column set: CreateAction now writes
+	// v0.12 columns (remote_owner_id/remote_bps) that only exist after migration 027.
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO actions (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		uuid.New().String(), uid, "act", "wasm", 1, "public", int64(0), "d", "{}", "{}", "", "", "", now, now); err != nil {
 		t.Fatalf("seed action: %v", err)
 	}
 
@@ -358,8 +363,9 @@ func TestMigration021DropsEmailPreservesRows(t *testing.T) {
 	}
 
 	// The pre-existing user survived the rebuild with its data; description defaults to "".
+	// Migration 026 (v0.12) strips the stored `@` sigil, so `@old` reads back bare as `old`.
 	got, err := s.ReadUser(ctx, uid)
-	if err != nil || got.Handle != "@old" || got.Available != 42 {
+	if err != nil || got.Handle != "old" || got.Available != 42 {
 		t.Fatalf("user lost or altered by rebuild: err=%v got=%+v", err, got)
 	}
 	if got.Description != "" || got.RecoveryPublicKey != "" {
@@ -386,7 +392,7 @@ func TestActionCRUD(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 0)
+	owner := newUser("owner", 0)
 	_ = db.CreateUser(ctx, owner)
 
 	a := newAction(owner.ID, "/hello", 10, false)
@@ -424,7 +430,7 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@hd-owner", 0)
+	owner := newUser("hd-owner", 0)
 	_ = db.CreateUser(ctx, owner)
 
 	a := newAction(owner.ID, "/hd-svc", 0, true)
@@ -465,7 +471,7 @@ func TestListActions(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 0)
+	owner := newUser("owner", 0)
 	_ = db.CreateUser(ctx, owner)
 
 	active := newAction(owner.ID, "/active", 0, true)
@@ -500,7 +506,7 @@ func TestListPublicActionsExcludesSuspendedOwner(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 0)
+	owner := newUser("owner", 0)
 	_ = db.CreateUser(ctx, owner)
 	a := newAction(owner.ID, "/svc", 0, true)
 	a.Visibility = kernel.VisibilityPublic
@@ -540,7 +546,7 @@ func TestBeginRunDeductsFunds(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@alice", 1000)
+	user := newUser("alice", 1000)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
 	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
@@ -575,11 +581,46 @@ func TestBeginRunDeductsFunds(t *testing.T) {
 	}
 }
 
+func TestBeginRunBilateralCredit(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	// An ordinary account (credit_max 0) with zero balance cannot run a priced action.
+	local := newUser("local", 0)
+	_ = db.CreateUser(ctx, local)
+	p0 := newProcess(local.ID)
+	tr0 := &kernel.Trace{ID: uuid.New().String(), ProcessID: p0.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p0, tr0, local.ID, 1); err == nil {
+		t.Error("ordinary account with no balance and no credit ran a priced action")
+	}
+
+	// A peer with credit_max=100 may draw its balance negative down to -100.
+	peer := newUser("peer", 0)
+	_ = db.CreateUser(ctx, peer)
+	if err := db.SetCreditPolicy(ctx, peer.ID, 100, 50); err != nil {
+		t.Fatal(err)
+	}
+	p1 := newProcess(peer.ID)
+	tr1 := &kernel.Trace{ID: uuid.New().String(), ProcessID: p1.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p1, tr1, peer.ID, 60); err != nil {
+		t.Fatalf("peer within credit should run: %v", err)
+	}
+	if u, _ := db.ReadUser(ctx, peer.ID); u.Available != -60 {
+		t.Errorf("peer available after credit draw: got %d, want -60", u.Available)
+	}
+	// A further draw past the limit (-60-60 = -120 < -100) is rejected.
+	p2 := newProcess(peer.ID)
+	tr2 := &kernel.Trace{ID: uuid.New().String(), ProcessID: p2.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p2, tr2, peer.ID, 60); err == nil {
+		t.Error("draw beyond credit_max should fail")
+	}
+}
+
 func TestBeginRunAndSubcall(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@alice", 500)
+	user := newUser("alice", 500)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
@@ -619,9 +660,9 @@ func TestCommitCall(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	payer := newUser("@payer", 1000)
-	target := newUser("@target", 0)
-	fee := newUser("@fee", 0)
+	payer := newUser("payer", 1000)
+	target := newUser("target", 0)
+	fee := newUser("fee", 0)
 	_ = db.CreateUser(ctx, payer)
 	_ = db.CreateUser(ctx, target)
 	_ = db.CreateUser(ctx, fee)
@@ -674,7 +715,7 @@ func TestEndProcess(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@alice", 1000)
+	user := newUser("alice", 1000)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
@@ -725,7 +766,7 @@ func TestEndProcessWithLockedFundsForceCloseSucceeds(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@alice-locked", 500)
+	user := newUser("alice-locked", 500)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
 	// BeginRun creates process (locked=500) + root trace (available=500).
@@ -751,9 +792,9 @@ func TestEndProcessCancelsWaitingStep(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@ep-running", 1000)
+	user := newUser("ep-running", 1000)
 	_ = db.CreateUser(ctx, user)
-	caller := newUser("@ep-running-caller", 0)
+	caller := newUser("ep-running-caller", 0)
 	_ = db.CreateUser(ctx, caller)
 
 	p := newProcess(user.ID)
@@ -819,9 +860,9 @@ func TestEndProcessDoesNotDoubleCountCompletedStep(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@ep-done", 1000)
+	user := newUser("ep-done", 1000)
 	_ = db.CreateUser(ctx, user)
-	caller := newUser("@ep-done-caller", 0)
+	caller := newUser("ep-done-caller", 0)
 	_ = db.CreateUser(ctx, caller)
 
 	p := newProcess(user.ID)
@@ -894,9 +935,9 @@ func TestBeginStepCallGuardsParkInvariant(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@bsc-guard", 1000)
+	user := newUser("bsc-guard", 1000)
 	_ = db.CreateUser(ctx, user)
-	caller := newUser("@bsc-guard-caller", 0)
+	caller := newUser("bsc-guard-caller", 0)
 	_ = db.CreateUser(ctx, caller)
 
 	p := newProcess(user.ID)
@@ -935,7 +976,7 @@ func TestStats(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 0)
+	owner := newUser("owner", 0)
 	_ = db.CreateUser(ctx, owner)
 	a := newAction(owner.ID, "/svc", 0, true)
 	_ = db.CreateAction(ctx, a)
@@ -972,9 +1013,9 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	payer := newUser("@payer-inc", 1000)
-	target := newUser("@target-inc", 0)
-	fee := newUser("@fee-inc", 0)
+	payer := newUser("payer-inc", 1000)
+	target := newUser("target-inc", 0)
+	fee := newUser("fee-inc", 0)
 	_ = db.CreateUser(ctx, payer)
 	_ = db.CreateUser(ctx, target)
 	_ = db.CreateUser(ctx, fee)
@@ -1046,7 +1087,7 @@ func TestListTraces(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@alice", 200)
+	user := newUser("alice", 200)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
@@ -1079,7 +1120,7 @@ func TestAuthCodeFlow(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@dave", 0)
+	user := newUser("dave", 0)
 	_ = db.CreateUser(ctx, user)
 
 	ac := &kernel.AuthCode{
@@ -1121,7 +1162,7 @@ func TestRefreshTokenRotation(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@eve", 0)
+	user := newUser("eve", 0)
 	_ = db.CreateUser(ctx, user)
 
 	rt := &kernel.RefreshToken{
@@ -1168,9 +1209,9 @@ func TestTransactionCRUD(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 100)
-	target := newUser("@target", 0)
-	feeUser := newUser("@fee-crud", 0)
+	owner := newUser("owner", 100)
+	target := newUser("target", 0)
+	feeUser := newUser("fee-crud", 0)
 	_ = db.CreateUser(ctx, owner)
 	_ = db.CreateUser(ctx, target)
 	_ = db.CreateUser(ctx, feeUser)
@@ -1235,8 +1276,8 @@ func TestListProcesses(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@lp-owner", 1000)
-	other := newUser("@lp-other", 0)
+	u := newUser("lp-owner", 1000)
+	other := newUser("lp-other", 0)
 	if err := db.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
@@ -1277,7 +1318,7 @@ func TestRevokeRefreshToken(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@rt-user", 0)
+	u := newUser("rt-user", 0)
 	if err := db.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
@@ -1314,7 +1355,7 @@ func TestCreateReadReceipt(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	issuer := newUser("@issuer", 0)
+	issuer := newUser("issuer", 0)
 	_ = db.CreateUser(ctx, issuer)
 
 	tx := &kernel.Transaction{
@@ -1370,7 +1411,7 @@ func TestCreateRatingDirect(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	rater := newUser("@rater", 0)
+	rater := newUser("rater", 0)
 	_ = db.CreateUser(ctx, rater)
 
 	tx := &kernel.Transaction{
@@ -1430,7 +1471,7 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 1000)
+	owner := newUser("owner", 1000)
 	_ = db.CreateUser(ctx, owner)
 	action := newAction(owner.ID, "/a", 10, true)
 	_ = db.CreateAction(ctx, action)
@@ -1443,7 +1484,7 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 		t.Fatalf("UpsertStats: %v", err)
 	}
 
-	rater := newUser("@rater", 0)
+	rater := newUser("rater", 0)
 	_ = db.CreateUser(ctx, rater)
 	tx := &kernel.Transaction{
 		ID:           uuid.New().String(),
@@ -1490,7 +1531,7 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 	}
 
 	// Second rating (0) must update the running mean atomically.
-	rater2 := newUser("@rater2", 0)
+	rater2 := newUser("rater2", 0)
 	_ = db.CreateUser(ctx, rater2)
 	tx2 := &kernel.Transaction{
 		ID:           uuid.New().String(),
@@ -1526,12 +1567,12 @@ func TestListRatings(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@list-owner", 0)
+	owner := newUser("list-owner", 0)
 	_ = db.CreateUser(ctx, owner)
 	action := newAction(owner.ID, "/list-a", 0, true)
 	_ = db.CreateAction(ctx, action)
 
-	rater := newUser("@list-rater", 0)
+	rater := newUser("list-rater", 0)
 	_ = db.CreateUser(ctx, rater)
 
 	makeTxAndRating := func(id string, rating float64, offset time.Duration) {
@@ -1587,9 +1628,9 @@ func TestListStepsPagination(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@ls-owner", 1000)
+	user := newUser("ls-owner", 1000)
 	_ = db.CreateUser(ctx, user)
-	caller := newUser("@ls-caller", 0)
+	caller := newUser("ls-caller", 0)
 	_ = db.CreateUser(ctx, caller)
 
 	p := newProcess(user.ID)
@@ -1645,9 +1686,9 @@ func TestListTransactionsByParty(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@tx-party-owner", 0)   // seller
-	caller := newUser("@tx-party-caller", 0) // buyer
-	other := newUser("@tx-party-other", 0)   // non-party
+	owner := newUser("tx-party-owner", 0)   // seller
+	caller := newUser("tx-party-caller", 0) // buyer
+	other := newUser("tx-party-other", 0)   // non-party
 	_ = db.CreateUser(ctx, owner)
 	_ = db.CreateUser(ctx, caller)
 	_ = db.CreateUser(ctx, other)
@@ -1703,7 +1744,7 @@ func TestListTransactionsByParty(t *testing.T) {
 	}
 
 	// Caller distinct from process owner: caller_user_id should also grant access.
-	distinctCaller := newUser("@tx-party-distinct-caller", 0)
+	distinctCaller := newUser("tx-party-distinct-caller", 0)
 	_ = db.CreateUser(ctx, distinctCaller)
 	txDistinct := &kernel.Transaction{
 		ID:            "party-tx-distinct",
@@ -1731,7 +1772,7 @@ func TestReadUserByPublicKey(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@remote", 0)
+	u := newUser("remote", 0)
 	u.PublicKey = "ed25519pubkeyABC"
 	if err := db.CreateUser(ctx, u); err != nil {
 		t.Fatalf("CreateUser: %v", err)
@@ -1741,7 +1782,7 @@ func TestReadUserByPublicKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadUserByPublicKey: %v", err)
 	}
-	if got.Handle != "@remote" {
+	if got.Handle != "remote" {
 		t.Errorf("handle: got %q, want @remote", got.Handle)
 	}
 	if got.PublicKey != "ed25519pubkeyABC" {
@@ -1760,7 +1801,7 @@ func TestIdempotencyStateMachine(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	cp := newUser("@cp-sm", 0)
+	cp := newUser("cp-sm", 0)
 	_ = db.CreateUser(ctx, cp)
 
 	now := time.Now().UTC()
@@ -1842,8 +1883,8 @@ func TestListActionsByOwnerOpenAPISpec(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@oapi-owner", 0)
-	other := newUser("@oapi-other", 0)
+	owner := newUser("oapi-owner", 0)
+	other := newUser("oapi-other", 0)
 	_ = db.CreateUser(ctx, owner)
 	_ = db.CreateUser(ctx, other)
 
@@ -1860,22 +1901,22 @@ func TestListActionsByOwnerOpenAPISpec(t *testing.T) {
 	}
 
 	// Action matching owner + specURL.
-	a1 := newAction(owner.ID, "@oapi-owner/op1", 0, false)
+	a1 := newAction(owner.ID, "oapi-owner/op1", 0, false)
 	a1.Source = makeSrc(specURL, "op1")
 	_ = db.CreateAction(ctx, a1)
 
 	// Action matching owner + specURL2 (different spec; must not appear).
-	a2 := newAction(owner.ID, "@oapi-owner/op2", 0, false)
+	a2 := newAction(owner.ID, "oapi-owner/op2", 0, false)
 	a2.Source = makeSrc(specURL2, "op2")
 	_ = db.CreateAction(ctx, a2)
 
 	// Action owned by other user for specURL (must not appear).
-	a3 := newAction(other.ID, "@oapi-other/op1", 0, false)
+	a3 := newAction(other.ID, "oapi-other/op1", 0, false)
 	a3.Source = makeSrc(specURL, "op1")
 	_ = db.CreateAction(ctx, a3)
 
 	// Plain HTTP action with no OpenAPI source (must not appear).
-	a4 := newAction(owner.ID, "@oapi-owner/plain", 0, false)
+	a4 := newAction(owner.ID, "oapi-owner/plain", 0, false)
 	_ = db.CreateAction(ctx, a4)
 
 	got, err := db.ListActionsByOwnerOpenAPISpec(ctx, owner.ID, specURL)
@@ -1897,7 +1938,7 @@ func TestInitFirstBootConfigPreservesExisting(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@sys", 0)
+	u := newUser("sys", 0)
 	configs := map[string]string{"signing_key": "original-value"}
 	if err := db.InitFirstBoot(ctx, u, configs); err != nil {
 		t.Fatalf("InitFirstBoot: %v", err)
@@ -1928,8 +1969,8 @@ func TestCommitCallFeeDestructionRejected(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	payer := newUser("@payer-fd", 1000)
-	target := newUser("@target-fd", 0)
+	payer := newUser("payer-fd", 1000)
+	target := newUser("target-fd", 0)
 	_ = db.CreateUser(ctx, payer)
 	_ = db.CreateUser(ctx, target)
 
@@ -1975,10 +2016,10 @@ func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	payer := newUser("@payer-idem", 1000)
-	target := newUser("@target-idem", 0)
-	fee := newUser("@fee-idem", 0)
-	cp := newUser("@cp-idem", 0)
+	payer := newUser("payer-idem", 1000)
+	target := newUser("target-idem", 0)
+	fee := newUser("fee-idem", 0)
+	cp := newUser("cp-idem", 0)
 	_ = db.CreateUser(ctx, payer)
 	_ = db.CreateUser(ctx, target)
 	_ = db.CreateUser(ctx, fee)
@@ -2032,8 +2073,8 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	payer := newUser("@payer-idem2", 1000)
-	cp := newUser("@cp-idem2", 0)
+	payer := newUser("payer-idem2", 1000)
+	cp := newUser("cp-idem2", 0)
 	_ = db.CreateUser(ctx, payer)
 	_ = db.CreateUser(ctx, cp)
 
@@ -2087,7 +2128,7 @@ func TestUpsertAndListEmbeddings(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner-emb", 0)
+	owner := newUser("owner-emb", 0)
 	_ = db.CreateUser(ctx, owner)
 
 	active := &kernel.Action{
@@ -2142,7 +2183,7 @@ func TestProxyUserIdentifiedByPublicKey(t *testing.T) {
 
 	// A key-only account: a public key, no password (that credential combination is what makes it
 	// a peer). Same CreateUser insert as any account.
-	peer := newUser("@key-peer", 0)
+	peer := newUser("key-peer", 0)
 	peer.PublicKey = "somepubkey"
 	peer.PasswordHash = ""
 	if err := db.CreateUser(ctx, peer); err != nil {
@@ -2165,7 +2206,7 @@ func TestUpdateActionAndResetStats(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@stats-owner", 0)
+	owner := newUser("stats-owner", 0)
 	if err := db.CreateUser(ctx, owner); err != nil {
 		t.Fatal(err)
 	}
@@ -2272,11 +2313,11 @@ func TestDeactivateActionsOwnedBy(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@peer-owner", 0)
+	owner := newUser("peer-owner", 0)
 	if err := db.CreateUser(ctx, owner); err != nil {
 		t.Fatal(err)
 	}
-	other := newUser("@other-owner", 0)
+	other := newUser("other-owner", 0)
 	if err := db.CreateUser(ctx, other); err != nil {
 		t.Fatal(err)
 	}
@@ -2308,7 +2349,7 @@ func TestListStatsByOwner(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@stats-peer", 0)
+	owner := newUser("stats-peer", 0)
 	if err := db.CreateUser(ctx, owner); err != nil {
 		t.Fatal(err)
 	}
@@ -2351,7 +2392,7 @@ func TestBeginRunIsAtomic(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@beginrun-alice", 200)
+	user := newUser("beginrun-alice", 200)
 	_ = db.CreateUser(ctx, user)
 	action := newAction(user.ID, "beginrun-action", 100, true)
 	_ = db.CreateAction(ctx, action)
@@ -2406,7 +2447,7 @@ func TestListOrphanRunningStepsDistinguishesSettled(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@orphan-settled", 1000)
+	user := newUser("orphan-settled", 1000)
 	_ = db.CreateUser(ctx, user)
 	act := newAction(user.ID, "orphan-settled-act", 100, true)
 	_ = db.CreateAction(ctx, act)
@@ -2474,7 +2515,7 @@ func TestListUnsettledTracesChildFirst(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@unsettled-order", 200)
+	user := newUser("unsettled-order", 200)
 	_ = db.CreateUser(ctx, user)
 
 	p := newProcess(user.ID)
@@ -2512,9 +2553,9 @@ func TestListDirectUnsettledChildren(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@unsettled-children", 300)
+	user := newUser("unsettled-children", 300)
 	_ = db.CreateUser(ctx, user)
-	feeUser := newUser("@fee-uc", 0)
+	feeUser := newUser("fee-uc", 0)
 	_ = db.CreateUser(ctx, feeUser)
 	act := newAction(user.ID, "uc-act", 0, true)
 	_ = db.CreateAction(ctx, act)
@@ -2580,9 +2621,9 @@ func TestResetStepAndReparkWithDescendantTransaction(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@repark-desc-tx", 200)
+	user := newUser("repark-desc-tx", 200)
 	_ = db.CreateUser(ctx, user)
-	feeUser := newUser("@fee-rdtx", 0)
+	feeUser := newUser("fee-rdtx", 0)
 	_ = db.CreateUser(ctx, feeUser)
 	act := newAction(user.ID, "repark-desc-tx-act", 100, true)
 	_ = db.CreateAction(ctx, act)
@@ -2639,7 +2680,7 @@ func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@repark-nonempty", 200)
+	user := newUser("repark-nonempty", 200)
 	_ = db.CreateUser(ctx, user)
 	act := newAction(user.ID, "repark-nonempty-act", 100, true)
 	_ = db.CreateAction(ctx, act)
@@ -2682,7 +2723,7 @@ func TestMigration011RewritesBareURLSources(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@mig-owner", 0)
+	owner := newUser("mig-owner", 0)
 	if err := db.CreateUser(ctx, owner); err != nil {
 		t.Fatal(err)
 	}
@@ -2730,7 +2771,7 @@ func TestPurgePeerCascade(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	peer := newPeer(t, db, "@peerP", "peerkeyAAA", 0, 0, time.Now().UTC())
+	peer := newPeer(t, db, "peerP", "peerkeyAAA", 0, 0, time.Now().UTC())
 
 	var actIDs []string
 	for _, n := range []string{"svc-1", "svc-2"} {
@@ -2750,10 +2791,10 @@ func TestPurgePeerCascade(t *testing.T) {
 	// A discovered_kernels row about the peer (must be deleted) and one about another kernel that
 	// the peer merely introduced (must survive — it is information about a different peer).
 	now := time.Now().UTC()
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "peerkeyAAA", IntroducedBy: "someIntro", Handle: "@peerP", StatsJSON: json.RawMessage("{}"), FirstSeen: now, UpdatedAt: now}); err != nil {
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "peerkeyAAA", IntroducedBy: "someIntro", Handle: "peerP", StatsJSON: json.RawMessage("{}"), FirstSeen: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "otherkeyBBB", IntroducedBy: "peerkeyAAA", Handle: "@other", StatsJSON: json.RawMessage("{}"), FirstSeen: now, UpdatedAt: now}); err != nil {
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "otherkeyBBB", IntroducedBy: "peerkeyAAA", Handle: "other", StatsJSON: json.RawMessage("{}"), FirstSeen: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2806,25 +2847,25 @@ func TestListPurgeablePeers(t *testing.T) {
 	now := time.Now().UTC()
 	cutoff := now.Add(-30 * 24 * time.Hour)
 
-	idle := newPeer(t, db, "@idle", "k-idle", 0, 0, old) // the only purgeable peer
+	idle := newPeer(t, db, "idle", "k-idle", 0, 0, old) // the only purgeable peer
 
-	newPeer(t, db, "@funded", "k-funded", 100, 0, old) // excluded: holds value (available)
-	newPeer(t, db, "@locked", "k-locked", 0, 50, old)  // excluded: holds value (locked)
-	newPeer(t, db, "@recent", "k-recent", 0, 0, now)   // excluded: created within the window
+	newPeer(t, db, "funded", "k-funded", 100, 0, old) // excluded: holds value (available)
+	newPeer(t, db, "locked", "k-locked", 0, 50, old)  // excluded: holds value (locked)
+	newPeer(t, db, "recent", "k-recent", 0, 0, now)   // excluded: created within the window
 
 	// excluded: a recent gossip mention keeps it live
-	newPeer(t, db, "@gossip", "k-gossip", 0, 0, old)
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "k-gossip", IntroducedBy: "x", Handle: "@gossip", StatsJSON: json.RawMessage("{}"), FirstSeen: old, UpdatedAt: now}); err != nil {
+	newPeer(t, db, "gossip", "k-gossip", 0, 0, old)
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "k-gossip", IntroducedBy: "x", Handle: "gossip", StatsJSON: json.RawMessage("{}"), FirstSeen: old, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 
 	// excluded: a recent transaction names the peer, though its balance is zero
-	txp := newPeer(t, db, "@txp", "k-txp", 0, 0, old)
+	txp := newPeer(t, db, "txp", "k-txp", 0, 0, old)
 	insertTx(t, db, txp.ID, txp.ID, "some-target", "some-action", now)
 
 	// excluded: a waiting step is addressed to the peer as required caller
-	stepp := newPeer(t, db, "@stepp", "k-stepp", 0, 0, old)
-	owner := newUser("@sowner", 0)
+	stepp := newPeer(t, db, "stepp", "k-stepp", 0, 0, old)
+	owner := newUser("sowner", 0)
 	_ = db.CreateUser(ctx, owner)
 	act := newAction(owner.ID, "approve", 0, true)
 	if err := db.CreateAction(ctx, act); err != nil {
@@ -2835,7 +2876,7 @@ func TestListPurgeablePeers(t *testing.T) {
 	}
 
 	// excluded: a local (non-peer) account, even though old and zero-balance
-	local := newUser("@local", 0)
+	local := newUser("local", 0)
 	local.CreatedAt = old
 	_ = db.CreateUser(ctx, local)
 
@@ -2859,7 +2900,7 @@ func TestUpdatePeerSync(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	peer := newPeer(t, db, "@synced", "k-synced", 0, 0, now)
+	peer := newPeer(t, db, "synced", "k-synced", 0, 0, now)
 
 	credit := int64(900)
 	if err := db.UpdatePeerSync(ctx, peer.ID, now, &credit); err != nil {
@@ -2890,7 +2931,7 @@ func TestGrantCRUDAndUpsert(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@grantor", 0)
+	user := newUser("grantor", 0)
 	_ = db.CreateUser(ctx, user)
 	a := newAction(user.ID, "/oauth-svc", 0, true)
 	_ = db.CreateAction(ctx, a)
@@ -2935,8 +2976,8 @@ func TestDeleteGrantsForAction(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u1 := newUser("@g1", 0)
-	u2 := newUser("@g2", 0)
+	u1 := newUser("g1", 0)
+	u2 := newUser("g2", 0)
 	_ = db.CreateUser(ctx, u1)
 	_ = db.CreateUser(ctx, u2)
 	a := newAction(u1.ID, "/multi", 0, true)
@@ -2959,7 +3000,7 @@ func TestConnectionCRUDAndCascade(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@conn", 0)
+	u := newUser("conn", 0)
 	_ = db.CreateUser(ctx, u)
 	a1 := newAction(u.ID, "inbox/send", 0, true)
 	a2 := newAction(u.ID, "inbox/read", 0, true)
@@ -3032,7 +3073,7 @@ func TestLegacyTokenBackfillHelpers(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@legacy", 0)
+	u := newUser("legacy", 0)
 	_ = db.CreateUser(ctx, u)
 	a := newAction(u.ID, "svc", 0, true)
 	_ = db.CreateAction(ctx, a)
@@ -3070,7 +3111,7 @@ func TestListNativeActions(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@sys", 0)
+	owner := newUser("sys", 0)
 	_ = db.CreateUser(ctx, owner)
 
 	// A live native, an http action (wrong kind), and a soft-deleted native.
@@ -3103,9 +3144,9 @@ func TestListNativeActions(t *testing.T) {
 func TestCreateLedgerEntry(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
-	sys := newUser("@sys", 0)
-	alice := newUser("@alice", 100)
-	bob := newUser("@bob", 0)
+	sys := newUser("sys", 0)
+	alice := newUser("alice", 100)
+	bob := newUser("bob", 0)
 	for _, u := range []*kernel.User{sys, alice, bob} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
@@ -3185,9 +3226,9 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 1000)
-	assignee := newUser("@assignee", 0)
-	other := newUser("@other", 0)
+	owner := newUser("owner", 1000)
+	assignee := newUser("assignee", 0)
+	other := newUser("other", 0)
 	for _, u := range []*kernel.User{owner, assignee, other} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
@@ -3282,9 +3323,9 @@ func TestCommitRemoteSettlementStoresFailureResult(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@rs-owner", 1000)
-	proxy := newUser("@rs-proxy", 0)
-	sys := newUser("@rs-sys", 0)
+	owner := newUser("rs-owner", 1000)
+	proxy := newUser("rs-proxy", 0)
+	sys := newUser("rs-sys", 0)
 	for _, u := range []*kernel.User{owner, proxy, sys} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)

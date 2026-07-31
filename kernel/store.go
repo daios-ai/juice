@@ -68,6 +68,17 @@ type FederationExecutor interface {
 	ExecuteFederation(ctx context.Context, peerPublicKey, actionRef, idempotencyKey string, args map[string]any) (FederationResult, error)
 }
 
+// RemoteResolver resolves a single remote action or user on demand over /juice/fed/resolve/1
+// (§13 subscription-free calls). Like FederationExecutor it is an optional capability the injected
+// HTTPExecutor may implement; the kernel checks via type assertion and never imports fed.
+// ResolveRemoteAction returns the peer's signed manifest for one action; ResolveRemoteUser maps a
+// user reference to its stable id and handle on the peer. A nil/absent resolver disables lazy
+// resolution (a cold cross-kernel ref is then a plain ErrNotFound).
+type RemoteResolver interface {
+	ResolveRemoteAction(ctx context.Context, peerPublicKey, owner, name string) (*ActionManifest, error)
+	ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (userID, handle string, err error)
+}
+
 // HostFunctions are the callbacks available to a running script.
 type HostFunctions interface {
 	Call(ctx context.Context, actionName string, args []byte) ([]byte, error)
@@ -433,6 +444,7 @@ type Store interface {
 	// and, when the peer reported one, peer_credit=credit (nil leaves the prior value). Display-only
 	// cache; never a money path.
 	UpdatePeerSync(ctx context.Context, id string, lastSeen time.Time, credit *int64) error
+	SetCreditPolicy(ctx context.Context, userID string, creditMax, settlementTrigger int64) error
 
 	// ---- Gossip / Federation ----
 

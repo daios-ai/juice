@@ -7,11 +7,11 @@ flow_pkce_auth() {
     local dir db hs base v ch code
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
     start_server "$db" "$hs" || { fail "pkce_auth.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$(home "$dir" alice)" @alice
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$(home "$dir" alice)" alice
     base=$(url "$db")
 
-    v=$(pkce_verifier); ch=$(pkce_challenge "$v"); code=$(pkce_code "$base" @alice userpass "$ch")
+    v=$(pkce_verifier); ch=$(pkce_challenge "$v"); code=$(pkce_code "$base" alice userpass "$ch")
     # authorization_code + correct verifier → access_token.
     local tok; tok=$(strfield "$(curl -sf -X POST "$base/v1/auth/token" -H 'Content-Type: application/json' \
         -d "{\"grant_type\":\"authorization_code\",\"code\":\"$code\",\"code_verifier\":\"$v\"}" 2>/dev/null)" access_token)
@@ -22,7 +22,7 @@ flow_pkce_auth() {
         "$(http_code POST "$base/v1/auth/token" "{\"grant_type\":\"authorization_code\",\"code\":\"$code\",\"code_verifier\":\"$v\"}")"
 
     # A fresh code with the wrong verifier → rejected.
-    local code2; code2=$(pkce_code "$base" @alice userpass "$ch")
+    local code2; code2=$(pkce_code "$base" alice userpass "$ch")
     assert_ne "pkce_auth.wrong_verifier_rejected" 200 \
         "$(http_code POST "$base/v1/auth/token" "{\"grant_type\":\"authorization_code\",\"code\":\"$code2\",\"code_verifier\":\"wrong\"}")"
 }
@@ -32,8 +32,8 @@ flow_refresh_rotation() {
     local dir db hs ha tdir
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "refresh_rotation.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice   # CLI login uses PKCE → stores a refresh token
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice   # CLI login uses PKCE → stores a refresh token
     tdir=$(juice_token_dir "$ha" "$db")
 
     local rt1; rt1=$(cat "$tdir/refresh_token" 2>/dev/null)
@@ -57,16 +57,16 @@ flow_successful_receipt() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
     start_server "$db" "$hs" || { fail "successful_receipt.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    make_user "$db" "$hs" "$hb" @bob
-    deposit "$db" "$hs" @bob 100
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
+    deposit "$db" "$hs" bob 100
 
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create receipt-action --kind http --source "http://127.0.0.1:${bport}/act" --price 10 --description "receipt")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
-    local out; out=$(jj "$db" "$hb" run @alice/receipt-action '{}')
+    local out; out=$(jj "$db" "$hb" run alice/receipt-action '{}')
     assert_nonempty "successful_receipt.call_succeeded" "$(strfield "$out" tx_id)"
     assert_nonempty "successful_receipt.receipt_id_returned" "$(strfield "$out" receipt_id)"
 }
@@ -77,16 +77,16 @@ flow_failed_receipt() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 500 '{"error":"backend error"}'
     start_server "$db" "$hs" || { fail "failed_receipt.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    make_user "$db" "$hs" "$hb" @bob
-    deposit "$db" "$hs" @bob 100
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
+    deposit "$db" "$hs" bob 100
 
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create fail-action --kind http --source "http://127.0.0.1:${bport}/fail" --price 10 --description "fail")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
-    j "$db" "$hb" run @alice/fail-action '{}' >/dev/null 2>&1 || true
+    j "$db" "$hb" run alice/fail-action '{}' >/dev/null 2>&1 || true
     local txs; txs=$(jj "$db" "$hb" tx list)
     local tx_id; tx_id=$(python3 -c "import sys,json;print(json.loads(sys.argv[1])[0]['id'])" "$txs" 2>/dev/null)
     assert_eq   "failed_receipt.failure_tx_recorded" failure "$(python3 -c "import sys,json;print(json.loads(sys.argv[1])[0]['status'])" "$txs" 2>/dev/null)"
@@ -98,10 +98,10 @@ flow_lookup() {
     local dir db hs ha
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "lookup.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    # @sys/lookup requires "query"; missing it → schema violation.
-    assert_fails "lookup.missing_query_rejected" "query\|required\|schema" -- j "$db" "$ha" run @sys/lookup '{}'
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    # sys/lookup requires "query"; missing it → schema violation.
+    assert_fails "lookup.missing_query_rejected" "query\|required\|schema" -- j "$db" "$ha" run sys/lookup '{}'
 
     # Hybrid lookup degrades to the lexical (BM25) leg with no Ollama, so a distinctively-named
     # action is discoverable by keyword — the offline happy path, untestable before.
@@ -109,7 +109,7 @@ flow_lookup() {
     aid=$(strfield "$(jj "$db" "$ha" action create zqxwvprobe --kind http --source "https://api.example/x" --price 0 --description "zqxwvprobe lexical lookup probe")" id)
     assert_nonempty "lookup.action_created" "$aid"
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    assert_contains "lookup.lexical_hit" "@alice/zqxwvprobe" "$(jj "$db" "$ha" run @sys/lookup '{"query":"zqxwvprobe"}')"
+    assert_contains "lookup.lexical_hit" "alice/zqxwvprobe" "$(jj "$db" "$ha" run sys/lookup '{"query":"zqxwvprobe"}')"
 }
 
 flow_chat() {
@@ -117,22 +117,22 @@ flow_chat() {
     local dir db hs ha
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "chat.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
     # No chatter configured → ErrInvalidState (or a reply if one is); either is acceptable.
-    local out; out=$(j "$db" "$ha" run @sys/llm/chat '{"messages":[{"role":"user","content":"hello"}]}' 2>&1)
+    local out; out=$(j "$db" "$ha" run sys/llm/chat '{"messages":[{"role":"user","content":"hello"}]}' 2>&1)
     case "$out" in *invalid?state*|*invalid_state*|*content*|*assistant*|*message*) ok "chat.no_chatter_or_reply";; *) fail "chat.no_chatter_or_reply" "got: $out";; esac
     # Missing "messages" → schema violation.
-    assert_fails "chat.missing_messages_rejected" "messages\|required\|schema" -- j "$db" "$ha" run @sys/llm/chat '{}'
+    assert_fails "chat.missing_messages_rejected" "messages\|required\|schema" -- j "$db" "$ha" run sys/llm/chat '{}'
 }
 
 # --- OpenAPI ---
-# _greet_spec port file [desc]  — one-operation OpenAPI spec owned by @alice.
+# _greet_spec port file [desc]  — one-operation OpenAPI spec owned by alice.
 _greet_spec() {
     python3 - "$1" "$2" "${3:-Say hello}" <<'PY'
 import json,sys
 port,f,desc=sys.argv[1],sys.argv[2],sys.argv[3]
-json.dump({"openapi":"3.0.0","info":{"title":"T","version":"1"},"x-juice-owner":"@alice",
+json.dump({"openapi":"3.0.0","info":{"title":"T","version":"1"},"x-juice-owner":"alice",
   "servers":[{"url":f"http://127.0.0.1:{port}"}],
   "paths":{"/greet":{"post":{"operationId":"greet","description":desc,"x-juice-price":5,
     "requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"name":{"type":"string","description":"who"}}}}}},
@@ -146,10 +146,10 @@ flow_openapi_import_execute() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     aport=$(backend_port); _greet_spec "$aport" "$dir/spec.json"; start_api_server "$aport" "$dir/spec.json"
     start_server "$db" "$hs" || { fail "openapi_import.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    make_user "$db" "$hs" "$hb" @bob
-    deposit "$db" "$hs" @bob 50
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
+    deposit "$db" "$hs" bob 50
 
     # Server fetches the spec (allow_local_sources=true). created=1, name=greet.
     local imp; imp=$(jj "$db" "$ha" action import "http://127.0.0.1:${aport}/")
@@ -161,7 +161,7 @@ flow_openapi_import_execute() {
 
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
-    assert_nonempty "openapi_import.call_succeeds" "$(strfield "$(jj "$db" "$hb" run "@alice/$name" '{}')" tx_id)"
+    assert_nonempty "openapi_import.call_succeeds" "$(strfield "$(jj "$db" "$hb" run "alice/$name" '{}')" tx_id)"
 }
 
 flow_openapi_changed_reimport() {
@@ -170,8 +170,8 @@ flow_openapi_changed_reimport() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     aport=$(backend_port); _greet_spec "$aport" "$dir/spec.json" "hello v1"; start_api_server "$aport" "$dir/spec.json"
     start_server "$db" "$hs" || { fail "openapi_reimport.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
 
     local imp1; imp1=$(jj "$db" "$ha" action import "http://127.0.0.1:${aport}/")
     local aid; aid=$(python3 -c "import sys,json;print(json.loads(sys.argv[1])['Created'][0]['id'])" "$imp1" 2>/dev/null)
@@ -195,14 +195,14 @@ port,f=sys.argv[1],sys.argv[2]
 op=lambda oid,desc:{"post":{"operationId":oid,"description":desc,
   "requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"name":{"type":"string","description":"who"}}}}}},
   "responses":{"200":{"content":{"application/json":{"schema":{"type":"object"}}}}}}}
-json.dump({"openapi":"3.0.0","info":{"title":"T","version":"1"},"x-juice-owner":"@alice",
+json.dump({"openapi":"3.0.0","info":{"title":"T","version":"1"},"x-juice-owner":"alice",
   "servers":[{"url":f"http://127.0.0.1:{port}"}],
   "paths":{"/greet":op("greet","hi"),"/farewell":op("farewell","bye")}},open(f,"w"))
 PY
     start_api_server "$aport" "$dir/spec.json"
     start_server "$db" "$hs" || { fail "openapi_unimport.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
 
     local imp; imp=$(jj "$db" "$ha" action import "http://127.0.0.1:${aport}/")
     local greet_id; greet_id=$(python3 -c "import sys,json;print(next(a['id'] for a in json.loads(sys.argv[1])['Created'] if 'greet' in a['name']))" "$imp" 2>/dev/null)

@@ -23,9 +23,9 @@ func sha256Hex(s string) string {
 }
 
 // remoteManifestPrice derives the original remote manifest price (mp) from a proxy price
-// (q = mp + import duty): mp = floor(q * 10000 / (10000 + ImportBPS)).
+// (q = mp + import duty): mp = floor(q * 10000 / (10000 + RemoteBPS)).
 func (k *Kernel) remoteManifestPrice(proxyPrice int64) int64 {
-	return proxyPrice * 10000 / (10000 + k.cfg.ImportBPS)
+	return proxyPrice * 10000 / (10000 + k.cfg.RemoteBPS)
 }
 
 // RemoteManifestPrice is the exported form of remoteManifestPrice, used by the service layer to
@@ -146,7 +146,7 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 
 	// 6. Settlement arithmetic: duty rule.
 	if tx.Status == TxSuccess {
-		expectedDuty := ceilDiv(tx.Net*k.cfg.ImportBPS, 10000)
+		expectedDuty := ceilDiv(tx.Net*k.cfg.RemoteBPS, 10000)
 		checks.SettlementArith = tx.Fee == expectedDuty
 	} else {
 		checks.SettlementArith = tx.Fee == 0
@@ -278,7 +278,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 		ktx.Reason = "remote receipt invalid: " + invalid
 	} else {
 		if r.Status == TxSuccess {
-			duty = ceilDiv(charge*k.cfg.ImportBPS, 10000)
+			duty = ceilDiv(charge*k.cfg.RemoteBPS, 10000)
 			ktx.ReplyJSON = json.RawMessage(replyJSON)
 		}
 		ktx.Status = r.Status
@@ -394,10 +394,10 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	}
 	mp := dispatch.RemotePrice
 	if mp == 0 {
-		// Fallback: derive from action.Price and ImportBPS.
+		// Fallback: derive from action.Price and RemoteBPS.
 		mp = k.remoteManifestPrice(action.Price)
 	}
-	maxDuty := ceilDiv(mp*k.cfg.ImportBPS, 10000)
+	maxDuty := ceilDiv(mp*k.cfg.RemoteBPS, 10000)
 	q := mp + maxDuty
 
 	callerWalletID, callerWalletKind := callerWalletFor(dispatch.StepID, process.ID, trace.ParentTraceID)
@@ -473,6 +473,114 @@ func (k *Kernel) SignStepList(counterparty, recipient string) (sig, ts string, e
 }
 
 // ---- Peer operations ----
+
+// ResolveKernelKey maps a kernel qualifier (from an owner@kernel/name reference) to the peer's
+// public key and, when one exists locally, its mount (the peer proxy user). Resolution order is
+// strictly: a bound local alias (a peer user's handle) → a raw base64url key → not found. A
+// discovered-kernel label NEVER resolves a reference (§13), so no kernel can capture a name by
+// gossiping a label first. mount may be nil for a raw key not yet mounted.
+func (k *Kernel) ResolveKernelKey(ctx context.Context, ident string) (peerKey string, mount *User, err error) {
+	ident = strings.TrimPrefix(strings.TrimSpace(ident), "@")
+	if u, err := k.store.ReadUserByHandle(ctx, ident); err == nil && u != nil && u.PublicKey != "" {
+		return u.PublicKey, u, nil
+	}
+	if looksLikeKey(ident) {
+		u, _ := k.store.ReadUserByPublicKey(ctx, ident) // may be nil: known key, not yet mounted
+		return ident, u, nil
+	}
+	return "", nil, ErrNotFound.Wrapf("kernel %q is not a known peer alias or key", ident)
+}
+
+// ResolveRequiredCaller resolves a step's required-caller reference (§10, §13). A bare/local ref
+// returns (localUserID, ""). A kernel-qualified ref user@kernel returns (peer proxy userID, stable
+// remote user_id): the proxy user is the local accounting/routing account, the remote id addresses
+// the completer beneath its mutable handle, so completion demands a step_auth attestation naming it.
+// A raw-key qualifier is mounted on demand (best-effort alias); the remote user is resolved to its
+// stable id over /juice/fed/resolve/1.
+func (k *Kernel) ResolveRequiredCaller(ctx context.Context, ref string) (callerID, remoteID string, err error) {
+	owner, kernelAlias, hasKernel := strings.Cut(strings.TrimPrefix(strings.TrimSpace(ref), "@"), "@")
+	if !hasKernel {
+		u, uerr := k.ResolveUser(ctx, ref)
+		if uerr != nil || u == nil {
+			return "", "", ErrNotFound.Wrapf("required caller %q not found", ref)
+		}
+		return u.ID, "", nil
+	}
+	peerKey, mount, kerr := k.ResolveKernelKey(ctx, kernelAlias)
+	if kerr != nil {
+		return "", "", kerr
+	}
+	resolver, ok := k.http.(RemoteResolver)
+	if !ok {
+		return "", "", ErrNotFound.Wrap("remote resolution unavailable")
+	}
+	remoteUserID, _, rerr := resolver.ResolveRemoteUser(ctx, peerKey, owner)
+	if rerr != nil {
+		return "", "", rerr
+	}
+	if mount == nil {
+		handle := kernelAlias
+		if IsPublicKey(kernelAlias) && len(peerKey) >= 8 {
+			handle = "k-" + peerKey[:8]
+		}
+		if mount, err = k.CreateOrUpdateProxyPeer(ctx, handle, peerKey); err != nil {
+			return "", "", err
+		}
+	}
+	return mount.ID, remoteUserID, nil
+}
+
+// SetPeerCredit sets the bilateral credit policy this kernel extends a peer (§13): the largest
+// negative balance (credit_max) it permits and the debt level (settlement_trigger) at which it
+// flags settlement. Superuser-only. Requires 0 ≤ trigger ≤ max, a peer target, and refuses lowering
+// credit_max below the peer's current debt.
+func (k *Kernel) SetPeerCredit(ctx context.Context, operatorID, peerRef string, creditMax, settlementTrigger int64) (*User, error) {
+	if err := k.requireSuperuser(ctx, operatorID); err != nil {
+		return nil, err
+	}
+	if creditMax < 0 || settlementTrigger < 0 || settlementTrigger > creditMax {
+		return nil, ErrInvalidInput.Wrap("require 0 <= settlement_trigger <= credit_max")
+	}
+	peer, err := k.ResolveUser(ctx, peerRef)
+	if err != nil || peer == nil {
+		return nil, ErrNotFound.Wrapf("peer %q not found", peerRef)
+	}
+	if !peer.IsPeer() {
+		return nil, ErrInvalidInput.Wrap("credit policy applies only to peer accounts")
+	}
+	if peer.Available < -creditMax {
+		return nil, ErrInvalidState.Wrapf("cannot lower credit_max below the peer's current debt %d", -peer.Available)
+	}
+	if err := k.store.SetCreditPolicy(ctx, peer.ID, creditMax, settlementTrigger); err != nil {
+		return nil, err
+	}
+	peer.CreditMax, peer.SettlementTrigger = creditMax, settlementTrigger
+	return peer, nil
+}
+
+// ResolvePrincipal resolves a user reference (bare handle or id) to its stable id and current
+// handle, for the open /juice/fed/resolve/1 protocol (§13): the caller's home kernel maps a
+// friendly `owner@kernel` to the underlying PrincipalID beneath the name. Only a live
+// (non-suspended) account resolves; ids are addresses, not secrets.
+func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (userID, handle string, err error) {
+	u, err := k.ResolveUser(ctx, ref)
+	if err != nil || u == nil || u.SuspendedAt != nil {
+		return "", "", ErrNotFound.Wrapf("user %s not found", ref)
+	}
+	return u.ID, u.Handle, nil
+}
+
+// ResolveKernelMount is ResolveKernelKey requiring an existing local mount (peer account).
+func (k *Kernel) ResolveKernelMount(ctx context.Context, ident string) (*User, error) {
+	_, mount, err := k.ResolveKernelKey(ctx, ident)
+	if err != nil {
+		return nil, err
+	}
+	if mount == nil {
+		return nil, ErrNotFound.Wrapf("kernel %q has no local account yet", ident)
+	}
+	return mount, nil
+}
 
 // CreateOrUpdateProxyPeer creates or updates a local user record representing a remote kernel peer,
 // addressed by Ed25519 public key. Location is not stored — the federation transport resolves the
@@ -702,15 +810,13 @@ func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 	return purged, nil
 }
 
-// qualifiedActionName renders an action as @owner/name — the address form used everywhere else —
-// so gossip and roster views name actions consistently (@sys/message, @alice/greet) rather than as
-// bare names. For a remote proxy the local Name already encodes the remote owner (owner/name), and
-// the OwnerHandle is only our private mount alias for the peer; naming it in the peer's own
-// namespace (a leading @) keeps the name portable — the same action reads identically whether the
-// peer self-reports it or we vouch for it. Falls back to the bare name if OwnerHandle wasn't loaded.
+// qualifiedActionName renders an action's reference for gossip and roster views. For a remote proxy
+// it returns the action's name in the PEER's own namespace (owner/name) — never our local mount
+// alias — so vouching for a peer's action reads identically whether the peer self-reports it or we
+// gossip it (§13). For a local action it is ownerHandle/name.
 func qualifiedActionName(a *Action) string {
 	if a.Kind == KindRemoteProxy {
-		return "@" + a.Name
+		return a.Name
 	}
 	if a.OwnerHandle != "" {
 		return a.OwnerHandle + "/" + a.Name
@@ -731,7 +837,7 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey string) (*GossipRes
 	handle, _ := k.store.GetConfig(ctx, "kernel_handle")
 	// The kernel's self-description is @sys's user description (§13): one primitive, not a config key.
 	var about string
-	if sys, err := k.store.ReadUserByHandle(ctx, "@sys"); err == nil && sys != nil {
+	if sys, err := k.store.ReadUserByHandle(ctx, "sys"); err == nil && sys != nil {
 		about = sys.Description
 	}
 
@@ -942,6 +1048,8 @@ func decodeRemotePublicKey(publicKey string) (ed25519.PublicKey, error) {
 func remoteManifestHash(m ActionManifest) string {
 	inputJSON, _ := CanonicalJSON(m.InputSchema)
 	outputJSON, _ := CanonicalJSON(m.OutputSchema)
+	// owner_id (stable identity) and remote_bps (provider pricing) are contract fields; owner_handle
+	// is display metadata, so a remote handle rename never re-keys the cache or deactivates a proxy.
 	payload, _ := CanonicalJSON(map[string]any{
 		"action_id":     m.ActionID,
 		"artifact_hash": m.ArtifactHash,
@@ -950,8 +1058,9 @@ func remoteManifestHash(m ActionManifest) string {
 		"kind":          string(m.Kind),
 		"name":          m.Name,
 		"output_schema": string(outputJSON),
-		"owner_handle":  m.OwnerHandle,
+		"owner_id":      m.OwnerID,
 		"price":         m.Price,
+		"remote_bps":    m.RemoteBPS,
 	})
 	h := sha256.Sum256(payload)
 	return hex.EncodeToString(h[:])
@@ -965,6 +1074,42 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 	if err := k.requireSuperuser(ctx, subjectID); err != nil {
 		return nil, err
 	}
+	return k.importRemoteActionCore(ctx, remoteUserID, m)
+}
+
+// ImportPeerAction imports one signed manifest without a superuser gate (its authority is the
+// verified manifest signature) and activates it as a local proxy — the §13 subscription-free
+// resolve path used by lazy cross-kernel calls. Returns the resulting proxy action.
+func (k *Kernel) ImportPeerAction(ctx context.Context, remoteUserID string, m ActionManifest) (*Action, error) {
+	res, err := k.importRemoteActionCore(ctx, remoteUserID, m)
+	if err != nil {
+		return nil, err
+	}
+	var a *Action
+	switch {
+	case len(res.Created) > 0:
+		a = res.Created[0]
+	case len(res.Updated) > 0:
+		a = res.Updated[0]
+	case len(res.Unchanged) > 0:
+		a = res.Unchanged[0]
+	default:
+		return nil, ErrNotFound.Wrap("import produced no action")
+	}
+	// Enable and make callable by local users (visibility=local), mirroring the subscribe path.
+	// The manifest is already signature-verified, so no further gate is needed.
+	if !a.Active || a.Visibility != VisibilityLocal {
+		a.Active = true
+		a.Visibility = VisibilityLocal
+		a.UpdatedAt = time.Now().UTC()
+		if err := k.store.UpdateAction(ctx, a); err != nil {
+			return nil, err
+		}
+	}
+	return a, nil
+}
+
+func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string, m ActionManifest) (*ImportResult, error) {
 	remoteUser, err := k.store.ReadUser(ctx, remoteUserID)
 	if err != nil {
 		return nil, err
@@ -1016,11 +1161,13 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 	}
 
 	contentHash := remoteManifestHash(m)
-	// Owner-qualified (addressed @peer/owner/name) so same-named actions from different owners on the peer don't collide.
-	name := strings.TrimPrefix(m.OwnerHandle, "@") + "/" + m.Name
-	// Proxy price = mp + ceil(mp * import_bps / 10000): the caller pays the remote price
-	// plus the local import duty, all locked atomically at dispatch time.
-	proxyPrice := m.Price + ceilDiv(m.Price*k.cfg.ImportBPS, 10000)
+	// Owner-qualified (rendered remoteowner@mount/name) so same-named actions from different owners
+	// on the peer don't collide.
+	name := NormalizeHandle(m.OwnerHandle) + "/" + m.Name
+	// Proxy price = mp + ceil(mp * remote_bps / 10000): the provider's advertised premium (a signed
+	// manifest field), so the caller sees one authenticated price bounding the whole remote call (§13).
+	rbps := m.RemoteBPS
+	proxyPrice := m.Price + ceilDiv(m.Price*rbps, 10000)
 	incoming := []incomingOp{{
 		key:  m.ActionID,
 		hash: contentHash,
@@ -1032,6 +1179,8 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 			a.InputSchema = m.InputSchema
 			a.OutputSchema = m.OutputSchema
 			a.ArtifactHash = contentHash
+			a.RemoteOwnerID = m.OwnerID
+			a.RemoteBPS = &rbps
 		},
 		new: func() *Action {
 			now := time.Now().UTC()
@@ -1049,6 +1198,8 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 				Source:         source,
 				ArtifactHash:   contentHash,
 				RemoteActionID: m.ActionID,
+				RemoteOwnerID:  m.OwnerID,
+				RemoteBPS:      &rbps,
 				CreatedAt:      now,
 				UpdatedAt:      now,
 			}
@@ -1148,8 +1299,10 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 	}
 	m := &ActionManifest{
 		ActionID:     a.ID,
+		OwnerID:      owner.ID,
 		OwnerHandle:  owner.Handle,
 		Name:         a.Name,
+		RemoteBPS:    k.cfg.RemoteBPS,
 		Description:  a.Description,
 		InputSchema:  a.InputSchema,
 		OutputSchema: a.OutputSchema,
@@ -1255,6 +1408,45 @@ func stepPayload(stepID, counterparty, recipient, idempotencyKey, timestamp, inp
 		"step_id":         stepID,
 		"timestamp":       timestamp,
 	}
+}
+
+// SignStepAuthPayload signs the home-kernel attestation that its authenticated local user (userID)
+// authorized completing step stepID (§13). The fixed scope "step_auth" plus the user_id key keep
+// this key-set disjoint from the step-complete and step-list payloads; recipient binds it to the
+// serving kernel, closing cross-kernel replay.
+func SignStepAuthPayload(key ed25519.PrivateKey, counterparty, recipient, userID, stepID, timestamp string) (string, error) {
+	return signJCS(key, stepAuthPayload(counterparty, recipient, userID, stepID, timestamp))
+}
+
+// VerifyStepAuthSignature verifies the attestation. recipient must be the verifying kernel's own key.
+func VerifyStepAuthSignature(pubKeyB64, counterparty, recipient, userID, stepID, timestamp, sigB64 string) error {
+	pub, err := decodeRemotePublicKey(pubKeyB64)
+	if err != nil {
+		return ErrUnauthenticated.Wrap("invalid counterparty public key")
+	}
+	if err := verifyJCS(pub, stepAuthPayload(counterparty, recipient, userID, stepID, timestamp), sigB64); err != nil {
+		return ErrUnauthenticated.Wrap("step attestation is invalid")
+	}
+	return nil
+}
+
+func stepAuthPayload(counterparty, recipient, userID, stepID, timestamp string) map[string]string {
+	return map[string]string{
+		"counterparty": counterparty,
+		"recipient":    recipient,
+		"scope":        "step_auth",
+		"step_id":      stepID,
+		"timestamp":    timestamp,
+		"user_id":      userID,
+	}
+}
+
+// SignStepAuth stamps the current time and signs the step_auth attestation with this kernel's
+// platform key. counterparty is this kernel's own key; recipient is the serving peer's key.
+func (k *Kernel) SignStepAuth(counterparty, recipient, userID, stepID string) (sig, ts string, err error) {
+	ts = time.Now().UTC().Format(time.RFC3339)
+	sig, err = SignStepAuthPayload(k.cfg.SigningKey, counterparty, recipient, userID, stepID, ts)
+	return
 }
 
 // SignStepListPayload creates a base64url Ed25519 signature over

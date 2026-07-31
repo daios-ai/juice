@@ -12,23 +12,23 @@ flow_bootstrap() {
 
     start_server "$db" "$hs" || { fail "bootstrap.first_boot" "server did not start"; return; }
     ok "bootstrap.first_boot"
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
 
-    assert_json "bootstrap.sys_user" "$(jj "$db" "$hs" user me)" handle @sys
+    assert_json "bootstrap.sys_user" "$(jj "$db" "$hs" user me)" handle sys
 
     local acts; acts=$(jj "$db" "$hs" action list)
     assert_eq "bootstrap.lookup_registered"  yes "$(has_action "$acts" lookup)"
     assert_eq "bootstrap.llm_chat_registered" yes "$(has_action "$acts" llm/chat)"
 
-    # Restart on the same DB: bootstrap is idempotent (re-reconciles natives, keeps @sys).
+    # Restart on the same DB: bootstrap is idempotent (re-reconciles natives, keeps sys).
     stop_server "$db"
     start_server "$db" "$hs" || { fail "bootstrap.idempotent" "second boot failed"; return; }
     ok "bootstrap.idempotent"
-    assert_json "bootstrap.state_preserved" "$(jj "$db" "$hs" user me)" handle @sys
+    assert_json "bootstrap.state_preserved" "$(jj "$db" "$hs" user me)" handle sys
 
     # HTTP-only: the password-grant token endpoint (CLI login uses PKCE, not this path).
     local tok; tok=$(strfield "$(curl -sf -X POST "$(url "$db")/v1/auth/token" \
-        -H 'Content-Type: application/json' -d '{"handle":"@sys","password":"sys-pass"}' 2>/dev/null)" token)
+        -H 'Content-Type: application/json' -d '{"handle":"sys","password":"sys-pass"}' 2>/dev/null)" token)
     assert_nonempty "bootstrap.http_password_grant" "$tok"
 }
 
@@ -37,17 +37,17 @@ flow_local_auth() {
     local dir db hs tdir
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
     start_server "$db" "$hs" || { fail "local_auth.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
     tdir=$(juice_token_dir "$hs" "$db")
 
     assert_eq "local_auth.token_stored" yes "$([ -f "$tdir/token" ] && echo yes || echo no)"
-    assert_json "local_auth.me_succeeds" "$(jj "$db" "$hs" user me)" handle @sys
+    assert_json "local_auth.me_succeeds" "$(jj "$db" "$hs" user me)" handle sys
 
     local old_rt=""; [ -f "$tdir/refresh_token" ] && old_rt=$(cat "$tdir/refresh_token")
     j "$db" "$hs" auth refresh >/dev/null 2>&1
     local new_rt=""; [ -f "$tdir/refresh_token" ] && new_rt=$(cat "$tdir/refresh_token")
     assert_ne "local_auth.refresh_rotates_token" "$old_rt" "$new_rt"
-    assert_json "local_auth.me_after_refresh" "$(jj "$db" "$hs" user me)" handle @sys
+    assert_json "local_auth.me_after_refresh" "$(jj "$db" "$hs" user me)" handle sys
 
     # A reused (rotated-away) refresh token must be rejected.
     if [ -n "$old_rt" ]; then
@@ -70,18 +70,18 @@ flow_suspension() {
     local dir db hs ha
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "suspension.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
 
-    assert_json "suspension.alice_active" "$(jj "$db" "$ha" user me)" handle @alice
+    assert_json "suspension.alice_active" "$(jj "$db" "$ha" user me)" handle alice
 
-    j "$db" "$hs" admin suspend @alice >/dev/null 2>&1
+    j "$db" "$hs" admin suspend alice >/dev/null 2>&1
     assert_fails "suspension.suspended_rejected" "suspended\|unauthenticated\|error" -- j "$db" "$ha" user me
-    # Data preserved: @sys can still see @alice.
-    assert_json "suspension.data_preserved" "$(jj "$db" "$hs" admin show @alice)" handle @alice
+    # Data preserved: sys can still see alice.
+    assert_json "suspension.data_preserved" "$(jj "$db" "$hs" admin show alice)" handle alice
 
-    j "$db" "$hs" admin unsuspend @alice >/dev/null 2>&1
-    assert_json "suspension.unsuspend_restores" "$(jj "$db" "$ha" user me)" handle @alice
+    j "$db" "$hs" admin unsuspend alice >/dev/null 2>&1
+    assert_json "suspension.unsuspend_restores" "$(jj "$db" "$ha" user me)" handle alice
 }
 
 flow_deposits() {
@@ -89,17 +89,17 @@ flow_deposits() {
     local dir db hs ha hb
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     start_server "$db" "$hs" || { fail "deposits.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    make_user "$db" "$hs" "$hb" @bob
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
 
     assert_jnum "deposits.initial_zero" "$(jj "$db" "$ha" user me)" available 0
-    j "$db" "$hs" admin deposit @alice 500 >/dev/null 2>&1
+    j "$db" "$hs" admin deposit alice 500 >/dev/null 2>&1
     assert_jnum "deposits.balance_updated" "$(jj "$db" "$ha" user me)" available 500
-    j "$db" "$hs" admin deposit @alice 200 >/dev/null 2>&1
+    j "$db" "$hs" admin deposit alice 200 >/dev/null 2>&1
     assert_jnum "deposits.accumulates" "$(jj "$db" "$ha" user me)" available 700
 
-    assert_fails "deposits.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$hb" admin deposit @alice 10
+    assert_fails "deposits.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$hb" admin deposit alice 10
     assert_jnum "deposits.other_user_unaffected" "$(jj "$db" "$hb" user me)" available 0
 }
 
@@ -108,27 +108,27 @@ flow_transfers() {
     local dir db hs ha hb
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     start_server "$db" "$hs" || { fail "transfers.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    make_user "$db" "$hs" "$hb" @bob
-    j "$db" "$hs" admin deposit @alice 500 >/dev/null 2>&1
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
+    j "$db" "$hs" admin deposit alice 500 >/dev/null 2>&1
 
-    # Alice transfers 200 to bob by @handle; balances move by exactly the amount.
-    j "$db" "$ha" user transfer @bob 200 --reason gift >/dev/null 2>&1
+    # Alice transfers 200 to bob by handle; balances move by exactly the amount.
+    j "$db" "$ha" user transfer bob 200 --reason gift >/dev/null 2>&1
     assert_jnum "transfers.sender_debited" "$(jj "$db" "$ha" user me)" available 300
     assert_jnum "transfers.recipient_credited" "$(jj "$db" "$hb" user me)" available 200
 
     # Both parties see the transfer in their ledger (alice also sees her deposit).
-    assert_contains "transfers.sender_ledger" "@bob" "$(jj "$db" "$ha" user ledger)"
-    assert_contains "transfers.recipient_ledger" "@alice" "$(jj "$db" "$hb" user ledger)"
+    assert_contains "transfers.sender_ledger" "bob" "$(jj "$db" "$ha" user ledger)"
+    assert_contains "transfers.recipient_ledger" "alice" "$(jj "$db" "$hb" user ledger)"
 
     # Pagination: alice has 2 ledger entries (deposit + transfer); --limit 1 returns one.
     assert_eq "transfers.ledger_paginated" 1 \
         "$(jj "$db" "$ha" user ledger --limit 1 | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
 
     # Over-balance and self transfers are rejected; balance unchanged.
-    assert_fails "transfers.overdraw_rejected" "insufficient\|error" -- j "$db" "$ha" user transfer @bob 100000
-    assert_fails "transfers.self_rejected" "yourself\|invalid\|error" -- j "$db" "$ha" user transfer @alice 10
+    assert_fails "transfers.overdraw_rejected" "insufficient\|error" -- j "$db" "$ha" user transfer bob 100000
+    assert_fails "transfers.self_rejected" "yourself\|invalid\|error" -- j "$db" "$ha" user transfer alice 10
     assert_jnum "transfers.balance_unchanged" "$(jj "$db" "$ha" user me)" available 300
 }
 
@@ -137,9 +137,9 @@ flow_action_lifecycle() {
     local dir db hs ha hb bport
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     start_server "$db" "$hs" || { fail "action_lifecycle.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    make_user "$db" "$hs" "$hb" @bob
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
 
     # Create — inactive by default.
     local cr aid
@@ -176,7 +176,7 @@ flow_action_lifecycle() {
     tid=$(strfield "$(jj "$db" "$ha" action create callable --kind http --source "http://127.0.0.1:${bport}/call" --description "tx test" --price 0)" id)
     j "$db" "$ha" action enable "$tid" >/dev/null 2>&1
     j "$db" "$ha" action update "$tid" --visibility public >/dev/null 2>&1
-    tx_id=$(strfield "$(jj "$db" "$hb" run @alice/callable '{}')" tx_id)
+    tx_id=$(strfield "$(jj "$db" "$hb" run alice/callable '{}')" tx_id)
     j "$db" "$ha" action delete "$tid" >/dev/null 2>&1
     assert_json "action_lifecycle.action_name_in_tx_after_delete" "$(jj "$db" "$hb" tx show "$tx_id")" action_name callable
 }
@@ -186,8 +186,8 @@ flow_action_owner_visibility() {
     local dir db hs ha
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "action_owner_visibility.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
 
     # A private, inactive action (no enable, no --visibility public).
     j "$db" "$ha" action create secret-op --kind http --source "http://127.0.0.1:1/secret" --description "private" >/dev/null 2>&1
@@ -196,41 +196,41 @@ flow_action_owner_visibility() {
     # (Raw HTTP: exercises the auth-conditional ?owner= visibility the CLI abstracts over.)
     local base; base=$(url "$db")
     assert_eq "action_owner_visibility.unauthenticated_zero" 0 \
-        "$(list_len "$(curl -sf "$base/v1/actions?owner=@alice" 2>/dev/null)")"
+        "$(list_len "$(curl -sf "$base/v1/actions?owner=alice" 2>/dev/null)")"
     local tok; tok=$(strfield "$(curl -sf -X POST "$base/v1/auth/token" -H 'Content-Type: application/json' \
-        -d '{"handle":"@alice","password":"userpass"}' 2>/dev/null)" token)
-    local n; n=$(list_len "$(curl -sf -H "Authorization: Bearer $tok" "$base/v1/actions?owner=@alice" 2>/dev/null)")
+        -d '{"handle":"alice","password":"userpass"}' 2>/dev/null)" token)
+    local n; n=$(list_len "$(curl -sf -H "Authorization: Bearer $tok" "$base/v1/actions?owner=alice" 2>/dev/null)")
     assert_eq "action_owner_visibility.owner_sees_private" yes "$([ "${n:-0}" -ge 1 ] && echo yes || echo no)"
 }
 
 # flow_recovery: seed-phrase password recovery (§12), plus user/kernel descriptions (§13).
 # A created account prints a one-time recovery phrase; losing the password, the user recovers it by
-# signing the server challenge with that phrase. Also: a user sets its own description, and @sys's
+# signing the server challenge with that phrase. Also: a user sets its own description, and sys's
 # description is the kernel "about" surfaced by admin identity.
 flow_recovery() {
     echo "=== FLOW recovery ==="
     local dir db hs uh phrase
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); uh=$(home "$dir" rec)
     start_server "$db" "$hs" || { fail "recovery.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
 
-    # @sys's description is the kernel "about" (surfaced by admin identity).
+    # sys's description is the kernel "about" (surfaced by admin identity).
     j "$db" "$hs" user update --description "the neighbourhood kernel" >/dev/null 2>&1
     assert_contains "recovery.kernel_about" "neighbourhood" "$(j "$db" "$hs" admin identity)"
 
     # Create a user and capture the one-time recovery phrase (printed to stderr, merged by j()).
-    phrase=$(j "$db" "$uh" user create @recuser --password origpass | grep -oE '([a-z]+ ){11}[a-z]+' | head -1)
+    phrase=$(j "$db" "$uh" user create recuser --password origpass | grep -oE '([a-z]+ ){11}[a-z]+' | head -1)
     assert_ne "recovery.phrase_printed" "" "$phrase"
 
     # A user sets and reads back its own description.
-    j "$db" "$uh" auth login @recuser --password origpass >/dev/null 2>&1
+    j "$db" "$uh" auth login recuser --password origpass >/dev/null 2>&1
     j "$db" "$uh" user update --description "weather tools" >/dev/null 2>&1
     assert_json "recovery.user_description" "$(jj "$db" "$uh" user me)" description "weather tools"
     j "$db" "$uh" auth logout >/dev/null 2>&1
 
     # Recover a lost password with the phrase; the old password is then rejected and the new works.
-    j "$db" "$uh" auth recover @recuser --phrase "$phrase" --password newpass1 >/dev/null 2>&1
-    assert_fails "recovery.old_password_rejected" "invalid\|error\|unauth" -- j "$db" "$uh" auth login @recuser --password origpass
-    j "$db" "$uh" auth login @recuser --password newpass1 >/dev/null 2>&1
-    assert_json "recovery.new_password_works" "$(jj "$db" "$uh" user me)" handle @recuser
+    j "$db" "$uh" auth recover recuser --phrase "$phrase" --password newpass1 >/dev/null 2>&1
+    assert_fails "recovery.old_password_rejected" "invalid\|error\|unauth" -- j "$db" "$uh" auth login recuser --password origpass
+    j "$db" "$uh" auth login recuser --password newpass1 >/dev/null 2>&1
+    assert_json "recovery.new_password_works" "$(jj "$db" "$uh" user me)" handle recuser
 }

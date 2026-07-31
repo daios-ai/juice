@@ -17,7 +17,7 @@ const (
 	configKeySuperuser      = "superuser_handle"
 	configKeySigningPublic  = "signing_public_key"
 	configKeySigningPrivate = "signing_private_key"
-	superuserHandle         = "@sys"
+	superuserHandle         = "sys"
 )
 
 // bootstrap runs idempotent startup tasks before the server accepts requests.
