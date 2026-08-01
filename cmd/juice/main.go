@@ -253,6 +253,26 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 		return nil, nil, nil, nil, fmt.Errorf("remote_bps must be 0–10000")
 	}
 
+	cfg.ImportBPS = globalCfg.ImportBPS
+	if globalCfg.ImportBPS < 0 || globalCfg.ImportBPS > 10000 {
+		db.Close()
+		return nil, nil, nil, nil, fmt.Errorf("import_bps must be 0–10000")
+	}
+
+	// Global exposure policy (§13): X ≥ 0; when X > 0 the settlement trigger must sit strictly inside
+	// it (0 < Y < X) so a flagged peer is still below the hard cap; Q ≥ 0 (0 disables the residual path).
+	cfg.ExposureMax = globalCfg.ExposureMax
+	cfg.SettlementTrigger = globalCfg.SettlementTrigger
+	cfg.SettlementQuantum = globalCfg.SettlementQuantum
+	if globalCfg.ExposureMax < 0 || globalCfg.SettlementQuantum < 0 {
+		db.Close()
+		return nil, nil, nil, nil, fmt.Errorf("exposure_max and settlement_quantum must be non-negative")
+	}
+	if globalCfg.ExposureMax > 0 && !(globalCfg.SettlementTrigger > 0 && globalCfg.SettlementTrigger < globalCfg.ExposureMax) {
+		db.Close()
+		return nil, nil, nil, nil, fmt.Errorf("settlement_trigger must satisfy 0 < settlement_trigger < exposure_max when exposure_max > 0")
+	}
+
 	tokenTTL, err := time.ParseDuration(globalCfg.TokenTTL)
 	if err != nil {
 		db.Close()

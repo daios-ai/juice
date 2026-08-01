@@ -98,7 +98,7 @@ func setupProcessHTTP(t *testing.T, db *store.DB, ownerID string, funds int64) *
 		CallerUserID:  ownerID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := db.BeginRun(ctx, p, tr, ownerID, funds); err != nil {
+	if err := db.BeginRun(ctx, p, tr, ownerID, funds, 0, 0); err != nil {
 		t.Fatalf("setupProcessHTTP: %v", err)
 	}
 	return p

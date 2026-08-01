@@ -985,7 +985,7 @@ func setupStepWithCompletionTrace(t *testing.T, st kernel.Store, k *kernel.Kerne
 		CallerUserID:  ownerID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := st.BeginRun(ctx, p, root, ownerID, price); err != nil {
+	if err := st.BeginRun(ctx, p, root, ownerID, price, 0, 0); err != nil {
 		t.Fatalf("setupStepWithCompletionTrace: BeginRun: %v", err)
 	}
 	ptID := root.ID

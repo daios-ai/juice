@@ -54,14 +54,8 @@ type User struct {
 	// credit *on* the peer, valid as of PeerLastSeen.
 	PeerLastSeen *time.Time `json:"peer_last_seen,omitempty"`
 	PeerCredit   *int64     `json:"peer_credit,omitempty"`
-	// CreditMax and SettlementTrigger are the provider-side bilateral credit policy for a peer
-	// (§13): the largest negative Available this kernel permits (0 ⇒ prepaid-only) and the debt at
-	// which it flags settlement. SettlementDue is a debtor-side sync-cache flag (display-only).
-	CreditMax         int64 `json:"credit_max,omitempty"`
-	SettlementTrigger int64 `json:"settlement_trigger,omitempty"`
-	SettlementDue     *bool `json:"settlement_due,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // IsPeer reports whether u is a remote-kernel proxy user, identified by a set public_key (§13).
@@ -331,6 +325,26 @@ type LedgerEntry struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// SettlementRecord is the creditor-signed evidence of one residual settlement (§13). An *open*
+// record carries only the commitment H(s); a *final* record adds the revealed secret, the debtor's
+// nonce, and the outcome. It is JCS-signed by the creditor over all fields with Signature="", and its
+// key-set (creditor+debtor+quantum+commitment) is disjoint from every other signed payload (§12).
+type SettlementRecord struct {
+	SettlementID string    `json:"settlement_id"`
+	Creditor     string    `json:"creditor"`          // creditor kernel public key (base64url)
+	Debtor       string    `json:"debtor"`            // debtor kernel public key (base64url)
+	Amount       int64     `json:"amount"`            // d, the residual debt being settled
+	Quantum      int64     `json:"quantum"`           // Q, the creditor's fee-rational quantum
+	Mode         string    `json:"mode"`              // "probabilistic"
+	Commitment   string    `json:"commitment"`        // SHA-256(secret) hex — binds the creditor before the nonce
+	Nonce        string    `json:"nonce,omitempty"`   // final only: the debtor's committed nonce
+	Secret       string    `json:"secret,omitempty"`  // final only: revealed secret s (hex)
+	Outcome      string    `json:"outcome,omitempty"` // final only: "pay" | "clear"
+	ExpiresAt    time.Time `json:"expires_at"`
+	CreatedAt    time.Time `json:"created_at"`
+	Signature    string    `json:"signature"`
+}
+
 // DiscoveredKernel is a remote kernel learned via gossip.
 type DiscoveredKernel struct {
 	PublicKey    string          `json:"public_key"`
@@ -377,10 +391,15 @@ type Receipt struct {
 	Net          int64     `json:"net"`
 	Fee          int64     `json:"fee"`
 	Charge       int64     `json:"charge"`
-	Reason       string    `json:"reason"`
-	StartedAt    time.Time `json:"started_at"`
-	CreatedAt    time.Time `json:"created_at"`
-	Signature    string    `json:"signature"`
+	// Premium is the serving kernel's markup (execution tax + risk premium) on this charge, credited
+	// to the serving kernel's sys and owed by the origin peer on top of Charge (§13). omitempty keeps
+	// it out of the JCS signature for all local and pre-v0.13 receipts (Premium=0), so those verify
+	// unchanged; nonzero only on a receipt the serving kernel issues for an inbound federated call.
+	Premium   int64     `json:"premium,omitempty"`
+	Reason    string    `json:"reason"`
+	StartedAt time.Time `json:"started_at"`
+	CreatedAt time.Time `json:"created_at"`
+	Signature string    `json:"signature"`
 }
 
 // Rating is an immutable human-submitted rating for a transaction.
@@ -496,8 +515,9 @@ type ReceiptChecks struct {
 	Signature          bool `json:"signature"`
 	ActionID           bool `json:"action_id"`
 	Status             bool `json:"status"`
-	Charge             bool `json:"charge"`              // amount paid to proxy == receipt.charge
-	SettlementArith    bool `json:"settlement_arith"`    // net + fee == gross (internal receipt math)
+	Charge             bool `json:"charge"`              // amount paid to proxy (tx.net) == receipt.charge + receipt.premium
+	Premium            bool `json:"premium"`             // receipt.premium == ceil(receipt.charge * remote_bps / 10000)
+	SettlementArith    bool `json:"settlement_arith"`    // tx.fee == ceil(tx.net * import_bps / 10000) on success, 0 on failure
 	RefundConservation bool `json:"refund_conservation"` // tx.Refund == tx.Gross - tx.Net - tx.Fee (exact equality)
 	ArgsHash           bool `json:"args_hash"`
 	ReplyHash          bool `json:"reply_hash"`
@@ -524,6 +544,10 @@ type PeerView struct {
 	// and when we last reached it. Display-only.
 	PeerCredit *int64     `json:"peer_credit,omitempty"`
 	LastSeen   *time.Time `json:"last_seen,omitempty"`
+	// SettlementDue flags a debtor peer when this kernel's global gross receivables have reached the
+	// settlement trigger Y (§13): information for the operator, never authority — computed live, display
+	// only. FIX 3: Y signals; the operator runs `admin settle`.
+	SettlementDue bool `json:"settlement_due,omitempty"`
 }
 
 // GossipAction is an action entry in a gossip response.

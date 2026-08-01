@@ -164,40 +164,26 @@ func (s *server) ctlAdjust(credit bool) http.HandlerFunc {
 	}
 }
 
-// ctlSetPeerCredit sets a peer's bilateral credit policy (§13). Given a raw key it provisions the
-// peer account first (like deposit-by-key), so credit can be extended before the peer's first call.
-func (s *server) ctlSetPeerCredit(w http.ResponseWriter, r *http.Request) {
+// ctlSettlePeer settles the bilateral position with a peer (§13): exact when |d| ≥ Q, otherwise the
+// probabilistic residual protocol. Superuser only; the kernel decides direction and mode.
+func (s *server) ctlSettlePeer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Handle            string `json:"handle"`
-		CreditMax         int64  `json:"credit_max"`
-		SettlementTrigger int64  `json:"settlement_trigger"`
+		Handle string `json:"handle"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
 	u, err := resolveHandle(s.kernel, r.Context(), req.Handle)
 	if err != nil {
-		kh := strings.TrimPrefix(strings.TrimSpace(req.Handle), "@")
-		if kernel.IsPublicKey(kh) {
-			short := kh
-			if len(short) > 8 {
-				short = short[:8]
-			}
-			u, err = s.kernel.AddPeer(r.Context(), callerFrom(r), "k-"+short, kh)
-		}
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
+		writeErr(w, err)
+		return
 	}
-	peer, err := s.kernel.SetPeerCredit(r.Context(), callerFrom(r), u.ID, req.CreditMax, req.SettlementTrigger)
+	res, err := s.kernel.SettlePeer(r.Context(), callerFrom(r), u.ID)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"handle": peer.Handle, "credit_max": peer.CreditMax, "settlement_trigger": peer.SettlementTrigger,
-	})
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
@@ -218,7 +204,18 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 		}
 		peers = kept
 	}
-	out := map[string]any{"peers": peerViews(peers)}
+	views := peerViews(peers)
+	// Flag debtor peers when global gross receivables have reached Y (display only, FIX 3).
+	if globalCfg.SettlementTrigger > 0 {
+		if gross, err := s.kernel.GrossReceivables(r.Context()); err == nil && gross >= globalCfg.SettlementTrigger {
+			for _, v := range views {
+				if v.Available < 0 {
+					v.SettlementDue = true
+				}
+			}
+		}
+	}
+	out := map[string]any{"peers": views}
 	if r.URL.Query().Get("gossip") == "1" {
 		roster, err := s.kernel.DiscoveryRoster(r.Context())
 		if err != nil {
@@ -469,7 +466,11 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	if s.fed != nil {
 		addrs = s.fed.ListenAddrs()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"handle": handle, "public_key": pub, "about": about, "addrs": addrs})
+	gross, _ := s.kernel.GrossReceivables(ctx)
+	writeJSON(w, http.StatusOK, map[string]any{"handle": handle, "public_key": pub, "about": about, "addrs": addrs,
+		"exposure_max": globalCfg.ExposureMax, "settlement_trigger": globalCfg.SettlementTrigger,
+		"settlement_quantum": globalCfg.SettlementQuantum, "gross_receivables": gross,
+		"settlement_due": globalCfg.SettlementTrigger > 0 && gross >= globalCfg.SettlementTrigger})
 }
 
 func (s *server) ctlUnsubscribePeer(w http.ResponseWriter, r *http.Request) {

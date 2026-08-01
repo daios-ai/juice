@@ -480,7 +480,7 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Post("/control/users/{handle}/rename", srv.ctlRenameUser)
 		r.Post("/control/deposit", srv.ctlAdjust(true))
 		r.Post("/control/withdraw", srv.ctlAdjust(false))
-		r.Post("/control/peers/credit", srv.ctlSetPeerCredit)
+		r.Post("/control/peers/settle", srv.ctlSettlePeer)
 		r.Get("/control/peers", srv.ctlListPeers)
 		r.Get("/control/peers/inspect", srv.ctlInspectPeer)
 		r.Post("/control/peers/subscribe", srv.ctlSubscribePeer)
@@ -1678,6 +1678,29 @@ func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRe
 	}
 	b, _ := json.Marshal(body)
 	return fed.StepResponse{Status: status, Body: b}
+}
+
+// OnSettle answers the /juice/fed/settle/1 residual-settlement exchange (§13): the creditor side of
+// the two-party commit/reveal. The connection-key check and freshness window mirror OnCall/OnStep;
+// the kernel verifies the debtor's scoped signature and applies the three-way legs idempotently.
+func (h *fedHandlers) OnSettle(ctx context.Context, peerKey string, req fed.SettleRequest) fed.SettleResponse {
+	settleErr := func(err error) fed.SettleResponse {
+		code := kernel.KernelErrorCode(err)
+		b, _ := json.Marshal(map[string]string{"error": err.Error(), "code": code})
+		return fed.SettleResponse{Status: kernel.HTTPStatusFromCode(code), Body: b}
+	}
+	if peerKey != "" && peerKey != req.Counterparty {
+		return settleErr(kernel.ErrUnauthenticated.Wrap("counterparty does not match the authenticated connection"))
+	}
+	if err := checkFederationTimestamp(req.Timestamp); err != nil {
+		return settleErr(err)
+	}
+	status, body, err := h.kernel.HandleSettle(ctx, req.Counterparty, req.Kind, req.Timestamp, req.Signature,
+		req.SettlementID, req.Amount, req.Nonce, []byte(req.Record))
+	if err != nil {
+		return settleErr(err)
+	}
+	return fed.SettleResponse{Status: status, Body: body}
 }
 
 // OnManifest returns one signed manifest per active public action (chunked, relay-safe).

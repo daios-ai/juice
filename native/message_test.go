@@ -84,7 +84,7 @@ func TestExecuteMessage_CreatesStep(t *testing.T) {
 		ActionOwnerID: sink.OwnerUserID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := st.BeginRun(ctx, p, rootTrace, caller.ID, 0); err != nil {
+	if err := st.BeginRun(ctx, p, rootTrace, caller.ID, 0, 0, 0); err != nil {
 		t.Fatalf("BeginRun: %v", err)
 	}
 

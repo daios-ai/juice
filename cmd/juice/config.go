@@ -73,7 +73,11 @@ type ServerConfig struct {
 	ScriptTimeoutMS            int64        `json:"script_timeout_ms"`
 	ScriptMemoryBytes          int64        `json:"script_memory_bytes"`
 	FeeBPS                     int64        `json:"fee_bps"`
-	RemoteBPS                  int64        `json:"remote_bps"`
+	RemoteBPS                  int64        `json:"remote_bps"`         // serving-side markup on inbound remote calls (§13)
+	ImportBPS                  int64        `json:"import_bps"`         // origin-side import fee on outbound remote calls, retained locally (§13)
+	ExposureMax                int64        `json:"exposure_max"`       // X: max gross unsecured receivables across all peers (§13); 0 = prepaid-only
+	SettlementTrigger          int64        `json:"settlement_trigger"` // Y: gross-receivables level flagging settlement_due (§13); 0 < Y < X when X > 0
+	SettlementQuantum          int64        `json:"settlement_quantum"` // Q: smallest fee-rational external payment (§13); 0 disables the probabilistic path
 	TokenTTL                   string       `json:"token_ttl"`
 	AuthIssuer                 string       `json:"auth_issuer"`
 	AuthAudience               string       `json:"auth_audience"`
@@ -139,6 +143,10 @@ func DefaultServerConfig() ServerConfig {
 		ScriptMemoryBytes: 64 * 1024 * 1024,
 		FeeBPS:            2000,
 		RemoteBPS:         500,
+		ImportBPS:         500,
+		ExposureMax:       0,
+		SettlementTrigger: 0,
+		SettlementQuantum: 0,
 		TokenTTL:          "15m",
 		AuthIssuer:        "",
 		AuthAudience:      "",

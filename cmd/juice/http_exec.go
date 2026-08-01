@@ -234,6 +234,23 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, peerPublicKe
 type federationTransport interface {
 	Call(ctx context.Context, peerKey string, req fed.CallRequest) (fed.CallResponse, error)
 	Resolve(ctx context.Context, peerKey string, req fed.ResolveRequest) (fed.ResolveResponse, error)
+	Settle(ctx context.Context, peerKey string, req fed.SettleRequest) (fed.SettleResponse, error)
+}
+
+// Settle implements kernel.FederationSettler over /juice/fed/settle/1 (§13): the debtor forwards one
+// signed round to the peer and returns its raw response body (a signed SettlementRecord) and status.
+func (e *httpActionExecutor) Settle(ctx context.Context, peerPublicKey, kind, timestamp, signature, settlementID string, amount int64, nonce string, record []byte) (int, []byte, error) {
+	if e.fedTransport == nil {
+		return 0, nil, kernel.ErrPeerUnreachable.Wrap("federation transport not running")
+	}
+	resp, err := e.fedTransport.Settle(ctx, peerPublicKey, fed.SettleRequest{
+		Kind: kind, Counterparty: e.localPubKey, Timestamp: timestamp, Signature: signature,
+		SettlementID: settlementID, Amount: amount, Nonce: nonce, Record: record,
+	})
+	if err != nil {
+		return 0, nil, kernel.ErrPeerUnreachable.Wrap("peer unreachable")
+	}
+	return resp.Status, resp.Body, nil
 }
 
 // ResolveRemoteAction / ResolveRemoteUser implement kernel.RemoteResolver over the transport's

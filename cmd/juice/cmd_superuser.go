@@ -66,7 +66,7 @@ func init() {
 		adminRenameCmd(),
 		adminDepositCmd(),
 		adminWithdrawCmd(),
-		adminCreditCmd(),
+		adminSettleCmd(),
 		peerSubscribeCmd(),
 		peerUnsubscribeCmd(),
 		peerListCmd(),
@@ -86,10 +86,15 @@ func identityCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			var out struct {
-				Handle    string   `json:"handle"`
-				PublicKey string   `json:"public_key"`
-				About     string   `json:"about"`
-				Addrs     []string `json:"addrs"`
+				Handle            string   `json:"handle"`
+				PublicKey         string   `json:"public_key"`
+				About             string   `json:"about"`
+				Addrs             []string `json:"addrs"`
+				ExposureMax       int64    `json:"exposure_max"`
+				SettlementTrigger int64    `json:"settlement_trigger"`
+				SettlementQuantum int64    `json:"settlement_quantum"`
+				GrossReceivables  int64    `json:"gross_receivables"`
+				SettlementDue     bool     `json:"settlement_due"`
 			}
 			if err := apiCall(context.Background(), "GET", "/control/identity", nil, &out); err != nil {
 				return err
@@ -101,6 +106,12 @@ func identityCmd() *cobra.Command {
 			fmt.Printf("Public key: %s\n", out.PublicKey)
 			if out.About != "" {
 				fmt.Printf("About:      %s\n", out.About)
+			}
+			// Global exposure policy and current standing (§13).
+			fmt.Printf("Exposure:   max=%d gross_receivables=%d trigger=%d quantum=%d\n",
+				out.ExposureMax, out.GrossReceivables, out.SettlementTrigger, out.SettlementQuantum)
+			if out.SettlementDue {
+				fmt.Println("Settlement: DUE (gross receivables ≥ trigger)")
 			}
 			if len(out.Addrs) > 0 {
 				fmt.Println("Listen addresses:")
@@ -229,21 +240,15 @@ func adminWithdrawCmd() *cobra.Command {
 	return adjustCmd("withdraw <user> <amount>", "Deduct credits from a user", "/control/withdraw")
 }
 
-func adminCreditCmd() *cobra.Command {
-	var max, settleAt int64
-	cmd := &cobra.Command{
-		Use:   "credit <peer>",
-		Short: "Set the bilateral credit this kernel extends a peer (§13)",
+func adminSettleCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "settle <peer>",
+		Short: "Settle the bilateral position with a peer: exact if debt ≥ Q, else the probabilistic residual protocol (§13)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("POST", "/control/peers/credit", map[string]any{
-				"handle": args[0], "credit_max": max, "settlement_trigger": settleAt,
-			})
+			return apiEmit("POST", "/control/peers/settle", map[string]any{"handle": args[0]})
 		},
 	}
-	cmd.Flags().Int64Var(&max, "max", 0, "Maximum bilateral debt to permit the peer")
-	cmd.Flags().Int64Var(&settleAt, "settle-at", 0, "Debt level at which settlement is flagged")
-	return cmd
 }
 
 func peerInspectCmd() *cobra.Command {

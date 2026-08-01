@@ -202,7 +202,7 @@ func beginTestRun(t *testing.T, st kernel.Store, callerID string, action *kernel
 		CallerUserID:  callerID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := st.BeginRun(ctx, p, tr, callerID, action.Price); err != nil {
+	if err := st.BeginRun(ctx, p, tr, callerID, action.Price, 0, 0); err != nil {
 		t.Fatalf("beginTestRun: %v", err)
 	}
 	return p, tr
@@ -227,7 +227,7 @@ func setupOrphanTrace(t *testing.T, st kernel.Store, ownerID, actionOwnerID, cal
 		CallerUserID:  callerID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := st.BeginRun(ctx, p, tr, ownerID, 0); err != nil {
+	if err := st.BeginRun(ctx, p, tr, ownerID, 0, 0, 0); err != nil {
 		t.Fatalf("setupOrphanTrace: %v", err)
 	}
 	return p, tr

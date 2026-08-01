@@ -671,7 +671,7 @@ func TestCallNestedTraceTree(t *testing.T) {
 		Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
 	traceA := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
 		ActionOwnerID: alice.ID, CallerUserID: alice.ID, CreatedAt: time.Now().UTC()}
-	if err := st.BeginRun(ctx, p, traceA, alice.ID, 0); err != nil {
+	if err := st.BeginRun(ctx, p, traceA, alice.ID, 0, 0, 0); err != nil {
 		t.Fatalf("BeginRun A: %v", err)
 	}
 	traceB := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
@@ -1228,12 +1228,12 @@ type failingCommitStore struct {
 	calls int
 }
 
-func (f *failingCommitStore) CommitCall(ctx context.Context, tx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
+func (f *failingCommitStore) CommitCall(ctx context.Context, tx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee, premiumReserve int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
 	f.calls++
 	if f.calls > 0 {
 		return kernel.ErrInternal.Wrap("injected commit failure")
 	}
-	return f.Store.CommitCall(ctx, tx, receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID, net, fee, stats, idempotencyRecordID, stepID)
+	return f.Store.CommitCall(ctx, tx, receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID, net, fee, premiumReserve, stats, idempotencyRecordID, stepID)
 }
 
 func TestCommitCallAtomicOnFailure(t *testing.T) {
@@ -1415,7 +1415,7 @@ type failingCommitFailedCallStore struct {
 	kernel.Store
 }
 
-func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *kernel.Transaction, _ func(int64) (*kernel.Receipt, error), _, _, _ string, _ int64, _ *kernel.Stats, _, _, _ string) error {
+func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *kernel.Transaction, _ func(int64) (*kernel.Receipt, error), _, _, _, _ string, _, _ int64, _ *kernel.Stats, _, _, _ string) error {
 	return kernel.ErrInternal.Wrap("injected CommitFailedCall failure")
 }
 

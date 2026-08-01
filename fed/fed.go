@@ -32,6 +32,7 @@ const (
 	ProtocolGossip   = "/juice/fed/gossip/1"
 	ProtocolInspect  = "/juice/fed/inspect/1"
 	ProtocolStep     = "/juice/fed/step/1"
+	ProtocolSettle   = "/juice/fed/settle/1"
 )
 
 // ResolveRequest is the wire form of a /juice/fed/resolve/1 request (§13): the open, read-only
@@ -96,6 +97,30 @@ type StepResponse struct {
 	Body   json.RawMessage `json:"body"`
 }
 
+// SettleRequest is the wire form of a /juice/fed/settle/1 request (§13): the debtor-driven two-party
+// commit/reveal that settles a sub-quantum residual debt probabilistically. Kind selects the round:
+// "open" asks the creditor to commit (returns a signed open record with H(s)); "finish" hands the
+// nonce back with the creditor's own open record so the creditor reveals s, computes the outcome, and
+// applies the three-way settlement; "reconcile" re-presents an expired open record so the creditor
+// applies the binding clear-for-zero (FIX 2). Signatures are over disjoint scoped payloads (§12).
+type SettleRequest struct {
+	Kind         string          `json:"kind"`                    // "open" | "finish" | "reconcile"
+	Counterparty string          `json:"counterparty"`            // debtor's base64url Ed25519 public key
+	Timestamp    string          `json:"timestamp"`               // RFC3339
+	Signature    string          `json:"signature"`               // Ed25519 over the kind's scoped canonical payload
+	SettlementID string          `json:"settlement_id"`           // debtor-chosen unique id, binds the whole exchange
+	Amount       int64           `json:"amount,omitempty"`        // open: the debt d the debtor owes (creditor checks == its receivable)
+	Nonce        string          `json:"nonce,omitempty"`         // finish: the debtor's committed nonce
+	Record       json.RawMessage `json:"record,omitempty"`        // finish/reconcile: the creditor-signed open record carried back
+}
+
+// SettleResponse mirrors CallResponse: a status plus an opaque JSON body. The body is a signed
+// SettlementRecord (open → commitment; finish/reconcile → final record with outcome), or an error.
+type SettleResponse struct {
+	Status int             `json:"status"`
+	Body   json.RawMessage `json:"body"`
+}
+
 // Handlers is implemented by cmd/juice to answer inbound protocol streams. Each method
 // receives the peer's verified public key (from the authenticated libp2p connection) plus
 // the request, and returns opaque JSON. The transport applies no Juice semantics itself.
@@ -115,6 +140,10 @@ type Handlers interface {
 	// OnStep handles an inbound /juice/fed/step/1 request: listing or completing the waiting
 	// steps this peer is the required caller of (§10, §13).
 	OnStep(ctx context.Context, peerKey string, req StepRequest) StepResponse
+	// OnSettle handles an inbound /juice/fed/settle/1 request (§13): the creditor side of the
+	// two-party commit/reveal residual settlement. peerKey is the connection's authenticated key;
+	// the handler still verifies req.Signature against req.Counterparty per §13.
+	OnSettle(ctx context.Context, peerKey string, req SettleRequest) SettleResponse
 }
 
 // Config configures a transport host.

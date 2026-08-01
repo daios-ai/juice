@@ -25,7 +25,11 @@ import (
 // Config holds kernel-level configuration.
 type Config struct {
 	FeeBPS            int64         // basis points, e.g. 2000 = 20%
-	RemoteBPS         int64         // basis points provider premium on inbound remote calls, default 500
+	RemoteBPS         int64         // basis points serving markup (execution tax + risk premium) on inbound remote calls, default 500
+	ImportBPS         int64         // basis points origin import fee on outbound remote calls, retained locally, default 500
+	ExposureMax       int64         // X: max gross unsecured receivables across all peers (§13); 0 = prepaid-only
+	SettlementTrigger int64         // Y: gross-receivables level flagging settlement_due (§13); 0 < Y < X when X > 0
+	SettlementQuantum int64         // Q: smallest fee-rational external payment (§13); 0 disables the probabilistic path
 	FeeRecipientID    string        // user ID that receives fees
 	TokenSecret       string        // HMAC secret for JWT signing
 	TokenTTL          time.Duration // token validity window
@@ -49,6 +53,7 @@ func DefaultConfig() Config {
 	return Config{
 		FeeBPS:        2000,
 		RemoteBPS:     500,
+		ImportBPS:     500,
 		TokenTTL:      15 * time.Minute,
 		ScriptTimeout: 10 * time.Second,
 		ScriptMemory:  64 * 1024 * 1024, // 64 MiB
@@ -2220,10 +2225,15 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
-	// Bilateral credit (§13): a peer caller may draw its Available negative down to -CreditMax; an
-	// ordinary caller has CreditMax=0, so this is the classic Available>=Price check. The atomic
-	// guard in store.BeginRun enforces the same bound against concurrent draws.
-	if caller.Available-action.Price < -caller.CreditMax {
+	// Global-exposure admission (§13). A peer caller (an inbound federated call this kernel serves)
+	// is charged the base price plus the serving markup, so it reserves the worst-case obligation
+	// W = price + premiumReserve and is admitted against the kernel-global exposure cap X inside the
+	// atomic guard of store.BeginRun (Sybil-proof). An ordinary caller reserves only the price and is
+	// gated here (prepaid); its exposure clause is a no-op.
+	var premiumReserve int64
+	if caller.IsPeer() {
+		premiumReserve = ceilDiv(action.Price*k.cfg.RemoteBPS, 10000)
+	} else if caller.Available < action.Price {
 		return nil, ErrInsufficientFunds.Wrapf("user has %d credits, action costs %d", caller.Available, action.Price)
 	}
 	now := time.Now().UTC()
@@ -2252,18 +2262,27 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 		t.IdempotencyKey = &key
 		t.DispatchJSON = marshalDispatch(args, "", k.remoteManifestPrice(action.Price))
 	}
-	if err := k.store.BeginRun(ctx, p, t, caller.ID, action.Price); err != nil {
+	if err := k.store.BeginRun(ctx, p, t, caller.ID, action.Price, premiumReserve, k.cfg.ExposureMax); err != nil {
+		if caller.IsPeer() && errors.Is(err, ErrInsufficientFunds) {
+			return nil, PeerUnfundedError(caller.Handle)
+		}
 		return nil, err
 	}
 	k.log.With(ctx).Info("process.created", "process_id", p.ID, "owner", caller.ID, "price", action.Price)
 	// Pass the validated Action snapshot and the funded root trace into Call: binds execution to
-	// the row just funded (no TOCTOU window). Call re-validates the snapshot.
+	// the row just funded (no TOCTOU window). Call re-validates the snapshot. A peer caller carries
+	// the serving-markup rate so the receipt levies premium and the parked reserve is released (§13).
+	var premiumBPS int64
+	if caller.IsPeer() {
+		premiumBPS = k.cfg.RemoteBPS
+	}
 	return k.Call(ctx, CallRequest{
 		CallerID:            caller.ID,
 		Action:              action,
 		Args:                args,
 		ExistingTraceID:     t.ID,
 		IdempotencyRecordID: idempotencyRecordID,
+		PremiumBPS:          premiumBPS,
 	})
 }
 
@@ -2897,7 +2916,7 @@ func (k *Kernel) CompleteIdempotencyRecordIfPending(ctx context.Context, id, res
 // ≤ gross on failure, 0 on rejection). It must be pre-computed by the caller so that
 // it is included in the JCS signature before the receipt is persisted.
 // Returns ErrInvalidState if the kernel has not been bootstrapped (no issuer configured).
-func (k *Kernel) buildReceipt(tx *Transaction, charge int64) (*Receipt, error) {
+func (k *Kernel) buildReceipt(tx *Transaction, charge, premium int64) (*Receipt, error) {
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
@@ -2924,6 +2943,7 @@ func (k *Kernel) buildReceipt(tx *Transaction, charge int64) (*Receipt, error) {
 		Net:          tx.Net,
 		Fee:          tx.Fee,
 		Charge:       charge,
+		Premium:      premium,
 		Reason:       tx.Reason,
 		StartedAt:    tx.StartedAt,
 		CreatedAt:    time.Now().UTC().Truncate(time.Second),

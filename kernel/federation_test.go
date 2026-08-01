@@ -181,9 +181,9 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 	if a.RemoteActionID != m.ActionID {
 		t.Errorf("remote_action_id: got %q, want %q", a.RemoteActionID, m.ActionID)
 	}
-	// proxyPrice = mp + ceil(mp*RemoteBPS/10000) = 50 + ceil(50*500/10000) = 50+3 = 53
-	if a.Price != 53 {
-		t.Errorf("price: got %d, want 53 (proxyPrice = mp + import duty)", a.Price)
+	// Two-step (§13): sr = 50 + ceil(50*500/10000) = 53; price = 53 + ceil(53*500/10000) = 53+3 = 56
+	if a.Price != 56 {
+		t.Errorf("price: got %d, want 56 (two-step: serving markup + import fee)", a.Price)
 	}
 }
 
@@ -245,9 +245,9 @@ func TestImportRemoteActionReimp(t *testing.T) {
 	if second.ID != firstID {
 		t.Error("reimport must preserve the same action ID")
 	}
-	// proxyPrice = mp + ceil(mp*RemoteBPS/10000) = 99 + ceil(99*500/10000) = 99+5 = 104
-	if second.Price != 104 {
-		t.Errorf("reimport price: got %d, want 104 (proxyPrice = mp + import duty)", second.Price)
+	// Two-step (§13): sr = 99 + ceil(99*500/10000) = 104; price = 104 + ceil(104*500/10000) = 104+6 = 110
+	if second.Price != 110 {
+		t.Errorf("reimport price: got %d, want 110 (two-step: serving markup + import fee)", second.Price)
 	}
 }
 
@@ -716,7 +716,7 @@ func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel,
 	}
 	m := kernel.ActionManifest{
 		ActionID: remoteActionID, OwnerHandle: "settle-peer", Name: "settleact",
-		Kind: kernel.KindHTTP, Price: proxyPrice, Description: "s",
+		Kind: kernel.KindHTTP, Price: proxyPrice, RemoteBPS: kernel.DefaultConfig().RemoteBPS, Description: "s",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
@@ -813,7 +813,8 @@ func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
 	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "ret-action", 1000)
-	mp := a.Price * 10000 / (10000 + bps)
+	mp := k.RemoteManifestPrice(a.Price)
+	premium := (mp*bps + 9999) / 10000
 
 	// Call while the peer is offline → pending, no settled transaction, funds locked.
 	if _, err := k.Run(ctx, caller.ID, "settle-peer/settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
@@ -831,7 +832,7 @@ func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
 	r := &kernel.Receipt{
 		ID: uuid.New().String(), TxID: "rtx", ActionID: "ret-action",
 		ArgsHash: jcsHashForTest(t, `{}`), ReplyHash: jcsHashForTest(t, `{}`),
-		Status: kernel.TxSuccess, Charge: mp, StartedAt: now, CreatedAt: now,
+		Status: kernel.TxSuccess, Charge: mp, Premium: premium, StartedAt: now, CreatedAt: now,
 	}
 	r.Signature = signReceiptForTest(t, priv, r)
 	b, _ := json.Marshal(r)
@@ -847,10 +848,10 @@ func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
 	if len(txs) != 1 || txs[0].Status != kernel.TxSuccess {
 		t.Fatalf("expected 1 success transaction after retry, got %+v", txs)
 	}
-	if txs[0].Net != mp {
-		t.Errorf("net: got %d, want %d", txs[0].Net, mp)
+	if txs[0].Net != mp+premium {
+		t.Errorf("net: got %d, want %d (charge+premium paid to proxy)", txs[0].Net, mp+premium)
 	}
-	// Caller was funded exactly the proxy price (mp+duty); a success spends it all and closes the process.
+	// Caller was funded exactly the proxy price; a success spends it all and closes the process.
 	after, _ := st.ReadUser(ctx, caller.ID)
 	if after.Locked != 0 {
 		t.Errorf("expected 0 locked after settlement, got %d", after.Locked)
@@ -920,7 +921,8 @@ func TestPendingRemoteTracesAndRetryWrappers(t *testing.T) {
 	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "wrap-action", 1000)
-	mp := a.Price * 10000 / (10000 + bps)
+	mp := k.RemoteManifestPrice(a.Price)
+	premium := (mp*bps + 9999) / 10000
 
 	if _, err := k.Run(ctx, caller.ID, "settle-peer/settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
@@ -938,7 +940,7 @@ func TestPendingRemoteTracesAndRetryWrappers(t *testing.T) {
 	r := &kernel.Receipt{
 		ID: uuid.New().String(), TxID: "rtx", ActionID: "wrap-action",
 		ArgsHash: jcsHashForTest(t, `{}`), ReplyHash: jcsHashForTest(t, `{}`),
-		Status: kernel.TxSuccess, Charge: mp, StartedAt: now, CreatedAt: now,
+		Status: kernel.TxSuccess, Charge: mp, Premium: premium, StartedAt: now, CreatedAt: now,
 	}
 	r.Signature = signReceiptForTest(t, priv, r)
 	b, _ := json.Marshal(r)
@@ -1093,15 +1095,17 @@ func TestSettleRemoteCallValidChargeNotClamped(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	fake := &fakeFederationHTTP{}
 	bps := kernel.DefaultConfig().RemoteBPS
+	ibps := kernel.DefaultConfig().ImportBPS
 	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "valid-action", 1000)
 	_, tr := beginTestRun(t, st, caller.ID, a)
-	mp := a.Price * 10000 / (10000 + bps)
+	mp := k.RemoteManifestPrice(a.Price)
+	premium := (mp*bps + 9999) / 10000
 
 	now := time.Now().UTC()
 	r := &kernel.Receipt{
 		ID: uuid.New().String(), TxID: "rtx", ActionID: "valid-action",
 		ArgsHash: jcsHashForTest(t, `{}`), ReplyHash: jcsHashForTest(t, `{}`),
-		Status: kernel.TxSuccess, Charge: mp, StartedAt: now, CreatedAt: now,
+		Status: kernel.TxSuccess, Charge: mp, Premium: premium, StartedAt: now, CreatedAt: now,
 	}
 	r.Signature = signReceiptForTest(t, priv, r)
 	b, _ := json.Marshal(r)
@@ -1122,12 +1126,12 @@ func TestSettleRemoteCallValidChargeNotClamped(t *testing.T) {
 	if tx.Status != kernel.TxSuccess {
 		t.Fatalf("status: got %s, want success", tx.Status)
 	}
-	if tx.Net != mp {
-		t.Errorf("net: got %d, want %d (mp, unclamped)", tx.Net, mp)
+	if tx.Net != mp+premium {
+		t.Errorf("net: got %d, want %d (charge+premium, unclamped)", tx.Net, mp+premium)
 	}
-	wantDuty := (mp*bps + 9999) / 10000 // ceilDiv(mp*bps, 10000)
-	if tx.Fee != wantDuty {
-		t.Errorf("duty: got %d, want %d", tx.Fee, wantDuty)
+	wantImportFee := ((mp+premium)*ibps + 9999) / 10000 // ceilDiv((charge+premium)*import_bps, 10000)
+	if tx.Fee != wantImportFee {
+		t.Errorf("import fee: got %d, want %d", tx.Fee, wantImportFee)
 	}
 	v, err := k.VerifyRemoteReceipt(ctx, caller.ID, tx.ID)
 	if err != nil {
@@ -1333,8 +1337,8 @@ func TestLazyResolveRemoteCachesProxy(t *testing.T) {
 	if a.Kind != kernel.KindRemoteProxy || !a.Active || a.Visibility != kernel.VisibilityLocal {
 		t.Errorf("proxy row: kind=%v active=%v vis=%v", a.Kind, a.Active, a.Visibility)
 	}
-	if a.Price != 105 { // mp 100 + ceil(100*500/10000)=5
-		t.Errorf("price: got %d, want 105 (mp + premium)", a.Price)
+	if a.Price != 111 { // two-step: sr=100+5=105; price=105+ceil(105*500/10000)=105+6=111
+		t.Errorf("price: got %d, want 111 (two-step: serving markup + import fee)", a.Price)
 	}
 	if a.RemoteOwnerID != "remote-bob-id" {
 		t.Errorf("remote_owner_id: got %q, want remote-bob-id", a.RemoteOwnerID)
@@ -2379,7 +2383,7 @@ func TestCrashRecoveryCompletesInboundRecordForALocalAction(t *testing.T) {
 		ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, ActionID: action.ID,
 		CallerUserID: peer.ID, IdempotencyRecordID: &rec.ID, CreatedAt: time.Now().UTC(),
 	}
-	if err := st.BeginRun(ctx, p, tr, peer.ID, 0); err != nil {
+	if err := st.BeginRun(ctx, p, tr, peer.ID, 0, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 

@@ -424,6 +424,7 @@ func (t *Transport) registerHandlers() {
 	t.host.SetStreamHandler(protocol.ID(ProtocolGossip), t.handleGossip)
 	t.host.SetStreamHandler(protocol.ID(ProtocolInspect), t.handleInspect)
 	t.host.SetStreamHandler(protocol.ID(ProtocolStep), t.handleStep)
+	t.host.SetStreamHandler(protocol.ID(ProtocolSettle), t.handleSettle)
 }
 
 // serveReq reads one typed request frame, runs handle, and writes its response frame. Used by the
@@ -460,6 +461,10 @@ func (t *Transport) handleStep(s network.Stream) {
 
 func (t *Transport) handleResolve(s network.Stream) {
 	serveReq(s, func(key string, req ResolveRequest) any { return t.cfg.Handlers.OnResolve(context.Background(), key, req) })
+}
+
+func (t *Transport) handleSettle(s network.Stream) {
+	serveReq(s, func(key string, req SettleRequest) any { return t.cfg.Handlers.OnSettle(context.Background(), key, req) })
 }
 
 func (t *Transport) handleGossip(s network.Stream) {
@@ -535,6 +540,11 @@ func (t *Transport) Step(ctx context.Context, peerKey string, req StepRequest) (
 // Resolve fetches one action's signed manifest or one user's stable id+handle from the peer (§13).
 func (t *Transport) Resolve(ctx context.Context, peerKey string, req ResolveRequest) (ResolveResponse, error) {
 	return roundTrip[ResolveRequest, ResolveResponse](ctx, t, peerKey, ProtocolResolve, req)
+}
+
+// Settle runs one round of the two-party residual settlement commit/reveal with the peer (§13).
+func (t *Transport) Settle(ctx context.Context, peerKey string, req SettleRequest) (SettleResponse, error) {
+	return roundTrip[SettleRequest, SettleResponse](ctx, t, peerKey, ProtocolSettle, req)
 }
 
 // Gossip fetches the peer's gossip document.

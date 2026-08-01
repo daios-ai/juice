@@ -92,6 +92,7 @@ func TestValidateRedirectHostAllowed(t *testing.T) {
 // without a network.
 type fakeFedCaller struct {
 	resolveResp fed.ResolveResponse
+	settleResp  fed.SettleResponse
 	resp    fed.CallResponse
 	err     error
 	lastReq fed.CallRequest
@@ -104,6 +105,10 @@ func (f *fakeFedCaller) Call(_ context.Context, _ string, req fed.CallRequest) (
 
 func (f *fakeFedCaller) Resolve(_ context.Context, _ string, _ fed.ResolveRequest) (fed.ResolveResponse, error) {
 	return f.resolveResp, f.err
+}
+
+func (f *fakeFedCaller) Settle(_ context.Context, _ string, _ fed.SettleRequest) (fed.SettleResponse, error) {
+	return f.settleResp, f.err
 }
 
 func TestExecuteFederationSuccess(t *testing.T) {

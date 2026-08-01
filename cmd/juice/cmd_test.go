@@ -761,7 +761,7 @@ func setupProcessCmd(t *testing.T, env *testEnv, ownerID string, funds int64) (*
 		CallerUserID:  ownerID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := env.db.BeginRun(ctx, p, tr, ownerID, funds); err != nil {
+	if err := env.db.BeginRun(ctx, p, tr, ownerID, funds, 0, 0); err != nil {
 		t.Fatalf("setupProcessCmd: %v", err)
 	}
 	return p, tr
@@ -850,7 +850,7 @@ func TestProcessNegativeFundsFails(t *testing.T) {
 		CallerUserID:  owner.ID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	err := env.db.BeginRun(ctx, p, tr, owner.ID, -1)
+	err := env.db.BeginRun(ctx, p, tr, owner.ID, -1, 0, 0)
 	if err == nil {
 		t.Error("expected error creating process with negative funds")
 	}

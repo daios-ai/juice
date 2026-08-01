@@ -58,7 +58,7 @@ _all_receipt_checks() {
 import sys,json
 vr=json.loads(sys.argv[1]); c=vr.get('checks',{}); bad=[]
 if vr.get('valid') is not True: bad.append('valid')
-for k in ['receipt_hash','signature','action_id','status','charge','settlement_arith','refund_conservation','args_hash','reply_hash']:
+for k in ['receipt_hash','signature','action_id','status','charge','premium','settlement_arith','refund_conservation','args_hash','reply_hash']:
     if c.get(k) is not True: bad.append(k)
 print('OK' if not bad else 'FAIL:'+','.join(bad))" "$1" 2>/dev/null
 }
@@ -226,12 +226,14 @@ flow_fed_import_duty() {
     local dir; dir=$(new_dir)
     _fed_setup "$dir" || { fail "fed_import_duty.setup" "setup failed"; return; }
 
-    # Paid action on R (1000); proxy price = 1000 + ceil(1000*500/10000) = 1050 (5% duty).
+    # Two-step pricing (§13). mp=1000, remote_bps=500, import_bps=500:
+    #   sr    = 1000 + ceil(1000*500/10000) = 1050  (serving markup, → R's sys)
+    #   price = 1050 + ceil(1050*500/10000) = 1103  (import fee 53, retained by L's sys)
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create duty-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "duty" --price 1000)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$pid" --visibility public >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin subscribe "$FED_RKEY" >/dev/null 2>&1
-    assert_jnum "fed_import_duty.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show kernel-r/sys/duty-svc)" price 1050
+    assert_jnum "fed_pricing.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show kernel-r/sys/duty-svc)" price 1103
 
     # R deposits to L's account by key (handshake-free: this both provisions and funds it, §13).
     j "$FED_DBR" "$FED_HR" admin deposit "$FED_LKEY" 5000 >/dev/null 2>&1
@@ -239,16 +241,17 @@ flow_fed_import_duty() {
     local ub pb; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available); pb=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show "$FED_LKEY")" available)
 
     local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run kernel-r/sys/duty-svc '{}')" tx_id)
-    assert_nonempty "fed_import_duty.call_succeeded" "$tx_id"
+    assert_nonempty "fed_pricing.call_succeeded" "$tx_id"
     local ua pa; ua=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available); pa=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show "$FED_LKEY")" available)
-    # L's sys is caller AND fee recipient: gross 1050 out, fee 50 back → net 1000.
-    assert_eq "fed_import_duty.user_charged" 1000 "$(( ub - ua ))"
-    assert_eq "fed_import_duty.peer_charged_base" 1000 "$(( pb - pa ))"
+    # L's sys is caller AND origin fee recipient: locks 1103, gets the 53 import fee back → net 1050 out.
+    assert_eq "fed_pricing.user_charged" 1050 "$(( ub - ua ))"
+    # L's account on R pays the cross-kernel obligation: charge 1000 + serving premium 50 = 1050.
+    assert_eq "fed_pricing.peer_charged" 1050 "$(( pb - pa ))"
     local tx; tx=$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")
-    assert_jnum "fed_import_duty.tx_gross" "$tx" gross 1050
-    assert_jnum "fed_import_duty.tx_net"   "$tx" net 1000
-    assert_jnum "fed_import_duty.tx_fee"   "$tx" fee 50
-    assert_json "fed_import_duty.tx_status" "$tx" status success
+    assert_jnum "fed_pricing.tx_gross" "$tx" gross 1103
+    assert_jnum "fed_pricing.tx_net"   "$tx" net 1050
+    assert_jnum "fed_pricing.tx_fee"   "$tx" fee 53
+    assert_json "fed_pricing.tx_status" "$tx" status success
 }
 
 flow_fed_failed_action_refund() {
@@ -257,7 +260,7 @@ flow_fed_failed_action_refund() {
     _fed_setup "$dir" || { fail "fed_failed_refund.setup" "setup failed"; return; }
     fport=$(backend_port); start_backend "$fport" 500 '{"error":"boom"}'
 
-    # Paid action on R backed by a 500 backend; proxy price = 100 + ceil(100*5%) = 105.
+    # Paid action on R backed by a 500 backend; two-step price = sr(105) + ceil(105*5%) = 111.
     local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create fail-svc --kind http --source "http://127.0.0.1:$fport" --description "fails" --price 100)" id)
     j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$pid" --visibility public >/dev/null 2>&1
@@ -273,7 +276,7 @@ flow_fed_failed_action_refund() {
     assert_nonempty "fed_failed_refund.tx_recorded" "$tx_id"
     local tx; tx=$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")
     assert_json "fed_failed_refund.tx_status_failure" "$tx" status failure
-    assert_jnum "fed_failed_refund.tx_gross" "$tx" gross 105
+    assert_jnum "fed_failed_refund.tx_gross" "$tx" gross 111
     assert_jnum "fed_failed_refund.tx_net_zero" "$tx" net 0
     assert_jnum "fed_failed_refund.tx_fee_zero" "$tx" fee 0
 }
@@ -538,4 +541,55 @@ flow_fed_step_complete() {
     j "$FED_DBR" "$FED_HR" admin unsuspend "$FED_LKEY" >/dev/null 2>&1
     assert_contains "fed_step_complete.unsuspend_restores" tx_id \
         "$(jj "$FED_DBL" "$FED_HL" step complete "$step2" --peer "$FED_RKEY" '{}')"
+}
+
+# flow_settlement exercises the §13 residual settlement protocol end-to-end over the real transport:
+# L draws R's global exposure (unfunded paid call), so L owes R a sub-quantum debt, then `admin settle`
+# runs the two-party probabilistic commit/reveal and both bilateral rows clear to zero.
+flow_settlement() {
+    echo "=== FLOW settlement ==="
+    local dir; dir=$(new_dir)
+    FED_DBL="$dir/l/juice.db"; FED_DBR="$dir/r/juice.db"
+    FED_HL="$dir/lsys"; FED_HR="$dir/rsys"
+    mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
+    local bport; bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
+
+    # R (creditor) extends global exposure and sets the fee-rational quantum; L (debtor) shares Q so it
+    # takes the probabilistic branch for a sub-quantum debt.
+    start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r exposure_max=1000 settlement_trigger=500 settlement_quantum=100 || { fail "settlement.setup_r" "boot"; return; }
+    local boot; boot=$(kernel_fed_addr "$FED_DBR"); [ -n "$boot" ] || { fail "settlement.boot" "no addr"; return; }
+    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$boot" settlement_quantum=100 || { fail "settlement.setup_l" "boot"; return; }
+    j "$FED_DBR" "$FED_HR" auth login sys --password sys-pass >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" auth login sys --password sys-pass >/dev/null 2>&1
+    local rkey; rkey=$(kernel_key "$FED_DBR" "$FED_HR"); [ -n "$rkey" ] || { fail "settlement.rkey" "empty"; return; }
+    local lkey; lkey=$(kernel_key "$FED_DBL" "$FED_HL"); [ -n "$lkey" ] || { fail "settlement.lkey" "empty"; return; }
+
+    # R: paid action (mp=10). L subscribes and funds only its OWN caller (never prepaid on R).
+    local rid; rid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create paid --kind http --source "http://127.0.0.1:$bport" --description "paid" --price 10)" id)
+    j "$FED_DBR" "$FED_HR" action enable "$rid" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" action update "$rid" --visibility public >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin subscribe "$rkey" >/dev/null 2>&1 || { fail "settlement.subscribe" "failed"; return; }
+    j "$FED_DBL" "$FED_HL" admin deposit sys 1000 >/dev/null 2>&1
+
+    # L calls the paid action unfunded on R → R admits it against its global exposure → L now owes R.
+    assert_nonempty "settlement.call_on_credit" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run kernel-r/sys/paid '{}')" tx_id)"
+    local d; d=$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)
+    assert_eq "settlement.debtor_owes_r" 11 "$d"   # charge 10 + serving premium 1
+    assert_eq "settlement.creditor_owed_by_l" -11 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show "$lkey")" available)"
+
+    # R flags settlement_due once gross receivables reach Y (display only, FIX 3) — 11 < 500 here, so not yet.
+    assert_json "settlement.identity_has_quantum" "$(jj "$FED_DBR" "$FED_HR" admin identity)" settlement_quantum 100
+
+    # Settle: L is the debtor; d=11 < Q=100 → the probabilistic commit/reveal runs over the transport.
+    local out; out=$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r)
+    assert_json "settlement.settled" "$out" mode probabilistic
+    local outcome; outcome=$(strfield "$out" outcome)
+    assert_eq "settlement.outcome_valid" ok "$(case "$outcome" in pay|clear) echo ok;; *) echo "bad:$outcome";; esac)"
+
+    # A completed outcome clears the debt on BOTH kernels, whichever way the coin fell.
+    assert_eq "settlement.debtor_row_cleared"   0 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)"
+    assert_eq "settlement.creditor_row_cleared" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show "$lkey")" available)"
+
+    # Nothing left to settle: a second run reports the zero position, not a new flip.
+    assert_json "settlement.idempotent" "$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r)" status settled
 }

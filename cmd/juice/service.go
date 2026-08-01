@@ -1213,8 +1213,11 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 		// zero-charge rejection receipt so the caller can settle locally without leaving the
 		// trace pending.
 		status, msg := http.StatusUnprocessableEntity, callErr.Error()
-		if errors.Is(callErr, kernel.ErrInsufficientFunds) {
-			status, msg = http.StatusPaymentRequired, "insufficient balance"
+		// Insufficient prepaid balance or exhausted global exposure (§13) both surface to the caller as
+		// a 402 so its settleRemoteCall attributes them to the operator (settle/deposit), never to the
+		// caller's own funds.
+		if errors.Is(callErr, kernel.ErrInsufficientFunds) || errors.Is(callErr, kernel.ErrPeerUnfunded) {
+			status, msg = http.StatusPaymentRequired, "global exposure exhausted"
 		}
 		if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey, msg); signErr == nil {
 			receiptJSON, _ := json.Marshal(receipt)
