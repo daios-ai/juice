@@ -165,10 +165,12 @@ func (s *server) ctlAdjust(credit bool) http.HandlerFunc {
 }
 
 // ctlSettlePeer settles the bilateral position with a peer (§13): exact when |d| ≥ Q, otherwise the
-// probabilistic residual protocol. Superuser only; the kernel decides direction and mode.
+// probabilistic residual protocol. With a settlement_id it instead records the rail payment for a
+// paid probabilistic outcome (SettleCash). Superuser only; the kernel decides direction and mode.
 func (s *server) ctlSettlePeer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Handle string `json:"handle"`
+		Handle       string `json:"handle"`
+		SettlementID string `json:"settlement_id"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -178,7 +180,12 @@ func (s *server) ctlSettlePeer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	res, err := s.kernel.SettlePeer(r.Context(), callerFrom(r), u.ID)
+	var res map[string]any
+	if req.SettlementID != "" {
+		res, err = s.kernel.SettleCash(r.Context(), callerFrom(r), u.ID, req.SettlementID)
+	} else {
+		res, err = s.kernel.SettlePeer(r.Context(), callerFrom(r), u.ID)
+	}
 	if err != nil {
 		writeErr(w, err)
 		return

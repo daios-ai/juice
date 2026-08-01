@@ -141,11 +141,15 @@ func DefaultServerConfig() ServerConfig {
 		},
 		ScriptTimeoutMS:   10000,
 		ScriptMemoryBytes: 64 * 1024 * 1024,
-		FeeBPS:            2000,
-		RemoteBPS:         500,
-		ImportBPS:         500,
-		ExposureMax:       0,
-		SettlementTrigger: 0,
+		FeeBPS:    2000,
+		RemoteBPS: 500,
+		ImportBPS: 500,
+		// A fresh kernel serves remote paid calls out of the box (§13): X=1000 caps the total
+		// unsecured credit it extends across all peers (a bounded, Sybil-proof maximum loss),
+		// flagged for settlement at Y=500. Set exposure_max=0 to opt into prepaid-only. Q stays 0
+		// (rail-dependent; the operator sets it from F/r to enable the probabilistic residual path).
+		ExposureMax:       1000,
+		SettlementTrigger: 500,
 		SettlementQuantum: 0,
 		TokenTTL:          "15m",
 		AuthIssuer:        "",

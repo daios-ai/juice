@@ -634,77 +634,92 @@ func TestBeginRunGlobalExposure(t *testing.T) {
 	}
 }
 
-// TestCommitSettlementThreeWayAndIdempotency verifies the §13 residual-settlement store op: the debt
-// clears on the peer row, the variance lands on sys, the per-kernel identity Δrow + Δsys = external
-// cash holds, and a settlement_id replay is a no-op that re-serves the first record (anti-grinding).
-func TestCommitSettlementThreeWayAndIdempotency(t *testing.T) {
+// TestCommitSettlement verifies the §13 rail-anchored residual-settlement store ops: a pay outcome
+// moves no balance (the debt stays, pending), a clear outcome extinguishes it, the cash finalization
+// is the only non-conservative move, insufficient debtor reserve rolls back with no partial writes,
+// and every path is idempotent.
+func TestCommitSettlement(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	sys := newUser("sys", 0)
+	sys := newUser("sys", 100) // operator reserve (accumulated fees) absorbs write-off variance
 	if err := db.CreateUser(ctx, sys); err != nil {
 		t.Fatal(err)
 	}
 	const d, Q = int64(3), int64(10)
 
-	// Creditor pay outcome: a peer owes us d (available −d); clear +d on the row, variance +(Q−d) on
-	// sys. Δrow(+3) + Δsys(+7) = 10 = external cash Q received — conservation holds.
-	peer := newPeer(t, db, "peerPay", "pkPay", -d, 0, now)
-	stored, err := db.CommitSettlement(ctx, "sid-pay", peer.ID, sys.ID, d, Q-d, `{"outcome":"pay"}`)
-	if err != nil {
+	// (6) Clear outcome (creditor: peer owes us d): clear +d on the row, sys absorbs −d, no cash.
+	pc := newPeer(t, db, "peerClear", "pkClear", -d, 0, now)
+	sys0, _ := db.ReadUser(ctx, sys.ID)
+	if _, err := db.CommitSettlement(ctx, "sid-clear", pc.ID, sys.ID, d, -d, d, `{"outcome":"clear"}`); err != nil {
 		t.Fatal(err)
 	}
-	if stored != "" {
-		t.Errorf("first apply must not report an idempotent replay, got %q", stored)
+	if u, _ := db.ReadUser(ctx, pc.ID); u.Available != 0 {
+		t.Errorf("clear: peer row got %d, want 0", u.Available)
 	}
-	if pu, _ := db.ReadUser(ctx, peer.ID); pu.Available != 0 {
-		t.Errorf("peer row after pay: got %d, want 0 (debt cleared)", pu.Available)
-	}
-	if su, _ := db.ReadUser(ctx, sys.ID); su.Available != Q-d {
-		t.Errorf("sys variance after pay: got %d, want %d", su.Available, Q-d)
+	if u, _ := db.ReadUser(ctx, sys.ID); u.Available != sys0.Available-d {
+		t.Errorf("clear: sys delta got %d, want %d", u.Available-sys0.Available, -d)
 	}
 
-	// Idempotent replay: the stored record is re-served with no balance change (anti-grinding — a
-	// second finish with a different nonce cannot apply a second outcome).
-	stored2, err := db.CommitSettlement(ctx, "sid-pay", peer.ID, sys.ID, d, Q-d, `{"outcome":"clear"}`)
-	if err != nil {
+	// (1) Pay outcome: NO balance change — the debt stays, and G is unchanged. Record stored (replay).
+	pp := newPeer(t, db, "peerPay", "pkPay", -d, 0, now)
+	if _, err := db.CommitSettlement(ctx, "sid-pay", pp.ID, sys.ID, 0, 0, d, `{"outcome":"pay"}`); err != nil {
 		t.Fatal(err)
 	}
-	if stored2 != `{"outcome":"pay"}` {
-		t.Errorf("replay must return the first record, got %q", stored2)
+	if u, _ := db.ReadUser(ctx, pp.ID); u.Available != -d {
+		t.Errorf("pay: peer row moved to %d, want unchanged %d", u.Available, -d)
 	}
-	if pu, _ := db.ReadUser(ctx, peer.ID); pu.Available != 0 {
-		t.Errorf("replay changed the peer balance: %d", pu.Available)
+	if pending, _ := db.HasPendingSettlement(ctx, pp.ID); !pending {
+		t.Error("pay: expected HasPendingSettlement true")
 	}
-	if rec, _ := db.ReadSettlementRecord(ctx, "sid-pay"); rec != `{"outcome":"pay"}` {
-		t.Errorf("ReadSettlementRecord: got %q", rec)
+	// (5) Replay returns the first record with no second application (anti-grinding).
+	if stored, _ := db.CommitSettlement(ctx, "sid-pay", pp.ID, sys.ID, 0, 0, d, `{"outcome":"clear"}`); stored != `{"outcome":"pay"}` {
+		t.Errorf("pay replay: got %q, want the stored pay record", stored)
 	}
 
-	// Creditor clear outcome: clear +d on the row, variance −d on sys, no external cash. Δrow(+5) +
-	// Δsys(−5) = 0 = cash — conservation holds for the zero-payment branch too.
-	peer2 := newPeer(t, db, "peerClear", "pkClear", -5, 0, now)
-	if _, err := db.CommitSettlement(ctx, "sid-clear", peer2.ID, sys.ID, 5, -5, `{"outcome":"clear"}`); err != nil {
+	// (3) Cash finalization (creditor): clear +d on the row, sys += (Q−d), record cash Q.
+	sysBefore, _ := db.ReadUser(ctx, sys.ID)
+	if _, err := db.CommitSettlementCash(ctx, "sid-pay", pp.ID, sys.ID, d, Q-d, Q, `{"outcome":"cash"}`); err != nil {
 		t.Fatal(err)
 	}
-	if p2, _ := db.ReadUser(ctx, peer2.ID); p2.Available != 0 {
-		t.Errorf("peer2 row after clear: got %d, want 0", p2.Available)
+	if u, _ := db.ReadUser(ctx, pp.ID); u.Available != 0 {
+		t.Errorf("cash: peer row got %d, want 0 (debt cleared)", u.Available)
 	}
-	if s2, _ := db.ReadUser(ctx, sys.ID); s2.Available != (Q-d)-5 {
-		t.Errorf("sys after clear: got %d, want %d", s2.Available, (Q-d)-5)
+	if u, _ := db.ReadUser(ctx, sys.ID); u.Available != sysBefore.Available+(Q-d) {
+		t.Errorf("cash: sys variance got %d, want +%d", u.Available-sysBefore.Available, Q-d)
 	}
-	// Debtor leg: dClear is negative (the debtor owes and clears down), which the ledger's amount>0
-	// CHECK must still accept (the magnitude is stored). A peer this kernel owes d=4, clear outcome.
-	debtor := newPeer(t, db, "peerDebtor", "pkDebtor", 4, 0, now)
-	if _, err := db.CommitSettlement(ctx, "sid-debtor", debtor.ID, sys.ID, -4, 4, `{"outcome":"clear"}`); err != nil {
-		t.Fatalf("debtor-side settlement (negative dClear) failed: %v", err)
+	if pending, _ := db.HasPendingSettlement(ctx, pp.ID); pending {
+		t.Error("cash: settlement should no longer be pending")
 	}
-	if du, _ := db.ReadUser(ctx, debtor.ID); du.Available != 0 {
-		t.Errorf("debtor row after clear: got %d, want 0", du.Available)
+	// Cash replay is a no-op.
+	if _, err := db.CommitSettlementCash(ctx, "sid-pay", pp.ID, sys.ID, d, Q-d, Q, `{"outcome":"cash"}`); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := db.ReadUser(ctx, pp.ID); u.Available != 0 {
+		t.Errorf("cash replay changed the row: %d", u.Available)
 	}
 
-	// Both settled peers are back at zero, so global receivables are zero.
-	if g, _ := db.GrossReceivables(ctx); g != 0 {
-		t.Errorf("gross receivables after settling: got %d, want 0", g)
+	// (8) Debtor cash with insufficient sys reserve rolls back — no partial writes, still pending. A
+	// debtor owes d (row +d); paying Q needs sys ≥ Q−d, but sys here (a fresh user) has 0.
+	poor := newUser("poorSys", 0)
+	_ = db.CreateUser(ctx, poor)
+	dbtr := newPeer(t, db, "peerDebtor", "pkDebtor", d, 0, now)
+	if _, err := db.CommitSettlement(ctx, "sid-dp", dbtr.ID, poor.ID, 0, 0, d, `{"outcome":"pay"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CommitSettlementCash(ctx, "sid-dp", dbtr.ID, poor.ID, -d, -(Q - d), Q, `{"outcome":"cash"}`); err == nil {
+		t.Error("cash with insufficient debtor reserve should fail")
+	}
+	if u, _ := db.ReadUser(ctx, dbtr.ID); u.Available != d {
+		t.Errorf("failed cash left a partial write on the row: got %d, want %d", u.Available, d)
+	}
+	if pending, _ := db.HasPendingSettlement(ctx, dbtr.ID); !pending {
+		t.Error("failed cash should leave the settlement pending")
+	}
+
+	// The conservation guard rejects a non-conservative outcome record.
+	if _, err := db.CommitSettlement(ctx, "sid-bad", pc.ID, sys.ID, d, 0, d, `{"outcome":"clear"}`); err == nil {
+		t.Error("CommitSettlement must reject dClear+variance != 0")
 	}
 }
 
@@ -777,7 +792,7 @@ func TestCommitCall(t *testing.T) {
 		Gross: 100, Net: 80, Fee: 20, CreatedAt: time.Now().UTC(),
 	}
 	// Root call: callerWalletID=p.ID, callerWalletKind=CallerProcess
-	if err := db.CommitCall(ctx, tx, receipt, root.ID, p.ID, kernel.CallerProcess, target.ID, fee.ID, 80, 20, 0, nil, "", ""); err != nil {
+	if err := db.CommitCall(ctx, tx, receipt, root.ID, p.ID, kernel.CallerProcess, target.ID, fee.ID, 80, 20, nil, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -800,6 +815,50 @@ func TestCommitCall(t *testing.T) {
 	stored, err := db.ReadTransaction(ctx, tx.ID)
 	if err != nil || stored.Status != kernel.TxSuccess {
 		t.Errorf("transaction not committed: %v", err)
+	}
+}
+
+// TestPremiumReserveReleasedFromTrace is the F1 regression: the serving-markup reserve parked at
+// admission must be released from the trace's premium_parked snapshot at settlement — WITHOUT any
+// in-memory request — so crash-recovery / forced-closure failure paths (which rebuild the request
+// with no rate) never leak it in owner.locked. Here a peer-owner root call parks a reserve, then
+// CommitFailedCall (the recovery settle op) fully restores the balance.
+func TestPremiumReserveReleasedFromTrace(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	sys := newUser("sys", 0)
+	_ = db.CreateUser(ctx, sys)
+	const price, reserve = int64(100), int64(5)
+	peer := newPeer(t, db, "peer", "pk", price+reserve, 0, now)
+
+	p := newProcess(peer.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, PremiumBPS: 500, PremiumParked: reserve, CreatedAt: now}
+	if err := db.BeginRun(ctx, p, root, peer.ID, price, reserve, 0); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := db.ReadUser(ctx, peer.ID); u.Available != 0 || u.Locked != price+reserve {
+		t.Fatalf("after BeginRun: available=%d locked=%d, want 0/%d", u.Available, u.Locked, price+reserve)
+	}
+
+	// Settle as a failure with a full refund — mirrors recoverTrace, which passes NO premium reserve
+	// (it rebuilds the request fresh); the store must read the reserve from the trace row alone.
+	tx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID, OwnerUserID: peer.ID,
+		CallerUserID: peer.ID, TargetUserID: peer.ID, ActionID: "dummy",
+		Status: kernel.TxFailure, Gross: price, Reason: "recovered", ArgsJSON: []byte("{}"), ReplyJSON: []byte("null"),
+		StartedAt: now, EndedAt: now,
+	}
+	buildFn := func(refund int64) (*kernel.Receipt, error) {
+		charge := price - refund // full refund ⇒ charge 0 ⇒ premium 0
+		return &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: sys.ID, TxID: tx.ID, TraceID: root.ID, ActionID: "dummy", Status: kernel.TxFailure, Charge: charge, CreatedAt: now}, nil
+	}
+	if err := db.CommitFailedCall(ctx, tx, buildFn, root.ID, p.ID, kernel.CallerProcess, sys.ID, price, nil, "", "recovered", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Reserve fully released: locked back to 0, available restored — no leak.
+	if u, _ := db.ReadUser(ctx, peer.ID); u.Locked != 0 || u.Available != price+reserve {
+		t.Errorf("after recovery: available=%d locked=%d, want %d/0 (reserve leaked in locked?)", u.Available, u.Locked, price+reserve)
 	}
 }
 
@@ -831,7 +890,7 @@ func TestEndProcess(t *testing.T) {
 		}, nil
 	}
 	// CallerProcess: root call's caller wallet is the process itself.
-	if err := db.CommitFailedCall(ctx, failTx, buildReceipt, root.ID, p.ID, kernel.CallerProcess, "", 600, 0, nil, "", "failure", ""); err != nil {
+	if err := db.CommitFailedCall(ctx, failTx, buildReceipt, root.ID, p.ID, kernel.CallerProcess, "", 600, nil, "", "failure", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1144,7 +1203,7 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	tx1 := makeTx(uuid.New().String(), p1.ID, tr1.ID, 100)
 	rc1 := makeReceipt(uuid.New().String(), tx1.ID, tr1.ID, 100)
 	stats1 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, LatencyEstimate: 0.1, LastUsedAt: time.Now().UTC()}
-	if err := db.CommitCall(ctx, tx1, rc1, tr1.ID, p1.ID, kernel.CallerProcess, target.ID, fee.ID, tx1.Net, tx1.Fee, 0, stats1, "", ""); err != nil {
+	if err := db.CommitCall(ctx, tx1, rc1, tr1.ID, p1.ID, kernel.CallerProcess, target.ID, fee.ID, tx1.Net, tx1.Fee, stats1, "", ""); err != nil {
 		t.Fatalf("CommitCall #1: %v", err)
 	}
 
@@ -1152,7 +1211,7 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	tx2 := makeTx(uuid.New().String(), p2.ID, tr2.ID, 50)
 	rc2 := makeReceipt(uuid.New().String(), tx2.ID, tr2.ID, 50)
 	stats2 := &kernel.Stats{ActionID: a.ID, Uses: 1, Successes: 1, LatencyEstimate: 0.3, LastUsedAt: time.Now().UTC()}
-	if err := db.CommitCall(ctx, tx2, rc2, tr2.ID, p2.ID, kernel.CallerProcess, target.ID, fee.ID, tx2.Net, tx2.Fee, 0, stats2, "", ""); err != nil {
+	if err := db.CommitCall(ctx, tx2, rc2, tr2.ID, p2.ID, kernel.CallerProcess, target.ID, fee.ID, tx2.Net, tx2.Fee, stats2, "", ""); err != nil {
 		t.Fatalf("CommitCall #2: %v", err)
 	}
 
@@ -1339,7 +1398,7 @@ func TestTransactionCRUD(t *testing.T) {
 		ArgsHash: "ah", ReplyHash: "rh", Status: kernel.TxSuccess,
 		Gross: 100, Net: 80, Fee: 20, CreatedAt: now,
 	}
-	if err := db.CommitCall(ctx, tx, receipt, root.ID, p.ID, kernel.CallerProcess, target.ID, feeUser.ID, 80, 20, 0, nil, "", ""); err != nil {
+	if err := db.CommitCall(ctx, tx, receipt, root.ID, p.ID, kernel.CallerProcess, target.ID, feeUser.ID, 80, 20, nil, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2085,7 +2144,7 @@ func TestCommitCallFeeDestructionRejected(t *testing.T) {
 	}
 
 	// fee=20 with empty feeRecipientID must be rejected.
-	err := db.CommitCall(ctx, tx, receipt, root.ID, p.ID, kernel.CallerProcess, target.ID, "", 80, 20, 0, nil, "", "")
+	err := db.CommitCall(ctx, tx, receipt, root.ID, p.ID, kernel.CallerProcess, target.ID, "", 80, 20, nil, "", "")
 	if err == nil {
 		t.Fatal("expected error when fee > 0 and feeRecipientID is empty, got nil")
 	}
@@ -2141,7 +2200,7 @@ func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 		Gross: 100, Net: 100, Fee: 0, CreatedAt: time.Now().UTC(),
 	}
 
-	if err := db.CommitCall(ctx, tx, receipt, root.ID, p.ID, kernel.CallerProcess, target.ID, "", 100, 0, 0, nil, rec.ID, ""); err != nil {
+	if err := db.CommitCall(ctx, tx, receipt, root.ID, p.ID, kernel.CallerProcess, target.ID, "", 100, 0, nil, rec.ID, ""); err != nil {
 		t.Fatalf("CommitCall: %v", err)
 	}
 
@@ -2196,7 +2255,7 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 
 	// Root call: callerWalletID=p.ID, callerWalletKind=CallerProcess
 	buildFn := func(_ int64) (*kernel.Receipt, error) { return receipt, nil }
-	if err := db.CommitFailedCall(ctx, tx, buildFn, root.ID, p.ID, kernel.CallerProcess, "", 100, 0, nil, rec.ID, "execution_failed", ""); err != nil {
+	if err := db.CommitFailedCall(ctx, tx, buildFn, root.ID, p.ID, kernel.CallerProcess, "", 100, nil, rec.ID, "execution_failed", ""); err != nil {
 		t.Fatalf("CommitFailedCall: %v", err)
 	}
 
@@ -2683,7 +2742,7 @@ func TestListDirectUnsettledChildren(t *testing.T) {
 		ActionID: act.ID, Status: kernel.TxSuccess, Gross: 50, Net: 40, Fee: 10,
 		CreatedAt: time.Now().UTC(),
 	}
-	if err := db.CommitCall(ctx, tx2, rc2, child2.ID, root.ID, kernel.CallerTrace, user.ID, feeUser.ID, 40, 10, 0, nil, "", ""); err != nil {
+	if err := db.CommitCall(ctx, tx2, rc2, child2.ID, root.ID, kernel.CallerTrace, user.ID, feeUser.ID, 40, 10, nil, "", ""); err != nil {
 		t.Fatalf("CommitCall child2: %v", err)
 	}
 
@@ -2750,7 +2809,7 @@ func TestResetStepAndReparkWithDescendantTransaction(t *testing.T) {
 		ActionID: act.ID, Status: kernel.TxSuccess, Gross: 50, Net: 40, Fee: 10,
 		CreatedAt: time.Now().UTC(),
 	}
-	if err := db.CommitCall(ctx, subTx, subRc, sub.ID, ct.ID, kernel.CallerTrace, user.ID, feeUser.ID, 40, 10, 0, nil, "", ""); err != nil {
+	if err := db.CommitCall(ctx, subTx, subRc, sub.ID, ct.ID, kernel.CallerTrace, user.ID, feeUser.ID, 40, 10, nil, "", ""); err != nil {
 		t.Fatalf("CommitCall sub: %v", err)
 	}
 

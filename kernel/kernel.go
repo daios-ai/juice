@@ -2230,9 +2230,20 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	// W = price + premiumReserve and is admitted against the kernel-global exposure cap X inside the
 	// atomic guard of store.BeginRun (Sybil-proof). An ordinary caller reserves only the price and is
 	// gated here (prepaid); its exposure clause is a no-op.
-	var premiumReserve int64
+	var premiumReserve, premiumBPS int64
 	if caller.IsPeer() {
-		premiumReserve = ceilDiv(action.Price*k.cfg.RemoteBPS, 10000)
+		premiumBPS = k.cfg.RemoteBPS
+		premiumReserve = ceilDiv(action.Price*premiumBPS, 10000)
+		// A peer with a paid probabilistic outcome still awaiting its rail record must finalize it
+		// before drawing new credit (§13). Fully-prepaid calls (available ≥ W) add no obligation and
+		// are unaffected; only credit-drawing calls are gated.
+		if w := action.Price + premiumReserve; w > caller.Available {
+			if pending, err := k.store.HasPendingSettlement(ctx, caller.ID); err != nil {
+				return nil, err
+			} else if pending {
+				return nil, PeerUnfundedError(caller.Handle)
+			}
+		}
 	} else if caller.Available < action.Price {
 		return nil, ErrInsufficientFunds.Wrapf("user has %d credits, action costs %d", caller.Available, action.Price)
 	}
@@ -2249,6 +2260,11 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 		ActionOwnerID: action.OwnerUserID,
 		ActionID:      action.ID,
 		CallerUserID:  caller.ID,
+		// Snapshot the serving markup on the root trace so every settlement path (commit, failure,
+		// recovery, forced closure) levies the receipt premium and releases the parked reserve
+		// config-independently (§13). Both 0 for a local caller.
+		PremiumBPS:    premiumBPS,
+		PremiumParked: premiumReserve,
 		CreatedAt:     now,
 	}
 	// Persist the inbound cross-kernel record on the trace, for every action kind: whichever
@@ -2270,19 +2286,14 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	}
 	k.log.With(ctx).Info("process.created", "process_id", p.ID, "owner", caller.ID, "price", action.Price)
 	// Pass the validated Action snapshot and the funded root trace into Call: binds execution to
-	// the row just funded (no TOCTOU window). Call re-validates the snapshot. A peer caller carries
-	// the serving-markup rate so the receipt levies premium and the parked reserve is released (§13).
-	var premiumBPS int64
-	if caller.IsPeer() {
-		premiumBPS = k.cfg.RemoteBPS
-	}
+	// the row just funded (no TOCTOU window). Call re-validates the snapshot. The serving-markup rate
+	// rides on the trace (loaded by Call), so no request field is needed.
 	return k.Call(ctx, CallRequest{
 		CallerID:            caller.ID,
 		Action:              action,
 		Args:                args,
 		ExistingTraceID:     t.ID,
 		IdempotencyRecordID: idempotencyRecordID,
-		PremiumBPS:          premiumBPS,
 	})
 }
 

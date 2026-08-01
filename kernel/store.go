@@ -245,10 +245,10 @@ type Store interface {
 	// settles funds (trace.available→target/sys; caller wallet locked released;
 	// owner.locked decremented by taxable), updates trace latency, upserts action stats,
 	// completes the idempotency record (if non-empty), and marks the step done (if non-empty).
-	// premiumReserve is the serving-markup reserve parked in the owner's locked at admission (§13);
-	// it is released here — receipt.Premium to feeRecipientID's sys, the remainder back to the owner
-	// (0 for every local call, so the premium legs are a no-op).
-	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee, premiumReserve int64, stats *Stats, idempotencyRecordID, stepID string) error
+	// The serving-markup reserve parked in the owner's locked at admission (§13) is released here from
+	// the trace's premium_parked snapshot — receipt.Premium to feeRecipientID's sys, the remainder back
+	// to the owner (0 for every local call/subcall, so the premium legs are a no-op).
+	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, idempotencyRecordID, stepID string) error
 
 	// CommitFailedCall atomically cancels all outstanding steps in the trace's subtree
 	// (collecting their parked prices), refunds trace.available + step prices to the caller
@@ -260,9 +260,9 @@ type Store interface {
 	// would double-count with the closure step.
 	// buildReceipt is called inside the transaction with the computed refund so that the
 	// signed charge (gross − refund) is guaranteed to match what is committed. It also fixes
-	// receipt.Premium, so the serving-markup legs (premiumReserve released to feeRecipientID's sys
-	// and the owner) cannot diverge from the signed number; 0 premiumReserve ⇒ no premium legs.
-	CommitFailedCall(ctx context.Context, tx *Transaction, buildReceipt func(refund int64) (*Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross, premiumReserve int64, stats *Stats, idempotencyRecordID, errorCode, stepID string) error
+	// receipt.Premium, so the serving-markup legs (the trace's parked reserve released to
+	// feeRecipientID's sys and the owner) cannot diverge from the signed number.
+	CommitFailedCall(ctx context.Context, tx *Transaction, buildReceipt func(refund int64) (*Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64, stats *Stats, idempotencyRecordID, errorCode, stepID string) error
 
 	// EndProcess cancels all waiting steps (returning parked prices to the process owner's
 	// available balance), then returns process.available to the owner, and closes the process.
@@ -465,17 +465,27 @@ type Store interface {
 	// cache; never a money path.
 	UpdatePeerSync(ctx context.Context, id string, lastSeen time.Time, credit *int64) error
 
-	// CommitSettlement atomically applies one residual-settlement outcome (§13), keyed idempotently by
-	// settlementID (the external_key read-first short-circuit): it clears dClear on the peer/proxy row
-	// (rowUserID), realizes variance on sysID, and records a settlement_id-keyed ledger entry holding
-	// recordJSON. A replay with an existing settlementID is a no-op that returns the stored record via
-	// storedRecord. The three internal effects satisfy Δrow + Δsys − external_cash = 0 (external_cash is
-	// the physical rail move, not a juice balance). Returns storedRecord="" on first application.
-	CommitSettlement(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance int64, recordJSON string) (storedRecord string, err error)
+	// CommitSettlement records one finish outcome atomically, keyed idempotently by settlementID (§13,
+	// the external_key read-first short-circuit — anti-grinding). A "clear" outcome passes dClear=±d,
+	// variance=∓d (internally conservative) and extinguishes the debt; a "pay" outcome passes
+	// dClear=variance=0, leaving the debt on the row until the cash record. `debt` (>0) is the ledger
+	// row amount. A replay returns the stored record via storedRecord; "" on first application.
+	CommitSettlement(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance, debt int64, recordJSON string) (storedRecord string, err error)
 
-	// ReadSettlementRecord returns the stored final record for a completed settlement (by settlementID),
-	// or "" if none exists yet — the creditor's idempotency/anti-grinding lookup before a finish flip.
+	// CommitSettlementCash finalizes a paid probabilistic outcome (§13), keyed idempotently by
+	// settlementID.cash: it clears the debt d on rowUserID, books the variance ±(Q−d) on sysID, and
+	// records the external cash Q — the sole non-conservative settlement move (this is where cash
+	// crosses the rail). A debtor with insufficient sys reserve trips the users CHECK and the tx rolls
+	// back, leaving the settlement pending with no partial writes.
+	CommitSettlementCash(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance, q int64, recordJSON string) (storedRecord string, err error)
+
+	// ReadSettlementRecord returns the stored record for a settlement (by settlementID), or "" if none
+	// exists yet — the creditor's idempotency/anti-grinding lookup before a finish flip.
 	ReadSettlementRecord(ctx context.Context, settlementID string) (string, error)
+
+	// HasPendingSettlement reports whether peerID has a paid probabilistic outcome awaiting its rail
+	// record (§13): a "pay" settlement with no companion .cash finalization.
+	HasPendingSettlement(ctx context.Context, peerID string) (bool, error)
 
 	// GrossReceivables returns Σ over peer rows of max(0, −available): the kernel's total unsecured
 	// receivables, compared against exposure_max/settlement_trigger for display (§13).

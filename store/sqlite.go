@@ -730,9 +730,9 @@ func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error
 
 func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTraceID *string, price int64) error {
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,created_at)
-		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?)`,
-		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, t.IdempotencyRecordID, timeToStr(t.CreatedAt),
+		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,premium_bps,premium_parked,created_at)
+		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?,?)`,
+		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, t.IdempotencyRecordID, t.PremiumBPS, t.PremiumParked, timeToStr(t.CreatedAt),
 	)
 	return dbErr(err, "insert trace")
 }
@@ -1013,10 +1013,16 @@ WHERE parent_trace_id IN (SELECT id FROM sub)
 // CallerTrace (parent trace.locked), or CallerStep (no lock to release; BeginStepCall
 // already consumed it — refund would go to process on failure).
 // applyPremiumLegs releases the serving-markup premium the peer owner parked in its locked balance
-// at admission (§13): the whole reserve leaves owner.locked, the actual premium (on the settled
-// charge, ≤ reserve) is credited to the serving kernel's sys, and the unused remainder refunds to
-// the owner. A no-op when reserve==0 (every local call), so callers invoke it unconditionally.
-func applyPremiumLegs(ctx context.Context, tx *sql.Tx, ownerID, sysID string, reserve, premium int64) error {
+// at admission (§13). The reserve is read from the root trace's premium_parked snapshot rather than a
+// caller argument, so EVERY settlement path — commit, failure, crash recovery, forced closure —
+// releases it without needing the in-memory request (0 on local calls and subcalls ⇒ no-op). The whole
+// reserve leaves owner.locked, the actual premium (≤ reserve) is credited to sys, and the remainder
+// refunds to the owner.
+func applyPremiumLegs(ctx context.Context, tx *sql.Tx, traceID, ownerID, sysID string, premium int64) error {
+	var reserve int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(premium_parked,0) FROM traces WHERE id=?`, traceID).Scan(&reserve); err != nil {
+		return dbErr(err, "premium legs: read reserve")
+	}
 	if reserve == 0 {
 		return nil
 	}
@@ -1043,7 +1049,7 @@ func applyPremiumLegs(ctx context.Context, tx *sql.Tx, ownerID, sysID string, re
 	return nil
 }
 
-func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee, premiumReserve int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
+func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
 	return s.withTx(ctx, "commit call", func(tx *sql.Tx) error {
 		taxable := net + fee
 		// Zero out trace.available (taxable flows out; the rest was consumed by subcalls/steps).
@@ -1095,9 +1101,9 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 				return fmt.Errorf("commit call: fee recipient %q not found: funds would be destroyed", feeRecipientID)
 			}
 		}
-		// Serving-markup premium (§13): release the reserve parked in the peer owner's locked, credit
-		// receipt.Premium to sys, refund the remainder. No-op for local calls (premiumReserve==0).
-		if err := applyPremiumLegs(ctx, tx, ktx.OwnerUserID, feeRecipientID, premiumReserve, receipt.Premium); err != nil {
+		// Serving-markup premium (§13): release the reserve snapshotted on the trace, credit
+		// receipt.Premium to sys, refund the remainder. No-op for local calls/subcalls.
+		if err := applyPremiumLegs(ctx, tx, traceID, ktx.OwnerUserID, feeRecipientID, receipt.Premium); err != nil {
 			return err
 		}
 		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, rawJSONStr(ktx.ReplyJSON), stepID, "commit call"); err != nil {
@@ -1111,7 +1117,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 //   - cancels all outstanding steps in the trace's subtree, summing their parked prices
 //   - total refund = trace.available + step prices
 //   - refunds total to caller wallet (process or parent trace); CallerStep → process.available
-func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buildReceipt func(refund int64) (*kernel.Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross, premiumReserve int64, stats *kernel.Stats, idempotencyRecordID, errorCode, stepID string) error {
+func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buildReceipt func(refund int64) (*kernel.Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64, stats *kernel.Stats, idempotencyRecordID, errorCode, stepID string) error {
 	return s.withTx(ctx, "commit failed call", func(tx *sql.Tx) error {
 		// Read trace.available before zeroing.
 		var traceAvailable int64
@@ -1168,7 +1174,7 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 		// The serving-markup premium reserve is a separate parked amount (not part of the process
 		// budget or the refund flow above), so it is released here in full — receipt.Premium (on the
 		// actual failed charge) to sys, the remainder back to the peer owner. No-op for local calls.
-		if err := applyPremiumLegs(ctx, tx, ktx.OwnerUserID, feeRecipientID, premiumReserve, receipt.Premium); err != nil {
+		if err := applyPremiumLegs(ctx, tx, traceID, ktx.OwnerUserID, feeRecipientID, receipt.Premium); err != nil {
 			return err
 		}
 		errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
@@ -1393,17 +1399,20 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 
 // ---- Traces ----
 
-const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,created_at`
+const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,premium_bps,premium_parked,created_at`
 
 func scanTrace(t *kernel.Trace, scanFn func(...any) error) error {
 	var createdAt string
 	var parentID, idempotencyKey, dispatchJSON, recordID sql.NullString
+	var premiumBPS, premiumParked sql.NullInt64
 	err := scanFn(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.ActionID, &t.CallerUserID,
-		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &recordID, &createdAt)
+		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &recordID, &premiumBPS, &premiumParked, &createdAt)
 	if err != nil {
 		return err
 	}
 	t.CreatedAt = strToTime(createdAt)
+	t.PremiumBPS = premiumBPS.Int64
+	t.PremiumParked = premiumParked.Int64
 	if parentID.Valid {
 		t.ParentTraceID = &parentID.String
 	}
@@ -2407,14 +2416,20 @@ func readLedgerByExternalKey(ctx context.Context, tx *sql.Tx, externalKey string
 	return &e, nil
 }
 
-// CommitSettlement applies one residual-settlement outcome atomically, keyed by settlementID (§13).
-func (s *DB) CommitSettlement(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance int64, recordJSON string) (string, error) {
+// commitSettlementRow applies a settlement's balance legs and records one idempotent ledger row (§13).
+// externalKey is the idempotency key (a replay returns the stored record with no balance change —
+// anti-grinding); ledgerAmt>0 is the debt/cash magnitude for the audit row; conserve requires
+// dClear+variance==0 (internal-only outcome records — clear applies ±d/∓d, a pending pay applies
+// 0/0). A cash finalization sets conserve=false, since it is the point where external cash Q enters
+// (dClear+variance==Q). A debtor's negative sys variance exceeding its reserve trips the
+// users.available CHECK, rolling the whole tx back → the settlement stays pending, no partial writes.
+func (s *DB) commitSettlementRow(ctx context.Context, externalKey, rowUserID, sysID string, dClear, variance, ledgerAmt int64, recordJSON string, conserve bool) (string, error) {
+	if conserve && dClear+variance != 0 {
+		return "", fmt.Errorf("commit settlement: non-conservative outcome (dClear=%d variance=%d)", dClear, variance)
+	}
 	var stored string
 	err := s.withTx(ctx, "commit settlement", func(tx *sql.Tx) error {
-		// Idempotency + anti-grinding in one mechanism: an existing settlement_id returns the stored
-		// record with no balance change, so a replayed finish (even a ground nonce) is re-served the
-		// first outcome and never applies a second.
-		existing, err := readLedgerByExternalKey(ctx, tx, settlementID)
+		existing, err := readLedgerByExternalKey(ctx, tx, externalKey)
 		if err != nil {
 			return err
 		}
@@ -2422,8 +2437,6 @@ func (s *DB) CommitSettlement(ctx context.Context, settlementID, rowUserID, sysI
 			stored = existing.Reason
 			return nil
 		}
-		// Clear the debt on the peer/proxy row and realize the variance on sys. Δrow + Δsys is exactly
-		// the external cash the physical rail moves (§13), so credits track cash without minting.
 		if dClear != 0 {
 			if _, err := tx.ExecContext(ctx, `UPDATE users SET available=available+? WHERE id=?`, dClear, rowUserID); err != nil {
 				return dbErr(err, "commit settlement: clear row")
@@ -2434,20 +2447,28 @@ func (s *DB) CommitSettlement(ctx context.Context, settlementID, rowUserID, sysI
 				return dbErr(err, "commit settlement: sys variance")
 			}
 		}
-		// to_user_id names the settled peer/proxy row (satisfies the ledger's non-null from/to CHECK
-		// and makes the entry attributable); amount is the debt magnitude |dClear| (the ledger's
-		// amount>0 CHECK; the signed balance change is applied above); reason carries the record JSON.
-		amt := dClear
-		if amt < 0 {
-			amt = -amt
-		}
+		// to_user_id names the settled peer/proxy row (non-null from/to CHECK + attribution); the
+		// signed balance change is applied above; reason carries the record JSON.
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO ledger (id,operator_user_id,from_user_id,to_user_id,amount,reason,external_key,created_at)
 			 VALUES (?,?,?,?,?,?,?,?)`,
-			"st_"+settlementID, sysID, nil, rowUserID, amt, recordJSON, settlementID, timeToStr(time.Now().UTC()))
+			"st_"+externalKey, sysID, nil, rowUserID, ledgerAmt, recordJSON, externalKey, timeToStr(time.Now().UTC()))
 		return dbErr(err, "commit settlement: insert ledger")
 	})
 	return stored, err
+}
+
+// CommitSettlement records a finish outcome (§13): clear applies ±d/∓d and extinguishes the debt; a
+// pending pay applies no legs (dClear=variance=0) and leaves the debt on the row until the cash record.
+func (s *DB) CommitSettlement(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance, debt int64, recordJSON string) (string, error) {
+	return s.commitSettlementRow(ctx, settlementID, rowUserID, sysID, dClear, variance, debt, recordJSON, true)
+}
+
+// CommitSettlementCash finalizes a paid probabilistic outcome (§13): it clears the debt d on the row,
+// books the variance ±(Q−d) on sys, and records the external cash Q under settlementID.cash — the
+// only settlement move that is not internally conservative, because it is where cash crosses the rail.
+func (s *DB) CommitSettlementCash(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance, q int64, recordJSON string) (string, error) {
+	return s.commitSettlementRow(ctx, settlementID+".cash", rowUserID, sysID, dClear, variance, q, recordJSON, false)
 }
 
 // ReadSettlementRecord returns the stored final record for settlementID, or "" if none exists.
@@ -2458,6 +2479,21 @@ func (s *DB) ReadSettlementRecord(ctx context.Context, settlementID string) (str
 		return "", nil
 	}
 	return reason, dbErr(err, "read settlement record")
+}
+
+// HasPendingSettlement reports whether peerID has a paid probabilistic outcome awaiting its rail
+// record (§13): a settlement row with outcome "pay" and no companion .cash finalization. The serving
+// side gates obligation-increasing calls on this; the debtor side reports it instead of re-flipping.
+func (s *DB) HasPendingSettlement(ctx context.Context, peerID string) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(
+		   SELECT 1 FROM ledger l
+		   WHERE l.to_user_id=? AND l.external_key IS NOT NULL AND l.external_key NOT LIKE '%.cash'
+		     AND l.reason LIKE '%"outcome":"pay"%'
+		     AND NOT EXISTS (SELECT 1 FROM ledger c WHERE c.external_key = l.external_key || '.cash'))`,
+		peerID).Scan(&exists)
+	return exists == 1, dbErr(err, "has pending settlement")
 }
 
 // GrossReceivables returns Σ over peer rows of max(0, −available) (§13).

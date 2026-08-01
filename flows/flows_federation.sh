@@ -583,12 +583,31 @@ flow_settlement() {
     # Settle: L is the debtor; d=11 < Q=100 → the probabilistic commit/reveal runs over the transport.
     local out; out=$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r)
     assert_json "settlement.settled" "$out" mode probabilistic
-    local outcome; outcome=$(strfield "$out" outcome)
+    local outcome sid
+    outcome=$(strfield "$out" outcome); sid=$(strfield "$out" settlement_id)
     assert_eq "settlement.outcome_valid" ok "$(case "$outcome" in pay|clear) echo ok;; *) echo "bad:$outcome";; esac)"
 
-    # A completed outcome clears the debt on BOTH kernels, whichever way the coin fell.
-    assert_eq "settlement.debtor_row_cleared"   0 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)"
-    assert_eq "settlement.creditor_row_cleared" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show "$lkey")" available)"
+    if [ "$outcome" = "clear" ]; then
+        # A clear outcome extinguishes the debt immediately on both kernels — no money moves.
+        assert_json "settlement.clear_status" "$out" status settled
+        assert_eq "settlement.clear_debtor_row"   0 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)"
+        assert_eq "settlement.clear_creditor_row" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show "$lkey")" available)"
+    else
+        # A pay outcome moves NO money yet (§13): the debt stays and the settlement is pending its rail record.
+        assert_json "settlement.pay_status" "$out" status pending_cash
+        assert_eq "settlement.pay_debtor_still_owes"   11 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)"
+        assert_eq "settlement.pay_creditor_still_owed" -11 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show "$lkey")" available)"
+        # A further credit-drawing call from L is refused while the pending pay is unsettled.
+        assert_fails "settlement.pending_blocks_call" "" -- j "$FED_DBL" "$FED_HL" run kernel-r/sys/paid '{}'
+        # Operators record the rail payment of Q on both kernels → both rows clear (sys books ±(Q−d)).
+        j "$FED_DBL" "$FED_HL" admin settle kernel-r --cash "$sid" >/dev/null 2>&1 || { fail "settlement.debtor_cash" "failed"; return; }
+        j "$FED_DBR" "$FED_HR" admin settle "$lkey" --cash "$sid" >/dev/null 2>&1 || { fail "settlement.creditor_cash" "failed"; return; }
+        assert_eq "settlement.cash_debtor_row"   0 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)"
+        assert_eq "settlement.cash_creditor_row" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show "$lkey")" available)"
+        # Replaying the cash record is a no-op.
+        j "$FED_DBL" "$FED_HL" admin settle kernel-r --cash "$sid" >/dev/null 2>&1
+        assert_eq "settlement.cash_idempotent" 0 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)"
+    fi
 
     # Nothing left to settle: a second run reports the zero position, not a new flip.
     assert_json "settlement.idempotent" "$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r)" status settled

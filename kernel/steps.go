@@ -118,7 +118,7 @@ func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Tr
 	if trace.IdempotencyRecordID != nil {
 		req.IdempotencyRecordID = *trace.IdempotencyRecordID
 	}
-	_, settleErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, recoverErr)
+	_, settleErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, 0, recoverErr)
 	return settleErr
 }
 

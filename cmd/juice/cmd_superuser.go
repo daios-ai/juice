@@ -241,14 +241,18 @@ func adminWithdrawCmd() *cobra.Command {
 }
 
 func adminSettleCmd() *cobra.Command {
-	return &cobra.Command{
+	var cash string
+	cmd := &cobra.Command{
 		Use:   "settle <peer>",
 		Short: "Settle the bilateral position with a peer: exact if debt ≥ Q, else the probabilistic residual protocol (§13)",
+		Long:  "Settle the bilateral position with a peer.\n\nWith no flags: exact settlement if the debt ≥ Q, otherwise the two-party probabilistic\ncommit/reveal. A paid probabilistic outcome does NOT move money — it leaves a debt of Q pending.\n\nAfter paying that Q on your rail, record it with --cash <settlement_id> (run on both kernels).",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("POST", "/control/peers/settle", map[string]any{"handle": args[0]})
+			return apiEmit("POST", "/control/peers/settle", map[string]any{"handle": args[0], "settlement_id": cash})
 		},
 	}
+	cmd.Flags().StringVar(&cash, "cash", "", "record the rail payment for a paid probabilistic outcome (settlement_id)")
+	return cmd
 }
 
 func peerInspectCmd() *cobra.Command {

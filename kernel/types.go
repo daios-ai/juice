@@ -256,8 +256,15 @@ type Trace struct {
 	// IdempotencyRecordID is the inbound cross-kernel record this trace serves (§13), set only on a
 	// root call made on a peer's behalf. Whichever settlement resolves the trace completes that
 	// record, so a crashed or parked federated call never strands its requester.
-	IdempotencyRecordID *string   `json:"idempotency_record_id,omitempty"`
-	CreatedAt           time.Time `json:"created_at"`
+	IdempotencyRecordID *string `json:"idempotency_record_id,omitempty"`
+	// PremiumBPS and PremiumParked snapshot the serving-markup admitted for an inbound federated root
+	// call (§13): the rate the receipt levies on the actual charge, and the reserve parked in the
+	// owner's locked at admission. Persisting them on the trace lets EVERY settlement path — commit,
+	// failure, crash recovery, forced closure — release the reserve without the in-memory request,
+	// and pins the rate against a mid-call config change. 0 on local calls and subcalls.
+	PremiumBPS    int64     `json:"premium_bps,omitempty"`
+	PremiumParked int64     `json:"premium_parked,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // Transaction records one attempted call. Immutable after creation.

@@ -467,7 +467,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 		ktx.Status = TxFailure
 		ktx.Reason = "remote call unsettled past max pending age"
 		logger.Warn("remote.retry.expired", "trace_id", trace.ID, "age_seconds", now.Sub(trace.CreatedAt).Seconds())
-		_, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, ErrTimeout.Wrap("remote call unsettled past max pending age"))
+		_, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, 0, ErrTimeout.Wrap("remote call unsettled past max pending age"))
 		return sErr
 	}
 	return nil
@@ -1631,12 +1631,14 @@ func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, s
 			return 0, nil, err
 		}
 		fb, _ := json.Marshal(&final)
-		// Creditor legs: clear +d on the peer row; variance +（Q−d) on pay, −d on clear.
-		variance := -open.Amount
-		if pay {
-			variance = open.Quantum - open.Amount
+		// A pay outcome changes NO balance (§13): the record is stored for anti-grinding and the debt
+		// stays d, pending the rail record. A clear outcome extinguishes the debt now (creditor: clear
+		// +d on the peer row, sys absorbs −d).
+		dClear, variance := int64(0), int64(0)
+		if !pay {
+			dClear, variance = open.Amount, -open.Amount
 		}
-		if _, err := k.store.CommitSettlement(ctx, settlementID, peer.ID, sysID, open.Amount, variance, string(fb)); err != nil {
+		if _, err := k.store.CommitSettlement(ctx, settlementID, peer.ID, sysID, dClear, variance, open.Amount, string(fb)); err != nil {
 			return 0, nil, err
 		}
 		return 200, fb, nil
@@ -1665,7 +1667,7 @@ func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, s
 			return 0, nil, err
 		}
 		fb, _ := json.Marshal(&final)
-		if _, err := k.store.CommitSettlement(ctx, settlementID, peer.ID, sysID, open.Amount, -open.Amount, string(fb)); err != nil {
+		if _, err := k.store.CommitSettlement(ctx, settlementID, peer.ID, sysID, open.Amount, -open.Amount, open.Amount, string(fb)); err != nil {
 			return 0, nil, err
 		}
 		return 200, fb, nil
@@ -1704,6 +1706,14 @@ func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (ma
 	}
 	if !peer.IsPeer() {
 		return nil, ErrInvalidInput.Wrap("settle applies only to peer accounts")
+	}
+	// A prior paid outcome still awaiting its rail record must be finalized (admin settle --cash)
+	// before opening a new lottery on the same position.
+	if pending, err := k.store.HasPendingSettlement(ctx, peer.ID); err != nil {
+		return nil, err
+	} else if pending {
+		return map[string]any{"status": "pending_cash", "handle": peer.Handle,
+			"message": "a paid probabilistic outcome is awaiting its rail record; pay the quantum, then run `admin settle <peer> --cash <settlement_id>`"}, nil
 	}
 	d := peer.Available // > 0 ⇒ this kernel owes the peer (we are the debtor)
 	switch {
@@ -1780,20 +1790,68 @@ func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (ma
 	if (pay && final.Outcome != "pay") || (!pay && final.Outcome != "clear") {
 		return nil, ErrInvalidState.Wrap("final outcome contradicts the revealed secret")
 	}
-	// Debtor legs: clear −d on our peer row; variance −(Q−d) on pay, +d on clear.
-	variance := d
-	if pay {
-		variance = -(open.Quantum - d)
+	// A pay outcome changes NO balance: the debt stays d until the operator records the rail payment
+	// (§13). A clear outcome extinguishes it now (debtor: clear −d, sys gains +d).
+	dClear, variance := int64(0), int64(0)
+	if !pay {
+		dClear, variance = -d, d
 	}
-	if _, err := k.store.CommitSettlement(ctx, settlementID, peer.ID, k.cfg.FeeRecipientID, -d, variance, string(body)); err != nil {
+	if _, err := k.store.CommitSettlement(ctx, settlementID, peer.ID, k.cfg.FeeRecipientID, dClear, variance, d, string(body)); err != nil {
 		return nil, err
 	}
-	res := map[string]any{"status": "settled", "mode": "probabilistic", "outcome": final.Outcome, "settlement_id": settlementID, "handle": peer.Handle}
+	res := map[string]any{"mode": "probabilistic", "outcome": final.Outcome, "settlement_id": settlementID, "handle": peer.Handle}
 	if pay {
+		res["status"] = "pending_cash"
 		res["amount"] = open.Quantum
-		res["message"] = fmt.Sprintf("outcome=pay: send %d on the rail to %s", open.Quantum, peer.Handle)
+		res["message"] = fmt.Sprintf("you owe %d; pay it on the rail, then run `admin settle %s --cash %s`", open.Quantum, peer.Handle, settlementID)
 	} else {
+		res["status"] = "settled"
 		res["amount"] = int64(0)
 	}
 	return res, nil
+}
+
+// SettleCash finalizes a paid probabilistic outcome on this kernel after the operator moved the
+// quantum on the rail (§13): it clears the debt d and books the variance ±(Q−d), deriving this
+// kernel's side (creditor or debtor) from the stored signed record. Run on BOTH kernels — the debtor
+// after paying, the creditor after receiving. Superuser only; idempotent by settlement_id.
+func (k *Kernel) SettleCash(ctx context.Context, operatorID, peerRef, settlementID string) (map[string]any, error) {
+	if err := k.requireSuperuser(ctx, operatorID); err != nil {
+		return nil, err
+	}
+	peer, err := k.ResolveUser(ctx, peerRef)
+	if err != nil || peer == nil || !peer.IsPeer() {
+		return nil, ErrNotFound.Wrapf("peer %q not found", peerRef)
+	}
+	recJSON, err := k.store.ReadSettlementRecord(ctx, settlementID)
+	if err != nil {
+		return nil, err
+	}
+	if recJSON == "" {
+		return nil, ErrNotFound.Wrapf("no settlement %q", settlementID)
+	}
+	var rec SettlementRecord
+	if err := json.Unmarshal([]byte(recJSON), &rec); err != nil {
+		return nil, ErrInternal.Wrap("stored settlement record is invalid")
+	}
+	if rec.Outcome != "pay" {
+		return nil, ErrInvalidState.Wrap("settlement is not an unpaid probabilistic outcome")
+	}
+	d, q := rec.Amount, rec.Quantum
+	// Creditor: clear +d on the peer row, sys += (Q−d). Debtor: clear −d, sys −= (Q−d) (guarded by the
+	// users CHECK — insufficient reserve rolls back and the settlement stays pending).
+	var dClear, variance int64
+	switch k.ourKeyB64() {
+	case rec.Creditor:
+		dClear, variance = d, q-d
+	case rec.Debtor:
+		dClear, variance = -d, -(q - d)
+	default:
+		return nil, ErrInvalidState.Wrap("this kernel is not a party to the settlement")
+	}
+	cashRec := fmt.Sprintf(`{"settlement_id":%q,"cash":%d,"outcome":"cash"}`, settlementID, q)
+	if _, err := k.store.CommitSettlementCash(ctx, settlementID, peer.ID, k.cfg.FeeRecipientID, dClear, variance, q, cashRec); err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "settled", "settlement_id": settlementID, "cash": q, "handle": peer.Handle}, nil
 }

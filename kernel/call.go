@@ -47,11 +47,6 @@ type CallRequest struct {
 	// IdempotencyRecordID, if non-empty, causes CommitCall/CommitFailedCall to atomically
 	// mark the pending idempotency record as complete. Set only by federation handlers.
 	IdempotencyRecordID string
-	// PremiumBPS is the serving-markup rate (§13) applied when this kernel serves an inbound
-	// federated root call: the receipt carries premium = ceil(charge·PremiumBPS/10000) and the
-	// reserve ceil(price·PremiumBPS/10000) parked at admission is released to sys/owner at commit.
-	// Set only by beginRun for a peer caller; 0 for every local call and every subcall.
-	PremiumBPS int64
 }
 
 // CallReply is the response from a successful Call().
@@ -472,7 +467,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			ktx.Status = TxFailure
 			ktx.Reason = cfgErr.Error()
 			ktx.EndedAt = time.Now().UTC()
-			receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, cfgErr)
+			receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, 0, cfgErr)
 			if sErr != nil {
 				return nil, sErr
 			}
@@ -494,7 +489,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			unreach := ErrPeerUnreachable.Wrapf("peer @%s is unreachable; the call was not sent and has been refunded", target.Handle).WithMeta("peer", target.Handle)
 			ktx.Status = TxFailure
 			ktx.Reason = unreach.Error()
-			receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, unreach)
+			receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, unreach)
 			if sErr != nil {
 				return nil, sErr
 			}
@@ -511,7 +506,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if execErr != nil {
 		ktx.Status = TxFailure
 		ktx.Reason = execErr.Error()
-		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, execErr)
+		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, execErr)
 		if sErr != nil {
 			return nil, sErr
 		}
@@ -523,7 +518,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if schemaErr := ValidateInput(action.OutputSchema, any(reply)); schemaErr != nil {
 		ktx.Status = TxFailure
 		ktx.Reason = "output schema violation: " + schemaErr.Error()
-		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, schemaErr)
+		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, schemaErr)
 		if sErr != nil {
 			return nil, sErr
 		}
@@ -546,7 +541,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		// the caller has in fact been charged, and the idempotency record already completed.
 		ktx.Status = TxFailure
 		ktx.Reason = "could not read trace post-execution"
-		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, readErr)
+		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, readErr)
 		if sErr != nil || receipt == nil {
 			return nil, ErrInternal.Wrap("could not read trace")
 		}
@@ -561,10 +556,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	ktx.Net = net
 	ktx.Fee = fee
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
-	// Serving-markup premium (§13): the reserve parked at admission (on action.Price) is released at
-	// commit; premium is levied on the actual charge (= gross on success). Both 0 for local calls.
-	premiumReserve := ceilDiv(action.Price*req.PremiumBPS, 10000)
-	premium := ceilDiv(ktx.Gross*req.PremiumBPS, 10000)
+	// Serving-markup premium (§13): the rate is snapshotted on the trace at admission; premium is
+	// levied on the actual charge (= gross on success). 0 for local calls (trace.PremiumBPS==0). The
+	// parked reserve is released inside CommitCall from the trace's premium_parked snapshot.
+	premium := ceilDiv(ktx.Gross*trace.PremiumBPS, 10000)
 	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium) // success: charge = gross
 	if receiptErr != nil {
 		mu.Unlock()
@@ -572,7 +567,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		ktx.Reason = "could not build receipt"
 		// Same as the post-execution read failure above: the settlement committed, so its receipt
 		// is returned rather than discarded.
-		failReceipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, latency, receiptErr)
+		failReceipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, receiptErr)
 		if sErr != nil || failReceipt == nil {
 			return nil, ErrInternal.Wrap("could not build receipt")
 		}
@@ -582,7 +577,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// (payout + lock release + audit record) is never aborted mid-flight (§5).
 	sctx, cancel := settlementContext(ctx)
 	defer cancel()
-	commitErr := k.store.CommitCall(sctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, net, fee, premiumReserve, stats, req.IdempotencyRecordID, req.StepID)
+	commitErr := k.store.CommitCall(sctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.StepID)
 	mu.Unlock()
 	if commitErr != nil {
 		return nil, ErrInternal.Wrap("could not commit transaction")
@@ -618,6 +613,10 @@ func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
 	trace.ParentTraceID = dbTrace.ParentTraceID
 	trace.IdempotencyKey = dbTrace.IdempotencyKey
 	trace.DispatchJSON = dbTrace.DispatchJSON
+	// The serving-markup snapshot (§13) rides on the funded root trace; carry it into the adopted
+	// trace so the receipt levies the correct premium and the reserve is released at settlement.
+	trace.PremiumBPS = dbTrace.PremiumBPS
+	trace.PremiumParked = dbTrace.PremiumParked
 	return dbTrace.Available
 }
 
@@ -879,7 +878,8 @@ func (k *Kernel) computeStats(_ context.Context, actionID string, tx *Transactio
 // It returns the committed receipt so callers can surface the real charge (e.g. an inbound
 // federation call that failed after settling descendants must return that receipt, not a
 // zero-charge rejection).
-func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, traceID, callerWalletID, callerWalletKind string, req CallRequest, action *Action, latency float64, callErr error) (*Receipt, error) {
+func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req CallRequest, action *Action, latency float64, callErr error) (*Receipt, error) {
+	traceID := trace.ID
 	// Settlement is a money transition + its audit record (§5); it must commit even
 	// if the call timed out or the client disconnected. Detach from execution-scoped
 	// cancellation so a cancelled/contended ctx can never strand the locked allocation.
@@ -901,18 +901,19 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 		}
 	}
 	stats := k.computeStats(ctx, action.ID, tx, latency)
-	// Serving-markup premium (§13): premium is levied on the actual failed charge (gross−refund),
-	// computed inside the receipt closure so the signed number and the committed legs cannot diverge;
-	// the reserve (on action.Price) is released at commit. Both 0 for local calls (PremiumBPS==0).
-	premiumReserve := ceilDiv(action.Price*req.PremiumBPS, 10000)
+	// Serving-markup premium (§13): the rate is snapshotted on the trace, so premium — levied on the
+	// actual failed charge (gross−refund), computed inside the receipt closure so the signed number and
+	// the committed legs cannot diverge — is available on EVERY failure path (execution, recovery,
+	// forced closure, max-age expiry), not only those with the in-memory request. The parked reserve is
+	// released inside CommitFailedCall from the trace snapshot. Both 0 for local calls.
 	var committed *Receipt
 	buildFn := func(refund int64) (*Receipt, error) {
 		charge := tx.Gross - refund
-		r, err := k.buildReceipt(tx, charge, ceilDiv(charge*req.PremiumBPS, 10000))
+		r, err := k.buildReceipt(tx, charge, ceilDiv(charge*trace.PremiumBPS, 10000))
 		committed = r
 		return r, err
 	}
-	if settlErr := k.store.CommitFailedCall(ctx, tx, buildFn, traceID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, tx.Gross, premiumReserve, stats, req.IdempotencyRecordID, KernelErrorCode(callErr), req.StepID); settlErr != nil {
+	if settlErr := k.store.CommitFailedCall(ctx, tx, buildFn, traceID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, tx.Gross, stats, req.IdempotencyRecordID, KernelErrorCode(callErr), req.StepID); settlErr != nil {
 		logger.Error("call.settlement_failed", "action", action.Name, "error", callErr, "settlement_error", settlErr)
 		return nil, ErrInternal.Wrap("could not record failure transaction")
 	}
