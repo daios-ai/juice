@@ -64,7 +64,7 @@ func TestCapabilityRejectedAfterSettlement(t *testing.T) {
 		t.Fatal(err)
 	}
 	obj := map[string]any{"type": "object"}
-	if err := k.ActivateNativeAction(ctx, a.ID, "echo native", obj, obj, 0); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, "echo native", obj, obj, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 

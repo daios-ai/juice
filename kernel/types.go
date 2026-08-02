@@ -100,6 +100,7 @@ type Action struct {
 	RemoteActionID string           `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
 	RemoteOwnerID  string           `json:"remote_owner_id,omitempty"`  // stable owner user_id on the remote kernel (with peer key = PrincipalID, §13)
 	RemoteBPS      *int64           `json:"remote_bps,omitempty"`       // provider premium snapshot from the signed manifest; nil = pre-v0.12 proxy row
+	Effect         string           `json:"effect,omitempty"`           // signed manifest contract: a privileged execution effect ("transfer", §13); empty = ordinary action
 	AuthJSON       string           `json:"-"`                          // AES-256-GCM encrypted upstream auth credentials; never serialized
 	CreatedAt      time.Time        `json:"created_at"`
 	UpdatedAt      time.Time        `json:"updated_at"`
@@ -264,13 +265,30 @@ type Trace struct {
 	// and pins the rate against a mid-call config change. 0 on local calls and subcalls.
 	PremiumBPS    int64 `json:"premium_bps,omitempty"`
 	PremiumParked int64 `json:"premium_parked,omitempty"`
-	// Value and ValueTo snapshot a federated value transfer (§13): the amount to deliver to the local
-	// beneficiary ValueTo, parked in the caller's locked at admission and credited at settlement — the
-	// same trace-snapshot mechanism as the premium reserve. 0/"" on every call that is not the inbound
-	// serving leg of a value transfer.
-	Value     int64     `json:"value,omitempty"`
-	ValueTo   string    `json:"value_to,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	// Value, ValueTo, ValueReserve snapshot a TransferEffect on a call whose caller C funds a transfer
+	// (§13): the delivered amount, the resolved local-beneficiary user id (empty for a remote/outbound
+	// destination), and the total reserve locked from C.available at admission (value + value fees).
+	// Released to the beneficiary/peer + sys + refund at settlement, or refunded on failure — sourced
+	// from C, not the trace budget. All 0/"" on every non-transfer call.
+	Value        int64     `json:"value,omitempty"`
+	ValueTo      string    `json:"value_to,omitempty"`
+	ValueReserve int64     `json:"value_reserve,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// ValueSettlement describes how an outbound remote settlement disposes of the value-transfer reserve
+// locked on the caller C (§13). It is computed by settleRemoteCall from the peer's signed receipt and
+// applied atomically inside CommitRemoteSettlement. A zero Reserve means the call carried no transfer.
+// Exactly one disposition applies: Quarantine leaves the reserve LOCKED (an invalid/inconsistent
+// receipt after a possibly-executed dispatch — never auto-refund); Refund returns the whole reserve to
+// C (a valid failure/rejection); otherwise the reserve settles — Credit (value+value_premium) to the
+// peer proxy row, SysCredit (value_import) to origin sys, remainder refunded to C.
+type ValueSettlement struct {
+	Reserve    int64
+	Quarantine bool
+	Refund     bool
+	Credit     int64
+	SysCredit  int64
 }
 
 // Transaction records one attempted call. Immutable after creation.
@@ -409,13 +427,16 @@ type Receipt struct {
 	// it out of the JCS signature for all local and pre-v0.12 receipts (Premium=0), so those verify
 	// unchanged; nonzero only on a receipt the serving kernel issues for an inbound federated call.
 	Premium int64 `json:"premium,omitempty"`
-	// Value is the amount delivered to the transfer beneficiary, kept distinct from Charge (execution
-	// consumed) so a partial-charge failure never dilutes the delivered amount (§13). It is
-	// all-or-nothing — 0 or the requested amount — and part of the bilateral obligation
-	// (paid = charge + value + premium). omitempty keeps it out of the JCS signature for every
-	// non-transfer receipt (Value=0), so those verify unchanged.
-	Value     int64     `json:"value,omitempty"`
-	Reason    string    `json:"reason"`
+	// Value / ValuePremium / ValueTo are the transfer channel, kept distinct from the execution channel
+	// (Charge/Premium) so the two never mix (§13). Value is the delivered amount — all-or-nothing (0 or
+	// the requested amount, so a partial-charge failure never dilutes delivery); ValuePremium is the
+	// serving markup on the value (= ceil(value·remote_bps), NOT folded into execution Premium); ValueTo
+	// is the resolved beneficiary the origin binds. omitempty keeps all three out of the JCS signature
+	// for every non-transfer receipt (0/""), so those verify unchanged.
+	Value        int64     `json:"value,omitempty"`
+	ValuePremium int64     `json:"value_premium,omitempty"`
+	ValueTo      string    `json:"value_to,omitempty"`
+	Reason       string    `json:"reason"`
 	StartedAt time.Time `json:"started_at"`
 	CreatedAt time.Time `json:"created_at"`
 	Signature string    `json:"signature"`
@@ -512,6 +533,7 @@ type ActionManifest struct {
 	OutputSchema map[string]any `json:"output_schema"`
 	Price        int64          `json:"price"`
 	Kind         ActionKind     `json:"kind"`
+	Effect       string         `json:"effect,omitempty"` // privileged execution effect ("transfer"); signed so the origin decides value-bearing from the contract, not a name (§13)
 	ArtifactHash string         `json:"artifact_hash"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 	Stats        *Stats         `json:"stats"`
@@ -534,8 +556,9 @@ type ReceiptChecks struct {
 	Signature          bool `json:"signature"`
 	ActionID           bool `json:"action_id"`
 	Status             bool `json:"status"`
-	Charge             bool `json:"charge"`              // amount paid to proxy (tx.net) == receipt.charge + receipt.premium
+	Charge             bool `json:"charge"`              // execution obligation (tx.net) == receipt.charge + receipt.premium
 	Premium            bool `json:"premium"`             // receipt.premium == ceil(receipt.charge * remote_bps / 10000)
+	ValuePremium       bool `json:"value_premium"`       // receipt.value_premium == ceil(receipt.value * remote_bps / 10000) (§13)
 	SettlementArith    bool `json:"settlement_arith"`    // tx.fee == ceil(tx.net * import_bps / 10000) on success, 0 on failure
 	RefundConservation bool `json:"refund_conservation"` // tx.Refund == tx.Gross - tx.Net - tx.Fee (exact equality)
 	ArgsHash           bool `json:"args_hash"`

@@ -37,57 +37,65 @@ func (k *Kernel) RemoteManifestPrice(proxyPrice int64) int64 {
 	return k.remoteManifestPrice(proxyPrice)
 }
 
-// callValue computes value-transfer funding parameters for a call at funding time (§13). It returns:
-//   (value>0, benefID set) — inbound serving leg: a local value action with a peer caller and a local
-//                            beneficiary. The peer funds `value` against this kernel's exposure and the
-//                            beneficiary is credited at settlement.
-//   (value>0, "")          — outbound leg: a remote_proxy value action. `value` folds into the funded
-//                            gross and the receipted `paid`; the far kernel credits its beneficiary.
-//   (0, "")                — fund no value here: a local caller performs the transfer directly in the
-//                            handler, or the action is not value-bearing.
-// It rejects, before any funds move, a non-positive amount, a peer caller naming a remote beneficiary
-// (non-transitive), and an unresolvable / peer / suspended local beneficiary.
-func (k *Kernel) callValue(ctx context.Context, callerIsPeer bool, a *Action, args map[string]any) (int64, string, error) {
+// TransferEffect is the staged value channel of an effect-bearing action (§13): the delivered Amount,
+// the resolved local-beneficiary Dest (empty for an outbound/remote destination), and the total Reserve
+// to lock from the immediate caller C's own balance at admission. It is produced only for an action
+// whose signed contract declares an effect, and settled deferredly by the kernel at commit; the two
+// money channels (execution price, funded by the trace, and this value, funded by C) never mix.
+type TransferEffect struct {
+	Amount  int64
+	Dest    string
+	Reserve int64
+}
+
+// prepareTransferEffect stages the value channel for a call at funding time (§13), or returns nil when
+// the action declares no transfer effect. Effect identity comes from the action's signed contract
+// (actionValue keys on a.Effect), never its name. The reserve, locked from the immediate caller C's own
+// balance, covers the delivered value plus the value-channel fees owed at settlement, by destination:
+//   - local action, local target (local caller):  reserve = value                         (Dest = id)
+//   - local action, local target (peer caller):   reserve = value + value_premium         (Dest = id)
+//   - remote_proxy action (outbound, local caller): reserve = value + value_premium + value_import (Dest = "")
+// It rejects, before any funds move, a non-positive amount, a peer caller relaying a cross-kernel
+// transfer (non-transitive), an @-qualified target on a local action, and an unresolvable / peer /
+// suspended local beneficiary.
+func (k *Kernel) prepareTransferEffect(ctx context.Context, callerIsPeer bool, a *Action, args map[string]any) (*TransferEffect, error) {
 	fn := k.actionValue(a)
 	if fn == nil {
-		return 0, "", nil
+		return nil, nil
 	}
 	amount, ref, err := fn(args)
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 	if amount < 1 {
-		return 0, "", ErrInvalidInput.Wrap("transfer amount must be a positive integer")
+		return nil, ErrInvalidInput.Wrap("transfer amount must be a positive integer")
 	}
 	if a.Kind == KindRemoteProxy {
-		return amount, "", nil // outbound: value funds the proxy call; the peer credits its beneficiary
+		if callerIsPeer {
+			return nil, ErrInvalidInput.Wrap("a peer caller cannot relay a cross-kernel transfer (non-transitive)")
+		}
+		vp := ceilDiv(amount*k.cfg.RemoteBPS, 10000)
+		vi := ceilDiv((amount+vp)*k.cfg.ImportBPS, 10000)
+		return &TransferEffect{Amount: amount, Dest: "", Reserve: amount + vp + vi}, nil
 	}
 	if strings.Contains(ref, "@") {
-		return 0, "", ErrInvalidInput.Wrap("address a cross-kernel transfer as sys@<kernel>/transfer with a bare target")
+		return nil, ErrInvalidInput.Wrap("address a cross-kernel transfer as sys@<kernel>/transfer with a bare target")
 	}
-	if !callerIsPeer {
-		return 0, "", nil // pure local transfer: the handler moves the funds via Transfer
-	}
-	// Inbound serving leg: the beneficiary must be a local, ordinary, active account.
 	benef, err := k.ResolveUser(ctx, ref)
 	if err != nil || benef == nil {
-		return 0, "", ErrNotFound.Wrapf("transfer beneficiary %q not found", ref)
+		return nil, ErrNotFound.Wrapf("transfer beneficiary %q not found", ref)
 	}
 	if benef.IsPeer() {
-		return 0, "", ErrInvalidInput.Wrap("transfer beneficiary is a peer account")
+		return nil, ErrInvalidInput.Wrap("transfer beneficiary is a peer account")
 	}
 	if benef.SuspendedAt != nil {
-		return 0, "", ErrInvalidInput.Wrap("transfer beneficiary is suspended")
+		return nil, ErrInvalidInput.Wrap("transfer beneficiary is suspended")
 	}
-	return amount, benef.ID, nil
-}
-
-// proxyGross applies the two-step remote markup to a base amount (§13): sr = base + ceil(base·remote_bps),
-// gross = sr + ceil(sr·import_bps). A value transfer funds proxyGross(mp+value); a plain proxy call's
-// stored action.Price already equals proxyGross(mp).
-func (k *Kernel) proxyGross(base int64) int64 {
-	sr := base + ceilDiv(base*k.cfg.RemoteBPS, 10000)
-	return sr + ceilDiv(sr*k.cfg.ImportBPS, 10000)
+	reserve := amount
+	if callerIsPeer {
+		reserve += ceilDiv(amount*k.cfg.RemoteBPS, 10000) // inbound serving markup owed to sys at settlement
+	}
+	return &TransferEffect{Amount: amount, Dest: benef.ID, Reserve: reserve}, nil
 }
 
 // dispatchPayload is the persisted remote-proxy dispatch record, stored on Trace.DispatchJSON
@@ -203,17 +211,20 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	// 4. Status consistency.
 	checks.Status = r.Status == tx.Status
 
-	// 5. Charge: local tx.net (what we paid the proxy) must equal the bilateral payable
-	// receipt.charge + receipt.value + receipt.premium (base charge + delivered value + serving markup).
-	checks.Charge = tx.Net == r.Charge+r.Value+r.Premium
+	// 5. Charge: local tx.net (the EXECUTION obligation paid to the proxy) must equal receipt.charge +
+	// receipt.premium. The value channel is settled separately on the caller's own reserve, not through
+	// tx.net, so it is audited by its own check below (§13, the un-folded two-channel model).
+	checks.Charge = tx.Net == r.Charge+r.Premium
 
-	// 6. Premium: the serving markup must equal ceil((charge+value)·remote_bps) for the manifest-snapshot
-	// rate on the proxy row (0 when charge and value are 0).
+	// 6. Premium: the execution serving markup must equal ceil(charge·remote_bps), and the value serving
+	// markup ceil(value·remote_bps), for the manifest-snapshot rate on the proxy row — computed
+	// separately (never the folded ceil((charge+value)·…), whose rounding merge is the bug).
 	rbps := int64(0)
 	if act, aerr := k.store.ReadAction(ctx, tx.ActionID); aerr == nil && act.RemoteBPS != nil {
 		rbps = *act.RemoteBPS
 	}
-	checks.Premium = r.Premium == ceilDiv((r.Charge+r.Value)*rbps, 10000)
+	checks.Premium = r.Premium == ceilDiv(r.Charge*rbps, 10000)
+	checks.ValuePremium = r.ValuePremium == ceilDiv(r.Value*rbps, 10000)
 
 	// 7. Settlement arithmetic: the origin import fee on the actual obligation (tx.net = paid).
 	if tx.Status == TxSuccess {
@@ -240,7 +251,7 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	}
 
 	valid := checks.ReceiptHash && checks.Signature && checks.ActionID &&
-		checks.Status && checks.Charge && checks.Premium && checks.SettlementArith &&
+		checks.Status && checks.Charge && checks.Premium && checks.ValuePremium && checks.SettlementArith &&
 		checks.RefundConservation && checks.ArgsHash && checks.ReplyHash
 
 	return &ReceiptVerification{
@@ -320,12 +331,14 @@ func remoteReceiptInvalid(r Receipt, mp, rbps, sentValue int64, replyJSON []byte
 	default:
 		return "unknown status"
 	}
-	// The serving markup must equal the manifest-snapshot rate on the actual charge plus delivered
-	// value (§13); a receipt claiming any other premium is quarantined, which also bounds
-	// paid = charge+value+premium ≤ sr(mp+value) and keeps the settlement refund non-negative against
-	// the locked two-step gross.
-	if r.Premium != ceilDiv((r.Charge+r.Value)*rbps, 10000) {
-		return "premium != ceil((charge+value)*rbps)"
+	// The two channels are audited separately (§13, the un-folded model): the execution premium must be
+	// the manifest-snapshot rate on the charge, and the value premium the same rate on the delivered
+	// value — never ceil((charge+value)·rbps), whose rounding merge is the bug. Either mismatch quarantines.
+	if r.Premium != ceilDiv(r.Charge*rbps, 10000) {
+		return "premium != ceil(charge*rbps)"
+	}
+	if r.ValuePremium != ceilDiv(r.Value*rbps, 10000) {
+		return "value_premium != ceil(value*rbps)"
 	}
 	return ""
 }
@@ -367,30 +380,46 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	if action.RemoteBPS != nil {
 		rbps = *action.RemoteBPS
 	}
-	var premium, value, importFee int64
+	// The two channels settle independently (§13): the EXECUTION channel (charge/premium/import) is the
+	// normal proxy settlement on the trace-funded gross q; the VALUE channel is the TransferEffect reserve
+	// locked on the caller C, disposed of via `vs` — settled to the peer proxy row on success, refunded on
+	// a valid failure, or kept LOCKED (quarantined) on an invalid receipt after a possibly-executed dispatch.
+	var premium, importFee int64
+	var valueForReceipt, valuePremForReceipt int64
+	var valueToForReceipt string
+	vs := ValueSettlement{Reserve: trace.ValueReserve}
 	if invalid := remoteReceiptInvalid(r, mp, rbps, sentValue, replyJSON); invalid != "" {
 		logger.Warn("remote.receipt_invalid", "action", action.Name, "reason", invalid)
 		charge = 0
 		ktx.Status = TxFailure
 		ktx.Reason = "remote receipt invalid: " + invalid
+		vs.Quarantine = true
 	} else {
-		premium = r.Premium
-		value = r.Value
-		if r.Status == TxSuccess {
-			importFee = ceilDiv((charge+value+premium)*k.cfg.ImportBPS, 10000)
-			ktx.ReplyJSON = json.RawMessage(replyJSON)
-		}
+		premium = r.Premium // execution serving markup
 		ktx.Status = r.Status
 		ktx.Reason = r.Reason
+		if r.Status == TxSuccess {
+			importFee = ceilDiv((charge+premium)*k.cfg.ImportBPS, 10000) // execution import on the execution obligation
+			ktx.ReplyJSON = json.RawMessage(replyJSON)
+			// Value channel: C owes the peer value+value_premium (credited to the proxy row), and origin
+			// sys retains value_import; the remainder of the reserve refunds to C inside the commit.
+			vs.Credit = r.Value + r.ValuePremium
+			vs.SysCredit = ceilDiv((r.Value+r.ValuePremium)*k.cfg.ImportBPS, 10000)
+			valueForReceipt = r.Value
+			valuePremForReceipt = trace.ValueReserve - r.Value // caller's value overhead: value_premium + value_import
+			valueToForReceipt = r.ValueTo
+		} else {
+			vs.Refund = true // valid failure/rejection: return the whole value reserve to C
+		}
 	}
-	paid := charge + value + premium // the bilateral payable to the peer (charge + delivered value + serving premium)
+	paid := charge + premium // execution bilateral payable to the peer
 	ktx.Net = paid
 	ktx.Fee = importFee
 	ktx.RemoteReceiptHash = sha256Hex(fr.ReceiptJSON)
 	ktx.RemoteReceiptJSON = fr.ReceiptJSON
 
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
-	localReceipt, receiptErr := k.buildReceipt(ktx, paid+importFee, 0, value)
+	localReceipt, receiptErr := k.buildReceipt(ktx, paid+importFee, 0, valueForReceipt, valuePremForReceipt, valueToForReceipt)
 	if receiptErr != nil {
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
@@ -419,7 +448,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// (charge/duty/refund + audit record) always commits once the signed receipt is in.
 	sctx, cancel := settlementContext(ctx)
 	defer cancel()
-	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, paid, importFee, stats, req.IdempotencyRecordID, req.StepID, KernelErrorCode(failErr)); err != nil {
+	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, paid, importFee, vs, stats, req.IdempotencyRecordID, req.StepID, KernelErrorCode(failErr)); err != nil {
 		return nil, ErrInternal.Wrap("could not commit remote settlement")
 	}
 
@@ -1128,6 +1157,7 @@ func remoteManifestHash(m ActionManifest) string {
 		"action_id":     m.ActionID,
 		"artifact_hash": m.ArtifactHash,
 		"description":   m.Description,
+		"effect":        m.Effect,
 		"input_schema":  string(inputJSON),
 		"kind":          string(m.Kind),
 		"name":          m.Name,
@@ -1258,6 +1288,7 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 			a.ArtifactHash = contentHash
 			a.RemoteOwnerID = m.OwnerID
 			a.RemoteBPS = &rbps
+			a.Effect = m.Effect // signed effect contract: the proxy is value-bearing iff the peer signed it
 		},
 		new: func() *Action {
 			now := time.Now().UTC()
@@ -1277,6 +1308,7 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 				RemoteActionID: m.ActionID,
 				RemoteOwnerID:  m.OwnerID,
 				RemoteBPS:      &rbps,
+				Effect:         m.Effect,
 				CreatedAt:      now,
 				UpdatedAt:      now,
 			}
@@ -1385,6 +1417,7 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 		OutputSchema: a.OutputSchema,
 		Price:        a.Price,
 		Kind:         a.Kind,
+		Effect:       a.Effect, // signed so a peer decides value-bearing from the contract, not the name (§13)
 		ArtifactHash: a.ArtifactHash,
 		UpdatedAt:    a.UpdatedAt,
 		Stats:        stats,

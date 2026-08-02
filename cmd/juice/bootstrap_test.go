@@ -228,7 +228,7 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID, "old description", stale, stale, 0); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, "old description", stale, stale, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 

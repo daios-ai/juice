@@ -383,20 +383,27 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 
 	// For remote_proxy: action.Price = q = proxyPrice (mp + import duty), set at ImportRemoteAction.
 	// Derive the original remote manifest price (mp) from q for clamping and receipt audit.
-	// lockPrice = q (already correct; no re-addition of duty). A value transfer subcall funds the
-	// two-step gross on mp+value and records the amount in dispatch (§13). (For a root/step call the
-	// ExistingTraceID branch below discards this and adopts the pre-funded snapshot from beginRun.)
+	// lockPrice = q funds the EXECUTION channel from the parent trace; the value channel is a separate
+	// TransferEffect reserve locked from the immediate caller C's own balance in BeginSubcall (§13), so
+	// a composed transfer pays the value from the composing action owner, not the process budget. (For a
+	// root/step call the ExistingTraceID branch below discards this and adopts beginRun's snapshot.)
 	lockPrice := action.Price
 	var mp int64 = action.Price // for non-remote-proxy: mp unused; for remote-proxy: corrected below
+	eff, verr := k.prepareTransferEffect(ctx, false, action, req.Args)
+	if verr != nil {
+		return nil, verr
+	}
+	if eff != nil {
+		trace.Value = eff.Amount
+		trace.ValueTo = eff.Dest
+		trace.ValueReserve = eff.Reserve
+	}
 	if action.Kind == KindRemoteProxy {
 		// mp_original = floor(q * 10000 / (10000 + RemoteBPS))
 		mp = k.remoteManifestPrice(action.Price)
-		value, _, verr := k.callValue(ctx, false, action, req.Args)
-		if verr != nil {
-			return nil, verr
-		}
-		if value > 0 {
-			lockPrice = k.proxyGross(mp + value)
+		var value int64
+		if eff != nil {
+			value = eff.Amount
 		}
 		key := uuid.New().String()
 		trace.IdempotencyKey = &key
@@ -565,12 +572,14 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	ktx.Net = net
 	ktx.Fee = fee
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
-	// Serving-markup premium (§13): the rate is snapshotted on the trace at admission and levied on the
-	// actual charge PLUS the delivered value (both are the serving kernel's credit exposure). On success
-	// the full value is delivered; the parked premium+value reserve is released inside CommitCall from
-	// the trace snapshot. All 0 for local calls (trace.PremiumBPS/Value == 0).
-	premium := ceilDiv((ktx.Gross+trace.Value)*trace.PremiumBPS, 10000)
-	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium, trace.Value) // success: charge = gross, value delivered
+	// Two independent channels (§13), the rate snapshotted on the trace at admission: the EXECUTION
+	// premium is levied on the charge (= gross) and the VALUE premium on the delivered value, computed
+	// separately (never on charge+value — the rounding-merge is the bug). On success the full value is
+	// delivered; the value reserve is released to the beneficiary + sys inside CommitCall from the trace
+	// snapshot. All 0 for a local caller (trace.PremiumBPS == 0).
+	premium := ceilDiv(ktx.Gross*trace.PremiumBPS, 10000)
+	valuePremium := ceilDiv(trace.Value*trace.PremiumBPS, 10000)
+	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium, trace.Value, valuePremium, trace.ValueTo) // success: charge = gross, value delivered
 	if receiptErr != nil {
 		mu.Unlock()
 		ktx.Status = TxFailure
@@ -630,6 +639,7 @@ func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
 	trace.PremiumParked = dbTrace.PremiumParked
 	trace.Value = dbTrace.Value
 	trace.ValueTo = dbTrace.ValueTo
+	trace.ValueReserve = dbTrace.ValueReserve
 	return dbTrace.Available
 }
 
@@ -922,9 +932,9 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 	var committed *Receipt
 	buildFn := func(refund int64) (*Receipt, error) {
 		charge := tx.Gross - refund
-		// value delivery is all-or-nothing (§13): a failed transfer delivers nothing, so value=0 and the
-		// premium is levied on charge alone; applyPremiumLegs then refunds the whole parked value.
-		r, err := k.buildReceipt(tx, charge, ceilDiv(charge*trace.PremiumBPS, 10000), 0)
+		// value delivery is all-or-nothing (§13): a failed transfer delivers nothing, so value/value_premium
+		// are 0 and refundTransferEffect returns the whole value reserve to the caller C.
+		r, err := k.buildReceipt(tx, charge, ceilDiv(charge*trace.PremiumBPS, 10000), 0, 0, "")
 		committed = r
 		return r, err
 	}

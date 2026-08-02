@@ -192,20 +192,20 @@ func (k *Kernel) RegisterNativeHandler(name string, fn NativeFunc) {
 // value transfer stays encapsulated (native actions are never hardwired into the kernel).
 type ValueFunc func(args map[string]any) (amount int64, beneficiary string, err error)
 
-// RegisterValueAction marks a native action (by name) as value-bearing.
-func (k *Kernel) RegisterValueAction(name string, fn ValueFunc) {
-	k.valueFuncs[name] = fn
+// RegisterValueAction registers the args extractor for a privileged execution effect (e.g. "transfer").
+func (k *Kernel) RegisterValueAction(effect string, fn ValueFunc) {
+	k.valueFuncs[effect] = fn
 }
 
-// actionValue returns the value extractor for an action, matched on its bare name's last segment so
-// it fires for both the local native ("transfer") and its remote proxy ("sysowner/transfer"). nil
-// when the action is not value-bearing.
+// actionValue returns the value extractor for an action keyed on its signed `effect` contract field,
+// never on the action name (§13): a local native carries effect set at bootstrap; a remote proxy
+// carries it copied from the peer's SIGNED manifest, so the origin never reserves value on a name
+// coincidence. nil when the action declares no effect or none is registered for it.
 func (k *Kernel) actionValue(a *Action) ValueFunc {
-	name := a.Name
-	if i := strings.LastIndex(name, "/"); i >= 0 {
-		name = name[i+1:]
+	if a.Effect == "" {
+		return nil
 	}
-	return k.valueFuncs[name]
+	return k.valueFuncs[a.Effect]
 }
 
 // PruneOrphanedNativeActions soft-deletes every kind=native action whose handler is no longer
@@ -1440,6 +1440,7 @@ type CreateActionRequest struct {
 	Name         string
 	Kind         ActionKind
 	Price        int64
+	Effect       string // privileged execution effect ("transfer"); empty for an ordinary action (§13)
 	Description  string
 	InputSchema  map[string]any
 	OutputSchema map[string]any
@@ -1761,6 +1762,7 @@ func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionReque
 		Active:       false,
 		Visibility:   VisibilityPrivate, // promoted to public by ActivateNativeAction
 		Price:        req.Price,
+		Effect:       req.Effect,
 		Description:  req.Description,
 		InputSchema:  req.InputSchema,
 		OutputSchema: req.OutputSchema,
@@ -1794,9 +1796,9 @@ func (k *Kernel) validateAndInitActivation(ctx context.Context, a *Action) error
 	return nil
 }
 
-// ActivateNativeAction reconciles spec fields and activates a native action for bootstrap use.
-// It overwrites price, description, inputSchema, and outputSchema so drift is corrected on every boot.
-func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description string, inputSchema, outputSchema map[string]any, price int64) error {
+// ActivateNativeAction reconciles spec fields and activates a native action for bootstrap use. It
+// overwrites price, effect, description, inputSchema, and outputSchema so drift is corrected on every boot.
+func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description string, inputSchema, outputSchema map[string]any, price int64, effect string) error {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return err
@@ -1805,6 +1807,7 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 		return ErrInvalidInput.Wrap("action is not native")
 	}
 	a.Price = price
+	a.Effect = effect
 	a.Description = description
 	a.InputSchema = inputSchema
 	a.OutputSchema = outputSchema
@@ -2249,30 +2252,34 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
-	// Value transfer (§13): the delivered amount enters admission/reservation/settlement like a priced
-	// call. Outbound (remote_proxy) folds it into the funded gross; inbound (peer caller) funds it
-	// against exposure and credits the local beneficiary at settlement.
-	value, beneficiaryID, err := k.callValue(ctx, caller.IsPeer(), action, args)
+	// Value transfer (§13): sys/transfer is an ordinary priced action with one deferred, receipt-backed
+	// transfer effect. The execution channel (price) is the normal Call lifecycle, funded by the process;
+	// the value channel is an additive TransferEffect funded from the immediate caller C's OWN balance
+	// (here C == P, a root call) and settled to the beneficiary/peer, never taxed by ComputeFee.
+	eff, err := k.prepareTransferEffect(ctx, caller.IsPeer(), action, args)
 	if err != nil {
 		return nil, err
 	}
-	// Global-exposure admission (§13). `lockPrice` funds the process (spendable, taxed at settlement);
-	// `reserve` is parked beyond it (never taxed) and released at settlement — the serving markup and
-	// the delivered value both live there, so value reaches the beneficiary untaxed rather than
-	// flowing through ComputeFee. A peer caller (inbound serving leg) reserves W = price + value +
-	// premium against the exposure cap X inside store.BeginRun's atomic guard (Sybil-proof); an
-	// ordinary caller prepays its lockPrice (action.Price, or the two-step gross for an outbound value
-	// transfer, which settleRemoteCall distributes without ComputeFee) and is gated here.
+	var value, valueReserve int64
+	var valueTo string
+	if eff != nil {
+		value, valueReserve, valueTo = eff.Amount, eff.Reserve, eff.Dest
+	}
+	// Global-exposure admission (§13). `lockPrice` funds the process (spendable, taxed at settlement) and
+	// is action.Price for every kind (already the two-step gross for a remote proxy). `premiumReserve` is
+	// the EXECUTION serving markup only, parked beyond it and released at settlement. The value reserve is
+	// funded separately from C's own row inside store.BeginRun (an atomic second lock on t.CallerUserID),
+	// so value never flows through the execution economics. A peer caller (C == P inbound) reserves
+	// W = price + premiumReserve + valueReserve against the exposure cap X; an ordinary caller prepays it.
 	lockPrice := action.Price
-	var premiumReserve, premiumBPS, reserve int64
+	var premiumReserve, premiumBPS int64
 	if caller.IsPeer() {
 		premiumBPS = k.cfg.RemoteBPS
-		premiumReserve = ceilDiv((action.Price+value)*premiumBPS, 10000)
-		reserve = premiumReserve + value
+		premiumReserve = ceilDiv(action.Price*premiumBPS, 10000)
 		// A peer with a paid probabilistic outcome still awaiting its rail record must finalize it
 		// before drawing new credit (§13). Fully-prepaid calls (available ≥ W) add no obligation and
 		// are unaffected; only credit-drawing calls are gated.
-		if w := lockPrice + reserve; w > caller.Available {
+		if w := lockPrice + premiumReserve + valueReserve; w > caller.Available {
 			if pending, err := k.store.HasPendingSettlement(ctx, caller.ID); err != nil {
 				return nil, err
 			} else if pending {
@@ -2280,11 +2287,8 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 			}
 		}
 	} else {
-		if action.Kind == KindRemoteProxy && value > 0 {
-			lockPrice = k.proxyGross(k.remoteManifestPrice(action.Price) + value)
-		}
-		if caller.Available < lockPrice {
-			return nil, ErrInsufficientFunds.Wrapf("user has %d credits, call costs %d", caller.Available, lockPrice)
+		if caller.Available < lockPrice+valueReserve {
+			return nil, ErrInsufficientFunds.Wrapf("user has %d credits, call costs %d", caller.Available, lockPrice+valueReserve)
 		}
 	}
 	now := time.Now().UTC()
@@ -2307,11 +2311,14 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 		PremiumParked: premiumReserve,
 		CreatedAt:     now,
 	}
-	// Inbound serving leg only: snapshot the delivered amount + beneficiary so settlement credits it
-	// (§13, the value counterpart of the premium reserve). Outbound carries value in dispatch instead.
-	if beneficiaryID != "" {
+	// Snapshot the TransferEffect on the trace so every settlement path releases the value reserve
+	// config-independently (§13): the delivered amount, the resolved local beneficiary (empty for an
+	// outbound destination — settled against the remote receipt), and the reserve locked from C. All 0
+	// on a non-transfer call.
+	if eff != nil {
 		t.Value = value
-		t.ValueTo = beneficiaryID
+		t.ValueTo = valueTo
+		t.ValueReserve = valueReserve
 	}
 	// Persist the inbound cross-kernel record on the trace, for every action kind: whichever
 	// settlement resolves this call — commit, retry, max-age, forced closure, crash recovery —
@@ -2324,7 +2331,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 		t.IdempotencyKey = &key
 		t.DispatchJSON = marshalDispatch(args, "", k.remoteManifestPrice(action.Price), value, lockPrice)
 	}
-	if err := k.store.BeginRun(ctx, p, t, caller.ID, lockPrice, reserve, k.cfg.ExposureMax); err != nil {
+	if err := k.store.BeginRun(ctx, p, t, caller.ID, lockPrice, premiumReserve, k.cfg.ExposureMax); err != nil {
 		if caller.IsPeer() && errors.Is(err, ErrInsufficientFunds) {
 			return nil, PeerUnfundedError(caller.Handle)
 		}
@@ -2973,7 +2980,7 @@ func (k *Kernel) CompleteIdempotencyRecordIfPending(ctx context.Context, id, res
 // ≤ gross on failure, 0 on rejection). It must be pre-computed by the caller so that
 // it is included in the JCS signature before the receipt is persisted.
 // Returns ErrInvalidState if the kernel has not been bootstrapped (no issuer configured).
-func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value int64) (*Receipt, error) {
+func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value, valuePremium int64, valueTo string) (*Receipt, error) {
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
@@ -3002,6 +3009,8 @@ func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value int64) (*R
 		Charge:       charge,
 		Premium:      premium,
 		Value:        value,
+		ValuePremium: valuePremium,
+		ValueTo:      valueTo,
 		Reason:       tx.Reason,
 		StartedAt:    tx.StartedAt,
 		CreatedAt:    time.Now().UTC().Truncate(time.Second),

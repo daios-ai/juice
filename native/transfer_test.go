@@ -38,12 +38,13 @@ func TestTransferValue(t *testing.T) {
 	}
 }
 
-// seedNativeAction creates a kind=native action owned by ownerID with the given price.
-func seedNativeAction(t *testing.T, st kernel.Store, ownerID, name string, price int64) {
+// seedNativeAction creates a kind=native action owned by ownerID with the given price and effect
+// (effect "transfer" makes it value-bearing; "" for an ordinary native).
+func seedNativeAction(t *testing.T, st kernel.Store, ownerID, name string, price int64, effect string) {
 	t.Helper()
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: ownerID, Name: name, Kind: kernel.KindNative,
-		Price: price, Active: true, Visibility: kernel.VisibilityPublic, Description: "transfer credits",
+		Price: price, Effect: effect, Active: true, Visibility: kernel.VisibilityPublic, Description: "transfer credits",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(context.Background(), a); err != nil {
@@ -58,7 +59,7 @@ func TestTransferLocal(t *testing.T) {
 	RegisterTransferHandler(k)
 	ctx := context.Background()
 	sys := seedOwner(t, db, "sys")
-	seedNativeAction(t, db, sys.ID, "transfer", 0)
+	seedNativeAction(t, db, sys.ID, "transfer", 0, "transfer")
 	alice := seedUserWithBalance(t, db, "alice", 1000)
 	bob := seedUserWithBalance(t, db, "bob", 0)
 

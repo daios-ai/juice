@@ -370,7 +370,7 @@ type Store interface {
 	// decrements owner.locked by taxable (paid+importFee), records the transaction+receipt, updates
 	// stats, marks step done (if stepID non-empty), completes the idempotency record (if non-empty),
 	// and closes the process if quiescent.
-	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, proxyUserID, feeRecipientID string, paid, importFee int64, stats *Stats, idempotencyRecordID, stepID, errorCode string) error
+	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, proxyUserID, feeRecipientID string, paid, importFee int64, vs ValueSettlement, stats *Stats, idempotencyRecordID, stepID, errorCode string) error
 
 	// ---- Traces (by process) ----
 

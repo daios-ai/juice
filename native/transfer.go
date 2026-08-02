@@ -6,37 +6,21 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// RegisterTransferHandler wires sys/transfer: a value-bearing native that moves `amount` from the
-// immediate caller to `target` (§13). A same-kernel target settles here as the existing atomic ledger
-// transfer; a peer caller (an inbound federated transfer, target `sys@<kernel>/transfer`) has the
-// delivered value settled by the receipt legs, so the handler only acknowledges. RegisterValueAction
-// tells the kernel the action is value-bearing without the kernel ever naming it, keeping cross-kernel
-// transfer encapsulated (native actions are never hardwired into the kernel).
+// RegisterTransferHandler wires sys/transfer: a value-bearing native declaring the "transfer" effect
+// (§13). The runtime handler only VALIDATES and acknowledges — it moves no balances. The value channel
+// is a deferred TransferEffect staged at admission (the reserve locked from the immediate caller C) and
+// committed atomically by the kernel at settlement, for both local and cross-kernel transfers alike, so
+// no non-atomic ledger write happens in-handler. RegisterValueAction binds the effect id → args
+// extractor without the kernel ever naming the action, keeping the effect encapsulated (native actions
+// are never hardwired into the kernel).
 func RegisterTransferHandler(k *kernel.Kernel) {
 	k.RegisterValueAction("transfer", transferValue)
-	k.RegisterNativeHandler("transfer", func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
-		amount, target, err := transferValue(args)
+	k.RegisterNativeHandler("transfer", func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+		amount, _, err := transferValue(args)
 		if err != nil {
 			return nil, err
 		}
-		caller, err := k.ResolveUser(ctx, callerID)
-		if err != nil {
-			return nil, err
-		}
-		if caller.IsPeer() {
-			// Inbound serving leg: the delivered value is credited to the beneficiary at settlement.
-			return map[string]any{"amount": amount}, nil
-		}
-		benef, err := k.ResolveUser(ctx, target)
-		if err != nil || benef == nil {
-			return nil, kernel.ErrNotFound.Wrapf("transfer target %q not found", target)
-		}
-		extKey, _ := args["external_key"].(string)
-		e, err := k.Transfer(ctx, callerID, benef.ID, amount, "transfer", extKey)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"transfer_id": e.ID, "amount": amount}, nil
+		return map[string]any{"amount": amount}, nil
 	})
 }
 

@@ -818,6 +818,126 @@ func TestCommitCall(t *testing.T) {
 	}
 }
 
+// TestTransferEffectFundsFromCaller is the core value-wallet regression (§13): a composed transfer
+// (an action subcalls sys/transfer) funds the delivered VALUE from the immediate caller C's own
+// balance — NOT the process budget (owner P) nor the parent trace. A subcall trace carrying a value
+// reserve locks it from C at BeginSubcall and settles it to the beneficiary at CommitCall, leaving P
+// and the parent trace's execution budget untouched.
+func TestTransferEffectFundsFromCaller(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	P := newUser("proc-owner", 1000) // process owner: funds execution only
+	C := newUser("caller", 500)      // immediate caller: funds the value
+	B := newUser("beneficiary", 0)
+	sys := newUser("sys", 0)
+	for _, u := range []*kernel.User{P, C, B, sys} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Process owned by P with a funded parent trace (execution budget 200).
+	p := newProcess(P.ID)
+	parent := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CallerUserID: P.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, parent, P.ID, 200, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Composed subcall: caller C subcalls a value-bearing action delivering 100 to B. Execution price
+	// 0 (funded from the parent trace); the value reserve 100 is locked from C's own balance.
+	sub := &kernel.Trace{
+		ID: uuid.New().String(), ProcessID: p.ID, CallerUserID: C.ID,
+		Value: 100, ValueTo: B.ID, ValueReserve: 100, CreatedAt: time.Now().UTC(),
+	}
+	if err := db.BeginSubcall(ctx, parent.ID, sub, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Reserve is locked from C, not P or the parent trace.
+	if cu, _ := db.ReadUser(ctx, C.ID); cu.Available != 400 || cu.Locked != 100 {
+		t.Fatalf("after admission C: got available=%d locked=%d, want 400/100", cu.Available, cu.Locked)
+	}
+	if pu, _ := db.ReadUser(ctx, P.ID); pu.Available != 800 {
+		t.Errorf("P.available disturbed by value reserve: got %d, want 800 (200 execution only)", pu.Available)
+	}
+
+	tx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: sub.ID, ParentTraceID: parent.ID,
+		OwnerUserID: P.ID, CallerUserID: C.ID, TargetUserID: sys.ID, ActionID: "a1",
+		Status: kernel.TxSuccess, Gross: 0, Net: 0, Fee: 0, StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	receipt := &kernel.Receipt{
+		ID: uuid.New().String(), IssuerUserID: P.ID, TxID: tx.ID, TraceID: sub.ID, ActionID: "a1",
+		ArgsHash: "ah", ReplyHash: "rh", Status: kernel.TxSuccess, Value: 100, ValueTo: B.ID, CreatedAt: time.Now().UTC(),
+	}
+	if err := db.CommitCall(ctx, tx, receipt, sub.ID, parent.ID, kernel.CallerTrace, sys.ID, sys.ID, 0, 0, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Value delivered to B from C; C down exactly 100; P's execution budget intact; local caller pays
+	// no value premium (sys unchanged).
+	if cu, _ := db.ReadUser(ctx, C.ID); cu.Available != 400 || cu.Locked != 0 {
+		t.Errorf("after settle C: got available=%d locked=%d, want 400/0", cu.Available, cu.Locked)
+	}
+	if bu, _ := db.ReadUser(ctx, B.ID); bu.Available != 100 {
+		t.Errorf("beneficiary credited: got %d, want 100", bu.Available)
+	}
+	if su, _ := db.ReadUser(ctx, sys.ID); su.Available != 0 {
+		t.Errorf("local transfer must be untaxed: sys got %d, want 0", su.Available)
+	}
+	if pu, _ := db.ReadUser(ctx, P.ID); pu.Available != 800 || pu.Locked != 200 {
+		t.Errorf("P untouched by value channel: got available=%d locked=%d, want 800/200", pu.Available, pu.Locked)
+	}
+}
+
+// TestTransferEffectRefundedOnFailure: a failed composed transfer returns the whole value reserve to
+// the caller C — nothing delivered, no premium taken (§13, all-or-nothing).
+func TestTransferEffectRefundedOnFailure(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	P := newUser("proc-owner", 1000)
+	C := newUser("caller", 500)
+	B := newUser("beneficiary", 0)
+	sys := newUser("sys", 0)
+	for _, u := range []*kernel.User{P, C, B, sys} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := newProcess(P.ID)
+	parent := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CallerUserID: P.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, parent, P.ID, 200, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	sub := &kernel.Trace{
+		ID: uuid.New().String(), ProcessID: p.ID, CallerUserID: C.ID,
+		Value: 100, ValueTo: B.ID, ValueReserve: 100, CreatedAt: time.Now().UTC(),
+	}
+	if err := db.BeginSubcall(ctx, parent.ID, sub, 0); err != nil {
+		t.Fatal(err)
+	}
+	tx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: sub.ID, ParentTraceID: parent.ID,
+		OwnerUserID: P.ID, CallerUserID: C.ID, ActionID: "a1", Status: kernel.TxFailure,
+		Gross: 0, Reason: "boom", StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	buildReceipt := func(refund int64) (*kernel.Receipt, error) {
+		return &kernel.Receipt{
+			ID: uuid.New().String(), IssuerUserID: P.ID, TxID: tx.ID, TraceID: sub.ID, ActionID: "a1",
+			ArgsHash: "ah", ReplyHash: "rh", Status: kernel.TxFailure, CreatedAt: time.Now().UTC(),
+		}, nil
+	}
+	if err := db.CommitFailedCall(ctx, tx, buildReceipt, sub.ID, parent.ID, kernel.CallerTrace, sys.ID, 0, nil, "", "execution_failed", ""); err != nil {
+		t.Fatal(err)
+	}
+	if cu, _ := db.ReadUser(ctx, C.ID); cu.Available != 500 || cu.Locked != 0 {
+		t.Errorf("failed transfer must refund C in full: got available=%d locked=%d, want 500/0", cu.Available, cu.Locked)
+	}
+	if bu, _ := db.ReadUser(ctx, B.ID); bu.Available != 0 {
+		t.Errorf("failed transfer delivered value: beneficiary got %d, want 0", bu.Available)
+	}
+}
+
 // TestPremiumReserveReleasedFromTrace is the F1 regression: the serving-markup reserve parked at
 // admission must be released from the trace's premium_parked snapshot at settlement — WITHOUT any
 // in-memory request — so crash-recovery / forced-closure failure paths (which rebuild the request
@@ -3513,7 +3633,7 @@ func TestCommitRemoteSettlementStoresFailureResult(t *testing.T) {
 		Status: "failure", Gross: 10, StartedAt: now, CreatedAt: now,
 	}
 	if err := db.CommitRemoteSettlement(ctx, ktx, receipt, root.ID, p.ID, kernel.CallerProcess,
-		proxy.ID, sys.ID, 0, 0, &kernel.Stats{ActionID: act.ID}, rec.ID, "", kernel.ErrExecutionFailed.Code); err != nil {
+		proxy.ID, sys.ID, 0, 0, kernel.ValueSettlement{}, &kernel.Stats{ActionID: act.ID}, rec.ID, "", kernel.ErrExecutionFailed.Code); err != nil {
 		t.Fatalf("CommitRemoteSettlement: %v", err)
 	}
 
