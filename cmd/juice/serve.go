@@ -1261,7 +1261,7 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 			if s.kernel.IsSuperuser(r.Context(), callerID) {
 				forUserID = "" // kernel-level completion (no per-user attestation)
 			}
-			body, err := s.completePeerStep(r.Context(), req.Peer, pathID(r), *req.Args, forUserID)
+			body, err := s.completePeerStepMaybePaid(r.Context(), req.Peer, pathID(r), *req.Args, forUserID, forUserID)
 			return body, http.StatusOK, err
 		}
 		// Under a capability the caller is the executing action's owner (§9); CompleteStep still

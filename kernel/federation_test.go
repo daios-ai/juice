@@ -493,6 +493,116 @@ func TestImportRemoteActionRejectsMissingRequiredFields(t *testing.T) {
 	}
 }
 
+// TestSettleRemotePaidStep exercises the buyer side of a remote payment step (§13): AdmitRemotePaidStep
+// locks max_total, then SettleRemotePaidStep disposes of it on the serving kernel's signed receipt — a
+// valid bound success settles (value+value_premium → peer proxy row, value_import → buyer sys), a signed
+// failure refunds in full, and a mis-bound success quarantines (reserve stays locked).
+func TestSettleRemotePaidStep(t *testing.T) {
+	ctx := context.Background()
+	// A's signing key; descriptor amount 100, remote_max 105 ⇒ value_premium 5.
+	pubA, privA, _ := ed25519.GenerateKey(rand.Reader)
+	keyA := base64.RawURLEncoding.EncodeToString(pubA)
+	desc := kernel.PaymentDescriptor{Beneficiary: "benef-on-a", Amount: 100, RemoteBPS: 500, RemoteMax: 105}
+	desc.Hash = kernel.PaymentDescriptorHash(desc)
+
+	// signedReceipt builds a receipt signed by A over the given fields.
+	signedReceipt := func(t *testing.T, status kernel.TxStatus, value, valuePremium int64, valueTo string) []byte {
+		t.Helper()
+		r := &kernel.Receipt{
+			ID: uuid.New().String(), TxID: uuid.New().String(), Status: status,
+			Value: value, ValuePremium: valuePremium, ValueTo: valueTo,
+			StartedAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
+		}
+		r.Signature = signReceiptForTest(t, privA, r)
+		b, _ := json.Marshal(r)
+		return b
+	}
+
+	// admit sets up a kernel with a funded buyer and A's proxy row, and admits one pending transfer.
+	var sysID string
+	admit := func(t *testing.T) (*kernel.Kernel, kernel.Store, *kernel.User, *kernel.User, *kernel.PendingTransfer) {
+		st := newTestStore(t)
+		sys := setupUser(t, st, "sys", 0)
+		sysID = sys.ID // SetSigningKey makes sys the fee recipient
+		k := newTestKernel(st)
+		k.SetSigningKey(testSigningKey(), sys.ID)
+		buyer := setupUser(t, st, "buyer", 1000)
+		proxyA, err := k.AddPeer(ctx, sys.ID, "kernel-a", keyA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pt, err := k.AdmitRemotePaidStep(ctx, buyer.ID, keyA, "step-1", "ih", uuid.New().String(), desc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := st.ReadUser(ctx, buyer.ID); b.Available != 1000-pt.Reserve || b.Locked != pt.Reserve {
+			t.Fatalf("after admit buyer: available=%d locked=%d, want %d/%d", b.Available, b.Locked, 1000-pt.Reserve, pt.Reserve)
+		}
+		return k, st, buyer, proxyA, pt
+	}
+
+	t.Run("valid success settles", func(t *testing.T) {
+		k, st, buyer, proxyA, pt := admit(t)
+		valueImport := pt.Reserve - desc.RemoteMax // = max_total − remote_max
+		if err := k.SettleRemotePaidStep(ctx, pt, desc, signedReceipt(t, kernel.TxSuccess, 100, 5, "benef-on-a")); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := st.ReadUser(ctx, buyer.ID); b.Locked != 0 || b.Available != 1000-pt.Reserve {
+			t.Errorf("settled buyer: available=%d locked=%d, want %d/0", b.Available, b.Locked, 1000-pt.Reserve)
+		}
+		if p, _ := st.ReadUser(ctx, proxyA.ID); p.Available != 105 {
+			t.Errorf("buyer owes A (proxy row): got %d, want 105", p.Available)
+		}
+		if sysU, _ := st.ReadUser(ctx, sysID); sysU.Available != valueImport {
+			t.Errorf("buyer sys value_import: got %d, want %d", sysU.Available, valueImport)
+		}
+	})
+
+	t.Run("signed failure refunds", func(t *testing.T) {
+		k, st, buyer, _, pt := admit(t)
+		if err := k.SettleRemotePaidStep(ctx, pt, desc, signedReceipt(t, kernel.TxFailure, 0, 0, "")); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := st.ReadUser(ctx, buyer.ID); b.Locked != 0 || b.Available != 1000 {
+			t.Errorf("refunded buyer: available=%d locked=%d, want 1000/0", b.Available, b.Locked)
+		}
+	})
+
+	t.Run("mis-bound success quarantines (reserve stays locked)", func(t *testing.T) {
+		k, st, buyer, proxyA, pt := admit(t)
+		// value != amount: A short-changed the beneficiary; keep the reserve locked, do not settle.
+		if err := k.SettleRemotePaidStep(ctx, pt, desc, signedReceipt(t, kernel.TxSuccess, 50, 5, "benef-on-a")); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := st.ReadUser(ctx, buyer.ID); b.Locked != pt.Reserve || b.Available != 1000-pt.Reserve {
+			t.Errorf("quarantined buyer must stay locked: available=%d locked=%d", b.Available, b.Locked)
+		}
+		if p, _ := st.ReadUser(ctx, proxyA.ID); p.Available != 0 {
+			t.Errorf("quarantine must not credit the proxy row: got %d", p.Available)
+		}
+	})
+
+	t.Run("wrong beneficiary quarantines", func(t *testing.T) {
+		k, st, buyer, _, pt := admit(t)
+		if err := k.SettleRemotePaidStep(ctx, pt, desc, signedReceipt(t, kernel.TxSuccess, 100, 5, "someone-else")); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := st.ReadUser(ctx, buyer.ID); b.Locked != pt.Reserve {
+			t.Errorf("wrong beneficiary must quarantine: locked=%d, want %d", b.Locked, pt.Reserve)
+		}
+	})
+
+	t.Run("uncertain (no receipt) leaves pending", func(t *testing.T) {
+		k, st, buyer, _, pt := admit(t)
+		if err := k.SettleRemotePaidStep(ctx, pt, desc, nil); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := st.ReadUser(ctx, buyer.ID); b.Locked != pt.Reserve {
+			t.Errorf("uncertain must leave reserve locked pending retry: locked=%d, want %d", b.Locked, pt.Reserve)
+		}
+	})
+}
+
 // TestLocalActionNotExported: a local-visibility action is never served as a manifest nor gossiped
 // (§13); only public actions cross the kernel boundary. This keeps friendship non-transitive and is
 // how an imported proxy (set local) stays unreachable by peers.

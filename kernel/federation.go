@@ -118,6 +118,143 @@ func marshalDispatch(args map[string]any, stepID string, mp, value, gross int64)
 	return &s
 }
 
+// PaymentDescriptor is what a serving kernel A advertises about a payment Step to the buyer B (§13): the
+// bilateral obligation A can compute, and nothing more. `remote_max = amount + value_premium` is what B
+// owes A; B computes its own `value_import`/`max_total` locally (its import policy is not A's business).
+// Hash binds the descriptor into the completion idempotency key so the step cannot be completed for a
+// different payment.
+type PaymentDescriptor struct {
+	Beneficiary string `json:"beneficiary"` // resolved local beneficiary user_id on the serving kernel
+	Amount      int64  `json:"amount"`
+	RemoteBPS   int64  `json:"remote_bps"`
+	RemoteMax   int64  `json:"remote_max"`
+	Hash        string `json:"hash,omitempty"`
+}
+
+// PaymentDescriptorHash is the SHA-256 over the JCS-canonical descriptor (excluding hash), shared by the
+// serving kernel (which advertises it) and the buyer (which binds it into the idempotency key). Both
+// sides compute it identically, so a mismatch means a tampered payment.
+func PaymentDescriptorHash(d PaymentDescriptor) string {
+	d.Hash = ""
+	payload, _ := CanonicalJSON(d)
+	return sha256Hex(string(payload))
+}
+
+// BuildPaymentDescriptor computes the payment descriptor for an effect-bearing step from its partial
+// args (§13), resolving the local beneficiary and pricing the serving markup. Returns nil for a
+// non-transfer action or when the step's args do not name a resolvable local beneficiary.
+func (k *Kernel) BuildPaymentDescriptor(ctx context.Context, action *Action, partialArgs []byte) (*PaymentDescriptor, error) {
+	fn := k.actionValue(action)
+	if fn == nil {
+		return nil, nil // not a payment step
+	}
+	var args map[string]any
+	if err := json.Unmarshal(partialArgs, &args); err != nil {
+		return nil, nil
+	}
+	amount, ref, err := fn(args)
+	if err != nil || amount < 1 || strings.Contains(ref, "@") {
+		return nil, nil
+	}
+	benef, err := k.ResolveUser(ctx, ref)
+	if err != nil || benef == nil || benef.IsPeer() || benef.SuspendedAt != nil {
+		return nil, nil
+	}
+	valuePremium := ceilDiv(amount*k.cfg.RemoteBPS, 10000)
+	d := PaymentDescriptor{
+		Beneficiary: benef.ID,
+		Amount:      amount,
+		RemoteBPS:   k.cfg.RemoteBPS,
+		RemoteMax:   amount + valuePremium,
+	}
+	d.Hash = PaymentDescriptorHash(d)
+	return &d, nil
+}
+
+// StepPaymentHash returns the payment-descriptor hash for a step, or "" when it is not a payment step
+// (§13). The serving side folds it into the expected completion idempotency key to bind the payment.
+func (k *Kernel) StepPaymentHash(ctx context.Context, stepID string) string {
+	step, err := k.store.ReadStep(ctx, stepID)
+	if err != nil {
+		return ""
+	}
+	action, err := k.store.ReadAction(ctx, step.ActionID)
+	if err != nil {
+		return ""
+	}
+	d, err := k.BuildPaymentDescriptor(ctx, action, step.PartialArgs)
+	if err != nil || d == nil {
+		return ""
+	}
+	return d.Hash
+}
+
+// ReadPendingTransferByKey returns the buyer-side pending payment record for an idempotency key (§13),
+// or ErrNotFound. Used by the completion orchestration to make funding idempotent across retries.
+func (k *Kernel) ReadPendingTransferByKey(ctx context.Context, idempotencyKey string) (*PendingTransfer, error) {
+	return k.store.ReadPendingTransferByKey(ctx, idempotencyKey)
+}
+
+// AdmitRemotePaidStep locks the buyer's reserve (max_total = remote_max + its own import fee) from its
+// own balance and records a pending_transfers row, reserve-first and atomic (§13). The idempotency key is
+// payment-bound (control layer). Returns the pending record; a duplicate key (retry) returns ErrConflict.
+func (k *Kernel) AdmitRemotePaidStep(ctx context.Context, buyerID, peerKey, stepID, inputHash, idempotencyKey string, d PaymentDescriptor) (*PendingTransfer, error) {
+	valueImport := ceilDiv(d.RemoteMax*k.cfg.ImportBPS, 10000)
+	pt := &PendingTransfer{
+		ID:             uuid.New().String(),
+		BuyerID:        buyerID,
+		PeerKey:        peerKey,
+		StepID:         stepID,
+		InputHash:      inputHash,
+		IdempotencyKey: idempotencyKey,
+		Beneficiary:    d.Beneficiary,
+		Amount:         d.Amount,
+		Reserve:        d.RemoteMax + valueImport, // max_total: value + value_premium + value_import
+		Status:         "pending",
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := k.store.InsertPendingTransfer(ctx, pt); err != nil {
+		return nil, err
+	}
+	return pt, nil
+}
+
+// SettleRemotePaidStep disposes of a buyer-side payment reserve on the serving kernel's completion
+// receipt (§13), the same rule as the outbound-call value channel:
+//   - valid SUCCESS binding the payment (signature over A's key; value == amount; value_to ==
+//     beneficiary; value_premium == remote_max − amount) ⇒ settle: value+value_premium to A's proxy row
+//     (buyer owes A), value_import to buyer sys, remainder refunded;
+//   - valid FAILURE/rejection ⇒ refund the whole reserve;
+//   - an inconsistent/mis-bound receipt after a possibly-executed completion ⇒ QUARANTINE (reserve stays
+//     locked; A may have paid the beneficiary).
+// receiptJSON is nil/empty when no receipt arrived (uncertain): the record is left pending for retry.
+func (k *Kernel) SettleRemotePaidStep(ctx context.Context, pending *PendingTransfer, d PaymentDescriptor, receiptJSON []byte) error {
+	if len(receiptJSON) == 0 {
+		return nil // uncertain: leave pending, retry with the same key
+	}
+	var r Receipt
+	if err := json.Unmarshal(receiptJSON, &r); err != nil {
+		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined")
+	}
+	if verifyRemoteReceiptSignature(&r, pending.PeerKey) != nil {
+		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined")
+	}
+	if r.Status != TxSuccess {
+		return k.store.RefundPendingTransfer(ctx, pending.ID) // valid signed failure
+	}
+	valuePremium := d.RemoteMax - d.Amount
+	if r.Value != d.Amount || r.ValueTo != d.Beneficiary || r.ValuePremium != valuePremium {
+		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined") // mis-bound success
+	}
+	proxy, err := k.store.ReadUserByPublicKey(ctx, pending.PeerKey)
+	if err != nil || proxy == nil {
+		return ErrNotFound.Wrap("serving-kernel proxy row not found for settlement")
+	}
+	credit := r.Value + r.ValuePremium // buyer owes A value + serving markup
+	valueImport := pending.Reserve - credit
+	return k.store.CommitPendingTransfer(ctx, pending.ID, proxy.ID, credit, k.cfg.FeeRecipientID, valueImport)
+}
+
 // callerWalletFor returns the (walletID, walletKind) that funds a call:
 //   - step completion → CallerStep (no wallet id; BeginStepCall already released the lock)
 //   - subcall (has parent trace) → CallerTrace

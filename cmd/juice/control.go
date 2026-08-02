@@ -399,7 +399,7 @@ func (s *server) stepRoundTrip(ctx context.Context, peerKey string, req fed.Step
 // non-empty, is the completing user's own stable id on THIS kernel: it attaches a step_auth
 // attestation so a remote-user-addressed step is completed as that specific user (an empty forUserID
 // is a kernel-level completion, superuser scope, for a kernel-addressed step).
-func (s *server) completePeerStep(ctx context.Context, peerRef, stepID string, rawInput json.RawMessage, forUserID string) (map[string]any, error) {
+func (s *server) completePeerStep(ctx context.Context, peerRef, stepID string, rawInput json.RawMessage, forUserID, paymentHash string) (map[string]any, error) {
 	peerKey, err := s.resolvePeerKey(ctx, strings.TrimSpace(peerRef))
 	if err != nil {
 		return nil, err
@@ -421,7 +421,9 @@ func (s *server) completePeerStep(ctx context.Context, peerRef, stepID string, r
 	// Derive the idempotency key rather than minting a UUID per attempt: a retry must present the
 	// SAME key, or the peer cannot recognize it as a duplicate and the tx/receipt of an
 	// already-executed completion is lost. Same peer + step + input ⇒ same key, nothing persisted.
-	idempotencyKey := sha256HexBytes([]byte("juice/fed/step/1|" + peerKey + "|" + stepID + "|" + inputHash))
+	// The key binds the payment descriptor hash (§13): a payment step folds its hash here so the serving
+	// kernel, recomputing its own, rejects a mismatch. A non-payment step uses paymentHash="".
+	idempotencyKey := sha256HexBytes([]byte("juice/fed/step/1|" + peerKey + "|" + stepID + "|" + inputHash + "|" + paymentHash))
 	sig, ts, err := s.kernel.SignStep(stepID, pub, peerKey, idempotencyKey, inputHash)
 	if err != nil {
 		return nil, err
@@ -438,6 +440,93 @@ func (s *server) completePeerStep(ctx context.Context, peerRef, stepID string, r
 		req.ForUserID, req.UserAttestation, req.UserTimestamp = forUserID, asig, ats
 	}
 	return s.stepRoundTrip(ctx, peerKey, req, fedStepTimeout)
+}
+
+// completePeerStepMaybePaid completes a peer-held step, funding the value channel when the step is a
+// payment step (§13). It first reads the peer's step listing for a payment descriptor: absent ⇒ an
+// ordinary completion (paymentHash ""). Present ⇒ the buyer locks its own max_total reserve-first in a
+// pending_transfers record (idempotent on the payment-bound key), completes, and settles on the serving
+// kernel's signed receipt — value+value_premium to A's proxy row, value_import to buyer sys, refund on a
+// signed failure, left pending on an uncertain outcome for retry with the same key.
+func (s *server) completePeerStepMaybePaid(ctx context.Context, peerRef, stepID string, rawInput json.RawMessage, forUserID, buyerID string) (map[string]any, error) {
+	peerKey, err := s.resolvePeerKey(ctx, strings.TrimSpace(peerRef))
+	if err != nil {
+		return nil, err
+	}
+	desc := s.findPeerStepPayment(ctx, peerKey, stepID)
+	if desc == nil {
+		return s.completePeerStep(ctx, peerRef, stepID, rawInput, forUserID, "") // ordinary (non-payment) step
+	}
+	if buyerID == "" {
+		return nil, kernel.ErrInvalidInput.Wrap("a payment step must be completed by a specific user")
+	}
+	if kernel.PaymentDescriptorHash(*desc) != desc.Hash {
+		return nil, kernel.ErrInvalidState.Wrap("payment descriptor hash mismatch")
+	}
+	// Hash the input exactly as completePeerStep will (marshaling a RawMessage is a fixed point).
+	input := []byte(rawInput)
+	if len(input) == 0 {
+		input = []byte("{}")
+	}
+	if input, err = json.Marshal(json.RawMessage(input)); err != nil {
+		return nil, kernel.ErrInvalidInput.Wrap("input must be valid JSON")
+	}
+	inputHash := sha256HexBytes(input)
+	idempotencyKey := sha256HexBytes([]byte("juice/fed/step/1|" + peerKey + "|" + stepID + "|" + inputHash + "|" + desc.Hash))
+
+	// Reuse an existing reserve (retry) or admit a new one (lock max_total). Reserve-first: fund before
+	// the network completion so a crash never leaves the buyer having paid without a record.
+	pending, err := s.kernel.ReadPendingTransferByKey(ctx, idempotencyKey)
+	if err != nil {
+		if pending, err = s.kernel.AdmitRemotePaidStep(ctx, buyerID, peerKey, stepID, inputHash, idempotencyKey, *desc); err != nil {
+			return nil, err
+		}
+	}
+	body, cerr := s.completePeerStep(ctx, peerRef, stepID, rawInput, forUserID, desc.Hash)
+	var receiptJSON []byte
+	if body != nil {
+		if rj, ok := body["receipt"]; ok && rj != nil {
+			receiptJSON, _ = json.Marshal(rj)
+		}
+	}
+	if serr := s.kernel.SettleRemotePaidStep(ctx, pending, *desc, receiptJSON); serr != nil {
+		return body, serr
+	}
+	return body, cerr
+}
+
+// findPeerStepPayment fetches the peer's step listing and returns the payment descriptor for stepID, or
+// nil when the step is not a payment step (or the listing cannot be read).
+func (s *server) findPeerStepPayment(ctx context.Context, peerKey, stepID string) *kernel.PaymentDescriptor {
+	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	sig, ts, err := s.kernel.SignStepList(pub, peerKey)
+	if err != nil {
+		return nil
+	}
+	body, err := s.stepRoundTrip(ctx, peerKey, fed.StepRequest{
+		Kind: "list", Counterparty: pub, Timestamp: ts, Signature: sig,
+	}, fedOpTimeout)
+	if err != nil {
+		return nil
+	}
+	raw, ok := body["steps"]
+	if !ok {
+		return nil
+	}
+	b, _ := json.Marshal(raw)
+	var views []struct {
+		ID      string                    `json:"id"`
+		Payment *kernel.PaymentDescriptor `json:"payment"`
+	}
+	if json.Unmarshal(b, &views) != nil {
+		return nil
+	}
+	for _, v := range views {
+		if v.ID == stepID {
+			return v.Payment
+		}
+	}
+	return nil
 }
 
 // peerStepsAwaitingUs lists the steps a peer holds for this kernel, for admin inspect (§13).

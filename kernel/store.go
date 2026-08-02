@@ -239,7 +239,7 @@ type Store interface {
 	// BeginStepCall atomically moves step.price from the step's parent_trace.locked back into
 	// parent_trace.available (the step is being consumed), creates the new trace with
 	// available=step.price, and transitions the step waiting→running.
-	BeginStepCall(ctx context.Context, stepID string, t *Trace) error
+	BeginStepCall(ctx context.Context, stepID string, t *Trace, exposureMax int64) error
 
 	// CommitCall atomically records a successful transaction, creates its receipt,
 	// settles funds (trace.available→target/sys; caller wallet locked released;
@@ -371,6 +371,20 @@ type Store interface {
 	// stats, marks step done (if stepID non-empty), completes the idempotency record (if non-empty),
 	// and closes the process if quiescent.
 	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, proxyUserID, feeRecipientID string, paid, importFee int64, vs ValueSettlement, stats *Stats, idempotencyRecordID, stepID, errorCode string) error
+
+	// Remote payment-step reserve (buyer side, §13): the buyer funds a TransferEffect attached to a
+	// Step hosted on another kernel via a dedicated pending_transfers record, not a fabricated trace.
+	// InsertPendingTransfer locks max_total from the buyer reserve-first and records the row atomically.
+	// CommitPendingTransfer settles it on the serving kernel's valid success receipt (value+value_premium
+	// → peer proxy row, value_import → buyer sys, remainder refunded). RefundPendingTransfer returns the
+	// whole reserve (valid failure/never-dispatched). SetPendingTransferStatus quarantines WITHOUT
+	// touching balances (invalid receipt: reserve stays locked). ReadPendingTransferByKey is the
+	// idempotency/retry lookup.
+	InsertPendingTransfer(ctx context.Context, pt *PendingTransfer) error
+	ReadPendingTransferByKey(ctx context.Context, idempotencyKey string) (*PendingTransfer, error)
+	CommitPendingTransfer(ctx context.Context, id, proxyRowID string, credit int64, sysID string, sysCredit int64) error
+	RefundPendingTransfer(ctx context.Context, id string) error
+	SetPendingTransferStatus(ctx context.Context, id, status string) error
 
 	// ---- Traces (by process) ----
 

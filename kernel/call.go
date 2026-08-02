@@ -572,13 +572,17 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	ktx.Net = net
 	ktx.Fee = fee
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
-	// Two independent channels (§13), the rate snapshotted on the trace at admission: the EXECUTION
-	// premium is levied on the charge (= gross) and the VALUE premium on the delivered value, computed
-	// separately (never on charge+value — the rounding-merge is the bug). On success the full value is
-	// delivered; the value reserve is released to the beneficiary + sys inside CommitCall from the trace
-	// snapshot. All 0 for a local caller (trace.PremiumBPS == 0).
+	// Two independent channels (§13). The EXECUTION premium is levied on the charge (= gross) at the
+	// rate snapshotted on the trace, and released from premium_parked at settlement. The VALUE premium
+	// is the serving markup baked into the value reserve at admission — value_reserve − value — so the
+	// receipt's value_premium is exactly what commitTraceTransferEffect settles to sys, for every
+	// caller (a local caller reserves exactly value ⇒ 0; a peer/step completer reserves value+markup).
+	// Both computed separately; never on charge+value (the rounding-merge is the bug).
 	premium := ceilDiv(ktx.Gross*trace.PremiumBPS, 10000)
-	valuePremium := ceilDiv(trace.Value*trace.PremiumBPS, 10000)
+	var valuePremium int64
+	if trace.ValueTo != "" && trace.ValueReserve > trace.Value {
+		valuePremium = trace.ValueReserve - trace.Value
+	}
 	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium, trace.Value, valuePremium, trace.ValueTo) // success: charge = gross, value delivered
 	if receiptErr != nil {
 		mu.Unlock()

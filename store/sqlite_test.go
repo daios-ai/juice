@@ -938,6 +938,81 @@ func TestTransferEffectRefundedOnFailure(t *testing.T) {
 	}
 }
 
+// TestPendingTransferSettlement is the buyer-side payment-step reserve (§13): InsertPendingTransfer
+// locks max_total from the buyer; CommitPendingTransfer settles value+value_premium to the peer proxy
+// row and value_import to sys, refunding the remainder; RefundPendingTransfer returns the whole reserve;
+// SetPendingTransferStatus('quarantined') leaves it LOCKED.
+func TestPendingTransferSettlement(t *testing.T) {
+	ctx := context.Background()
+	// amount 100, rbps/ibps 500: value_premium 5, remote_max 105, value_import 6, max_total 111.
+	mk := func(t *testing.T) (*DB, *kernel.User, *kernel.User, *kernel.User, *kernel.PendingTransfer) {
+		db := openTestDB(t)
+		buyer := newUser("buyer", 1000)
+		proxyA := newUser("proxy-a", 0)
+		sys := newUser("sys", 0)
+		for _, u := range []*kernel.User{buyer, proxyA, sys} {
+			if err := db.CreateUser(ctx, u); err != nil {
+				t.Fatal(err)
+			}
+		}
+		pt := &kernel.PendingTransfer{
+			ID: uuid.New().String(), BuyerID: buyer.ID, PeerKey: "keyA", StepID: "s1",
+			InputHash: "ih", IdempotencyKey: uuid.New().String(), Beneficiary: "benef",
+			Amount: 100, Reserve: 111, CreatedAt: time.Now().UTC(),
+		}
+		if err := db.InsertPendingTransfer(ctx, pt); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 889 || b.Locked != 111 {
+			t.Fatalf("after admit buyer: got available=%d locked=%d, want 889/111", b.Available, b.Locked)
+		}
+		return db, buyer, proxyA, sys, pt
+	}
+
+	t.Run("settle", func(t *testing.T) {
+		db, buyer, proxyA, sys, pt := mk(t)
+		if err := db.CommitPendingTransfer(ctx, pt.ID, proxyA.ID, 105, sys.ID, 6); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 889 || b.Locked != 0 {
+			t.Errorf("settled buyer: got available=%d locked=%d, want 889/0", b.Available, b.Locked)
+		}
+		if p, _ := db.ReadUser(ctx, proxyA.ID); p.Available != 105 {
+			t.Errorf("proxy row (buyer owes A): got %d, want 105", p.Available)
+		}
+		if su, _ := db.ReadUser(ctx, sys.ID); su.Available != 6 {
+			t.Errorf("sys value_import: got %d, want 6", su.Available)
+		}
+	})
+
+	t.Run("refund", func(t *testing.T) {
+		db, buyer, _, _, pt := mk(t)
+		if err := db.RefundPendingTransfer(ctx, pt.ID); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 1000 || b.Locked != 0 {
+			t.Errorf("refunded buyer: got available=%d locked=%d, want 1000/0", b.Available, b.Locked)
+		}
+	})
+
+	t.Run("quarantine keeps reserve locked", func(t *testing.T) {
+		db, buyer, _, _, pt := mk(t)
+		if err := db.SetPendingTransferStatus(ctx, pt.ID, "quarantined"); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 889 || b.Locked != 111 {
+			t.Errorf("quarantined buyer must stay locked: got available=%d locked=%d, want 889/111", b.Available, b.Locked)
+		}
+		// A later commit/refund on a non-pending record is a no-op (idempotent disposition).
+		if err := db.RefundPendingTransfer(ctx, pt.ID); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 889 {
+			t.Errorf("refund after quarantine must be a no-op: got %d, want 889", b.Available)
+		}
+	})
+}
+
 // TestPremiumReserveReleasedFromTrace is the F1 regression: the serving-markup reserve parked at
 // admission must be released from the trace's premium_parked snapshot at settlement — WITHOUT any
 // in-memory request — so crash-recovery / forced-closure failure paths (which rebuild the request
@@ -1162,7 +1237,7 @@ func TestEndProcessDoesNotDoubleCountCompletedStep(t *testing.T) {
 	}
 
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginStepCall(ctx, step.ID, ct); err != nil {
+	if err := db.BeginStepCall(ctx, step.ID, ct, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1235,7 +1310,7 @@ func TestBeginStepCallGuardsParkInvariant(t *testing.T) {
 	}
 
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	err := db.BeginStepCall(ctx, step.ID, ct)
+	err := db.BeginStepCall(ctx, step.ID, ct, 0)
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("BeginStepCall with broken park: got %v, want ErrInvalidState", err)
 	}
@@ -2736,7 +2811,7 @@ func TestListOrphanRunningStepsDistinguishesSettled(t *testing.T) {
 		}
 		_ = db.CreateStep(ctx, step)
 		ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-		_ = db.BeginStepCall(ctx, step.ID, ct)
+		_ = db.BeginStepCall(ctx, step.ID, ct, 0)
 		return step, ct
 	}
 
@@ -2910,7 +2985,7 @@ func TestResetStepAndReparkWithDescendantTransaction(t *testing.T) {
 	}
 	_ = db.CreateStep(ctx, step)
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	_ = db.BeginStepCall(ctx, step.ID, ct)
+	_ = db.BeginStepCall(ctx, step.ID, ct, 0)
 
 	// Create a descendant subcall of the completion trace and commit a transaction for it.
 	sub := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
@@ -2967,7 +3042,7 @@ func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {
 	}
 	_ = db.CreateStep(ctx, step)
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	_ = db.BeginStepCall(ctx, step.ID, ct)
+	_ = db.BeginStepCall(ctx, step.ID, ct, 0)
 
 	// Make the completion trace non-empty: lock funds via a subcall.
 	sub := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}

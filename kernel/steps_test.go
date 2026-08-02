@@ -468,7 +468,7 @@ func TestBootstrapResetsRunningStepsToWaiting(t *testing.T) {
 		ProcessID: p.ID,
 		CreatedAt: time.Now().UTC(),
 	}
-	if err := st.BeginStepCall(ctx, step.ID, stepTrace); err != nil {
+	if err := st.BeginStepCall(ctx, step.ID, stepTrace, 0); err != nil {
 		t.Fatalf("BeginStepCall: %v", err)
 	}
 	got, _ := st.ReadStep(ctx, step.ID)
@@ -1001,7 +1001,7 @@ func setupStepWithCompletionTrace(t *testing.T, st kernel.Store, k *kernel.Kerne
 		CallerUserID:  caller.ID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := st.BeginStepCall(ctx, step.ID, ct); err != nil {
+	if err := st.BeginStepCall(ctx, step.ID, ct, 0); err != nil {
 		t.Fatalf("setupStepWithCompletionTrace: BeginStepCall: %v", err)
 	}
 	return step, ct

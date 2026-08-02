@@ -873,17 +873,23 @@ func checkFederationTimestamp(tsStr string) error {
 // action ref (it names a local owner), created_by, owner_handle, and every trace/action/tx id —
 // is local composition detail the completer does not need in order to complete.
 type peerStepView struct {
-	ID           string          `json:"id"`
-	PartialArgs  json.RawMessage `json:"partial_args,omitempty"`
-	AllowedInput map[string]any  `json:"allowed_input,omitempty"`
-	Price        int64           `json:"price"`
-	CreatedAt    time.Time       `json:"created_at"`
+	ID           string                    `json:"id"`
+	PartialArgs  json.RawMessage           `json:"partial_args,omitempty"`
+	AllowedInput map[string]any            `json:"allowed_input,omitempty"`
+	Price        int64                     `json:"price"`
+	Payment      *kernel.PaymentDescriptor `json:"payment,omitempty"` // present iff this is a payment step (§13)
+	CreatedAt    time.Time                 `json:"created_at"`
 }
 
-func newPeerStepView(s *kernel.Step, action *kernel.Action) *peerStepView {
+func newPeerStepView(ctx context.Context, k *kernel.Kernel, s *kernel.Step, action *kernel.Action) *peerStepView {
 	v := &peerStepView{ID: s.ID, PartialArgs: s.PartialArgs, Price: s.Price, CreatedAt: s.CreatedAt}
 	if action != nil {
 		v.AllowedInput = kernel.DeriveAllowedSchema(action.InputSchema, s.PartialArgs)
+		// A payment step (effect-bearing action) carries the payment descriptor so the buyer can fund the
+		// value channel and bind it into the completion (§13). Silently absent otherwise.
+		if d, err := k.BuildPaymentDescriptor(ctx, action, s.PartialArgs); err == nil && d != nil {
+			v.Payment = d
+		}
 	}
 	return v
 }
@@ -925,7 +931,7 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	views := make([]*peerStepView, len(steps))
 	for i, s := range steps {
 		action, _ := k.ReadAction(ctx, s.ActionID)
-		views[i] = newPeerStepView(s, action)
+		views[i] = newPeerStepView(ctx, k, s, action)
 	}
 	body := map[string]any{"steps": views}
 	// A full page means more may be waiting. One honest flag, no continuation: this queue holds
@@ -977,6 +983,17 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 		if forUserID != *remoteID {
 			return 0, nil, kernel.ErrUnauthorized.Wrap("attested user is not the step's required caller")
 		}
+	}
+
+	// Payment binding (§13): fold the step's OWN payment-descriptor hash into the expected idempotency
+	// key and require the presented key to match, so a payment step cannot be completed for a different
+	// (or no) payment — the key is already inside the signed step payload, so binding it here binds the
+	// whole completion. A non-payment step has paymentHash="" — identical to the base key (back-compat
+	// within the federation line).
+	paymentHash := k.StepPaymentHash(ctx, stepID)
+	expectedKey := sha256HexBytes([]byte("juice/fed/step/1|" + self + "|" + stepID + "|" + sha256HexBytes(rawInput) + "|" + paymentHash))
+	if idempotencyKey != expectedKey {
+		return 0, nil, kernel.ErrUnauthorized.Wrap("idempotency key does not match the step's payment binding")
 	}
 
 	now := time.Now().UTC()

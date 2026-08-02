@@ -416,7 +416,7 @@ func TestCompletePeerStep_DerivesTheIdempotencyKey(t *testing.T) {
 
 	key := func(stepID string, input string) string {
 		t.Helper()
-		if _, err := srv.completePeerStep(ctx, handle, stepID, json.RawMessage(input), ""); err != nil {
+		if _, err := srv.completePeerStep(ctx, handle, stepID, json.RawMessage(input), "", ""); err != nil {
 			t.Fatalf("completePeerStep: %v", err)
 		}
 		return f.lastStep.IdempotencyKey
@@ -447,7 +447,7 @@ func TestCompletePeerStep_SignsTheBytesItSends(t *testing.T) {
 	srv, handle := peerStepServer(t, f)
 
 	pretty := json.RawMessage("{\n  \"city\": \"Rio\",\n  \"note\": \"a<b&c\"\n}")
-	if _, err := srv.completePeerStep(context.Background(), handle, "s1", pretty, ""); err != nil {
+	if _, err := srv.completePeerStep(context.Background(), handle, "s1", pretty, "", ""); err != nil {
 		t.Fatalf("completePeerStep: %v", err)
 	}
 
@@ -487,7 +487,7 @@ func TestCompletePeerStep_DistinguishesNeverSentFromMayHaveRun(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, handle := peerStepServer(t, tc.fed)
-			_, err := srv.completePeerStep(context.Background(), handle, "s1", json.RawMessage(`{}`), "")
+			_, err := srv.completePeerStep(context.Background(), handle, "s1", json.RawMessage(`{}`), "", "")
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("got %v, want %v", err, tc.want)
 			}

@@ -780,7 +780,7 @@ func (s *DB) BeginSubcall(ctx context.Context, parentTraceID string, t *kernel.T
 // BeginStepCall atomically moves step.price from the step's parent_trace.locked back into
 // parent_trace.available (consuming the park), claims the step waiting→running, and creates
 // a new trace with available=step.price funded from the released lock.
-func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace) error {
+func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace, exposureMax int64) error {
 	return s.withTx(ctx, "begin step call", func(tx *sql.Tx) error {
 		// Read step to get price and parent_trace_id.
 		var price int64
@@ -810,6 +810,12 @@ func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace) 
 			if n, _ := res.RowsAffected(); n == 0 {
 				return kernel.ErrInvalidState.Wrap("step park invariant violated: parent trace locked < step price")
 			}
+		}
+		// Value transfer (§13): a payment step locks its value reserve from the completer C's OWN
+		// balance (a peer completer's proxy row, guarded against global exposure X), atomic with claiming
+		// the step — the buyer funds the value, the step's execution price stays creator-parked above.
+		if err = lockReserveTx(ctx, tx, t.CallerUserID, t.ValueReserve, exposureMax); err != nil {
+			return err
 		}
 		// Insert the completion trace first so the FK on steps.completion_trace_id is satisfied.
 		if err = insertTraceTx(ctx, tx, t, parentTraceID, price); err != nil {
@@ -1160,6 +1166,108 @@ func refundTransferEffect(ctx context.Context, tx *sql.Tx, traceID string) error
 		return dbErr(err, "transfer refund: read trace")
 	}
 	return settleTransferReserve(ctx, tx, callerC, reserve, "", 0, "", 0)
+}
+
+// ---- Remote payment-step reserve (buyer side, §13) ----
+
+// InsertPendingTransfer locks the buyer's reserve (max_total) from its own balance and records the
+// pending_transfers row in ONE transaction, reserve-first (§13). The buyer is local, so it prepays
+// (exposureMax 0). The unique idempotency_key makes a retry idempotent: a duplicate insert returns
+// ErrConflict without a second lock.
+func (s *DB) InsertPendingTransfer(ctx context.Context, pt *kernel.PendingTransfer) error {
+	return s.withTx(ctx, "insert pending transfer", func(tx *sql.Tx) error {
+		if err := lockReserveTx(ctx, tx, pt.BuyerID, pt.Reserve, 0); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO pending_transfers (id,buyer_id,peer_key,step_id,input_hash,idempotency_key,beneficiary,amount,reserve,status,created_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			pt.ID, pt.BuyerID, pt.PeerKey, pt.StepID, pt.InputHash, pt.IdempotencyKey,
+			pt.Beneficiary, pt.Amount, pt.Reserve, "pending", timeToStr(pt.CreatedAt))
+		if err != nil {
+			return dbErr(err, "insert pending transfer")
+		}
+		return nil
+	})
+}
+
+// ReadPendingTransferByKey returns the pending_transfers row for an idempotency key, or ErrNotFound.
+func (s *DB) ReadPendingTransferByKey(ctx context.Context, idempotencyKey string) (*kernel.PendingTransfer, error) {
+	var pt kernel.PendingTransfer
+	var createdAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id,buyer_id,peer_key,step_id,input_hash,idempotency_key,beneficiary,amount,reserve,status,created_at
+		 FROM pending_transfers WHERE idempotency_key=?`, idempotencyKey,
+	).Scan(&pt.ID, &pt.BuyerID, &pt.PeerKey, &pt.StepID, &pt.InputHash, &pt.IdempotencyKey,
+		&pt.Beneficiary, &pt.Amount, &pt.Reserve, &pt.Status, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("pending transfer not found")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read pending transfer")
+	}
+	pt.CreatedAt = strToTime(createdAt)
+	return &pt, nil
+}
+
+// CommitPendingTransfer settles a buyer-side payment reserve on the serving kernel's valid success
+// receipt (§13): the reserve leaves the buyer's locked, `credit` (value+value_premium) goes to the peer
+// proxy row (what the buyer owes the serving kernel), `sysCredit` (value_import) to the buyer's sys, and
+// the remainder refunds to the buyer — marking the record settled, one tx. Guarded so a wrong-status
+// record (already disposed) is a no-op rather than a double settlement.
+func (s *DB) CommitPendingTransfer(ctx context.Context, id, proxyRowID string, credit int64, sysID string, sysCredit int64) error {
+	return s.withTx(ctx, "commit pending transfer", func(tx *sql.Tx) error {
+		var buyerID string
+		var reserve int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT buyer_id,reserve FROM pending_transfers WHERE id=? AND status='pending'`, id,
+		).Scan(&buyerID, &reserve); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil // already disposed; idempotent
+			}
+			return dbErr(err, "commit pending transfer: read")
+		}
+		if err := settleTransferReserve(ctx, tx, buyerID, reserve, proxyRowID, credit, sysID, sysCredit); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE pending_transfers SET status='settled' WHERE id=?`, id)
+		return err
+	})
+}
+
+// RefundPendingTransfer returns the whole reserve to the buyer and marks the record refunded — the
+// disposition for a valid failure/rejection or a never-dispatched completion (§13). A quarantined/invalid
+// receipt is NOT refunded here (see SetPendingTransferStatus): the serving kernel may have paid the
+// beneficiary, so the reserve stays locked for operator reconciliation.
+func (s *DB) RefundPendingTransfer(ctx context.Context, id string) error {
+	return s.withTx(ctx, "refund pending transfer", func(tx *sql.Tx) error {
+		var buyerID string
+		var reserve int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT buyer_id,reserve FROM pending_transfers WHERE id=? AND status='pending'`, id,
+		).Scan(&buyerID, &reserve); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil // already disposed; idempotent
+			}
+			return dbErr(err, "refund pending transfer: read")
+		}
+		if err := settleTransferReserve(ctx, tx, buyerID, reserve, "", 0, "", 0); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE pending_transfers SET status='refunded' WHERE id=?`, id)
+		return err
+	})
+}
+
+// SetPendingTransferStatus marks a pending record 'quarantined' WITHOUT touching balances — the reserve
+// stays locked (an invalid/inconsistent receipt after a possibly-executed dispatch, §13).
+func (s *DB) SetPendingTransferStatus(ctx context.Context, id, status string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE pending_transfers SET status=? WHERE id=? AND status='pending'`, status, id)
+	if err != nil {
+		return dbErr(err, "set pending transfer status")
+	}
+	return nil
 }
 
 func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {

@@ -291,6 +291,24 @@ type ValueSettlement struct {
 	SysCredit  int64
 }
 
+// PendingTransfer is the buyer-side reserve holder for a remote payment Step (§13): the buyer funds a
+// TransferEffect attached to a Step hosted on another kernel, so the reserve lives here rather than on a
+// fabricated local trace. Status ∈ {pending, settled, refunded, quarantined}. IdempotencyKey is unique
+// and payment-bound, so a retry presents the same key and never double-funds.
+type PendingTransfer struct {
+	ID             string
+	BuyerID        string
+	PeerKey        string
+	StepID         string
+	InputHash      string
+	IdempotencyKey string
+	Beneficiary    string // the beneficiary user_id the serving kernel binds in its receipt
+	Amount         int64
+	Reserve        int64 // buyer's max_total: amount + value_premium + value_import
+	Status         string
+	CreatedAt      time.Time
+}
+
 // Transaction records one attempted call. Immutable after creation.
 type Transaction struct {
 	ID                string          `json:"id"`
