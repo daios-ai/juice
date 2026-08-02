@@ -53,16 +53,22 @@ type NativeWebConfig struct {
 	UserAgent string `json:"user_agent"`
 }
 
+// NativeTransferConfig holds configuration for the @sys/transfer native action.
+type NativeTransferConfig struct {
+	Price int64 `json:"price"`
+}
+
 // NativeConfig holds per-action configuration for all native actions.
 type NativeConfig struct {
-	LLM     NativeLLMConfig     `json:"llm"`
-	Lookup  NativeLookupConfig  `json:"lookup"`
-	Time    NativeTimeConfig    `json:"time"`
-	Sink    NativeSinkConfig    `json:"sink"`
-	Message NativeMessageConfig `json:"message"`
-	Random  NativeRandomConfig  `json:"random"`
-	Web     NativeWebConfig     `json:"web"`
-	TinyGo  NativeTinyGoConfig  `json:"tinygo"`
+	LLM      NativeLLMConfig      `json:"llm"`
+	Lookup   NativeLookupConfig   `json:"lookup"`
+	Time     NativeTimeConfig     `json:"time"`
+	Sink     NativeSinkConfig     `json:"sink"`
+	Message  NativeMessageConfig  `json:"message"`
+	Random   NativeRandomConfig   `json:"random"`
+	Web      NativeWebConfig      `json:"web"`
+	TinyGo   NativeTinyGoConfig   `json:"tinygo"`
+	Transfer NativeTransferConfig `json:"transfer"`
 }
 
 // ServerConfig holds all non-secret runtime configuration.
@@ -136,8 +142,9 @@ func DefaultServerConfig() ServerConfig {
 			Sink:    NativeSinkConfig{Price: 0},
 			Message: NativeMessageConfig{Price: 0},
 			Random:  NativeRandomConfig{Price: 0},
-			Web:     NativeWebConfig{Price: 0, UserAgent: "juice-kernel/0.4 (+https://github.com/daios-ai/juice)"},
-			TinyGo:  NativeTinyGoConfig{Price: 5},
+			Web:      NativeWebConfig{Price: 0, UserAgent: "juice-kernel/0.4 (+https://github.com/daios-ai/juice)"},
+			TinyGo:   NativeTinyGoConfig{Price: 5},
+			Transfer: NativeTransferConfig{Price: 0},
 		},
 		ScriptTimeoutMS:   10000,
 		ScriptMemoryBytes: 64 * 1024 * 1024,

@@ -1,4 +1,4 @@
--- v0.13 global settlement model (§3, §13): replace per-peer bilateral credit with a kernel-global
+-- v0.12 global settlement model (§3, §13): replace per-peer bilateral credit with a kernel-global
 -- exposure cap X enforced at admission, and add the serving-markup premium leg to receipts.
 -- NOTE: statement comments must be on their own lines (the migration splitter carries an inline
 -- trailing comment into the next statement and drops it), so every note here is a full-line comment.
@@ -30,6 +30,6 @@ DROP TABLE users;
 ALTER TABLE users_new RENAME TO users;
 CREATE UNIQUE INDEX idx_users_public_key ON users(public_key) WHERE public_key IS NOT NULL;
 -- Serving-markup premium leg on receipts (§13): the amount the serving kernel charges its origin
--- peer on top of the base charge, credited to the serving kernel's sys. 0 on all local/pre-v0.13
+-- peer on top of the base charge, credited to the serving kernel's sys. 0 on all local/pre-v0.12
 -- receipts, so JCS verification of old receipts is unchanged (omitempty on the struct).
 ALTER TABLE receipts ADD COLUMN premium INTEGER NOT NULL DEFAULT 0;

@@ -262,9 +262,15 @@ type Trace struct {
 	// owner's locked at admission. Persisting them on the trace lets EVERY settlement path — commit,
 	// failure, crash recovery, forced closure — release the reserve without the in-memory request,
 	// and pins the rate against a mid-call config change. 0 on local calls and subcalls.
-	PremiumBPS    int64     `json:"premium_bps,omitempty"`
-	PremiumParked int64     `json:"premium_parked,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
+	PremiumBPS    int64 `json:"premium_bps,omitempty"`
+	PremiumParked int64 `json:"premium_parked,omitempty"`
+	// Value and ValueTo snapshot a federated value transfer (§13): the amount to deliver to the local
+	// beneficiary ValueTo, parked in the caller's locked at admission and credited at settlement — the
+	// same trace-snapshot mechanism as the premium reserve. 0/"" on every call that is not the inbound
+	// serving leg of a value transfer.
+	Value     int64     `json:"value,omitempty"`
+	ValueTo   string    `json:"value_to,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Transaction records one attempted call. Immutable after creation.
@@ -400,9 +406,15 @@ type Receipt struct {
 	Charge       int64     `json:"charge"`
 	// Premium is the serving kernel's markup (execution tax + risk premium) on this charge, credited
 	// to the serving kernel's sys and owed by the origin peer on top of Charge (§13). omitempty keeps
-	// it out of the JCS signature for all local and pre-v0.13 receipts (Premium=0), so those verify
+	// it out of the JCS signature for all local and pre-v0.12 receipts (Premium=0), so those verify
 	// unchanged; nonzero only on a receipt the serving kernel issues for an inbound federated call.
-	Premium   int64     `json:"premium,omitempty"`
+	Premium int64 `json:"premium,omitempty"`
+	// Value is the amount delivered to the transfer beneficiary, kept distinct from Charge (execution
+	// consumed) so a partial-charge failure never dilutes the delivered amount (§13). It is
+	// all-or-nothing — 0 or the requested amount — and part of the bilateral obligation
+	// (paid = charge + value + premium). omitempty keeps it out of the JCS signature for every
+	// non-transfer receipt (Value=0), so those verify unchanged.
+	Value     int64     `json:"value,omitempty"`
 	Reason    string    `json:"reason"`
 	StartedAt time.Time `json:"started_at"`
 	CreatedAt time.Time `json:"created_at"`

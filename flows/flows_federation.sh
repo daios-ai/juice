@@ -612,3 +612,49 @@ flow_settlement() {
     # Nothing left to settle: a second run reports the zero position, not a new flip.
     assert_json "settlement.idempotent" "$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r)" status settled
 }
+
+# flow_transfer exercises federated value transfer (§13): alice@L sends credits to bob@R by calling
+# R's sys/transfer proxy. The amount rides the call through L's funding, R's exposure admission, the
+# signed receipt, and settlement — alice is debited amount+fees, bob is credited exactly the amount.
+flow_transfer() {
+    echo "=== FLOW transfer ==="
+    local dir; dir=$(new_dir)
+    FED_DBL="$dir/l/juice.db"; FED_DBR="$dir/r/juice.db"
+    FED_HL="$dir/lsys"; FED_HR="$dir/rsys"
+    mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
+
+    # R extends global exposure so it will front alice's transfer to bob before settlement.
+    start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r exposure_max=1000 settlement_trigger=500 || { fail "transfer.setup_r" "boot"; return; }
+    local boot; boot=$(kernel_fed_addr "$FED_DBR"); [ -n "$boot" ] || { fail "transfer.boot" "no addr"; return; }
+    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$boot" || { fail "transfer.setup_l" "boot"; return; }
+    j "$FED_DBR" "$FED_HR" auth login sys --password sys-pass >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" auth login sys --password sys-pass >/dev/null 2>&1
+    local rkey; rkey=$(kernel_key "$FED_DBR" "$FED_HR"); [ -n "$rkey" ] || { fail "transfer.rkey" "empty"; return; }
+    local lkey; lkey=$(kernel_key "$FED_DBL" "$FED_HL"); [ -n "$lkey" ] || { fail "transfer.lkey" "empty"; return; }
+
+    # bob is a local user on R; alice is a funded local user on L. L subscribes to R (imports sys/transfer).
+    j "$FED_DBR" "$FED_HR" user create bob --password userpass >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" user create alice --password userpass >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin deposit alice 1000 >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin subscribe "$rkey" >/dev/null 2>&1 || { fail "transfer.subscribe" "failed"; return; }
+    local ahome; ahome=$(home "$dir" alice); j "$FED_DBL" "$ahome" auth login alice --password userpass >/dev/null 2>&1
+
+    # alice sends 100 to bob on R. mp=0, rbps=500, ibps=500, value=100 ⇒ sr=105, alice locks q=111;
+    # settlement: paid=charge0+value100+premium5=105 → L owes R; importFee=6 → L sys; refund 0.
+    local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$ahome" run kernel-r/sys/transfer '{"target":"bob","amount":100}')" tx_id)
+    assert_nonempty "transfer.call_succeeded" "$tx_id"
+    assert_json "transfer.tx_success" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status success
+
+    # alice paid amount + fees (100 + premium 5 + import fee 6 = 111); bob received exactly 100.
+    assert_eq "transfer.alice_charged" 889 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
+    assert_eq "transfer.bob_credited" 100 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show bob)" available)"
+    # Bilateral rows: L owes R the value + serving premium (105) on both ledgers.
+    assert_eq "transfer.l_owes_r" 105 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)"
+    assert_eq "transfer.r_owed_by_l" -105 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show "$lkey")" available)"
+    # Receipt audit passes with the value/premium checks.
+    assert_json "transfer.receipt_valid" "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")" valid True
+
+    # A transfer alice cannot afford is rejected with no balance change.
+    j "$FED_DBL" "$ahome" run kernel-r/sys/transfer '{"target":"bob","amount":100000}' >/dev/null 2>&1 || true
+    assert_eq "transfer.underfunded_no_charge" 889 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
+}

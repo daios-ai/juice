@@ -374,7 +374,7 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 	if action.Kind == KindRemoteProxy {
 		key := uuid.New().String()
 		stepTrace.IdempotencyKey = &key
-		stepTrace.DispatchJSON = marshalDispatch(args, stepID, k.remoteManifestPrice(action.Price))
+		stepTrace.DispatchJSON = marshalDispatch(args, stepID, k.remoteManifestPrice(action.Price), 0, action.Price)
 	}
 	// A lost waiting→running CAS already carries ErrStepNotClaimed from the store, which marks
 	// only the two genuine claim races. Deliberately NOT relabelled here: BeginStepCall also

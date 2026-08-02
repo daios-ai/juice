@@ -346,6 +346,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	native.RegisterSinkHandler(k)
 	native.RegisterMessageHandler(k)
 	native.RegisterRandomHandler(k)
+	native.RegisterTransferHandler(k)
 	webUA := globalCfg.Native.Web.UserAgent
 	native.RegisterWebHandler(k, native.WebDeps{
 		Fetch: func(ctx context.Context, url string) (int, []byte, string, string, error) {

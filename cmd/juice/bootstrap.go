@@ -393,6 +393,28 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 			},
 		},
 		{
+			name:        "transfer",
+			price:       cfg.Transfer.Price,
+			description: "Transfers credits from the caller to another user. The target may be local (a handle) or a remote transfer action (sys@<kernel>/transfer with a local target on that kernel); a cross-kernel transfer settles through the federation receipt/exposure system (§13).",
+			inputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"target":       map[string]any{"type": "string", "description": "Recipient: a local handle, or (when calling sys@<kernel>/transfer) a bare handle on that kernel"},
+					"amount":       map[string]any{"type": "integer", "description": "Amount of credits to transfer (positive integer)"},
+					"external_key": map[string]any{"type": "string", "description": "Optional idempotency key for a local transfer"},
+				},
+				"required": []string{"target", "amount"},
+			},
+			outputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"amount":      map[string]any{"type": "integer", "description": "Amount transferred"},
+					"transfer_id": map[string]any{"type": "string", "description": "Ledger entry id, present for a same-kernel transfer"},
+				},
+				"required": []string{"amount"},
+			},
+		},
+		{
 			name:        "tinygo/compile",
 			price:       cfg.TinyGo.Price,
 			description: "Compiles TinyGo source (a Handle function written against the Juice SDK) to a WASM artifact, ready to register with action create --kind wasm --artifact",

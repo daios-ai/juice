@@ -730,9 +730,9 @@ func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error
 
 func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTraceID *string, price int64) error {
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,premium_bps,premium_parked,created_at)
-		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?,?)`,
-		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, t.IdempotencyRecordID, t.PremiumBPS, t.PremiumParked, timeToStr(t.CreatedAt),
+		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,premium_bps,premium_parked,value,value_to,created_at)
+		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)`,
+		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, t.IdempotencyRecordID, t.PremiumBPS, t.PremiumParked, t.Value, nullStr(t.ValueTo), timeToStr(t.CreatedAt),
 	)
 	return dbErr(err, "insert trace")
 }
@@ -828,12 +828,12 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
-		                       args_hash,reply_hash,status,gross,net,fee,charge,premium,reason,started_at,created_at,signature)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		                       args_hash,reply_hash,status,gross,net,fee,charge,premium,value,reason,started_at,created_at,signature)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		receipt.ID, receipt.IssuerUserID, receipt.TxID, receipt.TraceID, receipt.ActionID,
 		receipt.CallerUserID, receipt.ProcessID,
 		receipt.ArgsHash, receipt.ReplyHash, string(receipt.Status),
-		receipt.Gross, receipt.Net, receipt.Fee, receipt.Charge, receipt.Premium, receipt.Reason,
+		receipt.Gross, receipt.Net, receipt.Fee, receipt.Charge, receipt.Premium, receipt.Value, receipt.Reason,
 		timeToStr(receipt.StartedAt), timeToStr(receipt.CreatedAt), receipt.Signature,
 	); err != nil {
 		return dbErr(err, label+": insert receipt")
@@ -1012,26 +1012,31 @@ WHERE parent_trace_id IN (SELECT id FROM sub)
 // callerWalletKind controls the lock release: CallerProcess (process.locked),
 // CallerTrace (parent trace.locked), or CallerStep (no lock to release; BeginStepCall
 // already consumed it — refund would go to process on failure).
-// applyPremiumLegs releases the serving-markup premium the peer owner parked in its locked balance
-// at admission (§13). The reserve is read from the root trace's premium_parked snapshot rather than a
-// caller argument, so EVERY settlement path — commit, failure, crash recovery, forced closure —
-// releases it without needing the in-memory request (0 on local calls and subcalls ⇒ no-op). The whole
-// reserve leaves owner.locked, the actual premium (≤ reserve) is credited to sys, and the remainder
-// refunds to the owner.
-func applyPremiumLegs(ctx context.Context, tx *sql.Tx, traceID, ownerID, sysID string, premium int64) error {
-	var reserve int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(premium_parked,0) FROM traces WHERE id=?`, traceID).Scan(&reserve); err != nil {
+// applyPremiumLegs releases the reserve the peer owner parked in its locked balance at admission (§13):
+// the serving-markup premium AND, for a value transfer, the delivered amount. Both are read from the
+// trace snapshot (premium_parked, value, value_to) rather than caller arguments, so EVERY settlement
+// path — commit, failure, crash recovery, forced closure — releases them without the in-memory request
+// (a no-op when nothing is parked). The whole parked amount leaves owner.locked; the actual `premium`
+// goes to sys, the delivered `value` (= receipt.Value: the full amount on success, 0 on failure) goes
+// to the trace's value_to beneficiary, and the unused remainder refunds to the owner.
+func applyPremiumLegs(ctx context.Context, tx *sql.Tx, traceID, ownerID, sysID string, premium, value int64) error {
+	var parkedPremium, parkedValue int64
+	var valueTo sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(premium_parked,0), COALESCE(value,0), value_to FROM traces WHERE id=?`, traceID,
+	).Scan(&parkedPremium, &parkedValue, &valueTo); err != nil {
 		return dbErr(err, "premium legs: read reserve")
 	}
+	reserve := parkedPremium + parkedValue
 	if reserve == 0 {
 		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE users SET locked=locked-? WHERE id=?`, reserve, ownerID); err != nil {
 		return dbErr(err, "premium legs: release owner reserve")
 	}
-	if refund := reserve - premium; refund > 0 {
+	if refund := reserve - premium - value; refund > 0 {
 		if _, err := tx.ExecContext(ctx, `UPDATE users SET available=available+? WHERE id=?`, refund, ownerID); err != nil {
-			return dbErr(err, "premium legs: refund unused premium")
+			return dbErr(err, "premium legs: refund unused reserve")
 		}
 	}
 	if premium > 0 {
@@ -1044,6 +1049,18 @@ func applyPremiumLegs(ctx context.Context, tx *sql.Tx, traceID, ownerID, sysID s
 		}
 		if n, _ := res.RowsAffected(); n != 1 {
 			return fmt.Errorf("premium legs: sys recipient %q not found: funds would be destroyed", sysID)
+		}
+	}
+	if value > 0 {
+		if !valueTo.Valid || valueTo.String == "" {
+			return fmt.Errorf("premium legs: value %d > 0 but no beneficiary: funds would be destroyed", value)
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE users SET available=available+? WHERE id=?`, value, valueTo.String)
+		if err != nil {
+			return dbErr(err, "premium legs: credit beneficiary")
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return fmt.Errorf("premium legs: beneficiary %q not found: funds would be destroyed", valueTo.String)
 		}
 	}
 	return nil
@@ -1103,7 +1120,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		}
 		// Serving-markup premium (§13): release the reserve snapshotted on the trace, credit
 		// receipt.Premium to sys, refund the remainder. No-op for local calls/subcalls.
-		if err := applyPremiumLegs(ctx, tx, traceID, ktx.OwnerUserID, feeRecipientID, receipt.Premium); err != nil {
+		if err := applyPremiumLegs(ctx, tx, traceID, ktx.OwnerUserID, feeRecipientID, receipt.Premium, receipt.Value); err != nil {
 			return err
 		}
 		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, rawJSONStr(ktx.ReplyJSON), stepID, "commit call"); err != nil {
@@ -1174,7 +1191,7 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 		// The serving-markup premium reserve is a separate parked amount (not part of the process
 		// budget or the refund flow above), so it is released here in full — receipt.Premium (on the
 		// actual failed charge) to sys, the remainder back to the peer owner. No-op for local calls.
-		if err := applyPremiumLegs(ctx, tx, traceID, ktx.OwnerUserID, feeRecipientID, receipt.Premium); err != nil {
+		if err := applyPremiumLegs(ctx, tx, traceID, ktx.OwnerUserID, feeRecipientID, receipt.Premium, receipt.Value); err != nil {
 			return err
 		}
 		errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
@@ -1399,20 +1416,22 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 
 // ---- Traces ----
 
-const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,premium_bps,premium_parked,created_at`
+const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,premium_bps,premium_parked,value,value_to,created_at`
 
 func scanTrace(t *kernel.Trace, scanFn func(...any) error) error {
 	var createdAt string
-	var parentID, idempotencyKey, dispatchJSON, recordID sql.NullString
-	var premiumBPS, premiumParked sql.NullInt64
+	var parentID, idempotencyKey, dispatchJSON, recordID, valueTo sql.NullString
+	var premiumBPS, premiumParked, value sql.NullInt64
 	err := scanFn(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.ActionID, &t.CallerUserID,
-		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &recordID, &premiumBPS, &premiumParked, &createdAt)
+		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &recordID, &premiumBPS, &premiumParked, &value, &valueTo, &createdAt)
 	if err != nil {
 		return err
 	}
 	t.CreatedAt = strToTime(createdAt)
 	t.PremiumBPS = premiumBPS.Int64
 	t.PremiumParked = premiumParked.Int64
+	t.Value = value.Int64
+	t.ValueTo = valueTo.String
 	if parentID.Valid {
 		t.ParentTraceID = &parentID.String
 	}
@@ -2675,7 +2694,7 @@ func (s *DB) withTx(ctx context.Context, label string, fn func(*sql.Tx) error) e
 // ---- Receipts ----
 
 const receiptSelectCols = `id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
-		        args_hash,reply_hash,status,gross,net,fee,charge,premium,reason,started_at,created_at,signature`
+		        args_hash,reply_hash,status,gross,net,fee,charge,premium,value,reason,started_at,created_at,signature`
 
 func scanReceipt(row *sql.Row, op string) (*kernel.Receipt, error) {
 	var r kernel.Receipt
@@ -2683,7 +2702,7 @@ func scanReceipt(row *sql.Row, op string) (*kernel.Receipt, error) {
 	err := row.Scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
 		&r.CallerUserID, &r.ProcessID,
 		&r.ArgsHash, &r.ReplyHash, &status,
-		&r.Gross, &r.Net, &r.Fee, &r.Charge, &r.Premium, &r.Reason, &startedAt, &createdAt, &r.Signature)
+		&r.Gross, &r.Net, &r.Fee, &r.Charge, &r.Premium, &r.Value, &r.Reason, &startedAt, &createdAt, &r.Signature)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("receipt not found")
 	}

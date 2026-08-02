@@ -60,6 +60,6 @@ run_flows \
     flow_fed_verify_receipt flow_fed_all_receipt_checks flow_fed_suspend_blocks \
     flow_fed_denial_underfunded flow_fed_disabled_action_rejection flow_fed_import_duty flow_fed_failed_action_refund \
     flow_fed_gossip_discovery flow_fed_discovery flow_fed_offline flow_fed_peer_sync flow_fed_inspect_sync \
-    flow_fed_step_complete flow_settlement \
+    flow_fed_step_complete flow_settlement flow_transfer \
     flow_transaction_access flow_admin_supervision flow_native_orphan_purge flow_time flow_message flow_grant flow_grant_bearer
 exit $?

@@ -220,7 +220,7 @@ func TestReceiptSigningRequiresConfiguredKey(t *testing.T) {
 		ReplyJSON: json.RawMessage(`{}`),
 		Status:    TxSuccess,
 		EndedAt:   time.Now().UTC(),
-	}, 0, 0)
+	}, 0, 0, 0)
 	if !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
 	}
@@ -612,5 +612,31 @@ func TestSettleOutcomeAndPayloads(t *testing.T) {
 	}
 	if err := verifyJCS(pub, settleFinishPayload("c", "r", "sid", "5", "ts"), sig); err == nil {
 		t.Error("a settle_open signature must not verify as settle_finish (disjoint scopes)")
+	}
+}
+
+// TestRemoteReceiptInvalidValue: the origin quarantines a transfer receipt that short-changes the
+// beneficiary, misprices the premium, or delivers value on a failure (§13 value transfer).
+func TestRemoteReceiptInvalidValue(t *testing.T) {
+	replyHash, _ := jcsHashStr("null")
+	const rbps, mp, sent = int64(500), int64(0), int64(100)
+	// Valid success transfer: charge 0, value 100, premium ceil(100*500/1e4)=5.
+	if got := remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: 0, Value: 100, Premium: 5, ReplyHash: replyHash}, mp, rbps, sent, []byte("null")); got != "" {
+		t.Errorf("valid transfer receipt rejected: %s", got)
+	}
+	// Delivered value != sent (short-changed beneficiary).
+	if remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: 0, Value: 50, Premium: 3, ReplyHash: replyHash}, mp, rbps, sent, []byte("null")) == "" {
+		t.Error("value != sent must be quarantined")
+	}
+	// Premium not levied on charge+value.
+	if remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: 0, Value: 100, Premium: 0, ReplyHash: replyHash}, mp, rbps, sent, []byte("null")) == "" {
+		t.Error("wrong premium must be quarantined")
+	}
+	// A failed transfer must deliver nothing.
+	if remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0, Value: 100}, mp, rbps, sent, nil) == "" {
+		t.Error("failure with delivered value must be quarantined")
+	}
+	if remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0, Value: 0}, mp, rbps, sent, nil) != "" {
+		t.Error("failure with no value must settle")
 	}
 }
