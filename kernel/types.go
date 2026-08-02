@@ -301,12 +301,16 @@ type PendingTransfer struct {
 	PeerKey        string
 	StepID         string
 	InputHash      string
+	Input          json.RawMessage // raw completion input bytes, so a retry rebuilds the SAME signed request
 	IdempotencyKey string
 	Beneficiary    string // the beneficiary user_id the serving kernel binds in its receipt
 	Amount         int64
+	RemoteMax      int64 // descriptor obligation (amount + value_premium); settlement re-validates against it
 	Reserve        int64 // buyer's max_total: amount + value_premium + value_import
 	Status         string
+	LastError      string // disposition reason (e.g. why quarantined), for the operator
 	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // Transaction records one attempted call. Immutable after creation.

@@ -1170,6 +1170,23 @@ func refundTransferEffect(ctx context.Context, tx *sql.Tx, traceID string) error
 
 // ---- Remote payment-step reserve (buyer side, §13) ----
 
+const pendingTransferCols = `id,buyer_id,peer_key,step_id,input_hash,input,idempotency_key,beneficiary,amount,remote_max,reserve,status,COALESCE(last_error,''),created_at,updated_at`
+
+// scanPendingTransfer reads one row selected with pendingTransferCols.
+func scanPendingTransfer(row interface{ Scan(...any) error }) (*kernel.PendingTransfer, error) {
+	var pt kernel.PendingTransfer
+	var input, createdAt, updatedAt string
+	if err := row.Scan(&pt.ID, &pt.BuyerID, &pt.PeerKey, &pt.StepID, &pt.InputHash, &input,
+		&pt.IdempotencyKey, &pt.Beneficiary, &pt.Amount, &pt.RemoteMax, &pt.Reserve, &pt.Status,
+		&pt.LastError, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	pt.Input = json.RawMessage(input)
+	pt.CreatedAt = strToTime(createdAt)
+	pt.UpdatedAt = strToTime(updatedAt)
+	return &pt, nil
+}
+
 // InsertPendingTransfer locks the buyer's reserve (max_total) from its own balance and records the
 // pending_transfers row in ONE transaction, reserve-first (§13). The buyer is local, so it prepays
 // (exposureMax 0). The unique idempotency_key makes a retry idempotent: a duplicate insert returns
@@ -1179,11 +1196,12 @@ func (s *DB) InsertPendingTransfer(ctx context.Context, pt *kernel.PendingTransf
 		if err := lockReserveTx(ctx, tx, pt.BuyerID, pt.Reserve, 0); err != nil {
 			return err
 		}
+		now := timeToStr(pt.CreatedAt)
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO pending_transfers (id,buyer_id,peer_key,step_id,input_hash,idempotency_key,beneficiary,amount,reserve,status,created_at)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-			pt.ID, pt.BuyerID, pt.PeerKey, pt.StepID, pt.InputHash, pt.IdempotencyKey,
-			pt.Beneficiary, pt.Amount, pt.Reserve, "pending", timeToStr(pt.CreatedAt))
+			`INSERT INTO pending_transfers (id,buyer_id,peer_key,step_id,input_hash,input,idempotency_key,beneficiary,amount,remote_max,reserve,status,created_at,updated_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			pt.ID, pt.BuyerID, pt.PeerKey, pt.StepID, pt.InputHash, rawJSONStr(pt.Input), pt.IdempotencyKey,
+			pt.Beneficiary, pt.Amount, pt.RemoteMax, pt.Reserve, "pending", now, now)
 		if err != nil {
 			return dbErr(err, "insert pending transfer")
 		}
@@ -1193,21 +1211,56 @@ func (s *DB) InsertPendingTransfer(ctx context.Context, pt *kernel.PendingTransf
 
 // ReadPendingTransferByKey returns the pending_transfers row for an idempotency key, or ErrNotFound.
 func (s *DB) ReadPendingTransferByKey(ctx context.Context, idempotencyKey string) (*kernel.PendingTransfer, error) {
-	var pt kernel.PendingTransfer
-	var createdAt string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id,buyer_id,peer_key,step_id,input_hash,idempotency_key,beneficiary,amount,reserve,status,created_at
-		 FROM pending_transfers WHERE idempotency_key=?`, idempotencyKey,
-	).Scan(&pt.ID, &pt.BuyerID, &pt.PeerKey, &pt.StepID, &pt.InputHash, &pt.IdempotencyKey,
-		&pt.Beneficiary, &pt.Amount, &pt.Reserve, &pt.Status, &createdAt)
+	pt, err := scanPendingTransfer(s.db.QueryRowContext(ctx,
+		`SELECT `+pendingTransferCols+` FROM pending_transfers WHERE idempotency_key=?`, idempotencyKey))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("pending transfer not found")
 	}
 	if err != nil {
 		return nil, dbErr(err, "read pending transfer")
 	}
-	pt.CreatedAt = strToTime(createdAt)
-	return &pt, nil
+	return pt, nil
+}
+
+// ReadPendingTransfer returns the pending_transfers row by its id, or ErrNotFound.
+func (s *DB) ReadPendingTransfer(ctx context.Context, id string) (*kernel.PendingTransfer, error) {
+	pt, err := scanPendingTransfer(s.db.QueryRowContext(ctx,
+		`SELECT `+pendingTransferCols+` FROM pending_transfers WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("pending transfer not found")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read pending transfer")
+	}
+	return pt, nil
+}
+
+// ListPendingTransfers returns pending_transfers rows for the operator surface (§13), oldest first. An
+// empty status returns only the UNRESOLVED records (pending + quarantined); an explicit status filters to
+// exactly that one.
+func (s *DB) ListPendingTransfers(ctx context.Context, status string, limit, offset int) ([]*kernel.PendingTransfer, error) {
+	where := "status IN ('pending','quarantined')"
+	args := []any{}
+	if status != "" {
+		where = "status=?"
+		args = append(args, status)
+	}
+	args = append(args, limit, offset)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+pendingTransferCols+` FROM pending_transfers WHERE `+where+` ORDER BY created_at ASC LIMIT ? OFFSET ?`, args...)
+	if err != nil {
+		return nil, dbErr(err, "list pending transfers")
+	}
+	defer rows.Close()
+	var out []*kernel.PendingTransfer
+	for rows.Next() {
+		pt, serr := scanPendingTransfer(rows)
+		if serr != nil {
+			return nil, dbErr(serr, "list pending transfers: scan")
+		}
+		out = append(out, pt)
+	}
+	return out, rows.Err()
 }
 
 // CommitPendingTransfer settles a buyer-side payment reserve on the serving kernel's valid success
@@ -1230,7 +1283,7 @@ func (s *DB) CommitPendingTransfer(ctx context.Context, id, proxyRowID string, c
 		if err := settleTransferReserve(ctx, tx, buyerID, reserve, proxyRowID, credit, sysID, sysCredit); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `UPDATE pending_transfers SET status='settled' WHERE id=?`, id)
+		_, err := tx.ExecContext(ctx, `UPDATE pending_transfers SET status='settled', last_error=NULL, updated_at=? WHERE id=?`, timeToStr(time.Now().UTC()), id)
 		return err
 	})
 }
@@ -1254,16 +1307,18 @@ func (s *DB) RefundPendingTransfer(ctx context.Context, id string) error {
 		if err := settleTransferReserve(ctx, tx, buyerID, reserve, "", 0, "", 0); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `UPDATE pending_transfers SET status='refunded' WHERE id=?`, id)
+		_, err := tx.ExecContext(ctx, `UPDATE pending_transfers SET status='refunded', last_error=NULL, updated_at=? WHERE id=?`, timeToStr(time.Now().UTC()), id)
 		return err
 	})
 }
 
-// SetPendingTransferStatus marks a pending record 'quarantined' WITHOUT touching balances — the reserve
-// stays locked (an invalid/inconsistent receipt after a possibly-executed dispatch, §13).
-func (s *DB) SetPendingTransferStatus(ctx context.Context, id, status string) error {
+// SetPendingTransferStatus marks a pending record 'quarantined' (with a reason) WITHOUT touching
+// balances — the reserve stays locked (an invalid/inconsistent receipt after a possibly-executed
+// dispatch, §13). Guarded on status='pending' so a disposed record is untouched.
+func (s *DB) SetPendingTransferStatus(ctx context.Context, id, status, reason string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE pending_transfers SET status=? WHERE id=? AND status='pending'`, status, id)
+		`UPDATE pending_transfers SET status=?, last_error=?, updated_at=? WHERE id=? AND status='pending'`,
+		status, nullStr(reason), timeToStr(time.Now().UTC()), id)
 	if err != nil {
 		return dbErr(err, "set pending transfer status")
 	}

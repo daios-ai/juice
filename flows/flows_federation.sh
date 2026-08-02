@@ -657,4 +657,8 @@ flow_transfer() {
     # A transfer alice cannot afford is rejected with no balance change.
     j "$FED_DBL" "$ahome" run kernel-r/sys/transfer '{"target":"bob","amount":100000}' >/dev/null 2>&1 || true
     assert_eq "transfer.underfunded_no_charge" 889 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
+
+    # The admin transfers surface is wired end-to-end (route + superuser gate + CLI): no buyer-side
+    # payment steps here, so the unresolved list is empty (§13).
+    assert_eq "transfer.admin_list_empty" "[]" "$(jj "$FED_DBL" "$FED_HL" admin transfer list)"
 }

@@ -478,7 +478,7 @@ func (s *server) completePeerStepMaybePaid(ctx context.Context, peerRef, stepID 
 	// the network completion so a crash never leaves the buyer having paid without a record.
 	pending, err := s.kernel.ReadPendingTransferByKey(ctx, idempotencyKey)
 	if err != nil {
-		if pending, err = s.kernel.AdmitRemotePaidStep(ctx, buyerID, peerKey, stepID, inputHash, idempotencyKey, *desc); err != nil {
+		if pending, err = s.kernel.AdmitRemotePaidStep(ctx, buyerID, peerKey, stepID, input, idempotencyKey, *desc); err != nil {
 			return nil, err
 		}
 	}
@@ -527,6 +527,125 @@ func (s *server) findPeerStepPayment(ctx context.Context, peerKey, stepID string
 		}
 	}
 	return nil
+}
+
+// retryPendingTransfer re-presents the SAME signed completion for a still-pending payment reserve and
+// settles on the result (§13 operator surface / future sweeper — one shared path). It re-derives nothing:
+// the stored idempotency key and raw input rebuild the identical request, so the serving kernel replays an
+// already-executed completion (returning its stored receipt) rather than re-running it. Disposition is
+// exactly the completion path's: a valid success settles, a valid failure refunds, an invalid receipt
+// quarantines, and no receipt / an unreachable peer leaves the record pending — a retry has no
+// never-dispatched proof (§13), since the first attempt may already have paid the beneficiary. Only a
+// pending record is actionable; settled/refunded are terminal and a quarantined receipt can never heal.
+func (s *server) retryPendingTransfer(ctx context.Context, pt *kernel.PendingTransfer) (*kernel.PendingTransfer, error) {
+	if pt.Status != "pending" {
+		return nil, kernel.ErrInvalidState.Wrapf("transfer is %s, not pending", pt.Status)
+	}
+	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	sig, ts, err := s.kernel.SignStep(pt.StepID, pub, pt.PeerKey, pt.IdempotencyKey, pt.InputHash)
+	if err != nil {
+		return nil, err
+	}
+	req := fed.StepRequest{
+		Kind: "complete", Counterparty: pub, Timestamp: ts, Signature: sig,
+		StepID: pt.StepID, IdempotencyKey: pt.IdempotencyKey, Input: pt.Input,
+	}
+	// A payment step is always user-addressed; re-attest as the buyer.
+	asig, ats, aerr := s.kernel.SignStepAuth(pub, pt.PeerKey, pt.BuyerID, pt.StepID)
+	if aerr != nil {
+		return nil, aerr
+	}
+	req.ForUserID, req.UserAttestation, req.UserTimestamp = pt.BuyerID, asig, ats
+
+	// A transport failure (unreachable / no settleable receipt) is not an error here: the record simply
+	// stays pending for a later retry. Only a signed receipt moves it.
+	body, _ := s.stepRoundTrip(ctx, pt.PeerKey, req, fedStepTimeout)
+	var receiptJSON []byte
+	if body != nil {
+		if rj, ok := body["receipt"]; ok && rj != nil {
+			receiptJSON, _ = json.Marshal(rj)
+		}
+	}
+	d := kernel.PaymentDescriptor{Beneficiary: pt.Beneficiary, Amount: pt.Amount, RemoteMax: pt.RemoteMax}
+	if serr := s.kernel.SettleRemotePaidStep(ctx, pt, d, receiptJSON); serr != nil {
+		return nil, serr
+	}
+	return s.kernel.ReadPendingTransfer(ctx, pt.ID)
+}
+
+// pendingTransferView is the operator-facing shape of a pending_transfers record (§13): operational
+// fields only — never the idempotency key, raw input bytes, buyer user-id, or receipt internals.
+type pendingTransferView struct {
+	ID            string    `json:"id"`
+	Status        string    `json:"status"`
+	BuyerHandle   string    `json:"buyer_handle"`
+	PeerHandle    string    `json:"peer_handle"`
+	PeerPublicKey string    `json:"peer_public_key"`
+	Beneficiary   string    `json:"beneficiary"`
+	Amount        int64     `json:"amount"`
+	Reserve       int64     `json:"reserve"`
+	StepID        string    `json:"step_id"`
+	LastError     string    `json:"last_error,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// transferView enriches a record with display handles (buyer, peer) resolved locally. `beneficiary` is
+// the serving kernel's stable user id as stored — identity, not a locally-resolvable display handle.
+func (s *server) transferView(ctx context.Context, pt *kernel.PendingTransfer) pendingTransferView {
+	v := pendingTransferView{
+		ID: pt.ID, Status: pt.Status, PeerPublicKey: pt.PeerKey, Beneficiary: pt.Beneficiary,
+		Amount: pt.Amount, Reserve: pt.Reserve, StepID: pt.StepID, LastError: pt.LastError,
+		CreatedAt: pt.CreatedAt, UpdatedAt: pt.UpdatedAt,
+	}
+	if buyer, err := s.kernel.ResolveUser(ctx, pt.BuyerID); err == nil && buyer != nil {
+		v.BuyerHandle = buyer.Handle
+	}
+	if peer, err := s.kernel.ReadUserByPublicKey(ctx, pt.PeerKey); err == nil && peer != nil {
+		v.PeerHandle = peer.Handle
+	}
+	return v
+}
+
+// ctlListTransfers lists pending value-transfer records (§13 admin surface): an empty status returns the
+// unresolved records (pending + quarantined); an explicit status filters to that one.
+func (s *server) ctlListTransfers(w http.ResponseWriter, r *http.Request) {
+	limit, offset := listBounds(r)
+	pts, err := s.kernel.ListPendingTransfers(r.Context(), r.URL.Query().Get("status"), limit, offset)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	views := make([]pendingTransferView, 0, len(pts))
+	for _, pt := range pts {
+		views = append(views, s.transferView(r.Context(), pt))
+	}
+	writeJSON(w, http.StatusOK, views)
+}
+
+func (s *server) ctlShowTransfer(w http.ResponseWriter, r *http.Request) {
+	pt, err := s.kernel.ReadPendingTransfer(r.Context(), pathID(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.transferView(r.Context(), pt))
+}
+
+// ctlRetryTransfer re-presents the stored completion and returns the updated resource (§13). It is the
+// only mutation on the resource — quarantine means "evidence insufficient", not "operator may choose".
+func (s *server) ctlRetryTransfer(w http.ResponseWriter, r *http.Request) {
+	pt, err := s.kernel.ReadPendingTransfer(r.Context(), pathID(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	updated, err := s.retryPendingTransfer(r.Context(), pt)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.transferView(r.Context(), updated))
 }
 
 // peerStepsAwaitingUs lists the steps a peer holds for this kernel, for admin inspect (§13).

@@ -378,13 +378,16 @@ type Store interface {
 	// CommitPendingTransfer settles it on the serving kernel's valid success receipt (value+value_premium
 	// → peer proxy row, value_import → buyer sys, remainder refunded). RefundPendingTransfer returns the
 	// whole reserve (valid failure/never-dispatched). SetPendingTransferStatus quarantines WITHOUT
-	// touching balances (invalid receipt: reserve stays locked). ReadPendingTransferByKey is the
-	// idempotency/retry lookup.
+	// touching balances (invalid receipt: reserve stays locked), recording a reason. ReadPendingTransferByKey
+	// is the idempotency/retry lookup; ReadPendingTransfer/ListPendingTransfers back the operator surface
+	// (an empty status lists only unresolved records — pending + quarantined).
 	InsertPendingTransfer(ctx context.Context, pt *PendingTransfer) error
 	ReadPendingTransferByKey(ctx context.Context, idempotencyKey string) (*PendingTransfer, error)
+	ReadPendingTransfer(ctx context.Context, id string) (*PendingTransfer, error)
+	ListPendingTransfers(ctx context.Context, status string, limit, offset int) ([]*PendingTransfer, error)
 	CommitPendingTransfer(ctx context.Context, id, proxyRowID string, credit int64, sysID string, sysCredit int64) error
 	RefundPendingTransfer(ctx context.Context, id string) error
-	SetPendingTransferStatus(ctx context.Context, id, status string) error
+	SetPendingTransferStatus(ctx context.Context, id, status, reason string) error
 
 	// ---- Traces (by process) ----
 

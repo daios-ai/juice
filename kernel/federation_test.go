@@ -531,7 +531,7 @@ func TestSettleRemotePaidStep(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		pt, err := k.AdmitRemotePaidStep(ctx, buyer.ID, keyA, "step-1", "ih", uuid.New().String(), desc)
+		pt, err := k.AdmitRemotePaidStep(ctx, buyer.ID, keyA, "step-1", []byte(`{}`), uuid.New().String(), desc)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -580,6 +580,10 @@ func TestSettleRemotePaidStep(t *testing.T) {
 		if p, _ := st.ReadUser(ctx, proxyA.ID); p.Available != 0 {
 			t.Errorf("quarantine must not credit the proxy row: got %d", p.Available)
 		}
+		// The disposition reason is recorded for the operator.
+		if q, _ := st.ReadPendingTransfer(ctx, pt.ID); q.Status != "quarantined" || q.LastError != "receipt value != amount" {
+			t.Errorf("quarantine reason: status=%q last_error=%q", q.Status, q.LastError)
+		}
 	})
 
 	t.Run("wrong beneficiary quarantines", func(t *testing.T) {
@@ -590,6 +594,9 @@ func TestSettleRemotePaidStep(t *testing.T) {
 		if b, _ := st.ReadUser(ctx, buyer.ID); b.Locked != pt.Reserve {
 			t.Errorf("wrong beneficiary must quarantine: locked=%d, want %d", b.Locked, pt.Reserve)
 		}
+		if q, _ := st.ReadPendingTransfer(ctx, pt.ID); q.LastError != "receipt beneficiary mismatch" {
+			t.Errorf("quarantine reason: last_error=%q", q.LastError)
+		}
 	})
 
 	t.Run("uncertain (no receipt) leaves pending", func(t *testing.T) {
@@ -599,6 +606,9 @@ func TestSettleRemotePaidStep(t *testing.T) {
 		}
 		if b, _ := st.ReadUser(ctx, buyer.ID); b.Locked != pt.Reserve {
 			t.Errorf("uncertain must leave reserve locked pending retry: locked=%d, want %d", b.Locked, pt.Reserve)
+		}
+		if q, _ := st.ReadPendingTransfer(ctx, pt.ID); q.Status != "pending" {
+			t.Errorf("uncertain must stay pending, got %q", q.Status)
 		}
 	})
 }

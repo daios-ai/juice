@@ -486,6 +486,9 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Post("/control/peers/subscribe", srv.ctlSubscribePeer)
 		r.Post("/control/peers/unsubscribe", srv.ctlUnsubscribePeer)
 		r.Get("/control/identity", srv.ctlIdentity)
+		r.Get("/control/transfers", srv.ctlListTransfers)
+		r.Get("/control/transfers/{id}", srv.ctlShowTransfer)
+		r.Post("/control/transfers/{id}/retry", srv.ctlRetryTransfer)
 	})
 }
 

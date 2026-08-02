@@ -195,20 +195,35 @@ func (k *Kernel) ReadPendingTransferByKey(ctx context.Context, idempotencyKey st
 	return k.store.ReadPendingTransferByKey(ctx, idempotencyKey)
 }
 
+// ReadPendingTransfer returns a pending payment record by id (§13 operator surface), or ErrNotFound.
+func (k *Kernel) ReadPendingTransfer(ctx context.Context, id string) (*PendingTransfer, error) {
+	return k.store.ReadPendingTransfer(ctx, id)
+}
+
+// ListPendingTransfers backs the admin transfers resource (§13): an empty status returns only the
+// unresolved records (pending + quarantined); an explicit status filters to exactly that one.
+func (k *Kernel) ListPendingTransfers(ctx context.Context, status string, limit, offset int) ([]*PendingTransfer, error) {
+	return k.store.ListPendingTransfers(ctx, status, limit, offset)
+}
+
 // AdmitRemotePaidStep locks the buyer's reserve (max_total = remote_max + its own import fee) from its
-// own balance and records a pending_transfers row, reserve-first and atomic (§13). The idempotency key is
+// own balance and records a pending_transfers row, reserve-first and atomic (§13). It stores the RAW
+// completion input (not just its hash) so a later retry rebuilds the same signed request, and the
+// descriptor's remote_max so settlement re-validates without the live descriptor. The idempotency key is
 // payment-bound (control layer). Returns the pending record; a duplicate key (retry) returns ErrConflict.
-func (k *Kernel) AdmitRemotePaidStep(ctx context.Context, buyerID, peerKey, stepID, inputHash, idempotencyKey string, d PaymentDescriptor) (*PendingTransfer, error) {
+func (k *Kernel) AdmitRemotePaidStep(ctx context.Context, buyerID, peerKey, stepID string, input []byte, idempotencyKey string, d PaymentDescriptor) (*PendingTransfer, error) {
 	valueImport := ceilDiv(d.RemoteMax*k.cfg.ImportBPS, 10000)
 	pt := &PendingTransfer{
 		ID:             uuid.New().String(),
 		BuyerID:        buyerID,
 		PeerKey:        peerKey,
 		StepID:         stepID,
-		InputHash:      inputHash,
+		InputHash:      sha256Hex(string(input)),
+		Input:          json.RawMessage(input),
 		IdempotencyKey: idempotencyKey,
 		Beneficiary:    d.Beneficiary,
 		Amount:         d.Amount,
+		RemoteMax:      d.RemoteMax,
 		Reserve:        d.RemoteMax + valueImport, // max_total: value + value_premium + value_import
 		Status:         "pending",
 		CreatedAt:      time.Now().UTC(),
@@ -234,17 +249,22 @@ func (k *Kernel) SettleRemotePaidStep(ctx context.Context, pending *PendingTrans
 	}
 	var r Receipt
 	if err := json.Unmarshal(receiptJSON, &r); err != nil {
-		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined")
+		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "receipt unparseable")
 	}
 	if verifyRemoteReceiptSignature(&r, pending.PeerKey) != nil {
-		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined")
+		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "invalid receipt signature")
 	}
 	if r.Status != TxSuccess {
 		return k.store.RefundPendingTransfer(ctx, pending.ID) // valid signed failure
 	}
 	valuePremium := d.RemoteMax - d.Amount
-	if r.Value != d.Amount || r.ValueTo != d.Beneficiary || r.ValuePremium != valuePremium {
-		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined") // mis-bound success
+	switch {
+	case r.Value != d.Amount:
+		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "receipt value != amount")
+	case r.ValueTo != d.Beneficiary:
+		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "receipt beneficiary mismatch")
+	case r.ValuePremium != valuePremium:
+		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "receipt value_premium mismatch")
 	}
 	proxy, err := k.store.ReadUserByPublicKey(ctx, pending.PeerKey)
 	if err != nil || proxy == nil {

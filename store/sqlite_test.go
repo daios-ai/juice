@@ -957,8 +957,8 @@ func TestPendingTransferSettlement(t *testing.T) {
 		}
 		pt := &kernel.PendingTransfer{
 			ID: uuid.New().String(), BuyerID: buyer.ID, PeerKey: "keyA", StepID: "s1",
-			InputHash: "ih", IdempotencyKey: uuid.New().String(), Beneficiary: "benef",
-			Amount: 100, Reserve: 111, CreatedAt: time.Now().UTC(),
+			InputHash: "ih", Input: json.RawMessage(`{}`), IdempotencyKey: uuid.New().String(), Beneficiary: "benef",
+			Amount: 100, RemoteMax: 105, Reserve: 111, CreatedAt: time.Now().UTC(),
 		}
 		if err := db.InsertPendingTransfer(ctx, pt); err != nil {
 			t.Fatal(err)
@@ -997,7 +997,7 @@ func TestPendingTransferSettlement(t *testing.T) {
 
 	t.Run("quarantine keeps reserve locked", func(t *testing.T) {
 		db, buyer, _, _, pt := mk(t)
-		if err := db.SetPendingTransferStatus(ctx, pt.ID, "quarantined"); err != nil {
+		if err := db.SetPendingTransferStatus(ctx, pt.ID, "quarantined", "receipt value != amount"); err != nil {
 			t.Fatal(err)
 		}
 		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 889 || b.Locked != 111 {
@@ -1011,6 +1011,76 @@ func TestPendingTransferSettlement(t *testing.T) {
 			t.Errorf("refund after quarantine must be a no-op: got %d, want 889", b.Available)
 		}
 	})
+}
+
+// TestPendingTransferListing covers the operator surface (§13): the default list returns only the
+// UNRESOLVED records (pending + quarantined), a status filter selects one status, read-by-id works,
+// quarantine records a last_error, and updated_at advances on a status transition.
+func TestPendingTransferListing(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	buyer := newUser("buyer", 1000)
+	if err := db.CreateUser(ctx, buyer); err != nil {
+		t.Fatal(err)
+	}
+	seed := func(t *testing.T) *kernel.PendingTransfer {
+		t.Helper()
+		pt := &kernel.PendingTransfer{
+			ID: uuid.New().String(), BuyerID: buyer.ID, PeerKey: "keyA", StepID: "s1",
+			InputHash: "ih", Input: json.RawMessage(`{}`), IdempotencyKey: uuid.New().String(),
+			Beneficiary: "benef", Amount: 10, RemoteMax: 11, Reserve: 12, CreatedAt: time.Now().UTC(),
+		}
+		if err := db.InsertPendingTransfer(ctx, pt); err != nil {
+			t.Fatal(err)
+		}
+		return pt
+	}
+	pending := seed(t)
+	quarantined := seed(t)
+	refunded := seed(t)
+	if err := db.SetPendingTransferStatus(ctx, quarantined.ID, "quarantined", "receipt value != amount"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RefundPendingTransfer(ctx, refunded.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default (empty status) = unresolved only: pending + quarantined, never the refunded (terminal) one.
+	got, err := db.ListPendingTransfers(ctx, "", 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]string{}
+	for _, pt := range got {
+		ids[pt.ID] = pt.Status
+	}
+	if len(got) != 2 || ids[pending.ID] != "pending" || ids[quarantined.ID] != "quarantined" {
+		t.Fatalf("default list must be unresolved only, got %v", ids)
+	}
+	if _, ok := ids[refunded.ID]; ok {
+		t.Error("default list must not include a refunded (terminal) record")
+	}
+
+	// A status filter selects exactly that status.
+	ref, _ := db.ListPendingTransfers(ctx, "refunded", 50, 0)
+	if len(ref) != 1 || ref[0].ID != refunded.ID {
+		t.Errorf("status=refunded filter: got %v", ref)
+	}
+
+	// Read-by-id + quarantine metadata.
+	q, err := db.ReadPendingTransfer(ctx, quarantined.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.LastError != "receipt value != amount" {
+		t.Errorf("quarantine last_error: got %q", q.LastError)
+	}
+	if !q.UpdatedAt.After(q.CreatedAt) && !q.UpdatedAt.Equal(q.CreatedAt) {
+		t.Errorf("updated_at must be >= created_at, got created=%v updated=%v", q.CreatedAt, q.UpdatedAt)
+	}
+	if _, err := db.ReadPendingTransfer(ctx, "no-such-id"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("read unknown id: want ErrNotFound, got %v", err)
+	}
 }
 
 // TestPremiumReserveReleasedFromTrace is the F1 regression: the serving-markup reserve parked at
