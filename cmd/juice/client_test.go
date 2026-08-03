@@ -152,10 +152,10 @@ func TestRunCommandPostsToServer(t *testing.T) {
 		gotAction, gotArgs = req.Action, req.Args
 		_ = json.NewEncoder(w).Encode(map[string]any{"tx_id": "tx-1", "result": map[string]any{"ok": true}})
 	})
-	if _, err := execTestCmd(t, runCmd(), "@a/b", `{"x":1}`); err != nil {
+	if _, err := execTestCmd(t, runCmd(), "a/b", `{"x":1}`); err != nil {
 		t.Fatal(err)
 	}
-	if gotAction != "@a/b" {
+	if gotAction != "a/b" {
 		t.Fatalf("action = %q", gotAction)
 	}
 	if gotArgs["x"].(float64) != 1 {
@@ -180,7 +180,7 @@ func TestActionCreateBinaryWasmRoutesToArtifact(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		gotSource, gotArtifact = req.Source, req.WasmArtifact
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "x", "action": "@a/m"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "x", "action": "a/m"})
 	})
 	if _, err := execTestCmd(t, actionCreateCmd(), "m",
 		"--kind", "wasm", "--source", f, "--price", "0", "--description", "d"); err != nil {
@@ -206,7 +206,7 @@ func TestActionUpdateSendsArtifact(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		gotArtifact = req.WasmArtifact
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "act1", "action": "@a/m"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "act1", "action": "a/m"})
 	})
 	if _, err := execTestCmd(t, actionUpdateCmd(), "act1", "--artifact", artifactB64); err != nil {
 		t.Fatal(err)

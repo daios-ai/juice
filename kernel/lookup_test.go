@@ -45,7 +45,7 @@ func TestLookupRanking(t *testing.T) {
 	k := newTestKernelWithEmbedder(st, emb)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@alice", 0)
+	owner := setupUser(t, st, "alice", 0)
 	for _, desc := range []struct{ name, text string }{
 		{"/weather", "weather forecast temperature rain"},
 		{"/news", "latest news headlines today"},
@@ -74,7 +74,7 @@ func TestLookupRanking(t *testing.T) {
 		if r.Score < 0 {
 			t.Errorf("score should be non-negative: %f", r.Score)
 		}
-		if r.OwnerHandle != "@alice" {
+		if r.OwnerHandle != "alice" {
 			t.Errorf("expected owner handle @alice, got %q", r.OwnerHandle)
 		}
 		if r.Action.Description == "" {
@@ -92,7 +92,7 @@ func TestLookupRankingWithFakeEmbeddings(t *testing.T) {
 	k := newTestKernelWithEmbedder(st, emb)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@alice", 0)
+	owner := setupUser(t, st, "alice", 0)
 	descs := map[string]string{"/match": "compute data results", "/other": "unrelated banana topic"}
 	for name, desc := range descs {
 		a := &kernel.Action{
@@ -128,7 +128,7 @@ func TestLookupIgnoresStatsWhileQualityUnderRevision(t *testing.T) {
 	k := newTestKernelWithEmbedder(st, emb)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@alice", 0)
+	owner := setupUser(t, st, "alice", 0)
 	ids := map[string]string{}
 	descs := map[string]string{"/a": "compute data results", "/b": "compute data metrics"}
 	for name, desc := range descs {
@@ -180,7 +180,7 @@ func TestLookupLexicalDegradedMode(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st) // no embedder
 	ctx := context.Background()
-	owner := setupUser(t, st, "@alice", 0)
+	owner := setupUser(t, st, "alice", 0)
 
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/weather",
@@ -214,7 +214,7 @@ func TestLookupSkipsMismatchedEmbedding(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithEmbedder(st, &fakeEmbedder{}) // 8-dim
 	ctx := context.Background()
-	owner := setupUser(t, st, "@alice", 0)
+	owner := setupUser(t, st, "alice", 0)
 
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/x",
@@ -240,8 +240,8 @@ func TestLookupFillsPastUncallable(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st) // lexical-only, deterministic
 	ctx := context.Background()
-	alice := setupUser(t, st, "@alice", 0)
-	bob := setupUser(t, st, "@bob", 0)
+	alice := setupUser(t, st, "alice", 0)
+	bob := setupUser(t, st, "bob", 0)
 
 	mk := func(owner *kernel.User, name string, vis kernel.ActionVisibility) *kernel.Action {
 		a := &kernel.Action{
@@ -271,7 +271,7 @@ func TestLookupQuerySanitized(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	owner := setupUser(t, st, "@alice", 0)
+	owner := setupUser(t, st, "alice", 0)
 
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/db",
@@ -295,7 +295,7 @@ func TestLookupInactiveActionsExcluded(t *testing.T) {
 	k := newTestKernelWithEmbedder(st, &fakeEmbedder{})
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@alice", 0)
+	owner := setupUser(t, st, "alice", 0)
 	_ = st.CreateAction(ctx, &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/hidden",
 		Kind: kernel.KindHTTP, Active: false, Description: "hidden service do not show",
@@ -324,8 +324,8 @@ func TestLookupEmbeddingStoredOnActivate(t *testing.T) {
 	k := newTestKernelWithEmbedder(st, &fakeEmbedder{})
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@alice", 0)
-	sys := setupUser(t, st, "@sys", 0)
+	owner := setupUser(t, st, "alice", 0)
+	sys := setupUser(t, st, "sys", 0)
 	_ = sys
 
 	a := &kernel.Action{
@@ -368,7 +368,7 @@ func TestLookupMatchesOwnerHandle(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	owner := setupUser(t, st, "@alice", 0)
+	owner := setupUser(t, st, "alice", 0)
 
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/translate",

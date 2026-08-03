@@ -96,11 +96,11 @@ func TestGrantRequiredCodeAndMeta(t *testing.T) {
 	}
 	// The single constructor attaches the ref both in the message and as Meta["action"], and
 	// preserves the sentinel identity (chaining must not drop it).
-	e := GrantRequiredError("@a/b").(*KernelError)
-	if e.Meta["action"] != "@a/b" {
+	e := GrantRequiredError("a/b").(*KernelError)
+	if e.Meta["action"] != "a/b" {
 		t.Errorf("Meta[action] = %q, want @a/b", e.Meta["action"])
 	}
-	if !strings.Contains(e.Message, "@a/b") {
+	if !strings.Contains(e.Message, "a/b") {
 		t.Errorf("message = %q, want it to contain @a/b", e.Message)
 	}
 	if !errorsIs(e, ErrGrantRequired) {
@@ -119,15 +119,15 @@ func TestPeerErrorsCodesAndMeta(t *testing.T) {
 	if HTTPStatusFromCode("peer_unfunded") != 402 {
 		t.Errorf("peer_unfunded status = %d, want 402", HTTPStatusFromCode("peer_unfunded"))
 	}
-	for _, e := range []*KernelError{PeerUnreachableError("@b"), PeerUnfundedError("@b")} {
-		if e.Meta["peer"] != "@b" {
+	for _, e := range []*KernelError{PeerUnreachableError("b"), PeerUnfundedError("b")} {
+		if e.Meta["peer"] != "b" {
 			t.Errorf("Meta[peer] = %q, want @b", e.Meta["peer"])
 		}
 	}
-	if !errorsIs(PeerUnreachableError("@b"), ErrPeerUnreachable) {
+	if !errorsIs(PeerUnreachableError("b"), ErrPeerUnreachable) {
 		t.Error("PeerUnreachableError lost the error identity")
 	}
-	if !errorsIs(PeerUnfundedError("@b"), ErrPeerUnfunded) {
+	if !errorsIs(PeerUnfundedError("b"), ErrPeerUnfunded) {
 		t.Error("PeerUnfundedError lost the error identity")
 	}
 }

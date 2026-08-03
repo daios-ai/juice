@@ -206,7 +206,7 @@ func TestDelegatedTokenBinding(t *testing.T) {
 	eng := newAuthenticator(box, gs, true, time.Second)
 	// refFn is wired in main from k.ActionRef; stub it so the grant-required error carries the
 	// qualified @owner/name (the bug being guarded: dispatch sites used the bare action name).
-	eng.refFn = func(context.Context, string) string { return "@sys/inbox" }
+	eng.refFn = func(context.Context, string) string { return "sys/inbox" }
 	auth := &kernel.AuthInput{Scheme: kernel.AuthSchemeOAuthDelegated,
 		Config: map[string]any{"token_url": provider.URL, "auth_url": provider.URL + "/a", "client_id": "c"}}
 	ctx := context.Background()
@@ -218,7 +218,7 @@ func TestDelegatedTokenBinding(t *testing.T) {
 	// Binding mismatch: ownerB has no grant → grant-required error carrying the qualified ref.
 	if _, err := eng.token(ctx, action, "ownerB", auth, true); err == nil || !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("ownerB: got %v, want grant-required", err)
-	} else if got := grantMeta(err); got != "@sys/inbox" {
+	} else if got := grantMeta(err); got != "sys/inbox" {
 		t.Errorf("ownerB grant-required meta[action] = %q, want @sys/inbox", got)
 	}
 
@@ -235,7 +235,7 @@ func TestDelegatedTokenBinding(t *testing.T) {
 	connC := gs.seed(box, "ownerC", action.ID, "wrong")
 	if _, err := eng.token(ctx, action, "ownerC", auth, true); err == nil || !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("invalid_grant: got %v, want grant-required", err)
-	} else if got := grantMeta(err); got != "@sys/inbox" {
+	} else if got := grantMeta(err); got != "sys/inbox" {
 		t.Errorf("invalid_grant grant-required meta[action] = %q, want @sys/inbox", got)
 	}
 	if !gs.deletedConns[connC] {
@@ -315,7 +315,7 @@ func TestDelegatedBearerBindingMismatch(t *testing.T) {
 	gs.seed(box, "ownerA", action.ID, "ghp_x")
 
 	eng := newAuthenticator(box, gs, true, time.Second)
-	eng.refFn = func(context.Context, string) string { return "@sys/x" }
+	eng.refFn = func(context.Context, string) string { return "sys/x" }
 	exec := &httpActionExecutor{auth: eng}
 
 	// ownerB holds no grant → grant-required, request never sent.

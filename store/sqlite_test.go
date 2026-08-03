@@ -167,7 +167,7 @@ func TestUserCRUD(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@alice", 0)
+	u := newUser("alice", 0)
 	if err := db.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
@@ -180,8 +180,8 @@ func TestUserCRUD(t *testing.T) {
 		t.Errorf("handle: got %q, want %q", got.Handle, u.Handle)
 	}
 
-	// ReadUserByHandle canonicalizes its argument, so both "@alice" and "alice" resolve.
-	for _, h := range []string{"@alice", "alice"} {
+	// ReadUserByHandle canonicalizes its argument, so both "alice" and "alice" resolve.
+	for _, h := range []string{"alice", "alice"} {
 		got2, err := db.ReadUserByHandle(ctx, h)
 		if err != nil {
 			t.Fatalf("ReadUserByHandle(%q): %v", h, err)
@@ -197,21 +197,21 @@ func TestUserCRUD(t *testing.T) {
 	}
 
 	// RenameUser moves the handle: the old one frees, the new one resolves.
-	if err := db.RenameUser(ctx, u.ID, "@alice2"); err != nil {
+	if err := db.RenameUser(ctx, u.ID, "alice2"); err != nil {
 		t.Fatalf("RenameUser: %v", err)
 	}
-	if got, err := db.ReadUserByHandle(ctx, "@alice2"); err != nil || got.ID != u.ID {
+	if got, err := db.ReadUserByHandle(ctx, "alice2"); err != nil || got.ID != u.ID {
 		t.Errorf("renamed handle does not resolve: %v", err)
 	}
-	if _, err := db.ReadUserByHandle(ctx, "@alice"); err == nil {
+	if _, err := db.ReadUserByHandle(ctx, "alice"); err == nil {
 		t.Error("old handle should be free after rename")
 	}
 	// The UNIQUE constraint is the backstop against a colliding rename.
-	other := newUser("@carol", 0)
+	other := newUser("carol", 0)
 	if err := db.CreateUser(ctx, other); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.RenameUser(ctx, other.ID, "@alice2"); err == nil {
+	if err := db.RenameUser(ctx, other.ID, "alice2"); err == nil {
 		t.Error("rename onto a taken handle should fail on the UNIQUE constraint")
 	}
 }
@@ -228,13 +228,13 @@ func TestUsersTableConstraints(t *testing.T) {
 		t.Error("denied_at column should no longer exist after migration 022")
 	}
 
-	a := newUser("@alice", 0)
+	a := newUser("alice", 0)
 	if err := db.CreateUser(ctx, a); err != nil {
 		t.Fatalf("create @alice: %v", err)
 	}
 
 	// The rebuild kept handle uniqueness.
-	if err := db.CreateUser(ctx, newUser("@alice", 0)); err == nil {
+	if err := db.CreateUser(ctx, newUser("alice", 0)); err == nil {
 		t.Error("duplicate handle should still fail (handle UNIQUE preserved)")
 	}
 
@@ -259,7 +259,7 @@ func TestUsersTableConstraints(t *testing.T) {
 func TestSuspendStampRealTime(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
-	u := newUser("@stamp", 0)
+	u := newUser("stamp", 0)
 	if err := db.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
@@ -344,10 +344,15 @@ func TestMigration021DropsEmailPreservesRows(t *testing.T) {
 	if _, err := raw.ExecContext(ctx,
 		`INSERT INTO users (id,handle,email,password_hash,available,locked,created_at,updated_at)
 		 VALUES (?,?,?,?,?,?,?,?)`,
-		uid, "@old", "old@example.com", "hash", int64(42), int64(0), now, now); err != nil {
+		uid, "old", "old@example.com", "hash", int64(42), int64(0), now, now); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	if err := s.CreateAction(ctx, newAction(uid, "act", 0, true)); err != nil {
+	// Seed the child action via raw SQL under the pre-021 column set: CreateAction now writes
+	// v0.12 columns (remote_owner_id/remote_bps) that only exist after migration 027.
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO actions (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		uuid.New().String(), uid, "act", "wasm", 1, "public", int64(0), "d", "{}", "{}", "", "", "", now, now); err != nil {
 		t.Fatalf("seed action: %v", err)
 	}
 
@@ -358,8 +363,9 @@ func TestMigration021DropsEmailPreservesRows(t *testing.T) {
 	}
 
 	// The pre-existing user survived the rebuild with its data; description defaults to "".
+	// Migration 026 (v0.12) strips the stored `@` sigil, so `@old` reads back bare as `old`.
 	got, err := s.ReadUser(ctx, uid)
-	if err != nil || got.Handle != "@old" || got.Available != 42 {
+	if err != nil || got.Handle != "old" || got.Available != 42 {
 		t.Fatalf("user lost or altered by rebuild: err=%v got=%+v", err, got)
 	}
 	if got.Description != "" || got.RecoveryPublicKey != "" {
@@ -386,7 +392,7 @@ func TestActionCRUD(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 0)
+	owner := newUser("owner", 0)
 	_ = db.CreateUser(ctx, owner)
 
 	a := newAction(owner.ID, "/hello", 10, false)
@@ -424,7 +430,7 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@hd-owner", 0)
+	owner := newUser("hd-owner", 0)
 	_ = db.CreateUser(ctx, owner)
 
 	a := newAction(owner.ID, "/hd-svc", 0, true)
@@ -465,7 +471,7 @@ func TestListActions(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 0)
+	owner := newUser("owner", 0)
 	_ = db.CreateUser(ctx, owner)
 
 	active := newAction(owner.ID, "/active", 0, true)
@@ -500,7 +506,7 @@ func TestListPublicActionsExcludesSuspendedOwner(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 0)
+	owner := newUser("owner", 0)
 	_ = db.CreateUser(ctx, owner)
 	a := newAction(owner.ID, "/svc", 0, true)
 	a.Visibility = kernel.VisibilityPublic
@@ -540,12 +546,12 @@ func TestBeginRunDeductsFunds(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@alice", 1000)
+	user := newUser("alice", 1000)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
 	tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
 
-	if err := db.BeginRun(ctx, p, tr, user.ID, 400); err != nil {
+	if err := db.BeginRun(ctx, p, tr, user.ID, 400, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -570,8 +576,150 @@ func TestBeginRunDeductsFunds(t *testing.T) {
 	// Insufficient funds should fail.
 	p2 := newProcess(user.ID)
 	tr2 := &kernel.Trace{ID: uuid.New().String(), ProcessID: p2.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p2, tr2, user.ID, 9999); err == nil {
+	if err := db.BeginRun(ctx, p2, tr2, user.ID, 9999, 0, 0); err == nil {
 		t.Error("expected error for insufficient funds")
+	}
+}
+
+// TestBeginRunGlobalExposure exercises the §13 admission guard: ordinary accounts stay prepaid, a
+// peer may draw negative only within the GLOBAL cap X, and — critically — a second peer identity
+// cannot use exposure the first already consumed (Sybil-proof: one X across all peers).
+func TestBeginRunGlobalExposure(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	const X = 100
+	now := time.Now().UTC()
+	run := func(u *kernel.User, price, exposureMax int64) error {
+		p := newProcess(u.ID)
+		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: now}
+		return db.BeginRun(ctx, p, tr, u.ID, price, 0, exposureMax)
+	}
+
+	// Ordinary account with no balance cannot run a priced action (prepaid-only), regardless of X.
+	local := newUser("local", 0)
+	_ = db.CreateUser(ctx, local)
+	if err := run(local, 1, X); err == nil {
+		t.Error("ordinary account with no balance ran a priced action")
+	}
+
+	// A peer may draw negative up to the global cap X.
+	peerA := newPeer(t, db, "peerA", "keyA", 0, 0, now)
+	if err := run(peerA, 60, X); err != nil {
+		t.Fatalf("peer within X should run: %v", err)
+	}
+	if u, _ := db.ReadUser(ctx, peerA.ID); u.Available != -60 {
+		t.Errorf("peerA available: got %d, want -60", u.Available)
+	}
+
+	// Sybil: a second peer identity cannot use the exposure the first consumed. Global gross is 60;
+	// a 60 draw would push it to 120 > X=100, so it is refused — proving X is not per-peer.
+	peerB := newPeer(t, db, "peerB", "keyB", 0, 0, now)
+	if err := run(peerB, 60, X); err == nil {
+		t.Error("second peer identity jointly exceeded the global cap X (Sybil)")
+	}
+	// A draw that keeps global gross ≤ X is admitted (60 + 40 = 100).
+	if err := run(peerB, 40, X); err != nil {
+		t.Fatalf("second peer within remaining headroom should run: %v", err)
+	}
+
+	// X=0 ⇒ prepaid-only: a peer with no balance cannot draw negative.
+	peerC := newPeer(t, db, "peerC", "keyC", 0, 0, now)
+	if err := run(peerC, 1, 0); err == nil {
+		t.Error("X=0 should forbid any peer credit draw")
+	}
+	// A prepaid peer is immune to X: with balance ≥ price it always runs.
+	peerD := newPeer(t, db, "peerD", "keyD", 50, 0, now)
+	if err := run(peerD, 50, 0); err != nil {
+		t.Fatalf("prepaid peer should run regardless of X: %v", err)
+	}
+}
+
+// TestCommitSettlement verifies the §13 rail-anchored residual-settlement store ops: a pay outcome
+// moves no balance (the debt stays, pending), a clear outcome extinguishes it, the cash finalization
+// is the only non-conservative move, insufficient debtor reserve rolls back with no partial writes,
+// and every path is idempotent.
+func TestCommitSettlement(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	sys := newUser("sys", 100) // operator reserve (accumulated fees) absorbs write-off variance
+	if err := db.CreateUser(ctx, sys); err != nil {
+		t.Fatal(err)
+	}
+	const d, Q = int64(3), int64(10)
+
+	// (6) Clear outcome (creditor: peer owes us d): clear +d on the row, sys absorbs −d, no cash.
+	pc := newPeer(t, db, "peerClear", "pkClear", -d, 0, now)
+	sys0, _ := db.ReadUser(ctx, sys.ID)
+	if _, err := db.CommitSettlement(ctx, "sid-clear", pc.ID, sys.ID, d, -d, d, `{"outcome":"clear"}`); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := db.ReadUser(ctx, pc.ID); u.Available != 0 {
+		t.Errorf("clear: peer row got %d, want 0", u.Available)
+	}
+	if u, _ := db.ReadUser(ctx, sys.ID); u.Available != sys0.Available-d {
+		t.Errorf("clear: sys delta got %d, want %d", u.Available-sys0.Available, -d)
+	}
+
+	// (1) Pay outcome: NO balance change — the debt stays, and G is unchanged. Record stored (replay).
+	pp := newPeer(t, db, "peerPay", "pkPay", -d, 0, now)
+	if _, err := db.CommitSettlement(ctx, "sid-pay", pp.ID, sys.ID, 0, 0, d, `{"outcome":"pay"}`); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := db.ReadUser(ctx, pp.ID); u.Available != -d {
+		t.Errorf("pay: peer row moved to %d, want unchanged %d", u.Available, -d)
+	}
+	if pending, _ := db.HasPendingSettlement(ctx, pp.ID); !pending {
+		t.Error("pay: expected HasPendingSettlement true")
+	}
+	// (5) Replay returns the first record with no second application (anti-grinding).
+	if stored, _ := db.CommitSettlement(ctx, "sid-pay", pp.ID, sys.ID, 0, 0, d, `{"outcome":"clear"}`); stored != `{"outcome":"pay"}` {
+		t.Errorf("pay replay: got %q, want the stored pay record", stored)
+	}
+
+	// (3) Cash finalization (creditor): clear +d on the row, sys += (Q−d), record cash Q.
+	sysBefore, _ := db.ReadUser(ctx, sys.ID)
+	if _, err := db.CommitSettlementCash(ctx, "sid-pay", pp.ID, sys.ID, d, Q-d, Q, `{"outcome":"cash"}`); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := db.ReadUser(ctx, pp.ID); u.Available != 0 {
+		t.Errorf("cash: peer row got %d, want 0 (debt cleared)", u.Available)
+	}
+	if u, _ := db.ReadUser(ctx, sys.ID); u.Available != sysBefore.Available+(Q-d) {
+		t.Errorf("cash: sys variance got %d, want +%d", u.Available-sysBefore.Available, Q-d)
+	}
+	if pending, _ := db.HasPendingSettlement(ctx, pp.ID); pending {
+		t.Error("cash: settlement should no longer be pending")
+	}
+	// Cash replay is a no-op.
+	if _, err := db.CommitSettlementCash(ctx, "sid-pay", pp.ID, sys.ID, d, Q-d, Q, `{"outcome":"cash"}`); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := db.ReadUser(ctx, pp.ID); u.Available != 0 {
+		t.Errorf("cash replay changed the row: %d", u.Available)
+	}
+
+	// (8) Debtor cash with insufficient sys reserve rolls back — no partial writes, still pending. A
+	// debtor owes d (row +d); paying Q needs sys ≥ Q−d, but sys here (a fresh user) has 0.
+	poor := newUser("poorSys", 0)
+	_ = db.CreateUser(ctx, poor)
+	dbtr := newPeer(t, db, "peerDebtor", "pkDebtor", d, 0, now)
+	if _, err := db.CommitSettlement(ctx, "sid-dp", dbtr.ID, poor.ID, 0, 0, d, `{"outcome":"pay"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CommitSettlementCash(ctx, "sid-dp", dbtr.ID, poor.ID, -d, -(Q - d), Q, `{"outcome":"cash"}`); err == nil {
+		t.Error("cash with insufficient debtor reserve should fail")
+	}
+	if u, _ := db.ReadUser(ctx, dbtr.ID); u.Available != d {
+		t.Errorf("failed cash left a partial write on the row: got %d, want %d", u.Available, d)
+	}
+	if pending, _ := db.HasPendingSettlement(ctx, dbtr.ID); !pending {
+		t.Error("failed cash should leave the settlement pending")
+	}
+
+	// The conservation guard rejects a non-conservative outcome record.
+	if _, err := db.CommitSettlement(ctx, "sid-bad", pc.ID, sys.ID, d, 0, d, `{"outcome":"clear"}`); err == nil {
+		t.Error("CommitSettlement must reject dClear+variance != 0")
 	}
 }
 
@@ -579,13 +727,13 @@ func TestBeginRunAndSubcall(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@alice", 500)
+	user := newUser("alice", 500)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
 
 	// BeginRun atomically creates process+root trace and debits user.
-	if err := db.BeginRun(ctx, p, root, user.ID, 500); err != nil {
+	if err := db.BeginRun(ctx, p, root, user.ID, 500, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	proc, _ := db.ReadProcess(ctx, p.ID)
@@ -619,16 +767,16 @@ func TestCommitCall(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	payer := newUser("@payer", 1000)
-	target := newUser("@target", 0)
-	fee := newUser("@fee", 0)
+	payer := newUser("payer", 1000)
+	target := newUser("target", 0)
+	fee := newUser("fee", 0)
 	_ = db.CreateUser(ctx, payer)
 	_ = db.CreateUser(ctx, target)
 	_ = db.CreateUser(ctx, fee)
 
 	p := newProcess(payer.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, payer.ID, 100); err != nil {
+	if err := db.BeginRun(ctx, p, root, payer.ID, 100, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -670,15 +818,324 @@ func TestCommitCall(t *testing.T) {
 	}
 }
 
+// TestTransferEffectFundsFromCaller is the core value-wallet regression (§13): a composed transfer
+// (an action subcalls sys/transfer) funds the delivered VALUE from the immediate caller C's own
+// balance — NOT the process budget (owner P) nor the parent trace. A subcall trace carrying a value
+// reserve locks it from C at BeginSubcall and settles it to the beneficiary at CommitCall, leaving P
+// and the parent trace's execution budget untouched.
+func TestTransferEffectFundsFromCaller(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	P := newUser("proc-owner", 1000) // process owner: funds execution only
+	C := newUser("caller", 500)      // immediate caller: funds the value
+	B := newUser("beneficiary", 0)
+	sys := newUser("sys", 0)
+	for _, u := range []*kernel.User{P, C, B, sys} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Process owned by P with a funded parent trace (execution budget 200).
+	p := newProcess(P.ID)
+	parent := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CallerUserID: P.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, parent, P.ID, 200, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Composed subcall: caller C subcalls a value-bearing action delivering 100 to B. Execution price
+	// 0 (funded from the parent trace); the value reserve 100 is locked from C's own balance.
+	sub := &kernel.Trace{
+		ID: uuid.New().String(), ProcessID: p.ID, CallerUserID: C.ID,
+		Value: 100, ValueTo: B.ID, ValueReserve: 100, CreatedAt: time.Now().UTC(),
+	}
+	if err := db.BeginSubcall(ctx, parent.ID, sub, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Reserve is locked from C, not P or the parent trace.
+	if cu, _ := db.ReadUser(ctx, C.ID); cu.Available != 400 || cu.Locked != 100 {
+		t.Fatalf("after admission C: got available=%d locked=%d, want 400/100", cu.Available, cu.Locked)
+	}
+	if pu, _ := db.ReadUser(ctx, P.ID); pu.Available != 800 {
+		t.Errorf("P.available disturbed by value reserve: got %d, want 800 (200 execution only)", pu.Available)
+	}
+
+	tx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: sub.ID, ParentTraceID: parent.ID,
+		OwnerUserID: P.ID, CallerUserID: C.ID, TargetUserID: sys.ID, ActionID: "a1",
+		Status: kernel.TxSuccess, Gross: 0, Net: 0, Fee: 0, StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	receipt := &kernel.Receipt{
+		ID: uuid.New().String(), IssuerUserID: P.ID, TxID: tx.ID, TraceID: sub.ID, ActionID: "a1",
+		ArgsHash: "ah", ReplyHash: "rh", Status: kernel.TxSuccess, Value: 100, ValueTo: B.ID, CreatedAt: time.Now().UTC(),
+	}
+	if err := db.CommitCall(ctx, tx, receipt, sub.ID, parent.ID, kernel.CallerTrace, sys.ID, sys.ID, 0, 0, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Value delivered to B from C; C down exactly 100; P's execution budget intact; local caller pays
+	// no value premium (sys unchanged).
+	if cu, _ := db.ReadUser(ctx, C.ID); cu.Available != 400 || cu.Locked != 0 {
+		t.Errorf("after settle C: got available=%d locked=%d, want 400/0", cu.Available, cu.Locked)
+	}
+	if bu, _ := db.ReadUser(ctx, B.ID); bu.Available != 100 {
+		t.Errorf("beneficiary credited: got %d, want 100", bu.Available)
+	}
+	if su, _ := db.ReadUser(ctx, sys.ID); su.Available != 0 {
+		t.Errorf("local transfer must be untaxed: sys got %d, want 0", su.Available)
+	}
+	if pu, _ := db.ReadUser(ctx, P.ID); pu.Available != 800 || pu.Locked != 200 {
+		t.Errorf("P untouched by value channel: got available=%d locked=%d, want 800/200", pu.Available, pu.Locked)
+	}
+}
+
+// TestTransferEffectRefundedOnFailure: a failed composed transfer returns the whole value reserve to
+// the caller C — nothing delivered, no premium taken (§13, all-or-nothing).
+func TestTransferEffectRefundedOnFailure(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	P := newUser("proc-owner", 1000)
+	C := newUser("caller", 500)
+	B := newUser("beneficiary", 0)
+	sys := newUser("sys", 0)
+	for _, u := range []*kernel.User{P, C, B, sys} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := newProcess(P.ID)
+	parent := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CallerUserID: P.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, parent, P.ID, 200, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	sub := &kernel.Trace{
+		ID: uuid.New().String(), ProcessID: p.ID, CallerUserID: C.ID,
+		Value: 100, ValueTo: B.ID, ValueReserve: 100, CreatedAt: time.Now().UTC(),
+	}
+	if err := db.BeginSubcall(ctx, parent.ID, sub, 0); err != nil {
+		t.Fatal(err)
+	}
+	tx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: sub.ID, ParentTraceID: parent.ID,
+		OwnerUserID: P.ID, CallerUserID: C.ID, ActionID: "a1", Status: kernel.TxFailure,
+		Gross: 0, Reason: "boom", StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	buildReceipt := func(refund int64) (*kernel.Receipt, error) {
+		return &kernel.Receipt{
+			ID: uuid.New().String(), IssuerUserID: P.ID, TxID: tx.ID, TraceID: sub.ID, ActionID: "a1",
+			ArgsHash: "ah", ReplyHash: "rh", Status: kernel.TxFailure, CreatedAt: time.Now().UTC(),
+		}, nil
+	}
+	if err := db.CommitFailedCall(ctx, tx, buildReceipt, sub.ID, parent.ID, kernel.CallerTrace, sys.ID, 0, nil, "", "execution_failed", ""); err != nil {
+		t.Fatal(err)
+	}
+	if cu, _ := db.ReadUser(ctx, C.ID); cu.Available != 500 || cu.Locked != 0 {
+		t.Errorf("failed transfer must refund C in full: got available=%d locked=%d, want 500/0", cu.Available, cu.Locked)
+	}
+	if bu, _ := db.ReadUser(ctx, B.ID); bu.Available != 0 {
+		t.Errorf("failed transfer delivered value: beneficiary got %d, want 0", bu.Available)
+	}
+}
+
+// TestPendingTransferSettlement is the buyer-side payment-step reserve (§13): InsertPendingTransfer
+// locks max_total from the buyer; CommitPendingTransfer settles value+value_premium to the peer proxy
+// row and value_import to sys, refunding the remainder; RefundPendingTransfer returns the whole reserve;
+// SetPendingTransferStatus('quarantined') leaves it LOCKED.
+func TestPendingTransferSettlement(t *testing.T) {
+	ctx := context.Background()
+	// amount 100, rbps/ibps 500: value_premium 5, remote_max 105, value_import 6, max_total 111.
+	mk := func(t *testing.T) (*DB, *kernel.User, *kernel.User, *kernel.User, *kernel.PendingTransfer) {
+		db := openTestDB(t)
+		buyer := newUser("buyer", 1000)
+		proxyA := newUser("proxy-a", 0)
+		sys := newUser("sys", 0)
+		for _, u := range []*kernel.User{buyer, proxyA, sys} {
+			if err := db.CreateUser(ctx, u); err != nil {
+				t.Fatal(err)
+			}
+		}
+		pt := &kernel.PendingTransfer{
+			ID: uuid.New().String(), BuyerID: buyer.ID, PeerKey: "keyA", StepID: "s1",
+			InputHash: "ih", Input: json.RawMessage(`{}`), IdempotencyKey: uuid.New().String(), Beneficiary: "benef",
+			Amount: 100, RemoteMax: 105, Reserve: 111, CreatedAt: time.Now().UTC(),
+		}
+		if err := db.InsertPendingTransfer(ctx, pt); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 889 || b.Locked != 111 {
+			t.Fatalf("after admit buyer: got available=%d locked=%d, want 889/111", b.Available, b.Locked)
+		}
+		return db, buyer, proxyA, sys, pt
+	}
+
+	t.Run("settle", func(t *testing.T) {
+		db, buyer, proxyA, sys, pt := mk(t)
+		if err := db.CommitPendingTransfer(ctx, pt.ID, proxyA.ID, 105, sys.ID, 6); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 889 || b.Locked != 0 {
+			t.Errorf("settled buyer: got available=%d locked=%d, want 889/0", b.Available, b.Locked)
+		}
+		if p, _ := db.ReadUser(ctx, proxyA.ID); p.Available != 105 {
+			t.Errorf("proxy row (buyer owes A): got %d, want 105", p.Available)
+		}
+		if su, _ := db.ReadUser(ctx, sys.ID); su.Available != 6 {
+			t.Errorf("sys value_import: got %d, want 6", su.Available)
+		}
+	})
+
+	t.Run("refund", func(t *testing.T) {
+		db, buyer, _, _, pt := mk(t)
+		if err := db.RefundPendingTransfer(ctx, pt.ID); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 1000 || b.Locked != 0 {
+			t.Errorf("refunded buyer: got available=%d locked=%d, want 1000/0", b.Available, b.Locked)
+		}
+	})
+
+	t.Run("quarantine keeps reserve locked", func(t *testing.T) {
+		db, buyer, _, _, pt := mk(t)
+		if err := db.SetPendingTransferStatus(ctx, pt.ID, "quarantined", "receipt value != amount"); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 889 || b.Locked != 111 {
+			t.Errorf("quarantined buyer must stay locked: got available=%d locked=%d, want 889/111", b.Available, b.Locked)
+		}
+		// A later commit/refund on a non-pending record is a no-op (idempotent disposition).
+		if err := db.RefundPendingTransfer(ctx, pt.ID); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 889 {
+			t.Errorf("refund after quarantine must be a no-op: got %d, want 889", b.Available)
+		}
+	})
+}
+
+// TestPendingTransferListing covers the operator surface (§13): the default list returns only the
+// UNRESOLVED records (pending + quarantined), a status filter selects one status, read-by-id works,
+// quarantine records a last_error, and updated_at advances on a status transition.
+func TestPendingTransferListing(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	buyer := newUser("buyer", 1000)
+	if err := db.CreateUser(ctx, buyer); err != nil {
+		t.Fatal(err)
+	}
+	seed := func(t *testing.T) *kernel.PendingTransfer {
+		t.Helper()
+		pt := &kernel.PendingTransfer{
+			ID: uuid.New().String(), BuyerID: buyer.ID, PeerKey: "keyA", StepID: "s1",
+			InputHash: "ih", Input: json.RawMessage(`{}`), IdempotencyKey: uuid.New().String(),
+			Beneficiary: "benef", Amount: 10, RemoteMax: 11, Reserve: 12, CreatedAt: time.Now().UTC(),
+		}
+		if err := db.InsertPendingTransfer(ctx, pt); err != nil {
+			t.Fatal(err)
+		}
+		return pt
+	}
+	pending := seed(t)
+	quarantined := seed(t)
+	refunded := seed(t)
+	if err := db.SetPendingTransferStatus(ctx, quarantined.ID, "quarantined", "receipt value != amount"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RefundPendingTransfer(ctx, refunded.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default (empty status) = unresolved only: pending + quarantined, never the refunded (terminal) one.
+	got, err := db.ListPendingTransfers(ctx, "", 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]string{}
+	for _, pt := range got {
+		ids[pt.ID] = pt.Status
+	}
+	if len(got) != 2 || ids[pending.ID] != "pending" || ids[quarantined.ID] != "quarantined" {
+		t.Fatalf("default list must be unresolved only, got %v", ids)
+	}
+	if _, ok := ids[refunded.ID]; ok {
+		t.Error("default list must not include a refunded (terminal) record")
+	}
+
+	// A status filter selects exactly that status.
+	ref, _ := db.ListPendingTransfers(ctx, "refunded", 50, 0)
+	if len(ref) != 1 || ref[0].ID != refunded.ID {
+		t.Errorf("status=refunded filter: got %v", ref)
+	}
+
+	// Read-by-id + quarantine metadata.
+	q, err := db.ReadPendingTransfer(ctx, quarantined.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.LastError != "receipt value != amount" {
+		t.Errorf("quarantine last_error: got %q", q.LastError)
+	}
+	if !q.UpdatedAt.After(q.CreatedAt) && !q.UpdatedAt.Equal(q.CreatedAt) {
+		t.Errorf("updated_at must be >= created_at, got created=%v updated=%v", q.CreatedAt, q.UpdatedAt)
+	}
+	if _, err := db.ReadPendingTransfer(ctx, "no-such-id"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("read unknown id: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestPremiumReserveReleasedFromTrace is the F1 regression: the serving-markup reserve parked at
+// admission must be released from the trace's premium_parked snapshot at settlement — WITHOUT any
+// in-memory request — so crash-recovery / forced-closure failure paths (which rebuild the request
+// with no rate) never leak it in owner.locked. Here a peer-owner root call parks a reserve, then
+// CommitFailedCall (the recovery settle op) fully restores the balance.
+func TestPremiumReserveReleasedFromTrace(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	sys := newUser("sys", 0)
+	_ = db.CreateUser(ctx, sys)
+	const price, reserve = int64(100), int64(5)
+	peer := newPeer(t, db, "peer", "pk", price+reserve, 0, now)
+
+	p := newProcess(peer.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, PremiumBPS: 500, PremiumParked: reserve, CreatedAt: now}
+	if err := db.BeginRun(ctx, p, root, peer.ID, price, reserve, 0); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := db.ReadUser(ctx, peer.ID); u.Available != 0 || u.Locked != price+reserve {
+		t.Fatalf("after BeginRun: available=%d locked=%d, want 0/%d", u.Available, u.Locked, price+reserve)
+	}
+
+	// Settle as a failure with a full refund — mirrors recoverTrace, which passes NO premium reserve
+	// (it rebuilds the request fresh); the store must read the reserve from the trace row alone.
+	tx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID, OwnerUserID: peer.ID,
+		CallerUserID: peer.ID, TargetUserID: peer.ID, ActionID: "dummy",
+		Status: kernel.TxFailure, Gross: price, Reason: "recovered", ArgsJSON: []byte("{}"), ReplyJSON: []byte("null"),
+		StartedAt: now, EndedAt: now,
+	}
+	buildFn := func(refund int64) (*kernel.Receipt, error) {
+		charge := price - refund // full refund ⇒ charge 0 ⇒ premium 0
+		return &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: sys.ID, TxID: tx.ID, TraceID: root.ID, ActionID: "dummy", Status: kernel.TxFailure, Charge: charge, CreatedAt: now}, nil
+	}
+	if err := db.CommitFailedCall(ctx, tx, buildFn, root.ID, p.ID, kernel.CallerProcess, sys.ID, price, nil, "", "recovered", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Reserve fully released: locked back to 0, available restored — no leak.
+	if u, _ := db.ReadUser(ctx, peer.ID); u.Locked != 0 || u.Available != price+reserve {
+		t.Errorf("after recovery: available=%d locked=%d, want %d/0 (reserve leaked in locked?)", u.Available, u.Locked, price+reserve)
+	}
+}
+
 func TestEndProcess(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@alice", 1000)
+	user := newUser("alice", 1000)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, user.ID, 600); err != nil {
+	if err := db.BeginRun(ctx, p, root, user.ID, 600, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -698,7 +1155,7 @@ func TestEndProcess(t *testing.T) {
 		}, nil
 	}
 	// CallerProcess: root call's caller wallet is the process itself.
-	if err := db.CommitFailedCall(ctx, failTx, buildReceipt, root.ID, p.ID, kernel.CallerProcess, 600, nil, "", "failure", ""); err != nil {
+	if err := db.CommitFailedCall(ctx, failTx, buildReceipt, root.ID, p.ID, kernel.CallerProcess, "", 600, nil, "", "failure", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -725,12 +1182,12 @@ func TestEndProcessWithLockedFundsForceCloseSucceeds(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@alice-locked", 500)
+	user := newUser("alice-locked", 500)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
 	// BeginRun creates process (locked=500) + root trace (available=500).
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, user.ID, 500); err != nil {
+	if err := db.BeginRun(ctx, p, root, user.ID, 500, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -751,15 +1208,15 @@ func TestEndProcessCancelsWaitingStep(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@ep-running", 1000)
+	user := newUser("ep-running", 1000)
 	_ = db.CreateUser(ctx, user)
-	caller := newUser("@ep-running-caller", 0)
+	caller := newUser("ep-running-caller", 0)
 	_ = db.CreateUser(ctx, caller)
 
 	p := newProcess(user.ID)
 	// BeginRun: user.locked=50, root trace.available=50.
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, user.ID, 50); err != nil {
+	if err := db.BeginRun(ctx, p, root, user.ID, 50, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -819,14 +1276,14 @@ func TestEndProcessDoesNotDoubleCountCompletedStep(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@ep-done", 1000)
+	user := newUser("ep-done", 1000)
 	_ = db.CreateUser(ctx, user)
-	caller := newUser("@ep-done-caller", 0)
+	caller := newUser("ep-done-caller", 0)
 	_ = db.CreateUser(ctx, caller)
 
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, user.ID, 50); err != nil {
+	if err := db.BeginRun(ctx, p, root, user.ID, 50, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -850,7 +1307,7 @@ func TestEndProcessDoesNotDoubleCountCompletedStep(t *testing.T) {
 	}
 
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginStepCall(ctx, step.ID, ct); err != nil {
+	if err := db.BeginStepCall(ctx, step.ID, ct, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -894,14 +1351,14 @@ func TestBeginStepCallGuardsParkInvariant(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@bsc-guard", 1000)
+	user := newUser("bsc-guard", 1000)
 	_ = db.CreateUser(ctx, user)
-	caller := newUser("@bsc-guard-caller", 0)
+	caller := newUser("bsc-guard-caller", 0)
 	_ = db.CreateUser(ctx, caller)
 
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, user.ID, 50); err != nil {
+	if err := db.BeginRun(ctx, p, root, user.ID, 50, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	act := newAction(user.ID, "bsc-guard-act", 50, true)
@@ -923,7 +1380,7 @@ func TestBeginStepCallGuardsParkInvariant(t *testing.T) {
 	}
 
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	err := db.BeginStepCall(ctx, step.ID, ct)
+	err := db.BeginStepCall(ctx, step.ID, ct, 0)
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("BeginStepCall with broken park: got %v, want ErrInvalidState", err)
 	}
@@ -935,7 +1392,7 @@ func TestStats(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 0)
+	owner := newUser("owner", 0)
 	_ = db.CreateUser(ctx, owner)
 	a := newAction(owner.ID, "/svc", 0, true)
 	_ = db.CreateAction(ctx, a)
@@ -972,9 +1429,9 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	payer := newUser("@payer-inc", 1000)
-	target := newUser("@target-inc", 0)
-	fee := newUser("@fee-inc", 0)
+	payer := newUser("payer-inc", 1000)
+	target := newUser("target-inc", 0)
+	fee := newUser("fee-inc", 0)
 	_ = db.CreateUser(ctx, payer)
 	_ = db.CreateUser(ctx, target)
 	_ = db.CreateUser(ctx, fee)
@@ -986,7 +1443,7 @@ func TestCommitCallIncrementalStats(t *testing.T) {
 	makeRun := func(price int64) (*kernel.Process, *kernel.Trace) {
 		pr := newProcess(payer.ID)
 		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: pr.ID, CreatedAt: time.Now().UTC()}
-		if err := db.BeginRun(ctx, pr, tr, payer.ID, price); err != nil {
+		if err := db.BeginRun(ctx, pr, tr, payer.ID, price, 0, 0); err != nil {
 			t.Fatalf("BeginRun: %v", err)
 		}
 		return pr, tr
@@ -1046,11 +1503,11 @@ func TestListTraces(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@alice", 200)
+	user := newUser("alice", 200)
 	_ = db.CreateUser(ctx, user)
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, user.ID, 200); err != nil {
+	if err := db.BeginRun(ctx, p, root, user.ID, 200, 0, 0); err != nil {
 		t.Fatalf("BeginRun: %v", err)
 	}
 
@@ -1079,7 +1536,7 @@ func TestAuthCodeFlow(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@dave", 0)
+	user := newUser("dave", 0)
 	_ = db.CreateUser(ctx, user)
 
 	ac := &kernel.AuthCode{
@@ -1121,7 +1578,7 @@ func TestRefreshTokenRotation(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@eve", 0)
+	user := newUser("eve", 0)
 	_ = db.CreateUser(ctx, user)
 
 	rt := &kernel.RefreshToken{
@@ -1168,9 +1625,9 @@ func TestTransactionCRUD(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 100)
-	target := newUser("@target", 0)
-	feeUser := newUser("@fee-crud", 0)
+	owner := newUser("owner", 100)
+	target := newUser("target", 0)
+	feeUser := newUser("fee-crud", 0)
 	_ = db.CreateUser(ctx, owner)
 	_ = db.CreateUser(ctx, target)
 	_ = db.CreateUser(ctx, feeUser)
@@ -1180,7 +1637,7 @@ func TestTransactionCRUD(t *testing.T) {
 
 	p := newProcess(owner.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, owner.ID, 100); err != nil {
+	if err := db.BeginRun(ctx, p, root, owner.ID, 100, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1235,8 +1692,8 @@ func TestListProcesses(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@lp-owner", 1000)
-	other := newUser("@lp-other", 0)
+	u := newUser("lp-owner", 1000)
+	other := newUser("lp-other", 0)
 	if err := db.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
@@ -1254,7 +1711,7 @@ func TestListProcesses(t *testing.T) {
 		}
 		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
 		_ = i
-		if err := db.BeginRun(ctx, p, tr, ownerID, 0); err != nil {
+		if err := db.BeginRun(ctx, p, tr, ownerID, 0, 0, 0); err != nil {
 			t.Fatalf("BeginRun %d: %v", i, err)
 		}
 	}
@@ -1277,7 +1734,7 @@ func TestRevokeRefreshToken(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@rt-user", 0)
+	u := newUser("rt-user", 0)
 	if err := db.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
@@ -1314,7 +1771,7 @@ func TestCreateReadReceipt(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	issuer := newUser("@issuer", 0)
+	issuer := newUser("issuer", 0)
 	_ = db.CreateUser(ctx, issuer)
 
 	tx := &kernel.Transaction{
@@ -1370,7 +1827,7 @@ func TestCreateRatingDirect(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	rater := newUser("@rater", 0)
+	rater := newUser("rater", 0)
 	_ = db.CreateUser(ctx, rater)
 
 	tx := &kernel.Transaction{
@@ -1430,7 +1887,7 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 1000)
+	owner := newUser("owner", 1000)
 	_ = db.CreateUser(ctx, owner)
 	action := newAction(owner.ID, "/a", 10, true)
 	_ = db.CreateAction(ctx, action)
@@ -1443,7 +1900,7 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 		t.Fatalf("UpsertStats: %v", err)
 	}
 
-	rater := newUser("@rater", 0)
+	rater := newUser("rater", 0)
 	_ = db.CreateUser(ctx, rater)
 	tx := &kernel.Transaction{
 		ID:           uuid.New().String(),
@@ -1490,7 +1947,7 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 	}
 
 	// Second rating (0) must update the running mean atomically.
-	rater2 := newUser("@rater2", 0)
+	rater2 := newUser("rater2", 0)
 	_ = db.CreateUser(ctx, rater2)
 	tx2 := &kernel.Transaction{
 		ID:           uuid.New().String(),
@@ -1526,12 +1983,12 @@ func TestListRatings(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@list-owner", 0)
+	owner := newUser("list-owner", 0)
 	_ = db.CreateUser(ctx, owner)
 	action := newAction(owner.ID, "/list-a", 0, true)
 	_ = db.CreateAction(ctx, action)
 
-	rater := newUser("@list-rater", 0)
+	rater := newUser("list-rater", 0)
 	_ = db.CreateUser(ctx, rater)
 
 	makeTxAndRating := func(id string, rating float64, offset time.Duration) {
@@ -1587,14 +2044,14 @@ func TestListStepsPagination(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@ls-owner", 1000)
+	user := newUser("ls-owner", 1000)
 	_ = db.CreateUser(ctx, user)
-	caller := newUser("@ls-caller", 0)
+	caller := newUser("ls-caller", 0)
 	_ = db.CreateUser(ctx, caller)
 
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, user.ID, 100); err != nil {
+	if err := db.BeginRun(ctx, p, root, user.ID, 100, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	act := newAction(user.ID, "ls-act", 10, true)
@@ -1645,9 +2102,9 @@ func TestListTransactionsByParty(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@tx-party-owner", 0)   // seller
-	caller := newUser("@tx-party-caller", 0) // buyer
-	other := newUser("@tx-party-other", 0)   // non-party
+	owner := newUser("tx-party-owner", 0)   // seller
+	caller := newUser("tx-party-caller", 0) // buyer
+	other := newUser("tx-party-other", 0)   // non-party
 	_ = db.CreateUser(ctx, owner)
 	_ = db.CreateUser(ctx, caller)
 	_ = db.CreateUser(ctx, other)
@@ -1657,7 +2114,7 @@ func TestListTransactionsByParty(t *testing.T) {
 	p := newProcess(caller.ID)
 	{
 		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-		if err := db.BeginRun(ctx, p, tr, caller.ID, 0); err != nil {
+		if err := db.BeginRun(ctx, p, tr, caller.ID, 0, 0, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1703,7 +2160,7 @@ func TestListTransactionsByParty(t *testing.T) {
 	}
 
 	// Caller distinct from process owner: caller_user_id should also grant access.
-	distinctCaller := newUser("@tx-party-distinct-caller", 0)
+	distinctCaller := newUser("tx-party-distinct-caller", 0)
 	_ = db.CreateUser(ctx, distinctCaller)
 	txDistinct := &kernel.Transaction{
 		ID:            "party-tx-distinct",
@@ -1731,7 +2188,7 @@ func TestReadUserByPublicKey(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@remote", 0)
+	u := newUser("remote", 0)
 	u.PublicKey = "ed25519pubkeyABC"
 	if err := db.CreateUser(ctx, u); err != nil {
 		t.Fatalf("CreateUser: %v", err)
@@ -1741,7 +2198,7 @@ func TestReadUserByPublicKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadUserByPublicKey: %v", err)
 	}
-	if got.Handle != "@remote" {
+	if got.Handle != "remote" {
 		t.Errorf("handle: got %q, want @remote", got.Handle)
 	}
 	if got.PublicKey != "ed25519pubkeyABC" {
@@ -1760,7 +2217,7 @@ func TestIdempotencyStateMachine(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	cp := newUser("@cp-sm", 0)
+	cp := newUser("cp-sm", 0)
 	_ = db.CreateUser(ctx, cp)
 
 	now := time.Now().UTC()
@@ -1842,8 +2299,8 @@ func TestListActionsByOwnerOpenAPISpec(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@oapi-owner", 0)
-	other := newUser("@oapi-other", 0)
+	owner := newUser("oapi-owner", 0)
+	other := newUser("oapi-other", 0)
 	_ = db.CreateUser(ctx, owner)
 	_ = db.CreateUser(ctx, other)
 
@@ -1860,22 +2317,22 @@ func TestListActionsByOwnerOpenAPISpec(t *testing.T) {
 	}
 
 	// Action matching owner + specURL.
-	a1 := newAction(owner.ID, "@oapi-owner/op1", 0, false)
+	a1 := newAction(owner.ID, "oapi-owner/op1", 0, false)
 	a1.Source = makeSrc(specURL, "op1")
 	_ = db.CreateAction(ctx, a1)
 
 	// Action matching owner + specURL2 (different spec; must not appear).
-	a2 := newAction(owner.ID, "@oapi-owner/op2", 0, false)
+	a2 := newAction(owner.ID, "oapi-owner/op2", 0, false)
 	a2.Source = makeSrc(specURL2, "op2")
 	_ = db.CreateAction(ctx, a2)
 
 	// Action owned by other user for specURL (must not appear).
-	a3 := newAction(other.ID, "@oapi-other/op1", 0, false)
+	a3 := newAction(other.ID, "oapi-other/op1", 0, false)
 	a3.Source = makeSrc(specURL, "op1")
 	_ = db.CreateAction(ctx, a3)
 
 	// Plain HTTP action with no OpenAPI source (must not appear).
-	a4 := newAction(owner.ID, "@oapi-owner/plain", 0, false)
+	a4 := newAction(owner.ID, "oapi-owner/plain", 0, false)
 	_ = db.CreateAction(ctx, a4)
 
 	got, err := db.ListActionsByOwnerOpenAPISpec(ctx, owner.ID, specURL)
@@ -1897,7 +2354,7 @@ func TestInitFirstBootConfigPreservesExisting(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@sys", 0)
+	u := newUser("sys", 0)
 	configs := map[string]string{"signing_key": "original-value"}
 	if err := db.InitFirstBoot(ctx, u, configs); err != nil {
 		t.Fatalf("InitFirstBoot: %v", err)
@@ -1928,14 +2385,14 @@ func TestCommitCallFeeDestructionRejected(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	payer := newUser("@payer-fd", 1000)
-	target := newUser("@target-fd", 0)
+	payer := newUser("payer-fd", 1000)
+	target := newUser("target-fd", 0)
 	_ = db.CreateUser(ctx, payer)
 	_ = db.CreateUser(ctx, target)
 
 	p := newProcess(payer.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, payer.ID, 100); err != nil {
+	if err := db.BeginRun(ctx, p, root, payer.ID, 100, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1975,10 +2432,10 @@ func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	payer := newUser("@payer-idem", 1000)
-	target := newUser("@target-idem", 0)
-	fee := newUser("@fee-idem", 0)
-	cp := newUser("@cp-idem", 0)
+	payer := newUser("payer-idem", 1000)
+	target := newUser("target-idem", 0)
+	fee := newUser("fee-idem", 0)
+	cp := newUser("cp-idem", 0)
 	_ = db.CreateUser(ctx, payer)
 	_ = db.CreateUser(ctx, target)
 	_ = db.CreateUser(ctx, fee)
@@ -1986,7 +2443,7 @@ func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 
 	p := newProcess(payer.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, payer.ID, 100); err != nil {
+	if err := db.BeginRun(ctx, p, root, payer.ID, 100, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2032,14 +2489,14 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	payer := newUser("@payer-idem2", 1000)
-	cp := newUser("@cp-idem2", 0)
+	payer := newUser("payer-idem2", 1000)
+	cp := newUser("cp-idem2", 0)
 	_ = db.CreateUser(ctx, payer)
 	_ = db.CreateUser(ctx, cp)
 
 	p := newProcess(payer.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, payer.ID, 100); err != nil {
+	if err := db.BeginRun(ctx, p, root, payer.ID, 100, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2063,7 +2520,7 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 
 	// Root call: callerWalletID=p.ID, callerWalletKind=CallerProcess
 	buildFn := func(_ int64) (*kernel.Receipt, error) { return receipt, nil }
-	if err := db.CommitFailedCall(ctx, tx, buildFn, root.ID, p.ID, kernel.CallerProcess, 100, nil, rec.ID, "execution_failed", ""); err != nil {
+	if err := db.CommitFailedCall(ctx, tx, buildFn, root.ID, p.ID, kernel.CallerProcess, "", 100, nil, rec.ID, "execution_failed", ""); err != nil {
 		t.Fatalf("CommitFailedCall: %v", err)
 	}
 
@@ -2087,7 +2544,7 @@ func TestUpsertAndListEmbeddings(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner-emb", 0)
+	owner := newUser("owner-emb", 0)
 	_ = db.CreateUser(ctx, owner)
 
 	active := &kernel.Action{
@@ -2142,7 +2599,7 @@ func TestProxyUserIdentifiedByPublicKey(t *testing.T) {
 
 	// A key-only account: a public key, no password (that credential combination is what makes it
 	// a peer). Same CreateUser insert as any account.
-	peer := newUser("@key-peer", 0)
+	peer := newUser("key-peer", 0)
 	peer.PublicKey = "somepubkey"
 	peer.PasswordHash = ""
 	if err := db.CreateUser(ctx, peer); err != nil {
@@ -2165,7 +2622,7 @@ func TestUpdateActionAndResetStats(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@stats-owner", 0)
+	owner := newUser("stats-owner", 0)
 	if err := db.CreateUser(ctx, owner); err != nil {
 		t.Fatal(err)
 	}
@@ -2272,11 +2729,11 @@ func TestDeactivateActionsOwnedBy(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@peer-owner", 0)
+	owner := newUser("peer-owner", 0)
 	if err := db.CreateUser(ctx, owner); err != nil {
 		t.Fatal(err)
 	}
-	other := newUser("@other-owner", 0)
+	other := newUser("other-owner", 0)
 	if err := db.CreateUser(ctx, other); err != nil {
 		t.Fatal(err)
 	}
@@ -2308,7 +2765,7 @@ func TestListStatsByOwner(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@stats-peer", 0)
+	owner := newUser("stats-peer", 0)
 	if err := db.CreateUser(ctx, owner); err != nil {
 		t.Fatal(err)
 	}
@@ -2351,7 +2808,7 @@ func TestBeginRunIsAtomic(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@beginrun-alice", 200)
+	user := newUser("beginrun-alice", 200)
 	_ = db.CreateUser(ctx, user)
 	action := newAction(user.ID, "beginrun-action", 100, true)
 	_ = db.CreateAction(ctx, action)
@@ -2365,7 +2822,7 @@ func TestBeginRunIsAtomic(t *testing.T) {
 		CallerUserID:  user.ID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := db.BeginRun(ctx, p, tr, user.ID, 100); err != nil {
+	if err := db.BeginRun(ctx, p, tr, user.ID, 100, 0, 0); err != nil {
 		t.Fatalf("BeginRun: %v", err)
 	}
 
@@ -2394,7 +2851,7 @@ func TestBeginRunIsAtomic(t *testing.T) {
 		ActionOwnerID: user.ID, ActionID: action.ID, CallerUserID: user.ID,
 		CreatedAt: time.Now().UTC(),
 	}
-	if err := db.BeginRun(ctx, p2, tr2, user.ID, 9999); !errors.Is(err, kernel.ErrInsufficientFunds) {
+	if err := db.BeginRun(ctx, p2, tr2, user.ID, 9999, 0, 0); !errors.Is(err, kernel.ErrInsufficientFunds) {
 		t.Fatalf("expected ErrInsufficientFunds, got %v", err)
 	}
 	if _, readErr := db.ReadProcess(ctx, p2.ID); !errors.Is(readErr, kernel.ErrNotFound) {
@@ -2406,7 +2863,7 @@ func TestListOrphanRunningStepsDistinguishesSettled(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@orphan-settled", 1000)
+	user := newUser("orphan-settled", 1000)
 	_ = db.CreateUser(ctx, user)
 	act := newAction(user.ID, "orphan-settled-act", 100, true)
 	_ = db.CreateAction(ctx, act)
@@ -2415,7 +2872,7 @@ func TestListOrphanRunningStepsDistinguishesSettled(t *testing.T) {
 	mkSetup := func(price int64) (*kernel.Step, *kernel.Trace) {
 		p := newProcess(user.ID)
 		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-		_ = db.BeginRun(ctx, p, root, user.ID, price)
+		_ = db.BeginRun(ctx, p, root, user.ID, price, 0, 0)
 		ptID := root.ID
 		step := &kernel.Step{
 			ID: uuid.New().String(), ParentTraceID: &ptID,
@@ -2424,7 +2881,7 @@ func TestListOrphanRunningStepsDistinguishesSettled(t *testing.T) {
 		}
 		_ = db.CreateStep(ctx, step)
 		ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-		_ = db.BeginStepCall(ctx, step.ID, ct)
+		_ = db.BeginStepCall(ctx, step.ID, ct, 0)
 		return step, ct
 	}
 
@@ -2474,13 +2931,13 @@ func TestListUnsettledTracesChildFirst(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@unsettled-order", 200)
+	user := newUser("unsettled-order", 200)
 	_ = db.CreateUser(ctx, user)
 
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
 		ActionOwnerID: user.ID, CallerUserID: user.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, user.ID, 200); err != nil {
+	if err := db.BeginRun(ctx, p, root, user.ID, 200, 0, 0); err != nil {
 		t.Fatalf("BeginRun: %v", err)
 	}
 
@@ -2512,9 +2969,9 @@ func TestListDirectUnsettledChildren(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@unsettled-children", 300)
+	user := newUser("unsettled-children", 300)
 	_ = db.CreateUser(ctx, user)
-	feeUser := newUser("@fee-uc", 0)
+	feeUser := newUser("fee-uc", 0)
 	_ = db.CreateUser(ctx, feeUser)
 	act := newAction(user.ID, "uc-act", 0, true)
 	_ = db.CreateAction(ctx, act)
@@ -2522,7 +2979,7 @@ func TestListDirectUnsettledChildren(t *testing.T) {
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
 		ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, user.ID, 200); err != nil {
+	if err := db.BeginRun(ctx, p, root, user.ID, 200, 0, 0); err != nil {
 		t.Fatalf("BeginRun: %v", err)
 	}
 
@@ -2580,16 +3037,16 @@ func TestResetStepAndReparkWithDescendantTransaction(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@repark-desc-tx", 200)
+	user := newUser("repark-desc-tx", 200)
 	_ = db.CreateUser(ctx, user)
-	feeUser := newUser("@fee-rdtx", 0)
+	feeUser := newUser("fee-rdtx", 0)
 	_ = db.CreateUser(ctx, feeUser)
 	act := newAction(user.ID, "repark-desc-tx-act", 100, true)
 	_ = db.CreateAction(ctx, act)
 
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	_ = db.BeginRun(ctx, p, root, user.ID, 100)
+	_ = db.BeginRun(ctx, p, root, user.ID, 100, 0, 0)
 	ptID := root.ID
 	step := &kernel.Step{
 		ID: uuid.New().String(), ParentTraceID: &ptID,
@@ -2598,7 +3055,7 @@ func TestResetStepAndReparkWithDescendantTransaction(t *testing.T) {
 	}
 	_ = db.CreateStep(ctx, step)
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	_ = db.BeginStepCall(ctx, step.ID, ct)
+	_ = db.BeginStepCall(ctx, step.ID, ct, 0)
 
 	// Create a descendant subcall of the completion trace and commit a transaction for it.
 	sub := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
@@ -2639,14 +3096,14 @@ func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@repark-nonempty", 200)
+	user := newUser("repark-nonempty", 200)
 	_ = db.CreateUser(ctx, user)
 	act := newAction(user.ID, "repark-nonempty-act", 100, true)
 	_ = db.CreateAction(ctx, act)
 
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	_ = db.BeginRun(ctx, p, root, user.ID, 100)
+	_ = db.BeginRun(ctx, p, root, user.ID, 100, 0, 0)
 	ptID := root.ID
 	step := &kernel.Step{
 		ID: uuid.New().String(), ParentTraceID: &ptID,
@@ -2655,7 +3112,7 @@ func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {
 	}
 	_ = db.CreateStep(ctx, step)
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	_ = db.BeginStepCall(ctx, step.ID, ct)
+	_ = db.BeginStepCall(ctx, step.ID, ct, 0)
 
 	// Make the completion trace non-empty: lock funds via a subcall.
 	sub := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
@@ -2682,7 +3139,7 @@ func TestMigration011RewritesBareURLSources(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@mig-owner", 0)
+	owner := newUser("mig-owner", 0)
 	if err := db.CreateUser(ctx, owner); err != nil {
 		t.Fatal(err)
 	}
@@ -2730,7 +3187,7 @@ func TestPurgePeerCascade(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	peer := newPeer(t, db, "@peerP", "peerkeyAAA", 0, 0, time.Now().UTC())
+	peer := newPeer(t, db, "peerP", "peerkeyAAA", 0, 0, time.Now().UTC())
 
 	var actIDs []string
 	for _, n := range []string{"svc-1", "svc-2"} {
@@ -2750,10 +3207,10 @@ func TestPurgePeerCascade(t *testing.T) {
 	// A discovered_kernels row about the peer (must be deleted) and one about another kernel that
 	// the peer merely introduced (must survive — it is information about a different peer).
 	now := time.Now().UTC()
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "peerkeyAAA", IntroducedBy: "someIntro", Handle: "@peerP", StatsJSON: json.RawMessage("{}"), FirstSeen: now, UpdatedAt: now}); err != nil {
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "peerkeyAAA", IntroducedBy: "someIntro", Handle: "peerP", StatsJSON: json.RawMessage("{}"), FirstSeen: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "otherkeyBBB", IntroducedBy: "peerkeyAAA", Handle: "@other", StatsJSON: json.RawMessage("{}"), FirstSeen: now, UpdatedAt: now}); err != nil {
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "otherkeyBBB", IntroducedBy: "peerkeyAAA", Handle: "other", StatsJSON: json.RawMessage("{}"), FirstSeen: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2806,25 +3263,25 @@ func TestListPurgeablePeers(t *testing.T) {
 	now := time.Now().UTC()
 	cutoff := now.Add(-30 * 24 * time.Hour)
 
-	idle := newPeer(t, db, "@idle", "k-idle", 0, 0, old) // the only purgeable peer
+	idle := newPeer(t, db, "idle", "k-idle", 0, 0, old) // the only purgeable peer
 
-	newPeer(t, db, "@funded", "k-funded", 100, 0, old) // excluded: holds value (available)
-	newPeer(t, db, "@locked", "k-locked", 0, 50, old)  // excluded: holds value (locked)
-	newPeer(t, db, "@recent", "k-recent", 0, 0, now)   // excluded: created within the window
+	newPeer(t, db, "funded", "k-funded", 100, 0, old) // excluded: holds value (available)
+	newPeer(t, db, "locked", "k-locked", 0, 50, old)  // excluded: holds value (locked)
+	newPeer(t, db, "recent", "k-recent", 0, 0, now)   // excluded: created within the window
 
 	// excluded: a recent gossip mention keeps it live
-	newPeer(t, db, "@gossip", "k-gossip", 0, 0, old)
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "k-gossip", IntroducedBy: "x", Handle: "@gossip", StatsJSON: json.RawMessage("{}"), FirstSeen: old, UpdatedAt: now}); err != nil {
+	newPeer(t, db, "gossip", "k-gossip", 0, 0, old)
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "k-gossip", IntroducedBy: "x", Handle: "gossip", StatsJSON: json.RawMessage("{}"), FirstSeen: old, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 
 	// excluded: a recent transaction names the peer, though its balance is zero
-	txp := newPeer(t, db, "@txp", "k-txp", 0, 0, old)
+	txp := newPeer(t, db, "txp", "k-txp", 0, 0, old)
 	insertTx(t, db, txp.ID, txp.ID, "some-target", "some-action", now)
 
 	// excluded: a waiting step is addressed to the peer as required caller
-	stepp := newPeer(t, db, "@stepp", "k-stepp", 0, 0, old)
-	owner := newUser("@sowner", 0)
+	stepp := newPeer(t, db, "stepp", "k-stepp", 0, 0, old)
+	owner := newUser("sowner", 0)
 	_ = db.CreateUser(ctx, owner)
 	act := newAction(owner.ID, "approve", 0, true)
 	if err := db.CreateAction(ctx, act); err != nil {
@@ -2835,7 +3292,7 @@ func TestListPurgeablePeers(t *testing.T) {
 	}
 
 	// excluded: a local (non-peer) account, even though old and zero-balance
-	local := newUser("@local", 0)
+	local := newUser("local", 0)
 	local.CreatedAt = old
 	_ = db.CreateUser(ctx, local)
 
@@ -2859,7 +3316,7 @@ func TestUpdatePeerSync(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	peer := newPeer(t, db, "@synced", "k-synced", 0, 0, now)
+	peer := newPeer(t, db, "synced", "k-synced", 0, 0, now)
 
 	credit := int64(900)
 	if err := db.UpdatePeerSync(ctx, peer.ID, now, &credit); err != nil {
@@ -2890,7 +3347,7 @@ func TestGrantCRUDAndUpsert(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	user := newUser("@grantor", 0)
+	user := newUser("grantor", 0)
 	_ = db.CreateUser(ctx, user)
 	a := newAction(user.ID, "/oauth-svc", 0, true)
 	_ = db.CreateAction(ctx, a)
@@ -2935,8 +3392,8 @@ func TestDeleteGrantsForAction(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u1 := newUser("@g1", 0)
-	u2 := newUser("@g2", 0)
+	u1 := newUser("g1", 0)
+	u2 := newUser("g2", 0)
 	_ = db.CreateUser(ctx, u1)
 	_ = db.CreateUser(ctx, u2)
 	a := newAction(u1.ID, "/multi", 0, true)
@@ -2959,7 +3416,7 @@ func TestConnectionCRUDAndCascade(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@conn", 0)
+	u := newUser("conn", 0)
 	_ = db.CreateUser(ctx, u)
 	a1 := newAction(u.ID, "inbox/send", 0, true)
 	a2 := newAction(u.ID, "inbox/read", 0, true)
@@ -3032,7 +3489,7 @@ func TestLegacyTokenBackfillHelpers(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("@legacy", 0)
+	u := newUser("legacy", 0)
 	_ = db.CreateUser(ctx, u)
 	a := newAction(u.ID, "svc", 0, true)
 	_ = db.CreateAction(ctx, a)
@@ -3070,7 +3527,7 @@ func TestListNativeActions(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@sys", 0)
+	owner := newUser("sys", 0)
 	_ = db.CreateUser(ctx, owner)
 
 	// A live native, an http action (wrong kind), and a soft-deleted native.
@@ -3103,9 +3560,9 @@ func TestListNativeActions(t *testing.T) {
 func TestCreateLedgerEntry(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
-	sys := newUser("@sys", 0)
-	alice := newUser("@alice", 100)
-	bob := newUser("@bob", 0)
+	sys := newUser("sys", 0)
+	alice := newUser("alice", 100)
+	bob := newUser("bob", 0)
 	for _, u := range []*kernel.User{sys, alice, bob} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
@@ -3185,9 +3642,9 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@owner", 1000)
-	assignee := newUser("@assignee", 0)
-	other := newUser("@other", 0)
+	owner := newUser("owner", 1000)
+	assignee := newUser("assignee", 0)
+	other := newUser("other", 0)
 	for _, u := range []*kernel.User{owner, assignee, other} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
@@ -3201,7 +3658,7 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 		t.Helper()
 		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: processOwner, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
 		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-		if err := db.BeginRun(ctx, p, root, processOwner, 0); err != nil {
+		if err := db.BeginRun(ctx, p, root, processOwner, 0, 0, 0); err != nil {
 			t.Fatal(err)
 		}
 		ptID := root.ID
@@ -3259,7 +3716,7 @@ func seedWaitingStep(t *testing.T, db *DB, prefix string) (assigneeID string, mk
 		t.Helper()
 		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: owner.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
 		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-		if err := db.BeginRun(ctx, p, root, owner.ID, 0); err != nil {
+		if err := db.BeginRun(ctx, p, root, owner.ID, 0, 0, 0); err != nil {
 			t.Fatal(err)
 		}
 		ptID := root.ID
@@ -3282,9 +3739,9 @@ func TestCommitRemoteSettlementStoresFailureResult(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("@rs-owner", 1000)
-	proxy := newUser("@rs-proxy", 0)
-	sys := newUser("@rs-sys", 0)
+	owner := newUser("rs-owner", 1000)
+	proxy := newUser("rs-proxy", 0)
+	sys := newUser("rs-sys", 0)
 	for _, u := range []*kernel.User{owner, proxy, sys} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
@@ -3296,7 +3753,7 @@ func TestCommitRemoteSettlementStoresFailureResult(t *testing.T) {
 	}
 	p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: owner.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: proxy.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, owner.ID, 10); err != nil {
+	if err := db.BeginRun(ctx, p, root, owner.ID, 10, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	rec := &kernel.IdempotencyRecord{
@@ -3321,7 +3778,7 @@ func TestCommitRemoteSettlementStoresFailureResult(t *testing.T) {
 		Status: "failure", Gross: 10, StartedAt: now, CreatedAt: now,
 	}
 	if err := db.CommitRemoteSettlement(ctx, ktx, receipt, root.ID, p.ID, kernel.CallerProcess,
-		proxy.ID, sys.ID, 0, 0, &kernel.Stats{ActionID: act.ID}, rec.ID, "", kernel.ErrExecutionFailed.Code); err != nil {
+		proxy.ID, sys.ID, 0, 0, kernel.ValueSettlement{}, &kernel.Stats{ActionID: act.ID}, rec.ID, "", kernel.ErrExecutionFailed.Code); err != nil {
 		t.Fatalf("CommitRemoteSettlement: %v", err)
 	}
 

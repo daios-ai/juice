@@ -7,13 +7,13 @@ flow_process_lifecycle() {
     local dir db hs ha
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "process_lifecycle.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    deposit "$db" "$hs" @alice 1000
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    deposit "$db" "$hs" alice 1000
 
-    # @sys/message (price 0) creates a process + a waiting step addressed to @alice.
+    # sys/message (price 0) creates a process + a waiting step addressed to alice.
     local msg tx_id step_id proc
-    msg=$(jj "$db" "$ha" run @sys/message '{"to":"@alice","message":"lifecycle"}')
+    msg=$(jj "$db" "$ha" run sys/message '{"to":"alice","message":"lifecycle"}')
     tx_id=$(strfield "$msg" tx_id)
     step_id=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get('step_id',''))" "$msg" 2>/dev/null)
     proc=$(strfield "$(jj "$db" "$ha" tx show "$tx_id")" process_id)
@@ -26,8 +26,8 @@ flow_process_lifecycle() {
     assert_jnum "process_lifecycle.process_available" "$ps" available 0
     assert_json "process_lifecycle.status_open" "$ps" status open
 
-    # The step's meaning comes from its creating action (@sys/message), not its sink target.
-    assert_eq "process_lifecycle.step_created_by" "@sys/message" \
+    # The step's meaning comes from its creating action (sys/message), not its sink target.
+    assert_eq "process_lifecycle.step_created_by" "sys/message" \
         "$(jj "$db" "$ha" step list | python3 -c "import sys,json;print(next((s.get('created_by','') for s in json.load(sys.stdin) if s.get('id')=='$step_id'),''))" 2>/dev/null)"
 
     # End the process: waiting step cancelled, funds returned, process closed.
@@ -43,29 +43,29 @@ flow_acl_public() {
     local dir db hs ha hb aid
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     start_server "$db" "$hs" || { fail "acl_public.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    make_user "$db" "$hs" "$hb" @bob
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
 
     # Private action pointing at an unreachable backend (port 1): permission is checked
     # before any process/backend work.
     aid=$(strfield "$(jj "$db" "$ha" action create target --kind http --source "http://127.0.0.1:1/target" --price 0 --description "acl")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
 
-    assert_fails "acl_public.private_denied" "unauthorized\|permission\|error" -- j "$db" "$hb" run @alice/target '{}'
+    assert_fails "acl_public.private_denied" "unauthorized\|permission\|error" -- j "$db" "$hb" run alice/target '{}'
     assert_fails "acl_public.update_owner_only" "unauthorized\|error" -- j "$db" "$hb" action update "$aid" --visibility public
 
-    # Local: @bob (a local user) passes the permission check (then fails at the unreachable backend, NOT on permission).
+    # Local: bob (a local user) passes the permission check (then fails at the unreachable backend, NOT on permission).
     j "$db" "$ha" action update "$aid" --visibility local >/dev/null 2>&1
-    assert_not_contains "acl_public.local_passes_for_local_user" "permission" "$(j "$db" "$hb" run @alice/target '{}')"
+    assert_not_contains "acl_public.local_passes_for_local_user" "permission" "$(j "$db" "$hb" run alice/target '{}')"
 
-    # Public: @bob passes too.
+    # Public: bob passes too.
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
-    assert_not_contains "acl_public.public_passes" "permission" "$(j "$db" "$hb" run @alice/target '{}')"
+    assert_not_contains "acl_public.public_passes" "permission" "$(j "$db" "$hb" run alice/target '{}')"
 
     # Private again: permission enforced.
     j "$db" "$ha" action update "$aid" --visibility private >/dev/null 2>&1
-    assert_fails "acl_public.private_enforced" "unauthorized\|permission\|error" -- j "$db" "$hb" run @alice/target '{}'
+    assert_fails "acl_public.private_enforced" "unauthorized\|permission\|error" -- j "$db" "$hb" run alice/target '{}'
 }
 
 flow_successful_paid_call() {
@@ -74,18 +74,18 @@ flow_successful_paid_call() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"result":"ok"}'
     start_server "$db" "$hs" fee_bps=2000 || { fail "successful_paid_call.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    make_user "$db" "$hs" "$hb" @bob
-    deposit "$db" "$hs" @bob 500
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
+    deposit "$db" "$hs" bob 500
 
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create pay --kind http --source "http://127.0.0.1:${bport}/pay" --price 100 --description "paid")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
-    local sys_start; sys_start=$(numfield "$(jj "$db" "$hs" admin show @sys)" available)
+    local sys_start; sys_start=$(numfield "$(jj "$db" "$hs" admin show sys)" available)
 
     # fee_bps=2000 → on gross=100: fee=20, net=80.
-    local tx_id; tx_id=$(strfield "$(jj "$db" "$hb" run @alice/pay '{}')" tx_id)
+    local tx_id; tx_id=$(strfield "$(jj "$db" "$hb" run alice/pay '{}')" tx_id)
     assert_nonempty "successful_paid_call.call_succeeded" "$tx_id"
     local tx; tx=$(jj "$db" "$hb" tx show "$tx_id")
     assert_jnum "successful_paid_call.tx_gross" "$tx" gross 100
@@ -94,7 +94,7 @@ flow_successful_paid_call() {
     assert_json "successful_paid_call.tx_status" "$tx" status success
     assert_jnum "successful_paid_call.bob_debited"     "$(jj "$db" "$hb" user me)" available 400
     assert_jnum "successful_paid_call.target_credited" "$(jj "$db" "$ha" user me)" available 80
-    assert_eq   "successful_paid_call.fee_credited" "$(( sys_start + 20 ))" "$(numfield "$(jj "$db" "$hs" admin show @sys)" available)"
+    assert_eq   "successful_paid_call.fee_credited" "$(( sys_start + 20 ))" "$(numfield "$(jj "$db" "$hs" admin show sys)" available)"
 }
 
 flow_http_verbs() {
@@ -103,8 +103,8 @@ flow_http_verbs() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     bport=$(backend_port); start_echo_backend "$bport" || { fail "http_verbs.backend" "echo backend failed"; return; }
     start_server "$db" "$hs" || { fail "http_verbs.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
 
     # A kind=http action fires the verb it was created with; the input reaches upstream
     # (query for GET, body otherwise).
@@ -113,14 +113,14 @@ flow_http_verbs() {
         lname=$(printf '%s' "$verb" | tr 'A-Z' 'a-z')
         aid=$(strfield "$(jj "$db" "$ha" action create "v-$lname" --kind http --method "$verb" --source "http://127.0.0.1:${bport}/echo" --price 0 --description "verb $verb")" id)
         j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-        out=$(jj "$db" "$ha" run "@alice/v-$lname" '{"v":"x"}')
+        out=$(jj "$db" "$ha" run "alice/v-$lname" '{"v":"x"}')
         local m v
         m=$(python3 -c "import sys,json;print(json.loads(sys.argv[1]).get('result',{}).get('method',''))" "$out" 2>/dev/null)
         v=$(python3 -c "import sys,json;print(json.loads(sys.argv[1]).get('result',{}).get('v',''))" "$out" 2>/dev/null)
         assert_eq "http_verbs.$lname" "$verb:x" "$m:$v"
     done
     # Decomposed http view round-trips on read.
-    local m; m=$(python3 -c "import sys,json;print(json.loads(sys.argv[1]).get('http',{}).get('method',''))" "$(jj "$db" "$ha" action show @alice/v-get)" 2>/dev/null)
+    local m; m=$(python3 -c "import sys,json;print(json.loads(sys.argv[1]).get('http',{}).get('method',''))" "$(jj "$db" "$ha" action show alice/v-get)" 2>/dev/null)
     assert_eq "http_verbs.read_view" GET "$m"
 }
 
@@ -130,17 +130,17 @@ flow_failed_call_refund() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 500 '{"error":"backend error"}'
     start_server "$db" "$hs" || { fail "failed_call_refund.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    make_user "$db" "$hs" "$hb" @bob
-    deposit "$db" "$hs" @bob 500
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
+    deposit "$db" "$hs" bob 500
 
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create fail --kind http --source "http://127.0.0.1:${bport}/fail" --price 100 --description "failing")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
-    # Backend 500 → execution failure; full refund, @alice credited nothing, failure tx recorded.
-    j "$db" "$hb" run @alice/fail '{}' >/dev/null 2>&1 || true
+    # Backend 500 → execution failure; full refund, alice credited nothing, failure tx recorded.
+    j "$db" "$hb" run alice/fail '{}' >/dev/null 2>&1 || true
     assert_jnum "failed_call_refund.process_unchanged"    "$(jj "$db" "$hb" user me)" available 500
     assert_jnum "failed_call_refund.target_not_credited"  "$(jj "$db" "$ha" user me)" available 0
     local txs; txs=$(jj "$db" "$hb" tx list)
@@ -154,10 +154,10 @@ flow_input_schema_failure() {
     local dir db hs ha hb
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     start_server "$db" "$hs" || { fail "input_schema_failure.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    make_user "$db" "$hs" "$hb" @bob
-    deposit "$db" "$hs" @bob 300
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
+    deposit "$db" "$hs" bob 300
 
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create schema-in --kind http --source "http://127.0.0.1:1/x" --price 0 --description "schema" \
         --input-schema '{"type":"object","properties":{"x":{"type":"string","description":"the x parameter"}},"required":["x"]}')" id)
@@ -165,7 +165,7 @@ flow_input_schema_failure() {
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
     # Missing required "x" → schema error BEFORE any trace/charge.
-    assert_fails "input_schema_failure.error_returned" "schema\|invalid\|required\|error" -- j "$db" "$hb" run @alice/schema-in '{}'
+    assert_fails "input_schema_failure.error_returned" "schema\|invalid\|required\|error" -- j "$db" "$hb" run alice/schema-in '{}'
     assert_jnum "input_schema_failure.balance_unchanged" "$(jj "$db" "$hb" user me)" available 300
     assert_eq   "input_schema_failure.no_tx_created" 0 "$(list_len "$(jj "$db" "$hb" tx list)")"
 }
@@ -176,10 +176,10 @@ flow_output_schema_failure() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'   # missing required output "id"
     start_server "$db" "$hs" || { fail "output_schema_failure.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    make_user "$db" "$hs" "$hb" @bob
-    deposit "$db" "$hs" @bob 300
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
+    deposit "$db" "$hs" bob 300
 
     local aid; aid=$(strfield "$(jj "$db" "$ha" action create schema-out --kind http --source "http://127.0.0.1:${bport}/schema-out" --price 50 --description "schema out" \
         --output-schema '{"type":"object","properties":{"id":{"type":"string","description":"the record id"}},"required":["id"]}')" id)
@@ -187,7 +187,7 @@ flow_output_schema_failure() {
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
     # Execution succeeds but output fails validation → CommitFailedCall: refund + failure tx.
-    assert_fails "output_schema_failure.error_returned" "schema\|invalid\|error" -- j "$db" "$hb" run @alice/schema-out '{}'
+    assert_fails "output_schema_failure.error_returned" "schema\|invalid\|error" -- j "$db" "$hb" run alice/schema-out '{}'
     assert_jnum "output_schema_failure.process_refunded"   "$(jj "$db" "$hb" user me)" available 300
     assert_jnum "output_schema_failure.target_not_credited" "$(jj "$db" "$ha" user me)" available 0
     local txs; txs=$(jj "$db" "$hb" tx list)
@@ -205,9 +205,9 @@ flow_grant() {
     local dir db hs ha aid
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     start_server "$db" "$hs" || { fail "grant.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
-    deposit "$db" "$hs" @alice 1000
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
+    deposit "$db" "$hs" alice 1000
 
     # A delegated-OAuth action; provider endpoints are loopback stubs (never dialed on the
     # reject path — consent is required before any funds lock).
@@ -216,11 +216,11 @@ flow_grant() {
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
 
     # Running without a grant is rejected before any charge, with the consent hint surfaced.
-    assert_fails "grant.reject_before_consent" "grant" -- j "$db" "$ha" run @alice/inbox '{}'
+    assert_fails "grant.reject_before_consent" "grant" -- j "$db" "$ha" run alice/inbox '{}'
     assert_jnum "grant.no_charge" "$(jj "$db" "$ha" user me)" available 1000
 
     # No connection exists yet, so disconnect reports not-found.
-    assert_fails "grant.revoke_absent" "not found\|error" -- j "$db" "$ha" user disconnect @alice/inbox
+    assert_fails "grant.revoke_absent" "not found\|error" -- j "$db" "$ha" user disconnect alice/inbox
 }
 
 # flow_grant_bearer — delegated_bearer per-caller static token, directory batch (§8), full user story.
@@ -234,8 +234,8 @@ flow_grant_bearer() {
     dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     bport=$(backend_port); start_header_echo_backend "$bport" "X-Api-Key" || { fail "grant_bearer.backend" "backend failed"; return; }
     start_server "$db" "$hs" || { fail "grant_bearer.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login @sys --password sys-pass >/dev/null 2>&1
-    make_user "$db" "$hs" "$ha" @alice
+    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_user "$db" "$hs" "$ha" alice
 
     # Two actions under the inbox/ directory sharing one upstream host → one connection.
     a1=$(strfield "$(jj "$db" "$ha" action create inbox/send --kind http --source "http://127.0.0.1:${bport}/api" --price 0 --description "bearer send" --auth '{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}')" id)
@@ -246,20 +246,20 @@ flow_grant_bearer() {
     j "$db" "$ha" action enable "$a2" >/dev/null 2>&1
 
     # No grant yet: both rejected before consent.
-    assert_fails "grant_bearer.reject_send" "grant" -- j "$db" "$ha" run @alice/inbox/send '{}'
-    assert_fails "grant_bearer.reject_read" "grant" -- j "$db" "$ha" run @alice/inbox/read '{}'
+    assert_fails "grant_bearer.reject_send" "grant" -- j "$db" "$ha" run alice/inbox/send '{}'
+    assert_fails "grant_bearer.reject_read" "grant" -- j "$db" "$ha" run alice/inbox/read '{}'
 
     # One command connects the whole directory; both actions then see the token upstream.
-    j "$db" "$ha" user connect @alice/inbox --token ghp_secret >/dev/null 2>&1
-    assert_eq "grant_bearer.send_saw_token" "ghp_secret" "$(resultf "$(jj "$db" "$ha" run @alice/inbox/send '{}')" seen)"
-    assert_eq "grant_bearer.read_saw_token" "ghp_secret" "$(resultf "$(jj "$db" "$ha" run @alice/inbox/read '{}')" seen)"
-    assert_contains "grant_bearer.listed_send" "@alice/inbox/send" "$(j "$db" "$ha" user me)"
-    assert_contains "grant_bearer.listed_read" "@alice/inbox/read" "$(j "$db" "$ha" user me)"
+    j "$db" "$ha" user connect alice/inbox --token ghp_secret >/dev/null 2>&1
+    assert_eq "grant_bearer.send_saw_token" "ghp_secret" "$(resultf "$(jj "$db" "$ha" run alice/inbox/send '{}')" seen)"
+    assert_eq "grant_bearer.read_saw_token" "ghp_secret" "$(resultf "$(jj "$db" "$ha" run alice/inbox/read '{}')" seen)"
+    assert_contains "grant_bearer.listed_send" "alice/inbox/send" "$(j "$db" "$ha" user me)"
+    assert_contains "grant_bearer.listed_read" "alice/inbox/read" "$(j "$db" "$ha" user me)"
     assert_not_contains "grant_bearer.no_leak" "ghp_secret" "$(j "$db" "$ha" user me)"
 
     # Disconnect the whole upstream account (--account) → connection + both grants cascade away.
     j "$db" "$ha" user disconnect --account "bearer:127.0.0.1:${bport}" >/dev/null 2>&1
-    assert_fails "grant_bearer.reject_send_after" "grant" -- j "$db" "$ha" run @alice/inbox/send '{}'
-    assert_fails "grant_bearer.reject_read_after" "grant" -- j "$db" "$ha" run @alice/inbox/read '{}'
+    assert_fails "grant_bearer.reject_send_after" "grant" -- j "$db" "$ha" run alice/inbox/send '{}'
+    assert_fails "grant_bearer.reject_read_after" "grant" -- j "$db" "$ha" run alice/inbox/read '{}'
 }
 

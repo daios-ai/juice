@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,10 +23,12 @@ func sha256Hex(s string) string {
 	return fmt.Sprintf("%x", h)
 }
 
-// remoteManifestPrice derives the original remote manifest price (mp) from a proxy price
-// (q = mp + import duty): mp = floor(q * 10000 / (10000 + ImportBPS)).
+// remoteManifestPrice derives the base remote manifest price (mp) from a two-step proxy price
+// (q = sr + ceil(sr·import_bps), sr = mp + ceil(mp·remote_bps)) by inverting both layers in order:
+// sr = floor(q·10000/(10000+import_bps)), then mp = floor(sr·10000/(10000+remote_bps)) (§13).
 func (k *Kernel) remoteManifestPrice(proxyPrice int64) int64 {
-	return proxyPrice * 10000 / (10000 + k.cfg.ImportBPS)
+	sr := proxyPrice * 10000 / (10000 + k.cfg.ImportBPS)
+	return sr * 10000 / (10000 + k.cfg.RemoteBPS)
 }
 
 // RemoteManifestPrice is the exported form of remoteManifestPrice, used by the service layer to
@@ -34,19 +37,242 @@ func (k *Kernel) RemoteManifestPrice(proxyPrice int64) int64 {
 	return k.remoteManifestPrice(proxyPrice)
 }
 
+// TransferEffect is the staged value channel of an effect-bearing action (§13): the delivered Amount,
+// the resolved local-beneficiary Dest (empty for an outbound/remote destination), and the total Reserve
+// to lock from the immediate caller C's own balance at admission. It is produced only for an action
+// whose signed contract declares an effect, and settled deferredly by the kernel at commit; the two
+// money channels (execution price, funded by the trace, and this value, funded by C) never mix.
+type TransferEffect struct {
+	Amount  int64
+	Dest    string
+	Reserve int64
+}
+
+// prepareTransferEffect stages the value channel for a call at funding time (§13), or returns nil when
+// the action declares no transfer effect. Effect identity comes from the action's signed contract
+// (actionValue keys on a.Effect), never its name. The reserve, locked from the immediate caller C's own
+// balance, covers the delivered value plus the value-channel fees owed at settlement, by destination:
+//   - local action, local target (local caller):  reserve = value                         (Dest = id)
+//   - local action, local target (peer caller):   reserve = value + value_premium         (Dest = id)
+//   - remote_proxy action (outbound, local caller): reserve = value + value_premium + value_import (Dest = "")
+// It rejects, before any funds move, a non-positive amount, a peer caller relaying a cross-kernel
+// transfer (non-transitive), an @-qualified target on a local action, and an unresolvable / peer /
+// suspended local beneficiary.
+func (k *Kernel) prepareTransferEffect(ctx context.Context, callerIsPeer bool, a *Action, args map[string]any) (*TransferEffect, error) {
+	fn := k.actionValue(a)
+	if fn == nil {
+		return nil, nil
+	}
+	amount, ref, err := fn(args)
+	if err != nil {
+		return nil, err
+	}
+	if amount < 1 {
+		return nil, ErrInvalidInput.Wrap("transfer amount must be a positive integer")
+	}
+	if a.Kind == KindRemoteProxy {
+		if callerIsPeer {
+			return nil, ErrInvalidInput.Wrap("a peer caller cannot relay a cross-kernel transfer (non-transitive)")
+		}
+		vp := ceilDiv(amount*k.cfg.RemoteBPS, 10000)
+		vi := ceilDiv((amount+vp)*k.cfg.ImportBPS, 10000)
+		return &TransferEffect{Amount: amount, Dest: "", Reserve: amount + vp + vi}, nil
+	}
+	if strings.Contains(ref, "@") {
+		return nil, ErrInvalidInput.Wrap("address a cross-kernel transfer as sys@<kernel>/transfer with a bare target")
+	}
+	benef, err := k.ResolveUser(ctx, ref)
+	if err != nil || benef == nil {
+		return nil, ErrNotFound.Wrapf("transfer beneficiary %q not found", ref)
+	}
+	if benef.IsPeer() {
+		return nil, ErrInvalidInput.Wrap("transfer beneficiary is a peer account")
+	}
+	if benef.SuspendedAt != nil {
+		return nil, ErrInvalidInput.Wrap("transfer beneficiary is suspended")
+	}
+	reserve := amount
+	if callerIsPeer {
+		reserve += ceilDiv(amount*k.cfg.RemoteBPS, 10000) // inbound serving markup owed to sys at settlement
+	}
+	return &TransferEffect{Amount: amount, Dest: benef.ID, Reserve: reserve}, nil
+}
+
 // dispatchPayload is the persisted remote-proxy dispatch record, stored on Trace.DispatchJSON
 // so a pending remote call can be replayed verbatim by RetryPendingRemoteDispatches after restart.
 type dispatchPayload struct {
 	Args        map[string]any `json:"args"`
 	StepID      string         `json:"step_id"`
 	RemotePrice int64          `json:"remote_price"`
+	// Value is the delivered amount for a value transfer (§13); Gross is the funded local price (the
+	// two-step markup on mp+value), used to reconstruct the locked amount on retry after restart —
+	// action.Price alone is 0 for a transfer. Both 0 for a plain remote call.
+	Value int64 `json:"value,omitempty"`
+	Gross int64 `json:"gross,omitempty"`
 }
 
 // marshalDispatch serializes a dispatchPayload and returns a pointer suitable for Trace.DispatchJSON.
-func marshalDispatch(args map[string]any, stepID string, mp int64) *string {
-	b, _ := json.Marshal(dispatchPayload{Args: args, StepID: stepID, RemotePrice: mp})
+func marshalDispatch(args map[string]any, stepID string, mp, value, gross int64) *string {
+	b, _ := json.Marshal(dispatchPayload{Args: args, StepID: stepID, RemotePrice: mp, Value: value, Gross: gross})
 	s := string(b)
 	return &s
+}
+
+// PaymentDescriptor is what a serving kernel A advertises about a payment Step to the buyer B (§13): the
+// bilateral obligation A can compute, and nothing more. `remote_max = amount + value_premium` is what B
+// owes A; B computes its own `value_import`/`max_total` locally (its import policy is not A's business).
+// Hash binds the descriptor into the completion idempotency key so the step cannot be completed for a
+// different payment.
+type PaymentDescriptor struct {
+	Beneficiary string `json:"beneficiary"` // resolved local beneficiary user_id on the serving kernel
+	Amount      int64  `json:"amount"`
+	RemoteBPS   int64  `json:"remote_bps"`
+	RemoteMax   int64  `json:"remote_max"`
+	Hash        string `json:"hash,omitempty"`
+}
+
+// PaymentDescriptorHash is the SHA-256 over the JCS-canonical descriptor (excluding hash), shared by the
+// serving kernel (which advertises it) and the buyer (which binds it into the idempotency key). Both
+// sides compute it identically, so a mismatch means a tampered payment.
+func PaymentDescriptorHash(d PaymentDescriptor) string {
+	d.Hash = ""
+	payload, _ := CanonicalJSON(d)
+	return sha256Hex(string(payload))
+}
+
+// BuildPaymentDescriptor computes the payment descriptor for an effect-bearing step from its partial
+// args (§13), resolving the local beneficiary and pricing the serving markup. Returns nil for a
+// non-transfer action or when the step's args do not name a resolvable local beneficiary.
+func (k *Kernel) BuildPaymentDescriptor(ctx context.Context, action *Action, partialArgs []byte) (*PaymentDescriptor, error) {
+	fn := k.actionValue(action)
+	if fn == nil {
+		return nil, nil // not a payment step
+	}
+	var args map[string]any
+	if err := json.Unmarshal(partialArgs, &args); err != nil {
+		return nil, nil
+	}
+	amount, ref, err := fn(args)
+	if err != nil || amount < 1 || strings.Contains(ref, "@") {
+		return nil, nil
+	}
+	benef, err := k.ResolveUser(ctx, ref)
+	if err != nil || benef == nil || benef.IsPeer() || benef.SuspendedAt != nil {
+		return nil, nil
+	}
+	valuePremium := ceilDiv(amount*k.cfg.RemoteBPS, 10000)
+	d := PaymentDescriptor{
+		Beneficiary: benef.ID,
+		Amount:      amount,
+		RemoteBPS:   k.cfg.RemoteBPS,
+		RemoteMax:   amount + valuePremium,
+	}
+	d.Hash = PaymentDescriptorHash(d)
+	return &d, nil
+}
+
+// StepPaymentHash returns the payment-descriptor hash for a step, or "" when it is not a payment step
+// (§13). The serving side folds it into the expected completion idempotency key to bind the payment.
+func (k *Kernel) StepPaymentHash(ctx context.Context, stepID string) string {
+	step, err := k.store.ReadStep(ctx, stepID)
+	if err != nil {
+		return ""
+	}
+	action, err := k.store.ReadAction(ctx, step.ActionID)
+	if err != nil {
+		return ""
+	}
+	d, err := k.BuildPaymentDescriptor(ctx, action, step.PartialArgs)
+	if err != nil || d == nil {
+		return ""
+	}
+	return d.Hash
+}
+
+// ReadPendingTransferByKey returns the buyer-side pending payment record for an idempotency key (§13),
+// or ErrNotFound. Used by the completion orchestration to make funding idempotent across retries.
+func (k *Kernel) ReadPendingTransferByKey(ctx context.Context, idempotencyKey string) (*PendingTransfer, error) {
+	return k.store.ReadPendingTransferByKey(ctx, idempotencyKey)
+}
+
+// ReadPendingTransfer returns a pending payment record by id (§13 operator surface), or ErrNotFound.
+func (k *Kernel) ReadPendingTransfer(ctx context.Context, id string) (*PendingTransfer, error) {
+	return k.store.ReadPendingTransfer(ctx, id)
+}
+
+// ListPendingTransfers backs the admin transfers resource (§13): an empty status returns only the
+// unresolved records (pending + quarantined); an explicit status filters to exactly that one.
+func (k *Kernel) ListPendingTransfers(ctx context.Context, status string, limit, offset int) ([]*PendingTransfer, error) {
+	return k.store.ListPendingTransfers(ctx, status, limit, offset)
+}
+
+// AdmitRemotePaidStep locks the buyer's reserve (max_total = remote_max + its own import fee) from its
+// own balance and records a pending_transfers row, reserve-first and atomic (§13). It stores the RAW
+// completion input (not just its hash) so a later retry rebuilds the same signed request, and the
+// descriptor's remote_max so settlement re-validates without the live descriptor. The idempotency key is
+// payment-bound (control layer). Returns the pending record; a duplicate key (retry) returns ErrConflict.
+func (k *Kernel) AdmitRemotePaidStep(ctx context.Context, buyerID, peerKey, stepID string, input []byte, idempotencyKey string, d PaymentDescriptor) (*PendingTransfer, error) {
+	valueImport := ceilDiv(d.RemoteMax*k.cfg.ImportBPS, 10000)
+	pt := &PendingTransfer{
+		ID:             uuid.New().String(),
+		BuyerID:        buyerID,
+		PeerKey:        peerKey,
+		StepID:         stepID,
+		InputHash:      sha256Hex(string(input)),
+		Input:          json.RawMessage(input),
+		IdempotencyKey: idempotencyKey,
+		Beneficiary:    d.Beneficiary,
+		Amount:         d.Amount,
+		RemoteMax:      d.RemoteMax,
+		Reserve:        d.RemoteMax + valueImport, // max_total: value + value_premium + value_import
+		Status:         "pending",
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := k.store.InsertPendingTransfer(ctx, pt); err != nil {
+		return nil, err
+	}
+	return pt, nil
+}
+
+// SettleRemotePaidStep disposes of a buyer-side payment reserve on the serving kernel's completion
+// receipt (§13), the same rule as the outbound-call value channel:
+//   - valid SUCCESS binding the payment (signature over A's key; value == amount; value_to ==
+//     beneficiary; value_premium == remote_max − amount) ⇒ settle: value+value_premium to A's proxy row
+//     (buyer owes A), value_import to buyer sys, remainder refunded;
+//   - valid FAILURE/rejection ⇒ refund the whole reserve;
+//   - an inconsistent/mis-bound receipt after a possibly-executed completion ⇒ QUARANTINE (reserve stays
+//     locked; A may have paid the beneficiary).
+// receiptJSON is nil/empty when no receipt arrived (uncertain): the record is left pending for retry.
+func (k *Kernel) SettleRemotePaidStep(ctx context.Context, pending *PendingTransfer, d PaymentDescriptor, receiptJSON []byte) error {
+	if len(receiptJSON) == 0 {
+		return nil // uncertain: leave pending, retry with the same key
+	}
+	var r Receipt
+	if err := json.Unmarshal(receiptJSON, &r); err != nil {
+		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "receipt unparseable")
+	}
+	if verifyRemoteReceiptSignature(&r, pending.PeerKey) != nil {
+		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "invalid receipt signature")
+	}
+	if r.Status != TxSuccess {
+		return k.store.RefundPendingTransfer(ctx, pending.ID) // valid signed failure
+	}
+	valuePremium := d.RemoteMax - d.Amount
+	switch {
+	case r.Value != d.Amount:
+		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "receipt value != amount")
+	case r.ValueTo != d.Beneficiary:
+		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "receipt beneficiary mismatch")
+	case r.ValuePremium != valuePremium:
+		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "receipt value_premium mismatch")
+	}
+	proxy, err := k.store.ReadUserByPublicKey(ctx, pending.PeerKey)
+	if err != nil || proxy == nil {
+		return ErrNotFound.Wrap("serving-kernel proxy row not found for settlement")
+	}
+	credit := r.Value + r.ValuePremium // buyer owes A value + serving markup
+	valueImport := pending.Reserve - credit
+	return k.store.CommitPendingTransfer(ctx, pending.ID, proxy.ID, credit, k.cfg.FeeRecipientID, valueImport)
 }
 
 // callerWalletFor returns the (walletID, walletKind) that funds a call:
@@ -98,8 +324,9 @@ func verifyJCS(pub ed25519.PublicKey, v any, sigB64 string) error {
 //   - Signature: Ed25519 over JCS(receipt with Signature="") by peer key
 //   - ActionID: receipt.action_id == tx.remote_action_id (or tx.action_id if no remote ID)
 //   - Status: receipt.status == tx.status
-//   - Charge: tx.net == receipt.charge (local charge paid to proxy == what remote reported)
-//   - SettlementArith: duty rule — tx.fee == ceil(tx.net*import_bps/10000) for success, 0 for failure
+//   - Charge: tx.net == receipt.charge + receipt.value + receipt.premium (bilateral payable to the peer)
+//   - Premium: receipt.premium == ceil((receipt.charge+receipt.value)*remote_bps/10000) for the proxy-row snapshot
+//   - SettlementArith: tx.fee == ceil(tx.net*import_bps/10000) for success, 0 for failure
 //   - ArgsHash: receipt.args_hash == SHA-256(JCS(tx.args))
 //   - ReplyHash: receipt.reply_hash == SHA-256(JCS(tx.result)) on success
 func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string) (*ReceiptVerification, error) {
@@ -141,13 +368,24 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	// 4. Status consistency.
 	checks.Status = r.Status == tx.Status
 
-	// 5. Charge: local tx.net (what we paid the proxy) must equal remote receipt.charge.
-	checks.Charge = r.Charge == tx.Net
+	// 5. Charge: local tx.net (the EXECUTION obligation paid to the proxy) must equal receipt.charge +
+	// receipt.premium. The value channel is settled separately on the caller's own reserve, not through
+	// tx.net, so it is audited by its own check below (§13, the un-folded two-channel model).
+	checks.Charge = tx.Net == r.Charge+r.Premium
 
-	// 6. Settlement arithmetic: duty rule.
+	// 6. Premium: the execution serving markup must equal ceil(charge·remote_bps), and the value serving
+	// markup ceil(value·remote_bps), for the manifest-snapshot rate on the proxy row — computed
+	// separately (never the folded ceil((charge+value)·…), whose rounding merge is the bug).
+	rbps := int64(0)
+	if act, aerr := k.store.ReadAction(ctx, tx.ActionID); aerr == nil && act.RemoteBPS != nil {
+		rbps = *act.RemoteBPS
+	}
+	checks.Premium = r.Premium == ceilDiv(r.Charge*rbps, 10000)
+	checks.ValuePremium = r.ValuePremium == ceilDiv(r.Value*rbps, 10000)
+
+	// 7. Settlement arithmetic: the origin import fee on the actual obligation (tx.net = paid).
 	if tx.Status == TxSuccess {
-		expectedDuty := ceilDiv(tx.Net*k.cfg.ImportBPS, 10000)
-		checks.SettlementArith = tx.Fee == expectedDuty
+		checks.SettlementArith = tx.Fee == ceilDiv(tx.Net*k.cfg.ImportBPS, 10000)
 	} else {
 		checks.SettlementArith = tx.Fee == 0
 	}
@@ -170,7 +408,7 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	}
 
 	valid := checks.ReceiptHash && checks.Signature && checks.ActionID &&
-		checks.Status && checks.Charge && checks.SettlementArith &&
+		checks.Status && checks.Charge && checks.Premium && checks.ValuePremium && checks.SettlementArith &&
 		checks.RefundConservation && checks.ArgsHash && checks.ReplyHash
 
 	return &ReceiptVerification{
@@ -227,11 +465,14 @@ func parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedActionID, expec
 // §13 settlement invariants (success ⇒ charge = mp and reply_hash matches; failure ⇒ 0 ≤ charge ≤ mp),
 // so settlement can quarantine it (charge 0, full refund, no retry) instead of clamp-committing a
 // record that would fail VerifyRemoteReceipt. An empty string means the receipt is settleable.
-func remoteReceiptInvalid(r Receipt, mp int64, replyJSON []byte) string {
+func remoteReceiptInvalid(r Receipt, mp, rbps, sentValue int64, replyJSON []byte) string {
 	switch r.Status {
 	case TxSuccess:
 		if r.Charge != mp {
 			return "success charge != mp"
+		}
+		if r.Value != sentValue {
+			return "success value != sent"
 		}
 		if h, err := jcsHashStr(string(replyJSON)); err != nil || r.ReplyHash != h {
 			return "reply_hash mismatch"
@@ -240,8 +481,21 @@ func remoteReceiptInvalid(r Receipt, mp int64, replyJSON []byte) string {
 		if r.Charge < 0 || r.Charge > mp {
 			return "failure charge out of range"
 		}
+		// Value delivery is all-or-nothing (§13): a failed transfer delivers nothing.
+		if r.Value != 0 {
+			return "failure delivered value"
+		}
 	default:
 		return "unknown status"
+	}
+	// The two channels are audited separately (§13, the un-folded model): the execution premium must be
+	// the manifest-snapshot rate on the charge, and the value premium the same rate on the delivered
+	// value — never ceil((charge+value)·rbps), whose rounding merge is the bug. Either mismatch quarantines.
+	if r.Premium != ceilDiv(r.Charge*rbps, 10000) {
+		return "premium != ceil(charge*rbps)"
+	}
+	if r.ValuePremium != ceilDiv(r.Value*rbps, 10000) {
+		return "value_premium != ceil(value*rbps)"
 	}
 	return ""
 }
@@ -250,6 +504,15 @@ func remoteReceiptInvalid(r Receipt, mp int64, replyJSON []byte) string {
 // If the receipt is absent or has an invalid signature, the trace stays open for retry (ErrTimeout).
 // Otherwise it commits CommitRemoteSettlement with the correct charge/duty/refund split.
 func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, action *Action, ktx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req CallRequest, target *User, mp int64, fr FederationResult, latency float64) (*CallReply, error) {
+	// The value we dispatched (for a value transfer) rides on the trace, so both the direct and the
+	// retry settle paths read it from one source (§13).
+	var sentValue int64
+	if trace.DispatchJSON != nil {
+		var d dispatchPayload
+		if json.Unmarshal([]byte(*trace.DispatchJSON), &d) == nil {
+			sentValue = d.Value
+		}
+	}
 	// A missing, unparseable, unsigned, or mismatched receipt keeps the trace open for retry.
 	// action_id and args_hash are enforced here so settlement is valid by construction.
 	expectedArgsHash, _ := jcsHashStr(string(ktx.ArgsJSON))
@@ -270,27 +533,50 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 		replyJSON, _ = json.Marshal(fr.Result)
 	}
 	charge := r.Charge
-	var duty int64
-	if invalid := remoteReceiptInvalid(r, mp, replyJSON); invalid != "" {
+	rbps := int64(0)
+	if action.RemoteBPS != nil {
+		rbps = *action.RemoteBPS
+	}
+	// The two channels settle independently (§13): the EXECUTION channel (charge/premium/import) is the
+	// normal proxy settlement on the trace-funded gross q; the VALUE channel is the TransferEffect reserve
+	// locked on the caller C, disposed of via `vs` — settled to the peer proxy row on success, refunded on
+	// a valid failure, or kept LOCKED (quarantined) on an invalid receipt after a possibly-executed dispatch.
+	var premium, importFee int64
+	var valueForReceipt, valuePremForReceipt int64
+	var valueToForReceipt string
+	vs := ValueSettlement{Reserve: trace.ValueReserve}
+	if invalid := remoteReceiptInvalid(r, mp, rbps, sentValue, replyJSON); invalid != "" {
 		logger.Warn("remote.receipt_invalid", "action", action.Name, "reason", invalid)
 		charge = 0
 		ktx.Status = TxFailure
 		ktx.Reason = "remote receipt invalid: " + invalid
+		vs.Quarantine = true
 	} else {
-		if r.Status == TxSuccess {
-			duty = ceilDiv(charge*k.cfg.ImportBPS, 10000)
-			ktx.ReplyJSON = json.RawMessage(replyJSON)
-		}
+		premium = r.Premium // execution serving markup
 		ktx.Status = r.Status
 		ktx.Reason = r.Reason
+		if r.Status == TxSuccess {
+			importFee = ceilDiv((charge+premium)*k.cfg.ImportBPS, 10000) // execution import on the execution obligation
+			ktx.ReplyJSON = json.RawMessage(replyJSON)
+			// Value channel: C owes the peer value+value_premium (credited to the proxy row), and origin
+			// sys retains value_import; the remainder of the reserve refunds to C inside the commit.
+			vs.Credit = r.Value + r.ValuePremium
+			vs.SysCredit = ceilDiv((r.Value+r.ValuePremium)*k.cfg.ImportBPS, 10000)
+			valueForReceipt = r.Value
+			valuePremForReceipt = trace.ValueReserve - r.Value // caller's value overhead: value_premium + value_import
+			valueToForReceipt = r.ValueTo
+		} else {
+			vs.Refund = true // valid failure/rejection: return the whole value reserve to C
+		}
 	}
-	ktx.Net = charge
-	ktx.Fee = duty
+	paid := charge + premium // execution bilateral payable to the peer
+	ktx.Net = paid
+	ktx.Fee = importFee
 	ktx.RemoteReceiptHash = sha256Hex(fr.ReceiptJSON)
 	ktx.RemoteReceiptJSON = fr.ReceiptJSON
 
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
-	localReceipt, receiptErr := k.buildReceipt(ktx, charge+duty)
+	localReceipt, receiptErr := k.buildReceipt(ktx, paid+importFee, 0, valueForReceipt, valuePremForReceipt, valueToForReceipt)
 	if receiptErr != nil {
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
@@ -319,11 +605,11 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// (charge/duty/refund + audit record) always commits once the signed receipt is in.
 	sctx, cancel := settlementContext(ctx)
 	defer cancel()
-	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, charge, duty, stats, req.IdempotencyRecordID, req.StepID, KernelErrorCode(failErr)); err != nil {
+	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, paid, importFee, vs, stats, req.IdempotencyRecordID, req.StepID, KernelErrorCode(failErr)); err != nil {
 		return nil, ErrInternal.Wrap("could not commit remote settlement")
 	}
 
-	logger.Info("remote.settled", "action", action.Name, "status", ktx.Status, "charge", charge, "duty", duty)
+	logger.Info("remote.settled", "action", action.Name, "status", ktx.Status, "charge", charge, "premium", premium, "import_fee", importFee)
 
 	if ktx.Status == TxSuccess {
 		return &CallReply{Result: fr.Result, TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID}, nil
@@ -394,11 +680,13 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	}
 	mp := dispatch.RemotePrice
 	if mp == 0 {
-		// Fallback: derive from action.Price and ImportBPS.
+		// Fallback: derive from action.Price and RemoteBPS.
 		mp = k.remoteManifestPrice(action.Price)
 	}
-	maxDuty := ceilDiv(mp*k.cfg.ImportBPS, 10000)
-	q := mp + maxDuty
+	// The locked gross is the proxy's full two-step local price (§13) — what BeginRun/BeginStepCall
+	// funded — not the bare serving markup; settlement pays charge+premium to the peer and the import
+	// fee to origin sys out of it, refunding the remainder.
+	q := action.Price
 
 	callerWalletID, callerWalletKind := callerWalletFor(dispatch.StepID, process.ID, trace.ParentTraceID)
 
@@ -441,7 +729,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 		ktx.Status = TxFailure
 		ktx.Reason = "remote call unsettled past max pending age"
 		logger.Warn("remote.retry.expired", "trace_id", trace.ID, "age_seconds", now.Sub(trace.CreatedAt).Seconds())
-		_, sErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, ErrTimeout.Wrap("remote call unsettled past max pending age"))
+		_, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, 0, ErrTimeout.Wrap("remote call unsettled past max pending age"))
 		return sErr
 	}
 	return nil
@@ -473,6 +761,86 @@ func (k *Kernel) SignStepList(counterparty, recipient string) (sig, ts string, e
 }
 
 // ---- Peer operations ----
+
+// ResolveKernelKey maps a kernel qualifier (from an owner@kernel/name reference) to the peer's
+// public key and, when one exists locally, its mount (the peer proxy user). Resolution order is
+// strictly: a bound local alias (a peer user's handle) → a raw base64url key → not found. A
+// discovered-kernel label NEVER resolves a reference (§13), so no kernel can capture a name by
+// gossiping a label first. mount may be nil for a raw key not yet mounted.
+func (k *Kernel) ResolveKernelKey(ctx context.Context, ident string) (peerKey string, mount *User, err error) {
+	ident = strings.TrimPrefix(strings.TrimSpace(ident), "@")
+	if u, err := k.store.ReadUserByHandle(ctx, ident); err == nil && u != nil && u.PublicKey != "" {
+		return u.PublicKey, u, nil
+	}
+	if looksLikeKey(ident) {
+		u, _ := k.store.ReadUserByPublicKey(ctx, ident) // may be nil: known key, not yet mounted
+		return ident, u, nil
+	}
+	return "", nil, ErrNotFound.Wrapf("kernel %q is not a known peer alias or key", ident)
+}
+
+// ResolveRequiredCaller resolves a step's required-caller reference (§10, §13). A bare/local ref
+// returns (localUserID, ""). A kernel-qualified ref user@kernel returns (peer proxy userID, stable
+// remote user_id): the proxy user is the local accounting/routing account, the remote id addresses
+// the completer beneath its mutable handle, so completion demands a step_auth attestation naming it.
+// A raw-key qualifier is mounted on demand (best-effort alias); the remote user is resolved to its
+// stable id over /juice/fed/resolve/1.
+func (k *Kernel) ResolveRequiredCaller(ctx context.Context, ref string) (callerID, remoteID string, err error) {
+	owner, kernelAlias, hasKernel := strings.Cut(strings.TrimPrefix(strings.TrimSpace(ref), "@"), "@")
+	if !hasKernel {
+		u, uerr := k.ResolveUser(ctx, ref)
+		if uerr != nil || u == nil {
+			return "", "", ErrNotFound.Wrapf("required caller %q not found", ref)
+		}
+		return u.ID, "", nil
+	}
+	peerKey, mount, kerr := k.ResolveKernelKey(ctx, kernelAlias)
+	if kerr != nil {
+		return "", "", kerr
+	}
+	resolver, ok := k.http.(RemoteResolver)
+	if !ok {
+		return "", "", ErrNotFound.Wrap("remote resolution unavailable")
+	}
+	remoteUserID, _, rerr := resolver.ResolveRemoteUser(ctx, peerKey, owner)
+	if rerr != nil {
+		return "", "", rerr
+	}
+	if mount == nil {
+		handle := kernelAlias
+		if IsPublicKey(kernelAlias) && len(peerKey) >= 8 {
+			handle = "k-" + peerKey[:8]
+		}
+		if mount, err = k.CreateOrUpdateProxyPeer(ctx, handle, peerKey); err != nil {
+			return "", "", err
+		}
+	}
+	return mount.ID, remoteUserID, nil
+}
+
+// ResolvePrincipal resolves a user reference (bare handle or id) to its stable id and current
+// handle, for the open /juice/fed/resolve/1 protocol (§13): the caller's home kernel maps a
+// friendly `owner@kernel` to the underlying PrincipalID beneath the name. Only a live
+// (non-suspended) account resolves; ids are addresses, not secrets.
+func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (userID, handle string, err error) {
+	u, err := k.ResolveUser(ctx, ref)
+	if err != nil || u == nil || u.SuspendedAt != nil {
+		return "", "", ErrNotFound.Wrapf("user %s not found", ref)
+	}
+	return u.ID, u.Handle, nil
+}
+
+// ResolveKernelMount is ResolveKernelKey requiring an existing local mount (peer account).
+func (k *Kernel) ResolveKernelMount(ctx context.Context, ident string) (*User, error) {
+	_, mount, err := k.ResolveKernelKey(ctx, ident)
+	if err != nil {
+		return nil, err
+	}
+	if mount == nil {
+		return nil, ErrNotFound.Wrapf("kernel %q has no local account yet", ident)
+	}
+	return mount, nil
+}
 
 // CreateOrUpdateProxyPeer creates or updates a local user record representing a remote kernel peer,
 // addressed by Ed25519 public key. Location is not stored — the federation transport resolves the
@@ -702,15 +1070,13 @@ func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 	return purged, nil
 }
 
-// qualifiedActionName renders an action as @owner/name — the address form used everywhere else —
-// so gossip and roster views name actions consistently (@sys/message, @alice/greet) rather than as
-// bare names. For a remote proxy the local Name already encodes the remote owner (owner/name), and
-// the OwnerHandle is only our private mount alias for the peer; naming it in the peer's own
-// namespace (a leading @) keeps the name portable — the same action reads identically whether the
-// peer self-reports it or we vouch for it. Falls back to the bare name if OwnerHandle wasn't loaded.
+// qualifiedActionName renders an action's reference for gossip and roster views. For a remote proxy
+// it returns the action's name in the PEER's own namespace (owner/name) — never our local mount
+// alias — so vouching for a peer's action reads identically whether the peer self-reports it or we
+// gossip it (§13). For a local action it is ownerHandle/name.
 func qualifiedActionName(a *Action) string {
 	if a.Kind == KindRemoteProxy {
-		return "@" + a.Name
+		return a.Name
 	}
 	if a.OwnerHandle != "" {
 		return a.OwnerHandle + "/" + a.Name
@@ -731,7 +1097,7 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey string) (*GossipRes
 	handle, _ := k.store.GetConfig(ctx, "kernel_handle")
 	// The kernel's self-description is @sys's user description (§13): one primitive, not a config key.
 	var about string
-	if sys, err := k.store.ReadUserByHandle(ctx, "@sys"); err == nil && sys != nil {
+	if sys, err := k.store.ReadUserByHandle(ctx, "sys"); err == nil && sys != nil {
 		about = sys.Description
 	}
 
@@ -942,16 +1308,20 @@ func decodeRemotePublicKey(publicKey string) (ed25519.PublicKey, error) {
 func remoteManifestHash(m ActionManifest) string {
 	inputJSON, _ := CanonicalJSON(m.InputSchema)
 	outputJSON, _ := CanonicalJSON(m.OutputSchema)
+	// owner_id (stable identity) and remote_bps (provider pricing) are contract fields; owner_handle
+	// is display metadata, so a remote handle rename never re-keys the cache or deactivates a proxy.
 	payload, _ := CanonicalJSON(map[string]any{
 		"action_id":     m.ActionID,
 		"artifact_hash": m.ArtifactHash,
 		"description":   m.Description,
+		"effect":        m.Effect,
 		"input_schema":  string(inputJSON),
 		"kind":          string(m.Kind),
 		"name":          m.Name,
 		"output_schema": string(outputJSON),
-		"owner_handle":  m.OwnerHandle,
+		"owner_id":      m.OwnerID,
 		"price":         m.Price,
+		"remote_bps":    m.RemoteBPS,
 	})
 	h := sha256.Sum256(payload)
 	return hex.EncodeToString(h[:])
@@ -965,6 +1335,42 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 	if err := k.requireSuperuser(ctx, subjectID); err != nil {
 		return nil, err
 	}
+	return k.importRemoteActionCore(ctx, remoteUserID, m)
+}
+
+// ImportPeerAction imports one signed manifest without a superuser gate (its authority is the
+// verified manifest signature) and activates it as a local proxy — the §13 subscription-free
+// resolve path used by lazy cross-kernel calls. Returns the resulting proxy action.
+func (k *Kernel) ImportPeerAction(ctx context.Context, remoteUserID string, m ActionManifest) (*Action, error) {
+	res, err := k.importRemoteActionCore(ctx, remoteUserID, m)
+	if err != nil {
+		return nil, err
+	}
+	var a *Action
+	switch {
+	case len(res.Created) > 0:
+		a = res.Created[0]
+	case len(res.Updated) > 0:
+		a = res.Updated[0]
+	case len(res.Unchanged) > 0:
+		a = res.Unchanged[0]
+	default:
+		return nil, ErrNotFound.Wrap("import produced no action")
+	}
+	// Enable and make callable by local users (visibility=local), mirroring the subscribe path.
+	// The manifest is already signature-verified, so no further gate is needed.
+	if !a.Active || a.Visibility != VisibilityLocal {
+		a.Active = true
+		a.Visibility = VisibilityLocal
+		a.UpdatedAt = time.Now().UTC()
+		if err := k.store.UpdateAction(ctx, a); err != nil {
+			return nil, err
+		}
+	}
+	return a, nil
+}
+
+func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string, m ActionManifest) (*ImportResult, error) {
 	remoteUser, err := k.store.ReadUser(ctx, remoteUserID)
 	if err != nil {
 		return nil, err
@@ -1016,11 +1422,16 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 	}
 
 	contentHash := remoteManifestHash(m)
-	// Owner-qualified (addressed @peer/owner/name) so same-named actions from different owners on the peer don't collide.
-	name := strings.TrimPrefix(m.OwnerHandle, "@") + "/" + m.Name
-	// Proxy price = mp + ceil(mp * import_bps / 10000): the caller pays the remote price
-	// plus the local import duty, all locked atomically at dispatch time.
-	proxyPrice := m.Price + ceilDiv(m.Price*k.cfg.ImportBPS, 10000)
+	// Owner-qualified (rendered remoteowner@mount/name) so same-named actions from different owners
+	// on the peer don't collide.
+	name := NormalizeHandle(m.OwnerHandle) + "/" + m.Name
+	// Proxy price is the two-step markup (§13): sr = mp + ceil(mp·remote_bps/10000) is the
+	// serving-kernel markup (a signed manifest field) and the cross-kernel obligation ceiling;
+	// q = sr + ceil(sr·import_bps/10000) adds the origin's locally-retained import fee, so the local
+	// user sees one authenticated price bounding the whole remote call.
+	rbps := m.RemoteBPS
+	sr := m.Price + ceilDiv(m.Price*rbps, 10000)
+	proxyPrice := sr + ceilDiv(sr*k.cfg.ImportBPS, 10000)
 	incoming := []incomingOp{{
 		key:  m.ActionID,
 		hash: contentHash,
@@ -1032,6 +1443,9 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 			a.InputSchema = m.InputSchema
 			a.OutputSchema = m.OutputSchema
 			a.ArtifactHash = contentHash
+			a.RemoteOwnerID = m.OwnerID
+			a.RemoteBPS = &rbps
+			a.Effect = m.Effect // signed effect contract: the proxy is value-bearing iff the peer signed it
 		},
 		new: func() *Action {
 			now := time.Now().UTC()
@@ -1049,6 +1463,9 @@ func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID
 				Source:         source,
 				ArtifactHash:   contentHash,
 				RemoteActionID: m.ActionID,
+				RemoteOwnerID:  m.OwnerID,
+				RemoteBPS:      &rbps,
+				Effect:         m.Effect,
 				CreatedAt:      now,
 				UpdatedAt:      now,
 			}
@@ -1148,13 +1565,16 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 	}
 	m := &ActionManifest{
 		ActionID:     a.ID,
+		OwnerID:      owner.ID,
 		OwnerHandle:  owner.Handle,
 		Name:         a.Name,
+		RemoteBPS:    k.cfg.RemoteBPS,
 		Description:  a.Description,
 		InputSchema:  a.InputSchema,
 		OutputSchema: a.OutputSchema,
 		Price:        a.Price,
 		Kind:         a.Kind,
+		Effect:       a.Effect, // signed so a peer decides value-bearing from the contract, not the name (§13)
 		ArtifactHash: a.ArtifactHash,
 		UpdatedAt:    a.UpdatedAt,
 		Stats:        stats,
@@ -1257,6 +1677,45 @@ func stepPayload(stepID, counterparty, recipient, idempotencyKey, timestamp, inp
 	}
 }
 
+// SignStepAuthPayload signs the home-kernel attestation that its authenticated local user (userID)
+// authorized completing step stepID (§13). The fixed scope "step_auth" plus the user_id key keep
+// this key-set disjoint from the step-complete and step-list payloads; recipient binds it to the
+// serving kernel, closing cross-kernel replay.
+func SignStepAuthPayload(key ed25519.PrivateKey, counterparty, recipient, userID, stepID, timestamp string) (string, error) {
+	return signJCS(key, stepAuthPayload(counterparty, recipient, userID, stepID, timestamp))
+}
+
+// VerifyStepAuthSignature verifies the attestation. recipient must be the verifying kernel's own key.
+func VerifyStepAuthSignature(pubKeyB64, counterparty, recipient, userID, stepID, timestamp, sigB64 string) error {
+	pub, err := decodeRemotePublicKey(pubKeyB64)
+	if err != nil {
+		return ErrUnauthenticated.Wrap("invalid counterparty public key")
+	}
+	if err := verifyJCS(pub, stepAuthPayload(counterparty, recipient, userID, stepID, timestamp), sigB64); err != nil {
+		return ErrUnauthenticated.Wrap("step attestation is invalid")
+	}
+	return nil
+}
+
+func stepAuthPayload(counterparty, recipient, userID, stepID, timestamp string) map[string]string {
+	return map[string]string{
+		"counterparty": counterparty,
+		"recipient":    recipient,
+		"scope":        "step_auth",
+		"step_id":      stepID,
+		"timestamp":    timestamp,
+		"user_id":      userID,
+	}
+}
+
+// SignStepAuth stamps the current time and signs the step_auth attestation with this kernel's
+// platform key. counterparty is this kernel's own key; recipient is the serving peer's key.
+func (k *Kernel) SignStepAuth(counterparty, recipient, userID, stepID string) (sig, ts string, err error) {
+	ts = time.Now().UTC().Format(time.RFC3339)
+	sig, err = SignStepAuthPayload(k.cfg.SigningKey, counterparty, recipient, userID, stepID, ts)
+	return
+}
+
 // SignStepListPayload creates a base64url Ed25519 signature over
 // JCS({counterparty, recipient, scope, timestamp}). The fixed scope value keeps this key-set
 // disjoint from every other signed payload (§12, §13).
@@ -1284,4 +1743,381 @@ func stepListPayload(counterparty, recipient, timestamp string) map[string]strin
 		"scope":        "step_list",
 		"timestamp":    timestamp,
 	}
+}
+
+// ---- Residual settlement (§13) ----
+
+const (
+	settleSecretTag = "juice-settle-v1"
+	settleExpiry    = 24 * time.Hour
+)
+
+// settleSecret derives the creditor's per-settlement secret deterministically from the platform
+// signing seed, so the creditor holds no state between the open and finish rounds (§13 stateless
+// creditor): s = SHA-256(signing_seed ‖ "juice-settle-v1" ‖ settlement_id).
+func (k *Kernel) settleSecret(settlementID string) string {
+	seed := k.cfg.SigningKey.Seed()
+	buf := append(append(append([]byte{}, seed...), settleSecretTag...), settlementID...)
+	h := sha256.Sum256(buf)
+	return hex.EncodeToString(h[:])
+}
+
+// settleOutcome is the fair probabilistic result: pay iff (first 8 bytes of
+// SHA-256(settlement_id‖s‖n) mod Q) < d. Modulo bias is negligible for Q ≪ 2^64 (§13).
+func settleOutcome(settlementID, secret, nonce string, quantum, amount int64) bool {
+	h := sha256.Sum256([]byte(settlementID + secret + nonce))
+	return int64(binary.BigEndian.Uint64(h[:8])%uint64(quantum)) < amount
+}
+
+// ourKeyB64 is this kernel's own platform public key, base64url — the federation identity used as
+// creditor/debtor and recipient in settlement payloads.
+func (k *Kernel) ourKeyB64() string {
+	return base64.RawURLEncoding.EncodeToString(k.cfg.SigningKey.Public().(ed25519.PublicKey))
+}
+
+// signSettlementRecord fixes the creditor signature over JCS(record with Signature="").
+func (k *Kernel) signSettlementRecord(r *SettlementRecord) error {
+	r.Signature = ""
+	sig, err := signJCS(k.cfg.SigningKey, r)
+	if err != nil {
+		return err
+	}
+	r.Signature = sig
+	return nil
+}
+
+// verifySettlementRecord checks the creditor's signature on a record.
+func verifySettlementRecord(r *SettlementRecord, creditorB64 string) error {
+	pub, err := decodeRemotePublicKey(creditorB64)
+	if err != nil {
+		return ErrUnauthenticated.Wrap("invalid creditor public key")
+	}
+	cp := *r
+	cp.Signature = ""
+	if err := verifyJCS(pub, cp, r.Signature); err != nil {
+		return ErrUnauthenticated.Wrap("settlement record signature is invalid")
+	}
+	return nil
+}
+
+// The three settle request scopes are disjoint from each other and from every other signed payload
+// (§12): each carries its own fixed scope value plus a distinct key-set. recipient binds a request to
+// the intended creditor, closing cross-kernel replay.
+func settleOpenPayload(counterparty, recipient, settlementID string, amount int64, timestamp string) map[string]string {
+	return map[string]string{"amount": strconv.FormatInt(amount, 10), "counterparty": counterparty, "recipient": recipient, "scope": "settle_open", "settlement_id": settlementID, "timestamp": timestamp}
+}
+
+func settleFinishPayload(counterparty, recipient, settlementID, nonce, timestamp string) map[string]string {
+	return map[string]string{"counterparty": counterparty, "nonce": nonce, "recipient": recipient, "scope": "settle_finish", "settlement_id": settlementID, "timestamp": timestamp}
+}
+
+func settleReconcilePayload(counterparty, recipient, settlementID, timestamp string) map[string]string {
+	return map[string]string{"counterparty": counterparty, "recipient": recipient, "scope": "settle_reconcile", "settlement_id": settlementID, "timestamp": timestamp}
+}
+
+// GrossReceivables returns this kernel's total unsecured receivables across all peers (§13).
+func (k *Kernel) GrossReceivables(ctx context.Context) (int64, error) {
+	return k.store.GrossReceivables(ctx)
+}
+
+// HandleSettle is the creditor side of the /juice/fed/settle/1 exchange (§13). debtorKey is the
+// authenticated counterparty; the caller (cmd/juice) has already matched the connection key and
+// checked freshness. It verifies the debtor's scoped signature and serves one round: "open" commits
+// a fresh secret and returns a signed open record; "finish" reveals the secret, computes the outcome,
+// and applies the creditor three-way legs (idempotent by settlement_id — anti-grinding); "reconcile"
+// binds a clear-for-zero when this creditor failed to reveal before expiry (FIX 2). Returns
+// (status, body, err): a business rejection uses a non-200 status with a body; a protocol error uses err.
+func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, signature, settlementID string, amount int64, nonce string, recordJSON []byte) (int, []byte, error) {
+	peer, err := k.store.ReadUserByPublicKey(ctx, debtorKey)
+	if err != nil || peer == nil || !peer.IsPeer() {
+		return 0, nil, ErrNotFound.Wrap("unknown settlement counterparty")
+	}
+	if peer.SuspendedAt != nil {
+		return 0, nil, ErrUnauthenticated.Wrap("peer suspended")
+	}
+	our := k.ourKeyB64()
+	debtorPub, err := decodeRemotePublicKey(debtorKey)
+	if err != nil {
+		return 0, nil, ErrUnauthenticated.Wrap("invalid counterparty key")
+	}
+	sysID := k.cfg.FeeRecipientID
+
+	switch kind {
+	case "open":
+		if err := verifyJCS(debtorPub, settleOpenPayload(debtorKey, our, settlementID, amount, timestamp), signature); err != nil {
+			return 0, nil, ErrUnauthenticated.Wrap("settle_open signature invalid")
+		}
+		// Our books must agree that this peer owes us exactly the claimed debt d (= −available).
+		if -peer.Available != amount {
+			b, _ := json.Marshal(map[string]any{"error": "receivable mismatch", "receivable": -peer.Available})
+			return 409, b, nil
+		}
+		Q := k.cfg.SettlementQuantum
+		if amount <= 0 || Q <= 0 || amount >= Q {
+			return 0, nil, ErrInvalidState.Wrap("debt is not within the probabilistic band 0 < d < Q")
+		}
+		s := k.settleSecret(settlementID)
+		now := time.Now().UTC()
+		rec := &SettlementRecord{
+			SettlementID: settlementID, Creditor: our, Debtor: debtorKey,
+			Amount: amount, Quantum: Q, Mode: "probabilistic",
+			Commitment: sha256Hex(s), ExpiresAt: now.Add(settleExpiry), CreatedAt: now,
+		}
+		if err := k.signSettlementRecord(rec); err != nil {
+			return 0, nil, err
+		}
+		b, _ := json.Marshal(rec)
+		return 200, b, nil
+
+	case "finish":
+		if err := verifyJCS(debtorPub, settleFinishPayload(debtorKey, our, settlementID, nonce, timestamp), signature); err != nil {
+			return 0, nil, ErrUnauthenticated.Wrap("settle_finish signature invalid")
+		}
+		if stored, err := k.store.ReadSettlementRecord(ctx, settlementID); err != nil {
+			return 0, nil, err
+		} else if stored != "" {
+			return 200, []byte(stored), nil // idempotent replay — anti-grinding
+		}
+		open, oerr := k.verifyOwnOpenRecord(recordJSON, our, debtorKey, settlementID)
+		if oerr != nil {
+			return 0, nil, oerr
+		}
+		s := k.settleSecret(settlementID)
+		if sha256Hex(s) != open.Commitment {
+			return 0, nil, ErrInvalidState.Wrap("commitment mismatch")
+		}
+		pay := settleOutcome(settlementID, s, nonce, open.Quantum, open.Amount)
+		final := *open
+		final.Nonce, final.Secret = nonce, s
+		final.Outcome = "clear"
+		if pay {
+			final.Outcome = "pay"
+		}
+		if err := k.signSettlementRecord(&final); err != nil {
+			return 0, nil, err
+		}
+		fb, _ := json.Marshal(&final)
+		// A pay outcome changes NO balance (§13): the record is stored for anti-grinding and the debt
+		// stays d, pending the rail record. A clear outcome extinguishes the debt now (creditor: clear
+		// +d on the peer row, sys absorbs −d).
+		dClear, variance := int64(0), int64(0)
+		if !pay {
+			dClear, variance = open.Amount, -open.Amount
+		}
+		if _, err := k.store.CommitSettlement(ctx, settlementID, peer.ID, sysID, dClear, variance, open.Amount, string(fb)); err != nil {
+			return 0, nil, err
+		}
+		return 200, fb, nil
+
+	case "reconcile":
+		if err := verifyJCS(debtorPub, settleReconcilePayload(debtorKey, our, settlementID, timestamp), signature); err != nil {
+			return 0, nil, ErrUnauthenticated.Wrap("settle_reconcile signature invalid")
+		}
+		if stored, err := k.store.ReadSettlementRecord(ctx, settlementID); err != nil {
+			return 0, nil, err
+		} else if stored != "" {
+			return 200, []byte(stored), nil
+		}
+		open, oerr := k.verifyOwnOpenRecord(recordJSON, our, debtorKey, settlementID)
+		if oerr != nil {
+			return 0, nil, oerr
+		}
+		if time.Now().UTC().Before(open.ExpiresAt) {
+			return 0, nil, ErrInvalidState.Wrap("open record has not expired; finish instead")
+		}
+		// Binding clear-for-zero (FIX 2): we failed to reveal in time, so the debt clears for zero. We
+		// MUST apply the same outcome the debtor already applied locally, or be in provable default.
+		final := *open
+		final.Outcome = "clear"
+		if err := k.signSettlementRecord(&final); err != nil {
+			return 0, nil, err
+		}
+		fb, _ := json.Marshal(&final)
+		if _, err := k.store.CommitSettlement(ctx, settlementID, peer.ID, sysID, open.Amount, -open.Amount, open.Amount, string(fb)); err != nil {
+			return 0, nil, err
+		}
+		return 200, fb, nil
+	}
+	return 0, nil, ErrInvalidInput.Wrap("unknown settle kind")
+}
+
+// verifyOwnOpenRecord parses and validates that recordJSON is an open record this kernel signed for
+// this debtor and settlement (the trustless state carriage that lets the creditor stay stateless).
+func (k *Kernel) verifyOwnOpenRecord(recordJSON []byte, our, debtorKey, settlementID string) (*SettlementRecord, error) {
+	var open SettlementRecord
+	if err := json.Unmarshal(recordJSON, &open); err != nil {
+		return nil, ErrInvalidInput.Wrap("missing or invalid open record")
+	}
+	if err := verifySettlementRecord(&open, our); err != nil {
+		return nil, ErrUnauthenticated.Wrap("open record is not ours")
+	}
+	if open.SettlementID != settlementID || open.Debtor != debtorKey || open.Amount <= 0 || open.Quantum <= 0 {
+		return nil, ErrInvalidState.Wrap("open record does not match request")
+	}
+	return &open, nil
+}
+
+// SettlePeer is the debtor side of residual settlement (§13), invoked by the operator via
+// `admin settle <peer>`. It settles the position this kernel owes the peer: exact when |d| ≥ Q (the
+// operator records the rail payment with deposit/withdraw --external-key), otherwise the two-party
+// probabilistic commit/reveal. When the peer owes this kernel instead, settlement is theirs to
+// initiate (Y only signals). Superuser only.
+func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (map[string]any, error) {
+	if err := k.requireSuperuser(ctx, operatorID); err != nil {
+		return nil, err
+	}
+	peer, err := k.ResolveUser(ctx, peerRef)
+	if err != nil || peer == nil {
+		return nil, ErrNotFound.Wrapf("peer %q not found", peerRef)
+	}
+	if !peer.IsPeer() {
+		return nil, ErrInvalidInput.Wrap("settle applies only to peer accounts")
+	}
+	// A prior paid outcome still awaiting its rail record must be finalized (admin settle --cash)
+	// before opening a new lottery on the same position.
+	if pending, err := k.store.HasPendingSettlement(ctx, peer.ID); err != nil {
+		return nil, err
+	} else if pending {
+		return map[string]any{"status": "pending_cash", "handle": peer.Handle,
+			"message": "a paid probabilistic outcome is awaiting its rail record; pay the quantum, then run `admin settle <peer> --cash <settlement_id>`"}, nil
+	}
+	d := peer.Available // > 0 ⇒ this kernel owes the peer (we are the debtor)
+	switch {
+	case d == 0:
+		return map[string]any{"status": "settled", "amount": int64(0), "handle": peer.Handle}, nil
+	case d < 0:
+		return map[string]any{"status": "creditor", "amount": -d, "handle": peer.Handle,
+			"message": "the peer owes you; its operator initiates settlement"}, nil
+	}
+	Q := k.cfg.SettlementQuantum
+	settlementID := uuid.NewString()
+	if Q <= 0 || d >= Q {
+		return map[string]any{"status": "exact", "mode": "exact", "amount": d, "settlement_id": settlementID, "handle": peer.Handle,
+			"message": fmt.Sprintf("pay %d on the rail, then run `admin withdraw %s %d --external-key %s`", d, peer.Handle, d, settlementID)}, nil
+	}
+
+	settler, ok := k.http.(FederationSettler)
+	if !ok {
+		return nil, ErrInvalidState.Wrap("federation transport does not support settlement")
+	}
+	our := k.ourKeyB64()
+
+	// Round 1 — open: the creditor commits H(s).
+	ts := time.Now().UTC().Format(time.RFC3339)
+	openSig, err := signJCS(k.cfg.SigningKey, settleOpenPayload(our, peer.PublicKey, settlementID, d, ts))
+	if err != nil {
+		return nil, err
+	}
+	status, body, err := settler.Settle(ctx, peer.PublicKey, "open", ts, openSig, settlementID, d, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, ErrInvalidState.Wrapf("peer refused settlement open (status %d): %s", status, string(body))
+	}
+	open := SettlementRecord{}
+	if err := json.Unmarshal(body, &open); err != nil {
+		return nil, ErrInvalidState.Wrap("invalid open record")
+	}
+	if err := verifySettlementRecord(&open, peer.PublicKey); err != nil {
+		return nil, err
+	}
+	if open.SettlementID != settlementID || open.Amount != d || open.Creditor != peer.PublicKey || open.Quantum <= 0 {
+		return nil, ErrInvalidState.Wrap("open record does not match request")
+	}
+	openJSON := body
+
+	// Round 2 — finish: reveal the nonce; the creditor reveals s and applies its legs.
+	nonce := uuid.NewString()
+	ts2 := time.Now().UTC().Format(time.RFC3339)
+	finishSig, err := signJCS(k.cfg.SigningKey, settleFinishPayload(our, peer.PublicKey, settlementID, nonce, ts2))
+	if err != nil {
+		return nil, err
+	}
+	status, body, err = settler.Settle(ctx, peer.PublicKey, "finish", ts2, finishSig, settlementID, 0, nonce, openJSON)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, ErrInvalidState.Wrapf("peer refused settlement finish (status %d): %s", status, string(body))
+	}
+	final := SettlementRecord{}
+	if err := json.Unmarshal(body, &final); err != nil {
+		return nil, ErrInvalidState.Wrap("invalid final record")
+	}
+	if err := verifySettlementRecord(&final, peer.PublicKey); err != nil {
+		return nil, err
+	}
+	if final.SettlementID != settlementID || sha256Hex(final.Secret) != open.Commitment {
+		return nil, ErrInvalidState.Wrap("final record fails the commitment check")
+	}
+	// Recompute the flip ourselves — the creditor cannot misreport it once s is revealed.
+	pay := settleOutcome(settlementID, final.Secret, nonce, open.Quantum, d)
+	if (pay && final.Outcome != "pay") || (!pay && final.Outcome != "clear") {
+		return nil, ErrInvalidState.Wrap("final outcome contradicts the revealed secret")
+	}
+	// A pay outcome changes NO balance: the debt stays d until the operator records the rail payment
+	// (§13). A clear outcome extinguishes it now (debtor: clear −d, sys gains +d).
+	dClear, variance := int64(0), int64(0)
+	if !pay {
+		dClear, variance = -d, d
+	}
+	if _, err := k.store.CommitSettlement(ctx, settlementID, peer.ID, k.cfg.FeeRecipientID, dClear, variance, d, string(body)); err != nil {
+		return nil, err
+	}
+	res := map[string]any{"mode": "probabilistic", "outcome": final.Outcome, "settlement_id": settlementID, "handle": peer.Handle}
+	if pay {
+		res["status"] = "pending_cash"
+		res["amount"] = open.Quantum
+		res["message"] = fmt.Sprintf("you owe %d; pay it on the rail, then run `admin settle %s --cash %s`", open.Quantum, peer.Handle, settlementID)
+	} else {
+		res["status"] = "settled"
+		res["amount"] = int64(0)
+	}
+	return res, nil
+}
+
+// SettleCash finalizes a paid probabilistic outcome on this kernel after the operator moved the
+// quantum on the rail (§13): it clears the debt d and books the variance ±(Q−d), deriving this
+// kernel's side (creditor or debtor) from the stored signed record. Run on BOTH kernels — the debtor
+// after paying, the creditor after receiving. Superuser only; idempotent by settlement_id.
+func (k *Kernel) SettleCash(ctx context.Context, operatorID, peerRef, settlementID string) (map[string]any, error) {
+	if err := k.requireSuperuser(ctx, operatorID); err != nil {
+		return nil, err
+	}
+	peer, err := k.ResolveUser(ctx, peerRef)
+	if err != nil || peer == nil || !peer.IsPeer() {
+		return nil, ErrNotFound.Wrapf("peer %q not found", peerRef)
+	}
+	recJSON, err := k.store.ReadSettlementRecord(ctx, settlementID)
+	if err != nil {
+		return nil, err
+	}
+	if recJSON == "" {
+		return nil, ErrNotFound.Wrapf("no settlement %q", settlementID)
+	}
+	var rec SettlementRecord
+	if err := json.Unmarshal([]byte(recJSON), &rec); err != nil {
+		return nil, ErrInternal.Wrap("stored settlement record is invalid")
+	}
+	if rec.Outcome != "pay" {
+		return nil, ErrInvalidState.Wrap("settlement is not an unpaid probabilistic outcome")
+	}
+	d, q := rec.Amount, rec.Quantum
+	// Creditor: clear +d on the peer row, sys += (Q−d). Debtor: clear −d, sys −= (Q−d) (guarded by the
+	// users CHECK — insufficient reserve rolls back and the settlement stays pending).
+	var dClear, variance int64
+	switch k.ourKeyB64() {
+	case rec.Creditor:
+		dClear, variance = d, q-d
+	case rec.Debtor:
+		dClear, variance = -d, -(q - d)
+	default:
+		return nil, ErrInvalidState.Wrap("this kernel is not a party to the settlement")
+	}
+	cashRec := fmt.Sprintf(`{"settlement_id":%q,"cash":%d,"outcome":"cash"}`, settlementID, q)
+	if _, err := k.store.CommitSettlementCash(ctx, settlementID, peer.ID, k.cfg.FeeRecipientID, dClear, variance, q, cashRec); err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "settled", "settlement_id": settlementID, "cash": q, "handle": peer.Handle}, nil
 }

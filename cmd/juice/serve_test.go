@@ -39,7 +39,7 @@ func newTestHTTPServerFull(t *testing.T) (*httptest.Server, *kernel.Kernel, *sto
 func bootstrapSigning(t *testing.T, k *kernel.Kernel) ed25519.PrivateKey {
 	t.Helper()
 	ctx := context.Background()
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func bootstrapSigning(t *testing.T, k *kernel.Kernel) ed25519.PrivateKey {
 	}
 	priv := ed25519.PrivateKey(privBytes)
 	k.SetSigningKey(priv, sys.ID)
-	if err := k.SetConfig(ctx, configKeySuperuser, "@sys"); err != nil {
+	if err := k.SetConfig(ctx, configKeySuperuser, "sys"); err != nil {
 		t.Fatal(err)
 	}
 	return priv
@@ -98,7 +98,7 @@ func setupProcessHTTP(t *testing.T, db *store.DB, ownerID string, funds int64) *
 		CallerUserID:  ownerID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := db.BeginRun(ctx, p, tr, ownerID, funds); err != nil {
+	if err := db.BeginRun(ctx, p, tr, ownerID, funds, 0, 0); err != nil {
 		t.Fatalf("setupProcessHTTP: %v", err)
 	}
 	return p
@@ -135,7 +135,7 @@ func makeUser(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 func giveCredits(t *testing.T, k *kernel.Kernel, userID string, amount int64) {
 	t.Helper()
 	ctx := context.Background()
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatalf("giveCredits: @sys not found: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestServeHealth(t *testing.T) {
 
 	saved := globalCfg.KernelHandle
 	t.Cleanup(func() { globalCfg.KernelHandle = saved })
-	globalCfg.KernelHandle = "@kernel-test"
+	globalCfg.KernelHandle = "kernel-test"
 
 	resp := httpDo(t, srv, "GET", "/health", nil, "")
 	defer resp.Body.Close()
@@ -280,7 +280,7 @@ func TestServeHealth(t *testing.T) {
 	if body["status"] != "ok" {
 		t.Errorf("status = %q, want ok", body["status"])
 	}
-	if body["handle"] != "@kernel-test" {
+	if body["handle"] != "kernel-test" {
 		t.Errorf("handle = %q, want @kernel-test", body["handle"])
 	}
 	if body["public_key"] == "" {
@@ -293,7 +293,7 @@ func TestServeCreateUser(t *testing.T) {
 	defer srv.Close()
 
 	resp := httpDo(t, srv, "POST", "/v1/users", map[string]any{
-		"handle": "@http-alice", "email": "alice@example.com", "password": "testpass",
+		"handle": "http-alice", "email": "alice@example.com", "password": "testpass",
 	}, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
@@ -307,7 +307,7 @@ func TestServeCreateUser(t *testing.T) {
 	if _, ok := body["password_hash"]; ok {
 		t.Error("response must not contain password_hash")
 	}
-	if body["handle"] != "@http-alice" {
+	if body["handle"] != "http-alice" {
 		t.Errorf("response handle: got %v", body["handle"])
 	}
 }
@@ -317,14 +317,14 @@ func TestServeAuthToken(t *testing.T) {
 	defer srv.Close()
 
 	_, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@http-bob", Password: "pass",
+		Handle: "http-bob", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	resp := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"handle": "@http-bob", "password": "pass",
+		"handle": "http-bob", "password": "pass",
 	}, "")
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
@@ -341,7 +341,7 @@ func TestServePKCEFlow(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, _ = makeUser(t, k, "@pkce-user")
+	_, _ = makeUser(t, k, "pkce-user")
 
 	verifier := strings.Repeat("x", 43)
 	h := sha256.Sum256([]byte(verifier))
@@ -349,7 +349,7 @@ func TestServePKCEFlow(t *testing.T) {
 
 	// Step 1: authorize.
 	resp := httpDo(t, srv, "POST", "/v1/auth/authorize", map[string]any{
-		"handle":         "@pkce-user",
+		"handle":         "pkce-user",
 		"password":       "pass",
 		"code_challenge": challenge,
 	}, "")
@@ -414,7 +414,7 @@ func TestServeCreateAndGetAction(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@srv-actowner")
+	_, tok := makeUser(t, k, "srv-actowner")
 
 	resp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "http-action", "kind": "http",
@@ -433,7 +433,7 @@ func TestServeCreateAndGetAction(t *testing.T) {
 		t.Error("expected action with ID")
 	}
 	// The owner is identified by @handle (owner_handle / action=@owner/name), never the raw UUID.
-	if action.OwnerHandle != "@srv-actowner" || action.ActionRef != "@srv-actowner/"+action.Name {
+	if action.OwnerHandle != "srv-actowner" || action.ActionRef != "srv-actowner/"+action.Name {
 		t.Errorf("action owner: got handle=%q ref=%q, want @srv-actowner", action.OwnerHandle, action.ActionRef)
 	}
 	if action.OwnerUserID != "" {
@@ -456,7 +456,7 @@ func TestServeListActions(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@list-owner")
+	_, tok := makeUser(t, k, "list-owner")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "list-me", "kind": "http", "price": 0, "source": "http://x.example",
@@ -509,7 +509,7 @@ func TestServeListPagination(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@page-owner")
+	_, tok := makeUser(t, k, "page-owner")
 
 	for i := 0; i < 3; i++ {
 		cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
@@ -551,7 +551,7 @@ func TestServeListActionsExcludesSuspendedOwner(t *testing.T) {
 	srv, k, st := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, tok := makeUser(t, k, "@susp-owner")
+	ownerID, tok := makeUser(t, k, "susp-owner")
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "svc", "kind": "http", "price": 0, "source": "http://x.example",
 		"description": "test action", "input_schema": minSchema, "output_schema": minSchema,
@@ -586,7 +586,7 @@ func TestServeCreateWasmActionFromArtifact(t *testing.T) {
 	srv, k, _ := newFlowKernel(t, &flowScriptExec{})
 	defer srv.Close()
 
-	ownerID, tok := makeUser(t, k, "@artifact-owner")
+	ownerID, tok := makeUser(t, k, "artifact-owner")
 
 	// A base64 artifact with no source — mirrors @sys/tinygo/compile output.
 	b64 := base64.StdEncoding.EncodeToString([]byte("fake-wasm-artifact-bytes"))
@@ -667,7 +667,7 @@ func TestServeEnableDisableAction(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@toggle-owner")
+	_, tok := makeUser(t, k, "toggle-owner")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "toggle-me", "kind": "http", "price": 0, "source": "http://x.example",
@@ -709,7 +709,7 @@ func TestServeDeleteAction(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@del-owner")
+	_, tok := makeUser(t, k, "del-owner")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "delete-me", "kind": "http", "price": 0, "source": "http://x.example",
@@ -734,7 +734,7 @@ func TestServeProcessLifecycle(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	userID, tok := makeUser(t, k, "@srv-proc")
+	userID, tok := makeUser(t, k, "srv-proc")
 	p := setupProcessHTTP(t, db, userID, 0)
 	pid := p.ID
 
@@ -762,8 +762,8 @@ func TestServeGetProcessUnauthorized(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "@proc-owner")
-	_, otherTok := makeUser(t, k, "@proc-other")
+	ownerID, ownerTok := makeUser(t, k, "proc-owner")
+	_, otherTok := makeUser(t, k, "proc-other")
 	_ = ownerTok
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
@@ -781,7 +781,7 @@ func TestServeFundProcess(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	userID, tok := makeUser(t, k, "@fund-user")
+	userID, tok := makeUser(t, k, "fund-user")
 	giveCredits(t, k, userID, 200)
 
 	// Create process with initial funds via store (process creation is internal in new model).
@@ -814,8 +814,8 @@ func TestServeCall(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@call-owner")
-	_, callerTok := makeUser(t, k, "@call-caller")
+	_, ownerTok := makeUser(t, k, "call-owner")
+	_, callerTok := makeUser(t, k, "call-caller")
 
 	// Create and activate a free public HTTP action.
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
@@ -829,7 +829,7 @@ func TestServeCall(t *testing.T) {
 
 	// Make the call via /v1/run (new API — price=0, caller needs no credits).
 	callResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "@call-owner/answer",
+		"action": "call-owner/answer",
 		"args":   map[string]any{},
 	}, callerTok)
 	if callResp.StatusCode != http.StatusOK {
@@ -850,11 +850,11 @@ func TestServeRunRejectsAbsentArgs(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@run-args-user")
+	_, tok := makeUser(t, k, "run-args-user")
 
 	// Absent args field must be rejected (ErrInvalidInput = 422), not silently treated as {}.
 	resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "@run-args-user/nonexistent",
+		"action": "run-args-user/nonexistent",
 	}, tok)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnprocessableEntity {
@@ -866,7 +866,7 @@ func TestServeRunRejectsEmptyAction(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@run-action-user")
+	_, tok := makeUser(t, k, "run-action-user")
 
 	// Present args={} with absent action must be rejected (ErrInvalidInput = 422).
 	resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
@@ -888,8 +888,8 @@ func TestServeListAndGetTransaction(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@tx-owner")
-	_, callerTok := makeUser(t, k, "@tx-caller")
+	_, ownerTok := makeUser(t, k, "tx-owner")
+	_, callerTok := makeUser(t, k, "tx-caller")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "tx-action", "kind": "http", "price": 0, "source": backend.URL,
@@ -901,7 +901,7 @@ func TestServeListAndGetTransaction(t *testing.T) {
 	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "@tx-owner/tx-action", "args": map[string]any{},
+		"action": "tx-owner/tx-action", "args": map[string]any{},
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -945,8 +945,8 @@ func TestServeRateTransaction(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@rate-owner")
-	_, callerTok := makeUser(t, k, "@rate-caller")
+	_, ownerTok := makeUser(t, k, "rate-owner")
+	_, callerTok := makeUser(t, k, "rate-caller")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "rate-action", "kind": "http", "price": 0, "source": backend.URL,
@@ -958,7 +958,7 @@ func TestServeRateTransaction(t *testing.T) {
 	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "@rate-owner/rate-action", "args": map[string]any{},
+		"action": "rate-owner/rate-action", "args": map[string]any{},
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -999,8 +999,8 @@ func TestServeListActionRatings(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@list-ratings-owner")
-	_, callerTok := makeUser(t, k, "@list-ratings-caller")
+	_, ownerTok := makeUser(t, k, "list-ratings-owner")
+	_, callerTok := makeUser(t, k, "list-ratings-caller")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "list-ratings-action", "kind": "http", "price": 0, "source": backend.URL,
@@ -1012,7 +1012,7 @@ func TestServeListActionRatings(t *testing.T) {
 	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "@list-ratings-owner/list-ratings-action", "args": map[string]any{},
+		"action": "list-ratings-owner/list-ratings-action", "args": map[string]any{},
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -1047,7 +1047,7 @@ func TestServeRateTransactionNotFound(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	tok, err := k.Login(context.Background(), "@sys", "sys-pass")
+	tok, err := k.Login(context.Background(), "sys", "sys-pass")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1070,8 +1070,8 @@ func TestServeGetStats(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@stats-owner")
-	_, callerTok := makeUser(t, k, "@stats-caller")
+	_, ownerTok := makeUser(t, k, "stats-owner")
+	_, callerTok := makeUser(t, k, "stats-caller")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "stats-action", "kind": "http", "price": 0, "source": backend.URL,
@@ -1084,7 +1084,7 @@ func TestServeGetStats(t *testing.T) {
 
 	// Make one call to generate stats.
 	httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "@stats-owner/stats-action", "args": map[string]any{},
+		"action": "stats-owner/stats-action", "args": map[string]any{},
 	}, callerTok).Body.Close()
 
 	get := httpDo(t, srv, "GET", "/v1/stats/"+action.ID, nil, ownerTok)
@@ -1103,7 +1103,7 @@ func TestServeLookupEndpointRemoved(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@lookup-user")
+	_, tok := makeUser(t, k, "lookup-user")
 
 	// POST /v1/lookup was removed; the route no longer exists.
 	resp := httpDo(t, srv, "POST", "/v1/lookup", map[string]any{"query": "something"}, tok)
@@ -1117,7 +1117,7 @@ func TestServeUpdateAction(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@upd-owner")
+	_, tok := makeUser(t, k, "upd-owner")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "upd-action", "kind": "http", "price": 0, "source": "http://x.example",
@@ -1151,7 +1151,7 @@ func TestServeListProcesses(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	userID, tok := makeUser(t, k, "@lp-user")
+	userID, tok := makeUser(t, k, "lp-user")
 
 	// Create two processes directly via the store (POST /v1/processes no longer exists).
 	setupProcessHTTP(t, db, userID, 0)
@@ -1173,7 +1173,7 @@ func TestServeLogout(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, _ = makeUser(t, k, "@logout-user")
+	_, _ = makeUser(t, k, "logout-user")
 
 	// Obtain a refresh token via PKCE.
 	verifier := strings.Repeat("y", 43)
@@ -1181,7 +1181,7 @@ func TestServeLogout(t *testing.T) {
 	challenge := base64.RawURLEncoding.EncodeToString(h[:])
 
 	authResp := httpDo(t, srv, "POST", "/v1/auth/authorize", map[string]any{
-		"handle": "@logout-user", "password": "pass", "code_challenge": challenge,
+		"handle": "logout-user", "password": "pass", "code_challenge": challenge,
 	}, "")
 	var authResult map[string]string
 	decodeResponse(t, authResp, &authResult)
@@ -1229,7 +1229,7 @@ func TestRateLimitLogin(t *testing.T) {
 	logger := log.Discard()
 	k := kernel.New(db, nil, nil, nil, cfg, logger)
 	if _, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@rlu", Password: "pass",
+		Handle: "rlu", Password: "pass",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1242,7 +1242,7 @@ func TestRateLimitLogin(t *testing.T) {
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
-	body := map[string]any{"handle": "@rlu", "password": "pass"}
+	body := map[string]any{"handle": "rlu", "password": "pass"}
 
 	// httptest requests originate from loopback. A genuine local client (no X-Forwarded-For) is
 	// exempt from rate limiting, so a burst well past the limit never 429s.
@@ -1277,7 +1277,7 @@ func TestServeRequestIDHeader(t *testing.T) {
 	defer srv.Close()
 
 	resp := httpDo(t, srv, "POST", "/v1/users", map[string]any{
-		"handle": "@ridtest", "email": "rid@example.com", "password": "p",
+		"handle": "ridtest", "email": "rid@example.com", "password": "p",
 	}, "")
 	defer resp.Body.Close()
 	if resp.Header.Get("X-Request-ID") == "" {
@@ -1289,7 +1289,7 @@ func TestServeGetMe(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	uid, tok := makeUser(t, k, "@metest")
+	uid, tok := makeUser(t, k, "metest")
 	giveCredits(t, k, uid, 500)
 
 	resp := httpDo(t, srv, "GET", "/v1/me", nil, tok)
@@ -1299,7 +1299,7 @@ func TestServeGetMe(t *testing.T) {
 	var got map[string]any
 	decodeResponse(t, resp, &got)
 
-	if got["handle"] != "@metest" {
+	if got["handle"] != "metest" {
 		t.Errorf("handle: got %v, want @metest", got["handle"])
 	}
 	if _, ok := got["description"]; !ok {
@@ -1321,7 +1321,7 @@ func TestPutMe(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@putmetest")
+	_, tok := makeUser(t, k, "putmetest")
 
 	// Update description only.
 	resp := httpDo(t, srv, "PUT", "/v1/me", map[string]any{"description": "hi there"}, tok)
@@ -1358,7 +1358,7 @@ func TestPutMe(t *testing.T) {
 
 	// Old password login must fail; new password must succeed.
 	oldLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"grant_type": "password", "handle": "@putmetest", "password": "pass",
+		"grant_type": "password", "handle": "putmetest", "password": "pass",
 	}, "")
 	if oldLogin.StatusCode != http.StatusUnauthorized {
 		t.Errorf("old password: want 401, got %d", oldLogin.StatusCode)
@@ -1366,7 +1366,7 @@ func TestPutMe(t *testing.T) {
 	oldLogin.Body.Close()
 
 	newLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"grant_type": "password", "handle": "@putmetest", "password": "newpass",
+		"grant_type": "password", "handle": "putmetest", "password": "newpass",
 	}, "")
 	if newLogin.StatusCode != http.StatusOK {
 		t.Errorf("new password: want 200, got %d", newLogin.StatusCode)
@@ -1402,8 +1402,8 @@ func TestGetActionReadPermission(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@ra-owner")
-	_, strangerTok := makeUser(t, k, "@ra-stranger")
+	_, ownerTok := makeUser(t, k, "ra-owner")
+	_, strangerTok := makeUser(t, k, "ra-stranger")
 	_ = k
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
@@ -1447,7 +1447,7 @@ func TestFederationCall(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1460,7 +1460,7 @@ func TestFederationCall(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
 	// Register the remote peer with its real public key.
-	_, err = k.AddPeer(ctx, sys.ID, "@remote-example", pubB64)
+	_, err = k.AddPeer(ctx, sys.ID, "remote-example", pubB64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1488,7 +1488,7 @@ func TestFederationCall(t *testing.T) {
 	}
 
 	// Signed federation call succeeds; counterparty is identified by public key.
-	resp := fedCall(t, k, priv, "@sys/ping", "idem-key-1", map[string]any{})
+	resp := fedCall(t, k, priv, "sys/ping", "idem-key-1", map[string]any{})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -1501,14 +1501,14 @@ func TestFederationCall(t *testing.T) {
 	}
 
 	// Unknown action returns not found (auth passes, action check fails).
-	resp2 := fedCall(t, k, priv, "@sys/nope", "idem-key-2", map[string]any{})
+	resp2 := fedCall(t, k, priv, "sys/nope", "idem-key-2", map[string]any{})
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown action: expected 404, got %d", resp2.StatusCode)
 	}
 
 	// Missing counterparty (empty key) is unauthenticated.
-	resp3 := fedCallRaw(t, k, "", time.Now().UTC().Format(time.RFC3339), "idem-key-3b", "@sys/ping", "", []byte("{}"))
+	resp3 := fedCallRaw(t, k, "", time.Now().UTC().Format(time.RFC3339), "idem-key-3b", "sys/ping", "", []byte("{}"))
 	resp3.Body.Close()
 	if resp3.StatusCode != http.StatusUnauthorized {
 		t.Errorf("missing counterparty: expected 401, got %d", resp3.StatusCode)
@@ -1531,7 +1531,7 @@ func TestFederationCallSignsRejectionForNonExecutableAction(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1542,7 +1542,7 @@ func TestFederationCallSignsRejectionForNonExecutableAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.AddPeer(ctx, sys.ID, "@remote-caller", pubB64); err != nil {
+	if _, err := k.AddPeer(ctx, sys.ID, "remote-caller", pubB64); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1596,13 +1596,13 @@ func TestFederationCallSignsRejectionForNonExecutableAction(t *testing.T) {
 	}
 
 	// Inactive action → signed rejection.
-	assertSignedRejection("inactive", fedCall(t, k, priv, "@sys/secret", "idem-s-1", map[string]any{}))
+	assertSignedRejection("inactive", fedCall(t, k, priv, "sys/secret", "idem-s-1", map[string]any{}))
 
 	// Activate but keep private → still non-executable for a non-owner → signed rejection.
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	assertSignedRejection("active-private", fedCall(t, k, priv, "@sys/secret", "idem-s-2", map[string]any{}))
+	assertSignedRejection("active-private", fedCall(t, k, priv, "sys/secret", "idem-s-2", map[string]any{}))
 }
 
 // TestWaitingOnPeer: a waiting step whose required caller is a peer (proxy) user is flagged
@@ -1612,13 +1612,13 @@ func TestWaitingOnPeer(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
-	localID, _ := makeUser(t, k, "@local-caller")
+	localID, _ := makeUser(t, k, "local-caller")
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	peer, err := k.AddPeer(ctx, sys.ID, "@peer-caller", base64.RawURLEncoding.EncodeToString(pub))
+	peer, err := k.AddPeer(ctx, sys.ID, "peer-caller", base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1629,7 +1629,7 @@ func TestWaitingOnPeer(t *testing.T) {
 	if !pv.WaitingOnPeer {
 		t.Error("step addressed to a peer should be waiting_on_peer")
 	}
-	if pv.RequiredCallerHandle != "@peer-caller" {
+	if pv.RequiredCallerHandle != "peer-caller" {
 		t.Errorf("required_caller_handle: got %q, want @peer-caller", pv.RequiredCallerHandle)
 	}
 	localStep := &kernel.Step{Status: kernel.StepWaiting, RequiredCallerUserID: localID}
@@ -1772,7 +1772,7 @@ func TestFederationCallAuth(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1782,7 +1782,7 @@ func TestFederationCallAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.AddPeer(ctx, sys.ID, "@auth-test-remote", pubB64); err != nil {
+	if _, err := k.AddPeer(ctx, sys.ID, "auth-test-remote", pubB64); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1807,7 +1807,7 @@ func TestFederationCallAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	action := "@sys/authtest"
+	action := "sys/authtest"
 	cpKey := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
 
@@ -1877,11 +1877,11 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.AddPeer(ctx, sys.ID, "@replay-example", pubB64)
+	_, _ = k.AddPeer(ctx, sys.ID, "replay-example", pubB64)
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
@@ -1898,7 +1898,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
 	// First call: must return a non-nil receipt.
-	r1 := fedCall(t, k, priv, "@sys/replay-ping", "replay-idem-1", map[string]any{})
+	r1 := fedCall(t, k, priv, "sys/replay-ping", "replay-idem-1", map[string]any{})
 	defer r1.Body.Close()
 	if r1.StatusCode != http.StatusOK {
 		t.Fatalf("first call: want 200, got %d", r1.StatusCode)
@@ -1910,7 +1910,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 	}
 
 	// Replay with same idempotency key: receipt must also be non-nil.
-	r2 := fedCall(t, k, priv, "@sys/replay-ping", "replay-idem-1", map[string]any{})
+	r2 := fedCall(t, k, priv, "sys/replay-ping", "replay-idem-1", map[string]any{})
 	defer r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
 		t.Fatalf("replay: want 200, got %d", r2.StatusCode)
@@ -1943,7 +1943,7 @@ func TestHealthCmdHonorsServer(t *testing.T) {
 	var hit string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hit = r.URL.Path
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "handle": "@k", "public_key": "pk"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "handle": "k", "public_key": "pk"})
 	}))
 	defer srv.Close()
 
@@ -1970,7 +1970,7 @@ func TestServeImportOpenAPI(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@import-srv-owner")
+	_, tok := makeUser(t, k, "import-srv-owner")
 
 	resp := httpDo(t, srv, "POST", "/v1/actions/import",
 		map[string]any{"spec_url": specSrv.URL + "/spec.json"}, tok)
@@ -2002,7 +2002,7 @@ func TestServeUnimportOpenAPI(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "@unimport-srv-owner")
+	_, tok := makeUser(t, k, "unimport-srv-owner")
 	specURL := specSrv.URL + "/spec.json"
 
 	// Import first.
@@ -2041,7 +2041,7 @@ func TestFederationReplay(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
 
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
@@ -2062,24 +2062,24 @@ func TestFederationReplay(t *testing.T) {
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.AddPeer(ctx, sys.ID, "@replay-caller", pubB64)
+	_, _ = k.AddPeer(ctx, sys.ID, "replay-caller", pubB64)
 
 	ikey1 := uuid.New().String()
-	r1 := fedCall(t, k, priv, "@sys/fed-greet", ikey1, map[string]any{})
+	r1 := fedCall(t, k, priv, "sys/fed-greet", ikey1, map[string]any{})
 	defer r1.Body.Close()
 	if r1.StatusCode != http.StatusOK {
 		t.Fatalf("first call: want 200, got %d", r1.StatusCode)
 	}
 
 	// Replay same key → 200.
-	r2 := fedCall(t, k, priv, "@sys/fed-greet", ikey1, map[string]any{})
+	r2 := fedCall(t, k, priv, "sys/fed-greet", ikey1, map[string]any{})
 	defer r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
 		t.Errorf("replay: want 200, got %d", r2.StatusCode)
 	}
 
 	// Pending in-flight key → 409.
-	caller, _ := k.ReadUserByHandle(ctx, "@replay-caller")
+	caller, _ := k.ReadUserByHandle(ctx, "replay-caller")
 	ikey2 := uuid.New().String()
 	now := time.Now().UTC()
 	_ = k.InsertPendingIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
@@ -2089,7 +2089,7 @@ func TestFederationReplay(t *testing.T) {
 		CreatedAt:          now,
 		ExpiresAt:          now.Add(time.Hour),
 	})
-	r3 := fedCall(t, k, priv, "@sys/fed-greet", ikey2, map[string]any{})
+	r3 := fedCall(t, k, priv, "sys/fed-greet", ikey2, map[string]any{})
 	defer r3.Body.Close()
 	if r3.StatusCode != http.StatusConflict {
 		t.Errorf("pending: want 409, got %d", r3.StatusCode)
@@ -2110,10 +2110,10 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.AddPeer(ctx, sys.ID, "@schema-fail-peer", pubB64)
+	_, _ = k.AddPeer(ctx, sys.ID, "schema-fail-peer", pubB64)
 
 	// Action requires a "name" field; empty body {} will fail schema validation.
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
@@ -2139,7 +2139,7 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 
 	ikey := uuid.New().String()
 	// fedHeaders signs an empty body {}; strict schema requires "name" → schema error.
-	r1 := fedCall(t, k, priv, "@sys/strict", ikey, map[string]any{})
+	r1 := fedCall(t, k, priv, "sys/strict", ikey, map[string]any{})
 	defer r1.Body.Close()
 	if r1.StatusCode == http.StatusConflict {
 		t.Fatal("first call returned 409: idempotency record was not created")
@@ -2150,7 +2150,7 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 	}
 
 	// Replay same key → must return the same error, not 409.
-	r2 := fedCall(t, k, priv, "@sys/strict", ikey, map[string]any{})
+	r2 := fedCall(t, k, priv, "sys/strict", ikey, map[string]any{})
 	defer r2.Body.Close()
 	if r2.StatusCode == http.StatusConflict {
 		t.Errorf("replay after precondition failure: got 409 (record still pending), want error response")
@@ -2174,10 +2174,10 @@ func TestFederationIdempotencyCommittedFailureHasReceipt(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.AddPeer(ctx, sys.ID, "@committed-fail-peer", pubB64)
+	_, _ = k.AddPeer(ctx, sys.ID, "committed-fail-peer", pubB64)
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID: sys.ID, Name: "fail-exec", Kind: kernel.KindHTTP,
@@ -2190,14 +2190,14 @@ func TestFederationIdempotencyCommittedFailureHasReceipt(t *testing.T) {
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
 	ikey := uuid.New().String()
-	r1 := fedCall(t, k, priv, "@sys/fail-exec", ikey, map[string]any{})
+	r1 := fedCall(t, k, priv, "sys/fail-exec", ikey, map[string]any{})
 	defer r1.Body.Close()
 	if r1.StatusCode == http.StatusConflict {
 		t.Fatal("first call returned 409")
 	}
 
 	// Replay same key: must return error (not 409) and a non-nil receipt.
-	r2 := fedCall(t, k, priv, "@sys/fail-exec", ikey, map[string]any{})
+	r2 := fedCall(t, k, priv, "sys/fail-exec", ikey, map[string]any{})
 	if r2.StatusCode == http.StatusConflict {
 		t.Errorf("committed failure replay: got 409, want error response")
 	}
@@ -2223,10 +2223,10 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, err := k.AddPeer(ctx, sys.ID, "@args-hash-peer", pubB64)
+	_, err := k.AddPeer(ctx, sys.ID, "args-hash-peer", pubB64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2244,8 +2244,8 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 	ts := time.Now().UTC().Format(time.RFC3339)
 	signedHash := sha256HexBytes([]byte("{}"))
-	sig, _ := kernel.SignFederationPayload(priv, "@sys/hash-check", cp, "idem-hash-1", ts, signedHash)
-	resp := fedCallRaw(t, k, cp, ts, "idem-hash-1", "@sys/hash-check", sig, []byte(`{"injected":true}`))
+	sig, _ := kernel.SignFederationPayload(priv, "sys/hash-check", cp, "idem-hash-1", ts, signedHash)
+	resp := fedCallRaw(t, k, cp, ts, "idem-hash-1", "sys/hash-check", sig, []byte(`{"injected":true}`))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("args_hash mismatch: want 401, got %d", resp.StatusCode)
@@ -2263,9 +2263,9 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 	ctx := context.Background()
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
 
-	userID, tok := makeUser(t, k, "@vrr-http-user")
+	userID, tok := makeUser(t, k, "vrr-http-user")
 	giveCredits(t, k, userID, 100)
 
 	// Create a local HTTP action and make a call via /v1/run to get a transaction.
@@ -2279,7 +2279,7 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
 	callResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "@sys/vrr-http", "args": map[string]any{},
+		"action": "sys/vrr-http", "args": map[string]any{},
 	}, tok)
 	if callResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(callResp.Body)
@@ -2312,7 +2312,7 @@ func TestServeListActionsOwnerAuth(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@la-auth-owner")
+	_, ownerTok := makeUser(t, k, "la-auth-owner")
 
 	// Create a private (inactive, non-public) action.
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
@@ -2377,11 +2377,11 @@ func TestSuperuserScopeOverTCP(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 
-	sysTok, err := k.Login(ctx, "@sys", "sys-pass")
+	sysTok, err := k.Login(ctx, "sys", "sys-pass")
 	if err != nil {
 		t.Fatal(err)
 	}
-	aliceID, aliceTok := makeUser(t, k, "@alice")
+	aliceID, aliceTok := makeUser(t, k, "alice")
 
 	// @alice creates a private, inactive action.
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
@@ -2398,26 +2398,26 @@ func TestSuperuserScopeOverTCP(t *testing.T) {
 	}
 	asSys := decodeActions(t, httpDo(t, srv, "GET", "/v1/actions?owner=@alice", nil, sysTok))
 	if len(asSys) != 1 {
-		t.Errorf("@sys should see @alice's private action, got %d", len(asSys))
+		t.Errorf("sys should see @alice's private action, got %d", len(asSys))
 	}
 
 	// @alice owns a process; @sys sees it in the system-wide process list, a stranger doesn't.
 	giveCredits(t, k, aliceID, 100)
 	proc := setupProcessHTTP(t, db, aliceID, 100)
 	if !containsProcess(t, httpDo(t, srv, "GET", "/v1/processes", nil, sysTok), proc.ID) {
-		t.Error("@sys process list should include @alice's process")
+		t.Error("sys process list should include @alice's process")
 	}
-	_, bobTok := makeUser(t, k, "@bob")
+	_, bobTok := makeUser(t, k, "bob")
 	if containsProcess(t, httpDo(t, srv, "GET", "/v1/processes", nil, bobTok), proc.ID) {
-		t.Error("@bob must not see @alice's process")
+		t.Error("bob must not see @alice's process")
 	}
 
 	// @sys may disable @alice's action over TCP (owner-or-superuser); @bob may not.
 	if resp := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/disable", nil, bobTok); resp.StatusCode < 400 {
-		t.Errorf("@bob disabling @alice's action should fail, got %d", resp.StatusCode)
+		t.Errorf("bob disabling @alice's action should fail, got %d", resp.StatusCode)
 	}
 	if resp := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/disable", nil, sysTok); resp.StatusCode >= 400 {
-		t.Errorf("@sys disabling @alice's action should succeed, got %d", resp.StatusCode)
+		t.Errorf("sys disabling @alice's action should succeed, got %d", resp.StatusCode)
 	}
 }
 
@@ -2506,7 +2506,7 @@ func TestDiscoverOnce(t *testing.T) {
 // advertising or enumerating providers.
 func TestDiscoverOnceFriendSync(t *testing.T) {
 	bal := int64(42)
-	g, _ := json.Marshal(kernel.GossipResponse{PublicKey: "F", Handle: "@F", CounterpartyBalance: &bal})
+	g, _ := json.Marshal(kernel.GossipResponse{PublicKey: "F", Handle: "F", CounterpartyBalance: &bal})
 	f := &fakeDiscoverer{
 		bootstrap: []string{"A"}, // must be ignored when directory=false
 		providers: []string{"B"}, // must be ignored when directory=false
@@ -2568,9 +2568,9 @@ func TestGrantRoutesRequireAuth(t *testing.T) {
 		body         any
 	}{
 		{"GET", "/v1/grants/plan?selector=@x", nil},
-		{"POST", "/v1/grants/start", map[string]any{"selector": "@x/y"}},
+		{"POST", "/v1/grants/start", map[string]any{"selector": "x/y"}},
 		{"POST", "/v1/grants/complete", map[string]any{"state": "s"}},
-		{"POST", "/v1/grants", map[string]any{"selector": "@x/y", "token": "t"}},
+		{"POST", "/v1/grants", map[string]any{"selector": "x/y", "token": "t"}},
 		{"DELETE", "/v1/grants?selector=@x/y", nil},
 		{"DELETE", "/v1/grants?account=bearer:x", nil},
 	}
@@ -2603,7 +2603,7 @@ func TestKeyLimiter(t *testing.T) {
 func TestOnCallRejectsPeerKeyMismatch(t *testing.T) {
 	h := &fedHandlers{callLimiter: newKeyLimiter(50, 100)}
 	resp := h.OnCall(context.Background(), "peerA", fed.CallRequest{
-		Counterparty: "peerB", Timestamp: "t", IdempotencyKey: "k", Action: "@x/y", Signature: "s", Args: json.RawMessage("{}"),
+		Counterparty: "peerB", Timestamp: "t", IdempotencyKey: "k", Action: "x/y", Signature: "s", Args: json.RawMessage("{}"),
 	})
 	if resp.Status != http.StatusUnauthorized {
 		t.Errorf("mismatched peer key: status %d, want 401", resp.Status)

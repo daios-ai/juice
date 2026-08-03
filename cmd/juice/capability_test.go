@@ -70,9 +70,9 @@ func TestCapabilityComposition(t *testing.T) {
 	srv, k, db := newCapabilityKernel(t)
 	ctx := context.Background()
 
-	provID, provTok := makeUser(t, k, "@prov")
-	subID, subTok := makeUser(t, k, "@sub")
-	callerID, callerTok := makeUser(t, k, "@caller")
+	provID, provTok := makeUser(t, k, "prov")
+	subID, subTok := makeUser(t, k, "sub")
+	callerID, callerTok := makeUser(t, k, "caller")
 	giveCredits(t, k, callerID, 1000)
 
 	// A leaf sub-action owned by @sub.
@@ -89,11 +89,11 @@ func TestCapabilityComposition(t *testing.T) {
 		cb := r.Header.Get(callbackHeader)
 		capTok := r.Header.Get(capabilityHeader)
 		// Subcall @sub/sub within our trace (juice.call ≡ /v1/call).
-		callStatus, _ = capCallback(cb, capTok, "/v1/call", map[string]any{"action": "@sub/sub", "args": map[string]any{}})
+		callStatus, _ = capCallback(cb, capTok, "/v1/call", map[string]any{"action": "sub/sub", "args": map[string]any{}})
 		// Create a step addressed to @caller (juice.step_create ≡ /v1/steps, no trace_id).
 		var sBody []byte
 		stepStatus, sBody = capCallback(cb, capTok, "/v1/steps", map[string]any{
-			"action_id": "@sub/sub", "required_caller": "@caller", "partial_args": map[string]any{},
+			"action_id": "sub/sub", "required_caller": "caller", "partial_args": map[string]any{},
 		})
 		var sv map[string]any
 		_ = json.Unmarshal(sBody, &sv)
@@ -105,7 +105,7 @@ func TestCapabilityComposition(t *testing.T) {
 	t.Cleanup(compose.Close)
 	createEnabledPublicAction(t, srv, provTok, "compose", "http", compose.URL, "composing action", 100)
 
-	reply := runAction(t, srv, callerTok, "@prov/compose", map[string]any{})
+	reply := runAction(t, srv, callerTok, "prov/compose", map[string]any{})
 
 	if callStatus != http.StatusOK {
 		t.Fatalf("/v1/call callback status = %d, want 200", callStatus)
@@ -178,9 +178,9 @@ func TestCapabilityComposition(t *testing.T) {
 func TestCapabilityConcurrentCallbacksBounded(t *testing.T) {
 	srv, k, db := newCapabilityKernel(t)
 
-	_, provTok := makeUser(t, k, "@prov")
-	_, subTok := makeUser(t, k, "@sub")
-	callerID, callerTok := makeUser(t, k, "@caller")
+	_, provTok := makeUser(t, k, "prov")
+	_, subTok := makeUser(t, k, "sub")
+	callerID, callerTok := makeUser(t, k, "caller")
 	giveCredits(t, k, callerID, 1000)
 
 	leaf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -198,7 +198,7 @@ func TestCapabilityConcurrentCallbacksBounded(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				st, _ := capCallback(cb, capTok, "/v1/call", map[string]any{"action": "@sub/sub", "args": map[string]any{}})
+				st, _ := capCallback(cb, capTok, "/v1/call", map[string]any{"action": "sub/sub", "args": map[string]any{}})
 				mu.Lock()
 				statuses[st]++
 				mu.Unlock()
@@ -211,7 +211,7 @@ func TestCapabilityConcurrentCallbacksBounded(t *testing.T) {
 	createEnabledPublicAction(t, srv, provTok, "compose", "http", compose.URL, "composer", 100)
 
 	before := readAvailable(t, db, callerID)
-	runAction(t, srv, callerTok, "@prov/compose", map[string]any{})
+	runAction(t, srv, callerTok, "prov/compose", map[string]any{})
 
 	if statuses[http.StatusOK] != 2 {
 		t.Errorf("successful subcalls = %d, want 2 (80 ≤ 100 < 120)", statuses[http.StatusOK])
@@ -237,7 +237,7 @@ func readAvailable(t *testing.T, db *store.DB, userID string) int64 {
 func TestCapabilityRejectedOnRun(t *testing.T) {
 	srv, _, _ := newCapabilityKernel(t)
 	resp := httpDoWithHeaders(t, srv, "POST", "/v1/run",
-		map[string]any{"action": "@sys/whatever", "args": map[string]any{}}, "",
+		map[string]any{"action": "sys/whatever", "args": map[string]any{}}, "",
 		map[string]string{capabilityHeader: "anything.sig"})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {

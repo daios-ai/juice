@@ -480,11 +480,15 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Post("/control/users/{handle}/rename", srv.ctlRenameUser)
 		r.Post("/control/deposit", srv.ctlAdjust(true))
 		r.Post("/control/withdraw", srv.ctlAdjust(false))
+		r.Post("/control/peers/settle", srv.ctlSettlePeer)
 		r.Get("/control/peers", srv.ctlListPeers)
 		r.Get("/control/peers/inspect", srv.ctlInspectPeer)
 		r.Post("/control/peers/subscribe", srv.ctlSubscribePeer)
 		r.Post("/control/peers/unsubscribe", srv.ctlUnsubscribePeer)
 		r.Get("/control/identity", srv.ctlIdentity)
+		r.Get("/control/transfers", srv.ctlListTransfers)
+		r.Get("/control/transfers/{id}", srv.ctlShowTransfer)
+		r.Post("/control/transfers/{id}/retry", srv.ctlRetryTransfer)
 	})
 }
 
@@ -1249,14 +1253,18 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 		if req.Args == nil {
 			return nil, 0, kernel.ErrInvalidInput.Wrap("args is required")
 		}
-		// A peer-held step is completed over /juice/fed/step/1 (§13) — the same command, since a
-		// step is a step. It is superuser scope on a normal command (§14): the request is signed
-		// with this kernel's own federation identity, so it acts as the whole kernel, not as a user.
+		// A peer-held step is completed over /juice/fed/step/1 (§13) — the same command, since a step
+		// is a step. An ordinary authenticated user may complete a remote step addressed to THEM: the
+		// home kernel attaches a step_auth attestation naming their stable id, and the serving kernel
+		// enforces it against the step's required remote caller. A superuser completes kernel-level
+		// (no attestation) — the request acts as the whole kernel, for a kernel-addressed step.
 		if req.Peer != "" {
-			if !s.kernel.IsSuperuser(r.Context(), callerFrom(r)) {
-				return nil, 0, kernel.ErrUnauthorized.Wrap("completing a peer's step is superuser supervision")
+			callerID := callerFrom(r)
+			forUserID := callerID
+			if s.kernel.IsSuperuser(r.Context(), callerID) {
+				forUserID = "" // kernel-level completion (no per-user attestation)
 			}
-			body, err := s.completePeerStep(r.Context(), req.Peer, pathID(r), *req.Args)
+			body, err := s.completePeerStepMaybePaid(r.Context(), req.Peer, pathID(r), *req.Args, forUserID, forUserID)
 			return body, http.StatusOK, err
 		}
 		// Under a capability the caller is the executing action's owner (§9); CompleteStep still
@@ -1664,7 +1672,7 @@ func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRe
 			input = []byte("{}")
 		}
 		status, body, err = handleFederationStepComplete(h.kernel, ctx, req.Counterparty, req.Timestamp,
-			req.IdempotencyKey, req.StepID, req.Signature, input)
+			req.IdempotencyKey, req.StepID, req.Signature, input, req.ForUserID, req.UserAttestation, req.UserTimestamp)
 	default:
 		return stepErr(kernel.ErrInvalidInput.Wrap("unknown step request kind"))
 	}
@@ -1673,6 +1681,29 @@ func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRe
 	}
 	b, _ := json.Marshal(body)
 	return fed.StepResponse{Status: status, Body: b}
+}
+
+// OnSettle answers the /juice/fed/settle/1 residual-settlement exchange (§13): the creditor side of
+// the two-party commit/reveal. The connection-key check and freshness window mirror OnCall/OnStep;
+// the kernel verifies the debtor's scoped signature and applies the three-way legs idempotently.
+func (h *fedHandlers) OnSettle(ctx context.Context, peerKey string, req fed.SettleRequest) fed.SettleResponse {
+	settleErr := func(err error) fed.SettleResponse {
+		code := kernel.KernelErrorCode(err)
+		b, _ := json.Marshal(map[string]string{"error": err.Error(), "code": code})
+		return fed.SettleResponse{Status: kernel.HTTPStatusFromCode(code), Body: b}
+	}
+	if peerKey != "" && peerKey != req.Counterparty {
+		return settleErr(kernel.ErrUnauthenticated.Wrap("counterparty does not match the authenticated connection"))
+	}
+	if err := checkFederationTimestamp(req.Timestamp); err != nil {
+		return settleErr(err)
+	}
+	status, body, err := h.kernel.HandleSettle(ctx, req.Counterparty, req.Kind, req.Timestamp, req.Signature,
+		req.SettlementID, req.Amount, req.Nonce, []byte(req.Record))
+	if err != nil {
+		return settleErr(err)
+	}
+	return fed.SettleResponse{Status: status, Body: body}
 }
 
 // OnManifest returns one signed manifest per active public action (chunked, relay-safe).
@@ -1697,6 +1728,35 @@ func (h *fedHandlers) OnManifest(ctx context.Context, _ string) ([]json.RawMessa
 		out = append(out, b)
 	}
 	return out, nil
+}
+
+// OnResolve answers the open /juice/fed/resolve/1 protocol (§13): resolve one action to its signed
+// manifest, or one user reference to its stable id+handle — the primitive that lets a caller reach a
+// remote action without prior subscription.
+func (h *fedHandlers) OnResolve(ctx context.Context, _ string, req fed.ResolveRequest) fed.ResolveResponse {
+	errBody := func(msg string) json.RawMessage { b, _ := json.Marshal(map[string]string{"error": msg}); return b }
+	switch req.Kind {
+	case "action":
+		a, err := h.kernel.ResolveAction(ctx, req.Owner+"/"+req.Name)
+		if err != nil || a == nil {
+			return fed.ResolveResponse{Status: 404, Body: errBody("action not found")}
+		}
+		m, err := h.kernel.GetActionManifest(ctx, a.ID)
+		if err != nil {
+			return fed.ResolveResponse{Status: 403, Body: errBody(err.Error())}
+		}
+		b, _ := json.Marshal(m)
+		return fed.ResolveResponse{Status: 200, Body: b}
+	case "user":
+		id, handle, err := h.kernel.ResolvePrincipal(ctx, req.User)
+		if err != nil {
+			return fed.ResolveResponse{Status: 404, Body: errBody("user not found")}
+		}
+		b, _ := json.Marshal(map[string]string{"user_id": id, "handle": handle})
+		return fed.ResolveResponse{Status: 200, Body: b}
+	default:
+		return fed.ResolveResponse{Status: 422, Body: errBody("unknown resolve kind")}
+	}
 }
 
 // OnGossip returns the gossip document (§13). peerKey is the connection's authenticated public key;

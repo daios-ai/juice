@@ -164,6 +164,35 @@ func (s *server) ctlAdjust(credit bool) http.HandlerFunc {
 	}
 }
 
+// ctlSettlePeer settles the bilateral position with a peer (§13): exact when |d| ≥ Q, otherwise the
+// probabilistic residual protocol. With a settlement_id it instead records the rail payment for a
+// paid probabilistic outcome (SettleCash). Superuser only; the kernel decides direction and mode.
+func (s *server) ctlSettlePeer(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Handle       string `json:"handle"`
+		SettlementID string `json:"settlement_id"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	u, err := resolveHandle(s.kernel, r.Context(), req.Handle)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var res map[string]any
+	if req.SettlementID != "" {
+		res, err = s.kernel.SettleCash(r.Context(), callerFrom(r), u.ID, req.SettlementID)
+	} else {
+		res, err = s.kernel.SettlePeer(r.Context(), callerFrom(r), u.ID)
+	}
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 	peers, err := s.kernel.ListPeers(r.Context())
 	if err != nil {
@@ -182,7 +211,18 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 		}
 		peers = kept
 	}
-	out := map[string]any{"peers": peerViews(peers)}
+	views := peerViews(peers)
+	// Flag debtor peers when global gross receivables have reached Y (display only, FIX 3).
+	if globalCfg.SettlementTrigger > 0 {
+		if gross, err := s.kernel.GrossReceivables(r.Context()); err == nil && gross >= globalCfg.SettlementTrigger {
+			for _, v := range views {
+				if v.Available < 0 {
+					v.SettlementDue = true
+				}
+			}
+		}
+	}
+	out := map[string]any{"peers": views}
 	if r.URL.Query().Get("gossip") == "1" {
 		roster, err := s.kernel.DiscoveryRoster(r.Context())
 		if err != nil {
@@ -308,12 +348,13 @@ func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, erro
 		}
 		return u.PublicKey, nil
 	}
-	if strings.HasPrefix(ident, "@") {
-		return "", kernel.ErrNotFound.Wrapf("no peer %q", ident)
+	// An unresolvable identifier with public-key shape is a raw stranger key (inspecting or addressing
+	// a peer before it is known locally) — the transport reports it unreachable if it is not real.
+	// Anything else is simply an unknown peer (§14 productions: a bare handle never means a key).
+	if kernel.IsPublicKey(strings.TrimPrefix(ident, "@")) {
+		return strings.TrimPrefix(ident, "@"), nil
 	}
-	// An unresolvable non-@ identifier is treated as a raw stranger key (inspecting or addressing a
-	// peer before it is known locally) — the transport reports it unreachable if it is not one.
-	return ident, nil
+	return "", kernel.ErrNotFound.Wrapf("no peer %q", ident)
 }
 
 // stepRoundTrip signs, dispatches, and unwraps one outbound /juice/fed/step/1 request.
@@ -354,7 +395,11 @@ func (s *server) stepRoundTrip(ctx context.Context, peerKey string, req fed.Step
 // completePeerStep resumes a step a peer parked for this kernel, over /juice/fed/step/1 (§13).
 // Reached from POST /v1/steps/{id}/complete when the request names a peer — the same command that
 // completes a local step, since a step is a step.
-func (s *server) completePeerStep(ctx context.Context, peerRef, stepID string, rawInput json.RawMessage) (map[string]any, error) {
+// completePeerStep drives an outbound step completion to the serving peer (§13). forUserID, when
+// non-empty, is the completing user's own stable id on THIS kernel: it attaches a step_auth
+// attestation so a remote-user-addressed step is completed as that specific user (an empty forUserID
+// is a kernel-level completion, superuser scope, for a kernel-addressed step).
+func (s *server) completePeerStep(ctx context.Context, peerRef, stepID string, rawInput json.RawMessage, forUserID, paymentHash string) (map[string]any, error) {
 	peerKey, err := s.resolvePeerKey(ctx, strings.TrimSpace(peerRef))
 	if err != nil {
 		return nil, err
@@ -376,15 +421,231 @@ func (s *server) completePeerStep(ctx context.Context, peerRef, stepID string, r
 	// Derive the idempotency key rather than minting a UUID per attempt: a retry must present the
 	// SAME key, or the peer cannot recognize it as a duplicate and the tx/receipt of an
 	// already-executed completion is lost. Same peer + step + input ⇒ same key, nothing persisted.
-	idempotencyKey := sha256HexBytes([]byte("juice/fed/step/1|" + peerKey + "|" + stepID + "|" + inputHash))
+	// The key binds the payment descriptor hash (§13): a payment step folds its hash here so the serving
+	// kernel, recomputing its own, rejects a mismatch. A non-payment step uses paymentHash="".
+	idempotencyKey := sha256HexBytes([]byte("juice/fed/step/1|" + peerKey + "|" + stepID + "|" + inputHash + "|" + paymentHash))
 	sig, ts, err := s.kernel.SignStep(stepID, pub, peerKey, idempotencyKey, inputHash)
 	if err != nil {
 		return nil, err
 	}
-	return s.stepRoundTrip(ctx, peerKey, fed.StepRequest{
+	req := fed.StepRequest{
 		Kind: "complete", Counterparty: pub, Timestamp: ts, Signature: sig,
 		StepID: stepID, IdempotencyKey: idempotencyKey, Input: json.RawMessage(input),
-	}, fedStepTimeout)
+	}
+	if forUserID != "" {
+		asig, ats, aerr := s.kernel.SignStepAuth(pub, peerKey, forUserID, stepID)
+		if aerr != nil {
+			return nil, aerr
+		}
+		req.ForUserID, req.UserAttestation, req.UserTimestamp = forUserID, asig, ats
+	}
+	return s.stepRoundTrip(ctx, peerKey, req, fedStepTimeout)
+}
+
+// completePeerStepMaybePaid completes a peer-held step, funding the value channel when the step is a
+// payment step (§13). It first reads the peer's step listing for a payment descriptor: absent ⇒ an
+// ordinary completion (paymentHash ""). Present ⇒ the buyer locks its own max_total reserve-first in a
+// pending_transfers record (idempotent on the payment-bound key), completes, and settles on the serving
+// kernel's signed receipt — value+value_premium to A's proxy row, value_import to buyer sys, refund on a
+// signed failure, left pending on an uncertain outcome for retry with the same key.
+func (s *server) completePeerStepMaybePaid(ctx context.Context, peerRef, stepID string, rawInput json.RawMessage, forUserID, buyerID string) (map[string]any, error) {
+	peerKey, err := s.resolvePeerKey(ctx, strings.TrimSpace(peerRef))
+	if err != nil {
+		return nil, err
+	}
+	desc := s.findPeerStepPayment(ctx, peerKey, stepID)
+	if desc == nil {
+		return s.completePeerStep(ctx, peerRef, stepID, rawInput, forUserID, "") // ordinary (non-payment) step
+	}
+	if buyerID == "" {
+		return nil, kernel.ErrInvalidInput.Wrap("a payment step must be completed by a specific user")
+	}
+	if kernel.PaymentDescriptorHash(*desc) != desc.Hash {
+		return nil, kernel.ErrInvalidState.Wrap("payment descriptor hash mismatch")
+	}
+	// Hash the input exactly as completePeerStep will (marshaling a RawMessage is a fixed point).
+	input := []byte(rawInput)
+	if len(input) == 0 {
+		input = []byte("{}")
+	}
+	if input, err = json.Marshal(json.RawMessage(input)); err != nil {
+		return nil, kernel.ErrInvalidInput.Wrap("input must be valid JSON")
+	}
+	inputHash := sha256HexBytes(input)
+	idempotencyKey := sha256HexBytes([]byte("juice/fed/step/1|" + peerKey + "|" + stepID + "|" + inputHash + "|" + desc.Hash))
+
+	// Reuse an existing reserve (retry) or admit a new one (lock max_total). Reserve-first: fund before
+	// the network completion so a crash never leaves the buyer having paid without a record.
+	pending, err := s.kernel.ReadPendingTransferByKey(ctx, idempotencyKey)
+	if err != nil {
+		if pending, err = s.kernel.AdmitRemotePaidStep(ctx, buyerID, peerKey, stepID, input, idempotencyKey, *desc); err != nil {
+			return nil, err
+		}
+	}
+	body, cerr := s.completePeerStep(ctx, peerRef, stepID, rawInput, forUserID, desc.Hash)
+	var receiptJSON []byte
+	if body != nil {
+		if rj, ok := body["receipt"]; ok && rj != nil {
+			receiptJSON, _ = json.Marshal(rj)
+		}
+	}
+	if serr := s.kernel.SettleRemotePaidStep(ctx, pending, *desc, receiptJSON); serr != nil {
+		return body, serr
+	}
+	return body, cerr
+}
+
+// findPeerStepPayment fetches the peer's step listing and returns the payment descriptor for stepID, or
+// nil when the step is not a payment step (or the listing cannot be read).
+func (s *server) findPeerStepPayment(ctx context.Context, peerKey, stepID string) *kernel.PaymentDescriptor {
+	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	sig, ts, err := s.kernel.SignStepList(pub, peerKey)
+	if err != nil {
+		return nil
+	}
+	body, err := s.stepRoundTrip(ctx, peerKey, fed.StepRequest{
+		Kind: "list", Counterparty: pub, Timestamp: ts, Signature: sig,
+	}, fedOpTimeout)
+	if err != nil {
+		return nil
+	}
+	raw, ok := body["steps"]
+	if !ok {
+		return nil
+	}
+	b, _ := json.Marshal(raw)
+	var views []struct {
+		ID      string                    `json:"id"`
+		Payment *kernel.PaymentDescriptor `json:"payment"`
+	}
+	if json.Unmarshal(b, &views) != nil {
+		return nil
+	}
+	for _, v := range views {
+		if v.ID == stepID {
+			return v.Payment
+		}
+	}
+	return nil
+}
+
+// retryPendingTransfer re-presents the SAME signed completion for a still-pending payment reserve and
+// settles on the result (§13 operator surface / future sweeper — one shared path). It re-derives nothing:
+// the stored idempotency key and raw input rebuild the identical request, so the serving kernel replays an
+// already-executed completion (returning its stored receipt) rather than re-running it. Disposition is
+// exactly the completion path's: a valid success settles, a valid failure refunds, an invalid receipt
+// quarantines, and no receipt / an unreachable peer leaves the record pending — a retry has no
+// never-dispatched proof (§13), since the first attempt may already have paid the beneficiary. Only a
+// pending record is actionable; settled/refunded are terminal and a quarantined receipt can never heal.
+func (s *server) retryPendingTransfer(ctx context.Context, pt *kernel.PendingTransfer) (*kernel.PendingTransfer, error) {
+	if pt.Status != "pending" {
+		return nil, kernel.ErrInvalidState.Wrapf("transfer is %s, not pending", pt.Status)
+	}
+	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	sig, ts, err := s.kernel.SignStep(pt.StepID, pub, pt.PeerKey, pt.IdempotencyKey, pt.InputHash)
+	if err != nil {
+		return nil, err
+	}
+	req := fed.StepRequest{
+		Kind: "complete", Counterparty: pub, Timestamp: ts, Signature: sig,
+		StepID: pt.StepID, IdempotencyKey: pt.IdempotencyKey, Input: pt.Input,
+	}
+	// A payment step is always user-addressed; re-attest as the buyer.
+	asig, ats, aerr := s.kernel.SignStepAuth(pub, pt.PeerKey, pt.BuyerID, pt.StepID)
+	if aerr != nil {
+		return nil, aerr
+	}
+	req.ForUserID, req.UserAttestation, req.UserTimestamp = pt.BuyerID, asig, ats
+
+	// A transport failure (unreachable / no settleable receipt) is not an error here: the record simply
+	// stays pending for a later retry. Only a signed receipt moves it.
+	body, _ := s.stepRoundTrip(ctx, pt.PeerKey, req, fedStepTimeout)
+	var receiptJSON []byte
+	if body != nil {
+		if rj, ok := body["receipt"]; ok && rj != nil {
+			receiptJSON, _ = json.Marshal(rj)
+		}
+	}
+	d := kernel.PaymentDescriptor{Beneficiary: pt.Beneficiary, Amount: pt.Amount, RemoteMax: pt.RemoteMax}
+	if serr := s.kernel.SettleRemotePaidStep(ctx, pt, d, receiptJSON); serr != nil {
+		return nil, serr
+	}
+	return s.kernel.ReadPendingTransfer(ctx, pt.ID)
+}
+
+// pendingTransferView is the operator-facing shape of a pending_transfers record (§13): operational
+// fields only — never the idempotency key, raw input bytes, buyer user-id, or receipt internals.
+type pendingTransferView struct {
+	ID            string    `json:"id"`
+	Status        string    `json:"status"`
+	BuyerHandle   string    `json:"buyer_handle"`
+	PeerHandle    string    `json:"peer_handle"`
+	PeerPublicKey string    `json:"peer_public_key"`
+	Beneficiary   string    `json:"beneficiary"`
+	Amount        int64     `json:"amount"`
+	Reserve       int64     `json:"reserve"`
+	StepID        string    `json:"step_id"`
+	LastError     string    `json:"last_error,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// transferView enriches a record with display handles (buyer, peer) resolved locally. `beneficiary` is
+// the serving kernel's stable user id as stored — identity, not a locally-resolvable display handle.
+func (s *server) transferView(ctx context.Context, pt *kernel.PendingTransfer) pendingTransferView {
+	v := pendingTransferView{
+		ID: pt.ID, Status: pt.Status, PeerPublicKey: pt.PeerKey, Beneficiary: pt.Beneficiary,
+		Amount: pt.Amount, Reserve: pt.Reserve, StepID: pt.StepID, LastError: pt.LastError,
+		CreatedAt: pt.CreatedAt, UpdatedAt: pt.UpdatedAt,
+	}
+	if buyer, err := s.kernel.ResolveUser(ctx, pt.BuyerID); err == nil && buyer != nil {
+		v.BuyerHandle = buyer.Handle
+	}
+	if peer, err := s.kernel.ReadUserByPublicKey(ctx, pt.PeerKey); err == nil && peer != nil {
+		v.PeerHandle = peer.Handle
+	}
+	return v
+}
+
+// ctlListTransfers lists pending value-transfer records (§13 admin surface): an empty status returns the
+// unresolved records (pending + quarantined); an explicit status filters to that one.
+func (s *server) ctlListTransfers(w http.ResponseWriter, r *http.Request) {
+	limit, offset := listBounds(r)
+	pts, err := s.kernel.ListPendingTransfers(r.Context(), r.URL.Query().Get("status"), limit, offset)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	views := make([]pendingTransferView, 0, len(pts))
+	for _, pt := range pts {
+		views = append(views, s.transferView(r.Context(), pt))
+	}
+	writeJSON(w, http.StatusOK, views)
+}
+
+func (s *server) ctlShowTransfer(w http.ResponseWriter, r *http.Request) {
+	pt, err := s.kernel.ReadPendingTransfer(r.Context(), pathID(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.transferView(r.Context(), pt))
+}
+
+// ctlRetryTransfer re-presents the stored completion and returns the updated resource (§13). It is the
+// only mutation on the resource — quarantine means "evidence insufficient", not "operator may choose".
+func (s *server) ctlRetryTransfer(w http.ResponseWriter, r *http.Request) {
+	pt, err := s.kernel.ReadPendingTransfer(r.Context(), pathID(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	updated, err := s.retryPendingTransfer(r.Context(), pt)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.transferView(r.Context(), updated))
 }
 
 // peerStepsAwaitingUs lists the steps a peer holds for this kernel, for admin inspect (§13).
@@ -413,14 +674,18 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
 	handle := globalCfg.KernelHandle
 	var about string
-	if sys, err := s.kernel.ReadUserByHandle(ctx, "@sys"); err == nil && sys != nil {
+	if sys, err := s.kernel.ReadUserByHandle(ctx, "sys"); err == nil && sys != nil {
 		about = sys.Description
 	}
 	var addrs []string
 	if s.fed != nil {
 		addrs = s.fed.ListenAddrs()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"handle": handle, "public_key": pub, "about": about, "addrs": addrs})
+	gross, _ := s.kernel.GrossReceivables(ctx)
+	writeJSON(w, http.StatusOK, map[string]any{"handle": handle, "public_key": pub, "about": about, "addrs": addrs,
+		"exposure_max": globalCfg.ExposureMax, "settlement_trigger": globalCfg.SettlementTrigger,
+		"settlement_quantum": globalCfg.SettlementQuantum, "gross_receivables": gross,
+		"settlement_due": globalCfg.SettlementTrigger > 0 && gross >= globalCfg.SettlementTrigger})
 }
 
 func (s *server) ctlUnsubscribePeer(w http.ResponseWriter, r *http.Request) {

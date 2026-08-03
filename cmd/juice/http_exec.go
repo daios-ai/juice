@@ -233,6 +233,67 @@ func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, peerPublicKe
 // satisfies it. Keeping it an interface lets the fake in tests stand in without a real network.
 type federationTransport interface {
 	Call(ctx context.Context, peerKey string, req fed.CallRequest) (fed.CallResponse, error)
+	Resolve(ctx context.Context, peerKey string, req fed.ResolveRequest) (fed.ResolveResponse, error)
+	Settle(ctx context.Context, peerKey string, req fed.SettleRequest) (fed.SettleResponse, error)
+}
+
+// Settle implements kernel.FederationSettler over /juice/fed/settle/1 (§13): the debtor forwards one
+// signed round to the peer and returns its raw response body (a signed SettlementRecord) and status.
+func (e *httpActionExecutor) Settle(ctx context.Context, peerPublicKey, kind, timestamp, signature, settlementID string, amount int64, nonce string, record []byte) (int, []byte, error) {
+	if e.fedTransport == nil {
+		return 0, nil, kernel.ErrPeerUnreachable.Wrap("federation transport not running")
+	}
+	resp, err := e.fedTransport.Settle(ctx, peerPublicKey, fed.SettleRequest{
+		Kind: kind, Counterparty: e.localPubKey, Timestamp: timestamp, Signature: signature,
+		SettlementID: settlementID, Amount: amount, Nonce: nonce, Record: record,
+	})
+	if err != nil {
+		return 0, nil, kernel.ErrPeerUnreachable.Wrap("peer unreachable")
+	}
+	return resp.Status, resp.Body, nil
+}
+
+// ResolveRemoteAction / ResolveRemoteUser implement kernel.RemoteResolver over the transport's
+// /juice/fed/resolve/1 protocol (§13 subscription-free calls): fetch one signed manifest, or map a
+// user reference to its stable id+handle on the peer. A missing transport is ErrPeerUnreachable so
+// the kernel never treats "no network" as "action absent".
+func (e *httpActionExecutor) ResolveRemoteAction(ctx context.Context, peerPublicKey, owner, name string) (*kernel.ActionManifest, error) {
+	if e.fedTransport == nil {
+		return nil, kernel.ErrPeerUnreachable.Wrap("federation transport not running")
+	}
+	resp, err := e.fedTransport.Resolve(ctx, peerPublicKey, fed.ResolveRequest{Kind: "action", Owner: owner, Name: name})
+	if err != nil {
+		return nil, kernel.ErrPeerUnreachable.Wrap("peer unreachable")
+	}
+	if resp.Status != 200 {
+		return nil, kernel.ErrNotFound.Wrap("remote action not found")
+	}
+	var m kernel.ActionManifest
+	if err := json.Unmarshal(resp.Body, &m); err != nil {
+		return nil, kernel.ErrInvalidInput.Wrap("invalid remote manifest")
+	}
+	return &m, nil
+}
+
+func (e *httpActionExecutor) ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (string, string, error) {
+	if e.fedTransport == nil {
+		return "", "", kernel.ErrPeerUnreachable.Wrap("federation transport not running")
+	}
+	resp, err := e.fedTransport.Resolve(ctx, peerPublicKey, fed.ResolveRequest{Kind: "user", User: ref})
+	if err != nil {
+		return "", "", kernel.ErrPeerUnreachable.Wrap("peer unreachable")
+	}
+	if resp.Status != 200 {
+		return "", "", kernel.ErrNotFound.Wrap("remote user not found")
+	}
+	var body struct {
+		UserID string `json:"user_id"`
+		Handle string `json:"handle"`
+	}
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		return "", "", kernel.ErrInvalidInput.Wrap("invalid resolve response")
+	}
+	return body.UserID, body.Handle, nil
 }
 
 // executeFederationOverTransport is the transport-backed kernel.FederationExecutor. It signs the

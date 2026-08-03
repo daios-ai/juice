@@ -171,12 +171,12 @@ func extractFirstJSON(s string) string {
 	return s
 }
 
-// sanitizeToolName converts an action reference like "@sys/llm/chat" to a valid
-// Ollama/OpenAI function name "sys__llm__chat" by dropping the leading "@" and
-// replacing "/" with "__". Double underscore avoids collision with action names
-// that contain a single underscore (e.g. "@user/llm_chat" → "user__llm_chat").
+// sanitizeToolName converts an action reference like "sys/llm/chat" (or a kernel-qualified
+// "bob@acme/foo") to a valid Ollama/OpenAI function name by replacing "@" with "_at_" and "/"
+// with "__" — e.g. "sys__llm__chat", "bob_at_acme__foo". The nameToRef map restores the original
+// reference on decode, so the transform only needs to be injective across a single tool list.
 func sanitizeToolName(ref string) string {
-	s := strings.TrimPrefix(ref, "@")
+	s := strings.ReplaceAll(ref, "@", "_at_")
 	return strings.ReplaceAll(s, "/", "__")
 }
 

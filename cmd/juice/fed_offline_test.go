@@ -72,7 +72,7 @@ func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	ctx := context.Background()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	key := base64.RawURLEncoding.EncodeToString(pub)
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,12 +136,12 @@ func listPeersResp(t *testing.T, srv *server, all bool) []map[string]any {
 func TestListPeersHidesSuspended(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedPeer(t, k, "@peer-live")
-	_, goneKey := seedPeer(t, k, "@peer-gone")
+	seedPeer(t, k, "peer-live")
+	_, goneKey := seedPeer(t, k, "peer-gone")
 	gone, _ := k.ReadUserByPublicKey(ctx, goneKey)
 	if err := k.SuspendUser(ctx, sys.ID, gone.ID); err != nil {
 		t.Fatal(err)
@@ -149,7 +149,7 @@ func TestListPeersHidesSuspended(t *testing.T) {
 	srv := &server{kernel: k, log: log.Discard()}
 
 	def := listPeersResp(t, srv, false)
-	if len(def) != 1 || def[0]["handle"] != "@peer-live" {
+	if len(def) != 1 || def[0]["handle"] != "peer-live" {
 		t.Fatalf("default peers should list only the active peer, got %v", def)
 	}
 	if all := listPeersResp(t, srv, true); len(all) != 2 {
@@ -161,7 +161,7 @@ func TestListPeersHidesSuspended(t *testing.T) {
 // last-known actions plus reachability=unreachable, not an opaque failure (§13).
 func TestInspectOfflineFriendedShowsLocalData(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
-	handle, _ := seedPeer(t, k, "@peer-off")
+	handle, _ := seedPeer(t, k, "peer-off")
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{reachPath: "unreachable"}}
 
 	out := inspectResp(t, srv, handle)
@@ -182,13 +182,13 @@ func TestInspectOfflineFriendedShowsLocalData(t *testing.T) {
 func TestInspectLocalUserRejected(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
-	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@chat", Password: "pw"}); err != nil {
+	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "chat", Password: "pw"}); err != nil {
 		t.Fatal(err)
 	}
 	// fed is present so the guard, not a missing transport, is what rejects.
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{reachPath: "direct"}}
 
-	req := httptest.NewRequest("GET", "/control/peers/inspect?key="+url.QueryEscape("@chat"), nil)
+	req := httptest.NewRequest("GET", "/control/peers/inspect?key="+url.QueryEscape("chat"), nil)
 	rec := httptest.NewRecorder()
 	srv.ctlInspectPeer(rec, req)
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -200,7 +200,7 @@ func TestInspectLocalUserRejected(t *testing.T) {
 
 	// An @handle that names nothing at all is "no peer" (404), not a key to probe: a stranger is
 	// inspected by key, never by an unfriended handle.
-	req = httptest.NewRequest("GET", "/control/peers/inspect?key="+url.QueryEscape("@nope"), nil)
+	req = httptest.NewRequest("GET", "/control/peers/inspect?key="+url.QueryEscape("nope"), nil)
 	rec = httptest.NewRecorder()
 	srv.ctlInspectPeer(rec, req)
 	if rec.Code != http.StatusNotFound {
@@ -213,13 +213,13 @@ func TestInspectLocalUserRejected(t *testing.T) {
 func TestUnsubscribeLocalUserRejected(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
-	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@chat", Password: "pw"}); err != nil {
+	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "chat", Password: "pw"}); err != nil {
 		t.Fatal(err)
 	}
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	srv := &server{kernel: k, log: log.Discard()}
 
-	body, _ := json.Marshal(map[string]string{"handle": "@chat"})
+	body, _ := json.Marshal(map[string]string{"handle": "chat"})
 	req := httptest.NewRequest("POST", "/control/peers/unsubscribe", bytes.NewReader(body))
 	req = req.WithContext(context.WithValue(req.Context(), ctxCallerID, sys.ID))
 	rec := httptest.NewRecorder()
@@ -248,13 +248,15 @@ func TestInspectOfflineStranger(t *testing.T) {
 // TestInspectOnlineLive: a reachable peer yields live identity/actions with source=live.
 func TestInspectOnlineLive(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	livekey := base64.RawURLEncoding.EncodeToString(pub)
 	doc, _ := json.Marshal(kernel.GossipResponse{
-		Handle: "@live-peer", PublicKey: "livekey",
-		Actions: []kernel.GossipAction{{ActionID: "a", Name: "@live-peer/x", Price: 3}},
+		Handle: "live-peer", PublicKey: livekey,
+		Actions: []kernel.GossipAction{{ActionID: "a", Name: "live-peer/x", Price: 3}},
 	})
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{inspectDoc: doc, reachPath: "direct"}}
 
-	out := inspectResp(t, srv, "livekey")
+	out := inspectResp(t, srv, livekey)
 	if out["source"] != "live" || out["online"] != true {
 		t.Errorf("live: source=%v online=%v, want live/true", out["source"], out["online"])
 	}
@@ -270,7 +272,7 @@ func TestInspectOnlineLive(t *testing.T) {
 func TestInspectPersistsPeerSync(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
-	handle, key := seedPeer(t, k, "@peer-sync")
+	handle, key := seedPeer(t, k, "peer-sync")
 
 	// A freshly seeded peer has no sync cache yet (its proxies read offline).
 	before, _ := k.ReadUserByPublicKey(ctx, key)
@@ -317,8 +319,8 @@ func TestSubscribeOfflineClearError(t *testing.T) {
 // transport absent (offline), proving it never depends on reaching the peer.
 func TestUnsubscribeWorksWithNoTransport(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
-	handle, _ := seedPeer(t, k, "@peer-unf")
-	sys, _ := k.ReadUserByHandle(context.Background(), "@sys")
+	handle, _ := seedPeer(t, k, "peer-unf")
+	sys, _ := k.ReadUserByHandle(context.Background(), "sys")
 	srv := &server{kernel: k, log: log.Discard(), fed: nil} // transport down
 
 	body, _ := json.Marshal(map[string]string{"handle": handle})
@@ -341,17 +343,17 @@ func TestResubscribeReactivatesProxy(t *testing.T) {
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	key := base64.RawURLEncoding.EncodeToString(pub)
-	sys, err := k.ReadUserByHandle(ctx, "@sys")
+	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer, err := k.AddPeer(ctx, sys.ID, "@peer-rf", key)
+	peer, err := k.AddPeer(ctx, sys.ID, "peer-rf", key)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	m := kernel.ActionManifest{
-		ActionID: "act-1", OwnerHandle: "@peer-rf", Name: "greet", Description: "greet",
+		ActionID: "act-1", OwnerHandle: "peer-rf", Name: "greet", Description: "greet",
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "sha256-x", Stats: &kernel.Stats{},
 		UpdatedAt: time.Now(),
@@ -400,7 +402,7 @@ func TestResubscribeReactivatesProxy(t *testing.T) {
 func peerStepServer(t *testing.T, f *fakeFed) (*server, string) {
 	t.Helper()
 	k, _ := newRemoteTestKernel(t)
-	handle, _ := seedPeer(t, k, "@peer-steps")
+	handle, _ := seedPeer(t, k, "peer-steps")
 	return &server{kernel: k, log: log.Discard(), fed: f}, handle
 }
 
@@ -414,7 +416,7 @@ func TestCompletePeerStep_DerivesTheIdempotencyKey(t *testing.T) {
 
 	key := func(stepID string, input string) string {
 		t.Helper()
-		if _, err := srv.completePeerStep(ctx, handle, stepID, json.RawMessage(input)); err != nil {
+		if _, err := srv.completePeerStep(ctx, handle, stepID, json.RawMessage(input), "", ""); err != nil {
 			t.Fatalf("completePeerStep: %v", err)
 		}
 		return f.lastStep.IdempotencyKey
@@ -445,7 +447,7 @@ func TestCompletePeerStep_SignsTheBytesItSends(t *testing.T) {
 	srv, handle := peerStepServer(t, f)
 
 	pretty := json.RawMessage("{\n  \"city\": \"Rio\",\n  \"note\": \"a<b&c\"\n}")
-	if _, err := srv.completePeerStep(context.Background(), handle, "s1", pretty); err != nil {
+	if _, err := srv.completePeerStep(context.Background(), handle, "s1", pretty, "", ""); err != nil {
 		t.Fatalf("completePeerStep: %v", err)
 	}
 
@@ -485,7 +487,7 @@ func TestCompletePeerStep_DistinguishesNeverSentFromMayHaveRun(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, handle := peerStepServer(t, tc.fed)
-			_, err := srv.completePeerStep(context.Background(), handle, "s1", json.RawMessage(`{}`))
+			_, err := srv.completePeerStep(context.Background(), handle, "s1", json.RawMessage(`{}`), "", "")
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("got %v, want %v", err, tc.want)
 			}

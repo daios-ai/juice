@@ -91,6 +91,8 @@ func TestValidateRedirectHostAllowed(t *testing.T) {
 // envelope-parsing + result/receipt extraction in executeFederationOverTransport is testable
 // without a network.
 type fakeFedCaller struct {
+	resolveResp fed.ResolveResponse
+	settleResp  fed.SettleResponse
 	resp    fed.CallResponse
 	err     error
 	lastReq fed.CallRequest
@@ -99,6 +101,14 @@ type fakeFedCaller struct {
 func (f *fakeFedCaller) Call(_ context.Context, _ string, req fed.CallRequest) (fed.CallResponse, error) {
 	f.lastReq = req
 	return f.resp, f.err
+}
+
+func (f *fakeFedCaller) Resolve(_ context.Context, _ string, _ fed.ResolveRequest) (fed.ResolveResponse, error) {
+	return f.resolveResp, f.err
+}
+
+func (f *fakeFedCaller) Settle(_ context.Context, _ string, _ fed.SettleRequest) (fed.SettleResponse, error) {
+	return f.settleResp, f.err
 }
 
 func TestExecuteFederationSuccess(t *testing.T) {
@@ -112,7 +122,7 @@ func TestExecuteFederationSuccess(t *testing.T) {
 	}
 	fr, err := executeFederationOverTransport(context.Background(), fc, signer,
 		base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)),
-		"peerkey", "@owner/act", "key-123", map[string]any{})
+		"peerkey", "owner/act", "key-123", map[string]any{})
 	if err != nil {
 		t.Fatalf("executeFederationOverTransport: %v", err)
 	}
@@ -131,7 +141,7 @@ func TestExecuteFederationSuccess(t *testing.T) {
 func TestExecuteFederationNon200(t *testing.T) {
 	// A non-200 with no parseable receipt → no receipt, status propagated (caller stays pending).
 	fc := &fakeFedCaller{resp: fed.CallResponse{Status: 500, Body: []byte(`error`)}}
-	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", "@o/a", "key-x", map[string]any{})
+	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", "o/a", "key-x", map[string]any{})
 	if err != nil {
 		t.Fatalf("executeFederationOverTransport: unexpected error: %v", err)
 	}
@@ -147,7 +157,7 @@ func TestExecuteFederationNon200(t *testing.T) {
 // A plain (post-connect) error is NOT NotDispatched: the request may have executed remotely.
 func TestExecuteFederationTransportError(t *testing.T) {
 	fc := &fakeFedCaller{err: fmt.Errorf("unreachable")}
-	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", "@o/a", "key-y", map[string]any{})
+	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", "o/a", "key-y", map[string]any{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -160,7 +170,7 @@ func TestExecuteFederationTransportError(t *testing.T) {
 // dispatch can fail fast (§13). The nil-transport executor is the same provably-never-sent case.
 func TestExecuteFederationNotDispatched(t *testing.T) {
 	fc := &fakeFedCaller{err: fmt.Errorf("%w: cannot resolve", fed.ErrNotDispatched)}
-	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", "@o/a", "key-z", map[string]any{})
+	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", "o/a", "key-z", map[string]any{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -170,7 +180,7 @@ func TestExecuteFederationNotDispatched(t *testing.T) {
 
 	// nil transport → provably never sent.
 	e := &httpActionExecutor{}
-	fr2, err := e.ExecuteFederation(context.Background(), "peer", "@o/a", "key-w", map[string]any{})
+	fr2, err := e.ExecuteFederation(context.Background(), "peer", "o/a", "key-w", map[string]any{})
 	if err != nil {
 		t.Fatalf("nil-transport ExecuteFederation: %v", err)
 	}

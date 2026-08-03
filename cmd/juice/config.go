@@ -53,16 +53,22 @@ type NativeWebConfig struct {
 	UserAgent string `json:"user_agent"`
 }
 
+// NativeTransferConfig holds configuration for the @sys/transfer native action.
+type NativeTransferConfig struct {
+	Price int64 `json:"price"`
+}
+
 // NativeConfig holds per-action configuration for all native actions.
 type NativeConfig struct {
-	LLM     NativeLLMConfig     `json:"llm"`
-	Lookup  NativeLookupConfig  `json:"lookup"`
-	Time    NativeTimeConfig    `json:"time"`
-	Sink    NativeSinkConfig    `json:"sink"`
-	Message NativeMessageConfig `json:"message"`
-	Random  NativeRandomConfig  `json:"random"`
-	Web     NativeWebConfig     `json:"web"`
-	TinyGo  NativeTinyGoConfig  `json:"tinygo"`
+	LLM      NativeLLMConfig      `json:"llm"`
+	Lookup   NativeLookupConfig   `json:"lookup"`
+	Time     NativeTimeConfig     `json:"time"`
+	Sink     NativeSinkConfig     `json:"sink"`
+	Message  NativeMessageConfig  `json:"message"`
+	Random   NativeRandomConfig   `json:"random"`
+	Web      NativeWebConfig      `json:"web"`
+	TinyGo   NativeTinyGoConfig   `json:"tinygo"`
+	Transfer NativeTransferConfig `json:"transfer"`
 }
 
 // ServerConfig holds all non-secret runtime configuration.
@@ -73,7 +79,11 @@ type ServerConfig struct {
 	ScriptTimeoutMS            int64        `json:"script_timeout_ms"`
 	ScriptMemoryBytes          int64        `json:"script_memory_bytes"`
 	FeeBPS                     int64        `json:"fee_bps"`
-	ImportBPS                  int64        `json:"import_bps"`
+	RemoteBPS                  int64        `json:"remote_bps"`         // serving-side markup on inbound remote calls (§13)
+	ImportBPS                  int64        `json:"import_bps"`         // origin-side import fee on outbound remote calls, retained locally (§13)
+	ExposureMax                int64        `json:"exposure_max"`       // X: max gross unsecured receivables across all peers (§13); 0 = prepaid-only
+	SettlementTrigger          int64        `json:"settlement_trigger"` // Y: gross-receivables level flagging settlement_due (§13); 0 < Y < X when X > 0
+	SettlementQuantum          int64        `json:"settlement_quantum"` // Q: smallest fee-rational external payment (§13); 0 disables the probabilistic path
 	TokenTTL                   string       `json:"token_ttl"`
 	AuthIssuer                 string       `json:"auth_issuer"`
 	AuthAudience               string       `json:"auth_audience"`
@@ -132,13 +142,22 @@ func DefaultServerConfig() ServerConfig {
 			Sink:    NativeSinkConfig{Price: 0},
 			Message: NativeMessageConfig{Price: 0},
 			Random:  NativeRandomConfig{Price: 0},
-			Web:     NativeWebConfig{Price: 0, UserAgent: "juice-kernel/0.4 (+https://github.com/daios-ai/juice)"},
-			TinyGo:  NativeTinyGoConfig{Price: 5},
+			Web:      NativeWebConfig{Price: 0, UserAgent: "juice-kernel/0.4 (+https://github.com/daios-ai/juice)"},
+			TinyGo:   NativeTinyGoConfig{Price: 5},
+			Transfer: NativeTransferConfig{Price: 0},
 		},
 		ScriptTimeoutMS:   10000,
 		ScriptMemoryBytes: 64 * 1024 * 1024,
-		FeeBPS:            2000,
-		ImportBPS:         500,
+		FeeBPS:    2000,
+		RemoteBPS: 500,
+		ImportBPS: 500,
+		// A fresh kernel serves remote paid calls out of the box (§13): X=1000 caps the total
+		// unsecured credit it extends across all peers (a bounded, Sybil-proof maximum loss),
+		// flagged for settlement at Y=500. Set exposure_max=0 to opt into prepaid-only. Q stays 0
+		// (rail-dependent; the operator sets it from F/r to enable the probabilistic residual path).
+		ExposureMax:       1000,
+		SettlementTrigger: 500,
+		SettlementQuantum: 0,
 		TokenTTL:          "15m",
 		AuthIssuer:        "",
 		AuthAudience:      "",

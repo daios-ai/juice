@@ -220,7 +220,7 @@ func TestReceiptSigningRequiresConfiguredKey(t *testing.T) {
 		ReplyJSON: json.RawMessage(`{}`),
 		Status:    TxSuccess,
 		EndedAt:   time.Now().UTC(),
-	}, 0)
+	}, 0, 0, 0, 0, "")
 	if !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
 	}
@@ -242,7 +242,7 @@ func TestRatingSigningRequiresConfiguredKey(t *testing.T) {
 func TestRemoteManifestHashIncludesKindAndArtifact(t *testing.T) {
 	base := ActionManifest{
 		ActionID:     "act-1",
-		OwnerHandle:  "@peer",
+		OwnerHandle:  "peer",
 		Name:         "svc",
 		Description:  "test",
 		Kind:         KindHTTP,
@@ -485,12 +485,12 @@ func TestConnectionKeyDerivation(t *testing.T) {
 
 func TestSelectorParsingAndSegmentMatch(t *testing.T) {
 	cases := []struct{ sel, owner, path string }{
-		{"@tom", "@tom", ""},
-		{"@tom/brief", "@tom", "brief"},
-		{"@tom/brief/eu", "@tom", "brief/eu"},
-		{"@tom/*", "@tom", ""},
-		{"@tom/brief/*", "@tom", "brief"},
-		{"tom/brief", "@tom", "brief"}, // missing @ tolerated
+		{"tom", "tom", ""},
+		{"tom/brief", "tom", "brief"},
+		{"tom/brief/eu", "tom", "brief/eu"},
+		{"tom/*", "tom", ""},
+		{"tom/brief/*", "tom", "brief"},
+		{"tom/brief", "tom", "brief"}, // missing @ tolerated
 	}
 	for _, c := range cases {
 		o, p, err := ParseGrantSelector(c.sel)
@@ -552,5 +552,96 @@ func TestParseOpenAPISpecRejectsInvalidPrice(t *testing.T) {
 		if len(rejected) != 1 || rejected[0].Reason != tc.reason {
 			t.Errorf("price=%s: expected rejection %q, got %+v", tc.price, tc.reason, rejected)
 		}
+	}
+}
+
+// TestSettleOutcomeAndPayloads exercises the residual-settlement primitives (§13): the fair outcome
+// function's determinism, boundaries, and E[pay]≈d/Q distribution; the creditor record sign/verify
+// roundtrip with tamper detection; and the disjointness of the settle_open / settle_finish scopes.
+func TestSettleOutcomeAndPayloads(t *testing.T) {
+	// Deterministic in (id, s, n, Q, d).
+	if settleOutcome("sid", "secret", "nonce", 100, 40) != settleOutcome("sid", "secret", "nonce", 100, 40) {
+		t.Fatal("settleOutcome is not deterministic")
+	}
+	// d=0 never pays; d=Q always pays (the whole probability mass).
+	if settleOutcome("sid", "secret", "nonce", 100, 0) {
+		t.Error("d=0 must never pay")
+	}
+	if !settleOutcome("sid", "secret", "nonce", 100, 100) {
+		t.Error("d=Q must always pay")
+	}
+	// Empirical E[pay] ≈ d/Q over many nonces (EV-exactness of the mechanism).
+	const Q, d, N = int64(100), int64(30), 20000
+	pays := 0
+	for i := 0; i < N; i++ {
+		if settleOutcome("sid", "secret", fmt.Sprint(i), Q, d) {
+			pays++
+		}
+	}
+	if frac := float64(pays) / N; frac < 0.27 || frac > 0.33 {
+		t.Errorf("empirical pay fraction %.3f, want ≈0.30 (d/Q)", frac)
+	}
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	creditor := base64.RawURLEncoding.EncodeToString(pub)
+
+	// Record sign/verify roundtrip with tamper detection.
+	k := &Kernel{cfg: Config{SigningKey: priv}}
+	rec := &SettlementRecord{
+		SettlementID: "sid", Creditor: creditor, Debtor: "debtor-key", Amount: 3, Quantum: 10,
+		Mode: "probabilistic", Commitment: "abc", ExpiresAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
+	}
+	if err := k.signSettlementRecord(rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifySettlementRecord(rec, creditor); err != nil {
+		t.Fatalf("record should verify: %v", err)
+	}
+	rec.Amount = 4 // tamper
+	if err := verifySettlementRecord(rec, creditor); err == nil {
+		t.Error("a tampered record must not verify")
+	}
+
+	// Scope disjointness: a signature over settle_open must not verify as settle_finish (§12).
+	sig, err := signJCS(priv, settleOpenPayload("c", "r", "sid", 5, "ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyJCS(pub, settleOpenPayload("c", "r", "sid", 5, "ts"), sig); err != nil {
+		t.Fatalf("settle_open should verify against itself: %v", err)
+	}
+	if err := verifyJCS(pub, settleFinishPayload("c", "r", "sid", "5", "ts"), sig); err == nil {
+		t.Error("a settle_open signature must not verify as settle_finish (disjoint scopes)")
+	}
+}
+
+// TestRemoteReceiptInvalidValue: the origin quarantines a transfer receipt that short-changes the
+// beneficiary, misprices the premium, or delivers value on a failure (§13 value transfer).
+func TestRemoteReceiptInvalidValue(t *testing.T) {
+	replyHash, _ := jcsHashStr("null")
+	const rbps, mp, sent = int64(500), int64(0), int64(100)
+	// Valid success transfer (the un-folded two-channel model): charge 0 ⇒ execution premium 0; value
+	// 100 ⇒ value_premium ceil(100*500/1e4)=5, computed separately.
+	if got := remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: 0, Value: 100, Premium: 0, ValuePremium: 5, ReplyHash: replyHash}, mp, rbps, sent, []byte("null")); got != "" {
+		t.Errorf("valid transfer receipt rejected: %s", got)
+	}
+	// Delivered value != sent (short-changed beneficiary).
+	if remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: 0, Value: 50, Premium: 0, ValuePremium: 3, ReplyHash: replyHash}, mp, rbps, sent, []byte("null")) == "" {
+		t.Error("value != sent must be quarantined")
+	}
+	// Value premium not levied on the delivered value.
+	if remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: 0, Value: 100, Premium: 0, ValuePremium: 0, ReplyHash: replyHash}, mp, rbps, sent, []byte("null")) == "" {
+		t.Error("wrong value_premium must be quarantined")
+	}
+	// Execution premium not levied on the charge (charge 0 ⇒ premium must be 0).
+	if remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: 0, Value: 100, Premium: 5, ValuePremium: 5, ReplyHash: replyHash}, mp, rbps, sent, []byte("null")) == "" {
+		t.Error("wrong execution premium must be quarantined")
+	}
+	// A failed transfer must deliver nothing.
+	if remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0, Value: 100}, mp, rbps, sent, nil) == "" {
+		t.Error("failure with delivered value must be quarantined")
+	}
+	if remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0, Value: 0}, mp, rbps, sent, nil) != "" {
+		t.Error("failure with no value must settle")
 	}
 }

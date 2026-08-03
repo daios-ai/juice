@@ -17,7 +17,7 @@ const (
 	configKeySuperuser      = "superuser_handle"
 	configKeySigningPublic  = "signing_public_key"
 	configKeySigningPrivate = "signing_private_key"
-	superuserHandle         = "@sys"
+	superuserHandle         = "sys"
 )
 
 // bootstrap runs idempotent startup tasks before the server accepts requests.
@@ -153,6 +153,7 @@ func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 type sysNativeSpec struct {
 	name         string
 	price        int64
+	effect       string // privileged execution effect ("transfer"); empty for an ordinary native (§13)
 	description  string
 	inputSchema  map[string]any
 	outputSchema map[string]any
@@ -173,12 +174,13 @@ func ensureSysNative(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 			Name:        spec.name,
 			Kind:        kernel.KindNative,
 			Price:       spec.price,
+			Effect:      spec.effect,
 		})
 		if err != nil {
 			return fmt.Errorf("create @sys/%s: %w", spec.name, err)
 		}
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID, spec.description, spec.inputSchema, spec.outputSchema, spec.price); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, spec.description, spec.inputSchema, spec.outputSchema, spec.price, spec.effect); err != nil {
 		return fmt.Errorf("activate @sys/%s: %w", spec.name, err)
 	}
 	return nil
@@ -390,6 +392,27 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 				"properties": map[string]any{
 					"step_id": map[string]any{"type": "string", "description": "ID of the created step"},
 				},
+			},
+		},
+		{
+			name:        "transfer",
+			price:       cfg.Transfer.Price,
+			effect:      "transfer",
+			description: "Transfers credits from the caller to another user. The target may be local (a handle) or a remote transfer action (sys@<kernel>/transfer with a local target on that kernel); a cross-kernel transfer settles through the federation receipt/exposure system (§13). The value is funded from the immediate caller's own balance and delivered by a deferred, receipt-backed transfer effect.",
+			inputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"target": map[string]any{"type": "string", "description": "Recipient: a local handle, or (when calling sys@<kernel>/transfer) a bare handle on that kernel"},
+					"amount": map[string]any{"type": "integer", "description": "Amount of credits to transfer (positive integer)"},
+				},
+				"required": []string{"target", "amount"},
+			},
+			outputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"amount": map[string]any{"type": "integer", "description": "Amount transferred"},
+				},
+				"required": []string{"amount"},
 			},
 		},
 		{

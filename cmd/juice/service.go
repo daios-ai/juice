@@ -752,7 +752,9 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 	if err != nil {
 		return nil, err
 	}
-	callerUser, err := resolveHandle(k, ctx, p.RequiredCaller)
+	// RequiredCaller may be a local handle or a remote user@kernel (§13): resolve to the routing
+	// account id plus the completer's stable remote id (empty for a local recipient).
+	requiredCallerID, remoteID, err := k.ResolveRequiredCaller(ctx, p.RequiredCaller)
 	if err != nil {
 		return nil, fmt.Errorf("required_caller not found: %w", err)
 	}
@@ -763,13 +765,11 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 			return nil, err
 		}
 	}
-	step, err := k.CreateStep(ctx, p.TraceID, action.ID, p.PartialArgs, callerUser.ID)
+	step, err := k.CreateStep(ctx, p.TraceID, action.ID, p.PartialArgs, requiredCallerID, remoteID)
 	if err != nil {
 		return nil, err
 	}
-	uc := newUserCache(k, ctx)
-	uc.m[callerUser.ID] = callerUser // already resolved; avoid a redundant read
-	return enrichStep(k, ctx, step, action, uc), nil
+	return enrichStep(k, ctx, step, action, newUserCache(k, ctx)), nil
 }
 
 func listSteps(k *kernel.Kernel, ctx context.Context, callerID, processID, status string, limit, offset int) ([]*stepWithAction, error) {
@@ -873,17 +873,23 @@ func checkFederationTimestamp(tsStr string) error {
 // action ref (it names a local owner), created_by, owner_handle, and every trace/action/tx id —
 // is local composition detail the completer does not need in order to complete.
 type peerStepView struct {
-	ID           string          `json:"id"`
-	PartialArgs  json.RawMessage `json:"partial_args,omitempty"`
-	AllowedInput map[string]any  `json:"allowed_input,omitempty"`
-	Price        int64           `json:"price"`
-	CreatedAt    time.Time       `json:"created_at"`
+	ID           string                    `json:"id"`
+	PartialArgs  json.RawMessage           `json:"partial_args,omitempty"`
+	AllowedInput map[string]any            `json:"allowed_input,omitempty"`
+	Price        int64                     `json:"price"`
+	Payment      *kernel.PaymentDescriptor `json:"payment,omitempty"` // present iff this is a payment step (§13)
+	CreatedAt    time.Time                 `json:"created_at"`
 }
 
-func newPeerStepView(s *kernel.Step, action *kernel.Action) *peerStepView {
+func newPeerStepView(ctx context.Context, k *kernel.Kernel, s *kernel.Step, action *kernel.Action) *peerStepView {
 	v := &peerStepView{ID: s.ID, PartialArgs: s.PartialArgs, Price: s.Price, CreatedAt: s.CreatedAt}
 	if action != nil {
 		v.AllowedInput = kernel.DeriveAllowedSchema(action.InputSchema, s.PartialArgs)
+		// A payment step (effect-bearing action) carries the payment descriptor so the buyer can fund the
+		// value channel and bind it into the completion (§13). Silently absent otherwise.
+		if d, err := k.BuildPaymentDescriptor(ctx, action, s.PartialArgs); err == nil && d != nil {
+			v.Payment = d
+		}
 	}
 	return v
 }
@@ -925,7 +931,7 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	views := make([]*peerStepView, len(steps))
 	for i, s := range steps {
 		action, _ := k.ReadAction(ctx, s.ActionID)
-		views[i] = newPeerStepView(s, action)
+		views[i] = newPeerStepView(ctx, k, s, action)
 	}
 	body := map[string]any{"steps": views}
 	// A full page means more may be waiting. One honest flag, no continuation: this queue holds
@@ -939,7 +945,7 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 // handleFederationStepComplete resumes a waiting step on behalf of the requesting peer (§10, §13).
 // Unlike a call, the requester parks nothing locally — the step's price was parked here at creation
 // — so failures are plain typed errors: there is no remote trace awaiting a signed rejection.
-func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, stepID, sigStr string, rawInput []byte) (int, map[string]any, error) {
+func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, stepID, sigStr string, rawInput []byte, forUserID, userAttestation, userTimestamp string) (int, map[string]any, error) {
 	if err := checkFederationTimestamp(tsStr); err != nil {
 		return 0, nil, err
 	}
@@ -958,6 +964,36 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 	}
 	if peer == nil || peer.PublicKey == "" {
 		return 0, nil, kernel.ErrUnauthorized.Wrap("unknown peer")
+	}
+
+	// If the step is addressed to a specific remote user (§13), require and verify a home-kernel
+	// step_auth attestation naming that user. A missing attestation is a pre-upgrade home kernel,
+	// reported as a typed unauthorized so the requester can surface "upgrade required" rather than a
+	// generic failure. A kernel-level step (no remote id) keeps today's wire/behavior unchanged.
+	if remoteID, rerr := k.StepRemoteRequiredCaller(ctx, stepID); rerr == nil && remoteID != nil {
+		if forUserID == "" || userAttestation == "" || userTimestamp == "" {
+			return 0, nil, kernel.ErrUnauthorized.Wrap("this step requires a home-kernel user attestation (upgrade required)")
+		}
+		if err := checkFederationTimestamp(userTimestamp); err != nil {
+			return 0, nil, err
+		}
+		if err := kernel.VerifyStepAuthSignature(cpPubKey, cpPubKey, self, forUserID, stepID, userTimestamp, userAttestation); err != nil {
+			return 0, nil, err
+		}
+		if forUserID != *remoteID {
+			return 0, nil, kernel.ErrUnauthorized.Wrap("attested user is not the step's required caller")
+		}
+	}
+
+	// Payment binding (§13): fold the step's OWN payment-descriptor hash into the expected idempotency
+	// key and require the presented key to match, so a payment step cannot be completed for a different
+	// (or no) payment — the key is already inside the signed step payload, so binding it here binds the
+	// whole completion. A non-payment step has paymentHash="" — identical to the base key (back-compat
+	// within the federation line).
+	paymentHash := k.StepPaymentHash(ctx, stepID)
+	expectedKey := sha256HexBytes([]byte("juice/fed/step/1|" + self + "|" + stepID + "|" + sha256HexBytes(rawInput) + "|" + paymentHash))
+	if idempotencyKey != expectedKey {
+		return 0, nil, kernel.ErrUnauthorized.Wrap("idempotency key does not match the step's payment binding")
 	}
 
 	now := time.Now().UTC()
@@ -1114,9 +1150,14 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 		}
 	}
 
-	ownerHandle, actionName, err := kernel.ParseActionRef(actionParam)
+	// The inbound wire ref is a local action on this (the serving) kernel: owner/name, tolerant of a
+	// legacy leading "@". A kernel-qualified ref would name a third kernel and is not executable here.
+	r, err := kernel.ParseActionRef(actionParam)
 	if err != nil {
 		return 0, nil, err
+	}
+	if !r.Local() {
+		return 0, nil, kernel.ErrNotFound.Wrapf("action %s not found", actionParam)
 	}
 
 	var args map[string]any
@@ -1124,11 +1165,11 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 		return 0, nil, kernel.ErrInvalidInput.Wrap("invalid JSON")
 	}
 
-	owner, err := k.ReadUserByHandle(ctx, ownerHandle)
+	owner, err := k.ReadUserByHandle(ctx, r.Owner)
 	if err != nil || owner == nil {
 		return 0, nil, kernel.ErrNotFound.Wrap("action owner not found")
 	}
-	action, err := k.ReadActionByOwnerName(ctx, owner.ID, actionName)
+	action, err := k.ReadActionByOwnerName(ctx, owner.ID, r.Name)
 	if err != nil || action == nil {
 		return 0, nil, kernel.ErrNotFound.Wrapf("action %s not found", actionParam)
 	}
@@ -1164,7 +1205,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 		return 0, nil, kernel.ErrInvalidState.Wrap("idempotency check failed")
 	}
 
-	reply, callErr := k.RunFederated(ctx, counterparty.ID, owner.ID, actionName, args, rec.ID)
+	reply, callErr := k.RunFederated(ctx, counterparty.ID, owner.ID, r.Name, args, rec.ID)
 	if callErr != nil {
 		errJSON, _ := json.Marshal(map[string]string{
 			"error": callErr.Error(),
@@ -1189,8 +1230,11 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 		// zero-charge rejection receipt so the caller can settle locally without leaving the
 		// trace pending.
 		status, msg := http.StatusUnprocessableEntity, callErr.Error()
-		if errors.Is(callErr, kernel.ErrInsufficientFunds) {
-			status, msg = http.StatusPaymentRequired, "insufficient balance"
+		// Insufficient prepaid balance or exhausted global exposure (§13) both surface to the caller as
+		// a 402 so its settleRemoteCall attributes them to the operator (settle/deposit), never to the
+		// caller's own funds.
+		if errors.Is(callErr, kernel.ErrInsufficientFunds) || errors.Is(callErr, kernel.ErrPeerUnfunded) {
+			status, msg = http.StatusPaymentRequired, "global exposure exhausted"
 		}
 		if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey, msg); signErr == nil {
 			receiptJSON, _ := json.Marshal(receipt)

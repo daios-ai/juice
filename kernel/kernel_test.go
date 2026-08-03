@@ -157,7 +157,7 @@ func setupLocalAction(t *testing.T, st kernel.Store, ownerID, name string, price
 // Call this in any test that invokes RegisterRemoteKernel or ImportRemoteAction.
 func setupSys(t *testing.T, _ *kernel.Kernel, st kernel.Store) *kernel.User {
 	t.Helper()
-	return setupUser(t, st, "@sys", 0)
+	return setupUser(t, st, "sys", 0)
 }
 
 func setupProcess(t *testing.T, st kernel.Store, ownerID string, funds int64) *kernel.Process {
@@ -202,7 +202,7 @@ func beginTestRun(t *testing.T, st kernel.Store, callerID string, action *kernel
 		CallerUserID:  callerID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := st.BeginRun(ctx, p, tr, callerID, action.Price); err != nil {
+	if err := st.BeginRun(ctx, p, tr, callerID, action.Price, 0, 0); err != nil {
 		t.Fatalf("beginTestRun: %v", err)
 	}
 	return p, tr
@@ -227,7 +227,7 @@ func setupOrphanTrace(t *testing.T, st kernel.Store, ownerID, actionOwnerID, cal
 		CallerUserID:  callerID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := st.BeginRun(ctx, p, tr, ownerID, 0); err != nil {
+	if err := st.BeginRun(ctx, p, tr, ownerID, 0, 0, 0); err != nil {
 		t.Fatalf("setupOrphanTrace: %v", err)
 	}
 	return p, tr
@@ -271,7 +271,7 @@ func TestCreateNativeActionRejected(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@owner", 0)
+	owner := setupUser(t, st, "owner", 0)
 	_, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
 		Name:        "native-attempt",
@@ -287,7 +287,7 @@ func TestNativeActionNormalLifecycleRejected(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@sys", 0)
+	owner := setupUser(t, st, "sys", 0)
 	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
 		Name:        "native",
@@ -326,7 +326,7 @@ func (b64Box) Open(_, ciphertext string) (string, error) {
 func TestAuthCredentialsRequireSecretBox(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	owner := setupUser(t, st, "@svcowner", 0)
+	owner := setupUser(t, st, "svcowner", 0)
 	req := kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
 		Name:         "svc",
@@ -367,7 +367,7 @@ func TestActivateWasmActionFromArtifactOnly(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
-	owner := setupUser(t, st, "@wasm-owner", 0)
+	owner := setupUser(t, st, "wasm-owner", 0)
 
 	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
@@ -406,7 +406,7 @@ func TestActivateNativeActionBootstrapPath(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@sys", 0)
+	owner := setupUser(t, st, "sys", 0)
 	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
 		Name:        "native",
@@ -421,7 +421,7 @@ func TestActivateNativeActionBootstrapPath(t *testing.T) {
 	desc := "A native action"
 	in := map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string", "description": "x"}}}
 	out := map[string]any{"type": "object"}
-	if err := k.ActivateNativeAction(ctx, a.ID, desc, in, out, 0); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, desc, in, out, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	active, err := k.ReadAction(ctx, a.ID)
@@ -444,7 +444,7 @@ func TestPruneOrphanedNativeActions(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@sys", 0)
+	owner := setupUser(t, st, "sys", 0)
 
 	// Only "keep" has a registered handler.
 	k.RegisterNativeHandler("keep", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
@@ -458,7 +458,7 @@ func TestPruneOrphanedNativeActions(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := k.ActivateNativeAction(ctx, a.ID, name+" native", in, out, 0); err != nil {
+		if err := k.ActivateNativeAction(ctx, a.ID, name+" native", in, out, 0, ""); err != nil {
 			t.Fatal(err)
 		}
 		return a.ID
@@ -504,7 +504,7 @@ func TestActivateNativeActionReconcilesSchema(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@sys", 0)
+	owner := setupUser(t, st, "sys", 0)
 	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
 		Name:         "native-reconcile",
@@ -519,7 +519,7 @@ func TestActivateNativeActionReconcilesSchema(t *testing.T) {
 
 	newIn := map[string]any{"type": "object", "properties": map[string]any{"y": map[string]any{"type": "integer", "description": "y"}}}
 	newOut := map[string]any{"type": "object", "properties": map[string]any{"z": map[string]any{"type": "string", "description": "z"}}}
-	if err := k.ActivateNativeAction(ctx, a.ID, "new desc", newIn, newOut, 0); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, "new desc", newIn, newOut, 0, ""); err != nil {
 		t.Fatalf("ActivateNativeAction: %v", err)
 	}
 
@@ -543,7 +543,7 @@ func TestActivateNativeActionRejectsSchemaWithoutDescriptions(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@sys", 0)
+	owner := setupUser(t, st, "sys", 0)
 	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
 		Name:        "native-bad",
@@ -558,7 +558,7 @@ func TestActivateNativeActionRejectsSchemaWithoutDescriptions(t *testing.T) {
 			"x": map[string]any{"type": "string"}, // missing description
 		},
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID, "desc", badIn, nil, 0); !errors.Is(err, kernel.ErrSchemaViolation) {
+	if err := k.ActivateNativeAction(ctx, a.ID, "desc", badIn, nil, 0, ""); !errors.Is(err, kernel.ErrSchemaViolation) {
 		t.Fatalf("ActivateNativeAction with missing schema descriptions: got %v, want ErrSchemaViolation", err)
 	}
 }
@@ -568,7 +568,7 @@ func TestActivateNativeActionReconcilesPrice(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@sys", 0)
+	owner := setupUser(t, st, "sys", 0)
 	in := map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string", "description": "x"}}}
 	out := map[string]any{"type": "object"}
 	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
@@ -580,7 +580,7 @@ func TestActivateNativeActionReconcilesPrice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID, "desc", in, out, 5); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, "desc", in, out, 5, ""); err != nil {
 		t.Fatalf("ActivateNativeAction: %v", err)
 	}
 	got, err := k.ReadAction(ctx, a.ID)
@@ -598,14 +598,14 @@ func TestCreateUser(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "@alice",
+		Handle:   "alice",
 		Password: "secret",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.Handle != "@alice" {
-		t.Errorf("handle: got %q, want %q", u.Handle, "@alice")
+	if u.Handle != "alice" {
+		t.Errorf("handle: got %q, want %q", u.Handle, "alice")
 	}
 	if u.PasswordHash == "secret" {
 		t.Error("password should be hashed")
@@ -614,12 +614,12 @@ func TestCreateUser(t *testing.T) {
 
 func TestNormalizeHandle(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"bob", "@bob"},
-		{"@bob", "@bob"},
-		{"  carol  ", "@carol"},
-		{" @dave ", "@dave"},
+		{"bob", "bob"},
+		{"bob", "bob"},
+		{"  carol  ", "carol"},
+		{" @dave ", "dave"},
 		{"", ""},
-		{"@", "@"},
+		{"@", ""},
 	}
 	for _, c := range cases {
 		if got := kernel.NormalizeHandle(c.in); got != c.want {
@@ -633,18 +633,18 @@ func TestCreateUserNormalizesHandle(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	// Created without a leading "@": stored canonically as "@carol".
+	// Created without a leading "@": stored canonically as "carol".
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
 		Handle: "carol", Password: "secret",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.Handle != "@carol" {
-		t.Errorf("stored handle = %q, want %q", u.Handle, "@carol")
+	if u.Handle != "carol" {
+		t.Errorf("stored handle = %q, want %q", u.Handle, "carol")
 	}
 	// Both forms resolve to the same user.
-	for _, h := range []string{"carol", "@carol"} {
+	for _, h := range []string{"carol", "carol"} {
 		got, err := k.ReadUserByHandle(ctx, h)
 		if err != nil || got == nil || got.ID != u.ID {
 			t.Errorf("ReadUserByHandle(%q): got %v err %v, want id %s", h, got, err, u.ID)
@@ -667,14 +667,14 @@ func TestLogin(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "@bob",
+		Handle:   "bob",
 		Password: "mypass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	tok, err := k.Login(ctx, "@bob", "mypass")
+	tok, err := k.Login(ctx, "bob", "mypass")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,12 +686,12 @@ func TestLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, _ := k.ReadUserByHandle(ctx, "@bob")
+	u, _ := k.ReadUserByHandle(ctx, "bob")
 	if subjectID != u.ID {
 		t.Errorf("token subject: got %q, want %q", subjectID, u.ID)
 	}
 
-	if _, err := k.Login(ctx, "@bob", "wrong"); err == nil {
+	if _, err := k.Login(ctx, "bob", "wrong"); err == nil {
 		t.Error("expected error for wrong password")
 	}
 }
@@ -703,12 +703,12 @@ func TestLoginRejectsRemotePeer(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	_, err := k.AddPeer(ctx, sys.ID, "@peer", base64.RawURLEncoding.EncodeToString(pub))
+	_, err := k.AddPeer(ctx, sys.ID, "peer", base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := k.Login(ctx, "@peer", "remote"); err == nil {
+	if _, err := k.Login(ctx, "peer", "remote"); err == nil {
 		t.Error("Login must reject remote kernel peers")
 	}
 }
@@ -720,7 +720,7 @@ func TestStartAndEndProcess(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@owner", 1000)
+	owner := setupUser(t, st, "owner", 1000)
 
 	p := setupProcess(t, st, owner.ID, 500)
 
@@ -756,8 +756,8 @@ func TestReadProcessUnauthorized(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	alice := setupUser(t, st, "@alice-proc", 500)
-	bob := setupUser(t, st, "@bob-proc", 0)
+	alice := setupUser(t, st, "alice-proc", 500)
+	bob := setupUser(t, st, "bob-proc", 0)
 
 	p := setupProcess(t, st, alice.ID, 100)
 
@@ -776,7 +776,7 @@ func TestProcessOwnerID(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	alice := setupUser(t, st, "@alice-owner-id", 500)
+	alice := setupUser(t, st, "alice-owner-id", 500)
 	p := setupProcess(t, st, alice.ID, 100)
 
 	// Resolves the owner id unauthorized (no caller argument) — the required-caller view path
@@ -795,7 +795,7 @@ func TestProcessAvailablePlusLockedInvariant(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	alice := setupUser(t, st, "@alice", 2000)
+	alice := setupUser(t, st, "alice", 2000)
 	a := &kernel.Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: alice.ID,
@@ -846,7 +846,7 @@ func TestUserLockedBalanceInvariant(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	alice := setupUser(t, st, "@alice", 1000)
+	alice := setupUser(t, st, "alice", 1000)
 
 	assertUserBalance(t, st, alice.ID, 1000, 0)
 
@@ -925,7 +925,7 @@ func TestCreateHTTPActionRejectsSSRFURL(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@owner", 0)
+	owner := setupUser(t, st, "owner", 0)
 	_, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
 		Name:        "webhook",
@@ -942,8 +942,8 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	buyer := setupUser(t, st, "@rate-buyer", 1000)
-	provider := setupUser(t, st, "@rate-provider", 0)
+	buyer := setupUser(t, st, "rate-buyer", 1000)
+	provider := setupUser(t, st, "rate-provider", 0)
 	a := &kernel.Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: provider.ID,
@@ -992,8 +992,8 @@ func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	buyer := setupUser(t, st, "@rerate-buyer", 500)
-	provider := setupUser(t, st, "@rerate-provider", 0)
+	buyer := setupUser(t, st, "rerate-buyer", 500)
+	provider := setupUser(t, st, "rerate-provider", 0)
 	a := &kernel.Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: provider.ID,
@@ -1034,7 +1034,7 @@ func TestRateTransactionOwnerCallingOwnActionCanRate(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@self-rater", 500)
+	owner := setupUser(t, st, "self-rater", 500)
 	a := &kernel.Action{
 		ID:          uuid.New().String(),
 		OwnerUserID: owner.ID,
@@ -1074,7 +1074,7 @@ func TestCallPreconditionOrderTraceBeforeAction(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@ptrace-owner", 100)
+	owner := setupUser(t, st, "ptrace-owner", 100)
 	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID:      owner.ID,
 		ParentTraceID: "nonexistent-trace-id",
@@ -1094,7 +1094,7 @@ func TestCallPreconditionOrderActionAfterValidTrace(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@ptrace-owner2", 100)
+	owner := setupUser(t, st, "ptrace-owner2", 100)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "dummy",
 		Kind: kernel.KindNative, Active: true, Price: 0,
@@ -1124,9 +1124,9 @@ func TestDepositNonSuperuserRejected(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	su := setupUser(t, st, "@sys", 0)
-	regular := setupUser(t, st, "@regular", 0)
-	recipient := setupUser(t, st, "@recipient", 0)
+	su := setupUser(t, st, "sys", 0)
+	regular := setupUser(t, st, "regular", 0)
+	recipient := setupUser(t, st, "recipient", 0)
 
 	// Superuser can deposit.
 	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 100, "ok", ""); err != nil {
@@ -1143,36 +1143,36 @@ func TestRenameUser(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	su := setupUser(t, st, "@sys", 0)
-	regular := setupUser(t, st, "@regular", 0)
-	bob := setupUser(t, st, "@bob", 0)
+	su := setupUser(t, st, "sys", 0)
+	regular := setupUser(t, st, "regular", 0)
+	bob := setupUser(t, st, "bob", 0)
 
 	// Non-superuser cannot rename.
-	if _, err := k.RenameUser(ctx, regular.ID, bob.ID, "@x"); !errors.Is(err, kernel.ErrUnauthorized) {
+	if _, err := k.RenameUser(ctx, regular.ID, bob.ID, "x"); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("non-superuser rename: got %v, want ErrUnauthorized", err)
 	}
 	// The superuser's own handle cannot be renamed (bound to config.superuser_handle).
-	if _, err := k.RenameUser(ctx, su.ID, su.ID, "@root"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.RenameUser(ctx, su.ID, su.ID, "root"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("rename superuser: got %v, want ErrInvalidInput", err)
 	}
 	// A rename onto a handle another account already holds is rejected.
-	if _, err := k.RenameUser(ctx, su.ID, bob.ID, "@regular"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.RenameUser(ctx, su.ID, bob.ID, "regular"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("rename onto taken handle: got %v, want ErrInvalidInput", err)
 	}
 
 	// Superuser renames bob aside, vacating @bob.
-	out, err := k.RenameUser(ctx, su.ID, bob.ID, "@bob-retired")
+	out, err := k.RenameUser(ctx, su.ID, bob.ID, "bob-retired")
 	if err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	if out.Handle != "@bob-retired" {
+	if out.Handle != "bob-retired" {
 		t.Errorf("returned handle: got %q, want @bob-retired", out.Handle)
 	}
-	if got, err := k.ReadUserByHandle(ctx, "@bob-retired"); err != nil || got.ID != bob.ID {
+	if got, err := k.ReadUserByHandle(ctx, "bob-retired"); err != nil || got.ID != bob.ID {
 		t.Errorf("new handle does not resolve to bob: %v", err)
 	}
 	// The freed @bob is reusable by a fresh account, which inherits nothing of bob's identity.
-	fresh, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "@bob", Password: "password"})
+	fresh, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "bob", Password: "password"})
 	if err != nil {
 		t.Fatalf("reuse freed handle: %v", err)
 	}
@@ -1186,8 +1186,8 @@ func TestAdjustmentExternalKeyIdempotent(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	su := setupUser(t, st, "@sys", 0)
-	recipient := setupUser(t, st, "@recipient", 0)
+	su := setupUser(t, st, "sys", 0)
+	recipient := setupUser(t, st, "recipient", 0)
 
 	balance := func() int64 {
 		u, err := k.ReadUser(ctx, recipient.ID)
@@ -1261,8 +1261,8 @@ func TestTransfer(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	alice := setupUser(t, st, "@alice", 100)
-	bob := setupUser(t, st, "@bob", 0)
+	alice := setupUser(t, st, "alice", 100)
+	bob := setupUser(t, st, "bob", 0)
 
 	// Happy path: debit sender, credit recipient, one ledger entry from→to.
 	e, err := k.Transfer(ctx, alice.ID, bob.ID, 30, "gift", "")
@@ -1292,7 +1292,7 @@ func TestTransfer(t *testing.T) {
 
 	// Peer/proxy recipient (public_key set) rejected.
 	peer := &kernel.User{
-		ID: uuid.New().String(), Handle: "@peer",
+		ID: uuid.New().String(), Handle: "peer",
 		PublicKey: "cGVlci1rZXk", Available: 0,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -1304,7 +1304,7 @@ func TestTransfer(t *testing.T) {
 	}
 
 	// Suspended recipient rejected; suspended caller rejected (ErrUnauthenticated).
-	carol := setupUser(t, st, "@carol", 0)
+	carol := setupUser(t, st, "carol", 0)
 	if err := st.SuspendUser(ctx, carol.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -1324,8 +1324,8 @@ func TestTransferIdempotent(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	alice := setupUser(t, st, "@alice", 100)
-	bob := setupUser(t, st, "@bob", 0)
+	alice := setupUser(t, st, "alice", 100)
+	bob := setupUser(t, st, "bob", 0)
 
 	first, err := k.Transfer(ctx, alice.ID, bob.ID, 40, "invoice", "inv-1")
 	if err != nil {
@@ -1348,9 +1348,9 @@ func TestListLedger(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	su := setupUser(t, st, "@sys", 0)
-	alice := setupUser(t, st, "@alice", 0)
-	bob := setupUser(t, st, "@bob", 0)
+	su := setupUser(t, st, "sys", 0)
+	alice := setupUser(t, st, "alice", 0)
+	bob := setupUser(t, st, "bob", 0)
 
 	if _, err := k.Deposit(ctx, su.ID, alice.ID, 100, "", ""); err != nil {
 		t.Fatal(err)
@@ -1381,12 +1381,12 @@ func TestListLedger(t *testing.T) {
 
 func TestReceiptCreatedWithCall(t *testing.T) {
 	st := newTestStore(t)
-	su := setupUser(t, st, "@sys", 0)
+	su := setupUser(t, st, "sys", 0)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	k.SetSigningKey(testSigningKey(), su.ID)
 	ctx := context.Background()
 
-	caller := setupUser(t, st, "@rcpt-caller", 500)
+	caller := setupUser(t, st, "rcpt-caller", 500)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: caller.ID, Name: "rcpt-svc",
 		Kind: kernel.KindWasm, Active: true, Price: 0, Source: "wat",
@@ -1419,12 +1419,12 @@ func TestReceiptCreatedWithCall(t *testing.T) {
 
 func TestReceiptCreatedWithFailedCall(t *testing.T) {
 	st := newTestStore(t)
-	su := setupUser(t, st, "@sys", 0)
+	su := setupUser(t, st, "sys", 0)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{err: kernel.ErrExecutionFailed.Wrap("boom")})
 	k.SetSigningKey(testSigningKey(), su.ID)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@fail-owner", 500)
+	owner := setupUser(t, st, "fail-owner", 500)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "fail-svc",
 		Kind: kernel.KindWasm, Active: true, Price: 0, Source: "wat",
@@ -1476,14 +1476,14 @@ func TestReceiptCreatedWithFailedCall(t *testing.T) {
 
 func TestReadTransactionPartyAccess(t *testing.T) {
 	st := newTestStore(t)
-	su := setupUser(t, st, "@sys", 0)
+	su := setupUser(t, st, "sys", 0)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	k.SetSigningKey(testSigningKey(), su.ID)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@provider", 500) // seller
-	caller := setupUser(t, st, "@buyer", 500)   // buyer
-	other := setupUser(t, st, "@other", 500)    // non-party
+	owner := setupUser(t, st, "provider", 500) // seller
+	caller := setupUser(t, st, "buyer", 500)   // buyer
+	other := setupUser(t, st, "other", 500)    // non-party
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pvd-svc",
 		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 10, Source: "wat",
@@ -1525,7 +1525,7 @@ func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	k.SetSigningKey(nil, "issuer-id")
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@no-receipt-owner", 100)
+	owner := setupUser(t, st, "no-receipt-owner", 100)
 	a := &kernel.Action{
 		ID:           uuid.New().String(),
 		OwnerUserID:  owner.ID,
@@ -1542,7 +1542,7 @@ func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	if err := st.CreateAction(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	_, err := k.Run(ctx, owner.ID, "@no-receipt-owner/no-receipt", map[string]any{})
+	_, err := k.Run(ctx, owner.ID, "no-receipt-owner/no-receipt", map[string]any{})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState, got %v", err)
 	}
@@ -1561,7 +1561,7 @@ func TestManifestSigningRequiresConfiguredKey(t *testing.T) {
 	k.SetSigningKey(nil, "issuer-id")
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@manifest-owner", 0)
+	owner := setupUser(t, st, "manifest-owner", 0)
 	a := &kernel.Action{
 		ID:           uuid.New().String(),
 		OwnerUserID:  owner.ID,
@@ -1592,8 +1592,8 @@ func TestRatingRecordCreated(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	buyer := setupUser(t, st, "@rr-buyer", 500)
-	provider := setupUser(t, st, "@rr-provider", 0)
+	buyer := setupUser(t, st, "rr-buyer", 500)
+	provider := setupUser(t, st, "rr-provider", 0)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "rr-svc",
 		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0, Source: "wat",
@@ -1639,8 +1639,8 @@ func TestRatingDuplicateRejected(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	buyer := setupUser(t, st, "@dup-buyer", 500)
-	provider := setupUser(t, st, "@dup-provider", 0)
+	buyer := setupUser(t, st, "dup-buyer", 500)
+	provider := setupUser(t, st, "dup-provider", 0)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "dup-svc",
 		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0, Source: "wat",
@@ -1672,8 +1672,8 @@ func TestTransactionViewEmbeddedRating(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	buyer := setupUser(t, st, "@tv-buyer", 500)
-	provider := setupUser(t, st, "@tv-provider", 0)
+	buyer := setupUser(t, st, "tv-buyer", 500)
+	provider := setupUser(t, st, "tv-provider", 0)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "tv-svc",
 		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0, Source: "wat",
@@ -1752,7 +1752,7 @@ func TestListAllTransactionViewsAttachesRating(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	alice := setupUser(t, st, "@alice", 1000)
+	alice := setupUser(t, st, "alice", 1000)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "svc",
 		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0, Source: "wat",
@@ -1762,7 +1762,7 @@ func TestListAllTransactionViewsAttachesRating(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	reply, err := k.Run(ctx, alice.ID, "@alice/svc", map[string]any{})
+	reply, err := k.Run(ctx, alice.ID, "alice/svc", map[string]any{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -1796,7 +1796,7 @@ func TestZeroCreditProcess(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@zero-owner", 100)
+	owner := setupUser(t, st, "zero-owner", 100)
 
 	p := setupProcess(t, st, owner.ID, 0)
 
@@ -1816,7 +1816,7 @@ func TestDeleteActionSoftDelete(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@sd-owner", 0)
+	owner := setupUser(t, st, "sd-owner", 0)
 
 	a := &kernel.Action{
 		ID:          uuid.New().String(),
@@ -1864,7 +1864,7 @@ func TestCreateHTTPActionBuildsStructuredSource(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	owner := setupUser(t, st, "@hsrc-owner", 0)
+	owner := setupUser(t, st, "hsrc-owner", 0)
 
 	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
@@ -1899,7 +1899,7 @@ func TestCreateHTTPActionDefaultsToPOST(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	owner := setupUser(t, st, "@hpost-owner", 0)
+	owner := setupUser(t, st, "hpost-owner", 0)
 
 	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "hook", Kind: kernel.KindHTTP,
@@ -1917,7 +1917,7 @@ func TestCreateHTTPActionRejectsBadMethodAndParam(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	owner := setupUser(t, st, "@hbad-owner", 0)
+	owner := setupUser(t, st, "hbad-owner", 0)
 
 	_, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "bad-method", Kind: kernel.KindHTTP,
@@ -1940,7 +1940,7 @@ func TestUpdateHTTPActionMergesSource(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	owner := setupUser(t, st, "@hmerge-owner", 0)
+	owner := setupUser(t, st, "hmerge-owner", 0)
 
 	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "svc", Kind: kernel.KindHTTP,
@@ -1972,7 +1972,7 @@ func TestSetActiveRequiresDescription(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	owner := setupUser(t, st, "@desc-owner", 0)
+	owner := setupUser(t, st, "desc-owner", 0)
 
 	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
@@ -2002,7 +2002,7 @@ func TestActivationRejectsPropertyMissingDescription(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	owner := setupUser(t, st, "@desc-prop-owner", 0)
+	owner := setupUser(t, st, "desc-prop-owner", 0)
 
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "nodesc-prop",
@@ -2039,7 +2039,7 @@ func TestActivationRejectsPropertyMissingDescription(t *testing.T) {
 func TestSetActiveValidatesWasm(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	owner := setupUser(t, st, "@alice", 0)
+	owner := setupUser(t, st, "alice", 0)
 
 	// WASM action with placeholder source.
 	a, err := newTestKernel(st).CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
@@ -2066,7 +2066,7 @@ func TestSetActiveValidatesWasm(t *testing.T) {
 func TestSetActiveValidatesSchemas(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	owner := setupUser(t, st, "@alice", 0)
+	owner := setupUser(t, st, "alice", 0)
 
 	// Create action via store directly with a nil schema to bypass CreateAction validation.
 	a := &kernel.Action{
@@ -2093,8 +2093,8 @@ func TestCreateActionSubjectMismatchRejected(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	userA := setupUser(t, st, "@user-a", 0)
-	userB := setupUser(t, st, "@user-b", 0)
+	userA := setupUser(t, st, "user-a", 0)
+	userB := setupUser(t, st, "user-b", 0)
 
 	_, err := k.CreateAction(ctx, userA.ID, kernel.CreateActionRequest{
 		OwnerUserID: userB.ID,
@@ -2145,10 +2145,28 @@ func (f *fakeSuccessHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[str
 }
 
 type fakeFederationHTTP struct {
-	result        map[string]any
-	receiptJSON   string
-	httpStatus    int  // 0 → 200 (kept so existing tests read as success)
-	notDispatched bool // simulate a provably-never-sent dispatch (§13)
+	result          map[string]any
+	receiptJSON     string
+	httpStatus      int  // 0 → 200 (kept so existing tests read as success)
+	notDispatched   bool // simulate a provably-never-sent dispatch (§13)
+	resolveManifest *kernel.ActionManifest
+	resolveUserID   string
+	resolveHandle   string
+	resolveErr      error
+}
+
+func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, _, _ string) (*kernel.ActionManifest, error) {
+	if f.resolveErr != nil {
+		return nil, f.resolveErr
+	}
+	return f.resolveManifest, nil
+}
+
+func (f *fakeFederationHTTP) ResolveRemoteUser(_ context.Context, _, _ string) (string, string, error) {
+	if f.resolveErr != nil {
+		return "", "", f.resolveErr
+	}
+	return f.resolveUserID, f.resolveHandle, nil
 }
 
 func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _, _ string) (map[string]any, error) {
@@ -2218,8 +2236,8 @@ func TestSuperuserListTransactions(t *testing.T) {
 	ctx := context.Background()
 
 	sys := setupSys(t, k, st)
-	buyer := setupUser(t, st, "@su-buyer", 500)
-	provider := setupUser(t, st, "@su-provider", 0)
+	buyer := setupUser(t, st, "su-buyer", 500)
+	provider := setupUser(t, st, "su-provider", 0)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "su-svc",
 		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0, Source: "wat",
@@ -2255,7 +2273,7 @@ func TestSuperuserListTransactions(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("@sys ListTransactions did not return transaction %s", reply.TxID)
+		t.Errorf("sys ListTransactions did not return transaction %s", reply.TxID)
 	}
 }
 
@@ -2264,8 +2282,8 @@ func TestReadCallableAction(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@owner", 0)
-	other := setupUser(t, st, "@other", 0)
+	owner := setupUser(t, st, "owner", 0)
+	other := setupUser(t, st, "other", 0)
 
 	baseSchema := map[string]any{
 		"type":       "object",
@@ -2293,7 +2311,7 @@ func TestReadCallableAction(t *testing.T) {
 	}
 
 	t.Run("public action visible to any process owner", func(t *testing.T) {
-		a, err := k.ReadCallableAction(ctx, "@owner", "pub-action", other.ID)
+		a, err := k.ReadCallableAction(ctx, "owner", "pub-action", other.ID)
 		if err != nil {
 			t.Fatalf("expected public action to be callable by other: %v", err)
 		}
@@ -2303,7 +2321,7 @@ func TestReadCallableAction(t *testing.T) {
 	})
 
 	t.Run("private action visible only to its owner process", func(t *testing.T) {
-		a, err := k.ReadCallableAction(ctx, "@owner", "priv-action", owner.ID)
+		a, err := k.ReadCallableAction(ctx, "owner", "priv-action", owner.ID)
 		if err != nil {
 			t.Fatalf("expected private action callable by own process: %v", err)
 		}
@@ -2313,14 +2331,14 @@ func TestReadCallableAction(t *testing.T) {
 	})
 
 	t.Run("private action not callable by foreign process", func(t *testing.T) {
-		_, err := k.ReadCallableAction(ctx, "@owner", "priv-action", other.ID)
+		_, err := k.ReadCallableAction(ctx, "owner", "priv-action", other.ID)
 		if err == nil {
 			t.Error("expected error: private action should not be callable by other process")
 		}
 	})
 
 	t.Run("unknown action returns not-found error", func(t *testing.T) {
-		_, err := k.ReadCallableAction(ctx, "@owner", "no-such-action", owner.ID)
+		_, err := k.ReadCallableAction(ctx, "owner", "no-such-action", owner.ID)
 		if err == nil {
 			t.Error("expected error for missing action")
 		}
@@ -2332,7 +2350,7 @@ func TestRunInputSchemaRejectionLeavesNoProcess(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
 	ctx := context.Background()
 
-	alice := setupUser(t, st, "@alice-run-schema", 500)
+	alice := setupUser(t, st, "alice-run-schema", 500)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "schema-guarded",
 		Kind: kernel.KindWasm, Active: true, Price: 100,
@@ -2344,7 +2362,7 @@ func TestRunInputSchemaRejectionLeavesNoProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, alice.ID, "@alice-run-schema/schema-guarded", map[string]any{"wrong_field": "x"})
+	_, err := k.Run(ctx, alice.ID, "alice-run-schema/schema-guarded", map[string]any{"wrong_field": "x"})
 	if err == nil {
 		t.Fatal("expected schema validation error")
 	}
@@ -2365,7 +2383,7 @@ func TestRunNoSigningKeyLeavesNoProcess(t *testing.T) {
 	k.SetSigningKey(nil, "issuer-id")
 	ctx := context.Background()
 
-	bob := setupUser(t, st, "@bob-run-nokey", 200)
+	bob := setupUser(t, st, "bob-run-nokey", 200)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "no-key",
 		Kind: kernel.KindWasm, Active: true, Price: 50,
@@ -2377,7 +2395,7 @@ func TestRunNoSigningKeyLeavesNoProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, bob.ID, "@bob-run-nokey/no-key", map[string]any{})
+	_, err := k.Run(ctx, bob.ID, "bob-run-nokey/no-key", map[string]any{})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState, got %v", err)
 	}
@@ -2397,7 +2415,7 @@ func TestRunDoesNotCreateProcessForInactiveAction(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
 	ctx := context.Background()
 
-	alice := setupUser(t, st, "@alice-run-inactive", 500)
+	alice := setupUser(t, st, "alice-run-inactive", 500)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "inactive-act",
 		Kind: kernel.KindWasm, Active: false, Price: 100,
@@ -2409,7 +2427,7 @@ func TestRunDoesNotCreateProcessForInactiveAction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, alice.ID, "@alice-run-inactive/inactive-act", map[string]any{})
+	_, err := k.Run(ctx, alice.ID, "alice-run-inactive/inactive-act", map[string]any{})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState for inactive action, got %v", err)
 	}
@@ -2429,8 +2447,8 @@ func TestRunFederatedDoesNotCreateProcessOnInsufficientBalance(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
 	ctx := context.Background()
 
-	target := setupUser(t, st, "@target-fed-bal", 0)
-	caller := setupUser(t, st, "@caller-fed-bal", 50) // balance < action price
+	target := setupUser(t, st, "target-fed-bal", 0)
+	caller := setupUser(t, st, "caller-fed-bal", 50) // balance < action price
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: target.ID, Name: "fed-bal-act",
 		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 100,
@@ -2466,11 +2484,11 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
 	ctx := context.Background()
 
-	target := setupUser(t, st, "@target-local-fed", 0)
+	target := setupUser(t, st, "target-local-fed", 0)
 	// A peer proxy user: a set public_key makes it a key account (a peer), funded so the denial is
 	// on visibility, not balance.
 	peer := &kernel.User{
-		ID: uuid.New().String(), Handle: "@peer-local-fed",
+		ID: uuid.New().String(), Handle: "peer-local-fed",
 		PublicKey: "cGVlci1sb2NhbC1mZWQ", Available: 1000,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -2508,7 +2526,7 @@ func TestCallBindsToPassedAction(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "@pid-owner", 200)
+	owner := setupUser(t, st, "pid-owner", 200)
 	actionA := setupWasmAction(t, st, owner.ID, "pid-act", "", 100)
 
 	// Fund a process+trace for action A.
@@ -2559,7 +2577,7 @@ func TestCallLogsTxID(t *testing.T) {
 	k := kernel.New(st, &fakeScriptExec{result: `{"ok":true}`}, nil, nil, cfg, logger)
 
 	ctx := context.Background()
-	alice := setupUser(t, st, "@alice", 2000)
+	alice := setupUser(t, st, "alice", 2000)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "paid", Kind: kernel.KindWasm,
 		Active: true, Price: 100, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -2626,8 +2644,8 @@ func TestListProcessesSuperuserWidening(t *testing.T) {
 	ctx := context.Background()
 
 	sys := setupSys(t, k, st)
-	alice := setupUser(t, st, "@alice", 100)
-	bob := setupUser(t, st, "@bob", 0)
+	alice := setupUser(t, st, "alice", 100)
+	bob := setupUser(t, st, "bob", 0)
 	proc := setupProcess(t, st, alice.ID, 0)
 
 	has := func(callerID string) bool {
@@ -2643,20 +2661,20 @@ func TestListProcessesSuperuserWidening(t *testing.T) {
 		return false
 	}
 	if !has(alice.ID) {
-		t.Error("@alice should see her own process")
+		t.Error("alice should see her own process")
 	}
 	if !has(sys.ID) {
-		t.Error("@sys should see @alice's process (superuser widening)")
+		t.Error("sys should see @alice's process (superuser widening)")
 	}
 	if has(bob.ID) {
-		t.Error("@bob must not see @alice's process")
+		t.Error("bob must not see @alice's process")
 	}
 
 	if _, err := k.ReadProcess(ctx, sys.ID, proc.ID); err != nil {
-		t.Errorf("@sys ReadProcess should succeed: %v", err)
+		t.Errorf("sys ReadProcess should succeed: %v", err)
 	}
 	if _, err := k.ReadProcess(ctx, bob.ID, proc.ID); err == nil {
-		t.Error("@bob ReadProcess of @alice's process should fail")
+		t.Error("bob ReadProcess of @alice's process should fail")
 	}
 }
 
@@ -2703,7 +2721,7 @@ func TestValidateAuthInputSchemes(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "@authcfg", 0)
+	owner := setupUser(t, st, "authcfg", 0)
 
 	base := func(auth *kernel.AuthInput) kernel.CreateActionRequest {
 		return kernel.CreateActionRequest{
@@ -2748,7 +2766,7 @@ func TestGrantRequiredRejectsBeforeLock(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "@dlg-owner", 1000)
+	owner := setupUser(t, st, "dlg-owner", 1000)
 
 	a := createDelegatedAction(t, k, owner.ID, "inbox", 100)
 
@@ -2777,7 +2795,7 @@ func TestCreateGrantListAndRevoke(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "@grantsvc", 0)
+	owner := setupUser(t, st, "grantsvc", 0)
 	a := createDelegatedAction(t, k, owner.ID, "svc", 0)
 
 	if _, err := k.CreateGrant(ctx, owner.ID, a.ID, "refresh-xyz"); err != nil {
@@ -2825,7 +2843,7 @@ func TestDeactivatingUpdateRevokesGrants(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "@revsvc", 0)
+	owner := setupUser(t, st, "revsvc", 0)
 	a := createDelegatedAction(t, k, owner.ID, "svc", 0)
 
 	mkGrant := func() {
@@ -2861,7 +2879,7 @@ func TestUpdateActionVisibility(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	k := newTestKernel(st)
-	owner := setupUser(t, st, "@vis-owner", 0)
+	owner := setupUser(t, st, "vis-owner", 0)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "vis",
 		Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPrivate, Price: 0,
@@ -2897,7 +2915,7 @@ func TestManifestExcludesDelegatedAction(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "@mfsvc", 0)
+	owner := setupUser(t, st, "mfsvc", 0)
 	a := createDelegatedAction(t, k, owner.ID, "svc", 0)
 	pub := kernel.VisibilityPublic
 	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
@@ -2944,7 +2962,7 @@ func TestDelegatedBearerValidation(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "@bearercfg", 0)
+	owner := setupUser(t, st, "bearercfg", 0)
 
 	base := func(name string, auth *kernel.AuthInput) kernel.CreateActionRequest {
 		return kernel.CreateActionRequest{
@@ -2988,7 +3006,7 @@ func TestBearerGrantRequiredBeforeLock(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "@br-owner", 1000)
+	owner := setupUser(t, st, "br-owner", 1000)
 	a := createBearerAction(t, k, owner.ID, "inbox", 100)
 
 	_, err := k.Run(ctx, owner.ID, owner.Handle+"/"+a.Name, map[string]any{})
@@ -3014,7 +3032,7 @@ func TestAttachBearerGrant(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "@br-attach", 0)
+	owner := setupUser(t, st, "br-attach", 0)
 	bearer := createBearerAction(t, k, owner.ID, "svc", 0)
 
 	if _, err := k.AttachBearerGrant(ctx, owner.ID, bearer.ID, "ghp_secret"); err != nil {
@@ -3060,7 +3078,7 @@ func TestManifestExcludesBearerAction(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "@br-mf", 0)
+	owner := setupUser(t, st, "br-mf", 0)
 	a := createBearerAction(t, k, owner.ID, "svc", 0)
 	pub := kernel.VisibilityPublic
 	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
@@ -3078,7 +3096,7 @@ func TestActionAuthInfo(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "@authinfo", 0)
+	owner := setupUser(t, st, "authinfo", 0)
 	read := func(id string) *kernel.Action { a, _ := k.ReadAction(ctx, id); return a }
 
 	mk := func(name string, auth *kernel.AuthInput) *kernel.Action {
@@ -3171,7 +3189,7 @@ func TestOAuthDestinationBindingBlocksConfusedDeputy(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	victim := setupUser(t, st, "@victim", 0)
+	victim := setupUser(t, st, "victim", 0)
 	good := createOAuthActionSrc(t, k, victim.ID, "good/read", "read", "https://api.provider.example/v1")
 	evil := createOAuthActionSrc(t, k, victim.ID, "evil/read", "read", "https://evil.attacker.com/x")
 
@@ -3190,7 +3208,7 @@ func TestOAuthDestinationBindingBlocksConfusedDeputy(t *testing.T) {
 	}
 
 	// The consent plan for the malicious action reveals where the credential would actually go.
-	plan, err := k.ConsentPlan(ctx, victim.ID, "@victim/evil")
+	plan, err := k.ConsentPlan(ctx, victim.ID, "victim/evil")
 	if err != nil {
 		t.Fatalf("ConsentPlan: %v", err)
 	}
@@ -3210,11 +3228,11 @@ func TestConnectBearerSelectorBatch(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "@chatco", 0)
+	owner := setupUser(t, st, "chatco", 0)
 	_ = createBearerAction(t, k, owner.ID, "chat/send", 0)
 	_ = createBearerAction(t, k, owner.ID, "chat/history", 0)
 
-	plan, err := k.ConsentPlan(ctx, owner.ID, "@chatco/chat")
+	plan, err := k.ConsentPlan(ctx, owner.ID, "chatco/chat")
 	if err != nil {
 		t.Fatalf("ConsentPlan: %v", err)
 	}
@@ -3225,7 +3243,7 @@ func TestConnectBearerSelectorBatch(t *testing.T) {
 		t.Error("group should not be connected before consent")
 	}
 
-	grants, err := k.AttachBearerGrants(ctx, owner.ID, "@chatco/chat", "", "ghp_x")
+	grants, err := k.AttachBearerGrants(ctx, owner.ID, "chatco/chat", "", "ghp_x")
 	if err != nil || len(grants) != 2 {
 		t.Fatalf("AttachBearerGrants: %v n=%d", err, len(grants))
 	}
@@ -3234,7 +3252,7 @@ func TestConnectBearerSelectorBatch(t *testing.T) {
 		t.Fatalf("connections = %+v, want one with two actions", conns)
 	}
 
-	plan, _ = k.ConsentPlan(ctx, owner.ID, "@chatco/chat")
+	plan, _ = k.ConsentPlan(ctx, owner.ID, "chatco/chat")
 	g := plan.Groups[0]
 	if !g.Connected || !g.Covered {
 		t.Error("group should be connected and covered after consent")
@@ -3250,7 +3268,7 @@ func TestConnectBearerSelectorBatch(t *testing.T) {
 	if _, err := k.CreateGrants(ctx, owner.ID, "bearer:provider.example", []string{react.ID}, "", ""); err != nil {
 		t.Fatalf("instant bearer grant: %v", err)
 	}
-	plan, _ = k.ConsentPlan(ctx, owner.ID, "@chatco/chat")
+	plan, _ = k.ConsentPlan(ctx, owner.ID, "chatco/chat")
 	if len(plan.Groups[0].Actions) != 3 {
 		t.Fatalf("expected 3 actions after adding react, got %d", len(plan.Groups[0].Actions))
 	}
@@ -3268,12 +3286,12 @@ func TestConnectOAuthUnionScopes(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "@gco", 0)
+	owner := setupUser(t, st, "gco", 0)
 	a1 := createOAuthActionScopes(t, k, owner.ID, "g/read", "read")
 	a2 := createOAuthActionScopes(t, k, owner.ID, "g/write", "write")
 	const pk = "oauth:https://provider.example/token|cid|provider.example"
 
-	plan, err := k.ConsentPlan(ctx, owner.ID, "@gco/g")
+	plan, err := k.ConsentPlan(ctx, owner.ID, "gco/g")
 	if err != nil {
 		t.Fatalf("ConsentPlan: %v", err)
 	}
@@ -3309,23 +3327,23 @@ func TestRevokeSelectorAndAccount(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "@multi", 0)
+	owner := setupUser(t, st, "multi", 0)
 	_ = createBearerAction(t, k, owner.ID, "chat/send", 0)                              // bearer:provider.example
 	_ = createBearerActionSrc(t, k, owner.ID, "mail/inbox", "https://mail.example/api") // bearer:mail.example
 
-	if _, err := k.AttachBearerGrants(ctx, owner.ID, "@multi/chat", "", "t1"); err != nil {
+	if _, err := k.AttachBearerGrants(ctx, owner.ID, "multi/chat", "", "t1"); err != nil {
 		t.Fatalf("connect chat: %v", err)
 	}
-	if _, err := k.AttachBearerGrants(ctx, owner.ID, "@multi/mail", "", "t2"); err != nil {
+	if _, err := k.AttachBearerGrants(ctx, owner.ID, "multi/mail", "", "t2"); err != nil {
 		t.Fatalf("connect mail: %v", err)
 	}
 
 	// Disconnect chat by selector: chat grant gone, mail grant survives, both connections remain.
-	revoked, err := k.RevokeGrantsBySelector(ctx, owner.ID, "@multi/chat")
+	revoked, err := k.RevokeGrantsBySelector(ctx, owner.ID, "multi/chat")
 	if err != nil || len(revoked) != 1 {
 		t.Fatalf("RevokeGrantsBySelector: %v n=%d", err, len(revoked))
 	}
-	mailPlan, _ := k.ConsentPlan(ctx, owner.ID, "@multi/mail")
+	mailPlan, _ := k.ConsentPlan(ctx, owner.ID, "multi/mail")
 	if !mailPlan.Groups[0].Actions[0].Granted {
 		t.Error("mail grant should survive a chat-selector revoke")
 	}
@@ -3362,7 +3380,7 @@ func TestBackfillGrantConnections(t *testing.T) {
 	k := newTestKernel(st)
 	box := b64Box{}
 	k.SetSecretBox(box)
-	owner := setupUser(t, st, "@legacyco", 0)
+	owner := setupUser(t, st, "legacyco", 0)
 	a := createBearerAction(t, k, owner.ID, "svc", 0)
 
 	// Seed a legacy grant directly: sealed token under the old AAD grantor|action, no connection.

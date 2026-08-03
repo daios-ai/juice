@@ -118,14 +118,14 @@ func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Tr
 	if trace.IdempotencyRecordID != nil {
 		req.IdempotencyRecordID = *trace.IdempotencyRecordID
 	}
-	_, settleErr := k.settleFailedCall(ctx, logger, ktx, trace.ID, callerWalletID, callerWalletKind, req, action, 0, recoverErr)
+	_, settleErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, 0, recoverErr)
 	return settleErr
 }
 
 // CreateStep creates a new waiting step. The step records a future Call that a designated caller can resume.
 // The creating authority is derived from Trace(traceID).action_owner_id (implicit for in-execution creation).
 // For external creation (POST /v1/steps) the service layer must enforce precondition-4 before calling this.
-func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, requiredCallerID string) (*Step, error) {
+func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, requiredCallerID, requiredCallerRemoteID string) (*Step, error) {
 	if traceID == "" {
 		return nil, ErrInvalidInput.Wrap("trace_id is required")
 	}
@@ -158,8 +158,19 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 		return nil, ErrUnauthorized.Wrap("creator cannot call action")
 	}
 	// The required caller must resolve to a real account so the step is completable (§10).
-	if _, err := k.store.ReadUser(ctx, requiredCallerID); err != nil {
+	rc, err := k.store.ReadUser(ctx, requiredCallerID)
+	if err != nil {
 		return nil, ErrNotFound.Wrap("required_caller_user_id not found")
+	}
+	// A remote required caller (§13) names a peer's proxy user as the accounting/routing account and
+	// the completer's stable user_id on that peer kernel; completion then demands a home-kernel
+	// step_auth attestation naming that id, so a remote handle rename never mis-addresses the step.
+	var remoteID *string
+	if requiredCallerRemoteID != "" {
+		if !rc.IsPeer() {
+			return nil, ErrInvalidInput.Wrap("a remote required caller must be a peer proxy user")
+		}
+		remoteID = &requiredCallerRemoteID
 	}
 	var normErr error
 	partialArgs, normErr = normalizeJSONObject(partialArgs, "partial_args")
@@ -168,10 +179,11 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 	}
 	now := time.Now().UTC()
 	step := &Step{
-		ID:                   uuid.New().String(),
-		ParentTraceID:        &traceID,
-		RequiredCallerUserID: requiredCallerID,
-		ActionID:             actionID,
+		ID:                     uuid.New().String(),
+		ParentTraceID:          &traceID,
+		RequiredCallerUserID:   requiredCallerID,
+		RequiredCallerRemoteID: remoteID,
+		ActionID:               actionID,
 		PartialArgs:          partialArgs,
 		Price:                action.Price,
 		Status:               StepWaiting,
@@ -249,8 +261,19 @@ func (k *Kernel) CompleteStepFederated(ctx context.Context, callerID, stepID str
 	return k.completeStep(ctx, callerID, stepID, input, idempotencyRecordID)
 }
 
+// StepRemoteRequiredCaller returns a step's required remote-caller id (nil = a local/kernel-level
+// required caller), for the federation completion path to enforce the §13 step_auth attestation.
+func (k *Kernel) StepRemoteRequiredCaller(ctx context.Context, stepID string) (*string, error) {
+	step, err := k.store.ReadStep(ctx, stepID)
+	if err != nil {
+		return nil, err
+	}
+	return step.RequiredCallerRemoteID, nil
+}
+
 func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID string) (*StepReply, error) {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+	caller, err := k.requireActiveUser(ctx, callerID)
+	if err != nil {
 		return nil, err
 	}
 	step, err := k.store.ReadStep(ctx, stepID)
@@ -328,6 +351,15 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		return nil, ErrInvalidInput.Wrap("merged args are not a valid JSON object")
 	}
 
+	// Value transfer (§13): a payment step is a Step whose action bears the transfer effect, completed
+	// by the required caller. Stage the inbound TransferEffect over the merged args so BeginStepCall
+	// locks the value reserve from the completer's own balance (a peer completer's proxy row, against
+	// exposure) atomic with claiming the step, and settlement credits the beneficiary — the buyer funds
+	// the value, the step's execution price stays creator-parked. Nil for a non-transfer step.
+	eff, err := k.prepareTransferEffect(ctx, caller.IsPeer(), action, args)
+	if err != nil {
+		return nil, err
+	}
 	// BeginStepCall atomically marks the step as running, releases its parked price
 	// from parent_trace.locked, and creates a new trace with available=step.price.
 	stepTrace := &Trace{
@@ -338,6 +370,12 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		ActionID:      action.ID,
 		CallerUserID:  callerID,
 		CreatedAt:     time.Now().UTC(),
+	}
+	if eff != nil {
+		// The value premium (for a peer completer) is baked into eff.Reserve; the receipt derives it as
+		// value_reserve−value, so no PremiumBPS snapshot is needed and the completer pays no EXECUTION
+		// premium (the step's price was creator-parked, not funded across the wire).
+		stepTrace.Value, stepTrace.ValueTo, stepTrace.ValueReserve = eff.Amount, eff.Dest, eff.Reserve
 	}
 	// Same as a root call (kernel.go): the inbound record rides on the trace so any settlement
 	// completes it, for every action kind rather than only remote proxies.
@@ -352,13 +390,13 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 	if action.Kind == KindRemoteProxy {
 		key := uuid.New().String()
 		stepTrace.IdempotencyKey = &key
-		stepTrace.DispatchJSON = marshalDispatch(args, stepID, k.remoteManifestPrice(action.Price))
+		stepTrace.DispatchJSON = marshalDispatch(args, stepID, k.remoteManifestPrice(action.Price), 0, action.Price)
 	}
 	// A lost waiting→running CAS already carries ErrStepNotClaimed from the store, which marks
 	// only the two genuine claim races. Deliberately NOT relabelled here: BeginStepCall also
 	// reports a park-invariant violation as ErrInvalidState, and a blanket relabel would present
 	// that ledger corruption to a gate as an ordinary lost race and silently drop the contribution.
-	if err := k.store.BeginStepCall(ctx, stepID, stepTrace); err != nil {
+	if err := k.store.BeginStepCall(ctx, stepID, stepTrace, k.cfg.ExposureMax); err != nil {
 		return nil, err
 	}
 

@@ -66,13 +66,92 @@ func init() {
 		adminRenameCmd(),
 		adminDepositCmd(),
 		adminWithdrawCmd(),
+		adminSettleCmd(),
 		peerSubscribeCmd(),
 		peerUnsubscribeCmd(),
 		peerListCmd(),
 		peerInspectCmd(),
 		identityCmd(),
+		adminTransferCmd(),
 	)
 	rootCmd.AddCommand(adminCmd)
+}
+
+// adminTransferCmd groups the operator surface for buyer-side pending value transfers (§13): a payment
+// step whose completion is unresolved (pending) or whose receipt could not be validated (quarantined).
+// list/show are read-only; retry is the ONLY mutation — it re-presents the SAME signed completion and
+// settles strictly on receipt evidence (quarantine means "evidence insufficient", never "operator
+// chooses"), so there is deliberately no refund/force-settle/edit/delete.
+func adminTransferCmd() *cobra.Command {
+	transferCmd := &cobra.Command{Use: "transfer", Short: "Inspect and retry pending value transfers"}
+	transferCmd.AddCommand(transferListCmd(), transferShowCmd(), transferRetryCmd())
+	return transferCmd
+}
+
+// transferRow is the CLI decode target for the list table (the server view carries more fields).
+type transferRow struct {
+	ID          string `json:"id"`
+	Status      string `json:"status"`
+	BuyerHandle string `json:"buyer_handle"`
+	PeerHandle  string `json:"peer_handle"`
+	Amount      int64  `json:"amount"`
+	Reserve     int64  `json:"reserve"`
+	CreatedAt   string `json:"created_at"`
+}
+
+func transferListCmd() *cobra.Command {
+	var status string
+	var limit, offset int
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List pending value transfers (default: unresolved — pending + quarantined)",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			q := url.Values{}
+			if status != "" {
+				q.Set("status", status)
+			}
+			setLimitOffset(q, limit, offset)
+			var rows []transferRow
+			if err := apiCall(context.Background(), "GET", "/control/transfers?"+q.Encode(), nil, &rows); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(rows)
+			}
+			for _, t := range rows {
+				fmt.Printf("%-36s  %-11s  %-16s  %-16s  amount=%-6d reserve=%-6d  %s\n",
+					t.ID, t.Status, t.BuyerHandle, t.PeerHandle, t.Amount, t.Reserve, t.CreatedAt)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&status, "status", "", "Filter by status (pending, quarantined, settled, refunded)")
+	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
+	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	return cmd
+}
+
+func transferShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <id>",
+		Short: "Show a pending value transfer",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return apiEmit("GET", "/control/transfers/"+url.PathEscape(args[0]), nil)
+		},
+	}
+}
+
+func transferRetryCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "retry <id>",
+		Short: "Re-present a pending transfer's completion and settle on the result",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return apiEmit("POST", "/control/transfers/"+url.PathEscape(args[0])+"/retry", nil)
+		},
+	}
 }
 
 // identityCmd prints this kernel's own federation identity: its public key (which peers use to
@@ -85,10 +164,15 @@ func identityCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			var out struct {
-				Handle    string   `json:"handle"`
-				PublicKey string   `json:"public_key"`
-				About     string   `json:"about"`
-				Addrs     []string `json:"addrs"`
+				Handle            string   `json:"handle"`
+				PublicKey         string   `json:"public_key"`
+				About             string   `json:"about"`
+				Addrs             []string `json:"addrs"`
+				ExposureMax       int64    `json:"exposure_max"`
+				SettlementTrigger int64    `json:"settlement_trigger"`
+				SettlementQuantum int64    `json:"settlement_quantum"`
+				GrossReceivables  int64    `json:"gross_receivables"`
+				SettlementDue     bool     `json:"settlement_due"`
 			}
 			if err := apiCall(context.Background(), "GET", "/control/identity", nil, &out); err != nil {
 				return err
@@ -100,6 +184,12 @@ func identityCmd() *cobra.Command {
 			fmt.Printf("Public key: %s\n", out.PublicKey)
 			if out.About != "" {
 				fmt.Printf("About:      %s\n", out.About)
+			}
+			// Global exposure policy and current standing (§13).
+			fmt.Printf("Exposure:   max=%d gross_receivables=%d trigger=%d quantum=%d\n",
+				out.ExposureMax, out.GrossReceivables, out.SettlementTrigger, out.SettlementQuantum)
+			if out.SettlementDue {
+				fmt.Println("Settlement: DUE (gross receivables ≥ trigger)")
 			}
 			if len(out.Addrs) > 0 {
 				fmt.Println("Listen addresses:")
@@ -226,6 +316,21 @@ func adminDepositCmd() *cobra.Command {
 
 func adminWithdrawCmd() *cobra.Command {
 	return adjustCmd("withdraw <user> <amount>", "Deduct credits from a user", "/control/withdraw")
+}
+
+func adminSettleCmd() *cobra.Command {
+	var cash string
+	cmd := &cobra.Command{
+		Use:   "settle <peer>",
+		Short: "Settle the bilateral position with a peer: exact if debt ≥ Q, else the probabilistic residual protocol (§13)",
+		Long:  "Settle the bilateral position with a peer.\n\nWith no flags: exact settlement if the debt ≥ Q, otherwise the two-party probabilistic\ncommit/reveal. A paid probabilistic outcome does NOT move money — it leaves a debt of Q pending.\n\nAfter paying that Q on your rail, record it with --cash <settlement_id> (run on both kernels).",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return apiEmit("POST", "/control/peers/settle", map[string]any{"handle": args[0], "settlement_id": cash})
+		},
+	}
+	cmd.Flags().StringVar(&cash, "cash", "", "record the rail payment for a paid probabilistic outcome (settlement_id)")
+	return cmd
 }
 
 func peerInspectCmd() *cobra.Command {

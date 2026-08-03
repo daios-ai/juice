@@ -126,11 +126,11 @@ func TestUserCreateMismatchedPassword(t *testing.T) {
 	stubPasswordPrompts(t, "s3cret", "typo")
 
 	// No --password flag, so the command falls through to the interactive prompt.
-	_, err := execTestCmd(t, userCreateCmd(), "@newuser")
+	_, err := execTestCmd(t, userCreateCmd(), "newuser")
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("mismatch: want ErrInvalidInput, got %v", err)
 	}
-	if _, err := env.db.ReadUserByHandle(context.Background(), "@newuser"); !errors.Is(err, kernel.ErrNotFound) {
+	if _, err := env.db.ReadUserByHandle(context.Background(), "newuser"); !errors.Is(err, kernel.ErrNotFound) {
 		t.Fatalf("no user should be created on mismatch, got %v", err)
 	}
 }
@@ -140,13 +140,13 @@ func TestUserCreate(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "@testuser",
+		Handle:   "testuser",
 		Password: "testpass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.Handle != "@testuser" {
+	if u.Handle != "testuser" {
 		t.Errorf("handle: got %q, want @testuser", u.Handle)
 	}
 	if u.PasswordHash == "testpass" {
@@ -159,18 +159,18 @@ func TestUserReadByHandle(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "@readtest",
+		Handle:   "readtest",
 		Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	u, err := env.k.ReadUserByHandle(ctx, "@readtest")
+	u, err := env.k.ReadUserByHandle(ctx, "readtest")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.Handle != "@readtest" {
+	if u.Handle != "readtest" {
 		t.Errorf("handle: got %q, want @readtest", u.Handle)
 	}
 }
@@ -179,7 +179,7 @@ func TestUserDuplicateHandleFails(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
-	req := kernel.CreateUserRequest{Handle: "@dup", Password: "p"}
+	req := kernel.CreateUserRequest{Handle: "dup", Password: "p"}
 	if _, err := env.k.CreateUser(ctx, req); err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestUserMe(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@meuser", Password: "pass",
+		Handle: "meuser", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -203,7 +203,7 @@ func TestUserMe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Handle != "@meuser" {
+	if got.Handle != "meuser" {
 		t.Errorf("handle: got %q, want @meuser", got.Handle)
 	}
 }
@@ -213,7 +213,7 @@ func TestUserUpdateDescription(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@upddesc", Password: "pass",
+		Handle: "upddesc", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -242,7 +242,7 @@ func TestUserUpdatePassword(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@updpass", Password: "oldpass",
+		Handle: "updpass", Password: "oldpass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -255,10 +255,10 @@ func TestUserUpdatePassword(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := env.k.LoginWithRefresh(ctx, "@updpass", "oldpass"); err == nil {
+	if _, _, err := env.k.LoginWithRefresh(ctx, "updpass", "oldpass"); err == nil {
 		t.Error("old password should be rejected after change")
 	}
-	if _, _, err := env.k.LoginWithRefresh(ctx, "@updpass", "newpass"); err != nil {
+	if _, _, err := env.k.LoginWithRefresh(ctx, "updpass", "newpass"); err != nil {
 		t.Errorf("new password should work: %v", err)
 	}
 }
@@ -268,7 +268,7 @@ func TestUserUpdatePasswordWrongCurrent(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@wrongpass", Password: "correct",
+		Handle: "wrongpass", Password: "correct",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -291,7 +291,7 @@ func TestUserUpdateNoFields(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@nofields", Password: "pass",
+		Handle: "nofields", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -312,7 +312,7 @@ func TestUserUpdateProxyUser(t *testing.T) {
 
 	proxy := &kernel.User{
 		ID:        "proxy-id-1",
-		Handle:    "@remote-peer",
+		Handle:    "remote-peer",
 		PublicKey: "dGVzdGtleQ==",
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -340,7 +340,7 @@ func TestActionCreateAndToggle(t *testing.T) {
 	ctx := context.Background()
 
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@actowner", Password: "pass",
+		Handle: "actowner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -384,7 +384,7 @@ func TestActionPriceUpdateDeactivates(t *testing.T) {
 	ctx := context.Background()
 
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@priceowner", Password: "pass",
+		Handle: "priceowner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -427,7 +427,7 @@ func TestActionDelete(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@delowner", Password: "pass",
+		Handle: "delowner", Password: "pass",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "to-delete",
@@ -446,10 +446,10 @@ func TestActionShowPrivate(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@show-owner", Password: "pass",
+		Handle: "show-owner", Password: "pass",
 	})
 	stranger, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@show-stranger", Password: "pass",
+		Handle: "show-stranger", Password: "pass",
 	})
 	_ = stranger
 
@@ -458,7 +458,7 @@ func TestActionShowPrivate(t *testing.T) {
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
 
-	ownerTok, _ := env.k.Login(ctx, "@show-owner", "pass")
+	ownerTok, _ := env.k.Login(ctx, "show-owner", "pass")
 	if err := saveToken(ownerTok); err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +466,7 @@ func TestActionShowPrivate(t *testing.T) {
 		t.Errorf("owner: unexpected error: %v", err)
 	}
 
-	strangerTok, _ := env.k.Login(ctx, "@show-stranger", "pass")
+	strangerTok, _ := env.k.Login(ctx, "show-stranger", "pass")
 	if err := saveToken(strangerTok); err != nil {
 		t.Fatal(err)
 	}
@@ -482,12 +482,12 @@ func TestActionCreateSchemasAndAuthFromFile(t *testing.T) {
 	ctx := context.Background()
 
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@authowner", Password: "pass",
+		Handle: "authowner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(ctx, "@authowner", "pass")
+	tok, _ := env.k.Login(ctx, "authowner", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -534,12 +534,12 @@ func TestActionCreateFromArtifact(t *testing.T) {
 	ctx := context.Background()
 
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@wasmowner", Password: "pass",
+		Handle: "wasmowner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(ctx, "@wasmowner", "pass")
+	tok, _ := env.k.Login(ctx, "wasmowner", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -572,12 +572,12 @@ func TestActionCreateHTTPMethodParam(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@httpowner", Password: "pass",
+		Handle: "httpowner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(ctx, "@httpowner", "pass")
+	tok, _ := env.k.Login(ctx, "httpowner", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -608,12 +608,12 @@ func TestActionImportOpenAPI(t *testing.T) {
 	t.Setenv("JUICE_ALLOW_LOCAL_SOURCES", "true")
 
 	_, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@cli-import-owner", Password: "pass",
+		Handle: "cli-import-owner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(context.Background(), "@cli-import-owner", "pass")
+	tok, _ := env.k.Login(context.Background(), "cli-import-owner", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -649,12 +649,12 @@ func TestActionUnimportOpenAPI(t *testing.T) {
 	t.Setenv("JUICE_ALLOW_LOCAL_SOURCES", "true")
 
 	_, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "@cli-unimport-owner", Password: "pass",
+		Handle: "cli-unimport-owner", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(context.Background(), "@cli-unimport-owner", "pass")
+	tok, _ := env.k.Login(context.Background(), "cli-unimport-owner", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -673,7 +673,7 @@ func TestActionListActive(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@listowner", Password: "pass",
+		Handle: "listowner", Password: "pass",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
@@ -708,7 +708,7 @@ func TestStatsInitializedOnActivation(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@statsowner", Password: "p",
+		Handle: "statsowner", Password: "p",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
@@ -761,7 +761,7 @@ func setupProcessCmd(t *testing.T, env *testEnv, ownerID string, funds int64) (*
 		CallerUserID:  ownerID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := env.db.BeginRun(ctx, p, tr, ownerID, funds); err != nil {
+	if err := env.db.BeginRun(ctx, p, tr, ownerID, funds, 0, 0); err != nil {
 		t.Fatalf("setupProcessCmd: %v", err)
 	}
 	return p, tr
@@ -773,7 +773,7 @@ func TestProcessStartFundEnd(t *testing.T) {
 
 	owner := &kernel.User{
 		ID:        "user-proc-test",
-		Handle:    "@proctest",
+		Handle:    "proctest",
 		Available: 2000,
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -806,10 +806,10 @@ func TestProcessList(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@list-proc", Password: "p",
+		Handle: "list-proc", Password: "p",
 	})
 	other, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@list-proc-other", Password: "p",
+		Handle: "list-proc-other", Password: "p",
 	})
 
 	setupProcessCmd(t, env, owner.ID, 0)
@@ -835,7 +835,7 @@ func TestProcessNegativeFundsFails(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@negfund", Password: "p",
+		Handle: "negfund", Password: "p",
 	})
 	p := &kernel.Process{
 		ID:          uuid.New().String(),
@@ -850,7 +850,7 @@ func TestProcessNegativeFundsFails(t *testing.T) {
 		CallerUserID:  owner.ID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	err := env.db.BeginRun(ctx, p, tr, owner.ID, -1)
+	err := env.db.BeginRun(ctx, p, tr, owner.ID, -1, 0, 0)
 	if err == nil {
 		t.Error("expected error creating process with negative funds")
 	}
@@ -862,7 +862,7 @@ func TestProcessEndReturnsBalance(t *testing.T) {
 
 	owner := &kernel.User{
 		ID:        "balance-return-user",
-		Handle:    "@baltest",
+		Handle:    "baltest",
 		Available: 1000,
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -896,14 +896,11 @@ func assertActionRef(t *testing.T, v any) {
 		t.Errorf("action field is not a non-empty string: %v", v)
 		return
 	}
-	if strings.HasPrefix(s, "@@") {
-		t.Errorf("action field has double @: %q", s)
+	if strings.HasPrefix(s, "@") {
+		t.Errorf("action field must be a bare owner/name reference (no @ sigil), got %q", s)
 	}
-	if !strings.HasPrefix(s, "@") {
-		t.Errorf("action field must start with @, got %q", s)
-	}
-	if strings.Count(s, "/") != 1 {
-		t.Errorf("action field must contain exactly one /, got %q", s)
+	if !strings.Contains(s, "/") {
+		t.Errorf("action field must contain a /, got %q", s)
 	}
 }
 
@@ -946,10 +943,10 @@ func TestServeCreateStep(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "@cs-create-owner")
-	makeUser(t, k, "@cs-create-caller")
+	ownerID, ownerTok := makeUser(t, k, "cs-create-owner")
+	makeUser(t, k, "cs-create-caller")
 
-	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@cs-create-owner", "cs-create-svc")
+	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "cs-create-owner", "cs-create-svc")
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
@@ -958,7 +955,7 @@ func TestServeCreateStep(t *testing.T) {
 	resp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action_id":       actionID,
-		"required_caller": "@cs-create-caller",
+		"required_caller": "cs-create-caller",
 		"partial_args":    map[string]any{"preset": "val"},
 	}, ownerTok)
 	if resp.StatusCode != http.StatusCreated {
@@ -984,10 +981,10 @@ func TestServeListSteps(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "@sl-steps-owner")
-	makeUser(t, k, "@sl-steps-caller")
+	ownerID, ownerTok := makeUser(t, k, "sl-steps-owner")
+	makeUser(t, k, "sl-steps-caller")
 
-	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@sl-steps-owner", "sl-steps-svc")
+	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "sl-steps-owner", "sl-steps-svc")
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
@@ -997,7 +994,7 @@ func TestServeListSteps(t *testing.T) {
 		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 			"trace_id":        traceID,
 			"action_id":       actionID,
-			"required_caller": "@sl-steps-caller",
+			"required_caller": "sl-steps-caller",
 			"partial_args":    map[string]any{},
 		}, ownerTok)
 		if r.StatusCode != http.StatusCreated {
@@ -1065,11 +1062,11 @@ func TestCLIListPaginationFlags(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@page-cli", Password: "pass",
+		Handle: "page-cli", Password: "pass",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(ctx, "@page-cli", "pass")
+	tok, _ := env.k.Login(ctx, "page-cli", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -1090,11 +1087,11 @@ func TestServeGetStep(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "@gs-steps-owner")
-	_, callerTok := makeUser(t, k, "@gs-steps-caller")
-	_, unrelTok := makeUser(t, k, "@gs-steps-unrelated")
+	ownerID, ownerTok := makeUser(t, k, "gs-steps-owner")
+	_, callerTok := makeUser(t, k, "gs-steps-caller")
+	_, unrelTok := makeUser(t, k, "gs-steps-unrelated")
 
-	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@gs-steps-owner", "gs-steps-svc")
+	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "gs-steps-owner", "gs-steps-svc")
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
@@ -1103,7 +1100,7 @@ func TestServeGetStep(t *testing.T) {
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action_id":       actionID,
-		"required_caller": "@gs-steps-caller",
+		"required_caller": "gs-steps-caller",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -1150,10 +1147,10 @@ func TestServeCompleteStepMissingArgs(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "@csmiss-owner")
-	_, callerTok := makeUser(t, k, "@csmiss-caller")
+	ownerID, ownerTok := makeUser(t, k, "csmiss-owner")
+	_, callerTok := makeUser(t, k, "csmiss-caller")
 
-	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@csmiss-owner", "csmiss-svc")
+	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "csmiss-owner", "csmiss-svc")
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
@@ -1162,7 +1159,7 @@ func TestServeCompleteStepMissingArgs(t *testing.T) {
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action_id":       actionID,
-		"required_caller": "@csmiss-caller",
+		"required_caller": "csmiss-caller",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -1187,10 +1184,10 @@ func TestServeCompleteStep(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "@cs2-owner")
-	_, callerTok := makeUser(t, k, "@cs2-caller")
+	ownerID, ownerTok := makeUser(t, k, "cs2-owner")
+	_, callerTok := makeUser(t, k, "cs2-caller")
 
-	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "@cs2-owner", "cs2-svc")
+	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "cs2-owner", "cs2-svc")
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
@@ -1199,7 +1196,7 @@ func TestServeCompleteStep(t *testing.T) {
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action_id":       actionID,
-		"required_caller": "@cs2-caller",
+		"required_caller": "cs2-caller",
 		"partial_args":    map[string]any{"from_partial": "A"},
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -1236,17 +1233,17 @@ func TestServeCompleteStep(t *testing.T) {
 
 // TestStepCompleteFileArg verifies the positional json argument of `step complete` honours the
 // @file convention (API.md C9): a missing file is reported as a read error before any kernel
-// call, rather than the literal bytes "@file" being shipped as the step input.
+// call, rather than the literal bytes "file" being shipped as the step input.
 func TestStepCompleteFileArg(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
 	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@sc-caller", Password: "pass",
+		Handle: "sc-caller", Password: "pass",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(ctx, "@sc-caller", "pass")
+	tok, _ := env.k.Login(ctx, "sc-caller", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -1265,7 +1262,7 @@ func TestTransactionListEmpty(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@txowner", Password: "p",
+		Handle: "txowner", Password: "p",
 	})
 
 	txs, err := env.k.ListTransactions(ctx, owner.ID, kernel.TxFilter{Limit: 10})
@@ -1282,7 +1279,7 @@ func TestTransactionRate(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@rateowner", Password: "p",
+		Handle: "rateowner", Password: "p",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "rateable",
@@ -1304,7 +1301,7 @@ func TestTransactionRating(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@rater", Password: "p",
+		Handle: "rater", Password: "p",
 	})
 	p, _ := setupProcessCmd(t, env, owner.ID, 0)
 
@@ -1332,7 +1329,7 @@ func TestCallClosedProcess(t *testing.T) {
 
 	owner := &kernel.User{
 		ID:        uuid.New().String(),
-		Handle:    "@call-owner",
+		Handle:    "call-owner",
 		Available: 1000,
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -1367,7 +1364,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "@poorowner", Password: "p",
+		Handle: "poorowner", Password: "p",
 	})
 
 	_, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
@@ -1380,7 +1377,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	a, _ := env.k.ReadActionByOwnerName(ctx, owner.ID, "expensive")
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 
-	_, err = env.k.Run(ctx, owner.ID, "@poorowner/expensive", map[string]any{})
+	_, err = env.k.Run(ctx, owner.ID, "poorowner/expensive", map[string]any{})
 	if err == nil {
 		t.Error("expected insufficient funds error")
 	}
@@ -1436,7 +1433,7 @@ func TestRemoteImport(t *testing.T) {
 	const actionID = "action-remote-id"
 	m := kernel.ActionManifest{
 		ActionID:     actionID,
-		OwnerHandle:  "@import-remote",
+		OwnerHandle:  "import-remote",
 		Name:         "greet",
 		Description:  "says hello",
 		Kind:         kernel.KindHTTP,
@@ -1462,16 +1459,16 @@ func TestRemoteImport(t *testing.T) {
 	}))
 	defer remote.Close()
 
-	sys, err := k.ReadUserByHandle(t.Context(), "@sys")
+	sys, err := k.ReadUserByHandle(t.Context(), "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := k.AddPeer(t.Context(), sys.ID, "@import-remote", pubB64); err != nil {
+	if _, err := k.AddPeer(t.Context(), sys.ID, "import-remote", pubB64); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "@import-remote", "greet", &m); err != nil {
+	if _, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "import-remote", "greet", &m); err != nil {
 		t.Fatalf("ReconcileRemoteAction: %v", err)
 	}
 
@@ -1502,7 +1499,7 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 	const actionID = "disappear-action-id"
 	m := kernel.ActionManifest{
 		ActionID:     actionID,
-		OwnerHandle:  "@disappear-remote",
+		OwnerHandle:  "disappear-remote",
 		Name:         "bye",
 		Description:  "going away",
 		Kind:         kernel.KindHTTP,
@@ -1533,15 +1530,15 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 	}))
 	defer remote.Close()
 
-	sys, err := k.ReadUserByHandle(t.Context(), "@sys")
+	sys, err := k.ReadUserByHandle(t.Context(), "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.AddPeer(t.Context(), sys.ID, "@disappear-remote", pubB64); err != nil {
+	if _, err := k.AddPeer(t.Context(), sys.ID, "disappear-remote", pubB64); err != nil {
 		t.Fatal(err)
 	}
 
-	r, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "@disappear-remote", "bye", &m)
+	r, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "disappear-remote", "bye", &m)
 	if err != nil {
 		t.Fatalf("initial import: %v", err)
 	}
@@ -1554,7 +1551,7 @@ func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
 
 	serveAction = false // action gone from remote; passing nil manifest deactivates the proxy.
 	// The local action is owner-qualified (disappear-remote/bye); deactivation is by that name.
-	if _, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "@disappear-remote", "disappear-remote/bye", nil); err != nil {
+	if _, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "disappear-remote", "disappear-remote/bye", nil); err != nil {
 		t.Fatalf("reimport after disappearance: %v", err)
 	}
 
@@ -1578,18 +1575,18 @@ func TestRemoteUnimport(t *testing.T) {
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
-	sys, err := k.ReadUserByHandle(t.Context(), "@sys")
+	sys, err := k.ReadUserByHandle(t.Context(), "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
-	remoteUser, err := k.AddPeer(t.Context(), sys.ID, "@unimport-peer", pubB64)
+	remoteUser, err := k.AddPeer(t.Context(), sys.ID, "unimport-peer", pubB64)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	m := kernel.ActionManifest{
 		ActionID:     "unimport-action-id",
-		OwnerHandle:  "@unimport-peer",
+		OwnerHandle:  "unimport-peer",
 		Name:         "greet",
 		Description:  "greet action",
 		Kind:         kernel.KindHTTP,
@@ -1609,7 +1606,7 @@ func TestRemoteUnimport(t *testing.T) {
 		t.Fatalf("ImportRemoteAction: %v", err)
 	}
 
-	if _, err := k.UnimportRemoteAction(t.Context(), sys.ID, "@unimport-peer", "unimport-peer/greet"); err != nil {
+	if _, err := k.UnimportRemoteAction(t.Context(), sys.ID, "unimport-peer", "unimport-peer/greet"); err != nil {
 		t.Fatalf("UnimportRemoteAction: %v", err)
 	}
 }
@@ -1640,14 +1637,14 @@ func captureStdout(t *testing.T, fn func() error) string {
 func TestPrintTextParity(t *testing.T) {
 	objects := []any{
 		enrichAction(&kernel.Kernel{}, &kernel.Action{
-			ID: "a1", OwnerUserID: "u1", OwnerHandle: "@alice", Name: "weather",
+			ID: "a1", OwnerUserID: "u1", OwnerHandle: "alice", Name: "weather",
 			Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPublic, Price: 5,
 			Description:  "current weather",
 			InputSchema:  map[string]any{"type": "object"},
 			OutputSchema: map[string]any{"type": "object"},
 		}),
 		&kernel.TransactionView{Transaction: &kernel.Transaction{ID: "t1", Status: "success", Gross: 10, Net: 8, Fee: 2}},
-		&stepWithAction{Step: &kernel.Step{ID: "s1", Status: "waiting"}, Action: "@alice/weather"},
+		&stepWithAction{Step: &kernel.Step{ID: "s1", Status: "waiting"}, Action: "alice/weather"},
 	}
 	for _, obj := range objects {
 		// Canonical key set from the marshaled object (what HTTP would send).
@@ -1683,9 +1680,9 @@ func TestPrintTextParity(t *testing.T) {
 // TestDirectorySelector: the run grant-required hint groups an action by its directory (§8).
 func TestDirectorySelector(t *testing.T) {
 	cases := map[string]string{
-		"@alice/mail/send": "@alice/mail",
-		"@alice/send":      "@alice/send",
-		"@a/x/y/z":         "@a/x/y",
+		"alice/mail/send": "alice/mail",
+		"alice/send":      "alice/send",
+		"a/x/y/z":         "a/x/y",
 		"noslash":          "noslash",
 	}
 	for in, want := range cases {

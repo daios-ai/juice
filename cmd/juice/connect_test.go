@@ -55,7 +55,7 @@ func TestUserConnectCommandTree(t *testing.T) {
 func TestUserDisconnectCLI(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
-	uid, tok := makeUser(t, env.k, "@grant-cli")
+	uid, tok := makeUser(t, env.k, "grant-cli")
 	aid := createDelegatedCLIAction(t, env.k, uid, "inbox")
 	if _, err := env.k.CreateGrant(ctx, uid, aid, "refresh-tok"); err != nil {
 		t.Fatalf("CreateGrant: %v", err)
@@ -64,7 +64,7 @@ func TestUserDisconnectCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := execTestCmd(t, userDisconnectCmd(), "@grant-cli/inbox"); err != nil {
+	if _, err := execTestCmd(t, userDisconnectCmd(), "grant-cli/inbox"); err != nil {
 		t.Fatalf("user disconnect: %v", err)
 	}
 	if views, _ := env.k.ListGrantViews(ctx, uid); len(views) != 0 {
@@ -94,14 +94,14 @@ func createBearerCLIAction(t *testing.T, k *kernel.Kernel, ownerID, name, source
 func TestUserConnectTokenBatchCLI(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
-	uid, tok := makeUser(t, env.k, "@chatcli")
+	uid, tok := makeUser(t, env.k, "chatcli")
 	createBearerCLIAction(t, env.k, uid, "chat/send", "https://api.chat.example/x")
 	createBearerCLIAction(t, env.k, uid, "chat/history", "https://api.chat.example/x")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := execTestCmd(t, userConnectCmd(), "@chatcli/chat", "--token", "ghp_x"); err != nil {
+	if _, err := execTestCmd(t, userConnectCmd(), "chatcli/chat", "--token", "ghp_x"); err != nil {
 		t.Fatalf("user connect --token: %v", err)
 	}
 	conns, _ := env.k.ListConnectionViews(ctx, uid)
@@ -110,7 +110,7 @@ func TestUserConnectTokenBatchCLI(t *testing.T) {
 	}
 
 	// Disconnect by selector removes both grants; the connection remains (now unused).
-	if _, err := execTestCmd(t, userDisconnectCmd(), "@chatcli/chat"); err != nil {
+	if _, err := execTestCmd(t, userDisconnectCmd(), "chatcli/chat"); err != nil {
 		t.Fatalf("user disconnect: %v", err)
 	}
 	if views, _ := env.k.ListGrantViews(ctx, uid); len(views) != 0 {
@@ -125,16 +125,16 @@ func TestUserConnectTokenBatchCLI(t *testing.T) {
 // env returns the structured ErrGrantRequired (no hang on a browser prompt).
 func TestRunGrantRequiredNonTTY(t *testing.T) {
 	env := newTestEnv(t)
-	uid, tok := makeUser(t, env.k, "@run-grant")
+	uid, tok := makeUser(t, env.k, "run-grant")
 	createDelegatedCLIAction(t, env.k, uid, "inbox")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
-	_, err := execTestCmd(t, runCmd(), "@run-grant/inbox", "{}")
+	_, err := execTestCmd(t, runCmd(), "run-grant/inbox", "{}")
 	if !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}
-	if grantActionRef(err, "fallback") != "@run-grant/inbox" {
+	if grantActionRef(err, "fallback") != "run-grant/inbox" {
 		t.Errorf("grantActionRef did not recover the action from meta: %q", grantActionRef(err, "fallback"))
 	}
 }

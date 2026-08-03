@@ -25,7 +25,11 @@ import (
 // Config holds kernel-level configuration.
 type Config struct {
 	FeeBPS            int64         // basis points, e.g. 2000 = 20%
-	ImportBPS         int64         // basis points import duty on remote-proxy calls, default 500
+	RemoteBPS         int64         // basis points serving markup (execution tax + risk premium) on inbound remote calls, default 500
+	ImportBPS         int64         // basis points origin import fee on outbound remote calls, retained locally, default 500
+	ExposureMax       int64         // X: max gross unsecured receivables across all peers (§13); 0 = prepaid-only
+	SettlementTrigger int64         // Y: gross-receivables level flagging settlement_due (§13); 0 < Y < X when X > 0
+	SettlementQuantum int64         // Q: smallest fee-rational external payment (§13); 0 disables the probabilistic path
 	FeeRecipientID    string        // user ID that receives fees
 	TokenSecret       string        // HMAC secret for JWT signing
 	TokenTTL          time.Duration // token validity window
@@ -48,6 +52,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		FeeBPS:        2000,
+		RemoteBPS:     500,
 		ImportBPS:     500,
 		TokenTTL:      15 * time.Minute,
 		ScriptTimeout: 10 * time.Second,
@@ -81,6 +86,7 @@ type Kernel struct {
 	cfg            Config
 	log            *log.Logger
 	nativeHandlers map[string]NativeFunc
+	valueFuncs     map[string]ValueFunc
 	secretBox      SecretBox
 	lookupHost     func(context.Context, string) ([]string, error)
 	userHandles    sync.Map // user ID → handle, cached for readable logging
@@ -165,6 +171,7 @@ func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, c
 		cfg:            cfg,
 		log:            logger,
 		nativeHandlers: make(map[string]NativeFunc),
+		valueFuncs:     make(map[string]ValueFunc),
 		lookupHost:     net.DefaultResolver.LookupHost,
 	}
 }
@@ -178,6 +185,27 @@ func (k *Kernel) SetLookupHost(fn func(context.Context, string) ([]string, error
 // Call from bootstrap to wire each native action without touching call.go.
 func (k *Kernel) RegisterNativeHandler(name string, fn NativeFunc) {
 	k.nativeHandlers[name] = fn
+}
+
+// ValueFunc extracts the transferred amount and beneficiary reference from a value-bearing action's
+// args (§13 value transfer). The native package registers it; the kernel never names the action, so
+// value transfer stays encapsulated (native actions are never hardwired into the kernel).
+type ValueFunc func(args map[string]any) (amount int64, beneficiary string, err error)
+
+// RegisterValueAction registers the args extractor for a privileged execution effect (e.g. "transfer").
+func (k *Kernel) RegisterValueAction(effect string, fn ValueFunc) {
+	k.valueFuncs[effect] = fn
+}
+
+// actionValue returns the value extractor for an action keyed on its signed `effect` contract field,
+// never on the action name (§13): a local native carries effect set at bootstrap; a remote proxy
+// carries it copied from the peer's SIGNED manifest, so the origin never reserves value on a name
+// coincidence. nil when the action declares no effect or none is registered for it.
+func (k *Kernel) actionValue(a *Action) ValueFunc {
+	if a.Effect == "" {
+		return nil
+	}
+	return k.valueFuncs[a.Effect]
 }
 
 // PruneOrphanedNativeActions soft-deletes every kind=native action whose handler is no longer
@@ -578,26 +606,22 @@ func unionScopes(existingJSON string, requested []string) (string, bool) {
 	return string(b), covered
 }
 
-// ParseGrantSelector splits a consent selector into owner handle and path (§8). A selector is
-// @owner or @owner/path; a trailing "/*" is an accepted alias for the whole-owner form.
+// ParseGrantSelector splits a consent selector into bare owner handle and path (§8). A selector is
+// owner or owner/path (a legacy leading "@" is tolerated); a trailing "/*" aliases the whole-owner form.
 func ParseGrantSelector(sel string) (ownerHandle, path string, err error) {
-	sel = strings.TrimSpace(sel)
+	sel = strings.TrimPrefix(strings.TrimSpace(sel), "@") // bare; legacy "@" tolerated
 	sel = strings.TrimSuffix(sel, "/*")
-	if !strings.HasPrefix(sel, "@") {
-		sel = "@" + sel
+	if sel == "" {
+		return "", "", ErrInvalidInput.Wrap("selector must be owner or owner/path")
 	}
-	if len(sel) <= 1 {
-		return "", "", ErrInvalidInput.Wrap("selector must be @owner or @owner/path")
+	if idx := strings.Index(sel, "/"); idx >= 0 {
+		owner := sel[:idx]
+		if owner == "" {
+			return "", "", ErrInvalidInput.Wrap("selector must be owner or owner/path")
+		}
+		return owner, sel[idx+1:], nil
 	}
-	idx := strings.Index(sel[1:], "/")
-	if idx < 0 {
-		return sel, "", nil
-	}
-	owner := sel[:idx+1]
-	if owner == "@" {
-		return "", "", ErrInvalidInput.Wrap("selector must be @owner or @owner/path")
-	}
-	return owner, sel[idx+2:], nil
+	return sel, "", nil
 }
 
 // selectorPathMatches implements path-segment matching (§8): the empty path matches all of an
@@ -1036,22 +1060,26 @@ type CreateUserRequest struct {
 // whitespace and prepends "@" when missing, so "bob" and "@bob" denote the same user.
 // Idempotent; leaves "" untouched (validateHandle rejects it).
 func NormalizeHandle(h string) string {
-	h = strings.TrimSpace(h)
-	if h == "" || strings.HasPrefix(h, "@") {
-		return h
-	}
-	return "@" + h
+	return strings.TrimPrefix(strings.TrimSpace(h), "@")
 }
 
 // validateHandle rejects empty handles, a bare "@", and handles containing /, enforcing
 // the invariant that @owner/name references are unambiguous (handles ≡ hostnames, no /).
 // Callers normalize with NormalizeHandle first, so a valid handle is "@" followed by ≥1 char.
 func validateHandle(handle string) error {
-	if handle == "" || handle == "@" {
+	if handle == "" {
 		return ErrInvalidInput.Wrap("handle is required")
 	}
-	if strings.Contains(handle, "/") {
-		return ErrInvalidInput.Wrap("handle must not contain /")
+	if strings.ContainsAny(handle, "@/") {
+		return ErrInvalidInput.Wrap("handle must not contain @ or /")
+	}
+	if len(handle) > 64 {
+		return ErrInvalidInput.Wrap("handle must be at most 64 characters")
+	}
+	// Handles must not collide with the other two account productions (§14), so one resolver
+	// disambiguates by shape without a sigil.
+	if looksLikeKey(handle) || looksLikeID(handle) {
+		return ErrInvalidInput.Wrap("handle must not look like a public key or id")
 	}
 	return nil
 }
@@ -1341,11 +1369,12 @@ func (k *Kernel) Withdraw(ctx context.Context, operatorID, targetUserID string, 
 
 // Transfer moves credits from the caller's own available balance to another local
 // user, recording one ledger entry (from caller, to recipient). It is user self-service
-// — the self-authorized sibling of Deposit/Withdraw — not superuser supervision, and it
-// never routes through Call(), so it has no composition surface. The recipient must be a
-// local account (a peer/proxy user is rejected, as crediting it would corrupt the
-// bilateral federation account, §13). Sufficient-funds is enforced atomically at the
-// store debit, so a concurrent spend cannot overdraw.
+// — the self-authorized sibling of Deposit/Withdraw. It is the same-kernel leg of the
+// sys/transfer native action (§13), which composes it through Call() and Steps; a
+// cross-kernel transfer routes through the federation pipeline instead, never here. The
+// recipient must be a local account (a peer/proxy user is rejected, as crediting it would
+// corrupt the bilateral federation account, §13). Sufficient-funds is enforced atomically at
+// the store debit, so a concurrent spend cannot overdraw.
 func (k *Kernel) Transfer(ctx context.Context, callerID, recipientID string, amount int64, reason, externalKey string) (*LedgerEntry, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
@@ -1411,6 +1440,7 @@ type CreateActionRequest struct {
 	Name         string
 	Kind         ActionKind
 	Price        int64
+	Effect       string // privileged execution effect ("transfer"); empty for an ordinary action (§13)
 	Description  string
 	InputSchema  map[string]any
 	OutputSchema map[string]any
@@ -1732,6 +1762,7 @@ func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionReque
 		Active:       false,
 		Visibility:   VisibilityPrivate, // promoted to public by ActivateNativeAction
 		Price:        req.Price,
+		Effect:       req.Effect,
 		Description:  req.Description,
 		InputSchema:  req.InputSchema,
 		OutputSchema: req.OutputSchema,
@@ -1765,9 +1796,9 @@ func (k *Kernel) validateAndInitActivation(ctx context.Context, a *Action) error
 	return nil
 }
 
-// ActivateNativeAction reconciles spec fields and activates a native action for bootstrap use.
-// It overwrites price, description, inputSchema, and outputSchema so drift is corrected on every boot.
-func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description string, inputSchema, outputSchema map[string]any, price int64) error {
+// ActivateNativeAction reconciles spec fields and activates a native action for bootstrap use. It
+// overwrites price, effect, description, inputSchema, and outputSchema so drift is corrected on every boot.
+func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description string, inputSchema, outputSchema map[string]any, price int64, effect string) error {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
 		return err
@@ -1776,6 +1807,7 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 		return ErrInvalidInput.Wrap("action is not native")
 	}
 	a.Price = price
+	a.Effect = effect
 	a.Description = description
 	a.InputSchema = inputSchema
 	a.OutputSchema = outputSchema
@@ -1936,7 +1968,7 @@ func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey stri
 	now := time.Now().UTC()
 	u := &User{
 		ID:                uuid.New().String(),
-		Handle:            "@sys",
+		Handle:            SuperuserHandle,
 		PasswordHash:      hash,
 		RecoveryPublicKey: recoveryPublicKey,
 		CreatedAt:         now,
@@ -1947,7 +1979,7 @@ func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey stri
 		return ErrInternal.Wrapf("generate jwt secret: %v", err)
 	}
 	configs := map[string]string{
-		"superuser_handle":    "@sys",
+		"superuser_handle":    SuperuserHandle,
 		"signing_public_key":  base64.RawURLEncoding.EncodeToString(pub),
 		"signing_private_key": base64.RawURLEncoding.EncodeToString(priv),
 		"jwt_secret":          hex.EncodeToString(jwtRaw),
@@ -1955,7 +1987,7 @@ func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey stri
 	if err := k.store.InitFirstBoot(ctx, u, configs); err != nil {
 		return err
 	}
-	su, err := k.store.ReadUserByHandle(ctx, "@sys")
+	su, err := k.store.ReadUserByHandle(ctx, SuperuserHandle)
 	if err != nil {
 		return err
 	}
@@ -2220,8 +2252,44 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
-	if caller.Available < action.Price {
-		return nil, ErrInsufficientFunds.Wrapf("user has %d credits, action costs %d", caller.Available, action.Price)
+	// Value transfer (§13): sys/transfer is an ordinary priced action with one deferred, receipt-backed
+	// transfer effect. The execution channel (price) is the normal Call lifecycle, funded by the process;
+	// the value channel is an additive TransferEffect funded from the immediate caller C's OWN balance
+	// (here C == P, a root call) and settled to the beneficiary/peer, never taxed by ComputeFee.
+	eff, err := k.prepareTransferEffect(ctx, caller.IsPeer(), action, args)
+	if err != nil {
+		return nil, err
+	}
+	var value, valueReserve int64
+	var valueTo string
+	if eff != nil {
+		value, valueReserve, valueTo = eff.Amount, eff.Reserve, eff.Dest
+	}
+	// Global-exposure admission (§13). `lockPrice` funds the process (spendable, taxed at settlement) and
+	// is action.Price for every kind (already the two-step gross for a remote proxy). `premiumReserve` is
+	// the EXECUTION serving markup only, parked beyond it and released at settlement. The value reserve is
+	// funded separately from C's own row inside store.BeginRun (an atomic second lock on t.CallerUserID),
+	// so value never flows through the execution economics. A peer caller (C == P inbound) reserves
+	// W = price + premiumReserve + valueReserve against the exposure cap X; an ordinary caller prepays it.
+	lockPrice := action.Price
+	var premiumReserve, premiumBPS int64
+	if caller.IsPeer() {
+		premiumBPS = k.cfg.RemoteBPS
+		premiumReserve = ceilDiv(action.Price*premiumBPS, 10000)
+		// A peer with a paid probabilistic outcome still awaiting its rail record must finalize it
+		// before drawing new credit (§13). Fully-prepaid calls (available ≥ W) add no obligation and
+		// are unaffected; only credit-drawing calls are gated.
+		if w := lockPrice + premiumReserve + valueReserve; w > caller.Available {
+			if pending, err := k.store.HasPendingSettlement(ctx, caller.ID); err != nil {
+				return nil, err
+			} else if pending {
+				return nil, PeerUnfundedError(caller.Handle)
+			}
+		}
+	} else {
+		if caller.Available < lockPrice+valueReserve {
+			return nil, ErrInsufficientFunds.Wrapf("user has %d credits, call costs %d", caller.Available, lockPrice+valueReserve)
+		}
 	}
 	now := time.Now().UTC()
 	p := &Process{
@@ -2236,7 +2304,21 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 		ActionOwnerID: action.OwnerUserID,
 		ActionID:      action.ID,
 		CallerUserID:  caller.ID,
+		// Snapshot the serving markup on the root trace so every settlement path (commit, failure,
+		// recovery, forced closure) levies the receipt premium and releases the parked reserve
+		// config-independently (§13). Both 0 for a local caller.
+		PremiumBPS:    premiumBPS,
+		PremiumParked: premiumReserve,
 		CreatedAt:     now,
+	}
+	// Snapshot the TransferEffect on the trace so every settlement path releases the value reserve
+	// config-independently (§13): the delivered amount, the resolved local beneficiary (empty for an
+	// outbound destination — settled against the remote receipt), and the reserve locked from C. All 0
+	// on a non-transfer call.
+	if eff != nil {
+		t.Value = value
+		t.ValueTo = valueTo
+		t.ValueReserve = valueReserve
 	}
 	// Persist the inbound cross-kernel record on the trace, for every action kind: whichever
 	// settlement resolves this call — commit, retry, max-age, forced closure, crash recovery —
@@ -2247,14 +2329,18 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	if action.Kind == KindRemoteProxy {
 		key := uuid.New().String()
 		t.IdempotencyKey = &key
-		t.DispatchJSON = marshalDispatch(args, "", k.remoteManifestPrice(action.Price))
+		t.DispatchJSON = marshalDispatch(args, "", k.remoteManifestPrice(action.Price), value, lockPrice)
 	}
-	if err := k.store.BeginRun(ctx, p, t, caller.ID, action.Price); err != nil {
+	if err := k.store.BeginRun(ctx, p, t, caller.ID, lockPrice, premiumReserve, k.cfg.ExposureMax); err != nil {
+		if caller.IsPeer() && errors.Is(err, ErrInsufficientFunds) {
+			return nil, PeerUnfundedError(caller.Handle)
+		}
 		return nil, err
 	}
 	k.log.With(ctx).Info("process.created", "process_id", p.ID, "owner", caller.ID, "price", action.Price)
 	// Pass the validated Action snapshot and the funded root trace into Call: binds execution to
-	// the row just funded (no TOCTOU window). Call re-validates the snapshot.
+	// the row just funded (no TOCTOU window). Call re-validates the snapshot. The serving-markup rate
+	// rides on the trace (loaded by Call), so no request field is needed.
 	return k.Call(ctx, CallRequest{
 		CallerID:            caller.ID,
 		Action:              action,
@@ -2769,8 +2855,12 @@ func (k *Kernel) requireActiveUser(ctx context.Context, userID string) (*User, e
 }
 
 // isUserSuperuser returns true if u is the platform superuser (@sys is fixed by the spec).
+// SuperuserHandle is the bare handle of the single privileged system account (§12): signing-key
+// owner, native-action owner, fee recipient, and gossip "about" source.
+const SuperuserHandle = "sys"
+
 func (k *Kernel) isUserSuperuser(_ context.Context, u *User) bool {
-	return u.Handle == "@sys"
+	return u.Handle == SuperuserHandle
 }
 
 // IsSuperuser reports whether userID is the configured superuser. Exported so the service
@@ -2890,7 +2980,7 @@ func (k *Kernel) CompleteIdempotencyRecordIfPending(ctx context.Context, id, res
 // ≤ gross on failure, 0 on rejection). It must be pre-computed by the caller so that
 // it is included in the JCS signature before the receipt is persisted.
 // Returns ErrInvalidState if the kernel has not been bootstrapped (no issuer configured).
-func (k *Kernel) buildReceipt(tx *Transaction, charge int64) (*Receipt, error) {
+func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value, valuePremium int64, valueTo string) (*Receipt, error) {
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
@@ -2917,6 +3007,10 @@ func (k *Kernel) buildReceipt(tx *Transaction, charge int64) (*Receipt, error) {
 		Net:          tx.Net,
 		Fee:          tx.Fee,
 		Charge:       charge,
+		Premium:      premium,
+		Value:        value,
+		ValuePremium: valuePremium,
+		ValueTo:      valueTo,
 		Reason:       tx.Reason,
 		StartedAt:    tx.StartedAt,
 		CreatedAt:    time.Now().UTC().Truncate(time.Second),

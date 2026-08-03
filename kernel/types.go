@@ -98,6 +98,9 @@ type Action struct {
 	ArtifactHash   string           `json:"artifact_hash,omitempty"`    // content-addressed compiled WASM artifact
 	WasmArtifact   string           `json:"wasm_artifact,omitempty"`    // base64-encoded compiled WASM bytes (wasm only); Source holds the TinyGo text
 	RemoteActionID string           `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
+	RemoteOwnerID  string           `json:"remote_owner_id,omitempty"`  // stable owner user_id on the remote kernel (with peer key = PrincipalID, §13)
+	RemoteBPS      *int64           `json:"remote_bps,omitempty"`       // provider premium snapshot from the signed manifest; nil = pre-v0.12 proxy row
+	Effect         string           `json:"effect,omitempty"`           // signed manifest contract: a privileged execution effect ("transfer", §13); empty = ordinary action
 	AuthJSON       string           `json:"-"`                          // AES-256-GCM encrypted upstream auth credentials; never serialized
 	CreatedAt      time.Time        `json:"created_at"`
 	UpdatedAt      time.Time        `json:"updated_at"`
@@ -207,6 +210,7 @@ type Step struct {
 	ID                   string          `json:"id"`
 	ParentTraceID        *string         `json:"parent_trace_id,omitempty"`
 	RequiredCallerUserID string          `json:"required_caller_user_id"`
+	RequiredCallerRemoteID *string       `json:"required_caller_remote_id,omitempty"` // stable remote user_id on the peer kernel (§13); nil = local required caller
 	ActionID             string          `json:"action_id"`
 	PartialArgs          json.RawMessage `json:"partial_args"`
 	Price                int64           `json:"price"`
@@ -253,8 +257,60 @@ type Trace struct {
 	// IdempotencyRecordID is the inbound cross-kernel record this trace serves (§13), set only on a
 	// root call made on a peer's behalf. Whichever settlement resolves the trace completes that
 	// record, so a crashed or parked federated call never strands its requester.
-	IdempotencyRecordID *string   `json:"idempotency_record_id,omitempty"`
-	CreatedAt           time.Time `json:"created_at"`
+	IdempotencyRecordID *string `json:"idempotency_record_id,omitempty"`
+	// PremiumBPS and PremiumParked snapshot the serving-markup admitted for an inbound federated root
+	// call (§13): the rate the receipt levies on the actual charge, and the reserve parked in the
+	// owner's locked at admission. Persisting them on the trace lets EVERY settlement path — commit,
+	// failure, crash recovery, forced closure — release the reserve without the in-memory request,
+	// and pins the rate against a mid-call config change. 0 on local calls and subcalls.
+	PremiumBPS    int64 `json:"premium_bps,omitempty"`
+	PremiumParked int64 `json:"premium_parked,omitempty"`
+	// Value, ValueTo, ValueReserve snapshot a TransferEffect on a call whose caller C funds a transfer
+	// (§13): the delivered amount, the resolved local-beneficiary user id (empty for a remote/outbound
+	// destination), and the total reserve locked from C.available at admission (value + value fees).
+	// Released to the beneficiary/peer + sys + refund at settlement, or refunded on failure — sourced
+	// from C, not the trace budget. All 0/"" on every non-transfer call.
+	Value        int64     `json:"value,omitempty"`
+	ValueTo      string    `json:"value_to,omitempty"`
+	ValueReserve int64     `json:"value_reserve,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// ValueSettlement describes how an outbound remote settlement disposes of the value-transfer reserve
+// locked on the caller C (§13). It is computed by settleRemoteCall from the peer's signed receipt and
+// applied atomically inside CommitRemoteSettlement. A zero Reserve means the call carried no transfer.
+// Exactly one disposition applies: Quarantine leaves the reserve LOCKED (an invalid/inconsistent
+// receipt after a possibly-executed dispatch — never auto-refund); Refund returns the whole reserve to
+// C (a valid failure/rejection); otherwise the reserve settles — Credit (value+value_premium) to the
+// peer proxy row, SysCredit (value_import) to origin sys, remainder refunded to C.
+type ValueSettlement struct {
+	Reserve    int64
+	Quarantine bool
+	Refund     bool
+	Credit     int64
+	SysCredit  int64
+}
+
+// PendingTransfer is the buyer-side reserve holder for a remote payment Step (§13): the buyer funds a
+// TransferEffect attached to a Step hosted on another kernel, so the reserve lives here rather than on a
+// fabricated local trace. Status ∈ {pending, settled, refunded, quarantined}. IdempotencyKey is unique
+// and payment-bound, so a retry presents the same key and never double-funds.
+type PendingTransfer struct {
+	ID             string
+	BuyerID        string
+	PeerKey        string
+	StepID         string
+	InputHash      string
+	Input          json.RawMessage // raw completion input bytes, so a retry rebuilds the SAME signed request
+	IdempotencyKey string
+	Beneficiary    string // the beneficiary user_id the serving kernel binds in its receipt
+	Amount         int64
+	RemoteMax      int64 // descriptor obligation (amount + value_premium); settlement re-validates against it
+	Reserve        int64 // buyer's max_total: amount + value_premium + value_import
+	Status         string
+	LastError      string // disposition reason (e.g. why quarantined), for the operator
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // Transaction records one attempted call. Immutable after creation.
@@ -322,6 +378,26 @@ type LedgerEntry struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// SettlementRecord is the creditor-signed evidence of one residual settlement (§13). An *open*
+// record carries only the commitment H(s); a *final* record adds the revealed secret, the debtor's
+// nonce, and the outcome. It is JCS-signed by the creditor over all fields with Signature="", and its
+// key-set (creditor+debtor+quantum+commitment) is disjoint from every other signed payload (§12).
+type SettlementRecord struct {
+	SettlementID string    `json:"settlement_id"`
+	Creditor     string    `json:"creditor"`          // creditor kernel public key (base64url)
+	Debtor       string    `json:"debtor"`            // debtor kernel public key (base64url)
+	Amount       int64     `json:"amount"`            // d, the residual debt being settled
+	Quantum      int64     `json:"quantum"`           // Q, the creditor's fee-rational quantum
+	Mode         string    `json:"mode"`              // "probabilistic"
+	Commitment   string    `json:"commitment"`        // SHA-256(secret) hex — binds the creditor before the nonce
+	Nonce        string    `json:"nonce,omitempty"`   // final only: the debtor's committed nonce
+	Secret       string    `json:"secret,omitempty"`  // final only: revealed secret s (hex)
+	Outcome      string    `json:"outcome,omitempty"` // final only: "pay" | "clear"
+	ExpiresAt    time.Time `json:"expires_at"`
+	CreatedAt    time.Time `json:"created_at"`
+	Signature    string    `json:"signature"`
+}
+
 // DiscoveredKernel is a remote kernel learned via gossip.
 type DiscoveredKernel struct {
 	PublicKey    string          `json:"public_key"`
@@ -368,10 +444,24 @@ type Receipt struct {
 	Net          int64     `json:"net"`
 	Fee          int64     `json:"fee"`
 	Charge       int64     `json:"charge"`
+	// Premium is the serving kernel's markup (execution tax + risk premium) on this charge, credited
+	// to the serving kernel's sys and owed by the origin peer on top of Charge (§13). omitempty keeps
+	// it out of the JCS signature for all local and pre-v0.12 receipts (Premium=0), so those verify
+	// unchanged; nonzero only on a receipt the serving kernel issues for an inbound federated call.
+	Premium int64 `json:"premium,omitempty"`
+	// Value / ValuePremium / ValueTo are the transfer channel, kept distinct from the execution channel
+	// (Charge/Premium) so the two never mix (§13). Value is the delivered amount — all-or-nothing (0 or
+	// the requested amount, so a partial-charge failure never dilutes delivery); ValuePremium is the
+	// serving markup on the value (= ceil(value·remote_bps), NOT folded into execution Premium); ValueTo
+	// is the resolved beneficiary the origin binds. omitempty keeps all three out of the JCS signature
+	// for every non-transfer receipt (0/""), so those verify unchanged.
+	Value        int64     `json:"value,omitempty"`
+	ValuePremium int64     `json:"value_premium,omitempty"`
+	ValueTo      string    `json:"value_to,omitempty"`
 	Reason       string    `json:"reason"`
-	StartedAt    time.Time `json:"started_at"`
-	CreatedAt    time.Time `json:"created_at"`
-	Signature    string    `json:"signature"`
+	StartedAt time.Time `json:"started_at"`
+	CreatedAt time.Time `json:"created_at"`
+	Signature string    `json:"signature"`
 }
 
 // Rating is an immutable human-submitted rating for a transaction.
@@ -456,13 +546,16 @@ type HTTPSource struct {
 // ActionManifest is a signed, exportable description of a public active action.
 type ActionManifest struct {
 	ActionID     string         `json:"action_id"`
-	OwnerHandle  string         `json:"owner_handle"`
+	OwnerID      string         `json:"owner_id"`     // stable owner user_id on the serving kernel (identity half of PrincipalID)
+	OwnerHandle  string         `json:"owner_handle"` // owner's current display handle (mutable metadata, not identity/contract)
 	Name         string         `json:"name"`
+	RemoteBPS    int64          `json:"remote_bps"` // provider premium (bps) on inbound remote calls (§13)
 	Description  string         `json:"description"`
 	InputSchema  map[string]any `json:"input_schema"`
 	OutputSchema map[string]any `json:"output_schema"`
 	Price        int64          `json:"price"`
 	Kind         ActionKind     `json:"kind"`
+	Effect       string         `json:"effect,omitempty"` // privileged execution effect ("transfer"); signed so the origin decides value-bearing from the contract, not a name (§13)
 	ArtifactHash string         `json:"artifact_hash"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 	Stats        *Stats         `json:"stats"`
@@ -485,8 +578,10 @@ type ReceiptChecks struct {
 	Signature          bool `json:"signature"`
 	ActionID           bool `json:"action_id"`
 	Status             bool `json:"status"`
-	Charge             bool `json:"charge"`              // amount paid to proxy == receipt.charge
-	SettlementArith    bool `json:"settlement_arith"`    // net + fee == gross (internal receipt math)
+	Charge             bool `json:"charge"`              // execution obligation (tx.net) == receipt.charge + receipt.premium
+	Premium            bool `json:"premium"`             // receipt.premium == ceil(receipt.charge * remote_bps / 10000)
+	ValuePremium       bool `json:"value_premium"`       // receipt.value_premium == ceil(receipt.value * remote_bps / 10000) (§13)
+	SettlementArith    bool `json:"settlement_arith"`    // tx.fee == ceil(tx.net * import_bps / 10000) on success, 0 on failure
 	RefundConservation bool `json:"refund_conservation"` // tx.Refund == tx.Gross - tx.Net - tx.Fee (exact equality)
 	ArgsHash           bool `json:"args_hash"`
 	ReplyHash          bool `json:"reply_hash"`
@@ -513,6 +608,10 @@ type PeerView struct {
 	// and when we last reached it. Display-only.
 	PeerCredit *int64     `json:"peer_credit,omitempty"`
 	LastSeen   *time.Time `json:"last_seen,omitempty"`
+	// SettlementDue flags a debtor peer when this kernel's global gross receivables have reached the
+	// settlement trigger Y (§13): information for the operator, never authority — computed live, display
+	// only. FIX 3: Y signals; the operator runs `admin settle`.
+	SettlementDue bool `json:"settlement_due,omitempty"`
 }
 
 // GossipAction is an action entry in a gossip response.

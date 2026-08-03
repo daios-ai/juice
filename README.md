@@ -11,14 +11,14 @@ settles atomically, and produces a signed receipt.
 
 Juice aims to be a kernel in the OS sense: a small set of general, robust primitives
 (execution, accounting, tracing, settlement, federation), with everything else — including the
-standard library of `@sys` actions — living in the application layer on top of those primitives.
+standard library of `sys` actions — living in the application layer on top of those primitives.
 
 ## Core model
 
 Execution starts with a single primitive:
 
 ```text
-run(action, args)        // action is @owner/name
+run(action, args)        // action is owner/name
 ```
 
 `run` atomically creates a process funded with exactly `action.price`, locked from the caller's
@@ -35,7 +35,7 @@ never start or fund a process by hand.
 
 **Money.** Every wallet — user, process, trace — has `available` and `locked`. `action.price` is
 a *subtree bound*: the most the whole call tree can cost. A call's unspent allocation is its value
-added and is paid to the action owner at settlement; the platform (`@sys`) takes `fee_bps`
+added and is paid to the action owner at settlement; the platform (`sys`) takes `fee_bps`
 (default `2000` = 20%). Failures refund the remaining allocation up the chain. Settlement is
 final and atomic with its transaction and receipt.
 
@@ -57,7 +57,7 @@ final and atomic with its transaction and receipt.
   `juice user connect --token`, applied into a configurable header). Reads expose only the
   non-secret `auth_scheme` name and a `requires_grant` flag, never config or secrets. See
   **[docs/oauth.md](docs/oauth.md)**.
-- **Native `@sys` actions** (the platform stdlib): `lookup`, `llm/chat`, `llm/embed`, `llm/json`,
+- **Native `sys` actions** (the platform stdlib): `lookup`, `llm/chat`, `llm/embed`, `llm/json`,
   `llm/decide`, `tinygo/compile`, `time`, `sink`, `message`, `random`, `web`.
 - **Federation** — subscribe to peer kernels by public key, proxy users, prepaid credits, signed
   manifests, and gossip-based discovery; `juice tx verify` checks a remote receipt locally.
@@ -77,10 +77,10 @@ make build        # or: go build -o juice ./cmd/juice/
 
 Requires Go 1.25+. Module path is `github.com/daios-ai/juice`.
 
-On first boot the kernel prompts for a superuser password and atomically creates the `@sys` user,
-its signing keypair, and a JWT secret, then registers the native `@sys` actions. It also prints a
-one-time 12-word recovery phrase for `@sys` — write it down; it is the only way to reset the
-superuser password (`juice auth recover @sys`) and cannot be recovered if lost. Subsequent boots
+On first boot the kernel prompts for a superuser password and atomically creates the `sys` user,
+its signing keypair, and a JWT secret, then registers the native `sys` actions. It also prints a
+one-time 12-word recovery phrase for `sys` — write it down; it is the only way to reset the
+superuser password (`juice auth recover sys`) and cannot be recovered if lost. Subsequent boots
 are idempotent.
 
 State — the database (which holds the signing key), config, and auth tokens — lives under
@@ -92,7 +92,7 @@ subdirectory holds regenerable data and is safe to delete.
 ## Quick start
 
 ```bash
-# Start the server (first run prompts for the @sys password)
+# Start the server (first run prompts for the sys password)
 ./juice serve --addr :4040
 
 # Create a user and log in (token stored under $JUICE_HOME/kernel/)
@@ -112,7 +112,7 @@ subdirectory holds regenerable data and is safe to delete.
 ./juice tx rate <tx-id> 1
 
 # Native actions work the same way
-./juice run @sys/time
+./juice run sys/time
 ```
 
 JSON arguments accept the `@file.json` convention (a leading `@` reads the value from a file), and
@@ -122,7 +122,7 @@ or `--quiet` to print only a created resource's id.
 ## CLI
 
 Every HTTP endpoint has a CLI command. Primary identifiers are positional natural keys — a user is
-`@handle`, an action is `@owner/name` (an id is also accepted), and processes, steps, and
+`handle`, an action is `owner/name` (an id is also accepted), and processes, steps, and
 transactions are ids.
 
 ```text
@@ -164,7 +164,7 @@ Key groups:
 | Key | Purpose |
 |---|---|
 | `native.*` | Per-action prices plus LLM URL/models (`native.llm`) |
-| `fee_bps` | Platform fee in basis points (default `2000` = 20%; recipient is fixed to `@sys`) |
+| `fee_bps` | Platform fee in basis points (default `2000` = 20%; recipient is fixed to `sys`) |
 | `import_bps` | Federation import duty in basis points (default `500`) |
 | `token_ttl` | Access-token lifetime (e.g. `15m`) |
 | `log_level` / `log_file` / `log_format` | Structured logging |
@@ -187,7 +187,7 @@ kernel/      Core types, interfaces, auth, call/settlement semantics, federation
 store/       SQLite implementation of kernel.Store (migrations, WAL)
 script/      WebAssembly execution via wazero
 llm/         Language and embedding adapter (Ollama) for lookup, chat, json, decide
-native/      Native @sys action handlers (lookup, llm/*, time, sink, message, random, web, tinygo)
+native/      Native sys action handlers (lookup, llm/*, time, sink, message, random, web, tinygo)
 log/         Structured logger (slog + tint, text + JSON)
 ```
 

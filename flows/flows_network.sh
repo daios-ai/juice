@@ -31,9 +31,9 @@ flow_network_reachability() {
     local db="$dir/n/juice.db" hm="$dir/nsys"
     mkdir -p "$dir/n" "$hm/.juice"
     # allow_local_sources=false here: this is a REAL network run, public addresses only.
-    start_server "$db" "$hm" kernel_handle=@net-node bootstrap_peers="$boot" || {
+    start_server "$db" "$hm" kernel_handle=net-node bootstrap_peers="$boot" || {
         fail "net.boot" "kernel did not start"; return; }
-    j "$db" "$hm" auth login @sys --password sys-pass >/dev/null 2>&1
+    j "$db" "$hm" auth login sys --password sys-pass >/dev/null 2>&1
 
     # Self-identity is reachable and announced.
     local mykey; mykey=$(kernel_key "$db" "$hm")

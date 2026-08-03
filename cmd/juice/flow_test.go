@@ -195,12 +195,12 @@ func TestFlow_SignupDepositRun(t *testing.T) {
 	defer srv.Close()
 
 	// Provider (owner) sets up a paid action.
-	providerID, providerTok := makeUser(t, k, "@flow-provider")
+	providerID, providerTok := makeUser(t, k, "flow-provider")
 	const price int64 = 100
 	actionID := createPublicAction(t, srv, backend.URL, providerTok, "flow-answer", price)
 
 	// Caller signs up and receives credits.
-	callerID, callerTok := makeUser(t, k, "@flow-caller")
+	callerID, callerTok := makeUser(t, k, "flow-caller")
 	giveCredits(t, k, callerID, 500)
 
 	balanceBefore := getBalance(t, srv, callerTok)
@@ -209,7 +209,7 @@ func TestFlow_SignupDepositRun(t *testing.T) {
 	}
 
 	// Run the action.
-	reply := runAction(t, srv, callerTok, "@flow-provider/flow-answer", map[string]any{})
+	reply := runAction(t, srv, callerTok, "flow-provider/flow-answer", map[string]any{})
 	if reply.TxID == "" {
 		t.Fatal("expected tx_id in reply")
 	}
@@ -283,25 +283,25 @@ func TestFlow_WASMSubcallProviderMargin(t *testing.T) {
 	defer srv.Close()
 
 	// Sub-provider A: price=20.
-	subProvAID, subProvATok := makeUser(t, k, "@flow-subprov-a")
+	subProvAID, subProvATok := makeUser(t, k, "flow-subprov-a")
 	_ = subProvAID
 	createPublicAction(t, srv, subBackend.URL, subProvATok, "sub-a", 20)
 
 	// Sub-provider B: price=20.
-	subProvBID, subProvBTok := makeUser(t, k, "@flow-subprov-b")
+	subProvBID, subProvBTok := makeUser(t, k, "flow-subprov-b")
 	_ = subProvBID
 	createPublicAction(t, srv, subBackend.URL, subProvBTok, "sub-b", 20)
 
 	// Main provider creates a WASM action priced at 100 that subcalls both.
-	mainProvID, mainProvTok := makeUser(t, k, "@flow-mainprov")
+	mainProvID, mainProvTok := makeUser(t, k, "flow-mainprov")
 	giveCredits(t, k, mainProvID, 1000) // provider needs budget for subcalls
 
 	// Register the WASM handler.
 	exec.handlers["wasm-orchestrate"] = func(ctx context.Context, input []byte, host kernel.HostFunctions) ([]byte, error) {
-		if _, err := host.Call(ctx, "@flow-subprov-a/sub-a", []byte(`{}`)); err != nil {
+		if _, err := host.Call(ctx, "flow-subprov-a/sub-a", []byte(`{}`)); err != nil {
 			return nil, fmt.Errorf("sub-a call failed: %w", err)
 		}
-		if _, err := host.Call(ctx, "@flow-subprov-b/sub-b", []byte(`{}`)); err != nil {
+		if _, err := host.Call(ctx, "flow-subprov-b/sub-b", []byte(`{}`)); err != nil {
 			return nil, fmt.Errorf("sub-b call failed: %w", err)
 		}
 		return []byte(`{"orchestrated":true}`), nil
@@ -324,11 +324,11 @@ func TestFlow_WASMSubcallProviderMargin(t *testing.T) {
 	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, mainProvTok).Body.Close()
 
 	// Caller runs the orchestrated action.
-	callerID, callerTok := makeUser(t, k, "@flow-orch-caller")
+	callerID, callerTok := makeUser(t, k, "flow-orch-caller")
 	giveCredits(t, k, callerID, 500)
 
 	balBefore := getBalance(t, srv, callerTok)
-	reply := runAction(t, srv, callerTok, "@flow-mainprov/wasm-orchestrate", map[string]any{})
+	reply := runAction(t, srv, callerTok, "flow-mainprov/wasm-orchestrate", map[string]any{})
 	balAfter := getBalance(t, srv, callerTok)
 
 	// Caller pays exactly the advertised price.
@@ -341,8 +341,8 @@ func TestFlow_WASMSubcallProviderMargin(t *testing.T) {
 
 	// Sub-providers received payment (balance > 0).
 	ctx := context.Background()
-	subA, _ := k.ReadUserByHandle(ctx, "@flow-subprov-a")
-	subB, _ := k.ReadUserByHandle(ctx, "@flow-subprov-b")
+	subA, _ := k.ReadUserByHandle(ctx, "flow-subprov-a")
+	subB, _ := k.ReadUserByHandle(ctx, "flow-subprov-b")
 	if subA.Available == 0 {
 		t.Error("sub-provider A should have received payment")
 	}
@@ -376,17 +376,17 @@ func TestFlow_FailMidTree(t *testing.T) {
 	defer srv.Close()
 
 	// Sub-provider: a cheap action that succeeds.
-	subProvID, subProvTok := makeUser(t, k, "@flow-fail-subprov")
+	subProvID, subProvTok := makeUser(t, k, "flow-fail-subprov")
 	_ = subProvID
 	createPublicAction(t, srv, succeedBackend.URL, subProvTok, "succeed-svc", 10)
 
 	// Main provider: WASM that calls succeed-svc then returns an error.
-	mainProvID, mainProvTok := makeUser(t, k, "@flow-fail-mainprov")
+	mainProvID, mainProvTok := makeUser(t, k, "flow-fail-mainprov")
 	giveCredits(t, k, mainProvID, 1000)
 
 	exec.handlers["fail-after-sub"] = func(ctx context.Context, input []byte, host kernel.HostFunctions) ([]byte, error) {
 		// First subcall succeeds.
-		if _, err := host.Call(ctx, "@flow-fail-subprov/succeed-svc", []byte(`{}`)); err != nil {
+		if _, err := host.Call(ctx, "flow-fail-subprov/succeed-svc", []byte(`{}`)); err != nil {
 			return nil, fmt.Errorf("unexpected sub error: %w", err)
 		}
 		// Then deliberately fail.
@@ -408,13 +408,13 @@ func TestFlow_FailMidTree(t *testing.T) {
 	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, mainProvTok).Body.Close()
 	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, mainProvTok).Body.Close()
 
-	callerID, callerTok := makeUser(t, k, "@flow-fail-caller")
+	callerID, callerTok := makeUser(t, k, "flow-fail-caller")
 	giveCredits(t, k, callerID, 500)
 	balBefore := getBalance(t, srv, callerTok)
 
 	// Run — expect failure.
 	resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "@flow-fail-mainprov/fail-after-sub",
+		"action": "flow-fail-mainprov/fail-after-sub",
 		"args":   map[string]any{},
 	}, callerTok)
 	// Should be an error response.
@@ -432,7 +432,7 @@ func TestFlow_FailMidTree(t *testing.T) {
 	}
 	// The sub-provider was paid (settled subcall).
 	ctx := context.Background()
-	subProv, _ := k.ReadUserByHandle(ctx, "@flow-fail-subprov")
+	subProv, _ := k.ReadUserByHandle(ctx, "flow-fail-subprov")
 	if subProv.Available == 0 {
 		t.Error("settled sub-provider should have received payment")
 	}
@@ -454,8 +454,8 @@ func TestFlow_ApprovalStep(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "@appr-owner")
-	humanID, humanTok := makeUser(t, k, "@appr-human")
+	ownerID, ownerTok := makeUser(t, k, "appr-owner")
+	humanID, humanTok := makeUser(t, k, "appr-human")
 	_ = humanID
 
 	giveCredits(t, k, ownerID, 500)
@@ -471,7 +471,7 @@ func TestFlow_ApprovalStep(t *testing.T) {
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action_id":       stepActionID,
-		"required_caller": "@appr-human",
+		"required_caller": "appr-human",
 		"partial_args":    map[string]any{"preset": "value"},
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -543,8 +543,8 @@ func TestFlow_WebhookCompleteStep(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "@wh-owner")
-	webhookID, webhookTok := makeUser(t, k, "@wh-webhook-sys")
+	ownerID, ownerTok := makeUser(t, k, "wh-owner")
+	webhookID, webhookTok := makeUser(t, k, "wh-webhook-sys")
 	_ = webhookID
 
 	giveCredits(t, k, ownerID, 500)
@@ -559,7 +559,7 @@ func TestFlow_WebhookCompleteStep(t *testing.T) {
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action_id":       actionID,
-		"required_caller": "@wh-webhook-sys",
+		"required_caller": "wh-webhook-sys",
 		"partial_args":    map[string]any{"purchase_id": "abc123"},
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -596,7 +596,7 @@ func TestFlow_WebhookCompleteStep(t *testing.T) {
 		CallerHandle string `json:"caller_handle"`
 	}
 	decodeResponse(t, txResp, &tx)
-	if tx.CallerHandle != "@wh-webhook-sys" {
+	if tx.CallerHandle != "wh-webhook-sys" {
 		t.Errorf("tx caller_handle: got %s, want @wh-webhook-sys (webhook)", tx.CallerHandle)
 	}
 	if tx.Status != kernel.TxSuccess {
@@ -616,9 +616,9 @@ func TestFlow_ForceEndWithSteps(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "@fend-owner")
+	ownerID, ownerTok := makeUser(t, k, "fend-owner")
 	giveCredits(t, k, ownerID, 500)
-	_, callerTok := makeUser(t, k, "@fend-caller")
+	_, callerTok := makeUser(t, k, "fend-caller")
 	_ = callerTok
 
 	actionID := createPublicAction(t, srv, backend.URL, ownerTok, "fend-action", 0)
@@ -632,7 +632,7 @@ func TestFlow_ForceEndWithSteps(t *testing.T) {
 		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 			"trace_id":        traceID,
 			"action_id":       actionID,
-			"required_caller": "@fend-caller",
+			"required_caller": "fend-caller",
 			"partial_args":    map[string]any{},
 		}, ownerTok)
 		if r.StatusCode != http.StatusCreated {
@@ -697,8 +697,8 @@ func TestFlow_RestartRecovery(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "@rst-owner")
-	callerID, callerTok := makeUser(t, k, "@rst-caller")
+	ownerID, ownerTok := makeUser(t, k, "rst-owner")
+	callerID, callerTok := makeUser(t, k, "rst-caller")
 	_ = callerTok
 
 	giveCredits(t, k, ownerID, 500)
@@ -713,7 +713,7 @@ func TestFlow_RestartRecovery(t *testing.T) {
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action_id":       actionID,
-		"required_caller": "@rst-caller",
+		"required_caller": "rst-caller",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -742,7 +742,7 @@ func TestFlow_RestartRecovery(t *testing.T) {
 	callerUser, _ := k.ReadUser(ctx, callerID)
 	_ = callerUser
 
-	_, callerTok2 := makeUser(t, k, "@rst-caller2")
+	_, callerTok2 := makeUser(t, k, "rst-caller2")
 	// Let's use the existing caller.
 	complResp := httpDo(t, srv, "POST", "/v1/steps/"+stepID+"/complete", map[string]any{
 		"args": map[string]any{},
@@ -776,7 +776,7 @@ func TestFlow_OpenAPIImportActivateRun(t *testing.T) {
 	defer apiBackend.Close()
 
 	// Well-known ownership proof server.
-	ownerHandle := "@oa-owner"
+	ownerHandle := "oa-owner"
 	wkServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.well-known/juice-owner.txt" {
 			w.Write([]byte(ownerHandle))
@@ -878,7 +878,7 @@ func TestFlow_OpenAPIImportActivateRun(t *testing.T) {
 	}
 
 	// Caller executes through Run().
-	callerID, callerTok := makeUser(t, k, "@oa-caller")
+	callerID, callerTok := makeUser(t, k, "oa-caller")
 	giveCredits(t, k, callerID, 100)
 
 	runResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
@@ -919,7 +919,7 @@ func TestFlow_OpenAPIReimport(t *testing.T) {
 	}))
 	defer apiBackend.Close()
 
-	ownerHandle := "@reimp-owner"
+	ownerHandle := "reimp-owner"
 	buildSpec := func(summary string) []byte {
 		spec := map[string]any{
 			"openapi":       "3.0.0",
@@ -992,7 +992,7 @@ func TestFlow_OpenAPIReimport(t *testing.T) {
 	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, ownerTok).Body.Close()
 	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
 
-	callerID, callerTok := makeUser(t, k, "@reimp-caller")
+	callerID, callerTok := makeUser(t, k, "reimp-caller")
 	giveCredits(t, k, callerID, 100)
 	runRep := runAction(t, srv, callerTok, ownerHandle+"/doSomething", map[string]any{})
 	txID := runRep.TxID
@@ -1036,7 +1036,7 @@ func TestFlow_OpenAPIUnimport(t *testing.T) {
 	}))
 	defer apiBackend.Close()
 
-	ownerHandle := "@unimp-owner"
+	ownerHandle := "unimp-owner"
 	spec := map[string]any{
 		"openapi":       "3.0.0",
 		"x-juice-owner": ownerHandle,
@@ -1102,7 +1102,7 @@ func TestFlow_OpenAPIUnimport(t *testing.T) {
 	// Enable and run once to generate history.
 	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, ownerTok).Body.Close()
 	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
-	callerID, callerTok := makeUser(t, k, "@unimp-caller")
+	callerID, callerTok := makeUser(t, k, "unimp-caller")
 	giveCredits(t, k, callerID, 100)
 	runRep := runAction(t, srv, callerTok, ownerHandle+"/goSomething", map[string]any{})
 	txID := runRep.TxID
@@ -1153,8 +1153,8 @@ func TestFlow_ReconcileNetAmounts(t *testing.T) {
 	srv, k, _ := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "@rec-owner")
-	callerID, callerTok := makeUser(t, k, "@rec-caller")
+	ownerID, ownerTok := makeUser(t, k, "rec-owner")
+	callerID, callerTok := makeUser(t, k, "rec-caller")
 	giveCredits(t, k, callerID, 1000)
 
 	const price int64 = 50
@@ -1163,7 +1163,7 @@ func TestFlow_ReconcileNetAmounts(t *testing.T) {
 	// Run 3 times.
 	const runs = 3
 	for i := 0; i < runs; i++ {
-		r := runAction(t, srv, callerTok, "@rec-owner/rec-action", map[string]any{})
+		r := runAction(t, srv, callerTok, "rec-owner/rec-action", map[string]any{})
 		if r.TxID == "" {
 			t.Fatalf("run %d: expected tx_id", i)
 		}
@@ -1202,15 +1202,15 @@ func TestFlow_RatingVisibility(t *testing.T) {
 	srv, k, _ := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "@rv-owner")
+	ownerID, ownerTok := makeUser(t, k, "rv-owner")
 	_ = ownerID
-	callerID, callerTok := makeUser(t, k, "@rv-caller")
+	callerID, callerTok := makeUser(t, k, "rv-caller")
 	giveCredits(t, k, callerID, 200)
 
 	createPublicAction(t, srv, backend.URL, ownerTok, "rv-action", 0)
 
 	// Run once — creates a transaction.
-	r := runAction(t, srv, callerTok, "@rv-owner/rv-action", map[string]any{})
+	r := runAction(t, srv, callerTok, "rv-owner/rv-action", map[string]any{})
 	txID := r.TxID
 	if txID == "" {
 		t.Fatal("expected tx_id")
@@ -1344,8 +1344,8 @@ func TestFlow_UpstreamAuthSecrecy(t *testing.T) {
 	srv, k, _ := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "@auth-owner")
-	callerID, callerTok := makeUser(t, k, "@auth-caller")
+	ownerID, ownerTok := makeUser(t, k, "auth-owner")
+	callerID, callerTok := makeUser(t, k, "auth-caller")
 	giveCredits(t, k, callerID, 100)
 
 	// Create action with bearer auth credentials via HTTP API.
@@ -1403,7 +1403,7 @@ func TestFlow_UpstreamAuthSecrecy(t *testing.T) {
 
 	// Run the action — backend should receive the Authorization header.
 	runResult := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "@auth-owner/secured-action",
+		"action": "auth-owner/secured-action",
 		"args":   map[string]any{},
 	}, callerTok)
 	if runResult.StatusCode != http.StatusOK {
@@ -1480,7 +1480,7 @@ func bootstrapSysNative(t *testing.T, k *kernel.Kernel, names ...string) {
 		if !ok {
 			t.Fatalf("bootstrapSysNative: unknown spec %q", name)
 		}
-		if err := ensureSysNative(ctx, k, "@sys", spec); err != nil {
+		if err := ensureSysNative(ctx, k, "sys", spec); err != nil {
 			t.Fatalf("bootstrapSysNative %q: %v", name, err)
 		}
 	}
@@ -1505,7 +1505,7 @@ func TestFlow_LookupAndRun(t *testing.T) {
 	native.RegisterLookupHandler(k)
 
 	// Provider creates a public action with a distinctive description.
-	providerID, providerTok := makeUser(t, k, "@lk-provider")
+	providerID, providerTok := makeUser(t, k, "lk-provider")
 	_ = providerID
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": "pressure-api", "kind": "http", "price": 0, "source": backend.URL,
@@ -1525,10 +1525,10 @@ func TestFlow_LookupAndRun(t *testing.T) {
 	}
 
 	// Caller looks up actions matching the description.
-	callerID, callerTok := makeUser(t, k, "@lk-caller")
+	callerID, callerTok := makeUser(t, k, "lk-caller")
 	giveCredits(t, k, callerID, 200)
 
-	lookupReply := runAction(t, srv, callerTok, "@sys/lookup", map[string]any{"query": description})
+	lookupReply := runAction(t, srv, callerTok, "sys/lookup", map[string]any{"query": description})
 	results, _ := lookupReply.Result["results"].([]any)
 	found := false
 	for _, r := range results {
@@ -1546,7 +1546,7 @@ func TestFlow_LookupAndRun(t *testing.T) {
 	}
 
 	// Caller runs the top result directly.
-	reply := runAction(t, srv, callerTok, "@lk-provider/pressure-api", map[string]any{})
+	reply := runAction(t, srv, callerTok, "lk-provider/pressure-api", map[string]any{})
 	if reply.TxID == "" {
 		t.Error("expected tx_id from pressure-api run")
 	}
@@ -1562,18 +1562,18 @@ func TestFlow_Message(t *testing.T) {
 	native.RegisterSinkHandler(k)
 	native.RegisterMessageHandler(k)
 
-	userAID, userATok := makeUser(t, k, "@msg-a")
-	_, userBTok := makeUser(t, k, "@msg-b")
+	userAID, userATok := makeUser(t, k, "msg-a")
+	_, userBTok := makeUser(t, k, "msg-b")
 	giveCredits(t, k, userAID, 200)
 
 	// A sends a message to B.
-	reply := runAction(t, srv, userATok, "@sys/message", map[string]any{
-		"to":      "@msg-b",
+	reply := runAction(t, srv, userATok, "sys/message", map[string]any{
+		"to":      "msg-b",
 		"message": "hello from A",
 	})
 	stepID, _ := reply.Result["step_id"].(string)
 	if stepID == "" {
-		t.Fatalf("@sys/message: expected step_id in result, got %v", reply.Result)
+		t.Fatalf("sys/message: expected step_id in result, got %v", reply.Result)
 	}
 
 	// B sees the step in their list.
@@ -1633,9 +1633,9 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	pID, pTok := makeUser(t, k, "@3p-owner")
-	_, cTok := makeUser(t, k, "@3p-caller")
-	_, aTok := makeUser(t, k, "@3p-provider")
+	pID, pTok := makeUser(t, k, "3p-owner")
+	_, cTok := makeUser(t, k, "3p-caller")
+	_, aTok := makeUser(t, k, "3p-provider")
 
 	giveCredits(t, k, pID, 500)
 
@@ -1649,7 +1649,7 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 
 	// P creates a step addressed to C, pointing at A's action.
 	aAction, err := k.ReadActionByOwnerName(ctx, func() string {
-		u, _ := k.ReadUserByHandle(ctx, "@3p-provider")
+		u, _ := k.ReadUserByHandle(ctx, "3p-provider")
 		return u.ID
 	}(), "3p-action")
 	if err != nil || aAction == nil {
@@ -1658,7 +1658,7 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action_id":       aAction.ID,
-		"required_caller": "@3p-caller",
+		"required_caller": "3p-caller",
 		"partial_args":    map[string]any{},
 	}, pTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -1695,13 +1695,13 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 		}
 		var tx map[string]any
 		decodeResponse(t, r, &tx)
-		if tx["owner_handle"] != "@3p-owner" {
+		if tx["owner_handle"] != "3p-owner" {
 			t.Errorf("tx.owner_handle: got %v, want @3p-owner", tx["owner_handle"])
 		}
-		if tx["caller_handle"] != "@3p-caller" {
+		if tx["caller_handle"] != "3p-caller" {
 			t.Errorf("tx.caller_handle: got %v, want @3p-caller", tx["caller_handle"])
 		}
-		if tx["target_handle"] != "@3p-provider" {
+		if tx["target_handle"] != "3p-provider" {
 			t.Errorf("tx.target_handle: got %v, want @3p-provider", tx["target_handle"])
 		}
 		// The raw party UUIDs are no longer exposed (a user is addressed by @handle, §14).
@@ -1723,9 +1723,9 @@ func TestFlow_PrivateAction(t *testing.T) {
 	srv, k, _ := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	providerID, providerTok := makeUser(t, k, "@priv-owner")
+	providerID, providerTok := makeUser(t, k, "priv-owner")
 	giveCredits(t, k, providerID, 200)
-	otherID, otherTok := makeUser(t, k, "@priv-other")
+	otherID, otherTok := makeUser(t, k, "priv-other")
 	giveCredits(t, k, otherID, 200)
 
 	// Create private action (public=false, which is the default).
@@ -1743,14 +1743,14 @@ func TestFlow_PrivateAction(t *testing.T) {
 	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, providerTok).Body.Close()
 
 	// Owner can run their own private action.
-	reply := runAction(t, srv, providerTok, "@priv-owner/private-action", map[string]any{})
+	reply := runAction(t, srv, providerTok, "priv-owner/private-action", map[string]any{})
 	if reply.TxID == "" {
 		t.Error("owner run: expected tx_id")
 	}
 
 	// Another user is rejected.
 	resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "@priv-owner/private-action", "args": map[string]any{},
+		"action": "priv-owner/private-action", "args": map[string]any{},
 	}, otherTok)
 	resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
@@ -1765,10 +1765,10 @@ func TestFlow_AuthTokenLifecycle(t *testing.T) {
 	defer srv.Close()
 
 	// Create user; Login is already tested via makeUser; here we test via HTTP.
-	_, _ = makeUser(t, k, "@auth-life")
+	_, _ = makeUser(t, k, "auth-life")
 
 	loginResp := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"handle": "@auth-life", "password": "pass",
+		"handle": "auth-life", "password": "pass",
 	}, "")
 	if loginResp.StatusCode != http.StatusOK {
 		loginResp.Body.Close()
@@ -1799,7 +1799,7 @@ func TestFlow_AuthTokenLifecycle(t *testing.T) {
 
 	// Old password is rejected.
 	oldLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"handle": "@auth-life", "password": "pass",
+		"handle": "auth-life", "password": "pass",
 	}, "")
 	oldLogin.Body.Close()
 	if oldLogin.StatusCode == http.StatusOK {
@@ -1808,7 +1808,7 @@ func TestFlow_AuthTokenLifecycle(t *testing.T) {
 
 	// New password works.
 	newLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"handle": "@auth-life", "password": "newpass",
+		"handle": "auth-life", "password": "newpass",
 	}, "")
 	if newLogin.StatusCode != http.StatusOK {
 		newLogin.Body.Close()
@@ -1828,8 +1828,8 @@ func TestFlow_SuspendUnsuspend(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
-	userID, userTok := makeUser(t, k, "@susp-user")
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
+	userID, userTok := makeUser(t, k, "susp-user")
 	giveCredits(t, k, userID, 300)
 
 	// Verify balance before suspend.
@@ -1875,7 +1875,7 @@ func TestFlow_AccountSelfService(t *testing.T) {
 	srv, k, _ := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	userID, userTok := makeUser(t, k, "@self-user")
+	userID, userTok := makeUser(t, k, "self-user")
 	_ = userID
 
 	// Update description.
@@ -1904,7 +1904,7 @@ func TestFlow_AccountSelfService(t *testing.T) {
 
 	// Old password rejected.
 	oldLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"handle": "@self-user", "password": "pass",
+		"handle": "self-user", "password": "pass",
 	}, "")
 	oldLogin.Body.Close()
 	if oldLogin.StatusCode == http.StatusOK {
@@ -1913,7 +1913,7 @@ func TestFlow_AccountSelfService(t *testing.T) {
 
 	// New password accepted.
 	newLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"handle": "@self-user", "password": "changed123",
+		"handle": "self-user", "password": "changed123",
 	}, "")
 	newLogin.Body.Close()
 	if newLogin.StatusCode != http.StatusOK {
@@ -1934,9 +1934,9 @@ func TestFlow_DepositSpendWithdraw(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
-	userID, userTok := makeUser(t, k, "@dsw-user")
-	providerID, providerTok := makeUser(t, k, "@dsw-provider")
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
+	userID, userTok := makeUser(t, k, "dsw-user")
+	providerID, providerTok := makeUser(t, k, "dsw-provider")
 	_ = providerID
 
 	// Deposit 100.
@@ -1950,7 +1950,7 @@ func TestFlow_DepositSpendWithdraw(t *testing.T) {
 	// Spend 20 by running an action priced at 20.
 	actID := createPublicAction(t, srv, backend.URL, providerTok, "dsw-action", 20)
 	_ = actID
-	runAction(t, srv, userTok, "@dsw-provider/dsw-action", map[string]any{})
+	runAction(t, srv, userTok, "dsw-provider/dsw-action", map[string]any{})
 	if getBalance(t, srv, userTok) != 80 {
 		t.Errorf("balance after spend: got %d, want 80", getBalance(t, srv, userTok))
 	}
@@ -1994,22 +1994,22 @@ func TestFlow_Transfer(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	sys, _ := k.ReadUserByHandle(ctx, "@sys")
-	aliceID, aliceTok := makeUser(t, k, "@xfer-alice")
-	_, bobTok := makeUser(t, k, "@xfer-bob")
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
+	aliceID, aliceTok := makeUser(t, k, "xfer-alice")
+	_, bobTok := makeUser(t, k, "xfer-bob")
 
 	if _, err := k.Deposit(ctx, sys.ID, aliceID, 100, "seed", ""); err != nil {
 		t.Fatalf("deposit: %v", err)
 	}
 
 	// Alice transfers 30 to bob by @handle.
-	resp := httpDo(t, srv, "POST", "/v1/transfers", map[string]any{"recipient": "@xfer-bob", "amount": 30}, aliceTok)
+	resp := httpDo(t, srv, "POST", "/v1/transfers", map[string]any{"recipient": "xfer-bob", "amount": 30}, aliceTok)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /v1/transfers: got %d", resp.StatusCode)
 	}
 	var entry map[string]any
 	decodeResponse(t, resp, &entry)
-	if entry["from_handle"] != "@xfer-alice" || entry["to_handle"] != "@xfer-bob" {
+	if entry["from_handle"] != "xfer-alice" || entry["to_handle"] != "xfer-bob" {
 		t.Errorf("transfer response handles: got from=%v to=%v", entry["from_handle"], entry["to_handle"])
 	}
 
@@ -2029,7 +2029,7 @@ func TestFlow_Transfer(t *testing.T) {
 	}
 
 	// Over-balance transfer rejected (402), balance unchanged.
-	resp = httpDo(t, srv, "POST", "/v1/transfers", map[string]any{"recipient": "@xfer-bob", "amount": 1000}, aliceTok)
+	resp = httpDo(t, srv, "POST", "/v1/transfers", map[string]any{"recipient": "xfer-bob", "amount": 1000}, aliceTok)
 	if resp.StatusCode != http.StatusPaymentRequired {
 		t.Errorf("over-balance transfer: got %d, want 402", resp.StatusCode)
 	}
@@ -2052,16 +2052,16 @@ func TestFlow_ActionUpdateLive(t *testing.T) {
 	srv, k, _ := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	providerID, providerTok := makeUser(t, k, "@upd-provider")
+	providerID, providerTok := makeUser(t, k, "upd-provider")
 	_ = providerID
-	callerID, callerTok := makeUser(t, k, "@upd-caller")
+	callerID, callerTok := makeUser(t, k, "upd-caller")
 	giveCredits(t, k, callerID, 500)
 
 	// Create and activate at price=50.
 	actID := createPublicAction(t, srv, backend.URL, providerTok, "upd-action", 50)
 
 	// Caller runs it — tx1 recorded at gross=50.
-	reply1 := runAction(t, srv, callerTok, "@upd-provider/upd-action", map[string]any{})
+	reply1 := runAction(t, srv, callerTok, "upd-provider/upd-action", map[string]any{})
 	tx1ID := reply1.TxID
 	if tx1ID == "" {
 		t.Fatal("expected tx_id from first run")
@@ -2077,7 +2077,7 @@ func TestFlow_ActionUpdateLive(t *testing.T) {
 
 	// Caller is rejected (action inactive).
 	failResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "@upd-provider/upd-action", "args": map[string]any{},
+		"action": "upd-provider/upd-action", "args": map[string]any{},
 	}, callerTok)
 	failResp.Body.Close()
 	if failResp.StatusCode == http.StatusOK {
@@ -2100,7 +2100,7 @@ func TestFlow_ActionUpdateLive(t *testing.T) {
 	}
 
 	// Caller runs again at new price.
-	reply2 := runAction(t, srv, callerTok, "@upd-provider/upd-action", map[string]any{})
+	reply2 := runAction(t, srv, callerTok, "upd-provider/upd-action", map[string]any{})
 	tx2Resp := httpDo(t, srv, "GET", "/v1/transactions/"+reply2.TxID, nil, callerTok)
 	var tx2Body map[string]any
 	decodeResponse(t, tx2Resp, &tx2Body)
@@ -2119,7 +2119,7 @@ func TestFlow_OpenAPIOwnershipProof(t *testing.T) {
 	}))
 	defer apiBackend.Close()
 
-	const ownerHandle = "@proof-owner"
+	const ownerHandle = "proof-owner"
 
 	// Spec WITHOUT x-juice-owner (first import — no ownership).
 	noProofSpec := map[string]any{
@@ -2180,7 +2180,7 @@ func TestFlow_OpenAPIOwnershipProof(t *testing.T) {
 	defer srv.Close()
 
 	ownerID, ownerTok := makeUser(t, k, ownerHandle)
-	callerID, callerTok := makeUser(t, k, "@proof-caller")
+	callerID, callerTok := makeUser(t, k, "proof-caller")
 	giveCredits(t, k, callerID, 200)
 
 	// First import: no ownership.
@@ -2257,7 +2257,7 @@ func TestFlow_OpenAPIOwnershipProof(t *testing.T) {
 }
 
 // TestFlow_ImportDutyAdjustment: two kernels sharing the same provider DB path but
-// configured with different ImportBPS values import the same action; the proxy prices
+// configured with different RemoteBPS values import the same action; the proxy prices
 // reflect each kernel's duty rate, and original transactions are immutable.
 func TestFlow_ImportDutyAdjustment(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2272,10 +2272,10 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 	ctx := context.Background()
 	pubA := privA.Public().(ed25519.PublicKey)
 	pubAB64 := base64.RawURLEncoding.EncodeToString(pubA)
-	sysA, _ := kA.ReadUserByHandle(ctx, "@sys")
+	sysA, _ := kA.ReadUserByHandle(ctx, "sys")
 
 	// A creates a public action priced at 1000.
-	_, ownerATok := makeUser(t, kA, "@duty-a-prov")
+	_, ownerATok := makeUser(t, kA, "duty-a-prov")
 	const priceA int64 = 1000
 	actAID := createPublicAction(t, srvA, backend.URL, ownerATok, "duty-action", priceA)
 	manifestPtr, err := kA.GetActionManifest(ctx, actAID)
@@ -2284,7 +2284,7 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 	}
 	manifest := *manifestPtr
 
-	// Helper: build a fed kernel with a specific ImportBPS and import A's action.
+	// Helper: build a fed kernel with a specific RemoteBPS and import A's action.
 	importWithBPS := func(importBPS int64) int64 {
 		dir := t.TempDir()
 		db, err := store.Open(filepath.Join(dir, "duty.db"))
@@ -2296,7 +2296,7 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 		cfg := kernel.DefaultConfig()
 		cfg.TokenSecret = fmt.Sprintf("duty-secret-%d", importBPS)
 		cfg.AllowLocalSources = true
-		cfg.ImportBPS = importBPS
+		cfg.RemoteBPS = importBPS
 		logger := log.Discard()
 		httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
 		kB := kernel.New(db, nil, httpExec, nil, cfg, logger)
@@ -2304,25 +2304,34 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 		if err := kB.FirstBoot(ctx, "sys-pass", ""); err != nil {
 			t.Fatal(err)
 		}
-		sysB, _ := kB.ReadUserByHandle(ctx, "@sys")
+		sysB, _ := kB.ReadUserByHandle(ctx, "sys")
 		privB64, _ := kB.GetConfig(ctx, configKeySigningPrivate)
 		privBBytes, _ := base64.RawURLEncoding.DecodeString(privB64)
 		privB := ed25519.PrivateKey(privBBytes)
 		kB.SetSigningKey(privB, sysB.ID)
 		httpExec.signerFn = kB.SignFederation
 
-		peerAOnB, err := kB.AddPeer(ctx, sysA.ID, "@duty-a", pubAB64)
+		peerAOnB, err := kB.AddPeer(ctx, sysA.ID, "duty-a", pubAB64)
 		if err != nil {
 			// AddPeer might check ownership; use CreateOrUpdateProxyPeer if needed.
 			peerAOnB, _ = kB.ReadUserByPublicKey(ctx, pubAB64)
 		}
 		if peerAOnB == nil {
-			peerAOnB, _ = kB.CreateOrUpdateProxyPeer(ctx, "@duty-a", pubAB64)
+			peerAOnB, _ = kB.CreateOrUpdateProxyPeer(ctx, "duty-a", pubAB64)
 		}
 
-		importResult, err := kB.ImportRemoteAction(ctx, sysB.ID, peerAOnB.ID, manifest)
+		// The provider advertises its premium in the signed manifest (§13, v0.12): a higher
+		// remote_bps yields a higher proxy price on import. Vary it and re-sign with the provider key.
+		m := manifest
+		m.RemoteBPS = importBPS
+		msig, err := kernel.SignManifest(privA, &m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Signature = msig
+		importResult, err := kB.ImportRemoteAction(ctx, sysB.ID, peerAOnB.ID, m)
 		if err != nil || len(importResult.Created) == 0 {
-			t.Fatalf("ImportBPS=%d import failed: err=%v created=%d", importBPS, err, len(importResult.Created))
+			t.Fatalf("RemoteBPS=%d import failed: err=%v created=%d", importBPS, err, len(importResult.Created))
 		}
 		return importResult.Created[0].Price
 	}
@@ -2332,12 +2341,12 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 
 	// The proxy price must be higher with a higher import duty.
 	if price2000 <= price500 {
-		t.Errorf("higher ImportBPS should yield higher proxy price: got %d (5%%) and %d (20%%)",
+		t.Errorf("higher RemoteBPS should yield higher proxy price: got %d (5%%) and %d (20%%)",
 			price500, price2000)
 	}
 
 	// Both proxy prices should be ≥ the remote action price (proxy price = mp + duty ≥ mp).
-	// mp = priceA * 10000 / (10000 + ImportBPS) — always ≤ priceA.
+	// mp = priceA * 10000 / (10000 + RemoteBPS) — always ≤ priceA.
 	// proxy price ≥ mp, and duty ≥ 0, so proxy price ≤ priceA is not guaranteed.
 	// We just assert prices are positive.
 	if price500 <= 0 || price2000 <= 0 {
@@ -2358,9 +2367,9 @@ func TestFlow_AuthenticatedActionList(t *testing.T) {
 	srv, k, _ := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	providerID, providerTok := makeUser(t, k, "@aal-provider")
+	providerID, providerTok := makeUser(t, k, "aal-provider")
 	_ = providerID
-	_, otherTok := makeUser(t, k, "@aal-other")
+	_, otherTok := makeUser(t, k, "aal-other")
 
 	// Create public+active action.
 	pubResp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
@@ -2534,12 +2543,12 @@ func TestFlow_OAuthDelegated(t *testing.T) {
 	srv, k := newOAuthFlowServer(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@oauth-owner")
+	_, ownerTok := makeUser(t, k, "oauth-owner")
 	// Two oauth actions under one directory sharing one provider app — they group into one
 	// connection, so a single consent covers both (§8).
 	createDelegatedActionHTTP(t, srv, ownerTok, "mail/read", upstream.URL, provider.URL)
 	createDelegatedActionHTTP(t, srv, ownerTok, "mail/send", upstream.URL, provider.URL)
-	const readRef, sendRef, selector = "@oauth-owner/mail/read", "@oauth-owner/mail/send", "@oauth-owner/mail"
+	const readRef, sendRef, selector = "oauth-owner/mail/read", "oauth-owner/mail/send", "oauth-owner/mail"
 
 	rejectRun := func(ref string) {
 		resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{"action": ref, "args": map[string]any{}}, ownerTok)
@@ -2632,7 +2641,7 @@ func TestFlow_DelegatedBearer(t *testing.T) {
 	srv, k := newOAuthFlowServer(t)
 	defer srv.Close()
 
-	_, ownerTok := makeUser(t, k, "@bearer-owner")
+	_, ownerTok := makeUser(t, k, "bearer-owner")
 	// Two bearer actions under one directory, sharing one upstream host → one connection, one paste.
 	for _, name := range []string{"inbox/send", "inbox/read"} {
 		cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
@@ -2650,7 +2659,7 @@ func TestFlow_DelegatedBearer(t *testing.T) {
 		decodeResponse(t, cr, &act)
 		httpDo(t, srv, "POST", "/v1/actions/"+act["id"].(string)+"/enable", nil, ownerTok).Body.Close()
 	}
-	const sendRef, readRef, selector = "@bearer-owner/inbox/send", "@bearer-owner/inbox/read", "@bearer-owner/inbox"
+	const sendRef, readRef, selector = "bearer-owner/inbox/send", "bearer-owner/inbox/read", "bearer-owner/inbox"
 	providerKey := "bearer:" + strings.TrimPrefix(upstream.URL, "http://")
 
 	rejectRun := func(ref string) {
@@ -2717,7 +2726,7 @@ func TestFlow_DelegatedBearer(t *testing.T) {
 	if err := json.Unmarshal([]byte(meBody), &me); err != nil {
 		t.Fatalf("decode /v1/me: %v", err)
 	}
-	if len(me.Connectors) != 1 || me.Connectors[0].Directory != "@bearer-owner/inbox" {
+	if len(me.Connectors) != 1 || me.Connectors[0].Directory != "bearer-owner/inbox" {
 		t.Fatalf("connectors tree = %+v, want one @bearer-owner/inbox node", me.Connectors)
 	}
 	node := me.Connectors[0]
