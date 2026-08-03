@@ -510,10 +510,34 @@ type Store interface {
 
 	// ---- Gossip / Federation ----
 
-	// CreateOrUpdateDiscoveredKernel upserts a DiscoveredKernel row keyed by (public_key, introduced_by).
+	// CreateOrUpdateDiscoveredKernel upserts a DiscoveredKernel row keyed by public_key. It updates
+	// handle/about and (when non-empty) gossip_cursor, preserving the earliest first_seen.
 	CreateOrUpdateDiscoveredKernel(ctx context.Context, k *DiscoveredKernel) error
-	// ListDiscoveredKernels returns all discovered kernel rows.
-	ListDiscoveredKernels(ctx context.Context) ([]*DiscoveredKernel, error)
+	// ReadDiscoveredKernel returns the discovered-kernel row for a public key, or nil if unknown.
+	ReadDiscoveredKernel(ctx context.Context, publicKey string) (*DiscoveredKernel, error)
+	// SetGossipCursor persists the evidence high-watermark for a peer (§13 peer sync).
+	SetGossipCursor(ctx context.Context, publicKey, cursor string) error
+
+	// ---- Discovery docs (regenerable lookup cache, §13) ----
+
+	// ReplaceDiscoveryDocs replaces ALL discovery docs (and their FTS mirror rows) for one source
+	// kernel with the supplied set, in one transaction. An empty set clears that kernel's docs.
+	ReplaceDiscoveryDocs(ctx context.Context, kernelPublicKey string, docs []*DiscoveryDoc) error
+	// ListDiscoveryDocs returns all discovery docs (with embeddings) for the lookup dense leg.
+	ListDiscoveryDocs(ctx context.Context) ([]*DiscoveryDoc, error)
+	// SearchDiscoveryLexical returns doc_keys ranked by BM25 for query, most relevant first.
+	SearchDiscoveryLexical(ctx context.Context, query string, limit int) ([]string, error)
+
+	// ---- Evidence cache (regenerable reputation cache, §13) ----
+
+	// UpsertEvidence stores or merges one verified evidence row, enforcing the late-rating
+	// transitions and the E-per-(issuer,subject_kernel,subject_action) cap (§13).
+	UpsertEvidence(ctx context.Context, e *EvidenceRow) error
+	// ListEvidenceBySubject returns evidence rows about a subject kernel, for inspect display.
+	ListEvidenceBySubject(ctx context.Context, subjectKernelPublicKey string) ([]*EvidenceRow, error)
+	// ListReceiptsForGossip returns one ordered page of this kernel's own gossip-eligible receipts
+	// (with any joined rating and remote receipt) after the cursor, for the evidence sender (§13).
+	ListReceiptsForGossip(ctx context.Context, cursor string, limit int) ([]*GossipReceiptRow, error)
 
 	// ---- Peer lifecycle ----
 
@@ -523,25 +547,15 @@ type Store interface {
 	// mention) before cutoff, and no waiting/running step addressed to them or to their actions.
 	ListPurgeablePeers(ctx context.Context, cutoff time.Time) ([]string, error)
 	// PurgePeerCascade atomically deletes a purged peer's derived data — its proxy actions,
-	// their stats and stat_tags, its steps, and its discovered_kernels rows — and forgets the
-	// peer identity by clearing public_key on the user row. The immutable transaction/receipt
-	// ledger is preserved (party ids carry no FK), keeping local counterparties' credits
-	// reconstructible (§11); the anonymized user row stays as a ledger anchor so old history
-	// remains legible.
+	// their stats, its steps, its discovered_kernels row, its discovery_docs, and its evidence
+	// rows (as issuer and as subject) — and forgets the peer identity by clearing public_key on the
+	// user row. The immutable transaction/receipt ledger is preserved (party ids carry no FK),
+	// keeping local counterparties' credits reconstructible (§11); the anonymized user row stays as
+	// a ledger anchor so old history remains legible.
 	PurgePeerCascade(ctx context.Context, userID string) error
 	// DeactivateActionsOwnedBy sets active=false for all non-deleted actions owned by ownerUserID.
 	// This is the unsubscribe operation: it drops a peer's imported proxy catalog here.
 	DeactivateActionsOwnedBy(ctx context.Context, ownerUserID string) error
-	// ListStatsByOwner returns Stats rows for actions owned by ownerUserID that have uses > 0.
-	// Used by GetGossip to identify transacted peers.
-	ListStatsByOwner(ctx context.Context, ownerUserID string) ([]*Stats, error)
-
-	// ---- StatTags (gossip endorsements) ----
-
-	// UpsertStatTag creates or updates a stat_tag row keyed by (action_id, key, source).
-	UpsertStatTag(ctx context.Context, tag *StatTag) error
-	// ListStatTagsByAction returns all stat_tag rows for an action.
-	ListStatTagsByAction(ctx context.Context, actionID string) ([]*StatTag, error)
 }
 
 // SecretBox provides authenticated encryption for upstream action credentials.

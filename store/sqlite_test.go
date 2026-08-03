@@ -2761,49 +2761,6 @@ func TestDeactivateActionsOwnedBy(t *testing.T) {
 	}
 }
 
-func TestListStatsByOwner(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	owner := newUser("stats-peer", 0)
-	if err := db.CreateUser(ctx, owner); err != nil {
-		t.Fatal(err)
-	}
-
-	a1 := newAction(owner.ID, "used-act", 10, true)
-	a2 := newAction(owner.ID, "unused-act", 5, true)
-	for _, a := range []*kernel.Action{a1, a2} {
-		if err := db.CreateAction(ctx, a); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Upsert stats: a1 has uses=3, a2 has uses=0 (default).
-	now := time.Now().UTC()
-	if err := db.UpsertStats(ctx, &kernel.Stats{
-		ActionID:   a1.ID,
-		Uses:       3,
-		Successes:  3,
-		LastUsedAt: now,
-	}); err != nil {
-		t.Fatalf("UpsertStats: %v", err)
-	}
-
-	results, err := db.ListStatsByOwner(ctx, owner.ID)
-	if err != nil {
-		t.Fatalf("ListStatsByOwner: %v", err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result (uses>0 only), got %d", len(results))
-	}
-	if results[0].ActionID != a1.ID {
-		t.Errorf("expected action %s, got %s", a1.ID, results[0].ActionID)
-	}
-	if results[0].Uses != 3 {
-		t.Errorf("expected Uses=3, got %d", results[0].Uses)
-	}
-}
-
 func TestBeginRunIsAtomic(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -3199,18 +3156,15 @@ func TestPurgePeerCascade(t *testing.T) {
 		if err := db.UpsertStats(ctx, &kernel.Stats{ActionID: a.ID, Uses: 5, Successes: 5, LastUsedAt: time.Now().UTC()}); err != nil {
 			t.Fatalf("upsert stats: %v", err)
 		}
-		if err := db.UpsertStatTag(ctx, &kernel.StatTag{ActionID: a.ID, Key: "gossip_uses", Value: "5", Source: "introX", UpdatedAt: time.Now().UTC()}); err != nil {
-			t.Fatalf("upsert stat tag: %v", err)
-		}
 	}
 
-	// A discovered_kernels row about the peer (must be deleted) and one about another kernel that
-	// the peer merely introduced (must survive — it is information about a different peer).
+	// A discovered_kernels row about the peer (must be deleted) and one about another kernel (must
+	// survive — it is information about a different peer).
 	now := time.Now().UTC()
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "peerkeyAAA", IntroducedBy: "someIntro", Handle: "peerP", StatsJSON: json.RawMessage("{}"), FirstSeen: now, UpdatedAt: now}); err != nil {
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "peerkeyAAA", Handle: "peerP", FirstSeen: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "otherkeyBBB", IntroducedBy: "peerkeyAAA", Handle: "other", StatsJSON: json.RawMessage("{}"), FirstSeen: now, UpdatedAt: now}); err != nil {
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "otherkeyBBB", Handle: "other", FirstSeen: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3234,9 +3188,6 @@ func TestPurgePeerCascade(t *testing.T) {
 	}
 	if n := count(`SELECT COUNT(*) FROM action_stats WHERE action_id IN (?,?)`, actIDs[0], actIDs[1]); n != 0 {
 		t.Errorf("action_stats after purge = %d, want 0", n)
-	}
-	if n := count(`SELECT COUNT(*) FROM stat_tags WHERE action_id IN (?,?)`, actIDs[0], actIDs[1]); n != 0 {
-		t.Errorf("stat_tags after purge = %d, want 0", n)
 	}
 	if n := count(`SELECT COUNT(*) FROM discovered_kernels WHERE public_key=?`, "peerkeyAAA"); n != 0 {
 		t.Errorf("discovered_kernels(peer) after purge = %d, want 0", n)
@@ -3271,7 +3222,7 @@ func TestListPurgeablePeers(t *testing.T) {
 
 	// excluded: a recent gossip mention keeps it live
 	newPeer(t, db, "gossip", "k-gossip", 0, 0, old)
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "k-gossip", IntroducedBy: "x", Handle: "gossip", StatsJSON: json.RawMessage("{}"), FirstSeen: old, UpdatedAt: now}); err != nil {
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "k-gossip", Handle: "gossip", FirstSeen: old, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3795,5 +3746,72 @@ func TestCommitRemoteSettlementStoresFailureResult(t *testing.T) {
 	}
 	if result["code"] != kernel.ErrExecutionFailed.Code {
 		t.Errorf("stored code = %v, want %q", result["code"], kernel.ErrExecutionFailed.Code)
+	}
+}
+
+// TestListReceiptsForGossip pins the evidence sender (§13): a committed call to the kernel's own
+// active public action is gossip-eligible execution evidence with the caller named as counterparty
+// when the caller is a peer. A NULL-effect ordinary action must be included (regression: a naive
+// `effect != 'transfer'` filter drops NULL-effect rows).
+func TestListReceiptsForGossip(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	owner := newUser("gprov", 0)
+	_ = db.CreateUser(ctx, owner)
+	// A peer caller (public_key set) so the evidence names it as counterparty.
+	peer := newPeer(t, db, "gpeer", "peerKeyXYZ", 100, 0, time.Now().UTC())
+	fee := newUser("gfee", 0)
+	_ = db.CreateUser(ctx, fee)
+
+	act := newAction(owner.ID, "greet", 10, true)
+	act.Kind = kernel.KindHTTP
+	act.Visibility = kernel.VisibilityPublic
+	act.Effect = "" // stored as NULL-ish ordinary action
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+
+	p := newProcess(peer.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, peer.ID, 10, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	tx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID,
+		OwnerUserID: peer.ID, CallerUserID: peer.ID, TargetUserID: owner.ID,
+		ActionID: act.ID, Status: kernel.TxSuccess, Gross: 10, Net: 8, Fee: 2,
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	receipt := &kernel.Receipt{
+		ID: uuid.New().String(), IssuerUserID: owner.ID, TxID: tx.ID, TraceID: root.ID, ActionID: act.ID,
+		ArgsHash: "ah", ReplyHash: "rh", Status: kernel.TxSuccess, Gross: 10, Net: 8, Fee: 2,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := db.CommitCall(ctx, tx, receipt, root.ID, p.ID, kernel.CallerProcess, owner.ID, fee.ID, 8, 2, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := db.ListReceiptsForGossip(ctx, "", 100)
+	if err != nil {
+		t.Fatalf("ListReceiptsForGossip: %v", err)
+	}
+	var found *kernel.GossipReceiptRow
+	for _, r := range rows {
+		if r.Receipt != nil && r.Receipt.ActionID == act.ID {
+			found = r
+		}
+	}
+	if found == nil {
+		t.Fatalf("a NULL-effect public action's receipt must be gossip-eligible; got %d rows", len(rows))
+	}
+	if found.CounterpartyKernelPublicKey != "peerKeyXYZ" {
+		t.Errorf("counterparty = %q, want the peer caller's key", found.CounterpartyKernelPublicKey)
+	}
+	if found.SubjectKernelPublicKey != "" {
+		t.Errorf("own-action subject kernel must be empty (kernel fills its own key), got %q", found.SubjectKernelPublicKey)
+	}
+	if found.Cursor == "" {
+		t.Error("gossip row must carry a cursor high-watermark")
 	}
 }

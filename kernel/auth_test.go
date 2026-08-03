@@ -504,7 +504,7 @@ func TestSeedPhraseRecovery(t *testing.T) {
 	}
 
 	sign := func(key ed25519.PrivateKey, nonce string) string {
-		payload, err := kernel.CanonicalJSON(kernel.RecoveryChallenge{Challenge: nonce})
+		payload, err := kernel.RecoveryChallengeSigningBytes(nonce)
 		if err != nil {
 			t.Fatal(err)
 		}

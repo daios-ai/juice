@@ -338,6 +338,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	// Register native action plugins. Must happen on every kernel open, not just bootstrap.
 	compiler := script.NewTinyGoCompiler(script.CompileConfig{})
 	native.RegisterLookupHandler(k)
+	native.RegisterUserLookupHandler(k)
 	native.RegisterChatHandler(k, chatter)
 	native.RegisterEmbedHandler(k, embedder)
 	native.RegisterJSONHandler(k, ollamaChatter)

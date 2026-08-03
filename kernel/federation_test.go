@@ -637,12 +637,12 @@ func TestLocalActionNotExported(t *testing.T) {
 	if _, err := k.GetActionManifest(ctx, a.ID); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("local action manifest: want ErrUnauthorized, got %v", err)
 	}
-	g, err := k.GetGossip(ctx, "")
+	g, err := k.GetGossip(ctx, "", "")
 	if err != nil {
 		t.Fatalf("GetGossip: %v", err)
 	}
-	for _, ga := range g.Actions {
-		if ga.ActionID == a.ID {
+	for _, m := range g.ActionManifests {
+		if m.ActionID == a.ID {
 			t.Error("local action must not appear in gossip")
 		}
 	}
@@ -661,7 +661,7 @@ func TestGossipAboutFromSysDescription(t *testing.T) {
 	if err := st.UpdateUser(ctx, su); err != nil {
 		t.Fatal(err)
 	}
-	g, err := k.GetGossip(ctx, "")
+	g, err := k.GetGossip(ctx, "", "")
 	if err != nil {
 		t.Fatalf("GetGossip: %v", err)
 	}
@@ -1875,7 +1875,7 @@ func TestPurgeIdlePeers(t *testing.T) {
 	if err := st.UpsertStats(ctx, &kernel.Stats{ActionID: act.ID, Uses: 3, Successes: 3, LastUsedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: pubB64, IntroducedBy: "x", Handle: "old-peer", StatsJSON: json.RawMessage("{}"), FirstSeen: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+	if err := st.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: pubB64, Handle: "old-peer", FirstSeen: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1912,136 +1912,8 @@ func TestPurgeIdlePeers(t *testing.T) {
 	if u.PublicKey != "" {
 		t.Errorf("public_key must be cleared, got %q", u.PublicKey)
 	}
-	dks, _ := kEnabled.ListDiscoveredKernels(ctx)
-	for _, d := range dks {
-		if d.PublicKey == pubB64 {
-			t.Error("discovered_kernels row for the purged peer must be deleted")
-		}
-	}
-}
-
-func TestGetGossipOnlyIncludesTransactedFriends(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-	sys := setupSys(t, k, st)
-
-	// Register two peers: one transacted, one not.
-	_, privA, _ := ed25519.GenerateKey(rand.Reader)
-	pubA := privA.Public().(ed25519.PublicKey)
-	pubAB64 := base64.RawURLEncoding.EncodeToString(pubA)
-	peerA, err := k.AddPeer(ctx, sys.ID, "gossip-transacted", pubAB64)
-	if err != nil {
-		t.Fatalf("AddPeer A: %v", err)
-	}
-	_, privB, _ := ed25519.GenerateKey(rand.Reader)
-	pubB := privB.Public().(ed25519.PublicKey)
-	pubBB64 := base64.RawURLEncoding.EncodeToString(pubB)
-	_, err = k.AddPeer(ctx, sys.ID, "gossip-untransacted", pubBB64)
-	if err != nil {
-		t.Fatalf("AddPeer B: %v", err)
-	}
-
-	// Create a proxy action owned by peer A with uses > 0.
-	actA := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: peerA.ID, Name: "a-act",
-		Kind: kernel.KindRemoteProxy, Active: true, Price: 10,
-		Source:      "https://gossip-a.example.com/v1/federation/call?action=@gossip-transacted/a-act&counterparty=x",
-		InputSchema: map[string]any{}, OutputSchema: map[string]any{},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	if err := st.CreateAction(ctx, actA); err != nil {
-		t.Fatalf("create actA: %v", err)
-	}
-	now := time.Now().UTC()
-	if err := st.UpsertStats(ctx, &kernel.Stats{
-		ActionID: actA.ID, Uses: 2, Successes: 2, LastUsedAt: now,
-	}); err != nil {
-		t.Fatalf("UpsertStats: %v", err)
-	}
-
-	gossip, err := k.GetGossip(ctx, "")
-	if err != nil {
-		t.Fatalf("GetGossip: %v", err)
-	}
-
-	// Only peer A (transacted) should appear in Friends.
-	if len(gossip.Friends) != 1 {
-		t.Fatalf("expected 1 transacted friend, got %d", len(gossip.Friends))
-	}
-	if gossip.Friends[0].Handle != "gossip-transacted" {
-		t.Errorf("expected @gossip-transacted, got %s", gossip.Friends[0].Handle)
-	}
-	if len(gossip.Friends[0].Actions) != 1 {
-		t.Fatalf("expected 1 action in friend view, got %d", len(gossip.Friends[0].Actions))
-	}
-	if gossip.Friends[0].Actions[0].Uses != 2 {
-		t.Errorf("expected Uses=2, got %d", gossip.Friends[0].Actions[0].Uses)
-	}
-}
-
-// DiscoveryRoster groups discovered_kernels by kernel and lists each introducer's report:
-// self-reported (introduced by the kernel itself) vs hearsay (introduced by a third party). Action
-// names stay owner-qualified (@owner/name), never bare.
-func TestDiscoveryRoster(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-	setupSys(t, k, st)
-
-	keyFor := func() string {
-		pub, _, _ := ed25519.GenerateKey(rand.Reader)
-		return base64.RawURLEncoding.EncodeToString(pub)
-	}
-	pubA, pubB, pubC := keyFor(), keyFor(), keyFor()
-
-	// A self-reports an owner-qualified action and a transacted friend B.
-	gA := &kernel.GossipResponse{
-		PublicKey: pubA, Handle: "a",
-		Actions: []kernel.GossipAction{{ActionID: "a1", Name: "sys/greet", Uses: 40, Rating: 0.8, Price: 5}},
-		Friends: []kernel.GossipFriendView{{Handle: "b", PublicKey: pubB,
-			Actions: []kernel.GossipAction{{ActionID: "b1", Name: "bob/translate", Uses: 3}}}},
-	}
-	if err := k.AccumulateGossip(ctx, gA, pubA); err != nil {
-		t.Fatal(err)
-	}
-	// C introduces A too (third-party hearsay).
-	gC := &kernel.GossipResponse{
-		PublicKey: pubC, Handle: "c",
-		Friends: []kernel.GossipFriendView{{Handle: "a", PublicKey: pubA,
-			Actions: []kernel.GossipAction{{ActionID: "a1", Name: "sys/greet", Uses: 41}}}},
-	}
-	if err := k.AccumulateGossip(ctx, gC, pubC); err != nil {
-		t.Fatal(err)
-	}
-
-	roster, err := k.DiscoveryRoster(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var a *kernel.KernelRoster
-	for _, r := range roster {
-		if r.PublicKey == pubA {
-			a = r
-		}
-	}
-	if a == nil {
-		t.Fatal("kernel A missing from roster")
-	}
-	var selfReported, viaC bool
-	for _, s := range a.Sources {
-		if s.SelfReported && s.IntroducedBy == pubA {
-			selfReported = true
-			if len(s.Actions) == 0 || s.Actions[0].Name != "sys/greet" {
-				t.Errorf("self-report actions = %+v, want first name @sys/greet", s.Actions)
-			}
-		}
-		if !s.SelfReported && s.IntroducedBy == pubC {
-			viaC = true
-		}
-	}
-	if !selfReported || !viaC {
-		t.Errorf("A sources: selfReported=%v viaC=%v (sources=%+v)", selfReported, viaC, a.Sources)
+	if dk, _ := kEnabled.ReadDiscoveredKernel(ctx, pubB64); dk != nil {
+		t.Error("discovered_kernels row for the purged peer must be deleted")
 	}
 }
 
@@ -2100,14 +1972,14 @@ func TestFriendDoesNotReexportImportedProxies(t *testing.T) {
 		t.Errorf("own manifest should succeed: %v", err)
 	}
 	// Gossip lists our own action, never the imported proxy as one of ours.
-	g, err := k.GetGossip(ctx, "")
+	g, err := k.GetGossip(ctx, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var sawOwn, sawProxy bool
-	for _, ga := range g.Actions {
-		sawOwn = sawOwn || ga.ActionID == own.ID
-		sawProxy = sawProxy || ga.ActionID == proxy.ID
+	for _, m := range g.ActionManifests {
+		sawOwn = sawOwn || m.ActionID == own.ID
+		sawProxy = sawProxy || m.ActionID == proxy.ID
 	}
 	if !sawOwn {
 		t.Error("gossip should include our own action")
@@ -2287,7 +2159,7 @@ func TestGetGossipCounterpartyBalance(t *testing.T) {
 		t.Fatalf("Deposit: %v", err)
 	}
 
-	g, err := k.GetGossip(ctx, friendKey)
+	g, err := k.GetGossip(ctx, friendKey, "")
 	if err != nil {
 		t.Fatalf("GetGossip: %v", err)
 	}
@@ -2296,17 +2168,17 @@ func TestGetGossipCounterpartyBalance(t *testing.T) {
 	}
 
 	// Anonymous, stranger, and suspended all omit the field.
-	if g, _ := k.GetGossip(ctx, ""); g.CounterpartyBalance != nil {
+	if g, _ := k.GetGossip(ctx, "", ""); g.CounterpartyBalance != nil {
 		t.Error("anonymous pull must not carry counterparty_balance")
 	}
 	strangerPub, _, _ := ed25519.GenerateKey(rand.Reader)
-	if g, _ := k.GetGossip(ctx, base64.RawURLEncoding.EncodeToString(strangerPub)); g.CounterpartyBalance != nil {
+	if g, _ := k.GetGossip(ctx, base64.RawURLEncoding.EncodeToString(strangerPub), ""); g.CounterpartyBalance != nil {
 		t.Error("stranger must not carry counterparty_balance")
 	}
 	if err := k.SuspendUser(ctx, sys.ID, friend.ID); err != nil {
 		t.Fatalf("SuspendUser: %v", err)
 	}
-	if g, _ := k.GetGossip(ctx, friendKey); g.CounterpartyBalance != nil {
+	if g, _ := k.GetGossip(ctx, friendKey, ""); g.CounterpartyBalance != nil {
 		t.Error("suspended peer must not carry counterparty_balance")
 	}
 }

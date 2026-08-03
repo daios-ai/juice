@@ -22,6 +22,11 @@ type NativeLookupConfig struct {
 	Price        int64 `json:"price"`
 }
 
+// NativeUserLookupConfig holds configuration for the @sys/user-lookup native action.
+type NativeUserLookupConfig struct {
+	Price int64 `json:"price"`
+}
+
 // NativeTimeConfig holds configuration for the @sys/time native action.
 type NativeTimeConfig struct {
 	Price int64 `json:"price"`
@@ -60,9 +65,10 @@ type NativeTransferConfig struct {
 
 // NativeConfig holds per-action configuration for all native actions.
 type NativeConfig struct {
-	LLM      NativeLLMConfig      `json:"llm"`
-	Lookup   NativeLookupConfig   `json:"lookup"`
-	Time     NativeTimeConfig     `json:"time"`
+	LLM        NativeLLMConfig        `json:"llm"`
+	Lookup     NativeLookupConfig     `json:"lookup"`
+	UserLookup NativeUserLookupConfig `json:"user-lookup"`
+	Time       NativeTimeConfig       `json:"time"`
 	Sink     NativeSinkConfig     `json:"sink"`
 	Message  NativeMessageConfig  `json:"message"`
 	Random   NativeRandomConfig   `json:"random"`
@@ -136,9 +142,10 @@ func (c ServerConfig) peerRetention() time.Duration {
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
 		Native: NativeConfig{
-			LLM:     NativeLLMConfig{URL: "http://localhost:11434", ChatModel: "gemma4:26b", EmbedModel: "nomic-embed-text", Price: 0},
-			Lookup:  NativeLookupConfig{DefaultLimit: 10, Price: 0},
-			Time:    NativeTimeConfig{Price: 0},
+			LLM:        NativeLLMConfig{URL: "http://localhost:11434", ChatModel: "gemma4:26b", EmbedModel: "nomic-embed-text", Price: 0},
+			Lookup:     NativeLookupConfig{DefaultLimit: 10, Price: 0},
+			UserLookup: NativeUserLookupConfig{Price: 0},
+			Time:       NativeTimeConfig{Price: 0},
 			Sink:    NativeSinkConfig{Price: 0},
 			Message: NativeMessageConfig{Price: 0},
 			Random:  NativeRandomConfig{Price: 0},

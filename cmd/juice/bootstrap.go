@@ -231,6 +231,39 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 			},
 		},
 		{
+			name:        "user-lookup",
+			price:       cfg.UserLookup.Price,
+			description: "Semantic search over local and discovered users",
+			inputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{"type": "string", "description": "Semantic search query"},
+					"limit": map[string]any{"type": "integer", "description": "Maximum number of results"},
+				},
+				"required": []string{"query"},
+			},
+			outputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"results": map[string]any{
+						"type":        "array",
+						"description": "Ranked list of matching users",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"principal_id":      map[string]any{"type": "object", "description": "Stable identity: kernel_public_key + user_id"},
+								"reference":         map[string]any{"type": "string", "description": "Display/use form: handle@<kernel-key> or a local handle"},
+								"handle":            map[string]any{"type": "string", "description": "The user's handle on its home kernel"},
+								"description":       map[string]any{"type": "string", "description": "The user's self-description"},
+								"kernel_public_key": map[string]any{"type": "string", "description": "The home kernel's public key (empty for a local user)"},
+								"score":             map[string]any{"type": "number", "description": "Relevance score"},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name:        "llm/chat",
 			price:       cfg.LLM.Price,
 			description: "Chat completion via the configured language model",

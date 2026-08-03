@@ -226,7 +226,7 @@ func generateRecovery() (mnemonic, recoveryPublicKey string, err error) {
 // signRecoveryChallenge signs the recovery nonce with the phrase-derived key, matching the kernel's
 // verification payload exactly (kernel.RecoveryChallenge, a disjoint signature domain).
 func signRecoveryChallenge(priv ed25519.PrivateKey, nonce string) (string, error) {
-	payload, err := kernel.CanonicalJSON(kernel.RecoveryChallenge{Challenge: nonce})
+	payload, err := kernel.RecoveryChallengeSigningBytes(nonce)
 	if err != nil {
 		return "", err
 	}

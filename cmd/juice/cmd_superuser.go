@@ -347,16 +347,19 @@ func peerInspectCmd() *cobra.Command {
 					Name        string `json:"name"`
 					Description string `json:"description"`
 					Price       int64  `json:"price"`
-					Uses        int64  `json:"uses"`
 				} `json:"actions"`
-				Friends []struct {
-					Handle    string `json:"handle"`
-					PublicKey string `json:"public_key"`
-					Actions   []struct {
-						Name string `json:"name"`
-						Uses int64  `json:"uses"`
-					} `json:"actions"`
-				} `json:"friends"`
+				Evidence []struct {
+					IssuerPublicKey   string   `json:"issuer_public_key"`
+					SubjectActionID   string   `json:"subject_action_id"`
+					Uses              int64    `json:"uses"`
+					Successes         int64    `json:"successes"`
+					Failures          int64    `json:"failures"`
+					AvgLatencyMs      float64  `json:"avg_latency_ms"`
+					RatingCount       int64    `json:"rating_count"`
+					RatingMean        float64  `json:"rating_mean"`
+					UnverifiedRatings int64    `json:"unverified_ratings"`
+					Notes             []string `json:"notes"`
+				} `json:"evidence"`
 				Reachability struct {
 					Path      string `json:"path"`
 					RTTmillis int64  `json:"rtt_millis"`
@@ -395,22 +398,28 @@ func peerInspectCmd() *cobra.Command {
 				return nil
 			}
 			if len(out.Actions) > 0 {
-				label := "Active actions"
+				label := "Public actions"
 				if out.Source == "local" {
-					label = "Actions (last imported — peer offline)"
+					label = "Actions (from discovery cache — peer offline)"
 				}
 				fmt.Printf("\n%s (%d):\n", label, len(out.Actions))
 				for _, a := range out.Actions {
-					fmt.Printf("  %-30s  %d credits  (uses: %d)\n", a.Name, a.Price, a.Uses)
+					fmt.Printf("  %-30s  %d credits\n", a.Name, a.Price)
 					if a.Description != "" {
 						fmt.Printf("      %s\n", a.Description)
 					}
 				}
 			}
-			if len(out.Friends) > 0 {
-				fmt.Printf("\nTransacted friends (%d):\n", len(out.Friends))
-				for _, f := range out.Friends {
-					fmt.Printf("  %-20s %s\n", f.Handle, f.PublicKey)
+			if len(out.Evidence) > 0 {
+				fmt.Printf("\nRetained evidence (§13) — grouped by issuer (trade-backed ratings only):\n")
+				for _, e := range out.Evidence {
+					fmt.Printf("  action %s  (issuer %s)\n", e.SubjectActionID, shortKey(e.IssuerPublicKey))
+					fmt.Printf("      uses %d  ok %d  fail %d  ~%.0fms  ratings %d (mean %.2f)",
+						e.Uses, e.Successes, e.Failures, e.AvgLatencyMs, e.RatingCount, e.RatingMean)
+					if e.UnverifiedRatings > 0 {
+						fmt.Printf("  [+%d unverified]", e.UnverifiedRatings)
+					}
+					fmt.Println()
 				}
 			}
 			if len(out.Steps) > 0 {
@@ -486,16 +495,13 @@ func peerUnsubscribeCmd() *cobra.Command {
 }
 
 func peerListCmd() *cobra.Command {
-	var showGossip, showAll bool
+	var showAll bool
 	cmd := &cobra.Command{
 		Use:   "peers",
 		Short: "List peers",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			q := url.Values{}
-			if showGossip {
-				q.Set("gossip", "1")
-			}
 			if showAll {
 				q.Set("all", "1")
 			}
@@ -504,8 +510,7 @@ func peerListCmd() *cobra.Command {
 				path += "?" + e
 			}
 			var out struct {
-				Peers  []*kernel.PeerView     `json:"peers"`
-				Roster []*kernel.KernelRoster `json:"roster"`
+				Peers []*kernel.PeerView `json:"peers"`
 			}
 			if err := apiCall(context.Background(), "GET", path, nil, &out); err != nil {
 				return err
@@ -526,53 +531,17 @@ func peerListCmd() *cobra.Command {
 						p.Handle, p.Available, p.Locked, peerCreditStr(p.PeerCredit), lastSeenStr(p.LastSeen), p.PublicKey, suspended)
 				}
 			}
-			if showGossip {
-				renderRoster(out.Roster, out.Peers)
-			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&showGossip, "gossip", false, "Also show the known-network directory (discovery)")
 	cmd.Flags().BoolVar(&showAll, "all", false, "Include suspended peers")
 	return cmd
 }
 
-// renderRoster prints the known-network directory (§13) grouped kernel → introducer → action, with
-// our own earned stats first (ground truth) and each introducer flagged self-reported or hearsay.
-func renderRoster(roster []*kernel.KernelRoster, peers []*kernel.PeerView) {
-	if len(roster) == 0 {
-		fmt.Println("\nNo known kernels yet (discovery seeds from bootstrap peers).")
-		return
+// shortKey abbreviates a base64url public key for display.
+func shortKey(k string) string {
+	if len(k) > 12 {
+		return k[:12] + "…"
 	}
-	friendByKey := map[string]string{}
-	for _, p := range peers {
-		if p.PublicKey != "" {
-			friendByKey[p.PublicKey] = p.Handle
-		}
-	}
-	printActions := func(as []kernel.GossipAction) {
-		for _, a := range as {
-			fmt.Printf("      %-24s uses %-5d rating %.2f  price %d\n", a.Name, a.Uses, a.Rating, a.Price)
-		}
-	}
-	fmt.Println("\nKnown kernels (discovery):")
-	for _, kr := range roster {
-		fmt.Printf("\n%-20s %s\n", kr.Handle, kr.PublicKey)
-		if len(kr.Own) > 0 {
-			fmt.Println("  you:")
-			printActions(kr.Own)
-		}
-		for _, src := range kr.Sources {
-			label := "self-reported"
-			if !src.SelfReported {
-				if h, ok := friendByKey[src.IntroducedBy]; ok {
-					label = "via " + h
-				} else {
-					label = "via " + src.IntroducedBy
-				}
-			}
-			fmt.Printf("  %s:\n", label)
-			printActions(src.Actions)
-		}
-	}
+	return k
 }

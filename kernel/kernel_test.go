@@ -2220,9 +2220,7 @@ func jcsHashForTest(t *testing.T, jsonStr string) string {
 // Ed25519 over CanonicalJSON of the receipt with Signature cleared.
 func signReceiptForTest(t *testing.T, key ed25519.PrivateKey, r *kernel.Receipt) string {
 	t.Helper()
-	cp := *r
-	cp.Signature = ""
-	payload, err := kernel.CanonicalJSON(cp)
+	payload, err := kernel.ReceiptSigningBytes(r)
 	if err != nil {
 		t.Fatal(err)
 	}

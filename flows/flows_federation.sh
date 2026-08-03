@@ -286,26 +286,27 @@ flow_fed_gossip_discovery() {
     local dir; dir=$(new_dir)
     _fed_setup "$dir" || { fail "fed_gossip.setup" "L-R setup failed"; return; }
 
-    # L calls R (price 0) → R becomes a transacted friend in L's gossip with earned stats.
-    assert_nonempty "fed_gossip.initial_call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run kernel-r/sys/greet '{}')" tx_id)"
+    # L calls R (price 0) and rates it, so L holds trade evidence about R to gossip (§13).
+    local ltx; ltx=$(strfield "$(jj "$FED_DBL" "$FED_HL" run kernel-r/sys/greet '{}')" tx_id)
+    assert_nonempty "fed_gossip.initial_call" "$ltx"
+    j "$FED_DBL" "$FED_HL" tx rate "$ltx" 1 >/dev/null 2>&1
 
-    # Third kernel T discovers R by inspecting L's gossip over the transport, then friends R by key.
+    # R publishes greet publicly so its own gossip carries a signed manifest T can index (§13).
+    local rkey; rkey=$(kernel_key "$FED_DBR" "$FED_HR")
+
+    # Third kernel T joins the network via the seed and must discover R WITHOUT subscribing: its
+    # discovery loop pulls gossip and indexes R's public action into T's lookup docs.
     local dbt ht; dbt="$dir/t/juice.db"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
-    start_server "$dbt" "$ht" kernel_handle=kernel-t bootstrap_peers="$FED_BOOT" || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
+    start_server "$dbt" "$ht" kernel_handle=kernel-t bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
     j "$dbt" "$ht" auth login sys --password sys-pass >/dev/null 2>&1
 
-    # T inspects L (resolved by key via the seed); L's transacted-friends list carries R's key + stats.
-    # Retry until the DHT lookup converges (loopback is usually instant, but slow under CPU load).
-    local ldoc rkey=""
+    # Poll T's discovery cache until R's action surfaces in sys/lookup as a kernel-qualified reference.
+    local found=no
     for _ in $(seq 1 25); do
-        ldoc=$(jj "$dbt" "$ht" admin inspect "$FED_LKEY")
-        rkey=$(python3 -c "import sys,json;print(next((f['public_key'] for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','')),''))" "$ldoc" 2>/dev/null)
-        [ -n "$rkey" ] && break
-        sleep 0.2
+        if jj "$dbt" "$ht" run sys/lookup '{"query":"greet"}' | grep -q "$rkey"; then found=yes; break; fi
+        sleep 0.5
     done
-    assert_nonempty "fed_gossip.r_in_gossip" "$rkey"
-    local guses; guses=$(python3 -c "import sys,json;print(next((a.get('uses',0) for f in json.loads(sys.argv[1]).get('friends',[]) if 'kernel-r' in f.get('handle','') for a in f.get('actions',[]) if a.get('name')=='sys/greet'),0))" "$ldoc" 2>/dev/null)
-    assert_eq "fed_gossip.earned_stats" yes "$([ "${guses:-0}" -ge 1 ] && echo yes || echo no)"
+    assert_eq "fed_gossip.r_discovered_via_gossip" yes "$found"
 
     assert_eq "fed_gossip.t_subscribes_r" 0 "$(j "$dbt" "$ht" admin subscribe "$rkey" >/dev/null 2>&1; echo $?)"
 
@@ -347,15 +348,17 @@ flow_fed_discovery() {
         || { fail "fed_discovery.l" "L did not start"; return; }
     j "$dbl" "$hl" auth login sys --password sys-pass >/dev/null 2>&1
 
-    # Poll L's known network until R appears — a discovery pass runs at startup, then every 2s.
+    # Poll L's discovery cache (§13): a discovery pass runs at startup then every 2s, pulling R's
+    # gossip and indexing R's public action into L's lookup docs. sys/lookup then surfaces it as a
+    # kernel-qualified reference (sys@<rkey>/greet) — discovered WITHOUT subscribing.
     local found=no i
     for i in $(seq 1 20); do
-        if jj "$dbl" "$hl" admin peers --gossip | grep -q "$rkey"; then found=yes; break; fi
+        if jj "$dbl" "$hl" run sys/lookup '{"query":"greet"}' | grep -q "$rkey"; then found=yes; break; fi
         sleep 1
     done
     assert_eq "fed_discovery.r_discovered_without_subscribe" yes "$found"
-    # The roster names actions owner-qualified (sys/greet), not a bare "greet".
-    assert_contains "fed_discovery.qualified_action" "sys/greet" "$(jj "$dbl" "$hl" admin peers --gossip)"
+    # The discovered reference is kernel-qualified by raw key (a gossiped label never resolves).
+    assert_contains "fed_discovery.qualified_action" "@$rkey/greet" "$(jj "$dbl" "$hl" run sys/lookup '{"query":"greet"}')"
     # L never subscribed to R: its peer list (proxy users) holds no R.
     assert_eq "fed_discovery.no_subscription" 0 "$(jj "$dbl" "$hl" admin peers | grep -c "$rkey")"
 }

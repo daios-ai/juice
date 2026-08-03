@@ -351,15 +351,6 @@ type Stats struct {
 	LastUsedAt      time.Time `json:"last_used_at"`
 }
 
-// StatTag is an extensible key/value annotation on an action's stats.
-type StatTag struct {
-	ActionID  string    `json:"action_id"`
-	Key       string    `json:"key"`
-	Value     string    `json:"value"`
-	Source    string    `json:"source"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
 // LedgerEntry is an immutable audit record of one direct balance movement, with a
 // nullable source and destination: a deposit credits (FromUserID empty, ToUserID set),
 // a withdrawal debits (FromUserID set, ToUserID empty), and a user transfer moves
@@ -398,14 +389,18 @@ type SettlementRecord struct {
 	Signature    string    `json:"signature"`
 }
 
-// DiscoveredKernel is a remote kernel learned via gossip.
+// DiscoveredKernel is a remote kernel learned via gossip (§13). One row per kernel
+// (keyed by public_key); it is a regenerable discovery cache carrying no execution
+// semantics. GossipCursor is this kernel's persisted evidence high-watermark for that
+// peer (§13 peer sync): the exclusive (effective_at, receipt_hash) position past which
+// evidence has already been pulled, advanced only after a page is verified and committed.
 type DiscoveredKernel struct {
-	PublicKey    string          `json:"public_key"`
-	IntroducedBy string          `json:"introduced_by"`
-	Handle       string          `json:"handle"`
-	StatsJSON    json.RawMessage `json:"stats_json"`
-	FirstSeen    time.Time       `json:"first_seen"`
-	UpdatedAt    time.Time       `json:"updated_at"`
+	PublicKey    string    `json:"public_key"`
+	Handle       string    `json:"handle"`
+	About        string    `json:"about,omitempty"`
+	GossipCursor string    `json:"gossip_cursor,omitempty"`
+	FirstSeen    time.Time `json:"first_seen"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // AuthCode is a short-lived PKCE authorization code.
@@ -473,8 +468,14 @@ type Rating struct {
 	RaterUserID    string    `json:"rater_user_id"`
 	Rating         float64   `json:"rating"`
 	Note           *string   `json:"note"` // optional human-readable justification
-	CreatedAt      time.Time `json:"created_at"`
-	Signature      string    `json:"signature"`
+	// RatedReceiptHash is SHA-256(CanonicalJSON(rated receipt)) — the portable link a v0.13
+	// evidence bundle carries so a receiver can join this rating to its receipt (§13). omitempty
+	// is load-bearing: a pre-v0.13 rating was signed without this field, so keeping it out of the
+	// canonical payload lets legacy ratings still verify unchanged. Wire-ingress evidence requires
+	// it non-empty; legacy ratings feed local Stats only and are never gossip-eligible.
+	RatedReceiptHash string    `json:"rated_receipt_hash,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	Signature        string    `json:"signature"`
 }
 
 // EmbeddedRating is the rating summary embedded in TransactionView responses.
@@ -568,8 +569,11 @@ type ReceiptVerification struct {
 	Valid                 bool          `json:"valid"`
 	RemoteKernelHandle    string        `json:"remote_kernel_handle"`
 	RemoteKernelPublicKey string        `json:"remote_kernel_public_key"`
-	Checks                ReceiptChecks `json:"checks"`
-	Receipt               *Receipt      `json:"receipt"`
+	// SignatureVersion is which signing scheme verified the stored receipt: 2 = v0.13
+	// domain-prefixed, 1 = legacy undomained (a pre-v0.13 audit record, still authentic), 0 = none.
+	SignatureVersion int           `json:"signature_version"`
+	Checks           ReceiptChecks `json:"checks"`
+	Receipt          *Receipt      `json:"receipt"`
 }
 
 // ReceiptChecks holds the per-field results of a remote receipt verification.
@@ -614,51 +618,138 @@ type PeerView struct {
 	SettlementDue bool `json:"settlement_due,omitempty"`
 }
 
-// GossipAction is an action entry in a gossip response.
-type GossipAction struct {
-	ActionID    string  `json:"action_id"`
-	Name        string  `json:"name"`
-	Description string  `json:"description"`
-	Price       int64   `json:"price"`
-	Uses        int64   `json:"uses"`
-	Rating      float64 `json:"rating"`
+// EvidenceReceipt is a wire-only signed projection of a committed call, gossiped as trade
+// evidence (§13). It is never an authoritative table — the issuer builds it on demand from its
+// own records at gossip-serve time. It exposes only what a third party needs to derive
+// uses/failures/latency and to verify a rating link, and NOTHING that would leak a counterparty's
+// business: no transaction/trace/process/caller/payer identity, no args_hash/reply_hash, no amounts,
+// no value_to.
+//
+// ReceiptHash is SHA-256(CanonicalJSON(the stored Receipt)) — the same definition on both sides of
+// the remote-receipt join, so an origin kernel's RemoteReceiptHash equals the serving kernel's
+// ReceiptHash byte-for-byte. Subject{Kernel,Action} is the PrincipalID-style stable identity of the
+// executed action (own key for a first-party action, the peer's key + RemoteActionID for a proxy
+// call). CounterpartyKernelPublicKey is set ONLY when the execution caller was a peer kernel (an
+// inbound federated call), never for a local caller and never a user identity: it is the two-kernel
+// trade proof that lets a receiver confirm a remote rating's issuer actually traded here.
+// RemoteReceiptHash links an origin's rating evidence to the serving kernel's execution receipt.
+// Signed under the evidence_receipt domain (§12).
+type EvidenceReceipt struct {
+	ReceiptHash                 string    `json:"receipt_hash"`
+	SubjectKernelPublicKey      string    `json:"subject_kernel_public_key"`
+	SubjectActionID             string    `json:"subject_action_id"`
+	CounterpartyKernelPublicKey string    `json:"counterparty_kernel_public_key,omitempty"`
+	Status                      TxStatus  `json:"status"`
+	StartedAt                   time.Time `json:"started_at"`
+	CreatedAt                   time.Time `json:"created_at"`
+	RemoteReceiptHash           string    `json:"remote_receipt_hash,omitempty"`
+	Signature                   string    `json:"signature"`
 }
 
-// GossipFriendView is a transacted friend in a gossip response: a peer kernel this kernel
-// has settled calls with, including this kernel's locally earned stats for their actions.
-type GossipFriendView struct {
-	Handle    string         `json:"handle"`
-	PublicKey string         `json:"public_key"`
-	Actions   []GossipAction `json:"actions"`
+// GossipRequest is the (cursored) request payload for /juice/fed/gossip/1. An empty cursor
+// starts the evidence stream at the oldest retained item.
+type GossipRequest struct {
+	Cursor string `json:"cursor,omitempty"`
 }
 
-// GossipResponse is the payload returned by GET /v1/gossip.
+// GossipUser is a first-party user summary in a gossip response: @sys and the owners of active
+// public actions, the searchable identities a peer indexes into its discovery docs (§13).
+type GossipUser struct {
+	UserID      string `json:"user_id"`
+	Handle      string `json:"handle"`
+	Description string `json:"description,omitempty"`
+}
+
+// EvidenceBundle is one retained receipt, optionally with the rating that references it (§13).
+type EvidenceBundle struct {
+	EvidenceReceipt *EvidenceReceipt `json:"evidence_receipt"`
+	Rating          *Rating          `json:"rating,omitempty"`
+}
+
+// GossipResponse is the v0.13 gossip payload. It carries the full first-party catalog snapshot
+// (identity, users, own signed manifests) on every response, plus one page of evidence bundles
+// ordered by effective time (a rating's created_at when rated, else the receipt's) so a late
+// rating re-surfaces its bundle. NextCursor is the exclusive high-watermark to send on the next pull.
 type GossipResponse struct {
-	PublicKey string             `json:"public_key"`
-	Handle    string             `json:"handle"`
-	About     string             `json:"about,omitempty"` // @sys's description: the kernel's self-description (§13)
-	Actions   []GossipAction     `json:"actions"`
-	Friends   []GossipFriendView `json:"friends"`
+	PublicKey       string            `json:"public_key"`
+	Handle          string            `json:"handle"`
+	About           string            `json:"about,omitempty"` // @sys's description: the kernel's self-description (§13)
+	Users           []GossipUser      `json:"users,omitempty"`
+	ActionManifests []*ActionManifest `json:"action_manifests,omitempty"`
+	Evidence        []EvidenceBundle  `json:"evidence,omitempty"`
+	NextCursor      string            `json:"next_cursor,omitempty"`
 	// CounterpartyBalance is the requesting peer's credit on this kernel (§13 peer sync),
-	// set only for a friended, non-denied requester; nil otherwise. Information, never authority.
+	// set only for a known non-suspended requester; nil otherwise. Information, never authority.
 	CounterpartyBalance *int64 `json:"counterparty_balance,omitempty"`
 }
 
-// KernelRoster is one entry of the known-network directory (§13): a discovered kernel grouped with
-// every introducer's report of it and, when we have friended and transacted with it, our own earned
-// stats. Display only — the known network grants no callability, pricing, or settlement.
-type KernelRoster struct {
-	PublicKey string         `json:"public_key"`
-	Handle    string         `json:"handle"`
-	Own       []GossipAction `json:"own,omitempty"` // our own earned stats (ground truth), if transacted
-	Sources   []RosterSource `json:"sources"`       // one per introducer, self-report or hearsay
+// GossipReceiptRow is one gossip-eligible receipt row assembled by the evidence sender (§13): the
+// stored receipt, its transaction facts needed to build the projection (subject, counterparty,
+// timestamps), the joined rating (if any), and the stored remote receipt JSON (for a proxy call).
+// Ordered by EffectiveAt so a late rating re-surfaces its bundle.
+type GossipReceiptRow struct {
+	Receipt                     *Receipt
+	SubjectKernelPublicKey      string
+	SubjectActionID             string
+	CounterpartyKernelPublicKey string
+	RemoteReceiptJSON           string
+	Rating                      *Rating
+	EffectiveAt                 time.Time
+	Cursor                      string // the (effective_at, receipt_hash) high-watermark AFTER this row
 }
 
-// RosterSource is one introducer's gossiped view of a kernel's actions, namespaced by who told us.
-type RosterSource struct {
-	IntroducedBy string         `json:"introduced_by"`
-	SelfReported bool           `json:"self_reported"` // IntroducedBy == the kernel's own key
-	Actions      []GossipAction `json:"actions"`
+// EvidenceRow is one persisted, verified evidence record in the regenerable evidence cache (§13).
+// It is keyed by (IssuerPublicKey, ReceiptHash) and truncatable with zero semantic effect.
+type EvidenceRow struct {
+	IssuerPublicKey             string
+	ReceiptHash                 string
+	SubjectKernelPublicKey      string
+	SubjectActionID             string
+	CounterpartyKernelPublicKey string
+	EvidenceReceiptJSON         string
+	RatingJSON                  string
+	RemoteReceiptHash           string
+	ReceiptCreatedAt            time.Time
+	EffectiveAt                 time.Time
+	ObservedAt                  time.Time
+	Equivocated                 bool
+}
+
+// DiscoveryDoc is one regenerable, searchable discovery record (§13): a user or action summary
+// learned first-party from gossip and indexed by the lookup machinery. It carries no execution
+// semantics and is truncatable with zero effect (a lookup selection still resolves and verifies
+// from the home kernel). For Kind=="action", ActionID is the remote action's stable id and the
+// schemas mirror the signed manifest; for Kind=="user", UserID/Handle/Description summarize the
+// remote principal.
+type DiscoveryDoc struct {
+	KernelPublicKey string         `json:"kernel_public_key"`
+	Kind            string         `json:"kind"` // "user" | "action"
+	UserID          string         `json:"user_id,omitempty"`
+	Handle          string         `json:"handle,omitempty"`
+	Description     string         `json:"description,omitempty"`
+	ActionID        string         `json:"action_id,omitempty"` // remote action id (Kind=="action")
+	Name            string         `json:"name,omitempty"`
+	InputSchema     map[string]any `json:"input_schema,omitempty"`
+	OutputSchema    map[string]any `json:"output_schema,omitempty"`
+	Embedding       []float32      `json:"-"`
+	ObservedAt      time.Time      `json:"observed_at"`
+}
+
+// SubjectEvidenceRow is one issuer's derived retained-evidence metrics about a subject action (§13),
+// as surfaced by `admin inspect`. RatingCount/RatingMean cover only trade-backed ratings (the
+// counterparty and hashes join); UnverifiedRatings counts issuer-attested ratings whose two-kernel
+// link could not be confirmed locally. Uses/Successes/Failures/latency count only issuer==subject rows.
+type SubjectEvidenceRow struct {
+	IssuerPublicKey  string   `json:"issuer_public_key"`
+	SubjectActionID  string   `json:"subject_action_id"`
+	Uses             int64    `json:"uses"`
+	Successes        int64    `json:"successes"`
+	Failures         int64    `json:"failures"`
+	AvgLatencyMs     float64  `json:"avg_latency_ms"`
+	RatingCount      int64    `json:"rating_count"`
+	RatingMean       float64  `json:"rating_mean"`
+	UnverifiedRatings int64   `json:"unverified_ratings"`
+	Notes            []string `json:"notes,omitempty"`
 }
 
 // FederationResult is the return value of ExecuteFederation.

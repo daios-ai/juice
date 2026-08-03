@@ -422,7 +422,6 @@ func (t *Transport) registerHandlers() {
 	t.host.SetStreamHandler(protocol.ID(ProtocolManifest), t.handleManifest)
 	t.host.SetStreamHandler(protocol.ID(ProtocolResolve), t.handleResolve)
 	t.host.SetStreamHandler(protocol.ID(ProtocolGossip), t.handleGossip)
-	t.host.SetStreamHandler(protocol.ID(ProtocolInspect), t.handleInspect)
 	t.host.SetStreamHandler(protocol.ID(ProtocolStep), t.handleStep)
 	t.host.SetStreamHandler(protocol.ID(ProtocolSettle), t.handleSettle)
 }
@@ -437,18 +436,6 @@ func serveReq[Req any](s network.Stream, handle func(string, Req) any) {
 		return
 	}
 	_ = writeFrame(s, handle(peerKeyOf(s), req))
-}
-
-// serveDoc writes the document produced by fetch. The document protocols (gossip, inspect) take no
-// request payload, so the client's empty request frame is left unread and discarded on close.
-func serveDoc(s network.Stream, fetch func(string) (json.RawMessage, error)) {
-	defer s.Close()
-	_ = s.SetDeadline(time.Now().Add(streamDeadline))
-	body, err := fetch(peerKeyOf(s))
-	if err != nil {
-		return
-	}
-	_ = writeFrame(s, body)
 }
 
 func (t *Transport) handleCall(s network.Stream) {
@@ -468,11 +455,19 @@ func (t *Transport) handleSettle(s network.Stream) {
 }
 
 func (t *Transport) handleGossip(s network.Stream) {
-	serveDoc(s, func(key string) (json.RawMessage, error) { return t.cfg.Handlers.OnGossip(context.Background(), key) })
-}
-
-func (t *Transport) handleInspect(s network.Stream) {
-	serveDoc(s, func(key string) (json.RawMessage, error) { return t.cfg.Handlers.OnInspect(context.Background(), key) })
+	// Gossip is now a request/response protocol carrying the evidence cursor (§13). The reply frame is
+	// the JSON document; on handler error we close without a frame, which the client reads as empty.
+	defer s.Close()
+	_ = s.SetDeadline(time.Now().Add(streamDeadline))
+	var req GossipRequest
+	if err := readFrame(s, &req); err != nil {
+		return
+	}
+	body, err := t.cfg.Handlers.OnGossip(context.Background(), peerKeyOf(s), req)
+	if err != nil {
+		return
+	}
+	_ = writeFrame(s, body)
 }
 
 func (t *Transport) handleManifest(s network.Stream) {
@@ -547,14 +542,10 @@ func (t *Transport) Settle(ctx context.Context, peerKey string, req SettleReques
 	return roundTrip[SettleRequest, SettleResponse](ctx, t, peerKey, ProtocolSettle, req)
 }
 
-// Gossip fetches the peer's gossip document.
-func (t *Transport) Gossip(ctx context.Context, peerKey string) (json.RawMessage, error) {
-	return roundTrip[struct{}, json.RawMessage](ctx, t, peerKey, ProtocolGossip, struct{}{})
-}
-
-// Inspect fetches the peer's inspect document.
-func (t *Transport) Inspect(ctx context.Context, peerKey string) (json.RawMessage, error) {
-	return roundTrip[struct{}, json.RawMessage](ctx, t, peerKey, ProtocolInspect, struct{}{})
+// Gossip fetches one page of the peer's gossip document, resuming from cursor (§13). An empty
+// cursor starts at the oldest retained evidence; the catalog snapshot rides every reply.
+func (t *Transport) Gossip(ctx context.Context, peerKey, cursor string) (json.RawMessage, error) {
+	return roundTrip[GossipRequest, json.RawMessage](ctx, t, peerKey, ProtocolGossip, GossipRequest{Cursor: cursor})
 }
 
 // Manifests fetches the peer's action manifests, one JSON frame per action.

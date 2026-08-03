@@ -31,7 +31,7 @@ func TestRecoveryKeyDerivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	sig, _ := base64.RawURLEncoding.DecodeString(sigB64)
-	payload, _ := kernel.CanonicalJSON(kernel.RecoveryChallenge{Challenge: nonce})
+	payload, _ := kernel.RecoveryChallengeSigningBytes(nonce)
 	pub, _ := base64.RawURLEncoding.DecodeString(pubB64)
 	if !ed25519.Verify(ed25519.PublicKey(pub), payload, sig) {
 		t.Error("recovery challenge signature did not verify against the enrolled key")

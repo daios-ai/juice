@@ -20,7 +20,7 @@ func capPayload(traceID string) map[string]string { return map[string]string{"ca
 
 // IssueCapability mints a capability for a live trace. Requires a configured signing key.
 func (k *Kernel) IssueCapability(traceID string) (string, error) {
-	sig, err := signJCS(k.cfg.SigningKey, capPayload(traceID))
+	sig, err := signJCS(k.cfg.SigningKey, sigDomainCapability, capPayload(traceID))
 	if err != nil {
 		return "", err
 	}
@@ -42,7 +42,7 @@ func (k *Kernel) VerifyCapability(ctx context.Context, token string) (traceID, o
 	if !ok {
 		return "", "", ErrInvalidState.Wrap("signing key is not configured")
 	}
-	if err := verifyJCS(pub, capPayload(traceID), sig); err != nil {
+	if err := verifyJCS(pub, sigDomainCapability, capPayload(traceID), sig); err != nil {
 		return "", "", ErrUnauthorized.Wrap("invalid capability")
 	}
 

@@ -308,9 +308,6 @@ func (s *DB) PurgePeerCascade(ctx context.Context, userID string) error {
 			return dbErr(err, "read peer key")
 		}
 		const owned = `SELECT id FROM actions WHERE owner_user_id=?`
-		if _, err := tx.ExecContext(ctx, `DELETE FROM stat_tags WHERE action_id IN (`+owned+`)`, userID); err != nil {
-			return dbErr(err, "delete stat_tags")
-		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM action_stats WHERE action_id IN (`+owned+`)`, userID); err != nil {
 			return dbErr(err, "delete action_stats")
 		}
@@ -324,6 +321,17 @@ func (s *DB) PurgePeerCascade(ctx context.Context, userID string) error {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM discovered_kernels WHERE public_key=?`, pubKey.String); err != nil {
 				return dbErr(err, "delete discovered_kernels")
 			}
+			// Regenerable discovery/evidence caches purge with the peer (§13): the peer's discovery
+			// docs (and their FTS mirror) and its evidence rows both as issuer and as subject.
+			if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key LIKE ? || '/%'`, pubKey.String); err != nil {
+				return dbErr(err, "delete discovery_fts")
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_docs WHERE kernel_public_key=?`, pubKey.String); err != nil {
+				return dbErr(err, "delete discovery_docs")
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM evidence WHERE issuer_public_key=? OR subject_kernel_public_key=?`, pubKey.String, pubKey.String); err != nil {
+				return dbErr(err, "delete evidence")
+			}
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE users SET public_key=NULL, peer_last_seen=NULL, peer_credit=NULL, updated_at=? WHERE id=?`,
@@ -334,54 +342,6 @@ func (s *DB) PurgePeerCascade(ctx context.Context, userID string) error {
 	})
 }
 
-func (s *DB) UpsertStatTag(ctx context.Context, tag *kernel.StatTag) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO stat_tags (action_id, key, value, source, updated_at)
-		 VALUES (?,?,?,?,?)
-		 ON CONFLICT(action_id,key,source) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
-		tag.ActionID, tag.Key, tag.Value, tag.Source, timeToStr(tag.UpdatedAt))
-	return dbErr(err, "upsert stat tag")
-}
-
-func (s *DB) ListStatTagsByAction(ctx context.Context, actionID string) ([]*kernel.StatTag, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT action_id, key, value, source, updated_at FROM stat_tags WHERE action_id=?`, actionID)
-	if err != nil {
-		return nil, dbErr(err, "list stat tags")
-	}
-	return queryList(rows, "list stat tags", func(scan func(...any) error) (*kernel.StatTag, error) {
-		var t kernel.StatTag
-		var updatedAt string
-		if err := scan(&t.ActionID, &t.Key, &t.Value, &t.Source, &updatedAt); err != nil {
-			return nil, err
-		}
-		t.UpdatedAt = strToTime(updatedAt)
-		return &t, nil
-	})
-}
-
-func (s *DB) ListStatsByOwner(ctx context.Context, ownerUserID string) ([]*kernel.Stats, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT s.action_id, s.uses, s.successes, s.failures, s.rating_count,
-		        s.latency_estimate, s.rating_estimate, s.last_used_at
-		 FROM action_stats s
-		 JOIN actions a ON a.id = s.action_id
-		 WHERE a.owner_user_id = ? AND s.uses > 0 AND a.deleted_at IS NULL`,
-		ownerUserID)
-	if err != nil {
-		return nil, dbErr(err, "list stats by owner")
-	}
-	return queryList(rows, "list stats by owner", func(scan func(...any) error) (*kernel.Stats, error) {
-		var st kernel.Stats
-		var lastUsedAt string
-		if err := scan(&st.ActionID, &st.Uses, &st.Successes, &st.Failures,
-			&st.RatingCount, &st.LatencyEstimate, &st.RatingEstimate, &lastUsedAt); err != nil {
-			return nil, err
-		}
-		st.LastUsedAt = strToTime(lastUsedAt)
-		return &st, nil
-	})
-}
 
 func scanUserFn(scan func(...any) error) (*kernel.User, error) {
 	var u kernel.User
@@ -2899,40 +2859,304 @@ func ftsMatchQuery(query string) string {
 // ---- Gossip / Discovered Kernels ----
 
 func (s *DB) CreateOrUpdateDiscoveredKernel(ctx context.Context, k *kernel.DiscoveredKernel) error {
-	statsJSON := "{}"
-	if len(k.StatsJSON) > 0 {
-		statsJSON = string(k.StatsJSON)
-	}
+	// Preserve the earliest first_seen; update handle/about; advance gossip_cursor only when non-empty
+	// (an identity-only upsert must not reset a peer's evidence high-watermark).
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO discovered_kernels (public_key,introduced_by,handle,stats_json,first_seen,updated_at)
+		`INSERT INTO discovered_kernels (public_key,handle,about,gossip_cursor,first_seen,updated_at)
 		 VALUES (?,?,?,?,?,?)
-		 ON CONFLICT(public_key,introduced_by) DO UPDATE SET
+		 ON CONFLICT(public_key) DO UPDATE SET
 		   handle=excluded.handle,
-		   stats_json=excluded.stats_json, updated_at=excluded.updated_at`,
-		k.PublicKey, k.IntroducedBy, k.Handle, statsJSON,
+		   about=excluded.about,
+		   gossip_cursor=CASE WHEN excluded.gossip_cursor != '' THEN excluded.gossip_cursor ELSE discovered_kernels.gossip_cursor END,
+		   updated_at=excluded.updated_at`,
+		k.PublicKey, k.Handle, k.About, k.GossipCursor,
 		timeToStr(k.FirstSeen), timeToStr(k.UpdatedAt),
 	)
 	return dbErr(err, "create or update discovered kernel")
 }
 
-func (s *DB) ListDiscoveredKernels(ctx context.Context) ([]*kernel.DiscoveredKernel, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT public_key,introduced_by,handle,stats_json,first_seen,updated_at
-		 FROM discovered_kernels ORDER BY updated_at DESC`)
-	if err != nil {
-		return nil, dbErr(err, "list discovered kernels")
+func (s *DB) ReadDiscoveredKernel(ctx context.Context, publicKey string) (*kernel.DiscoveredKernel, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT public_key,handle,about,gossip_cursor,first_seen,updated_at FROM discovered_kernels WHERE public_key=?`, publicKey)
+	var k kernel.DiscoveredKernel
+	var firstSeen, updatedAt string
+	err := row.Scan(&k.PublicKey, &k.Handle, &k.About, &k.GossipCursor, &firstSeen, &updatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
 	}
-	return queryList(rows, "list discovered kernels", func(scan func(...any) error) (*kernel.DiscoveredKernel, error) {
-		var k kernel.DiscoveredKernel
-		var firstSeen, updatedAt, statsJSON string
-		if err := scan(&k.PublicKey, &k.IntroducedBy, &k.Handle, &statsJSON, &firstSeen, &updatedAt); err != nil {
+	if err != nil {
+		return nil, dbErr(err, "read discovered kernel")
+	}
+	k.FirstSeen = strToTime(firstSeen)
+	k.UpdatedAt = strToTime(updatedAt)
+	return &k, nil
+}
+
+func (s *DB) SetGossipCursor(ctx context.Context, publicKey, cursor string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE discovered_kernels SET gossip_cursor=?, updated_at=? WHERE public_key=?`,
+		cursor, timeToStr(time.Now().UTC()), publicKey)
+	return dbErr(err, "set gossip cursor")
+}
+
+// ---- Discovery docs (regenerable lookup cache) ----
+
+// discoveryDocKey is the FTS/join key for a discovery doc: "<kernel>/<kind>/<user_id>/<action_id>".
+func discoveryDocKey(kernelKey, kind, userID, actionID string) string {
+	return kernelKey + "/" + kind + "/" + userID + "/" + actionID
+}
+
+func (s *DB) ReplaceDiscoveryDocs(ctx context.Context, kernelPublicKey string, docs []*kernel.DiscoveryDoc) error {
+	return s.withTx(ctx, "replace discovery docs", func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key LIKE ? || '/%'`, kernelPublicKey); err != nil {
+			return dbErr(err, "clear discovery_fts")
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_docs WHERE kernel_public_key=?`, kernelPublicKey); err != nil {
+			return dbErr(err, "clear discovery_docs")
+		}
+		for _, d := range docs {
+			inJSON, o0 := json.Marshal(d.InputSchema)
+			outJSON, o1 := json.Marshal(d.OutputSchema)
+			if oo := firstErr(o0, o1); oo != nil {
+				return dbErr(oo, "marshal discovery schema")
+			}
+			var embed any
+			if len(d.Embedding) > 0 {
+				b, e := json.Marshal(d.Embedding)
+				if e != nil {
+					return dbErr(e, "marshal discovery embed")
+				}
+				embed = string(b)
+			}
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO discovery_docs (kernel_public_key,kind,user_id,handle,description,action_id,name,input_schema,output_schema,embed_vec,observed_at)
+				 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+				d.KernelPublicKey, d.Kind, d.UserID, d.Handle, d.Description, d.ActionID, d.Name,
+				string(inJSON), string(outJSON), embed, timeToStr(d.ObservedAt)); err != nil {
+				return dbErr(err, "insert discovery_doc")
+			}
+			text := d.Handle + " " + d.Name + " " + d.Description
+			if _, err := tx.ExecContext(ctx, `INSERT INTO discovery_fts(doc_key, text) VALUES (?, ?)`,
+				discoveryDocKey(d.KernelPublicKey, d.Kind, d.UserID, d.ActionID), text); err != nil {
+				return dbErr(err, "insert discovery_fts")
+			}
+		}
+		return nil
+	})
+}
+
+func (s *DB) ListDiscoveryDocs(ctx context.Context) ([]*kernel.DiscoveryDoc, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT kernel_public_key,kind,user_id,handle,description,action_id,name,input_schema,output_schema,embed_vec,observed_at
+		 FROM discovery_docs`)
+	if err != nil {
+		return nil, dbErr(err, "list discovery docs")
+	}
+	return queryList(rows, "list discovery docs", func(scan func(...any) error) (*kernel.DiscoveryDoc, error) {
+		var d kernel.DiscoveryDoc
+		var inJSON, outJSON, observedAt string
+		var embed sql.NullString
+		if err := scan(&d.KernelPublicKey, &d.Kind, &d.UserID, &d.Handle, &d.Description, &d.ActionID, &d.Name,
+			&inJSON, &outJSON, &embed, &observedAt); err != nil {
 			return nil, err
 		}
-		k.StatsJSON = json.RawMessage(statsJSON)
-		k.FirstSeen = strToTime(firstSeen)
-		k.UpdatedAt = strToTime(updatedAt)
-		return &k, nil
+		_ = json.Unmarshal([]byte(inJSON), &d.InputSchema)
+		_ = json.Unmarshal([]byte(outJSON), &d.OutputSchema)
+		if embed.Valid && embed.String != "" {
+			_ = json.Unmarshal([]byte(embed.String), &d.Embedding)
+		}
+		d.ObservedAt = strToTime(observedAt)
+		return &d, nil
 	})
+}
+
+func (s *DB) SearchDiscoveryLexical(ctx context.Context, query string, limit int) ([]string, error) {
+	match := ftsMatchQuery(query)
+	if match == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT doc_key FROM discovery_fts WHERE text MATCH ? ORDER BY bm25(discovery_fts) LIMIT ?`, match, limit)
+	if err != nil {
+		return nil, dbErr(err, "discovery lexical search")
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, dbErr(err, "discovery lexical search: scan")
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+// ---- Evidence cache ----
+
+func (s *DB) UpsertEvidence(ctx context.Context, e *kernel.EvidenceRow) error {
+	return s.withTx(ctx, "upsert evidence", func(tx *sql.Tx) error {
+		var existingRating string
+		var equivocated int
+		err := tx.QueryRowContext(ctx,
+			`SELECT rating_json, equivocated FROM evidence WHERE issuer_public_key=? AND receipt_hash=?`,
+			e.IssuerPublicKey, e.ReceiptHash).Scan(&existingRating, &equivocated)
+		switch {
+		case err == sql.ErrNoRows:
+			// New row.
+		case err != nil:
+			return dbErr(err, "read existing evidence")
+		default:
+			// Late-rating transitions (§13). A row already exists for this (issuer, receipt).
+			newRating := e.RatingJSON
+			finalRating := existingRating
+			finalEquivocated := equivocated == 1
+			switch {
+			case existingRating == "" && newRating != "":
+				finalRating = newRating // attach a late rating
+			case newRating == "":
+				// keep existing rating (a receipt re-gossiped without its rating)
+			case existingRating != "" && newRating != "" && existingRating != newRating:
+				finalEquivocated = true // two different valid ratings → both excluded
+			}
+			_, uerr := tx.ExecContext(ctx,
+				`UPDATE evidence SET rating_json=?, equivocated=?, observed_at=?,
+				   counterparty_kernel_public_key=?, remote_receipt_hash=?, effective_at=?
+				 WHERE issuer_public_key=? AND receipt_hash=?`,
+				finalRating, boolInt(finalEquivocated), timeToStr(e.ObservedAt),
+				e.CounterpartyKernelPublicKey, e.RemoteReceiptHash, timeToStr(e.EffectiveAt),
+				e.IssuerPublicKey, e.ReceiptHash)
+			return dbErr(uerr, "update evidence")
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO evidence (issuer_public_key,receipt_hash,subject_kernel_public_key,subject_action_id,
+			   counterparty_kernel_public_key,evidence_receipt_json,rating_json,remote_receipt_hash,
+			   receipt_created_at,effective_at,observed_at,equivocated)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,0)`,
+			e.IssuerPublicKey, e.ReceiptHash, e.SubjectKernelPublicKey, e.SubjectActionID,
+			e.CounterpartyKernelPublicKey, e.EvidenceReceiptJSON, e.RatingJSON, e.RemoteReceiptHash,
+			timeToStr(e.ReceiptCreatedAt), timeToStr(e.EffectiveAt), timeToStr(e.ObservedAt)); err != nil {
+			return dbErr(err, "insert evidence")
+		}
+		// Enforce the E cap per (issuer, subject_kernel, subject_action): keep the newest E rows.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM evidence
+			  WHERE issuer_public_key=? AND subject_kernel_public_key=? AND subject_action_id=?
+			    AND receipt_hash NOT IN (
+			      SELECT receipt_hash FROM evidence
+			       WHERE issuer_public_key=? AND subject_kernel_public_key=? AND subject_action_id=?
+			       ORDER BY receipt_created_at DESC LIMIT ?)`,
+			e.IssuerPublicKey, e.SubjectKernelPublicKey, e.SubjectActionID,
+			e.IssuerPublicKey, e.SubjectKernelPublicKey, e.SubjectActionID, kernelEvidenceCap); err != nil {
+			return dbErr(err, "evict evidence over cap")
+		}
+		return nil
+	})
+}
+
+func (s *DB) ListEvidenceBySubject(ctx context.Context, subjectKernelPublicKey string) ([]*kernel.EvidenceRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT issuer_public_key,receipt_hash,subject_kernel_public_key,subject_action_id,
+		        counterparty_kernel_public_key,evidence_receipt_json,rating_json,remote_receipt_hash,
+		        receipt_created_at,effective_at,observed_at,equivocated
+		 FROM evidence WHERE subject_kernel_public_key=? ORDER BY receipt_created_at DESC`, subjectKernelPublicKey)
+	if err != nil {
+		return nil, dbErr(err, "list evidence by subject")
+	}
+	return queryList(rows, "list evidence by subject", func(scan func(...any) error) (*kernel.EvidenceRow, error) {
+		var e kernel.EvidenceRow
+		var receiptCreated, effectiveAt, observedAt string
+		var equiv int
+		if err := scan(&e.IssuerPublicKey, &e.ReceiptHash, &e.SubjectKernelPublicKey, &e.SubjectActionID,
+			&e.CounterpartyKernelPublicKey, &e.EvidenceReceiptJSON, &e.RatingJSON, &e.RemoteReceiptHash,
+			&receiptCreated, &effectiveAt, &observedAt, &equiv); err != nil {
+			return nil, err
+		}
+		e.ReceiptCreatedAt = strToTime(receiptCreated)
+		e.EffectiveAt = strToTime(effectiveAt)
+		e.ObservedAt = strToTime(observedAt)
+		e.Equivocated = equiv == 1
+		return &e, nil
+	})
+}
+
+// ListReceiptsForGossip returns one ordered page of this kernel's own gossip-eligible receipts after
+// cursor (§13). Two legs, unified: (a) receipts of the kernel's own active public non-transfer
+// actions (execution evidence — SubjectKernelPublicKey left empty for the kernel to fill with its own
+// key; CounterpartyKernelPublicKey set when the caller was a peer); (b) RATED receipts of remote_proxy
+// calls (rating evidence — subject is the peer owner's key + remote action id; RemoteReceiptJSON is the
+// stored serving receipt). Ordered ascending by effective time (a rating's created_at when rated, else
+// the receipt's), so a late rating re-surfaces its bundle. cursor is "<effective_at>\x1f<receipt_id>".
+func (s *DB) ListReceiptsForGossip(ctx context.Context, cursor string, limit int) ([]*kernel.GossipReceiptRow, error) {
+	var curEff, curID string
+	if i := strings.IndexByte(cursor, '\x1f'); i >= 0 {
+		curEff, curID = cursor[:i], cursor[i+1:]
+	}
+	const q = `
+SELECT r.id, r.tx_id,
+       CASE WHEN a.kind='remote_proxy' THEN COALESCE(ow.public_key,'') ELSE '' END AS subj_kernel,
+       CASE WHEN a.kind='remote_proxy' THEN a.remote_action_id ELSE r.action_id END AS subj_action,
+       CASE WHEN a.kind='remote_proxy' THEN '' ELSE COALESCE(ca.public_key,'') END AS cp_kernel,
+       COALESCE(t.remote_receipt_json,'') AS remote_receipt_json,
+       COALESCE(rt.created_at, r.created_at) AS eff
+FROM receipts r
+JOIN transactions t ON t.id = r.tx_id
+JOIN actions a ON a.id = r.action_id
+LEFT JOIN users ow ON ow.id = a.owner_user_id
+LEFT JOIN users ca ON ca.id = t.caller_user_id
+LEFT JOIN ratings rt ON rt.rated_tx_id = r.tx_id
+WHERE r.value = 0 AND COALESCE(a.effect,'') != 'transfer'
+  AND (
+        (a.kind IN ('http','wasm','native') AND a.visibility='public' AND a.active=1 AND a.deleted_at IS NULL)
+     OR (a.kind='remote_proxy' AND rt.id IS NOT NULL AND ow.public_key IS NOT NULL AND ow.public_key != '')
+      )
+  AND ( ? = ''
+        OR julianday(COALESCE(rt.created_at, r.created_at)) > julianday(?)
+        OR (julianday(COALESCE(rt.created_at, r.created_at)) = julianday(?) AND r.id > ?) )
+ORDER BY julianday(COALESCE(rt.created_at, r.created_at)) ASC, r.id ASC
+LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, q, curEff, curEff, curEff, curID, limit)
+	if err != nil {
+		return nil, dbErr(err, "list receipts for gossip")
+	}
+	type raw struct {
+		receiptID, txID, subjKernel, subjAction, cpKernel, remoteReceiptJSON, eff string
+	}
+	var raws []raw
+	for rows.Next() {
+		var rr raw
+		if err := rows.Scan(&rr.receiptID, &rr.txID, &rr.subjKernel, &rr.subjAction, &rr.cpKernel, &rr.remoteReceiptJSON, &rr.eff); err != nil {
+			rows.Close()
+			return nil, dbErr(err, "scan gossip receipt")
+		}
+		raws = append(raws, rr)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, dbErr(err, "gossip receipt rows")
+	}
+	out := make([]*kernel.GossipReceiptRow, 0, len(raws))
+	for _, rr := range raws {
+		rec, rerr := s.ReadReceipt(ctx, rr.receiptID)
+		if rerr != nil {
+			return nil, rerr
+		}
+		var rating *kernel.Rating
+		if rt, rterr := s.ReadRatingByTxID(ctx, rr.txID); rterr == nil {
+			rating = rt
+		}
+		out = append(out, &kernel.GossipReceiptRow{
+			Receipt:                     rec,
+			SubjectKernelPublicKey:      rr.subjKernel,
+			SubjectActionID:             rr.subjAction,
+			CounterpartyKernelPublicKey: rr.cpKernel,
+			RemoteReceiptJSON:           rr.remoteReceiptJSON,
+			Rating:                      rating,
+			EffectiveAt:                 strToTime(rr.eff),
+			Cursor:                      rr.eff + "\x1f" + rr.receiptID,
+		})
+	}
+	return out, nil
 }
 
 // ---- helpers ----
@@ -2942,6 +3166,19 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// kernelEvidenceCap (E) is the retained-evidence window per (issuer, subject_kernel, subject_action)
+// (§13). Fixed, mirroring kernel.gossipEvidenceCap; kept store-local to avoid a cross-package const.
+const kernelEvidenceCap = 200
+
+func firstErr(errs ...error) error {
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 func dbErr(err error, op string) error {
@@ -3018,9 +3255,9 @@ func (s *DB) ReadReceipt(ctx context.Context, id string) (*kernel.Receipt, error
 func (s *DB) CreateRatingAndUpdateStats(ctx context.Context, r *kernel.Rating, actionID string, rating float64) error {
 	return s.withTx(ctx, "create rating and update stats", func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rater_user_id,rating,note,created_at,signature)
-			 VALUES (?,?,?,?,?,?,?,?)`,
-			r.ID, r.RatedTxID, r.RatedReceiptID, r.RaterUserID, r.Rating, r.Note,
+			`INSERT INTO ratings (id,rated_tx_id,rated_receipt_id,rated_receipt_hash,rater_user_id,rating,note,created_at,signature)
+			 VALUES (?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.RatedTxID, r.RatedReceiptID, r.RatedReceiptHash, r.RaterUserID, r.Rating, r.Note,
 			timeToStr(r.CreatedAt), r.Signature,
 		); err != nil {
 			return dbErr(err, "create rating and update stats: insert rating")
@@ -3038,7 +3275,7 @@ func (s *DB) CreateRatingAndUpdateStats(ctx context.Context, r *kernel.Rating, a
 
 func (s *DB) ListRatings(ctx context.Context, actionID string, limit, offset int) ([]*kernel.Rating, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT r.id, r.rated_tx_id, r.rated_receipt_id, r.rater_user_id, r.rating, r.note, r.created_at, r.signature
+		`SELECT r.id, r.rated_tx_id, r.rated_receipt_id, r.rated_receipt_hash, r.rater_user_id, r.rating, r.note, r.created_at, r.signature
 		 FROM ratings r
 		 JOIN transactions t ON t.id = r.rated_tx_id
 		 WHERE t.action_id = ?
@@ -3053,7 +3290,7 @@ func (s *DB) ListRatings(ctx context.Context, actionID string, limit, offset int
 		var r kernel.Rating
 		var ratedReceiptID *string
 		var createdAt string
-		if err := scan(&r.ID, &r.RatedTxID, &ratedReceiptID, &r.RaterUserID, &r.Rating, &r.Note, &createdAt, &r.Signature); err != nil {
+		if err := scan(&r.ID, &r.RatedTxID, &ratedReceiptID, &r.RatedReceiptHash, &r.RaterUserID, &r.Rating, &r.Note, &createdAt, &r.Signature); err != nil {
 			return nil, err
 		}
 		r.RatedReceiptID = ratedReceiptID
@@ -3067,9 +3304,9 @@ func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating,
 	var ratedReceiptID *string
 	var createdAt string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,rated_tx_id,rated_receipt_id,rater_user_id,rating,note,created_at,signature
+		`SELECT id,rated_tx_id,rated_receipt_id,rated_receipt_hash,rater_user_id,rating,note,created_at,signature
 		 FROM ratings WHERE rated_tx_id=?`, txID,
-	).Scan(&r.ID, &r.RatedTxID, &ratedReceiptID, &r.RaterUserID, &r.Rating, &r.Note, &createdAt, &r.Signature)
+	).Scan(&r.ID, &r.RatedTxID, &ratedReceiptID, &r.RatedReceiptHash, &r.RaterUserID, &r.Rating, &r.Note, &createdAt, &r.Signature)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("rating not found")
 	}

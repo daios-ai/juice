@@ -222,16 +222,7 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	out := map[string]any{"peers": views}
-	if r.URL.Query().Get("gossip") == "1" {
-		roster, err := s.kernel.DiscoveryRoster(r.Context())
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		out["roster"] = roster
-	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, map[string]any{"peers": views})
 }
 
 // ctlInspectPeer has defined behavior whether the peer is up or down (§13). It always reports
@@ -260,35 +251,49 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 
 	reach := s.fed.Probe(octx, peerKey)
 	resp := map[string]any{"reachability": reach, "online": reach.Path != "unreachable"}
+	// Retained evidence about this subject kernel, grouped by issuer (§13) — the reputation display
+	// that replaces the deleted introducer roster. Local; works online or offline.
+	if ev, eerr := s.kernel.SubjectEvidence(ctx, peerKey); eerr == nil {
+		resp["evidence"] = ev
+	}
 
-	// Live view when the peer answers.
-	if iRaw, err := s.fed.Inspect(octx, peerKey); err == nil {
+	// Live view when the peer answers: a fresh gossip pull (identity + first-party users + own
+	// signed manifests). The evidence page is ignored here; the persistent discovery loop ingests it.
+	if gRaw, err := s.fed.Gossip(octx, peerKey, ""); err == nil {
 		var g kernel.GossipResponse
-		if json.Unmarshal(iRaw, &g) == nil {
+		if json.Unmarshal(gRaw, &g) == nil {
 			resp["handle"], resp["public_key"] = g.Handle, g.PublicKey
-			resp["actions"], resp["friends"] = g.Actions, g.Friends
+			resp["about"], resp["users"], resp["actions"] = g.About, g.Users, g.ActionManifests
 			resp["source"] = "live"
-			// Steps this peer has parked for us: an operator-visible window onto work awaiting this
-			// kernel, and the ids `step complete --peer` takes (§13).
 			if steps, ok := s.peerStepsAwaitingUs(octx, peerKey); ok {
 				resp["steps"] = steps
 			}
-			// On-demand peer sync: the live inspect just learned this peer is up and (for a friend)
-			// our credit there. Persist it so peer_state / last_seen refresh immediately instead of
-			// waiting for the discovery timer. RecordPeerSync no-ops for strangers/denied peers (§13).
 			_ = s.kernel.RecordPeerSync(ctx, g.PublicKey, g.CounterpartyBalance)
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
 	}
-	// Offline (or unparseable): fall back to what we hold locally about a friended peer.
-	if handle, pk, actions, err := s.kernel.PeerLocalView(ctx, ident); err == nil {
-		resp["handle"], resp["public_key"], resp["actions"] = handle, pk, actions
-		resp["friends"], resp["source"] = []kernel.GossipFriendView{}, "local"
+	// Offline (or unparseable): fall back to what we hold locally — the slim discovered-kernel row
+	// and/or a proxy-user identity — plus the cached discovery docs for this kernel (§13). A peer we
+	// know locally (either way) is source="local"; a total stranger is "none".
+	known := false
+	if dk, _ := s.kernel.ReadDiscoveredKernel(ctx, peerKey); dk != nil {
+		resp["handle"], resp["public_key"], resp["about"] = dk.Handle, dk.PublicKey, dk.About
+		known = true
+	}
+	if !known {
+		if pu, _ := s.kernel.ReadUserByPublicKey(ctx, peerKey); pu != nil {
+			resp["handle"], resp["public_key"] = pu.Handle, pu.PublicKey
+			known = true
+		}
+	}
+	if known {
+		resp["source"] = "local"
 	} else {
-		resp["handle"], resp["public_key"] = "", peerKey
-		resp["actions"], resp["friends"] = []kernel.GossipAction{}, []kernel.GossipFriendView{}
-		resp["source"] = "none"
+		resp["handle"], resp["public_key"], resp["source"] = "", peerKey, "none"
+	}
+	if docs, derr := s.kernel.DiscoveryDocsForKernel(ctx, peerKey); derr == nil {
+		resp["actions"] = docs
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -314,7 +319,7 @@ func (s *server) ctlSubscribePeer(w http.ResponseWriter, r *http.Request) {
 	// must match the key we dialed (a consistency check).
 	octx, cancel := context.WithTimeout(ctx, fedOpTimeout)
 	defer cancel()
-	gRaw, err := s.fed.Gossip(octx, peerKey)
+	gRaw, err := s.fed.Gossip(octx, peerKey, "")
 	if err != nil {
 		writeErr(w, kernel.ErrExecutionFailed.Wrapf("cannot subscribe to %s: peer is unreachable (offline?)", peerKey))
 		return
@@ -331,8 +336,7 @@ func (s *server) ctlSubscribePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	imported, skipped := bulkImportPeerActionsFed(ctx, s.fed, s.kernel, callerFrom(r), peerKey, u)
-	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	_ = s.kernel.AccumulateGossip(ctx, &g, pub)
+	_, _ = s.kernel.AccumulateGossip(ctx, &g, g.PublicKey)
 	writeJSON(w, http.StatusOK, map[string]any{"handle": u.Handle, "imported": imported, "skipped": skipped})
 }
 

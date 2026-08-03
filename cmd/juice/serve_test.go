@@ -2460,13 +2460,17 @@ type fakeDiscoverer struct {
 func (f *fakeDiscoverer) Advertise(context.Context) error                 { f.advertised++; return nil }
 func (f *fakeDiscoverer) BootstrapKeys() []string                         { return f.bootstrap }
 func (f *fakeDiscoverer) DiscoverProviders(context.Context, int) []string { return f.providers }
-func (f *fakeDiscoverer) Gossip(_ context.Context, key string) (json.RawMessage, error) {
+func (f *fakeDiscoverer) Gossip(_ context.Context, key string, _ string) (json.RawMessage, error) {
 	f.gossiped = append(f.gossiped, key)
 	if raw, ok := f.gossip[key]; ok {
 		return raw, nil
 	}
 	return nil, fmt.Errorf("offline")
 }
+
+// noCursor / discardCursor are the getCursor / setCursor stubs for discoverOnce tests.
+func noCursor(context.Context, string) string        { return "" }
+func discardCursor(context.Context, string, string) error { return nil }
 
 // discoverOnce advertises once, dedups bootstrap ∪ providers, pulls gossip from each reachable key,
 // and accumulates it introduced-by the kernel's own key (self-report). Offline peers are skipped.
@@ -2481,16 +2485,16 @@ func TestDiscoverOnce(t *testing.T) {
 		gossip:    map[string]json.RawMessage{"A": mkGossip("A"), "B": mkGossip("B")},
 	}
 	var got []string
-	acc := func(_ context.Context, g *kernel.GossipResponse, introducer string) error {
+	acc := func(_ context.Context, g *kernel.GossipResponse, introducer string) (string, error) {
 		if introducer != g.PublicKey {
 			t.Errorf("introducer %q must equal own key %q (self-report)", introducer, g.PublicKey)
 		}
 		got = append(got, g.PublicKey)
-		return nil
+		return "", nil
 	}
 	noFriends := func(context.Context) []string { return nil }
 	noSync := func(context.Context, string, *int64) error { return nil }
-	discoverOnce(context.Background(), f, true, noFriends, acc, noSync, log.Discard())
+	discoverOnce(context.Background(), f, true, noFriends, acc, noSync, noCursor, discardCursor, log.Discard())
 
 	if f.advertised != 1 {
 		t.Errorf("advertised %d times, want 1", f.advertised)
@@ -2519,7 +2523,7 @@ func TestDiscoverOnceFriendSync(t *testing.T) {
 		syncedKey, syncedCredit = key, credit
 		return nil
 	}
-	discoverOnce(context.Background(), f, false, friends, func(context.Context, *kernel.GossipResponse, string) error { return nil }, rec, log.Discard())
+	discoverOnce(context.Background(), f, false, friends, func(context.Context, *kernel.GossipResponse, string) (string, error) { return "", nil }, rec, noCursor, discardCursor, log.Discard())
 
 	if f.advertised != 0 {
 		t.Errorf("advertised %d times with directory disabled, want 0", f.advertised)

@@ -602,16 +602,17 @@ func TestSettleOutcomeAndPayloads(t *testing.T) {
 		t.Error("a tampered record must not verify")
 	}
 
-	// Scope disjointness: a signature over settle_open must not verify as settle_finish (§12).
-	sig, err := signJCS(priv, settleOpenPayload("c", "r", "sid", 5, "ts"))
+	// Domain disjointness: a signature made under the settle_open domain must not verify under the
+	// settle_finish domain (§12), even for the SAME payload — disjointness is now the domain prefix.
+	sig, err := signJCS(priv, sigDomainSettleOpen, settleOpenPayload("c", "r", "sid", 5, "ts"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyJCS(pub, settleOpenPayload("c", "r", "sid", 5, "ts"), sig); err != nil {
+	if err := verifyJCS(pub, sigDomainSettleOpen, settleOpenPayload("c", "r", "sid", 5, "ts"), sig); err != nil {
 		t.Fatalf("settle_open should verify against itself: %v", err)
 	}
-	if err := verifyJCS(pub, settleFinishPayload("c", "r", "sid", "5", "ts"), sig); err == nil {
-		t.Error("a settle_open signature must not verify as settle_finish (disjoint scopes)")
+	if err := verifyJCS(pub, sigDomainSettleFinish, settleOpenPayload("c", "r", "sid", 5, "ts"), sig); err == nil {
+		t.Error("a settle_open signature must not verify under the settle_finish domain")
 	}
 }
 
@@ -643,5 +644,69 @@ func TestRemoteReceiptInvalidValue(t *testing.T) {
 	}
 	if remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0, Value: 0}, mp, rbps, sent, nil) != "" {
 		t.Error("failure with no value must settle")
+	}
+}
+
+// TestReceiptHashJoinDefinition pins the v0.13 rule that both sides of the remote-receipt evidence
+// join hash the SAME canonical bytes (§13): receiptHash over a struct equals receiptHashFromJSON over
+// that struct's JSON, so an origin's RemoteReceiptHash equals the serving kernel's ReceiptHash. It is
+// deliberately NOT the raw-wire-bytes hash (sha256Hex of the marshaled JSON), which Go marshal order
+// makes differ from the canonical hash.
+func TestReceiptHashJoinDefinition(t *testing.T) {
+	r := &Receipt{
+		ID: "rid", IssuerUserID: "sys", ActionID: "act", Status: TxSuccess,
+		ArgsHash: "ah", ReplyHash: "rh", Gross: 10, Net: 8, Fee: 2, Charge: 10,
+		StartedAt: time.Unix(1000, 0).UTC(), CreatedAt: time.Unix(1001, 0).UTC(), Signature: "sig",
+	}
+	h1, err := receiptHash(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(r)
+	h2, err := receiptHashFromJSON(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 != h2 {
+		t.Errorf("receiptHash and receiptHashFromJSON disagree: %s vs %s", h1, h2)
+	}
+	// Empty JSON yields an empty hash (no remote receipt).
+	if h, _ := receiptHashFromJSON(""); h != "" {
+		t.Errorf("empty remote receipt must hash to empty, got %q", h)
+	}
+}
+
+// TestSignatureDomainStoredVsWire: a legacy (undomained) signature verifies only via the stored-artifact
+// fallback (signature_version 1), never on the wire; a v0.13 domained signature verifies on the wire and
+// reports version 2. A signature made under one domain never verifies under another (§12).
+func TestSignatureDomainStoredVsWire(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub := priv.Public().(ed25519.PublicKey)
+	payload := map[string]string{"k": "v"}
+
+	// Legacy: raw ed25519 over CanonicalJSON with no domain prefix.
+	canon, _ := CanonicalJSON(payload)
+	legacySig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(priv, canon))
+	if err := verifyJCS(pub, sigDomainReceipt, payload, legacySig); err == nil {
+		t.Error("a legacy undomained signature must NOT verify on the wire")
+	}
+	if v, err := verifyJCSStored(pub, sigDomainReceipt, payload, legacySig); err != nil || v != 1 {
+		t.Errorf("legacy signature must verify stored as version 1, got v=%d err=%v", v, err)
+	}
+
+	// v0.13: domained signature.
+	sig, err := signJCS(priv, sigDomainReceipt, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyJCS(pub, sigDomainReceipt, payload, sig); err != nil {
+		t.Errorf("a domained signature must verify on the wire: %v", err)
+	}
+	if v, err := verifyJCSStored(pub, sigDomainReceipt, payload, sig); err != nil || v != 2 {
+		t.Errorf("domained signature must verify stored as version 2, got v=%d err=%v", v, err)
+	}
+	// Cross-domain: same payload, different domain must not verify.
+	if err := verifyJCS(pub, sigDomainRating, payload, sig); err == nil {
+		t.Error("a receipt-domain signature must not verify under the rating domain")
 	}
 }

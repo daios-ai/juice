@@ -134,7 +134,7 @@ func runServer(addr string) error {
 		go startDiscoveryLoop(discCtx, globalCfg.discoveryInterval(), func(c context.Context) {
 			pctx, cancel := context.WithTimeout(c, discoveryPassTimeout)
 			defer cancel()
-			discoverOnce(pctx, disc, directory, k.PeerKeys, k.AccumulateGossip, k.RecordPeerSync, logger)
+			discoverOnce(pctx, disc, directory, k.PeerKeys, k.AccumulateGossip, k.RecordPeerSync, k.GossipCursor, k.SetGossipCursor, logger)
 		})
 	}
 
@@ -242,7 +242,7 @@ type fedDiscoverer interface {
 	Advertise(ctx context.Context) error
 	BootstrapKeys() []string
 	DiscoverProviders(ctx context.Context, limit int) []string
-	Gossip(ctx context.Context, peerKey string) (json.RawMessage, error)
+	Gossip(ctx context.Context, peerKey, cursor string) (json.RawMessage, error)
 }
 
 // discoverOnce runs one known-network refresh plus friend sync (§13). When directory is set, it
@@ -253,8 +253,10 @@ type fedDiscoverer interface {
 // Best-effort throughout — an offline DHT or peer is skipped, never fatal.
 func discoverOnce(ctx context.Context, d fedDiscoverer, directory bool,
 	friendKeys func(context.Context) []string,
-	accumulate func(context.Context, *kernel.GossipResponse, string) error,
+	accumulate func(context.Context, *kernel.GossipResponse, string) (string, error),
 	recordSync func(context.Context, string, *int64) error,
+	getCursor func(context.Context, string) string,
+	setCursor func(context.Context, string, string) error,
 	logger *log.Logger) {
 
 	keys := map[string]bool{}
@@ -275,7 +277,11 @@ func discoverOnce(ctx context.Context, d fedDiscoverer, directory bool,
 		}
 	}
 	for key := range keys {
-		raw, err := d.Gossip(ctx, key)
+		// Resume this peer's evidence stream from its persisted high-watermark (§13). One page per
+		// pass; the catalog snapshot rides every reply, so identity/actions/users refresh each pass
+		// while evidence catches up across passes.
+		cursor := getCursor(ctx, key)
+		raw, err := d.Gossip(ctx, key, cursor)
 		if err != nil {
 			continue // peer offline or unreachable; a later pass retries
 		}
@@ -283,7 +289,10 @@ func discoverOnce(ctx context.Context, d fedDiscoverer, directory bool,
 		if json.Unmarshal(raw, &g) != nil || g.PublicKey == "" {
 			continue
 		}
-		_ = accumulate(ctx, &g, g.PublicKey)
+		next, aerr := accumulate(ctx, &g, g.PublicKey)
+		if aerr == nil && next != "" && next != cursor {
+			_ = setCursor(ctx, key, next)
+		}
 		if friends[key] {
 			// A friend answered: cache last_seen and, when it reported one, our credit there (§13).
 			_ = recordSync(ctx, key, g.CounterpartyBalance)
@@ -373,8 +382,7 @@ type server struct {
 // satisfies it; keeping it an interface lets tests supply a fake to exercise online/offline paths
 // without a real network.
 type fedClient interface {
-	Inspect(ctx context.Context, peerKey string) (json.RawMessage, error)
-	Gossip(ctx context.Context, peerKey string) (json.RawMessage, error)
+	Gossip(ctx context.Context, peerKey, cursor string) (json.RawMessage, error)
 	Manifests(ctx context.Context, peerKey string) ([]json.RawMessage, error)
 	Step(ctx context.Context, peerKey string, req fed.StepRequest) (fed.StepResponse, error)
 	Probe(ctx context.Context, peerKey string) fed.Reachability
@@ -1759,18 +1767,13 @@ func (h *fedHandlers) OnResolve(ctx context.Context, _ string, req fed.ResolveRe
 	}
 }
 
-// OnGossip returns the gossip document (§13). peerKey is the connection's authenticated public key;
-// GetGossip uses it to report the requesting friend its credit here (counterparty_balance, §13 peer sync).
-func (h *fedHandlers) OnGossip(ctx context.Context, peerKey string) (json.RawMessage, error) {
-	g, err := h.kernel.GetGossip(ctx, peerKey)
+// OnGossip returns one page of the gossip document (§13). peerKey is the connection's authenticated
+// public key; GetGossip uses it to report the requesting peer its credit here (counterparty_balance,
+// §13 peer sync). req.Cursor resumes the evidence stream.
+func (h *fedHandlers) OnGossip(ctx context.Context, peerKey string, req fed.GossipRequest) (json.RawMessage, error) {
+	g, err := h.kernel.GetGossip(ctx, peerKey, req.Cursor)
 	if err != nil {
 		return nil, err
 	}
 	return json.Marshal(g)
-}
-
-// OnInspect returns identity + public actions + transacted peers. Gossip already carries all
-// three, so the inspect document is the gossip document viewed by a prospective subscriber.
-func (h *fedHandlers) OnInspect(ctx context.Context, peerKey string) (json.RawMessage, error) {
-	return h.OnGossip(ctx, peerKey)
 }

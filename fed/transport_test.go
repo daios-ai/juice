@@ -271,7 +271,7 @@ func TestDiscoveryByKeyViaBootstrapKernel(t *testing.T) {
 	var lastErr error
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		g, err := b.Gossip(ctx, a.PublicKey())
+		g, err := b.Gossip(ctx, a.PublicKey(), "")
 		cancel()
 		if err == nil && string(g) == `{"public_key":"a"}` {
 			return // discovered by key through R's DHT and round-tripped

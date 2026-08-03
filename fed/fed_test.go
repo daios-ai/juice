@@ -37,10 +37,7 @@ func (f *fakeHandlers) OnManifest(_ context.Context, _ string) ([]json.RawMessag
 func (f *fakeHandlers) OnResolve(_ context.Context, _ string, _ ResolveRequest) ResolveResponse {
 	return ResolveResponse{Status: 200, Body: f.resolveBody}
 }
-func (f *fakeHandlers) OnGossip(_ context.Context, _ string) (json.RawMessage, error) {
-	return f.gossip, nil
-}
-func (f *fakeHandlers) OnInspect(_ context.Context, _ string) (json.RawMessage, error) {
+func (f *fakeHandlers) OnGossip(_ context.Context, _ string, _ GossipRequest) (json.RawMessage, error) {
 	return f.gossip, nil
 }
 func (f *fakeHandlers) OnStep(_ context.Context, peerKey string, req StepRequest) StepResponse {
@@ -108,7 +105,7 @@ func TestTransportRoundTrip(t *testing.T) {
 	}
 
 	// Gossip
-	g, err := b.Gossip(ctx, a.PublicKey())
+	g, err := b.Gossip(ctx, a.PublicKey(), "")
 	if err != nil || string(g) != `{"public_key":"srv","handle":"@srv"}` {
 		t.Fatalf("Gossip: %v body=%s", err, g)
 	}

@@ -23,6 +23,33 @@ func sha256Hex(s string) string {
 	return fmt.Sprintf("%x", h)
 }
 
+// receiptHash is SHA-256(CanonicalJSON(the full stored receipt, signature included)) hex — the ONE
+// definition of a receipt's portable identity, used on both sides of the remote-receipt evidence
+// join (§13). A rating hashes its receipt with this; an EvidenceReceipt's RemoteReceiptHash uses it;
+// a receiver joins A's RemoteReceiptHash to B's ReceiptHash byte-for-byte. It must never be conflated
+// with tx.RemoteReceiptHash, which hashes the RAW wire bytes for settlement-integrity and would not
+// match a re-canonicalized hash (Go marshal order ≠ JCS order).
+func receiptHash(r *Receipt) (string, error) {
+	b, err := CanonicalJSON(r)
+	if err != nil {
+		return "", ErrInternal.Wrapf("canonicalize receipt: %v", err)
+	}
+	return sha256Hex(string(b)), nil
+}
+
+// receiptHashFromJSON canonicalizes a stored receipt JSON string and hashes it, giving the same
+// value receiptHash would for the parsed receipt — used to hash a stored remote receipt (§13).
+func receiptHashFromJSON(receiptJSON string) (string, error) {
+	if receiptJSON == "" {
+		return "", nil
+	}
+	var r Receipt
+	if err := json.Unmarshal([]byte(receiptJSON), &r); err != nil {
+		return "", ErrInternal.Wrapf("decode receipt: %v", err)
+	}
+	return receiptHash(&r)
+}
+
 // remoteManifestPrice derives the base remote manifest price (mp) from a two-step proxy price
 // (q = sr + ceil(sr·import_bps), sr = mp + ceil(mp·remote_bps)) by inverting both layers in order:
 // sr = floor(q·10000/(10000+import_bps)), then mp = floor(sr·10000/(10000+remote_bps)) (§13).
@@ -290,29 +317,84 @@ func callerWalletFor(stepID, processID string, parentTraceID *string) (id, kind 
 	}
 }
 
-// signJCS signs the JCS-canonical form of v with key.
-func signJCS(key ed25519.PrivateKey, v any) (string, error) {
+// Signature domains (§12). Every signed Juice payload is bound to exactly one domain, so a
+// signature valid in one domain is rejected in every other — disjointness is now constructive
+// (an explicit per-domain prefix) rather than emergent from disjoint JCS key-sets. The prefix is
+// versioned so a future domain scheme can coexist. The transport-handshake domain is libp2p's
+// own and is disjoint from all of these by construction.
+const (
+	sigDomainReceipt         = "receipt"
+	sigDomainRating          = "rating"
+	sigDomainManifest        = "manifest"
+	sigDomainEvidenceReceipt = "evidence_receipt"
+	sigDomainFedCall         = "fed_call"
+	sigDomainStepComplete    = "step_complete"
+	sigDomainStepList        = "step_list"
+	sigDomainStepAuth        = "step_auth"
+	sigDomainSettleOpen      = "settle_open"
+	sigDomainSettleFinish    = "settle_finish"
+	sigDomainSettleReconcile = "settle_reconcile"
+	sigDomainSettlementRec   = "settlement_record"
+	sigDomainCapability      = "capability"
+	sigDomainRecovery        = "recovery"
+)
+
+// domainPayload prepends the versioned domain tag to the JCS-canonical bytes of v, giving the
+// exact byte string that is signed/verified under domain.
+func domainPayload(domain string, v any) ([]byte, error) {
+	canon, err := CanonicalJSON(v)
+	if err != nil {
+		return nil, ErrInternal.Wrapf("canonicalize: %v", err)
+	}
+	prefix := []byte("juice/v1/" + domain + "\n")
+	return append(prefix, canon...), nil
+}
+
+// signJCS signs the domain-prefixed JCS-canonical form of v with key.
+func signJCS(key ed25519.PrivateKey, domain string, v any) (string, error) {
 	if len(key) != ed25519.PrivateKeySize {
 		return "", ErrInvalidState.Wrap("signing key is not configured")
 	}
-	payload, err := CanonicalJSON(v)
+	payload, err := domainPayload(domain, v)
 	if err != nil {
-		return "", ErrInternal.Wrapf("canonicalize: %v", err)
+		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
 }
 
-// verifyJCS checks that sigB64 is a valid Ed25519 signature over the JCS-canonical form of v.
-func verifyJCS(pub ed25519.PublicKey, v any, sigB64 string) error {
-	payload, err := CanonicalJSON(v)
+// verifyJCS checks that sigB64 is a valid Ed25519 signature over the domain-prefixed JCS-canonical
+// form of v. Wire ingress must always pass the payload's own domain; the legacy (undomained)
+// fallback for stored historical artifacts lives in verifyJCSStored.
+func verifyJCS(pub ed25519.PublicKey, domain string, v any, sigB64 string) error {
+	payload, err := domainPayload(domain, v)
 	if err != nil {
-		return ErrInternal.Wrapf("canonicalize: %v", err)
+		return err
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
 	if err != nil || !ed25519.Verify(pub, payload, sig) {
 		return ErrUnauthorized.Wrap("signature is invalid")
 	}
 	return nil
+}
+
+// verifyJCSStored verifies a locally STORED signed artifact (a receipt or rating persisted before
+// or after the v0.13 domain break), returning the signature_version that matched: 2 for a
+// domain-prefixed signature, 1 for a legacy undomained one, 0 (with error) for neither. This
+// keeps authentic pre-v0.13 audit records verifiable without re-signing them (§12). It must never
+// be used on wire ingress — network traffic is domained-only.
+func verifyJCSStored(pub ed25519.PublicKey, domain string, v any, sigB64 string) (int, error) {
+	if err := verifyJCS(pub, domain, v, sigB64); err == nil {
+		return 2, nil
+	}
+	canon, err := CanonicalJSON(v)
+	if err != nil {
+		return 0, ErrInternal.Wrapf("canonicalize: %v", err)
+	}
+	sig, derr := base64.RawURLEncoding.DecodeString(sigB64)
+	if derr == nil && ed25519.Verify(pub, canon, sig) {
+		return 1, nil
+	}
+	return 0, ErrUnauthorized.Wrap("signature is invalid")
 }
 
 // VerifyRemoteReceipt verifies the stored remote receipt for a remote-proxy transaction.
@@ -355,8 +437,19 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	// 1. Hash integrity.
 	checks.ReceiptHash = sha256Hex(tx.RemoteReceiptJSON) == tx.RemoteReceiptHash
 
-	// 2. Signature.
-	checks.Signature = verifyRemoteReceiptSignature(&r, owner.PublicKey) == nil
+	// 2. Signature. A stored remote receipt may predate the v0.13 domain break, so audit it with the
+	// legacy fallback and surface which signature version matched (§12).
+	sigVer := 0
+	if owner.PublicKey != "" {
+		if pub, derr := decodeRemotePublicKey(owner.PublicKey); derr == nil {
+			cp := r
+			cp.Signature = ""
+			if v, verr := verifyJCSStored(pub, sigDomainReceipt, cp, r.Signature); verr == nil {
+				sigVer = v
+			}
+		}
+	}
+	checks.Signature = sigVer > 0
 
 	// 3. ActionID: receipt carries the remote action's ID.
 	if tx.RemoteActionID != "" {
@@ -416,9 +509,19 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 		Valid:                 valid,
 		RemoteKernelHandle:    owner.Handle,
 		RemoteKernelPublicKey: owner.PublicKey,
+		SignatureVersion:      sigVer,
 		Checks:                checks,
 		Receipt:               &r,
 	}, nil
+}
+
+// ReceiptSigningBytes returns the exact domain-prefixed bytes a receipt signature covers (§12) — the
+// serving kernel signs these; the origin verifies them. Exposed so an external signer (or a test)
+// reconstructs the identical payload.
+func ReceiptSigningBytes(r *Receipt) ([]byte, error) {
+	cp := *r
+	cp.Signature = ""
+	return domainPayload(sigDomainReceipt, cp)
 }
 
 // verifyRemoteReceiptSignature checks the receipt's Ed25519 signature against pubKeyB64. Fails
@@ -433,7 +536,7 @@ func verifyRemoteReceiptSignature(r *Receipt, pubKeyB64 string) error {
 	}
 	cp := *r
 	cp.Signature = ""
-	return verifyJCS(pub, cp, r.Signature)
+	return verifyJCS(pub, sigDomainReceipt, cp, r.Signature)
 }
 
 // parseAndVerifyRemoteReceipt parses receiptJSON and enforces the settlement preconditions:
@@ -956,95 +1059,92 @@ func (k *Kernel) Unsubscribe(ctx context.Context, subjectID, handle string) erro
 	return k.store.DeactivateActionsOwnedBy(ctx, u.ID)
 }
 
-// ListDiscoveredKernels returns all kernels learned via gossip accumulation.
-func (k *Kernel) ListDiscoveredKernels(ctx context.Context) ([]*DiscoveredKernel, error) {
-	return k.store.ListDiscoveredKernels(ctx)
-}
-
-// PeerLocalView returns the locally-held view of a friended peer — its handle, public key, and the
-// active proxy actions imported from it — for the offline-inspect fallback (§13). The identifier is
-// an `@handle` or a base64url key. ErrNotFound when no local proxy user matches.
-func (k *Kernel) PeerLocalView(ctx context.Context, ident string) (handle, publicKey string, actions []GossipAction, err error) {
-	u, _ := k.ResolveUser(ctx, ident)
-	if u == nil || u.PublicKey == "" {
-		return "", "", nil, ErrNotFound.Wrapf("no friended peer %q", ident)
-	}
-	acts, _ := k.store.ListActionsByOwner(ctx, u.ID, 500, 0)
-	for _, a := range acts {
-		if !a.Active || a.Kind != KindRemoteProxy {
-			continue
-		}
-		ga := GossipAction{ActionID: a.ID, Name: qualifiedActionName(a), Description: a.Description, Price: a.Price}
-		if s, _ := k.store.ReadStats(ctx, a.ID); s != nil {
-			ga.Uses = s.Uses
-			ga.Rating = s.RatingEstimate
-		}
-		actions = append(actions, ga)
-	}
-	return u.Handle, u.PublicKey, actions, nil
-}
-
-// DiscoveryRoster groups the raw discovered_kernels rows into the known-network directory view
-// (§13): one entry per kernel, each carrying every introducer's gossiped action stats (self-report
-// when the introducer is the kernel itself, hearsay otherwise) and, for kernels we have friended
-// and transacted with, our own earned stats as ground truth. Enrichment lives here (not the CLI)
-// so both the CLI and any HTTP client get the same shape. Display only — never callability.
-func (k *Kernel) DiscoveryRoster(ctx context.Context) ([]*KernelRoster, error) {
-	rows, err := k.store.ListDiscoveredKernels(ctx)
+// SubjectEvidence derives the retained-evidence metrics about a subject kernel from the local
+// evidence cache (§13), grouped by issuer. Uses/successes/failures/latency count ONLY issuer==subject
+// rows (first-party execution evidence, so a remote call is never double-counted). A rating counts
+// as trade-backed only when the two-kernel link holds: the rating's issuer evidence names this
+// subject, its RemoteReceiptHash equals a subject execution row's ReceiptHash, and that subject row
+// names the issuer as counterparty. Ratings that fail the link are surfaced as UnverifiedRatings;
+// equivocated rows contribute no rating. This replaces the deleted introducer roster as the
+// reputation display; local Stats are never touched by evidence.
+func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey string) ([]*SubjectEvidenceRow, error) {
+	rows, err := k.store.ListEvidenceBySubject(ctx, subjectKernelPublicKey)
 	if err != nil {
 		return nil, err
 	}
-	byKey := map[string]*KernelRoster{}
-	var order []string
-	for _, d := range rows {
-		r := byKey[d.PublicKey]
-		if r == nil {
-			r = &KernelRoster{PublicKey: d.PublicKey, Handle: d.Handle}
-			byKey[d.PublicKey] = r
-			order = append(order, d.PublicKey)
+	// Index subject-kernel's own execution receipts by ReceiptHash so a rating from another issuer can
+	// be confirmed trade-backed: it must reference one of these and be named as its counterparty.
+	type execFact struct{ counterparty string }
+	execByHash := map[string]execFact{}
+	for _, e := range rows {
+		if e.IssuerPublicKey == subjectKernelPublicKey {
+			execByHash[e.ReceiptHash] = execFact{counterparty: e.CounterpartyKernelPublicKey}
 		}
-		if r.Handle == "" {
-			r.Handle = d.Handle
-		}
-		var actions []GossipAction
-		_ = json.Unmarshal(d.StatsJSON, &actions)
-		r.Sources = append(r.Sources, RosterSource{
-			IntroducedBy: d.IntroducedBy,
-			SelfReported: d.IntroducedBy == d.PublicKey,
-			Actions:      actions,
-		})
 	}
-	// Attach our own earned stats for any discovered kernel we have a local proxy user for.
-	for _, key := range order {
-		proxy, err := k.store.ReadUserByPublicKey(ctx, key)
-		if err != nil || proxy == nil {
-			continue
+	agg := map[string]*SubjectEvidenceRow{}
+	key := func(issuer, action string) string { return issuer + "\x1f" + action }
+	get := func(issuer, action string) *SubjectEvidenceRow {
+		kk := key(issuer, action)
+		if agg[kk] == nil {
+			agg[kk] = &SubjectEvidenceRow{IssuerPublicKey: issuer, SubjectActionID: action}
 		}
-		stats, err := k.store.ListStatsByOwner(ctx, proxy.ID)
-		if err != nil {
-			continue
-		}
-		for _, s := range stats {
-			act, err := k.store.ReadAction(ctx, s.ActionID)
-			if err != nil || act == nil {
-				continue
+		return agg[kk]
+	}
+	for _, e := range rows {
+		row := get(e.IssuerPublicKey, e.SubjectActionID)
+		// Execution metrics come only from the subject's own first-party rows.
+		if e.IssuerPublicKey == subjectKernelPublicKey {
+			var er EvidenceReceipt
+			if json.Unmarshal([]byte(e.EvidenceReceiptJSON), &er) == nil {
+				row.Uses++
+				if er.Status == TxSuccess {
+					row.Successes++
+				} else {
+					row.Failures++
+				}
+				if lat := er.CreatedAt.Sub(er.StartedAt).Milliseconds(); lat >= 0 {
+					row.AvgLatencyMs += float64(lat)
+				}
 			}
-			byKey[key].Own = append(byKey[key].Own, GossipAction{
-				ActionID: s.ActionID, Name: qualifiedActionName(act), Price: act.Price,
-				Uses: s.Uses, Rating: s.RatingEstimate,
-			})
+		}
+		// Rating metrics: any issuer, but only counted when trade-backed and non-equivocated.
+		if e.RatingJSON != "" && !e.Equivocated {
+			var rt Rating
+			if json.Unmarshal([]byte(e.RatingJSON), &rt) == nil {
+				linked := false
+				if e.RemoteReceiptHash != "" {
+					if ef, ok := execByHash[e.RemoteReceiptHash]; ok && ef.counterparty == e.IssuerPublicKey {
+						linked = true
+					}
+				}
+				if linked {
+					row.RatingCount++
+					row.RatingMean += rt.Rating
+					if rt.Note != nil && *rt.Note != "" {
+						row.Notes = append(row.Notes, *rt.Note)
+					}
+				} else {
+					row.UnverifiedRatings++
+				}
+			}
 		}
 	}
-	out := make([]*KernelRoster, 0, len(order))
-	for _, key := range order {
-		out = append(out, byKey[key])
+	out := make([]*SubjectEvidenceRow, 0, len(agg))
+	for _, r := range agg {
+		if r.Uses > 0 {
+			r.AvgLatencyMs /= float64(r.Uses)
+		}
+		if r.RatingCount > 0 {
+			r.RatingMean /= float64(r.RatingCount)
+		}
+		out = append(out, r)
 	}
 	return out, nil
 }
 
 // PurgeIdlePeers reaps peers idle past PeerRetention at zero balance (§13 Retention): it deletes
-// each such peer's proxy actions, stats, stat_tags, and discovered_kernels rows and forgets the
-// peer identity, keeping the transaction ledger intact. Internal maintenance (like
+// each such peer's proxy actions, stats, discovery docs, evidence, and discovered_kernels rows and
+// forgets the peer identity, keeping the transaction ledger intact. Internal maintenance (like
 // RetryPendingRemoteDispatches, no superuser gate) — driven by the serve sweep and once at startup.
 // PeerRetention <= 0 disables it. Returns the number of peers purged.
 func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
@@ -1070,30 +1170,13 @@ func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 	return purged, nil
 }
 
-// qualifiedActionName renders an action's reference for gossip and roster views. For a remote proxy
-// it returns the action's name in the PEER's own namespace (owner/name) — never our local mount
-// alias — so vouching for a peer's action reads identically whether the peer self-reports it or we
-// gossip it (§13). For a local action it is ownerHandle/name.
-func qualifiedActionName(a *Action) string {
-	if a.Kind == KindRemoteProxy {
-		return a.Name
-	}
-	if a.OwnerHandle != "" {
-		return a.OwnerHandle + "/" + a.Name
-	}
-	return a.Name
-}
-
-// GetGossip returns this kernel's gossip payload: identity, public active actions, and peer list.
-// When requesterKey names a known, non-suspended peer, the response also carries that peer's credit
-// on this kernel (CounterpartyBalance, §13 peer sync); it is nil for strangers, suspended keys, and
-// anonymous pulls (requesterKey == "").
-func (k *Kernel) GetGossip(ctx context.Context, requesterKey string) (*GossipResponse, error) {
-	var pubKeyB64 string
-	if len(k.cfg.SigningKey) == ed25519.PrivateKeySize {
-		pub := k.cfg.SigningKey.Public().(ed25519.PublicKey)
-		pubKeyB64 = base64.RawURLEncoding.EncodeToString(pub)
-	}
+// GetGossip returns this kernel's v0.13 gossip payload (§13): first-party identity, users (sys +
+// owners of active public actions), the kernel's own signed action manifests, and one page of
+// evidence bundles ordered by effective time after cursor. When requesterKey names a known,
+// non-suspended peer, the response also carries that peer's credit here (CounterpartyBalance, §13
+// peer sync); nil for strangers, suspended keys, and anonymous pulls.
+func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*GossipResponse, error) {
+	ourKey := k.ourKeyB64()
 	handle, _ := k.store.GetConfig(ctx, "kernel_handle")
 	// The kernel's self-description is @sys's user description (§13): one primitive, not a config key.
 	var about string
@@ -1105,69 +1188,49 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey string) (*GossipRes
 	if err != nil {
 		return nil, err
 	}
-	var gossipActions []GossipAction
+	var manifests []*ActionManifest
+	ownerSeen := map[string]bool{}
+	var users []GossipUser
 	for _, a := range actions {
-		if !a.Active {
+		if !a.Active || a.Visibility != VisibilityPublic {
 			continue
 		}
 		if k.isDelegatedAuth(a) {
-			continue // never advertised to peers (§8/§13)
+			continue // delegated-auth actions are never advertised to peers (§8/§13)
 		}
 		if a.Kind == KindRemoteProxy {
-			continue // imports are not our own actions; peers reach them only by friending the owner directly (§13)
+			continue // imports are not our own actions; peers reach them by resolving the owner directly (§13)
 		}
-		stats, _ := k.store.ReadStats(ctx, a.ID)
-		ga := GossipAction{
-			ActionID:    a.ID,
-			Name:        qualifiedActionName(a),
-			Description: a.Description,
-			Price:       a.Price,
-		}
-		if stats != nil {
-			ga.Uses = stats.Uses
-			ga.Rating = stats.RatingEstimate
-		}
-		gossipActions = append(gossipActions, ga)
-	}
-
-	peers, _ := k.ListPeers(ctx)
-	var friendViews []GossipFriendView
-	for _, p := range peers {
-		if p.SuspendedAt != nil {
+		m, merr := k.GetActionManifest(ctx, a.ID)
+		if merr != nil || m == nil {
 			continue
 		}
-		peerStats, _ := k.store.ListStatsByOwner(ctx, p.ID)
-		if len(peerStats) == 0 {
-			continue // not transacted; endorsement is earned by trade, not by subscribing
-		}
-		var fActions []GossipAction
-		for _, s := range peerStats {
-			act, err := k.store.ReadAction(ctx, s.ActionID)
-			if err != nil || act == nil {
-				continue
+		manifests = append(manifests, m)
+		if !ownerSeen[a.OwnerUserID] {
+			ownerSeen[a.OwnerUserID] = true
+			if ow, oerr := k.store.ReadUser(ctx, a.OwnerUserID); oerr == nil && ow != nil && ow.PublicKey == "" {
+				users = append(users, GossipUser{UserID: ow.ID, Handle: ow.Handle, Description: ow.Description})
 			}
-			fActions = append(fActions, GossipAction{
-				ActionID:    s.ActionID,
-				Name:        qualifiedActionName(act),
-				Description: act.Description,
-				Price:       act.Price,
-				Uses:        s.Uses,
-				Rating:      s.RatingEstimate,
-			})
 		}
-		friendViews = append(friendViews, GossipFriendView{
-			Handle:    p.Handle,
-			PublicKey: p.PublicKey,
-			Actions:   fActions,
-		})
+	}
+	// Always advertise @sys so a discovering kernel can index the operator identity.
+	if sys, err := k.store.ReadUserByHandle(ctx, "sys"); err == nil && sys != nil && !ownerSeen[sys.ID] {
+		users = append(users, GossipUser{UserID: sys.ID, Handle: sys.Handle, Description: sys.Description})
+	}
+
+	bundles, nextCursor, err := k.gossipEvidencePage(ctx, ourKey, cursor)
+	if err != nil {
+		return nil, err
 	}
 
 	resp := &GossipResponse{
-		PublicKey: pubKeyB64,
-		Handle:    handle,
-		About:     about,
-		Actions:   gossipActions,
-		Friends:   friendViews,
+		PublicKey:       ourKey,
+		Handle:          handle,
+		About:           about,
+		Users:           users,
+		ActionManifests: manifests,
+		Evidence:        bundles,
+		NextCursor:      nextCursor,
 	}
 	// Report the requester's credit here only if it is a known, non-suspended peer (§13 peer sync).
 	if requesterKey != "" {
@@ -1177,6 +1240,104 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey string) (*GossipRes
 		}
 	}
 	return resp, nil
+}
+
+// buildEvidenceReceipt builds the wire-only signed projection of one of this kernel's receipts (§13).
+// For an own action the subject is (ourKey, receipt.action_id); for a proxy call the store supplied
+// the peer subject in row.Subject*. RemoteReceiptHash is receiptHash of the STORED remote receipt
+// (canonical JSON — the one definition shared with the serving kernel's ReceiptHash), never the raw
+// tx.RemoteReceiptHash. Signed under the evidence_receipt domain.
+func (k *Kernel) buildEvidenceReceipt(ourKey string, row *GossipReceiptRow) (*EvidenceReceipt, error) {
+	rh, err := receiptHash(row.Receipt)
+	if err != nil {
+		return nil, err
+	}
+	subjectKernel := row.SubjectKernelPublicKey
+	if subjectKernel == "" {
+		subjectKernel = ourKey // own execution evidence
+	}
+	er := &EvidenceReceipt{
+		ReceiptHash:                 rh,
+		SubjectKernelPublicKey:      subjectKernel,
+		SubjectActionID:             row.SubjectActionID,
+		CounterpartyKernelPublicKey: row.CounterpartyKernelPublicKey,
+		Status:                      row.Receipt.Status,
+		StartedAt:                   row.Receipt.StartedAt,
+		CreatedAt:                   row.Receipt.CreatedAt,
+	}
+	if row.RemoteReceiptJSON != "" {
+		h, herr := receiptHashFromJSON(row.RemoteReceiptJSON)
+		if herr != nil {
+			return nil, herr
+		}
+		er.RemoteReceiptHash = h
+	}
+	cp := *er
+	cp.Signature = ""
+	sig, err := signJCS(k.cfg.SigningKey, sigDomainEvidenceReceipt, cp)
+	if err != nil {
+		return nil, err
+	}
+	er.Signature = sig
+	return er, nil
+}
+
+// gossipEvidencePage builds one ordered evidence page after cursor, plus the next cursor (§13).
+func (k *Kernel) gossipEvidencePage(ctx context.Context, ourKey, cursor string) ([]EvidenceBundle, string, error) {
+	rows, err := k.store.ListReceiptsForGossip(ctx, cursor, gossipEvidencePageSize)
+	if err != nil {
+		return nil, "", err
+	}
+	bundles := make([]EvidenceBundle, 0, len(rows))
+	next := cursor
+	for _, row := range rows {
+		er, berr := k.buildEvidenceReceipt(ourKey, row)
+		if berr != nil {
+			return nil, "", berr
+		}
+		b := EvidenceBundle{EvidenceReceipt: er}
+		if row.Rating != nil && row.Rating.RatedReceiptHash != "" {
+			b.Rating = row.Rating
+		}
+		bundles = append(bundles, b)
+		next = row.Cursor
+	}
+	return bundles, next, nil
+}
+
+// ReadDiscoveredKernel returns the slim discovered-kernel row for a public key, or nil if unknown.
+func (k *Kernel) ReadDiscoveredKernel(ctx context.Context, publicKey string) (*DiscoveredKernel, error) {
+	return k.store.ReadDiscoveredKernel(ctx, publicKey)
+}
+
+// DiscoveryDocsForKernel returns the locally-cached "action" discovery docs for one source kernel
+// (§13), for the offline-inspect fallback. Regenerable — empty until the next gossip pull.
+func (k *Kernel) DiscoveryDocsForKernel(ctx context.Context, publicKey string) ([]*DiscoveryDoc, error) {
+	all, err := k.store.ListDiscoveryDocs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*DiscoveryDoc, 0)
+	for _, d := range all {
+		if d.KernelPublicKey == publicKey && d.Kind == "action" {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// GossipCursor returns the persisted evidence high-watermark for a peer (§13 peer sync); empty when
+// the peer is unknown or has never been pulled.
+func (k *Kernel) GossipCursor(ctx context.Context, publicKey string) string {
+	if dk, err := k.store.ReadDiscoveredKernel(ctx, publicKey); err == nil && dk != nil {
+		return dk.GossipCursor
+	}
+	return ""
+}
+
+// SetGossipCursor advances a peer's persisted evidence high-watermark (§13 peer sync).
+func (k *Kernel) SetGossipCursor(ctx context.Context, publicKey, cursor string) error {
+	return k.store.SetGossipCursor(ctx, publicKey, cursor)
 }
 
 // RecordPeerSync persists a successful peer gossip pull (§13 peer sync) keyed by public key:
@@ -1223,69 +1384,140 @@ func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, actionParam, argsH
 	return r, nil
 }
 
-// AccumulateGossip stores a gossip response in the discovered_kernels table and creates
-// StatTag rows (key="gossip_uses"/"gossip_rating") for any gossip actions we have locally
-// imported as proxy actions from that kernel. The source field is the introducer's public key.
-func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, introducerPublicKey string) error {
+// AccumulateGossip ingests one v0.13 gossip page (§13): it refreshes the slim discovered-kernel row,
+// rebuilds that kernel's searchable discovery docs from the verified first-party catalog snapshot, and
+// stores each verified evidence bundle. It returns the page's NextCursor so the discovery loop can
+// persist the peer's evidence high-watermark. Nothing here grants callability — a lookup selection
+// still resolves and verifies from the home kernel.
+func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, introducerPublicKey string) (string, error) {
 	if gossip.PublicKey == "" {
-		return ErrInvalidInput.Wrap("gossip missing public_key")
+		return "", ErrInvalidInput.Wrap("gossip missing public_key")
 	}
-	// gossip.Actions/Friends are peer-controlled and each drives a DB write; cap the fan-out so one
-	// gossip pull cannot force an unbounded write amplification (§13 information, not authority).
-	const maxGossipElements = 10000
-	if len(gossip.Actions) > maxGossipElements {
-		gossip.Actions = gossip.Actions[:maxGossipElements]
-	}
-	if len(gossip.Friends) > maxGossipElements {
-		gossip.Friends = gossip.Friends[:maxGossipElements]
-	}
-	statsJSON, _ := json.Marshal(gossip.Actions)
 	now := time.Now().UTC()
 	if err := k.store.CreateOrUpdateDiscoveredKernel(ctx, &DiscoveredKernel{
-		PublicKey:    gossip.PublicKey,
-		IntroducedBy: introducerPublicKey,
-		Handle:       gossip.Handle,
-		StatsJSON:    json.RawMessage(statsJSON),
-		FirstSeen:    now,
-		UpdatedAt:    now,
+		PublicKey: gossip.PublicKey,
+		Handle:    gossip.Handle,
+		About:     gossip.About,
+		FirstSeen: now,
+		UpdatedAt: now,
 	}); err != nil {
-		return err
-	}
-	// Store each transacted peer as a discovered kernel, introduced by the gossip source.
-	for _, f := range gossip.Friends {
-		if f.PublicKey == "" {
-			continue
-		}
-		friendStatsJSON, _ := json.Marshal(f.Actions)
-		_ = k.store.CreateOrUpdateDiscoveredKernel(ctx, &DiscoveredKernel{
-			PublicKey:    f.PublicKey,
-			IntroducedBy: gossip.PublicKey,
-			Handle:       f.Handle,
-			StatsJSON:    json.RawMessage(friendStatsJSON),
-			FirstSeen:    now,
-			UpdatedAt:    now,
-		})
+		return "", err
 	}
 
-	// For each gossip action, find the matching local proxy (by remote_action_id) and
-	// write gossip_uses / gossip_rating stat tags so @sys/lookup can use them as a prior.
-	remoteUser, err := k.store.ReadUserByPublicKey(ctx, gossip.PublicKey)
-	if err != nil || remoteUser == nil {
-		return nil // peer not yet registered locally; skip stat tags
-	}
-	for _, ga := range gossip.Actions {
-		proxy, err := k.store.ReadActionByOwnerRemoteID(ctx, remoteUser.ID, ga.ActionID)
-		if err != nil || proxy == nil {
-			continue // not imported locally
+	// Rebuild discovery docs from the verified catalog snapshot (replace-all per source kernel).
+	const maxGossipElements = 10000
+	docs := make([]*DiscoveryDoc, 0, len(gossip.ActionManifests)+len(gossip.Users))
+	for i, m := range gossip.ActionManifests {
+		if i >= maxGossipElements {
+			break
 		}
-		source := introducerPublicKey
-		if source == "" {
-			source = gossip.PublicKey
+		if m == nil || VerifyManifestSignature(gossip.PublicKey, m) != nil {
+			continue // only verified first-party manifests are indexed
 		}
-		_ = k.store.UpsertStatTag(ctx, &StatTag{ActionID: proxy.ID, Key: "gossip_uses", Value: fmt.Sprintf("%d", ga.Uses), Source: source, UpdatedAt: now})
-		_ = k.store.UpsertStatTag(ctx, &StatTag{ActionID: proxy.ID, Key: "gossip_rating", Value: fmt.Sprintf("%g", ga.Rating), Source: source, UpdatedAt: now})
+		d := &DiscoveryDoc{
+			KernelPublicKey: gossip.PublicKey,
+			Kind:            "action",
+			UserID:          m.OwnerID,
+			Handle:          m.OwnerHandle,
+			Description:     m.Description,
+			ActionID:        m.ActionID,
+			Name:            m.Name,
+			InputSchema:     m.InputSchema,
+			OutputSchema:    m.OutputSchema,
+			ObservedAt:      now,
+		}
+		if k.llm != nil {
+			if vec, eerr := k.llm.Embed(ctx, m.Name+" "+m.Description); eerr == nil {
+				d.Embedding = vec
+			}
+		}
+		docs = append(docs, d)
 	}
-	return nil
+	for i, u := range gossip.Users {
+		if i >= maxGossipElements {
+			break
+		}
+		if u.UserID == "" {
+			continue
+		}
+		d := &DiscoveryDoc{
+			KernelPublicKey: gossip.PublicKey,
+			Kind:            "user",
+			UserID:          u.UserID,
+			Handle:          u.Handle,
+			Description:     u.Description,
+			ObservedAt:      now,
+		}
+		if k.llm != nil {
+			if vec, eerr := k.llm.Embed(ctx, u.Handle+" "+u.Description); eerr == nil {
+				d.Embedding = vec
+			}
+		}
+		docs = append(docs, d)
+	}
+	if err := k.store.ReplaceDiscoveryDocs(ctx, gossip.PublicKey, docs); err != nil {
+		return "", err
+	}
+
+	// Store each verified evidence bundle.
+	for i, b := range gossip.Evidence {
+		if i >= maxGossipElements {
+			break
+		}
+		if err := k.ingestEvidenceBundle(ctx, gossip.PublicKey, b, now); err != nil {
+			k.log.With(ctx).Warn("gossip.evidence.rejected", "issuer", gossip.PublicKey, "error", err)
+		}
+	}
+	return gossip.NextCursor, nil
+}
+
+// ingestEvidenceBundle verifies and stores one evidence bundle from issuerKey (§13). It verifies the
+// evidence-receipt signature under the evidence_receipt domain against the gossiping key, requires a
+// present rating (if any) to be signed by the same key and to hash-match the receipt, drops transfer
+// subjects, and upserts under the late-rating/equivocation transitions.
+func (k *Kernel) ingestEvidenceBundle(ctx context.Context, issuerKey string, b EvidenceBundle, now time.Time) error {
+	er := b.EvidenceReceipt
+	if er == nil {
+		return ErrInvalidInput.Wrap("evidence bundle missing receipt")
+	}
+	pub, err := decodeRemotePublicKey(issuerKey)
+	if err != nil {
+		return err
+	}
+	cp := *er
+	cp.Signature = ""
+	if err := verifyJCS(pub, sigDomainEvidenceReceipt, cp, er.Signature); err != nil {
+		return ErrUnauthorized.Wrap("evidence receipt signature invalid")
+	}
+	row := &EvidenceRow{
+		IssuerPublicKey:             issuerKey,
+		ReceiptHash:                 er.ReceiptHash,
+		SubjectKernelPublicKey:      er.SubjectKernelPublicKey,
+		SubjectActionID:             er.SubjectActionID,
+		CounterpartyKernelPublicKey: er.CounterpartyKernelPublicKey,
+		RemoteReceiptHash:           er.RemoteReceiptHash,
+		ReceiptCreatedAt:            er.CreatedAt,
+		EffectiveAt:                 er.CreatedAt,
+		ObservedAt:                  now,
+	}
+	erJSON, _ := json.Marshal(er)
+	row.EvidenceReceiptJSON = string(erJSON)
+	if b.Rating != nil {
+		// Wire-ingress rule: a gossiped rating must carry a hash and match the receipt, and be signed
+		// (v2 domain) by the issuing kernel.
+		if b.Rating.RatedReceiptHash == "" || b.Rating.RatedReceiptHash != er.ReceiptHash {
+			return ErrInvalidInput.Wrap("rating does not match its receipt hash")
+		}
+		rc := *b.Rating
+		rc.Signature = ""
+		if err := verifyJCS(pub, sigDomainRating, rc, b.Rating.Signature); err != nil {
+			return ErrUnauthorized.Wrap("rating signature invalid")
+		}
+		rJSON, _ := json.Marshal(b.Rating)
+		row.RatingJSON = string(rJSON)
+		row.EffectiveAt = b.Rating.CreatedAt
+	}
+	return k.store.UpsertEvidence(ctx, row)
 }
 
 func decodeRemotePublicKey(publicKey string) (ed25519.PublicKey, error) {
@@ -1591,7 +1823,7 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 func SignManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
 	cp := *m
 	cp.Signature = ""
-	return signJCS(key, cp)
+	return signJCS(key, sigDomainManifest, cp)
 }
 
 // VerifyManifestSignature checks that m.Signature was produced by the private key
@@ -1603,7 +1835,7 @@ func VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
 	}
 	cp := *m
 	cp.Signature = ""
-	if err := verifyJCS(pub, cp, m.Signature); err != nil {
+	if err := verifyJCS(pub, sigDomainManifest, cp, m.Signature); err != nil {
 		return ErrUnauthorized.Wrap("manifest signature is invalid")
 	}
 	return nil
@@ -1616,7 +1848,7 @@ func VerifyFederationSignature(pubKeyB64, action, counterparty, idempotencyKey, 
 	if err != nil {
 		return ErrUnauthenticated.Wrap("invalid counterparty public key")
 	}
-	if err := verifyJCS(pub, map[string]string{
+	if err := verifyJCS(pub, sigDomainFedCall, map[string]string{
 		"action":          action,
 		"args_hash":       argsHash,
 		"counterparty":    counterparty,
@@ -1630,7 +1862,7 @@ func VerifyFederationSignature(pubKeyB64, action, counterparty, idempotencyKey, 
 
 // SignFederationPayload creates a base64url Ed25519 signature over the canonical federation payload.
 func SignFederationPayload(key ed25519.PrivateKey, action, counterparty, idempotencyKey, timestamp, argsHash string) (string, error) {
-	return signJCS(key, map[string]string{
+	return signJCS(key, sigDomainFedCall, map[string]string{
 		"action":          action,
 		"args_hash":       argsHash,
 		"counterparty":    counterparty,
@@ -1650,7 +1882,7 @@ func SignFederationPayload(key ed25519.PrivateKey, action, counterparty, idempot
 // JCS({counterparty, idempotency_key, input_hash, recipient, step_id, timestamp}) — a key-set
 // disjoint from every other signed Juice payload (§12, §13).
 func SignStepPayload(key ed25519.PrivateKey, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash string) (string, error) {
-	return signJCS(key, stepPayload(stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash))
+	return signJCS(key, sigDomainStepComplete, stepPayload(stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash))
 }
 
 // VerifyStepSignature verifies an Ed25519 signature over the canonical step-completion payload.
@@ -1660,7 +1892,7 @@ func VerifyStepSignature(pubKeyB64, stepID, counterparty, recipient, idempotency
 	if err != nil {
 		return ErrUnauthenticated.Wrap("invalid counterparty public key")
 	}
-	if err := verifyJCS(pub, stepPayload(stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash), sigB64); err != nil {
+	if err := verifyJCS(pub, sigDomainStepComplete, stepPayload(stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash), sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("step signature is invalid")
 	}
 	return nil
@@ -1682,7 +1914,7 @@ func stepPayload(stepID, counterparty, recipient, idempotencyKey, timestamp, inp
 // this key-set disjoint from the step-complete and step-list payloads; recipient binds it to the
 // serving kernel, closing cross-kernel replay.
 func SignStepAuthPayload(key ed25519.PrivateKey, counterparty, recipient, userID, stepID, timestamp string) (string, error) {
-	return signJCS(key, stepAuthPayload(counterparty, recipient, userID, stepID, timestamp))
+	return signJCS(key, sigDomainStepAuth, stepAuthPayload(counterparty, recipient, userID, stepID, timestamp))
 }
 
 // VerifyStepAuthSignature verifies the attestation. recipient must be the verifying kernel's own key.
@@ -1691,17 +1923,17 @@ func VerifyStepAuthSignature(pubKeyB64, counterparty, recipient, userID, stepID,
 	if err != nil {
 		return ErrUnauthenticated.Wrap("invalid counterparty public key")
 	}
-	if err := verifyJCS(pub, stepAuthPayload(counterparty, recipient, userID, stepID, timestamp), sigB64); err != nil {
+	if err := verifyJCS(pub, sigDomainStepAuth, stepAuthPayload(counterparty, recipient, userID, stepID, timestamp), sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("step attestation is invalid")
 	}
 	return nil
 }
 
 func stepAuthPayload(counterparty, recipient, userID, stepID, timestamp string) map[string]string {
+	// No "scope" key: the sigDomainStepAuth prefix now provides domain separation (§12).
 	return map[string]string{
 		"counterparty": counterparty,
 		"recipient":    recipient,
-		"scope":        "step_auth",
 		"step_id":      stepID,
 		"timestamp":    timestamp,
 		"user_id":      userID,
@@ -1720,7 +1952,7 @@ func (k *Kernel) SignStepAuth(counterparty, recipient, userID, stepID string) (s
 // JCS({counterparty, recipient, scope, timestamp}). The fixed scope value keeps this key-set
 // disjoint from every other signed payload (§12, §13).
 func SignStepListPayload(key ed25519.PrivateKey, counterparty, recipient, timestamp string) (string, error) {
-	return signJCS(key, stepListPayload(counterparty, recipient, timestamp))
+	return signJCS(key, sigDomainStepList, stepListPayload(counterparty, recipient, timestamp))
 }
 
 // VerifyStepListSignature verifies an Ed25519 signature over the canonical step-list payload.
@@ -1730,17 +1962,17 @@ func VerifyStepListSignature(pubKeyB64, counterparty, recipient, timestamp, sigB
 	if err != nil {
 		return ErrUnauthenticated.Wrap("invalid counterparty public key")
 	}
-	if err := verifyJCS(pub, stepListPayload(counterparty, recipient, timestamp), sigB64); err != nil {
+	if err := verifyJCS(pub, sigDomainStepList, stepListPayload(counterparty, recipient, timestamp), sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("step signature is invalid")
 	}
 	return nil
 }
 
 func stepListPayload(counterparty, recipient, timestamp string) map[string]string {
+	// No "scope" key: the sigDomainStepList prefix now provides domain separation (§12).
 	return map[string]string{
 		"counterparty": counterparty,
 		"recipient":    recipient,
-		"scope":        "step_list",
 		"timestamp":    timestamp,
 	}
 }
@@ -1778,7 +2010,7 @@ func (k *Kernel) ourKeyB64() string {
 // signSettlementRecord fixes the creditor signature over JCS(record with Signature="").
 func (k *Kernel) signSettlementRecord(r *SettlementRecord) error {
 	r.Signature = ""
-	sig, err := signJCS(k.cfg.SigningKey, r)
+	sig, err := signJCS(k.cfg.SigningKey, sigDomainSettlementRec, r)
 	if err != nil {
 		return err
 	}
@@ -1794,25 +2026,25 @@ func verifySettlementRecord(r *SettlementRecord, creditorB64 string) error {
 	}
 	cp := *r
 	cp.Signature = ""
-	if err := verifyJCS(pub, cp, r.Signature); err != nil {
+	if err := verifyJCS(pub, sigDomainSettlementRec, cp, r.Signature); err != nil {
 		return ErrUnauthenticated.Wrap("settlement record signature is invalid")
 	}
 	return nil
 }
 
-// The three settle request scopes are disjoint from each other and from every other signed payload
-// (§12): each carries its own fixed scope value plus a distinct key-set. recipient binds a request to
-// the intended creditor, closing cross-kernel replay.
+// The three settle request payloads are disjoint from each other and from every other signed payload
+// (§12): each is signed under its own domain (sigDomainSettleOpen/Finish/Reconcile). recipient binds a
+// request to the intended creditor, closing cross-kernel replay.
 func settleOpenPayload(counterparty, recipient, settlementID string, amount int64, timestamp string) map[string]string {
-	return map[string]string{"amount": strconv.FormatInt(amount, 10), "counterparty": counterparty, "recipient": recipient, "scope": "settle_open", "settlement_id": settlementID, "timestamp": timestamp}
+	return map[string]string{"amount": strconv.FormatInt(amount, 10), "counterparty": counterparty, "recipient": recipient, "settlement_id": settlementID, "timestamp": timestamp}
 }
 
 func settleFinishPayload(counterparty, recipient, settlementID, nonce, timestamp string) map[string]string {
-	return map[string]string{"counterparty": counterparty, "nonce": nonce, "recipient": recipient, "scope": "settle_finish", "settlement_id": settlementID, "timestamp": timestamp}
+	return map[string]string{"counterparty": counterparty, "nonce": nonce, "recipient": recipient, "settlement_id": settlementID, "timestamp": timestamp}
 }
 
 func settleReconcilePayload(counterparty, recipient, settlementID, timestamp string) map[string]string {
-	return map[string]string{"counterparty": counterparty, "recipient": recipient, "scope": "settle_reconcile", "settlement_id": settlementID, "timestamp": timestamp}
+	return map[string]string{"counterparty": counterparty, "recipient": recipient, "settlement_id": settlementID, "timestamp": timestamp}
 }
 
 // GrossReceivables returns this kernel's total unsecured receivables across all peers (§13).
@@ -1844,7 +2076,7 @@ func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, s
 
 	switch kind {
 	case "open":
-		if err := verifyJCS(debtorPub, settleOpenPayload(debtorKey, our, settlementID, amount, timestamp), signature); err != nil {
+		if err := verifyJCS(debtorPub, sigDomainSettleOpen, settleOpenPayload(debtorKey, our, settlementID, amount, timestamp), signature); err != nil {
 			return 0, nil, ErrUnauthenticated.Wrap("settle_open signature invalid")
 		}
 		// Our books must agree that this peer owes us exactly the claimed debt d (= −available).
@@ -1870,7 +2102,7 @@ func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, s
 		return 200, b, nil
 
 	case "finish":
-		if err := verifyJCS(debtorPub, settleFinishPayload(debtorKey, our, settlementID, nonce, timestamp), signature); err != nil {
+		if err := verifyJCS(debtorPub, sigDomainSettleFinish, settleFinishPayload(debtorKey, our, settlementID, nonce, timestamp), signature); err != nil {
 			return 0, nil, ErrUnauthenticated.Wrap("settle_finish signature invalid")
 		}
 		if stored, err := k.store.ReadSettlementRecord(ctx, settlementID); err != nil {
@@ -1910,7 +2142,7 @@ func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, s
 		return 200, fb, nil
 
 	case "reconcile":
-		if err := verifyJCS(debtorPub, settleReconcilePayload(debtorKey, our, settlementID, timestamp), signature); err != nil {
+		if err := verifyJCS(debtorPub, sigDomainSettleReconcile, settleReconcilePayload(debtorKey, our, settlementID, timestamp), signature); err != nil {
 			return 0, nil, ErrUnauthenticated.Wrap("settle_reconcile signature invalid")
 		}
 		if stored, err := k.store.ReadSettlementRecord(ctx, settlementID); err != nil {
@@ -2004,7 +2236,7 @@ func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (ma
 
 	// Round 1 — open: the creditor commits H(s).
 	ts := time.Now().UTC().Format(time.RFC3339)
-	openSig, err := signJCS(k.cfg.SigningKey, settleOpenPayload(our, peer.PublicKey, settlementID, d, ts))
+	openSig, err := signJCS(k.cfg.SigningKey, sigDomainSettleOpen, settleOpenPayload(our, peer.PublicKey, settlementID, d, ts))
 	if err != nil {
 		return nil, err
 	}
@@ -2030,7 +2262,7 @@ func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (ma
 	// Round 2 — finish: reveal the nonce; the creditor reveals s and applies its legs.
 	nonce := uuid.NewString()
 	ts2 := time.Now().UTC().Format(time.RFC3339)
-	finishSig, err := signJCS(k.cfg.SigningKey, settleFinishPayload(our, peer.PublicKey, settlementID, nonce, ts2))
+	finishSig, err := signJCS(k.cfg.SigningKey, sigDomainSettleFinish, settleFinishPayload(our, peer.PublicKey, settlementID, nonce, ts2))
 	if err != nil {
 		return nil, err
 	}

@@ -32,14 +32,11 @@ type fakeFed struct {
 	lastStep      fed.StepRequest // the last outbound step request, for assertions
 }
 
-func (f *fakeFed) Inspect(context.Context, string) (json.RawMessage, error) {
+func (f *fakeFed) Gossip(_ context.Context, _ string, _ string) (json.RawMessage, error) {
 	if f.inspectDoc == nil {
 		return nil, errors.New("fed: cannot resolve peer (offline)")
 	}
 	return f.inspectDoc, nil
-}
-func (f *fakeFed) Gossip(ctx context.Context, s string) (json.RawMessage, error) {
-	return f.Inspect(ctx, s)
 }
 func (f *fakeFed) Manifests(context.Context, string) ([]json.RawMessage, error) { return nil, nil }
 func (f *fakeFed) Step(_ context.Context, _ string, req fed.StepRequest) (fed.StepResponse, error) {
@@ -157,8 +154,10 @@ func TestListPeersHidesSuspended(t *testing.T) {
 	}
 }
 
-// TestInspectOfflineFriendedShowsLocalData: a friended peer that is offline still inspects — local
-// last-known actions plus reachability=unreachable, not an opaque failure (§13).
+// TestInspectOfflineFriendedShowsLocalData: a peer we know locally that is offline still inspects —
+// source=local + reachability=unreachable, not an opaque failure (§13). Under v0.13 the locally-held
+// action view comes from the regenerable discovery cache (empty until a gossip pull), not the
+// imported proxy rows; the essential guarantee is a graceful local degrade, not the action list.
 func TestInspectOfflineFriendedShowsLocalData(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	handle, _ := seedPeer(t, k, "peer-off")
@@ -170,9 +169,6 @@ func TestInspectOfflineFriendedShowsLocalData(t *testing.T) {
 	}
 	if out["online"] != false {
 		t.Errorf("online = %v, want false", out["online"])
-	}
-	if acts, _ := out["actions"].([]any); len(acts) != 1 {
-		t.Errorf("actions = %v, want 1 (last-imported)", out["actions"])
 	}
 }
 
@@ -252,7 +248,7 @@ func TestInspectOnlineLive(t *testing.T) {
 	livekey := base64.RawURLEncoding.EncodeToString(pub)
 	doc, _ := json.Marshal(kernel.GossipResponse{
 		Handle: "live-peer", PublicKey: livekey,
-		Actions: []kernel.GossipAction{{ActionID: "a", Name: "live-peer/x", Price: 3}},
+		ActionManifests: []*kernel.ActionManifest{{ActionID: "a", Name: "x", OwnerHandle: "live-peer", Price: 3}},
 	})
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{inspectDoc: doc, reachPath: "direct"}}
 

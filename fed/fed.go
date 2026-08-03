@@ -25,15 +25,24 @@ var ErrNotDispatched = errors.New("fed: request not dispatched")
 
 // Protocol IDs are versioned libp2p streams. The version suffix lets the protocol evolve
 // without silent incompatibility — HTTP+JSON was implicitly versionless; libp2p makes it explicit.
+// Protocol ids stay at /1 across the v0.13 signature-domain break (§12) and gossip v2: the stream
+// ids are unchanged, so a pre-0.13 peer negotiates the stream and then fails per-payload signature
+// verification (rather than failing to negotiate). The inspect protocol is removed: `admin inspect`
+// is served by gossip (§13).
 const (
 	ProtocolCall     = "/juice/fed/call/1"
 	ProtocolManifest = "/juice/fed/manifest/1"
 	ProtocolResolve  = "/juice/fed/resolve/1"
 	ProtocolGossip   = "/juice/fed/gossip/1"
-	ProtocolInspect  = "/juice/fed/inspect/1"
 	ProtocolStep     = "/juice/fed/step/1"
 	ProtocolSettle   = "/juice/fed/settle/1"
 )
+
+// GossipRequest is the wire form of a /juice/fed/gossip/1 request (§13): the evidence cursor to
+// resume from. Empty starts at the oldest retained evidence. The catalog snapshot rides every reply.
+type GossipRequest struct {
+	Cursor string `json:"cursor,omitempty"`
+}
 
 // ResolveRequest is the wire form of a /juice/fed/resolve/1 request (§13): the open, read-only
 // single-action / single-principal resolution that makes calling need no prior subscription.
@@ -133,10 +142,9 @@ type Handlers interface {
 	// OnResolve answers a /juice/fed/resolve/1 request: one action's signed manifest or one
 	// user's stable id+handle (§13). peerKey is informational; the reply is public directory data.
 	OnResolve(ctx context.Context, peerKey string, req ResolveRequest) ResolveResponse
-	// OnGossip returns the gossip document as JSON.
-	OnGossip(ctx context.Context, peerKey string) (json.RawMessage, error)
-	// OnInspect returns the inspect document (identity + public actions + transacted peers) as JSON.
-	OnInspect(ctx context.Context, peerKey string) (json.RawMessage, error)
+	// OnGossip returns one page of the gossip document (catalog snapshot + evidence page after
+	// req.Cursor) as JSON (§13).
+	OnGossip(ctx context.Context, peerKey string, req GossipRequest) (json.RawMessage, error)
 	// OnStep handles an inbound /juice/fed/step/1 request: listing or completing the waiting
 	// steps this peer is the required caller of (§10, §13).
 	OnStep(ctx context.Context, peerKey string, req StepRequest) StepResponse

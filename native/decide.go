@@ -9,7 +9,7 @@ import (
 // RegisterDecideHandler registers the @sys/llm/decide native action handler on k.
 func RegisterDecideHandler(k *kernel.Kernel, chatter kernel.DecideChatter) {
 	k.RegisterNativeHandler("llm/decide", func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
-		return executeDecide(ctx, args, chatter, k.ReadCallableAction, callerID)
+		return executeDecide(ctx, args, chatter, k.ReadCallableAction, k.ResolveAction, callerID)
 	})
 }
 
@@ -18,6 +18,7 @@ func executeDecide(
 	args map[string]any,
 	chatter kernel.DecideChatter,
 	lookup func(ctx context.Context, ownerHandle, actionName, callerID string) (*kernel.Action, error),
+	resolve func(ctx context.Context, ref string) (*kernel.Action, error),
 	callerID string,
 ) (map[string]any, error) {
 	if chatter == nil {
@@ -73,12 +74,22 @@ func executeDecide(
 		if err != nil {
 			return nil, kernel.ErrInvalidInput.Wrapf("invalid action reference %q: expected owner/name", ref)
 		}
-		ownerHandle := r.Owner
-		actionName := r.Name
 
-		a, err := lookup(ctx, ownerHandle, actionName, callerID)
-		if err != nil {
-			return nil, err
+		var a *kernel.Action
+		if r.Kernel != "" {
+			// A discovered kernel-qualified reference (lookup → decide → run): resolve it through the
+			// same resolve-and-cache path as run. A stale/unresolvable candidate is DISCARDED so one
+			// dead peer never blocks selection among the valid candidates (§13).
+			a, err = resolve(ctx, ref)
+			if err != nil {
+				continue
+			}
+		} else {
+			// A bare local reference keeps strict behavior: an unknown one aborts.
+			a, err = lookup(ctx, r.Owner, r.Name, callerID)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		price := a.Price
@@ -89,6 +100,9 @@ func executeDecide(
 			Price:       &price,
 		})
 		toolSchemas[ref] = a.InputSchema
+	}
+	if len(tools) == 0 {
+		return nil, kernel.ErrNotFound.Wrap("no action reference could be resolved")
 	}
 
 	call, msg, err := chatter.ChatDecide(ctx, messages, tools)

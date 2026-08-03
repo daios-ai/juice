@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
 	"net"
 	"net/url"
@@ -641,6 +640,18 @@ type delegatedMatch struct {
 
 // maxOwnerActions bounds a selector's owner-action enumeration (ListActionsByOwner needs a limit).
 const maxOwnerActions = 100000
+
+// maxRatingNoteBytes bounds a rating note (§11): a rating note is gossiped as network-distributed
+// text under the platform signature, so it is capped. Fixed, not configurable.
+const maxRatingNoteBytes = 1024
+
+// gossipEvidenceCap (E) is the number of most-recent evidence rows retained and gossiped per
+// (issuer, subject_kernel, subject_action) (§13). Fixed, not configurable.
+const gossipEvidenceCap = 200
+
+// gossipEvidencePageSize bounds one evidence page in a gossip response (§13): one page per peer per
+// discovery pass, sized to fit the fed frame cap with the catalog snapshot.
+const gossipEvidencePageSize = 100
 
 // expandSelector resolves a selector to the caller-callable delegated actions it names, grouped by
 // provider (§8). It applies the CanCall gate (§4) exactly as a single grant does, and reports how
@@ -2567,6 +2578,9 @@ func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rat
 	if rating != 0 && rating != 1 {
 		return nil, ErrInvalidInput.Wrap("rating must be 0 or 1")
 	}
+	if note != nil && len(*note) > maxRatingNoteBytes {
+		return nil, ErrInvalidInput.Wrapf("rating note exceeds %d bytes", maxRatingNoteBytes)
+	}
 	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return nil, err
 	}
@@ -2597,6 +2611,13 @@ func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rat
 	}
 	if receipt != nil {
 		r.RatedReceiptID = &receipt.ID
+		// The portable link a v0.13 evidence bundle carries so a receiver joins this rating to its
+		// receipt (§13). Hashes the full canonical receipt (same definition as EvidenceReceipt.ReceiptHash).
+		h, herr := receiptHash(receipt)
+		if herr != nil {
+			return nil, herr
+		}
+		r.RatedReceiptHash = h
 	}
 	sig, err := signRating(k.cfg.SigningKey, r)
 	if err != nil {
@@ -2635,10 +2656,12 @@ type LookupRequest struct {
 	CallerID string // authenticated caller
 }
 
-// LookupResult is a ranked action for a lookup query.
+// LookupResult is a ranked hit for a lookup query. Exactly one of Action (a local/imported action)
+// or Discovered (a not-yet-resolved remote action learned from gossip, §13) is set.
 type LookupResult struct {
 	Action      *Action
 	OwnerHandle string
+	Discovered  *DiscoveryDoc
 	Score       float32
 }
 
@@ -2705,12 +2728,22 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		fused[id] += 1.0 / float64(rrfK+rank)
 	}
 
+	// Discovery leg (§13): fold in cross-kernel discovery docs as a third RRF rank list. Gated to
+	// authenticated LOCAL callers (a session user, PublicKey==""), since discovered actions become
+	// visibility=local proxies — anonymous and peer callers see none. Discovery adds no terms when
+	// the caches are empty, so ranking is bit-identical to local-only in that case. Synthetic ids
+	// "disc:<doc_key>" are disjoint from action UUIDs by construction.
+	discHits := map[string]*DiscoveryDoc{}
+	if req.CallerID != "" {
+		if u, _ := k.store.ReadUser(ctx, req.CallerID); u != nil && u.PublicKey == "" {
+			k.mergeDiscoveryActionLegs(ctx, req.Query, oversample, fused, discHits)
+		}
+	}
+
 	// UNDER REVISION: the stats-based quality multiplier is temporarily removed. It multiplied each
-	// action's fused relevance by a Laplace-smoothed success ratio (1+successes)/(2+uses) — with a
-	// gossip prior on cold start — which is unbounded below, so a persistently-failing action could
-	// sink far beneath weakly-relevant matches. Until the redesign lands (see ranking.md) the score
-	// is relevance alone; fold the quality signal back in here when it does. gossipQualityPrior is
-	// deliberately kept for that reinstatement.
+	// action's fused relevance by a Laplace-smoothed success ratio (1+successes)/(2+uses), which is
+	// unbounded below, so a persistently-failing action could sink far beneath weakly-relevant
+	// matches. Until the redesign lands (see ranking.md) the score is relevance alone.
 	type scored struct {
 		id    string
 		score float64
@@ -2734,6 +2767,18 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		if len(out) >= limit {
 			break
 		}
+		// Discovered (not-yet-resolved) remote action.
+		if doc, ok := discHits[r.id]; ok {
+			// Shadow: if we already hold an active local proxy for this remote action, the local row is
+			// already in the local legs — drop the discovery duplicate.
+			if peer, _ := k.store.ReadUserByPublicKey(ctx, doc.KernelPublicKey); peer != nil {
+				if px, _ := k.store.ReadActionByOwnerRemoteID(ctx, peer.ID, doc.ActionID); px != nil && px.Active {
+					continue
+				}
+			}
+			out = append(out, &LookupResult{Discovered: doc, Score: float32(r.score)})
+			continue
+		}
 		a, err := k.store.ReadAction(ctx, r.id)
 		if err != nil || !canCall(caller, a) {
 			continue
@@ -2748,22 +2793,210 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	return out, nil
 }
 
-// gossipQualityPrior returns a quality prior in [0.5, 0.75] derived from gossip StatTags.
-// It is dominated by local stats (only applied when uses==0 locally).
-// Formula: 0.5 + 0.25*(clamp(gossip_rating,0,1)) using the first gossip_rating tag found.
-func gossipQualityPrior(tags []*StatTag) float32 {
-	for _, t := range tags {
-		if t.Key == "gossip_rating" {
-			var r float64
-			if _, err := fmt.Sscanf(t.Value, "%f", &r); err == nil && r > 0 {
-				if r > 1 {
-					r = 1
+// mergeDiscoveryActionLegs folds cross-kernel discovery "action" docs into fused as a third RRF rank
+// list (lexical + dense), recording each hit's doc under the synthetic id "disc:<doc_key>" (§13).
+func (k *Kernel) mergeDiscoveryActionLegs(ctx context.Context, query string, oversample int, fused map[string]float64, hits map[string]*DiscoveryDoc) {
+	docs, err := k.store.ListDiscoveryDocs(ctx)
+	if err != nil {
+		return
+	}
+	byKey := map[string]*DiscoveryDoc{}
+	for _, d := range docs {
+		if d.Kind != "action" {
+			continue
+		}
+		byKey[discoveryDocKey(d.KernelPublicKey, d.Kind, d.UserID, d.ActionID)] = d
+	}
+	// Dense leg over discovery embeddings.
+	if k.llm != nil {
+		if qvec, err := k.llm.Embed(ctx, query); err == nil {
+			type sc struct {
+				key string
+				s   float32
+			}
+			var cand []sc
+			for key, d := range byKey {
+				if len(d.Embedding) != len(qvec) {
+					continue
 				}
-				return float32(0.5 + 0.25*r)
+				cand = append(cand, sc{key, cosine(qvec, d.Embedding)})
+			}
+			sort.Slice(cand, func(i, j int) bool { return cand[i].s > cand[j].s })
+			for i, c := range cand {
+				if i >= oversample {
+					break
+				}
+				fused["disc:"+c.key] += 1.0 / float64(rrfK+i)
+				hits["disc:"+c.key] = byKey[c.key]
 			}
 		}
 	}
-	return 0.5
+	// Lexical leg over discovery FTS.
+	keys, err := k.store.SearchDiscoveryLexical(ctx, query, oversample)
+	if err != nil {
+		return
+	}
+	for rank, key := range keys {
+		if d := byKey[key]; d != nil {
+			fused["disc:"+key] += 1.0 / float64(rrfK+rank)
+			hits["disc:"+key] = d
+		}
+	}
+}
+
+// discoveryDocKey mirrors the store's FTS key composition so lookup can map a doc to its synthetic id.
+func discoveryDocKey(kernelKey, kind, userID, actionID string) string {
+	return kernelKey + "/" + kind + "/" + userID + "/" + actionID
+}
+
+// UserLookupResult is a ranked user hit (sys/user-lookup). PrincipalID is the stable identity
+// (kernel key + user id, §13); Reference is the display/use form ("handle@<key>" for a discovered
+// user, a bare handle for a local one). KernelPublicKey is empty for a local user (this kernel).
+type UserLookupResult struct {
+	KernelPublicKey string  `json:"kernel_public_key"`
+	UserID          string  `json:"user_id"`
+	Reference       string  `json:"reference"`
+	Handle          string  `json:"handle"`
+	Description     string  `json:"description"`
+	Score           float32 `json:"score"`
+}
+
+// LookupUsers ranks users — local (sys + owners of active public actions) and discovered (kind=user
+// docs) — by the same lexical+dense RRF as Lookup (§13). It returns the stable PrincipalID plus a
+// display reference. Discovered users are shown only to authenticated local callers.
+func (k *Kernel) LookupUsers(ctx context.Context, req LookupRequest) ([]*UserLookupResult, error) {
+	limit := req.Limit
+	if limit <= 0 || limit > 50 {
+		limit = 10
+	}
+	oversample := limit * 10
+	fused := map[string]float64{}
+	// Candidates keyed by synthetic id → result skeleton.
+	cands := map[string]*UserLookupResult{}
+
+	// Local candidates: sys + owners of active public actions. Small N; score lexically in-memory by
+	// substring, then let RRF ordering fold with discovery. We assign a rank by match position.
+	locals := map[string]*User{}
+	if sys, _ := k.store.ReadUserByHandle(ctx, "sys"); sys != nil {
+		locals[sys.ID] = sys
+	}
+	if actions, err := k.store.ListVisibleActions(ctx, false, 500, 0); err == nil {
+		for _, a := range actions {
+			if !a.Active || a.Visibility != VisibilityPublic {
+				continue
+			}
+			if _, ok := locals[a.OwnerUserID]; ok {
+				continue
+			}
+			if ow, _ := k.store.ReadUser(ctx, a.OwnerUserID); ow != nil && ow.PublicKey == "" {
+				locals[ow.ID] = ow
+			}
+		}
+	}
+	q := strings.ToLower(req.Query)
+	localRanked := make([]*User, 0, len(locals))
+	for _, u := range locals {
+		localRanked = append(localRanked, u)
+	}
+	// Rank local users: those whose handle/description contains the query first, stable by handle.
+	sort.Slice(localRanked, func(i, j int) bool {
+		mi := strings.Contains(strings.ToLower(localRanked[i].Handle+" "+localRanked[i].Description), q)
+		mj := strings.Contains(strings.ToLower(localRanked[j].Handle+" "+localRanked[j].Description), q)
+		if mi != mj {
+			return mi
+		}
+		return localRanked[i].Handle < localRanked[j].Handle
+	})
+	for rank, u := range localRanked {
+		id := "local:" + u.ID
+		fused[id] += 1.0 / float64(rrfK+rank)
+		cands[id] = &UserLookupResult{UserID: u.ID, Reference: u.Handle, Handle: u.Handle, Description: u.Description}
+	}
+
+	// Discovery candidates, gated to authenticated local callers.
+	if req.CallerID != "" {
+		if cu, _ := k.store.ReadUser(ctx, req.CallerID); cu != nil && cu.PublicKey == "" {
+			k.mergeDiscoveryUserLegs(ctx, req.Query, oversample, fused, cands)
+		}
+	}
+
+	type scored struct {
+		id string
+		s  float64
+	}
+	ranked := make([]scored, 0, len(fused))
+	for id, s := range fused {
+		ranked = append(ranked, scored{id, s})
+	}
+	sort.Slice(ranked, func(i, j int) bool { return ranked[i].s > ranked[j].s })
+	out := make([]*UserLookupResult, 0, limit)
+	for _, r := range ranked {
+		if len(out) >= limit {
+			break
+		}
+		if c := cands[r.id]; c != nil {
+			c.Score = float32(r.s)
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// mergeDiscoveryUserLegs folds discovery "user" docs into fused as an RRF rank list (§13).
+func (k *Kernel) mergeDiscoveryUserLegs(ctx context.Context, query string, oversample int, fused map[string]float64, cands map[string]*UserLookupResult) {
+	docs, err := k.store.ListDiscoveryDocs(ctx)
+	if err != nil {
+		return
+	}
+	byKey := map[string]*DiscoveryDoc{}
+	for _, d := range docs {
+		if d.Kind != "user" {
+			continue
+		}
+		byKey[discoveryDocKey(d.KernelPublicKey, d.Kind, d.UserID, d.ActionID)] = d
+	}
+	add := func(key string, rank int) {
+		d := byKey[key]
+		if d == nil {
+			return
+		}
+		id := "disc:" + key
+		fused[id] += 1.0 / float64(rrfK+rank)
+		cands[id] = &UserLookupResult{
+			KernelPublicKey: d.KernelPublicKey,
+			UserID:          d.UserID,
+			Reference:       d.Handle + "@" + d.KernelPublicKey,
+			Handle:          d.Handle,
+			Description:     d.Description,
+		}
+	}
+	if k.llm != nil {
+		if qvec, err := k.llm.Embed(ctx, query); err == nil {
+			type sc struct {
+				key string
+				s   float32
+			}
+			var cand []sc
+			for key, d := range byKey {
+				if len(d.Embedding) != len(qvec) {
+					continue
+				}
+				cand = append(cand, sc{key, cosine(qvec, d.Embedding)})
+			}
+			sort.Slice(cand, func(i, j int) bool { return cand[i].s > cand[j].s })
+			for i, c := range cand {
+				if i >= oversample {
+					break
+				}
+				add(c.key, i)
+			}
+		}
+	}
+	if keys, err := k.store.SearchDiscoveryLexical(ctx, query, oversample); err == nil {
+		for rank, key := range keys {
+			add(key, rank)
+		}
+	}
 }
 
 // indexForLookup keeps an action's lookup entries current: the lexical FTS text (always — it needs
@@ -3030,18 +3263,18 @@ func (k *Kernel) requireReceiptSigningReady() error {
 	return nil
 }
 
-// signReceipt signs the canonical Receipt object (with Signature cleared) using JCS.
+// signReceipt signs the canonical Receipt object (with Signature cleared) under the receipt domain.
 func signReceipt(key ed25519.PrivateKey, r *Receipt) (string, error) {
 	cp := *r
 	cp.Signature = ""
-	return signJCS(key, cp)
+	return signJCS(key, sigDomainReceipt, cp)
 }
 
-// signRating signs the canonical Rating object (with Signature cleared) using JCS.
+// signRating signs the canonical Rating object (with Signature cleared) under the rating domain.
 func signRating(key ed25519.PrivateKey, r *Rating) (string, error) {
 	cp := *r
 	cp.Signature = ""
-	return signJCS(key, cp)
+	return signJCS(key, sigDomainRating, cp)
 }
 
 // ---- Import shared logic ----

@@ -28,6 +28,21 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 	}
 	items := make([]any, len(results))
 	for i, r := range results {
+		if r.Discovered != nil {
+			// A not-yet-resolved remote action (§13): render with its STABLE identity — the remote
+			// action id and the kernel-qualified reference (raw key; a gossiped label never resolves).
+			// Selecting it invokes it by reference, which resolves and verifies from the home kernel.
+			d := r.Discovered
+			items[i] = map[string]any{
+				"action_id":     d.ActionID,
+				"action":        d.Handle + "@" + d.KernelPublicKey + "/" + d.Name,
+				"description":   d.Description,
+				"score":         float64(r.Score),
+				"input_schema":  d.InputSchema,
+				"output_schema": d.OutputSchema,
+			}
+			continue
+		}
 		items[i] = map[string]any{
 			"action_id":     r.Action.ID,
 			"action":        r.OwnerHandle + "/" + r.Action.Name,
