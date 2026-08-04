@@ -2725,7 +2725,7 @@ func (s *DB) completeIdempotencyRecord(ctx context.Context, id, resultJSON, rece
 	return dbErr(err, "complete idempotency record")
 }
 
-func TestDeactivateActionsOwnedBy(t *testing.T) {
+func TestDeactivateImportedIfHash(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -2733,31 +2733,27 @@ func TestDeactivateActionsOwnedBy(t *testing.T) {
 	if err := db.CreateUser(ctx, owner); err != nil {
 		t.Fatal(err)
 	}
-	other := newUser("other-owner", 0)
-	if err := db.CreateUser(ctx, other); err != nil {
+	proxy := newAction(owner.ID, "peer/act", 10, true)
+	proxy.Kind = kernel.KindRemoteProxy
+	proxy.ArtifactHash = "hash-v1"
+	if err := db.CreateAction(ctx, proxy); err != nil {
 		t.Fatal(err)
 	}
 
-	a1 := newAction(owner.ID, "act1", 10, true)
-	a2 := newAction(owner.ID, "act2", 5, true)
-	a3 := newAction(other.ID, "act3", 3, true)
-	for _, a := range []*kernel.Action{a1, a2, a3} {
-		if err := db.CreateAction(ctx, a); err != nil {
-			t.Fatal(err)
-		}
+	// A stale-hash rejection (a re-resolve already moved the row to a new hash) is a no-op: the
+	// refreshed row stays active (§13 rule C).
+	if err := db.DeactivateImportedIfHash(ctx, proxy.ID, "hash-v0", time.Now().UTC()); err != nil {
+		t.Fatalf("DeactivateImportedIfHash(stale): %v", err)
 	}
-
-	if err := db.DeactivateActionsOwnedBy(ctx, owner.ID); err != nil {
-		t.Fatalf("DeactivateActionsOwnedBy: %v", err)
+	if r, _ := db.ReadAction(ctx, proxy.ID); !r.Active {
+		t.Fatal("stale-hash deactivation must be a no-op")
 	}
-	r1, _ := db.ReadAction(ctx, a1.ID)
-	r2, _ := db.ReadAction(ctx, a2.ID)
-	r3, _ := db.ReadAction(ctx, a3.ID)
-	if r1.Active || r2.Active {
-		t.Error("owner's actions should be inactive after DeactivateActionsOwnedBy")
+	// The dispatched hash still matches: deactivate.
+	if err := db.DeactivateImportedIfHash(ctx, proxy.ID, "hash-v1", time.Now().UTC()); err != nil {
+		t.Fatalf("DeactivateImportedIfHash(current): %v", err)
 	}
-	if !r3.Active {
-		t.Error("other owner's action should remain active")
+	if r, _ := db.ReadAction(ctx, proxy.ID); r.Active {
+		t.Fatal("current-hash deactivation must clear active")
 	}
 }
 

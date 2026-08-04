@@ -247,10 +247,14 @@ func (s *DB) ReadUserByPublicKey(ctx context.Context, publicKey string) (*kernel
 		`SELECT `+userCols+` FROM users WHERE public_key=?`, publicKey))
 }
 
-func (s *DB) DeactivateActionsOwnedBy(ctx context.Context, ownerUserID string) error {
+// DeactivateImportedIfHash deactivates a remote_proxy action only while it still carries the given
+// contract hash (§13 rule C): a stale dispatch's rejection settling after a re-resolve, which has
+// already replaced the hash, is a no-op and spares the refreshed row. Not finding the row is fine.
+func (s *DB) DeactivateImportedIfHash(ctx context.Context, actionID, expectedHash string, updatedAt time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE actions SET active=FALSE WHERE owner_user_id=? AND deleted_at IS NULL`, ownerUserID)
-	return dbErr(err, "deactivate actions by owner")
+		`UPDATE actions SET active=FALSE, updated_at=? WHERE id=? AND artifact_hash=? AND kind='remote_proxy' AND deleted_at IS NULL`,
+		updatedAt.Format(timeLayout), actionID, expectedHash)
+	return dbErr(err, "deactivate imported by hash")
 }
 
 // ListPurgeablePeers returns peer users (public_key set) idle past cutoff at zero balance (§13).
@@ -297,7 +301,7 @@ ORDER BY u.id`, timeToStr(cutoff))
 // PurgePeerCascade deletes a purged peer's derived data and anonymizes the user row (§13 Retention).
 // It removes the peer's proxy actions and their stats/stat_tags, the peer's steps and any steps
 // bound to its actions, and its discovered_kernels rows; then clears public_key so the identity is
-// forgotten (re-subscribing starts fresh). The transaction/receipt ledger is left intact —
+// forgotten (a later re-resolve starts fresh). The transaction/receipt ledger is left intact —
 // its party ids carry no foreign key, so a now-dangling peer id is harmless and local counterparties'
 // history stays reconstructible (§11). Deletes run children-before-parents so the RESTRICT foreign
 // keys (steps→actions, stats→actions) never block.

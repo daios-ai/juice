@@ -383,7 +383,6 @@ type server struct {
 // without a real network.
 type fedClient interface {
 	Gossip(ctx context.Context, peerKey, cursor string) (json.RawMessage, error)
-	Manifests(ctx context.Context, peerKey string) ([]json.RawMessage, error)
 	Step(ctx context.Context, peerKey string, req fed.StepRequest) (fed.StepResponse, error)
 	Probe(ctx context.Context, peerKey string) fed.Reachability
 	ListenAddrs() []string
@@ -491,8 +490,6 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Post("/control/peers/settle", srv.ctlSettlePeer)
 		r.Get("/control/peers", srv.ctlListPeers)
 		r.Get("/control/peers/inspect", srv.ctlInspectPeer)
-		r.Post("/control/peers/subscribe", srv.ctlSubscribePeer)
-		r.Post("/control/peers/unsubscribe", srv.ctlUnsubscribePeer)
 		r.Get("/control/identity", srv.ctlIdentity)
 		r.Get("/control/transfers", srv.ctlListTransfers)
 		r.Get("/control/transfers/{id}", srv.ctlShowTransfer)
@@ -1632,8 +1629,8 @@ func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRe
 		b, _ := json.Marshal(map[string]string{"error": "rate limit exceeded", "code": kernel.KernelErrorCode(kernel.ErrInvalidState)})
 		return fed.CallResponse{Status: http.StatusTooManyRequests, Body: b}
 	}
-	status, body, err := handleFederationCall(h.kernel, ctx, req.Counterparty, req.Timestamp,
-		req.IdempotencyKey, req.Action, req.Signature, []byte(req.Args))
+	status, body, err := handleFederationCall(h.kernel, ctx, req.Counterparty, req.ExpectedContractHash,
+		req.Timestamp, req.IdempotencyKey, req.Action, req.Signature, []byte(req.Args))
 	if err != nil {
 		// No receipt to settle on → the caller treats this as pending (retry), exactly as the
 		// HTTP path did when it returned an error status with no receipt body.
@@ -1712,30 +1709,6 @@ func (h *fedHandlers) OnSettle(ctx context.Context, peerKey string, req fed.Sett
 		return settleErr(err)
 	}
 	return fed.SettleResponse{Status: status, Body: body}
-}
-
-// OnManifest returns one signed manifest per active public action (chunked, relay-safe).
-func (h *fedHandlers) OnManifest(ctx context.Context, _ string) ([]json.RawMessage, error) {
-	actions, err := h.kernel.ListVisibleActions(ctx, false, 200, 0)
-	if err != nil {
-		return nil, err
-	}
-	var out []json.RawMessage
-	for _, a := range actions {
-		if !a.Active {
-			continue
-		}
-		m, err := h.kernel.GetActionManifest(ctx, a.ID)
-		if err != nil {
-			continue
-		}
-		b, err := json.Marshal(m)
-		if err != nil {
-			continue
-		}
-		out = append(out, b)
-	}
-	return out, nil
 }
 
 // OnResolve answers the open /juice/fed/resolve/1 protocol (§13): resolve one action to its signed

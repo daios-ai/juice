@@ -453,6 +453,11 @@ type Receipt struct {
 	Value        int64     `json:"value,omitempty"`
 	ValuePremium int64     `json:"value_premium,omitempty"`
 	ValueTo      string    `json:"value_to,omitempty"`
+	// RefreshProxy signals the origin to invalidate its cached proxy for this action (§8/§13): set only
+	// on a zero-charge pre-execution rejection whose fault is the cache's (contract-hash mismatch, a
+	// non-executable action). omitempty keeps it out of the JCS signature for every other receipt, so
+	// those verify unchanged; a receipt setting it must be a valid zero-charge rejection or it quarantines.
+	RefreshProxy bool      `json:"refresh_proxy,omitempty"`
 	Reason       string    `json:"reason"`
 	StartedAt time.Time `json:"started_at"`
 	CreatedAt time.Time `json:"created_at"`

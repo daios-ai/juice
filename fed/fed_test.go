@@ -16,7 +16,6 @@ type fakeHandlers struct {
 	lastCall     CallRequest
 	callBody     json.RawMessage
 	gossip       json.RawMessage
-	manifests    []json.RawMessage
 	resolveBody  json.RawMessage
 	lastStepPeer string
 	lastStep     StepRequest
@@ -30,9 +29,6 @@ func (f *fakeHandlers) OnCall(_ context.Context, peerKey string, req CallRequest
 	f.lastCallPeer = peerKey
 	f.lastCall = req
 	return CallResponse{Status: 200, Body: f.callBody}
-}
-func (f *fakeHandlers) OnManifest(_ context.Context, _ string) ([]json.RawMessage, error) {
-	return f.manifests, nil
 }
 func (f *fakeHandlers) OnResolve(_ context.Context, _ string, _ ResolveRequest) ResolveResponse {
 	return ResolveResponse{Status: 200, Body: f.resolveBody}
@@ -72,10 +68,9 @@ func newTestTransport(t *testing.T, h Handlers, bootstrap []string) *Transport {
 // bootstrap connection) and every protocol returns the server's canned payload.
 func TestTransportRoundTrip(t *testing.T) {
 	srv := &fakeHandlers{
-		callBody:  json.RawMessage(`{"result":{"ok":true},"receipt":null}`),
-		gossip:    json.RawMessage(`{"public_key":"srv","handle":"@srv"}`),
-		manifests: []json.RawMessage{json.RawMessage(`{"name":"a"}`), json.RawMessage(`{"name":"b"}`)},
-		stepBody:  json.RawMessage(`{"result":{},"tx_id":"tx-1"}`),
+		callBody: json.RawMessage(`{"result":{"ok":true},"receipt":null}`),
+		gossip:   json.RawMessage(`{"public_key":"srv","handle":"@srv"}`),
+		stepBody: json.RawMessage(`{"result":{},"tx_id":"tx-1"}`),
 	}
 	a := newTestTransport(t, srv, nil)
 
@@ -108,15 +103,6 @@ func TestTransportRoundTrip(t *testing.T) {
 	g, err := b.Gossip(ctx, a.PublicKey(), "")
 	if err != nil || string(g) != `{"public_key":"srv","handle":"@srv"}` {
 		t.Fatalf("Gossip: %v body=%s", err, g)
-	}
-
-	// Manifests (chunked, one frame per action)
-	ms, err := b.Manifests(ctx, a.PublicKey())
-	if err != nil {
-		t.Fatalf("Manifests: %v", err)
-	}
-	if len(ms) != 2 || string(ms[0]) != `{"name":"a"}` || string(ms[1]) != `{"name":"b"}` {
-		t.Fatalf("Manifests: got %v", ms)
 	}
 
 	// Step (§13): the completion verb carries the exact input bytes, like Call's args.

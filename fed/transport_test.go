@@ -290,18 +290,3 @@ func TestTransportOffersRelay(t *testing.T) {
 		t.Error("expected the transport to run a circuit-relay service")
 	}
 }
-
-// TestBoundManifestCount: a peer-declared manifest count is bounded before it sizes an allocation
-// (anti-OOM, F2). Negative and absurdly-large counts are rejected; sane counts pass.
-func TestBoundManifestCount(t *testing.T) {
-	for _, ok := range []int{0, 1, 200, maxManifests} {
-		if err := boundManifestCount(ok); err != nil {
-			t.Errorf("boundManifestCount(%d) = %v, want nil", ok, err)
-		}
-	}
-	for _, bad := range []int{-1, maxManifests + 1, 2000000000} {
-		if err := boundManifestCount(bad); err == nil {
-			t.Errorf("boundManifestCount(%d) = nil, want error", bad)
-		}
-	}
-}

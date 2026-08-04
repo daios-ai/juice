@@ -209,7 +209,9 @@ func fedCall(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, action, id
 	ts := time.Now().UTC().Format(time.RFC3339)
 	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 	argsHash := sha256HexBytes(body)
-	sig, err := kernel.SignFederationPayload(priv, action, cp, idempKey, ts, argsHash)
+	// recipient is the serving kernel's own key; empty contract hash skips the §8 If-Match check.
+	ownKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+	sig, err := kernel.SignFederationPayload(priv, action, cp, ownKey, "", idempKey, ts, argsHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,32 +222,13 @@ func fedCall(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, action, id
 // missing counterparty or a tampered body) and wraps the result as an *http.Response.
 func fedCallRaw(t *testing.T, k *kernel.Kernel, cp, ts, idempKey, action, sig string, body []byte) *http.Response {
 	t.Helper()
-	status, respBody, callErr := handleFederationCall(k, context.Background(), cp, ts, idempKey, action, sig, body)
+	status, respBody, callErr := handleFederationCall(k, context.Background(), cp, "", ts, idempKey, action, sig, body)
 	if callErr != nil {
 		status = kernel.HTTPStatusFromCode(kernel.KernelErrorCode(callErr))
 		respBody = map[string]any{"error": callErr.Error()}
 	}
 	b, _ := json.Marshal(respBody)
 	return &http.Response{StatusCode: status, Body: io.NopCloser(bytes.NewReader(b))}
-}
-
-func fedHeaders(t *testing.T, priv ed25519.PrivateKey, action, idempKey string) map[string]string {
-	t.Helper()
-	ts := time.Now().UTC().Format(time.RFC3339)
-	counterparty := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
-	// json.NewEncoder appends a newline; match what httpDoWithHeaders sends.
-	var bodyBuf bytes.Buffer
-	json.NewEncoder(&bodyBuf).Encode(map[string]any{})
-	argsHash := sha256HexBytes(bodyBuf.Bytes())
-	sig, err := kernel.SignFederationPayload(priv, action, counterparty, idempKey, ts, argsHash)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return map[string]string{
-		"X-Timestamp":       ts,
-		"X-Idempotency-Key": idempKey,
-		"X-Signature":       sig,
-	}
 }
 
 func decodeResponse(t *testing.T, resp *http.Response, v any) {
@@ -2212,6 +2195,53 @@ func TestFederationIdempotencyCommittedFailureHasReceipt(t *testing.T) {
 
 // TestFederationCallRejectsArgsHashMismatch verifies that a federation call
 // whose body has been tampered with (args_hash no longer matches) is rejected.
+// Rule B (§8 If-Match): a call whose expected_contract_hash no longer matches the action's current
+// contract is refused before execution with a signed refresh_proxy rejection, so the caller re-resolves.
+func TestFederationCallContractHashMismatch(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+	ctx := context.Background()
+
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	if _, err := k.AddPeer(ctx, sys.ID, "chash-peer", base64.RawURLEncoding.EncodeToString(pub)); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
+		OwnerUserID: sys.ID, Name: "chash-act", Kind: kernel.KindHTTP,
+		Source: backend.URL, Description: "chash",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+	})
+	k.SetActive(ctx, sys.ID, a.ID, true)
+	pubAll := kernel.VisibilityPublic
+	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
+
+	cp := base64.RawURLEncoding.EncodeToString(pub)
+	ts := time.Now().UTC().Format(time.RFC3339)
+	body := []byte("{}")
+	argsHash := sha256HexBytes(body)
+	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
+	// Sign a stale contract hash: it verifies (it is in the signed payload) but does not match current.
+	sig, _ := kernel.SignFederationPayload(priv, "sys/chash-act", cp, ownKey, "stale-hash", "idem-chash-1", ts, argsHash)
+	status, respBody, err := handleFederationCall(k, ctx, cp, "stale-hash", ts, "idem-chash-1", "sys/chash-act", sig, body)
+	if err != nil {
+		t.Fatalf("handleFederationCall: %v", err)
+	}
+	if status != http.StatusUnprocessableEntity {
+		t.Errorf("status: got %d, want 422", status)
+	}
+	rc, _ := respBody["receipt"].(*kernel.Receipt)
+	if rc == nil || !rc.RefreshProxy || rc.Status != kernel.TxFailure || rc.Charge != 0 {
+		t.Errorf("want a signed zero-charge refresh_proxy rejection, got %+v", rc)
+	}
+}
+
 func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -2244,7 +2274,8 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 	ts := time.Now().UTC().Format(time.RFC3339)
 	signedHash := sha256HexBytes([]byte("{}"))
-	sig, _ := kernel.SignFederationPayload(priv, "sys/hash-check", cp, "idem-hash-1", ts, signedHash)
+	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
+	sig, _ := kernel.SignFederationPayload(priv, "sys/hash-check", cp, ownKey, "", "idem-hash-1", ts, signedHash)
 	resp := fedCallRaw(t, k, cp, ts, "idem-hash-1", "sys/hash-check", sig, []byte(`{"injected":true}`))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {

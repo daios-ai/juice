@@ -163,7 +163,10 @@ func (k *Kernel) ResolveAction(ctx context.Context, ref string) (*Action, error)
 			return nil, ErrNotFound.Wrapf("action %s not found", ref)
 		}
 		if mount != nil {
-			if a, aerr := k.store.ReadActionByOwnerName(ctx, mount.ID, r.Owner+"/"+r.Name); aerr == nil && a != nil {
+			// An active cached proxy is the fast path; an absent OR inactive row is a cache miss that
+			// re-resolves (§8 rule A) — reconcile preserves the id and re-enables, so an inactive proxy
+			// (drift-deactivated by a prior refresh_proxy/quarantine, §13) is never permanently dead.
+			if a, aerr := k.store.ReadActionByOwnerName(ctx, mount.ID, r.Owner+"/"+r.Name); aerr == nil && a != nil && a.Active {
 				return a, nil
 			}
 		}
@@ -381,7 +384,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		CreatedAt:     now,
 	}
 
-	// For remote_proxy: action.Price = q = proxyPrice (mp + import duty), set at ImportRemoteAction.
+	// For remote_proxy: action.Price = q = proxyPrice (mp + import duty), set at import (§8 resolve).
 	// Derive the original remote manifest price (mp) from q for clamping and receipt audit.
 	// lockPrice = q funds the EXECUTION channel from the parent trace; the value channel is a separate
 	// TransferEffect reserve locked from the immediate caller C's own balance in BeginSubcall (§13), so
@@ -407,7 +410,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		}
 		key := uuid.New().String()
 		trace.IdempotencyKey = &key
-		trace.DispatchJSON = marshalDispatch(req.Args, req.StepID, mp, value, lockPrice)
+		trace.DispatchJSON = marshalDispatch(req.Args, req.StepID, mp, value, lockPrice, action.ArtifactHash)
 	}
 
 	callerWalletID, callerWalletKind := k.callerWallet(req, process, parentTrace)
@@ -493,7 +496,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		if trace.IdempotencyKey != nil {
 			ikey = *trace.IdempotencyKey
 		}
-		fr, _ := fe.ExecuteFederation(ctx, target.PublicKey, action.Source, ikey, req.Args)
+		fr, _ := fe.ExecuteFederation(ctx, target.PublicKey, action.Source, action.ArtifactHash, ikey, req.Args)
 		latency := time.Since(started).Seconds()
 		ktx.EndedAt = time.Now().UTC()
 		if fr.NotDispatched {

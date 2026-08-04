@@ -2173,7 +2173,7 @@ func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[
 	return nil, kernel.ErrInvalidState.Wrap("not used in federation tests")
 }
 
-func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, _, _ string, _ map[string]any) (kernel.FederationResult, error) {
+func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, _, _, _ string, _ map[string]any) (kernel.FederationResult, error) {
 	if f.notDispatched {
 		return kernel.FederationResult{NotDispatched: true}, nil
 	}

@@ -59,7 +59,7 @@ final and atomic with its transaction and receipt.
   **[docs/oauth.md](docs/oauth.md)**.
 - **Native `sys` actions** (the platform stdlib): `lookup`, `llm/chat`, `llm/embed`, `llm/json`,
   `llm/decide`, `tinygo/compile`, `time`, `sink`, `message`, `random`, `web`.
-- **Federation** — subscribe to peer kernels by public key, proxy users, prepaid credits, signed
+- **Federation** — call peer kernels by public key (actions resolve and cache on first use), proxy users, prepaid credits, signed
   manifests, and gossip-based discovery; `juice tx verify` checks a remote receipt locally.
 - **OpenAPI import** — register representable HTTP operations as actions.
 - **WASM via wazero** — sandboxed scripts with host functions `juice.call`, `juice.step_create`,
@@ -136,7 +136,7 @@ juice process list | show <id> | end <id>
 juice step create <action> | list | show <id> | complete <id> [json]
 juice tx list | show <id> | rate <id> <0|1> | verify <id>
 juice admin users | show | suspend | unsuspend | rename | deposit | withdraw
-juice admin subscribe <key> | unsubscribe <user> | suspend <user> | peers | inspect <key|handle> | identity
+juice admin suspend <user> | unsuspend <user> | peers | inspect <key|handle> | settle <user> | identity
 ```
 
 Global flags: `--db <path>`, `--config <path>`, `--json`, `--quiet`. `admin` commands (including

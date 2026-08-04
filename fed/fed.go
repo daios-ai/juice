@@ -1,5 +1,5 @@
 // Package fed is the federation transport: the sole carrier for cross-kernel calls,
-// manifest serving, gossip, and inspection (§13). It is a replaceable
+// single-action resolution, gossip, and steps (§13). It is a replaceable
 // module behind an interface, exactly like store and llm; the kernel never imports it.
 //
 // Peers are addressed only by Ed25519 public key. The transport resolves a key to a live
@@ -23,19 +23,17 @@ import (
 // write, read) are NOT wrapped: bytes may have reached the peer, so the call stays pending for retry.
 var ErrNotDispatched = errors.New("fed: request not dispatched")
 
-// Protocol IDs are versioned libp2p streams. The version suffix lets the protocol evolve
-// without silent incompatibility — HTTP+JSON was implicitly versionless; libp2p makes it explicit.
-// Protocol ids stay at /1 across the v0.13 signature-domain break (§12) and gossip v2: the stream
-// ids are unchanged, so a pre-0.13 peer negotiates the stream and then fails per-payload signature
-// verification (rather than failing to negotiate). The inspect protocol is removed: `admin inspect`
-// is served by gossip (§13).
+// Protocol IDs are versioned libp2p streams. A signature/payload change keeps its stream id and
+// surfaces as a per-payload signature failure: the network upgrades in lockstep, so adding
+// CallRequest's recipient/expected_contract_hash fields (§13) warrants no id bump. The inspect
+// protocol is served by gossip (§13); there is no bulk-manifest protocol — a call resolves one
+// action on demand over ProtocolResolve (§8).
 const (
-	ProtocolCall     = "/juice/fed/call/1"
-	ProtocolManifest = "/juice/fed/manifest/1"
-	ProtocolResolve  = "/juice/fed/resolve/1"
-	ProtocolGossip   = "/juice/fed/gossip/1"
-	ProtocolStep     = "/juice/fed/step/1"
-	ProtocolSettle   = "/juice/fed/settle/1"
+	ProtocolCall    = "/juice/fed/call/1"
+	ProtocolResolve = "/juice/fed/resolve/1"
+	ProtocolGossip  = "/juice/fed/gossip/1"
+	ProtocolStep    = "/juice/fed/step/1"
+	ProtocolSettle  = "/juice/fed/settle/1"
 )
 
 // GossipRequest is the wire form of a /juice/fed/gossip/1 request (§13): the evidence cursor to
@@ -66,12 +64,17 @@ type ResolveResponse struct {
 // CallRequest is the wire form of an inbound federation call (§13). Args carries the exact
 // bytes the caller hashed and signed, so the receiver's args_hash matches byte-for-byte.
 type CallRequest struct {
-	Action         string          `json:"action"`          // remote action ref, @owner/name
-	Counterparty   string          `json:"counterparty"`    // caller's base64url Ed25519 public key
-	IdempotencyKey string          `json:"idempotency_key"` //
-	Timestamp      string          `json:"timestamp"`       // RFC3339
-	Signature      string          `json:"signature"`       // Ed25519 over JCS({action,args_hash,counterparty,idempotency_key,timestamp})
-	Args           json.RawMessage `json:"args"`            // exact request bytes
+	Action               string          `json:"action"`                 // remote action ref, @owner/name
+	Counterparty         string          `json:"counterparty"`           // caller's base64url Ed25519 public key
+	ExpectedContractHash string          `json:"expected_contract_hash"` // contract hash the caller cached (§8 If-Match)
+	IdempotencyKey       string          `json:"idempotency_key"`        //
+	Timestamp            string          `json:"timestamp"`              // RFC3339
+	// Signature is Ed25519 over JCS({action,args_hash,counterparty,expected_contract_hash,idempotency_key,recipient,timestamp}).
+	// recipient (the serving kernel's key) is bound into the signature but not carried on the wire: the signer
+	// signs the key it dialed, the receiver verifies with its own key, so a captured request cannot be replayed
+	// to a third kernel (§13, matching the step protocol).
+	Signature string          `json:"signature"`
+	Args      json.RawMessage `json:"args"` // exact request bytes
 }
 
 // CallResponse carries the settlement envelope back to the caller. Status mirrors the HTTP
@@ -137,8 +140,6 @@ type Handlers interface {
 	// OnCall handles an inbound /juice/fed/call/1 request. peerKey is the connection's
 	// authenticated public key; the handler still verifies req.Signature per §13.
 	OnCall(ctx context.Context, peerKey string, req CallRequest) CallResponse
-	// OnManifest returns one JSON frame per action manifest to serve (chunked, relay-safe).
-	OnManifest(ctx context.Context, peerKey string) ([]json.RawMessage, error)
 	// OnResolve answers a /juice/fed/resolve/1 request: one action's signed manifest or one
 	// user's stable id+handle (§13). peerKey is informational; the reply is public directory data.
 	OnResolve(ctx context.Context, peerKey string, req ResolveRequest) ResolveResponse

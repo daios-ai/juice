@@ -49,7 +49,7 @@ func parseAmount(s string) (int64, error) {
 
 // admin holds the superuser-only supervisory verbs — the operations no ordinary user ever
 // performs: money (deposit/withdraw), access (suspend/unsuspend), federation trust
-// (subscribe/unsubscribe/peers/inspect), and the global roster (users/show). They are ordinary TCP
+// (peers/inspect/settle), and the global roster (users/show). They are ordinary TCP
 // clients like every other command (apiCall/apiEmit); the server gates the routes with
 // requireSuperuserMW, so authority is the @sys bearer token (§14).
 //
@@ -67,8 +67,6 @@ func init() {
 		adminDepositCmd(),
 		adminWithdrawCmd(),
 		adminSettleCmd(),
-		peerSubscribeCmd(),
-		peerUnsubscribeCmd(),
 		peerListCmd(),
 		peerInspectCmd(),
 		identityCmd(),
@@ -437,58 +435,6 @@ func peerInspectCmd() *cobra.Command {
 					}
 				}
 			}
-			return nil
-		},
-	}
-}
-
-func peerSubscribeCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "subscribe <key>",
-		Short: "Subscribe to a kernel and import its actions",
-		Long:  "Subscribe to a kernel by public key and import its active public actions. The peer mounts under its self-reported handle (auto-suffixed on collision); rename the mount with `admin rename <key> <new-handle>`. Calls stay rejected until the peer holds credit here — fund it with `admin deposit <key> <amount>`.",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			body := map[string]any{"key": args[0]}
-			var out struct {
-				Handle   string `json:"handle"`
-				Imported int    `json:"imported"`
-				Skipped  int    `json:"skipped"`
-			}
-			if err := apiCall(context.Background(), "POST", "/control/peers/subscribe", body, &out); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(out)
-			}
-			msg := fmt.Sprintf("Subscribed to %s", out.Handle)
-			if out.Imported > 0 {
-				msg += fmt.Sprintf(" — %d action(s) available", out.Imported)
-			}
-			if out.Skipped > 0 {
-				msg += fmt.Sprintf(", %d skipped", out.Skipped)
-			}
-			fmt.Println(msg + ".")
-			return nil
-		},
-	}
-}
-
-func peerUnsubscribeCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "unsubscribe <user>",
-		Short: "Unsubscribe from a peer (@handle or key), deactivating its imported actions",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			var out struct {
-				Handle string `json:"handle"`
-			}
-			// Pass the identifier raw (a key must not become an @handle); the server resolves either.
-			if err := apiCall(context.Background(), "POST", "/control/peers/unsubscribe",
-				map[string]any{"handle": args[0]}, &out); err != nil {
-				return err
-			}
-			fmt.Printf("Unsubscribed from %s.\n", out.Handle)
 			return nil
 		},
 	}

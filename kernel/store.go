@@ -61,11 +61,12 @@ type URLFetcher interface {
 
 // FederationExecutor sends a cross-kernel call to a remote proxy target over the federation
 // transport (§13), addressing the peer by its Ed25519 public key. actionRef is the remote
-// action reference (@owner/name); the transport signs the request as this kernel and resolves
-// peerPublicKey to a live path (direct / hole-punched / relayed). HTTPExecutor implementations
-// may optionally implement this interface; kernel checks via type assertion.
+// action reference (@owner/name); expectedContractHash is the cached contract hash the call
+// binds as the §8 If-Match precondition. The transport signs the request as this kernel and
+// resolves peerPublicKey to a live path (direct / hole-punched / relayed). HTTPExecutor
+// implementations may optionally implement this interface; kernel checks via type assertion.
 type FederationExecutor interface {
-	ExecuteFederation(ctx context.Context, peerPublicKey, actionRef, idempotencyKey string, args map[string]any) (FederationResult, error)
+	ExecuteFederation(ctx context.Context, peerPublicKey, actionRef, expectedContractHash, idempotencyKey string, args map[string]any) (FederationResult, error)
 }
 
 // FederationSettler runs one round of the /juice/fed/settle/1 residual-settlement exchange against a
@@ -553,9 +554,10 @@ type Store interface {
 	// keeping local counterparties' credits reconstructible (§11); the anonymized user row stays as
 	// a ledger anchor so old history remains legible.
 	PurgePeerCascade(ctx context.Context, userID string) error
-	// DeactivateActionsOwnedBy sets active=false for all non-deleted actions owned by ownerUserID.
-	// This is the unsubscribe operation: it drops a peer's imported proxy catalog here.
-	DeactivateActionsOwnedBy(ctx context.Context, ownerUserID string) error
+	// DeactivateImportedIfHash deactivates a remote_proxy action only while its contract hash still
+	// matches expectedHash (§13 rule C: hash-conditional so a stale dispatch's late rejection cannot
+	// deactivate a re-resolved row). A no-op when the row is absent or its hash has changed.
+	DeactivateImportedIfHash(ctx context.Context, actionID, expectedHash string, updatedAt time.Time) error
 }
 
 // SecretBox provides authenticated encryption for upstream action credentials.

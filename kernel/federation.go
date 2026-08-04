@@ -136,11 +136,15 @@ type dispatchPayload struct {
 	// action.Price alone is 0 for a transfer. Both 0 for a plain remote call.
 	Value int64 `json:"value,omitempty"`
 	Gross int64 `json:"gross,omitempty"`
+	// ContractHash is the expected_contract_hash this dispatch bound (§8 If-Match). Read back at
+	// settlement to key the hash-conditional proxy deactivation, so a stale dispatch settling after a
+	// re-resolve never deactivates the refreshed row (§13).
+	ContractHash string `json:"contract_hash,omitempty"`
 }
 
 // marshalDispatch serializes a dispatchPayload and returns a pointer suitable for Trace.DispatchJSON.
-func marshalDispatch(args map[string]any, stepID string, mp, value, gross int64) *string {
-	b, _ := json.Marshal(dispatchPayload{Args: args, StepID: stepID, RemotePrice: mp, Value: value, Gross: gross})
+func marshalDispatch(args map[string]any, stepID string, mp, value, gross int64, contractHash string) *string {
+	b, _ := json.Marshal(dispatchPayload{Args: args, StepID: stepID, RemotePrice: mp, Value: value, Gross: gross, ContractHash: contractHash})
 	s := string(b)
 	return &s
 }
@@ -569,6 +573,12 @@ func parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedActionID, expec
 // so settlement can quarantine it (charge 0, full refund, no retry) instead of clamp-committing a
 // record that would fail VerifyRemoteReceipt. An empty string means the receipt is settleable.
 func remoteReceiptInvalid(r Receipt, mp, rbps, sentValue int64, replyJSON []byte) string {
+	// refresh_proxy is only ever a valid zero-charge pre-execution rejection (§13 rule C). A receipt
+	// setting it on a success or any charged/value-bearing failure is malformed and quarantines,
+	// so a hostile peer cannot pair a paid receipt with a cache-invalidation signal.
+	if r.RefreshProxy && !(r.Status == TxFailure && r.Charge == 0 && r.Premium == 0 && r.Value == 0 && r.ValuePremium == 0) {
+		return "refresh_proxy on a non-rejection receipt"
+	}
 	switch r.Status {
 	case TxSuccess:
 		if r.Charge != mp {
@@ -607,13 +617,15 @@ func remoteReceiptInvalid(r Receipt, mp, rbps, sentValue int64, replyJSON []byte
 // If the receipt is absent or has an invalid signature, the trace stays open for retry (ErrTimeout).
 // Otherwise it commits CommitRemoteSettlement with the correct charge/duty/refund split.
 func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, action *Action, ktx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req CallRequest, target *User, mp int64, fr FederationResult, latency float64) (*CallReply, error) {
-	// The value we dispatched (for a value transfer) rides on the trace, so both the direct and the
-	// retry settle paths read it from one source (§13).
+	// The value we dispatched (for a value transfer) and the contract hash we dispatched with ride on
+	// the trace, so both the direct and the retry settle paths read them from one source (§13).
 	var sentValue int64
+	var dispatchedHash string
 	if trace.DispatchJSON != nil {
 		var d dispatchPayload
 		if json.Unmarshal([]byte(*trace.DispatchJSON), &d) == nil {
 			sentValue = d.Value
+			dispatchedHash = d.ContractHash
 		}
 	}
 	// A missing, unparseable, unsigned, or mismatched receipt keeps the trace open for retry.
@@ -710,6 +722,25 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	defer cancel()
 	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, paid, importFee, vs, stats, req.IdempotencyRecordID, req.StepID, KernelErrorCode(failErr)); err != nil {
 		return nil, ErrInternal.Wrap("could not commit remote settlement")
+	}
+
+	// Rule C (§8/§13): a settlement outcome proving the cache wrong — a signed refresh_proxy rejection
+	// or a quarantined receipt — deactivates the proxy so the next call re-resolves. Supervision-side,
+	// outside the monetary write set (a failure here never rolls back settlement), and hash-conditional
+	// so a stale dispatch settling after a re-resolve spares the refreshed row. A funding (402) rejection
+	// carries no refresh_proxy, so it never reaches here.
+	if r.RefreshProxy || vs.Quarantine {
+		// The dispatch snapshots the hash it bound; absent it (a trace not dispatched through the normal
+		// path), guard against the row's current hash so the deactivation still targets this row.
+		guardHash := dispatchedHash
+		if guardHash == "" {
+			guardHash = action.ArtifactHash
+		}
+		if derr := k.store.DeactivateImportedIfHash(sctx, action.ID, guardHash, time.Now().UTC()); derr != nil {
+			logger.Warn("remote.proxy_deactivate_failed", "action", action.Name, "error", derr)
+		} else {
+			logger.Info("remote.proxy_deactivated", "action", action.Name, "reason", ktx.Reason)
+		}
 	}
 
 	logger.Info("remote.settled", "action", action.Name, "status", ktx.Status, "charge", charge, "premium", premium, "import_fee", importFee)
@@ -812,7 +843,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	// fr.NotDispatched is deliberately ignored on the retry path: a parked trace's request may
 	// already have executed remotely, so §13 forbids fail-fast here — only a signed receipt or the
 	// max-pending-age bound below settles it. Never-dispatched fail-fast lives solely in Call (§6).
-	fr, _ := fe.ExecuteFederation(ctx, target.PublicKey, action.Source, *trace.IdempotencyKey, dispatch.Args)
+	fr, _ := fe.ExecuteFederation(ctx, target.PublicKey, action.Source, action.ArtifactHash, *trace.IdempotencyKey, dispatch.Args)
 	if fr.ReceiptJSON != "" {
 		_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, 0)
 		if !errors.Is(err, ErrTimeout) {
@@ -840,9 +871,9 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 
 // SignFederation signs a federation payload with the platform key and returns
 // (signature, timestamp). Returns an error if the signing key is not configured.
-func (k *Kernel) SignFederation(action, counterparty, idempotencyKey, argsHash string) (sig, ts string, err error) {
+func (k *Kernel) SignFederation(action, counterparty, recipient, expectedContractHash, idempotencyKey, argsHash string) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = SignFederationPayload(k.cfg.SigningKey, action, counterparty, idempotencyKey, ts, argsHash)
+	sig, err = SignFederationPayload(k.cfg.SigningKey, action, counterparty, recipient, expectedContractHash, idempotencyKey, ts, argsHash)
 	return
 }
 
@@ -1045,19 +1076,6 @@ func (k *Kernel) PeerKeys(ctx context.Context) []string {
 	return keys
 }
 
-// Unsubscribe drops a peer's imported catalog here by deactivating all proxy actions it owns
-// (§13). The peer's billing account, balance, and history are untouched; a later subscribe
-// re-imports. Superuser-only.
-func (k *Kernel) Unsubscribe(ctx context.Context, subjectID, handle string) error {
-	if err := k.requireSuperuser(ctx, subjectID); err != nil {
-		return err
-	}
-	u, err := k.ResolveUser(ctx, handle)
-	if err != nil {
-		return ErrNotFound.Wrapf("peer %q not found", handle)
-	}
-	return k.store.DeactivateActionsOwnedBy(ctx, u.ID)
-}
 
 // SubjectEvidence derives the retained-evidence metrics about a subject kernel from the local
 // evidence cache (§13), grouped by issuer. Uses/successes/failures/latency count ONLY issuer==subject
@@ -1355,8 +1373,9 @@ func (k *Kernel) RecordPeerSync(ctx context.Context, publicKey string, credit *i
 // federation call the receiver refuses before execution. No transaction is created; the receipt is
 // signed with the kernel's Ed25519 key so the caller can verify the rejection was authentic. reason
 // records why (e.g. "counterparty denied", "insufficient balance", "action inactive") so the caller's
-// settled failure is legible rather than always reading "denied".
-func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, actionParam, argsHash, idempotencyKey, reason string) (*Receipt, error) {
+// settled failure is legible rather than always reading "denied". refreshProxy marks a cache fault
+// (contract-hash mismatch, non-executable action) so the origin invalidates its cached proxy (§13).
+func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, actionParam, argsHash, idempotencyKey, reason string, refreshProxy bool) (*Receipt, error) {
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
@@ -1372,6 +1391,7 @@ func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, actionParam, argsH
 		Gross:        0,
 		Net:          0,
 		Fee:          0,
+		RefreshProxy: refreshProxy,
 		Reason:       reason,
 		StartedAt:    now,
 		CreatedAt:    now,
@@ -1559,16 +1579,6 @@ func remoteManifestHash(m ActionManifest) string {
 	return hex.EncodeToString(h[:])
 }
 
-// ImportRemoteAction creates or updates a local remote_proxy action from a remote kernel's manifest.
-// The action is owned by the remote kernel user identified by remoteUserID.
-// It is idempotent: re-running with the same manifest preserves the action's active state.
-// Only the superuser may import remote actions.
-func (k *Kernel) ImportRemoteAction(ctx context.Context, subjectID, remoteUserID string, m ActionManifest) (*ImportResult, error) {
-	if err := k.requireSuperuser(ctx, subjectID); err != nil {
-		return nil, err
-	}
-	return k.importRemoteActionCore(ctx, remoteUserID, m)
-}
 
 // ImportPeerAction imports one signed manifest without a superuser gate (its authority is the
 // verified manifest signature) and activates it as a local proxy — the §13 subscription-free
@@ -1589,7 +1599,7 @@ func (k *Kernel) ImportPeerAction(ctx context.Context, remoteUserID string, m Ac
 	default:
 		return nil, ErrNotFound.Wrap("import produced no action")
 	}
-	// Enable and make callable by local users (visibility=local), mirroring the subscribe path.
+	// Enable and make callable by local users (visibility=local), mirroring the resolve path.
 	// The manifest is already signature-verified, so no further gate is needed.
 	if !a.Active || a.Visibility != VisibilityLocal {
 		a.Active = true
@@ -1719,52 +1729,6 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 	return result, nil
 }
 
-// UnimportRemoteAction deactivates the local proxy action for the given remote handle and action name.
-func (k *Kernel) UnimportRemoteAction(ctx context.Context, subjectID, remoteHandle, actionName string) (*Action, error) {
-	remoteUser, err := k.store.ReadUserByHandle(ctx, remoteHandle)
-	if err != nil {
-		return nil, ErrNotFound.Wrapf("remote kernel %q not found", remoteHandle)
-	}
-	if remoteUser.PublicKey == "" {
-		return nil, ErrInvalidInput.Wrapf("%q is not a remote kernel", remoteHandle)
-	}
-	a, err := k.store.ReadActionByOwnerName(ctx, remoteUser.ID, actionName)
-	if err != nil {
-		return nil, err
-	}
-	if a.Kind != KindRemoteProxy {
-		return nil, ErrInvalidInput.Wrap("action is not a remote proxy")
-	}
-	if subjectID != a.OwnerUserID {
-		if err := k.requireSuperuser(ctx, subjectID); err != nil {
-			return nil, ErrUnauthorized.Wrap("owner or superuser required to unimport remote action")
-		}
-	}
-	if err := k.deactivateImported(ctx, []*Action{a}, false); err != nil {
-		return nil, err
-	}
-	k.log.With(ctx).Info("action.unimported_remote", "action_id", a.ID, "name", a.Name)
-	return a, nil
-}
-
-// ReconcileRemoteAction applies the remote-import policy for a single action.
-// When manifest is nil (manifest endpoint non-200 or action gone), the local proxy is
-// deactivated and stats are reset. When manifest is non-nil, ImportRemoteAction runs.
-func (k *Kernel) ReconcileRemoteAction(ctx context.Context, subjectID, remoteHandle, actionName string, manifest *ActionManifest) (*ImportResult, error) {
-	if manifest == nil {
-		a, err := k.UnimportRemoteAction(ctx, subjectID, remoteHandle, actionName)
-		if err != nil {
-			return nil, err
-		}
-		_ = k.ResetActionStats(ctx, a.ID)
-		return &ImportResult{}, nil
-	}
-	remoteUser, err := k.store.ReadUserByHandle(ctx, remoteHandle)
-	if err != nil {
-		return nil, ErrNotFound.Wrapf("remote kernel %q not found", remoteHandle)
-	}
-	return k.ImportRemoteAction(ctx, subjectID, remoteUser.ID, *manifest)
-}
 
 // GetActionManifest returns a signed manifest for a public active action.
 // Manifests are only available for actions that are both active and public.
@@ -1819,6 +1783,18 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 	return m, nil
 }
 
+// CurrentContractHash returns the contract hash a peer would cache for this action — the same
+// remoteManifestHash the caller stored at resolve time (§8 If-Match). It errors for an action not
+// currently servable as a manifest (inactive, non-public, delegated-auth, remote_proxy); the inbound
+// handler then skips the explicit precondition and lets the non-executable path sign the rejection.
+func (k *Kernel) CurrentContractHash(ctx context.Context, actionID string) (string, error) {
+	m, err := k.GetActionManifest(ctx, actionID)
+	if err != nil {
+		return "", err
+	}
+	return remoteManifestHash(*m), nil
+}
+
 // SignManifest creates a base64url Ed25519 signature over the canonical ActionManifest.
 func SignManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
 	cp := *m
@@ -1841,42 +1817,38 @@ func VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
 	return nil
 }
 
-// VerifyFederationSignature verifies an Ed25519 signature over the canonical federation payload
-// JCS({action, args_hash, counterparty, idempotency_key, timestamp}).
-func VerifyFederationSignature(pubKeyB64, action, counterparty, idempotencyKey, timestamp, argsHash, sigB64 string) error {
+// fedCallPayload is the canonical federation call payload signed and verified on both sides:
+// JCS({action, args_hash, counterparty, expected_contract_hash, idempotency_key, recipient, timestamp}).
+// recipient (the serving kernel's key) binds the request to one kernel (§13 replay defense);
+// expected_contract_hash is the caller's cached contract hash (§8 If-Match).
+func fedCallPayload(action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash string) map[string]string {
+	return map[string]string{
+		"action":                 action,
+		"args_hash":              argsHash,
+		"counterparty":           counterparty,
+		"expected_contract_hash": expectedContractHash,
+		"idempotency_key":        idempotencyKey,
+		"recipient":              recipient,
+		"timestamp":              timestamp,
+	}
+}
+
+// VerifyFederationSignature verifies an Ed25519 signature over the canonical federation call payload.
+func VerifyFederationSignature(pubKeyB64, action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash, sigB64 string) error {
 	pub, err := decodeRemotePublicKey(pubKeyB64)
 	if err != nil {
 		return ErrUnauthenticated.Wrap("invalid counterparty public key")
 	}
-	if err := verifyJCS(pub, sigDomainFedCall, map[string]string{
-		"action":          action,
-		"args_hash":       argsHash,
-		"counterparty":    counterparty,
-		"idempotency_key": idempotencyKey,
-		"timestamp":       timestamp,
-	}, sigB64); err != nil {
+	if err := verifyJCS(pub, sigDomainFedCall, fedCallPayload(action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash), sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("federation signature is invalid")
 	}
 	return nil
 }
 
 // SignFederationPayload creates a base64url Ed25519 signature over the canonical federation payload.
-func SignFederationPayload(key ed25519.PrivateKey, action, counterparty, idempotencyKey, timestamp, argsHash string) (string, error) {
-	return signJCS(key, sigDomainFedCall, map[string]string{
-		"action":          action,
-		"args_hash":       argsHash,
-		"counterparty":    counterparty,
-		"idempotency_key": idempotencyKey,
-		"timestamp":       timestamp,
-	})
+func SignFederationPayload(key ed25519.PrivateKey, action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash string) (string, error) {
+	return signJCS(key, sigDomainFedCall, fedCallPayload(action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash))
 }
-
-// Step payloads name their `recipient` — the serving kernel's public key. Every other signed
-// payload in the system identifies only its sender, so a captured request is replayable to any
-// kernel that would accept it; for a step list that would let one kernel enumerate another's
-// parked steps on a third kernel. Binding the recipient closes that here. The call payload has
-// the same weakness, but adding a field there breaks the wire for every existing peer, which §12
-// assigns to a federation-protocol version bump.
 
 // SignStepPayload creates a base64url Ed25519 signature over the canonical step-completion payload
 // JCS({counterparty, idempotency_key, input_hash, recipient, step_id, timestamp}) — a key-set

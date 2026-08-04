@@ -38,7 +38,6 @@ func (f *fakeFed) Gossip(_ context.Context, _ string, _ string) (json.RawMessage
 	}
 	return f.inspectDoc, nil
 }
-func (f *fakeFed) Manifests(context.Context, string) ([]json.RawMessage, error) { return nil, nil }
 func (f *fakeFed) Step(_ context.Context, _ string, req fed.StepRequest) (fed.StepResponse, error) {
 	f.lastStep = req
 	// stepMidStream models a failure AFTER bytes may have reached the peer (a stream error, or a
@@ -85,9 +84,9 @@ func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	}
 	sig, _ := kernel.SignManifest(priv, &m)
 	m.Signature = sig
-	mBytes, _ := json.Marshal(m)
-	if imp, _ := bulkImportPeerActionsFed(ctx, &fakeManifestFetcher{frames: []json.RawMessage{mBytes}}, k, sys.ID, key, peer); imp != 1 {
-		t.Fatalf("seed import: got %d, want 1", imp)
+	// Cold resolve caches and activates the proxy (§8): the sole import path.
+	if _, err := k.ImportPeerAction(ctx, peer.ID, m); err != nil {
+		t.Fatalf("seed import: %v", err)
 	}
 	return handle, key
 }
@@ -204,30 +203,6 @@ func TestInspectLocalUserRejected(t *testing.T) {
 	}
 }
 
-// TestUnsubscribeLocalUserRejected: unsubscribe must never touch a local account (it has no
-// imported catalog). A handle with no public key is rejected as not-a-peer.
-func TestUnsubscribeLocalUserRejected(t *testing.T) {
-	k, _ := newRemoteTestKernel(t)
-	ctx := context.Background()
-	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "chat", Password: "pw"}); err != nil {
-		t.Fatal(err)
-	}
-	sys, _ := k.ReadUserByHandle(ctx, "sys")
-	srv := &server{kernel: k, log: log.Discard()}
-
-	body, _ := json.Marshal(map[string]string{"handle": "chat"})
-	req := httptest.NewRequest("POST", "/control/peers/unsubscribe", bytes.NewReader(body))
-	req = req.WithContext(context.WithValue(req.Context(), ctxCallerID, sys.ID))
-	rec := httptest.NewRecorder()
-	srv.ctlUnsubscribePeer(rec, req)
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("unsubscribe @chat: status %d, want 422; body=%s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "local user") {
-		t.Errorf("expected a 'local user, not a peer' message, got: %s", rec.Body.String())
-	}
-}
-
 // TestInspectOfflineStranger: an unreachable peer we never friended → empty view, source=none,
 // never a hang or opaque error.
 func TestInspectOfflineStranger(t *testing.T) {
@@ -290,101 +265,6 @@ func TestInspectPersistsPeerSync(t *testing.T) {
 	}
 	if after.PeerCredit == nil || *after.PeerCredit != bal {
 		t.Fatalf("inspect must persist peer_credit; got %v, want %d", after.PeerCredit, bal)
-	}
-}
-
-// TestSubscribeOfflineClearError: subscribing to an unreachable peer fails clearly (not a hang),
-// mentioning unreachable.
-func TestSubscribeOfflineClearError(t *testing.T) {
-	k, _ := newRemoteTestKernel(t)
-	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{reachPath: "unreachable"}}
-
-	body, _ := json.Marshal(map[string]string{"key": "some-offline-key"})
-	req := httptest.NewRequest("POST", "/control/peers/subscribe", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-	srv.ctlSubscribePeer(rec, req)
-	if rec.Code < 400 {
-		t.Fatalf("subscribe offline: status %d, want an error", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "unreachable") {
-		t.Errorf("subscribe offline error should mention unreachable: %s", rec.Body.String())
-	}
-}
-
-// TestUnsubscribeWorksWithNoTransport: unsubscribe is purely local — it works even with the
-// transport absent (offline), proving it never depends on reaching the peer.
-func TestUnsubscribeWorksWithNoTransport(t *testing.T) {
-	k, _ := newRemoteTestKernel(t)
-	handle, _ := seedPeer(t, k, "peer-unf")
-	sys, _ := k.ReadUserByHandle(context.Background(), "sys")
-	srv := &server{kernel: k, log: log.Discard(), fed: nil} // transport down
-
-	body, _ := json.Marshal(map[string]string{"handle": handle})
-	req := httptest.NewRequest("POST", "/control/peers/unsubscribe", bytes.NewReader(body))
-	req = req.WithContext(context.WithValue(req.Context(), ctxCallerID, sys.ID))
-	rec := httptest.NewRecorder()
-	srv.ctlUnsubscribePeer(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("unsubscribe with no transport: status %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestResubscribeReactivatesProxy: after unsubscribe deactivates a proxy, subscribing again must
-// reactivate it. The re-subscribe sees a byte-identical manifest, so reconcileImport files it
-// under Unchanged — which the import activation loop must still enable, or the proxy stays dead
-// and uncallable (the bug this guards).
-func TestResubscribeReactivatesProxy(t *testing.T) {
-	k, _ := newRemoteTestKernel(t)
-	ctx := context.Background()
-
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	key := base64.RawURLEncoding.EncodeToString(pub)
-	sys, err := k.ReadUserByHandle(ctx, "sys")
-	if err != nil {
-		t.Fatal(err)
-	}
-	peer, err := k.AddPeer(ctx, sys.ID, "peer-rf", key)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	m := kernel.ActionManifest{
-		ActionID: "act-1", OwnerHandle: "peer-rf", Name: "greet", Description: "greet",
-		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
-		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "sha256-x", Stats: &kernel.Stats{},
-		UpdatedAt: time.Now(),
-	}
-	sig, _ := kernel.SignManifest(priv, &m)
-	m.Signature = sig
-	mBytes, _ := json.Marshal(m)
-	fetch := &fakeManifestFetcher{frames: []json.RawMessage{mBytes}}
-
-	// First subscribe: import and activate.
-	if imp, _ := bulkImportPeerActionsFed(ctx, fetch, k, sys.ID, key, peer); imp != 1 {
-		t.Fatalf("first import: got %d, want 1", imp)
-	}
-	owned, err := k.ListOwnedActions(ctx, peer.ID, 100, 0)
-	if err != nil || len(owned) != 1 {
-		t.Fatalf("owned after subscribe: %v (err %v)", owned, err)
-	}
-	proxy := owned[0]
-	if !proxy.Active {
-		t.Fatal("proxy should be active after first subscribe")
-	}
-
-	// Unsubscribe deactivates the proxy.
-	if err := k.Unsubscribe(ctx, sys.ID, key); err != nil {
-		t.Fatal(err)
-	}
-
-	// Re-subscribe with the identical manifest → Unchanged → must be reactivated.
-	bulkImportPeerActionsFed(ctx, fetch, k, sys.ID, key, peer)
-	owned, err = k.ListOwnedActions(ctx, peer.ID, 100, 0)
-	if err != nil || len(owned) != 1 {
-		t.Fatalf("owned after re-subscribe: %v (err %v)", owned, err)
-	}
-	if !owned[0].Active {
-		t.Fatal("proxy should be reactivated after re-subscribe")
 	}
 }
 

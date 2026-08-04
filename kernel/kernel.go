@@ -2149,6 +2149,12 @@ func (k *Kernel) SetActive(ctx context.Context, callerID, actionID string, activ
 	if a.Kind == KindNative {
 		return ErrUnauthorized.Wrap("native actions are managed by bootstrap")
 	}
+	// A remote_proxy's active bit is cache state, kernel-managed (§8): set by resolve, cleared by a
+	// refresh_proxy rejection or quarantine. Manual enable/disable would be self-reversing (the next
+	// call re-resolves), so it is rejected — the durable peer lever is suspend (§13).
+	if a.Kind == KindRemoteProxy {
+		return ErrInvalidState.Wrap("remote proxy activation is kernel-managed; use admin suspend to block a peer")
+	}
 	if err := k.requireAdmin(ctx, callerID, a); err != nil {
 		return err
 	}
@@ -2340,7 +2346,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	if action.Kind == KindRemoteProxy {
 		key := uuid.New().String()
 		t.IdempotencyKey = &key
-		t.DispatchJSON = marshalDispatch(args, "", k.remoteManifestPrice(action.Price), value, lockPrice)
+		t.DispatchJSON = marshalDispatch(args, "", k.remoteManifestPrice(action.Price), value, lockPrice, action.ArtifactHash)
 	}
 	if err := k.store.BeginRun(ctx, p, t, caller.ID, lockPrice, premiumReserve, k.cfg.ExposureMax); err != nil {
 		if caller.IsPeer() && errors.Is(err, ErrInsufficientFunds) {
@@ -3291,7 +3297,7 @@ type incomingOp struct {
 // and incoming operations. hashOf extracts the stored content hash from an existing action.
 // resetStats controls whether changed or stale actions have their stats row zeroed:
 // true for OpenAPI (contract change invalidates prior stats), false for remote (local usage stats are preserved).
-// Used by both ImportOpenAPI and ImportRemoteAction.
+// Used by both ImportOpenAPI and ImportPeerAction.
 func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*Action, hashOf func(*Action) string, incoming []incomingOp, resetStats bool) (*ImportResult, error) {
 	incomingKeys := make(map[string]struct{}, len(incoming))
 	for _, op := range incoming {

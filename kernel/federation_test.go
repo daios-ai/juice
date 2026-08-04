@@ -167,14 +167,15 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Signature = sig
-	result, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	a, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
-		t.Fatalf("ImportRemoteAction: %v", err)
+		t.Fatalf("ImportPeerAction: %v", err)
 	}
-	if len(result.Created) != 1 {
-		t.Fatalf("expected 1 created action, got %d", len(result.Created))
+	// Resolve force-enables to visibility=local: callable by local users, never re-served to a
+	// further peer (non-transitive, §8/§13).
+	if !a.Active || a.Visibility != kernel.VisibilityLocal {
+		t.Errorf("imported proxy: active=%v visibility=%q, want active local", a.Active, a.Visibility)
 	}
-	a := result.Created[0]
 	if a.Kind != kernel.KindRemoteProxy {
 		t.Errorf("kind: got %q, want %q", a.Kind, kernel.KindRemoteProxy)
 	}
@@ -218,30 +219,24 @@ func TestImportRemoteActionReimp(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Signature = sig
-	firstResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	firstResult, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("first import: %v", err)
 	}
-	if len(firstResult.Created) != 1 {
-		t.Fatalf("expected 1 created action, got %d", len(firstResult.Created))
-	}
-	firstID := firstResult.Created[0].ID
+	firstID := firstResult.ID
 
-	// Reimport with updated price — content hash changes → Updated.
+	// Reimport with updated price — content hash changes → the row is updated in place.
 	m.Price = 99
 	sig2, err := kernel.SignManifest(priv, &m)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.Signature = sig2
-	secondResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	secondResult, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
-	if len(secondResult.Updated) != 1 {
-		t.Fatalf("expected 1 updated action, got %d", len(secondResult.Updated))
-	}
-	second := secondResult.Updated[0]
+	second := secondResult
 	if second.ID != firstID {
 		t.Error("reimport must preserve the same action ID")
 	}
@@ -283,30 +278,21 @@ func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
 	m.Signature = sig
 
 	// First import.
-	firstResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	firstResult, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("first import: %v", err)
 	}
-	if len(firstResult.Created) != 1 {
-		t.Fatalf("expected 1 created action, got %d", len(firstResult.Created))
+	firstID := firstResult.ID
+	if !firstResult.Active {
+		t.Fatal("import should activate the proxy (§8 resolve force-enables)")
 	}
-	firstID := firstResult.Created[0].ID
-
-	// Activate it so we can verify active state is preserved.
-	firstResult.Created[0].Active = true
-	firstResult.Created[0].Source = "https://stable.example.com/v1/federation/call?action=%40stable-peer%2Fstable&counterparty="
-	_ = st.UpdateAction(ctx, firstResult.Created[0])
 
 	// Re-import the identical manifest (same signature).
-	secondResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	secondResult, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("second import: %v", err)
 	}
-	if len(secondResult.Unchanged) != 1 {
-		t.Fatalf("expected 1 unchanged action, got: created=%d updated=%d unchanged=%d",
-			len(secondResult.Created), len(secondResult.Updated), len(secondResult.Unchanged))
-	}
-	if secondResult.Unchanged[0].ID != firstID {
+	if secondResult.ID != firstID {
 		t.Error("unchanged reimport must preserve the same action ID")
 	}
 	// Action must remain active.
@@ -351,33 +337,29 @@ func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
 	}
 
 	sign()
-	firstResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
-	if err != nil || len(firstResult.Created) != 1 {
-		t.Fatalf("first import: err=%v created=%d", err, len(firstResult.Created))
+	firstResult, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("first import: %v", err)
 	}
-	firstID := firstResult.Created[0].ID
+	firstID := firstResult.ID
 
-	// Second import: price change → Updated, ArtifactHash stored as contentHash.
+	// Second import: price change updates the row in place, ArtifactHash stored as contentHash.
 	m.Price = 99
 	sign()
-	secondResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
-	if err != nil || len(secondResult.Updated) != 1 {
-		t.Fatalf("second import: err=%v updated=%d", err, len(secondResult.Updated))
+	secondResult, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("second import: %v", err)
 	}
-	if secondResult.Updated[0].ID != firstID {
+	if secondResult.ID != firstID {
 		t.Error("reimport must preserve the same action ID")
 	}
 
-	// Third import: same manifest as second → Unchanged (ArtifactHash stored correctly).
-	thirdResult, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	// Third import: same manifest as second → unchanged (ArtifactHash stored correctly), id preserved.
+	thirdResult, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("third import: %v", err)
 	}
-	if len(thirdResult.Unchanged) != 1 {
-		t.Errorf("expected 1 unchanged, got created=%d updated=%d unchanged=%d",
-			len(thirdResult.Created), len(thirdResult.Updated), len(thirdResult.Unchanged))
-	}
-	if thirdResult.Unchanged[0].ID != firstID {
+	if thirdResult.ID != firstID {
 		t.Error("third import must reference the same action ID")
 	}
 }
@@ -404,7 +386,7 @@ func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
 		OutputSchema: map[string]any{"type": "object"},
 		Signature:    "invalidsignature",
 	}
-	_, err = k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	_, err = k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err == nil {
 		t.Fatal("expected error for invalid manifest signature")
 	}
@@ -437,7 +419,7 @@ func TestImportRemoteActionRejectsNegativePrice(t *testing.T) {
 	}
 	m.Signature = sig
 
-	_, err = k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	_, err = k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("negative price manifest: want ErrInvalidInput, got %v", err)
 	}
@@ -485,7 +467,7 @@ func TestImportRemoteActionRejectsMissingRequiredFields(t *testing.T) {
 			tc.mutate(&m)
 			sig, _ := kernel.SignManifest(priv, &m)
 			m.Signature = sig
-			_, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+			_, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 			if !errors.Is(err, kernel.ErrInvalidInput) {
 				t.Errorf("want ErrInvalidInput, got %v", err)
 			}
@@ -755,18 +737,12 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	}
 	m.Signature = sig
 
-	result, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	result, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
-		t.Fatalf("ImportRemoteAction: %v", err)
+		t.Fatalf("ImportPeerAction: %v", err)
 	}
-	if len(result.Created) != 1 {
-		t.Fatalf("expected 1 created action, got %d", len(result.Created))
-	}
-	a := result.Created[0]
+	a := result
 
-	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
-		t.Fatalf("SetActive: %v", err)
-	}
 	pubFed := kernel.VisibilityPublic
 	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed}); err != nil {
 		t.Fatalf("UpdateAction public: %v", err)
@@ -841,14 +817,11 @@ func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel,
 		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
 	m.Signature, _ = kernel.SignManifest(priv, &m)
-	result, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	result, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
-		t.Fatalf("ImportRemoteAction: %v", err)
+		t.Fatalf("ImportPeerAction: %v", err)
 	}
-	a := result.Created[0]
-	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
-		t.Fatal(err)
-	}
+	a := result
 	pubFed := kernel.VisibilityPublic
 	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed}); err != nil {
 		t.Fatal(err)
@@ -1203,6 +1176,10 @@ func TestSettleRemoteCallQuarantinesInvalidReceipt(t *testing.T) {
 			if pending, _ := st.ListPendingRemoteTraces(ctx); len(pending) != 0 {
 				t.Errorf("expected no pending remote traces, got %d", len(pending))
 			}
+			// Rule C (§13): a quarantined receipt deactivates the cached proxy so the next call re-resolves.
+			if ra, _ := st.ReadAction(ctx, a.ID); ra.Active {
+				t.Error("quarantine must deactivate the proxy (rule C)")
+			}
 		})
 	}
 }
@@ -1262,6 +1239,68 @@ func TestSettleRemoteCallValidChargeNotClamped(t *testing.T) {
 	}
 }
 
+// A receipt that is otherwise a valid success but carries refresh_proxy is malformed (§13 rule C):
+// refresh_proxy is only ever a zero-charge rejection, so the receipt quarantines rather than paying.
+func TestSettleRemoteCallRejectsRefreshProxyOnSuccess(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	fake := &fakeFederationHTTP{}
+	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "rp-inv-action", 1000)
+	_, tr := beginTestRun(t, st, caller.ID, a)
+	mp := k.RemoteManifestPrice(a.Price)
+	premium := (mp*kernel.DefaultConfig().RemoteBPS + 9999) / 10000
+
+	now := time.Now().UTC()
+	r := &kernel.Receipt{
+		ID: uuid.New().String(), TxID: "rtx", ActionID: "rp-inv-action",
+		ArgsHash: jcsHashForTest(t, `{}`), ReplyHash: jcsHashForTest(t, `{}`),
+		Status: kernel.TxSuccess, Charge: mp, Premium: premium,
+		RefreshProxy: true, StartedAt: now, CreatedAt: now,
+	}
+	r.Signature = signReceiptForTest(t, priv, r)
+	b, _ := json.Marshal(r)
+	fake.receiptJSON = string(b)
+
+	_, err := k.Call(ctx, kernel.CallRequest{
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
+		TargetUserID: "settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
+	})
+	if !errors.Is(err, kernel.ErrExecutionFailed) {
+		t.Fatalf("expected quarantine (ErrExecutionFailed), got %v", err)
+	}
+	assertUserBalance(t, st, caller.ID, a.Price, 0) // fully refunded, nothing paid
+}
+
+// Rule D (§8): a remote_proxy's active bit is kernel-managed; manual enable/disable is rejected.
+func TestSetActiveRejectsRemoteProxy(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "d-peer", base64.RawURLEncoding.EncodeToString(pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := kernel.ActionManifest{
+		ActionID: "d-act", OwnerHandle: "d-peer", Name: "svc", Description: "svc",
+		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+	}
+	m.Signature, _ = kernel.SignManifest(priv, &m)
+	proxy, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("ImportPeerAction: %v", err)
+	}
+	for _, active := range []bool{false, true} {
+		if err := k.SetActive(ctx, sys.ID, proxy.ID, active); !errors.Is(err, kernel.ErrInvalidState) {
+			t.Errorf("SetActive(%v) on proxy: want ErrInvalidState, got %v", active, err)
+		}
+	}
+}
+
 // ---- D1: proxy action source is the remote action ref ----
 
 func TestImportRemoteActionSourceIsActionRef(t *testing.T) {
@@ -1286,11 +1325,11 @@ func TestImportRemoteActionSourceIsActionRef(t *testing.T) {
 	}
 	sig, _ := kernel.SignManifest(priv, &m)
 	m.Signature = sig
-	result, err := k.ImportRemoteAction(ctx, sys.ID, peer.ID, m)
+	result, err := k.ImportPeerAction(ctx, peer.ID, m)
 	if err != nil {
-		t.Fatalf("ImportRemoteAction: %v", err)
+		t.Fatalf("ImportPeerAction: %v", err)
 	}
-	a := result.Created[0]
+	a := result
 	// Source is the remote action ref (@owner/name) — never a URL; the peer is resolved by key.
 	if a.Source != "ref-peer/act" {
 		t.Errorf("source: want @ref-peer/act, got %q", a.Source)
@@ -1354,7 +1393,7 @@ func TestRemoteImportOwnerQualifiedNoCollision(t *testing.T) {
 			ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 		}
 		m.Signature, _ = kernel.SignManifest(priv, &m)
-		if _, err := k.ImportRemoteAction(ctx, sys.ID, peer.ID, m); err != nil {
+		if _, err := k.ImportPeerAction(ctx, peer.ID, m); err != nil {
 			t.Fatalf("import %s: %v", owner, err)
 		}
 	}
@@ -1469,6 +1508,25 @@ func TestLazyResolveRemoteCachesProxy(t *testing.T) {
 	if err != nil || a2.ID != a.ID {
 		t.Errorf("cache hit: err=%v id2=%v want %v", err, a2.ID, a.ID)
 	}
+
+	// Rule A (§8): an inactive proxy is a cache miss — the next resolve re-resolves and reactivates it
+	// in place (id preserved), so a drift-deactivated proxy is never permanently dead.
+	if err := st.DeactivateImportedIfHash(ctx, a.ID, a.ArtifactHash, time.Now().UTC()); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	fake.resolveManifest = &m
+	a3, err := k.ResolveAction(ctx, "bob@"+pubB64+"/greet")
+	if err != nil || a3.ID != a.ID || !a3.Active {
+		t.Errorf("inactive re-resolve: err=%v id=%v active=%v (want same id, active)", err, a3.ID, a3.Active)
+	}
+	// With the row inactive and no resolver reachable, the reference does not resolve (no dead-row serve).
+	if err := st.DeactivateImportedIfHash(ctx, a.ID, a.ArtifactHash, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	fake.resolveManifest = nil
+	if _, err := k.ResolveAction(ctx, "bob@"+pubB64+"/greet"); err == nil {
+		t.Error("inactive proxy with no resolver should not resolve")
+	}
 }
 
 func TestVerifyRemoteReceiptValid(t *testing.T) {
@@ -1493,14 +1551,11 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	}
 	msig, _ := kernel.SignManifest(priv, &m)
 	m.Signature = msig
-	result, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	result, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	a := result.Created[0]
-	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
-		t.Fatal(err)
-	}
+	a := result
 	pubFed2 := kernel.VisibilityPublic
 	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed2}); err != nil {
 		t.Fatal(err)
@@ -1574,11 +1629,11 @@ func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
-		t.Fatal(err)
-	}
 	pubFed3 := kernel.VisibilityPublic
 	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1622,9 +1677,8 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	}
 	msig, _ := kernel.SignManifest(priv, &m)
 	m.Signature = msig
-	result, _ := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
-	a := result.Created[0]
-	_ = k.SetActive(ctx, sys.ID, a.ID, true)
+	result, _ := k.ImportPeerAction(ctx, remoteUser.ID, m)
+	a := result
 	pubFed4 := kernel.VisibilityPublic
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed4})
 
@@ -1682,14 +1736,11 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	}
 	msig, _ := kernel.SignManifest(priv, &m)
 	m.Signature = msig
-	result, err := k.ImportRemoteAction(ctx, sys.ID, remoteUser.ID, m)
+	result, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	a := result.Created[0]
-	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
-		t.Fatal(err)
-	}
+	a := result
 	pubFed := kernel.VisibilityPublic
 	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed}); err != nil {
 		t.Fatal(err)
@@ -1763,7 +1814,7 @@ func TestCreateSignedRejectionReceipt(t *testing.T) {
 		t.Fatalf("AddPeer: %v", err)
 	}
 
-	r, err := k.CreateSignedRejectionReceipt(peer.ID, "owner/some-action", "argsHash123", "idem-key-456", "action inactive")
+	r, err := k.CreateSignedRejectionReceipt(peer.ID, "owner/some-action", "argsHash123", "idem-key-456", "action inactive", false)
 	if err != nil {
 		t.Fatalf("CreateSignedRejectionReceipt: %v", err)
 	}
@@ -1782,56 +1833,6 @@ func TestCreateSignedRejectionReceipt(t *testing.T) {
 	}
 	if r.CallerUserID != peer.ID {
 		t.Errorf("expected CallerUserID=%s, got %s", peer.ID, r.CallerUserID)
-	}
-}
-
-// TestUnsubscribeDeactivatesActions: unsubscribing from a peer deactivates its imported proxy
-// catalog here, leaving the account (and its balance) intact. A re-import reactivates.
-func TestUnsubscribeDeactivatesActions(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-	sys := setupSys(t, k, st)
-
-	// Register peer B with a balance to prove unsubscribe leaves it untouched.
-	_, privB, _ := ed25519.GenerateKey(rand.Reader)
-	pubB := privB.Public().(ed25519.PublicKey)
-	pubBB64 := base64.RawURLEncoding.EncodeToString(pubB)
-	peerB, err := k.AddPeer(ctx, sys.ID, "sub-peer-b", pubBB64)
-	if err != nil {
-		t.Fatalf("AddPeer: %v", err)
-	}
-	if _, err := k.Deposit(ctx, sys.ID, peerB.ID, 250, "seed", ""); err != nil {
-		t.Fatalf("Deposit: %v", err)
-	}
-
-	// An imported proxy action owned by B's account here.
-	act := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: peerB.ID, Name: "b-act",
-		Kind: kernel.KindRemoteProxy, Active: true, Price: 0,
-		Source:      "https://sub-b.example.com/v1/federation/call?action=@b/b-act&counterparty=x",
-		InputSchema: map[string]any{}, OutputSchema: map[string]any{},
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	if err := st.CreateAction(ctx, act); err != nil {
-		t.Fatalf("create action: %v", err)
-	}
-	before, _ := k.ReadAction(ctx, act.ID)
-	if !before.Active {
-		t.Fatal("action should be active before unsubscribe")
-	}
-
-	// Unsubscribe deactivates the imported catalog but not the account or its balance.
-	if err := k.Unsubscribe(ctx, sys.ID, "sub-peer-b"); err != nil {
-		t.Fatalf("Unsubscribe: %v", err)
-	}
-	after, _ := k.ReadAction(ctx, act.ID)
-	if after.Active {
-		t.Error("action should be inactive after Unsubscribe")
-	}
-	peerBRead, _ := k.ReadUser(ctx, peerB.ID)
-	if peerBRead.Available != 250 {
-		t.Errorf("peer B balance must survive unsubscribe, got %d", peerBRead.Available)
 	}
 }
 
@@ -1953,11 +1954,10 @@ func TestFriendDoesNotReexportImportedProxies(t *testing.T) {
 	}
 	sig, _ := kernel.SignManifest(priv, &m)
 	m.Signature = sig
-	res, err := k.ImportRemoteAction(ctx, sys.ID, peerC.ID, m)
-	if err != nil || len(res.Created) != 1 {
-		t.Fatalf("ImportRemoteAction: %v (created %d)", err, len(res.Created))
+	proxy, err := k.ImportPeerAction(ctx, peerC.ID, m)
+	if err != nil {
+		t.Fatalf("ImportPeerAction: %v", err)
 	}
-	proxy := res.Created[0]
 	proxy.Active, proxy.Visibility = true, kernel.VisibilityPublic
 	if err := st.UpdateAction(ctx, proxy); err != nil {
 		t.Fatal(err)
@@ -2136,6 +2136,11 @@ func TestSettleRemoteCallPeerUnfunded(t *testing.T) {
 				if errors.Is(err, kernel.ErrPeerUnfunded) {
 					t.Error("422 rejection must not be attributed to peer_unfunded")
 				}
+			}
+			// Rule C (§13): neither a funding (402) nor a plain execution rejection is a cache fault,
+			// so the proxy stays active (only refresh_proxy / quarantine deactivate).
+			if ra, _ := st.ReadAction(ctx, a.ID); !ra.Active {
+				t.Error("a funding/execution rejection must leave the proxy active")
 			}
 		})
 	}

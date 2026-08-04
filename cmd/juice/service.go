@@ -1122,15 +1122,17 @@ func settleIdempotencyWithReceipt(k *kernel.Kernel, ctx context.Context, recID, 
 
 // handleFederationCall validates the inbound federation request (counterparty, timestamp,
 // signature) and executes the call. Returns (httpStatus, responseBody, err).
-func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, actionParam, sigStr string, rawBody []byte) (int, map[string]any, error) {
+func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expectedContractHash, tsStr, idempotencyKey, actionParam, sigStr string, rawBody []byte) (int, map[string]any, error) {
 	argsHash := sha256HexBytes(rawBody)
 
 	if err := checkFederationTimestamp(tsStr); err != nil {
 		return 0, nil, err
 	}
-	// cpPubKey is the transport-authenticated caller key (OnCall proved connection key == counterparty);
-	// verify the request signature against it before touching state.
-	if err := kernel.VerifyFederationSignature(cpPubKey, actionParam, cpPubKey, idempotencyKey, tsStr, argsHash, sigStr); err != nil {
+	// recipient is this kernel's own key: verifying with it (not the wire value) rejects a request signed
+	// for a different kernel, so a captured call cannot be replayed here (§13). cpPubKey is the
+	// transport-authenticated caller key (OnCall proved connection key == counterparty).
+	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
+	if err := kernel.VerifyFederationSignature(cpPubKey, actionParam, cpPubKey, ownKey, expectedContractHash, idempotencyKey, tsStr, argsHash, sigStr); err != nil {
 		return 0, nil, err
 	}
 	// Resolve or lazily provision the caller's billing account (§13, handshake-free): a
@@ -1205,6 +1207,24 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 		return 0, nil, kernel.ErrInvalidState.Wrap("idempotency check failed")
 	}
 
+	// If-Match precondition (§8): the caller pins the contract hash it cached. If the action is
+	// servable and its current contract differs, refuse before execution with a signed refresh_proxy
+	// rejection so the caller re-resolves. A non-servable action (inactive/non-public) yields an error
+	// here and falls through to RunFederated, which signs a plain (non-refresh) rejection — re-resolving
+	// a withdrawn action would not help. Placed after the idempotency insert so a replay is idempotent.
+	if expectedContractHash != "" {
+		if cur, herr := k.CurrentContractHash(ctx, action.ID); herr == nil && cur != expectedContractHash {
+			errJSON, _ := json.Marshal(map[string]string{"error": "contract changed", "code": kernel.KernelErrorCode(kernel.ErrInvalidState)})
+			if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey, "contract changed", true); signErr == nil {
+				receiptJSON, _ := json.Marshal(receipt)
+				settleIdempotencyWithReceipt(k, ctx, rec.ID, string(errJSON), string(receiptJSON))
+				return http.StatusUnprocessableEntity, map[string]any{"error": "contract changed", "receipt": receipt}, nil
+			}
+			_ = k.DeleteIdempotencyRecord(ctx, rec.ID)
+			return 0, nil, kernel.ErrInvalidState.Wrap("contract changed")
+		}
+	}
+
 	reply, callErr := k.RunFederated(ctx, counterparty.ID, owner.ID, r.Name, args, rec.ID)
 	if callErr != nil {
 		errJSON, _ := json.Marshal(map[string]string{
@@ -1236,7 +1256,10 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr
 		if errors.Is(callErr, kernel.ErrInsufficientFunds) || errors.Is(callErr, kernel.ErrPeerUnfunded) {
 			status, msg = http.StatusPaymentRequired, "global exposure exhausted"
 		}
-		if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey, msg); signErr == nil {
+		// A pre-execution rejection here (non-executable action, suspended caller, bad input, or funding)
+		// is not a contract-hash fault — re-resolving would not change the outcome — so refresh_proxy is
+		// false. Only the If-Match mismatch above sets it (§13).
+		if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey, msg, false); signErr == nil {
 			receiptJSON, _ := json.Marshal(receipt)
 			settleIdempotencyWithReceipt(k, ctx, rec.ID, string(errJSON), string(receiptJSON))
 			return status, map[string]any{"error": msg, "receipt": receipt}, nil

@@ -365,13 +365,11 @@ func parseAddrInfos(addrs []string) ([]peer.AddrInfo, error) {
 // ---- Protocol streams ----
 //
 // Wire framing: each message is a 4-byte big-endian length prefix followed by that many JSON
-// bytes. Manifest sync sends one frame per action so a large catalog survives a bandwidth-capped
-// relayed connection; every other protocol is a single request frame and response frame.
+// bytes. Every protocol is a single request frame and response frame.
 
 const (
 	maxFrameBytes  = 8 << 20 // 8 MiB per frame — a call+receipt or one action manifest fits comfortably
 	streamDeadline = 60 * time.Second
-	maxManifests   = 100000 // upper bound on a peer-declared manifest chunk count (anti-OOM)
 )
 
 func writeFrame(s io.Writer, v any) error {
@@ -419,7 +417,6 @@ func peerKeyOf(s network.Stream) string {
 
 func (t *Transport) registerHandlers() {
 	t.host.SetStreamHandler(protocol.ID(ProtocolCall), t.handleCall)
-	t.host.SetStreamHandler(protocol.ID(ProtocolManifest), t.handleManifest)
 	t.host.SetStreamHandler(protocol.ID(ProtocolResolve), t.handleResolve)
 	t.host.SetStreamHandler(protocol.ID(ProtocolGossip), t.handleGossip)
 	t.host.SetStreamHandler(protocol.ID(ProtocolStep), t.handleStep)
@@ -468,22 +465,6 @@ func (t *Transport) handleGossip(s network.Stream) {
 		return
 	}
 	_ = writeFrame(s, body)
-}
-
-func (t *Transport) handleManifest(s network.Stream) {
-	defer s.Close()
-	_ = s.SetDeadline(time.Now().Add(streamDeadline))
-	frames, err := t.cfg.Handlers.OnManifest(context.Background(), peerKeyOf(s))
-	if err != nil {
-		return
-	}
-	// Send the count, then one frame per action manifest.
-	_ = writeFrame(s, map[string]int{"count": len(frames)})
-	for _, f := range frames {
-		if err := writeFrame(s, json.RawMessage(f)); err != nil {
-			return
-		}
-	}
 }
 
 // ---- Outbound client ----
@@ -546,44 +527,6 @@ func (t *Transport) Settle(ctx context.Context, peerKey string, req SettleReques
 // cursor starts at the oldest retained evidence; the catalog snapshot rides every reply.
 func (t *Transport) Gossip(ctx context.Context, peerKey, cursor string) (json.RawMessage, error) {
 	return roundTrip[GossipRequest, json.RawMessage](ctx, t, peerKey, ProtocolGossip, GossipRequest{Cursor: cursor})
-}
-
-// Manifests fetches the peer's action manifests, one JSON frame per action.
-// boundManifestCount rejects a peer-declared manifest chunk count that is negative or past the
-// anti-OOM cap, before it is used to size an allocation. A count past the cap is a hostile or
-// broken peer, not a real catalog.
-func boundManifestCount(n int) error {
-	if n < 0 || n > maxManifests {
-		return fmt.Errorf("peer declared %d manifests, exceeds max %d", n, maxManifests)
-	}
-	return nil
-}
-
-func (t *Transport) Manifests(ctx context.Context, peerKey string) ([]json.RawMessage, error) {
-	s, err := t.openStream(ctx, peerKey, ProtocolManifest)
-	if err != nil {
-		return nil, err
-	}
-	defer s.Close()
-	var head struct {
-		Count int `json:"count"`
-	}
-	if err := readFrame(s, &head); err != nil {
-		return nil, err
-	}
-	// head.Count is peer-controlled; bound it before it sizes an allocation (anti-OOM).
-	if err := boundManifestCount(head.Count); err != nil {
-		return nil, err
-	}
-	out := make([]json.RawMessage, 0, head.Count)
-	for i := 0; i < head.Count; i++ {
-		var f json.RawMessage
-		if err := readFrame(s, &f); err != nil {
-			return nil, err
-		}
-		out = append(out, f)
-	}
-	return out, nil
 }
 
 // ---- Reachability ----

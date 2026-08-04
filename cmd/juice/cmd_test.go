@@ -1464,12 +1464,14 @@ func TestRemoteImport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := k.AddPeer(t.Context(), sys.ID, "import-remote", pubB64); err != nil {
+	remoteUser, err := k.AddPeer(t.Context(), sys.ID, "import-remote", pubB64)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "import-remote", "greet", &m); err != nil {
-		t.Fatalf("ReconcileRemoteAction: %v", err)
+	// Cold resolve caches and activates the proxy (§8): the sole import path.
+	if _, err := k.ImportPeerAction(t.Context(), remoteUser.ID, m); err != nil {
+		t.Fatalf("ImportPeerAction: %v", err)
 	}
 
 	actions, err := k.ListAllActions(t.Context(), 100, 0)
@@ -1484,130 +1486,6 @@ func TestRemoteImport(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected imported action import-remote/greet to appear in @import-remote's actions")
-	}
-}
-
-func TestRemoteImportDisappearedDeactivatesProxy(t *testing.T) {
-	k, _ := newRemoteTestKernel(t)
-
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-
-	const actionID = "disappear-action-id"
-	m := kernel.ActionManifest{
-		ActionID:     actionID,
-		OwnerHandle:  "disappear-remote",
-		Name:         "bye",
-		Description:  "going away",
-		Kind:         kernel.KindHTTP,
-		InputSchema:  map[string]any{"type": "object"},
-		OutputSchema: map[string]any{"type": "object"},
-		ArtifactHash: "sha256-deadbeef",
-		Stats:        &kernel.Stats{},
-		UpdatedAt:    time.Now(),
-	}
-	sig, err := kernel.SignManifest(priv, &m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.Signature = sig
-
-	serveAction := true
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(r.URL.Path, "/manifest") {
-			json.NewEncoder(w).Encode(m)
-			return
-		}
-		if serveAction {
-			json.NewEncoder(w).Encode([]map[string]string{{"ID": actionID, "Name": "bye"}})
-		} else {
-			json.NewEncoder(w).Encode([]map[string]string{})
-		}
-	}))
-	defer remote.Close()
-
-	sys, err := k.ReadUserByHandle(t.Context(), "sys")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := k.AddPeer(t.Context(), sys.ID, "disappear-remote", pubB64); err != nil {
-		t.Fatal(err)
-	}
-
-	r, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "disappear-remote", "bye", &m)
-	if err != nil {
-		t.Fatalf("initial import: %v", err)
-	}
-	if len(r.Created) > 0 {
-		// Enable the proxy so the deactivation assertion below is meaningful.
-		if err := k.SetActive(t.Context(), sys.ID, r.Created[0].ID, true); err != nil {
-			t.Fatalf("SetActive: %v", err)
-		}
-	}
-
-	serveAction = false // action gone from remote; passing nil manifest deactivates the proxy.
-	// The local action is owner-qualified (disappear-remote/bye); deactivation is by that name.
-	if _, err := k.ReconcileRemoteAction(t.Context(), sys.ID, "disappear-remote", "disappear-remote/bye", nil); err != nil {
-		t.Fatalf("reimport after disappearance: %v", err)
-	}
-
-	actions, err := k.ListAllActions(t.Context(), 100, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, a := range actions {
-		if a.Name == "disappear-remote/bye" && a.Active {
-			t.Error("expected local proxy to be deactivated after remote action disappeared")
-		}
-	}
-}
-
-func TestRemoteUnimport(t *testing.T) {
-	k, _ := newRemoteTestKernel(t)
-
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-
-	sys, err := k.ReadUserByHandle(t.Context(), "sys")
-	if err != nil {
-		t.Fatal(err)
-	}
-	remoteUser, err := k.AddPeer(t.Context(), sys.ID, "unimport-peer", pubB64)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	m := kernel.ActionManifest{
-		ActionID:     "unimport-action-id",
-		OwnerHandle:  "unimport-peer",
-		Name:         "greet",
-		Description:  "greet action",
-		Kind:         kernel.KindHTTP,
-		InputSchema:  map[string]any{"type": "object"},
-		OutputSchema: map[string]any{"type": "object"},
-		ArtifactHash: "sha256-deadbeef",
-		Stats:        &kernel.Stats{},
-		UpdatedAt:    time.Now(),
-	}
-	sig, err := kernel.SignManifest(priv, &m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.Signature = sig
-
-	if _, err := k.ImportRemoteAction(t.Context(), sys.ID, remoteUser.ID, m); err != nil {
-		t.Fatalf("ImportRemoteAction: %v", err)
-	}
-
-	if _, err := k.UnimportRemoteAction(t.Context(), sys.ID, "unimport-peer", "unimport-peer/greet"); err != nil {
-		t.Fatalf("UnimportRemoteAction: %v", err)
 	}
 }
 

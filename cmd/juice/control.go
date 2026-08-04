@@ -132,7 +132,7 @@ func (s *server) ctlAdjust(credit bool) http.HandlerFunc {
 		u, err := resolveHandle(s.kernel, r.Context(), req.Handle)
 		if err != nil {
 			// Deposit-by-key opens the peer's billing account (§13): the provider's single deposit
-			// both provisions and funds a not-yet-known subscriber's account — this replaces the old
+			// both provisions and funds a not-yet-known peer's account — this replaces the old
 			// friend handshake. Withdraw never auto-provisions (nothing to redeem from a fresh row).
 			if credit && !strings.HasPrefix(strings.TrimSpace(req.Handle), "@") {
 				kh := strings.TrimSpace(req.Handle)
@@ -236,7 +236,7 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	// A local account with no public key is a plain user, not a federation peer, and an @handle
 	// naming no account is not a peer either — resolvePeerKey rejects both rather than probing the
 	// handle as if it were a key (inspect is a peer-only window, §13). An unresolvable non-@
-	// identifier is a raw stranger key, which is exactly the inspect-before-subscribing case.
+	// identifier is a raw stranger key, which is exactly the inspect-before-peering case.
 	peerKey, err := s.resolvePeerKey(ctx, ident)
 	if err != nil {
 		writeErr(w, err)
@@ -296,48 +296,6 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 		resp["actions"] = docs
 	}
 	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *server) ctlSubscribePeer(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Key string `json:"key"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	if s.fed == nil {
-		writeErr(w, kernel.ErrInvalidState.Wrap("federation transport not running"))
-		return
-	}
-	ctx := r.Context()
-	peerKey := strings.TrimSpace(req.Key)
-
-	// Subscribe is a purely local import: read the peer's gossip (identity + actions), mount it
-	// under its self-reported handle, import its active public actions, and accumulate its gossip.
-	// Nothing is written to the peer — its billing account here is opened by a deposit, not a
-	// handshake. Bounded by fedOpTimeout so an offline peer fails promptly. The gossip's public_key
-	// must match the key we dialed (a consistency check).
-	octx, cancel := context.WithTimeout(ctx, fedOpTimeout)
-	defer cancel()
-	gRaw, err := s.fed.Gossip(octx, peerKey, "")
-	if err != nil {
-		writeErr(w, kernel.ErrExecutionFailed.Wrapf("cannot subscribe to %s: peer is unreachable (offline?)", peerKey))
-		return
-	}
-	var g kernel.GossipResponse
-	if json.Unmarshal(gRaw, &g) != nil || g.PublicKey != peerKey {
-		writeErr(w, kernel.ErrExecutionFailed.Wrap("peer gossip identity mismatch"))
-		return
-	}
-
-	u, err := s.kernel.CreateOrUpdateProxyPeer(ctx, g.Handle, peerKey)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	imported, skipped := bulkImportPeerActionsFed(ctx, s.fed, s.kernel, callerFrom(r), peerKey, u)
-	_, _ = s.kernel.AccumulateGossip(ctx, &g, g.PublicKey)
-	writeJSON(w, http.StatusOK, map[string]any{"handle": u.Handle, "imported": imported, "skipped": skipped})
 }
 
 // resolvePeerKey maps an @handle / key / id reference to a peer's public key, rejecting a local
@@ -692,29 +650,6 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 		"settlement_due": globalCfg.SettlementTrigger > 0 && gross >= globalCfg.SettlementTrigger})
 }
 
-func (s *server) ctlUnsubscribePeer(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Handle string `json:"handle"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	// Accept @handle or the peer's key. Purely local (no transport), so it works whether or not the
-	// peer is reachable. A clear not-found when the identifier names no known peer.
-	u, err := resolveHandle(s.kernel, r.Context(), req.Handle)
-	if err != nil {
-		writeErr(w, kernel.ErrNotFound.Wrapf("no peer %q", req.Handle))
-		return
-	}
-	// A local account with no key is not a peer: there is no catalog to drop.
-	if u.PublicKey == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrapf("%q is a local user, not a federation peer", req.Handle))
-		return
-	}
-	err = s.kernel.Unsubscribe(r.Context(), callerFrom(r), u.Handle)
-	writeOr(w, map[string]string{"handle": u.Handle}, err)
-}
-
 // writeOr writes v as JSON on success, or the error otherwise.
 func writeOr(w http.ResponseWriter, v any, err error) {
 	if err != nil {
@@ -722,45 +657,6 @@ func writeOr(w http.ResponseWriter, v any, err error) {
 		return
 	}
 	writeJSON(w, http.StatusOK, v)
-}
-
-// manifestFetcher is the transport capability bulk import needs; *fed.Transport satisfies it,
-// and tests supply a fake so the import + enable + publish logic is unit-testable without libp2p.
-type manifestFetcher interface {
-	Manifests(ctx context.Context, peerKey string) ([]json.RawMessage, error)
-}
-
-// bulkImportPeerActionsFed fetches a peer's manifests over the transport and imports them as
-// enabled, local remote_proxy actions. Local (not public) keeps friendship non-transitive: a peer
-// cannot reach this kernel's imports even by name, and they are never re-served in manifests/gossip
-// (§13). Returns the counts imported and skipped.
-func bulkImportPeerActionsFed(ctx context.Context, tr manifestFetcher, k *kernel.Kernel, subjectID, peerKey string, peer *kernel.User) (imported, skipped int) {
-	manifests, err := tr.Manifests(ctx, peerKey)
-	if err != nil {
-		return 0, 0
-	}
-	for _, raw := range manifests {
-		var m kernel.ActionManifest
-		if json.Unmarshal(raw, &m) != nil {
-			skipped++
-			continue
-		}
-		result, rErr := k.ReconcileRemoteAction(ctx, subjectID, peer.Handle, m.Name, &m)
-		if rErr != nil {
-			skipped++
-			continue
-		}
-		// Friending is an explicit trust act: activate every one of the peer's proxies, including
-		// Unchanged ones. A re-friend after unfriend sees byte-identical manifests (→ Unchanged) whose
-		// Active was cleared by the unfriend cascade; without this they'd stay dead and uncallable.
-		local := kernel.VisibilityLocal
-		for _, act := range append(append(result.Created, result.Updated...), result.Unchanged...) {
-			_ = enableAction(k, ctx, subjectID, act.ID)
-			_, _ = k.UpdateAction(ctx, subjectID, kernel.UpdateActionRequest{ID: act.ID, Visibility: &local})
-		}
-		imported += len(result.Created) + len(result.Unchanged)
-	}
-	return imported, skipped
 }
 
 // ---------------------------------------------------------------------------

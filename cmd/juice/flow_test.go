@@ -2329,11 +2329,11 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 			t.Fatal(err)
 		}
 		m.Signature = msig
-		importResult, err := kB.ImportRemoteAction(ctx, sysB.ID, peerAOnB.ID, m)
-		if err != nil || len(importResult.Created) == 0 {
-			t.Fatalf("RemoteBPS=%d import failed: err=%v created=%d", importBPS, err, len(importResult.Created))
+		proxy, err := kB.ImportPeerAction(ctx, peerAOnB.ID, m)
+		if err != nil {
+			t.Fatalf("RemoteBPS=%d import failed: %v", importBPS, err)
 		}
-		return importResult.Created[0].Price
+		return proxy.Price
 	}
 
 	price500 := importWithBPS(500)   // 5% duty
