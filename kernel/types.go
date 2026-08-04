@@ -665,10 +665,21 @@ type GossipUser struct {
 	Description string `json:"description,omitempty"`
 }
 
-// EvidenceBundle is one retained receipt, optionally with the rating that references it (§13).
+// RatingEvidence is the wire projection of a Rating (§13): the public reputation signal only —
+// value, note, timestamp, and the receipt link — with no rater or transaction identity. The
+// gossiping kernel signs it under sigDomainRating; the full Rating never crosses the wire.
+type RatingEvidence struct {
+	Rating           float64   `json:"rating"`
+	Note             *string   `json:"note"`
+	RatedReceiptHash string    `json:"rated_receipt_hash"`
+	CreatedAt        time.Time `json:"created_at"`
+	Signature        string    `json:"signature"`
+}
+
+// EvidenceBundle is one retained receipt, optionally with the rating projection referencing it (§13).
 type EvidenceBundle struct {
 	EvidenceReceipt *EvidenceReceipt `json:"evidence_receipt"`
-	Rating          *Rating          `json:"rating,omitempty"`
+	Rating          *RatingEvidence  `json:"rating,omitempty"`
 }
 
 // GossipResponse is the v0.13 gossip payload. It carries the full first-party catalog snapshot

@@ -35,7 +35,7 @@ func ratingEvidence(t *testing.T, issuer, subjKernel, action, receiptHash, remot
 		StartedAt: created, CreatedAt: created,
 	}
 	erJSON, _ := json.Marshal(er)
-	rating := kernel.Rating{ID: "r-" + receiptHash, Rating: val, RatedReceiptHash: receiptHash, CreatedAt: created}
+	rating := kernel.RatingEvidence{Rating: val, RatedReceiptHash: receiptHash, CreatedAt: created}
 	rJSON, _ := json.Marshal(rating)
 	return &kernel.EvidenceRow{
 		IssuerPublicKey: issuer, ReceiptHash: receiptHash, SubjectKernelPublicKey: subjKernel,

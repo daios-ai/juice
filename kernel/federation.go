@@ -1122,7 +1122,7 @@ func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey str
 		}
 		// Rating metrics: any issuer, but only counted when trade-backed and non-equivocated.
 		if e.RatingJSON != "" && !e.Equivocated {
-			var rt Rating
+			var rt RatingEvidence
 			if json.Unmarshal([]byte(e.RatingJSON), &rt) == nil {
 				linked := false
 				if e.RemoteReceiptHash != "" {
@@ -1319,12 +1319,34 @@ func (k *Kernel) gossipEvidencePage(ctx context.Context, ourKey, cursor string) 
 		}
 		b := EvidenceBundle{EvidenceReceipt: er}
 		if row.Rating != nil && row.Rating.RatedReceiptHash != "" {
-			b.Rating = row.Rating
+			re, perr := k.projectRating(row.Rating)
+			if perr != nil {
+				return nil, "", perr
+			}
+			b.Rating = re
 		}
 		bundles = append(bundles, b)
 		next = row.Cursor
 	}
 	return bundles, next, nil
+}
+
+// projectRating drops the identity fields of a locally-created rating and re-signs the projection
+// with the platform key under sigDomainRating (§13): the gossiping kernel is always the rater, so
+// it holds the key. Signed per serve, never stored.
+func (k *Kernel) projectRating(r *Rating) (*RatingEvidence, error) {
+	re := &RatingEvidence{
+		Rating:           r.Rating,
+		Note:             r.Note,
+		RatedReceiptHash: r.RatedReceiptHash,
+		CreatedAt:        r.CreatedAt,
+	}
+	sig, err := signJCS(k.cfg.SigningKey, sigDomainRating, re)
+	if err != nil {
+		return nil, err
+	}
+	re.Signature = sig
+	return re, nil
 }
 
 // ReadDiscoveredKernel returns the slim discovered-kernel row for a public key, or nil if unknown.
@@ -1527,8 +1549,8 @@ func (k *Kernel) ingestEvidenceBundle(ctx context.Context, issuerKey string, b E
 	erJSON, _ := json.Marshal(er)
 	row.EvidenceReceiptJSON = string(erJSON)
 	if b.Rating != nil {
-		// Wire-ingress rule: a gossiped rating must carry a hash and match the receipt, and be signed
-		// (v2 domain) by the issuing kernel.
+		// Wire-ingress rule: a gossiped rating projection must carry a hash matching the receipt and
+		// be signed (v2 domain) by the issuing kernel. It carries no rater/transaction identity (§13).
 		if b.Rating.RatedReceiptHash == "" || b.Rating.RatedReceiptHash != er.ReceiptHash {
 			return ErrInvalidInput.Wrap("rating does not match its receipt hash")
 		}

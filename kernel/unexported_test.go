@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -708,5 +709,57 @@ func TestSignatureDomainStoredVsWire(t *testing.T) {
 	// Cross-domain: same payload, different domain must not verify.
 	if err := verifyJCS(pub, sigDomainRating, payload, sig); err == nil {
 		t.Error("a receipt-domain signature must not verify under the rating domain")
+	}
+}
+
+// TestProjectRatingPrivacy: the gossip rating projection (§13) drops rater and transaction
+// identity, is signed under sigDomainRating by the gossiping kernel, and a full-Rating signature
+// does not verify over it — the projection is a distinct signed payload, not a field deletion.
+func TestProjectRatingPrivacy(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub := priv.Public().(ed25519.PublicKey)
+	k := &Kernel{cfg: Config{SigningKey: priv}}
+
+	note := "frequently timed out"
+	r := &Rating{
+		ID: "rating-uuid", RatedTxID: "tx-uuid", RaterUserID: "alice-uuid",
+		Rating: 1, Note: &note, RatedReceiptHash: "RECEIPT-HASH",
+		CreatedAt: time.Unix(1700000000, 0).UTC(),
+	}
+	proj, err := k.projectRating(r)
+	if err != nil {
+		t.Fatalf("projectRating: %v", err)
+	}
+
+	// No rater or transaction identity crosses the wire.
+	js, _ := json.Marshal(proj)
+	for _, leaked := range []string{"rater_user_id", "rated_tx_id", "rated_receipt_id", "alice-uuid", "tx-uuid", "rating-uuid"} {
+		if strings.Contains(string(js), leaked) {
+			t.Errorf("projection leaks %q: %s", leaked, js)
+		}
+	}
+	// The public signal is present.
+	if proj.Rating != 1 || proj.Note == nil || *proj.Note != note || proj.RatedReceiptHash != "RECEIPT-HASH" {
+		t.Errorf("projection dropped a public field: %+v", proj)
+	}
+
+	// The projection signature verifies under its own domain.
+	unsigned := *proj
+	unsigned.Signature = ""
+	if err := verifyJCS(pub, sigDomainRating, unsigned, proj.Signature); err != nil {
+		t.Errorf("projection signature must verify: %v", err)
+	}
+	// Tampering the value breaks it.
+	tampered := unsigned
+	tampered.Rating = 0
+	if err := verifyJCS(pub, sigDomainRating, tampered, proj.Signature); err == nil {
+		t.Error("a tampered projection value must fail verification")
+	}
+	// A full-Rating signature (over the identity-bearing record) does not verify over the projection.
+	rc := *r
+	rc.Signature = ""
+	fullSig, _ := signJCS(priv, sigDomainRating, rc)
+	if err := verifyJCS(pub, sigDomainRating, unsigned, fullSig); err == nil {
+		t.Error("a full-Rating signature must not verify over the projection")
 	}
 }
