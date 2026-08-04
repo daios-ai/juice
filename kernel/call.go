@@ -76,11 +76,10 @@ func (r ActionRef) String() string {
 }
 
 // ParseActionRef parses a "user[@kernel]/action" reference (§13, §14): `@` qualifies a kernel,
-// `/` namespaces the action, handles are bare. A leading `@` is accepted for one migration period
-// and stripped. Returns ErrInvalidInput if the format is invalid. A legacy "@mount/owner/name"
-// parses to {Owner: mount, Name: "owner/name"}, which still resolves against the local proxy cache.
+// `/` namespaces the action, handles are bare (no sigil). Returns ErrInvalidInput if the format is
+// invalid — including a sigil-prefixed "@owner/name", which parses to an empty owner and is rejected.
 func ParseActionRef(ref string) (ActionRef, error) {
-	ref = strings.TrimPrefix(strings.TrimSpace(ref), "@") // legacy tolerance
+	ref = strings.TrimSpace(ref)
 	i := strings.Index(ref, "/")
 	if i < 0 {
 		return ActionRef{}, ErrInvalidInput.Wrap("action ref must be owner[@kernel]/name")
@@ -153,6 +152,12 @@ func (k *Kernel) ResolveAction(ctx context.Context, ref string) (*Action, error)
 			if err != nil || a == nil {
 				return nil, ErrNotFound.Wrapf("action %s not found", ref)
 			}
+			// A proxy is stored under its mount user named "owner/name", so a bare
+			// "mount/owner/name" would otherwise resolve here (the legacy mount form). Proxies are
+			// addressable only kernel-qualified (owner@kernel/name), so reject it (§8, §13 grammar).
+			if a.Kind == KindRemoteProxy {
+				return nil, ErrNotFound.Wrapf("action %s not found", ref)
+			}
 			return a, nil
 		}
 		// Kernel-qualified: the local proxy cache row is owned by the peer's mount user and named
@@ -220,12 +225,12 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *U
 	return k.ImportPeerAction(ctx, mount.ID, *m)
 }
 
-// ResolveUser resolves a user reference to a User. It accepts "@handle" (or a bare
-// handle), a base64url public key, or a raw user ID — the shapes are disjoint, so a
-// single lookup disambiguates. This is the single user-resolution entry point shared by
-// Call, Run, the WASM host, native actions, federation, and the service layer.
+// ResolveUser resolves a user reference to a User. It accepts a bare handle, a base64url
+// public key, or a raw user ID — the shapes are disjoint, so a single lookup disambiguates.
+// This is the single user-resolution entry point shared by Call, Run, the WASM host, native
+// actions, federation, and the service layer.
 func (k *Kernel) ResolveUser(ctx context.Context, ident string) (*User, error) {
-	ident = strings.TrimPrefix(strings.TrimSpace(ident), "@") // legacy tolerance
+	ident = strings.TrimSpace(ident)
 	if looksLikeKey(ident) {
 		if u, err := k.store.ReadUserByPublicKey(ctx, ident); err == nil && u != nil {
 			return u, nil

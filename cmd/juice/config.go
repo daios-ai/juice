@@ -178,7 +178,7 @@ func DefaultServerConfig() ServerConfig {
 		// extend for a private network; clear it to run standalone.
 		BootstrapPeers:             []string{"/dns4/daios.ai/tcp/31313/p2p/12D3KooWJ5ZwPSAV17q2hv6ttZ8J3hHsTMNaSC61kbVbvxvtArjK"},
 		RemoteRetryIntervalSeconds: 60,
-		PeerRetentionDays:          30,
+		PeerRetentionDays:          90,
 		DiscoveryIntervalSeconds:   300,
 	}
 }

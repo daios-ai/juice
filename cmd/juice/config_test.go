@@ -40,9 +40,9 @@ func TestPeerRetention(t *testing.T) {
 	if got := (ServerConfig{PeerRetentionDays: -5}).peerRetention(); got != 0 {
 		t.Errorf("negative: got %v, want 0 (disabled)", got)
 	}
-	// The default config ships a 30-day retention.
-	if DefaultServerConfig().peerRetention() != 30*24*time.Hour {
-		t.Errorf("default config retention = %v, want 720h", DefaultServerConfig().peerRetention())
+	// The default config ships a 90-day retention (§14).
+	if DefaultServerConfig().peerRetention() != 90*24*time.Hour {
+		t.Errorf("default config retention = %v, want 2160h", DefaultServerConfig().peerRetention())
 	}
 }
 

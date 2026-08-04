@@ -55,8 +55,8 @@ flow_fed_rename() {
     # The local mount handle is chosen with admin rename (by peer key). After renaming kernel-r to
     # myremote, R's action is addressable and callable under the new handle.
     j "$FED_DBL" "$FED_HL" admin rename -- "$FED_RKEY" myremote >/dev/null 2>&1 || { fail "fed_rename.rename" "rename failed"; return; }
-    assert_json "fed_rename.proxy_remounted" "$(jj "$FED_DBL" "$FED_HL" action show myremote/sys/greet)" id "$FED_PROXY"
-    assert_nonempty "fed_rename.callable_under_new" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run myremote/sys/greet '{}')" tx_id)"
+    assert_json "fed_rename.proxy_remounted" "$(jj "$FED_DBL" "$FED_HL" action show sys@myremote/greet)" id "$FED_PROXY"
+    assert_nonempty "fed_rename.callable_under_new" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@myremote/greet '{}')" tx_id)"
 }
 
 # _all_receipt_checks vr_json — "OK" iff valid=true and all 9 receipt checks are true.

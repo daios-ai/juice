@@ -131,7 +131,7 @@ func TestAdminRenameOverTCP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, status := tcpDo(t, suTok, "POST", "/control/users/@bob/rename",
+	body, status := tcpDo(t, suTok, "POST", "/control/users/bob/rename",
 		map[string]any{"new_handle": "bob-retired"})
 	if status != http.StatusOK {
 		t.Fatalf("rename status %d: %s", status, body)

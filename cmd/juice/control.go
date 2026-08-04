@@ -132,15 +132,15 @@ func (s *server) ctlAdjust(credit bool) http.HandlerFunc {
 		u, err := resolveHandle(s.kernel, r.Context(), req.Handle)
 		if err != nil {
 			// Deposit-by-key opens the peer's billing account (§13): the provider's single deposit
-			// both provisions and funds a not-yet-known peer's account — this replaces the old
-			// friend handshake. Withdraw never auto-provisions (nothing to redeem from a fresh row).
-			if credit && !strings.HasPrefix(strings.TrimSpace(req.Handle), "@") {
-				kh := strings.TrimSpace(req.Handle)
-				short := kh
+			// both provisions and funds a not-yet-known peer's account. Only a public key auto-
+			// provisions (a bare handle never means a key, §14); withdraw never does (nothing to
+			// redeem from a fresh row).
+			if key := strings.TrimSpace(req.Handle); credit && kernel.IsPublicKey(key) {
+				short := key
 				if len(short) > 8 {
 					short = short[:8]
 				}
-				if peer, aerr := s.kernel.AddPeer(r.Context(), callerFrom(r), "@k-"+short, kh); aerr == nil {
+				if peer, aerr := s.kernel.AddPeer(r.Context(), callerFrom(r), "k-"+short, key); aerr == nil {
 					u = peer
 					err = nil
 				}
@@ -226,8 +226,8 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 }
 
 // ctlInspectPeer has defined behavior whether the peer is up or down (§13). It always reports
-// reachability; a reachable peer yields live identity/actions/friends; an unreachable but
-// previously-friended peer degrades to the last-known local data; a stranger that is unreachable
+// reachability; a reachable peer yields live identity/actions/evidence; an unreachable but
+// previously-known peer degrades to the last-known local data; a stranger that is unreachable
 // yields an empty view with source="none". Every remote call is bounded by fedOpTimeout so an
 // offline peer fails in seconds, not on the client timeout.
 func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
@@ -302,7 +302,7 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 // account that is not a federation peer. Shared by the peer commands.
 func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, error) {
 	if ident == "" {
-		return "", kernel.ErrInvalidInput.Wrap("a peer @handle or public key is required")
+		return "", kernel.ErrInvalidInput.Wrap("a peer handle or public key is required")
 	}
 	if u, err := resolveHandle(s.kernel, ctx, ident); err == nil {
 		if u.PublicKey == "" {
@@ -313,8 +313,8 @@ func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, erro
 	// An unresolvable identifier with public-key shape is a raw stranger key (inspecting or addressing
 	// a peer before it is known locally) — the transport reports it unreachable if it is not real.
 	// Anything else is simply an unknown peer (§14 productions: a bare handle never means a key).
-	if kernel.IsPublicKey(strings.TrimPrefix(ident, "@")) {
-		return strings.TrimPrefix(ident, "@"), nil
+	if kernel.IsPublicKey(ident) {
+		return ident, nil
 	}
 	return "", kernel.ErrNotFound.Wrapf("no peer %q", ident)
 }

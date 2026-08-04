@@ -97,15 +97,15 @@ subdirectory holds regenerable data and is safe to delete.
 
 # Create a user and log in (token stored under $JUICE_HOME/kernel/)
 # `user create` prints a one-time recovery phrase — write it down.
-./juice user create @alice
-./juice auth login @alice
+./juice user create alice
+./juice auth login alice
 
 # Register an action and activate it
 ./juice action create echo --kind http --source https://httpbin.org/post --price 0
-./juice action enable @alice/echo
+./juice action enable alice/echo
 
 # Run it — creates a funded process, calls the action, closes the process
-./juice run @alice/echo '{"msg":"hello"}'
+./juice run alice/echo '{"msg":"hello"}'
 
 # Inspect and rate the resulting transaction
 ./juice tx show <tx-id>

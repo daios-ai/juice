@@ -741,12 +741,7 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportPeerAction: %v", err)
 	}
-	a := result
-
-	pubFed := kernel.VisibilityPublic
-	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed}); err != nil {
-		t.Fatalf("UpdateAction public: %v", err)
-	}
+	a := result // ImportPeerAction leaves the proxy active+local, callable by a local caller (§8)
 
 	caller := setupUser(t, st, "proxy-caller", 0)
 	p, tr := beginTestRun(t, st, caller.ID, a)
@@ -821,11 +816,7 @@ func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel,
 	if err != nil {
 		t.Fatalf("ImportPeerAction: %v", err)
 	}
-	a := result
-	pubFed := kernel.VisibilityPublic
-	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed}); err != nil {
-		t.Fatal(err)
-	}
+	a := result // proxy is active+local after import (§8)
 	// Fund the caller with exactly the proxy price so a full refund restores the original balance.
 	caller := setupUser(t, st, "settle-caller", a.Price)
 	return k, a, caller
@@ -853,7 +844,7 @@ func TestRetryExpiredRemoteTraceSettlesAsFailure(t *testing.T) {
 
 	// Real root run: the empty receipt makes the proxy call time out; the process stays open and
 	// the trace persists in the DB with its idempotency key (beginRun records the dispatch).
-	if _, err := k.Run(ctx, caller.ID, "settle-peer/settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -910,7 +901,7 @@ func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
 	premium := (mp*bps + 9999) / 10000
 
 	// Call while the peer is offline → pending, no settled transaction, funds locked.
-	if _, err := k.Run(ctx, caller.ID, "settle-peer/settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (pending), got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -969,7 +960,7 @@ func TestAwaitingReceiptSince(t *testing.T) {
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "await-action", 1000)
 
 	// Offline call → parked, awaiting a receipt.
-	if _, err := k.Run(ctx, caller.ID, "settle-peer/settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	pend, _ := st.ListPendingRemoteTraces(ctx)
@@ -1017,7 +1008,7 @@ func TestPendingRemoteTracesAndRetryWrappers(t *testing.T) {
 	mp := k.RemoteManifestPrice(a.Price)
 	premium := (mp*bps + 9999) / 10000
 
-	if _, err := k.Run(ctx, caller.ID, "settle-peer/settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	pending, err := k.PendingRemoteTraces(ctx)
@@ -1272,6 +1263,106 @@ func TestSettleRemoteCallRejectsRefreshProxyOnSuccess(t *testing.T) {
 	assertUserBalance(t, st, caller.ID, a.Price, 0) // fully refunded, nothing paid
 }
 
+// Rule D (§8): a remote_proxy is kernel-managed; manual enable/disable, update, and delete are all
+// rejected. A hand-set public proxy would pass a peer's CanCall and break non-transitivity.
+func TestProxyMutationsRejected(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	remoteUser, err := k.AddPeer(ctx, sys.ID, "mut-peer", base64.RawURLEncoding.EncodeToString(pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := kernel.ActionManifest{
+		ActionID: "mut-act", OwnerHandle: "mut-peer", Name: "svc", Description: "svc",
+		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+	}
+	m.Signature, _ = kernel.SignManifest(priv, &m)
+	proxy, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("ImportPeerAction: %v", err)
+	}
+	pub2 := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: proxy.ID, Visibility: &pub2}); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("UpdateAction(visibility=public) on proxy: want ErrInvalidState, got %v", err)
+	}
+	if err := k.DeleteAction(ctx, sys.ID, proxy.ID); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("DeleteAction on proxy: want ErrInvalidState, got %v", err)
+	}
+	// The proxy row is untouched: still active and local, never public.
+	if got, _ := st.ReadAction(ctx, proxy.ID); got == nil || got.Visibility != kernel.VisibilityLocal || !got.Active {
+		t.Errorf("proxy must stay active+local after rejected mutations, got %+v", got)
+	}
+}
+
+// B5 (§8, §13 grammar): a proxy is addressable only kernel-qualified (owner@kernel/name) or by raw
+// id — never by the legacy bare mount form (mount/owner/name), which must not resolve.
+func TestProxyAddressableFormsOnly(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	peer, err := k.AddPeer(ctx, sys.ID, "mp-peer", base64.RawURLEncoding.EncodeToString(pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := kernel.ActionManifest{
+		ActionID: "mp-act", OwnerHandle: "mp-owner", Name: "act", Description: "svc",
+		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+	}
+	m.Signature, _ = kernel.SignManifest(priv, &m)
+	proxy, err := k.ImportPeerAction(ctx, peer.ID, m)
+	if err != nil {
+		t.Fatalf("ImportPeerAction: %v", err)
+	}
+	// Kernel-qualified resolves; raw id resolves; the legacy mount form does not.
+	if a, err := k.ResolveAction(ctx, "mp-owner@mp-peer/act"); err != nil || a.ID != proxy.ID {
+		t.Errorf("owner@kernel/name: want proxy, got (%v, %v)", a, err)
+	}
+	if a, err := k.ResolveAction(ctx, proxy.ID); err != nil || a.ID != proxy.ID {
+		t.Errorf("raw id: want proxy, got (%v, %v)", a, err)
+	}
+	if _, err := k.ResolveAction(ctx, "mp-peer/mp-owner/act"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("legacy mount form must not resolve: want ErrNotFound, got %v", err)
+	}
+}
+
+// D (§3, §14): a sigil-prefixed handle is rejected wherever it enters — a manifest owner_handle is
+// not silently embedded into a proxy name, and a step's required-caller "@bob" is not misparsed as a
+// kernel-qualified ref with an empty owner.
+func TestSigilHandleRejectedAtBoundaries(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	peer, err := k.AddPeer(ctx, sys.ID, "sig-peer", base64.RawURLEncoding.EncodeToString(pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := kernel.ActionManifest{
+		ActionID: "sig-act", OwnerHandle: "@bob", Name: "act", Description: "svc",
+		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+	}
+	m.Signature, _ = kernel.SignManifest(priv, &m)
+	if _, err := k.ImportPeerAction(ctx, peer.ID, m); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("import with owner_handle=@bob: want ErrInvalidInput, got %v", err)
+	}
+
+	if _, _, err := k.ResolveRequiredCaller(ctx, "@bob"); err == nil {
+		t.Error("ResolveRequiredCaller(@bob): want error, got nil")
+	}
+}
+
 // Rule D (§8): a remote_proxy's active bit is kernel-managed; manual enable/disable is rejected.
 func TestSetActiveRejectsRemoteProxy(t *testing.T) {
 	st := newTestStore(t)
@@ -1455,16 +1546,18 @@ func TestResolvePrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// By bare handle, by legacy @handle, and by raw id all resolve to the stable (id, handle).
-	for _, ref := range []string{"alice", "@alice", u.ID} {
+	// By bare handle and by raw id resolve to the stable (id, handle).
+	for _, ref := range []string{"alice", u.ID} {
 		id, handle, err := k.ResolvePrincipal(ctx, ref)
 		if err != nil || id != u.ID || handle != "alice" {
 			t.Errorf("ResolvePrincipal(%q) = (%q,%q,%v), want (%q,alice,nil)", ref, id, handle, err, u.ID)
 		}
 	}
-	// An unknown reference is a plain not-found.
-	if _, _, err := k.ResolvePrincipal(ctx, "nobody"); err == nil {
-		t.Error("ResolvePrincipal(unknown): expected error")
+	// A sigil-prefixed handle no longer resolves (handles are bare, §14), nor does an unknown ref.
+	for _, ref := range []string{"@alice", "nobody"} {
+		if _, _, err := k.ResolvePrincipal(ctx, ref); err == nil {
+			t.Errorf("ResolvePrincipal(%q): expected error", ref)
+		}
 	}
 }
 
@@ -1555,11 +1648,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	a := result
-	pubFed2 := kernel.VisibilityPublic
-	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed2}); err != nil {
-		t.Fatal(err)
-	}
+	a := result // proxy is active+local after import (§8)
 
 	caller := setupUser(t, st, "verify-caller", 0)
 	p, tr := beginTestRun(t, st, caller.ID, a)
@@ -1678,9 +1767,7 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	msig, _ := kernel.SignManifest(priv, &m)
 	m.Signature = msig
 	result, _ := k.ImportPeerAction(ctx, remoteUser.ID, m)
-	a := result
-	pubFed4 := kernel.VisibilityPublic
-	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed4})
+	a := result // proxy is active+local after import (§8)
 
 	remoteReceipt := &kernel.Receipt{
 		ID: uuid.New().String(), IssuerUserID: "rs",
@@ -1740,11 +1827,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	a := result
-	pubFed := kernel.VisibilityPublic
-	if _, err := k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubFed}); err != nil {
-		t.Fatal(err)
-	}
+	a := result // proxy is active+local after import (§8)
 
 	caller := setupUser(t, st, "del-caller", 0)
 	p, tr := beginTestRun(t, st, caller.ID, a)
@@ -1771,8 +1854,9 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	}
 	_ = reply
 
-	// Soft-delete the proxy action.
-	if err := k.DeleteAction(ctx, sys.ID, a.ID); err != nil {
+	// The proxy row vanishes at the store level (e.g. peer-retention purge) — the kernel forbids a
+	// manual proxy delete (§8), so model the purge with a direct store delete.
+	if err := st.DeleteAction(ctx, a.ID); err != nil {
 		t.Fatalf("DeleteAction: %v", err)
 	}
 
@@ -2008,13 +2092,13 @@ func TestRemoteCallNotDispatchedFailsFast(t *testing.T) {
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "nd-action", 1000)
 	before, _ := st.ReadUser(ctx, caller.ID)
 
-	_, err := k.Run(ctx, caller.ID, "settle-peer/settle-peer/settleact", map[string]any{})
+	_, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{})
 	if !errors.Is(err, kernel.ErrPeerUnreachable) {
 		t.Fatalf("Run: expected ErrPeerUnreachable, got %v", err)
 	}
 	var ke *kernel.KernelError
 	if !errors.As(err, &ke) || ke.Meta["peer"] != "settle-peer" {
-		t.Errorf("expected Meta[peer]=@settle-peer, got %+v", err)
+		t.Errorf("expected Meta[peer]=settle-peer, got %+v", err)
 	}
 	// Settled as a failure, not parked: no pending trace, exactly one failure transaction.
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 0 {
@@ -2051,7 +2135,7 @@ func TestRetryNeverFailsFastOnNotDispatched(t *testing.T) {
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "retry-nd-action", 1000)
 	mp := a.Price * 10000 / (10000 + bps)
 
-	if _, err := k.Run(ctx, caller.ID, "settle-peer/settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (parked), got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -2127,7 +2211,7 @@ func TestSettleRemoteCallPeerUnfunded(t *testing.T) {
 				}
 				var ke *kernel.KernelError
 				if !errors.As(err, &ke) || ke.Meta["peer"] != "settle-peer" {
-					t.Errorf("expected Meta[peer]=@settle-peer, got %+v", err)
+					t.Errorf("expected Meta[peer]=settle-peer, got %+v", err)
 				}
 			} else {
 				if !errors.Is(err, kernel.ErrExecutionFailed) {

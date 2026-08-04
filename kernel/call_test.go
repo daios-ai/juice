@@ -1728,7 +1728,9 @@ func TestCallRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 		t.Fatalf("CreateAction: %v", err)
 	}
 
-	_, err := k.Run(ctx, caller.ID, "rpme-owner/rpme-action", map[string]any{})
+	// A proxy is addressable by its action id (never a bare owner/name, §8); the missing
+	// FederationExecutor then settles the call as a failure.
+	_, err := k.Run(ctx, caller.ID, remoteAct.ID, map[string]any{})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState for missing federation executor, got %v", err)
 	}
@@ -1770,8 +1772,8 @@ func TestParseActionRef(t *testing.T) {
 		{"alice/greet/subname", "alice", "", "greet/subname", false}, // names may contain /
 		{"sys/llm/chat", "sys", "", "llm/chat", false},          // multi-segment native
 		{"bob@acme/foo", "bob", "acme", "foo", false},           // kernel-qualified
-		{"alice/greet", "alice", "", "greet", false},           // legacy @ stripped
-		{"acme/alice/foo", "acme", "", "alice/foo", false},     // legacy 3-seg → proxy-cache shape
+		{"@alice/greet", "", "", "", true},                      // sigil-prefixed owner rejected (§14)
+		{"acme/alice/foo", "acme", "", "alice/foo", false},     // owner with a slashed action name
 		{"bob@/foo", "", "", "", true},                          // empty kernel
 		{"bob/", "", "", "", true},                             // empty name
 		{"alice", "", "", "", true},                             // missing /

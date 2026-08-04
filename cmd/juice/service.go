@@ -1146,7 +1146,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		if len(short) > 8 {
 			short = short[:8]
 		}
-		counterparty, err = k.CreateOrUpdateProxyPeer(ctx, "@k-"+short, cpPubKey)
+		counterparty, err = k.CreateOrUpdateProxyPeer(ctx, "k-"+short, cpPubKey)
 		if err != nil {
 			return 0, nil, err
 		}

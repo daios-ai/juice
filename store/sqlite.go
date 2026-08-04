@@ -322,19 +322,9 @@ func (s *DB) PurgePeerCascade(ctx context.Context, userID string) error {
 			return dbErr(err, "delete actions")
 		}
 		if pubKey.Valid && pubKey.String != "" {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM discovered_kernels WHERE public_key=?`, pubKey.String); err != nil {
-				return dbErr(err, "delete discovered_kernels")
-			}
-			// Regenerable discovery/evidence caches purge with the peer (§13): the peer's discovery
-			// docs (and their FTS mirror) and its evidence rows both as issuer and as subject.
-			if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key LIKE ? || '/%'`, pubKey.String); err != nil {
-				return dbErr(err, "delete discovery_fts")
-			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_docs WHERE kernel_public_key=?`, pubKey.String); err != nil {
-				return dbErr(err, "delete discovery_docs")
-			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM evidence WHERE issuer_public_key=? OR subject_kernel_public_key=?`, pubKey.String, pubKey.String); err != nil {
-				return dbErr(err, "delete evidence")
+			// Regenerable discovery/evidence caches purge with the peer (§13).
+			if err := deleteDiscoveryCache(ctx, tx, pubKey.String); err != nil {
+				return err
 			}
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -346,6 +336,63 @@ func (s *DB) PurgePeerCascade(ctx context.Context, userID string) error {
 	})
 }
 
+// deleteDiscoveryCache removes one kernel's regenerable discovery cache within tx: its discovery
+// docs and their FTS mirror, its evidence rows (as issuer and as subject), and its discovered_kernels
+// row. Shared by peer purge (§13 Retention) and stale non-peer eviction; order is free — no FK links
+// these tables. Doc keys are "<kernel_public_key>/…", so the FTS delete is prefix-scoped by key.
+func deleteDiscoveryCache(ctx context.Context, tx *sql.Tx, pubKey string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key LIKE ? || '/%'`, pubKey); err != nil {
+		return dbErr(err, "delete discovery_fts")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_docs WHERE kernel_public_key=?`, pubKey); err != nil {
+		return dbErr(err, "delete discovery_docs")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM evidence WHERE issuer_public_key=? OR subject_kernel_public_key=?`, pubKey, pubKey); err != nil {
+		return dbErr(err, "delete evidence")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM discovered_kernels WHERE public_key=?`, pubKey); err != nil {
+		return dbErr(err, "delete discovered_kernels")
+	}
+	return nil
+}
+
+// PurgeStaleDiscovery evicts directory-only discovered kernels — those stale past cutoff and not
+// backed by a peer user row — with their whole discovery cache (§13 Retention). Peer-backed kernels
+// are left to PurgePeerCascade. One transaction; returns the count evicted.
+func (s *DB) PurgeStaleDiscovery(ctx context.Context, cutoff time.Time) (int, error) {
+	var evicted int
+	err := s.withTx(ctx, "purge stale discovery", func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx,
+			`SELECT public_key FROM discovered_kernels
+			  WHERE updated_at <= ?
+			    AND public_key NOT IN (SELECT public_key FROM users WHERE public_key IS NOT NULL AND public_key != '')`,
+			timeToStr(cutoff))
+		if err != nil {
+			return dbErr(err, "list stale discovery")
+		}
+		var keys []string
+		for rows.Next() {
+			var k string
+			if err := rows.Scan(&k); err != nil {
+				rows.Close()
+				return dbErr(err, "scan stale discovery")
+			}
+			keys = append(keys, k)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return dbErr(err, "stale discovery rows")
+		}
+		for _, k := range keys {
+			if err := deleteDiscoveryCache(ctx, tx, k); err != nil {
+				return err
+			}
+		}
+		evicted = len(keys)
+		return nil
+	})
+	return evicted, err
+}
 
 func scanUserFn(scan func(...any) error) (*kernel.User, error) {
 	var u kernel.User

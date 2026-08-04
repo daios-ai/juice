@@ -67,7 +67,7 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 # Keys: fee_bps script_timeout_ms kernel_handle bootstrap_peers.
 write_config() {
     local db="$1"; shift
-    local fee_bps=0 script_timeout_ms=10000 kernel_handle="@test-kernel" bootstrap_peers="" remote_retry_interval_seconds=60 discovery_interval_seconds=300
+    local fee_bps=0 script_timeout_ms=10000 kernel_handle="test-kernel" bootstrap_peers="" remote_retry_interval_seconds=60 discovery_interval_seconds=300
     local exposure_max=0 settlement_trigger=0 settlement_quantum=0
     local a
     for a in "$@"; do case "$a" in
@@ -228,9 +228,9 @@ juice_token_dir() {
 # ---------------------------------------------------------------------------
 # Fixtures — the repeated preambles, once.
 # ---------------------------------------------------------------------------
-# make_admin db home         — boot a server and log @sys in (home is @sys's home).
-make_admin() { start_server "$1" "$2" "${@:3}" && j "$1" "$2" auth login @sys --password sys-pass >/dev/null 2>&1; }
-# make_user db admin_home user_home handle [password]  — create @handle (as @sys) and log it
+# make_admin db home         — boot a server and log sys in (home is sys's home).
+make_admin() { start_server "$1" "$2" "${@:3}" && j "$1" "$2" auth login sys --password sys-pass >/dev/null 2>&1; }
+# make_user db admin_home user_home handle [password]  — create handle (as sys) and log it
 # in under user_home. Default password is "userpass" so curl-based checks can reference it.
 make_user() {
     local db="$1" ah="$2" uh="$3" h="$4" pw="${5:-userpass}"

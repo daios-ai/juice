@@ -74,7 +74,7 @@ func userConnectCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "connect <selector>",
-		Short: "Connect your account so actions can act on your behalf upstream (selector: @owner, @owner/dir, or @owner/name)",
+		Short: "Connect your account so actions can act on your behalf upstream (selector: owner, owner/dir, or owner/name)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			selector := args[0]
@@ -343,7 +343,7 @@ func userDisconnectCmd() *cobra.Command {
 	var account string
 	cmd := &cobra.Command{
 		Use:   "disconnect [selector]",
-		Short: "Disconnect actions by selector (@owner, @owner/dir, or @owner/name), or a whole upstream account (--account)",
+		Short: "Disconnect actions by selector (owner, owner/dir, or owner/name), or a whole upstream account (--account)",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if account != "" {

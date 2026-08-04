@@ -245,14 +245,14 @@ type fedDiscoverer interface {
 	Gossip(ctx context.Context, peerKey, cursor string) (json.RawMessage, error)
 }
 
-// discoverOnce runs one known-network refresh plus friend sync (§13). When directory is set, it
+// discoverOnce runs one known-network refresh plus peer sync (§13). When directory is set, it
 // advertises under the discovery rendezvous and pulls gossip from the bootstrap seeds plus enumerated
 // DHT providers, accumulating each into the discovered-kernels table (introducer = the pulled kernel's
-// own key, a first-party self-report). Friend sync always runs: it pulls gossip directly from each
-// friended peer and, on success, persists that peer's liveness and reported credit via recordSync.
+// own key, a first-party self-report). Peer sync always runs: it pulls gossip directly from each
+// known peer and, on success, persists that peer's liveness and reported credit via recordSync.
 // Best-effort throughout — an offline DHT or peer is skipped, never fatal.
 func discoverOnce(ctx context.Context, d fedDiscoverer, directory bool,
-	friendKeys func(context.Context) []string,
+	peerKeys func(context.Context) []string,
 	accumulate func(context.Context, *kernel.GossipResponse, string) (string, error),
 	recordSync func(context.Context, string, *int64) error,
 	getCursor func(context.Context, string) string,
@@ -260,10 +260,10 @@ func discoverOnce(ctx context.Context, d fedDiscoverer, directory bool,
 	logger *log.Logger) {
 
 	keys := map[string]bool{}
-	friends := map[string]bool{}
-	for _, k := range friendKeys(ctx) {
+	peers := map[string]bool{}
+	for _, k := range peerKeys(ctx) {
 		keys[k] = true
-		friends[k] = true
+		peers[k] = true
 	}
 	if directory {
 		if err := d.Advertise(ctx); err != nil {
@@ -293,8 +293,8 @@ func discoverOnce(ctx context.Context, d fedDiscoverer, directory bool,
 		if aerr == nil && next != "" && next != cursor {
 			_ = setCursor(ctx, key, next)
 		}
-		if friends[key] {
-			// A friend answered: cache last_seen and, when it reported one, our credit there (§13).
+		if peers[key] {
+			// A known peer answered: cache last_seen and, when it reported one, our credit there (§13).
 			_ = recordSync(ctx, key, g.CounterpartyBalance)
 		}
 	}
@@ -413,9 +413,9 @@ func registerRoutes(r chi.Router, srv *server) {
 		})
 	})
 
-	// Federation has no HTTP surface: peer identity, the friend handshake, inbound calls,
-	// manifests, gossip, and inspection travel over the libp2p transport (§13), started in
-	// runServer. Public action listing stays on HTTP for local/user clients.
+	// Federation has no HTTP surface: peer identity, inbound calls, manifests, gossip, and
+	// inspection travel over the libp2p transport (§13), started in runServer. Public action
+	// listing stays on HTTP for local/user clients.
 	r.Get("/v1/actions", srv.getActions)
 
 	// Actions (authenticated).
@@ -1585,9 +1585,10 @@ type fedHandlers struct {
 }
 
 // keyLimiter is a per-key token-bucket rate limiter. Keyed by peer public key on the federation
-// call path — peer identities are free to mint (§13), but inbound calls only come from friended
-// peers, so the key set is operator-bounded and needs no eviction. Complements the transport's
-// frame/deadline caps and the economic (prepaid-balance) backstop with a call-rate ceiling.
+// call path — inbound calls are permissionless, so any signed key can call (§13); the distinct-key
+// set is therefore bounded by the transport's Sybil caps (per-source/per-peer/global, §13), not by
+// peering. Complements those transport frame/deadline caps and the economic (prepaid-balance)
+// backstop with a per-key call-rate ceiling.
 type keyLimiter struct {
 	mu      sync.Mutex
 	entries map[string]*rate.Limiter

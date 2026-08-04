@@ -902,7 +902,7 @@ func (k *Kernel) SignStepList(counterparty, recipient string) (sig, ts string, e
 // discovered-kernel label NEVER resolves a reference (§13), so no kernel can capture a name by
 // gossiping a label first. mount may be nil for a raw key not yet mounted.
 func (k *Kernel) ResolveKernelKey(ctx context.Context, ident string) (peerKey string, mount *User, err error) {
-	ident = strings.TrimPrefix(strings.TrimSpace(ident), "@")
+	ident = strings.TrimSpace(ident)
 	if u, err := k.store.ReadUserByHandle(ctx, ident); err == nil && u != nil && u.PublicKey != "" {
 		return u.PublicKey, u, nil
 	}
@@ -920,13 +920,19 @@ func (k *Kernel) ResolveKernelKey(ctx context.Context, ident string) (peerKey st
 // A raw-key qualifier is mounted on demand (best-effort alias); the remote user is resolved to its
 // stable id over /juice/fed/resolve/1.
 func (k *Kernel) ResolveRequiredCaller(ctx context.Context, ref string) (callerID, remoteID string, err error) {
-	owner, kernelAlias, hasKernel := strings.Cut(strings.TrimPrefix(strings.TrimSpace(ref), "@"), "@")
+	ref = strings.TrimSpace(ref)
+	owner, kernelAlias, hasKernel := strings.Cut(ref, "@")
 	if !hasKernel {
 		u, uerr := k.ResolveUser(ctx, ref)
 		if uerr != nil || u == nil {
 			return "", "", ErrNotFound.Wrapf("required caller %q not found", ref)
 		}
 		return u.ID, "", nil
+	}
+	// A sigil-prefixed "@bob" cuts to an empty owner; reject it rather than treat it as a
+	// kernel-qualified ref with no owner (handles are bare, §14).
+	if owner == "" || kernelAlias == "" {
+		return "", "", ErrInvalidInput.Wrapf("required caller %q must be owner@kernel", ref)
 	}
 	peerKey, mount, kerr := k.ResolveKernelKey(ctx, kernelAlias)
 	if kerr != nil {
@@ -1162,9 +1168,11 @@ func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey str
 
 // PurgeIdlePeers reaps peers idle past PeerRetention at zero balance (§13 Retention): it deletes
 // each such peer's proxy actions, stats, discovery docs, evidence, and discovered_kernels rows and
-// forgets the peer identity, keeping the transaction ledger intact. Internal maintenance (like
-// RetryPendingRemoteDispatches, no superuser gate) — driven by the serve sweep and once at startup.
-// PeerRetention <= 0 disables it. Returns the number of peers purged.
+// forgets the peer identity, keeping the transaction ledger intact. In the same pass it also evicts
+// directory-only discovered kernels stale past the same horizon (never-peer cache rows that would
+// otherwise accumulate unbounded, §13). Internal maintenance (like RetryPendingRemoteDispatches, no
+// superuser gate) — driven by the serve sweep and once at startup. PeerRetention <= 0 disables it.
+// Returns the number of peers purged.
 func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 	if k.cfg.PeerRetention <= 0 {
 		return 0, nil
@@ -1184,6 +1192,13 @@ func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 		}
 		purged++
 		logger.Info("peer.purged", "user_id", id)
+	}
+	// Evict directory-only discovered kernels stale past the same horizon, so the discovery cache
+	// stays bounded on a busy network (peer-backed kernels are handled by the loop above).
+	if evicted, derr := k.store.PurgeStaleDiscovery(ctx, cutoff); derr != nil {
+		logger.Error("discovery.purge.failed", "error", derr)
+	} else if evicted > 0 {
+		logger.Info("discovery.purged", "kernels", evicted)
 	}
 	return purged, nil
 }
@@ -1631,6 +1646,10 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 		return nil, ErrInvalidInput.Wrap("manifest missing name")
 	case m.OwnerHandle == "":
 		return nil, ErrInvalidInput.Wrap("manifest missing owner_handle")
+	case strings.ContainsAny(m.OwnerHandle, "@/"):
+		// owner_handle is concatenated into the proxy name/source below; a sigil or slash would
+		// corrupt the reference, so a bare handle is required (§3, §14) — not silently rewritten.
+		return nil, ErrInvalidInput.Wrap("manifest owner_handle must be a bare handle")
 	case m.Description == "":
 		return nil, ErrInvalidInput.Wrap("manifest missing description")
 	case m.InputSchema == nil:
@@ -1697,7 +1716,7 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 				Name:           name,
 				Kind:           KindRemoteProxy,
 				Active:         false,
-				Visibility:     VisibilityPrivate, // promoted to local when the peer is friended (§13)
+				Visibility:     VisibilityPrivate, // promoted to local on successful resolve (§8, below)
 				Price:          proxyPrice,
 				Description:    m.Description,
 				InputSchema:    m.InputSchema,

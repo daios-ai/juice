@@ -21,6 +21,16 @@ const (
 )
 
 // bootstrap runs idempotent startup tasks before the server accepts requests.
+// requireBareHandle rejects a kernel handle carrying a sigil or path separator; handles are bare
+// (§3, §14), and this one is concatenated into gossip and references, so it is validated — not
+// silently rewritten — wherever it enters (prompt, env, or config.json).
+func requireBareHandle(h string) error {
+	if strings.ContainsAny(h, "@/") {
+		return fmt.Errorf("kernel handle %q must be bare (no @ or /)", h)
+	}
+	return nil
+}
+
 // On first boot (no superuser configured), it prompts for credentials interactively.
 func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 	ctx := context.Background()
@@ -36,7 +46,7 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 		if globalCfg.KernelHandle == "" {
 			ph := os.Getenv("JUICE_BOOTSTRAP_KERNEL_HANDLE")
 			for ph == "" && term.IsTerminal(int(os.Stdin.Fd())) {
-				fmt.Fprint(os.Stderr, "Kernel name — the @handle this kernel presents to the network (required): ")
+				fmt.Fprint(os.Stderr, "Kernel name — the handle this kernel presents to the network (required): ")
 				var line string
 				fmt.Fscanln(os.Stdin, &line)
 				ph = strings.TrimSpace(line)
@@ -44,7 +54,10 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 			if ph == "" {
 				return fmt.Errorf("kernel name is required at first boot: run interactively or set JUICE_BOOTSTRAP_KERNEL_HANDLE")
 			}
-			globalCfg.KernelHandle = kernel.NormalizeHandle(ph)
+			if err := requireBareHandle(ph); err != nil {
+				return err
+			}
+			globalCfg.KernelHandle = ph
 			_ = writeConfig(resolvedConfigPath, globalCfg)
 		}
 	}
@@ -72,10 +85,15 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 	}
 
 	// Fallback for a pre-existing DB that predates the required-name boot and still has no handle:
-	// a distinct key-derived name, never the shared "@sys". Fresh boots always set a name above.
+	// a distinct key-derived name, never the shared "sys". Fresh boots always set a name above.
 	if globalCfg.KernelHandle == "" {
-		globalCfg.KernelHandle = "@k-" + pubKeyB64[:8]
+		globalCfg.KernelHandle = "k-" + pubKeyB64[:8]
 		_ = writeConfig(resolvedConfigPath, globalCfg)
+	}
+	// Catch-all: a handle set from config.json bypasses the prompt-path check above, so reject a
+	// non-bare configured value before it is persisted to the DB and served in gossip (§3, §14).
+	if err := requireBareHandle(globalCfg.KernelHandle); err != nil {
+		return err
 	}
 
 	// Load the signing key and issuer user ID into the kernel.
@@ -133,7 +151,7 @@ func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 		return "", fmt.Errorf("password cannot be empty")
 	}
 
-	// Enroll @sys's own recovery phrase (§12): generated here, only the public key is stored, so the
+	// Enroll sys's own recovery phrase (§12): generated here, only the public key is stored, so the
 	// operator can reset the superuser password if it is lost. The phrase is shown once.
 	mnemonic, recoveryPub, err := generateRecovery()
 	if err != nil {
@@ -144,7 +162,7 @@ func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 	}
 
 	fmt.Fprintf(os.Stderr, "Superuser %q created.\n", superuserHandle)
-	fmt.Fprintln(os.Stderr, "@sys recovery phrase (write this down; it is shown only once and cannot be recovered):")
+	fmt.Fprintln(os.Stderr, "sys recovery phrase (write this down; it is shown only once and cannot be recovered):")
 	fmt.Fprintf(os.Stderr, "  %s\n", mnemonic)
 	return superuserHandle, nil
 }
@@ -219,7 +237,7 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 							"type": "object",
 							"properties": map[string]any{
 								"action_id":     map[string]any{"type": "string", "description": "Unique action identifier"},
-								"action":        map[string]any{"type": "string", "description": "Action reference as @owner/name"},
+								"action":        map[string]any{"type": "string", "description": "Action reference as owner/name"},
 								"description":   map[string]any{"type": "string", "description": "Human-readable description of the action"},
 								"score":         map[string]any{"type": "number", "description": "Relevance score between 0 and 1"},
 								"input_schema":  map[string]any{"type": "object", "description": "JSON Schema for the action's input"},
@@ -325,7 +343,7 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 								"type":        "object",
 								"description": "Tool action and result; present on assistant proposal and tool result turns",
 								"properties": map[string]any{
-									"action": map[string]any{"type": "string", "description": "Juice action reference (@owner/name)"},
+									"action": map[string]any{"type": "string", "description": "Juice action reference (owner/name)"},
 									"args":   map[string]any{"type": "object", "description": "Arguments for the action"},
 									"result": map[string]any{"type": "object", "description": "Result from the action execution"},
 								},
@@ -333,14 +351,14 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 						},
 						"required": []string{"role"},
 					}},
-					"actions": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Candidate actions as @owner/name strings"},
+					"actions": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Candidate actions as owner/name strings"},
 				},
 				"required": []string{"messages", "actions"},
 			},
 			outputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"action":  map[string]any{"type": "string", "description": "Selected @owner/name"},
+					"action":  map[string]any{"type": "string", "description": "Selected owner/name"},
 					"args":    map[string]any{"type": "object", "description": "Arguments for the selected action"},
 					"message": map[string]any{"type": "object", "description": "Optional text message from the model"},
 				},
@@ -415,7 +433,7 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 			inputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"to":      map[string]any{"type": "string", "description": "Recipient handle (@owner)"},
+					"to":      map[string]any{"type": "string", "description": "Recipient handle"},
 					"message": map[string]any{"type": "string", "description": "Message body"},
 				},
 				"required": []string{"to", "message"},

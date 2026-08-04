@@ -490,7 +490,7 @@ func TestSelectorParsingAndSegmentMatch(t *testing.T) {
 		{"tom/brief/eu", "tom", "brief/eu"},
 		{"tom/*", "tom", ""},
 		{"tom/brief/*", "tom", "brief"},
-		{"tom/brief", "tom", "brief"}, // missing @ tolerated
+		{"tom/brief", "tom", "brief"},
 	}
 	for _, c := range cases {
 		o, p, err := ParseGrantSelector(c.sel)

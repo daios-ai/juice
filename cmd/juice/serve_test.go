@@ -2357,7 +2357,7 @@ func TestServeListActionsOwnerAuth(t *testing.T) {
 	}
 
 	// Without token: owner's private action not visible.
-	resp := httpDo(t, srv, "GET", "/v1/actions?owner=@la-auth-owner", nil, "")
+	resp := httpDo(t, srv, "GET", "/v1/actions?owner=la-auth-owner", nil, "")
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		t.Fatalf("unauthenticated list: expected 200, got %d", resp.StatusCode)
@@ -2369,7 +2369,7 @@ func TestServeListActionsOwnerAuth(t *testing.T) {
 	}
 
 	// With owner token: private action is visible.
-	resp2 := httpDo(t, srv, "GET", "/v1/actions?owner=@la-auth-owner", nil, ownerTok)
+	resp2 := httpDo(t, srv, "GET", "/v1/actions?owner=la-auth-owner", nil, ownerTok)
 	if resp2.StatusCode != http.StatusOK {
 		resp2.Body.Close()
 		t.Fatalf("authenticated list: expected 200, got %d", resp2.StatusCode)
@@ -2423,11 +2423,11 @@ func TestSuperuserScopeOverTCP(t *testing.T) {
 	decodeResponse(t, cr, &action)
 
 	// Anonymous listing of @alice's actions excludes the private one; @sys sees it.
-	anon := decodeActions(t, httpDo(t, srv, "GET", "/v1/actions?owner=@alice", nil, ""))
+	anon := decodeActions(t, httpDo(t, srv, "GET", "/v1/actions?owner=alice", nil, ""))
 	if len(anon) != 0 {
 		t.Errorf("anonymous should see 0 of @alice's actions, got %d", len(anon))
 	}
-	asSys := decodeActions(t, httpDo(t, srv, "GET", "/v1/actions?owner=@alice", nil, sysTok))
+	asSys := decodeActions(t, httpDo(t, srv, "GET", "/v1/actions?owner=alice", nil, sysTok))
 	if len(asSys) != 1 {
 		t.Errorf("sys should see @alice's private action, got %d", len(asSys))
 	}

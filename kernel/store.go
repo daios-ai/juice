@@ -554,6 +554,12 @@ type Store interface {
 	// keeping local counterparties' credits reconstructible (§11); the anonymized user row stays as
 	// a ledger anchor so old history remains legible.
 	PurgePeerCascade(ctx context.Context, userID string) error
+	// PurgeStaleDiscovery evicts the regenerable discovery cache of kernels learned only from the
+	// directory — a discovered_kernels row (with its discovery_docs, FTS mirror, and evidence) whose
+	// updated_at is at or before cutoff and which is NOT backed by a peer user row (§13 Retention).
+	// Peer-backed kernels are governed by PurgePeerCascade instead, so this never touches a kernel
+	// this one trades with. Returns the number of kernels evicted.
+	PurgeStaleDiscovery(ctx context.Context, cutoff time.Time) (int, error)
 	// DeactivateImportedIfHash deactivates a remote_proxy action only while its contract hash still
 	// matches expectedHash (§13 rule C: hash-conditional so a stale dispatch's late rejection cannot
 	// deactivate a re-resolved row). A no-op when the row is absent or its hash has changed.

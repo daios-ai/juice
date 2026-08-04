@@ -3203,6 +3203,63 @@ func TestPurgePeerCascade(t *testing.T) {
 	}
 }
 
+// TestPurgeStaleDiscovery evicts directory-only discovered kernels stale past the cutoff, with their
+// discovery docs, FTS mirror, and evidence — while sparing a fresh one and a peer-backed one (§13).
+func TestPurgeStaleDiscovery(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-100 * 24 * time.Hour)
+	fresh := time.Now().UTC()
+	cutoff := time.Now().UTC().Add(-90 * 24 * time.Hour)
+
+	// A stale never-peer kernel with a discovery doc and an evidence row (both must be evicted).
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "staleKey", Handle: "stale", FirstSeen: old, UpdatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReplaceDiscoveryDocs(ctx, "staleKey", []*kernel.DiscoveryDoc{{KernelPublicKey: "staleKey", Kind: "action", ActionID: "sa1", Name: "svc", Description: "d", ObservedAt: old}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertEvidence(ctx, &kernel.EvidenceRow{IssuerPublicKey: "staleKey", ReceiptHash: "rh1", SubjectKernelPublicKey: "staleKey", SubjectActionID: "sa1", EvidenceReceiptJSON: "{}", ReceiptCreatedAt: old, EffectiveAt: old, ObservedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh never-peer kernel survives.
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "freshKey", Handle: "fresh", FirstSeen: fresh, UpdatedAt: fresh}); err != nil {
+		t.Fatal(err)
+	}
+	// A stale but peer-backed kernel survives here (peer retention governs it, not this sweep).
+	newPeer(t, db, "peerP", "peerKey", 0, 0, old)
+	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "peerKey", Handle: "peerP", FirstSeen: old, UpdatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := db.PurgeStaleDiscovery(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("PurgeStaleDiscovery: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("evicted = %d, want 1", n)
+	}
+	count := func(q string, args ...any) int {
+		var c int
+		if err := db.db.QueryRowContext(ctx, q, args...).Scan(&c); err != nil {
+			t.Fatalf("count %q: %v", q, err)
+		}
+		return c
+	}
+	if c := count(`SELECT COUNT(*) FROM discovered_kernels WHERE public_key=?`, "staleKey"); c != 0 {
+		t.Errorf("stale discovered_kernels = %d, want 0", c)
+	}
+	if c := count(`SELECT COUNT(*) FROM discovery_docs WHERE kernel_public_key=?`, "staleKey"); c != 0 {
+		t.Errorf("stale discovery_docs = %d, want 0", c)
+	}
+	if c := count(`SELECT COUNT(*) FROM evidence WHERE issuer_public_key=?`, "staleKey"); c != 0 {
+		t.Errorf("stale evidence = %d, want 0", c)
+	}
+	if c := count(`SELECT COUNT(*) FROM discovered_kernels WHERE public_key IN ('freshKey','peerKey')`); c != 2 {
+		t.Errorf("fresh + peer-backed survivors = %d, want 2", c)
+	}
+}
+
 func TestListPurgeablePeers(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

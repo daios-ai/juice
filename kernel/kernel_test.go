@@ -613,13 +613,14 @@ func TestCreateUser(t *testing.T) {
 }
 
 func TestNormalizeHandle(t *testing.T) {
+	// NormalizeHandle trims whitespace only; it never strips a sigil — a "@"-prefixed input
+	// survives so validateHandle can reject it (handles are bare, §3, §14).
 	cases := []struct{ in, want string }{
 		{"bob", "bob"},
-		{"bob", "bob"},
 		{"  carol  ", "carol"},
-		{" @dave ", "dave"},
+		{" @dave ", "@dave"},
 		{"", ""},
-		{"@", ""},
+		{"@", "@"},
 	}
 	for _, c := range cases {
 		if got := kernel.NormalizeHandle(c.in); got != c.want {
@@ -628,36 +629,32 @@ func TestNormalizeHandle(t *testing.T) {
 	}
 }
 
-func TestCreateUserNormalizesHandle(t *testing.T) {
+func TestCreateUserRejectsSigilHandle(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	// Created without a leading "@": stored canonically as "carol".
-	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "carol", Password: "secret",
-	})
+	// A bare handle is stored as-is (whitespace trimmed).
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "  carol  ", Password: "secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if u.Handle != "carol" {
 		t.Errorf("stored handle = %q, want %q", u.Handle, "carol")
 	}
-	// Both forms resolve to the same user.
-	for _, h := range []string{"carol", "carol"} {
-		got, err := k.ReadUserByHandle(ctx, h)
-		if err != nil || got == nil || got.ID != u.ID {
-			t.Errorf("ReadUserByHandle(%q): got %v err %v, want id %s", h, got, err, u.ID)
-		}
+	if got, err := k.ReadUserByHandle(ctx, "carol"); err != nil || got == nil || got.ID != u.ID {
+		t.Errorf("ReadUserByHandle(carol): got %v err %v", got, err)
 	}
 
-	// A bare "@" and an empty handle are rejected.
-	for _, bad := range []string{"@", "  ", ""} {
-		if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-			Handle: bad, Password: "secret",
-		}); err == nil {
-			t.Errorf("CreateUser(handle=%q) should be rejected", bad)
+	// Handles are bare (§3, §14): a sigil-prefixed handle is rejected, not rewritten — as are a bare
+	// "@" and an empty handle. A later "@carol" lookup must also miss (it is not the same user).
+	for _, bad := range []string{"@carol", "@", "  ", ""} {
+		if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: bad, Password: "secret"}); !errors.Is(err, kernel.ErrInvalidInput) {
+			t.Errorf("CreateUser(handle=%q): want ErrInvalidInput, got %v", bad, err)
 		}
+	}
+	if got, _ := k.ReadUserByHandle(ctx, "@carol"); got != nil {
+		t.Errorf("ReadUserByHandle(@carol) must miss, got %v", got)
 	}
 }
 

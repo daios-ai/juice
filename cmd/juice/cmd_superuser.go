@@ -152,8 +152,8 @@ func transferRetryCmd() *cobra.Command {
 	}
 }
 
-// identityCmd prints this kernel's own federation identity: its public key (which peers use to
-// friend it), handle, and libp2p listen addresses. Federation no longer exposes a .well-known
+// identityCmd prints this kernel's own federation identity: its public key (which peers address
+// it by), handle, and libp2p listen addresses. Federation no longer exposes a .well-known
 // document, so this is how an operator learns the key to share.
 func identityCmd() *cobra.Command {
 	return &cobra.Command{
@@ -334,7 +334,7 @@ func adminSettleCmd() *cobra.Command {
 func peerInspectCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "inspect <key|handle>",
-		Short: "Inspect a remote kernel (by key, or @handle if already friended)",
+		Short: "Inspect a remote kernel (by key, or local alias handle if already known)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			var out struct {
@@ -392,7 +392,7 @@ func peerInspectCmd() *cobra.Command {
 			}
 			fmt.Printf("Reachability: %s (%dms)\n", reachLabel, out.Reachability.RTTmillis)
 			if out.Source == "none" {
-				fmt.Println("This peer is offline and not known locally (never friended).")
+				fmt.Println("This peer is offline and not known locally (no cached data).")
 				return nil
 			}
 			if len(out.Actions) > 0 {

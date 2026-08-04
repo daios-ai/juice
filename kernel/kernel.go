@@ -606,21 +606,14 @@ func unionScopes(existingJSON string, requested []string) (string, bool) {
 }
 
 // ParseGrantSelector splits a consent selector into bare owner handle and path (§8). A selector is
-// owner or owner/path (a legacy leading "@" is tolerated); a trailing "/*" aliases the whole-owner form.
+// owner or owner/path; a trailing "/*" aliases the whole-owner form.
 func ParseGrantSelector(sel string) (ownerHandle, path string, err error) {
-	sel = strings.TrimPrefix(strings.TrimSpace(sel), "@") // bare; legacy "@" tolerated
-	sel = strings.TrimSuffix(sel, "/*")
-	if sel == "" {
-		return "", "", ErrInvalidInput.Wrap("selector must be owner or owner/path")
+	sel = strings.TrimSuffix(strings.TrimSpace(sel), "/*")
+	owner, path, _ := strings.Cut(sel, "/")
+	if owner == "" || strings.Contains(owner, "@") {
+		return "", "", ErrInvalidInput.Wrap("selector must be owner or owner/path (bare handle, no @)")
 	}
-	if idx := strings.Index(sel, "/"); idx >= 0 {
-		owner := sel[:idx]
-		if owner == "" {
-			return "", "", ErrInvalidInput.Wrap("selector must be owner or owner/path")
-		}
-		return owner, sel[idx+1:], nil
-	}
-	return sel, "", nil
+	return owner, path, nil
 }
 
 // selectorPathMatches implements path-segment matching (§8): the empty path matches all of an
@@ -1067,16 +1060,17 @@ type CreateUserRequest struct {
 	RecoveryPublicKey string
 }
 
-// NormalizeHandle canonicalizes a user handle to start with "@". It trims surrounding
-// whitespace and prepends "@" when missing, so "bob" and "@bob" denote the same user.
+// NormalizeHandle canonicalizes a user handle by trimming surrounding whitespace only —
+// handles are bare, carrying no sigil (§3, §14). It is the single input-cleaning chokepoint
+// for handles; a `@`-prefixed input therefore survives to validateHandle, which rejects it.
 // Idempotent; leaves "" untouched (validateHandle rejects it).
 func NormalizeHandle(h string) string {
-	return strings.TrimPrefix(strings.TrimSpace(h), "@")
+	return strings.TrimSpace(h)
 }
 
-// validateHandle rejects empty handles, a bare "@", and handles containing /, enforcing
-// the invariant that @owner/name references are unambiguous (handles ≡ hostnames, no /).
-// Callers normalize with NormalizeHandle first, so a valid handle is "@" followed by ≥1 char.
+// validateHandle rejects empty handles and handles containing @ or /, enforcing the invariant
+// that owner/name and owner@kernel/name references are unambiguous (handles ≡ hostnames: bare,
+// no @ or /). A valid handle is ≥1 non-sigil character after NormalizeHandle trims whitespace.
 func validateHandle(handle string) error {
 	if handle == "" {
 		return ErrInvalidInput.Wrap("handle is required")
@@ -2043,6 +2037,13 @@ type UpdateActionRequest struct {
 	Auth         *AuthInput        // upstream credentials; sealed into auth_json at rest; write-only
 }
 
+// errProxyKernelManaged rejects any manual mutation of a remote_proxy: its active bit and
+// contract are cache state the kernel owns (§8, set by resolve, cleared by refresh_proxy /
+// quarantine, removed by peer retention). Enable/disable, update, and delete all return it, so a
+// public proxy — which a peer's CanCall would admit, breaking non-transitivity — can never be
+// minted by hand; the durable peer lever is suspend (§13).
+var errProxyKernelManaged = ErrInvalidState.Wrap("remote proxy is kernel-managed; use admin suspend to block a peer")
+
 // UpdateAction modifies an action and deactivates it (schema/source changes require re-activation).
 func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateActionRequest) (*Action, error) {
 	a, err := k.store.ReadAction(ctx, req.ID)
@@ -2054,6 +2055,9 @@ func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateAc
 	}
 	if a.Kind == KindNative {
 		return nil, ErrUnauthorized.Wrap("native actions are managed by bootstrap")
+	}
+	if a.Kind == KindRemoteProxy {
+		return nil, errProxyKernelManaged
 	}
 	if err := k.requireAdmin(ctx, callerID, a); err != nil {
 		return nil, err
@@ -2149,11 +2153,8 @@ func (k *Kernel) SetActive(ctx context.Context, callerID, actionID string, activ
 	if a.Kind == KindNative {
 		return ErrUnauthorized.Wrap("native actions are managed by bootstrap")
 	}
-	// A remote_proxy's active bit is cache state, kernel-managed (§8): set by resolve, cleared by a
-	// refresh_proxy rejection or quarantine. Manual enable/disable would be self-reversing (the next
-	// call re-resolves), so it is rejected — the durable peer lever is suspend (§13).
 	if a.Kind == KindRemoteProxy {
-		return ErrInvalidState.Wrap("remote proxy activation is kernel-managed; use admin suspend to block a peer")
+		return errProxyKernelManaged
 	}
 	if err := k.requireAdmin(ctx, callerID, a); err != nil {
 		return err
@@ -2234,6 +2235,9 @@ func (k *Kernel) DeleteAction(ctx context.Context, callerID, actionID string) er
 	}
 	if a.Kind == KindNative {
 		return ErrUnauthorized.Wrap("native actions are managed by bootstrap")
+	}
+	if a.Kind == KindRemoteProxy {
+		return errProxyKernelManaged
 	}
 	if err := k.requireAdmin(ctx, callerID, a); err != nil {
 		return err
