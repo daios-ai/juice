@@ -954,7 +954,7 @@ func TestServeCreateStep(t *testing.T) {
 
 	resp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action_id":       actionID,
+		"action":       actionID,
 		"required_caller": "cs-create-caller",
 		"partial_args":    map[string]any{"preset": "val"},
 	}, ownerTok)
@@ -993,7 +993,7 @@ func TestServeListSteps(t *testing.T) {
 	for range 2 {
 		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 			"trace_id":        traceID,
-			"action_id":       actionID,
+			"action":       actionID,
 			"required_caller": "sl-steps-caller",
 			"partial_args":    map[string]any{},
 		}, ownerTok)
@@ -1099,7 +1099,7 @@ func TestServeGetStep(t *testing.T) {
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action_id":       actionID,
+		"action":       actionID,
 		"required_caller": "gs-steps-caller",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
@@ -1158,7 +1158,7 @@ func TestServeCompleteStepMissingArgs(t *testing.T) {
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action_id":       actionID,
+		"action":       actionID,
 		"required_caller": "csmiss-caller",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
@@ -1195,7 +1195,7 @@ func TestServeCompleteStep(t *testing.T) {
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action_id":       actionID,
+		"action":       actionID,
 		"required_caller": "cs2-caller",
 		"partial_args":    map[string]any{"from_partial": "A"},
 	}, ownerTok)
@@ -1567,5 +1567,68 @@ func TestDirectorySelector(t *testing.T) {
 		if got := directorySelector(in); got != want {
 			t.Errorf("directorySelector(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestCLIActionRatings drives `juice action ratings <owner/name>` end to end: a caller runs a
+// public action and rates it, and the owner reads the projection through the CLI. Exercises the
+// every-command rule (§14) and confirms the human view surfaces the value and note.
+func TestCLIActionRatings(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(backend.Close)
+
+	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "rate-owner", Password: "pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, _ := kernel.HashPassword("pass")
+	caller := &kernel.User{
+		ID: uuid.NewString(), Handle: "rate-caller", PasswordHash: hash, Available: 100,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := env.db.CreateUser(ctx, caller); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID, Name: "svc", Kind: kernel.KindHTTP, Source: backend.URL,
+		Description: "rate me", InputSchema: minSchema, OutputSchema: minSchema, Price: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := kernel.VisibilityPublic
+	if _, err := env.k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := env.k.Run(ctx, caller.ID, "rate-owner/svc", map[string]any{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	note := "reliable"
+	if _, err := env.k.RateTransaction(ctx, caller.ID, reply.TxID, 1, &note); err != nil {
+		t.Fatalf("rate: %v", err)
+	}
+
+	tok, _ := env.k.Login(ctx, "rate-owner", "pass")
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() error {
+		_, err := execTestCmd(t, actionRatingsCmd(), "rate-owner/svc")
+		return err
+	})
+	if !strings.Contains(out, "1") || !strings.Contains(out, note) {
+		t.Errorf("action ratings output missing value/note: %q", out)
 	}
 }

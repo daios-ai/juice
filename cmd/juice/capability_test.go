@@ -93,7 +93,7 @@ func TestCapabilityComposition(t *testing.T) {
 		// Create a step addressed to @caller (juice.step_create ≡ /v1/steps, no trace_id).
 		var sBody []byte
 		stepStatus, sBody = capCallback(cb, capTok, "/v1/steps", map[string]any{
-			"action_id": "sub/sub", "required_caller": "caller", "partial_args": map[string]any{},
+			"action": "sub/sub", "required_caller": "caller", "partial_args": map[string]any{},
 		})
 		var sv map[string]any
 		_ = json.Unmarshal(sBody, &sv)

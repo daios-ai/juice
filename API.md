@@ -93,7 +93,7 @@ Federation has no HTTP surface: peer identity, gossip, manifests, and inbound ca
 | Password login | `POST /v1/auth/token` `{handle, password}` → `{token}` | `juice auth login <user> [--password]` |
 | PKCE authorize | `POST /v1/auth/authorize` `{handle, password, code_challenge, [redirect_uri]}` → `302` if `redirect_uri` provided, else `200 {"redirect":"?code=CODE"}` | `juice auth login <user> --pkce --server <url>` |
 | PKCE token exchange | `POST /v1/auth/token` `{grant_type:"authorization_code", code, code_verifier, [redirect_uri]}` → `{access_token, refresh_token}` | (handled internally by `--pkce` login) |
-| Refresh token | `POST /v1/auth/refresh` `{refresh_token}` → `{access_token, refresh_token}` | `juice auth refresh` |
+| Refresh token | `POST /v1/auth/refresh` `{refresh_token}` → `{access_token, refresh_token}` | (automatic on any command's 401) |
 | Logout | `POST /v1/auth/logout` `{refresh_token}` → 204 | `juice auth logout` |
 | Recover (start) | `POST /v1/auth/recover/start` `{handle}` → `{nonce, expires_in_seconds}` | (part of `juice auth recover`) |
 | Recover (complete) | `POST /v1/auth/recover/complete` `{handle, nonce, signature, password}` → `{status}` | `juice auth recover <user> [--phrase] [--password]` |
@@ -120,8 +120,8 @@ Federation has no HTTP surface: peer identity, gossip, manifests, and inbound ca
 |-----------|------|-----|
 | Plan consent | `GET /v1/grants/plan?selector=` → `{groups: [{provider, scheme, scopes, destinations, connected, covered, actions: [{action, granted}]}], skipped}` | (driven by `user connect`) |
 | Start consent | `POST /v1/grants/start` `{selector, provider, [redirect_uri], [flow]}` → `{status:"granted", actions}` (already covered) or `{state, authorize_url}` (code) or `{state, verification_uri, user_code, interval, expires_in}` (device) | `juice user connect <selector> [--device]` |
-| Complete consent | `POST /v1/grants/complete` `{state, [code]}` → `{status, provider, actions, created_at}` or `{status: "pending"}` | (driven by `user connect`) |
-| Attach token | `POST /v1/grants` `{selector, [provider], token}` → `{status, provider, actions, created_at}` | `juice user connect <selector> --token <pat>` |
+| Complete consent | `POST /v1/grants/complete` `{state, [code]}` → `{status:"granted", provider, actions, created_at}` or `{status:"pending"}` | (driven by `user connect`) |
+| Attach token | `POST /v1/grants` `{selector, [provider], token}` → `{status:"granted", provider, actions, created_at}` | `juice user connect <selector> --token <pat>` |
 | Disconnect grants | `DELETE /v1/grants?selector=` → `{revoked: [actions]}` (legacy `?action=` accepted) | `juice user disconnect <selector>` |
 | Disconnect account | `DELETE /v1/grants?account=<provider_key>` → `{revoked: [actions], connection}` | `juice user disconnect --account <provider>` |
 
@@ -140,8 +140,8 @@ A `Grant` is per-action consent (§8): a pointer binding one action to a `Connec
 | Delete action | `DELETE /v1/actions/{id}` → 204 | `juice action delete <action>` |
 | Import OpenAPI | `POST /v1/actions/import` `{spec_url}` → import result | `juice action import <spec-url>` |
 | Unimport OpenAPI | `POST /v1/actions/unimport` `{spec_url[, name]}` → action[] | `juice action unimport <spec-url> [--name]` |
-| Get stats | `GET /v1/stats/{action_id}` → stats | `juice action stats <action>` |
-| List ratings | `GET /v1/actions/{id}/ratings[?limit=&offset=]` → rating[] | — |
+| Get stats | `GET /v1/stats/{id}` → stats | `juice action stats <action>` |
+| List ratings | `GET /v1/actions/{id}/ratings[?limit=&offset=]` → `[{value, note, created_at}]` | `juice action ratings <action> [--limit --offset]` |
 
 `<action>` is `owner/name` (a raw id is also accepted). Action responses (show and list) include a computed `action` field (`owner/name`) alongside `id`, plus the full `input_schema` and `output_schema` — the CLI text view shows the same fields the JSON returns. `visibility` is `private` (owner only), `local` (any local caller of this kernel, never peers), or `public` (anyone, and the only value served in manifests/gossip, §13); it is caller-scoped callability (requirements.md §4), settable only via update, and defaults to `private`. Widening beyond `private` on an OpenAPI-imported action requires verified ownership. `price` is the subtree bound: the maximum total cost of the action and everything it calls. `auth` is the upstream credential config `{scheme, config, secrets}` (R9: write-only, never returned); reads instead expose only its non-secret summary — `auth_scheme` (scheme name, when present) and `requires_grant` (R8).
 
@@ -197,7 +197,7 @@ Remote-proxy transactions include `remote_receipt_hash` and `remote_receipt_json
 
 | Operation | HTTP | CLI |
 |-----------|------|-----|
-| Create step | `POST /v1/steps` `{trace_id, action_id, partial_args, required_caller}` → 201 step | `juice step create <action> --trace --required-caller <user> [--partial-args]` |
+| Create step | `POST /v1/steps` `{trace_id, action, partial_args, required_caller}` → 201 step | `juice step create <action> --trace --required-caller <user> [--partial-args]` |
 | List steps | `GET /v1/steps[?process_id=&status=&limit=&offset=]` → step[]; each carries `created_by` (the creating action `owner/name`, from the parent trace) alongside `action` (the completion target) | `juice step list [--process --status --limit --offset]` |
 | Show step | `GET /v1/steps/{id}` → step (incl. `created_by`) | `juice step show <id>` |
 | Complete step | `POST /v1/steps/{id}/complete` `{args}` → `{result, tx_id, trace_id, step_id}` | `juice step complete <id> [json]` |
@@ -232,20 +232,21 @@ There is no subscription: a call to a remote action `owner@kernel/name` resolves
 
 The operator verbs no ordinary user performs — money, access, federation trust, and the global roster. Served on the public TCP API, on routes gated by an `IsSuperuser` check (authority is the `sys` bearer token). Everything else a superuser does (see all actions/processes/txs/steps, disable any action) is *scope* on the normal commands above, not an admin command.
 
-| Operation | CLI |
-|-----------|-----|
-| List all users | `juice admin users [--limit --offset]` |
-| Show user | `juice admin show <user>` |
-| Suspend account | `juice admin suspend <user\|key>` — freezes any account: a human cannot log in; a peer's inbound calls are refused with a signed rejection |
-| Unsuspend account | `juice admin unsuspend <user\|key>` |
-| Rename handle | `juice admin rename <user\|key> <new-handle>` — frees the old handle for reuse; also renames a peer's local mount |
-| Deposit credits | `juice admin deposit <user\|key> <amount> [--reason --external-key]` |
-| Withdraw credits | `juice admin withdraw <user\|key> <amount> [--reason --external-key]` |
-| List peers | `juice admin peers [--all]` — active peers by default (`handle`, `public_key`, `available`, `locked`, plus the §13 sync cache `peer_credit` (our credit on the peer) and `last_seen`; no internal id); `--all` (`?all=1`) also lists suspended peers |
-| Inspect a kernel | `juice admin inspect <key\|user>` — identity (incl. its `about`), public actions (with descriptions), retained evidence grouped by issuer (trade-backed vs unverified), reachability. `source` is `live`/`local`/`none`: an offline but known peer degrades to last-known local data (`online:false`) |
-| Show own identity | `juice admin identity` — this kernel's public key, handle, `about` (`sys`'s description), listen addresses |
-| List pending transfers | `juice admin transfer list [--status --limit --offset]` — buyer-side value transfers awaiting resolution (§13); default lists only the unresolved records (`pending` + `quarantined`), `--status` selects one (also `settled`/`refunded`) |
-| Show a transfer | `juice admin transfer show <id>` |
-| Retry a transfer | `juice admin transfer retry <id>` — re-presents the SAME signed completion and settles strictly on receipt evidence (settles on a valid success, refunds on a valid failure, stays pending with no receipt, stays quarantined on an invalid one). The only mutation: quarantine means "evidence insufficient", never an operator-chosen outcome, so there is no refund/force-settle |
+| Operation | HTTP | CLI |
+|-----------|------|-----|
+| List all users | `GET /control/users[?limit=&offset=]` | `juice admin users [--limit --offset]` |
+| Show user | `GET /control/users/{handle}` | `juice admin show <user>` |
+| Suspend account | `POST /control/users/{handle}/suspend` | `juice admin suspend <user\|key>` — freezes any account: a human cannot log in; a peer's inbound calls are refused with a signed rejection |
+| Unsuspend account | `POST /control/users/{handle}/unsuspend` | `juice admin unsuspend <user\|key>` |
+| Rename handle | `POST /control/users/{handle}/rename` | `juice admin rename <user\|key> <new-handle>` — frees the old handle for reuse; also rebinds a peer's local alias |
+| Deposit credits | `POST /control/deposit` | `juice admin deposit <user\|key> <amount> [--reason --external-key]` |
+| Withdraw credits | `POST /control/withdraw` | `juice admin withdraw <user\|key> <amount> [--reason --external-key]` |
+| Settle a peer | `POST /control/peers/settle` | `juice admin settle <peer> [--cash <settlement_id>]` — settles the bilateral position: exact if debt ≥ `Q`, else the probabilistic residual protocol (§13); `--cash` records the rail payment for a paid outcome |
+| List peers | `GET /control/peers[?all=&limit=&offset=]` | `juice admin peers [--all --limit --offset]` — active peers by default (`handle`, `public_key`, `available`, `locked`, plus the §13 sync cache `peer_credit` and `last_seen`, and `settlement_due`); no internal id; `--all` also lists suspended peers |
+| Inspect a kernel | `GET /control/peers/inspect?key=` | `juice admin inspect <key\|user>` — identity (incl. its `about`), public actions (with descriptions), retained evidence grouped by issuer (trade-backed vs unverified), reachability. `source` is `live`/`local`/`none`: an offline but known peer degrades to last-known local data (`online:false`) |
+| Show own identity | `GET /control/identity` | `juice admin identity` — this kernel's public key, handle, `about` (`sys`'s description), listen addresses |
+| List pending transfers | `GET /control/transfers[?status=&limit=&offset=]` | `juice admin transfer list [--status --limit --offset]` — buyer-side value transfers awaiting resolution (§13); default lists only the unresolved records (`pending` + `quarantined`), `--status` selects one (also `settled`/`refunded`) |
+| Show a transfer | `GET /control/transfers/{id}` | `juice admin transfer show <id>` |
+| Retry a transfer | `POST /control/transfers/{id}/retry` | `juice admin transfer retry <id>` — re-presents the SAME signed completion and settles strictly on receipt evidence (settles on a valid success, refunds on a valid failure, stays pending with no receipt, stays quarantined on an invalid one). The only mutation: quarantine means "evidence insufficient", never an operator-chosen outcome, so there is no refund/force-settle |
 
 `<user>` is a `handle` — or, for a peer, its base64url public key (the global name); `<action>` is `owner/name` (or an id); `<key>` is a peer's base64url public key. `withdraw` requires `target.available ≥ amount`; it redeems credits and obliges the out-of-band payout. `admin deposit <key>` on a not-yet-known peer both provisions its billing account and funds it (peering is handshake-free); the `about` shown by `identity`/`inspect` is `sys`'s user description, set with `juice user update --description`. Blocking a peer's inbound calls is `admin suspend <key>` (reversible with `unsuspend`); a caller that no longer wants a peer's actions simply stops calling them, and the cached proxies lapse through peer retention (§13). A peer account holds no session token, so a step whose required caller is a peer is completed by this kernel's operator with `juice step complete <id> --peer <key>` (superuser scope on the ordinary command); `admin inspect <key>` lists what a peer holds for us. Both are refused for a suspended peer.

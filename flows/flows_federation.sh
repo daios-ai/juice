@@ -369,12 +369,12 @@ flow_fed_peer_sync() {
     local credit=""
     local i
     for i in $(seq 1 20); do
-        credit=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]).get('peers',[]);p=next((x for x in ps if x.get('handle')=='kernel-r'),{});print(p.get('peer_credit') if p.get('peer_credit') is not None else '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
+        credit=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get('handle')=='kernel-r'),{});print(p.get('peer_credit') if p.get('peer_credit') is not None else '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
         [ "$credit" = "250" ] && break
         sleep 1
     done
     assert_eq "fed_peer_sync.credit_cached" 250 "$credit"
-    local seen; seen=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]).get('peers',[]);p=next((x for x in ps if x.get('handle')=='kernel-r'),{});print(p.get('last_seen') or '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
+    local seen; seen=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get('handle')=='kernel-r'),{});print(p.get('last_seen') or '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
     assert_nonempty "fed_peer_sync.last_seen_cached" "$seen"
 }
 
@@ -409,7 +409,7 @@ flow_fed_inspect_sync() {
     j "$dbl" "$hl" admin rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "fed_inspect_sync.resolve" "resolve/rename failed"; return; }
     j "$dbr" "$hr" admin deposit -- "$lkey" 250 >/dev/null 2>&1
 
-    local pc='import sys,json;ps=json.loads(sys.argv[1]).get("peers",[]);p=next((x for x in ps if x.get("handle")=="kernel-r"),{});print(p.get("peer_credit") if p.get("peer_credit") is not None else "")'
+    local pc='import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get("handle")=="kernel-r"),{});print(p.get("peer_credit") if p.get("peer_credit") is not None else "")'
     # Baseline: with the sync pass parked at 3600s and no inspect yet, L has NOT cached R's report.
     assert_eq "fed_inspect_sync.baseline_uncached" "" \
         "$(python3 -c "$pc" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)"
@@ -422,7 +422,7 @@ flow_fed_inspect_sync() {
     # The cache is now fresh — set by inspect alone, no timer pass involved.
     assert_eq "fed_inspect_sync.credit_after_inspect" 250 \
         "$(python3 -c "$pc" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)"
-    local seen; seen=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]).get('peers',[]);p=next((x for x in ps if x.get('handle')=='kernel-r'),{});print(p.get('last_seen') or '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
+    local seen; seen=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get('handle')=='kernel-r'),{});print(p.get('last_seen') or '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
     assert_nonempty "fed_inspect_sync.last_seen_after_inspect" "$seen"
 }
 

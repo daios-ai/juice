@@ -286,7 +286,7 @@ func userUpdateCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			setDescription = cmd.Flags().Changed("description")
 			if !setDescription && !changePassword {
-				return kernel.ErrInvalidInput.Wrap("at least one of --description or --password must be specified")
+				return kernel.ErrInvalidInput.Wrap("at least one of --description or --password is required")
 			}
 			var currentPassword, newPassword string
 			if changePassword {
@@ -360,7 +360,7 @@ func userLedgerCmd() *cobra.Command {
 					to = "—"
 				}
 				fmt.Printf("[%s] amount:%-6d  from:%-12s  to:%-12s  %s\n",
-					e.CreatedAt.Format("2006-01-02T15:04:05"),
+					e.CreatedAt.Format(time.RFC3339),
 					e.Amount, from, to, e.Reason)
 			}
 			return nil
@@ -386,6 +386,7 @@ func init() {
 		actionImportCmd(),
 		actionUnimportCmd(),
 		actionStatsCmd(),
+		actionRatingsCmd(),
 	)
 	rootCmd.AddCommand(actionCmd)
 }
@@ -544,11 +545,11 @@ func actionUpdateCmd() *cobra.Command {
 }
 
 func actionEnableCmd() *cobra.Command {
-	return actionActiveCmd("enable <action>", "Activate an action", "enable", "enabled", true)
+	return actionActiveCmd("enable <action>", "Enable an action", "enable", "enabled", true)
 }
 
 func actionDisableCmd() *cobra.Command {
-	return actionActiveCmd("disable <action>", "Deactivate an action", "disable", "disabled", false)
+	return actionActiveCmd("disable <action>", "Disable an action", "disable", "disabled", false)
 }
 
 // actionActiveCmd builds the enable/disable action command; the two differ only in wording
@@ -642,7 +643,7 @@ func actionListCmd() *cobra.Command {
 func actionShowCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "show <action>",
-		Short: "Show an action's details",
+		Short: "Show action details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -756,6 +757,54 @@ func actionStatsCmd() *cobra.Command {
 	}
 }
 
+func actionRatingsCmd() *cobra.Command {
+	var limit, offset int
+	cmd := &cobra.Command{
+		Use:   "ratings <action>",
+		Short: "Show an action's public ratings",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			ctx := context.Background()
+			id, err := resolveActionID(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			q := url.Values{}
+			setLimitOffset(q, limit, offset)
+			path := "/v1/actions/" + id + "/ratings"
+			if e := q.Encode(); e != "" {
+				path += "?" + e
+			}
+			var raw json.RawMessage
+			if err := apiCall(ctx, "GET", path, nil, &raw); err != nil {
+				return err
+			}
+			if flagJSON {
+				return emitRaw(raw)
+			}
+			var ratings []struct {
+				Value   int     `json:"value"`
+				Note    *string `json:"note"`
+				Created string  `json:"created_at"`
+			}
+			if err := json.Unmarshal(raw, &ratings); err != nil {
+				return err
+			}
+			for _, rt := range ratings {
+				note := ""
+				if rt.Note != nil {
+					note = "  " + *rt.Note
+				}
+				fmt.Printf("%d  %s%s\n", rt.Value, rt.Created, note)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
+	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	return cmd
+}
+
 // ---- process ----
 
 func init() {
@@ -847,7 +896,7 @@ func stepCreateCmd() *cobra.Command {
 			}
 			body := map[string]any{
 				"trace_id":        traceID,
-				"action_id":       args[0], // @owner/name or id; the server resolves it
+				"action":          args[0], // @owner/name or id; the server resolves it
 				"required_caller": requiredCaller,
 				"partial_args":    pa,
 			}
@@ -996,7 +1045,7 @@ func txListCmd() *cobra.Command {
 			}
 			for _, tx := range txs {
 				fmt.Printf("[%s] %s  status:%s  gross:%d\n",
-					tx.StartedAt.Format("2006-01-02T15:04:05"),
+					tx.StartedAt.Format(time.RFC3339),
 					tx.ID, tx.Status, tx.Gross)
 			}
 			return nil
@@ -1011,7 +1060,7 @@ func txListCmd() *cobra.Command {
 func txShowCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "show <id>",
-		Short: "Show a transaction",
+		Short: "Show transaction details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return apiEmit("GET", "/v1/transactions/"+args[0], nil)
@@ -1035,6 +1084,7 @@ func txRateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rate <id> <0|1>",
 		Short: "Rate a transaction (0 bad, 1 good)",
+		Long:  "Rate a transaction (0 bad, 1 good). The rating and note are visible wherever the action is visible.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			rating, err := strconv.ParseFloat(args[1], 64)

@@ -45,7 +45,7 @@ func openBrowser(url string) bool {
 // start/complete/attach responses, which the service layer returns as ad-hoc JSON, are local here.
 
 type grantStartResp struct {
-	Status                  string   `json:"status"` // "granted" when already covered
+	Status                  string   `json:"status"` // "granted" on success, "pending" mid-device-flow
 	Actions                 []string `json:"actions"`
 	State                   string   `json:"state"`
 	AuthorizeURL            string   `json:"authorize_url"`
@@ -188,13 +188,8 @@ func confirmProceed(yes bool) error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return kernel.ErrInvalidInput.Wrap("re-run with --yes to accept the consent plan (no terminal to confirm)")
 	}
-	fmt.Print("Proceed? [Y/n] ")
-	s := bufio.NewScanner(os.Stdin)
-	if s.Scan() {
-		ans := strings.ToLower(strings.TrimSpace(s.Text()))
-		if ans != "" && ans != "y" && ans != "yes" {
-			return kernel.ErrInvalidInput.Wrap("aborted")
-		}
+	if !promptYesNo("Proceed?") {
+		return kernel.ErrInvalidInput.Wrap("aborted")
 	}
 	return nil
 }
@@ -329,7 +324,7 @@ func connectOAuthDevice(selector, provider string) error {
 			map[string]string{"state": start.State}, &done); err != nil {
 			return err
 		}
-		if done.Status == "complete" {
+		if done.Status == "granted" {
 			fmt.Printf("Connected %s.\n", strings.Join(done.Actions, ", "))
 			return nil
 		}

@@ -41,7 +41,7 @@ func lastSeenStr(t *time.Time) string {
 
 func parseAmount(s string) (int64, error) {
 	amount, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
+	if err != nil || amount <= 0 {
 		return 0, kernel.ErrInvalidInput.Wrap("amount must be a positive integer")
 	}
 	return amount, nil
@@ -102,7 +102,7 @@ func transferListCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List pending value transfers (default: unresolved — pending + quarantined)",
+		Short: "List pending value transfers",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			q := url.Values{}
@@ -124,7 +124,7 @@ func transferListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&status, "status", "", "Filter by status (pending, quarantined, settled, refunded)")
+	cmd.Flags().StringVar(&status, "status", "", "Filter by status; default lists the unresolved ones (pending, quarantined)")
 	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
 	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
 	return cmd
@@ -133,7 +133,7 @@ func transferListCmd() *cobra.Command {
 func transferShowCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "show <id>",
-		Short: "Show a pending value transfer",
+		Short: "Show transfer details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return apiEmit("GET", "/control/transfers/"+url.PathEscape(args[0]), nil)
@@ -208,7 +208,9 @@ func adminUsersCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			var users []*kernel.User
-			if err := apiCall(context.Background(), "GET", ctlPath("/control/users", limit, offset), nil, &users); err != nil {
+			q := url.Values{}
+			setLimitOffset(q, limit, offset)
+			if err := apiCall(context.Background(), "GET", "/control/users?"+q.Encode(), nil, &users); err != nil {
 				return err
 			}
 			if flagJSON {
@@ -217,7 +219,7 @@ func adminUsersCmd() *cobra.Command {
 			for _, u := range users {
 				suspended := ""
 				if u.SuspendedAt != nil {
-					suspended = " [SUSPENDED]"
+					suspended = " [suspended]"
 				}
 				fmt.Printf("%-20s  %s%s\n", u.Handle, u.Description, suspended)
 			}
@@ -320,14 +322,14 @@ func adminSettleCmd() *cobra.Command {
 	var cash string
 	cmd := &cobra.Command{
 		Use:   "settle <peer>",
-		Short: "Settle the bilateral position with a peer: exact if debt ≥ Q, else the probabilistic residual protocol (§13)",
+		Short: "Settle the bilateral position with a peer",
 		Long:  "Settle the bilateral position with a peer.\n\nWith no flags: exact settlement if the debt ≥ Q, otherwise the two-party probabilistic\ncommit/reveal. A paid probabilistic outcome does NOT move money — it leaves a debt of Q pending.\n\nAfter paying that Q on your rail, record it with --cash <settlement_id> (run on both kernels).",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return apiEmit("POST", "/control/peers/settle", map[string]any{"handle": args[0], "settlement_id": cash})
 		},
 	}
-	cmd.Flags().StringVar(&cash, "cash", "", "record the rail payment for a paid probabilistic outcome (settlement_id)")
+	cmd.Flags().StringVar(&cash, "cash", "", "Record the rail payment for a paid probabilistic outcome (settlement_id)")
 	return cmd
 }
 
@@ -442,6 +444,7 @@ func peerInspectCmd() *cobra.Command {
 
 func peerListCmd() *cobra.Command {
 	var showAll bool
+	var limit, offset int
 	cmd := &cobra.Command{
 		Use:   "peers",
 		Short: "List peers",
@@ -451,36 +454,39 @@ func peerListCmd() *cobra.Command {
 			if showAll {
 				q.Set("all", "1")
 			}
+			setLimitOffset(q, limit, offset)
 			path := "/control/peers"
 			if e := q.Encode(); e != "" {
 				path += "?" + e
 			}
-			var out struct {
-				Peers []*kernel.PeerView `json:"peers"`
-			}
-			if err := apiCall(context.Background(), "GET", path, nil, &out); err != nil {
+			var peers []*kernel.PeerView
+			if err := apiCall(context.Background(), "GET", path, nil, &peers); err != nil {
 				return err
 			}
 			if flagJSON {
-				return printJSON(out)
+				return printJSON(peers)
 			}
-			if len(out.Peers) == 0 {
-				fmt.Println("No peers registered.")
-			} else {
-				fmt.Printf("%-20s %10s %8s %12s %10s  %s\n", "HANDLE", "AVAILABLE", "LOCKED", "CREDIT_THERE", "LAST_SEEN", "PUBLIC_KEY")
-				for _, p := range out.Peers {
-					suspended := ""
-					if p.SuspendedAt != nil {
-						suspended = " [suspended]"
-					}
-					fmt.Printf("%-20s %10d %8d %12s %10s  %s%s\n",
-						p.Handle, p.Available, p.Locked, peerCreditStr(p.PeerCredit), lastSeenStr(p.LastSeen), p.PublicKey, suspended)
+			if len(peers) == 0 {
+				return nil
+			}
+			fmt.Printf("%-20s %10s %8s %12s %10s  %s\n", "HANDLE", "AVAILABLE", "LOCKED", "CREDIT_THERE", "LAST_SEEN", "PUBLIC_KEY")
+			for _, p := range peers {
+				flags := ""
+				if p.SettlementDue {
+					flags += " [settle_due]"
 				}
+				if p.SuspendedAt != nil {
+					flags += " [suspended]"
+				}
+				fmt.Printf("%-20s %10d %8d %12s %10s  %s%s\n",
+					p.Handle, p.Available, p.Locked, peerCreditStr(p.PeerCredit), lastSeenStr(p.LastSeen), p.PublicKey, flags)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&showAll, "all", false, "Include suspended peers")
+	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
+	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
 	return cmd
 }
 

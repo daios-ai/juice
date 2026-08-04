@@ -417,6 +417,9 @@ func registerRoutes(r chi.Router, srv *server) {
 	// inspection travel over the libp2p transport (§13), started in runServer. Public action
 	// listing stays on HTTP for local/user clients.
 	r.Get("/v1/actions", srv.getActions)
+	// Ratings are public reputation evidence (§13, §16): readable wherever the action is visible,
+	// anonymously for a public action. Optional auth, gated per-action inside the handler.
+	r.Get("/v1/actions/{id}/ratings", srv.listActionRatings)
 
 	// Actions (authenticated).
 	r.Group(func(r chi.Router) {
@@ -425,7 +428,6 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Post("/v1/actions/unimport", srv.unimportOpenAPI)
 		r.Post("/v1/actions", srv.postAction)
 		r.Get("/v1/actions/{id}", srv.getAction)
-		r.Get("/v1/actions/{id}/ratings", srv.listActionRatings)
 		r.Put("/v1/actions/{id}", srv.updateAction)
 		r.Post("/v1/actions/{id}/enable", srv.setActionActive(true))
 		r.Post("/v1/actions/{id}/disable", srv.setActionActive(false))
@@ -446,7 +448,7 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Get("/v1/transactions/{id}/receipt-verification", srv.getReceiptVerification)
 
 		// Stats.
-		r.Get("/v1/stats/{action_id}", srv.getStats)
+		r.Get("/v1/stats/{id}", srv.getStats)
 
 		// Steps (reads are JWT-only; the POSTs accept a capability too — see below).
 		r.Get("/v1/steps", srv.listSteps)
@@ -916,17 +918,32 @@ func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a)
 }
 
+// ratingView is the public reputation projection of a Rating (§13, §16): the market signal only,
+// never the rater identity, the transaction/receipt it links, or the signature.
+type ratingView struct {
+	Value   int       `json:"value"`
+	Note    *string   `json:"note"`
+	Created time.Time `json:"created_at"`
+}
+
 func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
+	// Gate on the action's own visibility (anonymous caller allowed for a public action); the read
+	// is independent of the action's active state so reputation survives deactivation (§8).
+	if _, err := s.kernel.ReadActionForSubject(r.Context(), s.optionalAuth(r), pathID(r)); err != nil {
+		writeErr(w, err)
+		return
+	}
 	limit, offset := listBounds(r)
 	ratings, err := s.kernel.ListRatings(r.Context(), pathID(r), limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if ratings == nil {
-		ratings = []*kernel.Rating{}
+	views := make([]ratingView, 0, len(ratings))
+	for _, rt := range ratings {
+		views = append(views, ratingView{Value: int(rt.Rating), Note: rt.Note, Created: rt.CreatedAt})
 	}
-	writeJSON(w, http.StatusOK, ratings)
+	writeJSON(w, http.StatusOK, views)
 }
 
 func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
@@ -1080,7 +1097,7 @@ func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *server) getStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := actionStats(s.kernel, r.Context(), chi.URLParam(r, "action_id"))
+	stats, err := actionStats(s.kernel, r.Context(), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1136,7 +1153,7 @@ func (s *server) postLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.RefreshToken == "" {
-		writeErr(w, kernel.ErrUnauthenticated.Wrap("refresh_token required"))
+		writeErr(w, kernel.ErrUnauthenticated.Wrap("refresh_token is required"))
 		return
 	}
 	if err := s.kernel.RevokeRefreshToken(r.Context(), req.RefreshToken); err != nil {
@@ -1194,7 +1211,7 @@ func (s *server) listSteps(w http.ResponseWriter, r *http.Request) {
 func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TraceID        string          `json:"trace_id"`
-		ActionID       string          `json:"action_id"`
+		Action         string          `json:"action"`
 		PartialArgs    json.RawMessage `json:"partial_args"`
 		RequiredCaller string          `json:"required_caller"`
 	}
@@ -1214,8 +1231,8 @@ func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("trace_id is required"))
 		return
 	}
-	if req.ActionID == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("action_id is required"))
+	if req.Action == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("action is required"))
 		return
 	}
 	if req.RequiredCaller == "" {
@@ -1229,7 +1246,7 @@ func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 	req.RequiredCaller = kernel.NormalizeHandle(req.RequiredCaller)
 	view, err := createStep(s.kernel, r.Context(), callerID, createStepParams{
 		TraceID:        traceID,
-		ActionRef:      req.ActionID,
+		ActionRef:      req.Action,
 		RequiredCaller: req.RequiredCaller,
 		PartialArgs:    req.PartialArgs,
 		ViaCapability:  isCap,
@@ -1627,7 +1644,7 @@ func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRe
 		limitKey = req.Counterparty
 	}
 	if h.callLimiter != nil && !h.callLimiter.allow(limitKey) {
-		b, _ := json.Marshal(map[string]string{"error": "rate limit exceeded", "code": kernel.KernelErrorCode(kernel.ErrInvalidState)})
+		b, _ := json.Marshal(map[string]string{"error": "rate limit exceeded"})
 		return fed.CallResponse{Status: http.StatusTooManyRequests, Body: b}
 	}
 	status, body, err := handleFederationCall(h.kernel, ctx, req.Counterparty, req.ExpectedContractHash,
@@ -1662,7 +1679,7 @@ func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRe
 		limitKey = req.Counterparty
 	}
 	if h.callLimiter != nil && !h.callLimiter.allow(limitKey) {
-		b, _ := json.Marshal(map[string]string{"error": "rate limit exceeded", "code": kernel.KernelErrorCode(kernel.ErrInvalidState)})
+		b, _ := json.Marshal(map[string]string{"error": "rate limit exceeded"})
 		return fed.StepResponse{Status: http.StatusTooManyRequests, Body: b}
 	}
 
@@ -1716,28 +1733,34 @@ func (h *fedHandlers) OnSettle(ctx context.Context, peerKey string, req fed.Sett
 // manifest, or one user reference to its stable id+handle — the primitive that lets a caller reach a
 // remote action without prior subscription.
 func (h *fedHandlers) OnResolve(ctx context.Context, _ string, req fed.ResolveRequest) fed.ResolveResponse {
-	errBody := func(msg string) json.RawMessage { b, _ := json.Marshal(map[string]string{"error": msg}); return b }
+	// Mirror the HTTP error shape ({error, code}) so an offline-verifiable rejection carries a
+	// typed code like every other reply (§14). Status derives from the code.
+	errResp := func(err error) fed.ResolveResponse {
+		code := kernel.KernelErrorCode(err)
+		b, _ := json.Marshal(map[string]string{"error": err.Error(), "code": code})
+		return fed.ResolveResponse{Status: kernel.HTTPStatusFromCode(code), Body: b}
+	}
 	switch req.Kind {
 	case "action":
 		a, err := h.kernel.ResolveAction(ctx, req.Owner+"/"+req.Name)
 		if err != nil || a == nil {
-			return fed.ResolveResponse{Status: 404, Body: errBody("action not found")}
+			return errResp(kernel.ErrNotFound.Wrap("action not found"))
 		}
 		m, err := h.kernel.GetActionManifest(ctx, a.ID)
 		if err != nil {
-			return fed.ResolveResponse{Status: 403, Body: errBody(err.Error())}
+			return errResp(err)
 		}
 		b, _ := json.Marshal(m)
 		return fed.ResolveResponse{Status: 200, Body: b}
 	case "user":
 		id, handle, err := h.kernel.ResolvePrincipal(ctx, req.User)
 		if err != nil {
-			return fed.ResolveResponse{Status: 404, Body: errBody("user not found")}
+			return errResp(kernel.ErrNotFound.Wrap("user not found"))
 		}
 		b, _ := json.Marshal(map[string]string{"user_id": id, "handle": handle})
 		return fed.ResolveResponse{Status: 200, Body: b}
 	default:
-		return fed.ResolveResponse{Status: 422, Body: errBody("unknown resolve kind")}
+		return errResp(kernel.ErrInvalidInput.Wrap("unknown resolve kind"))
 	}
 }
 

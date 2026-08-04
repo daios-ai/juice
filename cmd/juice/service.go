@@ -478,7 +478,7 @@ func completeGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, c
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"status": "complete", "provider": kernel.ProviderLabel(res.ProviderKey), "actions": grantRefs(k, ctx, grants), "created_at": grants[0].CreatedAt}, nil
+	return map[string]any{"status": "granted", "provider": kernel.ProviderLabel(res.ProviderKey), "actions": grantRefs(k, ctx, grants), "created_at": grants[0].CreatedAt}, nil
 }
 
 // attachToken stores a caller-supplied static token across a selector's delegated_bearer group
@@ -489,7 +489,7 @@ func attachToken(k *kernel.Kernel, ctx context.Context, callerID, selector, prov
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"status": "connected", "provider": kernel.ProviderLabel(provider), "actions": grantRefs(k, ctx, grants), "created_at": grants[0].CreatedAt}, nil
+	return map[string]any{"status": "granted", "provider": kernel.ProviderLabel(provider), "actions": grantRefs(k, ctx, grants), "created_at": grants[0].CreatedAt}, nil
 }
 
 // revokeGrantsBySelector deletes the caller's grants matching a selector (grants only, §8).
@@ -1214,11 +1214,12 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// a withdrawn action would not help. Placed after the idempotency insert so a replay is idempotent.
 	if expectedContractHash != "" {
 		if cur, herr := k.CurrentContractHash(ctx, action.ID); herr == nil && cur != expectedContractHash {
-			errJSON, _ := json.Marshal(map[string]string{"error": "contract changed", "code": kernel.KernelErrorCode(kernel.ErrInvalidState)})
+			code := kernel.KernelErrorCode(kernel.ErrInvalidState)
+			errJSON, _ := json.Marshal(map[string]string{"error": "contract changed", "code": code})
 			if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey, "contract changed", true); signErr == nil {
 				receiptJSON, _ := json.Marshal(receipt)
 				settleIdempotencyWithReceipt(k, ctx, rec.ID, string(errJSON), string(receiptJSON))
-				return http.StatusUnprocessableEntity, map[string]any{"error": "contract changed", "receipt": receipt}, nil
+				return kernel.HTTPStatusFromCode(code), map[string]any{"error": "contract changed", "code": code, "receipt": receipt}, nil
 			}
 			_ = k.DeleteIdempotencyRecord(ctx, rec.ID)
 			return 0, nil, kernel.ErrInvalidState.Wrap("contract changed")
@@ -1238,7 +1239,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 			receipt, _ := k.GetReceiptByID(ctx, reply.ReceiptID)
 			receiptJSON, _ := json.Marshal(receipt)
 			settleIdempotencyWithReceipt(k, ctx, rec.ID, string(errJSON), string(receiptJSON))
-			return http.StatusUnprocessableEntity, map[string]any{"error": callErr.Error(), "receipt": receipt}, nil
+			return kernel.HTTPStatus(callErr), map[string]any{"error": callErr.Error(), "code": kernel.KernelErrorCode(callErr), "receipt": receipt}, nil
 		}
 		// A parked remote dispatch has committed nothing yet and may still settle with a real
 		// charge; its own settlement completes the record (§13). Signing a zero-charge rejection
@@ -1248,21 +1249,17 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		}
 		// Pre-execution rejection (no transaction committed, e.g. insufficient funds): sign a
 		// zero-charge rejection receipt so the caller can settle locally without leaving the
-		// trace pending.
-		status, msg := http.StatusUnprocessableEntity, callErr.Error()
-		// Insufficient prepaid balance or exhausted global exposure (§13) both surface to the caller as
-		// a 402 so its settleRemoteCall attributes them to the operator (settle/deposit), never to the
-		// caller's own funds.
-		if errors.Is(callErr, kernel.ErrInsufficientFunds) || errors.Is(callErr, kernel.ErrPeerUnfunded) {
-			status, msg = http.StatusPaymentRequired, "global exposure exhausted"
-		}
+		// trace pending. Status and code derive from the error — HTTPStatus maps both
+		// ErrInsufficientFunds and ErrPeerUnfunded to 402, so its settleRemoteCall attributes them
+		// to the operator (settle/deposit), never to the caller's own funds (§13).
+		msg, code := callErr.Error(), kernel.KernelErrorCode(callErr)
 		// A pre-execution rejection here (non-executable action, suspended caller, bad input, or funding)
 		// is not a contract-hash fault — re-resolving would not change the outcome — so refresh_proxy is
 		// false. Only the If-Match mismatch above sets it (§13).
 		if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey, msg, false); signErr == nil {
 			receiptJSON, _ := json.Marshal(receipt)
 			settleIdempotencyWithReceipt(k, ctx, rec.ID, string(errJSON), string(receiptJSON))
-			return status, map[string]any{"error": msg, "receipt": receipt}, nil
+			return kernel.HTTPStatus(callErr), map[string]any{"error": msg, "code": code, "receipt": receipt}, nil
 		}
 		_ = k.DeleteIdempotencyRecord(ctx, rec.ID)
 		return 0, nil, callErr

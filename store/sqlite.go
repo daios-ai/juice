@@ -437,6 +437,26 @@ func (s *DB) ListUsers(ctx context.Context, limit, offset int) ([]*kernel.User, 
 	return queryList(rows, "list users", scanUserFn)
 }
 
+// ListPeers returns proxy users (public_key set) newest-first, filtering suspended rows in SQL
+// unless includeSuspended; limit<=0 returns every match (§13 peer sync enumerates unbounded).
+func (s *DB) ListPeers(ctx context.Context, includeSuspended bool, limit, offset int) ([]*kernel.User, error) {
+	where := `WHERE public_key IS NOT NULL AND public_key != ''`
+	if !includeSuspended {
+		where += ` AND suspended_at IS NULL`
+	}
+	q := `SELECT ` + userCols + ` FROM users ` + where + ` ORDER BY created_at DESC, id`
+	var args []any
+	if limit > 0 {
+		q += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, dbErr(err, "list peers")
+	}
+	return queryList(rows, "list peers", scanUserFn)
+}
+
 func (s *DB) SuspendUser(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE users SET suspended_at=? WHERE id=?`, timeToStr(time.Now().UTC()), id)

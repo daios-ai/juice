@@ -1051,33 +1051,22 @@ func (k *Kernel) AddPeer(ctx context.Context, subjectID, handle, publicKey strin
 	return k.CreateOrUpdateProxyPeer(ctx, handle, publicKey)
 }
 
-// ListPeers returns all remote kernel peers (proxy users, identified by a set public_key).
-func (k *Kernel) ListPeers(ctx context.Context) ([]*User, error) {
-	all, err := k.store.ListUsers(ctx, 1000, 0)
-	if err != nil {
-		return nil, err
-	}
-	var peers []*User
-	for _, u := range all {
-		if u.PublicKey != "" {
-			peers = append(peers, u)
-		}
-	}
-	return peers, nil
+// ListPeers returns remote kernel peers (proxy users, identified by a set public_key), newest
+// first. includeSuspended and limit/offset are pushed to the store (limit<=0 = all).
+func (k *Kernel) ListPeers(ctx context.Context, includeSuspended bool, limit, offset int) ([]*User, error) {
+	return k.store.ListPeers(ctx, includeSuspended, limit, offset)
 }
 
 // PeerKeys returns the public keys of all known, non-suspended peers — the pull set for the
-// discovery loop's peer sync (§13 peer sync).
+// discovery loop's peer sync (§13 peer sync). Enumerates unbounded (limit 0).
 func (k *Kernel) PeerKeys(ctx context.Context) []string {
-	peers, err := k.ListPeers(ctx)
+	peers, err := k.ListPeers(ctx, false, 0, 0)
 	if err != nil {
 		return nil
 	}
-	var keys []string
+	keys := make([]string, 0, len(peers))
 	for _, p := range peers {
-		if p.SuspendedAt == nil && p.PublicKey != "" {
-			keys = append(keys, p.PublicKey)
-		}
+		keys = append(keys, p.PublicKey)
 	}
 	return keys
 }

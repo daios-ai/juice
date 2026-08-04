@@ -118,13 +118,11 @@ func listPeersResp(t *testing.T, srv *server, all bool) []map[string]any {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("peers status %d: %s", rec.Code, rec.Body.String())
 	}
-	var out struct {
-		Peers []map[string]any `json:"peers"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+	var peers []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &peers); err != nil {
 		t.Fatal(err)
 	}
-	return out.Peers
+	return peers
 }
 
 // TestListPeersHidesSuspended: admin peers lists active peers by default and hides suspended ones,

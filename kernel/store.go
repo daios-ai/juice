@@ -187,6 +187,10 @@ type Store interface {
 	ReadUserByHandle(ctx context.Context, handle string) (*User, error)
 	ReadUserByPublicKey(ctx context.Context, publicKey string) (*User, error)
 	ListUsers(ctx context.Context, limit, offset int) ([]*User, error)
+	// ListPeers returns remote-kernel proxy users (public_key set), newest first. A false
+	// includeSuspended filters suspended peers out in SQL; limit<=0 returns all (the internal
+	// enumeration form used by peer sync, §13).
+	ListPeers(ctx context.Context, includeSuspended bool, limit, offset int) ([]*User, error)
 	SuspendUser(ctx context.Context, id string) error
 	UnsuspendUser(ctx context.Context, id string) error
 	UpdateUser(ctx context.Context, u *User) error

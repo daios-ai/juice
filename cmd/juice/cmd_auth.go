@@ -21,7 +21,7 @@ import (
 
 func init() {
 	authCmd := &cobra.Command{Use: "auth", Short: "Manage authentication"}
-	authCmd.AddCommand(loginCmd(), logoutCmd(), refreshCmd(), recoverCmd())
+	authCmd.AddCommand(loginCmd(), logoutCmd(), recoverCmd())
 	rootCmd.AddCommand(authCmd)
 }
 
@@ -145,35 +145,6 @@ func logoutCmd() *cobra.Command {
 			}
 			_ = removeRefreshToken()
 			fmt.Println("Logged out.")
-			return nil
-		},
-	}
-}
-
-func refreshCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "refresh",
-		Short: "Refresh your access token",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			rt, err := loadRefreshToken()
-			if err != nil {
-				return kernel.ErrUnauthenticated.Wrap("no refresh token stored; run: juice auth login")
-			}
-			var out struct {
-				AccessToken  string `json:"access_token"`
-				RefreshToken string `json:"refresh_token"`
-			}
-			if err := apiCall(context.Background(), "POST", "/v1/auth/refresh",
-				map[string]string{"refresh_token": rt}, &out); err != nil {
-				return err
-			}
-			if err := saveToken(out.AccessToken); err != nil {
-				return err
-			}
-			if err := saveRefreshToken(out.RefreshToken); err != nil {
-				return err
-			}
-			fmt.Println("Token refreshed.")
 			return nil
 		},
 	}

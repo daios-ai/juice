@@ -470,7 +470,7 @@ func TestFlow_ApprovalStep(t *testing.T) {
 	// Owner creates a step (approval gate) addressed to the human.
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action_id":       stepActionID,
+		"action":       stepActionID,
 		"required_caller": "appr-human",
 		"partial_args":    map[string]any{"preset": "value"},
 	}, ownerTok)
@@ -558,7 +558,7 @@ func TestFlow_WebhookCompleteStep(t *testing.T) {
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action_id":       actionID,
+		"action":       actionID,
 		"required_caller": "wh-webhook-sys",
 		"partial_args":    map[string]any{"purchase_id": "abc123"},
 	}, ownerTok)
@@ -631,7 +631,7 @@ func TestFlow_ForceEndWithSteps(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 			"trace_id":        traceID,
-			"action_id":       actionID,
+			"action":       actionID,
 			"required_caller": "fend-caller",
 			"partial_args":    map[string]any{},
 		}, ownerTok)
@@ -712,7 +712,7 @@ func TestFlow_RestartRecovery(t *testing.T) {
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action_id":       actionID,
+		"action":       actionID,
 		"required_caller": "rst-caller",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
@@ -1275,17 +1275,15 @@ func TestFlow_RatingVisibility(t *testing.T) {
 	if actID != "" {
 		ratingsResp := httpDo(t, srv, "GET", "/v1/actions/"+actID+"/ratings", nil, ownerTok)
 		if ratingsResp.StatusCode == http.StatusOK {
-			var ratings []kernel.Rating
+			var ratings []struct {
+				Value int     `json:"value"`
+				Note  *string `json:"note"`
+			}
 			decodeResponse(t, ratingsResp, &ratings)
 			if len(ratings) == 0 {
 				t.Error("expected at least one rating in action ratings list")
-			} else {
-				if ratings[0].RatedTxID != txID {
-					t.Errorf("rating rated_tx_id: got %s, want %s", ratings[0].RatedTxID, txID)
-				}
-				if ratings[0].Note == nil || *ratings[0].Note != note {
-					t.Errorf("rating note in list: got %v, want %q", ratings[0].Note, note)
-				}
+			} else if ratings[0].Note == nil || *ratings[0].Note != note {
+				t.Errorf("rating note in list: got %v, want %q", ratings[0].Note, note)
 			}
 		}
 	}
@@ -1657,7 +1655,7 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 	}
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action_id":       aAction.ID,
+		"action":       aAction.ID,
 		"required_caller": "3p-caller",
 		"partial_args":    map[string]any{},
 	}, pTok)
@@ -2587,8 +2585,8 @@ func TestFlow_OAuthDelegated(t *testing.T) {
 	var done map[string]any
 	cr := httpDo(t, srv, "POST", "/v1/grants/complete", map[string]any{"state": state, "code": "the-code"}, ownerTok)
 	decodeResponse(t, cr, &done)
-	if done["status"] != "complete" {
-		t.Fatalf("grants/complete status = %v, want complete", done["status"])
+	if done["status"] != "granted" {
+		t.Fatalf("grants/complete status = %v, want granted", done["status"])
 	}
 	if acts, _ := done["actions"].([]any); len(acts) != 2 {
 		t.Fatalf("one consent should mint two grants, got %v", done["actions"])
@@ -2686,8 +2684,8 @@ func TestFlow_DelegatedBearer(t *testing.T) {
 	var done map[string]any
 	ar := httpDo(t, srv, "POST", "/v1/grants", map[string]any{"selector": selector, "token": "ghp_secret"}, ownerTok)
 	decodeResponse(t, ar, &done)
-	if done["status"] != "connected" {
-		t.Fatalf("grants attach status = %v, want connected", done["status"])
+	if done["status"] != "granted" {
+		t.Fatalf("grants attach status = %v, want granted", done["status"])
 	}
 	if acts, _ := done["actions"].([]any); len(acts) != 2 {
 		t.Fatalf("one paste should connect two actions, got %v", done["actions"])

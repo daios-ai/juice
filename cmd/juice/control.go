@@ -194,22 +194,15 @@ func (s *server) ctlSettlePeer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
-	peers, err := s.kernel.ListPeers(r.Context())
+	// Active peers by default; suspended peers are included only with ?all=1, like action list hides
+	// inactive rows. The row still exists — this is display scope only. Filter and pagination are
+	// pushed to the store (§13).
+	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
+	limit, offset := listBounds(r)
+	peers, err := s.kernel.ListPeers(r.Context(), all, limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
-	}
-	// Active peers by default; suspended peers are hidden unless ?all=1, like action list hides
-	// inactive rows. The row still exists — this is display scope only.
-	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
-	if !all {
-		kept := peers[:0]
-		for _, p := range peers {
-			if p.SuspendedAt == nil {
-				kept = append(kept, p)
-			}
-		}
-		peers = kept
 	}
 	views := peerViews(peers)
 	// Flag debtor peers when global gross receivables have reached Y (display only, FIX 3).
@@ -222,7 +215,7 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"peers": views})
+	writeJSON(w, http.StatusOK, views)
 }
 
 // ctlInspectPeer has defined behavior whether the peer is up or down (§13). It always reports
@@ -662,21 +655,3 @@ func writeOr(w http.ResponseWriter, v any, err error) {
 // ---------------------------------------------------------------------------
 // Client helpers
 // ---------------------------------------------------------------------------
-
-// ctlPath appends limit/offset query parameters when set.
-func ctlPath(path string, limit, offset int) string {
-	q := ""
-	if limit > 0 {
-		q = "limit=" + strconv.Itoa(limit)
-	}
-	if offset > 0 {
-		if q != "" {
-			q += "&"
-		}
-		q += "offset=" + strconv.Itoa(offset)
-	}
-	if q == "" {
-		return path
-	}
-	return path + "?" + q
-}

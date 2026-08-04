@@ -43,16 +43,19 @@ flow_local_auth() {
     assert_eq "local_auth.token_stored" yes "$([ -f "$tdir/token" ] && echo yes || echo no)"
     assert_json "local_auth.me_succeeds" "$(jj "$db" "$hs" user me)" handle sys
 
+    # Refresh is automatic on a 401 (no standalone command): drop the access token, and the next
+    # authenticated call transparently refreshes and rotates the refresh token.
     local old_rt=""; [ -f "$tdir/refresh_token" ] && old_rt=$(cat "$tdir/refresh_token")
-    j "$db" "$hs" auth refresh >/dev/null 2>&1
+    rm -f "$tdir/token"
+    assert_json "local_auth.me_after_refresh" "$(jj "$db" "$hs" user me)" handle sys
     local new_rt=""; [ -f "$tdir/refresh_token" ] && new_rt=$(cat "$tdir/refresh_token")
     assert_ne "local_auth.refresh_rotates_token" "$old_rt" "$new_rt"
-    assert_json "local_auth.me_after_refresh" "$(jj "$db" "$hs" user me)" handle sys
 
-    # A reused (rotated-away) refresh token must be rejected.
+    # A reused (rotated-away) refresh token must be rejected: a stale access token 401s and its
+    # auto-refresh with the old refresh token is refused.
     if [ -n "$old_rt" ]; then
-        echo "$old_rt" > "$tdir/refresh_token"
-        assert_fails "local_auth.refresh_rotation_enforced" "expired\|invalid\|error" -- j "$db" "$hs" auth refresh
+        printf 'stale.access.token' > "$tdir/token"; echo "$old_rt" > "$tdir/refresh_token"
+        assert_fails "local_auth.refresh_rotation_enforced" "expired\|invalid\|unauthenticated" -- j "$db" "$hs" user me
         echo "$new_rt" > "$tdir/refresh_token"
     fi
 

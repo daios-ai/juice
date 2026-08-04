@@ -1987,7 +1987,7 @@ func TestPurgeIdlePeers(t *testing.T) {
 	if _, err := kEnabled.ReadAction(ctx, act.ID); err == nil {
 		t.Error("proxy action must be deleted after purge")
 	}
-	if peers, _ := kEnabled.ListPeers(ctx); len(peers) != 0 {
+	if peers, _ := kEnabled.ListPeers(ctx, true, 0, 0); len(peers) != 0 {
 		t.Errorf("ListPeers = %d, want 0 (peer identity forgotten)", len(peers))
 	}
 	u, err := kEnabled.ReadUser(ctx, peer.ID)

@@ -36,19 +36,27 @@ flow_refresh_rotation() {
     make_user "$db" "$hs" "$ha" alice   # CLI login uses PKCE → stores a refresh token
     tdir=$(juice_token_dir "$ha" "$db")
 
+    # Refresh is automatic on a 401 (no standalone command): dropping the access token makes the
+    # next authenticated call transparently refresh and rotate the refresh token.
     local rt1; rt1=$(cat "$tdir/refresh_token" 2>/dev/null)
-    assert_contains "refresh_rotation.refresh_succeeds" "refreshed" "$(j "$db" "$ha" auth refresh)"
+    rm -f "$tdir/token"
+    assert_json "refresh_rotation.refresh_succeeds" "$(jj "$db" "$ha" user me)" handle alice
     local rt2; rt2=$(cat "$tdir/refresh_token" 2>/dev/null)
     assert_ne "refresh_rotation.rt_rotated" "$rt1" "$rt2"
 
-    # Old (rotated-away) refresh token is rejected.
-    local ho; ho=$(home "$dir" old); mkdir -p "$(juice_token_dir "$ho" "$db")"; echo "$rt1" > "$(juice_token_dir "$ho" "$db")/refresh_token"
-    assert_fails "refresh_rotation.old_rt_rejected" "invalid\|expired\|unauthenticated" -- j "$db" "$ho" auth refresh
+    # Old (rotated-away) refresh token is rejected: a stale access token 401s, and its auto-refresh
+    # with the old refresh token is refused.
+    local ho; ho=$(home "$dir" old); mkdir -p "$(juice_token_dir "$ho" "$db")"
+    printf 'stale.access.token' > "$(juice_token_dir "$ho" "$db")/token"
+    echo "$rt1" > "$(juice_token_dir "$ho" "$db")/refresh_token"
+    assert_fails "refresh_rotation.old_rt_rejected" "invalid\|expired\|unauthenticated" -- j "$db" "$ho" user me
 
     # Logout revokes the current refresh token.
     j "$db" "$ha" auth logout >/dev/null 2>&1
-    local hr; hr=$(home "$dir" rt2); mkdir -p "$(juice_token_dir "$hr" "$db")"; echo "$rt2" > "$(juice_token_dir "$hr" "$db")/refresh_token"
-    assert_fails "refresh_rotation.revoked_rt_rejected" "invalid\|expired\|unauthenticated" -- j "$db" "$hr" auth refresh
+    local hr; hr=$(home "$dir" rt2); mkdir -p "$(juice_token_dir "$hr" "$db")"
+    printf 'stale.access.token' > "$(juice_token_dir "$hr" "$db")/token"
+    echo "$rt2" > "$(juice_token_dir "$hr" "$db")/refresh_token"
+    assert_fails "refresh_rotation.revoked_rt_rejected" "invalid\|expired\|unauthenticated" -- j "$db" "$hr" user me
 }
 
 flow_successful_receipt() {

@@ -1011,18 +1011,56 @@ func TestServeListActionRatings(t *testing.T) {
 	}
 	rate.Body.Close()
 
-	resp := httpDo(t, srv, "GET", "/v1/actions/"+action.ID+"/ratings", nil, ownerTok)
+	// The projection carries only the market signal — value, note, created_at — never the rater
+	// id, the transaction/receipt it links, or a signature (§13, §16).
+	readRatings := func(tok string) (*http.Response, []map[string]any) {
+		resp := httpDo(t, srv, "GET", "/v1/actions/"+action.ID+"/ratings", nil, tok)
+		var out []map[string]any
+		if resp.StatusCode == http.StatusOK {
+			decodeResponse(t, resp, &out)
+		} else {
+			resp.Body.Close()
+		}
+		return resp, out
+	}
+
+	resp, ratings := readRatings(ownerTok)
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
 		t.Fatalf("list ratings: expected 200, got %d", resp.StatusCode)
 	}
-	var ratings []kernel.Rating
-	decodeResponse(t, resp, &ratings)
-	if len(ratings) == 0 {
-		t.Fatal("expected at least one rating in response")
+	if len(ratings) != 1 {
+		t.Fatalf("expected one rating, got %d", len(ratings))
 	}
-	if ratings[0].RatedTxID != txID {
-		t.Errorf("rated_tx_id: got %q, want %q", ratings[0].RatedTxID, txID)
+	if v, _ := ratings[0]["value"].(float64); v != 1 {
+		t.Errorf("value: got %v, want 1", ratings[0]["value"])
+	}
+	if _, hasNote := ratings[0]["note"]; !hasNote {
+		t.Error("projection must include a note field (null here)")
+	}
+	for _, leaked := range []string{"rater_user_id", "rated_tx_id", "rated_receipt_id", "signature", "id"} {
+		if _, ok := ratings[0][leaked]; ok {
+			t.Errorf("projection leaks %q", leaked)
+		}
+	}
+
+	// Public action → readable anonymously (no token).
+	if resp, _ := readRatings(""); resp.StatusCode != http.StatusOK {
+		t.Errorf("anonymous read of a public action's ratings: got %d, want 200", resp.StatusCode)
+	}
+
+	// Reputation survives deactivation — the read is independent of active state (§8).
+	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/disable", nil, ownerTok).Body.Close()
+	if resp, r := readRatings(""); resp.StatusCode != http.StatusOK || len(r) != 1 {
+		t.Errorf("deactivated public action ratings: got %d / %d rows, want 200 / 1", resp.StatusCode, len(r))
+	}
+
+	// A private action's ratings are owner-only: a non-owner (here anonymous) is refused.
+	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "private"}, ownerTok).Body.Close()
+	if resp, _ := readRatings(""); resp.StatusCode == http.StatusOK {
+		t.Errorf("private action ratings must not be anonymously readable, got 200")
+	}
+	if resp, _ := readRatings(ownerTok); resp.StatusCode != http.StatusOK {
+		t.Errorf("private action ratings must be readable by the owner, got %d", resp.StatusCode)
 	}
 }
 
@@ -2233,8 +2271,8 @@ func TestFederationCallContractHashMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleFederationCall: %v", err)
 	}
-	if status != http.StatusUnprocessableEntity {
-		t.Errorf("status: got %d, want 422", status)
+	if status != http.StatusConflict {
+		t.Errorf("status: got %d, want 409 (invalid_state, aligned with the receipt's code)", status)
 	}
 	rc, _ := respBody["receipt"].(*kernel.Receipt)
 	if rc == nil || !rc.RefreshProxy || rc.Status != kernel.TxFailure || rc.Charge != 0 {

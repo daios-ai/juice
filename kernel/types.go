@@ -511,7 +511,7 @@ type IdempotencyRecord struct {
 }
 
 // ImportResult summarises the outcome of an import operation.
-// Used by both OpenAPI import and federation (remote) import.
+// Used by both OpenAPI import and per-call remote manifest resolution.
 type ImportResult struct {
 	Created     []*Action
 	Unchanged   []*Action
