@@ -664,7 +664,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 		logger.Warn("remote.receipt_invalid", "action", action.Name, "reason", invalid)
 		charge = 0
 		ktx.Status = TxFailure
-		ktx.Reason = "remote receipt invalid: " + invalid
+		ktx.Reason = reasonRemoteReceiptInvalidPrefix + invalid
 		vs.Quarantine = true
 	} else {
 		premium = r.Premium // execution serving markup
@@ -1105,18 +1105,28 @@ func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey str
 	}
 	for _, e := range rows {
 		row := get(e.IssuerPublicKey, e.SubjectActionID)
-		// Execution metrics come only from the subject's own first-party rows.
-		if e.IssuerPublicKey == subjectKernelPublicKey {
-			var er EvidenceReceipt
-			if json.Unmarshal([]byte(e.EvidenceReceiptJSON), &er) == nil {
-				row.Uses++
-				if er.Status == TxSuccess {
-					row.Successes++
-				} else {
-					row.Failures++
-				}
-				if lat := er.CreatedAt.Sub(er.StartedAt).Milliseconds(); lat >= 0 {
-					row.AvgLatencyMs += float64(lat)
+		// Interaction metrics come from each issuer's OWN evidence about the subject: the subject's
+		// self-reported executions when issuer == subject (the execution summary), and each other
+		// issuer's directly-observed calls otherwise (its counterparty-experience row). The two views
+		// read this field but are never summed together (§13 two views), so no call is double-counted.
+		var er EvidenceReceipt
+		if json.Unmarshal([]byte(e.EvidenceReceiptJSON), &er) == nil {
+			row.Uses++
+			if er.Status == TxSuccess {
+				row.Successes++
+			} else {
+				row.Failures++
+			}
+			if lat := er.CreatedAt.Sub(er.StartedAt).Milliseconds(); lat >= 0 {
+				row.AvgLatencyMs += float64(lat)
+			}
+			// Corroboration (§13): a counterparty-experience interaction (issuer != subject) is
+			// trade-backed only when the subject's OWN execution evidence names this issuer as
+			// counterparty and the receipt hashes join — the same two-kernel link a rating needs. A
+			// self-issued claim without that link is retained but shown unverified, never taken on faith.
+			if e.IssuerPublicKey != subjectKernelPublicKey && e.RemoteReceiptHash != "" {
+				if ef, ok := execByHash[e.RemoteReceiptHash]; ok && ef.counterparty == e.IssuerPublicKey {
+					row.CorroboratedUses++
 				}
 			}
 		}
@@ -1197,28 +1207,11 @@ func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 // evidence bundles ordered by effective time after cursor. When requesterKey names a known,
 // non-suspended peer, the response also carries that peer's credit here (CounterpartyBalance, §13
 // peer sync); nil for strangers, suspended keys, and anonymous pulls.
-// PEX peer-exchange bounds (§13). One sample size caps both directions; a stub is evicted after a
-// few non-verified pulls; the unverified cache is bounded so hints can't grow it without bound.
-const (
-	maxGossipKernelHints = 25
-	maxStubAttempts      = 3
-	maxUnverifiedKernels = 200
-)
-
-// gossipHintHorizon is how recently this kernel must have verified another for it to be relayed as a
-// PEX hint (§13). Freshness-gated relay is the standard alternative to death certificates: a kernel
-// dead longer than the horizon is hinted by no one and converges out. Derived from the discovery
-// interval (max with 1h so a short test interval still leaves a workable window), never a config key.
-func (k *Kernel) gossipHintHorizon() time.Duration {
-	iv := k.cfg.DiscoveryInterval
-	if iv <= 0 {
-		iv = 300 * time.Second
-	}
-	if h := 12 * iv; h > time.Hour {
-		return h
-	}
-	return time.Hour
-}
+// reasonRemoteReceiptInvalidPrefix marks a quarantined remote-proxy settlement: a validly-signed
+// receipt that breached the §13 settlement invariants (settled with charge 0, reserve kept locked,
+// reconciled out of band). settleRemoteCall writes it as the transaction reason; gossipRowIsExecuted
+// reads it to keep a quarantined receipt out of gossip evidence (§13 gossip-eligibility).
+const reasonRemoteReceiptInvalidPrefix = "remote receipt invalid: "
 
 func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*GossipResponse, error) {
 	ourKey := k.ourKeyB64()
@@ -1278,25 +1271,12 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*G
 		NextCursor:      nextCursor,
 	}
 	// Report the requester's credit here only if it is a known, non-suspended peer (§13 peer sync).
+	// Gossip carries no membership: which kernels exist is routing discovery's job (§13 Transport),
+	// so serving a pull learns nothing about the requester and provisions no account.
 	if requesterKey != "" {
 		if u, _ := k.store.ReadUserByPublicKey(ctx, requesterKey); u != nil && u.SuspendedAt == nil {
 			bal := u.Available
 			resp.CounterpartyBalance = &bal
-		}
-	}
-
-	// PEX (§13): learn the authenticated requester as an unverified stub (the "advertise" half — a
-	// puller thereby becomes discoverable), and relay a bounded random sample of kernels we have
-	// ourselves verified within the freshness horizon. Keys only; best-effort; a stub row is never
-	// a user account, so gossip opens no billing relationship.
-	if requesterKey != "" && requesterKey != ourKey {
-		_ = k.store.InsertDiscoveredKernelStub(ctx, requesterKey, time.Now().UTC(), maxUnverifiedKernels)
-	}
-	if sample, err := k.store.SampleVerifiedKernels(ctx, time.Now().UTC().Add(-k.gossipHintHorizon()), maxGossipKernelHints); err == nil {
-		for _, hk := range sample {
-			if hk != ourKey && hk != requesterKey {
-				resp.KnownKernels = append(resp.KnownKernels, hk)
-			}
 		}
 	}
 	return resp, nil
@@ -1342,7 +1322,47 @@ func (k *Kernel) buildEvidenceReceipt(ourKey string, row *GossipReceiptRow) (*Ev
 	return er, nil
 }
 
-// gossipEvidencePage builds one ordered evidence page after cursor, plus the next cursor (§13).
+// gossipRowIsExecuted reports whether a gossip-candidate receipt records an admitted execution, so it
+// is gossip-eligible (§13 leg-(b) exclusions). Own-execution leg-(a) rows carry no remote receipt and
+// are always executed. For a receipt-backed leg-(b) proxy row (locally-manufactured settlements are
+// already dropped in SQL by their empty remote_receipt_json), two non-executions are excluded: a
+// quarantined invalid receipt (our transaction reason carries the quarantine prefix) and a signed
+// rejection — the serving kernel sets a rejection receipt's tx_id to the caller's idempotency_key, so
+// tx_id == our dispatched key distinguishes any rejection from a genuine execution at any price, 0
+// included.
+func gossipRowIsExecuted(row *GossipReceiptRow) bool {
+	if row.RemoteReceiptJSON == "" {
+		return true // leg (a): own execution
+	}
+	var rr struct {
+		TxID   string   `json:"tx_id"`
+		Status TxStatus `json:"status"`
+	}
+	_ = json.Unmarshal([]byte(row.RemoteReceiptJSON), &rr)
+	// Signed rejection: the serving kernel sets a rejection receipt's tx_id to the caller's
+	// idempotency_key, distinguishing it from a genuine execution at any price (0 included).
+	if row.IdempotencyKey != "" && rr.TxID == row.IdempotencyKey {
+		return false
+	}
+	// Quarantined invalid receipt (§13): we settled it as a failure while keeping the reserve locked.
+	// The UNFORGEABLE signal is a status disagreement — the peer claimed success but we recorded a
+	// failure (a mispriced/inconsistent success receipt) — which a peer cannot fake to pass a bad
+	// receipt off as executed. The reason prefix additionally catches failure-receipt quarantines; a
+	// peer setting that exact reason could at most suppress one of its OWN failures, never inflate.
+	if row.Receipt != nil {
+		if rr.Status == TxSuccess && row.Receipt.Status == TxFailure {
+			return false
+		}
+		if strings.HasPrefix(row.Receipt.Reason, reasonRemoteReceiptInvalidPrefix) {
+			return false
+		}
+	}
+	return true
+}
+
+// gossipEvidencePage builds one ordered evidence page after cursor, plus the next cursor (§13). A
+// non-executed leg-(b) row (rejection or quarantine) is skipped but still advances the cursor past
+// it — sender-side gaps are expected and never an endless replay (§13 cursor).
 func (k *Kernel) gossipEvidencePage(ctx context.Context, ourKey, cursor string) ([]EvidenceBundle, string, error) {
 	rows, err := k.store.ListReceiptsForGossip(ctx, cursor, gossipEvidencePageSize)
 	if err != nil {
@@ -1351,6 +1371,10 @@ func (k *Kernel) gossipEvidencePage(ctx context.Context, ourKey, cursor string) 
 	bundles := make([]EvidenceBundle, 0, len(rows))
 	next := cursor
 	for _, row := range rows {
+		next = row.Cursor
+		if !gossipRowIsExecuted(row) {
+			continue
+		}
 		er, berr := k.buildEvidenceReceipt(ourKey, row)
 		if berr != nil {
 			return nil, "", berr
@@ -1364,7 +1388,6 @@ func (k *Kernel) gossipEvidencePage(ctx context.Context, ourKey, cursor string) 
 			b.Rating = re
 		}
 		bundles = append(bundles, b)
-		next = row.Cursor
 	}
 	return bundles, next, nil
 }
@@ -1564,35 +1587,14 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 		}
 	}
 
-	// PEX (§13): ingest the relayed known-kernel sample as unverified stubs — information, never
-	// authority. Keys only, bounded, own/sender/syntactically-invalid skipped; a stub is believed
-	// only after this kernel's own direct verified pull.
-	for i, hk := range gossip.KnownKernels {
-		if i >= maxGossipKernelHints {
-			break
-		}
-		if hk == "" || hk == gossip.PublicKey || hk == k.ourKeyB64() {
-			continue
-		}
-		if _, err := decodeRemotePublicKey(hk); err != nil {
-			continue
-		}
-		_ = k.store.InsertDiscoveredKernelStub(ctx, hk, now, maxUnverifiedKernels)
-	}
 	return gossip.NextCursor, nil
 }
 
-// KernelsForPull returns up to limit discovered-kernel keys in PEX pull order (§13), the candidate
-// set the discovery loop unions with peers and bootstrap seeds.
-func (k *Kernel) KernelsForPull(ctx context.Context, limit int) []string {
-	keys, _ := k.store.ListKernelsForPull(ctx, limit)
-	return keys
-}
-
-// RecordKernelPullFailure counts one non-verified pull against a candidate and evicts a spent stub
-// (§13), so a dead or poisoned hint rotates to the back and is dropped rather than pinning the set.
-func (k *Kernel) RecordKernelPullFailure(ctx context.Context, publicKey string) error {
-	return k.store.RecordKernelPullFailure(ctx, publicKey, time.Now().UTC(), maxStubAttempts)
+// ListDiscoveredKernels returns every verified discovered kernel with its cached public-action count,
+// the discovery-only half of the merged `admin peers` roster (§14). Discovery-only: it opens no
+// account and carries no execution semantics.
+func (k *Kernel) ListDiscoveredKernels(ctx context.Context) ([]*DiscoveredKernelView, error) {
+	return k.store.ListVerifiedDiscoveredKernels(ctx)
 }
 
 // ingestEvidenceBundle verifies and stores one evidence bundle from issuerKey (§13). It verifies the

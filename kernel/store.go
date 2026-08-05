@@ -517,20 +517,12 @@ type Store interface {
 
 	// CreateOrUpdateDiscoveredKernel upserts a DiscoveredKernel row keyed by public_key on a verified
 	// pull. It updates handle/about and (when non-empty) gossip_cursor, preserving the earliest
-	// first_seen, and clears attempts to 0 (the pull succeeded).
+	// first_seen.
 	CreateOrUpdateDiscoveredKernel(ctx context.Context, k *DiscoveredKernel) error
-	// InsertDiscoveredKernelStub records a second-hand key (PEX hint or authenticated requester,
-	// §13) insert-if-absent, never touching an existing row; refused once unverified stubs
-	// (handle='') reach maxUnverified.
-	InsertDiscoveredKernelStub(ctx context.Context, publicKey string, now time.Time, maxUnverified int) error
-	// RecordKernelPullFailure counts one non-verified pull (bumps attempts + last_attempt_at) and
-	// evicts a never-verified stub once attempts crosses maxAttempts (§13).
-	RecordKernelPullFailure(ctx context.Context, publicKey string, now time.Time, maxAttempts int) error
-	// SampleVerifiedKernels returns ≤limit random keys verified by a direct pull (handle!='') with
-	// updated_at after since — the PEX relay sample (§13).
-	SampleVerifiedKernels(ctx context.Context, since time.Time, limit int) ([]string, error)
-	// ListKernelsForPull returns ≤limit keys least-recently-attempted first — the pull rotation (§13).
-	ListKernelsForPull(ctx context.Context, limit int) ([]string, error)
+	// ListVerifiedDiscoveredKernels returns every verified discovered-kernel row (handle != ''), each
+	// with its cached public-action count, for the merged `admin peers` roster (§14). Discovery-only:
+	// it creates and reads no account.
+	ListVerifiedDiscoveredKernels(ctx context.Context) ([]*DiscoveredKernelView, error)
 	// ReadDiscoveredKernel returns the discovered-kernel row for a public key, or nil if unknown.
 	ReadDiscoveredKernel(ctx context.Context, publicKey string) (*DiscoveredKernel, error)
 	// SetGossipCursor persists the evidence high-watermark for a peer (§13 peer sync).

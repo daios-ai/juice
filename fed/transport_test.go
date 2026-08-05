@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/record"
 )
@@ -98,9 +100,6 @@ func TestBootstrapKeys(t *testing.T) {
 		}
 	}
 }
-
-// The discovery rendezvous CID is deterministic — every kernel must derive the same key with no
-// coordination, or provider records never meet.
 
 func TestPeerIDFromKeyRejectsGarbage(t *testing.T) {
 	if _, err := PeerIDFromKey("not-base64url!!"); err == nil {
@@ -267,35 +266,66 @@ func TestIsRelayAddr(t *testing.T) {
 
 // ---- Discovery ----
 
-// Discovery-by-key with no dedicated seed: three transports where one (R) is the bootstrap.
-// Every transport now runs a DHT server + relay, so a plain kernel is the meeting point. B knows
-// only R, yet resolves A by public key through R's DHT and round-trips gossip — the loopback
-// analogue of a home kernel being found by key with no dialable address and no separate seed.
-func TestDiscoveryByKeyViaBootstrapKernel(t *testing.T) {
+// Discovery via libp2p routing discovery in a real client/server topology — the invariant the old
+// all-ModeServer test could not check (§15). R is a DHT server + bootstrap; A and B are DHT clients
+// connected only to R, never to each other. A advertises the discovery namespace; B enumerates it
+// through R, must receive A WITH AT LEAST ONE ADDRESS, then opens a gossip stream to A by public key.
+// Under the previous key-only PEX path a client-mode A was not addressable this way — the regression.
+func TestDiscoveryByRoutingInClientServerTopology(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping DHT discovery test in short mode")
 	}
-	// R is the bootstrap/relay node (an ordinary transport).
-	r := newTestTransport(t, &fakeHandlers{}, nil)
+	r := newTestTransportMode(t, &fakeHandlers{}, nil, dht.ModeServer) // bootstrap/relay server
 	boot := r.ListenAddrs()
+	a := newTestTransportMode(t, &fakeHandlers{gossip: json.RawMessage(`{"public_key":"a"}`)}, boot, dht.ModeClient)
+	b := newTestTransportMode(t, &fakeHandlers{}, boot, dht.ModeClient)
 
-	// A serves gossip; B knows only R and must find A by key.
-	a := newTestTransport(t, &fakeHandlers{gossip: json.RawMessage(`{"public_key":"a"}`)}, boot)
-	b := newTestTransport(t, &fakeHandlers{}, boot)
+	// Precondition: A and B share no direct connection — only R. This is what makes B's discovery
+	// of A meaningful; without it a stray direct dial would resolve A regardless of routing discovery.
+	if b.host.Network().Connectedness(a.host.ID()) == network.Connected {
+		t.Fatal("A and B are directly connected before discovery; topology does not model NAT clients")
+	}
 
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(45 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		g, err := b.Gossip(ctx, a.PublicKey(), "")
+		actx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = a.Advertise(actx)
+		keys, err := b.DiscoverProviders(actx)
 		cancel()
-		if err == nil && string(g) == `{"public_key":"a"}` {
-			return // discovered by key through R's DHT and round-tripped
+		if err != nil {
+			lastErr = err
+			time.Sleep(500 * time.Millisecond)
+			continue
 		}
-		lastErr = err
+		found := false
+		for _, k := range keys {
+			if k == a.PublicKey() {
+				found = true
+			}
+		}
+		if !found {
+			lastErr = fmt.Errorf("A not yet among %d discovered providers", len(keys))
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		// B learned A by key; the address must have come with it (DiscoverProviders populated the
+		// peerstore from the provider record — the capability key-only PEX hints lacked).
+		if len(b.host.Peerstore().Addrs(a.host.ID())) == 0 {
+			lastErr = fmt.Errorf("A discovered without any address")
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		gctx, gcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		g, gerr := b.Gossip(gctx, a.PublicKey(), "")
+		gcancel()
+		if gerr == nil && string(g) == `{"public_key":"a"}` {
+			return // discovered A by routing discovery through the server and gossiped it by key
+		}
+		lastErr = gerr
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatalf("B never discovered A by key via the bootstrap kernel: %v", lastErr)
+	t.Fatalf("B never discovered A by routing discovery through the server: %v", lastErr)
 }
 
 // A publicly-reachable transport offers the circuit-relay service (folded into every host); this

@@ -2150,6 +2150,12 @@ type fakeFederationHTTP struct {
 	resolveUserID   string
 	resolveHandle   string
 	resolveErr      error
+	// When rejectSignKey is set, ExecuteFederation returns a signed zero-charge rejection receipt whose
+	// tx_id is the caller's idempotency_key — exactly how a real serving kernel refuses a call (§13), so
+	// a test can drive an ACTUAL rejection settlement.
+	rejectSignKey  ed25519.PrivateKey
+	rejectActionID string
+	rejectArgsHash string
 }
 
 func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, _, _ string) (*kernel.ActionManifest, error) {
@@ -2170,9 +2176,21 @@ func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[
 	return nil, kernel.ErrInvalidState.Wrap("not used in federation tests")
 }
 
-func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, _, _, _ string, _ map[string]any) (kernel.FederationResult, error) {
+func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, _, _, idempotencyKey string, _ map[string]any) (kernel.FederationResult, error) {
 	if f.notDispatched {
 		return kernel.FederationResult{NotDispatched: true}, nil
+	}
+	if f.rejectSignKey != nil {
+		now := time.Now().UTC()
+		r := &kernel.Receipt{
+			ID: uuid.New().String(), TxID: idempotencyKey, ActionID: f.rejectActionID,
+			ArgsHash: f.rejectArgsHash, Status: kernel.TxFailure, Reason: "counterparty denied",
+			StartedAt: now, CreatedAt: now,
+		}
+		payload, _ := kernel.ReceiptSigningBytes(r)
+		r.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(f.rejectSignKey, payload))
+		b, _ := json.Marshal(r)
+		return kernel.FederationResult{ReceiptJSON: string(b), HTTPStatus: 403}, nil
 	}
 	result := f.result
 	if result == nil {

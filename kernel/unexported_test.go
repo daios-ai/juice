@@ -763,3 +763,38 @@ func TestProjectRatingPrivacy(t *testing.T) {
 		t.Error("a full-Rating signature must not verify over the projection")
 	}
 }
+
+// gossipRowIsExecuted decides leg-(b) gossip eligibility (§13): only a receipt-backed admitted
+// execution is evidence. A leg-(a) own-execution row (no remote receipt) is always executed; a
+// quarantined receipt (reason prefix) and a signed rejection (remote tx_id == our idempotency_key)
+// are not. Locally-manufactured settlements never reach here — SQL drops their empty remote receipt.
+func TestGossipRowIsExecuted(t *testing.T) {
+	const idem = "idem-key-123"
+	cases := []struct {
+		name string
+		row  *GossipReceiptRow
+		want bool
+	}{
+		{"own execution (leg a)", &GossipReceiptRow{RemoteReceiptJSON: ""}, true},
+		{"admitted execution success", &GossipReceiptRow{
+			RemoteReceiptJSON: `{"tx_id":"real-remote-tx","status":"success","charge":10}`,
+			IdempotencyKey:    idem, Receipt: &Receipt{}}, true},
+		{"admitted price-0 failure", &GossipReceiptRow{
+			RemoteReceiptJSON: `{"tx_id":"real-remote-tx","status":"failure","charge":0}`,
+			IdempotencyKey:    idem, Receipt: &Receipt{Reason: "handler failed"}}, true},
+		{"signed rejection (tx_id == idempotency_key)", &GossipReceiptRow{
+			RemoteReceiptJSON: `{"tx_id":"` + idem + `","status":"failure","charge":0}`,
+			IdempotencyKey:    idem, Receipt: &Receipt{}}, false},
+		{"quarantined invalid receipt (reason prefix)", &GossipReceiptRow{
+			RemoteReceiptJSON: `{"tx_id":"real-remote-tx","status":"success","charge":10}`,
+			IdempotencyKey:    idem, Receipt: &Receipt{Reason: reasonRemoteReceiptInvalidPrefix + "premium != ceil"}}, false},
+		{"quarantined mispriced success (status disagreement, unforgeable)", &GossipReceiptRow{
+			RemoteReceiptJSON: `{"tx_id":"real-remote-tx","status":"success","charge":999}`,
+			IdempotencyKey:    idem, Receipt: &Receipt{Status: TxFailure, Reason: "remote call failed"}}, false},
+	}
+	for _, c := range cases {
+		if got := gossipRowIsExecuted(c.row); got != c.want {
+			t.Errorf("%s: gossipRowIsExecuted = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

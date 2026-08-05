@@ -143,8 +143,9 @@ type Handlers interface {
 	// OnResolve answers a /juice/fed/resolve/1 request: one action's signed manifest or one
 	// user's stable id+handle (§13). peerKey is informational; the reply is public directory data.
 	OnResolve(ctx context.Context, peerKey string, req ResolveRequest) ResolveResponse
-	// OnGossip returns one page of the gossip document (catalog snapshot + evidence page after
-	// req.Cursor + a bounded sample of recently-verified kernel keys, the PEX hints) as JSON (§13).
+	// OnGossip returns one page of the gossip document (first-party catalog snapshot + one
+	// evidence page after req.Cursor) as JSON (§13). Gossip carries no membership — discovery of
+	// which kernels exist is routing discovery's job (Advertise/DiscoverProviders).
 	OnGossip(ctx context.Context, peerKey string, req GossipRequest) (json.RawMessage, error)
 	// OnStep handles an inbound /juice/fed/step/1 request: listing or completing the waiting
 	// steps this peer is the required caller of (§10, §13).
@@ -159,7 +160,7 @@ type Handlers interface {
 type Config struct {
 	SigningKey     ed25519.PrivateKey // platform key; also the libp2p identity (§12)
 	ListenAddrs    []string           // multiaddrs to listen on; empty = sensible defaults
-	BootstrapPeers []string           // seed multiaddrs (incl. /p2p/<id>); the known-network seed (PEX, §13)
+	BootstrapPeers []string           // seed multiaddrs (incl. /p2p/<id>); DHT bootstrap + discovery seed (§13)
 	Handlers       Handlers           // inbound protocol handlers (from cmd/juice)
 	// AllowPrivateAddrs keeps loopback/private multiaddrs usable so the flow harness can run a
 	// full network on 127.0.0.1. Production leaves this false (public reachability only).

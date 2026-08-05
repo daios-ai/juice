@@ -15,8 +15,8 @@ _fed_setup() {
 
     FED_BPORT=$(backend_port); start_backend "$FED_BPORT" 200 '{"greeting":"hello"}'
     # R boots first and is the flow's bootstrap+relay; L (and T, in the gossip flow) dial it. A short
-    # discovery interval lets each kernel verify the others via PEX within the flow (§13): R learns L
-    # only on R's next pass, which the multi-hop gossip flow depends on.
+    # discovery interval lets each kernel verify the others via routing discovery within the flow (§13):
+    # R learns L only on R's next pass, which the multi-hop gossip flow depends on.
     start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r discovery_interval_seconds=2 || return 1
     FED_BOOT=$(kernel_fed_addr "$FED_DBR")
     [ -n "$FED_BOOT" ] || return 1
@@ -282,16 +282,16 @@ flow_fed_gossip_discovery() {
     done
     assert_eq "fed_gossip.r_discovered_via_gossip" yes "$found"
 
-    # Multi-hop PEX (§13): T bootstraps off R alone and never dials L, yet must learn L purely from
-    # R's known_kernels hint (R verified L after L bootstrapped to it, then relays L's key), then pull
-    # L directly and index L's sys user. Proves membership propagates transitively through gossip
-    # itself — not a shared DHT rendezvous.
+    # Routing discovery (§13): T bootstraps off the seed R alone and never dials L, yet must learn L
+    # through the shared routing-discovery namespace (L advertises to R's DHT; T enumerates it), then
+    # pull L directly and index L's sys user. Proves membership comes from the DHT namespace, not a
+    # gossip-carried hint.
     local lfound=no
     for _ in $(seq 1 45); do
         if jj "$dbt" "$ht" run sys/user-lookup '{"query":"sys"}' | grep -q "$FED_LKEY"; then lfound=yes; break; fi
         sleep 1
     done
-    assert_eq "fed_gossip.l_discovered_via_pex_hint" yes "$lfound"
+    assert_eq "fed_gossip.l_discovered_via_routing" yes "$lfound"
 
     # T cold-resolves R's action by key with its FIRST call, then binds the kernel-r alias by key.
     assert_nonempty "fed_gossip.t_resolves_and_calls" "$(strfield "$(jj "$dbt" "$ht" run "sys@$rkey/greet" '{}')" tx_id)"
@@ -300,12 +300,27 @@ flow_fed_gossip_discovery() {
     assert_nonempty "fed_gossip.t_has_greet_proxy" "$tp"
     # Exactly one use — T's OWN call — proving local stats are NOT inherited from R's gossiped manifest.
     assert_jnum "fed_gossip.t_stats_own_only" "$(jj "$dbt" "$ht" action stats "$tp")" uses 1
+
+    # §13 leg-(b) evidence propagation + corroboration: T's call to R above was UNRATED, yet T now gossips
+    # receipt-backed execution evidence about R (subject=R, issuer=T) — every admitted execution, not only
+    # rated calls. L, a third kernel, discovers T through routing discovery and pulls BOTH T's leg-(b)
+    # evidence and R's own leg-(a) execution evidence (which names T as counterparty). `admin inspect` on L
+    # then shows T's interaction under T as issuer (counterparty-experience view, never folded into R's own
+    # execution summary) AND marks it CORROBORATED — the two-kernel receipt link holds, so the claim is
+    # verified, not taken on faith. Proves an unrated call becomes visible, attributed, and trade-backed.
+    local tkey; tkey=$(kernel_key "$dbt" "$ht")
+    local tevi=no
+    for _ in $(seq 1 40); do
+        if python3 -c "import sys,json;e=json.loads(sys.argv[1]).get('evidence',[]);r=next((x for x in e if x.get('issuer_public_key')==sys.argv[2]),None);sys.exit(0 if r and r.get('corroborated_uses',0)>=1 else 1)" "$(jj "$FED_DBL" "$FED_HL" admin inspect "$rkey")" "$tkey" 2>/dev/null; then tevi=yes; break; fi
+        sleep 1
+    done
+    assert_eq "fed_gossip.unrated_call_propagates_as_verified_evidence" yes "$tevi"
 }
 
 # flow_fed_discovery: cold-start discovery. L boots with R as its only bootstrap peer and must learn
-# R into its known network automatically via the startup discovery pass that pulls gossip from the
-# bootstrap peers (§13 PEX). Proves discovery is independent of any peering step: the known network
-# (global, by key) grows from gossip alone, before any call resolves a proxy.
+# R into its known network automatically via the startup discovery pass — routing discovery finds R
+# and a gossip pull indexes its catalog (§13). Proves discovery is independent of any peering step: the
+# known network (global, by key) grows before any call resolves a proxy.
 flow_fed_discovery() {
     echo "=== FLOW fed_discovery ==="
     local dir; dir=$(new_dir)
@@ -342,8 +357,11 @@ flow_fed_discovery() {
     assert_eq "fed_discovery.r_discovered_without_subscribe" yes "$found"
     # The discovered reference is kernel-qualified by raw key (a gossiped label never resolves).
     assert_contains "fed_discovery.qualified_action" "@$rkey/greet" "$(jj "$dbl" "$hl" run sys/lookup '{"query":"greet"}')"
-    # L never resolved or called R: its peer list (proxy users) holds no R.
-    assert_eq "fed_discovery.no_peering" 0 "$(jj "$dbl" "$hl" admin peers | grep -c "$rkey")"
+    # L discovered R but never resolved or called it: R appears in the MERGED roster (§14) as a
+    # discovery-only kernel — present, but with NO account (has_account=false). Discovery creates no
+    # billing account.
+    local rentry; rentry=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);e=next((x for x in ps if x.get('public_key')==sys.argv[2]),None);print('missing' if e is None else ('account' if e.get('has_account') else 'discovery-only'))" "$(jj "$dbl" "$hl" admin peers)" "$rkey" 2>/dev/null)
+    assert_eq "fed_discovery.r_is_discovery_only" discovery-only "$rentry"
 }
 
 # flow_fed_peer_sync: the discovery timer also pulls gossip from known peers (§13 peer sync),

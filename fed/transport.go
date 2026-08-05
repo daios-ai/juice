@@ -15,11 +15,14 @@ import (
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/discovery"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/libp2p/go-libp2p/core/protocol"
+	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
+	dutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
 	relayv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 	"github.com/multiformats/go-multiaddr"
 )
@@ -89,6 +92,7 @@ const StdPort = 31313
 type Transport struct {
 	host      host.Host
 	dht       *dht.IpfsDHT
+	disc      *drouting.RoutingDiscovery
 	relay     *relayv2.Relay
 	cfg       Config
 	bootstrap []peer.AddrInfo
@@ -97,9 +101,32 @@ type Transport struct {
 	closed bool
 }
 
+// option is an unexported construction override. The public New applies none; the transport tests
+// use them to force a DHT client/server topology on loopback — where AllowPrivateAddrs otherwise
+// makes every node a ModeServer, hiding exactly the client-mode reachability the production bug
+// lived in. The public fed.Config / fed.New API stays unchanged.
+type option func(*buildOptions)
+
+type buildOptions struct {
+	dhtMode    dht.ModeOpt
+	dhtModeSet bool
+}
+
+func withDHTMode(m dht.ModeOpt) option {
+	return func(o *buildOptions) { o.dhtMode = m; o.dhtModeSet = true }
+}
+
 // New builds and starts a transport host from cfg. It listens, connects to the bootstrap peers,
-// starts the DHT, and registers the inbound protocol handlers. Call Close to stop.
+// starts the DHT and routing discovery, and registers the inbound protocol handlers. Call Close to stop.
 func New(ctx context.Context, cfg Config) (*Transport, error) {
+	return newTransport(ctx, cfg)
+}
+
+func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, error) {
+	var bo buildOptions
+	for _, opt := range opts {
+		opt(&bo)
+	}
 	hostKey, err := deriveHostKey(cfg.SigningKey)
 	if err != nil {
 		return nil, err
@@ -161,6 +188,9 @@ func New(ctx context.Context, cfg Config) (*Transport, error) {
 	if cfg.AllowPrivateAddrs {
 		dhtMode = dht.ModeServer
 	}
+	if bo.dhtModeSet {
+		dhtMode = bo.dhtMode // test-only override to build a real client/server topology (§15)
+	}
 	dhtOpts := []dht.Option{dht.Mode(dhtMode), dht.BootstrapPeers(bootstrap...)}
 	if cfg.AllowPrivateAddrs {
 		// Loopback flows run the whole network on 127.0.0.1; permit private addresses in the
@@ -181,7 +211,7 @@ func New(ctx context.Context, cfg Config) (*Transport, error) {
 		return nil, fmt.Errorf("fed: bootstrap dht: %w", err)
 	}
 
-	t := &Transport{host: h, dht: kdht, cfg: cfg, bootstrap: bootstrap}
+	t := &Transport{host: h, dht: kdht, disc: drouting.NewRoutingDiscovery(kdht), cfg: cfg, bootstrap: bootstrap}
 
 	// Every kernel offers the circuit-relay service. On a NAT-bound node it is unreachable and
 	// idle (harmless); on a publicly-reachable node it automatically becomes the relay that lets
@@ -277,12 +307,58 @@ func (t *Transport) resolve(ctx context.Context, peerKey string) (peer.ID, error
 	return "", fmt.Errorf("fed: cannot resolve peer %s: %w", pid, lastErr)
 }
 
-// ---- Discovery seed (§13) ----
+// ---- Discovery (§13) ----
 //
-// Discovery is peer-exchange gossip (§13 PEX), not a DHT provider rendezvous: the kernel learns
-// other kernels from the known_kernels sample on gossip replies and pulls each directly. The DHT is
-// retained solely for key→address resolution (resolve/FindPeer) and relay. BootstrapKeys is the one
-// transport-side seed the loop needs — the configured bootstrap peers as keys.
+// Discovery is libp2p routing discovery over a fixed namespace: every kernel advertises the namespace
+// to the DHT (its provider record carries its transport addresses) and enumerates the namespace's
+// providers to learn other kernels — addresses included, refreshed into the peerstore. A DHT client
+// may both advertise and enumerate, so a NAT-bound kernel is findable through the public servers with
+// no home-grown membership protocol. Provider records are ephemeral transport data and grant no Juice
+// identity, credit, callability, or alias; a verified first-party gossip pull is what a kernel
+// actually believes (§13).
+
+// discoveryNamespace is the fixed rendezvous string every kernel advertises and enumerates.
+// RoutingDiscovery hashes it to a CID whose providers are the known kernels. Changing it partitions
+// the network, so it is a protocol constant that upgrades in lockstep (§13).
+const discoveryNamespace = "juice/fed/discovery/1"
+
+// discoveryLimit bounds the providers enumerated per pass, so one enumeration cannot be made
+// unboundedly expensive by a large (or flooded) namespace.
+const discoveryLimit = 100
+
+// Advertise announces this kernel as a provider of the discovery namespace, publishing its current
+// transport addresses to the DHT, and returns the TTL after which the record should be refreshed.
+// Called once per discovery pass (§13). Provide needs only query capability, so a DHT-client kernel
+// behind NAT advertises successfully and becomes findable through the public servers.
+func (t *Transport) Advertise(ctx context.Context) (time.Duration, error) {
+	return t.disc.Advertise(ctx, discoveryNamespace)
+}
+
+// DiscoverProviders enumerates the discovery namespace's providers, refreshes each provider's
+// addresses into the peerstore as ephemeral reachability data (never Juice identity), and returns
+// their base64url public keys — this kernel's own key excluded. It is the routing-discovery
+// membership feed the discovery loop pulls gossip from; a returned key grants nothing until a
+// verified first-party gossip pull (§13).
+func (t *Transport) DiscoverProviders(ctx context.Context) ([]string, error) {
+	infos, err := dutil.FindPeers(ctx, t.disc, discoveryNamespace, discovery.Limit(discoveryLimit))
+	if err != nil {
+		return nil, err
+	}
+	self := t.host.ID()
+	var out []string
+	for _, ai := range infos {
+		if ai.ID == self {
+			continue
+		}
+		if len(ai.Addrs) > 0 {
+			t.host.Peerstore().AddAddrs(ai.ID, ai.Addrs, peerstore.TempAddrTTL)
+		}
+		if k, err := KeyFromPeerID(ai.ID); err == nil {
+			out = append(out, k)
+		}
+	}
+	return out, nil
+}
 
 // BootstrapKeys returns the base64url Ed25519 keys of the configured bootstrap peers — the same
 // key format inspect/gossip take. The libp2p peer ID inlines the Ed25519 key (KeyFromPeerID), so

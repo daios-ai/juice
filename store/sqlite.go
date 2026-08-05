@@ -2932,96 +2932,53 @@ func ftsMatchQuery(query string) string {
 func (s *DB) CreateOrUpdateDiscoveredKernel(ctx context.Context, k *kernel.DiscoveredKernel) error {
 	// The verified-pull path (§13): preserve the earliest first_seen; update handle/about; advance
 	// gossip_cursor only when non-empty (an identity-only upsert must not reset a peer's evidence
-	// high-watermark). A verified pull also stamps last_attempt_at and clears attempts to 0.
+	// high-watermark). Migration 036's last_attempt_at/attempts columns are retained for upgrade
+	// history but no longer written — routing discovery replaced the PEX pull-attempt state.
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO discovered_kernels (public_key,handle,about,gossip_cursor,first_seen,updated_at,last_attempt_at,attempts)
-		 VALUES (?,?,?,?,?,?,?,0)
+		`INSERT INTO discovered_kernels (public_key,handle,about,gossip_cursor,first_seen,updated_at)
+		 VALUES (?,?,?,?,?,?)
 		 ON CONFLICT(public_key) DO UPDATE SET
 		   handle=excluded.handle,
 		   about=excluded.about,
 		   gossip_cursor=CASE WHEN excluded.gossip_cursor != '' THEN excluded.gossip_cursor ELSE discovered_kernels.gossip_cursor END,
-		   updated_at=excluded.updated_at,
-		   last_attempt_at=excluded.updated_at,
-		   attempts=0`,
+		   updated_at=excluded.updated_at`,
 		k.PublicKey, k.Handle, k.About, k.GossipCursor,
-		timeToStr(k.FirstSeen), timeToStr(k.UpdatedAt), timeToStr(k.UpdatedAt),
+		timeToStr(k.FirstSeen), timeToStr(k.UpdatedAt),
 	)
 	return dbErr(err, "create or update discovered kernel")
 }
 
-// InsertDiscoveredKernelStub records a second-hand kernel key (a PEX hint or an authenticated
-// gossip requester, §13) insert-if-absent: it never touches an existing row's handle/about/cursor
-// or attempt state, so it cannot reset a verified row or a failing stub. Refused (no row written,
-// no error) once the count of unverified stubs (handle='') is at maxUnverified — the bounded cache.
-func (s *DB) InsertDiscoveredKernelStub(ctx context.Context, publicKey string, now time.Time, maxUnverified int) error {
-	t := timeToStr(now)
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO discovered_kernels (public_key,handle,about,gossip_cursor,first_seen,updated_at,last_attempt_at,attempts)
-		 SELECT ?, '', '', '', ?, ?, '', 0
-		 WHERE (SELECT COUNT(*) FROM discovered_kernels WHERE handle='') < ?
-		 ON CONFLICT(public_key) DO NOTHING`,
-		publicKey, t, t, maxUnverified)
-	return dbErr(err, "insert discovered kernel stub")
-}
-
-// RecordKernelPullFailure counts one non-verified pull against a candidate (§13): it bumps attempts
-// and last_attempt_at (rotating the row to the back of the pull order), then evicts a never-verified
-// stub once attempts crosses maxAttempts, so a poisoned or dead hint cannot linger.
-func (s *DB) RecordKernelPullFailure(ctx context.Context, publicKey string, now time.Time, maxAttempts int) error {
-	t := timeToStr(now)
-	if _, err := s.db.ExecContext(ctx,
-		`UPDATE discovered_kernels SET attempts=attempts+1, last_attempt_at=? WHERE public_key=?`, t, publicKey); err != nil {
-		return dbErr(err, "record kernel pull failure")
+// ListVerifiedDiscoveredKernels returns every verified discovered-kernel row (handle != ''), each
+// with its cached public-action count (discovery_docs of kind=action), most-recently-updated first —
+// the discovery-only half of the merged `admin peers` roster (§14).
+func (s *DB) ListVerifiedDiscoveredKernels(ctx context.Context) ([]*kernel.DiscoveredKernelView, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT dk.public_key, dk.handle, dk.about, dk.updated_at,
+		        (SELECT COUNT(*) FROM discovery_docs d WHERE d.kernel_public_key = dk.public_key AND d.kind='action')
+		 FROM discovered_kernels dk WHERE dk.handle != '' ORDER BY dk.updated_at DESC`)
+	if err != nil {
+		return nil, dbErr(err, "list verified discovered kernels")
 	}
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM discovered_kernels WHERE public_key=? AND handle='' AND attempts>=?`, publicKey, maxAttempts)
-	return dbErr(err, "evict stale kernel stub")
-}
-
-// scanStringColumn collects a single-string-column result set (rows are closed on return).
-func scanStringColumn(rows *sql.Rows, what string) ([]string, error) {
 	defer rows.Close()
-	var out []string
+	var out []*kernel.DiscoveredKernelView
 	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			return nil, dbErr(err, what)
+		var v kernel.DiscoveredKernelView
+		var updatedAt string
+		if err := rows.Scan(&v.PublicKey, &v.Handle, &v.About, &updatedAt, &v.Actions); err != nil {
+			return nil, dbErr(err, "scan discovered kernel view")
 		}
-		out = append(out, s)
+		v.UpdatedAt = strToTime(updatedAt)
+		out = append(out, &v)
 	}
-	return out, dbErr(rows.Err(), what)
-}
-
-// SampleVerifiedKernels returns up to limit random keys this kernel has itself verified by a direct
-// pull (handle != '') within the freshness horizon (updated_at > since) — the PEX relay sample (§13).
-func (s *DB) SampleVerifiedKernels(ctx context.Context, since time.Time, limit int) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT public_key FROM discovered_kernels WHERE handle != '' AND updated_at > ? ORDER BY RANDOM() LIMIT ?`,
-		timeToStr(since), limit)
-	if err != nil {
-		return nil, dbErr(err, "sample verified kernels")
-	}
-	return scanStringColumn(rows, "sample verified kernels")
-}
-
-// ListKernelsForPull returns up to limit discovered-kernel keys in PEX pull order (§13):
-// least-recently-attempted first (last_attempt_at ASC, so never-attempted '' sorts first), so dead
-// candidates retry at most once per rotation and cannot pin the pull set.
-func (s *DB) ListKernelsForPull(ctx context.Context, limit int) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT public_key FROM discovered_kernels ORDER BY last_attempt_at ASC LIMIT ?`, limit)
-	if err != nil {
-		return nil, dbErr(err, "list kernels for pull")
-	}
-	return scanStringColumn(rows, "list kernels for pull")
+	return out, dbErr(rows.Err(), "list verified discovered kernels")
 }
 
 func (s *DB) ReadDiscoveredKernel(ctx context.Context, publicKey string) (*kernel.DiscoveredKernel, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT public_key,handle,about,gossip_cursor,first_seen,updated_at,last_attempt_at,attempts FROM discovered_kernels WHERE public_key=?`, publicKey)
+		`SELECT public_key,handle,about,gossip_cursor,first_seen,updated_at FROM discovered_kernels WHERE public_key=?`, publicKey)
 	var k kernel.DiscoveredKernel
-	var firstSeen, updatedAt, lastAttempt string
-	err := row.Scan(&k.PublicKey, &k.Handle, &k.About, &k.GossipCursor, &firstSeen, &updatedAt, &lastAttempt, &k.Attempts)
+	var firstSeen, updatedAt string
+	err := row.Scan(&k.PublicKey, &k.Handle, &k.About, &k.GossipCursor, &firstSeen, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -3030,7 +2987,6 @@ func (s *DB) ReadDiscoveredKernel(ctx context.Context, publicKey string) (*kerne
 	}
 	k.FirstSeen = strToTime(firstSeen)
 	k.UpdatedAt = strToTime(updatedAt)
-	k.LastAttemptAt = strToTime(lastAttempt)
 	return &k, nil
 }
 
@@ -3225,10 +3181,14 @@ func (s *DB) ListEvidenceBySubject(ctx context.Context, subjectKernelPublicKey s
 // ListReceiptsForGossip returns one ordered page of this kernel's own gossip-eligible receipts after
 // cursor (§13). Two legs, unified: (a) receipts of the kernel's own active public non-transfer
 // actions (execution evidence — SubjectKernelPublicKey left empty for the kernel to fill with its own
-// key; CounterpartyKernelPublicKey set when the caller was a peer); (b) RATED receipts of remote_proxy
-// calls (rating evidence — subject is the peer owner's key + remote action id; RemoteReceiptJSON is the
-// stored serving receipt). Ordered ascending by effective time (a rating's created_at when rated, else
-// the receipt's), so a late rating re-surfaces its bundle. cursor is "<effective_at>\x1f<receipt_id>".
+// key; CounterpartyKernelPublicKey set when the caller was a peer); (b) receipt-backed remote_proxy
+// calls (subject is the peer owner's key + remote action id; RemoteReceiptJSON is the stored serving
+// receipt) — every admitted execution, rated or not. Leg (b) keys on a non-empty remote_receipt_json,
+// which only a receipt-settled call carries (a locally-manufactured settlement leaves it empty), and
+// carries IdempotencyKey so the kernel can drop signed rejections (tx_id == idempotency_key) and
+// quarantined receipts (§13 gossip-eligibility) without re-querying. Ordered ascending by effective
+// time (a rating's created_at when rated, else the receipt's), so a late rating re-surfaces its
+// bundle. cursor is "<effective_at>\x1f<receipt_id>".
 func (s *DB) ListReceiptsForGossip(ctx context.Context, cursor string, limit int) ([]*kernel.GossipReceiptRow, error) {
 	var curEff, curID string
 	if i := strings.IndexByte(cursor, '\x1f'); i >= 0 {
@@ -3240,17 +3200,19 @@ SELECT r.id, r.tx_id,
        CASE WHEN a.kind='remote_proxy' THEN a.remote_action_id ELSE r.action_id END AS subj_action,
        CASE WHEN a.kind='remote_proxy' THEN '' ELSE COALESCE(ca.public_key,'') END AS cp_kernel,
        COALESCE(t.remote_receipt_json,'') AS remote_receipt_json,
+       COALESCE(tr.idempotency_key,'') AS idem_key,
        COALESCE(rt.created_at, r.created_at) AS eff
 FROM receipts r
 JOIN transactions t ON t.id = r.tx_id
 JOIN actions a ON a.id = r.action_id
+LEFT JOIN traces tr ON tr.id = r.trace_id
 LEFT JOIN users ow ON ow.id = a.owner_user_id
 LEFT JOIN users ca ON ca.id = t.caller_user_id
 LEFT JOIN ratings rt ON rt.rated_tx_id = r.tx_id
 WHERE r.value = 0 AND COALESCE(a.effect,'') != 'transfer'
   AND (
         (a.kind IN ('http','wasm','native') AND a.visibility='public' AND a.active=1 AND a.deleted_at IS NULL)
-     OR (a.kind='remote_proxy' AND rt.id IS NOT NULL AND ow.public_key IS NOT NULL AND ow.public_key != '')
+     OR (a.kind='remote_proxy' AND COALESCE(t.remote_receipt_json,'') != '' AND ow.public_key IS NOT NULL AND ow.public_key != '')
       )
   AND ( ? = ''
         OR julianday(COALESCE(rt.created_at, r.created_at)) > julianday(?)
@@ -3262,12 +3224,12 @@ LIMIT ?`
 		return nil, dbErr(err, "list receipts for gossip")
 	}
 	type raw struct {
-		receiptID, txID, subjKernel, subjAction, cpKernel, remoteReceiptJSON, eff string
+		receiptID, txID, subjKernel, subjAction, cpKernel, remoteReceiptJSON, idemKey, eff string
 	}
 	var raws []raw
 	for rows.Next() {
 		var rr raw
-		if err := rows.Scan(&rr.receiptID, &rr.txID, &rr.subjKernel, &rr.subjAction, &rr.cpKernel, &rr.remoteReceiptJSON, &rr.eff); err != nil {
+		if err := rows.Scan(&rr.receiptID, &rr.txID, &rr.subjKernel, &rr.subjAction, &rr.cpKernel, &rr.remoteReceiptJSON, &rr.idemKey, &rr.eff); err != nil {
 			rows.Close()
 			return nil, dbErr(err, "scan gossip receipt")
 		}
@@ -3293,6 +3255,7 @@ LIMIT ?`
 			SubjectActionID:             rr.subjAction,
 			CounterpartyKernelPublicKey: rr.cpKernel,
 			RemoteReceiptJSON:           rr.remoteReceiptJSON,
+			IdempotencyKey:              rr.idemKey,
 			Rating:                      rating,
 			EffectiveAt:                 strToTime(rr.eff),
 			Cursor:                      rr.eff + "\x1f" + rr.receiptID,

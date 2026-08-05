@@ -3867,4 +3867,9 @@ func TestListReceiptsForGossip(t *testing.T) {
 	if found.Cursor == "" {
 		t.Error("gossip row must carry a cursor high-watermark")
 	}
+	// A leg-(a) own-execution row has no outbound idempotency key; the field is populated only for a
+	// leg-(b) receipt-backed proxy row, where the kernel uses it to drop signed rejections (§13).
+	if found.IdempotencyKey != "" {
+		t.Errorf("own-execution row must have an empty IdempotencyKey, got %q", found.IdempotencyKey)
+	}
 }

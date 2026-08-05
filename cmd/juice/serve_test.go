@@ -2520,12 +2520,19 @@ func containsProcess(t *testing.T, resp *http.Response, id string) bool {
 
 // fakeDiscoverer stands in for *fed.Transport so the discovery pass is exercised without libp2p.
 type fakeDiscoverer struct {
-	bootstrap []string
-	gossip    map[string]json.RawMessage
-	gossiped  []string
+	bootstrap  []string
+	providers  []string // routing-discovery providers enumerated this pass
+	gossip     map[string]json.RawMessage
+	gossiped   []string
+	advertised int
 }
 
-func (f *fakeDiscoverer) BootstrapKeys() []string { return f.bootstrap }
+func (f *fakeDiscoverer) Advertise(context.Context) (time.Duration, error) {
+	f.advertised++
+	return time.Minute, nil
+}
+func (f *fakeDiscoverer) DiscoverProviders(context.Context) ([]string, error) { return f.providers, nil }
+func (f *fakeDiscoverer) BootstrapKeys() []string                             { return f.bootstrap }
 func (f *fakeDiscoverer) Gossip(_ context.Context, key string, _ string) (json.RawMessage, error) {
 	f.gossiped = append(f.gossiped, key)
 	if raw, ok := f.gossip[key]; ok {
@@ -2538,10 +2545,10 @@ func (f *fakeDiscoverer) Gossip(_ context.Context, key string, _ string) (json.R
 func noCursor(context.Context, string) string             { return "" }
 func discardCursor(context.Context, string, string) error { return nil }
 
-// discoverOnce (§13 PEX): dedup peers ∪ bootstrap ∪ known-kernel rotation, pull each, and accumulate
-// only a VERIFIED reply (introducer = the authenticated key we dialed, == g.PublicKey). Every
-// non-verified outcome — offline, or a responder claiming a different identity than the dialed key —
-// is a recorded failure and never accumulated.
+// discoverOnce (§13): advertise this kernel, then dedup peers ∪ bootstrap ∪ routing-discovery
+// providers, pull each, and accumulate only a VERIFIED reply (introducer = the authenticated key we
+// dialed, == g.PublicKey). A non-verified outcome — offline, or a responder claiming a different
+// identity than the dialed key — is never accumulated (and is retried a later pass).
 func TestDiscoverOnce(t *testing.T) {
 	mkGossip := func(pk string) json.RawMessage {
 		b, _ := json.Marshal(kernel.GossipResponse{PublicKey: pk, Handle: pk})
@@ -2550,11 +2557,10 @@ func TestDiscoverOnce(t *testing.T) {
 	poison, _ := json.Marshal(kernel.GossipResponse{PublicKey: "X", Handle: "X"}) // D claims X ≠ D
 	f := &fakeDiscoverer{
 		bootstrap: []string{"A"},
+		providers: []string{"A", "B", "C", "D"}, // A duplicates bootstrap; C offline; D mismatched
 		gossip:    map[string]json.RawMessage{"A": mkGossip("A"), "B": mkGossip("B"), "D": poison},
 	}
-	// known rotation: A duplicates bootstrap; C is offline; D answers under a mismatched key.
-	known := func(context.Context, int) []string { return []string{"A", "B", "C", "D"} }
-	var got, failed []string
+	var got []string
 	acc := func(_ context.Context, g *kernel.GossipResponse, introducer string) (string, error) {
 		if introducer != g.PublicKey {
 			t.Errorf("introducer %q must be the authenticated key (== g.PublicKey %q)", introducer, g.PublicKey)
@@ -2564,16 +2570,14 @@ func TestDiscoverOnce(t *testing.T) {
 	}
 	noFriends := func(context.Context) []string { return nil }
 	noSync := func(context.Context, string, *int64) error { return nil }
-	recFail := func(_ context.Context, key string) error { failed = append(failed, key); return nil }
-	discoverOnce(context.Background(), f, noFriends, known, acc, noSync, recFail, noCursor, discardCursor, log.Discard())
+	discoverOnce(context.Background(), f, noFriends, acc, noSync, noCursor, discardCursor, log.Discard())
 
 	sort.Strings(got)
 	if strings.Join(got, ",") != "A,B" {
 		t.Errorf("accumulated %v, want [A B] (dup deduped, offline C and mismatched D excluded)", got)
 	}
-	sort.Strings(failed)
-	if strings.Join(failed, ",") != "C,D" {
-		t.Errorf("failed %v, want [C D] (offline C, key-mismatch D)", failed)
+	if f.advertised == 0 {
+		t.Error("discoverOnce must advertise this kernel to the routing-discovery namespace")
 	}
 }
 
@@ -2584,7 +2588,6 @@ func TestDiscoverOncePeerSyncNoSeeds(t *testing.T) {
 	g, _ := json.Marshal(kernel.GossipResponse{PublicKey: "F", Handle: "F", CounterpartyBalance: &bal})
 	f := &fakeDiscoverer{gossip: map[string]json.RawMessage{"F": g}}
 	peers := func(context.Context) []string { return []string{"F"} }
-	noKnown := func(context.Context, int) []string { return nil }
 	var syncedKey string
 	var syncedCredit *int64
 	rec := func(_ context.Context, key string, credit *int64) error {
@@ -2592,8 +2595,7 @@ func TestDiscoverOncePeerSyncNoSeeds(t *testing.T) {
 		return nil
 	}
 	acc := func(context.Context, *kernel.GossipResponse, string) (string, error) { return "", nil }
-	noFail := func(context.Context, string) error { return nil }
-	discoverOnce(context.Background(), f, peers, noKnown, acc, rec, noFail, noCursor, discardCursor, log.Discard())
+	discoverOnce(context.Background(), f, peers, acc, rec, noCursor, discardCursor, log.Discard())
 
 	if syncedKey != "F" || syncedCredit == nil || *syncedCredit != 42 {
 		t.Errorf("recordSync got (%q,%v), want (F, 42)", syncedKey, syncedCredit)
@@ -2634,6 +2636,7 @@ func TestDiscoverPullFailureLog(t *testing.T) {
 		return b
 	}
 	f := &fakeDiscoverer{
+		bootstrap: []string{"OFF", "DEC", "MIS", "ACC"}, // configured seeds, all pulled this pass
 		gossip: map[string]json.RawMessage{
 			"DEC": json.RawMessage("{not json"), // decode: malformed reply
 			"MIS": mkGossip("OTHER"),             // mismatch: claims OTHER ≠ MIS
@@ -2641,7 +2644,6 @@ func TestDiscoverPullFailureLog(t *testing.T) {
 			// "OFF" absent from the map → fakeDiscoverer returns an error → transport stage
 		},
 	}
-	known := func(context.Context, int) []string { return []string{"OFF", "DEC", "MIS", "ACC"} }
 	acc := func(_ context.Context, g *kernel.GossipResponse, _ string) (string, error) {
 		if g.PublicKey == "ACC" {
 			return "", fmt.Errorf("rejected")
@@ -2650,14 +2652,13 @@ func TestDiscoverPullFailureLog(t *testing.T) {
 	}
 	noFriends := func(context.Context) []string { return nil }
 	noSync := func(context.Context, string, *int64) error { return nil }
-	noFail := func(context.Context, string) error { return nil }
 
 	logPath := filepath.Join(t.TempDir(), "disc.log")
 	logger, err := log.New(log.Config{Level: "debug", FilePath: logPath, Format: "json"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	discoverOnce(context.Background(), f, noFriends, known, acc, noSync, noFail, noCursor, discardCursor, logger)
+	discoverOnce(context.Background(), f, noFriends, acc, noSync, noCursor, discardCursor, logger)
 
 	stageByKey := map[string]string{}
 	for _, e := range readJSONLogEvents(t, logPath, "discovery.pull.failed") {

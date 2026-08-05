@@ -279,6 +279,90 @@ func TestPeerViewsCarrySyncCache(t *testing.T) {
 	if len(views) != 1 || views[0].PeerCredit == nil || *views[0].PeerCredit != 64 || views[0].LastSeen == nil {
 		t.Errorf("peerViews dropped the sync cache: %+v", views[0])
 	}
+	if !views[0].HasAccount {
+		t.Error("a counterparty projection must have HasAccount=true")
+	}
+}
+
+// mergePeerRoster (§14): every known kernel by public key — counterparties (account) and
+// discovery-only kernels (no account) — deduped by key, this kernel's own key excluded. A suspended
+// counterparty is hidden by default even if it is also a discovered kernel (never re-surfaced).
+func TestMergePeerRoster(t *testing.T) {
+	const self = "SELF"
+	suspended := time.Now()
+	counterparties := []*kernel.User{
+		{Handle: "titan", PublicKey: "K1", Available: 5},                 // counterparty, also discovered
+		{Handle: "solo", PublicKey: "K2", Available: -3},                 // counterparty only
+		{Handle: "banned", PublicKey: "K4", SuspendedAt: &suspended},     // suspended counterparty, also discovered
+	}
+	discovered := []*kernel.DiscoveredKernelView{
+		{Handle: "titan-adv", PublicKey: "K1", Actions: 14}, // dup of a counterparty: fills action count
+		{Handle: "minibox", PublicKey: "K3", Actions: 13},   // discovery-only
+		{Handle: "banned-adv", PublicKey: "K4", Actions: 9}, // must NOT re-surface a hidden suspended counterparty
+		{Handle: "me", PublicKey: self, Actions: 1},         // this kernel: must be excluded
+	}
+
+	// Default (showSuspended=false): suspended K4 is hidden entirely, not shown as discovery-only.
+	out := mergePeerRoster(counterparties, discovered, self, false)
+	byKey := map[string]*kernel.PeerView{}
+	for _, v := range out {
+		if _, dup := byKey[v.PublicKey]; dup {
+			t.Errorf("key %s appears twice; roster must dedup by public key", v.PublicKey)
+		}
+		byKey[v.PublicKey] = v
+	}
+	if _, ok := byKey[self]; ok {
+		t.Error("the roster must exclude this kernel's own key")
+	}
+	if v := byKey["K1"]; v == nil || !v.HasAccount || v.Actions != 14 {
+		t.Errorf("K1 should be a counterparty with the discovered action count filled: %+v", v)
+	}
+	if v := byKey["K2"]; v == nil || !v.HasAccount {
+		t.Errorf("K2 should be an account-holding counterparty: %+v", v)
+	}
+	if v := byKey["K3"]; v == nil || v.HasAccount {
+		t.Errorf("K3 should be a discovery-only entry with no account: %+v", v)
+	}
+	if _, ok := byKey["K4"]; ok {
+		t.Error("a suspended counterparty must be hidden by default, not re-surfaced as discovery-only")
+	}
+
+	// With showSuspended=true, the suspended counterparty appears (as an account, not discovery-only).
+	all := mergePeerRoster(counterparties, discovered, self, true)
+	var k4 *kernel.PeerView
+	for _, v := range all {
+		if v.PublicKey == "K4" {
+			k4 = v
+		}
+	}
+	if k4 == nil || !k4.HasAccount || k4.SuspendedAt == nil {
+		t.Errorf("with --all, K4 should appear as a suspended counterparty: %+v", k4)
+	}
+}
+
+// pageViews paginates the MERGED roster (not one source), so limit/offset bound the whole list —
+// including discovered kernels — and never drop rows off the end silently.
+func TestPageViews(t *testing.T) {
+	v := []*kernel.PeerView{{PublicKey: "A"}, {PublicKey: "B"}, {PublicKey: "C"}, {PublicKey: "D"}}
+	got := func(limit, offset int) string {
+		var keys []string
+		for _, p := range pageViews(v, limit, offset) {
+			keys = append(keys, p.PublicKey)
+		}
+		return strings.Join(keys, ",")
+	}
+	if s := got(2, 0); s != "A,B" {
+		t.Errorf("limit=2 offset=0 → %q, want A,B", s)
+	}
+	if s := got(2, 2); s != "C,D" {
+		t.Errorf("limit=2 offset=2 → %q, want C,D", s)
+	}
+	if s := got(10, 1); s != "B,C,D" {
+		t.Errorf("limit past end → %q, want B,C,D", s)
+	}
+	if s := got(2, 99); s != "" {
+		t.Errorf("offset past end → %q, want empty", s)
+	}
 }
 
 func TestValidateRating(t *testing.T) {

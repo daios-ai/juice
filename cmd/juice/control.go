@@ -194,28 +194,38 @@ func (s *server) ctlSettlePeer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
-	// Active peers by default; suspended peers are included only with ?all=1, like action list hides
-	// inactive rows. The row still exists — this is display scope only. Filter and pagination are
-	// pushed to the store (§13).
+	// The merged roster (§14): every known kernel by public key — counterparties (with an account and
+	// balance) and discovery-only kernels (no account) — this kernel excluded. Suspended counterparties
+	// are included only with ?all=1, like action list hides inactive rows.
 	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
 	limit, offset := listBounds(r)
-	peers, err := s.kernel.ListPeers(r.Context(), all, limit, offset)
+	// Fetch the FULL counterparty set (suspended included, unpaged — ListPeers treats limit <= 0 as
+	// "all"): pagination is applied to the MERGED roster below, never to counterparties alone — else
+	// the appended discovered kernels would ignore limit/offset, and a suspended counterparty beyond
+	// the page would reappear as discovery-only, defeating the suspend filter.
+	peers, err := s.kernel.ListPeers(r.Context(), true, 0, 0)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	views := peerViews(peers)
-	// Flag debtor peers when global gross receivables have reached Y (display only, FIX 3).
+	discovered, err := s.kernel.ListDiscoveredKernels(r.Context())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	selfKey, _ := s.kernel.GetConfig(r.Context(), configKeySigningPublic)
+	views := mergePeerRoster(peers, discovered, selfKey, all)
+	// Flag debtor counterparties when global gross receivables have reached Y (display only, FIX 3).
 	if globalCfg.SettlementTrigger > 0 {
 		if gross, err := s.kernel.GrossReceivables(r.Context()); err == nil && gross >= globalCfg.SettlementTrigger {
 			for _, v := range views {
-				if v.Available < 0 {
+				if v.HasAccount && v.Available < 0 {
 					v.SettlementDue = true
 				}
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, views)
+	writeJSON(w, http.StatusOK, pageViews(views, limit, offset))
 }
 
 // ctlInspectPeer has defined behavior whether the peer is up or down (§13). It always reports
@@ -248,6 +258,11 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	// that replaces the deleted introducer roster. Local; works online or offline.
 	if ev, eerr := s.kernel.SubjectEvidence(ctx, peerKey); eerr == nil {
 		resp["evidence"] = ev
+	}
+	// Local account info when this peer is a financial counterparty here (§14 inspect): the bilateral
+	// balance and suspension, independent of whether the peer is currently reachable.
+	if pu, _ := s.kernel.ReadUserByPublicKey(ctx, peerKey); pu != nil {
+		resp["account"] = map[string]any{"available": pu.Available, "locked": pu.Locked, "suspended": pu.SuspendedAt != nil}
 	}
 
 	// Live view when the peer answers: a fresh gossip pull (identity + first-party users + own

@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 )
 
 // fakeHandlers records the last inbound request and returns canned responses.
@@ -58,6 +60,26 @@ func newTestTransport(t *testing.T, h Handlers, bootstrap []string) *Transport {
 		Handlers:          h,
 		AllowPrivateAddrs: true,
 	})
+	if err != nil {
+		t.Fatalf("New transport: %v", err)
+	}
+	t.Cleanup(func() { _ = tr.Close() })
+	return tr
+}
+
+// newTestTransportMode is newTestTransport with an explicit DHT mode, so a test can build a real
+// client/server topology on loopback. AllowPrivateAddrs otherwise forces every node to ModeServer —
+// exactly the configuration that masked the client-mode discovery regression (§15).
+func newTestTransportMode(t *testing.T, h Handlers, bootstrap []string, mode dht.ModeOpt) *Transport {
+	t.Helper()
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	tr, err := newTransport(context.Background(), Config{
+		SigningKey:        priv,
+		ListenAddrs:       []string{"/ip4/127.0.0.1/tcp/0"},
+		BootstrapPeers:    bootstrap,
+		Handlers:          h,
+		AllowPrivateAddrs: true,
+	}, withDHTMode(mode))
 	if err != nil {
 		t.Fatalf("New transport: %v", err)
 	}

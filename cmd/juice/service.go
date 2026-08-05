@@ -184,16 +184,71 @@ func enrichLedger(e *kernel.LedgerEntry, uc *userCache) *ledgerView {
 	return v
 }
 
-// peerViews projects proxy-peer users into handle+key+balance views (plus the §13 sync cache:
-// our credit on the peer and when we last reached it), dropping their internal ids.
+// peerViews projects counterparty (proxy-peer) users into handle+key+balance views (plus the §13
+// sync cache: our credit on the peer and when we last reached it), dropping their internal ids.
+// HasAccount is true because these rows are financial counterparties.
 func peerViews(peers []*kernel.User) []*kernel.PeerView {
 	out := make([]*kernel.PeerView, len(peers))
 	for i, p := range peers {
 		out[i] = &kernel.PeerView{
-			Handle: p.Handle, PublicKey: p.PublicKey,
+			Handle: p.Handle, PublicKey: p.PublicKey, HasAccount: true,
 			Available: p.Available, Locked: p.Locked, SuspendedAt: p.SuspendedAt,
 			PeerCredit: p.PeerCredit, LastSeen: p.PeerLastSeen,
 		}
+	}
+	return out
+}
+
+// pageViews applies limit/offset to an already-assembled roster (the merged peer roster paginates the
+// merged result, not one of its two sources, §14).
+func pageViews(views []*kernel.PeerView, limit, offset int) []*kernel.PeerView {
+	if offset >= len(views) {
+		return []*kernel.PeerView{}
+	}
+	end := offset + limit
+	if end > len(views) {
+		end = len(views)
+	}
+	return views[offset:end]
+}
+
+// mergePeerRoster builds the merged `admin peers` roster (§14): every known kernel by public key —
+// counterparties (with an account and balance) and discovery-only kernels (no account) — deduped by
+// key, this kernel's own key excluded. A counterparty that is also discovered fills its action count
+// from the discovery row; a discovery-only kernel becomes an account-less entry whose Handle is a
+// display label that never resolves a command. `peers` must be the FULL counterparty set (suspended
+// included); showSuspended then decides whether suspended counterparties appear. A suspended
+// counterparty hidden this way is never re-surfaced by its discovery row — it stays a known
+// counterparty, so hiding it hides the kernel entirely, as suspend intends.
+func mergePeerRoster(peers []*kernel.User, discovered []*kernel.DiscoveredKernelView, selfKey string, showSuspended bool) []*kernel.PeerView {
+	counterpartyKeys := map[string]bool{}
+	byKey := map[string]*kernel.PeerView{}
+	var out []*kernel.PeerView
+	for _, v := range peerViews(peers) {
+		if v.PublicKey == "" || v.PublicKey == selfKey {
+			continue
+		}
+		counterpartyKeys[v.PublicKey] = true // a known counterparty, whether shown or hidden below
+		if v.SuspendedAt != nil && !showSuspended {
+			continue // suspended counterparties appear only with --all
+		}
+		byKey[v.PublicKey] = v
+		out = append(out, v)
+	}
+	for _, d := range discovered {
+		if d.PublicKey == "" || d.PublicKey == selfKey {
+			continue
+		}
+		if counterpartyKeys[d.PublicKey] {
+			// Already represented by the counterparty pass (or deliberately hidden if suspended); a
+			// discovery row must not re-surface it as a separate account-less entry.
+			if v, ok := byKey[d.PublicKey]; ok {
+				v.Actions = d.Actions // fill the counterparty's catalog size
+			}
+			continue
+		}
+		ls := d.UpdatedAt
+		out = append(out, &kernel.PeerView{Handle: d.Handle, PublicKey: d.PublicKey, Actions: d.Actions, LastSeen: &ls})
 	}
 	return out
 }

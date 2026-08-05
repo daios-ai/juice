@@ -12,14 +12,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// peerCreditStr renders the §13 sync cache "our credit on the peer": a dash when unsynced (nil).
-func peerCreditStr(c *int64) string {
-	if c == nil {
-		return "-"
-	}
-	return strconv.FormatInt(*c, 10)
-}
-
 // lastSeenStr renders when a peer was last reached by peer sync (§13): "never" when unsynced,
 // else a coarse relative age.
 func lastSeenStr(t *time.Time) string {
@@ -354,12 +346,18 @@ func peerInspectCmd() *cobra.Command {
 					Uses              int64    `json:"uses"`
 					Successes         int64    `json:"successes"`
 					Failures          int64    `json:"failures"`
+					CorroboratedUses  int64    `json:"corroborated_uses"`
 					AvgLatencyMs      float64  `json:"avg_latency_ms"`
 					RatingCount       int64    `json:"rating_count"`
 					RatingMean        float64  `json:"rating_mean"`
 					UnverifiedRatings int64    `json:"unverified_ratings"`
 					Notes             []string `json:"notes"`
 				} `json:"evidence"`
+				Account *struct {
+					Available int64 `json:"available"`
+					Locked    int64 `json:"locked"`
+					Suspended bool  `json:"suspended"`
+				} `json:"account"`
 				Reachability struct {
 					Path      string `json:"path"`
 					RTTmillis int64  `json:"rtt_millis"`
@@ -393,6 +391,13 @@ func peerInspectCmd() *cobra.Command {
 				reachLabel = "offline"
 			}
 			fmt.Printf("Reachability: %s (%dms)\n", reachLabel, out.Reachability.RTTmillis)
+			if out.Account != nil {
+				susp := ""
+				if out.Account.Suspended {
+					susp = " [suspended]"
+				}
+				fmt.Printf("Account:      available=%d locked=%d%s\n", out.Account.Available, out.Account.Locked, susp)
+			}
 			if out.Source == "none" {
 				fmt.Println("This peer is offline and not known locally (no cached data).")
 				return nil
@@ -411,13 +416,53 @@ func peerInspectCmd() *cobra.Command {
 				}
 			}
 			if len(out.Evidence) > 0 {
-				fmt.Printf("\nRetained evidence (§13) — grouped by issuer (trade-backed ratings only):\n")
+				// Two views, never folded together: the subject's own execution summary (issuer ==
+				// subject), then per-issuer counterparty experience (every other issuer's direct
+				// interactions with the subject). A rating counts only when trade-backed (§13).
+				subjectName := out.Handle
+				if subjectName == "" {
+					subjectName = shortKey(out.PublicKey)
+				}
+				fmt.Printf("\nExecution reported by %s\n", subjectName)
+				own := false
 				for _, e := range out.Evidence {
-					fmt.Printf("  action %s  (issuer %s)\n", e.SubjectActionID, shortKey(e.IssuerPublicKey))
-					fmt.Printf("      uses %d  ok %d  fail %d  ~%.0fms  ratings %d (mean %.2f)",
-						e.Uses, e.Successes, e.Failures, e.AvgLatencyMs, e.RatingCount, e.RatingMean)
+					if e.IssuerPublicKey != out.PublicKey {
+						continue
+					}
+					own = true
+					fmt.Printf("  action %s: %d executions, %d successful  ~%.0fms\n",
+						e.SubjectActionID, e.Uses, e.Successes, e.AvgLatencyMs)
+				}
+				if !own {
+					fmt.Println("  (none)")
+				}
+				header := false
+				for _, e := range out.Evidence {
+					if e.IssuerPublicKey == out.PublicKey {
+						continue
+					}
+					if !header {
+						fmt.Printf("\nCounterparty experience\n")
+						header = true
+					}
+					fmt.Printf("  From %s on %s: %d interactions, %d successful",
+						shortKey(e.IssuerPublicKey), e.SubjectActionID, e.Uses, e.Successes)
+					// Corroboration tag on the interactions themselves (§13): [verified] when the
+					// two-kernel receipt link holds for all of them, a fraction when partial, else
+					// [unverified] — an issuer's self-attested claim is never shown as fact.
+					switch {
+					case e.Uses > 0 && e.CorroboratedUses == e.Uses:
+						fmt.Printf(" [verified]")
+					case e.CorroboratedUses > 0:
+						fmt.Printf(" [%d/%d verified]", e.CorroboratedUses, e.Uses)
+					default:
+						fmt.Printf(" [unverified]")
+					}
+					if e.RatingCount > 0 {
+						fmt.Printf("  rating %.2f", e.RatingMean)
+					}
 					if e.UnverifiedRatings > 0 {
-						fmt.Printf("  [+%d unverified]", e.UnverifiedRatings)
+						fmt.Printf("  [+%d unverified rating]", e.UnverifiedRatings)
 					}
 					fmt.Println()
 				}
@@ -447,7 +492,7 @@ func peerListCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{
 		Use:   "peers",
-		Short: "List peers",
+		Short: "List known kernels (counterparties and discovery-only), merged by key",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			q := url.Values{}
@@ -469,7 +514,9 @@ func peerListCmd() *cobra.Command {
 			if len(peers) == 0 {
 				return nil
 			}
-			fmt.Printf("%-20s %10s %8s %12s %10s  %s\n", "HANDLE", "AVAILABLE", "LOCKED", "CREDIT_THERE", "LAST_SEEN", "PUBLIC_KEY")
+			// NAME is display only (§14): a counterparty's local alias or a discovery-only kernel's
+			// advertised label; the public key always resolves, the advertised label never does.
+			fmt.Printf("%-16s %10s %8s %8s %10s  %s\n", "NAME", "LAST SEEN", "ACTIONS", "ACCOUNT", "BALANCE", "PUBLIC KEY")
 			for _, p := range peers {
 				flags := ""
 				if p.SettlementDue {
@@ -478,13 +525,18 @@ func peerListCmd() *cobra.Command {
 				if p.SuspendedAt != nil {
 					flags += " [suspended]"
 				}
-				fmt.Printf("%-20s %10d %8d %12s %10s  %s%s\n",
-					p.Handle, p.Available, p.Locked, peerCreditStr(p.PeerCredit), lastSeenStr(p.LastSeen), p.PublicKey, flags)
+				account, balance := "—", "—"
+				if p.HasAccount {
+					account = "yes"
+					balance = fmt.Sprintf("%d", p.Available)
+				}
+				fmt.Printf("%-16s %10s %8d %8s %10s  %s%s\n",
+					p.Handle, lastSeenStr(p.LastSeen), p.Actions, account, balance, p.PublicKey, flags)
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&showAll, "all", false, "Include suspended peers")
+	cmd.Flags().BoolVar(&showAll, "all", false, "Include suspended counterparties")
 	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
 	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
 	return cmd

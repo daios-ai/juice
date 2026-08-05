@@ -72,20 +72,37 @@ func TestSubjectEvidenceTradeBackedBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	var trade, unver int64
-	var uses int64
+	var subjectUses int64 // the execution summary counts only issuer==subject rows (§13 two views)
 	for _, r := range rows {
 		trade += r.RatingCount
 		unver += r.UnverifiedRatings
-		uses += r.Uses
+		if r.IssuerPublicKey == B {
+			subjectUses += r.Uses
+		}
 	}
-	if uses != 1 {
-		t.Errorf("uses = %d, want 1 (only B's own execution row counts)", uses)
+	if subjectUses != 1 {
+		t.Errorf("execution-summary uses = %d, want 1 (only B's own execution row, issuer==subject)", subjectUses)
 	}
 	if trade != 1 {
 		t.Errorf("trade-backed rating count = %d, want 1 (A only)", trade)
 	}
 	if unver != 1 {
 		t.Errorf("unverified rating count = %d, want 1 (C's fabricated rating)", unver)
+	}
+	// Interaction corroboration (not just ratings): A's interaction is trade-backed (B's own execution
+	// names A as counterparty and H1 joins), C's is not (C never traded with B, so its claim is
+	// uncorroborated even though it points at H1).
+	for _, r := range rows {
+		switch r.IssuerPublicKey {
+		case A:
+			if r.CorroboratedUses != 1 {
+				t.Errorf("A's interaction should be corroborated: CorroboratedUses=%d, want 1", r.CorroboratedUses)
+			}
+		case C:
+			if r.Uses != 1 || r.CorroboratedUses != 0 {
+				t.Errorf("C's interaction is uncorroborated: uses=%d corroborated=%d, want 1 and 0", r.Uses, r.CorroboratedUses)
+			}
+		}
 	}
 }
 

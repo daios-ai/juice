@@ -84,7 +84,7 @@ Every command runs by calling the server over HTTP; the base URL resolves from `
 |-----------|------|-----|
 | Health check | `GET /health` (open) → `{status, handle, public_key}`; identity banner — see which kernel you're on before login | `juice health` |
 
-Federation has no HTTP surface: peer identity, gossip, manifests, and inbound calls travel over the cross-kernel transport (§13), not over this API. Discovered kernels are learned in the background (peer-exchange gossip: bootstrap seeds plus `known_kernels` hints, §13) and surface only through `sys/lookup`/`sys/user-lookup` results, not a roster; a remote kernel is inspected with `admin inspect <key>`.
+Federation has no HTTP surface: peer identity, gossip, manifests, and inbound calls travel over the cross-kernel transport (§13), not over this API. Kernels discover each other in the background through libp2p routing discovery over a fixed namespace (§13); discovered actions/users surface through `sys/lookup`/`sys/user-lookup`, and every known kernel — counterparties and discovery-only alike — appears in the merged `admin peers` roster and is inspected with `admin inspect <key>`.
 
 ### Authentication
 
@@ -242,7 +242,7 @@ The operator verbs no ordinary user performs — money, access, federation trust
 | Deposit credits | `POST /control/deposit` | `juice admin deposit <user\|key> <amount> [--reason --external-key]` |
 | Withdraw credits | `POST /control/withdraw` | `juice admin withdraw <user\|key> <amount> [--reason --external-key]` |
 | Settle a peer | `POST /control/peers/settle` | `juice admin settle <peer> [--cash <settlement_id>]` — settles the bilateral position: exact if debt ≥ `Q`, else the probabilistic residual protocol (§13); `--cash` records the rail payment for a paid outcome |
-| List peers | `GET /control/peers[?all=&limit=&offset=]` | `juice admin peers [--all --limit --offset]` — active peers by default (`handle`, `public_key`, `available`, `locked`, plus the §13 sync cache `peer_credit` and `last_seen`, and `settlement_due`); no internal id; `--all` also lists suspended peers |
+| List peers | `GET /control/peers[?all=&limit=&offset=]` | `juice admin peers [--all --limit --offset]` — every known kernel merged by public key, this kernel excluded: counterparties (`has_account=true`, `available`/`locked`, the §13 sync cache `peer_credit`/`last_seen`, `settlement_due`) and discovery-only kernels (`has_account=false`, `actions` count); `handle` is the display NAME (no internal id); paginates the merged list; `--all` also lists suspended counterparties |
 | Inspect a kernel | `GET /control/peers/inspect?key=` | `juice admin inspect <key\|user>` — identity (incl. its `about`), public actions (with descriptions), retained evidence grouped by issuer (trade-backed vs unverified), reachability. `source` is `live`/`local`/`none`: an offline but known peer degrades to last-known local data (`online:false`) |
 | Show own identity | `GET /control/identity` | `juice admin identity` — this kernel's public key, handle, `about` (`sys`'s description), listen addresses |
 | List pending transfers | `GET /control/transfers[?status=&limit=&offset=]` | `juice admin transfer list [--status --limit --offset]` — buyer-side value transfers awaiting resolution (§13); default lists only the unresolved records (`pending` + `quarantined`), `--status` selects one (also `settled`/`refunded`) |

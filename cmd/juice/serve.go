@@ -121,19 +121,19 @@ func runServer(addr string) error {
 		defer retryCancel()
 		go startRemoteRetryLoop(retryCtx, k.PendingRemoteTraces, k.RetryRemoteTrace, globalCfg.remoteRetryInterval())
 
-		// Grow and refresh the known network (§13). One PEX loop, one rule: each pass pulls gossip
-		// from every kernel we know — peers, configured bootstrap seeds, and a rotation of kernels
-		// learned from prior gossip hints — verifies each first-party, and relays its own verified
-		// sample onward. Hints learned in pass N enter pass N+1's set, so the network fills in
-		// progressively. Runs with empty bootstrap_peers too (peers/hints still drive it).
-		// Best-effort; stops with runServer.
+		// Grow and refresh the known network (§13). One loop: each pass advertises this kernel to the
+		// routing-discovery namespace, then pulls gossip from the union of the namespace's providers,
+		// the configured bootstrap seeds, and known counterparties, verifying each first-party. Live
+		// kernels re-advertise every pass, so the network fills in progressively with no home-grown
+		// membership state. With no bootstrap_peers the directory leg is skipped and only counterparties
+		// are synced. Best-effort; stops with runServer.
 		discCtx, discCancel := context.WithCancel(context.Background())
 		defer discCancel()
 		disc := fedTransport
 		go startDiscoveryLoop(discCtx, globalCfg.discoveryInterval(), func(c context.Context) {
 			pctx, cancel := context.WithTimeout(c, discoveryPassTimeout)
 			defer cancel()
-			discoverOnce(pctx, disc, k.PeerKeys, k.KernelsForPull, k.AccumulateGossip, k.RecordPeerSync, k.RecordKernelPullFailure, k.GossipCursor, k.SetGossipCursor, logger)
+			discoverOnce(pctx, disc, k.PeerKeys, k.AccumulateGossip, k.RecordPeerSync, k.GossipCursor, k.SetGossipCursor, logger)
 		})
 	}
 
@@ -227,36 +227,36 @@ func startPeerRetentionSweep(ctx context.Context, purge func(context.Context) (i
 	}
 }
 
-// discoveryFanout caps how many discovered-kernel candidates one pass pulls (the PEX pull rotation,
-// §13); discoveryPullTimeout bounds a single pull and discoveryPassTimeout the whole pass, so one
-// slow or unreachable candidate can't stall the ticker. The rotation keeps filling across passes.
+// discoveryPullTimeout bounds a single gossip pull and discoveryPassTimeout the whole pass, so one
+// slow or unreachable candidate can't stall the ticker. Routing discovery re-surfaces live kernels
+// each pass, so a candidate skipped this pass is simply retried next.
 const (
-	discoveryFanout      = 25
-	discoveryPullTimeout = 10 * time.Second // bounds a hung pull; a reachable peer returns in ms, so this only paces a cold relay resolve of an unreachable candidate before the rotation moves on
-	discoveryPassTimeout = 30 * time.Second
+	discoveryPullTimeout      = 10 * time.Second // bounds a hung pull; a reachable peer returns in ms, so this only paces a cold relay resolve before the pass moves on
+	discoveryDirectoryTimeout = 10 * time.Second // bounds advertise+enumerate so a slow DHT can't consume the whole pass and starve counterparty sync
+	discoveryPassTimeout      = 30 * time.Second
 )
 
 // fedDiscoverer is the transport capability the discovery pass needs; *fed.Transport satisfies it,
 // and tests supply a fake so the pass logic is exercised without libp2p.
 type fedDiscoverer interface {
+	Advertise(ctx context.Context) (time.Duration, error)
+	DiscoverProviders(ctx context.Context) ([]string, error)
 	BootstrapKeys() []string
 	Gossip(ctx context.Context, peerKey, cursor string) (json.RawMessage, error)
 }
 
-// discoverOnce runs one PEX discovery pass (§13). The candidate set is the union of known peers,
-// configured bootstrap seeds, and a rotation of discovered kernels (least-recently-attempted first).
-// It pulls gossip from each and, on a VERIFIED pull — one authenticated as the key we dialed
-// (g.PublicKey == key) that accumulates cleanly — refreshes the catalog, advances the evidence
-// cursor, and (for a known peer) caches liveness/credit. Every non-verified outcome — transport
-// error, bad JSON, key mismatch, or accumulate rejection (an invalid handle among them) — is a
-// failed attempt (recordFailure), which rotates the candidate back and evicts a spent stub. One
+// discoverOnce runs one discovery pass (§13). It advertises this kernel to the routing-discovery
+// namespace, then pulls gossip from the union of the namespace's providers, configured bootstrap
+// seeds, and known counterparties. On a VERIFIED pull — one authenticated as the key we dialed
+// (g.PublicKey == key) that accumulates cleanly — it refreshes the catalog, advances the evidence
+// cursor, and (for a counterparty) caches liveness/credit. A non-verified pull (transport error, bad
+// JSON, key mismatch, or accumulate rejection) is logged and retried a later pass; discovery holds no
+// per-candidate attempt state, since routing discovery re-surfaces live kernels every pass. One
 // structured discovery.pass summary ends the pass: Debug when nothing failed, Info otherwise.
 func discoverOnce(ctx context.Context, d fedDiscoverer,
 	peerKeys func(context.Context) []string,
-	knownKernels func(context.Context, int) []string,
 	accumulate func(context.Context, *kernel.GossipResponse, string) (string, error),
 	recordSync func(context.Context, string, *int64) error,
-	recordFailure func(context.Context, string) error,
 	getCursor func(context.Context, string) string,
 	setCursor func(context.Context, string, string) error,
 	logger *log.Logger) {
@@ -268,11 +268,25 @@ func discoverOnce(ctx context.Context, d fedDiscoverer,
 		keys[k] = true
 		peers[k] = true
 	}
-	for _, k := range d.BootstrapKeys() {
-		keys[k] = true
-	}
-	for _, k := range knownKernels(ctx, discoveryFanout) {
-		keys[k] = true
+	// Directory discovery (advertise + enumerate providers) is time-boxed and skipped entirely with no
+	// bootstrap seeds, so a slow or unreachable DHT can never starve counterparty sync — the pull loop
+	// below always runs for known counterparties (§13). Bootstrap keys join the pull set as seeds.
+	if boot := d.BootstrapKeys(); len(boot) > 0 {
+		for _, k := range boot {
+			keys[k] = true
+		}
+		dctx, dcancel := context.WithTimeout(ctx, discoveryDirectoryTimeout)
+		if _, err := d.Advertise(dctx); err != nil {
+			logger.Debug("discovery.advertise.failed", "error", err.Error())
+		}
+		providers, derr := d.DiscoverProviders(dctx)
+		dcancel()
+		if derr != nil {
+			logger.Debug("discovery.enumerate.failed", "error", derr.Error())
+		}
+		for _, k := range providers {
+			keys[k] = true
+		}
 	}
 
 	var ok, failed int
@@ -280,7 +294,6 @@ func discoverOnce(ctx context.Context, d fedDiscoverer,
 		pstart := time.Now()
 		fail := func(stage string, err error) {
 			failed++
-			_ = recordFailure(ctx, key)
 			logger.Info("discovery.pull.failed",
 				"key", key, "stage", stage, "error", err.Error(),
 				"elapsed_ms", time.Since(pstart).Milliseconds())

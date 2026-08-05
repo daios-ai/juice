@@ -389,11 +389,11 @@ type SettlementRecord struct {
 	Signature    string    `json:"signature"`
 }
 
-// DiscoveredKernel is a remote kernel learned via gossip (§13). One row per kernel
-// (keyed by public_key); it is a regenerable discovery cache carrying no execution
-// semantics. GossipCursor is this kernel's persisted evidence high-watermark for that
-// peer (§13 peer sync): the exclusive (effective_at, receipt_hash) position past which
-// evidence has already been pulled, advanced only after a page is verified and committed.
+// DiscoveredKernel is a remote kernel learned via routing discovery and gossip (§13). One row per
+// kernel (keyed by public_key); it is a regenerable discovery cache carrying no execution semantics.
+// GossipCursor is this kernel's persisted evidence high-watermark (§13 peer sync): the exclusive
+// (effective_at, receipt_hash) position past which evidence has already been pulled, advanced only
+// after a page is verified and committed.
 type DiscoveredKernel struct {
 	PublicKey    string    `json:"public_key"`
 	Handle       string    `json:"handle"`
@@ -401,12 +401,6 @@ type DiscoveredKernel struct {
 	GossipCursor string    `json:"gossip_cursor,omitempty"`
 	FirstSeen    time.Time `json:"first_seen"`
 	UpdatedAt    time.Time `json:"updated_at"`
-	// LastAttemptAt/Attempts are the PEX pull-attempt state (§13). LastAttemptAt is the last pull
-	// attempt (success or failure) and orders the pull rotation least-recently-attempted first;
-	// Attempts is consecutive non-verified pulls, reset to 0 on a verified pull. A never-verified
-	// stub (Handle=="") is evicted once Attempts crosses the cap, so a poisoned hint cannot linger.
-	LastAttemptAt time.Time `json:"last_attempt_at,omitempty"`
-	Attempts      int       `json:"attempts,omitempty"`
 }
 
 // AuthCode is a short-lived PKCE authorization code.
@@ -614,8 +608,14 @@ const (
 // PeerView is a known peer kernel — identified by handle and public key (the global name), with
 // its bilateral balance. It carries no internal user id: a peer is never addressed by one.
 type PeerView struct {
-	Handle      string     `json:"handle"`
-	PublicKey   string     `json:"public_key"`
+	Handle    string `json:"handle"` // NAME column (§14): a counterparty's local alias, or a discovery-only kernel's advertised label (display only, never resolves)
+	PublicKey string `json:"public_key"`
+	// HasAccount is true iff a bilateral financial account (counterparty) exists here. It is false for a
+	// discovery-only kernel, whose Available/Locked/PeerCredit are meaningless and whose Handle never
+	// resolves a command (§13, §14 merged roster).
+	HasAccount bool `json:"has_account"`
+	// Actions is the kernel's cached public-action count (from discovery docs), 0 when unknown.
+	Actions     int        `json:"actions"`
 	Available   int64      `json:"available"`
 	Locked      int64      `json:"locked"`
 	SuspendedAt *time.Time `json:"suspended_at,omitempty"`
@@ -627,6 +627,17 @@ type PeerView struct {
 	// settlement trigger Y (§13): information for the operator, never authority — computed live, display
 	// only. FIX 3: Y signals; the operator runs `admin settle`.
 	SettlementDue bool `json:"settlement_due,omitempty"`
+}
+
+// DiscoveredKernelView is a verified discovered kernel plus its cached public-action count, for the
+// merged `admin peers` roster (§14). Discovery-only: it carries no account, balance, or execution
+// semantics — a kernel appears here because it was learned through routing discovery and gossip.
+type DiscoveredKernelView struct {
+	PublicKey string    `json:"public_key"`
+	Handle    string    `json:"handle"`
+	About     string    `json:"about,omitempty"`
+	Actions   int       `json:"actions"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // EvidenceReceipt is a wire-only signed projection of a committed call, gossiped as trade
@@ -703,11 +714,6 @@ type GossipResponse struct {
 	// CounterpartyBalance is the requesting peer's credit on this kernel (§13 peer sync),
 	// set only for a known non-suspended requester; nil otherwise. Information, never authority.
 	CounterpartyBalance *int64 `json:"counterparty_balance,omitempty"`
-	// KnownKernels is a bounded random sample of kernel public keys this kernel has itself
-	// verified by a direct gossip pull within the freshness horizon (§13 PEX peer exchange).
-	// Keys only — handle/about arrive first-party on the receiver's own pull. Information, never
-	// authority: a hinted key is believed only after the receiver directly pulls and verifies it.
-	KnownKernels []string `json:"known_kernels,omitempty"`
 }
 
 // GossipReceiptRow is one gossip-eligible receipt row assembled by the evidence sender (§13): the
@@ -720,9 +726,13 @@ type GossipReceiptRow struct {
 	SubjectActionID             string
 	CounterpartyKernelPublicKey string
 	RemoteReceiptJSON           string
-	Rating                      *Rating
-	EffectiveAt                 time.Time
-	Cursor                      string // the (effective_at, receipt_hash) high-watermark AFTER this row
+	// IdempotencyKey is the outbound proxy trace's key (empty for own-execution leg-(a) rows). A
+	// signed rejection receipt sets its tx_id to this key, so leg (b) distinguishes a genuine
+	// admitted execution from a rejection at any price, including 0 (§13 gossip-eligibility).
+	IdempotencyKey string
+	Rating         *Rating
+	EffectiveAt    time.Time
+	Cursor         string // the (effective_at, receipt_hash) high-watermark AFTER this row
 }
 
 // EvidenceRow is one persisted, verified evidence record in the regenerable evidence cache (§13).
@@ -765,13 +775,20 @@ type DiscoveryDoc struct {
 // SubjectEvidenceRow is one issuer's derived retained-evidence metrics about a subject action (§13),
 // as surfaced by `admin inspect`. RatingCount/RatingMean cover only trade-backed ratings (the
 // counterparty and hashes join); UnverifiedRatings counts issuer-attested ratings whose two-kernel
-// link could not be confirmed locally. Uses/Successes/Failures/latency count only issuer==subject rows.
+// link could not be confirmed locally. Uses/Successes/Failures/latency are this issuer's own
+// interactions with the subject: the execution summary when issuer==subject, else the issuer's
+// counterparty-experience row — the two views are shown separately and never summed (§13).
+// CorroboratedUses counts, for a counterparty-experience row (issuer!=subject), the interactions
+// whose two-kernel link holds — the subject's own execution evidence names this issuer as
+// counterparty and the receipt hashes join — so an issuer's claim is shown verified vs unverified,
+// not taken on faith. It is 0 for the self-reported execution summary.
 type SubjectEvidenceRow struct {
 	IssuerPublicKey  string   `json:"issuer_public_key"`
 	SubjectActionID  string   `json:"subject_action_id"`
 	Uses             int64    `json:"uses"`
 	Successes        int64    `json:"successes"`
 	Failures         int64    `json:"failures"`
+	CorroboratedUses int64    `json:"corroborated_uses"`
 	AvgLatencyMs     float64  `json:"avg_latency_ms"`
 	RatingCount      int64    `json:"rating_count"`
 	RatingMean       float64  `json:"rating_mean"`

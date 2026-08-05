@@ -1070,6 +1070,77 @@ func TestSettleRemoteCallRejectsWrongActionID(t *testing.T) {
 	}
 }
 
+// TestGossipEvidenceExcludesNonExecutions proves the §13/§15 leg-(b) exclusions end-to-end through
+// ACTUAL settlements (not fabricated rows): only a receipt-backed admitted execution is gossip-
+// eligible. Three real proxy calls settle on one price-0 proxy — an admitted success, a
+// never-dispatched failure (ErrPeerUnreachable, no remote receipt stored), and a quarantined invalid
+// receipt (a success claiming a charge the price-0 action cannot have) — and GetGossip must emit
+// EXACTLY ONE evidence bundle: the admitted execution.
+func TestGossipEvidenceExcludesNonExecutions(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	fake := &fakeFederationHTTP{}
+	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "ra-evid", 0)
+
+	mkReceipt := func(txID string, charge int64) string {
+		now := time.Now().UTC()
+		r := &kernel.Receipt{
+			ID: uuid.New().String(), TxID: txID, ActionID: "ra-evid",
+			ArgsHash: jcsHashForTest(t, `{}`), ReplyHash: jcsHashForTest(t, `{}`),
+			Status: kernel.TxSuccess, Charge: charge, StartedAt: now, CreatedAt: now,
+		}
+		r.Signature = signReceiptForTest(t, priv, r)
+		b, _ := json.Marshal(r)
+		return string(b)
+	}
+	// drive runs one proxy call on a fresh root trace; driveKeyed persists a known idempotency_key on
+	// the trace first (a root call reads the key back from the DB), so a rejection receipt can echo it.
+	driveKeyed := func(idem string) {
+		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: caller.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
+		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: a.OwnerUserID, ActionID: a.ID, CallerUserID: caller.ID, CreatedAt: time.Now().UTC()}
+		if idem != "" {
+			tr.IdempotencyKey = &idem
+		}
+		if err := st.BeginRun(ctx, p, tr, caller.ID, a.Price, 0, 0); err != nil {
+			t.Fatalf("BeginRun: %v", err)
+		}
+		_, _ = k.Call(ctx, kernel.CallRequest{
+			CallerID: caller.ID, ExistingTraceID: tr.ID,
+			TargetUserID: "settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
+		})
+	}
+	drive := func() { driveKeyed("") }
+
+	// 1. Admitted execution: a valid success receipt (charge 0 == the proxy's price 0).
+	fake.notDispatched, fake.receiptJSON = false, mkReceipt("remote-real-tx", 0)
+	drive()
+	// 2. Never dispatched: settled locally as ErrPeerUnreachable — no remote receipt is stored.
+	fake.notDispatched, fake.receiptJSON = true, ""
+	drive()
+	// 3. Signed rejection: a zero-charge refusal whose tx_id == the caller's idempotency_key (§13). The
+	//    fake echoes the dispatched key, so the origin recognises it as a rejection, not an execution.
+	fake.notDispatched, fake.receiptJSON = false, ""
+	fake.rejectSignKey, fake.rejectActionID, fake.rejectArgsHash = priv, "ra-evid", jcsHashForTest(t, `{}`)
+	driveKeyed("idem-reject-1")
+	fake.rejectSignKey = nil
+	// 4. Quarantined: a success receipt claiming charge 5 on a price-0 action → invalid → reserve kept
+	//    locked, settled as failure (runs LAST — a quarantine deactivates the proxy).
+	fake.receiptJSON = mkReceipt("remote-real-tx-2", 5)
+	drive()
+
+	resp, err := k.GetGossip(ctx, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Evidence) != 1 {
+		t.Fatalf("expected exactly 1 gossip evidence bundle (admitted execution only), got %d", len(resp.Evidence))
+	}
+	if resp.Evidence[0].EvidenceReceipt == nil || resp.Evidence[0].EvidenceReceipt.SubjectActionID != "ra-evid" {
+		t.Errorf("the one bundle must be the admitted execution about ra-evid, got %+v", resp.Evidence[0].EvidenceReceipt)
+	}
+}
+
 func TestSettleRemoteCallRejectsWrongArgsHash(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -2482,10 +2553,10 @@ func TestCrashRecoveryCompletesInboundRecordForALocalAction(t *testing.T) {
 	}
 }
 
-// ---- PEX peer-exchange discovery (§13) ----
+// ---- Discovery gossip (§13) ----
 
 // pexKernel builds a kernel with a known signing key (so the test knows ourKey) and a chosen
-// discovery interval (so the freshness horizon is testable).
+// discovery interval.
 func pexKernel(st kernel.Store, interval time.Duration) (*kernel.Kernel, string) {
 	priv := testSigningKey()
 	cfg := kernel.DefaultConfig()
@@ -2507,176 +2578,51 @@ func pexKey(t *testing.T) string {
 	return base64.RawURLEncoding.EncodeToString(pub)
 }
 
-func TestGossipKnownKernelsPEX(t *testing.T) {
+// Gossip carries no membership, and serving a pull provisions nothing (§13): discovery of which
+// kernels exist is routing discovery's job, so a puller is neither learned as a discovered kernel
+// nor given an account by the act of pulling.
+func TestGossipNoMembershipNoProvision(t *testing.T) {
 	ctx := context.Background()
-	// Mirror the kernel's unexported PEX policy (external test package can't see the consts).
-	const (
-		stubAttempts = 3    // == kernel maxStubAttempts (§13): stub eviction threshold
-		bigCap       = 1000 // above any stub count these subtests create (cap not under test here)
-	)
+	st := newTestStore(t)
+	k, _ := pexKernel(st, 0)
+	setupSys(t, k, st)
+	req := pexKey(t)
+	if _, err := k.GetGossip(ctx, req, ""); err != nil {
+		t.Fatal(err)
+	}
+	if dk, _ := st.ReadDiscoveredKernel(ctx, req); dk != nil {
+		t.Error("serving a gossip pull learned the requester as a discovered kernel; membership is routing discovery's job, not gossip's")
+	}
+	if u, _ := st.ReadUserByPublicKey(ctx, req); u != nil {
+		t.Error("serving a gossip pull provisioned a user account (no billing relationship from gossip)")
+	}
+}
 
-	// (a) GetGossip relays only kernels verified within the horizon, excluding stubs, stale rows,
-	//     self, and the requester; (b) it learns the authenticated requester as a stub, never a user.
-	t.Run("sample_and_requester", func(t *testing.T) {
-		st := newTestStore(t)
-		k, ourKey := pexKernel(st, 0) // interval 0 → default 300s → horizon 1h
-		setupSys(t, k, st)
-		now := time.Now().UTC()
-		fresh, stale, req := pexKey(t), pexKey(t), pexKey(t)
-		verify := func(key string, at time.Time) {
-			if err := st.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{
-				PublicKey: key, Handle: "h" + key[:6], FirstSeen: at, UpdatedAt: at,
-			}); err != nil {
-				t.Fatal(err)
-			}
-		}
-		verify(fresh, now)
-		verify(stale, now.Add(-2*time.Hour)) // older than the 1h horizon
-		verify(ourKey, now)                   // self must never be relayed
-		verify(req, now)                      // fresh+verified, but is the requester
-		if err := st.InsertDiscoveredKernelStub(ctx, pexKey(t), now, bigCap); err != nil {
-			t.Fatal(err) // an unverified stub is never relayed
-		}
+// AccumulateGossip enforces the authenticated-key binding and a valid bare identity (§13): a reply
+// claiming a key other than the one dialed, or carrying an invalid handle, is a failed pull, never
+// verified; a valid pull refreshes the discovered-kernel row.
+func TestAccumulateGossipBinding(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	k, _ := pexKernel(st, 0)
+	setupSys(t, k, st)
+	sender := pexKey(t)
 
-		resp, err := k.GetGossip(ctx, req, "")
-		if err != nil {
-			t.Fatal(err)
+	// binding: a reply claiming an identity other than the authenticated key is rejected.
+	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{PublicKey: sender, Handle: "ok"}, pexKey(t)); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("introducer mismatch: got %v, want ErrInvalidInput", err)
+	}
+	// invalid identity: empty and non-bare handles are failed pulls, not verified ones.
+	for _, bad := range []string{"", "a/b", "a@b"} {
+		if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{PublicKey: sender, Handle: bad}, sender); !errors.Is(err, kernel.ErrInvalidInput) {
+			t.Errorf("handle %q: got %v, want ErrInvalidInput", bad, err)
 		}
-		if len(resp.KnownKernels) != 1 || resp.KnownKernels[0] != fresh {
-			t.Fatalf("KnownKernels = %v, want [%s] (fresh verified only; stub/stale/self/requester excluded)", resp.KnownKernels, fresh)
-		}
-
-		// Requester-learning: a fresh, unseeded requester becomes a stub, but never a user account.
-		newReq := pexKey(t)
-		if _, err := k.GetGossip(ctx, newReq, ""); err != nil {
-			t.Fatal(err)
-		}
-		if dk, _ := st.ReadDiscoveredKernel(ctx, newReq); dk == nil {
-			t.Error("authenticated requester was not learned as a discovered-kernel stub")
-		}
-		if u, _ := st.ReadUserByPublicKey(ctx, newReq); u != nil {
-			t.Error("requester-learning must not provision a user account (no billing relationship from gossip)")
-		}
-	})
-
-	// AccumulateGossip enforces the authenticated-key binding and a valid identity, and ingests
-	// hints as stubs without clobbering a verified row.
-	t.Run("accumulate_binding_and_hints", func(t *testing.T) {
-		st := newTestStore(t)
-		k, ourKey := pexKernel(st, 0)
-		setupSys(t, k, st)
-		sender, hint, verified := pexKey(t), pexKey(t), pexKey(t)
-
-		// binding: a reply claiming an identity other than the authenticated key is rejected.
-		if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{PublicKey: sender, Handle: "ok"}, pexKey(t)); !errors.Is(err, kernel.ErrInvalidInput) {
-			t.Errorf("introducer mismatch: got %v, want ErrInvalidInput", err)
-		}
-		// invalid identity: empty and non-bare handles are failed pulls, not verified ones.
-		for _, bad := range []string{"", "a/b", "a@b"} {
-			if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{PublicKey: sender, Handle: bad}, sender); !errors.Is(err, kernel.ErrInvalidInput) {
-				t.Errorf("handle %q: got %v, want ErrInvalidInput", bad, err)
-			}
-		}
-
-		// a pre-existing verified row must survive hint ingest unchanged.
-		if err := st.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{
-			PublicKey: verified, Handle: "keepme", FirstSeen: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-		}); err != nil {
-			t.Fatal(err)
-		}
-		// a valid pull whose sample names a hint, ourKey (self), the sender, a garbage key, and the
-		// verified row: only the fresh hint becomes a new stub.
-		_, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{
-			PublicKey:    sender,
-			Handle:       "sendername",
-			KnownKernels: []string{hint, ourKey, sender, "not-a-key", verified},
-		}, sender)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if dk, _ := st.ReadDiscoveredKernel(ctx, hint); dk == nil {
-			t.Error("fresh hint was not ingested as a stub")
-		}
-		if dk, _ := st.ReadDiscoveredKernel(ctx, ourKey); dk != nil {
-			t.Error("own key must never be ingested from a hint")
-		}
-		if dk, _ := st.ReadDiscoveredKernel(ctx, verified); dk == nil || dk.Handle != "keepme" {
-			t.Error("hint ingest clobbered a pre-existing verified row")
-		}
-	})
-
-	// Rotation and eviction: a failed pull rotates the candidate to the back and evicts a stub once
-	// it has spent its attempts, so a dead or poisoned hint cannot starve the pull set.
-	t.Run("rotation_and_eviction", func(t *testing.T) {
-		st := newTestStore(t)
-		k, _ := pexKernel(st, 0)
-		now := time.Now().UTC()
-		a, b := pexKey(t), pexKey(t)
-		if err := st.InsertDiscoveredKernelStub(ctx, a, now, bigCap); err != nil {
-			t.Fatal(err)
-		}
-		if err := st.InsertDiscoveredKernelStub(ctx, b, now, bigCap); err != nil {
-			t.Fatal(err)
-		}
-		// Fail A once: B (never-attempted) must now sort ahead of A in the pull rotation.
-		if err := k.RecordKernelPullFailure(ctx, a); err != nil {
-			t.Fatal(err)
-		}
-		order := k.KernelsForPull(ctx, 10)
-		if len(order) != 2 || order[0] != b {
-			t.Fatalf("pull order = %v, want never-attempted %s first (least-recently-attempted rotation)", order, b)
-		}
-		// Fail A up to the cap: the stub is evicted, not retried forever.
-		for i := 1; i < stubAttempts; i++ {
-			if err := k.RecordKernelPullFailure(ctx, a); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if dk, _ := st.ReadDiscoveredKernel(ctx, a); dk != nil {
-			t.Errorf("stub A survived %d failed pulls, want eviction at %d", stubAttempts, stubAttempts)
-		}
-	})
-
-	// The unverified cache is bounded: a stub insert is refused once the cap is reached.
-	t.Run("unverified_cap", func(t *testing.T) {
-		st := newTestStore(t)
-		now := time.Now().UTC()
-		if err := st.InsertDiscoveredKernelStub(ctx, pexKey(t), now, 1); err != nil {
-			t.Fatal(err)
-		}
-		refused := pexKey(t)
-		if err := st.InsertDiscoveredKernelStub(ctx, refused, now, 1); err != nil {
-			t.Fatal(err)
-		}
-		if dk, _ := st.ReadDiscoveredKernel(ctx, refused); dk != nil {
-			t.Error("stub insert past the unverified cap must be refused")
-		}
-	})
-
-	// The relay horizon widens with the discovery interval: a 2h-old verified row is stale under the
-	// default (1h) horizon but fresh under a 1h interval (horizon 12h), so the same row is relayed.
-	t.Run("horizon_from_interval", func(t *testing.T) {
-		st := newTestStore(t)
-		k, _ := pexKernel(st, time.Hour) // horizon = max(1h, 12*1h) = 12h
-		setupSys(t, k, st)
-		key := pexKey(t)
-		if err := st.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{
-			PublicKey: key, Handle: "aged", FirstSeen: time.Now().UTC().Add(-2 * time.Hour), UpdatedAt: time.Now().UTC().Add(-2 * time.Hour),
-		}); err != nil {
-			t.Fatal(err)
-		}
-		resp, err := k.GetGossip(ctx, pexKey(t), "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		relayed := false
-		for _, hk := range resp.KnownKernels {
-			if hk == key {
-				relayed = true
-			}
-		}
-		if !relayed {
-			t.Errorf("a 2h-old row must be relayed under a 12h horizon (interval-derived), got %v", resp.KnownKernels)
-		}
-	})
+	}
+	// a valid pull refreshes the discovered-kernel row (verified).
+	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{PublicKey: sender, Handle: "sendername"}, sender); err != nil {
+		t.Fatal(err)
+	}
+	if dk, _ := st.ReadDiscoveredKernel(ctx, sender); dk == nil || dk.Handle != "sendername" {
+		t.Error("a verified pull did not refresh the discovered-kernel row")
+	}
 }
