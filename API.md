@@ -84,7 +84,7 @@ Every command runs by calling the server over HTTP; the base URL resolves from `
 |-----------|------|-----|
 | Health check | `GET /health` (open) → `{status, handle, public_key}`; identity banner — see which kernel you're on before login | `juice health` |
 
-Federation has no HTTP surface: peer identity, gossip, manifests, and inbound calls travel over the cross-kernel transport (§13), not over this API. Discovered kernels are learned in the background (bootstrap seeds plus DHT provider enumeration) and surface only through `sys/lookup`/`sys/user-lookup` results, not a roster; a remote kernel is inspected with `admin inspect <key>`.
+Federation has no HTTP surface: peer identity, gossip, manifests, and inbound calls travel over the cross-kernel transport (§13), not over this API. Discovered kernels are learned in the background (peer-exchange gossip: bootstrap seeds plus `known_kernels` hints, §13) and surface only through `sys/lookup`/`sys/user-lookup` results, not a roster; a remote kernel is inspected with `admin inspect <key>`.
 
 ### Authentication
 

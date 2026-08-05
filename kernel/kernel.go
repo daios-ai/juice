@@ -45,6 +45,10 @@ type Config struct {
 	// PeerRetention bounds how long a peer may stay idle at zero balance before it is purged
 	// (§13 Retention). 0 = disabled (never purge). Set from peer_retention_days.
 	PeerRetention time.Duration
+	// DiscoveryInterval is the gap between discovery passes (§13). It sets the PEX relay-freshness
+	// horizon (a kernel is relayed as a hint only while verified within a multiple of it). 0 = the
+	// 300s default. Set from discovery_interval_seconds.
+	DiscoveryInterval time.Duration
 }
 
 // DefaultConfig returns safe local defaults.

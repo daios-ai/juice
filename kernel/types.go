@@ -401,6 +401,12 @@ type DiscoveredKernel struct {
 	GossipCursor string    `json:"gossip_cursor,omitempty"`
 	FirstSeen    time.Time `json:"first_seen"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// LastAttemptAt/Attempts are the PEX pull-attempt state (§13). LastAttemptAt is the last pull
+	// attempt (success or failure) and orders the pull rotation least-recently-attempted first;
+	// Attempts is consecutive non-verified pulls, reset to 0 on a verified pull. A never-verified
+	// stub (Handle=="") is evicted once Attempts crosses the cap, so a poisoned hint cannot linger.
+	LastAttemptAt time.Time `json:"last_attempt_at,omitempty"`
+	Attempts      int       `json:"attempts,omitempty"`
 }
 
 // AuthCode is a short-lived PKCE authorization code.
@@ -697,6 +703,11 @@ type GossipResponse struct {
 	// CounterpartyBalance is the requesting peer's credit on this kernel (§13 peer sync),
 	// set only for a known non-suspended requester; nil otherwise. Information, never authority.
 	CounterpartyBalance *int64 `json:"counterparty_balance,omitempty"`
+	// KnownKernels is a bounded random sample of kernel public keys this kernel has itself
+	// verified by a direct gossip pull within the freshness horizon (§13 PEX peer exchange).
+	// Keys only — handle/about arrive first-party on the receiver's own pull. Information, never
+	// authority: a hinted key is believed only after the receiver directly pulls and verifies it.
+	KnownKernels []string `json:"known_kernels,omitempty"`
 }
 
 // GossipReceiptRow is one gossip-eligible receipt row assembled by the evidence sender (§13): the

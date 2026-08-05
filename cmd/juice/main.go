@@ -285,6 +285,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	cfg.AuthIssuer = globalCfg.AuthIssuer
 	cfg.AuthAudience = globalCfg.AuthAudience
 	cfg.PeerRetention = globalCfg.peerRetention()
+	cfg.DiscoveryInterval = globalCfg.discoveryInterval()
 
 	logger, _ := log.New(log.Config{
 		Level:    globalCfg.LogLevel,

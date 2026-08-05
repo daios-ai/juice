@@ -99,14 +99,6 @@ func TestBootstrapKeys(t *testing.T) {
 
 // The discovery rendezvous CID is deterministic — every kernel must derive the same key with no
 // coordination, or provider records never meet.
-func TestDiscoveryCIDStable(t *testing.T) {
-	if !juiceDiscoveryCID.Defined() {
-		t.Fatal("discovery cid undefined")
-	}
-	if juiceDiscoveryCID.String() != mustDiscoveryCID().String() {
-		t.Fatal("discovery cid not deterministic")
-	}
-}
 
 func TestPeerIDFromKeyRejectsGarbage(t *testing.T) {
 	if _, err := PeerIDFromKey("not-base64url!!"); err == nil {

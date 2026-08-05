@@ -2930,28 +2930,98 @@ func ftsMatchQuery(query string) string {
 // ---- Gossip / Discovered Kernels ----
 
 func (s *DB) CreateOrUpdateDiscoveredKernel(ctx context.Context, k *kernel.DiscoveredKernel) error {
-	// Preserve the earliest first_seen; update handle/about; advance gossip_cursor only when non-empty
-	// (an identity-only upsert must not reset a peer's evidence high-watermark).
+	// The verified-pull path (§13): preserve the earliest first_seen; update handle/about; advance
+	// gossip_cursor only when non-empty (an identity-only upsert must not reset a peer's evidence
+	// high-watermark). A verified pull also stamps last_attempt_at and clears attempts to 0.
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO discovered_kernels (public_key,handle,about,gossip_cursor,first_seen,updated_at)
-		 VALUES (?,?,?,?,?,?)
+		`INSERT INTO discovered_kernels (public_key,handle,about,gossip_cursor,first_seen,updated_at,last_attempt_at,attempts)
+		 VALUES (?,?,?,?,?,?,?,0)
 		 ON CONFLICT(public_key) DO UPDATE SET
 		   handle=excluded.handle,
 		   about=excluded.about,
 		   gossip_cursor=CASE WHEN excluded.gossip_cursor != '' THEN excluded.gossip_cursor ELSE discovered_kernels.gossip_cursor END,
-		   updated_at=excluded.updated_at`,
+		   updated_at=excluded.updated_at,
+		   last_attempt_at=excluded.updated_at,
+		   attempts=0`,
 		k.PublicKey, k.Handle, k.About, k.GossipCursor,
-		timeToStr(k.FirstSeen), timeToStr(k.UpdatedAt),
+		timeToStr(k.FirstSeen), timeToStr(k.UpdatedAt), timeToStr(k.UpdatedAt),
 	)
 	return dbErr(err, "create or update discovered kernel")
 }
 
+// InsertDiscoveredKernelStub records a second-hand kernel key (a PEX hint or an authenticated
+// gossip requester, §13) insert-if-absent: it never touches an existing row's handle/about/cursor
+// or attempt state, so it cannot reset a verified row or a failing stub. Refused (no row written,
+// no error) once the count of unverified stubs (handle='') is at maxUnverified — the bounded cache.
+func (s *DB) InsertDiscoveredKernelStub(ctx context.Context, publicKey string, now time.Time, maxUnverified int) error {
+	t := timeToStr(now)
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO discovered_kernels (public_key,handle,about,gossip_cursor,first_seen,updated_at,last_attempt_at,attempts)
+		 SELECT ?, '', '', '', ?, ?, '', 0
+		 WHERE (SELECT COUNT(*) FROM discovered_kernels WHERE handle='') < ?
+		 ON CONFLICT(public_key) DO NOTHING`,
+		publicKey, t, t, maxUnverified)
+	return dbErr(err, "insert discovered kernel stub")
+}
+
+// RecordKernelPullFailure counts one non-verified pull against a candidate (§13): it bumps attempts
+// and last_attempt_at (rotating the row to the back of the pull order), then evicts a never-verified
+// stub once attempts crosses maxAttempts, so a poisoned or dead hint cannot linger.
+func (s *DB) RecordKernelPullFailure(ctx context.Context, publicKey string, now time.Time, maxAttempts int) error {
+	t := timeToStr(now)
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE discovered_kernels SET attempts=attempts+1, last_attempt_at=? WHERE public_key=?`, t, publicKey); err != nil {
+		return dbErr(err, "record kernel pull failure")
+	}
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM discovered_kernels WHERE public_key=? AND handle='' AND attempts>=?`, publicKey, maxAttempts)
+	return dbErr(err, "evict stale kernel stub")
+}
+
+// scanStringColumn collects a single-string-column result set (rows are closed on return).
+func scanStringColumn(rows *sql.Rows, what string) ([]string, error) {
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, dbErr(err, what)
+		}
+		out = append(out, s)
+	}
+	return out, dbErr(rows.Err(), what)
+}
+
+// SampleVerifiedKernels returns up to limit random keys this kernel has itself verified by a direct
+// pull (handle != '') within the freshness horizon (updated_at > since) — the PEX relay sample (§13).
+func (s *DB) SampleVerifiedKernels(ctx context.Context, since time.Time, limit int) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT public_key FROM discovered_kernels WHERE handle != '' AND updated_at > ? ORDER BY RANDOM() LIMIT ?`,
+		timeToStr(since), limit)
+	if err != nil {
+		return nil, dbErr(err, "sample verified kernels")
+	}
+	return scanStringColumn(rows, "sample verified kernels")
+}
+
+// ListKernelsForPull returns up to limit discovered-kernel keys in PEX pull order (§13):
+// least-recently-attempted first (last_attempt_at ASC, so never-attempted '' sorts first), so dead
+// candidates retry at most once per rotation and cannot pin the pull set.
+func (s *DB) ListKernelsForPull(ctx context.Context, limit int) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT public_key FROM discovered_kernels ORDER BY last_attempt_at ASC LIMIT ?`, limit)
+	if err != nil {
+		return nil, dbErr(err, "list kernels for pull")
+	}
+	return scanStringColumn(rows, "list kernels for pull")
+}
+
 func (s *DB) ReadDiscoveredKernel(ctx context.Context, publicKey string) (*kernel.DiscoveredKernel, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT public_key,handle,about,gossip_cursor,first_seen,updated_at FROM discovered_kernels WHERE public_key=?`, publicKey)
+		`SELECT public_key,handle,about,gossip_cursor,first_seen,updated_at,last_attempt_at,attempts FROM discovered_kernels WHERE public_key=?`, publicKey)
 	var k kernel.DiscoveredKernel
-	var firstSeen, updatedAt string
-	err := row.Scan(&k.PublicKey, &k.Handle, &k.About, &k.GossipCursor, &firstSeen, &updatedAt)
+	var firstSeen, updatedAt, lastAttempt string
+	err := row.Scan(&k.PublicKey, &k.Handle, &k.About, &k.GossipCursor, &firstSeen, &updatedAt, &lastAttempt, &k.Attempts)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -2960,6 +3030,7 @@ func (s *DB) ReadDiscoveredKernel(ctx context.Context, publicKey string) (*kerne
 	}
 	k.FirstSeen = strToTime(firstSeen)
 	k.UpdatedAt = strToTime(updatedAt)
+	k.LastAttemptAt = strToTime(lastAttempt)
 	return &k, nil
 }
 

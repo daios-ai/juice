@@ -2481,3 +2481,202 @@ func TestCrashRecoveryCompletesInboundRecordForALocalAction(t *testing.T) {
 			"must not strand its peer until expiry", got.Status)
 	}
 }
+
+// ---- PEX peer-exchange discovery (§13) ----
+
+// pexKernel builds a kernel with a known signing key (so the test knows ourKey) and a chosen
+// discovery interval (so the freshness horizon is testable).
+func pexKernel(st kernel.Store, interval time.Duration) (*kernel.Kernel, string) {
+	priv := testSigningKey()
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = priv
+	cfg.DiscoveryInterval = interval
+	k := kernel.New(st, nil, nil, nil, cfg, log.Default())
+	return k, base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+}
+
+func pexKey(t *testing.T) string {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(pub)
+}
+
+func TestGossipKnownKernelsPEX(t *testing.T) {
+	ctx := context.Background()
+	// Mirror the kernel's unexported PEX policy (external test package can't see the consts).
+	const (
+		stubAttempts = 3    // == kernel maxStubAttempts (§13): stub eviction threshold
+		bigCap       = 1000 // above any stub count these subtests create (cap not under test here)
+	)
+
+	// (a) GetGossip relays only kernels verified within the horizon, excluding stubs, stale rows,
+	//     self, and the requester; (b) it learns the authenticated requester as a stub, never a user.
+	t.Run("sample_and_requester", func(t *testing.T) {
+		st := newTestStore(t)
+		k, ourKey := pexKernel(st, 0) // interval 0 → default 300s → horizon 1h
+		setupSys(t, k, st)
+		now := time.Now().UTC()
+		fresh, stale, req := pexKey(t), pexKey(t), pexKey(t)
+		verify := func(key string, at time.Time) {
+			if err := st.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{
+				PublicKey: key, Handle: "h" + key[:6], FirstSeen: at, UpdatedAt: at,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		verify(fresh, now)
+		verify(stale, now.Add(-2*time.Hour)) // older than the 1h horizon
+		verify(ourKey, now)                   // self must never be relayed
+		verify(req, now)                      // fresh+verified, but is the requester
+		if err := st.InsertDiscoveredKernelStub(ctx, pexKey(t), now, bigCap); err != nil {
+			t.Fatal(err) // an unverified stub is never relayed
+		}
+
+		resp, err := k.GetGossip(ctx, req, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.KnownKernels) != 1 || resp.KnownKernels[0] != fresh {
+			t.Fatalf("KnownKernels = %v, want [%s] (fresh verified only; stub/stale/self/requester excluded)", resp.KnownKernels, fresh)
+		}
+
+		// Requester-learning: a fresh, unseeded requester becomes a stub, but never a user account.
+		newReq := pexKey(t)
+		if _, err := k.GetGossip(ctx, newReq, ""); err != nil {
+			t.Fatal(err)
+		}
+		if dk, _ := st.ReadDiscoveredKernel(ctx, newReq); dk == nil {
+			t.Error("authenticated requester was not learned as a discovered-kernel stub")
+		}
+		if u, _ := st.ReadUserByPublicKey(ctx, newReq); u != nil {
+			t.Error("requester-learning must not provision a user account (no billing relationship from gossip)")
+		}
+	})
+
+	// AccumulateGossip enforces the authenticated-key binding and a valid identity, and ingests
+	// hints as stubs without clobbering a verified row.
+	t.Run("accumulate_binding_and_hints", func(t *testing.T) {
+		st := newTestStore(t)
+		k, ourKey := pexKernel(st, 0)
+		setupSys(t, k, st)
+		sender, hint, verified := pexKey(t), pexKey(t), pexKey(t)
+
+		// binding: a reply claiming an identity other than the authenticated key is rejected.
+		if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{PublicKey: sender, Handle: "ok"}, pexKey(t)); !errors.Is(err, kernel.ErrInvalidInput) {
+			t.Errorf("introducer mismatch: got %v, want ErrInvalidInput", err)
+		}
+		// invalid identity: empty and non-bare handles are failed pulls, not verified ones.
+		for _, bad := range []string{"", "a/b", "a@b"} {
+			if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{PublicKey: sender, Handle: bad}, sender); !errors.Is(err, kernel.ErrInvalidInput) {
+				t.Errorf("handle %q: got %v, want ErrInvalidInput", bad, err)
+			}
+		}
+
+		// a pre-existing verified row must survive hint ingest unchanged.
+		if err := st.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{
+			PublicKey: verified, Handle: "keepme", FirstSeen: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// a valid pull whose sample names a hint, ourKey (self), the sender, a garbage key, and the
+		// verified row: only the fresh hint becomes a new stub.
+		_, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{
+			PublicKey:    sender,
+			Handle:       "sendername",
+			KnownKernels: []string{hint, ourKey, sender, "not-a-key", verified},
+		}, sender)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dk, _ := st.ReadDiscoveredKernel(ctx, hint); dk == nil {
+			t.Error("fresh hint was not ingested as a stub")
+		}
+		if dk, _ := st.ReadDiscoveredKernel(ctx, ourKey); dk != nil {
+			t.Error("own key must never be ingested from a hint")
+		}
+		if dk, _ := st.ReadDiscoveredKernel(ctx, verified); dk == nil || dk.Handle != "keepme" {
+			t.Error("hint ingest clobbered a pre-existing verified row")
+		}
+	})
+
+	// Rotation and eviction: a failed pull rotates the candidate to the back and evicts a stub once
+	// it has spent its attempts, so a dead or poisoned hint cannot starve the pull set.
+	t.Run("rotation_and_eviction", func(t *testing.T) {
+		st := newTestStore(t)
+		k, _ := pexKernel(st, 0)
+		now := time.Now().UTC()
+		a, b := pexKey(t), pexKey(t)
+		if err := st.InsertDiscoveredKernelStub(ctx, a, now, bigCap); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.InsertDiscoveredKernelStub(ctx, b, now, bigCap); err != nil {
+			t.Fatal(err)
+		}
+		// Fail A once: B (never-attempted) must now sort ahead of A in the pull rotation.
+		if err := k.RecordKernelPullFailure(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		order := k.KernelsForPull(ctx, 10)
+		if len(order) != 2 || order[0] != b {
+			t.Fatalf("pull order = %v, want never-attempted %s first (least-recently-attempted rotation)", order, b)
+		}
+		// Fail A up to the cap: the stub is evicted, not retried forever.
+		for i := 1; i < stubAttempts; i++ {
+			if err := k.RecordKernelPullFailure(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if dk, _ := st.ReadDiscoveredKernel(ctx, a); dk != nil {
+			t.Errorf("stub A survived %d failed pulls, want eviction at %d", stubAttempts, stubAttempts)
+		}
+	})
+
+	// The unverified cache is bounded: a stub insert is refused once the cap is reached.
+	t.Run("unverified_cap", func(t *testing.T) {
+		st := newTestStore(t)
+		now := time.Now().UTC()
+		if err := st.InsertDiscoveredKernelStub(ctx, pexKey(t), now, 1); err != nil {
+			t.Fatal(err)
+		}
+		refused := pexKey(t)
+		if err := st.InsertDiscoveredKernelStub(ctx, refused, now, 1); err != nil {
+			t.Fatal(err)
+		}
+		if dk, _ := st.ReadDiscoveredKernel(ctx, refused); dk != nil {
+			t.Error("stub insert past the unverified cap must be refused")
+		}
+	})
+
+	// The relay horizon widens with the discovery interval: a 2h-old verified row is stale under the
+	// default (1h) horizon but fresh under a 1h interval (horizon 12h), so the same row is relayed.
+	t.Run("horizon_from_interval", func(t *testing.T) {
+		st := newTestStore(t)
+		k, _ := pexKernel(st, time.Hour) // horizon = max(1h, 12*1h) = 12h
+		setupSys(t, k, st)
+		key := pexKey(t)
+		if err := st.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{
+			PublicKey: key, Handle: "aged", FirstSeen: time.Now().UTC().Add(-2 * time.Hour), UpdatedAt: time.Now().UTC().Add(-2 * time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := k.GetGossip(ctx, pexKey(t), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		relayed := false
+		for _, hk := range resp.KnownKernels {
+			if hk == key {
+				relayed = true
+			}
+		}
+		if !relayed {
+			t.Errorf("a 2h-old row must be relayed under a 12h horizon (interval-derived), got %v", resp.KnownKernels)
+		}
+	})
+}

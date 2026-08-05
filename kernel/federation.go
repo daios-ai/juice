@@ -1197,6 +1197,29 @@ func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 // evidence bundles ordered by effective time after cursor. When requesterKey names a known,
 // non-suspended peer, the response also carries that peer's credit here (CounterpartyBalance, §13
 // peer sync); nil for strangers, suspended keys, and anonymous pulls.
+// PEX peer-exchange bounds (§13). One sample size caps both directions; a stub is evicted after a
+// few non-verified pulls; the unverified cache is bounded so hints can't grow it without bound.
+const (
+	maxGossipKernelHints = 25
+	maxStubAttempts      = 3
+	maxUnverifiedKernels = 200
+)
+
+// gossipHintHorizon is how recently this kernel must have verified another for it to be relayed as a
+// PEX hint (§13). Freshness-gated relay is the standard alternative to death certificates: a kernel
+// dead longer than the horizon is hinted by no one and converges out. Derived from the discovery
+// interval (max with 1h so a short test interval still leaves a workable window), never a config key.
+func (k *Kernel) gossipHintHorizon() time.Duration {
+	iv := k.cfg.DiscoveryInterval
+	if iv <= 0 {
+		iv = 300 * time.Second
+	}
+	if h := 12 * iv; h > time.Hour {
+		return h
+	}
+	return time.Hour
+}
+
 func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*GossipResponse, error) {
 	ourKey := k.ourKeyB64()
 	handle, _ := k.store.GetConfig(ctx, "kernel_handle")
@@ -1259,6 +1282,21 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*G
 		if u, _ := k.store.ReadUserByPublicKey(ctx, requesterKey); u != nil && u.SuspendedAt == nil {
 			bal := u.Available
 			resp.CounterpartyBalance = &bal
+		}
+	}
+
+	// PEX (§13): learn the authenticated requester as an unverified stub (the "advertise" half — a
+	// puller thereby becomes discoverable), and relay a bounded random sample of kernels we have
+	// ourselves verified within the freshness horizon. Keys only; best-effort; a stub row is never
+	// a user account, so gossip opens no billing relationship.
+	if requesterKey != "" && requesterKey != ourKey {
+		_ = k.store.InsertDiscoveredKernelStub(ctx, requesterKey, time.Now().UTC(), maxUnverifiedKernels)
+	}
+	if sample, err := k.store.SampleVerifiedKernels(ctx, time.Now().UTC().Add(-k.gossipHintHorizon()), maxGossipKernelHints); err == nil {
+		for _, hk := range sample {
+			if hk != ourKey && hk != requesterKey {
+				resp.KnownKernels = append(resp.KnownKernels, hk)
+			}
 		}
 	}
 	return resp, nil
@@ -1439,6 +1477,17 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 	if gossip.PublicKey == "" {
 		return "", ErrInvalidInput.Wrap("gossip missing public_key")
 	}
+	// Authenticated-key binding (§13): the reply must be signed-by-transport as the key we dialed;
+	// a responder cannot claim a different identity and write under it. The caller passes the
+	// Noise-authenticated key it dialed as the introducer.
+	if introducerPublicKey != "" && gossip.PublicKey != introducerPublicKey {
+		return "", ErrInvalidInput.Wrap("gossip public_key does not match the authenticated peer")
+	}
+	// A verified pull requires a valid (bare) identity (§3, §14); an empty or non-bare handle is a
+	// failed pull, not a success — so it never resets attempts and counts toward stub eviction.
+	if err := validateHandle(gossip.Handle); err != nil {
+		return "", ErrInvalidInput.Wrap("gossip handle invalid")
+	}
 	now := time.Now().UTC()
 	if err := k.store.CreateOrUpdateDiscoveredKernel(ctx, &DiscoveredKernel{
 		PublicKey: gossip.PublicKey,
@@ -1514,7 +1563,36 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 			k.log.With(ctx).Warn("gossip.evidence.rejected", "issuer", gossip.PublicKey, "error", err)
 		}
 	}
+
+	// PEX (§13): ingest the relayed known-kernel sample as unverified stubs — information, never
+	// authority. Keys only, bounded, own/sender/syntactically-invalid skipped; a stub is believed
+	// only after this kernel's own direct verified pull.
+	for i, hk := range gossip.KnownKernels {
+		if i >= maxGossipKernelHints {
+			break
+		}
+		if hk == "" || hk == gossip.PublicKey || hk == k.ourKeyB64() {
+			continue
+		}
+		if _, err := decodeRemotePublicKey(hk); err != nil {
+			continue
+		}
+		_ = k.store.InsertDiscoveredKernelStub(ctx, hk, now, maxUnverifiedKernels)
+	}
 	return gossip.NextCursor, nil
+}
+
+// KernelsForPull returns up to limit discovered-kernel keys in PEX pull order (§13), the candidate
+// set the discovery loop unions with peers and bootstrap seeds.
+func (k *Kernel) KernelsForPull(ctx context.Context, limit int) []string {
+	keys, _ := k.store.ListKernelsForPull(ctx, limit)
+	return keys
+}
+
+// RecordKernelPullFailure counts one non-verified pull against a candidate and evicts a spent stub
+// (§13), so a dead or poisoned hint rotates to the back and is dropped rather than pinning the set.
+func (k *Kernel) RecordKernelPullFailure(ctx context.Context, publicKey string) error {
+	return k.store.RecordKernelPullFailure(ctx, publicKey, time.Now().UTC(), maxStubAttempts)
 }
 
 // ingestEvidenceBundle verifies and stores one evidence bundle from issuerKey (§13). It verifies the

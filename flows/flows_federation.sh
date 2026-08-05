@@ -14,11 +14,13 @@ _fed_setup() {
     mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
 
     FED_BPORT=$(backend_port); start_backend "$FED_BPORT" 200 '{"greeting":"hello"}'
-    # R boots first and is the flow's bootstrap+relay; L (and T, in the gossip flow) dial it.
-    start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r || return 1
+    # R boots first and is the flow's bootstrap+relay; L (and T, in the gossip flow) dial it. A short
+    # discovery interval lets each kernel verify the others via PEX within the flow (§13): R learns L
+    # only on R's next pass, which the multi-hop gossip flow depends on.
+    start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r discovery_interval_seconds=2 || return 1
     FED_BOOT=$(kernel_fed_addr "$FED_DBR")
     [ -n "$FED_BOOT" ] || return 1
-    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$FED_BOOT" || return 1
+    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 || return 1
     j "$FED_DBR" "$FED_HR" auth login sys --password sys-pass >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" auth login sys --password sys-pass >/dev/null 2>&1
 
@@ -280,6 +282,17 @@ flow_fed_gossip_discovery() {
     done
     assert_eq "fed_gossip.r_discovered_via_gossip" yes "$found"
 
+    # Multi-hop PEX (§13): T bootstraps off R alone and never dials L, yet must learn L purely from
+    # R's known_kernels hint (R verified L after L bootstrapped to it, then relays L's key), then pull
+    # L directly and index L's sys user. Proves membership propagates transitively through gossip
+    # itself — not a shared DHT rendezvous.
+    local lfound=no
+    for _ in $(seq 1 45); do
+        if jj "$dbt" "$ht" run sys/user-lookup '{"query":"sys"}' | grep -q "$FED_LKEY"; then lfound=yes; break; fi
+        sleep 1
+    done
+    assert_eq "fed_gossip.l_discovered_via_pex_hint" yes "$lfound"
+
     # T cold-resolves R's action by key with its FIRST call, then binds the kernel-r alias by key.
     assert_nonempty "fed_gossip.t_resolves_and_calls" "$(strfield "$(jj "$dbt" "$ht" run "sys@$rkey/greet" '{}')" tx_id)"
     j "$dbt" "$ht" admin rename -- "$rkey" kernel-r >/dev/null 2>&1
@@ -290,8 +303,8 @@ flow_fed_gossip_discovery() {
 }
 
 # flow_fed_discovery: cold-start discovery. L boots with R as its only bootstrap peer and must learn
-# R into its known network automatically via the startup discovery pass that advertises and pulls
-# gossip from bootstrap peers. Proves discovery is independent of any peering step: the known network
+# R into its known network automatically via the startup discovery pass that pulls gossip from the
+# bootstrap peers (§13 PEX). Proves discovery is independent of any peering step: the known network
 # (global, by key) grows from gossip alone, before any call resolves a proxy.
 flow_fed_discovery() {
     echo "=== FLOW fed_discovery ==="

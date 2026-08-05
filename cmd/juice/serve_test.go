@@ -2519,16 +2519,12 @@ func containsProcess(t *testing.T, resp *http.Response, id string) bool {
 
 // fakeDiscoverer stands in for *fed.Transport so the discovery pass is exercised without libp2p.
 type fakeDiscoverer struct {
-	bootstrap  []string
-	providers  []string
-	gossip     map[string]json.RawMessage
-	advertised int
-	gossiped   []string
+	bootstrap []string
+	gossip    map[string]json.RawMessage
+	gossiped  []string
 }
 
-func (f *fakeDiscoverer) Advertise(context.Context) error                 { f.advertised++; return nil }
-func (f *fakeDiscoverer) BootstrapKeys() []string                         { return f.bootstrap }
-func (f *fakeDiscoverer) DiscoverProviders(context.Context, int) []string { return f.providers }
+func (f *fakeDiscoverer) BootstrapKeys() []string { return f.bootstrap }
 func (f *fakeDiscoverer) Gossip(_ context.Context, key string, _ string) (json.RawMessage, error) {
 	f.gossiped = append(f.gossiped, key)
 	if raw, ok := f.gossip[key]; ok {
@@ -2538,65 +2534,66 @@ func (f *fakeDiscoverer) Gossip(_ context.Context, key string, _ string) (json.R
 }
 
 // noCursor / discardCursor are the getCursor / setCursor stubs for discoverOnce tests.
-func noCursor(context.Context, string) string        { return "" }
+func noCursor(context.Context, string) string             { return "" }
 func discardCursor(context.Context, string, string) error { return nil }
 
-// discoverOnce advertises once, dedups bootstrap ∪ providers, pulls gossip from each reachable key,
-// and accumulates it introduced-by the kernel's own key (self-report). Offline peers are skipped.
+// discoverOnce (§13 PEX): dedup peers ∪ bootstrap ∪ known-kernel rotation, pull each, and accumulate
+// only a VERIFIED reply (introducer = the authenticated key we dialed, == g.PublicKey). Every
+// non-verified outcome — offline, or a responder claiming a different identity than the dialed key —
+// is a recorded failure and never accumulated.
 func TestDiscoverOnce(t *testing.T) {
 	mkGossip := func(pk string) json.RawMessage {
-		b, _ := json.Marshal(kernel.GossipResponse{PublicKey: pk, Handle: "@" + pk})
+		b, _ := json.Marshal(kernel.GossipResponse{PublicKey: pk, Handle: pk})
 		return b
 	}
+	poison, _ := json.Marshal(kernel.GossipResponse{PublicKey: "X", Handle: "X"}) // D claims X ≠ D
 	f := &fakeDiscoverer{
 		bootstrap: []string{"A"},
-		providers: []string{"A", "B", "C"}, // A duplicates bootstrap; C is offline (no gossip)
-		gossip:    map[string]json.RawMessage{"A": mkGossip("A"), "B": mkGossip("B")},
+		gossip:    map[string]json.RawMessage{"A": mkGossip("A"), "B": mkGossip("B"), "D": poison},
 	}
-	var got []string
+	// known rotation: A duplicates bootstrap; C is offline; D answers under a mismatched key.
+	known := func(context.Context, int) []string { return []string{"A", "B", "C", "D"} }
+	var got, failed []string
 	acc := func(_ context.Context, g *kernel.GossipResponse, introducer string) (string, error) {
 		if introducer != g.PublicKey {
-			t.Errorf("introducer %q must equal own key %q (self-report)", introducer, g.PublicKey)
+			t.Errorf("introducer %q must be the authenticated key (== g.PublicKey %q)", introducer, g.PublicKey)
 		}
 		got = append(got, g.PublicKey)
 		return "", nil
 	}
 	noFriends := func(context.Context) []string { return nil }
 	noSync := func(context.Context, string, *int64) error { return nil }
-	discoverOnce(context.Background(), f, true, noFriends, acc, noSync, noCursor, discardCursor, log.Discard())
+	recFail := func(_ context.Context, key string) error { failed = append(failed, key); return nil }
+	discoverOnce(context.Background(), f, noFriends, known, acc, noSync, recFail, noCursor, discardCursor, log.Discard())
 
-	if f.advertised != 1 {
-		t.Errorf("advertised %d times, want 1", f.advertised)
-	}
 	sort.Strings(got)
 	if strings.Join(got, ",") != "A,B" {
-		t.Errorf("accumulated %v, want [A B] (dup deduped, offline C skipped)", got)
+		t.Errorf("accumulated %v, want [A B] (dup deduped, offline C and mismatched D excluded)", got)
+	}
+	sort.Strings(failed)
+	if strings.Join(failed, ",") != "C,D" {
+		t.Errorf("failed %v, want [C D] (offline C, key-mismatch D)", failed)
 	}
 }
 
-// discoverOnce runs friend sync even with directory disabled (empty bootstrap_peers, §13): it pulls
-// gossip from each friended key and records last_seen + the reported counterparty_balance, without
-// advertising or enumerating providers.
-func TestDiscoverOnceFriendSync(t *testing.T) {
+// discoverOnce runs peer sync with no seeds at all (empty bootstrap_peers and no known kernels, §13):
+// it still pulls gossip from each known peer and records last_seen + the reported counterparty_balance.
+func TestDiscoverOncePeerSyncNoSeeds(t *testing.T) {
 	bal := int64(42)
 	g, _ := json.Marshal(kernel.GossipResponse{PublicKey: "F", Handle: "F", CounterpartyBalance: &bal})
-	f := &fakeDiscoverer{
-		bootstrap: []string{"A"}, // must be ignored when directory=false
-		providers: []string{"B"}, // must be ignored when directory=false
-		gossip:    map[string]json.RawMessage{"F": g},
-	}
-	friends := func(context.Context) []string { return []string{"F"} }
+	f := &fakeDiscoverer{gossip: map[string]json.RawMessage{"F": g}}
+	peers := func(context.Context) []string { return []string{"F"} }
+	noKnown := func(context.Context, int) []string { return nil }
 	var syncedKey string
 	var syncedCredit *int64
 	rec := func(_ context.Context, key string, credit *int64) error {
 		syncedKey, syncedCredit = key, credit
 		return nil
 	}
-	discoverOnce(context.Background(), f, false, friends, func(context.Context, *kernel.GossipResponse, string) (string, error) { return "", nil }, rec, noCursor, discardCursor, log.Discard())
+	acc := func(context.Context, *kernel.GossipResponse, string) (string, error) { return "", nil }
+	noFail := func(context.Context, string) error { return nil }
+	discoverOnce(context.Background(), f, peers, noKnown, acc, rec, noFail, noCursor, discardCursor, log.Discard())
 
-	if f.advertised != 0 {
-		t.Errorf("advertised %d times with directory disabled, want 0", f.advertised)
-	}
 	if syncedKey != "F" || syncedCredit == nil || *syncedCredit != 42 {
 		t.Errorf("recordSync got (%q,%v), want (F, 42)", syncedKey, syncedCredit)
 	}

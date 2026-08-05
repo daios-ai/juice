@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
@@ -23,7 +22,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	relayv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 	"github.com/multiformats/go-multiaddr"
-	"github.com/multiformats/go-multihash"
 )
 
 // This file is the libp2p transport implementation behind the fed.go seam: identity derivation,
@@ -153,11 +151,13 @@ func New(ctx context.Context, cfg Config) (*Transport, error) {
 		return nil, fmt.Errorf("fed: build host: %w", err)
 	}
 
-	// ModeAuto in production: a publicly-reachable node (a bootstrap host) becomes a DHT server
-	// and holds the routing table; NAT-bound nodes stay clients. On loopback, AutoNAT can't
-	// confirm reachability, so force ModeServer there — otherwise no node serves the table and
-	// resolve-by-key finds nothing.
-	dhtMode := dht.ModeAuto
+	// ModeAutoServer in production: serve the DHT (hold the routing table, answer FindPeer) while
+	// reachability is still unknown, and downgrade to client only once AutoNAT confirms this node is
+	// private. Plain ModeAuto starts as a client and promotes only after a ReachabilityPublic event,
+	// which never arrives in a sparse network with no confirmer — leaving the seed a client that
+	// serves no routing table, so resolve-by-key finds nothing (the confirmed federation bug, §13).
+	// On loopback, AutoNAT can't confirm reachability at all, so force full ModeServer there.
+	dhtMode := dht.ModeAutoServer
 	if cfg.AllowPrivateAddrs {
 		dhtMode = dht.ModeServer
 	}
@@ -277,68 +277,23 @@ func (t *Transport) resolve(ctx context.Context, peerKey string) (peer.ID, error
 	return "", fmt.Errorf("fed: cannot resolve peer %s: %w", pid, lastErr)
 }
 
-// ---- Discovery (the known-network directory engine, §13) ----
+// ---- Discovery seed (§13) ----
 //
-// Discovery is separate from gossip: gossip carries trade-backed reputation, while the DHT
-// provider-record rendezvous below is the fast, broad directory. Every kernel advertises itself
-// under one fixed content key and enumerates the same key to learn who else is online. Learning a
-// kernel this way grants nothing (§13) — it only fills the address book; calling still needs a
-// friendship and a deposit.
-
-const discoveryRendezvous = "juice/kernel/discovery/1"
-
-// juiceDiscoveryCID is the fixed content key every kernel provides and looks up to find peers. It
-// is a pure function of discoveryRendezvous, so every kernel computes the same value with no
-// coordination.
-var juiceDiscoveryCID = mustDiscoveryCID()
-
-func mustDiscoveryCID() cid.Cid {
-	mh, err := multihash.Sum([]byte(discoveryRendezvous), multihash.SHA2_256, -1)
-	if err != nil {
-		panic(fmt.Sprintf("fed: discovery cid: %v", err))
-	}
-	return cid.NewCidV1(cid.Raw, mh)
-}
+// Discovery is peer-exchange gossip (§13 PEX), not a DHT provider rendezvous: the kernel learns
+// other kernels from the known_kernels sample on gossip replies and pulls each directly. The DHT is
+// retained solely for key→address resolution (resolve/FindPeer) and relay. BootstrapKeys is the one
+// transport-side seed the loop needs — the configured bootstrap peers as keys.
 
 // BootstrapKeys returns the base64url Ed25519 keys of the configured bootstrap peers — the same
-// key format friend/inspect/gossip take. The libp2p peer ID inlines the Ed25519 key
-// (KeyFromPeerID), so this is the whole peer-ID→key bridge: the discovery loop can seed from, and
-// an operator can inspect, a bootstrap node addressed only by its multiaddr.
+// key format inspect/gossip take. The libp2p peer ID inlines the Ed25519 key (KeyFromPeerID), so
+// this is the whole peer-ID→key bridge: the discovery loop seeds from, and an operator can inspect,
+// a bootstrap node addressed only by its multiaddr.
 func (t *Transport) BootstrapKeys() []string {
 	var out []string
 	for _, ai := range t.bootstrap {
 		if k, err := KeyFromPeerID(ai.ID); err == nil {
 			out = append(out, k)
 		}
-	}
-	return out
-}
-
-// Advertise announces this kernel under the fixed juice discovery key so peers enumerating it find
-// us. Provider records expire, so the discovery loop re-advertises each pass. Best effort: an
-// unreachable DHT returns an error the caller logs and ignores.
-func (t *Transport) Advertise(ctx context.Context) error {
-	return t.dht.Provide(ctx, juiceDiscoveryCID, true)
-}
-
-// DiscoverProviders enumerates kernels advertising the juice discovery key and returns their
-// base64url keys (up to limit), excluding ourselves. This is the directory pull: it grows the
-// known network at the rate kernels come online, independent of who we have friended or traded
-// with.
-func (t *Transport) DiscoverProviders(ctx context.Context, limit int) []string {
-	self := t.host.ID()
-	seen := map[string]bool{}
-	var out []string
-	for ai := range t.dht.FindProvidersAsync(ctx, juiceDiscoveryCID, limit) {
-		if ai.ID == self {
-			continue
-		}
-		k, err := KeyFromPeerID(ai.ID)
-		if err != nil || seen[k] {
-			continue
-		}
-		seen[k] = true
-		out = append(out, k)
 	}
 	return out
 }
