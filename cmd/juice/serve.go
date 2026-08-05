@@ -277,23 +277,35 @@ func discoverOnce(ctx context.Context, d fedDiscoverer,
 
 	var ok, failed int
 	for key := range keys {
-		fail := func() { failed++; _ = recordFailure(ctx, key) }
+		pstart := time.Now()
+		fail := func(stage string, err error) {
+			failed++
+			_ = recordFailure(ctx, key)
+			logger.Info("discovery.pull.failed",
+				"key", key, "stage", stage, "error", err.Error(),
+				"elapsed_ms", time.Since(pstart).Milliseconds())
+		}
 		pctx, cancel := context.WithTimeout(ctx, discoveryPullTimeout)
 		cursor := getCursor(ctx, key)
 		raw, err := d.Gossip(pctx, key, cursor)
 		cancel()
 		if err != nil {
-			fail() // peer offline or unreachable; the rotation retries a later pass
+			fail("transport", err) // peer offline or unreachable; the rotation retries a later pass
 			continue
 		}
 		var g kernel.GossipResponse
-		if json.Unmarshal(raw, &g) != nil || g.PublicKey != key {
-			fail() // malformed, or a responder claiming an identity other than the key we dialed
+		if uerr := json.Unmarshal(raw, &g); uerr != nil {
+			fail("decode", uerr) // malformed reply
+			continue
+		}
+		if g.PublicKey != key {
+			// a responder claiming an identity other than the key we dialed
+			fail("mismatch", fmt.Errorf("public_key mismatch: claimed %s", g.PublicKey))
 			continue
 		}
 		next, aerr := accumulate(ctx, &g, key) // introducer = the authenticated key, never the claimed one
 		if aerr != nil {
-			fail() // an invalid handle or any other rejection is a failed pull, not a verified one
+			fail("accumulate", aerr) // an invalid handle or any other rejection is a failed pull, not a verified one
 			continue
 		}
 		ok++
@@ -1786,5 +1798,14 @@ func (h *fedHandlers) OnGossip(ctx context.Context, peerKey string, req fed.Goss
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(g)
+	b, err := json.Marshal(g)
+	if err != nil {
+		return nil, err
+	}
+	// Served-response telemetry (§13 diagnostics): size + payload counts, to correlate a
+	// puller's read-side failure against a heavy gossip frame near the relayed allowance.
+	h.log.With(ctx).Debug("gossip.served",
+		"requester", peerKey, "bytes", len(b),
+		"manifests", len(g.ActionManifests), "evidence", len(g.Evidence))
+	return b, nil
 }

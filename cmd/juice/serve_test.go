@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -2596,6 +2597,112 @@ func TestDiscoverOncePeerSyncNoSeeds(t *testing.T) {
 
 	if syncedKey != "F" || syncedCredit == nil || *syncedCredit != 42 {
 		t.Errorf("recordSync got (%q,%v), want (F, 42)", syncedKey, syncedCredit)
+	}
+}
+
+// readJSONLogEvents parses a JSON-format log file and returns the records whose message equals
+// event. Used to assert diagnostic log lines without a capturable logger (log.New writes only to
+// stderr + an optional file path — its handler is unexported, so the file is the seam).
+func readJSONLogEvents(t *testing.T, path, event string) []map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("log line not JSON: %v", err)
+		}
+		if m["msg"] == event {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// discoverOnce tags every failed pull with the stage it failed at plus its elapsed time, so an
+// operator can tell a timeout (elapsed≈cap) from a fast hard-fail and see which stage broke (§13
+// diag). Each non-verified outcome maps to a distinct stage: transport / decode / mismatch / accumulate.
+func TestDiscoverPullFailureLog(t *testing.T) {
+	mkGossip := func(pk string) json.RawMessage {
+		b, _ := json.Marshal(kernel.GossipResponse{PublicKey: pk, Handle: pk})
+		return b
+	}
+	f := &fakeDiscoverer{
+		gossip: map[string]json.RawMessage{
+			"DEC": json.RawMessage("{not json"), // decode: malformed reply
+			"MIS": mkGossip("OTHER"),             // mismatch: claims OTHER ≠ MIS
+			"ACC": mkGossip("ACC"),               // verifies, but accumulate rejects
+			// "OFF" absent from the map → fakeDiscoverer returns an error → transport stage
+		},
+	}
+	known := func(context.Context, int) []string { return []string{"OFF", "DEC", "MIS", "ACC"} }
+	acc := func(_ context.Context, g *kernel.GossipResponse, _ string) (string, error) {
+		if g.PublicKey == "ACC" {
+			return "", fmt.Errorf("rejected")
+		}
+		return "", nil
+	}
+	noFriends := func(context.Context) []string { return nil }
+	noSync := func(context.Context, string, *int64) error { return nil }
+	noFail := func(context.Context, string) error { return nil }
+
+	logPath := filepath.Join(t.TempDir(), "disc.log")
+	logger, err := log.New(log.Config{Level: "debug", FilePath: logPath, Format: "json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoverOnce(context.Background(), f, noFriends, known, acc, noSync, noFail, noCursor, discardCursor, logger)
+
+	stageByKey := map[string]string{}
+	for _, e := range readJSONLogEvents(t, logPath, "discovery.pull.failed") {
+		key, _ := e["key"].(string)
+		stage, _ := e["stage"].(string)
+		stageByKey[key] = stage
+		if _, ok := e["elapsed_ms"]; !ok {
+			t.Errorf("%s: discovery.pull.failed missing elapsed_ms", key)
+		}
+	}
+	want := map[string]string{"OFF": "transport", "DEC": "decode", "MIS": "mismatch", "ACC": "accumulate"}
+	for k, w := range want {
+		if stageByKey[k] != w {
+			t.Errorf("key %s: stage %q, want %q", k, stageByKey[k], w)
+		}
+	}
+}
+
+// OnGossip emits gossip.served with the serialized response size and payload counts (reusing the
+// marshal it already performs), so a puller's read-side failure can be correlated against a heavy
+// gossip frame near the relayed allowance (§13 diag).
+func TestOnGossipServedTelemetry(t *testing.T) {
+	_, k, _ := newFlowKernel(t, nil)
+	logPath := filepath.Join(t.TempDir(), "gossip.log")
+	logger, err := log.New(log.Config{Level: "debug", FilePath: logPath, Format: "json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &fedHandlers{kernel: k, log: logger}
+	if _, err := h.OnGossip(context.Background(), "peerX", fed.GossipRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	events := readJSONLogEvents(t, logPath, "gossip.served")
+	if len(events) != 1 {
+		t.Fatalf("gossip.served emitted %d times, want 1", len(events))
+	}
+	e := events[0]
+	if e["requester"] != "peerX" {
+		t.Errorf("requester %v, want peerX", e["requester"])
+	}
+	if b, _ := e["bytes"].(float64); b <= 0 {
+		t.Errorf("bytes %v, want > 0", e["bytes"])
+	}
+	if _, ok := e["manifests"]; !ok {
+		t.Error("gossip.served missing manifests count")
 	}
 }
 

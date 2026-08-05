@@ -16,6 +16,7 @@ type fakeHandlers struct {
 	lastCall     CallRequest
 	callBody     json.RawMessage
 	gossip       json.RawMessage
+	gossipErr    error
 	resolveBody  json.RawMessage
 	lastStepPeer string
 	lastStep     StepRequest
@@ -34,7 +35,7 @@ func (f *fakeHandlers) OnResolve(_ context.Context, _ string, _ ResolveRequest) 
 	return ResolveResponse{Status: 200, Body: f.resolveBody}
 }
 func (f *fakeHandlers) OnGossip(_ context.Context, _ string, _ GossipRequest) (json.RawMessage, error) {
-	return f.gossip, nil
+	return f.gossip, f.gossipErr
 }
 func (f *fakeHandlers) OnStep(_ context.Context, peerKey string, req StepRequest) StepResponse {
 	f.lastStepPeer = peerKey

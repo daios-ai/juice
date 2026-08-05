@@ -450,10 +450,10 @@ func roundTrip[Req, Resp any](ctx context.Context, t *Transport, peerKey, proto 
 	}
 	defer s.Close()
 	if err := writeFrame(s, req); err != nil {
-		return resp, err
+		return resp, fmt.Errorf("fed: write %s: %w", proto, err)
 	}
 	if err := readFrame(s, &resp); err != nil {
-		return resp, err
+		return resp, fmt.Errorf("fed: read %s: %w", proto, err)
 	}
 	return resp, nil
 }

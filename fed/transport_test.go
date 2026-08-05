@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -229,6 +231,28 @@ func TestCallUnresolvableIsNotDispatched(t *testing.T) {
 	a2 := newTestTransport(t, &fakeHandlers{}, b.ListenAddrs())
 	if _, err := a2.Call(ctx, b.PublicKey(), CallRequest{Action: "@x/y", IdempotencyKey: "k"}); errors.Is(err, ErrNotDispatched) {
 		t.Errorf("reachable Call must not report ErrNotDispatched: %v", err)
+	}
+}
+
+// A gossip pull whose server-side handler errors closes the stream with no reply frame; the
+// client's read failure is wrapped with the read stage and protocol, so a discovery pass can
+// attribute it (§13 diag) rather than logging a bare EOF. The resolve-stage ErrNotDispatched
+// sentinel must NOT appear — the request was dispatched, only the reply was lost.
+func TestGossipReadFailureTagged(t *testing.T) {
+	a := newTestTransport(t, &fakeHandlers{gossipErr: fmt.Errorf("boom")}, nil)
+	b := newTestTransport(t, &fakeHandlers{}, a.ListenAddrs())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := b.Gossip(ctx, a.PublicKey(), "")
+	if err == nil {
+		t.Fatal("expected the gossip pull to fail when the handler errors")
+	}
+	if errors.Is(err, ErrNotDispatched) {
+		t.Errorf("a read-side failure must not be tagged not-dispatched: %v", err)
+	}
+	if !strings.Contains(err.Error(), "fed: read") || !strings.Contains(err.Error(), ProtocolGossip) {
+		t.Errorf("error %q missing the read-stage + protocol tag", err)
 	}
 }
 
