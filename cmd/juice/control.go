@@ -78,23 +78,51 @@ func (s *server) ctlListUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) ctlShowUser(w http.ResponseWriter, r *http.Request) {
-	u, err := resolveHandle(s.kernel, r.Context(), chi.URLParam(r, "handle"))
-	writeOr(w, u, err)
+	acct, key, err := resolveMixed(s.kernel, r.Context(), chi.URLParam(r, "handle"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if key == "" {
+		writeOr(w, acct, nil)
+		return
+	}
+	// A kernel target renders one flat record: its naming state plus the account state when one
+	// exists, so `available` reads the same here as for a local account.
+	rk, _ := s.kernel.ReadKernel(r.Context(), key)
+	out := map[string]any{"public_key": key}
+	if rk != nil {
+		out["petname"], out["nickname"], out["about"] = rk.Petname, rk.Nickname, rk.About
+		out["last_seen"], out["peer_credit"] = rk.LastSeen, rk.PeerCredit
+	}
+	if acct != nil {
+		out["id"], out["available"], out["locked"] = acct.ID, acct.Available, acct.Locked
+		out["suspended_at"], out["created_at"] = acct.SuspendedAt, acct.CreatedAt
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *server) ctlSetSuspended(suspend bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		u, err := resolveHandle(s.kernel, r.Context(), chi.URLParam(r, "handle"))
+		ident := chi.URLParam(r, "handle")
+		acct, key, err := resolveMixed(s.kernel, r.Context(), ident)
 		if err != nil {
 			writeErr(w, err)
 			return
 		}
-		if suspend {
-			err = s.kernel.SuspendUser(r.Context(), callerFrom(r), u.ID)
-		} else {
-			err = s.kernel.UnsuspendUser(r.Context(), callerFrom(r), u.ID)
+		switch {
+		case suspend && key != "":
+			// Suspending a kernel provisions its account and freezes it atomically, so a
+			// not-yet-transacting kernel can be blocked before its first inbound call (§13).
+			err = s.kernel.SuspendKernel(r.Context(), callerFrom(r), key)
+		case acct == nil:
+			err = kernel.ErrNotFound.Wrapf("%s has no account here", ident)
+		case suspend:
+			err = s.kernel.SuspendUser(r.Context(), callerFrom(r), acct.ID)
+		default:
+			err = s.kernel.UnsuspendUser(r.Context(), callerFrom(r), acct.ID)
 		}
-		writeOr(w, map[string]string{"handle": u.Handle}, err)
+		writeOr(w, map[string]string{"target": ident}, err)
 	}
 }
 
@@ -105,12 +133,21 @@ func (s *server) ctlRenameUser(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	u, err := resolveHandle(s.kernel, r.Context(), chi.URLParam(r, "handle"))
+	acct, key, err := resolveMixed(s.kernel, r.Context(), chi.URLParam(r, "handle"))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	out, err := s.kernel.RenameUser(r.Context(), callerFrom(r), u.ID, req.NewHandle)
+	if key != "" {
+		petname, berr := s.kernel.RenameKernel(r.Context(), callerFrom(r), key, req.NewHandle)
+		if berr != nil {
+			writeErr(w, berr)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"petname": petname, "public_key": key})
+		return
+	}
+	out, err := s.kernel.RenameUser(r.Context(), callerFrom(r), acct.ID, req.NewHandle)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -129,23 +166,21 @@ func (s *server) ctlAdjust(credit bool) http.HandlerFunc {
 		if !decodeBody(w, r, &req) {
 			return
 		}
-		u, err := resolveHandle(s.kernel, r.Context(), req.Handle)
+		u, key, err := resolveMixed(s.kernel, r.Context(), req.Handle)
 		if err != nil {
-			// Deposit-by-key opens the peer's billing account (§13): the provider's single deposit
-			// both provisions and funds a not-yet-known peer's account. Only a public key auto-
-			// provisions (a bare handle never means a key, §14); withdraw never does (nothing to
-			// redeem from a fresh row).
-			if key := strings.TrimSpace(req.Handle); credit && kernel.IsPublicKey(key) {
-				short := key
-				if len(short) > 8 {
-					short = short[:8]
-				}
-				if peer, aerr := s.kernel.AddPeer(r.Context(), callerFrom(r), "k-"+short, key); aerr == nil {
-					u = peer
-					err = nil
-				}
+			writeErr(w, err)
+			return
+		}
+		if u == nil {
+			// Deposit-by-kernel opens the billing account (§13): the provider's single deposit both
+			// provisions and funds a not-yet-known kernel. Provisioning only — a deposit is not our
+			// act of naming, so no petname is bound; the operator binds one with `admin rename`.
+			// Withdraw never provisions: there is nothing to redeem from a fresh row.
+			if !credit || key == "" {
+				writeErr(w, kernel.ErrNotFound.Wrapf("%s has no account here", req.Handle))
+				return
 			}
-			if err != nil {
+			if u, err = s.kernel.EnsureKernelAccount(r.Context(), key); err != nil {
 				writeErr(w, err)
 				return
 			}
@@ -160,7 +195,7 @@ func (s *server) ctlAdjust(credit bool) http.HandlerFunc {
 			writeErr(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, enrichLedger(e, newUserCache(s.kernel, r.Context())))
+		writeJSON(w, http.StatusOK, enrichLedger(e, newAccountCache(s.kernel, r.Context())))
 	}
 }
 
@@ -175,9 +210,16 @@ func (s *server) ctlSettlePeer(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	u, err := resolveHandle(s.kernel, r.Context(), req.Handle)
+	// Settlement is kernel-only, so it uses the kernel resolver directly rather than the mixed
+	// wrapper (§14): a petname or key names the counterparty, and it must already hold an account.
+	key, err := s.resolvePeerKey(r.Context(), req.Handle)
 	if err != nil {
 		writeErr(w, err)
+		return
+	}
+	u, err := s.kernel.ReadAccountByKernelKey(r.Context(), key)
+	if err != nil || u == nil {
+		writeErr(w, kernel.ErrNotFound.Wrapf("%s has no account here", req.Handle))
 		return
 	}
 	var res map[string]any
@@ -194,27 +236,16 @@ func (s *server) ctlSettlePeer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
-	// The merged roster (§14): every known kernel by public key — counterparties (with an account and
-	// balance) and discovery-only kernels (no account) — this kernel excluded. Suspended counterparties
-	// are included only with ?all=1, like action list hides inactive rows.
+	// The roster (§14): every known kernel by public key — counterparties (with an account and
+	// balance) and discovery-only kernels (no account) — this kernel excluded, served by one store
+	// query. Suspended counterparties are included only with ?all=1, like action list hides inactive.
 	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
 	limit, offset := listBounds(r)
-	// Fetch the FULL counterparty set (suspended included, unpaged — ListPeers treats limit <= 0 as
-	// "all"): pagination is applied to the MERGED roster below, never to counterparties alone — else
-	// the appended discovered kernels would ignore limit/offset, and a suspended counterparty beyond
-	// the page would reappear as discovery-only, defeating the suspend filter.
-	peers, err := s.kernel.ListPeers(r.Context(), true, 0, 0)
+	views, err := s.kernel.ListKernels(r.Context(), all, limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	discovered, err := s.kernel.ListDiscoveredKernels(r.Context())
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	selfKey, _ := s.kernel.GetConfig(r.Context(), configKeySigningPublic)
-	views := mergePeerRoster(peers, discovered, selfKey, all)
 	// Flag debtor counterparties when global gross receivables have reached Y (display only, FIX 3).
 	if globalCfg.SettlementTrigger > 0 {
 		if gross, err := s.kernel.GrossReceivables(r.Context()); err == nil && gross >= globalCfg.SettlementTrigger {
@@ -225,7 +256,7 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, pageViews(views, limit, offset))
+	writeJSON(w, http.StatusOK, views)
 }
 
 // ctlInspectPeer has defined behavior whether the peer is up or down (§13). It always reports
@@ -261,7 +292,7 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	}
 	// Local account info when this peer is a financial counterparty here (§14 inspect): the bilateral
 	// balance and suspension, independent of whether the peer is currently reachable.
-	if pu, _ := s.kernel.ReadUserByPublicKey(ctx, peerKey); pu != nil {
+	if pu, _ := s.kernel.ReadAccountByKernelKey(ctx, peerKey); pu != nil {
 		resp["account"] = map[string]any{"available": pu.Available, "locked": pu.Locked, "suspended": pu.SuspendedAt != nil}
 	}
 
@@ -270,7 +301,11 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	if gRaw, err := s.fed.Gossip(octx, peerKey, ""); err == nil {
 		var g kernel.GossipResponse
 		if json.Unmarshal(gRaw, &g) == nil {
-			resp["handle"], resp["public_key"] = g.Handle, g.PublicKey
+			resp["nickname"], resp["public_key"] = g.Handle, g.PublicKey
+			resp["petname"] = s.kernel.KernelName(ctx, g.PublicKey)
+			if resp["petname"] == g.PublicKey {
+				resp["petname"] = "" // unbound: KernelName falls back to the key
+			}
 			resp["about"], resp["users"], resp["actions"] = g.About, g.Users, g.ActionManifests
 			resp["source"] = "live"
 			if steps, ok := s.peerStepsAwaitingUs(octx, peerKey); ok {
@@ -285,20 +320,14 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	// and/or a proxy-user identity — plus the cached discovery docs for this kernel (§13). A peer we
 	// know locally (either way) is source="local"; a total stranger is "none".
 	known := false
-	if dk, _ := s.kernel.ReadDiscoveredKernel(ctx, peerKey); dk != nil {
-		resp["handle"], resp["public_key"], resp["about"] = dk.Handle, dk.PublicKey, dk.About
+	if dk, _ := s.kernel.ReadKernel(ctx, peerKey); dk != nil {
+		resp["petname"], resp["nickname"], resp["public_key"], resp["about"] = dk.Petname, dk.Nickname, dk.PublicKey, dk.About
 		known = true
-	}
-	if !known {
-		if pu, _ := s.kernel.ReadUserByPublicKey(ctx, peerKey); pu != nil {
-			resp["handle"], resp["public_key"] = pu.Handle, pu.PublicKey
-			known = true
-		}
 	}
 	if known {
 		resp["source"] = "local"
 	} else {
-		resp["handle"], resp["public_key"], resp["source"] = "", peerKey, "none"
+		resp["petname"], resp["nickname"], resp["public_key"], resp["source"] = "", "", peerKey, "none"
 	}
 	if docs, derr := s.kernel.DiscoveryDocsForKernel(ctx, peerKey); derr == nil {
 		resp["actions"] = docs
@@ -312,11 +341,16 @@ func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, erro
 	if ident == "" {
 		return "", kernel.ErrInvalidInput.Wrap("a peer handle or public key is required")
 	}
+	// Kernel namespace first: a petname or raw key names a kernel directly, with or without an
+	// account here (§13). Only then fall back to the account namespace, to reject a local user.
+	if key, _, err := s.kernel.ResolveKernelKey(ctx, ident); err == nil {
+		return key, nil
+	}
 	if u, err := resolveHandle(s.kernel, ctx, ident); err == nil {
-		if u.PublicKey == "" {
+		if u.KernelPublicKey == "" {
 			return "", kernel.ErrInvalidInput.Wrapf("%q is a local user, not a federation peer", ident)
 		}
-		return u.PublicKey, nil
+		return u.KernelPublicKey, nil
 	}
 	// An unresolvable identifier with public-key shape is a raw stranger key (inspecting or addressing
 	// a peer before it is known locally) — the transport reports it unreachable if it is not real.
@@ -571,9 +605,7 @@ func (s *server) transferView(ctx context.Context, pt *kernel.PendingTransfer) p
 	if buyer, err := s.kernel.ResolveUser(ctx, pt.BuyerID); err == nil && buyer != nil {
 		v.BuyerHandle = buyer.Handle
 	}
-	if peer, err := s.kernel.ReadUserByPublicKey(ctx, pt.PeerKey); err == nil && peer != nil {
-		v.PeerHandle = peer.Handle
-	}
+	v.PeerHandle = s.kernel.KernelName(ctx, pt.PeerKey)
 	return v
 }
 

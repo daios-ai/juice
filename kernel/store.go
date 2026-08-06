@@ -180,20 +180,20 @@ type TxFilter struct {
 // supported realization of the spec's atomic write sets; they enforce atomicity that
 // individual primitive calls cannot. There is no parallel primitive-transaction API.
 type Store interface {
-	// ---- Users ----
+	// ---- Accounts ----
 
-	CreateUser(ctx context.Context, u *User) error
-	ReadUser(ctx context.Context, id string) (*User, error)
-	ReadUserByHandle(ctx context.Context, handle string) (*User, error)
-	ReadUserByPublicKey(ctx context.Context, publicKey string) (*User, error)
-	ListUsers(ctx context.Context, limit, offset int) ([]*User, error)
-	// ListPeers returns remote-kernel proxy users (public_key set), newest first. A false
-	// includeSuspended filters suspended peers out in SQL; limit<=0 returns all (the internal
-	// enumeration form used by peer sync, §13).
-	ListPeers(ctx context.Context, includeSuspended bool, limit, offset int) ([]*User, error)
+	CreateUser(ctx context.Context, u *Account) error
+	ReadUser(ctx context.Context, id string) (*Account, error)
+	// ReadUserByHandle resolves the user namespace. A kernel account holds no handle, so it is
+	// unreachable here by construction (§13).
+	ReadUserByHandle(ctx context.Context, handle string) (*Account, error)
+	// ReadAccountByKernelKey returns the account settling for a remote kernel, or ErrNotFound.
+	ReadAccountByKernelKey(ctx context.Context, publicKey string) (*Account, error)
+	// ListUsers returns local user accounts; kernel accounts are excluded (§14).
+	ListUsers(ctx context.Context, limit, offset int) ([]*Account, error)
 	SuspendUser(ctx context.Context, id string) error
 	UnsuspendUser(ctx context.Context, id string) error
-	UpdateUser(ctx context.Context, u *User) error
+	UpdateUser(ctx context.Context, u *Account) error
 	RenameUser(ctx context.Context, id, handle string) error
 
 	// ---- Actions ----
@@ -447,7 +447,7 @@ type Store interface {
 
 	// InitFirstBoot atomically creates a user and sets all given config entries.
 	// If the user handle already exists the user INSERT is skipped; config entries are always set.
-	InitFirstBoot(ctx context.Context, u *User, configs map[string]string) error
+	InitFirstBoot(ctx context.Context, u *Account, configs map[string]string) error
 
 	// ---- Receipts (by ID) ----
 
@@ -480,12 +480,12 @@ type Store interface {
 	// SearchActionsLexical returns up to limit active action IDs matching query, BM25-ranked best-first.
 	SearchActionsLexical(ctx context.Context, query string, limit int) ([]string, error)
 
-	// ---- Users (extended) ----
+	// ---- Peer sync ----
 
-	// UpdatePeerSync records a successful peer gossip pull (§13 peer sync): peer_last_seen=now
-	// and, when the peer reported one, peer_credit=credit (nil leaves the prior value). Display-only
-	// cache; never a money path.
-	UpdatePeerSync(ctx context.Context, id string, lastSeen time.Time, credit *int64) error
+	// UpdatePeerSync records a successful, authenticated peer gossip pull (§13 peer sync), keyed by
+	// public key: last_seen=now and, when the peer reported one, peer_credit=credit (nil leaves the
+	// prior value). Display-only cache; never a money path.
+	UpdatePeerSync(ctx context.Context, publicKey string, lastSeen time.Time, credit *int64) error
 
 	// CommitSettlement records one finish outcome atomically, keyed idempotently by settlementID (§13,
 	// the external_key read-first short-circuit — anti-grinding). A "clear" outcome passes dClear=±d,
@@ -513,19 +513,28 @@ type Store interface {
 	// receivables, compared against exposure_max/settlement_trigger for display (§13).
 	GrossReceivables(ctx context.Context) (int64, error)
 
-	// ---- Gossip / Federation ----
+	// ---- Kernels (identity, naming, discovery) ----
 
-	// CreateOrUpdateDiscoveredKernel upserts a DiscoveredKernel row keyed by public_key on a verified
-	// pull. It updates handle/about and (when non-empty) gossip_cursor, preserving the earliest
-	// first_seen.
-	CreateOrUpdateDiscoveredKernel(ctx context.Context, k *DiscoveredKernel) error
-	// ListVerifiedDiscoveredKernels returns every verified discovered-kernel row (handle != ''), each
-	// with its cached public-action count, for the merged `admin peers` roster (§14). Discovery-only:
-	// it creates and reads no account.
-	ListVerifiedDiscoveredKernels(ctx context.Context) ([]*DiscoveredKernelView, error)
-	// ReadDiscoveredKernel returns the discovered-kernel row for a public key, or nil if unknown.
-	ReadDiscoveredKernel(ctx context.Context, publicKey string) (*DiscoveredKernel, error)
-	// SetGossipCursor persists the evidence high-watermark for a peer (§13 peer sync).
+	// UpsertKernel records an observation: nickname, about, timestamps. It never writes the petname
+	// (assigned locally, only on our own outbound act) nor gossip_cursor/last_seen/peer_credit, each
+	// of which advances only after its own work is verified and committed (§13).
+	UpsertKernel(ctx context.Context, publicKey, nickname, about string, now time.Time) error
+	// BindPetname assigns a kernel's local petname in one transaction, so concurrent first use
+	// converges on one name (§13). exact=false preserves an existing petname and suffixes -2…-99 on
+	// collision; exact=true is an operator bind and errors on an occupied name. Returns the binding.
+	BindPetname(ctx context.Context, publicKey, desired string, exact bool) (string, error)
+	// SuspendKernelAccount provisions (when absent) and suspends a kernel's account in one
+	// transaction (§13), so an inbound signed call cannot slip between the two writes.
+	SuspendKernelAccount(ctx context.Context, publicKey, newAccountID string, now time.Time) error
+	// ListKernels returns the whole `admin peers` roster (§14) — every known kernel with its account
+	// state when one exists — from one kernels LEFT JOIN accounts, excluding selfKey.
+	ListKernels(ctx context.Context, selfKey string, includeSuspended bool, limit, offset int) ([]*RemoteKernelView, error)
+	// ReadKernel returns the kernel row for a public key, or nil if unknown.
+	ReadKernel(ctx context.Context, publicKey string) (*RemoteKernel, error)
+	// ReadKernelByPetname resolves a bound petname to its kernel; nil when no kernel holds it.
+	ReadKernelByPetname(ctx context.Context, petname string) (*RemoteKernel, error)
+	// SetGossipCursor persists the evidence high-watermark, only after a page is verified and
+	// committed (§13 peer sync).
 	SetGossipCursor(ctx context.Context, publicKey, cursor string) error
 
 	// ---- Discovery docs (regenerable lookup cache, §13) ----

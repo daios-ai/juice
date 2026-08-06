@@ -47,7 +47,7 @@ func newTestEnv(t *testing.T) *testEnv {
 
 	// Seed the issuer user so receipt FK constraints pass and buildReceipt can sign.
 	hash, _ := kernel.HashPassword("issuer-pass")
-	issuer := &kernel.User{
+	issuer := &kernel.Account{
 		ID: cmdTestIssuerID, Handle: "@_test_issuer",
 		PasswordHash: hash, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -310,12 +310,14 @@ func TestUserUpdateProxyUser(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
-	proxy := &kernel.User{
+	proxy := &kernel.Account{
 		ID:        "proxy-id-1",
-		Handle:    "remote-peer",
-		PublicKey: "dGVzdGtleQ==",
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
+		KernelPublicKey: "dGVzdGtleQ==",
+		CreatedAt:       time.Now().UTC(),
+		UpdatedAt:       time.Now().UTC(),
+	}
+	if err := env.db.UpsertKernel(ctx, "dGVzdGtleQ==", "remote-peer", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
 	}
 	if err := env.db.CreateUser(ctx, proxy); err != nil {
 		t.Fatal(err)
@@ -771,7 +773,7 @@ func TestProcessStartFundEnd(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
-	owner := &kernel.User{
+	owner := &kernel.Account{
 		ID:        "user-proc-test",
 		Handle:    "proctest",
 		Available: 2000,
@@ -860,7 +862,7 @@ func TestProcessEndReturnsBalance(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
-	owner := &kernel.User{
+	owner := &kernel.Account{
 		ID:        "balance-return-user",
 		Handle:    "baltest",
 		Available: 1000,
@@ -1327,7 +1329,7 @@ func TestCallClosedProcess(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
-	owner := &kernel.User{
+	owner := &kernel.Account{
 		ID:        uuid.New().String(),
 		Handle:    "call-owner",
 		Available: 1000,
@@ -1459,12 +1461,7 @@ func TestRemoteImport(t *testing.T) {
 	}))
 	defer remote.Close()
 
-	sys, err := k.ReadUserByHandle(t.Context(), "sys")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	remoteUser, err := k.AddPeer(t.Context(), sys.ID, "import-remote", pubB64)
+	remoteUser, err := k.EnsureKernelAccount(t.Context(), pubB64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1588,7 +1585,7 @@ func TestCLIActionRatings(t *testing.T) {
 		t.Fatal(err)
 	}
 	hash, _ := kernel.HashPassword("pass")
-	caller := &kernel.User{
+	caller := &kernel.Account{
 		ID: uuid.NewString(), Handle: "rate-caller", PasswordHash: hash, Available: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}

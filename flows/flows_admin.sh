@@ -167,16 +167,20 @@ flow_native_orphan_purge() {
     # Inject (server stopped) a kind=native row whose name no build registers a handler for —
     # simulating a native left over in an existing DB after it was removed from the stdlib.
     stop_server "$db"
-    python3 - "$db" <<'PYEOF'
+    local orphan_id; orphan_id=$(python3 - "$db" <<'PYEOF'
 import sqlite3, uuid, sys
 c = sqlite3.connect(sys.argv[1])
-owner = c.execute("SELECT id FROM users WHERE handle='sys' LIMIT 1").fetchone()[0]
+owner = c.execute("SELECT id FROM accounts WHERE handle='sys' LIMIT 1").fetchone()[0]
+aid = str(uuid.uuid4())
 c.execute("""INSERT INTO actions
   (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,auth_json,created_at,updated_at)
   VALUES (?,?,?,'native',1,'public',0,'obsolete',?,?,'','','','','',datetime('now'),datetime('now'))""",
-  [str(uuid.uuid4()), owner, 'obsolete-native', '{"type":"object"}', '{"type":"object"}'])
-c.commit()
+  [aid, owner, 'obsolete-native', '{"type":"object"}', '{"type":"object"}'])
+c.commit(); print(aid)
 PYEOF
+)
+    # The prune assertion below is vacuous if the row never landed, so the injection must fail loudly.
+    assert_nonempty "orphan.injected" "$orphan_id"
 
     # Restart → startup prune soft-deletes the handler-less native; real natives survive.
     start_server "$db" "$hs" || { fail "orphan.reboot" "server did not restart"; return; }

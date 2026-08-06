@@ -92,13 +92,9 @@ func TestAdminDepositByKey(t *testing.T) {
 	ctx := context.Background()
 	suTok := bootSuperuser(t, env)
 
-	sys, err := env.k.ReadUserByHandle(ctx, "sys")
-	if err != nil {
-		t.Fatal(err)
-	}
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	keyB64 := base64.RawURLEncoding.EncodeToString(pub)
-	peer, err := env.k.AddPeer(ctx, sys.ID, "peerx", keyB64)
+	peer, err := env.k.EnsureKernelAccount(ctx, keyB64)
 	if err != nil {
 		t.Fatal(err)
 	}

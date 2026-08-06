@@ -199,7 +199,7 @@ func adminUsersCmd() *cobra.Command {
 		Short: "List users",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			var users []*kernel.User
+			var users []*kernel.Account
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
 			if err := apiCall(context.Background(), "GET", "/control/users?"+q.Encode(), nil, &users); err != nil {
@@ -225,8 +225,8 @@ func adminUsersCmd() *cobra.Command {
 
 func adminShowCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show <user>",
-		Short: "Show user details",
+		Use:   "show <target>",
+		Short: "Show a local account or a remote kernel",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return apiEmit("GET", "/control/users/"+url.PathEscape(args[0]), nil)
@@ -236,14 +236,14 @@ func adminShowCmd() *cobra.Command {
 
 func adminSuspendCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "suspend <user>",
-		Short: "Suspend a user",
+		Use:   "suspend <target>",
+		Short: "Suspend a local account or a remote kernel",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/suspend", nil, nil); err != nil {
 				return err
 			}
-			fmt.Printf("User %s suspended.\n", kernel.NormalizeHandle(args[0]))
+			fmt.Printf("%s suspended.\n", kernel.NormalizeHandle(args[0]))
 			return nil
 		},
 	}
@@ -251,14 +251,14 @@ func adminSuspendCmd() *cobra.Command {
 
 func adminUnsuspendCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "unsuspend <user>",
-		Short: "Unsuspend a user",
+		Use:   "unsuspend <target>",
+		Short: "Unsuspend a local account or a remote kernel",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/unsuspend", nil, nil); err != nil {
 				return err
 			}
-			fmt.Printf("User %s unsuspended.\n", kernel.NormalizeHandle(args[0]))
+			fmt.Printf("%s unsuspended.\n", kernel.NormalizeHandle(args[0]))
 			return nil
 		},
 	}
@@ -266,15 +266,15 @@ func adminUnsuspendCmd() *cobra.Command {
 
 func adminRenameCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "rename <user> <new-handle>",
-		Short: "Rename a user's handle (frees the old handle for reuse)",
+		Use:   "rename <target> <new-name>",
+		Short: "Rename a local account, or bind a kernel's petname",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			body := map[string]any{"new_handle": args[1]}
 			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/rename", body, nil); err != nil {
 				return err
 			}
-			fmt.Printf("User %s renamed to %s.\n", kernel.NormalizeHandle(args[0]), kernel.NormalizeHandle(args[1]))
+			fmt.Printf("%s renamed to %s.\n", args[0], kernel.NormalizeHandle(args[1]))
 			return nil
 		},
 	}
@@ -303,11 +303,11 @@ func adjustCmd(use, short, path string) *cobra.Command {
 }
 
 func adminDepositCmd() *cobra.Command {
-	return adjustCmd("deposit <user> <amount>", "Add credits to a user", "/control/deposit")
+	return adjustCmd("deposit <target> <amount>", "Add credits to an account or kernel", "/control/deposit")
 }
 
 func adminWithdrawCmd() *cobra.Command {
-	return adjustCmd("withdraw <user> <amount>", "Deduct credits from a user", "/control/withdraw")
+	return adjustCmd("withdraw <target> <amount>", "Deduct credits from an account or kernel", "/control/withdraw")
 }
 
 func adminSettleCmd() *cobra.Command {
@@ -327,12 +327,14 @@ func adminSettleCmd() *cobra.Command {
 
 func peerInspectCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "inspect <key|handle>",
-		Short: "Inspect a remote kernel (by key, or local alias handle if already known)",
+		Use:   "inspect <key|petname>",
+		Short: "Inspect a remote kernel (by public key or bound petname)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			var out struct {
-				Handle    string `json:"handle"`
+				Petname   string `json:"petname"`
+				Nickname  string `json:"nickname"`
+				Handle    string `json:"handle"` // live pull: the kernel's own advertised name
 				PublicKey string `json:"public_key"`
 				About     string `json:"about"`
 				Actions   []struct {
@@ -381,7 +383,18 @@ func peerInspectCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(out)
 			}
-			fmt.Printf("Handle:       %s\n", out.Handle)
+			// Petname is the name that resolves a reference here; the kernel's own label never
+			// does (§13), so they print as separate lines rather than one ambiguous "handle".
+			petname := out.Petname
+			if petname == "" {
+				petname = "— (unbound; call it by key)"
+			}
+			nickname := out.Nickname
+			if nickname == "" {
+				nickname = out.Handle
+			}
+			fmt.Printf("Petname:      %s\n", petname)
+			fmt.Printf("Nickname:     %s\n", nickname)
 			fmt.Printf("Public key:   %s\n", out.PublicKey)
 			if out.About != "" {
 				fmt.Printf("About:        %s\n", out.About)
@@ -419,7 +432,10 @@ func peerInspectCmd() *cobra.Command {
 				// Two views, never folded together: the subject's own execution summary (issuer ==
 				// subject), then per-issuer counterparty experience (every other issuer's direct
 				// interactions with the subject). A rating counts only when trade-backed (§13).
-				subjectName := out.Handle
+				subjectName := out.Petname
+				if subjectName == "" {
+					subjectName = out.Nickname
+				}
 				if subjectName == "" {
 					subjectName = shortKey(out.PublicKey)
 				}
@@ -504,7 +520,7 @@ func peerListCmd() *cobra.Command {
 			if e := q.Encode(); e != "" {
 				path += "?" + e
 			}
-			var peers []*kernel.PeerView
+			var peers []*kernel.RemoteKernelView
 			if err := apiCall(context.Background(), "GET", path, nil, &peers); err != nil {
 				return err
 			}
@@ -514,9 +530,11 @@ func peerListCmd() *cobra.Command {
 			if len(peers) == 0 {
 				return nil
 			}
-			// NAME is display only (§14): a counterparty's local alias or a discovery-only kernel's
-			// advertised label; the public key always resolves, the advertised label never does.
-			fmt.Printf("%-16s %10s %8s %8s %10s  %s\n", "NAME", "LAST SEEN", "ACTIONS", "ACCOUNT", "BALANCE", "PUBLIC KEY")
+			// PETNAME is the local name that resolves a reference; NICKNAME is what the kernel
+			// calls itself and never resolves (§13). The public key always resolves, so an
+			// unbound kernel is still callable — bind a petname with `admin rename <key> <name>`.
+			fmt.Printf("%-16s %-16s %8s %8s %10s %10s  %s\n",
+				"PETNAME", "NICKNAME", "ACCOUNT", "BALANCE", "LAST SEEN", "ACTIONS", "PUBLIC KEY")
 			for _, p := range peers {
 				flags := ""
 				if p.SettlementDue {
@@ -525,13 +543,16 @@ func peerListCmd() *cobra.Command {
 				if p.SuspendedAt != nil {
 					flags += " [suspended]"
 				}
-				account, balance := "—", "—"
+				petname, account, balance := "—", "—", "—"
+				if p.Petname != "" {
+					petname = p.Petname
+				}
 				if p.HasAccount {
 					account = "yes"
 					balance = fmt.Sprintf("%d", p.Available)
 				}
-				fmt.Printf("%-16s %10s %8d %8s %10s  %s%s\n",
-					p.Handle, lastSeenStr(p.LastSeen), p.Actions, account, balance, p.PublicKey, flags)
+				fmt.Printf("%-16s %-16s %8s %8s %10s %10d  %s%s\n",
+					petname, p.Nickname, account, balance, lastSeenStr(p.LastSeen), p.Actions, p.PublicKey, flags)
 			}
 			return nil
 		},

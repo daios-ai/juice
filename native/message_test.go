@@ -11,10 +11,10 @@ import (
 	"github.com/google/uuid"
 )
 
-func seedUserWithBalance(t *testing.T, st kernel.Store, handle string, balance int64) *kernel.User {
+func seedUserWithBalance(t *testing.T, st kernel.Store, handle string, balance int64) *kernel.Account {
 	t.Helper()
 	hash, _ := kernel.HashPassword("pw")
-	u := &kernel.User{
+	u := &kernel.Account{
 		ID: uuid.New().String(), Handle: handle,
 		PasswordHash: hash, Available: balance,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),

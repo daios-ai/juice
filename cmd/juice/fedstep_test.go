@@ -31,11 +31,10 @@ func fedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, ed25519.Pri
 		t.Fatal(err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	sys, err := k.ReadUserByHandle(context.Background(), "sys")
-	if err != nil {
+	if _, err := k.BindPetname(context.Background(), pubB64, handle, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.AddPeer(context.Background(), sys.ID, handle, pubB64); err != nil {
+	if _, err := k.EnsureKernelAccount(context.Background(), pubB64); err != nil {
 		t.Fatal(err)
 	}
 	return pubB64, priv
@@ -52,7 +51,7 @@ func parkStepForPeer(t *testing.T, k *kernel.Kernel, db *store.DB, peerKey strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer, err := k.ReadUserByPublicKey(ctx, peerKey)
+	peer, err := k.ReadAccountByKernelKey(ctx, peerKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +161,7 @@ func TestFedStep_PaymentStepSettlesValue(t *testing.T) {
 	// A local beneficiary, and a funded peer buyer (deposited so it can draw the value reserve).
 	benefID, _ := makeUser(t, k, "seller-benef")
 	keyBuyer, privBuyer := fedPeer(t, k, "buyer")
-	buyer, _ := k.ReadUserByPublicKey(ctx, keyBuyer)
+	buyer, _ := k.ReadAccountByKernelKey(ctx, keyBuyer)
 	if _, err := k.Deposit(ctx, sys.ID, buyer.ID, 500, "seed", "seed-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +262,7 @@ func TestFedStep_ListUnknownKeyIsEmptyAndProvisionsNothing(t *testing.T) {
 	if steps, _ := body["steps"].([]*peerStepView); len(steps) != 0 {
 		t.Errorf("expected no steps for a stranger, got %+v", steps)
 	}
-	if u, _ := k.ReadUserByPublicKey(context.Background(), cp); u != nil {
+	if u, _ := k.ReadAccountByKernelKey(context.Background(), cp); u != nil {
 		t.Errorf("a read must not provision an account, but %s now exists", u.Handle)
 	}
 }
@@ -318,7 +317,7 @@ func TestFedStep_RequestsAreRejected(t *testing.T) {
 		}},
 		{"suspended peer", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error {
 			sys, _ := k.ReadUserByHandle(ctx, "sys")
-			peer, _ := k.ReadUserByPublicKey(ctx, keyA)
+			peer, _ := k.ReadAccountByKernelKey(ctx, keyA)
 			if err := k.SuspendUser(ctx, sys.ID, peer.ID); err != nil {
 				t.Fatalf("suspend: %v", err)
 			}
@@ -388,7 +387,7 @@ func TestFedStep_CompleteSettlesAndIsIdempotent(t *testing.T) {
 	if step.Status != kernel.StepDone {
 		t.Errorf("expected step done, got %s", step.Status)
 	}
-	peer, _ := k.ReadUserByPublicKey(ctx, keyA)
+	peer, _ := k.ReadAccountByKernelKey(ctx, keyA)
 	tx, err := k.ReadTransaction(ctx, sys.ID, txID)
 	if err != nil {
 		t.Fatalf("ReadTransaction: %v", err)
@@ -422,7 +421,7 @@ func TestFedStep_PeerCompletesLocalAction(t *testing.T) {
 	ctx := context.Background()
 
 	keyA, privA := fedPeer(t, k, "peer-a")
-	peer, _ := k.ReadUserByPublicKey(ctx, keyA)
+	peer, _ := k.ReadAccountByKernelKey(ctx, keyA)
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 
 	// A local action owned by @sys — the creator — and a step parked for the peer against it.
@@ -452,7 +451,7 @@ func TestFedStep_ListNotCrowdedOutByOwnProcesses(t *testing.T) {
 	ctx := context.Background()
 
 	keyA, privA := fedPeer(t, k, "peer-a")
-	peer, _ := k.ReadUserByPublicKey(ctx, keyA)
+	peer, _ := k.ReadAccountByKernelKey(ctx, keyA)
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 
 	// The step actually addressed to the peer, created FIRST so a newest-first cap would drop it.

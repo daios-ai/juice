@@ -2270,7 +2270,7 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 	ctx := context.Background()
 	pubA := privA.Public().(ed25519.PublicKey)
 	pubAB64 := base64.RawURLEncoding.EncodeToString(pubA)
-	sysA, _ := kA.ReadUserByHandle(ctx, "sys")
+	_, _ = kA.ReadUserByHandle(ctx, "sys")
 
 	// A creates a public action priced at 1000.
 	_, ownerATok := makeUser(t, kA, "duty-a-prov")
@@ -2309,13 +2309,13 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 		kB.SetSigningKey(privB, sysB.ID)
 		httpExec.signerFn = kB.SignFederation
 
-		peerAOnB, err := kB.AddPeer(ctx, sysA.ID, "duty-a", pubAB64)
+		peerAOnB, err := kB.EnsureKernelAccount(ctx, pubAB64)
 		if err != nil {
 			// AddPeer might check ownership; use CreateOrUpdateProxyPeer if needed.
-			peerAOnB, _ = kB.ReadUserByPublicKey(ctx, pubAB64)
+			peerAOnB, _ = kB.ReadAccountByKernelKey(ctx, pubAB64)
 		}
 		if peerAOnB == nil {
-			peerAOnB, _ = kB.CreateOrUpdateProxyPeer(ctx, "duty-a", pubAB64)
+			peerAOnB, _ = mountKernelForTest(t, kB, ctx, pubAB64, "duty-a")
 		}
 
 		// The provider advertises its premium in the signed manifest (§13, v0.12): a higher
@@ -2757,4 +2757,15 @@ func readAll(t *testing.T, resp *http.Response) (string, error) {
 	var buf bytes.Buffer
 	_, err := buf.ReadFrom(resp.Body)
 	return buf.String(), err
+}
+
+// mountKernelForTest performs the outbound-use composite of the kernel lifecycle (§13): observe,
+// bind a petname, and open the billing account — what a verified action or user resolve does. Tests
+// that only need one of the three call it directly instead.
+func mountKernelForTest(t *testing.T, k *kernel.Kernel, ctx context.Context, publicKey, petname string) (*kernel.Account, error) {
+	t.Helper()
+	if _, err := k.BindPetname(ctx, publicKey, petname, false); err != nil {
+		return nil, err
+	}
+	return k.EnsureKernelAccount(ctx, publicKey)
 }

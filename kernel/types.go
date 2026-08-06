@@ -31,36 +31,43 @@ const (
 	TxFailure TxStatus = "failure"
 )
 
-// User is an account with balances, distinguished only by the credentials it holds — a password
-// (session) and/or a PublicKey (federation signature); there is no "kind". A key makes it a peer
-// kernel here, its live path resolved from the key by the transport (§13). RecoveryPublicKey is a
-// distinct recovery credential (§12): an account's own key for signing a password-reset challenge,
-// never a federation identity, so it must not be confused with PublicKey (which sets IsPeer).
-type User struct {
+// Account is the local financial, authentication, and moderation principal: balances, credentials,
+// and the ledger identity every transaction party is captured under (§3). A local user holds a
+// Handle and password/recovery credentials; a remote kernel's account instead holds
+// KernelPublicKey and no credentials at all, so the two entities stay distinct while sharing one
+// wallet model. RecoveryPublicKey is a recovery credential (§12), never a federation identity.
+type Account struct {
 	ID           string     `json:"id"`
-	Handle       string     `json:"handle"`
-	Description  string     `json:"description"` // free-text "about"; @sys's is the kernel's about (§13)
+	Handle       string     `json:"handle"` // empty on a kernel account — a kernel is named by its petname (§13)
+	Description  string     `json:"description"` // free-text "about"; sys's is the kernel's about (§13)
 	PasswordHash string     `json:"-"`
 	Available    int64      `json:"available"`
 	Locked       int64      `json:"locked"`
 	SuspendedAt  *time.Time `json:"suspended_at,omitempty"`
-	PublicKey    string     `json:"public_key,omitempty"` // Ed25519 public key, base64url; empty = no signature credential
+	// KernelPublicKey links this account to the remote kernel it settles for — the sole
+	// account↔kernel relationship (§3), and the peer discriminator. Empty on a local user.
+	KernelPublicKey string `json:"kernel_public_key,omitempty"`
 	// RecoveryPublicKey is the account's own Ed25519 recovery key (base64url), enrolled at
 	// creation from a client-held seed phrase; the server stores only the public half and never
-	// the mnemonic (§12). Distinct from PublicKey: it does not make the account a peer.
-	RecoveryPublicKey string `json:"-"`
-	// PeerLastSeen and PeerCredit are the friend-sync cache (§13 peer sync): null except on peer
-	// rows. Display-only — never callability, pricing, or settlement. PeerCredit is our cached
-	// credit *on* the peer, valid as of PeerLastSeen.
-	PeerLastSeen *time.Time `json:"peer_last_seen,omitempty"`
-	PeerCredit   *int64     `json:"peer_credit,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// the mnemonic (§12).
+	RecoveryPublicKey string    `json:"-"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
-// IsPeer reports whether u is a remote-kernel proxy user, identified by a set public_key (§13).
-// A peer authenticates by federation signature and is denied local-visibility actions (§4).
-func (u *User) IsPeer() bool { return u != nil && u.PublicKey != "" }
+// IsPeer reports whether a is a remote kernel's account (§13): it authenticates by federation
+// signature and is denied local-visibility actions (§4).
+func (a *Account) IsPeer() bool { return a != nil && a.KernelPublicKey != "" }
+
+// IsLiveUser reports whether a is a usable local user: an account holding a handle. The three
+// states are exhaustive — a handle means a live user, a kernel key means a kernel account, and
+// neither means a purged peer's tombstone, which anchors the ledger (§13 Retention) but is history.
+// "Not a peer" therefore does not imply "live user", and mutating operations must test this.
+func (a *Account) IsLiveUser() bool { return a != nil && a.Handle != "" }
+
+// IsLive reports whether a names something that still exists to act or be acted upon. A tombstone
+// stays readable for historical enrichment but is refused by every live and mutating operation.
+func (a *Account) IsLive() bool { return a.IsLiveUser() || a.IsPeer() }
 
 // ActionVisibility is the callability scope of an action (§4). It replaces the earlier boolean
 // public flag with three levels, controlling the direct dependency surface, not reachability.
@@ -389,18 +396,23 @@ type SettlementRecord struct {
 	Signature    string    `json:"signature"`
 }
 
-// DiscoveredKernel is a remote kernel learned via routing discovery and gossip (§13). One row per
-// kernel (keyed by public_key); it is a regenerable discovery cache carrying no execution semantics.
-// GossipCursor is this kernel's persisted evidence high-watermark (§13 peer sync): the exclusive
-// (effective_at, receipt_hash) position past which evidence has already been pulled, advanced only
-// after a page is verified and committed.
-type DiscoveredKernel struct {
-	PublicKey    string    `json:"public_key"`
-	Handle       string    `json:"handle"`
-	About        string    `json:"about,omitempty"`
-	GossipCursor string    `json:"gossip_cursor,omitempty"`
-	FirstSeen    time.Time `json:"first_seen"`
-	UpdatedAt    time.Time `json:"updated_at"`
+// RemoteKernel is a known remote kernel: one row per public key, whether or not it holds an
+// account here (§3). It owns Stiegler naming state — the self-certifying key, the Nickname the
+// remote asserts about itself (never resolves a reference), and the Petname assigned locally
+// (resolves). GossipCursor is the persisted evidence high-watermark (§13 peer sync), advanced only
+// after a page is verified and committed, so it is never written by ordinary observation.
+// LastSeen and PeerCredit are the peer-sync display cache, written only after a successful
+// authenticated sync.
+type RemoteKernel struct {
+	PublicKey    string     `json:"public_key"`
+	Petname      string     `json:"petname,omitempty"`
+	Nickname     string     `json:"nickname,omitempty"`
+	About        string     `json:"about,omitempty"`
+	GossipCursor string     `json:"gossip_cursor,omitempty"`
+	LastSeen     *time.Time `json:"last_seen,omitempty"`
+	PeerCredit   *int64     `json:"peer_credit,omitempty"`
+	FirstSeen    time.Time  `json:"first_seen"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // AuthCode is a short-lived PKCE authorization code.
@@ -605,14 +617,17 @@ const (
 	CallerStep = "step"
 )
 
-// PeerView is a known peer kernel — identified by handle and public key (the global name), with
-// its bilateral balance. It carries no internal user id: a peer is never addressed by one.
-type PeerView struct {
-	Handle    string `json:"handle"` // NAME column (§14): a counterparty's local alias, or a discovery-only kernel's advertised label (display only, never resolves)
+// RemoteKernelView is one row of the `admin peers` roster (§14): every known kernel, served by a
+// single kernels LEFT JOIN accounts. Petname resolves a reference and Nickname never does, so the
+// two are surfaced as separate columns. It carries no internal account id — a kernel is addressed
+// by key or petname, never by one.
+type RemoteKernelView struct {
 	PublicKey string `json:"public_key"`
-	// HasAccount is true iff a bilateral financial account (counterparty) exists here. It is false for a
-	// discovery-only kernel, whose Available/Locked/PeerCredit are meaningless and whose Handle never
-	// resolves a command (§13, §14 merged roster).
+	Petname   string `json:"petname,omitempty"`
+	Nickname  string `json:"nickname,omitempty"`
+	About     string `json:"about,omitempty"`
+	// HasAccount is true iff a bilateral financial account exists here. It is false for a
+	// discovery-only kernel, whose Available/Locked/PeerCredit are meaningless.
 	HasAccount bool `json:"has_account"`
 	// Actions is the kernel's cached public-action count (from discovery docs), 0 when unknown.
 	Actions     int        `json:"actions"`
@@ -624,20 +639,8 @@ type PeerView struct {
 	PeerCredit *int64     `json:"peer_credit,omitempty"`
 	LastSeen   *time.Time `json:"last_seen,omitempty"`
 	// SettlementDue flags a debtor peer when this kernel's global gross receivables have reached the
-	// settlement trigger Y (§13): information for the operator, never authority — computed live, display
-	// only. FIX 3: Y signals; the operator runs `admin settle`.
+	// settlement trigger Y (§13): information for the operator, never authority — computed live.
 	SettlementDue bool `json:"settlement_due,omitempty"`
-}
-
-// DiscoveredKernelView is a verified discovered kernel plus its cached public-action count, for the
-// merged `admin peers` roster (§14). Discovery-only: it carries no account, balance, or execution
-// semantics — a kernel appears here because it was learned through routing discovery and gossip.
-type DiscoveredKernelView struct {
-	PublicKey string    `json:"public_key"`
-	Handle    string    `json:"handle"`
-	About     string    `json:"about,omitempty"`
-	Actions   int       `json:"actions"`
-	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // EvidenceReceipt is a wire-only signed projection of a committed call, gossiped as trade

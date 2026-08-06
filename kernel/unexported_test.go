@@ -21,9 +21,9 @@ import (
 // public is callable by anyone; local by any local (non-peer) caller but not a peer; private only
 // by the owner; and inactive/suspended-owner actions are never callable regardless of visibility.
 func TestCanCallVisibilityMatrix(t *testing.T) {
-	owner := &User{ID: "owner"}
-	other := &User{ID: "other"}
-	peer := &User{ID: "peer", PublicKey: "cGVlcg"}
+	owner := &Account{ID: "owner"}
+	other := &Account{ID: "other"}
+	peer := &Account{ID: "peer", KernelPublicKey: "cGVlcg"}
 
 	mk := func(vis ActionVisibility) *Action {
 		return &Action{OwnerUserID: "owner", Active: true, Visibility: vis}
@@ -31,7 +31,7 @@ func TestCanCallVisibilityMatrix(t *testing.T) {
 	cases := []struct {
 		name    string
 		action  *Action
-		caller  *User
+		caller  *Account
 		canCall bool
 	}{
 		{"public/owner", mk(VisibilityPublic), owner, true},

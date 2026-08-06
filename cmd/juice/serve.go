@@ -1419,7 +1419,7 @@ func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, 0, err
 		}
-		return enrichLedger(e, newUserCache(s.kernel, r.Context())), http.StatusOK, nil
+		return enrichLedger(e, newAccountCache(s.kernel, r.Context())), http.StatusOK, nil
 	})(w, r)
 }
 
@@ -1431,7 +1431,7 @@ func (s *server) getLedger(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	uc := newUserCache(s.kernel, r.Context())
+	uc := newAccountCache(s.kernel, r.Context())
 	views := make([]*ledgerView, len(entries))
 	for i, e := range entries {
 		views[i] = enrichLedger(e, uc)

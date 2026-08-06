@@ -243,7 +243,7 @@ func TestLookupFillsPastUncallable(t *testing.T) {
 	alice := setupUser(t, st, "alice", 0)
 	bob := setupUser(t, st, "bob", 0)
 
-	mk := func(owner *kernel.User, name string, vis kernel.ActionVisibility) *kernel.Action {
+	mk := func(owner *kernel.Account, name string, vis kernel.ActionVisibility) *kernel.Action {
 		a := &kernel.Action{
 			ID: uuid.New().String(), OwnerUserID: owner.ID, Name: name,
 			Kind: kernel.KindHTTP, Active: true, Visibility: vis, Description: "widget service",

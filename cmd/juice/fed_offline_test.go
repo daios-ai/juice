@@ -68,12 +68,13 @@ func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	ctx := context.Background()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	key := base64.RawURLEncoding.EncodeToString(pub)
-	sys, err := k.ReadUserByHandle(ctx, "sys")
+	peer, err := k.EnsureKernelAccount(ctx, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer, err := k.AddPeer(ctx, sys.ID, handle, key)
-	if err != nil {
+	// The outbound-use path also binds the local petname (§13), which is how the peer is
+	// addressable by name in the commands below.
+	if _, err := k.BindPetname(ctx, key, handle, false); err != nil {
 		t.Fatal(err)
 	}
 	m := kernel.ActionManifest{
@@ -136,14 +137,14 @@ func TestListPeersHidesSuspended(t *testing.T) {
 	}
 	seedPeer(t, k, "peer-live")
 	_, goneKey := seedPeer(t, k, "peer-gone")
-	gone, _ := k.ReadUserByPublicKey(ctx, goneKey)
+	gone, _ := k.ReadAccountByKernelKey(ctx, goneKey)
 	if err := k.SuspendUser(ctx, sys.ID, gone.ID); err != nil {
 		t.Fatal(err)
 	}
 	srv := &server{kernel: k, log: log.Discard()}
 
 	def := listPeersResp(t, srv, false)
-	if len(def) != 1 || def[0]["handle"] != "peer-live" {
+	if len(def) != 1 || def[0]["petname"] != "peer-live" {
 		t.Fatalf("default peers should list only the active peer, got %v", def)
 	}
 	if all := listPeersResp(t, srv, true); len(all) != 2 {
@@ -244,8 +245,8 @@ func TestInspectPersistsPeerSync(t *testing.T) {
 	handle, key := seedPeer(t, k, "peer-sync")
 
 	// A freshly seeded peer has no sync cache yet (its proxies read offline).
-	before, _ := k.ReadUserByPublicKey(ctx, key)
-	if before == nil || before.PeerLastSeen != nil {
+	before, _ := k.ReadKernel(ctx, key)
+	if before == nil || before.LastSeen != nil {
 		t.Fatalf("seeded peer should start with no last_seen, got %+v", before)
 	}
 
@@ -257,9 +258,9 @@ func TestInspectPersistsPeerSync(t *testing.T) {
 		t.Fatalf("source = %v, want live", out["source"])
 	}
 
-	after, _ := k.ReadUserByPublicKey(ctx, key)
-	if after == nil || after.PeerLastSeen == nil {
-		t.Fatal("inspect must persist last_seen for a friended peer")
+	after, _ := k.ReadKernel(ctx, key)
+	if after == nil || after.LastSeen == nil {
+		t.Fatal("inspect must persist last_seen for a known peer")
 	}
 	if after.PeerCredit == nil || *after.PeerCredit != bal {
 		t.Fatalf("inspect must persist peer_credit; got %v, want %d", after.PeerCredit, bal)

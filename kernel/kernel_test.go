@@ -45,7 +45,7 @@ func newTestStore(t testing.TB) kernel.Store {
 	if err != nil {
 		t.Fatalf("newTestStore: hash password: %v", err)
 	}
-	issuer := &kernel.User{
+	issuer := &kernel.Account{
 		ID:           testIssuerUserID,
 		Handle:       "@_test_issuer",
 		PasswordHash: hash,
@@ -84,13 +84,13 @@ func testSigningKey() ed25519.PrivateKey {
 	return priv
 }
 
-func setupUser(t *testing.T, st kernel.Store, handle string, balance int64) *kernel.User {
+func setupUser(t *testing.T, st kernel.Store, handle string, balance int64) *kernel.Account {
 	t.Helper()
 	hash, err := kernel.HashPassword("password")
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := &kernel.User{
+	u := &kernel.Account{
 		ID:           uuid.New().String(),
 		Handle:       handle,
 		PasswordHash: hash,
@@ -155,7 +155,7 @@ func setupLocalAction(t *testing.T, st kernel.Store, ownerID, name string, price
 
 // setupSys creates the @sys superuser.
 // Call this in any test that invokes RegisterRemoteKernel or ImportRemoteAction.
-func setupSys(t *testing.T, _ *kernel.Kernel, st kernel.Store) *kernel.User {
+func setupSys(t *testing.T, _ *kernel.Kernel, st kernel.Store) *kernel.Account {
 	t.Helper()
 	return setupUser(t, st, "sys", 0)
 }
@@ -697,10 +697,10 @@ func TestLoginRejectsRemotePeer(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	_, err := k.AddPeer(ctx, sys.ID, "peer", base64.RawURLEncoding.EncodeToString(pub))
+	_, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1288,9 +1288,11 @@ func TestTransfer(t *testing.T) {
 	}
 
 	// Peer/proxy recipient (public_key set) rejected.
-	peer := &kernel.User{
-		ID: uuid.New().String(), Handle: "peer",
-		PublicKey: "cGVlci1rZXk", Available: 0,
+	if err := st.UpsertKernel(ctx, "cGVlci1rZXk", "peer", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	peer := &kernel.Account{
+		ID: uuid.New().String(), KernelPublicKey: "cGVlci1rZXk", Available: 0,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateUser(ctx, peer); err != nil {
@@ -2500,9 +2502,11 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 	target := setupUser(t, st, "target-local-fed", 0)
 	// A peer proxy user: a set public_key makes it a key account (a peer), funded so the denial is
 	// on visibility, not balance.
-	peer := &kernel.User{
-		ID: uuid.New().String(), Handle: "peer-local-fed",
-		PublicKey: "cGVlci1sb2NhbC1mZWQ", Available: 1000,
+	if err := st.UpsertKernel(ctx, "cGVlci1sb2NhbC1mZWQ", "peer-local-fed", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	peer := &kernel.Account{
+		ID: uuid.New().String(), KernelPublicKey: "cGVlci1sb2NhbC1mZWQ", Available: 1000,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateUser(ctx, peer); err != nil {

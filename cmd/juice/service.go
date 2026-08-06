@@ -86,20 +86,20 @@ type httpView struct {
 
 // ---- Enrichment helpers ----
 
-// userCache resolves user IDs to display info within one request, reading each user at most once
+// accountCache resolves user IDs to display info within one request, reading each user at most once
 // (transaction lists reference few distinct users across many rows). handle() falls back to the raw
 // id only when the row is truly gone (a purged peer, §13), so an immutable ledger stays legible.
-type userCache struct {
+type accountCache struct {
 	k   *kernel.Kernel
 	ctx context.Context
-	m   map[string]*kernel.User
+	m   map[string]*kernel.Account
 }
 
-func newUserCache(k *kernel.Kernel, ctx context.Context) *userCache {
-	return &userCache{k: k, ctx: ctx, m: map[string]*kernel.User{}}
+func newAccountCache(k *kernel.Kernel, ctx context.Context) *accountCache {
+	return &accountCache{k: k, ctx: ctx, m: map[string]*kernel.Account{}}
 }
 
-func (c *userCache) get(id string) *kernel.User {
+func (c *accountCache) get(id string) *kernel.Account {
 	if u, ok := c.m[id]; ok {
 		return u
 	}
@@ -108,23 +108,37 @@ func (c *userCache) get(id string) *kernel.User {
 	return u
 }
 
-func (c *userCache) handle(id string) string {
+// reference renders an account as something a command can consume (§14). A local user shows its
+// handle; a kernel account shows its petname, falling back to the kernel's public key when no
+// petname is bound — a key always resolves, so the output stays actionable. Only a purged tombstone
+// falls back to the raw id.
+func (c *accountCache) reference(id string) string {
 	if id == "" {
 		return ""
 	}
-	if u := c.get(id); u != nil && u.Handle != "" {
+	u := c.get(id)
+	if u == nil {
+		return id
+	}
+	if u.Handle != "" {
 		return u.Handle
+	}
+	if u.KernelPublicKey != "" {
+		if rk, err := c.k.ReadKernel(c.ctx, u.KernelPublicKey); err == nil && rk != nil && rk.Petname != "" {
+			return rk.Petname
+		}
+		return u.KernelPublicKey
 	}
 	return id
 }
 
-func (c *userCache) isPeer(id string) bool {
+func (c *accountCache) isPeer(id string) bool {
 	u := c.get(id)
-	return u != nil && u.PublicKey != ""
+	return u != nil && u.KernelPublicKey != ""
 }
 
-func enrichStep(k *kernel.Kernel, ctx context.Context, step *kernel.Step, action *kernel.Action, uc *userCache) *stepWithAction {
-	v := &stepWithAction{Step: step, RequiredCallerHandle: uc.handle(step.RequiredCallerUserID)}
+func enrichStep(k *kernel.Kernel, ctx context.Context, step *kernel.Step, action *kernel.Action, uc *accountCache) *stepWithAction {
+	v := &stepWithAction{Step: step, RequiredCallerHandle: uc.reference(step.RequiredCallerUserID)}
 	if action != nil {
 		v.Action = action.OwnerHandle + "/" + action.Name
 	}
@@ -134,7 +148,7 @@ func enrichStep(k *kernel.Kernel, ctx context.Context, step *kernel.Step, action
 		if tr, err := k.ReadTrace(ctx, *step.ParentTraceID); err == nil {
 			v.CreatedBy = k.ActionRef(ctx, tr.ActionID)
 			// The step's process owner is the payer of the transaction it will settle into (§10).
-			v.OwnerHandle = uc.handle(k.ProcessOwnerID(ctx, tr.ProcessID))
+			v.OwnerHandle = uc.reference(k.ProcessOwnerID(ctx, tr.ProcessID))
 		}
 	}
 	if step.Status == kernel.StepWaiting {
@@ -148,8 +162,8 @@ func enrichStep(k *kernel.Kernel, ctx context.Context, step *kernel.Step, action
 
 // enrichProcess resolves the owner @handle and flags a process awaiting a remote receipt, with the
 // earliest such call's start time from the awaiting-receipt map (kernel.AwaitingReceiptSince).
-func enrichProcess(p *kernel.Process, since map[string]time.Time, uc *userCache) *processView {
-	v := &processView{Process: p, OwnerHandle: uc.handle(p.OwnerUserID)}
+func enrichProcess(p *kernel.Process, since map[string]time.Time, uc *accountCache) *processView {
+	v := &processView{Process: p, OwnerHandle: uc.reference(p.OwnerUserID)}
 	if t, ok := since[p.ID]; ok {
 		tt := t
 		v.AwaitingReceipt = true
@@ -173,93 +187,24 @@ type ledgerView struct {
 	ToHandle       string `json:"to_handle,omitempty"`
 }
 
-func enrichLedger(e *kernel.LedgerEntry, uc *userCache) *ledgerView {
-	v := &ledgerView{LedgerEntry: e, OperatorHandle: uc.handle(e.OperatorUserID)}
+func enrichLedger(e *kernel.LedgerEntry, uc *accountCache) *ledgerView {
+	v := &ledgerView{LedgerEntry: e, OperatorHandle: uc.reference(e.OperatorUserID)}
 	if e.FromUserID != "" {
-		v.FromHandle = uc.handle(e.FromUserID)
+		v.FromHandle = uc.reference(e.FromUserID)
 	}
 	if e.ToUserID != "" {
-		v.ToHandle = uc.handle(e.ToUserID)
+		v.ToHandle = uc.reference(e.ToUserID)
 	}
 	return v
 }
 
-// peerViews projects counterparty (proxy-peer) users into handle+key+balance views (plus the §13
-// sync cache: our credit on the peer and when we last reached it), dropping their internal ids.
-// HasAccount is true because these rows are financial counterparties.
-func peerViews(peers []*kernel.User) []*kernel.PeerView {
-	out := make([]*kernel.PeerView, len(peers))
-	for i, p := range peers {
-		out[i] = &kernel.PeerView{
-			Handle: p.Handle, PublicKey: p.PublicKey, HasAccount: true,
-			Available: p.Available, Locked: p.Locked, SuspendedAt: p.SuspendedAt,
-			PeerCredit: p.PeerCredit, LastSeen: p.PeerLastSeen,
-		}
-	}
-	return out
-}
-
-// pageViews applies limit/offset to an already-assembled roster (the merged peer roster paginates the
-// merged result, not one of its two sources, §14).
-func pageViews(views []*kernel.PeerView, limit, offset int) []*kernel.PeerView {
-	if offset >= len(views) {
-		return []*kernel.PeerView{}
-	}
-	end := offset + limit
-	if end > len(views) {
-		end = len(views)
-	}
-	return views[offset:end]
-}
-
-// mergePeerRoster builds the merged `admin peers` roster (§14): every known kernel by public key —
-// counterparties (with an account and balance) and discovery-only kernels (no account) — deduped by
-// key, this kernel's own key excluded. A counterparty that is also discovered fills its action count
-// from the discovery row; a discovery-only kernel becomes an account-less entry whose Handle is a
-// display label that never resolves a command. `peers` must be the FULL counterparty set (suspended
-// included); showSuspended then decides whether suspended counterparties appear. A suspended
-// counterparty hidden this way is never re-surfaced by its discovery row — it stays a known
-// counterparty, so hiding it hides the kernel entirely, as suspend intends.
-func mergePeerRoster(peers []*kernel.User, discovered []*kernel.DiscoveredKernelView, selfKey string, showSuspended bool) []*kernel.PeerView {
-	counterpartyKeys := map[string]bool{}
-	byKey := map[string]*kernel.PeerView{}
-	var out []*kernel.PeerView
-	for _, v := range peerViews(peers) {
-		if v.PublicKey == "" || v.PublicKey == selfKey {
-			continue
-		}
-		counterpartyKeys[v.PublicKey] = true // a known counterparty, whether shown or hidden below
-		if v.SuspendedAt != nil && !showSuspended {
-			continue // suspended counterparties appear only with --all
-		}
-		byKey[v.PublicKey] = v
-		out = append(out, v)
-	}
-	for _, d := range discovered {
-		if d.PublicKey == "" || d.PublicKey == selfKey {
-			continue
-		}
-		if counterpartyKeys[d.PublicKey] {
-			// Already represented by the counterparty pass (or deliberately hidden if suspended); a
-			// discovery row must not re-surface it as a separate account-less entry.
-			if v, ok := byKey[d.PublicKey]; ok {
-				v.Actions = d.Actions // fill the counterparty's catalog size
-			}
-			continue
-		}
-		ls := d.UpdatedAt
-		out = append(out, &kernel.PeerView{Handle: d.Handle, PublicKey: d.PublicKey, Actions: d.Actions, LastSeen: &ls})
-	}
-	return out
-}
-
 // enrichTx resolves the @handles of a transaction's three parties (payer, caller, payee).
-func enrichTx(tv *kernel.TransactionView, uc *userCache) *txView {
+func enrichTx(tv *kernel.TransactionView, uc *accountCache) *txView {
 	return &txView{
 		TransactionView: tv,
-		OwnerHandle:     uc.handle(tv.OwnerUserID),
-		CallerHandle:    uc.handle(tv.CallerUserID),
-		TargetHandle:    uc.handle(tv.TargetUserID),
+		OwnerHandle:     uc.reference(tv.OwnerUserID),
+		CallerHandle:    uc.reference(tv.CallerUserID),
+		TargetHandle:    uc.reference(tv.TargetUserID),
 	}
 }
 
@@ -281,14 +226,18 @@ func peerStateStaleAfter() time.Duration { return 3 * globalCfg.discoveryInterva
 // staleAfter. "unfunded": our cached credit on the peer is below the action's remote manifest price.
 // "offline" takes precedence — a stale credit figure is not actionable. "" when healthy or the
 // owner row is gone.
-func peerStateFor(k *kernel.Kernel, owner *kernel.User, price int64, staleAfter time.Duration) string {
-	if owner == nil {
+func peerStateFor(k *kernel.Kernel, ctx context.Context, owner *kernel.Account, price int64, staleAfter time.Duration) string {
+	if owner == nil || owner.KernelPublicKey == "" {
 		return ""
 	}
-	if owner.PeerLastSeen == nil || time.Since(*owner.PeerLastSeen) > staleAfter {
+	rk, err := k.ReadKernel(ctx, owner.KernelPublicKey)
+	if err != nil || rk == nil {
+		return ""
+	}
+	if rk.LastSeen == nil || time.Since(*rk.LastSeen) > staleAfter {
 		return "offline"
 	}
-	if owner.PeerCredit != nil && *owner.PeerCredit < k.RemoteManifestPrice(price) {
+	if rk.PeerCredit != nil && *rk.PeerCredit < k.RemoteManifestPrice(price) {
 		return "unfunded"
 	}
 	return ""
@@ -323,7 +272,7 @@ func parseParams(specs []string) ([]kernel.HTTPParam, error) {
 	return params, nil
 }
 
-func userView(u *kernel.User) map[string]any {
+func userView(u *kernel.Account) map[string]any {
 	return map[string]any{
 		"id":          u.ID,
 		"handle":      u.Handle,
@@ -337,8 +286,46 @@ func userView(u *kernel.User) map[string]any {
 
 // resolveHandle resolves an account by its @handle (kernel-local name) or public key (global name):
 // an @-prefixed string is a handle, a bare string is tried as a key first, then a handle.
-func resolveHandle(k *kernel.Kernel, ctx context.Context, ident string) (*kernel.User, error) {
+func resolveHandle(k *kernel.Kernel, ctx context.Context, ident string) (*kernel.Account, error) {
 	return k.ResolveUser(ctx, ident)
+}
+
+// resolveMixed resolves a target that may name either namespace — the only commands that need it are
+// show, rename, suspend/unsuspend, and deposit/withdraw (§14). It returns an account for a local
+// user and a public key for a kernel; the shapes are self-identifying, so only a bare name can be
+// ambiguous, and a bare name matching both a handle and a petname is refused rather than guessed:
+// money and moderation must never pick a target silently. Kernel-only commands (settle, inspect,
+// step --peer) call the kernel resolver directly instead.
+func resolveMixed(k *kernel.Kernel, ctx context.Context, ident string) (*kernel.Account, string, error) {
+	ident = strings.TrimSpace(ident)
+	if ident == "" {
+		return nil, "", kernel.ErrInvalidInput.Wrap("a user handle, kernel petname, or public key is required")
+	}
+	if kernel.IsPublicKey(ident) {
+		key, acct, err := k.ResolveKernelKey(ctx, ident)
+		if err != nil {
+			return nil, "", err
+		}
+		return acct, key, nil
+	}
+	acct, aerr := k.ResolveUser(ctx, ident)
+	if aerr == nil && !acct.IsLiveUser() && !acct.IsPeer() {
+		// A purged peer's tombstone still carries a resolvable id, but it names no live entity
+		// (§13 Retention): it must never become the target of a rename, a deposit, or a suspend.
+		return nil, "", kernel.ErrNotFound.Wrapf("%s is a purged account, not a live target", ident)
+	}
+	rk, rerr := k.ReadKernelByPetname(ctx, ident)
+	switch {
+	case aerr == nil && rk != nil && rerr == nil && acct.KernelPublicKey != rk.PublicKey:
+		return nil, "", kernel.ErrInvalidInput.Wrapf(
+			"%q names both a local user and a kernel; use the account id or the kernel's public key", ident)
+	case rk != nil && rerr == nil:
+		kacct, _ := k.ReadAccountByKernelKey(ctx, rk.PublicKey)
+		return kacct, rk.PublicKey, nil
+	case aerr == nil:
+		return acct, acct.KernelPublicKey, nil
+	}
+	return nil, "", kernel.ErrNotFound.Wrapf("%s not found", ident)
 }
 
 // resolveActionRef resolves "@owner/name" (with or without a leading "@") or a raw action ID.
@@ -617,7 +604,7 @@ func getAction(k *kernel.Kernel, ctx context.Context, callerID, id string) (acti
 	r := enrichAction(k, a)
 	if a.Kind == kernel.KindRemoteProxy {
 		owner, _ := k.ReadUser(ctx, a.OwnerUserID)
-		r.PeerState = peerStateFor(k, owner, a.Price, peerStateStaleAfter())
+		r.PeerState = peerStateFor(k, ctx, owner, a.Price, peerStateStaleAfter())
 	}
 	return r, nil
 }
@@ -656,7 +643,14 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 	if ownerHandle != "" {
 		u, err := k.ReadUserByHandle(ctx, ownerHandle)
 		if err != nil {
-			return []actionResp{}, nil
+			// A proxy row's owner is a kernel account, which holds no handle: the owner filter
+			// then names the kernel (petname or key), the same reference `owner@kernel/name`
+			// carries (§13). Falling through keeps one query serving both namespaces.
+			if _, acct, kerr := k.ResolveKernelKey(ctx, ownerHandle); kerr == nil && acct != nil {
+				u = acct
+			} else {
+				return []actionResp{}, nil
+			}
 		}
 		if !superuser && callerID != "" && callerID == u.ID {
 			// §3: an owner may list all their own actions regardless of active/public.
@@ -713,13 +707,13 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 		actions = filtered
 	}
 	resps := make([]actionResp, len(actions))
-	uc := newUserCache(k, ctx) // shared so listing is O(distinct peer owners), not O(rows)
+	uc := newAccountCache(k, ctx) // shared so listing is O(distinct peer owners), not O(rows)
 	staleAfter := peerStateStaleAfter()
 	for i, a := range actions {
 		cp := *a
 		r := enrichAction(k, &cp) // decompose http view before hiding the raw blob
 		if cp.Kind == kernel.KindRemoteProxy {
-			r.PeerState = peerStateFor(k, uc.get(cp.OwnerUserID), cp.Price, staleAfter)
+			r.PeerState = peerStateFor(k, uc.ctx, uc.get(cp.OwnerUserID), cp.Price, staleAfter)
 		}
 		cp.Source = ""
 		cp.ArtifactHash = ""
@@ -762,7 +756,7 @@ func listProcesses(k *kernel.Kernel, ctx context.Context, callerID string, limit
 	if err != nil {
 		return nil, err
 	}
-	uc := newUserCache(k, ctx)
+	uc := newAccountCache(k, ctx)
 	views := make([]*processView, len(processes))
 	for i, p := range processes {
 		views[i] = enrichProcess(p, since, uc)
@@ -779,7 +773,7 @@ func getProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) (*pr
 	if err != nil {
 		return nil, err
 	}
-	return enrichProcess(p, since, newUserCache(k, ctx)), nil
+	return enrichProcess(p, since, newAccountCache(k, ctx)), nil
 }
 
 func endProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) error {
@@ -824,7 +818,7 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 	if err != nil {
 		return nil, err
 	}
-	return enrichStep(k, ctx, step, action, newUserCache(k, ctx)), nil
+	return enrichStep(k, ctx, step, action, newAccountCache(k, ctx)), nil
 }
 
 func listSteps(k *kernel.Kernel, ctx context.Context, callerID, processID, status string, limit, offset int) ([]*stepWithAction, error) {
@@ -833,7 +827,7 @@ func listSteps(k *kernel.Kernel, ctx context.Context, callerID, processID, statu
 		return nil, err
 	}
 	views := make([]*stepWithAction, len(steps))
-	uc := newUserCache(k, ctx)
+	uc := newAccountCache(k, ctx)
 	for i, step := range steps {
 		action, _ := k.ReadAction(ctx, step.ActionID)
 		views[i] = enrichStep(k, ctx, step, action, uc)
@@ -847,7 +841,7 @@ func getStep(k *kernel.Kernel, ctx context.Context, callerID, id string) (*stepW
 		return nil, err
 	}
 	action, _ := k.ReadAction(ctx, step.ActionID)
-	return enrichStep(k, ctx, step, action, newUserCache(k, ctx)), nil
+	return enrichStep(k, ctx, step, action, newAccountCache(k, ctx)), nil
 }
 
 func completeStep(k *kernel.Kernel, ctx context.Context, callerID, id string, args json.RawMessage) (*kernel.StepReply, error) {
@@ -861,7 +855,7 @@ func listTransactions(k *kernel.Kernel, ctx context.Context, callerID string, f 
 	if err != nil {
 		return nil, err
 	}
-	uc := newUserCache(k, ctx)
+	uc := newAccountCache(k, ctx)
 	views := make([]*txView, len(txs))
 	for i, tv := range txs {
 		views[i] = enrichTx(tv, uc)
@@ -874,7 +868,7 @@ func getTransaction(k *kernel.Kernel, ctx context.Context, callerID, id string) 
 	if err != nil {
 		return nil, err
 	}
-	return enrichTx(tv, newUserCache(k, ctx)), nil
+	return enrichTx(tv, newAccountCache(k, ctx)), nil
 }
 
 // validateRating returns ErrInvalidInput if v is not 0 or 1.
@@ -969,11 +963,11 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	}
 	// A store failure must not read as "nothing is parked for you" — that is precisely the
 	// conclusion which leaves funds stranded. Only a genuinely absent key gets the empty list.
-	peer, err := k.ReadUserByPublicKey(ctx, cpPubKey)
+	peer, err := k.ReadAccountByKernelKey(ctx, cpPubKey)
 	if err != nil && !errors.Is(err, kernel.ErrNotFound) {
 		return 0, nil, err
 	}
-	if peer == nil || peer.PublicKey == "" {
+	if peer == nil || peer.KernelPublicKey == "" {
 		return http.StatusOK, map[string]any{"steps": []*stepWithAction{}}, nil
 	}
 	// Scoped in SQL, oldest first: ListSteps' predicate also matches every step inside a process
@@ -1013,11 +1007,11 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 	}
 	// A stranger can hold no step here: CreateStep resolves required_caller to an existing user,
 	// so an unknown key is necessarily not the required caller of anything.
-	peer, err := k.ReadUserByPublicKey(ctx, cpPubKey)
+	peer, err := k.ReadAccountByKernelKey(ctx, cpPubKey)
 	if err != nil && !errors.Is(err, kernel.ErrNotFound) {
 		return 0, nil, err
 	}
-	if peer == nil || peer.PublicKey == "" {
+	if peer == nil || peer.KernelPublicKey == "" {
 		return 0, nil, kernel.ErrUnauthorized.Wrap("unknown peer")
 	}
 
@@ -1195,14 +1189,11 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// succeeds and a priced call hits the normal insufficient-funds rejection the provider clears
 	// with a deposit. A suspended counterparty needs no gate here — RunFederated rejects it via
 	// requireActiveUser and the pre-execution branch signs a zero-charge rejection receipt.
-	counterparty, err := k.ReadUserByPublicKey(ctx, cpPubKey)
-	if err != nil || counterparty == nil || counterparty.PublicKey == "" {
-		short := cpPubKey
-		if len(short) > 8 {
-			short = short[:8]
-		}
-		counterparty, err = k.CreateOrUpdateProxyPeer(ctx, "k-"+short, cpPubKey)
-		if err != nil {
+	// No petname is bound here: a stranger calling us is not our act of naming (§13 lifecycle), so
+	// an inbound call can never seed a local name from a self-asserted nickname.
+	counterparty, err := k.ReadAccountByKernelKey(ctx, cpPubKey)
+	if err != nil || counterparty == nil {
+		if counterparty, err = k.EnsureKernelAccount(ctx, cpPubKey); err != nil {
 			return 0, nil, err
 		}
 	}

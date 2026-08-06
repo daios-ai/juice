@@ -169,10 +169,10 @@ flow_locked_funds_recovery() {
     local proc_id; proc_id=$(python3 - "$db" <<'PYEOF'
 import sqlite3, uuid, sys
 c = sqlite3.connect(sys.argv[1])
-owner = c.execute("SELECT id FROM users WHERE handle='sys' LIMIT 1").fetchone()[0]
+owner = c.execute("SELECT id FROM accounts WHERE handle='sys' LIMIT 1").fetchone()[0]
 act   = c.execute("SELECT id FROM actions WHERE name='tinygo/compile' LIMIT 1").fetchone()[0]
 proc, trace = str(uuid.uuid4()), str(uuid.uuid4())
-c.execute("UPDATE users SET available=available-5, locked=locked+5 WHERE id=?", [owner])
+c.execute("UPDATE accounts SET available=available-5, locked=locked+5 WHERE id=?", [owner])
 c.execute("INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at) VALUES (?,?,0,5,'open',datetime('now'),NULL)", [proc, owner])
 c.execute("""INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,created_at)
              VALUES (?,?,NULL,?,?,?,5,0,NULL,NULL,datetime('now'))""", [trace, proc, owner, act, owner])

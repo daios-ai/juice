@@ -53,7 +53,7 @@ func newTestKernelOn(t *testing.T, db *store.DB) *kernel.Kernel {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	issuerID := uuid.New().String()
 	hash, _ := kernel.HashPassword("pw")
-	_ = db.CreateUser(context.Background(), &kernel.User{
+	_ = db.CreateUser(context.Background(), &kernel.Account{
 		ID: issuerID, Handle: "@_issuer",
 		PasswordHash: hash, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	})
@@ -65,10 +65,10 @@ func newTestKernelOn(t *testing.T, db *store.DB) *kernel.Kernel {
 	return kernel.New(db, nil, nil, &fakeEmbedder{}, cfg, nil)
 }
 
-func seedOwner(t *testing.T, st kernel.Store, handle string) *kernel.User {
+func seedOwner(t *testing.T, st kernel.Store, handle string) *kernel.Account {
 	t.Helper()
 	hash, _ := kernel.HashPassword("pw")
-	u := &kernel.User{
+	u := &kernel.Account{
 		ID: uuid.New().String(), Handle: handle,
 		PasswordHash: hash, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}

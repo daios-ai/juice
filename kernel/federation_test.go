@@ -1,6 +1,7 @@
 package kernel_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -22,18 +23,18 @@ func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
-	if _, err := k.AddPeer(ctx, sys.ID, "bad/handle", "not-base64url"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.EnsureKernelAccount(ctx, "not-base64url"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for handle containing /, got %v", err)
 	}
 
-	if _, err := k.AddPeer(ctx, sys.ID, "bad-key", "not-base64url"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.EnsureKernelAccount(ctx, "not-base64url"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for malformed public key, got %v", err)
 	}
 
 	shortKey := base64.RawURLEncoding.EncodeToString([]byte("short"))
-	if _, err := k.AddPeer(ctx, sys.ID, "short-key", shortKey); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.EnsureKernelAccount(ctx, shortKey); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for short public key, got %v", err)
 	}
 
@@ -42,12 +43,12 @@ func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	validKey := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.AddPeer(ctx, sys.ID, "remote", validKey); err != nil {
+	if _, err := k.EnsureKernelAccount(ctx, validKey); err != nil {
 		t.Fatalf("valid remote kernel should register: %v", err)
 	}
 }
 
-func TestCreateOrUpdateProxyPeerHandleConflict(t *testing.T) {
+func TestBindPetnameCollisionSuffixes(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -60,34 +61,32 @@ func TestCreateOrUpdateProxyPeerHandleConflict(t *testing.T) {
 	key2 := base64.RawURLEncoding.EncodeToString(pub2)
 	key3 := base64.RawURLEncoding.EncodeToString(pub3)
 
-	u1, err := k.CreateOrUpdateProxyPeer(ctx, "remote", key1)
-	if err != nil {
-		t.Fatalf("first peer: %v", err)
-	}
-	if u1.Handle != "remote" {
-		t.Fatalf("want @remote, got %s", u1.Handle)
-	}
-
-	u2, err := k.CreateOrUpdateProxyPeer(ctx, "remote", key2)
-	if err != nil {
-		t.Fatalf("second peer: %v", err)
-	}
-	if u2.Handle != "remote-2" {
-		t.Fatalf("want @remote-2, got %s", u2.Handle)
-	}
-
-	u3, err := k.CreateOrUpdateProxyPeer(ctx, "remote", key3)
-	if err != nil {
-		t.Fatalf("third peer: %v", err)
-	}
-	if u3.Handle != "remote-3" {
-		t.Fatalf("want @remote-3, got %s", u3.Handle)
+	// Three kernels asking for the same name get distinct petnames, and each account holds none:
+	// the name lives in the kernel namespace (§13).
+	for i, tc := range []struct {
+		key  string
+		want string
+	}{{key1, "remote"}, {key2, "remote-2"}, {key3, "remote-3"}} {
+		acct, err := mountKernelForTest(t, k, ctx, tc.key, "remote")
+		if err != nil {
+			t.Fatalf("mount %d: %v", i, err)
+		}
+		if acct.Handle != "" {
+			t.Errorf("mount %d: a kernel account holds no handle, got %q", i, acct.Handle)
+		}
+		rk, err := k.ReadKernel(ctx, tc.key)
+		if err != nil || rk == nil {
+			t.Fatalf("mount %d: read kernel: %v", i, err)
+		}
+		if rk.Petname != tc.want {
+			t.Errorf("mount %d: petname = %q, want %q", i, rk.Petname, tc.want)
+		}
 	}
 }
 
 // A friend and its reciprocal both create the same proxy user at once; every concurrent
 // caller must succeed idempotently, never hit a unique-key conflict.
-func TestCreateOrUpdateProxyPeerConcurrent(t *testing.T) {
+func TestKernelMountConcurrent(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	setupSys(t, k, st)
@@ -100,7 +99,7 @@ func TestCreateOrUpdateProxyPeerConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = k.CreateOrUpdateProxyPeer(context.Background(), "remote", key)
+			_, errs[i] = mountKernelForTest(t, k, context.Background(), key, "remote")
 		}(i)
 	}
 	wg.Wait()
@@ -111,7 +110,7 @@ func TestCreateOrUpdateProxyPeerConcurrent(t *testing.T) {
 	}
 }
 
-func TestCreateOrUpdateProxyPeerNormalizesHandle(t *testing.T) {
+func TestBindPetnameNormalizes(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -120,17 +119,16 @@ func TestCreateOrUpdateProxyPeerNormalizesHandle(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	key := base64.RawURLEncoding.EncodeToString(pub)
 
-	// Peer self-reports a handle without "@": the local alias is canonicalized.
-	u, err := k.CreateOrUpdateProxyPeer(ctx, "peerless", key)
-	if err != nil {
-		t.Fatalf("create proxy: %v", err)
+	// The petname is canonicalized on binding and resolves in the kernel namespace only.
+	if _, err := mountKernelForTest(t, k, ctx, key, "peerless"); err != nil {
+		t.Fatalf("mount kernel: %v", err)
 	}
-	if u.Handle != "peerless" {
-		t.Fatalf("want @peerless, got %s", u.Handle)
+	rk, err := k.ReadKernelByPetname(ctx, "peerless")
+	if err != nil || rk == nil || rk.PublicKey != key {
+		t.Fatalf("ReadKernelByPetname(peerless): got %v err %v, want key %s", rk, err, key)
 	}
-	got, err := k.ReadUserByHandle(ctx, "peerless")
-	if err != nil || got == nil || got.ID != u.ID {
-		t.Errorf("ReadUserByHandle(peerless): got %v err %v, want id %s", got, err, u.ID)
+	if _, err := k.ReadUserByHandle(ctx, "peerless"); err == nil {
+		t.Error("a petname must not resolve in the user namespace")
 	}
 }
 
@@ -140,10 +138,11 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "remote-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "remote-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,10 +191,11 @@ func TestImportRemoteActionReimp(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "reimp-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "reimp-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,10 +250,11 @@ func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "stable-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "stable-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,10 +307,11 @@ func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "idem-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "idem-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,10 +370,11 @@ func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "bad-sig-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "bad-sig-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,10 +399,11 @@ func TestImportRemoteActionRejectsNegativePrice(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "neg-price-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "neg-price-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,10 +433,11 @@ func TestImportRemoteActionRejectsMissingRequiredFields(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "mrf-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "mrf-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,14 +507,14 @@ func TestSettleRemotePaidStep(t *testing.T) {
 
 	// admit sets up a kernel with a funded buyer and A's proxy row, and admits one pending transfer.
 	var sysID string
-	admit := func(t *testing.T) (*kernel.Kernel, kernel.Store, *kernel.User, *kernel.User, *kernel.PendingTransfer) {
+	admit := func(t *testing.T) (*kernel.Kernel, kernel.Store, *kernel.Account, *kernel.Account, *kernel.PendingTransfer) {
 		st := newTestStore(t)
 		sys := setupUser(t, st, "sys", 0)
 		sysID = sys.ID // SetSigningKey makes sys the fee recipient
 		k := newTestKernel(st)
 		k.SetSigningKey(testSigningKey(), sys.ID)
 		buyer := setupUser(t, st, "buyer", 1000)
-		proxyA, err := k.AddPeer(ctx, sys.ID, "kernel-a", keyA)
+		proxyA, err := k.EnsureKernelAccount(ctx, keyA)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -694,7 +699,7 @@ func TestGetActionManifestIncludesActionID(t *testing.T) {
 func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	sys := setupSys(t, nil, st)
+	setupSys(t, nil, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 
@@ -713,7 +718,8 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	fake := &fakeFederationHTTP{receiptJSON: fakeReceiptJSON}
 	k := newTestKernelWithHTTP(st, fake)
 
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "proxy-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "proxy-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -749,7 +755,7 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	reply, err := k.Call(ctx, kernel.CallRequest{
 		CallerID:        caller.ID,
 		ExistingTraceID: tr.ID,
-		TargetUserID:    "proxy-peer",
+		TargetUserID:    remoteUser.ID,
 		ActionName:      "proxy-peer/add",
 		Args:            map[string]any{},
 	})
@@ -789,21 +795,22 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 // setupSettleProxy creates an active+public remote proxy action and a funded caller with a
 // pre-funded root trace, returning everything needed to drive a remote settlement through Call.
 // The fake's receiptJSON is left empty for the caller to set.
-func setupSettleProxy(t *testing.T, st kernel.Store, fake *fakeFederationHTTP, priv ed25519.PrivateKey, pub ed25519.PublicKey, remoteActionID string, proxyPrice int64) (*kernel.Kernel, *kernel.Action, *kernel.User) {
+func setupSettleProxy(t *testing.T, st kernel.Store, fake *fakeFederationHTTP, priv ed25519.PrivateKey, pub ed25519.PublicKey, remoteActionID string, proxyPrice int64) (*kernel.Kernel, *kernel.Action, *kernel.Account) {
 	t.Helper()
 	return setupSettleProxyWithKernel(t, st, newTestKernelWithHTTP(st, fake), priv, pub, remoteActionID, proxyPrice)
 }
 
 // setupSettleProxyWithKernel is setupSettleProxy against a caller-supplied kernel, so a test
 // can configure the kernel (e.g. RemotePendingMaxAge) before importing the proxy.
-func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel, priv ed25519.PrivateKey, pub ed25519.PublicKey, remoteActionID string, proxyPrice int64) (*kernel.Kernel, *kernel.Action, *kernel.User) {
+func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel, priv ed25519.PrivateKey, pub ed25519.PublicKey, remoteActionID string, proxyPrice int64) (*kernel.Kernel, *kernel.Action, *kernel.Account) {
 	t.Helper()
 	ctx := context.Background()
-	sys := setupSys(t, nil, st)
+	setupSys(t, nil, st)
 
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "settle-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "settle-peer")
 	if err != nil {
-		t.Fatalf("AddPeer: %v", err)
+		t.Fatalf("EnsureKernelAccount: %v", err)
 	}
 	m := kernel.ActionManifest{
 		ActionID: remoteActionID, OwnerHandle: "settle-peer", Name: "settleact",
@@ -1058,7 +1065,7 @@ func TestSettleRemoteCallRejectsWrongActionID(t *testing.T) {
 
 	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
-		TargetUserID: "settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
+		ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("expected ErrTimeout on action_id mismatch, got %v", err)
@@ -1107,7 +1114,7 @@ func TestGossipEvidenceExcludesNonExecutions(t *testing.T) {
 		}
 		_, _ = k.Call(ctx, kernel.CallRequest{
 			CallerID: caller.ID, ExistingTraceID: tr.ID,
-			TargetUserID: "settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
+			ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 		})
 	}
 	drive := func() { driveKeyed("") }
@@ -1161,7 +1168,7 @@ func TestSettleRemoteCallRejectsWrongArgsHash(t *testing.T) {
 
 	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
-		TargetUserID: "settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
+		ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("expected ErrTimeout on args_hash mismatch, got %v", err)
@@ -1219,7 +1226,7 @@ func TestSettleRemoteCallQuarantinesInvalidReceipt(t *testing.T) {
 
 			_, err := k.Call(ctx, kernel.CallRequest{
 				CallerID: caller.ID, ExistingTraceID: tr.ID,
-				TargetUserID: "settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
+				ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 			})
 			// Terminal failure, not ErrTimeout (no retry) and not a silent success.
 			if !errors.Is(err, kernel.ErrExecutionFailed) {
@@ -1272,7 +1279,7 @@ func TestSettleRemoteCallValidChargeNotClamped(t *testing.T) {
 
 	if _, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
-		TargetUserID: "settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
+		ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 	}); err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -1326,7 +1333,7 @@ func TestSettleRemoteCallRejectsRefreshProxyOnSuccess(t *testing.T) {
 
 	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
-		TargetUserID: "settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
+		ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrExecutionFailed) {
 		t.Fatalf("expected quarantine (ErrExecutionFailed), got %v", err)
@@ -1343,7 +1350,8 @@ func TestProxyMutationsRejected(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "mut-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "mut-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1376,13 +1384,14 @@ func TestProxyAddressableFormsOnly(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	peer, err := k.AddPeer(ctx, sys.ID, "mp-peer", base64.RawURLEncoding.EncodeToString(pub))
+	peer, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "mp-peer")
 	m := kernel.ActionManifest{
 		ActionID: "mp-act", OwnerHandle: "mp-owner", Name: "act", Description: "svc",
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
@@ -1412,10 +1421,10 @@ func TestSigilHandleRejectedAtBoundaries(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	peer, err := k.AddPeer(ctx, sys.ID, "sig-peer", base64.RawURLEncoding.EncodeToString(pub))
+	peer, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1442,7 +1451,8 @@ func TestSetActiveRejectsRemoteProxy(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "d-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "d-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1469,12 +1479,12 @@ func TestImportRemoteActionSourceIsActionRef(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
-	peer, err := k.AddPeer(ctx, sys.ID, "ref-peer", pubB64)
+	peer, err := k.EnsureKernelAccount(ctx, pubB64)
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -1503,50 +1513,20 @@ func TestImportRemoteActionSourceIsActionRef(t *testing.T) {
 
 // ---- D5: duplicate identity guard ----
 
-func TestRegisterRemoteKernelResolvesDuplicateHandle(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-	sys := setupSys(t, k, st)
-
-	pub1, _, _ := ed25519.GenerateKey(rand.Reader)
-	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
-	pub1B64 := base64.RawURLEncoding.EncodeToString(pub1)
-	pub2B64 := base64.RawURLEncoding.EncodeToString(pub2)
-
-	u1, err := k.AddPeer(ctx, sys.ID, "dup-handle", pub1B64)
-	if err != nil {
-		t.Fatalf("first register: %v", err)
-	}
-	if u1.Handle != "dup-handle" {
-		t.Fatalf("want @dup-handle, got %s", u1.Handle)
-	}
-	// Same preferred handle, different public key → auto-resolved to suffix.
-	u2, err := k.AddPeer(ctx, sys.ID, "dup-handle", pub2B64)
-	if err != nil {
-		t.Fatalf("second register: %v", err)
-	}
-	if u2.Handle != "dup-handle-2" {
-		t.Errorf("want @dup-handle-2, got %s", u2.Handle)
-	}
-}
-
-// ---- D4: VerifyRemoteReceipt ----
-
-// TestRemoteImportOwnerQualifiedNoCollision: two owners on peer B with the same action name both
-// import under the one proxy user, owner-qualified (alice/greet, bob/greet), with no collision — and
-// each resolves via mount descent (@B.alice/greet → account @B, action "alice/greet").
 func TestRemoteImportOwnerQualifiedNoCollision(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	sys := setupSys(t, nil, st)
+	setupSys(t, nil, st)
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{})
 
-	peer, err := k.AddPeer(ctx, sys.ID, "B", base64.RawURLEncoding.EncodeToString(pub))
+	const peerPetname = "collide-peer"
+	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	peer, err := k.EnsureKernelAccount(ctx, peerKey)
 	if err != nil {
 		t.Fatal(err)
 	}
+	bindPetnameForTest(t, k, ctx, peerKey, peerPetname)
 	imp := func(owner, actionID string) {
 		m := kernel.ActionManifest{
 			ActionID: actionID, OwnerHandle: owner, Name: "greet",
@@ -1562,23 +1542,17 @@ func TestRemoteImportOwnerQualifiedNoCollision(t *testing.T) {
 	imp("alice", "act-alice")
 	imp("bob", "act-bob") // same Name "greet", different owner — must NOT collide
 
-	// Legacy <mount>/<owner>/<name> parses to {Owner: mount, Name: "<owner>/greet"}, so alice's and
-	// bob's same-named actions are distinct proxy rows and both resolve under the one mount.
-	for _, tc := range []struct{ sub, wantName string }{
-		{"alice/greet", "alice/greet"},
-		{"bob/greet", "bob/greet"},
-	} {
-		addr := peer.Handle + "/" + tc.sub
-		r, err := kernel.ParseActionRef(addr)
+	// Two owners on one peer keep distinct proxy rows and both resolve kernel-qualified (§13):
+	// alice@peer/greet and bob@peer/greet, addressed by the kernel's local petname.
+	for _, owner := range []string{"alice", "bob"} {
+		ref := owner + "@" + peerPetname + "/greet"
+		a, err := k.ResolveAction(ctx, ref)
 		if err != nil {
-			t.Fatalf("%s: %v", addr, err)
+			t.Fatalf("%s: %v", ref, err)
 		}
-		owner, err := k.ReadUserByHandle(ctx, r.Owner)
-		if err != nil || owner.ID != peer.ID || r.Name != tc.wantName {
-			t.Errorf("%s resolved to owner=%v name=%q, want the %s mount and %q", addr, r.Owner, r.Name, peer.Handle, tc.wantName)
-		}
-		if _, err := k.ReadActionByOwnerName(ctx, owner.ID, r.Name); err != nil {
-			t.Errorf("%s: action %q not found under %s: %v", addr, r.Name, peer.Handle, err)
+		if a.OwnerUserID != peer.ID || a.Name != owner+"/greet" {
+			t.Errorf("%s resolved to owner=%s name=%q, want the peer account and %q",
+				ref, a.OwnerUserID, a.Name, owner+"/greet")
 		}
 	}
 }
@@ -1696,13 +1670,14 @@ func TestLazyResolveRemoteCachesProxy(t *testing.T) {
 func TestVerifyRemoteReceiptValid(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	sys := setupSys(t, nil, st)
+	setupSys(t, nil, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	fake := &fakeFederationHTTP{}
 	k := newTestKernelWithHTTP(st, fake)
 
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "verify-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "verify-peer")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -1743,7 +1718,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
-		TargetUserID: "verify-peer", ActionName: "verify-peer/vact", Args: map[string]any{},
+		TargetUserID: remoteUser.ID, ActionName: "verify-peer/vact", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -1820,7 +1795,7 @@ func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
 func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	sys := setupSys(t, nil, st)
+	setupSys(t, nil, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	_, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
@@ -1828,7 +1803,7 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	fake := &fakeFederationHTTP{}
 	k := newTestKernelWithHTTP(st, fake)
 
-	remoteUser, _ := k.AddPeer(ctx, sys.ID, "tamper-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, _ := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
 	m := kernel.ActionManifest{
 		ActionID: "tamper-action-1", OwnerHandle: "tamper-peer", Name: "tact",
 		Kind: kernel.KindHTTP, Price: 0, Description: "t",
@@ -1858,7 +1833,7 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	// A receipt signed with the wrong key must be rejected: no settlement, trace stays open.
 	_, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
-		TargetUserID: "tamper-peer", ActionName: "tamper-peer/tact", Args: map[string]any{},
+		TargetUserID: remoteUser.ID, ActionName: "tamper-peer/tact", Args: map[string]any{},
 	})
 	if !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("expected ErrTimeout for invalid signature, got %v", err)
@@ -1875,13 +1850,14 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	sys := setupSys(t, nil, st)
+	setupSys(t, nil, st)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	fake := &fakeFederationHTTP{}
 	k := newTestKernelWithHTTP(st, fake)
 
-	remoteUser, err := k.AddPeer(ctx, sys.ID, "del-peer", base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "del-peer")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -1918,7 +1894,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 
 	reply, err := k.Call(ctx, kernel.CallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
-		TargetUserID: "del-peer", ActionName: "del-peer/dact", Args: map[string]any{},
+		TargetUserID: remoteUser.ID, ActionName: "del-peer/dact", Args: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -1958,15 +1934,15 @@ func TestCreateSignedRejectionReceipt(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	// Register a peer so we have a counterpartyID.
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pub := priv.Public().(ed25519.PublicKey)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	peer, err := k.AddPeer(ctx, sys.ID, "rejection-peer", pubB64)
+	peer, err := k.EnsureKernelAccount(ctx, pubB64)
 	if err != nil {
-		t.Fatalf("AddPeer: %v", err)
+		t.Fatalf("EnsureKernelAccount: %v", err)
 	}
 
 	r, err := k.CreateSignedRejectionReceipt(peer.ID, "owner/some-action", "argsHash123", "idem-key-456", "action inactive", false)
@@ -2008,14 +1984,14 @@ func TestPurgeIdlePeers(t *testing.T) {
 	}
 
 	kDisabled := kernel.New(st, nil, nil, nil, baseCfg(), log.Default())
-	sys := setupSys(t, kDisabled, st)
+	setupSys(t, kDisabled, st)
 
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pub := priv.Public().(ed25519.PublicKey)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	peer, err := kDisabled.AddPeer(ctx, sys.ID, "old-peer", pubB64)
+	peer, err := kDisabled.EnsureKernelAccount(ctx, pubB64)
 	if err != nil {
-		t.Fatalf("AddPeer: %v", err)
+		t.Fatalf("EnsureKernelAccount: %v", err)
 	}
 
 	act := &kernel.Action{
@@ -2031,7 +2007,7 @@ func TestPurgeIdlePeers(t *testing.T) {
 	if err := st.UpsertStats(ctx, &kernel.Stats{ActionID: act.ID, Uses: 3, Successes: 3, LastUsedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: pubB64, Handle: "old-peer", FirstSeen: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+	if err := st.UpsertKernel(ctx, pubB64, "old-peer", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2058,17 +2034,17 @@ func TestPurgeIdlePeers(t *testing.T) {
 	if _, err := kEnabled.ReadAction(ctx, act.ID); err == nil {
 		t.Error("proxy action must be deleted after purge")
 	}
-	if peers, _ := kEnabled.ListPeers(ctx, true, 0, 0); len(peers) != 0 {
-		t.Errorf("ListPeers = %d, want 0 (peer identity forgotten)", len(peers))
+	if kernels, _ := kEnabled.ListKernels(ctx, true, 0, 0); len(kernels) != 0 {
+		t.Errorf("ListKernels = %d, want 0 (kernel identity forgotten)", len(kernels))
 	}
 	u, err := kEnabled.ReadUser(ctx, peer.ID)
 	if err != nil {
 		t.Fatalf("anchor user row must remain: %v", err)
 	}
-	if u.PublicKey != "" {
-		t.Errorf("public_key must be cleared, got %q", u.PublicKey)
+	if u.KernelPublicKey != "" {
+		t.Errorf("public_key must be cleared, got %q", u.KernelPublicKey)
 	}
-	if dk, _ := kEnabled.ReadDiscoveredKernel(ctx, pubB64); dk != nil {
+	if dk, _ := kEnabled.ReadKernel(ctx, pubB64); dk != nil {
 		t.Error("discovered_kernels row for the purged peer must be deleted")
 	}
 }
@@ -2080,7 +2056,7 @@ func TestFriendDoesNotReexportImportedProxies(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	// Our own active+public action.
 	owner := setupUser(t, st, "localprov", 0)
@@ -2097,7 +2073,7 @@ func TestFriendDoesNotReexportImportedProxies(t *testing.T) {
 
 	// An imported proxy from peer C, made active+public exactly as the bulk friend-import does.
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	peerC, err := k.AddPeer(ctx, sys.ID, "peer-c", base64.RawURLEncoding.EncodeToString(pub))
+	peerC, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2274,7 +2250,7 @@ func TestSettleRemoteCallPeerUnfunded(t *testing.T) {
 
 			_, err := k.Call(ctx, kernel.CallRequest{
 				CallerID: caller.ID, ExistingTraceID: tr.ID,
-				TargetUserID: "settle-peer", ActionName: "settle-peer/settleact", Args: map[string]any{},
+				ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 			})
 			if tc.unfunded {
 				if !errors.Is(err, kernel.ErrPeerUnfunded) {
@@ -2307,13 +2283,14 @@ func TestGetGossipCounterpartyBalance(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	k := newTestKernel(st)
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
+	sys, _ := st.ReadUserByHandle(context.Background(), "sys")
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	friendKey := base64.RawURLEncoding.EncodeToString(pub)
-	friend, err := k.AddPeer(ctx, sys.ID, "a-friend", friendKey)
+	friend, err := k.EnsureKernelAccount(ctx, friendKey)
 	if err != nil {
-		t.Fatalf("AddPeer: %v", err)
+		t.Fatalf("EnsureKernelAccount: %v", err)
 	}
 	if _, err := k.Deposit(ctx, sys.ID, friend.ID, 777, "", ""); err != nil {
 		t.Fatalf("Deposit: %v", err)
@@ -2349,21 +2326,21 @@ func TestRecordPeerSync(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	k := newTestKernel(st)
-	sys := setupSys(t, k, st)
+	setupSys(t, k, st)
 
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	key := base64.RawURLEncoding.EncodeToString(pub)
-	friend, err := k.AddPeer(ctx, sys.ID, "sync-friend", key)
+	_, err := k.EnsureKernelAccount(ctx, key)
 	if err != nil {
-		t.Fatalf("AddPeer: %v", err)
+		t.Fatalf("EnsureKernelAccount: %v", err)
 	}
 
 	credit := int64(555)
 	if err := k.RecordPeerSync(ctx, key, &credit); err != nil {
 		t.Fatalf("RecordPeerSync: %v", err)
 	}
-	got, _ := st.ReadUser(ctx, friend.ID)
-	if got.PeerLastSeen == nil {
+	got, _ := st.ReadKernel(ctx, key)
+	if got.LastSeen == nil {
 		t.Error("expected peer_last_seen set after sync")
 	}
 	if got.PeerCredit == nil || *got.PeerCredit != 555 {
@@ -2374,7 +2351,7 @@ func TestRecordPeerSync(t *testing.T) {
 	if err := k.RecordPeerSync(ctx, key, nil); err != nil {
 		t.Fatalf("RecordPeerSync nil: %v", err)
 	}
-	got, _ = st.ReadUser(ctx, friend.ID)
+	got, _ = st.ReadKernel(ctx, key)
 	if got.PeerCredit == nil || *got.PeerCredit != 555 {
 		t.Errorf("nil credit must keep prior 555, got %v", got.PeerCredit)
 	}
@@ -2590,10 +2567,10 @@ func TestGossipNoMembershipNoProvision(t *testing.T) {
 	if _, err := k.GetGossip(ctx, req, ""); err != nil {
 		t.Fatal(err)
 	}
-	if dk, _ := st.ReadDiscoveredKernel(ctx, req); dk != nil {
+	if dk, _ := st.ReadKernel(ctx, req); dk != nil {
 		t.Error("serving a gossip pull learned the requester as a discovered kernel; membership is routing discovery's job, not gossip's")
 	}
-	if u, _ := st.ReadUserByPublicKey(ctx, req); u != nil {
+	if u, _ := st.ReadAccountByKernelKey(ctx, req); u != nil {
 		t.Error("serving a gossip pull provisioned a user account (no billing relationship from gossip)")
 	}
 }
@@ -2622,7 +2599,362 @@ func TestAccumulateGossipBinding(t *testing.T) {
 	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{PublicKey: sender, Handle: "sendername"}, sender); err != nil {
 		t.Fatal(err)
 	}
-	if dk, _ := st.ReadDiscoveredKernel(ctx, sender); dk == nil || dk.Handle != "sendername" {
+	if dk, _ := st.ReadKernel(ctx, sender); dk == nil || dk.Nickname != "sendername" {
 		t.Error("a verified pull did not refresh the discovered-kernel row")
+	}
+}
+
+// mountKernelForTest performs the outbound-use composite of the kernel lifecycle (§13): observe,
+// bind a petname, and open the billing account — what a verified action or user resolve does. Tests
+// that only need one of the three call it directly instead.
+func mountKernelForTest(t *testing.T, k *kernel.Kernel, ctx context.Context, publicKey, petname string) (*kernel.Account, error) {
+	t.Helper()
+	if _, err := k.BindPetname(ctx, publicKey, petname, false); err != nil {
+		return nil, err
+	}
+	return k.EnsureKernelAccount(ctx, publicKey)
+}
+
+// bindPetnameForTest binds a kernel's local petname, the naming half of the outbound-use lifecycle
+// (§13) — what a verified resolve does before the proxy is addressed as owner@petname/name.
+func bindPetnameForTest(t *testing.T, k *kernel.Kernel, ctx context.Context, publicKey, petname string) {
+	t.Helper()
+	if _, err := k.BindPetname(ctx, publicKey, petname, false); err != nil {
+		t.Fatalf("bind petname %s: %v", petname, err)
+	}
+}
+
+// ---- Kernel lifecycle and Stiegler naming (§13) ----
+
+// TestKernelLifecycleSeparation pins the three operations apart: observation names nothing and funds
+// nothing, provisioning opens an account without naming, and only our own outbound act binds a
+// petname. That separation is what keeps a nickname unable to capture a local name.
+func TestKernelLifecycleSeparation(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	setupSys(t, k, st)
+	key := testKernelKey(1)
+
+	// 1. Observe: a kernel row, no petname, no account.
+	if err := k.ObserveKernel(ctx, key, "acme", "a kernel"); err != nil {
+		t.Fatalf("ObserveKernel: %v", err)
+	}
+	rk, err := k.ReadKernel(ctx, key)
+	if err != nil || rk == nil {
+		t.Fatalf("ReadKernel: %v", err)
+	}
+	if rk.Nickname != "acme" || rk.Petname != "" {
+		t.Errorf("after observe: nickname=%q petname=%q, want acme and unbound", rk.Nickname, rk.Petname)
+	}
+	if acct, _ := k.ReadAccountByKernelKey(ctx, key); acct != nil {
+		t.Error("observation must not open an account")
+	}
+
+	// 2. Ensure account: an account, still no petname, and learned metadata is preserved.
+	if _, err := k.EnsureKernelAccount(ctx, key); err != nil {
+		t.Fatalf("EnsureKernelAccount: %v", err)
+	}
+	rk, _ = k.ReadKernel(ctx, key)
+	if rk.Petname != "" {
+		t.Errorf("provisioning must not bind a petname, got %q", rk.Petname)
+	}
+	if rk.Nickname != "acme" || rk.About != "a kernel" {
+		t.Errorf("provisioning must preserve observation: nickname=%q about=%q", rk.Nickname, rk.About)
+	}
+
+	// 3. Bind: automatic binding seeds from the cached nickname.
+	got, err := k.BindPetname(ctx, key, "", false)
+	if err != nil {
+		t.Fatalf("BindPetname: %v", err)
+	}
+	if got != "acme" {
+		t.Errorf("automatic bind seeded %q, want the cached nickname acme", got)
+	}
+
+	// A later nickname change never retargets the bound petname (§13).
+	if err := k.ObserveKernel(ctx, key, "renamed", ""); err != nil {
+		t.Fatal(err)
+	}
+	if rk, _ = k.ReadKernel(ctx, key); rk.Petname != "acme" || rk.Nickname != "renamed" {
+		t.Errorf("nickname change retargeted the petname: petname=%q nickname=%q", rk.Petname, rk.Nickname)
+	}
+}
+
+// TestBindPetnameFallsBackToMechanical: with no usable nickname the automatic seed is k-<key8>, so a
+// cold call by raw key always ends up with something addressable.
+func TestBindPetnameFallsBackToMechanical(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	setupSys(t, k, st)
+
+	for _, tc := range []struct{ name, nickname string }{
+		{"absent", ""},
+		{"key-shaped", testKernelKey(9)},
+		{"contains slash", "bad/name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := testKernelKey(20 + len(tc.name))
+			if err := k.ObserveKernel(ctx, key, tc.nickname, ""); err != nil {
+				t.Fatal(err)
+			}
+			got, err := k.BindPetname(ctx, key, "", false)
+			if err != nil {
+				t.Fatalf("BindPetname: %v", err)
+			}
+			if want := "k-" + key[:8]; got != want {
+				t.Errorf("petname = %q, want the mechanical %q", got, want)
+			}
+		})
+	}
+}
+
+// TestBindPetnameExactRejectsCollision: an operator bind is exact. Silently suffixing an explicit
+// request would name a different kernel than the operator asked for.
+func TestBindPetnameExactRejectsCollision(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	setupSys(t, k, st)
+	first, second := testKernelKey(3), testKernelKey(4)
+
+	if _, err := k.BindPetname(ctx, first, "taken", true); err != nil {
+		t.Fatalf("first bind: %v", err)
+	}
+	if _, err := k.BindPetname(ctx, second, "taken", true); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Fatalf("explicit collision: want ErrInvalidInput, got %v", err)
+	}
+	// Automatic binding of the same seed still suffixes rather than failing.
+	got, err := k.BindPetname(ctx, second, "taken", false)
+	if err != nil || got != "taken-2" {
+		t.Errorf("automatic bind = %q (%v), want taken-2", got, err)
+	}
+	// A petname may never take a key or id shape, or the resolver's disjointness collapses (§14).
+	for _, bad := range []string{testKernelKey(5), uuid.New().String(), "with/slash", "with@at"} {
+		if _, err := k.BindPetname(ctx, testKernelKey(6), bad, true); !errors.Is(err, kernel.ErrInvalidInput) {
+			t.Errorf("BindPetname(%q): want ErrInvalidInput, got %v", bad, err)
+		}
+	}
+}
+
+// TestHandleAndPetnameShareOneString: the two namespaces are independent, which is the point of the
+// split — a user and a kernel may both be called minibox locally.
+func TestHandleAndPetnameShareOneString(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	setupSys(t, k, st)
+
+	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "minibox", Password: "password123"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	key := testKernelKey(7)
+	if got, err := k.BindPetname(ctx, key, "minibox", true); err != nil || got != "minibox" {
+		t.Fatalf("petname bind alongside an identical handle: got %q, %v", got, err)
+	}
+	u, err := k.ResolveUser(ctx, "minibox")
+	if err != nil || u.KernelPublicKey != "" {
+		t.Errorf("the user namespace must still resolve to the local user, got %v (%v)", u, err)
+	}
+	rk, err := k.ReadKernelByPetname(ctx, "minibox")
+	if err != nil || rk == nil || rk.PublicKey != key {
+		t.Errorf("the kernel namespace must resolve to the kernel, got %v (%v)", rk, err)
+	}
+}
+
+// TestRenameUserRejectsKernelAccountByID: a kernel account holds no handle, so renaming it by its
+// account id would name the wrong entity; the operator is pointed at the kernel namespace.
+func TestRenameUserRejectsKernelAccountByID(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	acct, err := k.EnsureKernelAccount(ctx, testKernelKey(8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.RenameUser(ctx, sys.ID, acct.ID, "newname"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Fatalf("rename kernel account by id: want ErrInvalidInput, got %v", err)
+	}
+}
+
+// TestKernelMountIdempotentUnderConcurrency: concurrent first use of one key converges — one
+// account, one petname — and concurrent binds of one seed across distinct keys stay distinct.
+func TestKernelMountIdempotentUnderConcurrency(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	setupSys(t, k, st)
+	key := testKernelKey(10)
+
+	const n = 8
+	ids := make([]string, n)
+	names := make([]string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if name, err := k.BindPetname(ctx, key, "converge", false); err == nil {
+				names[i] = name
+			}
+			if acct, err := k.EnsureKernelAccount(ctx, key); err == nil {
+				ids[i] = acct.ID
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i := 0; i < n; i++ {
+		if ids[i] != ids[0] || ids[i] == "" {
+			t.Fatalf("account %d = %q, want the single winner %q", i, ids[i], ids[0])
+		}
+		if names[i] != names[0] || names[i] == "" {
+			t.Fatalf("petname %d = %q, want the single winner %q", i, names[i], names[0])
+		}
+	}
+
+	// Distinct keys racing for one seed each get a distinct petname.
+	var wg2 sync.WaitGroup
+	got := make([]string, n)
+	for i := 0; i < n; i++ {
+		wg2.Add(1)
+		go func(i int) {
+			defer wg2.Done()
+			got[i], _ = k.BindPetname(ctx, testKernelKey(100+i), "rival", false)
+		}(i)
+	}
+	wg2.Wait()
+	seen := map[string]bool{}
+	for i, name := range got {
+		if name == "" {
+			t.Fatalf("bind %d produced no petname", i)
+		}
+		if seen[name] {
+			t.Fatalf("petname %q was bound twice", name)
+		}
+		seen[name] = true
+	}
+}
+
+// TestSuspendKernelProvisionsAtomically: a kernel can be frozen before it ever calls, and the
+// provisioning and the freeze land together — no window in which an inbound call sees it active.
+func TestSuspendKernelProvisionsAtomically(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+	key := testKernelKey(11)
+
+	if err := k.SuspendKernel(ctx, sys.ID, key); err != nil {
+		t.Fatalf("SuspendKernel: %v", err)
+	}
+	acct, err := k.ReadAccountByKernelKey(ctx, key)
+	if err != nil || acct == nil {
+		t.Fatalf("suspend must provision the account: %v", err)
+	}
+	if acct.SuspendedAt == nil {
+		t.Error("the provisioned account must already be suspended")
+	}
+	// The next inbound call cannot arrive as a fresh unsuspended account.
+	again, err := k.EnsureKernelAccount(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != acct.ID || again.SuspendedAt == nil {
+		t.Errorf("EnsureKernelAccount created a second, unsuspended account: %+v", again)
+	}
+	// Suspension is not our act of naming.
+	if rk, _ := k.ReadKernel(ctx, key); rk == nil || rk.Petname != "" {
+		t.Errorf("suspend must bind no petname, got %+v", rk)
+	}
+}
+
+// testKernelKey builds a distinct, well-formed base64url Ed25519 public key for test n.
+func testKernelKey(n int) string {
+	b := bytes.Repeat([]byte{byte(n)}, ed25519.PublicKeySize)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// TestResolvePrincipalRefusesNamelessAccounts: /juice/fed/resolve/1 answers with a principal a peer
+// will address by name, so an id landing on a kernel account or a purged tombstone — neither of
+// which has a handle — must not resolve (§13).
+func TestResolvePrincipalRefusesNamelessAccounts(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	setupSys(t, k, st)
+
+	acct, err := k.EnsureKernelAccount(ctx, testKernelKey(31))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := k.ResolvePrincipal(ctx, acct.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("kernel account by id: want ErrNotFound, got %v", err)
+	}
+	// A live local user still resolves, by handle and by id.
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "resolvable", Password: "password123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{"resolvable", u.ID} {
+		id, handle, err := k.ResolvePrincipal(ctx, ref)
+		if err != nil || id != u.ID || handle != "resolvable" {
+			t.Errorf("ResolvePrincipal(%q) = %s/%s (%v), want the live user", ref, id, handle, err)
+		}
+	}
+}
+
+// TestTombstoneIsNeverALiveTarget: a purged peer keeps a resolvable id as the ledger anchor (§13
+// Retention), and every mutating path must test for a *live user* rather than infer one from "not a
+// peer" — otherwise a rename would hand a purged peer's history a fresh handle.
+func TestTombstoneIsNeverALiveTarget(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	acct, err := k.EnsureKernelAccount(ctx, testKernelKey(41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PurgePeerCascade(ctx, acct.ID); err != nil {
+		t.Fatalf("PurgePeerCascade: %v", err)
+	}
+	tomb, err := k.ReadUser(ctx, acct.ID)
+	if err != nil || tomb == nil {
+		t.Fatalf("the anchor must stay readable: %v", err)
+	}
+	if tomb.IsLiveUser() || tomb.IsPeer() {
+		t.Fatalf("a tombstone is neither a live user nor a peer, got %+v", tomb)
+	}
+
+	payer, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "payer", Password: "password123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Deposit(ctx, sys.ID, payer.ID, 100, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.RenameUser(ctx, sys.ID, tomb.ID, "resurrected"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("rename a tombstone: want ErrInvalidInput, got %v", err)
+	}
+	if _, err := k.Transfer(ctx, payer.ID, tomb.ID, 10, "", ""); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("transfer to a tombstone: want ErrInvalidInput, got %v", err)
+	}
+	// The kernel enforces it too, not only the HTTP resolver: supervision cannot fund or freeze a
+	// tombstone, and a step parked on one would hold its price with no actor able to free it (§10).
+	if _, err := k.Deposit(ctx, sys.ID, tomb.ID, 10, "", ""); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("deposit to a tombstone: want ErrNotFound, got %v", err)
+	}
+	if _, err := k.Withdraw(ctx, sys.ID, tomb.ID, 10, "", ""); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("withdraw from a tombstone: want ErrNotFound, got %v", err)
+	}
+	if err := k.SuspendUser(ctx, sys.ID, tomb.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("suspend a tombstone: want ErrNotFound, got %v", err)
+	}
+	if _, _, err := k.ResolveRequiredCaller(ctx, tomb.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("park a step on a tombstone: want ErrNotFound, got %v", err)
 	}
 }

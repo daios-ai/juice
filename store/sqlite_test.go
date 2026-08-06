@@ -92,8 +92,8 @@ func (s *DB) columnExists(table, column string) bool {
 	return false
 }
 
-func newUser(handle string, balance int64) *kernel.User {
-	return &kernel.User{
+func newUser(handle string, balance int64) *kernel.Account {
+	return &kernel.Account{
 		ID:           uuid.New().String(),
 		Handle:       handle,
 		PasswordHash: "hash",
@@ -130,13 +130,23 @@ func newProcess(ownerID string) *kernel.Process {
 
 // newPeer builds and inserts a proxy/peer user (public_key set) with explicit balances and
 // creation time, for §13 retention-purge tests.
-func newPeer(t *testing.T, db *DB, handle, key string, available, locked int64, createdAt time.Time) *kernel.User {
+func newPeer(t *testing.T, db *DB, handle, key string, available, locked int64, createdAt time.Time) *kernel.Account {
 	t.Helper()
 	u := newUser(handle, available)
+	// A kernel account holds no session credential at all (§3 CHECK): no handle, no password, no
+	// recovery key. It is named by its kernel's petname and authenticates by federation signature.
+	u.Handle, u.PasswordHash, u.RecoveryPublicKey = "", "", ""
 	u.Locked = locked
-	u.PublicKey = key
+	u.KernelPublicKey = key
 	u.CreatedAt = createdAt
 	u.UpdatedAt = createdAt
+	// The kernel row must exist first — accounts.kernel_public_key is a restrictive foreign key.
+	if err := db.UpsertKernel(context.Background(), key, handle, "", createdAt); err != nil {
+		t.Fatalf("upsert kernel %s: %v", handle, err)
+	}
+	if _, err := db.BindPetname(context.Background(), key, handle, false); err != nil {
+		t.Fatalf("bind petname %s: %v", handle, err)
+	}
 	if err := db.CreateUser(context.Background(), u); err != nil {
 		t.Fatalf("create peer %s: %v", handle, err)
 	}
@@ -589,7 +599,7 @@ func TestBeginRunGlobalExposure(t *testing.T) {
 	ctx := context.Background()
 	const X = 100
 	now := time.Now().UTC()
-	run := func(u *kernel.User, price, exposureMax int64) error {
+	run := func(u *kernel.Account, price, exposureMax int64) error {
 		p := newProcess(u.ID)
 		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: now}
 		return db.BeginRun(ctx, p, tr, u.ID, price, 0, exposureMax)
@@ -831,7 +841,7 @@ func TestTransferEffectFundsFromCaller(t *testing.T) {
 	C := newUser("caller", 500)      // immediate caller: funds the value
 	B := newUser("beneficiary", 0)
 	sys := newUser("sys", 0)
-	for _, u := range []*kernel.User{P, C, B, sys} {
+	for _, u := range []*kernel.Account{P, C, B, sys} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}
@@ -899,7 +909,7 @@ func TestTransferEffectRefundedOnFailure(t *testing.T) {
 	C := newUser("caller", 500)
 	B := newUser("beneficiary", 0)
 	sys := newUser("sys", 0)
-	for _, u := range []*kernel.User{P, C, B, sys} {
+	for _, u := range []*kernel.Account{P, C, B, sys} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}
@@ -945,12 +955,12 @@ func TestTransferEffectRefundedOnFailure(t *testing.T) {
 func TestPendingTransferSettlement(t *testing.T) {
 	ctx := context.Background()
 	// amount 100, rbps/ibps 500: value_premium 5, remote_max 105, value_import 6, max_total 111.
-	mk := func(t *testing.T) (*DB, *kernel.User, *kernel.User, *kernel.User, *kernel.PendingTransfer) {
+	mk := func(t *testing.T) (*DB, *kernel.Account, *kernel.Account, *kernel.Account, *kernel.PendingTransfer) {
 		db := openTestDB(t)
 		buyer := newUser("buyer", 1000)
 		proxyA := newUser("proxy-a", 0)
 		sys := newUser("sys", 0)
-		for _, u := range []*kernel.User{buyer, proxyA, sys} {
+		for _, u := range []*kernel.Account{buyer, proxyA, sys} {
 			if err := db.CreateUser(ctx, u); err != nil {
 				t.Fatal(err)
 			}
@@ -2184,29 +2194,30 @@ func TestListTransactionsByParty(t *testing.T) {
 
 // ---- ReadUserByPublicKey tests ----
 
-func TestReadUserByPublicKey(t *testing.T) {
+func TestReadAccountByKernelKey(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	u := newUser("remote", 0)
-	u.PublicKey = "ed25519pubkeyABC"
-	if err := db.CreateUser(ctx, u); err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
+	newPeer(t, db, "remote", "ed25519pubkeyABC", 0, 0, time.Now().UTC())
 
-	got, err := db.ReadUserByPublicKey(ctx, "ed25519pubkeyABC")
+	got, err := db.ReadAccountByKernelKey(ctx, "ed25519pubkeyABC")
 	if err != nil {
-		t.Fatalf("ReadUserByPublicKey: %v", err)
+		t.Fatalf("ReadAccountByKernelKey: %v", err)
 	}
-	if got.Handle != "remote" {
-		t.Errorf("handle: got %q, want @remote", got.Handle)
+	if got.Handle != "" {
+		t.Errorf("a kernel account holds no handle, got %q", got.Handle)
 	}
-	if got.PublicKey != "ed25519pubkeyABC" {
-		t.Errorf("PublicKey: got %q", got.PublicKey)
+	if got.KernelPublicKey != "ed25519pubkeyABC" {
+		t.Errorf("KernelPublicKey: got %q", got.KernelPublicKey)
+	}
+	// Its name lives in the other namespace: the kernel's petname (§13).
+	rk, err := db.ReadKernelByPetname(ctx, "remote")
+	if err != nil || rk == nil || rk.PublicKey != "ed25519pubkeyABC" {
+		t.Errorf("petname must resolve to the kernel: %+v, %v", rk, err)
 	}
 
 	// Unknown key returns ErrNotFound.
-	if _, err := db.ReadUserByPublicKey(ctx, "unknown-key"); err == nil {
+	if _, err := db.ReadAccountByKernelKey(ctx, "unknown-key"); err == nil {
 		t.Error("expected error for unknown public key")
 	}
 }
@@ -2599,22 +2610,17 @@ func TestProxyUserIdentifiedByPublicKey(t *testing.T) {
 
 	// A key-only account: a public key, no password (that credential combination is what makes it
 	// a peer). Same CreateUser insert as any account.
-	peer := newUser("key-peer", 0)
-	peer.PublicKey = "somepubkey"
-	peer.PasswordHash = ""
-	if err := db.CreateUser(ctx, peer); err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
+	peer := newPeer(t, db, "key-peer", "somepubkey", 0, 0, time.Now().UTC())
 
-	found, err := db.ReadUserByPublicKey(ctx, "somepubkey")
+	found, err := db.ReadAccountByKernelKey(ctx, "somepubkey")
 	if err != nil {
-		t.Fatalf("ReadUserByPublicKey: %v", err)
+		t.Fatalf("ReadAccountByKernelKey: %v", err)
 	}
 	if found.ID != peer.ID {
 		t.Errorf("expected peer ID %s, got %s", peer.ID, found.ID)
 	}
-	if found.PublicKey == "" || found.PasswordHash != "" {
-		t.Errorf("key-only account should have public_key set and empty password, got key=%q hash=%q", found.PublicKey, found.PasswordHash)
+	if found.KernelPublicKey == "" || found.PasswordHash != "" {
+		t.Errorf("kernel account should hold a key and no password, got key=%q hash=%q", found.KernelPublicKey, found.PasswordHash)
 	}
 }
 
@@ -3157,10 +3163,10 @@ func TestPurgePeerCascade(t *testing.T) {
 	// A discovered_kernels row about the peer (must be deleted) and one about another kernel (must
 	// survive — it is information about a different peer).
 	now := time.Now().UTC()
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "peerkeyAAA", Handle: "peerP", FirstSeen: now, UpdatedAt: now}); err != nil {
+	if err := db.UpsertKernel(ctx, "peerkeyAAA", "peerP", "", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "otherkeyBBB", Handle: "other", FirstSeen: now, UpdatedAt: now}); err != nil {
+	if err := db.UpsertKernel(ctx, "otherkeyBBB", "other", "", now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3185,10 +3191,10 @@ func TestPurgePeerCascade(t *testing.T) {
 	if n := count(`SELECT COUNT(*) FROM action_stats WHERE action_id IN (?,?)`, actIDs[0], actIDs[1]); n != 0 {
 		t.Errorf("action_stats after purge = %d, want 0", n)
 	}
-	if n := count(`SELECT COUNT(*) FROM discovered_kernels WHERE public_key=?`, "peerkeyAAA"); n != 0 {
+	if n := count(`SELECT COUNT(*) FROM kernels WHERE public_key=?`, "peerkeyAAA"); n != 0 {
 		t.Errorf("discovered_kernels(peer) after purge = %d, want 0", n)
 	}
-	if n := count(`SELECT COUNT(*) FROM discovered_kernels WHERE public_key=?`, "otherkeyBBB"); n != 1 {
+	if n := count(`SELECT COUNT(*) FROM kernels WHERE public_key=?`, "otherkeyBBB"); n != 1 {
 		t.Errorf("discovered_kernels(other) after purge = %d, want 1 (preserved)", n)
 	}
 	if _, err := db.ReadTransaction(ctx, txID); err != nil {
@@ -3198,8 +3204,8 @@ func TestPurgePeerCascade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("peer user must remain as ledger anchor: %v", err)
 	}
-	if u.PublicKey != "" {
-		t.Errorf("peer public_key must be cleared, got %q", u.PublicKey)
+	if u.KernelPublicKey != "" {
+		t.Errorf("account→kernel link must be cleared, got %q", u.KernelPublicKey)
 	}
 }
 
@@ -3213,7 +3219,7 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 	cutoff := time.Now().UTC().Add(-90 * 24 * time.Hour)
 
 	// A stale never-peer kernel with a discovery doc and an evidence row (both must be evicted).
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "staleKey", Handle: "stale", FirstSeen: old, UpdatedAt: old}); err != nil {
+	if err := db.UpsertKernel(ctx, "staleKey", "stale", "", old); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.ReplaceDiscoveryDocs(ctx, "staleKey", []*kernel.DiscoveryDoc{{KernelPublicKey: "staleKey", Kind: "action", ActionID: "sa1", Name: "svc", Description: "d", ObservedAt: old}}); err != nil {
@@ -3223,12 +3229,12 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A fresh never-peer kernel survives.
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "freshKey", Handle: "fresh", FirstSeen: fresh, UpdatedAt: fresh}); err != nil {
+	if err := db.UpsertKernel(ctx, "freshKey", "fresh", "", fresh); err != nil {
 		t.Fatal(err)
 	}
 	// A stale but peer-backed kernel survives here (peer retention governs it, not this sweep).
 	newPeer(t, db, "peerP", "peerKey", 0, 0, old)
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "peerKey", Handle: "peerP", FirstSeen: old, UpdatedAt: old}); err != nil {
+	if err := db.UpsertKernel(ctx, "peerKey", "peerP", "", old); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3246,7 +3252,7 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 		}
 		return c
 	}
-	if c := count(`SELECT COUNT(*) FROM discovered_kernels WHERE public_key=?`, "staleKey"); c != 0 {
+	if c := count(`SELECT COUNT(*) FROM kernels WHERE public_key=?`, "staleKey"); c != 0 {
 		t.Errorf("stale discovered_kernels = %d, want 0", c)
 	}
 	if c := count(`SELECT COUNT(*) FROM discovery_docs WHERE kernel_public_key=?`, "staleKey"); c != 0 {
@@ -3255,7 +3261,7 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 	if c := count(`SELECT COUNT(*) FROM evidence WHERE issuer_public_key=?`, "staleKey"); c != 0 {
 		t.Errorf("stale evidence = %d, want 0", c)
 	}
-	if c := count(`SELECT COUNT(*) FROM discovered_kernels WHERE public_key IN ('freshKey','peerKey')`); c != 2 {
+	if c := count(`SELECT COUNT(*) FROM kernels WHERE public_key IN ('freshKey','peerKey')`); c != 2 {
 		t.Errorf("fresh + peer-backed survivors = %d, want 2", c)
 	}
 }
@@ -3275,7 +3281,7 @@ func TestListPurgeablePeers(t *testing.T) {
 
 	// excluded: a recent gossip mention keeps it live
 	newPeer(t, db, "gossip", "k-gossip", 0, 0, old)
-	if err := db.CreateOrUpdateDiscoveredKernel(ctx, &kernel.DiscoveredKernel{PublicKey: "k-gossip", Handle: "gossip", FirstSeen: old, UpdatedAt: now}); err != nil {
+	if err := db.UpsertKernel(ctx, "k-gossip", "gossip", "", now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3302,7 +3308,7 @@ func TestListPurgeablePeers(t *testing.T) {
 
 	// The §13 sync cache must NOT count as activity: a fresh peer_last_seen on the idle peer keeps
 	// it purgeable, or answering gossip would immortalize a zombie peer.
-	if err := db.UpdatePeerSync(ctx, idle.ID, now, nil); err != nil {
+	if err := db.UpdatePeerSync(ctx, idle.KernelPublicKey, now, nil); err != nil {
 		t.Fatalf("UpdatePeerSync: %v", err)
 	}
 
@@ -3323,11 +3329,11 @@ func TestUpdatePeerSync(t *testing.T) {
 	peer := newPeer(t, db, "synced", "k-synced", 0, 0, now)
 
 	credit := int64(900)
-	if err := db.UpdatePeerSync(ctx, peer.ID, now, &credit); err != nil {
+	if err := db.UpdatePeerSync(ctx, peer.KernelPublicKey, now, &credit); err != nil {
 		t.Fatalf("UpdatePeerSync: %v", err)
 	}
-	got, _ := db.ReadUser(ctx, peer.ID)
-	if got.PeerLastSeen == nil {
+	got, _ := db.ReadKernel(ctx, peer.KernelPublicKey)
+	if got.LastSeen == nil {
 		t.Error("expected peer_last_seen set")
 	}
 	if got.PeerCredit == nil || *got.PeerCredit != 900 {
@@ -3336,10 +3342,10 @@ func TestUpdatePeerSync(t *testing.T) {
 
 	// A nil credit refreshes last_seen but keeps the prior value (COALESCE).
 	later := now.Add(time.Hour)
-	if err := db.UpdatePeerSync(ctx, peer.ID, later, nil); err != nil {
+	if err := db.UpdatePeerSync(ctx, peer.KernelPublicKey, later, nil); err != nil {
 		t.Fatalf("UpdatePeerSync nil: %v", err)
 	}
-	got, _ = db.ReadUser(ctx, peer.ID)
+	got, _ = db.ReadKernel(ctx, peer.KernelPublicKey)
 	if got.PeerCredit == nil || *got.PeerCredit != 900 {
 		t.Errorf("nil credit must keep prior 900, got %v", got.PeerCredit)
 	}
@@ -3403,13 +3409,13 @@ func TestDeleteGrantsForAction(t *testing.T) {
 	a := newAction(u1.ID, "/multi", 0, true)
 	_ = db.CreateAction(ctx, a)
 
-	for _, u := range []*kernel.User{u1, u2} {
+	for _, u := range []*kernel.Account{u1, u2} {
 		_ = db.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: u.ID, ActionID: a.ID, RefreshToken: "s", CreatedAt: time.Now().UTC()})
 	}
 	if err := db.DeleteGrantsForAction(ctx, a.ID); err != nil {
 		t.Fatalf("DeleteGrantsForAction: %v", err)
 	}
-	for _, u := range []*kernel.User{u1, u2} {
+	for _, u := range []*kernel.Account{u1, u2} {
 		if _, err := db.ReadGrant(ctx, u.ID, a.ID); !errors.Is(err, kernel.ErrNotFound) {
 			t.Errorf("grant for %s survived action-wide delete", u.Handle)
 		}
@@ -3567,7 +3573,7 @@ func TestCreateLedgerEntry(t *testing.T) {
 	sys := newUser("sys", 0)
 	alice := newUser("alice", 100)
 	bob := newUser("bob", 0)
-	for _, u := range []*kernel.User{sys, alice, bob} {
+	for _, u := range []*kernel.Account{sys, alice, bob} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}
@@ -3649,7 +3655,7 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 	owner := newUser("owner", 1000)
 	assignee := newUser("assignee", 0)
 	other := newUser("other", 0)
-	for _, u := range []*kernel.User{owner, assignee, other} {
+	for _, u := range []*kernel.Account{owner, assignee, other} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}
@@ -3707,7 +3713,7 @@ func seedWaitingStep(t *testing.T, db *DB, prefix string) (assigneeID string, mk
 	ctx := context.Background()
 	owner := newUser("@"+prefix+"-owner", 1000)
 	assignee := newUser("@"+prefix+"-assignee", 0)
-	for _, u := range []*kernel.User{owner, assignee} {
+	for _, u := range []*kernel.Account{owner, assignee} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}
@@ -3746,7 +3752,7 @@ func TestCommitRemoteSettlementStoresFailureResult(t *testing.T) {
 	owner := newUser("rs-owner", 1000)
 	proxy := newUser("rs-proxy", 0)
 	sys := newUser("rs-sys", 0)
-	for _, u := range []*kernel.User{owner, proxy, sys} {
+	for _, u := range []*kernel.Account{owner, proxy, sys} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}
@@ -3871,5 +3877,423 @@ func TestListReceiptsForGossip(t *testing.T) {
 	// leg-(b) receipt-backed proxy row, where the kernel uses it to drop signed rejections (§13).
 	if found.IdempotencyKey != "" {
 		t.Errorf("own-execution row must have an empty IdempotencyKey, got %q", found.IdempotencyKey)
+	}
+}
+
+// ---- Account/kernel split: schema invariants, roster, migration (§3, §13, §14) ----
+
+// TestKernelAccountCredentialSeparation: the split is enforced by the schema, not by convention — a
+// kernel account can never hold a session credential, so a peer can never authenticate as a user.
+func TestKernelAccountCredentialSeparation(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	const key = "credsepkey"
+	if err := db.UpsertKernel(ctx, key, "credsep", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	base := func() *kernel.Account {
+		return &kernel.Account{ID: uuid.New().String(), KernelPublicKey: key,
+			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	}
+	for _, tc := range []struct {
+		name  string
+		mutet func(*kernel.Account)
+	}{
+		{"handle", func(a *kernel.Account) { a.Handle = "named" }},
+		{"password", func(a *kernel.Account) { a.PasswordHash = "hash" }},
+		{"recovery key", func(a *kernel.Account) { a.RecoveryPublicKey = "reckey" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := base()
+			tc.mutet(a)
+			if err := db.CreateUser(ctx, a); err == nil {
+				t.Errorf("a kernel account with a %s must be rejected", tc.name)
+			}
+		})
+	}
+	if err := db.CreateUser(ctx, base()); err != nil {
+		t.Errorf("a credentialless kernel account must be accepted: %v", err)
+	}
+}
+
+// TestKernelDeleteBlockedByAccount: the account→kernel foreign key is restrictive on purpose, so a
+// code path that deletes a kernel outside the purge fails loudly instead of orphaning a ledger
+// principal. The purge clears the link first, which is why it succeeds.
+func TestKernelDeleteBlockedByAccount(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	peer := newPeer(t, db, "fk-peer", "fkpeerkey", 0, 0, time.Now().UTC())
+
+	if _, err := db.db.ExecContext(ctx, `DELETE FROM kernels WHERE public_key=?`, "fkpeerkey"); err == nil {
+		t.Fatal("deleting a kernel with a linked account must be rejected")
+	}
+	if err := db.PurgePeerCascade(ctx, peer.ID); err != nil {
+		t.Fatalf("PurgePeerCascade: %v", err)
+	}
+	if rk, _ := db.ReadKernel(ctx, "fkpeerkey"); rk != nil {
+		t.Error("purge must remove the kernel row once the link is cleared")
+	}
+}
+
+// TestSuspendedKernelAccountSurvivesRetention: a suspension must outlive idleness, or the peer
+// returns unsuspended after the sweep and the moderation decision quietly evaporates (§13).
+func TestSuspendedKernelAccountSurvivesRetention(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-40 * 24 * time.Hour)
+	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	idle := newPeer(t, db, "ret-idle", "retidlekey", 0, 0, old)
+	banned := newPeer(t, db, "ret-banned", "retbannedkey", 0, 0, old)
+	if err := db.SuspendUser(ctx, banned.ID); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := db.ListPurgeablePeers(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("ListPurgeablePeers: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != idle.ID {
+		t.Fatalf("purgeable = %v, want only the unsuspended idle peer %s", ids, idle.ID)
+	}
+}
+
+// TestListKernelsRoster: the whole `admin peers` view comes from one query — counterparties and
+// discovery-only kernels merged, self excluded, suspended hidden unless asked for (§14).
+func TestListKernelsRoster(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	newPeer(t, db, "titan", "rosterK1", 5, 0, now)
+	banned := newPeer(t, db, "banned", "rosterK4", 0, 0, now)
+	if err := db.SuspendUser(ctx, banned.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Discovery-only: a kernel row with a nickname and no account or petname.
+	if err := db.UpsertKernel(ctx, "rosterK3", "minibox", "", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertKernel(ctx, "SELF", "me", "", now); err != nil {
+		t.Fatal(err)
+	}
+
+	byKey := func(includeSuspended bool) map[string]*kernel.RemoteKernelView {
+		views, err := db.ListKernels(ctx, "SELF", includeSuspended, 0, 0)
+		if err != nil {
+			t.Fatalf("ListKernels: %v", err)
+		}
+		m := map[string]*kernel.RemoteKernelView{}
+		for _, v := range views {
+			m[v.PublicKey] = v
+		}
+		return m
+	}
+
+	def := byKey(false)
+	if _, ok := def["SELF"]; ok {
+		t.Error("the roster must exclude this kernel")
+	}
+	if _, ok := def["rosterK4"]; ok {
+		t.Error("a suspended counterparty must be hidden by default")
+	}
+	if v := def["rosterK1"]; v == nil || !v.HasAccount || v.Available != 5 || v.Petname != "titan" {
+		t.Errorf("counterparty row = %+v, want an account with balance 5 and petname titan", v)
+	}
+	if v := def["rosterK3"]; v == nil || v.HasAccount || v.Nickname != "minibox" || v.Petname != "" {
+		t.Errorf("discovery-only row = %+v, want no account and an unbound nickname", v)
+	}
+	if all := byKey(true); all["rosterK4"] == nil {
+		t.Error("--all must include suspended counterparties")
+	}
+}
+
+// TestUpsertKernelPreservesNarrowPaths: observation carries nickname/about only. The evidence cursor
+// and the sync cache each advance on their own path, after their own work commits — otherwise a
+// failure between observation and evidence persistence would skip a page forever (§13).
+func TestUpsertKernelPreservesNarrowPaths(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	const key = "narrowkey"
+
+	if err := db.UpsertKernel(ctx, key, "nick", "about", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetGossipCursor(ctx, key, "cursor-1"); err != nil {
+		t.Fatal(err)
+	}
+	credit := int64(42)
+	if err := db.UpdatePeerSync(ctx, key, now, &credit); err != nil {
+		t.Fatal(err)
+	}
+	// A later observation (e.g. the next gossip pass, or a minimal row from an inbound call)
+	// must not reset any of it.
+	if err := db.UpsertKernel(ctx, key, "", "", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	rk, err := db.ReadKernel(ctx, key)
+	if err != nil || rk == nil {
+		t.Fatalf("ReadKernel: %v", err)
+	}
+	if rk.GossipCursor != "cursor-1" {
+		t.Errorf("cursor = %q, want cursor-1 (observation must not touch it)", rk.GossipCursor)
+	}
+	if rk.LastSeen == nil || rk.PeerCredit == nil || *rk.PeerCredit != 42 {
+		t.Errorf("sync cache lost: last_seen=%v credit=%v", rk.LastSeen, rk.PeerCredit)
+	}
+	if rk.Nickname != "nick" || rk.About != "about" {
+		t.Errorf("an empty observation must preserve prior metadata, got %q/%q", rk.Nickname, rk.About)
+	}
+}
+
+// TestMigration037Integrity checks what the migration promises: account ids survive (so every
+// captured transaction party still resolves), no child table still points at the dropped `users`
+// table, and the schema is referentially clean. SQLite writes the rewritten name quoted, so the
+// sqlite_master check must look for both forms.
+func TestMigration037Integrity(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	var dangling int
+	if err := db.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%REFERENCES users%' OR sql LIKE '%REFERENCES "users"%'`).
+		Scan(&dangling); err != nil {
+		t.Fatal(err)
+	}
+	if dangling != 0 {
+		t.Errorf("%d schema objects still reference the dropped users table", dangling)
+	}
+	var children int
+	if err := db.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%REFERENCES "accounts"%' OR sql LIKE '%REFERENCES accounts%'`).
+		Scan(&children); err != nil {
+		t.Fatal(err)
+	}
+	if children == 0 {
+		t.Error("child tables must reference accounts after the rename")
+	}
+	// No legacy row may hold both a password and a kernel key — the CHECK would have failed the
+	// migration, and no production path creates one.
+	var mixed int
+	if err := db.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM accounts WHERE kernel_public_key IS NOT NULL AND (password_hash != '' OR handle IS NOT NULL)`).
+		Scan(&mixed); err != nil {
+		t.Fatal(err)
+	}
+	if mixed != 0 {
+		t.Errorf("%d kernel accounts hold a session credential", mixed)
+	}
+
+	// A child insert still works, proving the rewritten foreign keys resolve.
+	u := newUser("fk-child", 0)
+	if err := db.CreateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateAction(ctx, newAction(u.ID, "child-act", 0, false)); err != nil {
+		t.Fatalf("insert into a child table after migration: %v", err)
+	}
+	rows, err := db.db.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Error("PRAGMA foreign_key_check reported violations")
+	}
+}
+
+// TestMigration037SplitsAccountsAndKernelsPreservingRows exercises the real upgrade path for the
+// account/kernel split (§3, §13): it applies every migration strictly before 037, seeds a v0.12
+// database — a local user, a peer account, a discovered kernel, a discovery-only kernel, and child
+// rows referencing the peer — then applies 037 and asserts what the migration promises. A fresh-DB
+// test cannot cover any of this: ids must survive so every captured transaction party still
+// resolves, and the two naming sources must land in the right columns.
+func TestMigration037SplitsAccountsAndKernelsPreservingRows(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "up37.db") +
+		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
+	raw, err := sql.Open(driverName, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw.SetMaxOpenConns(1) // mirror Open(): the FK-off pragma and the rebuild tx share one conn
+	defer raw.Close()
+	s := &DB{db: raw}
+	if _, err := raw.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	files, err := migrationFileNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply := func(file string) {
+		version := strings.TrimSuffix(path.Base(file), ".sql")
+		b, err := migrationFS.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.applyMigration(version, string(b)); err != nil {
+			t.Fatalf("apply %s: %v", version, err)
+		}
+	}
+	var held []string
+	for _, f := range files {
+		if path.Base(f) >= "037_" {
+			held = append(held, f)
+			continue
+		}
+		apply(f)
+	}
+	if len(held) == 0 || !strings.HasPrefix(path.Base(held[0]), "037_") {
+		t.Fatal("migration 037 not found")
+	}
+
+	ctx := context.Background()
+	const peerKey, otherKey = "PEERKEY", "OTHERKEY"
+	aliceID, peerID := uuid.New().String(), uuid.New().String()
+	early := timeToStr(time.Now().UTC().Add(-72 * time.Hour))
+	mid := timeToStr(time.Now().UTC().Add(-48 * time.Hour))
+	late := timeToStr(time.Now().UTC().Add(-1 * time.Hour))
+
+	// Seed under the pre-037 schema: one local user and one peer account (public_key set, negative
+	// balance — allowed for a peer by the old CHECK), plus the peer's sync cache.
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO users (id,handle,description,password_hash,available,locked,public_key,peer_last_seen,peer_credit,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?), (?,?,?,?,?,?,?,?,?,?,?)`,
+		aliceID, "alice", "a local", "hash", int64(42), int64(0), nil, nil, nil, mid, mid,
+		peerID, "minibox", "", "", int64(-50), int64(0), peerKey, late, int64(7), mid, mid); err != nil {
+		t.Fatalf("seed users: %v", err)
+	}
+	// The discovery cache: one row backing the peer (its advertised label differs from the local
+	// name the operator bound) and one discovery-only kernel.
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO discovered_kernels (public_key,handle,about,gossip_cursor,first_seen,updated_at)
+		 VALUES (?,?,?,?,?,?), (?,?,?,?,?,?)`,
+		peerKey, "minibox-advertised", "a box", "cur1", early, late,
+		otherKey, "stranger", "", "cur3", mid, mid); err != nil {
+		t.Fatalf("seed discovered_kernels: %v", err)
+	}
+	// Child rows referencing the peer account: a proxy action, a process, and a transaction whose
+	// captured party ids must still resolve after the rebuild.
+	proxyID := uuid.New().String()
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO actions (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		proxyID, peerID, "sys/greet", "remote_proxy", 1, "local", int64(5), "d", "{}", "{}", "", "h", "ra-1", mid, mid); err != nil {
+		t.Fatalf("seed proxy action: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at) VALUES (?,?,?,?,?,?)`,
+		uuid.New().String(), peerID, int64(0), int64(0), "closed", mid); err != nil {
+		t.Fatalf("seed process: %v", err)
+	}
+	txID := uuid.New().String()
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO transactions (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,action_id,status,gross,net,fee,started_at,ended_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		txID, "p1", "t1", "", aliceID, aliceID, peerID, proxyID, "success", int64(5), int64(4), int64(1), mid, mid); err != nil {
+		t.Fatalf("seed transaction: %v", err)
+	}
+
+	for _, f := range held {
+		apply(f)
+	}
+
+	// Ids survive, so the transaction's captured parties still resolve.
+	alice, err := s.ReadUser(ctx, aliceID)
+	if err != nil || alice.Handle != "alice" || alice.Available != 42 || alice.KernelPublicKey != "" {
+		t.Fatalf("local user lost or altered: err=%v got=%+v", err, alice)
+	}
+	peer, err := s.ReadUser(ctx, peerID)
+	if err != nil || peer.Available != -50 || peer.KernelPublicKey != peerKey {
+		t.Fatalf("peer account lost or altered: err=%v got=%+v", err, peer)
+	}
+	if peer.Handle != "" || peer.PasswordHash != "" {
+		t.Errorf("a kernel account must hold no session credential, got handle=%q hash=%q", peer.Handle, peer.PasswordHash)
+	}
+	var owner, target string
+	if err := raw.QueryRowContext(ctx, `SELECT owner_user_id, target_user_id FROM transactions WHERE id=?`, txID).
+		Scan(&owner, &target); err != nil {
+		t.Fatal(err)
+	}
+	if owner != aliceID || target != peerID {
+		t.Errorf("transaction parties rewritten: owner=%s target=%s", owner, target)
+	}
+
+	// Naming precedence: the operator's bound name becomes the petname, the remote's advertised
+	// label becomes the nickname, and the two stay distinct.
+	rk, err := s.ReadKernel(ctx, peerKey)
+	if err != nil || rk == nil {
+		t.Fatalf("peer kernel row missing: %v", err)
+	}
+	if rk.Petname != "minibox" || rk.Nickname != "minibox-advertised" {
+		t.Errorf("naming precedence: petname=%q nickname=%q, want minibox / minibox-advertised", rk.Petname, rk.Nickname)
+	}
+	if rk.About != "a box" || rk.GossipCursor != "cur1" {
+		t.Errorf("discovery metadata lost: about=%q cursor=%q", rk.About, rk.GossipCursor)
+	}
+	if rk.PeerCredit == nil || *rk.PeerCredit != 7 || rk.LastSeen == nil {
+		t.Errorf("sync cache not carried onto the kernel row: credit=%v last_seen=%v", rk.PeerCredit, rk.LastSeen)
+	}
+	if got := timeToStr(rk.FirstSeen); got != early {
+		t.Errorf("first_seen = %s, want the earliest of the two sources (%s)", got, early)
+	}
+	// A discovery-only kernel arrives with a nickname and no petname: nothing bound it.
+	other, err := s.ReadKernel(ctx, otherKey)
+	if err != nil || other == nil {
+		t.Fatalf("discovery-only kernel missing: %v", err)
+	}
+	if other.Petname != "" || other.Nickname != "stranger" {
+		t.Errorf("discovery-only kernel: petname=%q nickname=%q, want unbound / stranger", other.Petname, other.Nickname)
+	}
+
+	// The FK graph survived the DROP/RENAME, and nothing still points at the dropped table.
+	fkRows, err := raw.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fkRows.Close()
+	if fkRows.Next() {
+		t.Error("foreign_key_check reported a violation after the upgrade")
+	}
+	var dangling int
+	if err := raw.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%REFERENCES users%' OR sql LIKE '%REFERENCES "users"%'`).
+		Scan(&dangling); err != nil {
+		t.Fatal(err)
+	}
+	if dangling != 0 {
+		t.Errorf("%d schema objects still reference the dropped users table", dangling)
+	}
+}
+
+// TestPurgedPeerIsHistoryNotAUser: retention keeps the credentialless row as the ledger anchor §13
+// requires, but a handleless, keyless account is history — it must not surface as a live local user.
+func TestPurgedPeerIsHistoryNotAUser(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	live := newUser("still-here", 0)
+	if err := db.CreateUser(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	peer := newPeer(t, db, "gone-peer", "gonekey", 0, 0, time.Now().UTC())
+	if err := db.PurgePeerCascade(ctx, peer.ID); err != nil {
+		t.Fatalf("PurgePeerCascade: %v", err)
+	}
+	// The anchor survives for the ledger…
+	if _, err := db.ReadUser(ctx, peer.ID); err != nil {
+		t.Fatalf("the tombstone must remain readable as a ledger anchor: %v", err)
+	}
+	// …but never as a user.
+	users, err := db.ListUsers(ctx, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range users {
+		if u.ID == peer.ID {
+			t.Error("a purged peer must not appear in the user list")
+		}
+	}
+	if len(users) != 1 || users[0].ID != live.ID {
+		t.Errorf("user list = %d rows, want only the live local user", len(users))
 	}
 }

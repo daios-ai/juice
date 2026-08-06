@@ -133,7 +133,7 @@ func VerifyCodeChallenge(verifier, challenge string) bool {
 
 // authenticateLocal verifies handle+password and returns the account. A key-only account has an
 // empty password hash, which CheckPassword rejects, so it can never obtain a token by this path.
-func (k *Kernel) authenticateLocal(ctx context.Context, handle, password string) (*User, error) {
+func (k *Kernel) authenticateLocal(ctx context.Context, handle, password string) (*Account, error) {
 	u, err := k.store.ReadUserByHandle(ctx, handle)
 	if err != nil || !CheckPassword(password, u.PasswordHash) {
 		return nil, ErrUnauthenticated.Wrap("invalid credentials")

@@ -1094,7 +1094,7 @@ func validateHandle(handle string) error {
 }
 
 // CreateUser creates a new user account and returns the user.
-func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*User, error) {
+func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*Account, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
 	req.Handle = NormalizeHandle(req.Handle)
@@ -1117,7 +1117,7 @@ func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*User, 
 	}
 
 	now := time.Now().UTC()
-	u := &User{
+	u := &Account{
 		ID:                uuid.New().String(),
 		Handle:            req.Handle,
 		PasswordHash:      hash,
@@ -1143,7 +1143,7 @@ type UpdateUserRequest struct {
 }
 
 // UpdateUser lets an authenticated password account update its own description and/or password.
-func (k *Kernel) UpdateUser(ctx context.Context, callerID string, req UpdateUserRequest) (*User, error) {
+func (k *Kernel) UpdateUser(ctx context.Context, callerID string, req UpdateUserRequest) (*Account, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
 	logger.Info("user.update.start", "user_id", callerID)
@@ -1184,18 +1184,18 @@ func (k *Kernel) UpdateUser(ctx context.Context, callerID string, req UpdateUser
 }
 
 // ReadUser returns the user with the given ID.
-func (k *Kernel) ReadUser(ctx context.Context, id string) (*User, error) {
+func (k *Kernel) ReadUser(ctx context.Context, id string) (*Account, error) {
 	return k.store.ReadUser(ctx, id)
 }
 
 // ReadUserByHandle returns the user with the given handle.
-func (k *Kernel) ReadUserByHandle(ctx context.Context, handle string) (*User, error) {
+func (k *Kernel) ReadUserByHandle(ctx context.Context, handle string) (*Account, error) {
 	return k.store.ReadUserByHandle(ctx, handle)
 }
 
-// ReadUserByPublicKey returns the user with the given base64url Ed25519 public key.
-func (k *Kernel) ReadUserByPublicKey(ctx context.Context, publicKey string) (*User, error) {
-	return k.store.ReadUserByPublicKey(ctx, publicKey)
+// ReadAccountByKernelKey returns the user with the given base64url Ed25519 public key.
+func (k *Kernel) ReadAccountByKernelKey(ctx context.Context, publicKey string) (*Account, error) {
+	return k.store.ReadAccountByKernelKey(ctx, publicKey)
 }
 
 // Login authenticates handle+password and returns a signed JWT.
@@ -1212,7 +1212,7 @@ func (k *Kernel) Login(ctx context.Context, handle, password string) (string, er
 	return tok, nil
 }
 
-func rejectSuspended(u *User) error {
+func rejectSuspended(u *Account) error {
 	if u.SuspendedAt != nil {
 		return ErrUnauthenticated.Wrap("account suspended")
 	}
@@ -1220,7 +1220,7 @@ func rejectSuspended(u *User) error {
 }
 
 // ListUsers returns all users ordered by creation time.
-func (k *Kernel) ListUsers(ctx context.Context, limit, offset int) ([]*User, error) {
+func (k *Kernel) ListUsers(ctx context.Context, limit, offset int) ([]*Account, error) {
 	return k.store.ListUsers(ctx, limit, offset)
 }
 
@@ -1237,6 +1237,10 @@ func (k *Kernel) setSuspended(ctx context.Context, operatorID, targetID string, 
 	logger := k.log.With(ctx)
 	logger.Info("user."+verb+".start", "target_id", targetID)
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
+		logger.Warn("user."+verb+".failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
+		return err
+	}
+	if err := k.requireLiveAccount(ctx, targetID); err != nil {
 		logger.Warn("user."+verb+".failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return err
 	}
@@ -1262,7 +1266,7 @@ func (k *Kernel) UnsuspendUser(ctx context.Context, operatorID, targetID string)
 // never touches it). Superuser-only. The superuser's own account is refused, since its handle is
 // bound to config.superuser_handle; a rename onto a handle another account holds is refused too.
 // Renaming a defunct account vacates its old handle for reuse (§12).
-func (k *Kernel) RenameUser(ctx context.Context, operatorID, targetID, newHandle string) (*User, error) {
+func (k *Kernel) RenameUser(ctx context.Context, operatorID, targetID, newHandle string) (*Account, error) {
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
 		return nil, err
 	}
@@ -1273,6 +1277,15 @@ func (k *Kernel) RenameUser(ctx context.Context, operatorID, targetID, newHandle
 	target, err := k.store.ReadUser(ctx, targetID)
 	if err != nil {
 		return nil, err
+	}
+	if !target.IsLiveUser() {
+		// A kernel account is named by its kernel's petname, in the other namespace (§13); a
+		// tombstone has no name at all. Renaming either would name the wrong entity — or, worse,
+		// give a purged peer's ledger history a fresh handle and resurrect it as a live user.
+		if target.IsPeer() {
+			return nil, ErrInvalidInput.Wrap("this account belongs to a remote kernel; rename it by its public key or petname")
+		}
+		return nil, ErrInvalidInput.Wrap("this account is a purged peer's ledger anchor and cannot be renamed")
 	}
 	if k.isUserSuperuser(ctx, target) {
 		return nil, ErrInvalidInput.Wrap("the superuser handle cannot be renamed")
@@ -1329,7 +1342,7 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 	if amount <= 0 {
 		return nil, ErrInvalidInput.Wrap("amount must be positive")
 	}
-	if _, err := k.store.ReadUser(ctx, targetUserID); err != nil {
+	if err := k.requireLiveAccount(ctx, targetUserID); err != nil {
 		return nil, err
 	}
 	e := &LedgerEntry{
@@ -1357,7 +1370,7 @@ func (k *Kernel) Withdraw(ctx context.Context, operatorID, targetUserID string, 
 	if amount <= 0 {
 		return nil, ErrInvalidInput.Wrap("amount must be positive")
 	}
-	if _, err := k.store.ReadUser(ctx, targetUserID); err != nil {
+	if err := k.requireLiveAccount(ctx, targetUserID); err != nil {
 		return nil, err
 	}
 	e := &LedgerEntry{
@@ -1402,8 +1415,8 @@ func (k *Kernel) Transfer(ctx context.Context, callerID, recipientID string, amo
 	if err != nil {
 		return nil, err
 	}
-	if recipient.PublicKey != "" {
-		return nil, ErrInvalidInput.Wrap("cannot transfer to a peer user")
+	if !recipient.IsLiveUser() {
+		return nil, ErrInvalidInput.Wrap("recipient must be a local user account")
 	}
 	if recipient.SuspendedAt != nil {
 		return nil, ErrInvalidInput.Wrap("recipient is suspended")
@@ -1975,7 +1988,7 @@ func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey stri
 		return ErrInternal.Wrapf("generate signing key: %v", err)
 	}
 	now := time.Now().UTC()
-	u := &User{
+	u := &Account{
 		ID:                uuid.New().String(),
 		Handle:            SuperuserHandle,
 		PasswordHash:      hash,
@@ -2261,7 +2274,7 @@ func (k *Kernel) DeleteAction(ctx context.Context, callerID, actionID string) er
 
 // beginRun consolidates all preconditions for a new process, atomically creates the process
 // and root trace via BeginRun, then executes the root call. Shared by Run and RunFederated.
-func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actionName string, args map[string]any, idempotencyRecordID string) (*CallReply, error) {
+func (k *Kernel) beginRun(ctx context.Context, caller *Account, targetUserID, actionName string, args map[string]any, idempotencyRecordID string) (*CallReply, error) {
 	action, err := k.store.ReadActionByOwnerName(ctx, targetUserID, actionName)
 	if err != nil || action == nil {
 		return nil, ErrNotFound.Wrapf("action %s/%s not found", targetUserID, actionName)
@@ -2308,7 +2321,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 			if pending, err := k.store.HasPendingSettlement(ctx, caller.ID); err != nil {
 				return nil, err
 			} else if pending {
-				return nil, PeerUnfundedError(caller.Handle)
+				return nil, PeerUnfundedError(k.KernelName(ctx, caller.KernelPublicKey))
 			}
 		}
 	} else {
@@ -2358,7 +2371,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *User, targetUserID, actio
 	}
 	if err := k.store.BeginRun(ctx, p, t, caller.ID, lockPrice, premiumReserve, k.cfg.ExposureMax); err != nil {
 		if caller.IsPeer() && errors.Is(err, ErrInsufficientFunds) {
-			return nil, PeerUnfundedError(caller.Handle)
+			return nil, PeerUnfundedError(k.KernelName(ctx, caller.KernelPublicKey))
 		}
 		return nil, err
 	}
@@ -2749,7 +2762,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	// "disc:<doc_key>" are disjoint from action UUIDs by construction.
 	discHits := map[string]*DiscoveryDoc{}
 	if req.CallerID != "" {
-		if u, _ := k.store.ReadUser(ctx, req.CallerID); u != nil && u.PublicKey == "" {
+		if u, _ := k.store.ReadUser(ctx, req.CallerID); u != nil && u.KernelPublicKey == "" {
 			k.mergeDiscoveryActionLegs(ctx, req.Query, oversample, fused, discHits)
 		}
 	}
@@ -2771,7 +2784,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	// Hydrate and filter by CanCall BEFORE truncating, so a run of others' private actions cannot
 	// starve the caller of results it may actually call. Visibility is caller-scoped (§4), so load
 	// the caller once; a nil caller (anonymous lookup) sees public actions only.
-	var caller *User
+	var caller *Account
 	if req.CallerID != "" {
 		caller, _ = k.store.ReadUser(ctx, req.CallerID)
 	}
@@ -2785,7 +2798,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		if doc, ok := discHits[r.id]; ok {
 			// Shadow: if we already hold an active local proxy for this remote action, the local row is
 			// already in the local legs — drop the discovery duplicate.
-			if peer, _ := k.store.ReadUserByPublicKey(ctx, doc.KernelPublicKey); peer != nil {
+			if peer, _ := k.store.ReadAccountByKernelKey(ctx, doc.KernelPublicKey); peer != nil {
 				if px, _ := k.store.ReadActionByOwnerRemoteID(ctx, peer.ID, doc.ActionID); px != nil && px.Active {
 					continue
 				}
@@ -2890,7 +2903,7 @@ func (k *Kernel) LookupUsers(ctx context.Context, req LookupRequest) ([]*UserLoo
 
 	// Local candidates: sys + owners of active public actions. Small N; score lexically in-memory by
 	// substring, then let RRF ordering fold with discovery. We assign a rank by match position.
-	locals := map[string]*User{}
+	locals := map[string]*Account{}
 	if sys, _ := k.store.ReadUserByHandle(ctx, "sys"); sys != nil {
 		locals[sys.ID] = sys
 	}
@@ -2902,13 +2915,13 @@ func (k *Kernel) LookupUsers(ctx context.Context, req LookupRequest) ([]*UserLoo
 			if _, ok := locals[a.OwnerUserID]; ok {
 				continue
 			}
-			if ow, _ := k.store.ReadUser(ctx, a.OwnerUserID); ow != nil && ow.PublicKey == "" {
+			if ow, _ := k.store.ReadUser(ctx, a.OwnerUserID); ow != nil && ow.KernelPublicKey == "" {
 				locals[ow.ID] = ow
 			}
 		}
 	}
 	q := strings.ToLower(req.Query)
-	localRanked := make([]*User, 0, len(locals))
+	localRanked := make([]*Account, 0, len(locals))
 	for _, u := range locals {
 		localRanked = append(localRanked, u)
 	}
@@ -2929,7 +2942,7 @@ func (k *Kernel) LookupUsers(ctx context.Context, req LookupRequest) ([]*UserLoo
 
 	// Discovery candidates, gated to authenticated local callers.
 	if req.CallerID != "" {
-		if cu, _ := k.store.ReadUser(ctx, req.CallerID); cu != nil && cu.PublicKey == "" {
+		if cu, _ := k.store.ReadUser(ctx, req.CallerID); cu != nil && cu.KernelPublicKey == "" {
 			k.mergeDiscoveryUserLegs(ctx, req.Query, oversample, fused, cands)
 		}
 	}
@@ -3090,13 +3103,29 @@ func sqrt32(x float32) float32 {
 // ---- Helpers ----
 
 // requireActiveUser rejects missing or suspended users.
-func (k *Kernel) requireActiveUser(ctx context.Context, userID string) (*User, error) {
+// requireLiveAccount is the supervision-side twin of requireActiveUser: it admits a live user or a
+// kernel account and refuses a purged tombstone, which no operation may fund, freeze, or rename.
+func (k *Kernel) requireLiveAccount(ctx context.Context, id string) error {
+	u, err := k.store.ReadUser(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !u.IsLive() {
+		return ErrNotFound.Wrapf("account %s is a purged ledger anchor, not a live target", id)
+	}
+	return nil
+}
+
+func (k *Kernel) requireActiveUser(ctx context.Context, userID string) (*Account, error) {
 	u, err := k.store.ReadUser(ctx, userID)
 	if err != nil {
 		return nil, ErrUnauthenticated.Wrap("user not found")
 	}
 	if u.SuspendedAt != nil {
 		return nil, ErrUnauthenticated.Wrap("account suspended")
+	}
+	if !u.IsLive() {
+		return nil, ErrUnauthenticated.Wrap("account not found")
 	}
 	return u, nil
 }
@@ -3106,7 +3135,7 @@ func (k *Kernel) requireActiveUser(ctx context.Context, userID string) (*User, e
 // owner, native-action owner, fee recipient, and gossip "about" source.
 const SuperuserHandle = "sys"
 
-func (k *Kernel) isUserSuperuser(_ context.Context, u *User) bool {
+func (k *Kernel) isUserSuperuser(_ context.Context, u *Account) bool {
 	return u.Handle == SuperuserHandle
 }
 

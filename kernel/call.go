@@ -195,7 +195,7 @@ func (k *Kernel) ResolveAction(ctx context.Context, ref string) (*Action, error)
 // (§13 subscription-free calls). It is invoked from ResolveAction's kernel-qualified miss branch, so
 // run, /v1/call, and WASM subcalls all reach unimported remote actions uniformly. Trust derives from
 // the manifest signature, not an operator act; a nil resolver (no transport) yields ErrNotFound.
-func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *User, r ActionRef) (*Action, error) {
+func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *Account, r ActionRef) (*Action, error) {
 	resolver, ok := k.http.(RemoteResolver)
 	if !ok {
 		return nil, ErrNotFound.Wrapf("action %s not found", r.String())
@@ -211,13 +211,13 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *U
 		return nil, ErrUnauthorized.Wrap("remote manifest signature is invalid")
 	}
 	if mount == nil {
-		// First contact by raw key: mechanical alias; a better label is a best-effort concern that
-		// must never fail the call (§13 first-meaningful-use naming).
-		handle := r.Kernel
-		if IsPublicKey(r.Kernel) && len(peerKey) >= 8 {
-			handle = "k-" + peerKey[:8]
+		// First meaningful use (§13): our own verified outbound act, so this is where a local
+		// petname is bound — seeded from the kernel's cached nickname when one is known, else
+		// mechanically. Naming is best-effort and must never fail the call; the account must.
+		if _, berr := k.BindPetname(ctx, peerKey, "", false); berr != nil {
+			k.log.With(ctx).Warn("kernel.petname.bind_failed", "public_key", peerKey, "error", berr.Error())
 		}
-		mount, err = k.CreateOrUpdateProxyPeer(ctx, handle, peerKey)
+		mount, err = k.EnsureKernelAccount(ctx, peerKey)
 		if err != nil {
 			return nil, err
 		}
@@ -229,10 +229,10 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *U
 // public key, or a raw user ID — the shapes are disjoint, so a single lookup disambiguates.
 // This is the single user-resolution entry point shared by Call, Run, the WASM host, native
 // actions, federation, and the service layer.
-func (k *Kernel) ResolveUser(ctx context.Context, ident string) (*User, error) {
+func (k *Kernel) ResolveUser(ctx context.Context, ident string) (*Account, error) {
 	ident = strings.TrimSpace(ident)
 	if looksLikeKey(ident) {
-		if u, err := k.store.ReadUserByPublicKey(ctx, ident); err == nil && u != nil {
+		if u, err := k.store.ReadAccountByKernelKey(ctx, ident); err == nil && u != nil {
 			return u, nil
 		}
 	}
@@ -318,7 +318,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// was funded and eliminates the TOCTOU window. The snapshot is still validated below.
 	// Subcalls and direct test invocations use the owner/name path.
 	var action *Action
-	var target *User
+	var target *Account
 	if req.Action != nil {
 		action = req.Action
 		target, err = k.store.ReadUser(ctx, action.OwnerUserID)
@@ -501,7 +501,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		if trace.IdempotencyKey != nil {
 			ikey = *trace.IdempotencyKey
 		}
-		fr, _ := fe.ExecuteFederation(ctx, target.PublicKey, action.Source, action.ArtifactHash, ikey, req.Args)
+		fr, _ := fe.ExecuteFederation(ctx, target.KernelPublicKey, action.Source, action.ArtifactHash, ikey, req.Args)
 		latency := time.Since(started).Seconds()
 		ktx.EndedAt = time.Now().UTC()
 		if fr.NotDispatched {
@@ -510,7 +510,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			// that would repeat a request the peer never received. Only here — retryRemoteTrace
 			// never fail-fasts, since a parked request may already have executed. Mirrors the
 			// executor-not-configured settlement above (a funded trace must never be stranded).
-			unreach := ErrPeerUnreachable.Wrapf("peer @%s is unreachable; the call was not sent and has been refunded", target.Handle).WithMeta("peer", target.Handle)
+			pn := k.KernelName(ctx, target.KernelPublicKey)
+			unreach := ErrPeerUnreachable.Wrapf("peer %s is unreachable; the call was not sent and has been refunded", pn).WithMeta("peer", pn)
 			ktx.Status = TxFailure
 			ktx.Reason = unreach.Error()
 			receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, unreach)
@@ -662,7 +663,7 @@ func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
 // CanCall(C, a) := active(a) ∧ ¬suspended(a.owner) ∧
 //
 //	(public(a) ∨ (local(a) ∧ ¬IsPeer(C)) ∨ C = a.OwnerUserID)
-func canCall(caller *User, action *Action) bool {
+func canCall(caller *Account, action *Action) bool {
 	if !action.Active || action.OwnerSuspended {
 		return false
 	}
@@ -683,7 +684,7 @@ func canCall(caller *User, action *Action) bool {
 // (§6). checkVisibility is false only for a step completion, which bound visibility at creation
 // (§10): a liveness failure still resets it to waiting, a later visibility change does not. The
 // grant check stays keyed on the process owner: delegated consent binds to the paying human (§8).
-func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *User, processOwnerID string, action *Action, args map[string]any, checkVisibility bool) error {
+func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *Account, processOwnerID string, action *Action, args map[string]any, checkVisibility bool) error {
 	if !action.Active {
 		return ErrInvalidState.Wrap("action is inactive")
 	}

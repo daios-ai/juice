@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -47,13 +49,9 @@ func TestResolveHandle(t *testing.T) {
 	}
 
 	// A peer is resolvable by its base64url public key (the global name), not only its @handle.
-	sys, err := k.ReadUserByHandle(ctx, "sys")
-	if err != nil {
-		t.Fatal(err)
-	}
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	keyB64 := base64.RawURLEncoding.EncodeToString(pub)
-	peer, err := k.AddPeer(ctx, sys.ID, "svc-peer", keyB64)
+	peer, err := k.EnsureKernelAccount(ctx, keyB64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +105,7 @@ func TestResolveActionRef(t *testing.T) {
 }
 
 func TestUserView(t *testing.T) {
-	u := &kernel.User{
+	u := &kernel.Account{
 		ID:        "u1",
 		Handle:    "x",
 		Available: 100,
@@ -133,7 +131,7 @@ func TestEnrichStep(t *testing.T) {
 
 	// No parent trace and not waiting, so neither the ref resolver nor the peer check is dialed
 	// (nil kernel is safe here).
-	v := enrichStep(nil, context.Background(), step, action, newUserCache(nil, context.Background()))
+	v := enrichStep(nil, context.Background(), step, action, newAccountCache(nil, context.Background()))
 	if v.Action != "alice/greet" {
 		t.Errorf("enrichStep: Action = %q, want @alice/greet", v.Action)
 	}
@@ -154,8 +152,8 @@ func TestEnrichStep(t *testing.T) {
 	// Nil action → empty action field; a waiting step to a peer caller flags waiting_on_peer and
 	// resolves the required-caller handle from the (pre-seeded) cache.
 	peerStep := &kernel.Step{ID: "s2", Status: kernel.StepWaiting, RequiredCallerUserID: "peer1"}
-	uc := newUserCache(nil, context.Background())
-	uc.m["peer1"] = &kernel.User{Handle: "peer", PublicKey: "pk"}
+	uc := newAccountCache(nil, context.Background())
+	uc.m["peer1"] = &kernel.Account{Handle: "peer", KernelPublicKey: "pk"}
 	v2 := enrichStep(nil, context.Background(), peerStep, nil, uc)
 	if v2.Action != "" {
 		t.Errorf("enrichStep(nil action): Action = %q, want empty", v2.Action)
@@ -182,8 +180,8 @@ func TestEnrichStep(t *testing.T) {
 		},
 	}
 	waiting := &kernel.Step{ID: "s3", Status: kernel.StepWaiting, RequiredCallerUserID: "u9", PartialArgs: json.RawMessage(`{"city":"NYC"}`)}
-	uc3 := newUserCache(nil, context.Background())
-	uc3.m["u9"] = &kernel.User{Handle: "carol"} // seeded so the peer check doesn't dial the nil kernel
+	uc3 := newAccountCache(nil, context.Background())
+	uc3.m["u9"] = &kernel.Account{Handle: "carol"} // seeded so the peer check doesn't dial the nil kernel
 	v3 := enrichStep(nil, context.Background(), waiting, schemaAction, uc3)
 	props, ok := v3.AllowedInput["properties"].(map[string]any)
 	if !ok {
@@ -201,8 +199,8 @@ func TestEnrichProcess(t *testing.T) {
 	p := &kernel.Process{ID: "p1", Status: kernel.ProcessOpen}
 	when := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 
-	uc := newUserCache(nil, context.Background())
-	uc.m["owner1"] = &kernel.User{Handle: "owner"}
+	uc := newAccountCache(nil, context.Background())
+	uc.m["owner1"] = &kernel.Account{Handle: "owner"}
 	p.OwnerUserID = "owner1"
 
 	// Not awaiting: no entry in the since map.
@@ -243,125 +241,50 @@ func TestEnrichAction(t *testing.T) {
 // offline (missing/stale last_seen) takes precedence over unfunded (cached credit below mp); healthy
 // yields "". A zero-value kernel has RemoteBPS 0, so RemoteManifestPrice(p) == p.
 func TestPeerStateFor(t *testing.T) {
-	k := &kernel.Kernel{}
+	k, _ := newRemoteTestKernel(t)
+	ctx := context.Background()
 	stale := time.Hour
-	fresh := time.Now().Add(-time.Minute)
-	old := time.Now().Add(-2 * time.Hour)
 	credit := func(v int64) *int64 { return &v }
 
+	// The sync cache lives on the kernel row now (§13): each case observes a kernel, optionally
+	// records a sync, and reads it back through the store exactly as the annotation does.
 	cases := []struct {
-		name  string
-		owner *kernel.User
-		price int64
-		want  string
+		name   string
+		synced bool
+		credit *int64
+		after  time.Duration
+		price  int64
+		want   string
 	}{
-		{"nil owner", nil, 10, ""},
-		{"never synced", &kernel.User{}, 10, "offline"},
-		{"stale last_seen", &kernel.User{PeerLastSeen: &old}, 10, "offline"},
-		{"fresh underfunded", &kernel.User{PeerLastSeen: &fresh, PeerCredit: credit(5)}, 10, "unfunded"},
-		{"fresh funded", &kernel.User{PeerLastSeen: &fresh, PeerCredit: credit(20)}, 10, ""},
-		{"fresh unknown credit", &kernel.User{PeerLastSeen: &fresh}, 10, ""},
+		{"nil owner", false, nil, stale, 10, ""},
+		{"never synced", false, nil, stale, 10, "offline"},
+		{"stale last_seen", true, nil, -time.Second, 10, "offline"},
+		{"fresh underfunded", true, credit(5), stale, 10, "unfunded"},
+		{"fresh funded", true, credit(20), stale, 10, ""},
+		{"fresh unknown credit", true, nil, stale, 10, ""},
 	}
-	for _, tc := range cases {
+	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := peerStateFor(k, tc.owner, tc.price, stale); got != tc.want {
+			if tc.name == "nil owner" {
+				if got := peerStateFor(k, ctx, nil, tc.price, tc.after); got != tc.want {
+					t.Errorf("peerStateFor(nil) = %q, want %q", got, tc.want)
+				}
+				return
+			}
+			key := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{byte(i + 1)}, 32))
+			if err := k.ObserveKernel(ctx, key, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			if tc.synced {
+				if err := k.RecordPeerSync(ctx, key, tc.credit); err != nil {
+					t.Fatal(err)
+				}
+			}
+			owner := &kernel.Account{KernelPublicKey: key}
+			if got := peerStateFor(k, ctx, owner, tc.price, tc.after); got != tc.want {
 				t.Errorf("peerStateFor = %q, want %q", got, tc.want)
 			}
 		})
-	}
-}
-
-// peerViews carries the §13 sync cache (our credit on the peer, last_seen) into the projection.
-func TestPeerViewsCarrySyncCache(t *testing.T) {
-	seen := time.Now()
-	credit := int64(64)
-	views := peerViews([]*kernel.User{{Handle: "b", PublicKey: "k", PeerCredit: &credit, PeerLastSeen: &seen}})
-	if len(views) != 1 || views[0].PeerCredit == nil || *views[0].PeerCredit != 64 || views[0].LastSeen == nil {
-		t.Errorf("peerViews dropped the sync cache: %+v", views[0])
-	}
-	if !views[0].HasAccount {
-		t.Error("a counterparty projection must have HasAccount=true")
-	}
-}
-
-// mergePeerRoster (§14): every known kernel by public key — counterparties (account) and
-// discovery-only kernels (no account) — deduped by key, this kernel's own key excluded. A suspended
-// counterparty is hidden by default even if it is also a discovered kernel (never re-surfaced).
-func TestMergePeerRoster(t *testing.T) {
-	const self = "SELF"
-	suspended := time.Now()
-	counterparties := []*kernel.User{
-		{Handle: "titan", PublicKey: "K1", Available: 5},                 // counterparty, also discovered
-		{Handle: "solo", PublicKey: "K2", Available: -3},                 // counterparty only
-		{Handle: "banned", PublicKey: "K4", SuspendedAt: &suspended},     // suspended counterparty, also discovered
-	}
-	discovered := []*kernel.DiscoveredKernelView{
-		{Handle: "titan-adv", PublicKey: "K1", Actions: 14}, // dup of a counterparty: fills action count
-		{Handle: "minibox", PublicKey: "K3", Actions: 13},   // discovery-only
-		{Handle: "banned-adv", PublicKey: "K4", Actions: 9}, // must NOT re-surface a hidden suspended counterparty
-		{Handle: "me", PublicKey: self, Actions: 1},         // this kernel: must be excluded
-	}
-
-	// Default (showSuspended=false): suspended K4 is hidden entirely, not shown as discovery-only.
-	out := mergePeerRoster(counterparties, discovered, self, false)
-	byKey := map[string]*kernel.PeerView{}
-	for _, v := range out {
-		if _, dup := byKey[v.PublicKey]; dup {
-			t.Errorf("key %s appears twice; roster must dedup by public key", v.PublicKey)
-		}
-		byKey[v.PublicKey] = v
-	}
-	if _, ok := byKey[self]; ok {
-		t.Error("the roster must exclude this kernel's own key")
-	}
-	if v := byKey["K1"]; v == nil || !v.HasAccount || v.Actions != 14 {
-		t.Errorf("K1 should be a counterparty with the discovered action count filled: %+v", v)
-	}
-	if v := byKey["K2"]; v == nil || !v.HasAccount {
-		t.Errorf("K2 should be an account-holding counterparty: %+v", v)
-	}
-	if v := byKey["K3"]; v == nil || v.HasAccount {
-		t.Errorf("K3 should be a discovery-only entry with no account: %+v", v)
-	}
-	if _, ok := byKey["K4"]; ok {
-		t.Error("a suspended counterparty must be hidden by default, not re-surfaced as discovery-only")
-	}
-
-	// With showSuspended=true, the suspended counterparty appears (as an account, not discovery-only).
-	all := mergePeerRoster(counterparties, discovered, self, true)
-	var k4 *kernel.PeerView
-	for _, v := range all {
-		if v.PublicKey == "K4" {
-			k4 = v
-		}
-	}
-	if k4 == nil || !k4.HasAccount || k4.SuspendedAt == nil {
-		t.Errorf("with --all, K4 should appear as a suspended counterparty: %+v", k4)
-	}
-}
-
-// pageViews paginates the MERGED roster (not one source), so limit/offset bound the whole list —
-// including discovered kernels — and never drop rows off the end silently.
-func TestPageViews(t *testing.T) {
-	v := []*kernel.PeerView{{PublicKey: "A"}, {PublicKey: "B"}, {PublicKey: "C"}, {PublicKey: "D"}}
-	got := func(limit, offset int) string {
-		var keys []string
-		for _, p := range pageViews(v, limit, offset) {
-			keys = append(keys, p.PublicKey)
-		}
-		return strings.Join(keys, ",")
-	}
-	if s := got(2, 0); s != "A,B" {
-		t.Errorf("limit=2 offset=0 → %q, want A,B", s)
-	}
-	if s := got(2, 2); s != "C,D" {
-		t.Errorf("limit=2 offset=2 → %q, want C,D", s)
-	}
-	if s := got(10, 1); s != "B,C,D" {
-		t.Errorf("limit past end → %q, want B,C,D", s)
-	}
-	if s := got(2, 99); s != "" {
-		t.Errorf("offset past end → %q, want empty", s)
 	}
 }
 
@@ -763,16 +686,16 @@ func TestManualHTTPActionRoundTrip(t *testing.T) {
 // userCache.handle returns the @handle, falling back to the raw id only when the user row is gone
 // (a purged peer, §13), and empty for an empty id.
 func TestUserCacheHandleFallback(t *testing.T) {
-	uc := newUserCache(nil, context.Background())
-	uc.m["u1"] = &kernel.User{Handle: "alice"}
+	uc := newAccountCache(nil, context.Background())
+	uc.m["u1"] = &kernel.Account{Handle: "alice"}
 	uc.m["gone"] = nil // cached miss (purged/unknown) → fall back to the id
-	if got := uc.handle("u1"); got != "alice" {
+	if got := uc.reference("u1"); got != "alice" {
 		t.Errorf("handle(u1) = %q, want @alice", got)
 	}
-	if got := uc.handle("gone"); got != "gone" {
+	if got := uc.reference("gone"); got != "gone" {
 		t.Errorf("handle(gone) = %q, want raw-id fallback", got)
 	}
-	if got := uc.handle(""); got != "" {
+	if got := uc.reference(""); got != "" {
 		t.Errorf("handle(empty) = %q, want empty", got)
 	}
 }
@@ -783,10 +706,10 @@ func TestEnrichTxDropsUUIDs(t *testing.T) {
 	tv := &kernel.TransactionView{Transaction: &kernel.Transaction{
 		ID: "tx1", OwnerUserID: "o", CallerUserID: "c", TargetUserID: "t",
 	}}
-	uc := newUserCache(nil, context.Background())
-	uc.m["o"] = &kernel.User{Handle: "owner"}
-	uc.m["c"] = &kernel.User{Handle: "caller"}
-	uc.m["t"] = &kernel.User{Handle: "target"}
+	uc := newAccountCache(nil, context.Background())
+	uc.m["o"] = &kernel.Account{Handle: "owner"}
+	uc.m["c"] = &kernel.Account{Handle: "caller"}
+	uc.m["t"] = &kernel.Account{Handle: "target"}
 
 	v := enrichTx(tv, uc)
 	if v.OwnerHandle != "owner" || v.CallerHandle != "caller" || v.TargetHandle != "target" {
@@ -847,5 +770,90 @@ func TestListActionsActiveOnlyByDefault(t *testing.T) {
 	all, _ := listPublicActions(k, ctx, sys.ID, "", "", true, 50, 0)
 	if !has(all) {
 		t.Error("superuser --all list must include the inactive action")
+	}
+}
+
+// TestResolveMixedNamespaces: only the six mixed admin commands consult both namespaces, and a bare
+// name matching a handle and a petname is refused rather than guessed — money and moderation must
+// never pick a target silently (§14).
+func TestResolveMixedNamespaces(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	ctx := context.Background()
+
+	local, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "shared", Password: "password123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	key := base64.RawURLEncoding.EncodeToString(pub)
+	if _, err := k.BindPetname(ctx, key, "kernelonly", true); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unambiguous: the local handle resolves to the account, the petname to the kernel.
+	if acct, gotKey, err := resolveMixed(k, ctx, "shared"); err != nil || acct == nil || acct.ID != local.ID || gotKey != "" {
+		t.Errorf("handle: got acct=%v key=%q err=%v", acct, gotKey, err)
+	}
+	if _, gotKey, err := resolveMixed(k, ctx, "kernelonly"); err != nil || gotKey != key {
+		t.Errorf("petname: got key=%q err=%v, want %s", gotKey, err, key)
+	}
+	// A raw key is self-identifying and always names the kernel.
+	if _, gotKey, err := resolveMixed(k, ctx, key); err != nil || gotKey != key {
+		t.Errorf("raw key: got key=%q err=%v", gotKey, err)
+	}
+
+	// Now make the name ambiguous by binding the same string in the kernel namespace.
+	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
+	key2 := base64.RawURLEncoding.EncodeToString(pub2)
+	if _, err := k.BindPetname(ctx, key2, "shared", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := resolveMixed(k, ctx, "shared"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("ambiguous bare name: want ErrInvalidInput, got %v", err)
+	}
+	if _, _, err := resolveMixed(k, ctx, "nobody"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("unknown name: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestAccountCacheReferenceRendersKernels: an unbound kernel account renders as its public key, not
+// a raw UUID — §14 requires a rendered identity to be a consumable command input, and a key is one.
+func TestAccountCacheReferenceRendersKernels(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	ctx := context.Background()
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	key := base64.RawURLEncoding.EncodeToString(pub)
+
+	acct, err := k.EnsureKernelAccount(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uc := newAccountCache(k, ctx)
+	if got := uc.reference(acct.ID); got != key {
+		t.Errorf("unbound kernel account rendered %q, want its key %s", got, key)
+	}
+	if _, err := k.BindPetname(ctx, key, "named-peer", true); err != nil {
+		t.Fatal(err)
+	}
+	if got := newAccountCache(k, ctx).reference(acct.ID); got != "named-peer" {
+		t.Errorf("bound kernel account rendered %q, want its petname", got)
+	}
+}
+
+// TestResolveMixedRefusesTombstones: the mixed admin commands take an id, so the purged-peer anchor
+// must be refused there too — it names no live entity (§13).
+func TestResolveMixedRefusesTombstones(t *testing.T) {
+	k, st := newRemoteTestKernel(t)
+	ctx := context.Background()
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	acct, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PurgePeerCascade(ctx, acct.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := resolveMixed(k, ctx, acct.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("tombstone id: want ErrNotFound, got %v", err)
 	}
 }

@@ -1904,12 +1904,14 @@ func TestResolveUser(t *testing.T) {
 	alice := setupUser(t, st, "alice", 0)
 	// A key account, to exercise public-key resolution.
 	pub := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
-	peer := &kernel.User{
-		ID:        uuid.New().String(),
-		Handle:    "peer",
-		PublicKey: pub,
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
+	if err := st.UpsertKernel(ctx, pub, "peer", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	peer := &kernel.Account{
+		ID:              uuid.New().String(),
+		KernelPublicKey: pub,
+		CreatedAt:       time.Now().UTC(),
+		UpdatedAt:       time.Now().UTC(),
 	}
 	if err := st.CreateUser(ctx, peer); err != nil {
 		t.Fatal(err)
@@ -1923,7 +1925,6 @@ func TestResolveUser(t *testing.T) {
 		{"alice", alice.ID},
 		{alice.ID, alice.ID},
 		{pub, peer.ID},
-		{"peer", peer.ID},
 	}
 	for _, c := range cases {
 		got, err := k.ResolveUser(ctx, c.ident)
@@ -1937,6 +1938,11 @@ func TestResolveUser(t *testing.T) {
 
 	if _, err := k.ResolveUser(ctx, "nobody"); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("ResolveUser(missing): want ErrNotFound, got %v", err)
+	}
+	// A kernel's petname lives in the OTHER namespace (§13): it never resolves as a user, which is
+	// what lets a local user and a kernel share the same bare name.
+	if _, err := k.ResolveUser(ctx, "peer"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("ResolveUser(petname): want ErrNotFound, got %v", err)
 	}
 }
 
