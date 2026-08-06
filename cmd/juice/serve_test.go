@@ -200,7 +200,8 @@ func httpDoWithHeaders(t *testing.T, srv *httptest.Server, method, path string, 
 // fedCall exercises the inbound federation path directly — the same handleFederationCall the
 // /juice/fed/call/1 transport handler invokes — and returns a synthetic *http.Response so the
 // existing status/body assertions carry over. The signature covers the exact args bytes, so the
-// receiver's args_hash matches (the same contract the transport preserves).
+// receiver's args_hash matches (the same contract the transport preserves). `action` is the
+// serving kernel's stable action id, exactly as the wire carries it (§13).
 func fedCall(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, action, idempKey string, args map[string]any) *http.Response {
 	t.Helper()
 	if args == nil {
@@ -1510,7 +1511,7 @@ func TestFederationCall(t *testing.T) {
 	}
 
 	// Signed federation call succeeds; counterparty is identified by public key.
-	resp := fedCall(t, k, priv, "sys/ping", "idem-key-1", map[string]any{})
+	resp := fedCall(t, k, priv, a.ID, "idem-key-1", map[string]any{})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -1523,24 +1524,93 @@ func TestFederationCall(t *testing.T) {
 	}
 
 	// Unknown action returns not found (auth passes, action check fails).
-	resp2 := fedCall(t, k, priv, "sys/nope", "idem-key-2", map[string]any{})
+	resp2 := fedCall(t, k, priv, uuid.New().String(), "idem-key-2", map[string]any{})
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown action: expected 404, got %d", resp2.StatusCode)
 	}
 
 	// Missing counterparty (empty key) is unauthenticated.
-	resp3 := fedCallRaw(t, k, "", time.Now().UTC().Format(time.RFC3339), "idem-key-3b", "sys/ping", "", []byte("{}"))
+	resp3 := fedCallRaw(t, k, "", time.Now().UTC().Format(time.RFC3339), "idem-key-3b", a.ID, "", []byte("{}"))
 	resp3.Body.Close()
 	if resp3.StatusCode != http.StatusUnauthorized {
 		t.Errorf("missing counterparty: expected 401, got %d", resp3.StatusCode)
 	}
 
-	// Valid counterparty but empty action ref is rejected (invalid action reference).
+	// An empty action id names no action, exactly like an unknown one.
 	resp4 := fedCall(t, k, priv, "", "idem-key-3", map[string]any{})
 	resp4.Body.Close()
-	if resp4.StatusCode != http.StatusUnprocessableEntity {
-		t.Errorf("empty action: expected 422, got %d", resp4.StatusCode)
+	if resp4.StatusCode != http.StatusNotFound {
+		t.Errorf("empty action: expected 404, got %d", resp4.StatusCode)
+	}
+}
+
+// TestFederationCallResolvesByStableID: the inbound wire reference is this kernel's stable action
+// id (§13), so an owner rename — display metadata, excluded from the contract hash — never strands
+// a caller's cached proxy. Resolving by id also makes a proxy row nameable inbound, which the old
+// handle lookup could not do, so it must be refused: federation is non-transitive (§8).
+func TestFederationCallResolvesByStableID(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	peer, err := k.EnsureKernelAccount(ctx, pubB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerID, _ := makeUser(t, k, "provider")
+	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
+		OwnerUserID: ownerID, Name: "greet", Kind: kernel.KindHTTP,
+		Source: backend.URL, Price: 0, Description: "greet",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, ownerID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	pubAll := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, ownerID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The owner renames: a handle-addressed dispatch would now resolve to nothing and park forever.
+	if _, err := k.RenameUser(ctx, sys.ID, ownerID, "provider2"); err != nil {
+		t.Fatal(err)
+	}
+	resp := fedCall(t, k, priv, a.ID, "idem-stable-1", map[string]any{})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("call after owner rename: expected 200, got %d", resp.StatusCode)
+	}
+
+	// A cached proxy row is never re-served, even when named by its id.
+	m := kernel.ActionManifest{
+		ActionID: "remote-act", OwnerHandle: "far", Name: "far-act", Kind: kernel.KindHTTP,
+		Price: 0, RemoteBPS: kernel.DefaultConfig().RemoteBPS, Description: "far",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-far", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+	}
+	m.Signature, _ = kernel.SignManifest(priv, &m)
+	proxy, err := k.ImportPeerAction(ctx, peer.ID, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2 := fedCall(t, k, priv, proxy.ID, "idem-stable-2", map[string]any{})
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("inbound call naming a proxy id: expected 404, got %d", resp2.StatusCode)
 	}
 }
 
@@ -1618,13 +1688,13 @@ func TestFederationCallSignsRejectionForNonExecutableAction(t *testing.T) {
 	}
 
 	// Inactive action → signed rejection.
-	assertSignedRejection("inactive", fedCall(t, k, priv, "sys/secret", "idem-s-1", map[string]any{}))
+	assertSignedRejection("inactive", fedCall(t, k, priv, a.ID, "idem-s-1", map[string]any{}))
 
 	// Activate but keep private → still non-executable for a non-owner → signed rejection.
 	if err := k.SetActive(ctx, sys.ID, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	assertSignedRejection("active-private", fedCall(t, k, priv, "sys/secret", "idem-s-2", map[string]any{}))
+	assertSignedRejection("active-private", fedCall(t, k, priv, a.ID, "idem-s-2", map[string]any{}))
 }
 
 // TestWaitingOnPeer: a waiting step whose required caller is a peer (proxy) user is flagged
@@ -1829,7 +1899,7 @@ func TestFederationCallAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	action := "sys/authtest"
+	action := a.ID
 	cpKey := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
 
@@ -1920,7 +1990,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
 	// First call: must return a non-nil receipt.
-	r1 := fedCall(t, k, priv, "sys/replay-ping", "replay-idem-1", map[string]any{})
+	r1 := fedCall(t, k, priv, a.ID, "replay-idem-1", map[string]any{})
 	defer r1.Body.Close()
 	if r1.StatusCode != http.StatusOK {
 		t.Fatalf("first call: want 200, got %d", r1.StatusCode)
@@ -1932,7 +2002,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 	}
 
 	// Replay with same idempotency key: receipt must also be non-nil.
-	r2 := fedCall(t, k, priv, "sys/replay-ping", "replay-idem-1", map[string]any{})
+	r2 := fedCall(t, k, priv, a.ID, "replay-idem-1", map[string]any{})
 	defer r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
 		t.Fatalf("replay: want 200, got %d", r2.StatusCode)
@@ -2087,14 +2157,14 @@ func TestFederationReplay(t *testing.T) {
 	_, _ = k.EnsureKernelAccount(ctx, pubB64)
 
 	ikey1 := uuid.New().String()
-	r1 := fedCall(t, k, priv, "sys/fed-greet", ikey1, map[string]any{})
+	r1 := fedCall(t, k, priv, a.ID, ikey1, map[string]any{})
 	defer r1.Body.Close()
 	if r1.StatusCode != http.StatusOK {
 		t.Fatalf("first call: want 200, got %d", r1.StatusCode)
 	}
 
 	// Replay same key → 200.
-	r2 := fedCall(t, k, priv, "sys/fed-greet", ikey1, map[string]any{})
+	r2 := fedCall(t, k, priv, a.ID, ikey1, map[string]any{})
 	defer r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
 		t.Errorf("replay: want 200, got %d", r2.StatusCode)
@@ -2115,7 +2185,7 @@ func TestFederationReplay(t *testing.T) {
 		CreatedAt:          now,
 		ExpiresAt:          now.Add(time.Hour),
 	})
-	r3 := fedCall(t, k, priv, "sys/fed-greet", ikey2, map[string]any{})
+	r3 := fedCall(t, k, priv, a.ID, ikey2, map[string]any{})
 	defer r3.Body.Close()
 	if r3.StatusCode != http.StatusConflict {
 		t.Errorf("pending: want 409, got %d", r3.StatusCode)
@@ -2165,7 +2235,7 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 
 	ikey := uuid.New().String()
 	// fedHeaders signs an empty body {}; strict schema requires "name" → schema error.
-	r1 := fedCall(t, k, priv, "sys/strict", ikey, map[string]any{})
+	r1 := fedCall(t, k, priv, a.ID, ikey, map[string]any{})
 	defer r1.Body.Close()
 	if r1.StatusCode == http.StatusConflict {
 		t.Fatal("first call returned 409: idempotency record was not created")
@@ -2176,7 +2246,7 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 	}
 
 	// Replay same key → must return the same error, not 409.
-	r2 := fedCall(t, k, priv, "sys/strict", ikey, map[string]any{})
+	r2 := fedCall(t, k, priv, a.ID, ikey, map[string]any{})
 	defer r2.Body.Close()
 	if r2.StatusCode == http.StatusConflict {
 		t.Errorf("replay after precondition failure: got 409 (record still pending), want error response")
@@ -2216,14 +2286,14 @@ func TestFederationIdempotencyCommittedFailureHasReceipt(t *testing.T) {
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
 	ikey := uuid.New().String()
-	r1 := fedCall(t, k, priv, "sys/fail-exec", ikey, map[string]any{})
+	r1 := fedCall(t, k, priv, a.ID, ikey, map[string]any{})
 	defer r1.Body.Close()
 	if r1.StatusCode == http.StatusConflict {
 		t.Fatal("first call returned 409")
 	}
 
 	// Replay same key: must return error (not 409) and a non-nil receipt.
-	r2 := fedCall(t, k, priv, "sys/fail-exec", ikey, map[string]any{})
+	r2 := fedCall(t, k, priv, a.ID, ikey, map[string]any{})
 	if r2.StatusCode == http.StatusConflict {
 		t.Errorf("committed failure replay: got 409, want error response")
 	}
@@ -2271,8 +2341,8 @@ func TestFederationCallContractHashMismatch(t *testing.T) {
 	argsHash := sha256HexBytes(body)
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
 	// Sign a stale contract hash: it verifies (it is in the signed payload) but does not match current.
-	sig, _ := kernel.SignFederationPayload(priv, "sys/chash-act", cp, ownKey, "stale-hash", "idem-chash-1", ts, argsHash)
-	status, respBody, err := handleFederationCall(k, ctx, cp, "stale-hash", ts, "idem-chash-1", "sys/chash-act", sig, body)
+	sig, _ := kernel.SignFederationPayload(priv, a.ID, cp, ownKey, "stale-hash", "idem-chash-1", ts, argsHash)
+	status, respBody, err := handleFederationCall(k, ctx, cp, "stale-hash", ts, "idem-chash-1", a.ID, sig, body)
 	if err != nil {
 		t.Fatalf("handleFederationCall: %v", err)
 	}
@@ -2318,8 +2388,8 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	signedHash := sha256HexBytes([]byte("{}"))
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
-	sig, _ := kernel.SignFederationPayload(priv, "sys/hash-check", cp, ownKey, "", "idem-hash-1", ts, signedHash)
-	resp := fedCallRaw(t, k, cp, ts, "idem-hash-1", "sys/hash-check", sig, []byte(`{"injected":true}`))
+	sig, _ := kernel.SignFederationPayload(priv, a.ID, cp, ownKey, "", "idem-hash-1", ts, signedHash)
+	resp := fedCallRaw(t, k, cp, ts, "idem-hash-1", a.ID, sig, []byte(`{"injected":true}`))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("args_hash mismatch: want 401, got %d", resp.StatusCode)

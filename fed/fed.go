@@ -64,7 +64,7 @@ type ResolveResponse struct {
 // CallRequest is the wire form of an inbound federation call (§13). Args carries the exact
 // bytes the caller hashed and signed, so the receiver's args_hash matches byte-for-byte.
 type CallRequest struct {
-	Action               string          `json:"action"`                 // remote action ref, @owner/name
+	Action               string          `json:"action"`                 // the action's stable id on the serving kernel
 	Counterparty         string          `json:"counterparty"`           // caller's base64url Ed25519 public key
 	ExpectedContractHash string          `json:"expected_contract_hash"` // contract hash the caller cached (§8 If-Match)
 	IdempotencyKey       string          `json:"idempotency_key"`        //

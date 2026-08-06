@@ -829,6 +829,56 @@ func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel,
 	return k, a, caller
 }
 
+// TestRemoteDispatchUsesStableActionID: dispatch names the peer's stable action id, never the
+// cached display reference in Source — on the first call and on the retry that settles a parked
+// one (§13). A row cached before handles were bare stores "@owner/name", which no current peer can
+// parse; that is a plain error, not a signed rejection, so a name-addressed dispatch would park the
+// caller until the max-age bound with no way to self-heal. A remote owner rename drifts the same way.
+func TestRemoteDispatchUsesStableActionID(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+
+	fake := &fakeFederationHTTP{} // no receipt → the call parks, so the retry path is reachable
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.FeeRecipientID = testIssuerUserID
+	cfg.SigningKey = testSigningKey()
+	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+
+	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "stable-action", 1000)
+	a.Source = "@settle-peer/settleact" // the legacy sigil form a v0.12.4+ peer rejects
+	if err := st.UpdateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("Run: expected ErrTimeout (pending), got %v", err)
+	}
+	if fake.sentAction != "stable-action" {
+		t.Errorf("first dispatch sent %q, want the stable remote action id", fake.sentAction)
+	}
+	pend, _ := st.ListPendingRemoteTraces(ctx)
+	if len(pend) != 1 {
+		t.Fatalf("expected 1 pending remote trace, got %d", len(pend))
+	}
+	ikey := *pend[0].IdempotencyKey
+	if fake.sentIdempotencyKey != ikey {
+		t.Errorf("first dispatch sent key %q, want the parked %q", fake.sentIdempotencyKey, ikey)
+	}
+
+	fake.sentAction, fake.sentIdempotencyKey = "", ""
+	k.RetryPendingRemoteDispatches(ctx)
+	if fake.sentAction != "stable-action" {
+		t.Errorf("retry dispatched %q, want the stable remote action id", fake.sentAction)
+	}
+	// The retry must re-present the parked key on the wire, or the peer executes the call twice.
+	if fake.sentIdempotencyKey != ikey {
+		t.Errorf("retry sent key %q, want the parked %q", fake.sentIdempotencyKey, ikey)
+	}
+}
+
 // TestRetryExpiredRemoteTraceSettlesAsFailure (#5): past RemotePendingMaxAge a never-settled
 // remote-proxy call is settled as a failure with full refund, not retried forever (§13).
 func TestRetryExpiredRemoteTraceSettlesAsFailure(t *testing.T) {

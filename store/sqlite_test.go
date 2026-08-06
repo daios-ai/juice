@@ -4266,6 +4266,93 @@ func TestMigration037SplitsAccountsAndKernelsPreservingRows(t *testing.T) {
 	}
 }
 
+// TestMigration038NormalizesProxyVisibility: a proxy row is kernel-managed and always local (§8),
+// but rows cached before that was enforced are public, so they surface in anonymous action
+// listings. The migration corrects the data without touching ids, stats, or history; a row that
+// was created and never promoted stays private.
+func TestMigration038NormalizesProxyVisibility(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "up38.db") +
+		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
+	raw, err := sql.Open(driverName, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw.SetMaxOpenConns(1)
+	defer raw.Close()
+	s := &DB{db: raw}
+	if _, err := raw.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	files, err := migrationFileNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var held []string
+	for _, f := range files {
+		version := strings.TrimSuffix(path.Base(f), ".sql")
+		if path.Base(f) >= "038_" {
+			held = append(held, f)
+			continue
+		}
+		b, _ := migrationFS.ReadFile(f)
+		if err := s.applyMigration(version, string(b)); err != nil {
+			t.Fatalf("apply %s: %v", version, err)
+		}
+	}
+	if len(held) == 0 || !strings.HasPrefix(path.Base(held[0]), "038_") {
+		t.Fatal("migration 038 not found")
+	}
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := s.UpsertKernel(ctx, "peerkey038", "peer", "", now); err != nil {
+		t.Fatal(err)
+	}
+	peer := newUser("", 0)
+	peer.PasswordHash, peer.KernelPublicKey = "", "peerkey038"
+	if err := s.CreateUser(ctx, peer); err != nil {
+		t.Fatal(err)
+	}
+	seed := func(name string, vis kernel.ActionVisibility) *kernel.Action {
+		a := newAction(peer.ID, name, 5, true)
+		a.Kind = kernel.KindRemoteProxy
+		a.Visibility = vis
+		a.RemoteActionID = "ra-" + name
+		if err := s.CreateAction(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	legacy := seed("far/one", kernel.VisibilityPublic)
+	unpromoted := seed("far/two", kernel.VisibilityPrivate)
+	local := newAction(peer.ID, "own/http", 5, true)
+	local.Visibility = kernel.VisibilityPublic
+	if err := s.CreateAction(ctx, local); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, f := range held {
+		b, _ := migrationFS.ReadFile(f)
+		if err := s.applyMigration(strings.TrimSuffix(path.Base(f), ".sql"), string(b)); err != nil {
+			t.Fatalf("apply 038: %v", err)
+		}
+	}
+
+	got, err := s.ReadAction(ctx, legacy.ID)
+	if err != nil || got.Visibility != kernel.VisibilityLocal {
+		t.Fatalf("legacy public proxy: err=%v visibility=%q, want local", err, got.Visibility)
+	}
+	if got.ID != legacy.ID || got.Price != 5 || !got.Active || got.RemoteActionID != "ra-far/one" {
+		t.Errorf("migration altered more than visibility: %+v", got)
+	}
+	if u, _ := s.ReadAction(ctx, unpromoted.ID); u.Visibility != kernel.VisibilityPrivate {
+		t.Errorf("unpromoted proxy visibility = %q, want private (untouched)", u.Visibility)
+	}
+	if l, _ := s.ReadAction(ctx, local.ID); l.Visibility != kernel.VisibilityPublic {
+		t.Errorf("non-proxy action visibility = %q, want public (untouched)", l.Visibility)
+	}
+}
+
 // TestPurgedPeerIsHistoryNotAUser: retention keeps the credentialless row as the ledger anchor §13
 // requires, but a handleless, keyless account is history — it must not surface as a live local user.
 func TestPurgedPeerIsHistoryNotAUser(t *testing.T) {

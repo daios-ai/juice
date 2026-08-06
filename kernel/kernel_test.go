@@ -2158,6 +2158,10 @@ type fakeFederationHTTP struct {
 	rejectSignKey  ed25519.PrivateKey
 	rejectActionID string
 	rejectArgsHash string
+	// sentAction / sentIdempotencyKey record what the kernel actually put on the wire (§13: the
+	// peer's stable action id, under the key parked with the dispatch).
+	sentAction         string
+	sentIdempotencyKey string
 }
 
 func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, _, _ string) (*kernel.ActionManifest, error) {
@@ -2178,7 +2182,8 @@ func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[
 	return nil, kernel.ErrInvalidState.Wrap("not used in federation tests")
 }
 
-func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, _, _, idempotencyKey string, _ map[string]any) (kernel.FederationResult, error) {
+func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, actionID, _, idempotencyKey string, _ map[string]any) (kernel.FederationResult, error) {
+	f.sentAction, f.sentIdempotencyKey = actionID, idempotencyKey
 	if f.notDispatched {
 		return kernel.FederationResult{NotDispatched: true}, nil
 	}

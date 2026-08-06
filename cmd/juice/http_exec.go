@@ -217,16 +217,16 @@ func doHTTP(ctx context.Context, method, rawURL string, headers map[string]strin
 type signerFunc = func(action, counterparty, recipient, expectedContractHash, idempotencyKey, argsHash string) (sig, ts string, err error)
 
 // ExecuteFederation sends a cross-kernel call over the libp2p federation transport (§13),
-// addressing the peer by its Ed25519 public key. The routing (peer key, action ref) that used
+// addressing the peer by its Ed25519 public key. The routing (peer key, action id) that used
 // to live in a URL is now explicit arguments. A missing transport, or a transport error,
 // returns a zero FederationResult so the kernel keeps the call pending for retry.
-func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, peerPublicKey, actionRef, expectedContractHash, idempotencyKey string, args map[string]any) (kernel.FederationResult, error) {
+func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, peerPublicKey, actionID, expectedContractHash, idempotencyKey string, args map[string]any) (kernel.FederationResult, error) {
 	if e.fedTransport == nil {
 		// No transport at all: the request provably cannot have been sent (§13 never-dispatched).
 		return kernel.FederationResult{NotDispatched: true}, nil
 	}
 	return executeFederationOverTransport(ctx, e.fedTransport, e.signerFn, e.localPubKey,
-		peerPublicKey, actionRef, expectedContractHash, idempotencyKey, args)
+		peerPublicKey, actionID, expectedContractHash, idempotencyKey, args)
 }
 
 // federationTransport is the outbound half of the libp2p transport this executor needs; *fed.Transport
@@ -299,7 +299,7 @@ func (e *httpActionExecutor) ResolveRemoteUser(ctx context.Context, peerPublicKe
 // executeFederationOverTransport is the transport-backed kernel.FederationExecutor. It signs the
 // request as this kernel and sends the exact args bytes so the receiver's args_hash matches.
 func executeFederationOverTransport(ctx context.Context, tr federationTransport, signerFn signerFunc,
-	localPubKey, peerPublicKey, actionRef, expectedContractHash, idempotencyKey string, args map[string]any) (kernel.FederationResult, error) {
+	localPubKey, peerPublicKey, actionID, expectedContractHash, idempotencyKey string, args map[string]any) (kernel.FederationResult, error) {
 
 	body, err := json.Marshal(args)
 	if err != nil {
@@ -307,14 +307,14 @@ func executeFederationOverTransport(ctx context.Context, tr federationTransport,
 	}
 	argsHash := sha256HexBytes(body)
 	req := fed.CallRequest{
-		Action:               actionRef,
+		Action:               actionID,
 		Counterparty:         localPubKey,
 		ExpectedContractHash: expectedContractHash,
 		IdempotencyKey:       idempotencyKey,
 		Args:                 json.RawMessage(body),
 	}
 	if signerFn != nil {
-		if sig, ts, serr := signerFn(actionRef, localPubKey, peerPublicKey, expectedContractHash, idempotencyKey, argsHash); serr == nil {
+		if sig, ts, serr := signerFn(actionID, localPubKey, peerPublicKey, expectedContractHash, idempotencyKey, argsHash); serr == nil {
 			req.Signature = sig
 			req.Timestamp = ts
 		}

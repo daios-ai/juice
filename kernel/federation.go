@@ -843,7 +843,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	// fr.NotDispatched is deliberately ignored on the retry path: a parked trace's request may
 	// already have executed remotely, so §13 forbids fail-fast here — only a signed receipt or the
 	// max-pending-age bound below settles it. Never-dispatched fail-fast lives solely in Call (§6).
-	fr, _ := fe.ExecuteFederation(ctx, target.KernelPublicKey, action.Source, action.ArtifactHash, *trace.IdempotencyKey, dispatch.Args)
+	fr, _ := fe.ExecuteFederation(ctx, target.KernelPublicKey, action.RemoteActionID, action.ArtifactHash, *trace.IdempotencyKey, dispatch.Args)
 	if fr.ReceiptJSON != "" {
 		_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, 0)
 		if !errors.Is(err, ErrTimeout) {
@@ -1520,7 +1520,7 @@ func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, actionParam, argsH
 		ID:           uuid.New().String(),
 		IssuerUserID: k.cfg.IssuerUserID,
 		TxID:         idempotencyKey, // no real TxID; idempotency key identifies this rejection
-		ActionID:     actionParam,    // action ref string (no UUID; no call was executed)
+		ActionID:     actionParam,    // the refused action's id, matching the caller's remote_action_id
 		CallerUserID: counterpartyID,
 		ArgsHash:     argsHash,
 		Status:       TxFailure,

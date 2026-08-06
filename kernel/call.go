@@ -476,7 +476,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	argsJSON, _ := json.Marshal(req.Args)
 	ktx.ArgsJSON = json.RawMessage(argsJSON)
 
-	// 9. Execute. Remote proxy calls use ExecuteFederation directly with the stored idempotency key.
+	// 9. Execute. Remote proxy calls use ExecuteFederation directly with the stored idempotency key,
+	// dispatching the peer's stable action id — never the cached display name (§13).
 	started := time.Now()
 
 	if action.Kind == KindRemoteProxy {
@@ -501,7 +502,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		if trace.IdempotencyKey != nil {
 			ikey = *trace.IdempotencyKey
 		}
-		fr, _ := fe.ExecuteFederation(ctx, target.KernelPublicKey, action.Source, action.ArtifactHash, ikey, req.Args)
+		fr, _ := fe.ExecuteFederation(ctx, target.KernelPublicKey, action.RemoteActionID, action.ArtifactHash, ikey, req.Args)
 		latency := time.Since(started).Seconds()
 		ktx.EndedAt = time.Now().UTC()
 		if fr.NotDispatched {

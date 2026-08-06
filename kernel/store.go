@@ -60,13 +60,13 @@ type URLFetcher interface {
 }
 
 // FederationExecutor sends a cross-kernel call to a remote proxy target over the federation
-// transport (§13), addressing the peer by its Ed25519 public key. actionRef is the remote
-// action reference (@owner/name); expectedContractHash is the cached contract hash the call
+// transport (§13), addressing the peer by its Ed25519 public key. actionID is the action's stable
+// id on that peer; expectedContractHash is the cached contract hash the call
 // binds as the §8 If-Match precondition. The transport signs the request as this kernel and
 // resolves peerPublicKey to a live path (direct / hole-punched / relayed). HTTPExecutor
 // implementations may optionally implement this interface; kernel checks via type assertion.
 type FederationExecutor interface {
-	ExecuteFederation(ctx context.Context, peerPublicKey, actionRef, expectedContractHash, idempotencyKey string, args map[string]any) (FederationResult, error)
+	ExecuteFederation(ctx context.Context, peerPublicKey, actionID, expectedContractHash, idempotencyKey string, args map[string]any) (FederationResult, error)
 }
 
 // FederationSettler runs one round of the /juice/fed/settle/1 residual-settlement exchange against a

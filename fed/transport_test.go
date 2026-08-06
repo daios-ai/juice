@@ -220,7 +220,7 @@ func TestCallUnresolvableIsNotDispatched(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := a.Call(ctx, unknown, CallRequest{Action: "@x/y", IdempotencyKey: "k"})
+	_, err := a.Call(ctx, unknown, CallRequest{Action: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", IdempotencyKey: "k"})
 	if !errors.Is(err, ErrNotDispatched) {
 		t.Fatalf("unresolvable Call: expected ErrNotDispatched, got %v", err)
 	}
@@ -228,7 +228,7 @@ func TestCallUnresolvableIsNotDispatched(t *testing.T) {
 	// A reachable peer round-trips without the sentinel.
 	b := newTestTransport(t, &fakeHandlers{callBody: json.RawMessage(`{}`)}, nil)
 	a2 := newTestTransport(t, &fakeHandlers{}, b.ListenAddrs())
-	if _, err := a2.Call(ctx, b.PublicKey(), CallRequest{Action: "@x/y", IdempotencyKey: "k"}); errors.Is(err, ErrNotDispatched) {
+	if _, err := a2.Call(ctx, b.PublicKey(), CallRequest{Action: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", IdempotencyKey: "k"}); errors.Is(err, ErrNotDispatched) {
 		t.Errorf("reachable Call must not report ErrNotDispatched: %v", err)
 	}
 }

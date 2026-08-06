@@ -105,7 +105,7 @@ func TestTransportRoundTrip(t *testing.T) {
 
 	// Call
 	resp, err := b.Call(ctx, a.PublicKey(), CallRequest{
-		Action: "@srv/act", Counterparty: b.PublicKey(), IdempotencyKey: "idem-1",
+		Action: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", Counterparty: b.PublicKey(), IdempotencyKey: "idem-1",
 		Timestamp: "2026-07-02T00:00:00Z", Signature: "sig", Args: json.RawMessage(`{"x":1}`),
 	})
 	if err != nil {
@@ -161,7 +161,7 @@ func TestTransportUnresolvableKey(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := a.Call(ctx, unknown, CallRequest{Action: "@x/y"}); err == nil {
+	if _, err := a.Call(ctx, unknown, CallRequest{Action: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31"}); err == nil {
 		t.Fatal("expected error calling an unresolvable key")
 	}
 }

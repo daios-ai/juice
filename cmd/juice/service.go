@@ -1198,28 +1198,22 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		}
 	}
 
-	// The inbound wire ref is a local action on this (the serving) kernel: owner/name, tolerant of a
-	// legacy leading "@". A kernel-qualified ref would name a third kernel and is not executable here.
-	r, err := kernel.ParseActionRef(actionParam)
-	if err != nil {
-		return 0, nil, err
+	// The inbound wire reference is this (the serving) kernel's stable action id (§13): a handle is
+	// mutable display metadata, so naming execution by it parks a caller forever the moment it drifts.
+	// An empty or unknown id is simply an unknown action.
+	action, err := k.ReadAction(ctx, actionParam)
+	if err != nil || action == nil {
+		return 0, nil, kernel.ErrNotFound.Wrapf("action %s not found", actionParam)
 	}
-	if !r.Local() {
+	// A proxy is never re-served: federation is non-transitive (§8), and resolving by id would
+	// otherwise reach the cache row that the old handle lookup could not name.
+	if action.Kind == kernel.KindRemoteProxy {
 		return 0, nil, kernel.ErrNotFound.Wrapf("action %s not found", actionParam)
 	}
 
 	var args map[string]any
 	if err := json.Unmarshal(rawBody, &args); err != nil {
 		return 0, nil, kernel.ErrInvalidInput.Wrap("invalid JSON")
-	}
-
-	owner, err := k.ReadUserByHandle(ctx, r.Owner)
-	if err != nil || owner == nil {
-		return 0, nil, kernel.ErrNotFound.Wrap("action owner not found")
-	}
-	action, err := k.ReadActionByOwnerName(ctx, owner.ID, r.Name)
-	if err != nil || action == nil {
-		return 0, nil, kernel.ErrNotFound.Wrapf("action %s not found", actionParam)
 	}
 	// A known-but-non-executable action (inactive, non-public, suspended owner) is NOT rejected
 	// here: letting the call flow into RunFederated makes CanCall fail before any transaction, and
@@ -1272,7 +1266,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		}
 	}
 
-	reply, callErr := k.RunFederated(ctx, counterparty.ID, owner.ID, r.Name, args, rec.ID)
+	reply, callErr := k.RunFederated(ctx, counterparty.ID, action.OwnerUserID, action.Name, args, rec.ID)
 	if callErr != nil {
 		errJSON, _ := json.Marshal(map[string]string{
 			"error": callErr.Error(),
