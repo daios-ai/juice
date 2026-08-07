@@ -1382,6 +1382,10 @@ a kernel calls a remote action (unrated), so it gossips receipt-backed trade evi
   caller and the subject, pulls gossip directly from each, sees the caller's evidence about the subject under
   the caller as issuer (creating no account for either), discovers the subject's action via its discovery
   cache (sys/lookup), resolves it directly by key, runs — its own Stats start at defaults and accumulate
+a caller resolves and runs a discovered remote action, then continues past the charge: the action is
+  still found by sys/lookup (the proxy is indexed, not merely cached), its rendered reference is
+  owner@kernel/name with a non-empty owner_handle, re-running it by that reference needs no second
+  resolve, and the petname bound itself on first use — including when the peer already held an account
 B suspends A: A's next inbound call to B gets a signed rejection receipt; unsuspend restores it
 inbound call from an underfunded peer yields a signed rejection receipt the caller settles on
 caller runs a NAT-bound peer's action, the peer goes offline mid-call; the caller's allocation stays

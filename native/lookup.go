@@ -46,7 +46,7 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 		}
 		items[i] = map[string]any{
 			"action_id":     r.Action.ID,
-			"action":        r.OwnerHandle + "/" + r.Action.Name,
+			"action":        kernel.FormatActionRef(r.Action),
 			"description":   r.Action.Description,
 			"price":         r.Price,
 			"score":         float64(r.Score),

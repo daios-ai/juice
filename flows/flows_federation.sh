@@ -293,13 +293,24 @@ flow_fed_gossip_discovery() {
     done
     assert_eq "fed_gossip.l_discovered_via_routing" yes "$lfound"
 
-    # T cold-resolves R's action by key with its FIRST call, then binds the kernel-r alias by key.
+    # T cold-resolves R's action by key with its FIRST call. No `admin rename` here on purpose:
+    # first meaningful use must bind the petname itself (§13), seeded from R's nickname kernel-r.
     assert_nonempty "fed_gossip.t_resolves_and_calls" "$(strfield "$(jj "$dbt" "$ht" run "sys@$rkey/greet" '{}')" tx_id)"
-    j "$dbt" "$ht" admin rename -- "$rkey" kernel-r >/dev/null 2>&1
     local tp; tp=$(strfield "$(jj "$dbt" "$ht" action show sys@kernel-r/greet)" id)
-    assert_nonempty "fed_gossip.t_has_greet_proxy" "$tp"
+    assert_nonempty "fed_gossip.t_auto_bound_petname" "$tp"
+
+    # The buying loop continues PAST the charge (§15). A bought action must stay findable, must
+    # render a reference a command can consume (R8), and must re-run from that reference alone.
+    local shown; shown=$(jj "$dbt" "$ht" action show "$tp")
+    assert_json "fed_gossip.t_proxy_ref_qualified" "$shown" action "sys@kernel-r/greet"
+    assert_json "fed_gossip.t_proxy_owner_handle" "$shown" owner_handle kernel-r
+    # Searching again finds the proxy that now shadows the discovery row it replaced.
+    assert_contains "fed_gossip.t_still_findable" "sys@kernel-r/greet" "$(jj "$dbt" "$ht" run sys/lookup '{"query":"greet"}')"
     # Exactly one use — T's OWN call — proving local stats are NOT inherited from R's gossiped manifest.
     assert_jnum "fed_gossip.t_stats_own_only" "$(jj "$dbt" "$ht" action stats "$tp")" uses 1
+    # Re-running by the rendered reference needs no second resolve (asserted after the stats check,
+    # which counts T's own calls).
+    assert_nonempty "fed_gossip.t_reruns_by_ref" "$(strfield "$(jj "$dbt" "$ht" run sys@kernel-r/greet '{}')" tx_id)"
 
     # §13 leg-(b) evidence propagation + corroboration: T's call to R above was UNRATED, yet T now gossips
     # receipt-backed execution evidence about R (subject=R, issuer=T) — every admitted execution, not only

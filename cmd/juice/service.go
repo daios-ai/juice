@@ -140,7 +140,7 @@ func (c *accountCache) isPeer(id string) bool {
 func enrichStep(k *kernel.Kernel, ctx context.Context, step *kernel.Step, action *kernel.Action, uc *accountCache) *stepWithAction {
 	v := &stepWithAction{Step: step, RequiredCallerHandle: uc.reference(step.RequiredCallerUserID)}
 	if action != nil {
-		v.Action = action.OwnerHandle + "/" + action.Name
+		v.Action = actionRef(action, uc)
 	}
 	// The creating action (what produced this step) carries its meaning; the target action can be a
 	// generic sink (e.g. @sys/message parks a @sys/sink step). Resolve it from the parent trace.
@@ -208,13 +208,23 @@ func enrichTx(tv *kernel.TransactionView, uc *accountCache) *txView {
 	}
 }
 
-func enrichAction(k *kernel.Kernel, a *kernel.Action) actionResp {
-	ref := ""
-	if a.OwnerHandle != "" && a.Name != "" {
-		ref = a.OwnerHandle + "/" + a.Name
+// actionRef renders an action's reference through the one canonical formatter (§13 grammar),
+// populating the display owner first: a kernel account holds no handle, so its petname — else its
+// key — is the mount alias FormatActionRef needs to render owner@kernel/name. Writing the field
+// back also keeps `owner_handle` non-empty on the response (R8).
+func actionRef(a *kernel.Action, uc *accountCache) string {
+	if a.OwnerHandle == "" {
+		a.OwnerHandle = uc.reference(a.OwnerUserID)
 	}
+	if a.Name == "" {
+		return ""
+	}
+	return kernel.FormatActionRef(a)
+}
+
+func enrichAction(k *kernel.Kernel, a *kernel.Action, uc *accountCache) actionResp {
 	scheme, requiresGrant := k.ActionAuthInfo(a)
-	return actionResp{Action: a, ActionRef: ref, HTTP: httpViewOf(a), AuthScheme: scheme, RequiresGrant: requiresGrant}
+	return actionResp{Action: a, ActionRef: actionRef(a, uc), HTTP: httpViewOf(a), AuthScheme: scheme, RequiresGrant: requiresGrant}
 }
 
 // peerStateStaleAfter is how old a peer's last sync may be before its proxies read as offline (§13):
@@ -593,7 +603,7 @@ func createAction(k *kernel.Kernel, ctx context.Context, callerID string, req ke
 	if err != nil {
 		return actionResp{}, err
 	}
-	return enrichAction(k, full), nil
+	return enrichAction(k, full, newAccountCache(k, ctx)), nil
 }
 
 func getAction(k *kernel.Kernel, ctx context.Context, callerID, id string) (actionResp, error) {
@@ -601,7 +611,7 @@ func getAction(k *kernel.Kernel, ctx context.Context, callerID, id string) (acti
 	if err != nil {
 		return actionResp{}, err
 	}
-	r := enrichAction(k, a)
+	r := enrichAction(k, a, newAccountCache(k, ctx))
 	if a.Kind == kernel.KindRemoteProxy {
 		owner, _ := k.ReadUser(ctx, a.OwnerUserID)
 		r.PeerState = peerStateFor(k, ctx, owner, a.Price, peerStateStaleAfter())
@@ -614,7 +624,7 @@ func updateAction(k *kernel.Kernel, ctx context.Context, callerID string, req ke
 	if err != nil {
 		return actionResp{}, err
 	}
-	return enrichAction(k, a), nil
+	return enrichAction(k, a, newAccountCache(k, ctx)), nil
 }
 
 // listPublicActions returns actions visible to the caller, optionally filtered by owner handle and name.
@@ -711,7 +721,7 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 	staleAfter := peerStateStaleAfter()
 	for i, a := range actions {
 		cp := *a
-		r := enrichAction(k, &cp) // decompose http view before hiding the raw blob
+		r := enrichAction(k, &cp, uc) // decompose http view before hiding the raw blob
 		if cp.Kind == kernel.KindRemoteProxy {
 			r.PeerState = peerStateFor(k, uc.ctx, uc.get(cp.OwnerUserID), cp.Price, staleAfter)
 		}

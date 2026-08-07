@@ -148,13 +148,29 @@ func (k *Kernel) ProcessOwnerID(ctx context.Context, processID string) string {
 	return p.OwnerUserID
 }
 
-// actionRefOf builds "@owner/name" for an already-read action (no redundant read); ActionRef and
-// callers that already hold the action share it.
+// actionRefOf builds an action's reference for an already-read action (no redundant read);
+// ActionRef and callers that already hold the action share it. Grammar lives in FormatActionRef —
+// this only supplies the display owner it needs.
 func (k *Kernel) actionRefOf(ctx context.Context, a *Action) string {
-	if h := k.callerHandle(ctx, a.OwnerUserID); h != "" {
-		return h + "/" + a.Name
+	cp := *a // display-only: never write the resolved owner back onto the caller's action
+	if cp.OwnerHandle == "" {
+		cp.OwnerHandle = k.displayOwner(ctx, a.OwnerUserID)
 	}
-	return a.Name
+	return FormatActionRef(&cp)
+}
+
+// displayOwner names an action's owner for output (§14): a local user's handle, else — for a
+// kernel account, which holds no handle by design — its kernel's petname, falling back to the raw
+// key. Empty only when the row is gone.
+func (k *Kernel) displayOwner(ctx context.Context, ownerID string) string {
+	if h := k.callerHandle(ctx, ownerID); h != "" {
+		return h
+	}
+	u, err := k.store.ReadUser(ctx, ownerID)
+	if err != nil || u == nil || u.KernelPublicKey == "" {
+		return ""
+	}
+	return k.KernelName(ctx, u.KernelPublicKey)
 }
 
 // SetSecretBox installs the credential encryption adapter. Must be called before any
@@ -2821,11 +2837,12 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 			continue
 		}
 		if _, cached := ownerHandles[a.OwnerUserID]; !cached {
-			if u, err := k.store.ReadUser(ctx, a.OwnerUserID); err == nil {
-				ownerHandles[a.OwnerUserID] = u.Handle
-			}
+			// displayOwner, not the bare handle: a resolved proxy is owned by a kernel account,
+			// which holds none, and would otherwise render with an empty owner (§14 R8).
+			ownerHandles[a.OwnerUserID] = k.displayOwner(ctx, a.OwnerUserID)
 		}
-		out = append(out, &LookupResult{Action: a, OwnerHandle: ownerHandles[a.OwnerUserID], Price: a.Price, Score: float32(r.score)})
+		a.OwnerHandle = ownerHandles[a.OwnerUserID] // the mount alias FormatActionRef renders from
+		out = append(out, &LookupResult{Action: a, OwnerHandle: a.OwnerHandle, Price: a.Price, Score: float32(r.score)})
 	}
 	return out, nil
 }

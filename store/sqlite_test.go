@@ -4428,3 +4428,66 @@ func TestDiscoveryDocServingPrice(t *testing.T) {
 		t.Error("a negative serving_price must be rejected by the CHECK constraint")
 	}
 }
+
+// TestMigration040ReindexesProxies: migration 040 backfills the lexical index for proxies created
+// by the resolve path before it indexed them, without duplicating an already-indexed row and
+// without touching inactive or deleted ones. The rows stay active — repair is of the derived
+// index, not of domain state (a raw-id call does not re-resolve). The migration's own SQL is
+// replayed from the embedded FS, so the test cannot drift from the shipped statement.
+func TestMigration040ReindexesProxies(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	owner := newUser("owner040", 0)
+	if err := db.CreateUser(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+
+	mk := func(name string, active bool) string {
+		t.Helper()
+		a := newAction(owner.ID, name, 0, active)
+		a.Kind = kernel.KindRemoteProxy
+		a.Description = "a remote thing"
+		if err := db.CreateAction(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		return a.ID
+	}
+	unindexed := mk("bob/greet", true)
+	indexed := mk("bob/wave", true)
+	inactive := mk("bob/idle", false)
+	if err := db.UpsertLookupText(ctx, indexed, "bob/wave a remote thing"); err != nil {
+		t.Fatal(err)
+	}
+
+	sqlBytes, err := migrationFS.ReadFile("migrations/040_reindex_proxies.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.ExecContext(ctx, string(sqlBytes)); err != nil {
+		t.Fatalf("replay 040: %v", err)
+	}
+
+	count := func(id string) int {
+		var n int
+		if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM actions_fts WHERE action_id=?`, id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if got := count(unindexed); got != 1 {
+		t.Errorf("unindexed active proxy: %d fts rows, want 1", got)
+	}
+	if got := count(indexed); got != 1 {
+		t.Errorf("already-indexed proxy: %d fts rows, want 1 (no duplicate)", got)
+	}
+	if got := count(inactive); got != 0 {
+		t.Errorf("inactive proxy: %d fts rows, want 0", got)
+	}
+	var active int
+	if err := db.db.QueryRowContext(ctx, `SELECT active FROM actions WHERE id=?`, unindexed).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 {
+		t.Error("repair must not deactivate the row")
+	}
+}

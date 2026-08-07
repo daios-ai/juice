@@ -973,12 +973,13 @@ func (k *Kernel) ResolveRequiredCaller(ctx context.Context, ref string) (callerI
 	if rerr != nil {
 		return "", "", rerr
 	}
+	// First meaningful use (§13): a verified remote-user resolve is our own outbound act, so a
+	// petname is bound here too — on the petname being unbound, not on the account being absent
+	// (see lazyResolveRemote). Best-effort — a missing name never blocks the step.
+	if _, berr := k.BindPetname(ctx, peerKey, "", false); berr != nil {
+		k.log.With(ctx).Warn("kernel.petname.bind_failed", "public_key", peerKey, "error", berr.Error())
+	}
 	if mount == nil {
-		// First meaningful use (§13): a verified remote-user resolve is our own outbound act, so a
-		// petname is bound here too. Best-effort — a missing name never blocks the step.
-		if _, berr := k.BindPetname(ctx, peerKey, "", false); berr != nil {
-			k.log.With(ctx).Warn("kernel.petname.bind_failed", "public_key", peerKey, "error", berr.Error())
-		}
 		if mount, err = k.EnsureKernelAccount(ctx, peerKey); err != nil {
 			return "", "", err
 		}
@@ -1783,6 +1784,11 @@ func (k *Kernel) ImportPeerAction(ctx context.Context, remoteUserID string, m Ac
 			return nil, err
 		}
 	}
+	// Activation is what indexes an action for lookup, but a proxy activates here rather than
+	// through SetActive (which rejects kernel-managed rows), so the index write must happen here
+	// too. Without it a resolved action is unfindable: the proxy also shadows the discovery row
+	// it replaces (§9), so buying an action would remove it from search.
+	k.indexForLookup(ctx, a)
 	return a, nil
 }
 

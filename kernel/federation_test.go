@@ -1717,6 +1717,85 @@ func TestLazyResolveRemoteCachesProxy(t *testing.T) {
 	}
 }
 
+// TestColdResolveIndexesAndBinds: a verified outbound resolve must leave the action USABLE, not
+// merely cached. It is indexed for lookup (§9 — otherwise buying an action removes it from search,
+// since the proxy shadows the discovery row it replaces) and it binds a petname (§13 first
+// meaningful use). Both are asserted through the real ResolveAction path, not by calling the
+// helpers directly — that is what the previous coverage missed.
+func TestColdResolveIndexesAndBinds(t *testing.T) {
+	newPeer := func(t *testing.T, handle string) (kernel.ActionManifest, string) {
+		t.Helper()
+		pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+		key := base64.RawURLEncoding.EncodeToString(pub)
+		m := kernel.ActionManifest{
+			ActionID: "ra-" + handle, OwnerID: "remote-" + handle, OwnerHandle: "bob", Name: "greet",
+			RemoteBPS: 500, Description: "greet a person warmly", Kind: kernel.KindHTTP, Price: 100,
+			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+			ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+		}
+		sig, err := kernel.SignManifest(priv, &m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Signature = sig
+		return m, key
+	}
+
+	for _, tc := range []struct {
+		name, nickname string
+		preAccount     bool
+	}{
+		// Cold peer: nothing known about it before the resolve.
+		{"cold peer", "provider-a", false},
+		// The case that actually broke: the peer already holds an account (it called us, or we
+		// deposited to it), so the bind must NOT be conditioned on the account being absent.
+		{"peer with an existing account", "provider-b", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestStore(t)
+			m, key := newPeer(t, tc.nickname)
+			k := newTestKernelWithHTTP(st, &fakeFederationHTTP{resolveManifest: &m})
+			ctx := context.Background()
+			// A valid, free nickname is available for the bind to seed from.
+			if err := st.UpsertKernel(ctx, key, tc.nickname, "", time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+			if tc.preAccount {
+				if _, err := k.EnsureKernelAccount(ctx, key); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			a, err := k.ResolveAction(ctx, "bob@"+key+"/greet")
+			if err != nil {
+				t.Fatalf("cold resolve: %v", err)
+			}
+
+			// Indexed: the lexical leg must reach the proxy, else it is unfindable once resolved.
+			ids, err := st.SearchActionsLexical(ctx, "greet warmly", 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, id := range ids {
+				found = found || id == a.ID
+			}
+			if !found {
+				t.Errorf("resolved proxy %s is absent from the lexical index: %v", a.ID, ids)
+			}
+
+			// Bound: first meaningful use names the peer (§13), seeded from its valid nickname.
+			rk, err := k.ReadKernel(ctx, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rk.Petname != tc.nickname {
+				t.Errorf("petname = %q, want %q (first meaningful use must bind)", rk.Petname, tc.nickname)
+			}
+		})
+	}
+}
+
 func TestVerifyRemoteReceiptValid(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()

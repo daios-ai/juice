@@ -1,82 +1,98 @@
-# Federation discovery — diagnosis and fix (2026-08-05)
+# Buying a remote action breaks it (2026-08-07, v0.12.11)
 
 ## TL;DR
 
-The production failure is a **pre-dispatch address-resolution regression**, not a gossip
-payload-size problem. The earlier payload-first hypothesis (compact gossip becoming one
-all-or-nothing catalog + up to 100 evidence bundles) is **withdrawn**: the failing node never
-gets far enough to decode a response. The log line is
+`v0.12.11` priced the catalog, so browsing finally works. The step *after* browsing does not.
+Resolving a remote action makes it **unfindable** and **unnameable**: the proxy is written into
+neither search index, and it shadows the discovery row that used to be findable; its rendered
+reference is empty because its owner is a handleless kernel account.
+
+Purchase deletes discoverability. None of this is new in `v0.12.11` — and that is not a
+defence, because `v0.12.11` is what made the catalog a place people shop.
+
+## Why we didn't catch it
+
+**Every federation flow in §15 stops at the moment money moves.** They are organised per
+mechanism — settlement, rejection, relay carriage, suspension, offline parking — and each ends
+on a charge, a refund, or a receipt. The closest one goes:
+
+> …discovers the subject's action via its discovery cache (`sys/lookup`), resolves it directly
+> by key, runs — its own Stats start at defaults and accumulate
+
+It walks discover → resolve → run and stops one step short of the bug. Not one federation flow
+does anything *after* a successful call: no second lookup, no re-invocation by name, no reading
+back of the row that was just created. The suite tests the **transaction**, never the
+**relationship** that outlives it.
+
+Second cause: almost every federation assertion is economic or protocol-level (charge, premium,
+refund, receipt hash, signature domain). The R8 rendering rule — outputs render a name a command
+can consume, never a raw id — has flow coverage for transactions, steps and processes, but
+**none for a proxy action**, which is the one row type whose owner cannot have a handle.
+
+So the gap is structural, not an oversight in one test: flows are written per mechanism, and
+mechanisms end at settlement. Users don't.
+
+## What a user hits
+
+Ana searches `compile tinygo`, sees `sys@esKD…/tinygo/compile — 7 credits`, and runs it. It
+resolves, executes, she is charged. Then:
+
+1. **She searches again. Nothing.** The action she just bought is gone from search — for her and
+   for everyone on her kernel. Only the raw catalog listing reaches it.
+2. **The listing shows `ref: ""`.** She cannot copy, click, or re-type what she bought. Only the
+   raw action id works.
+3. **Her operator raises `import_bps`.** Her card quoted 7; the cached proxy still charges the
+   frozen import-time price. Catalog and till disagree.
+
+## The three defects
+
+| # | Defect | Verified | Introduced |
+| - | ------ | -------- | ---------- |
+| 1 | A resolved proxy is indexed into **neither** search leg, and shadows the discovery row | yes, live | resolve-on-use rewrite |
+| 2 | A proxy's rendered `action` is `""`/`/name`, `owner_handle` null (R8 violation) | yes, live | accounts/kernels split |
+| 3 | First-meaningful-use petname auto-bind never fires | reported, not reproduced here | unknown |
+
+**Defect 1, evidence.** On the live kernel, the two proxies created by the current resolve path
+(6 Aug) are absent from both `actions_fts` and `embed_vec`; all twenty-four July-era proxies
+have both. The date split localises it to the resolve-on-use rewrite, not to `v0.12.11`. The
+throwaway pair reproduced it cleanly because every proxy there was fresh; the live kernel masked
+it because its catalog is dominated by correctly-indexed July rows. Fixing the path is not
+enough — the existing unindexed rows need a one-off reindex.
+
+**Defect 2, evidence.** The projection is `OwnerHandle + "/" + Name`; a kernel account holds no
+handle by design. Live lookup output reads `/sys/tinygo/compile`, `/sys/make`, `/sys/message`.
+The substitution should be petname, else raw key.
+
+**Compounding.** All three land on the same row. A bought action is simultaneously unfindable,
+unnameable, and — with the separately-recorded frozen-price defect — mispriced.
+
+## The user stories we should have had
+
+Written as §15 flow lines. Each one continues past the charge.
 
 ```text
-fed: request not dispatched: fed: cannot resolve peer <key>: context deadline exceeded
+— Federation: the buying loop —
+a caller discovers a remote action via sys/lookup, resolves and runs it, then searches AGAIN:
+  the action is still findable (now as the local proxy, shadowing its discovery row), its
+  rendered ref is usable, and re-running it BY THAT REF succeeds without a second resolve
+a resolved proxy renders a reference a command can consume: `action` is owner-qualified by the
+  peer's petname (its raw key when unbound) and owner_handle is never null (R8)
+first meaningful use binds a petname: after the first verified resolve the roster shows it, the
+  bound name resolves, and the nickname form still never does
+the operator raises import_bps: the catalog price and the price actually charged on the next
+  call agree, with no manifest change and no re-pull
 ```
 
-`resolve()` exhausts its `FindPeer` retries against the 10-second pull deadline on every pass.
-The `gossip.served bytes=…` lines in the same transcript are this node *serving* other
-requesters; they are not responses to the request that was never dispatched.
+The first line alone would have caught defects 1 and 2 on the day they were introduced.
 
-## Root cause
+## Priority
 
-`v0.12.6` replaced address-bearing DHT provider discovery with key-only peer-exchange (PEX)
-`known_kernels` hints. A hint carries a public key and **no address**, so every hinted
-NAT-bound kernel becomes reachable only via a cold `dht.FindPeer`. For a DHT *client* peer
-(the common case behind NAT) that lookup routinely fails, because a client publishes no
-provider record and may not be in any server's routing table. Key-only hints therefore cannot
-restore reachability — the missing capability is **address acquisition**, which only provider
-records supply.
+1. **Defect 1** — silently destroys the catalog; needs a path fix plus a reindex of existing rows.
+2. **Defect 2** — small substitution at the projection, but blocks the UI from rendering any
+   proxy at all.
+3. **Defect 3** — cosmetic until a user has to read a 43-char key.
+4. Add the four flow lines above **before** the fixes, so they fail first.
 
-## The v0.11 baseline that was lost
-
-`v0.11.x` (same libp2p/DHT versions, same circuit relay) advertised a fixed discovery namespace
-with DHT **provider records** and enumerated it before pulling gossip. Provider results are
-`peer.AddrInfo` — addresses, not bare IDs — and `FindProvidersAsync` refreshes them into the
-receiver's peerstore with a temporary TTL (relay-circuit addresses included). `resolve()` then
-found a fresh usable address and connected, so NAT↔NAT federation worked. `v0.12.6` removed that
-address-acquisition pass; nothing replaced its addresses.
-
-The separate `ModeAuto`→`ModeAutoServer` seed fix (also on the v0.12.6 line) was real and stays;
-it was never the reason provider discovery had to be removed.
-
-## Why the tests missed it
-
-Every loopback transport sets `AllowPrivateAddrs=true`, which forces each test DHT into
-`ModeServer` and disables the private-address filters. Under that configuration a cold
-`FindPeer` succeeds between nodes that would be DHT *clients* behind NAT in production, so the
-discovery test and the multi-kernel flows proved key propagation in an all-server DHT only —
-never that a client-mode kernel is addressable. The real-network gate (`flows_network.sh`) was
-also stale (invoking the removed `admin friend`, testing one manually-supplied peer rather than
-discovery of a third kernel) and could not catch it either.
-
-## Fix (this change)
-
-Restore standard **libp2p routing discovery** (`p2p/discovery/routing`) over a fixed namespace:
-advertise it, enumerate providers, refresh each `AddrInfo` into the peerstore, convert the peer
-ID to the Juice public key, then pull gossip and verify authenticity as before. Provider records
-are ephemeral transport data and grant no credit, callability, alias, or persisted identity.
-The custom key-only PEX path (`known_kernels`, requester-to-stub learning, hint sampling,
-freshness horizon, attempt rotation, stub eviction) is deleted; migration `036`'s two now-unused
-columns stay for upgrade history. Gossip keeps first-party identity, catalog, and evidence and
-no longer carries membership.
-
-Two behavioral changes ride with the repair:
-- `admin peers` now lists every known kernel merged by public key — counterparties (with an
-  account) and discovery-only kernels (without) — this kernel excluded, deduplicated by key.
-- Outbound leg-(b) evidence covers every receipt-settled **admitted execution**, not only rated
-  calls; never-dispatched, rejected (`tx_id == idempotency_key`), and quarantined settlements are
-  excluded. Ratings remain an optional attachment.
-
-## The test the regression should have had
-
-A client/server topology test: R is a DHT server + bootstrap; A and B are DHT clients connected
-only to R and not to each other; B enumerates the namespace through R, receives A with at least
-one address, and opens a gossip stream to A by public key. Plus a repaired real-network gate that
-actually exercises the NAT path (hole-punch and relay fallback) and fails hard when the required
-remote-topology variables are absent.
-
-## Adjacent cleanup folded in
-
-Internal spec citations had leaked into user-facing text. The `admin inspect` evidence header
-(`cmd/juice/cmd_superuser.go`) is rewritten by this change (two evidence views, no `§` leak). The
-`sys/transfer` description `(§13)` in `cmd/juice/bootstrap.go` is a **signed manifest field**
-(editing it re-hashes the manifest and re-syncs proxies) and is left for a separate, deliberate
-copy change rather than bundled here.
+Worth checking whether defect 1 and the frozen-price defect share a cause in
+`importRemoteActionCore`: both look like work the older import path did and the resolve-on-use
+path does not.

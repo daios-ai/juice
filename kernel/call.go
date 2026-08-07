@@ -210,13 +210,16 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *A
 	if err := VerifyManifestSignature(peerKey, m); err != nil {
 		return nil, ErrUnauthorized.Wrap("remote manifest signature is invalid")
 	}
+	// First meaningful use (§13): our own verified outbound act, so this is where a local petname
+	// is bound — seeded from the kernel's cached nickname when one is known, else mechanically.
+	// Naming turns on the petname being unbound, NOT on the account being absent: a peer that
+	// called us first, or that we deposited to, already holds an account and would otherwise stay
+	// nameless forever. A non-exact bind keeps any existing petname, so this is idempotent.
+	// Best-effort and must never fail the call; the account must.
+	if _, berr := k.BindPetname(ctx, peerKey, "", false); berr != nil {
+		k.log.With(ctx).Warn("kernel.petname.bind_failed", "public_key", peerKey, "error", berr.Error())
+	}
 	if mount == nil {
-		// First meaningful use (§13): our own verified outbound act, so this is where a local
-		// petname is bound — seeded from the kernel's cached nickname when one is known, else
-		// mechanically. Naming is best-effort and must never fail the call; the account must.
-		if _, berr := k.BindPetname(ctx, peerKey, "", false); berr != nil {
-			k.log.With(ctx).Warn("kernel.petname.bind_failed", "public_key", peerKey, "error", berr.Error())
-		}
 		mount, err = k.EnsureKernelAccount(ctx, peerKey)
 		if err != nil {
 			return nil, err

@@ -1517,7 +1517,7 @@ func TestPrintTextParity(t *testing.T) {
 			Description:  "current weather",
 			InputSchema:  map[string]any{"type": "object"},
 			OutputSchema: map[string]any{"type": "object"},
-		}),
+		}, newAccountCache(&kernel.Kernel{}, context.Background())),
 		&kernel.TransactionView{Transaction: &kernel.Transaction{ID: "t1", Status: "success", Gross: 10, Net: 8, Fee: 2}},
 		&stepWithAction{Step: &kernel.Step{ID: "s1", Status: "waiting"}, Action: "alice/weather"},
 	}
@@ -1545,7 +1545,7 @@ func TestPrintTextParity(t *testing.T) {
 			ID: "a1", Name: "x", Kind: kernel.KindHTTP,
 			InputSchema:  map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
 			OutputSchema: map[string]any{"type": "object"},
-		}))
+		}, newAccountCache(&kernel.Kernel{}, context.Background())))
 	})
 	if !strings.Contains(text, "input_schema: {") || !strings.Contains(text, `"type": "object"`) {
 		t.Errorf("input_schema not rendered as indented JSON:\n%s", text)

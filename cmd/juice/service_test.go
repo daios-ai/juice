@@ -223,17 +223,42 @@ func TestEnrichProcess(t *testing.T) {
 }
 
 func TestEnrichAction(t *testing.T) {
+	k := newTestKernel(t)
+	ctx := context.Background()
+	uc := newAccountCache(k, ctx)
+
 	a := &kernel.Action{ID: "a1", OwnerHandle: "bob", Name: "ping"}
-	r := enrichAction(&kernel.Kernel{}, a)
+	r := enrichAction(k, a, uc)
 	if r.ActionRef != "bob/ping" {
-		t.Errorf("enrichAction: ActionRef = %q, want @bob/ping", r.ActionRef)
+		t.Errorf("enrichAction: ActionRef = %q, want bob/ping", r.ActionRef)
 	}
 
-	// Empty handle → empty ref.
-	a2 := &kernel.Action{ID: "a2"}
-	r2 := enrichAction(&kernel.Kernel{}, a2)
-	if r2.ActionRef != "" {
-		t.Errorf("enrichAction(no handle): ActionRef = %q, want empty", r2.ActionRef)
+	// A remote proxy is owned by a kernel account, which holds no handle: its ref is qualified by
+	// the peer's mount alias, and owner_handle is never empty (§14 R8).
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	key := base64.RawURLEncoding.EncodeToString(pub)
+	if err := k.ObserveKernel(ctx, key, "provider", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.BindPetname(ctx, key, "", false); err != nil {
+		t.Fatal(err)
+	}
+	mount, err := k.EnsureKernelAccount(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := &kernel.Action{ID: "a2", OwnerUserID: mount.ID, Name: "bob/greet", Kind: kernel.KindRemoteProxy}
+	r2 := enrichAction(k, proxy, uc)
+	if r2.ActionRef != "bob@provider/greet" {
+		t.Errorf("proxy ActionRef = %q, want bob@provider/greet", r2.ActionRef)
+	}
+	if proxy.OwnerHandle != "provider" {
+		t.Errorf("proxy owner_handle = %q, want provider (never empty)", proxy.OwnerHandle)
+	}
+
+	// Name-less action still yields no ref.
+	if got := enrichAction(k, &kernel.Action{ID: "a3"}, uc).ActionRef; got != "" {
+		t.Errorf("enrichAction(no name): ActionRef = %q, want empty", got)
 	}
 }
 
