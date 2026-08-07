@@ -2684,11 +2684,14 @@ type LookupRequest struct {
 }
 
 // LookupResult is a ranked hit for a lookup query. Exactly one of Action (a local/imported action)
-// or Discovered (a not-yet-resolved remote action learned from gossip, §13) is set.
+// or Discovered (a not-yet-resolved remote action learned from gossip, §13) is set. Price is the
+// all-in local price either way: Action.price for a local or already-resolved action, and the
+// indicative catalog price for a discovered one (§13) — the latter re-quoted at resolve.
 type LookupResult struct {
 	Action      *Action
 	OwnerHandle string
 	Discovered  *DiscoveryDoc
+	Price       int64
 	Score       float32
 }
 
@@ -2803,7 +2806,14 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 					continue
 				}
 			}
-			out = append(out, &LookupResult{Discovered: doc, Score: float32(r.score)})
+			// Indicative all-in price: the peer's signed serving price plus this kernel's current
+			// import fee (§13), so local policy reprices the catalog with no re-pull. Resolve
+			// re-quotes authoritatively before any money moves.
+			price, perr := markedUpPrice(doc.ServingPrice, k.cfg.ImportBPS)
+			if perr != nil {
+				continue
+			}
+			out = append(out, &LookupResult{Discovered: doc, Price: price, Score: float32(r.score)})
 			continue
 		}
 		a, err := k.store.ReadAction(ctx, r.id)
@@ -2815,7 +2825,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 				ownerHandles[a.OwnerUserID] = u.Handle
 			}
 		}
-		out = append(out, &LookupResult{Action: a, OwnerHandle: ownerHandles[a.OwnerUserID], Score: float32(r.score)})
+		out = append(out, &LookupResult{Action: a, OwnerHandle: ownerHandles[a.OwnerUserID], Price: a.Price, Score: float32(r.score)})
 	}
 	return out, nil
 }

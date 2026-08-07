@@ -4384,3 +4384,47 @@ func TestPurgedPeerIsHistoryNotAUser(t *testing.T) {
 		t.Errorf("user list = %d rows, want only the live local user", len(users))
 	}
 }
+
+// TestDiscoveryDocServingPrice: serving_price round-trips through the replace-all rebuild, the
+// column rejects a negative value (§13), and migration 039 leaves no falsely-free legacy row —
+// a fresh DB starts with an empty cache, so nothing can be read back at a defaulted price.
+func TestDiscoveryDocServingPrice(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	var pre int
+	if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM discovery_docs`).Scan(&pre); err != nil {
+		t.Fatal(err)
+	}
+	if pre != 0 {
+		t.Errorf("migration 039 must leave the discovery cache empty, got %d rows", pre)
+	}
+
+	docs := []*kernel.DiscoveryDoc{
+		{KernelPublicKey: "pk", Kind: "action", ActionID: "a1", Name: "paid", Description: "d", ServingPrice: 105, ObservedAt: now},
+		{KernelPublicKey: "pk", Kind: "action", ActionID: "a2", Name: "free", Description: "d", ServingPrice: 0, ObservedAt: now},
+	}
+	if err := db.ReplaceDiscoveryDocs(ctx, "pk", docs); err != nil {
+		t.Fatalf("ReplaceDiscoveryDocs: %v", err)
+	}
+	got, err := db.ListDiscoveryDocs(ctx)
+	if err != nil {
+		t.Fatalf("ListDiscoveryDocs: %v", err)
+	}
+	prices := map[string]int64{}
+	for _, d := range got {
+		prices[d.ActionID] = d.ServingPrice
+	}
+	if prices["a1"] != 105 || prices["a2"] != 0 {
+		t.Errorf("serving_price round-trip = %v, want a1=105 a2=0", prices)
+	}
+
+	// A negative serving price is rejected by the column CHECK, not silently stored.
+	err = db.ReplaceDiscoveryDocs(ctx, "pk", []*kernel.DiscoveryDoc{
+		{KernelPublicKey: "pk", Kind: "action", ActionID: "a3", Name: "bad", ServingPrice: -1, ObservedAt: now},
+	})
+	if err == nil {
+		t.Error("a negative serving_price must be rejected by the CHECK constraint")
+	}
+}

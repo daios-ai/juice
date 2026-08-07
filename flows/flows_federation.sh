@@ -336,8 +336,10 @@ flow_fed_discovery() {
     local rkey; rkey=$(kernel_key "$dbr" "$hr")
     [ -n "$rkey" ] || { fail "fed_discovery.rkey" "no R key"; return; }
 
-    # R publishes a public action so its gossip carries something to display.
-    local rid; rid=$(strfield "$(jj "$dbr" "$hr" action create greet --kind http --source "http://127.0.0.1:$bport" --description greet --price 0)" id)
+    # R publishes a public action so its gossip carries something to display. It is PRICED, so the
+    # discovery card's indicative price is checkable (§9): mp=1000, remote_bps=500, import_bps=500
+    # ⇒ sr = 1050 (stored on the doc), displayed = 1050 + ceil(1050*500/10000) = 1103.
+    local rid; rid=$(strfield "$(jj "$dbr" "$hr" action create greet --kind http --source "http://127.0.0.1:$bport" --description greet --price 1000)" id)
     j "$dbr" "$hr" action enable "$rid" >/dev/null 2>&1
     j "$dbr" "$hr" action update "$rid" --visibility public >/dev/null 2>&1
 
@@ -356,7 +358,15 @@ flow_fed_discovery() {
     done
     assert_eq "fed_discovery.r_discovered_without_subscribe" yes "$found"
     # The discovered reference is kernel-qualified by raw key (a gossiped label never resolves).
-    assert_contains "fed_discovery.qualified_action" "@$rkey/greet" "$(jj "$dbl" "$hl" run sys/lookup '{"query":"greet"}')"
+    local lk; lk=$(jj "$dbl" "$hl" run sys/lookup '{"query":"greet"}')
+    assert_contains "fed_discovery.qualified_action" "@$rkey/greet" "$lk"
+    # The card carries an all-in price without ever resolving: L holds no proxy row for R (asserted
+    # discovery-only below), so 1103 can only have come from the gossiped serving price (§13).
+    local dprice; dprice=$(python3 -c "
+import sys,json
+r=json.loads(sys.argv[1]); res=r.get('result',r).get('results',[])
+print(next((x.get('price') for x in res if sys.argv[2] in str(x.get('action',''))),'missing'))" "$lk" "@$rkey/greet" 2>/dev/null)
+    assert_eq "fed_discovery.indicative_price" 1103 "$dprice"
     # L discovered R but never resolved or called it: R appears in the MERGED roster (§14) as a
     # discovery-only kernel — present, but with NO account (has_account=false). Discovery creates no
     # billing account.

@@ -206,7 +206,7 @@ A step is a funded continuation: creation snapshots the action's price as `step.
 
 ### System Actions
 
-Native actions registered at bootstrap, owned by `sys`, public, runnable like any other action — `juice run sys/lookup '{"query":"…"}'`. `sys/lookup` results carry `action_id`, `action` (`owner/name`), `description`, `score`, `input_schema`, and `output_schema`. `score` is a dimensionless relevance rank score (lexical and semantic legs fused by reciprocal-rank fusion; stats-based quality weighting is UNDER REVISION and temporarily removed, §9); it is comparable only for ordering within one response, not across queries or as a probability:
+Native actions registered at bootstrap, owned by `sys`, public, runnable like any other action — `juice run sys/lookup '{"query":"…"}'`. `sys/lookup` results carry `action_id`, `action` (`owner/name`), `description`, `price`, `score`, `input_schema`, and `output_schema`. `price` is the all-in local price; for a discovered-but-unresolved remote action it is indicative, re-quoted authoritatively at resolve (§13). `score` is a dimensionless relevance rank score (lexical and semantic legs fused by reciprocal-rank fusion; stats-based quality weighting is UNDER REVISION and temporarily removed, §9); it is comparable only for ordering within one response, not across queries or as a probability:
 
 | Action | Price | Purpose |
 |--------|-------|---------|

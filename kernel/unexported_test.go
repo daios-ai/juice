@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -795,6 +796,47 @@ func TestGossipRowIsExecuted(t *testing.T) {
 	for _, c := range cases {
 		if got := gossipRowIsExecuted(c.row); got != c.want {
 			t.Errorf("%s: gossipRowIsExecuted = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestMarkedUpPrice: the checked markup helper is exact against the naive product across the
+// residue classes of 10000, and reports overflow instead of wrapping (§13 pricing). Prices are
+// peer-supplied and every non-negative int64 price is legal (§3), so the only rejections are
+// out-of-range inputs and an unrepresentable result.
+func TestMarkedUpPrice(t *testing.T) {
+	// Exactness: for values small enough that base*bps cannot overflow, the helper must equal
+	// base + ceil(base*bps/10000) computed naively. Bases straddle every residue class boundary.
+	for _, base := range []int64{0, 1, 9999, 10000, 10001, 19999, 123456, 999999999} {
+		for _, bps := range []int64{0, 1, 500, 2000, 9999, 10000} {
+			got, err := markedUpPrice(base, bps)
+			if err != nil {
+				t.Fatalf("markedUpPrice(%d,%d): unexpected error %v", base, bps, err)
+			}
+			want := base + ceilDiv(base*bps, 10000)
+			if got != want {
+				t.Errorf("markedUpPrice(%d,%d) = %d, want %d", base, bps, got, want)
+			}
+		}
+	}
+
+	// A price that no naive implementation could handle: base*bps overflows int64, but the
+	// quotient/remainder split keeps the result exact and representable.
+	const big = int64(1) << 55
+	got, err := markedUpPrice(big, 10000)
+	if err != nil {
+		t.Fatalf("markedUpPrice(2^55, 10000): unexpected error %v", err)
+	}
+	if got != 2*big {
+		t.Errorf("markedUpPrice(2^55, 10000) = %d, want %d", got, 2*big)
+	}
+
+	// Rejections: out-of-range inputs, and a result that cannot be represented.
+	for _, c := range []struct{ base, bps int64 }{
+		{-1, 500}, {100, -1}, {100, 10001}, {math.MaxInt64, 1}, {math.MaxInt64 - 1, 10000},
+	} {
+		if _, err := markedUpPrice(c.base, c.bps); err == nil {
+			t.Errorf("markedUpPrice(%d,%d) must be rejected", c.base, c.bps)
 		}
 	}
 }

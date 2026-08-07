@@ -771,8 +771,13 @@ type DiscoveryDoc struct {
 	Name            string         `json:"name,omitempty"`
 	InputSchema     map[string]any `json:"input_schema,omitempty"`
 	OutputSchema    map[string]any `json:"output_schema,omitempty"`
-	Embedding       []float32      `json:"-"`
-	ObservedAt      time.Time      `json:"observed_at"`
+	// ServingPrice is the manifest's price plus the peer's signed serving markup,
+	// mp + ceil(mp·remote_bps/10000) (§13). The local all-in price adds import_bps at read time,
+	// so a policy change reprices the catalog with no re-pull. Untagged: admin inspect serializes
+	// these docs directly and its shape is not part of this record.
+	ServingPrice int64     `json:"-"`
+	Embedding    []float32 `json:"-"`
+	ObservedAt   time.Time `json:"observed_at"`
 }
 
 // SubjectEvidenceRow is one issuer's derived retained-evidence metrics about a subject action (§13),

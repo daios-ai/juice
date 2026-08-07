@@ -78,11 +78,18 @@ func seedOwner(t *testing.T, st kernel.Store, handle string) *kernel.Account {
 	return u
 }
 
-func seedAction(t *testing.T, st kernel.Store, ownerID, name, desc string) *kernel.Action {
+// seedAction creates an active public action. price is optional and defaults to 0; pass one only
+// where the price itself is under test (a nonzero price would otherwise unfund step-parking tests).
+func seedAction(t *testing.T, st kernel.Store, ownerID, name, desc string, price ...int64) *kernel.Action {
 	t.Helper()
+	var p int64
+	if len(price) > 0 {
+		p = price[0]
+	}
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: ownerID, Name: name,
 		Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPublic, Description: desc,
+		Price:     p,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(context.Background(), a); err != nil {
@@ -115,7 +122,7 @@ func TestExecuteLookup_ReturnsMatchingAction(t *testing.T) {
 	ctx := context.Background()
 
 	owner := seedOwner(t, st, "alice")
-	seedAction(t, st, owner.ID, "weather", "weather forecast temperature rain")
+	seedAction(t, st, owner.ID, "weather", "weather forecast temperature rain", 7)
 
 	result, err := executeLookup(ctx, map[string]any{"query": "weather forecast"}, "", k)
 	if err != nil {
@@ -134,8 +141,12 @@ func TestExecuteLookup_ReturnsMatchingAction(t *testing.T) {
 			t.Errorf("result missing %q", required)
 		}
 	}
+	// The all-in price is returned for every hit, local or discovered (§9).
+	if first["price"] != int64(7) {
+		t.Errorf("expected price 7, got %v", first["price"])
+	}
 	// The consolidated ref replaces the separate name/owner_handle fields.
-	for _, banned := range []string{"name", "owner_handle", "price", "uses", "failures"} {
+	for _, banned := range []string{"name", "owner_handle", "uses", "failures"} {
 		if _, ok := first[banned]; ok {
 			t.Errorf("result must not include field %q", banned)
 		}

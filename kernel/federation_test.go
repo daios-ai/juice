@@ -3008,3 +3008,69 @@ func TestTombstoneIsNeverALiveTarget(t *testing.T) {
 		t.Errorf("park a step on a tombstone: want ErrNotFound, got %v", err)
 	}
 }
+
+// TestManifestMonetaryBoundsRejected: a signature proves authorship, not sanity. A signed manifest
+// carrying a negative price or an out-of-range remote_bps is refused at the authoritative import
+// path and skipped at gossip ingest (§8, §13), so peer-supplied numbers never reach the proxy price
+// or the discovery cache.
+func TestManifestMonetaryBoundsRejected(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	setupSys(t, k, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	remoteUser, err := k.EnsureKernelAccount(ctx, peerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signed := func(id string, price, rbps int64) *kernel.ActionManifest {
+		m := &kernel.ActionManifest{
+			ActionID: id, OwnerID: "u1", OwnerHandle: "prov", Name: id,
+			Description: "a priced remote action", Kind: kernel.KindHTTP,
+			Price: price, RemoteBPS: rbps,
+			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+			Stats: &kernel.Stats{}, UpdatedAt: time.Now().UTC(),
+		}
+		sig, serr := kernel.SignManifest(priv, m)
+		if serr != nil {
+			t.Fatal(serr)
+		}
+		m.Signature = sig
+		return m
+	}
+
+	bad := map[string]*kernel.ActionManifest{
+		"negative-price":   signed("negative-price", -1, 500),
+		"negative-bps":     signed("negative-bps", 100, -1),
+		"out-of-range-bps": signed("out-of-range-bps", 100, 10001),
+	}
+	for name, m := range bad {
+		if _, err := k.ImportPeerAction(ctx, remoteUser.ID, *m); err == nil {
+			t.Errorf("%s: authoritative import must refuse an out-of-range manifest", name)
+		}
+	}
+
+	// Gossip ingest skips the same manifests while indexing a sound one alongside them.
+	good := signed("sound", 100, 500)
+	g := &kernel.GossipResponse{
+		PublicKey: peerKey, Handle: "peerk",
+		ActionManifests: []*kernel.ActionManifest{good, bad["negative-price"], bad["negative-bps"], bad["out-of-range-bps"]},
+	}
+	if _, err := k.AccumulateGossip(ctx, g, peerKey); err != nil {
+		t.Fatalf("AccumulateGossip: %v", err)
+	}
+	docs, err := k.DiscoveryDocsForKernel(ctx, peerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 || docs[0].ActionID != "sound" {
+		t.Fatalf("only the sound manifest may be indexed, got %d docs: %+v", len(docs), docs)
+	}
+	// sr = 100 + ceil(100*500/10000) = 105.
+	if docs[0].ServingPrice != 105 {
+		t.Errorf("serving_price = %d, want 105", docs[0].ServingPrice)
+	}
+}

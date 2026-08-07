@@ -239,6 +239,7 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 								"action_id":     map[string]any{"type": "string", "description": "Unique action identifier"},
 								"action":        map[string]any{"type": "string", "description": "Action reference as owner/name"},
 								"description":   map[string]any{"type": "string", "description": "Human-readable description of the action"},
+								"price":         map[string]any{"type": "integer", "description": "All-in price the caller pays; indicative for a not-yet-resolved remote action"},
 								"score":         map[string]any{"type": "number", "description": "Relevance score between 0 and 1"},
 								"input_schema":  map[string]any{"type": "object", "description": "JSON Schema for the action's input"},
 								"output_schema": map[string]any{"type": "object", "description": "JSON Schema for the action's output"},

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -48,6 +49,30 @@ func receiptHashFromJSON(receiptJSON string) (string, error) {
 		return "", ErrInternal.Wrapf("decode receipt: %v", err)
 	}
 	return receiptHash(&r)
+}
+
+// markedUpPrice applies one markup layer: base + ceil(base·bps/10000) (§13 pricing). It is the
+// forward direction of remoteManifestPrice and serves both layers — the serving markup
+// (remote_bps, signed by the peer) and the origin import fee (import_bps, local policy).
+//
+// base·bps is computed as (base/10000)·bps + ceil((base%10000)·bps/10000) so the product never
+// overflows: with bps ≤ 10000 the first term is ≤ base and the second is < 10^8. Prices are
+// peer-supplied and every non-negative int64 price is legal (§3), so the only rejection is a
+// result that cannot be represented.
+func markedUpPrice(base, bps int64) (int64, error) {
+	if base < 0 || bps < 0 || bps > 10000 {
+		return 0, ErrInvalidInput.Wrapf("price %d and markup %d bps are out of range", base, bps)
+	}
+	markup := (base / 10000) * bps
+	rem := ceilDiv((base%10000)*bps, 10000)
+	if markup > math.MaxInt64-rem {
+		return 0, ErrInvalidInput.Wrapf("markup of %d at %d bps overflows", base, bps)
+	}
+	markup += rem
+	if base > math.MaxInt64-markup {
+		return 0, ErrInvalidInput.Wrapf("marked-up price of %d at %d bps overflows", base, bps)
+	}
+	return base + markup, nil
 }
 
 // remoteManifestPrice derives the base remote manifest price (mp) from a two-step proxy price
@@ -1575,6 +1600,12 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 		if m == nil || VerifyManifestSignature(gossip.PublicKey, m) != nil {
 			continue // only verified first-party manifests are indexed
 		}
+		// The catalog price a browser sees without resolving: the peer's signed serving markup now,
+		// the origin's import fee at read time (§13). An unrepresentable one skips the manifest.
+		sp, perr := markedUpPrice(m.Price, m.RemoteBPS)
+		if perr != nil {
+			continue
+		}
 		d := &DiscoveryDoc{
 			KernelPublicKey: gossip.PublicKey,
 			Kind:            "action",
@@ -1585,6 +1616,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 			Name:            m.Name,
 			InputSchema:     m.InputSchema,
 			OutputSchema:    m.OutputSchema,
+			ServingPrice:    sp,
 			ObservedAt:      now,
 		}
 		if k.llm != nil {
@@ -1818,8 +1850,14 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 	// q = sr + ceil(sr·import_bps/10000) adds the origin's locally-retained import fee, so the local
 	// user sees one authenticated price bounding the whole remote call.
 	rbps := m.RemoteBPS
-	sr := m.Price + ceilDiv(m.Price*rbps, 10000)
-	proxyPrice := sr + ceilDiv(sr*k.cfg.ImportBPS, 10000)
+	sr, err := markedUpPrice(m.Price, rbps)
+	if err != nil {
+		return nil, err
+	}
+	proxyPrice, err := markedUpPrice(sr, k.cfg.ImportBPS)
+	if err != nil {
+		return nil, err
+	}
 	incoming := []incomingOp{{
 		key:  m.ActionID,
 		hash: contentHash,
@@ -1949,11 +1987,17 @@ func SignManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
 }
 
 // VerifyManifestSignature checks that m.Signature was produced by the private key
-// corresponding to pubKeyB64 (base64url Ed25519 public key).
+// corresponding to pubKeyB64 (base64url Ed25519 public key), and that the monetary fields the
+// origin prices from are in range. A signature proves authorship, not sanity: a signed negative
+// price or out-of-range markup would otherwise flow into the proxy price. This is the single
+// funnel for all three trust boundaries — gossip ingest, authoritative import, and resolve.
 func VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
 	pub, err := decodeRemotePublicKey(pubKeyB64)
 	if err != nil {
 		return err
+	}
+	if m.Price < 0 || m.RemoteBPS < 0 || m.RemoteBPS > 10000 {
+		return ErrInvalidInput.Wrapf("manifest price %d / remote_bps %d out of range", m.Price, m.RemoteBPS)
 	}
 	cp := *m
 	cp.Signature = ""

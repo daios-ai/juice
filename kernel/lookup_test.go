@@ -394,3 +394,103 @@ func TestLookupMatchesOwnerHandle(t *testing.T) {
 		t.Error("action should be found by its owner handle")
 	}
 }
+
+// newTestKernelWithImportBPS builds a kernel over an existing store with a chosen origin import
+// fee. Config is copied into the kernel at construction, so varying it means a second kernel over
+// the same store — which is also the honest simulation of an operator restarting with new policy.
+func newTestKernelWithImportBPS(st kernel.Store, importBPS int64) *kernel.Kernel {
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret = "test-secret"
+	cfg.IssuerUserID = testIssuerUserID
+	cfg.ImportBPS = importBPS
+	return kernel.New(st, nil, nil, &fakeEmbedder{}, cfg, nil)
+}
+
+// TestLookupDiscoveredActionPrice: a discovered-but-unresolved remote action is priced from its
+// signed serving price plus the ORIGIN's current import fee (§9, §13), so browsing needs no
+// resolve. Changing import_bps reprices the same cached doc with no re-pull.
+func TestLookupDiscoveredActionPrice(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	// A local session caller: the discovery leg is offered only to a local authenticated user.
+	caller := setupUser(t, st, "buyer", 0)
+
+	// mp=100 at remote_bps=500 → serving price sr = 100 + ceil(100*500/10000) = 105.
+	const servingPrice = int64(105)
+	doc := &kernel.DiscoveryDoc{
+		KernelPublicKey: "peer-key-1", Kind: "action",
+		UserID: "u-remote", Handle: "prov", ActionID: "act-remote", Name: "translate",
+		Description:  "translate icelandic contracts",
+		ServingPrice: servingPrice, ObservedAt: time.Now().UTC(),
+	}
+	if err := st.ReplaceDiscoveryDocs(ctx, "peer-key-1", []*kernel.DiscoveryDoc{doc}); err != nil {
+		t.Fatalf("ReplaceDiscoveryDocs: %v", err)
+	}
+
+	find := func(k *kernel.Kernel) *kernel.LookupResult {
+		t.Helper()
+		res, err := k.Lookup(ctx, kernel.LookupRequest{Query: "translate icelandic", Limit: 10, CallerID: caller.ID})
+		if err != nil {
+			t.Fatalf("Lookup: %v", err)
+		}
+		for _, r := range res {
+			if r.Discovered != nil && r.Discovered.ActionID == "act-remote" {
+				return r
+			}
+		}
+		t.Fatal("discovered remote action missing from lookup results")
+		return nil
+	}
+
+	// import_bps = 500 → 105 + ceil(105*500/10000) = 105 + 6 = 111.
+	if got := find(newTestKernelWithImportBPS(st, 500)).Price; got != 111 {
+		t.Errorf("discovered price at import_bps=500 = %d, want 111", got)
+	}
+	// A policy change reprices the SAME cached doc, with no gossip re-pull:
+	// import_bps = 2000 → 105 + ceil(105*2000/10000) = 105 + 21 = 126.
+	if got := find(newTestKernelWithImportBPS(st, 2000)).Price; got != 126 {
+		t.Errorf("discovered price at import_bps=2000 = %d, want 126", got)
+	}
+
+	// The stored serving price is untouched by either read.
+	docs, err := st.ListDiscoveryDocs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 || docs[0].ServingPrice != servingPrice {
+		t.Errorf("serving_price must round-trip unchanged, got %+v", docs)
+	}
+}
+
+// TestLookupLocalActionPrice: price is returned for ordinary local hits too — one uniform field,
+// not a remote special case (§9).
+func TestLookupLocalActionPrice(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithEmbedder(st, &fakeEmbedder{})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "provider", 0)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "forecast",
+		Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPublic,
+		Description: "weather forecast for a city", Price: 42,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	vec, _ := (&fakeEmbedder{}).Embed(ctx, a.Description)
+	_ = st.UpsertEmbedding(ctx, a.ID, vec)
+
+	res, err := k.Lookup(ctx, kernel.LookupRequest{Query: "weather forecast", Limit: 10})
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if len(res) == 0 || res[0].Action == nil {
+		t.Fatalf("expected a local hit, got %+v", res)
+	}
+	if res[0].Price != 42 {
+		t.Errorf("local hit price = %d, want 42 (action.price)", res[0].Price)
+	}
+}
