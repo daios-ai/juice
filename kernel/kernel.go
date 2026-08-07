@@ -182,8 +182,10 @@ func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, c
 	if logger == nil {
 		logger = log.Default()
 	}
+	// Every action the kernel reads carries its derived local price, because the derivation lives on
+	// the store handle rather than at each of the ~40 read sites (see pricing.go).
 	return &Kernel{
-		store:          store,
+		store:          &pricedStore{Store: store, importBPS: cfg.ImportBPS},
 		scripts:        scripts,
 		http:           http,
 		llm:            llm,
@@ -2383,7 +2385,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, targetUserID, ac
 	if action.Kind == KindRemoteProxy {
 		key := uuid.New().String()
 		t.IdempotencyKey = &key
-		t.DispatchJSON = marshalDispatch(args, "", k.remoteManifestPrice(action.Price), value, lockPrice, action.ArtifactHash)
+		t.DispatchJSON = marshalDispatch(args, "", actionBasePrice(action), value, lockPrice, action.ArtifactHash, actionRemoteBPS(action), k.cfg.ImportBPS)
 	}
 	if err := k.store.BeginRun(ctx, p, t, caller.ID, lockPrice, premiumReserve, k.cfg.ExposureMax); err != nil {
 		if caller.IsPeer() && errors.Is(err, ErrInsufficientFunds) {
@@ -3387,6 +3389,18 @@ func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*
 	for _, op := range incoming {
 		if ex, ok := existingByKey[op.key]; ok {
 			if hashOf(ex) == op.hash {
+				// An unchanged contract normally writes nothing. A proxy still missing its seller
+				// price is the exception: that field is local bookkeeping, absent from the contract
+				// hash, so without this a legacy row would re-resolve forever and never acquire it
+				// (§16). Apply in place, preserving active state and stats — the contract really is
+				// unchanged; only our own snapshot was missing.
+				if ex.Kind == KindRemoteProxy && ex.BasePrice == nil {
+					op.apply(ex)
+					ex.UpdatedAt = time.Now().UTC()
+					if err := k.store.UpdateAction(ctx, ex); err != nil {
+						return nil, err
+					}
+				}
 				result.Unchanged = append(result.Unchanged, ex)
 			} else {
 				ex.Active = false

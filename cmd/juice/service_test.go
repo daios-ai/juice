@@ -264,7 +264,7 @@ func TestEnrichAction(t *testing.T) {
 
 // peerStateFor derives a remote proxy's §13 liveness/funding annotation from the peer's sync cache:
 // offline (missing/stale last_seen) takes precedence over unfunded (cached credit below mp); healthy
-// yields "". A zero-value kernel has RemoteBPS 0, so RemoteManifestPrice(p) == p.
+// yields "". The comparison uses the action's stored seller price (BasePrice), not its local total.
 func TestPeerStateFor(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
@@ -291,7 +291,7 @@ func TestPeerStateFor(t *testing.T) {
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.name == "nil owner" {
-				if got := peerStateFor(k, ctx, nil, tc.price, tc.after); got != tc.want {
+				if got := peerStateFor(k, ctx, nil, &kernel.Action{BasePrice: &tc.price}, tc.after); got != tc.want {
 					t.Errorf("peerStateFor(nil) = %q, want %q", got, tc.want)
 				}
 				return
@@ -306,7 +306,7 @@ func TestPeerStateFor(t *testing.T) {
 				}
 			}
 			owner := &kernel.Account{KernelPublicKey: key}
-			if got := peerStateFor(k, ctx, owner, tc.price, tc.after); got != tc.want {
+			if got := peerStateFor(k, ctx, owner, &kernel.Action{BasePrice: &tc.price}, tc.after); got != tc.want {
 				t.Errorf("peerStateFor = %q, want %q", got, tc.want)
 			}
 		})

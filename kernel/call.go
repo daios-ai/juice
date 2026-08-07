@@ -171,7 +171,10 @@ func (k *Kernel) ResolveAction(ctx context.Context, ref string) (*Action, error)
 			// An active cached proxy is the fast path; an absent OR inactive row is a cache miss that
 			// re-resolves (§8 rule A) — reconcile preserves the id and re-enables, so an inactive proxy
 			// (drift-deactivated by a prior refresh_proxy/quarantine, §13) is never permanently dead.
-			if a, aerr := k.store.ReadActionByOwnerName(ctx, mount.ID, r.Owner+"/"+r.Name); aerr == nil && a != nil && a.Active {
+			// A row missing its seller price is a cache miss too: its total was frozen at import and
+			// cannot be re-derived, so it re-resolves once to acquire one rather than have it
+			// reverse-calculated from a rounded total (§16). Self-healing and one round-trip only.
+			if a, aerr := k.store.ReadActionByOwnerName(ctx, mount.ID, r.Owner+"/"+r.Name); aerr == nil && a != nil && a.Active && a.BasePrice != nil {
 				return a, nil
 			}
 		}
@@ -188,7 +191,33 @@ func (k *Kernel) ResolveAction(ctx context.Context, ref string) (*Action, error)
 	if err != nil || a == nil {
 		return nil, ErrNotFound.Wrapf("action %s not found", ref)
 	}
-	return a, nil
+	return k.ensureBasePrice(ctx, a)
+}
+
+// ensureBasePrice heals a proxy imported before the seller's price was stored (§16). Such a row's
+// total is frozen and its seller price unrecoverable — reversing the rounded total cannot recover it
+// — so it re-resolves once from the signed manifest. Called wherever a row is about to be FUNDED,
+// which includes CreateStep and a resolve by raw action id, not only a call by reference: dispatch
+// records the seller's price, and a legacy row would otherwise record its local total there and
+// quarantine the peer's perfectly valid receipt.
+//
+// It re-enters ResolveAction by the row's kernel-qualified reference, so healing reuses the one
+// resolve path rather than opening a second import route. Anything other than a proxy, or a proxy
+// that already has its price, is returned untouched.
+func (k *Kernel) ensureBasePrice(ctx context.Context, a *Action) (*Action, error) {
+	if a == nil || a.Kind != KindRemoteProxy || a.BasePrice != nil {
+		return a, nil
+	}
+	owner, rest, ok := strings.Cut(a.Name, "/")
+	mount, merr := k.store.ReadUser(ctx, a.OwnerUserID)
+	if !ok || merr != nil || mount == nil || mount.KernelPublicKey == "" {
+		return a, nil // not addressable as a remote reference; leave it as it is
+	}
+	healed, herr := k.ResolveAction(ctx, owner+"@"+mount.KernelPublicKey+"/"+rest)
+	if herr != nil {
+		return nil, herr // the peer must be reachable to fund a call on it anyway
+	}
+	return healed, nil
 }
 
 // lazyResolveRemote resolves a single remote action on demand and caches it as a local proxy row
@@ -410,15 +439,16 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		trace.ValueReserve = eff.Reserve
 	}
 	if action.Kind == KindRemoteProxy {
-		// mp_original = floor(q * 10000 / (10000 + RemoteBPS))
-		mp = k.remoteManifestPrice(action.Price)
+		// The seller's own price, kept on the row since it was resolved — never reverse-calculated
+		// from the rounded local total, which cannot recover it exactly (§16).
+		mp = actionBasePrice(action)
 		var value int64
 		if eff != nil {
 			value = eff.Amount
 		}
 		key := uuid.New().String()
 		trace.IdempotencyKey = &key
-		trace.DispatchJSON = marshalDispatch(req.Args, req.StepID, mp, value, lockPrice, action.ArtifactHash)
+		trace.DispatchJSON = marshalDispatch(req.Args, req.StepID, mp, value, lockPrice, action.ArtifactHash, actionRemoteBPS(action), k.cfg.ImportBPS)
 	}
 
 	callerWalletID, callerWalletKind := k.callerWallet(req, process, parentTrace)

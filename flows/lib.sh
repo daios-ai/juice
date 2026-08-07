@@ -64,11 +64,11 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 # write_config db [key=value ...]  — config.json next to db. server_url is intentionally
 # empty (CLI dials the real bound address). log_format is json so `server.ready` is
 # machine-readable. bootstrap_peers seeds the federation transport (§13); empty = no discovery.
-# Keys: fee_bps script_timeout_ms kernel_handle bootstrap_peers.
+# Keys: fee_bps import_bps script_timeout_ms kernel_handle bootstrap_peers.
 write_config() {
     local db="$1"; shift
     local fee_bps=0 script_timeout_ms=10000 kernel_handle="test-kernel" bootstrap_peers="" remote_retry_interval_seconds=60 discovery_interval_seconds=300
-    local exposure_max=0 settlement_trigger=0 settlement_quantum=0
+    local exposure_max=0 settlement_trigger=0 settlement_quantum=0 import_bps=500
     local a
     for a in "$@"; do case "$a" in
         fee_bps=*)                       fee_bps=${a#*=} ;;
@@ -80,6 +80,7 @@ write_config() {
         exposure_max=*)                  exposure_max=${a#*=} ;;
         settlement_trigger=*)            settlement_trigger=${a#*=} ;;
         settlement_quantum=*)            settlement_quantum=${a#*=} ;;
+        import_bps=*)                    import_bps=${a#*=} ;;
     esac; done
     local bp_json="[]"
     [ -n "$bootstrap_peers" ] && bp_json="[\"$bootstrap_peers\"]"
@@ -88,6 +89,7 @@ write_config() {
   "script_timeout_ms": $script_timeout_ms,
   "script_memory_bytes": 67108864,
   "fee_bps": $fee_bps,
+  "import_bps": $import_bps,
   "exposure_max": $exposure_max,
   "settlement_trigger": $settlement_trigger,
   "settlement_quantum": $settlement_quantum,

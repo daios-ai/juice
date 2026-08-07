@@ -503,18 +503,18 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO actions
-		 (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,remote_owner_id,remote_bps,effect,auth_json,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,remote_owner_id,remote_bps,base_price,effect,auth_json,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.OwnerUserID, a.Name, string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price,
 		a.Description, string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact, a.RemoteActionID,
-		a.RemoteOwnerID, a.RemoteBPS, nullStr(a.Effect), a.AuthJSON, timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
+		a.RemoteOwnerID, a.RemoteBPS, a.BasePrice, nullStr(a.Effect), a.AuthJSON, timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
 	)
 	return dbErr(err, "create action")
 }
 
 // actionCols is the canonical column list for action SELECT statements.
 // Must stay in sync with scanAction/scanActionFn/finishAction.
-const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),(u.suspended_at IS NOT NULL),a.name,a.kind,a.active,a.visibility,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,COALESCE(a.remote_owner_id,''),a.remote_bps,COALESCE(a.effect,''),a.auth_json,a.created_at,a.updated_at,a.deleted_at`
+const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),(u.suspended_at IS NOT NULL),a.name,a.kind,a.active,a.visibility,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,COALESCE(a.remote_owner_id,''),a.remote_bps,a.base_price,COALESCE(a.effect,''),a.auth_json,a.created_at,a.updated_at,a.deleted_at`
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
@@ -531,10 +531,10 @@ func (s *DB) updateActionTx(ctx context.Context, tx *sql.Tx, a *kernel.Action) e
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := tx.ExecContext(ctx,
 		`UPDATE actions SET kind=?,active=?,visibility=?,price=?,description=?,input_schema=?,output_schema=?,
-		 source=?,artifact_hash=?,wasm_artifact=?,remote_owner_id=?,remote_bps=?,effect=?,auth_json=?,updated_at=? WHERE id=?`,
+		 source=?,artifact_hash=?,wasm_artifact=?,remote_owner_id=?,remote_bps=?,base_price=?,effect=?,auth_json=?,updated_at=? WHERE id=?`,
 		string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price, a.Description,
 		string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact,
-		a.RemoteOwnerID, a.RemoteBPS, nullStr(a.Effect), a.AuthJSON, timeToStr(a.UpdatedAt), a.ID,
+		a.RemoteOwnerID, a.RemoteBPS, a.BasePrice, nullStr(a.Effect), a.AuthJSON, timeToStr(a.UpdatedAt), a.ID,
 	)
 	return dbErr(err, "update action")
 }
@@ -638,16 +638,20 @@ func scanActionFn(scan func(...any) error) (*kernel.Action, error) {
 	var a kernel.Action
 	var kind, visibility, inJSON, outJSON, createdAt, updatedAt string
 	var deletedAt sql.NullString
-	var remoteBPS sql.NullInt64
+	var remoteBPS, basePrice sql.NullInt64
 	var active, ownerSuspended int
 	if err := scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &ownerSuspended, &a.Name, &kind, &active, &visibility, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.WasmArtifact, &a.RemoteActionID,
-		&a.RemoteOwnerID, &remoteBPS, &a.Effect, &a.AuthJSON, &createdAt, &updatedAt, &deletedAt); err != nil {
+		&a.RemoteOwnerID, &remoteBPS, &basePrice, &a.Effect, &a.AuthJSON, &createdAt, &updatedAt, &deletedAt); err != nil {
 		return nil, err
 	}
 	if remoteBPS.Valid {
 		v := remoteBPS.Int64
 		a.RemoteBPS = &v
+	}
+	if basePrice.Valid {
+		v := basePrice.Int64
+		a.BasePrice = &v
 	}
 	a.OwnerSuspended = ownerSuspended != 0
 	return finishAction(&a, kind, visibility, active, inJSON, outJSON, createdAt, updatedAt, deletedAt)
@@ -1961,24 +1965,29 @@ func (s *DB) CreateStep(ctx context.Context, step *kernel.Step) error {
 		}
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO steps (id,parent_trace_id,required_caller_user_id,required_caller_remote_id,action_id,
-			                    partial_args,price,status,created_at)
-			 VALUES (?,?,?,?,?,?,?,?,?)`,
+			                    partial_args,price,import_bps,status,created_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
 			step.ID, step.ParentTraceID, step.RequiredCallerUserID, step.RequiredCallerRemoteID,
 			step.ActionID, rawJSONStr(step.PartialArgs),
-			step.Price, string(step.Status), timeToStr(step.CreatedAt),
+			step.Price, step.ImportBPS, string(step.Status), timeToStr(step.CreatedAt),
 		)
 		return dbErr(err, "create step: insert")
 	})
 }
 
-const stepCols = `id,parent_trace_id,required_caller_user_id,required_caller_remote_id,action_id,partial_args,price,status,tx_id,completion_trace_id,created_at`
+const stepCols = `id,parent_trace_id,required_caller_user_id,required_caller_remote_id,action_id,partial_args,price,import_bps,status,tx_id,completion_trace_id,created_at`
 
 func scanStep(step *kernel.Step, scanFn func(...any) error) error {
 	var parentTraceID, txID, completionTraceID, remoteID *string
 	var createdAt, partialArgs, status string
+	var importBPS sql.NullInt64
 	if err := scanFn(&step.ID, &parentTraceID, &step.RequiredCallerUserID, &remoteID,
-		&step.ActionID, &partialArgs, &step.Price, &status, &txID, &completionTraceID, &createdAt); err != nil {
+		&step.ActionID, &partialArgs, &step.Price, &importBPS, &status, &txID, &completionTraceID, &createdAt); err != nil {
 		return err
+	}
+	if importBPS.Valid {
+		v := importBPS.Int64
+		step.ImportBPS = &v
 	}
 	step.RequiredCallerRemoteID = remoteID
 	step.ParentTraceID = parentTraceID

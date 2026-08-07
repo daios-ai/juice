@@ -840,3 +840,69 @@ func TestMarkedUpPrice(t *testing.T) {
 		}
 	}
 }
+
+// The derived-price boundary. pricedStore is unexported on purpose: no caller outside the kernel
+// can see it, which is what makes the derivation impossible to forget.
+func TestPricedStoreDerivesLocalTotal(t *testing.T) {
+	base := int64(100)
+	rbps := int64(500)
+	s := &pricedStore{importBPS: 500}
+
+	// mp=100 at remote_bps=500 → sr=105; import_bps=500 → 105 + ceil(105*500/10000) = 111.
+	a := &Action{Kind: KindRemoteProxy, Price: 999, BasePrice: &base, RemoteBPS: &rbps}
+	if _, err := s.price(a); err != nil {
+		t.Fatalf("price: %v", err)
+	}
+	if a.Price != 111 {
+		t.Errorf("derived total = %d, want 111 (stored total is ignored)", a.Price)
+	}
+
+	// The same row under a different local policy: 105 + ceil(105*2000/10000) = 126. Nothing is
+	// stored, so a policy change reprices with no re-resolve.
+	b := &Action{Kind: KindRemoteProxy, BasePrice: &base, RemoteBPS: &rbps}
+	if _, err := (&pricedStore{importBPS: 2000}).price(b); err != nil {
+		t.Fatal(err)
+	}
+	if b.Price != 126 {
+		t.Errorf("derived total at 2000 bps = %d, want 126", b.Price)
+	}
+}
+
+func TestPricedStoreLeavesOtherRowsAlone(t *testing.T) {
+	s := &pricedStore{importBPS: 2000}
+
+	// A local action's price is authored, not derived.
+	local := &Action{Kind: KindHTTP, Price: 42}
+	if _, err := s.price(local); err != nil || local.Price != 42 {
+		t.Errorf("local action price = %d (err %v), want 42 untouched", local.Price, err)
+	}
+	// A proxy predating the snapshot keeps its stored total: reversing it cannot recover the
+	// seller's price, so it waits to heal instead of being guessed at.
+	legacy := &Action{Kind: KindRemoteProxy, Price: 111}
+	if _, err := s.price(legacy); err != nil || legacy.Price != 111 {
+		t.Errorf("legacy proxy price = %d (err %v), want 111 untouched", legacy.Price, err)
+	}
+	// A nil action is not a panic.
+	if got, err := s.price(nil); got != nil || err != nil {
+		t.Errorf("price(nil) = %v, %v; want nil, nil", got, err)
+	}
+}
+
+func TestPricedStorePropagatesOverflow(t *testing.T) {
+	// A signed manifest may name any non-negative int64 price. One whose markup does not fit must
+	// surface as an error at the read, not silently serve the stored total: these rows fund calls.
+	base := int64(math.MaxInt64)
+	rbps := int64(500)
+	a := &Action{Kind: KindRemoteProxy, Price: 7, BasePrice: &base, RemoteBPS: &rbps}
+	if _, err := (&pricedStore{importBPS: 500}).price(a); err == nil {
+		t.Fatal("an unrepresentable total must be an error, not a fallback to the stored price")
+	}
+	if a.Price != 7 {
+		t.Errorf("a failed derivation must not half-write the row: price = %d, want 7", a.Price)
+	}
+
+	// The list form fails the whole read rather than returning a mix of derived and stale rows.
+	if _, err := (&pricedStore{importBPS: 500}).priceMany([]*Action{a}, nil); err == nil {
+		t.Error("priceMany must propagate the overflow")
+	}
+}

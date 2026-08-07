@@ -144,6 +144,11 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 	if err != nil {
 		return nil, ErrNotFound.Wrap("action not found")
 	}
+	// Creation parks money, so it is a funding boundary: a legacy proxy heals here, before its
+	// frozen total is parked and its completion dispatches a wrong seller price (§16).
+	if action, err = k.ensureBasePrice(ctx, action); err != nil {
+		return nil, err
+	}
 	// A step is a partially applied future Call: the creator names the target, so visibility binds
 	// here against the creating trace's action owner (§4 binding rule) — completion re-checks only
 	// liveness, never visibility, so the completer needs no sight of a target the creator captured.
@@ -184,10 +189,17 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 		RequiredCallerUserID:   requiredCallerID,
 		RequiredCallerRemoteID: remoteID,
 		ActionID:               actionID,
-		PartialArgs:          partialArgs,
-		Price:                action.Price,
-		Status:               StepWaiting,
-		CreatedAt:            now,
+		PartialArgs:            partialArgs,
+		Price:                  action.Price,
+		Status:                 StepWaiting,
+		CreatedAt:              now,
+	}
+	// CreateStep is a funding boundary (§16 Price Snapshot Pattern): the price is parked now and may
+	// settle long after import_bps changes, so the rate is frozen alongside it. Proxies only — a
+	// local action's price carries no import fee.
+	if action.Kind == KindRemoteProxy {
+		ibps := k.cfg.ImportBPS
+		step.ImportBPS = &ibps
 	}
 	// The park moves action.Price from the funding trace's available into locked; lock the trace
 	// so it cannot interleave with that trace's settlement taxable-read (§9 composition fence).
@@ -390,7 +402,15 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 	if action.Kind == KindRemoteProxy {
 		key := uuid.New().String()
 		stepTrace.IdempotencyKey = &key
-		stepTrace.DispatchJSON = marshalDispatch(args, stepID, k.remoteManifestPrice(action.Price), 0, action.Price, action.ArtifactHash)
+		// Gross is the price the step PARKED, not the action's current one — those differ once the
+		// catalog reprices — and the rate is the one frozen at creation, so a fee change between
+		// parking and completion cannot move this step's arithmetic (§16). A pre-041 step has no
+		// snapshot and settles from live config, as it does today.
+		ibps := k.cfg.ImportBPS
+		if step.ImportBPS != nil {
+			ibps = *step.ImportBPS
+		}
+		stepTrace.DispatchJSON = marshalDispatch(args, stepID, actionBasePrice(action), 0, step.Price, action.ArtifactHash, actionRemoteBPS(action), ibps)
 	}
 	// A lost waiting→running CAS already carries ErrStepNotClaimed from the store, which marks
 	// only the two genuine claim races. Deliberately NOT relabelled here: BeginStepCall also

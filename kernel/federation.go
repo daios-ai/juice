@@ -52,7 +52,7 @@ func receiptHashFromJSON(receiptJSON string) (string, error) {
 }
 
 // markedUpPrice applies one markup layer: base + ceil(base·bps/10000) (§13 pricing). It is the
-// forward direction of remoteManifestPrice and serves both layers — the serving markup
+// forward direction of the two markup layers and serves both — the serving markup
 // (remote_bps, signed by the peer) and the origin import fee (import_bps, local policy).
 //
 // base·bps is computed as (base/10000)·bps + ceil((base%10000)·bps/10000) so the product never
@@ -75,18 +75,16 @@ func markedUpPrice(base, bps int64) (int64, error) {
 	return base + markup, nil
 }
 
-// remoteManifestPrice derives the base remote manifest price (mp) from a two-step proxy price
-// (q = sr + ceil(sr·import_bps), sr = mp + ceil(mp·remote_bps)) by inverting both layers in order:
-// sr = floor(q·10000/(10000+import_bps)), then mp = floor(sr·10000/(10000+remote_bps)) (§13).
-func (k *Kernel) remoteManifestPrice(proxyPrice int64) int64 {
-	sr := proxyPrice * 10000 / (10000 + k.cfg.ImportBPS)
-	return sr * 10000 / (10000 + k.cfg.RemoteBPS)
-}
-
-// RemoteManifestPrice is the exported form of remoteManifestPrice, used by the service layer to
-// compare a peer's cached credit against a proxy action's underlying manifest price (§13 peer_state).
-func (k *Kernel) RemoteManifestPrice(proxyPrice int64) int64 {
-	return k.remoteManifestPrice(proxyPrice)
+// actionBasePrice is the seller's manifest price (mp) snapshotted on a proxy row. Falling back to
+// the stored total is only reached for a pre-041 row, which re-resolves before it is next funded.
+func actionBasePrice(a *Action) int64 {
+	if a == nil {
+		return 0
+	}
+	if a.BasePrice != nil {
+		return *a.BasePrice
+	}
+	return a.Price
 }
 
 // TransferEffect is the staged value channel of an effect-bearing action (§13): the delivered Amount,
@@ -107,6 +105,7 @@ type TransferEffect struct {
 //   - local action, local target (local caller):  reserve = value                         (Dest = id)
 //   - local action, local target (peer caller):   reserve = value + value_premium         (Dest = id)
 //   - remote_proxy action (outbound, local caller): reserve = value + value_premium + value_import (Dest = "")
+//
 // It rejects, before any funds move, a non-positive amount, a peer caller relaying a cross-kernel
 // transfer (non-transitive), an @-qualified target on a local action, and an unresolvable / peer /
 // suspended local beneficiary.
@@ -165,11 +164,115 @@ type dispatchPayload struct {
 	// settlement to key the hash-conditional proxy deactivation, so a stale dispatch settling after a
 	// re-resolve never deactivates the refreshed row (§13).
 	ContractHash string `json:"contract_hash,omitempty"`
+	// RemoteBPS/ImportBPS are the rates this dispatch was funded under (§13). The funding boundary
+	// freezes every pricing input, so settlement, retry, refund, and audit read them here and never
+	// from the action row or live config — a catalog price now floats with local policy, and a call
+	// locked at one rate must settle at that rate. Nullable: 0 is a legitimate rate (a fee-free
+	// import), so a pre-041 dispatch that recorded neither must stay distinguishable from one that
+	// recorded zero. Nil ⇒ fall back to the old sources.
+	RemoteBPS *int64 `json:"remote_bps,omitempty"`
+	ImportBPS *int64 `json:"import_bps,omitempty"`
+}
+
+// actionRemoteBPS is the peer's signed serving markup snapshotted on a proxy row; 0 for a pre-v0.12
+// row that never captured one.
+func actionRemoteBPS(a *Action) int64 {
+	if a == nil || a.RemoteBPS == nil {
+		return 0
+	}
+	return *a.RemoteBPS
+}
+
+// pricedStore is the one place a proxy's local price becomes a number.
+//
+// A remote proxy stores the SELLER's price (§16 Price Snapshot Pattern); the local total is derived
+// from it and the current import fee, so changing local policy reprices the catalog with no
+// re-resolve. Deriving it at each call site does not work: the kernel reads actions from ~40 places
+// and any one of them forgetting would serve a stale price on a money path. So the derivation is
+// attached to the store handle itself, at construction, and every read — present and future — gets
+// it for free.
+//
+// Writes are unaffected. For a non-proxy the derivation is identity, and the sole proxy write path
+// (importRemoteActionCore) assigns Price unconditionally from the manifest, so a derived value can
+// never round-trip into storage.
+//
+// A derivation that overflows is returned as an error rather than silently falling back to the
+// stored total: these rows fund calls.
+type pricedStore struct {
+	Store
+	importBPS int64
+}
+
+// price derives one action's local total in place.
+func (s *pricedStore) price(a *Action) (*Action, error) {
+	if a == nil || a.Kind != KindRemoteProxy || a.BasePrice == nil {
+		return a, nil // non-proxy, or a pre-041 row whose stored total is still what it charges
+	}
+	sr, err := markedUpPrice(*a.BasePrice, actionRemoteBPS(a))
+	if err != nil {
+		return nil, err
+	}
+	q, err := markedUpPrice(sr, s.importBPS)
+	if err != nil {
+		return nil, err
+	}
+	a.Price = q
+	return a, nil
+}
+
+func (s *pricedStore) priceOne(a *Action, err error) (*Action, error) {
+	if err != nil {
+		return a, err
+	}
+	return s.price(a)
+}
+
+func (s *pricedStore) priceMany(as []*Action, err error) ([]*Action, error) {
+	if err != nil {
+		return as, err
+	}
+	for _, a := range as {
+		if _, perr := s.price(a); perr != nil {
+			return nil, perr
+		}
+	}
+	return as, nil
+}
+
+func (s *pricedStore) ReadAction(ctx context.Context, id string) (*Action, error) {
+	return s.priceOne(s.Store.ReadAction(ctx, id))
+}
+
+func (s *pricedStore) ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*Action, error) {
+	return s.priceOne(s.Store.ReadActionByOwnerName(ctx, ownerID, name))
+}
+
+func (s *pricedStore) ReadActionByOwnerRemoteID(ctx context.Context, ownerID, remoteActionID string) (*Action, error) {
+	return s.priceOne(s.Store.ReadActionByOwnerRemoteID(ctx, ownerID, remoteActionID))
+}
+
+func (s *pricedStore) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL string) ([]*Action, error) {
+	return s.priceMany(s.Store.ListActionsByOwnerOpenAPISpec(ctx, ownerID, specURL))
+}
+
+func (s *pricedStore) ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*Action, error) {
+	return s.priceMany(s.Store.ListVisibleActions(ctx, includeLocal, limit, offset))
+}
+
+func (s *pricedStore) ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Action, error) {
+	return s.priceMany(s.Store.ListActionsByOwner(ctx, ownerID, limit, offset))
+}
+
+func (s *pricedStore) ListAllActions(ctx context.Context, limit, offset int) ([]*Action, error) {
+	return s.priceMany(s.Store.ListAllActions(ctx, limit, offset))
 }
 
 // marshalDispatch serializes a dispatchPayload and returns a pointer suitable for Trace.DispatchJSON.
-func marshalDispatch(args map[string]any, stepID string, mp, value, gross int64, contractHash string) *string {
-	b, _ := json.Marshal(dispatchPayload{Args: args, StepID: stepID, RemotePrice: mp, Value: value, Gross: gross, ContractHash: contractHash})
+func marshalDispatch(args map[string]any, stepID string, mp, value, gross int64, contractHash string, remoteBPS, importBPS int64) *string {
+	b, _ := json.Marshal(dispatchPayload{
+		Args: args, StepID: stepID, RemotePrice: mp, Value: value, Gross: gross, ContractHash: contractHash,
+		RemoteBPS: &remoteBPS, ImportBPS: &importBPS,
+	})
 	s := string(b)
 	return &s
 }
@@ -298,6 +401,7 @@ func (k *Kernel) AdmitRemotePaidStep(ctx context.Context, buyerID, peerKey, step
 //   - valid FAILURE/rejection ⇒ refund the whole reserve;
 //   - an inconsistent/mis-bound receipt after a possibly-executed completion ⇒ QUARANTINE (reserve stays
 //     locked; A may have paid the beneficiary).
+//
 // receiptJSON is nil/empty when no receipt arrived (uncertain): the record is left pending for retry.
 func (k *Kernel) SettleRemotePaidStep(ctx context.Context, pending *PendingTransfer, d PaymentDescriptor, receiptJSON []byte) error {
 	if len(receiptJSON) == 0 {
@@ -498,19 +602,38 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	// 6. Premium: the execution serving markup must equal ceil(charge·remote_bps), and the value serving
 	// markup ceil(value·remote_bps), for the manifest-snapshot rate on the proxy row — computed
 	// separately (never the folded ceil((charge+value)·…), whose rounding merge is the bug).
-	rbps := int64(0)
+	// Both rates come from the dispatch record, which froze them at the funding boundary (§13): the
+	// action row's markup and local config both move, so auditing against them would fail a
+	// historically-correct settlement after any rate change. Pre-041 traces fall back to the old
+	// sources.
+	rbps, importBPS := int64(0), k.cfg.ImportBPS
 	if act, aerr := k.store.ReadAction(ctx, tx.ActionID); aerr == nil && act.RemoteBPS != nil {
 		rbps = *act.RemoteBPS
+	}
+	if tr, terr := k.store.ReadTrace(ctx, tx.TraceID); terr == nil && tr != nil && tr.DispatchJSON != nil {
+		var d dispatchPayload
+		if json.Unmarshal([]byte(*tr.DispatchJSON), &d) == nil {
+			if d.RemoteBPS != nil {
+				rbps = *d.RemoteBPS
+			}
+			if d.ImportBPS != nil {
+				importBPS = *d.ImportBPS
+			}
+		}
 	}
 	checks.Premium = r.Premium == ceilDiv(r.Charge*rbps, 10000)
 	checks.ValuePremium = r.ValuePremium == ceilDiv(r.Value*rbps, 10000)
 
 	// 7. Settlement arithmetic: the origin import fee on the actual obligation (tx.net = paid).
 	if tx.Status == TxSuccess {
-		checks.SettlementArith = tx.Fee == ceilDiv(tx.Net*k.cfg.ImportBPS, 10000)
+		checks.SettlementArith = tx.Fee == ceilDiv(tx.Net*importBPS, 10000)
 	} else {
 		checks.SettlementArith = tx.Fee == 0
 	}
+
+	// 7b. Charge ceiling (§13): the caller can never be charged more than the local price it
+	// authenticated and locked before dispatch.
+	checks.ChargeCeiling = r.Charge+r.Premium <= tx.Gross
 
 	// 7. Refund conservation: stored refund must equal gross − net − fee exactly.
 	checks.RefundConservation = tx.Refund == tx.Gross-tx.Net-tx.Fee
@@ -531,7 +654,7 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 
 	valid := checks.ReceiptHash && checks.Signature && checks.ActionID &&
 		checks.Status && checks.Charge && checks.Premium && checks.ValuePremium && checks.SettlementArith &&
-		checks.RefundConservation && checks.ArgsHash && checks.ReplyHash
+		checks.ChargeCeiling && checks.RefundConservation && checks.ArgsHash && checks.ReplyHash
 
 	return &ReceiptVerification{
 		TransactionID:         txID,
@@ -644,13 +767,23 @@ func remoteReceiptInvalid(r Receipt, mp, rbps, sentValue int64, replyJSON []byte
 func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, action *Action, ktx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req CallRequest, target *Account, mp int64, fr FederationResult, latency float64) (*CallReply, error) {
 	// The value we dispatched (for a value transfer) and the contract hash we dispatched with ride on
 	// the trace, so both the direct and the retry settle paths read them from one source (§13).
+	// The rates come from the same record: the funding boundary froze them, so a fee change between
+	// dispatch and settlement cannot move this call's arithmetic (§13). Nil = pre-041 dispatch, which
+	// falls back to the row and live config exactly as before.
 	var sentValue int64
 	var dispatchedHash string
+	rbps, importBPS := actionRemoteBPS(action), k.cfg.ImportBPS
 	if trace.DispatchJSON != nil {
 		var d dispatchPayload
 		if json.Unmarshal([]byte(*trace.DispatchJSON), &d) == nil {
 			sentValue = d.Value
 			dispatchedHash = d.ContractHash
+			if d.RemoteBPS != nil {
+				rbps = *d.RemoteBPS
+			}
+			if d.ImportBPS != nil {
+				importBPS = *d.ImportBPS
+			}
 		}
 	}
 	// A missing, unparseable, unsigned, or mismatched receipt keeps the trace open for retry.
@@ -673,10 +806,6 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 		replyJSON, _ = json.Marshal(fr.Result)
 	}
 	charge := r.Charge
-	rbps := int64(0)
-	if action.RemoteBPS != nil {
-		rbps = *action.RemoteBPS
-	}
 	// The two channels settle independently (§13): the EXECUTION channel (charge/premium/import) is the
 	// normal proxy settlement on the trace-funded gross q; the VALUE channel is the TransferEffect reserve
 	// locked on the caller C, disposed of via `vs` — settled to the peer proxy row on success, refunded on
@@ -696,12 +825,12 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 		ktx.Status = r.Status
 		ktx.Reason = r.Reason
 		if r.Status == TxSuccess {
-			importFee = ceilDiv((charge+premium)*k.cfg.ImportBPS, 10000) // execution import on the execution obligation
+			importFee = ceilDiv((charge+premium)*importBPS, 10000) // execution import at the DISPATCHED rate (§13)
 			ktx.ReplyJSON = json.RawMessage(replyJSON)
 			// Value channel: C owes the peer value+value_premium (credited to the proxy row), and origin
 			// sys retains value_import; the remainder of the reserve refunds to C inside the commit.
 			vs.Credit = r.Value + r.ValuePremium
-			vs.SysCredit = ceilDiv((r.Value+r.ValuePremium)*k.cfg.ImportBPS, 10000)
+			vs.SysCredit = ceilDiv((r.Value+r.ValuePremium)*importBPS, 10000)
 			valueForReceipt = r.Value
 			valuePremForReceipt = trace.ValueReserve - r.Value // caller's value overhead: value_premium + value_import
 			valueToForReceipt = r.ValueTo
@@ -839,13 +968,19 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	}
 	mp := dispatch.RemotePrice
 	if mp == 0 {
-		// Fallback: derive from action.Price and RemoteBPS.
-		mp = k.remoteManifestPrice(action.Price)
+		// Fallback for a pre-041 dispatch that recorded none.
+		mp = actionBasePrice(action)
 	}
 	// The locked gross is the proxy's full two-step local price (§13) — what BeginRun/BeginStepCall
 	// funded — not the bare serving markup; settlement pays charge+premium to the peer and the import
-	// fee to origin sys out of it, refunding the remainder.
-	q := action.Price
+	// fee to origin sys out of it, refunding the remainder. Take it from the dispatch record, which
+	// froze it at the funding boundary: the action's price now floats with local policy, so re-reading
+	// the column here would refund a call at a rate it was never locked at. Pre-041 dispatches
+	// recorded no gross; those fall back to the column, which for them is still the funded value.
+	q := dispatch.Gross
+	if q == 0 {
+		q = action.Price
+	}
 
 	callerWalletID, callerWalletKind := callerWalletFor(dispatch.StepID, process.ID, trace.ParentTraceID)
 
@@ -1141,7 +1276,6 @@ func (k *Kernel) PeerKeys(ctx context.Context) []string {
 	}
 	return keys
 }
-
 
 // SubjectEvidence derives the retained-evidence metrics about a subject kernel from the local
 // evidence cache (§13), grouped by issuer. Uses/successes/failures/latency count ONLY issuer==subject
@@ -1754,7 +1888,6 @@ func remoteManifestHash(m ActionManifest) string {
 	return hex.EncodeToString(h[:])
 }
 
-
 // ImportPeerAction imports one signed manifest without a superuser gate (its authority is the
 // verified manifest signature) and activates it as a local proxy — the §13 subscription-free
 // resolve path used by lazy cross-kernel calls. Returns the resulting proxy action.
@@ -1856,6 +1989,7 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 	// q = sr + ceil(sr·import_bps/10000) adds the origin's locally-retained import fee, so the local
 	// user sees one authenticated price bounding the whole remote call.
 	rbps := m.RemoteBPS
+	basePrice := m.Price // the seller's number, kept so the total can be re-derived (§16)
 	sr, err := markedUpPrice(m.Price, rbps)
 	if err != nil {
 		return nil, err
@@ -1877,6 +2011,7 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 			a.ArtifactHash = contentHash
 			a.RemoteOwnerID = m.OwnerID
 			a.RemoteBPS = &rbps
+			a.BasePrice = &basePrice
 			a.Effect = m.Effect // signed effect contract: the proxy is value-bearing iff the peer signed it
 		},
 		new: func() *Action {
@@ -1897,6 +2032,7 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 				RemoteActionID: m.ActionID,
 				RemoteOwnerID:  m.OwnerID,
 				RemoteBPS:      &rbps,
+				BasePrice:      &basePrice,
 				Effect:         m.Effect,
 				CreatedAt:      now,
 				UpdatedAt:      now,
@@ -1918,7 +2054,6 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 	}
 	return result, nil
 }
-
 
 // GetActionManifest returns a signed manifest for a public active action.
 // Manifests are only available for actions that are both active and public.

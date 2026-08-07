@@ -67,7 +67,7 @@ _all_receipt_checks() {
 import sys,json
 vr=json.loads(sys.argv[1]); c=vr.get('checks',{}); bad=[]
 if vr.get('valid') is not True: bad.append('valid')
-for k in ['receipt_hash','signature','action_id','status','charge','premium','settlement_arith','refund_conservation','args_hash','reply_hash']:
+for k in ['receipt_hash','signature','action_id','status','charge','premium','settlement_arith','charge_ceiling','refund_conservation','args_hash','reply_hash']:
     if c.get(k) is not True: bad.append(k)
 print('OK' if not bad else 'FAIL:'+','.join(bad))" "$1" 2>/dev/null
 }
@@ -227,6 +227,23 @@ flow_fed_import_duty() {
     assert_jnum "fed_pricing.tx_net"   "$tx" net 1050
     assert_jnum "fed_pricing.tx_fee"   "$tx" fee 53
     assert_json "fed_pricing.tx_status" "$tx" status success
+
+    # The operator raises the import fee to 20%. An imported action is a CATALOG entry, so its price
+    # derives from the seller's price and the CURRENT fee (§16): sr stays 1050, the total becomes
+    # 1050 + ceil(1050*2000/10000) = 1260 — with no re-resolve and no manifest change. Before this,
+    # the total was frozen at import and only never-imported actions ever saw a fee change.
+    stop_server "$FED_DBL"
+    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l import_bps=2000 bootstrap_peers="$FED_BOOT" \
+        || { fail "fed_pricing.restart_l" "L did not restart"; return; }
+    j "$FED_DBL" "$FED_HL" auth login sys --password sys-pass >/dev/null 2>&1
+    assert_jnum "fed_pricing.reprices_on_policy_change" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/duty-svc)" price 1260
+
+    # And the price shown is the price charged: gross on the next call is the new total, not the old.
+    local ub2; ub2=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
+    local tx2; tx2=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/duty-svc '{}')" tx_id)
+    assert_jnum "fed_pricing.charges_the_new_price" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx2")" gross 1260
+    # Import fee 210 returns to L's own sys, so the caller is out sr=1050 exactly, as before.
+    assert_eq "fed_pricing.user_charged_after" 1050 "$(( ub2 - $(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available) ))"
 }
 
 flow_fed_failed_action_refund() {

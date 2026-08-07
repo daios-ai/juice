@@ -2,6 +2,9 @@ package kernel_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1781,5 +1784,68 @@ func TestCompleteStepReportsACommittedWasmTimeout(t *testing.T) {
 	}
 	if done.Status != kernel.StepDone {
 		t.Errorf("step status = %s, want done", done.Status)
+	}
+}
+
+// TestCreateStepHealsLegacyProxy: parking money is a funding boundary, so a proxy imported before
+// the seller's price was stored heals BEFORE its price is parked (§16). Otherwise the step parks a
+// frozen total and its completion dispatches the local total as the seller's price, which makes the
+// peer's valid receipt fail the charge==mp check and quarantine.
+func TestCreateStepHealsLegacyProxy(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	m := kernel.ActionManifest{
+		ActionID: "ra-step-legacy", OwnerID: "remote-bob", OwnerHandle: "bob", Name: "greet",
+		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+	}
+	m.Signature, _ = kernel.SignManifest(priv, &m)
+	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{resolveManifest: &m})
+
+	a, err := k.ResolveAction(ctx, "bob@"+pubB64+"/greet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rewind to the pre-041 shape: the total is stored, the seller's price is not.
+	a.BasePrice = nil
+	if err := st.UpdateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	owner := setupUser(t, st, "step-legacy-owner", 1000)
+	caller := setupUser(t, st, "step-legacy-caller", 0)
+	local := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "host", Kind: kernel.KindHTTP,
+		Active: true, Visibility: kernel.VisibilityPublic, Description: "host",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, local); err != nil {
+		t.Fatal(err)
+	}
+	p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: owner.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, CreatedAt: time.Now().UTC()}
+	if err := st.BeginRun(ctx, p, root, owner.ID, 500, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	step, err := k.CreateStep(ctx, root.ID, a.ID, nil, caller.ID, "")
+	if err != nil {
+		t.Fatalf("CreateStep against a legacy proxy: %v", err)
+	}
+	healed, err := st.ReadAction(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healed.BasePrice == nil || *healed.BasePrice != 100 {
+		t.Fatalf("the row must heal before parking, got base price %v", healed.BasePrice)
+	}
+	if step.Price != 111 { // sr=105, import 500bps → 111
+		t.Errorf("parked price = %d, want 111", step.Price)
+	}
+	if step.ImportBPS == nil || *step.ImportBPS != 500 {
+		t.Errorf("step must freeze the fee it was funded under, got %v", step.ImportBPS)
 	}
 }

@@ -38,7 +38,7 @@ const (
 // wallet model. RecoveryPublicKey is a recovery credential (§12), never a federation identity.
 type Account struct {
 	ID           string     `json:"id"`
-	Handle       string     `json:"handle"` // empty on a kernel account — a kernel is named by its petname (§13)
+	Handle       string     `json:"handle"`      // empty on a kernel account — a kernel is named by its petname (§13)
 	Description  string     `json:"description"` // free-text "about"; sys's is the kernel's about (§13)
 	PasswordHash string     `json:"-"`
 	Available    int64      `json:"available"`
@@ -107,11 +107,16 @@ type Action struct {
 	RemoteActionID string           `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
 	RemoteOwnerID  string           `json:"remote_owner_id,omitempty"`  // stable owner user_id on the remote kernel (with peer key = PrincipalID, §13)
 	RemoteBPS      *int64           `json:"remote_bps,omitempty"`       // provider premium snapshot from the signed manifest; nil = pre-v0.12 proxy row
-	Effect         string           `json:"effect,omitempty"`           // signed manifest contract: a privileged execution effect ("transfer", §13); empty = ordinary action
-	AuthJSON       string           `json:"-"`                          // AES-256-GCM encrypted upstream auth credentials; never serialized
-	CreatedAt      time.Time        `json:"created_at"`
-	UpdatedAt      time.Time        `json:"updated_at"`
-	DeletedAt      *time.Time       `json:"deleted_at,omitempty"`
+	// BasePrice is the seller's manifest price (mp) on a remote_proxy row. Price is DERIVED from it
+	// and the current import_bps at read (§8, §16 Price Snapshot Pattern), so local policy reprices
+	// the catalog with no re-resolve. nil = imported before 041: the row re-resolves before it is
+	// next funded rather than having mp reverse-calculated from its rounded total.
+	BasePrice *int64     `json:"base_price,omitempty"`
+	Effect    string     `json:"effect,omitempty"` // signed manifest contract: a privileged execution effect ("transfer", §13); empty = ordinary action
+	AuthJSON  string     `json:"-"`                // AES-256-GCM encrypted upstream auth credentials; never serialized
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 }
 
 // Upstream auth schemes (§8). Owner-held schemes carry their secret in auth_json; the delegated
@@ -214,17 +219,21 @@ const (
 // Core invariant: CompleteStep(caller, id, input) = Call(caller, trace, action_id, partial_args ⊕ input)
 // The allowed completion input is derived live as action.input_schema \ keys(partial_args).
 type Step struct {
-	ID                   string          `json:"id"`
-	ParentTraceID        *string         `json:"parent_trace_id,omitempty"`
-	RequiredCallerUserID string          `json:"required_caller_user_id"`
-	RequiredCallerRemoteID *string       `json:"required_caller_remote_id,omitempty"` // stable remote user_id on the peer kernel (§13); nil = local required caller
-	ActionID             string          `json:"action_id"`
-	PartialArgs          json.RawMessage `json:"partial_args"`
-	Price                int64           `json:"price"`
-	Status               StepStatus      `json:"status"`
-	TxID                 *string         `json:"tx_id,omitempty"`
-	CompletionTraceID    *string         `json:"completion_trace_id,omitempty"`
-	CreatedAt            time.Time       `json:"created_at"`
+	ID                     string          `json:"id"`
+	ParentTraceID          *string         `json:"parent_trace_id,omitempty"`
+	RequiredCallerUserID   string          `json:"required_caller_user_id"`
+	RequiredCallerRemoteID *string         `json:"required_caller_remote_id,omitempty"` // stable remote user_id on the peer kernel (§13); nil = local required caller
+	ActionID               string          `json:"action_id"`
+	PartialArgs            json.RawMessage `json:"partial_args"`
+	Price                  int64           `json:"price"`
+	// ImportBPS freezes the origin fee this Step was funded under: CreateStep parks Price and the
+	// Step may settle long after import_bps changes (§16 Price Snapshot Pattern). Remote-proxy steps
+	// only; nil = parked before 041, settling from live config as before.
+	ImportBPS         *int64     `json:"import_bps,omitempty"`
+	Status            StepStatus `json:"status"`
+	TxID              *string    `json:"tx_id,omitempty"`
+	CompletionTraceID *string    `json:"completion_trace_id,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
 }
 
 // OrphanRunningStep is one result row from Store.ListOrphanRunningSteps.
@@ -437,20 +446,20 @@ type RefreshToken struct {
 // Receipt is an immutable signed record of a committed call.
 // Created atomically with the transaction in CommitCall or CommitFailedCall.
 type Receipt struct {
-	ID           string    `json:"id"`
-	IssuerUserID string    `json:"issuer_user_id"`
-	TxID         string    `json:"tx_id"`
-	TraceID      string    `json:"trace_id"`
-	ActionID     string    `json:"action_id"`
-	CallerUserID string    `json:"caller_user_id"`
-	ProcessID    string    `json:"process_id"`
-	ArgsHash     string    `json:"args_hash"`
-	ReplyHash    string    `json:"reply_hash"`
-	Status       TxStatus  `json:"status"`
-	Gross        int64     `json:"gross"`
-	Net          int64     `json:"net"`
-	Fee          int64     `json:"fee"`
-	Charge       int64     `json:"charge"`
+	ID           string   `json:"id"`
+	IssuerUserID string   `json:"issuer_user_id"`
+	TxID         string   `json:"tx_id"`
+	TraceID      string   `json:"trace_id"`
+	ActionID     string   `json:"action_id"`
+	CallerUserID string   `json:"caller_user_id"`
+	ProcessID    string   `json:"process_id"`
+	ArgsHash     string   `json:"args_hash"`
+	ReplyHash    string   `json:"reply_hash"`
+	Status       TxStatus `json:"status"`
+	Gross        int64    `json:"gross"`
+	Net          int64    `json:"net"`
+	Fee          int64    `json:"fee"`
+	Charge       int64    `json:"charge"`
 	// Premium is the serving kernel's markup (execution tax + risk premium) on this charge, credited
 	// to the serving kernel's sys and owed by the origin peer on top of Charge (§13). omitempty keeps
 	// it out of the JCS signature for all local and pre-v0.12 receipts (Premium=0), so those verify
@@ -462,29 +471,29 @@ type Receipt struct {
 	// serving markup on the value (= ceil(value·remote_bps), NOT folded into execution Premium); ValueTo
 	// is the resolved beneficiary the origin binds. omitempty keeps all three out of the JCS signature
 	// for every non-transfer receipt (0/""), so those verify unchanged.
-	Value        int64     `json:"value,omitempty"`
-	ValuePremium int64     `json:"value_premium,omitempty"`
-	ValueTo      string    `json:"value_to,omitempty"`
+	Value        int64  `json:"value,omitempty"`
+	ValuePremium int64  `json:"value_premium,omitempty"`
+	ValueTo      string `json:"value_to,omitempty"`
 	// RefreshProxy signals the origin to invalidate its cached proxy for this action (§8/§13): set only
 	// on a zero-charge pre-execution rejection whose fault is the cache's (contract-hash mismatch, a
 	// non-executable action). omitempty keeps it out of the JCS signature for every other receipt, so
 	// those verify unchanged; a receipt setting it must be a valid zero-charge rejection or it quarantines.
 	RefreshProxy bool      `json:"refresh_proxy,omitempty"`
 	Reason       string    `json:"reason"`
-	StartedAt time.Time `json:"started_at"`
-	CreatedAt time.Time `json:"created_at"`
-	Signature string    `json:"signature"`
+	StartedAt    time.Time `json:"started_at"`
+	CreatedAt    time.Time `json:"created_at"`
+	Signature    string    `json:"signature"`
 }
 
 // Rating is an immutable human-submitted rating for a transaction.
 // Stored in a separate ratings table; the transaction row is never modified after creation.
 type Rating struct {
-	ID             string    `json:"id"`
-	RatedTxID      string    `json:"rated_tx_id"`
-	RatedReceiptID *string   `json:"rated_receipt_id"` // nil for transactions predating the receipt requirement
-	RaterUserID    string    `json:"rater_user_id"`
-	Rating         float64   `json:"rating"`
-	Note           *string   `json:"note"` // optional human-readable justification
+	ID             string  `json:"id"`
+	RatedTxID      string  `json:"rated_tx_id"`
+	RatedReceiptID *string `json:"rated_receipt_id"` // nil for transactions predating the receipt requirement
+	RaterUserID    string  `json:"rater_user_id"`
+	Rating         float64 `json:"rating"`
+	Note           *string `json:"note"` // optional human-readable justification
 	// RatedReceiptHash is SHA-256(CanonicalJSON(rated receipt)) — the portable link a v0.13
 	// evidence bundle carries so a receiver can join this rating to its receipt (§13). omitempty
 	// is load-bearing: a pre-v0.13 rating was signed without this field, so keeping it out of the
@@ -582,10 +591,10 @@ type ActionManifest struct {
 
 // ReceiptVerification is the result of VerifyRemoteReceipt.
 type ReceiptVerification struct {
-	TransactionID         string        `json:"transaction_id"`
-	Valid                 bool          `json:"valid"`
-	RemoteKernelHandle    string        `json:"remote_kernel_handle"`
-	RemoteKernelPublicKey string        `json:"remote_kernel_public_key"`
+	TransactionID         string `json:"transaction_id"`
+	Valid                 bool   `json:"valid"`
+	RemoteKernelHandle    string `json:"remote_kernel_handle"`
+	RemoteKernelPublicKey string `json:"remote_kernel_public_key"`
 	// SignatureVersion is which signing scheme verified the stored receipt: 2 = v0.13
 	// domain-prefixed, 1 = legacy undomained (a pre-v0.13 audit record, still authentic), 0 = none.
 	SignatureVersion int           `json:"signature_version"`
@@ -603,6 +612,7 @@ type ReceiptChecks struct {
 	Premium            bool `json:"premium"`             // receipt.premium == ceil(receipt.charge * remote_bps / 10000)
 	ValuePremium       bool `json:"value_premium"`       // receipt.value_premium == ceil(receipt.value * remote_bps / 10000) (§13)
 	SettlementArith    bool `json:"settlement_arith"`    // tx.fee == ceil(tx.net * import_bps / 10000) on success, 0 on failure
+	ChargeCeiling      bool `json:"charge_ceiling"`      // receipt.charge + receipt.premium <= tx.gross, the authenticated ceiling (§13)
 	RefundConservation bool `json:"refund_conservation"` // tx.Refund == tx.Gross - tx.Net - tx.Fee (exact equality)
 	ArgsHash           bool `json:"args_hash"`
 	ReplyHash          bool `json:"reply_hash"`
@@ -791,17 +801,17 @@ type DiscoveryDoc struct {
 // counterparty and the receipt hashes join — so an issuer's claim is shown verified vs unverified,
 // not taken on faith. It is 0 for the self-reported execution summary.
 type SubjectEvidenceRow struct {
-	IssuerPublicKey  string   `json:"issuer_public_key"`
-	SubjectActionID  string   `json:"subject_action_id"`
-	Uses             int64    `json:"uses"`
-	Successes        int64    `json:"successes"`
-	Failures         int64    `json:"failures"`
-	CorroboratedUses int64    `json:"corroborated_uses"`
-	AvgLatencyMs     float64  `json:"avg_latency_ms"`
-	RatingCount      int64    `json:"rating_count"`
-	RatingMean       float64  `json:"rating_mean"`
-	UnverifiedRatings int64   `json:"unverified_ratings"`
-	Notes            []string `json:"notes,omitempty"`
+	IssuerPublicKey   string   `json:"issuer_public_key"`
+	SubjectActionID   string   `json:"subject_action_id"`
+	Uses              int64    `json:"uses"`
+	Successes         int64    `json:"successes"`
+	Failures          int64    `json:"failures"`
+	CorroboratedUses  int64    `json:"corroborated_uses"`
+	AvgLatencyMs      float64  `json:"avg_latency_ms"`
+	RatingCount       int64    `json:"rating_count"`
+	RatingMean        float64  `json:"rating_mean"`
+	UnverifiedRatings int64    `json:"unverified_ratings"`
+	Notes             []string `json:"notes,omitempty"`
 }
 
 // FederationResult is the return value of ExecuteFederation.

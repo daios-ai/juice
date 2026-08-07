@@ -954,7 +954,7 @@ func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
 	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "ret-action", 1000)
-	mp := k.RemoteManifestPrice(a.Price)
+	mp := *a.BasePrice
 	premium := (mp*bps + 9999) / 10000
 
 	// Call while the peer is offline → pending, no settled transaction, funds locked.
@@ -1062,7 +1062,7 @@ func TestPendingRemoteTracesAndRetryWrappers(t *testing.T) {
 	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "wrap-action", 1000)
-	mp := k.RemoteManifestPrice(a.Price)
+	mp := *a.BasePrice
 	premium := (mp*bps + 9999) / 10000
 
 	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
@@ -1314,7 +1314,7 @@ func TestSettleRemoteCallValidChargeNotClamped(t *testing.T) {
 	ibps := kernel.DefaultConfig().ImportBPS
 	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "valid-action", 1000)
 	_, tr := beginTestRun(t, st, caller.ID, a)
-	mp := k.RemoteManifestPrice(a.Price)
+	mp := *a.BasePrice
 	premium := (mp*bps + 9999) / 10000
 
 	now := time.Now().UTC()
@@ -1367,7 +1367,7 @@ func TestSettleRemoteCallRejectsRefreshProxyOnSuccess(t *testing.T) {
 	fake := &fakeFederationHTTP{}
 	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "rp-inv-action", 1000)
 	_, tr := beginTestRun(t, st, caller.ID, a)
-	mp := k.RemoteManifestPrice(a.Price)
+	mp := *a.BasePrice
 	premium := (mp*kernel.DefaultConfig().RemoteBPS + 9999) / 10000
 
 	now := time.Now().UTC()
@@ -3151,5 +3151,275 @@ func TestManifestMonetaryBoundsRejected(t *testing.T) {
 	// sr = 100 + ceil(100*500/10000) = 105.
 	if docs[0].ServingPrice != 105 {
 		t.Errorf("serving_price = %d, want 105", docs[0].ServingPrice)
+	}
+}
+
+// TestProxyRepricesOnImportBPSChange: an imported action is a CATALOG entry, so its total is derived
+// from the seller's stored price and the CURRENT import fee (§8, §16). Changing local policy reprices
+// it everywhere at once — with no re-resolve, no manifest change, and no peer contact.
+func TestProxyRepricesOnImportBPSChange(t *testing.T) {
+	st := newTestStore(t)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	m := kernel.ActionManifest{
+		ActionID: "ra-price", OwnerID: "remote-bob", OwnerHandle: "bob", Name: "greet",
+		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+	}
+	sig, err := kernel.SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+
+	kernelAt := func(importBPS int64) *kernel.Kernel {
+		cfg := kernel.DefaultConfig()
+		cfg.TokenSecret = "test-secret"
+		cfg.IssuerUserID = testIssuerUserID
+		cfg.FeeRecipientID = testIssuerUserID
+		cfg.SigningKey = testSigningKey()
+		cfg.ImportBPS = importBPS
+		return kernel.New(st, nil, &fakeFederationHTTP{resolveManifest: &m}, nil, cfg, log.Default())
+	}
+	ctx := context.Background()
+
+	// mp=100, remote_bps=500 → sr=105. At import_bps=500 the total is 105+6=111.
+	a, err := kernelAt(500).ResolveAction(ctx, "bob@"+pubB64+"/greet")
+	if err != nil {
+		t.Fatalf("cold resolve: %v", err)
+	}
+	if a.Price != 111 || a.BasePrice == nil || *a.BasePrice != 100 {
+		t.Fatalf("import: price=%d base=%v, want 111 and 100", a.Price, a.BasePrice)
+	}
+
+	// A second kernel over the SAME store at 2000 bps: 105 + ceil(105*2000/10000) = 105+21 = 126.
+	// No re-resolve happens — the manifest is unchanged and the row is already active.
+	reader := kernelAt(2000)
+	got, err := reader.ResolveAction(ctx, "bob@"+pubB64+"/greet")
+	if err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	if got.ID != a.ID {
+		t.Fatalf("expected the same cached row, got %s want %s", got.ID, a.ID)
+	}
+	if got.Price != 126 {
+		t.Errorf("repriced total = %d, want 126", got.Price)
+	}
+	// Every read boundary agrees, not just the resolver.
+	byID, err := reader.ReadAction(ctx, a.ID)
+	if err != nil || byID.Price != 126 {
+		t.Errorf("ReadAction price = %d (err %v), want 126", byID.Price, err)
+	}
+	// The stored seller price is untouched by any read.
+	if byID.BasePrice == nil || *byID.BasePrice != 100 {
+		t.Errorf("base price must not move: %v", byID.BasePrice)
+	}
+}
+
+// TestLegacyProxyHealsOnNextFundedUse: a row imported before the seller's price was stored has its
+// total frozen and cannot be re-derived. It re-resolves once, acquiring an exact price from the
+// signed manifest — even though the contract hash is UNCHANGED, the case reconcileImport skips.
+func TestLegacyProxyHealsOnNextFundedUse(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	setupSys(t, k, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	m := kernel.ActionManifest{
+		ActionID: "ra-legacy", OwnerID: "remote-bob", OwnerHandle: "bob", Name: "greet",
+		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+	}
+	sig, err := kernel.SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+
+	fake := &fakeFederationHTTP{resolveManifest: &m}
+	kf := newTestKernelWithHTTP(st, fake)
+	a, err := kf.ResolveAction(ctx, "bob@"+pubB64+"/greet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the pre-041 shape: an active row with the total stored but no seller price.
+	a.BasePrice = nil
+	if err := st.UpdateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	legacy, _ := st.ReadAction(ctx, a.ID)
+	if legacy.BasePrice != nil || !legacy.Active {
+		t.Fatalf("setup: want an active row with no base price, got %+v", legacy)
+	}
+
+	// The contract is unchanged, so reconcile lands in Unchanged — the path that used to write
+	// nothing. The row must still come back with an exact seller price, id and active state intact.
+	healed, err := kf.ResolveAction(ctx, "bob@"+pubB64+"/greet")
+	if err != nil {
+		t.Fatalf("healing resolve: %v", err)
+	}
+	if healed.ID != a.ID || !healed.Active {
+		t.Errorf("healing must preserve id and active state: %+v", healed)
+	}
+	if healed.BasePrice == nil || *healed.BasePrice != 100 {
+		t.Fatalf("base price after heal = %v, want 100", healed.BasePrice)
+	}
+}
+
+// TestSettlementUsesDispatchedRate: the funding boundary freezes the rate, so a call dispatched at
+// one import fee settles at THAT fee even if local policy moves while it is in flight (§16). Without
+// the snapshot a parked call would refund against a rate it was never locked at, and the caller's
+// balance would not reconcile.
+func TestSettlementUsesDispatchedRate(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	fake := &fakeFederationHTTP{} // no receipt → the peer is offline and the call parks
+
+	// Dispatch under the default 500 bps: mp=1000 → sr=1050 → q=1103.
+	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "ra-rate", 1000)
+	if a.Price != 1103 {
+		t.Fatalf("setup price = %d, want 1103", a.Price)
+	}
+	before, _ := st.ReadUser(ctx, caller.ID)
+
+	if _, err := k.Run(ctx, caller.ID, a.ID, map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("Run: expected ErrTimeout (parked), got %v", err)
+	}
+	pend, _ := st.ListPendingRemoteTraces(ctx)
+	if len(pend) != 1 {
+		t.Fatalf("expected 1 parked trace, got %d", len(pend))
+	}
+	var d struct {
+		Gross     int64  `json:"gross"`
+		ImportBPS *int64 `json:"import_bps"`
+		RemoteBPS *int64 `json:"remote_bps"`
+	}
+	if err := json.Unmarshal([]byte(*pend[0].DispatchJSON), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Gross != 1103 {
+		t.Errorf("dispatch gross = %d, want the locked 1103", d.Gross)
+	}
+	if d.ImportBPS == nil || *d.ImportBPS != 500 || d.RemoteBPS == nil || *d.RemoteBPS != 500 {
+		t.Fatalf("dispatch must freeze both rates, got import=%v remote=%v", d.ImportBPS, d.RemoteBPS)
+	}
+
+	// The operator now quadruples the import fee. The catalog reprices; this in-flight call must not.
+	cfg := kernel.DefaultConfig()
+	cfg.TokenSecret, cfg.IssuerUserID, cfg.FeeRecipientID = "test-secret", testIssuerUserID, testIssuerUserID
+	cfg.SigningKey, cfg.ImportBPS = testSigningKey(), 2000
+	repriced := kernel.New(st, nil, fake, nil, cfg, log.Default())
+	if got, _ := repriced.ReadAction(ctx, a.ID); got.Price != 1260 { // 1050 + ceil(1050*2000/10000)
+		t.Fatalf("catalog price after the change = %d, want 1260", got.Price)
+	}
+
+	// The peer returns and FAILS the call at zero charge: the full 1103 must come back, restoring
+	// the caller's original balance exactly. Refunding against 1281 would mint credits.
+	now := time.Now().UTC()
+	r := &kernel.Receipt{
+		ID: uuid.New().String(), TxID: "rtx-rate", ActionID: "ra-rate",
+		ArgsHash: jcsHashForTest(t, `{}`), ReplyHash: jcsHashForTest(t, `{}`),
+		Status: kernel.TxFailure, Charge: 0, Premium: 0, StartedAt: now, CreatedAt: now,
+	}
+	r.Signature = signReceiptForTest(t, priv, r)
+	b, _ := json.Marshal(r)
+	fake.receiptJSON = string(b)
+	repriced.RetryPendingRemoteDispatches(ctx)
+
+	after, _ := st.ReadUser(ctx, caller.ID)
+	if after.Available != before.Available || after.Locked != 0 {
+		t.Errorf("after refund: available=%d locked=%d, want available=%d locked=0",
+			after.Available, after.Locked, before.Available)
+	}
+}
+
+// TestEveryReadPathReprices: pricing a proxy is not any one caller's job — the derivation lives on
+// the store handle, so EVERY read carries it (§16). This pins that: the same repriced row must read
+// identically through the id path, the reference path, the listing, and sys/lookup. A caller that
+// bypassed the boundary would show the stale total here.
+func TestEveryReadPathReprices(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	m := kernel.ActionManifest{
+		ActionID: "ra-paths", OwnerID: "remote-bob", OwnerHandle: "bob", Name: "greet",
+		RemoteBPS: 500, Description: "greet a person warmly", Kind: kernel.KindHTTP, Price: 100,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+	}
+	m.Signature, _ = kernel.SignManifest(priv, &m)
+
+	at := func(importBPS int64) *kernel.Kernel {
+		cfg := kernel.DefaultConfig()
+		cfg.TokenSecret, cfg.IssuerUserID, cfg.FeeRecipientID = "test-secret", testIssuerUserID, testIssuerUserID
+		cfg.SigningKey, cfg.ImportBPS = testSigningKey(), importBPS
+		return kernel.New(st, nil, &fakeFederationHTTP{resolveManifest: &m}, &fakeEmbedder{}, cfg, log.Default())
+	}
+	a, err := at(500).ResolveAction(ctx, "bob@"+pubB64+"/greet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller := setupUser(t, st, "paths-caller", 0)
+
+	// sr = 105; at 2000 bps the total is 105 + ceil(105*2000/10000) = 126.
+	k := at(2000)
+	const want = int64(126)
+
+	byID, err := k.ReadAction(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byRef, err := k.ResolveAction(ctx, "bob@"+pubB64+"/greet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byRawID, err := k.ResolveAction(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forSubject, err := k.ReadActionForSubject(ctx, caller.ID, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string]*kernel.Action{
+		"ReadAction": byID, "ResolveAction(ref)": byRef,
+		"ResolveAction(id)": byRawID, "ReadActionForSubject": forSubject,
+	} {
+		if got.Price != want {
+			t.Errorf("%s price = %d, want %d", name, got.Price, want)
+		}
+	}
+	listed, err := k.ListOwnedActions(ctx, a.OwnerUserID, 50, 0)
+	if err != nil || len(listed) == 0 {
+		t.Fatalf("listing: %d rows, err %v", len(listed), err)
+	}
+	for _, got := range listed {
+		if got.ID == a.ID && got.Price != want {
+			t.Errorf("ListOwnedActions price = %d, want %d", got.Price, want)
+		}
+	}
+
+	// sys/lookup reads through the same boundary, so it needs no pricing logic of its own.
+	res, err := k.Lookup(ctx, kernel.LookupRequest{Query: "greet warmly", Limit: 10, CallerID: caller.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen bool
+	for _, r := range res {
+		if r.Action != nil && r.Action.ID == a.ID {
+			seen = true
+			if r.Price != want {
+				t.Errorf("lookup price = %d, want %d", r.Price, want)
+			}
+		}
+	}
+	if !seen {
+		t.Error("the resolved proxy must appear in lookup (it is indexed at resolve)")
 	}
 }

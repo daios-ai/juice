@@ -236,7 +236,7 @@ func peerStateStaleAfter() time.Duration { return 3 * globalCfg.discoveryInterva
 // staleAfter. "unfunded": our cached credit on the peer is below the action's remote manifest price.
 // "offline" takes precedence — a stale credit figure is not actionable. "" when healthy or the
 // owner row is gone.
-func peerStateFor(k *kernel.Kernel, ctx context.Context, owner *kernel.Account, price int64, staleAfter time.Duration) string {
+func peerStateFor(k *kernel.Kernel, ctx context.Context, owner *kernel.Account, a *kernel.Action, staleAfter time.Duration) string {
 	if owner == nil || owner.KernelPublicKey == "" {
 		return ""
 	}
@@ -247,7 +247,14 @@ func peerStateFor(k *kernel.Kernel, ctx context.Context, owner *kernel.Account, 
 	if rk.LastSeen == nil || time.Since(*rk.LastSeen) > staleAfter {
 		return "offline"
 	}
-	if rk.PeerCredit != nil && *rk.PeerCredit < k.RemoteManifestPrice(price) {
+	// The seller's own price, read from the row rather than reverse-calculated from the local
+	// total (§16). A pre-041 row has none; its stored total is the best available stand-in until
+	// its next funded call re-resolves it.
+	mp := a.Price
+	if a.BasePrice != nil {
+		mp = *a.BasePrice
+	}
+	if rk.PeerCredit != nil && *rk.PeerCredit < mp {
 		return "unfunded"
 	}
 	return ""
@@ -614,7 +621,7 @@ func getAction(k *kernel.Kernel, ctx context.Context, callerID, id string) (acti
 	r := enrichAction(k, a, newAccountCache(k, ctx))
 	if a.Kind == kernel.KindRemoteProxy {
 		owner, _ := k.ReadUser(ctx, a.OwnerUserID)
-		r.PeerState = peerStateFor(k, ctx, owner, a.Price, peerStateStaleAfter())
+		r.PeerState = peerStateFor(k, ctx, owner, a, peerStateStaleAfter())
 	}
 	return r, nil
 }
@@ -723,7 +730,7 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 		cp := *a
 		r := enrichAction(k, &cp, uc) // decompose http view before hiding the raw blob
 		if cp.Kind == kernel.KindRemoteProxy {
-			r.PeerState = peerStateFor(k, uc.ctx, uc.get(cp.OwnerUserID), cp.Price, staleAfter)
+			r.PeerState = peerStateFor(k, uc.ctx, uc.get(cp.OwnerUserID), &cp, staleAfter)
 		}
 		cp.Source = ""
 		cp.ArtifactHash = ""

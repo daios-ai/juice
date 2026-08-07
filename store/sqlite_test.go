@@ -4313,23 +4313,29 @@ func TestMigration038NormalizesProxyVisibility(t *testing.T) {
 	if err := s.CreateUser(ctx, peer); err != nil {
 		t.Fatal(err)
 	}
-	seed := func(name string, vis kernel.ActionVisibility) *kernel.Action {
+	// Seed with raw SQL, not CreateAction: this DB is deliberately held at the pre-038 schema, and
+	// the current store code writes columns later migrations add. A migration test must construct
+	// the historical world it claims to migrate.
+	seedRaw := func(name string, kind kernel.ActionKind, vis kernel.ActionVisibility) *kernel.Action {
+		t.Helper()
 		a := newAction(peer.ID, name, 5, true)
-		a.Kind = kernel.KindRemoteProxy
+		a.Kind = kind
 		a.Visibility = vis
 		a.RemoteActionID = "ra-" + name
-		if err := s.CreateAction(ctx, a); err != nil {
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO actions (id,owner_user_id,name,kind,active,visibility,price,description,
+			                      input_schema,output_schema,source,artifact_hash,wasm_artifact,
+			                      remote_action_id,created_at,updated_at)
+			 VALUES (?,?,?,?,1,?,5,'d','{}','{}','','','',?,?,?)`,
+			a.ID, peer.ID, name, string(kind), string(vis), a.RemoteActionID,
+			timeToStr(now), timeToStr(now)); err != nil {
 			t.Fatal(err)
 		}
 		return a
 	}
-	legacy := seed("far/one", kernel.VisibilityPublic)
-	unpromoted := seed("far/two", kernel.VisibilityPrivate)
-	local := newAction(peer.ID, "own/http", 5, true)
-	local.Visibility = kernel.VisibilityPublic
-	if err := s.CreateAction(ctx, local); err != nil {
-		t.Fatal(err)
-	}
+	legacy := seedRaw("far/one", kernel.KindRemoteProxy, kernel.VisibilityPublic)
+	unpromoted := seedRaw("far/two", kernel.KindRemoteProxy, kernel.VisibilityPrivate)
+	local := seedRaw("own/http", kernel.KindHTTP, kernel.VisibilityPublic)
 
 	for _, f := range held {
 		b, _ := migrationFS.ReadFile(f)
@@ -4489,5 +4495,57 @@ func TestMigration040ReindexesProxies(t *testing.T) {
 	}
 	if active != 1 {
 		t.Error("repair must not deactivate the row")
+	}
+}
+
+// TestPriceSnapshotColumnsRoundTrip: the two 041 snapshot columns are nullable and survive a
+// round-trip. NULL is meaningful — it marks a row imported or parked before the change, which heals
+// rather than being reverse-calculated (§16).
+func TestPriceSnapshotColumnsRoundTrip(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	owner := newUser("owner041", 0)
+	if err := db.CreateUser(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+
+	base := int64(100)
+	withPrice := newAction(owner.ID, "bob/greet", 111, true)
+	withPrice.Kind = kernel.KindRemoteProxy
+	withPrice.BasePrice = &base
+	legacy := newAction(owner.ID, "bob/wave", 111, true)
+	legacy.Kind = kernel.KindRemoteProxy
+	for _, a := range []*kernel.Action{withPrice, legacy} {
+		if err := db.CreateAction(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.ReadAction(ctx, withPrice.ID)
+	if err != nil || got.BasePrice == nil || *got.BasePrice != 100 {
+		t.Errorf("base_price round-trip = %v (err %v), want 100", got.BasePrice, err)
+	}
+	if l, _ := db.ReadAction(ctx, legacy.ID); l.BasePrice != nil {
+		t.Errorf("legacy row base_price = %v, want nil", l.BasePrice)
+	}
+
+	// steps.import_bps behaves the same way.
+	p := newProcess(owner.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, owner.ID, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	ptID := root.ID
+	ibps := int64(500)
+	step := &kernel.Step{
+		ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: owner.ID,
+		ActionID: withPrice.ID, Price: 0,
+		ImportBPS: &ibps, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+	}
+	if err := db.CreateStep(ctx, step); err != nil {
+		t.Fatal(err)
+	}
+	back, err := db.ReadStep(ctx, step.ID)
+	if err != nil || back.ImportBPS == nil || *back.ImportBPS != 500 {
+		t.Errorf("step import_bps round-trip = %v (err %v), want 500", back.ImportBPS, err)
 	}
 }
