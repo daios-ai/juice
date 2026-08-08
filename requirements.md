@@ -126,7 +126,7 @@ Check call preconditions in this exact order and return the typed error for the 
 
 Precondition 4 controls spending authority over the process (the process owner `P`). Precondition 6 controls action access by the immediate caller `C`. These are distinct questions: `P` decides whose funds may be spent, `C` decides whose code may reach the action.
 
-`quote_hash` = SHA-256(JCS(`{action_id, effect, description, input_schema, output_schema, price}`)) over the **stable** id — a proxy's remote id, so a discovered hit and the proxy it resolves to hash identically (§13) and a hash read from lookup binds a first cross-kernel call. Action reads, listings, and `sys/lookup` carry it; a root run may pin it, and a mismatch is refused with `ErrInvalidState` carrying the current hash and price in `meta`. `effect` is included because it alone decides whether a call engages the value channel (§13). Its position — after visibility, before schema validation — is why a mismatch never discloses a private action's terms and why terms that invalidate the args still report as changed terms. It binds the execution quote, not the implementation, and not a transfer total whose value fees are read live at funding.
+`quote_hash` = SHA-256(JCS(`{action_id, effect, description, input_schema, output_schema, price}`)) over the **stable** id — a proxy's remote id, so a discovered hit and the proxy it resolves to hash identically (§13) and a hash read from lookup binds a first cross-kernel call. Action reads, listings, and `sys/lookup` carry it; a root run may pin it, and a mismatch is refused with `ErrTermsChanged` carrying the current hash and price in `meta` — its own code, since the action is callable and only its terms moved. `effect` is included because it alone decides whether a call engages the value channel (§13). Its position — after visibility, before schema validation — is why a mismatch never discloses a private action's terms and why terms that invalidate the args still report as changed terms. It binds the execution quote, not the implementation, and not a transfer total whose value fees are read live at funding.
 
 Trace relation:
 
@@ -574,7 +574,7 @@ Errors:
 ```text
 ErrUnauthenticated ErrUnauthorized ErrNotFound ErrInvalidInput ErrInvalidState
 ErrInsufficientFunds ErrExecutionFailed ErrSchemaViolation ErrTimeout ErrInternal
-ErrGrantRequired ErrPeerUnreachable ErrPeerUnfunded
+ErrGrantRequired ErrPeerUnreachable ErrPeerUnfunded ErrTermsChanged
 ```
 
 `ErrGrantRequired` is a precondition failure, the twin of `ErrInsufficientFunds` — the process owner must delegate an upstream OAuth grant before the action can run (§8). It carries the action reference as structured metadata so clients act on a code, not a message.
@@ -1042,7 +1042,7 @@ lookup ranking with fake embeddings
 lookup ranks by fused relevance only while stats-based quality weighting is UNDER REVISION (temporarily removed): two identical-relevance actions score equally regardless of success history
 lookup results include action (owner/name), input_schema, and output_schema
 lookup returns an all-in price for every result: action.price locally, a discovered hit's serving_price marked up by current import_bps, repricing with no re-pull; a manifest with a negative price or out-of-range remote_bps is skipped at ingest and refused at import
-a pinned run succeeds unchanged and is refused with ErrInvalidState — balance and process count unmoved — when price, effect, description, either schema, or the stable id moved, including when the new schema rejects the args; a private action refuses on visibility, never disclosing its quote
+a pinned run succeeds unchanged and is refused with ErrTermsChanged, distinct from ErrInvalidState — balance and process count unmoved — when price, effect, description, either schema, or the stable id moved, including when the new schema rejects the args; a private action refuses on visibility, never disclosing its quote
 a discovered hit's quote_hash equals that of the proxy it resolves to
 lookup degrades to lexical (BM25) ranking with no embedder configured; a keyword query still finds actions
 lookup skips an embedding vector whose dimension differs from the query's (no panic, no cross-space score)

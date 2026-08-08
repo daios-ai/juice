@@ -2143,12 +2143,17 @@ func TestRunQuotePinRefusesBeforeFunding(t *testing.T) {
 	}
 
 	_, err := k.Run(ctx, alice.ID, "alice-quote/svc", map[string]any{}, stale)
-	if !errors.Is(err, kernel.ErrInvalidState) {
-		t.Fatalf("stale pin: got %v, want ErrInvalidState", err)
+	if !errors.Is(err, kernel.ErrTermsChanged) {
+		t.Fatalf("stale pin: got %v, want ErrTermsChanged", err)
 	}
 	var ke *kernel.KernelError
 	if !errors.As(err, &ke) || ke.Meta["quote_hash"] != kernel.QuoteHash(a) || ke.Meta["price"] != "500" {
 		t.Errorf("refusal must carry the current hash and price, got meta %v", ke.Meta)
+	}
+	// A distinct code, not invalid_state: a client must tell "re-confirm the new terms" from
+	// "this action is disabled" without sniffing Meta (§12).
+	if errors.Is(err, kernel.ErrInvalidState) || ke.Code != "terms_changed" {
+		t.Errorf("changed terms need their own code, got %q", ke.Code)
 	}
 	u, _ := st.ReadUser(ctx, alice.ID)
 	if u.Available != 5000 || u.Locked != 0 {
@@ -2204,7 +2209,7 @@ func TestQuotePinOrderedAfterVisibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = k.Run(ctx, alice.ID, "alice-order/secret", map[string]any{}, stale)
-	if !errors.Is(err, kernel.ErrInvalidState) {
+	if !errors.Is(err, kernel.ErrTermsChanged) {
 		t.Fatalf("a schema change under a stale pin must report changed terms, got %v", err)
 	}
 }

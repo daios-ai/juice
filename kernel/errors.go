@@ -88,7 +88,7 @@ func ErrorFromCode(code string) *KernelError {
 		ErrUnauthenticated, ErrUnauthorized, ErrNotFound, ErrInvalidInput,
 		ErrInvalidState, ErrInsufficientFunds, ErrExecutionFailed,
 		ErrSchemaViolation, ErrTimeout, ErrInternal, ErrGrantRequired,
-		ErrPeerUnreachable, ErrPeerUnfunded,
+		ErrPeerUnreachable, ErrPeerUnfunded, ErrTermsChanged,
 	} {
 		if sentinel.Code == code {
 			return sentinel
@@ -137,6 +137,11 @@ var (
 	// signed a zero-charge rejection. An operator condition (out-of-band payment + admin deposit),
 	// never the caller's own balance — hence a distinct code carrying Meta["peer"], HTTP 402.
 	ErrPeerUnfunded = &KernelError{Code: "peer_unfunded", HTTP: 402}
+	// ErrTermsChanged: a run's quote pin no longer matches (§4 precondition 7). Distinct from
+	// ErrInvalidState, which it shares a status with, because the action is perfectly callable —
+	// only at a price the caller has not agreed to — and a client must tell "re-confirm the new
+	// terms" from "this action is disabled" by code, never by sniffing Meta.
+	ErrTermsChanged = &KernelError{Code: "terms_changed", HTTP: 409}
 )
 
 // GrantRequiredError is the one lazy-consent rejection (§8): ref in both the message and
@@ -155,7 +160,7 @@ func PeerUnreachableError(handle string) *KernelError {
 // funds are locked. Meta carries the current hash AND price: the hash alone would let a client
 // blindly re-arm and retry, defeating the pin, while the price is what a human re-consents to.
 func TermsChangedError(currentHash string, currentPrice int64) error {
-	return ErrInvalidState.Wrapf("the action's terms changed; it now costs %d", currentPrice).
+	return ErrTermsChanged.Wrapf("the action's terms changed; it now costs %d", currentPrice).
 		WithMeta("quote_hash", currentHash).WithMeta("price", strconv.FormatInt(currentPrice, 10))
 }
 

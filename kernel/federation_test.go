@@ -3483,7 +3483,7 @@ func TestQuotePinCatchesEffectPromotion(t *testing.T) {
 	buyer := setupUser(t, st, "buyer-effect", 5000)
 	_, err = k.Run(ctx, buyer.ID, "seller@seller/pay",
 		map[string]any{"amount": 100, "target": "someone"}, quoted)
-	if !errors.Is(err, kernel.ErrInvalidState) {
+	if !errors.Is(err, kernel.ErrTermsChanged) {
 		t.Fatalf("a stale quote over a promoted effect must be refused, got %v", err)
 	}
 	u, _ := st.ReadUser(ctx, buyer.ID)
