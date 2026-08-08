@@ -865,7 +865,7 @@ juice tx rate <id> <0|1>                  juice tx verify <id>
 juice health
 juice admin users                         juice admin show <target>
 juice admin suspend <target>              juice admin unsuspend <target>
-juice admin rename <user> <new-handle>
+juice admin rename <target> <new-name>
 juice admin deposit <target> <amount>     juice admin withdraw <target> <amount>
 juice admin settle <peer>                 juice admin transfer list
 juice admin peers                         juice admin inspect <key>
@@ -884,7 +884,7 @@ juice action unimport <spec-url> --name <action-name>
 
 `juice serve` handles `SIGTERM`/`SIGINT`, stops accepting new requests, drains in-flight calls, exits cleanly. No `juice stop`.
 
-Server logs request, caller, process, trace, action, and transaction IDs where available; maps distinct auth, authorization, invalid input, insufficient funds, missing resource, and internal failures to distinct statuses; rate-limits auth and account creation per client with 429 (inbound federation traffic is limited at the transport instead, §13). A genuine-loopback client — the operator's own CLI, direct with no `X-Forwarded-For` — is exempt, since it is already inside the trust boundary the limiter defends; when a loopback peer does carry `X-Forwarded-For` (a co-located reverse proxy), the real client (the last forwarded hop the trusted proxy appended) is the rate-limit key, so external callers are limited per-client rather than sharing one bucket. Action read/list responses include computed `action=owner/name`, plus the non-secret auth summary `requires_grant` (always) and `auth_scheme` (when the action has upstream auth) — the scheme name and flag only, never `auth_json`'s config or secrets (§8). A `kind=remote_proxy` action additionally carries `peer_state ∈ {offline, unfunded}` from the peer-sync cache (§13): `offline` when the owner kernel's `last_seen` is null or older than 3× `discovery_interval_seconds`, `unfunded` when cached `peer_credit` is below the action's remote manifest price; omitted when healthy. It is display-only — lookup, callability, and settlement are untouched — and derives its staleness threshold from `discovery_interval_seconds`, adding no config key. `admin peers` lists every known kernel from one query — counterparties (with an `account`, bilateral balance, `peer_credit`, and `last_seen`) and discovery-only kernels (no account) alike, this kernel itself excluded, suspended counterparties shown only with `--all`. `PETNAME` and `NICKNAME` are separate columns because only the first resolves (§13); `—` marks an unbound kernel, still callable by key. Outputs render a name a command can consume, never a raw id: a local account its `handle`, a kernel account its petname, falling back to its key when unbound. Resolvers are **contextual** — the user position takes a handle or account id, the kernel position a petname or key, shapes being disjoint. Only `show`, `rename`, `suspend`/`unsuspend`, `deposit`/`withdraw` consult both, and a bare name matching a handle *and* a petname is refused with `ErrInvalidInput` rather than guessed: money and moderation never pick a target silently. `settle`, `inspect`, and `step --peer` are kernel-only. So transaction responses carry `owner_handle`/`caller_handle`/`target_handle` (not the stored `*_user_id`), step responses `required_caller_handle`, process responses `owner_handle`, ledger responses (deposit/withdraw/transfer) `operator_handle` plus `from_handle`/`to_handle` (each present only when that side is set — `from_handle` absent on a deposit, `to_handle` on a withdrawal), and the peer list carries no internal id — while the underlying immutable records keep their captured `*_user_id` fields (§3). A handle unresolvable at read time (a purged party, §13) falls back to the raw id. `GET /v1/me` is the sole exception: it returns the caller's own `id`.
+Server logs request, caller, process, trace, action, and transaction IDs where available; maps distinct auth, authorization, invalid input, insufficient funds, missing resource, and internal failures to distinct statuses; rate-limits auth and account creation per client with 429 (inbound federation traffic is limited at the transport instead, §13). A genuine-loopback client — the operator's own CLI, direct with no `X-Forwarded-For` — is exempt, since it is already inside the trust boundary the limiter defends; when a loopback peer does carry `X-Forwarded-For` (a co-located reverse proxy), the real client (the last forwarded hop the trusted proxy appended) is the rate-limit key, so external callers are limited per-client rather than sharing one bucket. Action read/list responses include computed `action=owner/name`, plus the non-secret auth summary `requires_grant` (always) and `auth_scheme` (when the action has upstream auth) — the scheme name and flag only, never `auth_json`'s config or secrets (§8). `admin peers` lists every known kernel from one query — counterparties (with an `account`, bilateral balance, `peer_credit`, and `last_seen`) and discovery-only kernels (no account) alike, this kernel itself excluded, suspended counterparties shown only with `--all`. `PETNAME` and `NICKNAME` are separate columns because only the first resolves (§13); `—` marks an unbound kernel, still callable by key. Outputs render a name a command can consume, never a raw id: a local account its `handle`, a kernel account its petname, falling back to its key when unbound. Resolvers are **contextual** — the user position takes a handle or account id, the kernel position a petname or key, shapes being disjoint. Only `show`, `rename`, `suspend`/`unsuspend`, `deposit`/`withdraw` consult both, and a bare name matching a handle *and* a petname is refused with `ErrInvalidInput` rather than guessed: money and moderation never pick a target silently. `settle`, `inspect`, and `step --peer` are kernel-only. So transaction responses carry `owner_handle`/`caller_handle`/`target_handle` (not the stored `*_user_id`), step responses `required_caller_handle`, process responses `owner_handle`, ledger responses (deposit/withdraw/transfer) `operator_handle` plus `from_handle`/`to_handle` (each present only when that side is set — `from_handle` absent on a deposit, `to_handle` on a withdrawal), and the peer list carries no internal id — while the underlying immutable records keep their captured `*_user_id` fields (§3). A handle unresolvable at read time (a purged party, §13) falls back to the raw id. `GET /v1/me` is the sole exception: it returns the caller's own `id`.
 
 Endpoint rules (notable rules only; the complete HTTP endpoint list is in `API.md`):
 
@@ -995,7 +995,7 @@ Federation is tested in three tiers. **Unit** (`go test ./...`, offline): kernel
 Required suites:
 
 ```text
-user creation
+user creation; a taken handle and a duplicate owner/name give ErrInvalidInput with no SQL text, while kernel-minted unique keys and CHECK/FK violations stay ErrInternal; replay is unchanged
 authentication token validation
 user update description; change reflected in GET /v1/me
 user update password with correct current_password; old password rejected after change
@@ -1148,6 +1148,7 @@ user ledger lists the caller's deposits, withdrawals, and transfers (from or to)
 transfer resolves the recipient by key (global name) as well as by handle
 receipt created atomically with successful transaction commit
 receipt created atomically with failed transaction commit
+a transaction's and its receipt's reason is the failure code — never an upstream URL, body, or SQL — and a peer's reason is never adopted locally
 action owner reads transactions for calls to their action
 non-party denied access to a transaction
 upstream auth secret never appears in args, replies, logs, receipts, or read paths
@@ -1256,7 +1257,6 @@ outbound call whose first dispatch provably never connects settles immediately a
 signed zero-charge 402 rejection settles as ErrPeerUnfunded with the peer handle in meta, never as the caller's own insufficient_funds
 gossip response carries counterparty_balance only for an authenticated known non-suspended peer; absent for strangers, suspended keys, and anonymous pulls
 successful peer gossip pull persists peer_last_seen and peer_credit; peer sync runs with empty bootstrap_peers; admin peers surfaces both
-action listings annotate remote proxies with peer_state offline/unfunded from the sync cache; the annotation never gates a call
 peer step list returns only steps whose required caller is the requesting peer; another peer sees none; an unknown key gets an empty list and is NOT provisioned an account
 peer step complete resumes the step as the peer's account (role law: caller_user_id = kernel account), settles on the serving kernel, and is idempotent over (idempotency_key, counterparty): a replay returns the stored result and re-executes nothing
 peer step complete rejects a bad signature, a stale timestamp, an input body that does not match input_hash, a non-required-caller peer, an unknown key, and a suspended peer
@@ -1326,7 +1326,8 @@ user signs up, deposits arrive (admin), runs a public action by owner/name, gets
 provider creates a WASM action that subcalls two cheaper actions, activates it, a caller runs it;
   caller pays one advertised price, subproviders paid from the provider's budget, provider keeps margin
 caller runs an action that fails mid-tree; settled subcall stays paid, remainder refunded,
-  process closes, transactions show success and failure with reasons
+  process closes, transactions show success and failure with reasons that name the class and carry
+  no upstream host or body, locally and across a federated proxy
 two users sign up and one is funded; the funded user transfers credits to the other by handle;
   balances move by exactly the amount, both see the entry in `user ledger`, and a transfer
   exceeding the sender's balance is rejected with insufficient funds

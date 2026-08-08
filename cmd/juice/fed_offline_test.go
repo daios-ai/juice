@@ -236,8 +236,8 @@ func TestInspectOnlineLive(t *testing.T) {
 }
 
 // TestInspectPersistsPeerSync: a live inspect of a friended peer persists the freshness it just
-// fetched — last_seen and our credit there — so peer_state refreshes on demand rather than only on
-// the 5-minute discovery timer (§13 peer sync). The stranger-live case (no proxy row) is covered by
+// fetched — last_seen and our credit there — so `admin peers`/`admin show` refresh on demand rather
+// than only on the 5-minute discovery timer (§13 peer sync). The stranger-live case is covered by
 // TestInspectOnlineLive, whose inspectDoc key has no user: RecordPeerSync no-ops without erroring.
 func TestInspectPersistsPeerSync(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)

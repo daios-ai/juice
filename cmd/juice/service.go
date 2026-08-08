@@ -73,7 +73,6 @@ type actionResp struct {
 	HTTP          *httpView `json:"http,omitempty"`
 	AuthScheme    string    `json:"auth_scheme,omitempty"` // upstream auth scheme name (§8); present only when the action has auth; never config/secrets (R9)
 	RequiresGrant bool      `json:"requires_grant"`        // true iff a caller must connect a per-caller grant first (delegated schemes)
-	PeerState     string    `json:"peer_state,omitempty"`  // remote_proxy only: "offline" | "unfunded" from the §13 sync cache; omitted when healthy. Display-only.
 }
 
 // httpView is the read-side decomposition of an action's HTTPSource. It carries
@@ -225,39 +224,6 @@ func actionRef(a *kernel.Action, uc *accountCache) string {
 func enrichAction(k *kernel.Kernel, a *kernel.Action, uc *accountCache) actionResp {
 	scheme, requiresGrant := k.ActionAuthInfo(a)
 	return actionResp{Action: a, ActionRef: actionRef(a, uc), HTTP: httpViewOf(a), AuthScheme: scheme, RequiresGrant: requiresGrant}
-}
-
-// peerStateStaleAfter is how old a peer's last sync may be before its proxies read as offline (§13):
-// 3× the discovery interval tolerates a couple of missed passes before flagging.
-func peerStateStaleAfter() time.Duration { return 3 * globalCfg.discoveryInterval() }
-
-// peerStateFor annotates a remote_proxy action with its peer's cached liveness/funding (§13),
-// display-only. "offline": the peer's last successful gossip sync is missing or older than
-// staleAfter. "unfunded": our cached credit on the peer is below the action's remote manifest price.
-// "offline" takes precedence — a stale credit figure is not actionable. "" when healthy or the
-// owner row is gone.
-func peerStateFor(k *kernel.Kernel, ctx context.Context, owner *kernel.Account, a *kernel.Action, staleAfter time.Duration) string {
-	if owner == nil || owner.KernelPublicKey == "" {
-		return ""
-	}
-	rk, err := k.ReadKernel(ctx, owner.KernelPublicKey)
-	if err != nil || rk == nil {
-		return ""
-	}
-	if rk.LastSeen == nil || time.Since(*rk.LastSeen) > staleAfter {
-		return "offline"
-	}
-	// The seller's own price, read from the row rather than reverse-calculated from the local
-	// total (§16). A pre-041 row has none; its stored total is the best available stand-in until
-	// its next funded call re-resolves it.
-	mp := a.Price
-	if a.BasePrice != nil {
-		mp = *a.BasePrice
-	}
-	if rk.PeerCredit != nil && *rk.PeerCredit < mp {
-		return "unfunded"
-	}
-	return ""
 }
 
 // httpViewOf decomposes a kind=http action's stored HTTPSource into a uniform
@@ -618,12 +584,7 @@ func getAction(k *kernel.Kernel, ctx context.Context, callerID, id string) (acti
 	if err != nil {
 		return actionResp{}, err
 	}
-	r := enrichAction(k, a, newAccountCache(k, ctx))
-	if a.Kind == kernel.KindRemoteProxy {
-		owner, _ := k.ReadUser(ctx, a.OwnerUserID)
-		r.PeerState = peerStateFor(k, ctx, owner, a, peerStateStaleAfter())
-	}
-	return r, nil
+	return enrichAction(k, a, newAccountCache(k, ctx)), nil
 }
 
 func updateAction(k *kernel.Kernel, ctx context.Context, callerID string, req kernel.UpdateActionRequest) (actionResp, error) {
@@ -725,13 +686,9 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 	}
 	resps := make([]actionResp, len(actions))
 	uc := newAccountCache(k, ctx) // shared so listing is O(distinct peer owners), not O(rows)
-	staleAfter := peerStateStaleAfter()
 	for i, a := range actions {
 		cp := *a
 		r := enrichAction(k, &cp, uc) // decompose http view before hiding the raw blob
-		if cp.Kind == kernel.KindRemoteProxy {
-			r.PeerState = peerStateFor(k, uc.ctx, uc.get(cp.OwnerUserID), &cp, staleAfter)
-		}
 		cp.Source = ""
 		cp.ArtifactHash = ""
 		resps[i] = r
@@ -1071,6 +1028,11 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 		ExpiresAt:          now.Add(24 * time.Hour),
 	}
 	if insertErr := k.InsertPendingIdempotencyRecord(ctx, rec); insertErr != nil {
+		// Only a uniqueness collision means "this key was already seen"; any other store failure is
+		// a fault, and answering it as a replay would silently mis-serve the peer.
+		if !errors.Is(insertErr, kernel.ErrInvalidInput) {
+			return 0, nil, insertErr
+		}
 		existing, readErr := k.GetIdempotencyRecord(ctx, idempotencyKey, peer.ID)
 		if readErr != nil {
 			return 0, nil, kernel.ErrInvalidState.Wrap("idempotency check failed")
@@ -1248,6 +1210,11 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		ExpiresAt:          now.Add(24 * time.Hour),
 	}
 	if insertErr := k.InsertPendingIdempotencyRecord(ctx, rec); insertErr != nil {
+		// Only a uniqueness collision means "this key was already seen"; any other store failure is
+		// a fault, and answering it as a replay would silently mis-serve the peer.
+		if !errors.Is(insertErr, kernel.ErrInvalidInput) {
+			return 0, nil, insertErr
+		}
 		existing, readErr := k.GetIdempotencyRecord(ctx, idempotencyKey, counterparty.ID)
 		if readErr == nil {
 			if existing.Status == "complete" {

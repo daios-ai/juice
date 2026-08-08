@@ -57,7 +57,7 @@ flow_network_reachability() {
     assert_eq "net.peer_discovered" yes "$found"
 
     # And the live connection is hole-punched (direct) or relayed — the path loopback cannot reproduce.
-    local path; path=$(python3 -c "import sys,json;print(json.loads(sys.argv[1]).get('reachability',{}).get('path',''))" "$(jj "$db" "$hm" admin inspect "$peer")" 2>/dev/null)
+    local path; path=$(pathf "$(jj "$db" "$hm" admin inspect "$peer")" reachability.path)
     echo "  reachability to remote peer: $path"
     assert_eq "net.reachable" yes "$([ "$path" = "direct" ] || [ "$path" = "relayed" ] && echo yes || echo no)"
 }

@@ -199,8 +199,19 @@ assert_fails() {
 # ---------------------------------------------------------------------------
 strfield() { python3 -c "import sys,json; print(json.loads(sys.argv[1]).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
 numfield() { python3 -c "import sys,json; print(int(json.loads(sys.argv[1]).get(sys.argv[2],0)))" "$1" "$2" 2>/dev/null; }
+# pathf json dotted.path — a nested field, e.g. pathf "$out" result.step_id or checks.signature.
+pathf() { python3 -c "
+import sys,json
+v=json.loads(sys.argv[1])
+for k in sys.argv[2].split('.'):
+    v = v.get(k) if isinstance(v,dict) else None
+print('' if v is None else v)" "$1" "$2" 2>/dev/null; }
+# find_id json field value — the id of the first list element whose field equals value.
+find_id() { python3 -c "
+import sys,json
+print(next((e.get('id','') for e in json.loads(sys.argv[1]) if str(e.get(sys.argv[2],''))==sys.argv[3]), ''))" "$1" "$2" "$3" 2>/dev/null; }
 # resultf json field — a field inside a run/step reply's nested "result" object.
-resultf()  { python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('result',{}).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
+resultf()  { pathf "$1" "result.$2"; }
 # list_len json — number of elements in a top-level JSON array.
 list_len() { python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" "$1" 2>/dev/null; }
 # has_action json name — 'yes'/'no' whether a name appears in an action-list response.
@@ -215,10 +226,25 @@ pkce_code() {
         -d "{\"handle\":\"$2\",\"password\":\"$3\",\"code_challenge\":\"$4\"}" 2>/dev/null \
     | python3 -c "import sys,json,urllib.parse as u; d=json.load(sys.stdin); print(u.parse_qs(u.urlparse(d['redirect']).query)['code'][0])" 2>/dev/null
 }
-# http_code method url [json] — HTTP status of a request (no auth).
+# http_code method url [json] [token] — HTTP status of a request.
 http_code() {
-    if [ -n "${3:-}" ]; then curl -s -o /dev/null -w '%{http_code}' -X "$1" "$2" -H 'Content-Type: application/json' -d "$3" 2>/dev/null
-    else curl -s -o /dev/null -w '%{http_code}' -X "$1" "$2" 2>/dev/null; fi
+    local hdr=(); [ -n "${4:-}" ] && hdr=(-H "Authorization: Bearer $4")
+    if [ -n "${3:-}" ]; then curl -s -o /dev/null -w '%{http_code}' -X "$1" "$2" -H 'Content-Type: application/json' "${hdr[@]}" -d "$3" 2>/dev/null
+    else curl -s -o /dev/null -w '%{http_code}' -X "$1" "$2" "${hdr[@]}" 2>/dev/null; fi
+}
+# http_body method url [json] [token] — response body of a request (for error-shape assertions).
+http_body() {
+    local hdr=(); [ -n "${4:-}" ] && hdr=(-H "Authorization: Bearer $4")
+    if [ -n "${3:-}" ]; then curl -s -X "$1" "$2" -H 'Content-Type: application/json' "${hdr[@]}" -d "$3" 2>/dev/null
+    else curl -s -X "$1" "$2" "${hdr[@]}" 2>/dev/null; fi
+}
+# assert_status label want method url [json] [token] — assert an exact HTTP status. Without this
+# an error contract is unassertable, which is why the suite never had one.
+assert_status() { local l="$1" w="$2"; shift 2; assert_eq "$l" "$w" "$(http_code "$@")"; }
+# token base handle password — a bearer token via the password grant, for raw-HTTP checks.
+token() {
+    strfield "$(curl -sf -X POST "$1/v1/auth/token" -H 'Content-Type: application/json' \
+        -d "{\"handle\":\"$2\",\"password\":\"$3\"}" 2>/dev/null)" token
 }
 
 # juice_token_dir home db — mirrors tokenDir() in cmd/juice/main.go:
@@ -241,6 +267,18 @@ make_user() {
 }
 # deposit db sys_home handle amount
 deposit() { j "$1" "$2" admin deposit "$3" "$4" >/dev/null 2>&1; :; }
+# _mkaction db home visibility name [action-create flags...] — create + enable (+ publish); echo id.
+_mkaction() {
+    local db="$1" h="$2" vis="$3" name="$4"; shift 4
+    local id; id=$(strfield "$(jj "$db" "$h" action create "$name" "$@")" id)
+    [ -n "$id" ] || return 1
+    j "$db" "$h" action enable "$id" >/dev/null 2>&1
+    [ "$vis" = public ] && j "$db" "$h" action update "$id" --visibility public >/dev/null 2>&1
+    echo "$id"
+}
+# publish db home name [flags...] — create, enable, make public. enabled — same without publishing.
+publish() { _mkaction "$1" "$2" public  "${@:3}"; }
+enabled() { _mkaction "$1" "$2" private "${@:3}"; }
 
 # home dir handle — make + echo a per-user HOME dir under dir (token isolation).
 home() { local d="$1/$2"; mkdir -p "$d/.juice"; echo "$d"; }

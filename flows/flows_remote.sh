@@ -4,10 +4,8 @@
 
 flow_pkce_auth() {
     echo "=== FLOW pkce_auth ==="
-    local dir db hs base v ch code
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
-    start_server "$db" "$hs" || { fail "pkce_auth.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs base v ch code; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
+    make_admin "$db" "$hs" || { fail "pkce_auth.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$(home "$dir" alice)" alice
     base=$(url "$db")
 
@@ -29,10 +27,8 @@ flow_pkce_auth() {
 
 flow_refresh_rotation() {
     echo "=== FLOW refresh_rotation ==="
-    local dir db hs ha tdir
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
-    start_server "$db" "$hs" || { fail "refresh_rotation.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha tdir; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" || { fail "refresh_rotation.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice   # CLI login uses PKCE → stores a refresh token
     tdir=$(juice_token_dir "$ha" "$db")
 
@@ -61,18 +57,14 @@ flow_refresh_rotation() {
 
 flow_successful_receipt() {
     echo "=== FLOW successful_receipt ==="
-    local dir db hs ha hb bport
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
-    start_server "$db" "$hs" || { fail "successful_receipt.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_admin "$db" "$hs" || { fail "successful_receipt.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 100
 
-    local aid; aid=$(strfield "$(jj "$db" "$ha" action create receipt-action --kind http --source "http://127.0.0.1:${bport}/act" --price 10 --description "receipt")" id)
-    j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
+    local aid; aid=$(publish "$db" "$ha" receipt-action --kind http --source "http://127.0.0.1:${bport}/act" --price 10 --description "receipt")
 
     local out; out=$(jj "$db" "$hb" run alice/receipt-action '{}')
     assert_nonempty "successful_receipt.call_succeeded" "$(strfield "$out" tx_id)"
@@ -81,18 +73,14 @@ flow_successful_receipt() {
 
 flow_failed_receipt() {
     echo "=== FLOW failed_receipt ==="
-    local dir db hs ha hb bport
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 500 '{"error":"backend error"}'
-    start_server "$db" "$hs" || { fail "failed_receipt.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_admin "$db" "$hs" || { fail "failed_receipt.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 100
 
-    local aid; aid=$(strfield "$(jj "$db" "$ha" action create fail-action --kind http --source "http://127.0.0.1:${bport}/fail" --price 10 --description "fail")" id)
-    j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
+    local aid; aid=$(publish "$db" "$ha" fail-action --kind http --source "http://127.0.0.1:${bport}/fail" --price 10 --description "fail")
 
     j "$db" "$hb" run alice/fail-action '{}' >/dev/null 2>&1 || true
     local txs; txs=$(jj "$db" "$hb" tx list)
@@ -103,10 +91,8 @@ flow_failed_receipt() {
 
 flow_lookup() {
     echo "=== FLOW lookup ==="
-    local dir db hs ha
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
-    start_server "$db" "$hs" || { fail "lookup.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" || { fail "lookup.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     # sys/lookup requires "query"; missing it → schema violation.
     assert_fails "lookup.missing_query_rejected" "query\|required\|schema" -- j "$db" "$ha" run sys/lookup '{}'
@@ -122,10 +108,8 @@ flow_lookup() {
 
 flow_chat() {
     echo "=== FLOW chat ==="
-    local dir db hs ha
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
-    start_server "$db" "$hs" || { fail "chat.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" || { fail "chat.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     # No chatter configured → ErrInvalidState (or a reply if one is); either is acceptable.
     local out; out=$(j "$db" "$ha" run sys/llm/chat '{"messages":[{"role":"user","content":"hello"}]}' 2>&1)
@@ -150,11 +134,9 @@ PY
 
 flow_openapi_import_execute() {
     echo "=== FLOW openapi_import_execute ==="
-    local dir db hs ha hb aport
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb aport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     aport=$(backend_port); _greet_spec "$aport" "$dir/spec.json"; start_api_server "$aport" "$dir/spec.json"
-    start_server "$db" "$hs" || { fail "openapi_import.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_admin "$db" "$hs" || { fail "openapi_import.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 50
@@ -174,11 +156,9 @@ flow_openapi_import_execute() {
 
 flow_openapi_changed_reimport() {
     echo "=== FLOW openapi_changed_reimport ==="
-    local dir db hs ha aport
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha aport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     aport=$(backend_port); _greet_spec "$aport" "$dir/spec.json" "hello v1"; start_api_server "$aport" "$dir/spec.json"
-    start_server "$db" "$hs" || { fail "openapi_reimport.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_admin "$db" "$hs" || { fail "openapi_reimport.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
     local imp1; imp1=$(jj "$db" "$ha" action import "http://127.0.0.1:${aport}/")
@@ -194,8 +174,7 @@ flow_openapi_changed_reimport() {
 
 flow_openapi_unimport() {
     echo "=== FLOW openapi_unimport ==="
-    local dir db hs ha aport
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha aport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     aport=$(backend_port)
     python3 - "$aport" "$dir/spec.json" <<'PY'
 import json,sys
@@ -208,15 +187,13 @@ json.dump({"openapi":"3.0.0","info":{"title":"T","version":"1"},"x-juice-owner":
   "paths":{"/greet":op("greet","hi"),"/farewell":op("farewell","bye")}},open(f,"w"))
 PY
     start_api_server "$aport" "$dir/spec.json"
-    start_server "$db" "$hs" || { fail "openapi_unimport.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_admin "$db" "$hs" || { fail "openapi_unimport.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
     local imp; imp=$(jj "$db" "$ha" action import "http://127.0.0.1:${aport}/")
     local greet_id; greet_id=$(python3 -c "import sys,json;print(next(a['id'] for a in json.loads(sys.argv[1])['Created'] if 'greet' in a['name']))" "$imp" 2>/dev/null)
     # A manual action must NOT be touched by unimport.
-    local manual_id; manual_id=$(strfield "$(jj "$db" "$ha" action create manual --kind http --source "http://127.0.0.1:${aport}/manual" --price 0 --description "manual")" id)
-    j "$db" "$ha" action enable "$manual_id" >/dev/null 2>&1
+    local manual_id; manual_id=$(enabled "$db" "$ha" manual --kind http --source "http://127.0.0.1:${aport}/manual" --price 0 --description "manual")
 
     assert_contains "openapi_unimport.two_deactivated" "deactivated 2" "$(j "$db" "$ha" action unimport "http://127.0.0.1:${aport}/")"
     assert_json "openapi_unimport.openapi_deactivated" "$(jj "$db" "$ha" action show "$greet_id")" active False

@@ -3,6 +3,7 @@
 - Keep the number of files small because this codebase is critical and must be correct!
 - Every GO file must have a corresponding test file
 - Never commit before passing ALL unit tests and user flows!
+- Never split work into phases, stages, or separate commits; deliver the full scope in one pass.
 - Native actions should be encapsulated, never hardwired into the kernel.
 
 Answering questions

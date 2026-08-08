@@ -171,6 +171,68 @@ func insertTx(t *testing.T, db *DB, ownerID, callerID, targetID, actionID string
 	return id
 }
 
+// TestDBErrClassifiesUniqueness: dbErr is the single funnel for every store error, so it is where a
+// caller's own uniqueness collision is separated from a broken internal invariant. A collision on a
+// caller-supplied key (a handle, an action owner/name) is ErrInvalidInput and carries no SQL or
+// table text; a kernel-minted key (transactions.trace_id) and every CHECK/FK violation stay
+// ErrInternal, because reaching those means a bug, not bad input. Unlisted keys fail closed.
+func TestDBErrClassifiesUniqueness(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	alice := newUser("alice", 0)
+	if err := db.CreateUser(ctx, alice); err != nil {
+		t.Fatal(err)
+	}
+
+	// Caller-supplied keys: the caller picked the colliding value and can pick another.
+	handleErr := db.CreateUser(ctx, newUser("alice", 0))
+	if !errors.Is(handleErr, kernel.ErrInvalidInput) {
+		t.Errorf("duplicate handle: got %v, want ErrInvalidInput", handleErr)
+	}
+	for _, leak := range []string{"constraint", "accounts.", "UNIQUE", "2067"} {
+		if strings.Contains(handleErr.Error(), leak) {
+			t.Errorf("duplicate handle message leaks %q: %v", leak, handleErr)
+		}
+	}
+	if err := db.CreateAction(ctx, newAction(alice.ID, "dup", 0, true)); err != nil {
+		t.Fatal(err)
+	}
+	if nameErr := db.CreateAction(ctx, newAction(alice.ID, "dup", 0, true)); !errors.Is(nameErr, kernel.ErrInvalidInput) {
+		t.Errorf("duplicate owner/name: got %v, want ErrInvalidInput", nameErr)
+	}
+
+	// A kernel-minted key: one receipt per transaction is a settlement invariant (§11), so a second
+	// insert on the same tx is double-settlement — a 500, never the caller's fault. (The sibling
+	// invariant, one transaction per trace, has NO enforced index: migration 008's
+	// "CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_trace" is a no-op because 001 already
+	// created a non-unique index of that name. Pre-existing, unrelated to this classifier.)
+	if _, err := db.db.ExecContext(ctx,
+		`INSERT INTO transactions (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,
+		   target_user_id,action_id,status,started_at,ended_at)
+		 VALUES ('t1','p1','trace-1','',?,?,?,'a','success','','')`,
+		alice.ID, alice.ID, alice.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.ExecContext(ctx,
+		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,status,created_at)
+		 VALUES ('r1',?,'t1','trace-1','a','success','')`, alice.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, rawErr := db.db.ExecContext(ctx,
+		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,status,created_at)
+		 VALUES ('r2',?,'t1','trace-1','a','success','')`, alice.ID)
+	if got := dbErr(rawErr, "insert receipt"); !errors.Is(got, kernel.ErrInternal) {
+		t.Errorf("duplicate receipt tx_id: got %v, want ErrInternal", got)
+	}
+
+	// A CHECK violation is an invariant breach too (the guarded UPDATE is the real path, §6).
+	_, checkErr := db.db.ExecContext(ctx, `UPDATE accounts SET available=-1 WHERE id=?`, alice.ID)
+	if got := dbErr(checkErr, "debit"); !errors.Is(got, kernel.ErrInternal) {
+		t.Errorf("CHECK violation: got %v, want ErrInternal", got)
+	}
+}
+
 // ---- User CRUD ----
 
 func TestUserCRUD(t *testing.T) {

@@ -823,7 +823,6 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	} else {
 		premium = r.Premium // execution serving markup
 		ktx.Status = r.Status
-		ktx.Reason = r.Reason
 		if r.Status == TxSuccess {
 			importFee = ceilDiv((charge+premium)*importBPS, 10000) // execution import at the DISPATCHED rate (§13)
 			ktx.ReplyJSON = json.RawMessage(replyJSON)
@@ -845,29 +844,31 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	ktx.RemoteReceiptJSON = fr.ReceiptJSON
 
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
-	localReceipt, receiptErr := k.buildReceipt(ktx, paid+importFee, 0, valueForReceipt, valuePremForReceipt, valueToForReceipt)
-	if receiptErr != nil {
-		return nil, ErrInternal.Wrap("could not build receipt")
-	}
-	// Classify a failure BEFORE committing: the commit stores the error body a replaying peer will
-	// be served, so it needs this call's code. Computing it here also keeps one definition of the
-	// 402/unfunded predicate, reused for the returned error below.
+	// Classify a failure BEFORE building the receipt: the commit stores the error body a replaying
+	// peer will be served, so it needs this call's code, and buildReceipt copies ktx.Reason — so the
+	// reason must be final here or the signed receipt and the transaction would disagree. This also
+	// keeps one definition of the 402/unfunded predicate, reused for the returned error below.
 	var failErr error
 	if ktx.Status != TxSuccess {
-		reason := ktx.Reason
-		if reason == "" {
-			reason = "remote call failed"
-		}
-		failErr = ErrExecutionFailed.Wrap(reason)
+		failErr = ErrExecutionFailed.Wrap("remote call failed")
 		// A signed zero-charge rejection carried on transport status 402 is the remote's structured
 		// ErrInsufficientFunds (the inbound handler's 402 mapping): OUR prepaid credit there is
 		// exhausted, not the caller's balance. Surface it as the operator-actionable ErrPeerUnfunded
 		// so a client never renders it as the caller's own insufficient_funds. Gated on the receipt
-		// being settleable (charge == 0 with a preserved remote reason), so a quarantined invalid
-		// receipt — which also forces charge 0 — never takes this branch.
-		if fr.HTTPStatus == 402 && charge == 0 && ktx.Reason == r.Reason {
+		// having validated — a quarantined receipt also forces charge 0, and vs.Quarantine is the
+		// explicit flag for that (never infer it from the reason string).
+		if fr.HTTPStatus == 402 && charge == 0 && !vs.Quarantine {
 			failErr = PeerUnfundedError(k.KernelName(ctx, target.KernelPublicKey))
 		}
+		// The peer authored r.Reason; never adopt it into a record we sign (§6). Its verbatim text
+		// stays verifiable in ktx.RemoteReceiptJSON. The quarantine marker above wins.
+		if ktx.Reason == "" {
+			ktx.Reason = KernelErrorCode(failErr)
+		}
+	}
+	localReceipt, receiptErr := k.buildReceipt(ktx, paid+importFee, 0, valueForReceipt, valuePremForReceipt, valueToForReceipt)
+	if receiptErr != nil {
+		return nil, ErrInternal.Wrap("could not build receipt")
 	}
 
 	// Detach settlement from execution-scoped cancellation so the remote settlement
@@ -1021,7 +1022,6 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	}
 	if now.Sub(trace.CreatedAt) > maxAge {
 		ktx.Status = TxFailure
-		ktx.Reason = "remote call unsettled past max pending age"
 		logger.Warn("remote.retry.expired", "trace_id", trace.ID, "age_seconds", now.Sub(trace.CreatedAt).Seconds())
 		_, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, 0, ErrTimeout.Wrap("remote call unsettled past max pending age"))
 		return sErr

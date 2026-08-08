@@ -128,7 +128,7 @@ func (s *server) ctlSetSuspended(suspend bool) http.HandlerFunc {
 
 func (s *server) ctlRenameUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		NewHandle string `json:"new_handle"`
+		NewName string `json:"new_name"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -139,7 +139,7 @@ func (s *server) ctlRenameUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if key != "" {
-		petname, berr := s.kernel.RenameKernel(r.Context(), callerFrom(r), key, req.NewHandle)
+		petname, berr := s.kernel.RenameKernel(r.Context(), callerFrom(r), key, req.NewName)
 		if berr != nil {
 			writeErr(w, berr)
 			return
@@ -147,7 +147,7 @@ func (s *server) ctlRenameUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"petname": petname, "public_key": key})
 		return
 	}
-	out, err := s.kernel.RenameUser(r.Context(), callerFrom(r), acct.ID, req.NewHandle)
+	out, err := s.kernel.RenameUser(r.Context(), callerFrom(r), acct.ID, req.NewName)
 	if err != nil {
 		writeErr(w, err)
 		return

@@ -46,7 +46,7 @@ fi
 
 # Default suite. Excludes flow_tinygo_compile (opt-in above).
 run_flows \
-    flow_bootstrap flow_local_auth flow_recovery flow_suspension flow_deposits flow_transfers \
+    flow_bootstrap flow_signup_errors flow_local_auth flow_recovery flow_suspension flow_deposits flow_transfers \
     flow_action_lifecycle flow_action_owner_visibility \
     flow_process_lifecycle flow_acl_public flow_successful_paid_call flow_http_verbs \
     flow_failed_call_refund flow_input_schema_failure flow_output_schema_failure \

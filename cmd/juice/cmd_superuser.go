@@ -270,7 +270,7 @@ func adminRenameCmd() *cobra.Command {
 		Short: "Rename a local account, or bind a kernel's petname",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
-			body := map[string]any{"new_handle": args[1]}
+			body := map[string]any{"new_name": args[1]}
 			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/rename", body, nil); err != nil {
 				return err
 			}

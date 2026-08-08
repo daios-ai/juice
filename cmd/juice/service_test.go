@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -259,57 +258,6 @@ func TestEnrichAction(t *testing.T) {
 	// Name-less action still yields no ref.
 	if got := enrichAction(k, &kernel.Action{ID: "a3"}, uc).ActionRef; got != "" {
 		t.Errorf("enrichAction(no name): ActionRef = %q, want empty", got)
-	}
-}
-
-// peerStateFor derives a remote proxy's §13 liveness/funding annotation from the peer's sync cache:
-// offline (missing/stale last_seen) takes precedence over unfunded (cached credit below mp); healthy
-// yields "". The comparison uses the action's stored seller price (BasePrice), not its local total.
-func TestPeerStateFor(t *testing.T) {
-	k, _ := newRemoteTestKernel(t)
-	ctx := context.Background()
-	stale := time.Hour
-	credit := func(v int64) *int64 { return &v }
-
-	// The sync cache lives on the kernel row now (§13): each case observes a kernel, optionally
-	// records a sync, and reads it back through the store exactly as the annotation does.
-	cases := []struct {
-		name   string
-		synced bool
-		credit *int64
-		after  time.Duration
-		price  int64
-		want   string
-	}{
-		{"nil owner", false, nil, stale, 10, ""},
-		{"never synced", false, nil, stale, 10, "offline"},
-		{"stale last_seen", true, nil, -time.Second, 10, "offline"},
-		{"fresh underfunded", true, credit(5), stale, 10, "unfunded"},
-		{"fresh funded", true, credit(20), stale, 10, ""},
-		{"fresh unknown credit", true, nil, stale, 10, ""},
-	}
-	for i, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.name == "nil owner" {
-				if got := peerStateFor(k, ctx, nil, &kernel.Action{BasePrice: &tc.price}, tc.after); got != tc.want {
-					t.Errorf("peerStateFor(nil) = %q, want %q", got, tc.want)
-				}
-				return
-			}
-			key := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{byte(i + 1)}, 32))
-			if err := k.ObserveKernel(ctx, key, "", ""); err != nil {
-				t.Fatal(err)
-			}
-			if tc.synced {
-				if err := k.RecordPeerSync(ctx, key, tc.credit); err != nil {
-					t.Fatal(err)
-				}
-			}
-			owner := &kernel.Account{KernelPublicKey: key}
-			if got := peerStateFor(k, ctx, owner, &kernel.Action{BasePrice: &tc.price}, tc.after); got != tc.want {
-				t.Errorf("peerStateFor = %q, want %q", got, tc.want)
-			}
-		})
 	}
 }
 

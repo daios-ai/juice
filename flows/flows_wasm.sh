@@ -4,52 +4,40 @@
 
 flow_wasm_execution() {
     echo "=== FLOW wasm_execution ==="
-    local dir db hs ha hb
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     # Short script timeout so the infinite-loop action is killed quickly (echo is instant).
-    start_server "$db" "$hs" script_timeout_ms=200 || { fail "wasm_execution.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_admin "$db" "$hs" script_timeout_ms=200 || { fail "wasm_execution.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 200
 
     make_echo_wasm "$dir/echo.wasm"
-    local aid; aid=$(strfield "$(jj "$db" "$ha" action create echo --kind wasm --source "$dir/echo.wasm" --price 10 --description "echo")" id)
-    j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
+    local aid; aid=$(publish "$db" "$ha" echo --kind wasm --source "$dir/echo.wasm" --price 10 --description "echo")
     assert_nonempty "wasm_execution.artifact_hash" "$(strfield "$(jj "$db" "$ha" action show "$aid")" artifact_hash)"
 
     assert_nonempty "wasm_execution.echo_call_succeeds" "$(strfield "$(jj "$db" "$hb" run alice/echo '{"msg":"hello"}')" tx_id)"
     assert_jnum "wasm_execution.echo_charged" "$(jj "$db" "$hb" user me)" available 190
 
     make_infinite_loop_wasm "$dir/loop.wasm"
-    local lid; lid=$(strfield "$(jj "$db" "$ha" action create loop --kind wasm --source "$dir/loop.wasm" --price 10 --description "loop")" id)
-    j "$db" "$ha" action enable "$lid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$lid" --visibility public >/dev/null 2>&1
+    local lid; lid=$(publish "$db" "$ha" loop --kind wasm --source "$dir/loop.wasm" --price 10 --description "loop")
     assert_fails "wasm_execution.infinite_loop_timeout" "timeout\|timed\|execution" -- j "$db" "$hb" run alice/loop '{}'
     assert_jnum "wasm_execution.loop_refunded" "$(jj "$db" "$hb" user me)" available 190
 }
 
 flow_contractor_subcall() {
     echo "=== FLOW contractor_subcall ==="
-    local dir db hs ha hb hc bport
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
+    local dir db hs ha hb hc bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
-    start_server "$db" "$hs" || { fail "contractor_subcall.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_admin "$db" "$hs" || { fail "contractor_subcall.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     make_user "$db" "$hs" "$hc" carol
     deposit "$db" "$hs" carol 50
 
     # bob's HTTP sub-target (price 50); alice's WASM contractor (price 50) sub-calls it.
-    local sub; sub=$(strfield "$(jj "$db" "$hb" action create sub-target --kind http --source "http://127.0.0.1:${bport}/sub" --price 50 --description "sub")" id)
-    j "$db" "$hb" action enable "$sub" >/dev/null 2>&1
-    j "$db" "$hb" action update "$sub" --visibility public >/dev/null 2>&1
+    local sub; sub=$(publish "$db" "$hb" sub-target --kind http --source "http://127.0.0.1:${bport}/sub" --price 50 --description "sub")
     make_contractor_wasm "$dir/contractor.wasm" "bob/sub-target"
-    local cid; cid=$(strfield "$(jj "$db" "$ha" action create contractor --kind wasm --source "$dir/contractor.wasm" --price 50 --description "contractor")" id)
-    j "$db" "$ha" action enable "$cid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$cid" --visibility public >/dev/null 2>&1
+    local cid; cid=$(publish "$db" "$ha" contractor --kind wasm --source "$dir/contractor.wasm" --price 50 --description "contractor")
 
     # carol funds the process with 50; the whole budget flows to bob via the sub-call.
     assert_nonempty "contractor_subcall.call_succeeds" "$(strfield "$(jj "$db" "$hc" run alice/contractor '{}')" tx_id)"
@@ -60,23 +48,17 @@ flow_contractor_subcall() {
 
 flow_contractor_failure() {
     echo "=== FLOW contractor_failure ==="
-    local dir db hs ha hb hc bport
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
+    local dir db hs ha hb hc bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
-    start_server "$db" "$hs" || { fail "contractor_failure.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_admin "$db" "$hs" || { fail "contractor_failure.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     make_user "$db" "$hs" "$hc" carol
     deposit "$db" "$hs" carol 30   # < sub-call price 50
 
-    local sub; sub=$(strfield "$(jj "$db" "$hb" action create sub-target --kind http --source "http://127.0.0.1:${bport}/sub" --price 50 --description "sub")" id)
-    j "$db" "$hb" action enable "$sub" >/dev/null 2>&1
-    j "$db" "$hb" action update "$sub" --visibility public >/dev/null 2>&1
+    local sub; sub=$(publish "$db" "$hb" sub-target --kind http --source "http://127.0.0.1:${bport}/sub" --price 50 --description "sub")
     make_contractor_wasm "$dir/contractor.wasm" "bob/sub-target"
-    local cid; cid=$(strfield "$(jj "$db" "$ha" action create contractor --kind wasm --source "$dir/contractor.wasm" --price 50 --description "contractor")" id)
-    j "$db" "$ha" action enable "$cid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$cid" --visibility public >/dev/null 2>&1
+    local cid; cid=$(publish "$db" "$ha" contractor --kind wasm --source "$dir/contractor.wasm" --price 50 --description "contractor")
 
     # carol (30) < contractor price (50) → rejected at the funds check, nothing charged.
     assert_fails "contractor_failure.error_returned" "insufficient\|balance\|funds\|credits\|costs" -- j "$db" "$hc" run alice/contractor '{}'
@@ -86,10 +68,8 @@ flow_contractor_failure() {
 
 flow_step_success() {
     echo "=== FLOW step_success ==="
-    local dir db hs ha hb
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
-    start_server "$db" "$hs" || { fail "step_success.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha hb; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    make_admin "$db" "$hs" || { fail "step_success.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
 
@@ -114,10 +94,8 @@ flow_step_success() {
 
 flow_step_failure() {
     echo "=== FLOW step_failure ==="
-    local dir db hs ha hb hc
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
-    start_server "$db" "$hs" || { fail "step_failure.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha hb hc; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
+    make_admin "$db" "$hs" || { fail "step_failure.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     make_user "$db" "$hs" "$hc" carol
@@ -134,10 +112,8 @@ flow_step_failure() {
 
 flow_step_restart() {
     echo "=== FLOW step_restart ==="
-    local dir db hs ha hb
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
-    start_server "$db" "$hs" || { fail "step_restart.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha hb; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    make_admin "$db" "$hs" || { fail "step_restart.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
 
@@ -156,10 +132,8 @@ flow_step_restart() {
 
 flow_locked_funds_recovery() {
     echo "=== FLOW locked_funds_recovery ==="
-    local dir db hs
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
-    start_server "$db" "$hs" || { fail "locked_funds.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
+    make_admin "$db" "$hs" || { fail "locked_funds.boot" "server did not start"; return; }
     j "$db" "$hs" admin deposit sys 200 >/dev/null 2>&1
 
     # Inject (server stopped) an orphan process+trace: a root call for sys/tinygo/compile (price 5)
@@ -183,8 +157,7 @@ PYEOF
 
     # Restart → Recover settles the orphan as an interrupted failure: refund flows up,
     # process closes, and sys's balance is made whole (200).
-    start_server "$db" "$hs" || { fail "locked_funds.reboot" "server did not restart"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_admin "$db" "$hs" || { fail "locked_funds.reboot" "server did not restart"; return; }
     local ps; ps=$(jj "$db" "$hs" process show "$proc_id")
     assert_jnum "locked_funds.locked_cleared" "$ps" locked 0
     assert_json "locked_funds.process_closed" "$ps" status closed
@@ -193,18 +166,14 @@ PYEOF
 
 flow_rating() {
     echo "=== FLOW rating ==="
-    local dir db hs ha hb bport
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
-    start_server "$db" "$hs" || { fail "rating.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_admin "$db" "$hs" || { fail "rating.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 200
 
-    local aid; aid=$(strfield "$(jj "$db" "$ha" action create rate-me --kind http --source "http://127.0.0.1:${bport}/rate" --price 10 --description "rateable")" id)
-    j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
+    local aid; aid=$(publish "$db" "$ha" rate-me --kind http --source "http://127.0.0.1:${bport}/rate" --price 10 --description "rateable")
 
     local tx_id; tx_id=$(strfield "$(jj "$db" "$hb" run alice/rate-me '{}')" tx_id)
     # Unrated → rating field is null (strfield renders JSON null as Python None).
@@ -229,10 +198,8 @@ flow_rating() {
 # from FILES, never argv (128 KB MAX_ARG_STRLEN).
 flow_tinygo_compile() {
     echo "=== FLOW tinygo_compile ==="
-    local dir db hs ha
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
-    start_server "$db" "$hs" || { fail "tinygo_compile.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" || { fail "tinygo_compile.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     deposit "$db" "$hs" alice 200
 

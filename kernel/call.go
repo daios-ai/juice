@@ -523,7 +523,6 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			// awaiting a remote receipt, not a local adapter being absent.
 			cfgErr := ErrInvalidState.Wrap("federation executor not configured")
 			ktx.Status = TxFailure
-			ktx.Reason = cfgErr.Error()
 			ktx.EndedAt = time.Now().UTC()
 			receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, 0, cfgErr)
 			if sErr != nil {
@@ -547,7 +546,6 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			pn := k.KernelName(ctx, target.KernelPublicKey)
 			unreach := ErrPeerUnreachable.Wrapf("peer %s is unreachable; the call was not sent and has been refunded", pn).WithMeta("peer", pn)
 			ktx.Status = TxFailure
-			ktx.Reason = unreach.Error()
 			receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, unreach)
 			if sErr != nil {
 				return nil, sErr
@@ -564,7 +562,6 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 
 	if execErr != nil {
 		ktx.Status = TxFailure
-		ktx.Reason = execErr.Error()
 		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, execErr)
 		if sErr != nil {
 			return nil, sErr
@@ -576,7 +573,6 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// 10. Validate output schema.
 	if schemaErr := ValidateInput(action.OutputSchema, any(reply)); schemaErr != nil {
 		ktx.Status = TxFailure
-		ktx.Reason = "output schema violation: " + schemaErr.Error()
 		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, schemaErr)
 		if sErr != nil {
 			return nil, sErr
@@ -599,7 +595,6 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 		// settled-failure path below: a nil reply here would tell callers nothing happened while
 		// the caller has in fact been charged, and the idempotency record already completed.
 		ktx.Status = TxFailure
-		ktx.Reason = "could not read trace post-execution"
 		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, readErr)
 		if sErr != nil || receipt == nil {
 			return nil, ErrInternal.Wrap("could not read trace")
@@ -630,7 +625,6 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	if receiptErr != nil {
 		mu.Unlock()
 		ktx.Status = TxFailure
-		ktx.Reason = "could not build receipt"
 		// Same as the post-execution read failure above: the settlement committed, so its receipt
 		// is returned rather than discarded.
 		failReceipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, receiptErr)
@@ -958,6 +952,12 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 	ctx = sctx
 	if len(tx.ReplyJSON) == 0 {
 		tx.ReplyJSON = json.RawMessage("null")
+	}
+	// The reason is the failure CLASS (§6): a code, never an adapter's prose, because it is signed
+	// into the receipt and crosses the kernel boundary. A mandated literal (`interrupted`, §5) is
+	// assigned first. Set before CommitFailedCall so the receipt matches the transaction.
+	if tx.Reason == "" {
+		tx.Reason = KernelErrorCode(callErr)
 	}
 	// Pre-settle any unsettled direct child traces (e.g. remote subcalls that timed out).
 	// recoverTrace settles each child as a failure, crediting its refund back into this

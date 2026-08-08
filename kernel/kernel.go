@@ -1308,9 +1308,7 @@ func (k *Kernel) RenameUser(ctx context.Context, operatorID, targetID, newHandle
 	if k.isUserSuperuser(ctx, target) {
 		return nil, ErrInvalidInput.Wrap("the superuser handle cannot be renamed")
 	}
-	if existing, _ := k.store.ReadUserByHandle(ctx, newHandle); existing != nil && existing.ID != target.ID {
-		return nil, ErrInvalidInput.Wrapf("handle %s is already taken", newHandle)
-	}
+	// accounts.handle UNIQUE rejects a taken handle atomically with the same ErrInvalidInput.
 	if err := k.store.RenameUser(ctx, targetID, newHandle); err != nil {
 		return nil, err
 	}
@@ -2640,10 +2638,8 @@ func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rat
 	if callerID != tx.OwnerUserID {
 		return nil, ErrUnauthorized.Wrap("only the direct buyer may rate a transaction")
 	}
-	// Check for duplicate rating (transaction already has a rating record).
-	if existing, _ := k.store.ReadRatingByTxID(ctx, txID); existing != nil {
-		return nil, ErrInvalidInput.Wrap("transaction already rated")
-	}
+	// ratings.rated_tx_id UNIQUE rejects a duplicate atomically with the same ErrInvalidInput (§11);
+	// a read-then-write pre-check could only race it.
 	// Look up receipt for this transaction (may be nil for old transactions).
 	receipt, _ := k.store.ReadReceiptByTxID(ctx, txID)
 	r := &Rating{

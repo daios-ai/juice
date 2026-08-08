@@ -17,10 +17,13 @@ _fed_setup() {
     # R boots first and is the flow's bootstrap+relay; L (and T, in the gossip flow) dial it. A short
     # discovery interval lets each kernel verify the others via routing discovery within the flow (§13):
     # R learns L only on R's next pass, which the multi-hop gossip flow depends on.
-    start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r discovery_interval_seconds=2 || return 1
+    # Per-kernel extra config, optionally set by the caller before calling (e.g.
+    # FED_RCFG=(exposure_max=1000)). Consumed and cleared here so it never leaks into the next flow.
+    start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r discovery_interval_seconds=2 "${FED_RCFG[@]:-}" || return 1
     FED_BOOT=$(kernel_fed_addr "$FED_DBR")
     [ -n "$FED_BOOT" ] || return 1
-    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 || return 1
+    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 "${FED_LCFG[@]:-}" || return 1
+    unset FED_RCFG FED_LCFG
     j "$FED_DBR" "$FED_HR" auth login sys --password sys-pass >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" auth login sys --password sys-pass >/dev/null 2>&1
 
@@ -92,9 +95,7 @@ flow_federation_changed_reimport() {
     _fed_setup "$dir" || { fail "fed_reimport.setup" "setup failed"; return; }
 
     # A brand-new action on R resolves on first use (§8) — no operator step, no bulk sync.
-    local wid; wid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create wave --kind http --source "http://127.0.0.1:$FED_BPORT" --description "wave" --price 0)" id)
-    j "$FED_DBR" "$FED_HR" action enable "$wid" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" action update "$wid" --visibility public >/dev/null 2>&1
+    local wid; wid=$(publish "$FED_DBR" "$FED_HR" wave --kind http --source "http://127.0.0.1:$FED_BPORT" --description "wave" --price 0)
     assert_nonempty "fed_reimport.wave_callable" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/wave '{}')" tx_id)"
     assert_json "fed_reimport.wave_resolves_on_use" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/wave)" active True
     assert_nonempty "fed_reimport.greet_before" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/greet '{}')" tx_id)"
@@ -121,8 +122,8 @@ flow_fed_verify_receipt() {
     [ -n "$tx_id" ] || { fail "fed_verify.call" "no tx_id"; return; }
     local vr; vr=$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")
     assert_json "fed_verify.buyer_valid"    "$vr" valid True
-    assert_eq   "fed_verify.signature_check" True "$(python3 -c "import sys,json;print(json.loads(sys.argv[1]).get('checks',{}).get('signature'))" "$vr" 2>/dev/null)"
-    assert_eq   "fed_verify.receipt_hash_check" True "$(python3 -c "import sys,json;print(json.loads(sys.argv[1]).get('checks',{}).get('receipt_hash'))" "$vr" 2>/dev/null)"
+    assert_eq   "fed_verify.signature_check" True "$(pathf "$vr" checks.signature)"
+    assert_eq   "fed_verify.receipt_hash_check" True "$(pathf "$vr" checks.receipt_hash)"
 
     # Verifying a non-remote-proxy (local) tx → ErrInvalidState.
     local ltx; ltx=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys/time '{}')" tx_id)
@@ -162,9 +163,7 @@ flow_fed_denial_underfunded() {
     _fed_setup "$dir" || { fail "fed_denial_underfunded.setup" "setup failed"; return; }
 
     # Paid action on R; L imports it but is NOT funded on R → underfunded → 402 denial receipt.
-    local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create paid-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 100)" id)
-    j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" action update "$pid" --visibility public >/dev/null 2>&1
+    local pid; pid=$(publish "$FED_DBR" "$FED_HR" paid-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 100)
     j "$FED_DBL" "$FED_HL" admin deposit sys 1000 >/dev/null 2>&1
 
     # The CLI attributes it to THIS kernel's exhausted credit on the peer (operator remedy), with a
@@ -173,7 +172,7 @@ flow_fed_denial_underfunded() {
     run_out=$(j "$FED_DBL" "$FED_HL" run sys@kernel-r/paid-svc '{}' 2>&1); rc=$?
     assert_eq "fed_denial_underfunded.run_exit_peer_unfunded" 10 "$rc"
     assert_contains "fed_denial_underfunded.run_says_exhausted" "exhausted" "$run_out"
-    local tx_id; tx_id=$(python3 -c "import sys,json;print(next((t['id'] for t in json.loads(sys.argv[1]) if t.get('action_name')=='sys/paid-svc'),''))" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
+    local tx_id; tx_id=$(find_id "$(jj "$FED_DBL" "$FED_HL" tx list)" action_name sys/paid-svc)
     assert_nonempty "fed_denial_underfunded.tx_recorded" "$tx_id"
     assert_json "fed_denial_underfunded.tx_status_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
     assert_eq "fed_denial_underfunded.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
@@ -189,7 +188,7 @@ flow_fed_disabled_action_rejection() {
     # IMMEDIATELY as a failure rather than pinning funds until the 24h pending bound.
     j "$FED_DBR" "$FED_HR" action disable "$FED_RID" >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" run sys@kernel-r/greet '{}' >/dev/null 2>&1 || true
-    local tx_id; tx_id=$(python3 -c "import sys,json;print(next((t['id'] for t in json.loads(sys.argv[1]) if t.get('action_name')=='sys/greet'),''))" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
+    local tx_id; tx_id=$(find_id "$(jj "$FED_DBL" "$FED_HL" tx list)" action_name sys/greet)
     assert_nonempty "fed_disabled.tx_settled_not_pending" "$tx_id"
     assert_json "fed_disabled.tx_status_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
     assert_eq "fed_disabled.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
@@ -203,9 +202,7 @@ flow_fed_import_duty() {
     # Two-step pricing (§13). mp=1000, remote_bps=500, import_bps=500:
     #   sr    = 1000 + ceil(1000*500/10000) = 1050  (serving markup, → R's sys)
     #   price = 1050 + ceil(1050*500/10000) = 1103  (import fee 53, retained by L's sys)
-    local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create duty-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "duty" --price 1000)" id)
-    j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" action update "$pid" --visibility public >/dev/null 2>&1
+    local pid; pid=$(publish "$FED_DBR" "$FED_HR" duty-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "duty" --price 1000)
     # A call cold-resolves the proxy (§8); it fails unfunded here but caches the row with its price.
     j "$FED_DBL" "$FED_HL" run sys@kernel-r/duty-svc '{}' >/dev/null 2>&1
     assert_jnum "fed_pricing.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/duty-svc)" price 1103
@@ -253,9 +250,7 @@ flow_fed_failed_action_refund() {
     fport=$(backend_port); start_backend "$fport" 500 '{"error":"boom"}'
 
     # Paid action on R backed by a 500 backend; two-step price = sr(105) + ceil(105*5%) = 111.
-    local pid; pid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create fail-svc --kind http --source "http://127.0.0.1:$fport" --description "fails" --price 100)" id)
-    j "$FED_DBR" "$FED_HR" action enable "$pid" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" action update "$pid" --visibility public >/dev/null 2>&1
+    local pid; pid=$(publish "$FED_DBR" "$FED_HR" fail-svc --kind http --source "http://127.0.0.1:$fport" --description "fails" --price 100)
     j "$FED_DBR" "$FED_HR" admin deposit -- "$FED_LKEY" 5000 >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit sys 1000 >/dev/null 2>&1
     local ub; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
@@ -263,13 +258,22 @@ flow_fed_failed_action_refund() {
     # Remote 500 → remote failure receipt → full refund to L's caller.
     j "$FED_DBL" "$FED_HL" run sys@kernel-r/fail-svc '{}' >/dev/null 2>&1 || true
     assert_jnum "fed_failed_refund.balance_unchanged" "$(jj "$FED_DBL" "$FED_HL" user me)" available "$ub"
-    local tx_id; tx_id=$(python3 -c "import sys,json;print(next((t['id'] for t in json.loads(sys.argv[1]) if t.get('action_name')=='sys/fail-svc'),''))" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
+    local tx_id; tx_id=$(find_id "$(jj "$FED_DBL" "$FED_HL" tx list)" action_name sys/fail-svc)
     assert_nonempty "fed_failed_refund.tx_recorded" "$tx_id"
     local tx; tx=$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")
     assert_json "fed_failed_refund.tx_status_failure" "$tx" status failure
     assert_jnum "fed_failed_refund.tx_gross" "$tx" gross 111
     assert_jnum "fed_failed_refund.tx_net_zero" "$tx" net 0
     assert_jnum "fed_failed_refund.tx_fee_zero" "$tx" fee 0
+
+    # The direction that matters: R's reason travels inside a SIGNED receipt that L stores forever.
+    # L must adopt none of it — neither R's dialed upstream nor its response body — and must record
+    # a class of its own instead. R's verbatim wording stays available in the stored receipt JSON.
+    local rsn; rsn=$(strfield "$tx" reason)
+    assert_nonempty     "fed_failed_refund.reason_present"           "$rsn"
+    assert_not_contains "fed_failed_refund.reason_hides_peer_host"   "127.0.0.1:$fport" "$rsn"
+    assert_not_contains "fed_failed_refund.reason_hides_peer_body"   "boom"             "$rsn"
+    assert_json "fed_failed_refund.receipt_still_verifies" "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")" valid True
 }
 
 flow_fed_gossip_discovery() {
@@ -288,8 +292,7 @@ flow_fed_gossip_discovery() {
     # Third kernel T joins the network via the seed and must discover R purely from gossip: its
     # discovery loop pulls gossip and indexes R's public action into T's lookup docs.
     local dbt ht; dbt="$dir/t/juice.db"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
-    start_server "$dbt" "$ht" kernel_handle=kernel-t bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
-    j "$dbt" "$ht" auth login sys --password sys-pass >/dev/null 2>&1
+    make_admin "$dbt" "$ht" kernel_handle=kernel-t bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
 
     # Poll T's discovery cache until R's action surfaces in sys/lookup as a kernel-qualified reference.
     local found=no
@@ -367,9 +370,7 @@ flow_fed_discovery() {
     # R publishes a public action so its gossip carries something to display. It is PRICED, so the
     # discovery card's indicative price is checkable (§9): mp=1000, remote_bps=500, import_bps=500
     # ⇒ sr = 1050 (stored on the doc), displayed = 1050 + ceil(1050*500/10000) = 1103.
-    local rid; rid=$(strfield "$(jj "$dbr" "$hr" action create greet --kind http --source "http://127.0.0.1:$bport" --description greet --price 1000)" id)
-    j "$dbr" "$hr" action enable "$rid" >/dev/null 2>&1
-    j "$dbr" "$hr" action update "$rid" --visibility public >/dev/null 2>&1
+    local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:$bport" --description greet --price 1000)
 
     # L joins with R as its ONLY bootstrap peer; it must discover R without subscribing to it.
     start_server "$dbl" "$hl" kernel_handle=kernel-l bootstrap_peers="$boot" discovery_interval_seconds=2 \
@@ -426,9 +427,7 @@ flow_fed_peer_sync() {
 
     # R exposes a public action; L cold-resolves it by key to provision R's proxy locally (manifest
     # only, no backend call) and binds the kernel-r alias. R then funds L's proxy on R by key.
-    local rid; rid=$(strfield "$(jj "$dbr" "$hr" action create greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)" id)
-    j "$dbr" "$hr" action enable "$rid" >/dev/null 2>&1
-    j "$dbr" "$hr" action update "$rid" --visibility public >/dev/null 2>&1
+    local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)
     j "$dbl" "$hl" run "sys@$rkey/greet" '{}' >/dev/null 2>&1  # resolve caches the proxy even if greet's dead backend fails execution
     j "$dbl" "$hl" admin rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "fed_peer_sync.resolve" "resolve/rename failed"; return; }
     j "$dbr" "$hr" admin deposit -- "$lkey" 250 >/dev/null 2>&1
@@ -471,9 +470,7 @@ flow_fed_inspect_sync() {
 
     # R exposes a public action; L cold-resolves it by key to provision R's proxy locally and bind the
     # kernel-r alias. R funds L's proxy by key so R reports our credit.
-    local rid; rid=$(strfield "$(jj "$dbr" "$hr" action create greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)" id)
-    j "$dbr" "$hr" action enable "$rid" >/dev/null 2>&1
-    j "$dbr" "$hr" action update "$rid" --visibility public >/dev/null 2>&1
+    local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)
     j "$dbl" "$hl" run "sys@$rkey/greet" '{}' >/dev/null 2>&1  # resolve caches the proxy even if greet's dead backend fails execution
     j "$dbl" "$hl" admin rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "fed_inspect_sync.resolve" "resolve/rename failed"; return; }
     j "$dbr" "$hr" admin deposit -- "$lkey" 250 >/dev/null 2>&1
@@ -520,7 +517,7 @@ flow_fed_offline() {
     run_out=$(j "$FED_DBL" "$FED_HL" run sys@kernel-r/greet '{}' 2>&1); rc=$?
     assert_eq "fed_offline.run_exit_unreachable" 9 "$rc"
     assert_contains "fed_offline.run_says_unreachable" "unreachable" "$run_out"
-    local tx_id; tx_id=$(python3 -c "import sys,json;print(next((t['id'] for t in json.loads(sys.argv[1]) if t.get('action_name')=='sys/greet'),''))" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
+    local tx_id; tx_id=$(find_id "$(jj "$FED_DBL" "$FED_HL" tx list)" action_name sys/greet)
     assert_nonempty "fed_offline.run_settled_not_pending" "$tx_id"
     assert_json "fed_offline.run_tx_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
 
@@ -596,33 +593,17 @@ flow_fed_step_complete() {
 flow_settlement() {
     echo "=== FLOW settlement ==="
     local dir; dir=$(new_dir)
-    FED_DBL="$dir/l/juice.db"; FED_DBR="$dir/r/juice.db"
-    FED_HL="$dir/lsys"; FED_HR="$dir/rsys"
-    mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
-    local bport; bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
-
     # R (creditor) extends global exposure and sets the fee-rational quantum; L (debtor) shares Q so it
-    # takes the probabilistic branch for a sub-quantum debt.
-    start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r exposure_max=1000 settlement_trigger=500 settlement_quantum=100 || { fail "settlement.setup_r" "boot"; return; }
-    local boot; boot=$(kernel_fed_addr "$FED_DBR"); [ -n "$boot" ] || { fail "settlement.boot" "no addr"; return; }
-    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$boot" settlement_quantum=100 || { fail "settlement.setup_l" "boot"; return; }
-    j "$FED_DBR" "$FED_HR" auth login sys --password sys-pass >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" auth login sys --password sys-pass >/dev/null 2>&1
-    local rkey; rkey=$(kernel_key "$FED_DBR" "$FED_HR"); [ -n "$rkey" ] || { fail "settlement.rkey" "empty"; return; }
-    local lkey; lkey=$(kernel_key "$FED_DBL" "$FED_HL"); [ -n "$lkey" ] || { fail "settlement.lkey" "empty"; return; }
+    # takes the probabilistic branch for a sub-quantum debt. _fed_setup does the rest of the bring-up,
+    # including the cold resolve of the price-0 greet that provisions R's proxy and binds kernel-r
+    # without drawing credit; the paid action below then resolves on its own first call.
+    FED_RCFG=(exposure_max=1000 settlement_trigger=500 settlement_quantum=100)
+    FED_LCFG=(settlement_quantum=100)
+    _fed_setup "$dir" || { fail "settlement.setup" "setup failed"; return; }
+    local lkey="$FED_LKEY"
 
-    # R: paid action (mp=10). L cold-resolves it by key and binds the kernel-r alias; funds only its
-    # OWN caller (never prepaid on R).
-    local rid; rid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create paid --kind http --source "http://127.0.0.1:$bport" --description "paid" --price 10)" id)
-    j "$FED_DBR" "$FED_HR" action enable "$rid" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" action update "$rid" --visibility public >/dev/null 2>&1
-    # Cold-resolve a price-0 greet to provision R's proxy and bind kernel-r without drawing credit; the
-    # paid action then resolves on its own first call below.
-    local gid; gid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create greet --kind http --source "http://127.0.0.1:$bport" --description greet --price 0)" id)
-    j "$FED_DBR" "$FED_HR" action enable "$gid" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" action update "$gid" --visibility public >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" run "sys@$rkey/greet" '{}' >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "settlement.resolve" "resolve/rename failed"; return; }
+    # R: paid action (mp=10). L funds only its OWN caller, never prepaying on R.
+    local rid; rid=$(publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 10)
     j "$FED_DBL" "$FED_HL" admin deposit sys 1000 >/dev/null 2>&1
 
     # L calls the paid action unfunded on R → R admits it against its global exposure → L now owes R.
@@ -693,9 +674,7 @@ flow_transfer() {
     j "$FED_DBL" "$FED_HL" admin deposit alice 1000 >/dev/null 2>&1
     # Cold-resolve a price-0 greet to provision R's proxy and bind kernel-r; sys/transfer then resolves
     # on alice's own first call below.
-    local gid; gid=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)" id)
-    j "$FED_DBR" "$FED_HR" action enable "$gid" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" action update "$gid" --visibility public >/dev/null 2>&1
+    local gid; gid=$(publish "$FED_DBR" "$FED_HR" greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)
     j "$FED_DBL" "$FED_HL" run "sys@$rkey/greet" '{}' >/dev/null 2>&1  # resolve caches R's proxy even though greet's dead backend fails execution
     j "$FED_DBL" "$FED_HL" admin rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "transfer.resolve" "resolve/rename failed"; return; }
     local ahome; ahome=$(home "$dir" alice); j "$FED_DBL" "$ahome" auth login alice --password userpass >/dev/null 2>&1

@@ -201,9 +201,9 @@ func doHTTP(ctx context.Context, method, rawURL string, headers map[string]strin
 	}
 	resp, err := newHTTPClient(timeout, allowLocal).Do(req)
 	if err != nil {
-		// Keep the detailed message and attach the typed cause (via Because) so callers can tell
-		// a client-side timeout apart from a connection failure (client.go isTimeoutErr).
-		return nil, 0, kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err).Because(err)
+		// The dialed URL stays out of the message (it becomes the signed receipt's reason, §6) but
+		// rides as the cause, which client.go's isTimeoutErr needs.
+		return nil, 0, kernel.ErrExecutionFailed.Wrap("upstream request failed").Because(err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
@@ -388,7 +388,7 @@ func (e *httpActionExecutor) fetchWeb(ctx context.Context, rawURL, userAgent str
 	}
 	resp, err := newHTTPClient(e.timeout, e.allowLocal).Do(req)
 	if err != nil {
-		return 0, nil, "", "", kernel.ErrExecutionFailed.Wrapf("HTTP call failed: %v", err)
+		return 0, nil, "", "", kernel.ErrExecutionFailed.Wrap("upstream request failed").Because(err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
@@ -558,7 +558,9 @@ func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Act
 		}
 	}
 	if status < 200 || status >= 300 {
-		return nil, kernel.ErrExecutionFailed.Wrapf("action returned status %d: %s", status, string(respBody))
+		// The body is discarded, not attached: it is upstream data (tokens, PII) and this error
+		// becomes the signed receipt's reason (§6).
+		return nil, kernel.ErrExecutionFailed.Wrapf("upstream returned status %d", status)
 	}
 	var result map[string]any
 	if err := json.Unmarshal(respBody, &result); err != nil {

@@ -615,12 +615,6 @@ func actionListCmd() *cobra.Command {
 				if a.RequiresGrant {
 					grant = " [grant]" // caller must connect their own credential first (§8)
 				}
-				switch a.PeerState { // remote_proxy liveness/funding from the §13 sync cache
-				case "offline":
-					grant += " [peer offline]"
-				case "unfunded":
-					grant += " [peer unfunded]"
-				}
 				if all {
 					active := " "
 					if a.Active {

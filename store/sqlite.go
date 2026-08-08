@@ -19,7 +19,7 @@ import (
 	"unicode"
 
 	"github.com/daios-ai/juice/kernel"
-	_ "modernc.org/sqlite"
+	sqlite "modernc.org/sqlite"
 )
 
 const driverName = "sqlite"
@@ -3389,9 +3389,33 @@ func firstErr(errs ...error) error {
 	return nil
 }
 
+// callerUnique lists the unique keys derived from caller input; a collision there is the caller's
+// conflict. Every other unique key is kernel-minted, so its collision is a broken invariant and
+// stays internal — unlisted keys fail closed. ledger.external_key never reaches the index (§12).
+var callerUnique = []string{
+	"accounts.handle", "kernels.petname", "actions.owner_user_id", "ratings.rated_tx_id",
+	"connections.user_id", "grants.grantor_user_id",
+	"idempotency_records.idempotency_key", "pending_transfers.idempotency_key",
+}
+
+// Extended result codes for the two uniqueness failures.
+const (
+	sqliteConstraintUnique     = 2067
+	sqliteConstraintPrimaryKey = 1555
+)
+
 func dbErr(err error, op string) error {
 	if err == nil {
 		return nil
+	}
+	// Classify BEFORE wrapping: Wrapf drops the cause, so the driver error is unreachable after.
+	var se *sqlite.Error
+	if errors.As(err, &se) && (se.Code() == sqliteConstraintUnique || se.Code() == sqliteConstraintPrimaryKey) {
+		for _, key := range callerUnique {
+			if strings.Contains(se.Error(), key) {
+				return kernel.ErrInvalidInput.Wrapf("%s: already exists", op)
+			}
+		}
 	}
 	return kernel.ErrInternal.Wrapf("%s: %v", op, err)
 }

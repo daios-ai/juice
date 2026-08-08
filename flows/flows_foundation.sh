@@ -7,8 +7,7 @@
 
 flow_bootstrap() {
     echo "=== FLOW bootstrap ==="
-    local dir db hs
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
+    local dir db hs; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
 
     start_server "$db" "$hs" || { fail "bootstrap.first_boot" "server did not start"; return; }
     ok "bootstrap.first_boot"
@@ -32,12 +31,42 @@ flow_bootstrap() {
     assert_nonempty "bootstrap.http_password_grant" "$tok"
 }
 
+# The error contract on the wire. Until assert_status existed, no flow could assert a status at
+# all, so a taken handle returning 500 with raw SQL went unnoticed: the CLI reported a generic
+# failure and every flow only ever checked success paths.
+flow_signup_errors() {
+    echo "=== FLOW signup_errors ==="
+    local dir db hs ha base; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" || { fail "signup_errors.boot" "server did not start"; return; }
+    make_user "$db" "$hs" "$ha" alice
+    base=$(url "$db")
+
+    # A taken handle is the caller's conflict, not an internal fault, and the body must not carry
+    # the schema: the UI keys on `code`, never on message text.
+    local dup='{"handle":"alice","password":"userpass"}' body
+    assert_status "signup_errors.duplicate_handle_status" 422 POST "$base/v1/users" "$dup"
+    body=$(http_body POST "$base/v1/users" "$dup")
+    assert_json         "signup_errors.duplicate_handle_code" "$body" code invalid_input
+    assert_not_contains "signup_errors.no_constraint_leak" "constraint" "$body"
+    assert_not_contains "signup_errors.no_table_leak"      "accounts."  "$body"
+
+    assert_status "signup_errors.bad_handle"      422 POST "$base/v1/users" '{"handle":"a/b","password":"userpass"}'
+    assert_status "signup_errors.short_password"  422 POST "$base/v1/users" '{"handle":"carol","password":"x"}'
+
+    # The same contract on a second caller-supplied unique key: (owner, name) on actions.
+    local tok; tok=$(token "$base" alice userpass)
+    assert_nonempty "signup_errors.token" "$tok"
+    local act='{"name":"dup","kind":"http","price":0,"description":"d","source":"http://127.0.0.1:9/x"}'
+    assert_status "signup_errors.first_action"     201 POST "$base/v1/actions" "$act" "$tok"
+    assert_status "signup_errors.duplicate_action" 422 POST "$base/v1/actions" "$act" "$tok"
+    assert_not_contains "signup_errors.action_no_sql_leak" "constraint" \
+        "$(http_body POST "$base/v1/actions" "$act" "$tok")"
+}
+
 flow_local_auth() {
     echo "=== FLOW local_auth ==="
-    local dir db hs tdir
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
-    start_server "$db" "$hs" || { fail "local_auth.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs tdir; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
+    make_admin "$db" "$hs" || { fail "local_auth.boot" "server did not start"; return; }
     tdir=$(juice_token_dir "$hs" "$db")
 
     assert_eq "local_auth.token_stored" yes "$([ -f "$tdir/token" ] && echo yes || echo no)"
@@ -70,10 +99,8 @@ flow_local_auth() {
 
 flow_suspension() {
     echo "=== FLOW suspension ==="
-    local dir db hs ha
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
-    start_server "$db" "$hs" || { fail "suspension.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" || { fail "suspension.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
     assert_json "suspension.alice_active" "$(jj "$db" "$ha" user me)" handle alice
@@ -89,10 +116,8 @@ flow_suspension() {
 
 flow_deposits() {
     echo "=== FLOW deposits ==="
-    local dir db hs ha hb
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
-    start_server "$db" "$hs" || { fail "deposits.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha hb; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    make_admin "$db" "$hs" || { fail "deposits.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
 
@@ -108,10 +133,8 @@ flow_deposits() {
 
 flow_transfers() {
     echo "=== FLOW transfers ==="
-    local dir db hs ha hb
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
-    start_server "$db" "$hs" || { fail "transfers.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha hb; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    make_admin "$db" "$hs" || { fail "transfers.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     j "$db" "$hs" admin deposit alice 500 >/dev/null 2>&1
@@ -137,10 +160,8 @@ flow_transfers() {
 
 flow_action_lifecycle() {
     echo "=== FLOW action_lifecycle ==="
-    local dir db hs ha hb bport
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
-    start_server "$db" "$hs" || { fail "action_lifecycle.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    make_admin "$db" "$hs" || { fail "action_lifecycle.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
 
@@ -176,9 +197,7 @@ flow_action_lifecycle() {
     # action_name is captured in a transaction and survives action deletion.
     bport=$(backend_port); start_backend "$bport" 200 '{"answer":42}'
     local tid tx_id
-    tid=$(strfield "$(jj "$db" "$ha" action create callable --kind http --source "http://127.0.0.1:${bport}/call" --description "tx test" --price 0)" id)
-    j "$db" "$ha" action enable "$tid" >/dev/null 2>&1
-    j "$db" "$ha" action update "$tid" --visibility public >/dev/null 2>&1
+    tid=$(publish "$db" "$ha" callable --kind http --source "http://127.0.0.1:${bport}/call" --description "tx test" --price 0)
     tx_id=$(strfield "$(jj "$db" "$hb" run alice/callable '{}')" tx_id)
     j "$db" "$ha" action delete "$tid" >/dev/null 2>&1
     assert_json "action_lifecycle.action_name_in_tx_after_delete" "$(jj "$db" "$hb" tx show "$tx_id")" action_name callable
@@ -186,10 +205,8 @@ flow_action_lifecycle() {
 
 flow_action_owner_visibility() {
     echo "=== FLOW action_owner_visibility ==="
-    local dir db hs ha
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
-    start_server "$db" "$hs" || { fail "action_owner_visibility.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" || { fail "action_owner_visibility.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
     # A private, inactive action (no enable, no --visibility public).
@@ -212,10 +229,8 @@ flow_action_owner_visibility() {
 # description is the kernel "about" surfaced by admin identity.
 flow_recovery() {
     echo "=== FLOW recovery ==="
-    local dir db hs uh phrase
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); uh=$(home "$dir" rec)
-    start_server "$db" "$hs" || { fail "recovery.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs uh phrase; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); uh=$(home "$dir" rec)
+    make_admin "$db" "$hs" || { fail "recovery.boot" "server did not start"; return; }
 
     # sys's description is the kernel "about" (surfaced by admin identity).
     j "$db" "$hs" user update --description "the neighbourhood kernel" >/dev/null 2>&1

@@ -8,11 +8,9 @@
 
 flow_transaction_access() {
     echo "=== FLOW transaction_access ==="
-    local dir db hs ha hb hc bport
-    dir=$(new_dir); db="$dir/juice.db"
+    local dir db hs ha hb hc bport; dir=$(new_dir); db="$dir/juice.db"
     hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
-    start_server "$db" "$hs" || { fail "tx_access.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_admin "$db" "$hs" || { fail "tx_access.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     make_user "$db" "$hs" "$hc" carol
@@ -48,10 +46,8 @@ flow_transaction_access() {
 
 flow_admin_supervision() {
     echo "=== FLOW admin_supervision ==="
-    local dir db hs ha bport
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
-    start_server "$db" "$hs" || { fail "admin.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" || { fail "admin.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
     # admin users lists sys and alice; admin show returns alice.
@@ -109,10 +105,8 @@ flow_admin_supervision() {
 
 flow_time() {
     echo "=== FLOW time ==="
-    local dir db hs ha
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
-    start_server "$db" "$hs" || { fail "time.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" || { fail "time.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
     # sys/time is registered active + public + free after bootstrap.
@@ -131,10 +125,8 @@ except Exception: print('bad')" "$(resultf "$out" iso)" 2>/dev/null)"
 
 flow_message() {
     echo "=== FLOW message ==="
-    local dir db hs ha hb
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
-    start_server "$db" "$hs" || { fail "message.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs ha hb; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    make_admin "$db" "$hs" || { fail "message.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
 
@@ -156,10 +148,8 @@ flow_message() {
 
 flow_native_orphan_purge() {
     echo "=== FLOW native_orphan_purge ==="
-    local dir db hs
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
-    start_server "$db" "$hs" || { fail "orphan.boot" "server did not start"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    local dir db hs; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
+    make_admin "$db" "$hs" || { fail "orphan.boot" "server did not start"; return; }
 
     # Baseline: a real native is present.
     assert_eq "orphan.time_present" yes "$(has_action "$(jj "$db" "$hs" action list)" time)"
@@ -183,8 +173,7 @@ PYEOF
     assert_nonempty "orphan.injected" "$orphan_id"
 
     # Restart → startup prune soft-deletes the handler-less native; real natives survive.
-    start_server "$db" "$hs" || { fail "orphan.reboot" "server did not restart"; return; }
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    make_admin "$db" "$hs" || { fail "orphan.reboot" "server did not restart"; return; }
     assert_eq "orphan.pruned"        no  "$(has_action "$(jj "$db" "$hs" action list --all)" obsolete-native)"
     assert_eq "orphan.real_survives" yes "$(has_action "$(jj "$db" "$hs" action list)" time)"
 }
