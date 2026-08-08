@@ -2290,7 +2290,7 @@ func (k *Kernel) DeleteAction(ctx context.Context, callerID, actionID string) er
 
 // beginRun consolidates all preconditions for a new process, atomically creates the process
 // and root trace via BeginRun, then executes the root call. Shared by Run and RunFederated.
-func (k *Kernel) beginRun(ctx context.Context, caller *Account, targetUserID, actionName string, args map[string]any, idempotencyRecordID string) (*CallReply, error) {
+func (k *Kernel) beginRun(ctx context.Context, caller *Account, targetUserID, actionName string, args map[string]any, idempotencyRecordID, quoteHash string) (*CallReply, error) {
 	action, err := k.store.ReadActionByOwnerName(ctx, targetUserID, actionName)
 	if err != nil || action == nil {
 		return nil, ErrNotFound.Wrapf("action %s/%s not found", targetUserID, actionName)
@@ -2300,7 +2300,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, targetUserID, ac
 	// §6), so the same check runs here before BeginRun parks funds.
 	// Root/federated runs have C = P (the caller owns the process), so one identity feeds both the
 	// caller-scoped visibility check and the process-owner-scoped grant check.
-	if err := k.checkCallPreconditions(ctx, caller, caller.ID, action, args, true); err != nil {
+	if err := k.checkCallPreconditions(ctx, caller, caller.ID, action, args, true, quoteHash); err != nil {
 		return nil, err
 	}
 	if err := k.requireReceiptSigningReady(); err != nil {
@@ -2405,7 +2405,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, targetUserID, ac
 }
 
 // Run atomically creates a process funded with action.Price, then executes the root call.
-func (k *Kernel) Run(ctx context.Context, callerID, actionRef string, args map[string]any) (*CallReply, error) {
+func (k *Kernel) Run(ctx context.Context, callerID, actionRef string, args map[string]any, quoteHash string) (*CallReply, error) {
 	caller, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
@@ -2414,7 +2414,7 @@ func (k *Kernel) Run(ctx context.Context, callerID, actionRef string, args map[s
 	if err != nil {
 		return nil, err
 	}
-	return k.beginRun(ctx, caller, action.OwnerUserID, action.Name, args, "")
+	return k.beginRun(ctx, caller, action.OwnerUserID, action.Name, args, "", quoteHash)
 }
 
 // RunFederated is like Run but accepts an idempotencyRecordID for federation calls.
@@ -2424,7 +2424,7 @@ func (k *Kernel) RunFederated(ctx context.Context, callerID, targetUserID, actio
 	if err != nil {
 		return nil, err
 	}
-	return k.beginRun(ctx, caller, targetUserID, actionName, args, idempotencyRecordID)
+	return k.beginRun(ctx, caller, targetUserID, actionName, args, idempotencyRecordID, "") // a peer pins the manifest via expected_contract_hash (§8), not a local quote
 }
 
 // EndProcess closes a process and returns all remaining funds to the owner.

@@ -111,6 +111,37 @@ func FormatActionRef(a *Action) string {
 	return a.Name
 }
 
+// quoteTerms is the advertised execution quote a buyer is shown, plus whether the action engages
+// the transfer-value channel. Named a quote, not a contract: expected_contract_hash already means
+// the full federation manifest If-Match (§8), and this is a smaller, buyer-facing fingerprint. It
+// binds neither implementation (a same-terms source or artifact change is not caught) nor a
+// transfer total, whose value fees are read from live config at funding (§13).
+type quoteTerms struct {
+	ActionID     string         `json:"action_id"` // stable identity: the remote id for a proxy
+	Effect       string         `json:"effect"`
+	Description  string         `json:"description"`
+	InputSchema  map[string]any `json:"input_schema"`
+	OutputSchema map[string]any `json:"output_schema"`
+	Price        int64          `json:"price"`
+}
+
+// QuoteHash fingerprints the terms a caller was quoted for an action (§4 precondition 7). It keys
+// on the STABLE id — a proxy's remote id, never its local cache UUID — so a discovered lookup hit
+// and the local proxy it resolves to hash identically and a hash read from lookup binds a first
+// cross-kernel call. Effect is included because it alone decides whether a call locks a value
+// reserve (§13): a peer promoting effect under unchanged terms would otherwise pass.
+func QuoteHash(a *Action) string {
+	id := a.RemoteActionID
+	if id == "" {
+		id = a.ID
+	}
+	payload, _ := CanonicalJSON(quoteTerms{
+		ActionID: id, Effect: a.Effect, Description: a.Description,
+		InputSchema: a.InputSchema, OutputSchema: a.OutputSchema, Price: a.Price,
+	})
+	return sha256Hex(string(payload))
+}
+
 // IsPublicKey reports whether s has the syntactic form of a base64url Ed25519 public key. Exported
 // for the service/CLI layer's shape-based peer resolution (§14 productions).
 func IsPublicKey(s string) bool { return looksLikeKey(s) }
@@ -387,7 +418,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	// checked here too with no extra DB read and no TOCTOU window — Call is the single validity
 	// function; no entry path bypasses it (beginRun runs the same check before funding). A step
 	// completion (req.StepID != "") bound visibility at creation (§10), so it skips that check.
-	if err := k.checkCallPreconditions(ctx, caller, process.OwnerUserID, action, req.Args, req.StepID == ""); err != nil {
+	if err := k.checkCallPreconditions(ctx, caller, process.OwnerUserID, action, req.Args, req.StepID == "", ""); err != nil {
 		return nil, err
 	}
 
@@ -705,14 +736,15 @@ func canCall(caller *Account, action *Action) bool {
 	}
 }
 
-// checkCallPreconditions enforces the §4 semantic call-validity rules (steps 6 and 7) for a
-// resolved action: liveness, visibility by the immediate caller, and input against the action's
-// schema. It is the single validity function — Call runs it unconditionally for every entry path,
-// and beginRun runs it once before funding so an invalid root call never creates a funded process
-// (§6). checkVisibility is false only for a step completion, which bound visibility at creation
-// (§10): a liveness failure still resets it to waiting, a later visibility change does not. The
-// grant check stays keyed on the process owner: delegated consent binds to the paying human (§8).
-func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *Account, processOwnerID string, action *Action, args map[string]any, checkVisibility bool) error {
+// checkCallPreconditions enforces the §4 semantic call-validity rules (steps 6 to 8) for a
+// resolved action: liveness, visibility by the immediate caller, the optional quote pin, and input
+// against the action's schema. It is the single validity function — Call runs it unconditionally
+// for every entry path, and beginRun runs it once before funding so an invalid root call never
+// creates a funded process (§6). checkVisibility is false only for a step completion, which bound
+// visibility at creation (§10): a liveness failure still resets it to waiting, a later visibility
+// change does not. The grant check stays keyed on the process owner: delegated consent binds to the
+// paying human (§8). quoteHash is empty on every path but a pinned root run.
+func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *Account, processOwnerID string, action *Action, args map[string]any, checkVisibility bool, quoteHash string) error {
 	if !action.Active {
 		return ErrInvalidState.Wrap("action is inactive")
 	}
@@ -721,6 +753,16 @@ func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *Account, pr
 	}
 	if checkVisibility && !canCall(caller, action) {
 		return ErrUnauthorized.Wrap("call permission denied")
+	}
+	// After visibility, so a mismatch never discloses a private action's terms; before input
+	// validation, so terms that changed enough to invalidate the args still report as changed terms
+	// rather than a schema violation (§4 precondition 7). Guarded rather than computed in the `if`
+	// initializer: this runs on every call, subcall and step completion, and hashing two schemas
+	// for a pin nobody supplied is pure waste.
+	if quoteHash != "" {
+		if cur := QuoteHash(action); quoteHash != cur {
+			return TermsChangedError(cur, action.Price)
+		}
 	}
 	if err := ValidateInput(action.InputSchema, args); err != nil {
 		return err

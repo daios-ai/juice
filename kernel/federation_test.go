@@ -853,7 +853,7 @@ func TestRemoteDispatchUsesStableActionID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (pending), got %v", err)
 	}
 	if fake.sentAction != "stable-action" {
@@ -901,7 +901,7 @@ func TestRetryExpiredRemoteTraceSettlesAsFailure(t *testing.T) {
 
 	// Real root run: the empty receipt makes the proxy call time out; the process stays open and
 	// the trace persists in the DB with its idempotency key (beginRun records the dispatch).
-	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -958,7 +958,7 @@ func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
 	premium := (mp*bps + 9999) / 10000
 
 	// Call while the peer is offline → pending, no settled transaction, funds locked.
-	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (pending), got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -1017,7 +1017,7 @@ func TestAwaitingReceiptSince(t *testing.T) {
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "await-action", 1000)
 
 	// Offline call → parked, awaiting a receipt.
-	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	pend, _ := st.ListPendingRemoteTraces(ctx)
@@ -1065,7 +1065,7 @@ func TestPendingRemoteTracesAndRetryWrappers(t *testing.T) {
 	mp := *a.BasePrice
 	premium := (mp*bps + 9999) / 10000
 
-	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	pending, err := k.PendingRemoteTraces(ctx)
@@ -2268,7 +2268,7 @@ func TestRemoteCallNotDispatchedFailsFast(t *testing.T) {
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "nd-action", 1000)
 	before, _ := st.ReadUser(ctx, caller.ID)
 
-	_, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{})
+	_, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, "")
 	if !errors.Is(err, kernel.ErrPeerUnreachable) {
 		t.Fatalf("Run: expected ErrPeerUnreachable, got %v", err)
 	}
@@ -2311,7 +2311,7 @@ func TestRetryNeverFailsFastOnNotDispatched(t *testing.T) {
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "retry-nd-action", 1000)
 	mp := a.Price * 10000 / (10000 + bps)
 
-	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (parked), got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -3287,7 +3287,7 @@ func TestSettlementUsesDispatchedRate(t *testing.T) {
 	}
 	before, _ := st.ReadUser(ctx, caller.ID)
 
-	if _, err := k.Run(ctx, caller.ID, a.ID, map[string]any{}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, caller.ID, a.ID, map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (parked), got %v", err)
 	}
 	pend, _ := st.ListPendingRemoteTraces(ctx)
@@ -3421,5 +3421,73 @@ func TestEveryReadPathReprices(t *testing.T) {
 	}
 	if !seen {
 		t.Error("the resolved proxy must appear in lookup (it is indexed at resolve)")
+	}
+}
+
+// TestQuotePinCatchesEffectPromotion is the case the quote pin exists for. `effect` alone decides
+// whether a call locks a value reserve from the caller's OWN balance (§13) — prepareTransferEffect
+// keys on it, and the schema plays no part. So a peer can re-sign a manifest that flips effect to
+// "transfer" while leaving price, description and both schemas untouched: the existing manifest
+// If-Match does not prevent it (it forces a re-resolve, after which the local row simply HAS the new
+// effect), and a buyer holding a quote taken beforehand would be admitted to a value-bearing call it
+// never agreed to. Binding effect into the quote is what refuses it.
+func TestQuotePinCatchesEffectPromotion(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	setupSys(t, k, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	key := base64.RawURLEncoding.EncodeToString(pub)
+	peer, err := k.EnsureKernelAccount(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindPetnameForTest(t, k, ctx, key, "seller")
+
+	m := kernel.ActionManifest{
+		ActionID: "remote-pay-id", OwnerHandle: "seller", Name: "pay",
+		Description: "moves value", Kind: kernel.KindHTTP, Price: 10, RemoteBPS: 500,
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{
+			"amount": map[string]any{"type": "integer"}, "target": map[string]any{"type": "string"}}},
+		OutputSchema: map[string]any{"type": "object"},
+		Stats:        &kernel.Stats{}, UpdatedAt: time.Now(),
+	}
+	sig, _ := kernel.SignManifest(priv, &m)
+	m.Signature = sig
+	ordinary, err := k.ImportPeerAction(ctx, peer.ID, m)
+	if err != nil {
+		t.Fatalf("ImportPeerAction: %v", err)
+	}
+	quoted := kernel.QuoteHash(ordinary) // what the buyer was shown
+
+	// The seller re-signs with effect promoted and NOTHING else changed, and the buyer re-resolves.
+	m.Effect = "transfer"
+	m.Signature = ""
+	sig2, _ := kernel.SignManifest(priv, &m)
+	m.Signature = sig2
+	promoted, err := k.ImportPeerAction(ctx, peer.ID, m)
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if promoted.Effect != "transfer" {
+		t.Fatalf("setup: effect did not promote, got %q", promoted.Effect)
+	}
+	if promoted.Price != ordinary.Price || promoted.Description != ordinary.Description {
+		t.Fatalf("setup: only effect may differ, got price %d desc %q", promoted.Price, promoted.Description)
+	}
+	if kernel.QuoteHash(promoted) == quoted {
+		t.Fatal("effect promotion under unchanged terms must move the quote hash, or the pin does not bind what can be charged")
+	}
+
+	buyer := setupUser(t, st, "buyer-effect", 5000)
+	_, err = k.Run(ctx, buyer.ID, "seller@seller/pay",
+		map[string]any{"amount": 100, "target": "someone"}, quoted)
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("a stale quote over a promoted effect must be refused, got %v", err)
+	}
+	u, _ := st.ReadUser(ctx, buyer.ID)
+	if u.Available != 5000 || u.Locked != 0 {
+		t.Errorf("the refusal must lock no value reserve; got available=%d locked=%d", u.Available, u.Locked)
 	}
 }

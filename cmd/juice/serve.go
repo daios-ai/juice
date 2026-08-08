@@ -1076,8 +1076,9 @@ func (s *server) endProcess(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) postRun(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, req struct {
-		Action string          `json:"action"`
-		Args   *map[string]any `json:"args"`
+		Action    string          `json:"action"`
+		Args      *map[string]any `json:"args"`
+		QuoteHash string          `json:"quote_hash"` // optional pin (§4 precondition 7)
 	}) (any, int, error) {
 		if req.Action == "" {
 			return nil, 0, kernel.ErrInvalidInput.Wrap("action is required")
@@ -1085,7 +1086,7 @@ func (s *server) postRun(w http.ResponseWriter, r *http.Request) {
 		if req.Args == nil {
 			return nil, 0, kernel.ErrInvalidInput.Wrap("args is required")
 		}
-		reply, err := run(s.kernel, r.Context(), callerFrom(r), req.Action, *req.Args)
+		reply, err := run(s.kernel, r.Context(), callerFrom(r), req.Action, *req.Args, req.QuoteHash)
 		return reply, http.StatusOK, err
 	})(w, r)
 }

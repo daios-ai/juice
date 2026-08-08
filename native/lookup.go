@@ -41,6 +41,12 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 				"score":         float64(r.Score),
 				"input_schema":  d.InputSchema,
 				"output_schema": d.OutputSchema,
+				// Keyed on the remote action id, so this equals the quote_hash of the local proxy
+				// this hit resolves to: a hash read here binds a first cross-kernel call (§13).
+				"quote_hash": kernel.QuoteHash(&kernel.Action{
+					RemoteActionID: d.ActionID, Effect: d.Effect, Description: d.Description,
+					InputSchema: d.InputSchema, OutputSchema: d.OutputSchema, Price: r.Price,
+				}),
 			}
 			continue
 		}
@@ -52,6 +58,7 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 			"score":         float64(r.Score),
 			"input_schema":  r.Action.InputSchema,
 			"output_schema": r.Action.OutputSchema,
+			"quote_hash":    kernel.QuoteHash(r.Action),
 		}
 	}
 	return map[string]any{"results": items}, nil

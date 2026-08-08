@@ -2193,7 +2193,7 @@ func TestFederationReplay(t *testing.T) {
 }
 
 // TestFederationIdempotencyPreconditionFailure verifies that a schema-validation failure
-// (precondition 7) completes the idempotency record so replays return the error, not 409.
+// (precondition 8) completes the idempotency record so replays return the error, not 409.
 func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 	// Backend won't be reached (schema validation fails first), but needs to exist for activation.
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

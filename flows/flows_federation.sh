@@ -401,6 +401,23 @@ print(next((x.get('price') for x in res if sys.argv[2] in str(x.get('action','')
     # billing account.
     local rentry; rentry=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);e=next((x for x in ps if x.get('public_key')==sys.argv[2]),None);print('missing' if e is None else ('account' if e.get('has_account') else 'discovery-only'))" "$(jj "$dbl" "$hl" admin peers)" "$rkey" 2>/dev/null)
     assert_eq "fed_discovery.r_is_discovery_only" discovery-only "$rentry"
+
+    # The discovery/proxy quote equality (§4 precondition 7): the hash on a catalog card, computed
+    # from the gossiped manifest, must equal the one the local proxy carries after resolve — keyed
+    # on the REMOTE action id, so the local cache UUID never enters it. That equality is what lets a
+    # buyer pin terms read from lookup on a FIRST cross-kernel call, before any proxy row exists.
+    local dhash; dhash=$(python3 -c "
+import sys,json
+r=json.loads(sys.argv[1]); res=r.get('result',r).get('results',[])
+print(next((x.get('quote_hash','') for x in res if sys.argv[2] in str(x.get('action',''))),''))" "$lk" "@$rkey/greet" 2>/dev/null)
+    assert_nonempty "fed_discovery.card_quote_hash" "$dhash"
+
+    j "$dbr" "$hr" admin deposit -- "$(kernel_key "$dbl" "$hl")" 5000 >/dev/null 2>&1
+    j "$dbl" "$hl" admin deposit sys 5000 >/dev/null 2>&1
+    assert_nonempty "fed_discovery.pinned_first_call" \
+        "$(strfield "$(jj "$dbl" "$hl" run "sys@$rkey/greet" '{}' --quote-hash "$dhash")" tx_id)"
+    assert_eq "fed_discovery.proxy_hash_equals_card" "$dhash" \
+        "$(strfield "$(jj "$dbl" "$hl" action show "sys@$rkey/greet")" quote_hash)"
 }
 
 # flow_fed_peer_sync: the discovery timer also pulls gossip from known peers (§13 peer sync),

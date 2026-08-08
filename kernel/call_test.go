@@ -222,7 +222,7 @@ func TestCallPrivateDenied(t *testing.T) {
 	setupAction(t, st, bob.ID, "private", 0)
 
 	// Alice (not the owner) tries to run bob's private action via Run, which enforces CanCall.
-	_, err := k.Run(ctx, alice.ID, "bob/private", map[string]any{})
+	_, err := k.Run(ctx, alice.ID, "bob/private", map[string]any{}, "")
 	if err == nil {
 		t.Error("expected call denial for private action owned by another user")
 	}
@@ -299,7 +299,7 @@ func TestCallPrivateActionOwnerOnly(t *testing.T) {
 	}
 
 	// Alice (not the owner) cannot run bob's private action. Validated by Run → beginRun.
-	_, err = k.Run(ctx, alice.ID, "bob/priv", map[string]any{})
+	_, err = k.Run(ctx, alice.ID, "bob/priv", map[string]any{}, "")
 	if err == nil {
 		t.Error("non-owner should not be able to call private action")
 	}
@@ -318,7 +318,7 @@ func TestCallInactiveActionBlocked(t *testing.T) {
 	})
 
 	// Run enforces CanCall (which requires active=true) in beginRun.
-	_, err := k.Run(ctx, alice.ID, "alice/inactive", map[string]any{})
+	_, err := k.Run(ctx, alice.ID, "alice/inactive", map[string]any{}, "")
 	if err == nil {
 		t.Error("inactive action should be blocked regardless of public flag")
 	}
@@ -340,7 +340,7 @@ func TestCallSuspendedOwnerActionBlocked(t *testing.T) {
 	})
 
 	// Callable before suspension.
-	if _, err := k.Run(ctx, alice.ID, "bob/svc", map[string]any{}); err != nil {
+	if _, err := k.Run(ctx, alice.ID, "bob/svc", map[string]any{}, ""); err != nil {
 		t.Fatalf("action should be callable before owner suspension: %v", err)
 	}
 
@@ -348,7 +348,7 @@ func TestCallSuspendedOwnerActionBlocked(t *testing.T) {
 	if err := st.SuspendUser(ctx, bob.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.Run(ctx, alice.ID, "bob/svc", map[string]any{}); !errors.Is(err, kernel.ErrInvalidState) {
+	if _, err := k.Run(ctx, alice.ID, "bob/svc", map[string]any{}, ""); !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("suspended owner's action should fail with ErrInvalidState, got %v", err)
 	}
 
@@ -356,7 +356,7 @@ func TestCallSuspendedOwnerActionBlocked(t *testing.T) {
 	if err := st.UnsuspendUser(ctx, bob.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.Run(ctx, alice.ID, "bob/svc", map[string]any{}); err != nil {
+	if _, err := k.Run(ctx, alice.ID, "bob/svc", map[string]any{}, ""); err != nil {
 		t.Fatalf("unsuspend should restore callability: %v", err)
 	}
 }
@@ -369,7 +369,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	alice := setupUser(t, st, "alice", 50)
 	_ = setupAction(t, st, alice.ID, "expensive", 200)
 
-	_, err := k.Run(ctx, alice.ID, "alice/expensive", map[string]any{})
+	_, err := k.Run(ctx, alice.ID, "alice/expensive", map[string]any{}, "")
 	if err == nil {
 		t.Error("expected insufficient funds error")
 	}
@@ -737,7 +737,7 @@ func TestCallInputSchemaRejection(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 
 	// Use Run, which enforces input schema validation in beginRun.
-	_, err := k.Run(ctx, alice.ID, "alice/strict", map[string]any{"wrong_field": "value"})
+	_, err := k.Run(ctx, alice.ID, "alice/strict", map[string]any{"wrong_field": "value"}, "")
 	if err == nil {
 		t.Error("expected schema violation error for missing required field")
 	}
@@ -1327,7 +1327,7 @@ func TestCallCrossProcessParentTraceRejectedForOwner(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 
 	// Run a call to get a trace from a completed (auto-closed) process.
-	otherReply, err := k.Run(ctx, alice.ID, "alice/svc", map[string]any{})
+	otherReply, err := k.Run(ctx, alice.ID, "alice/svc", map[string]any{}, "")
 	if err != nil {
 		t.Fatalf("setup call in otherP: %v", err)
 	}
@@ -1730,7 +1730,7 @@ func TestCallRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 
 	// A proxy is addressable by its action id (never a bare owner/name, §8); the missing
 	// FederationExecutor then settles the call as a failure.
-	_, err := k.Run(ctx, caller.ID, remoteAct.ID, map[string]any{})
+	_, err := k.Run(ctx, caller.ID, remoteAct.ID, map[string]any{}, "")
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState for missing federation executor, got %v", err)
 	}
@@ -2064,5 +2064,147 @@ func TestUpdateActionAcceptsWasmArtifact(t *testing.T) {
 
 	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, WasmArtifact: "!!! not base64 !!!"}); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("invalid artifact: want ErrInvalidInput, got %v", err)
+	}
+}
+
+// TestQuoteHashBindsTerms: the quote pin (§4 precondition 7) is a fingerprint of what a buyer was
+// shown. Every field that decides what they can be charged moves it — price, effect, description,
+// both schemas, and the stable id — while a field that does not is ignored. Effect is the one that
+// matters most: it alone decides whether a call locks a value reserve from the caller's own balance
+// (§13), so a peer promoting it under otherwise identical terms must not pass a stale pin.
+func TestQuoteHashBindsTerms(t *testing.T) {
+	base := func() *kernel.Action {
+		return &kernel.Action{
+			ID: "local-id", Name: "svc", Price: 100, Description: "d",
+			InputSchema:  map[string]any{"type": "object"},
+			OutputSchema: map[string]any{"type": "object"},
+		}
+	}
+	h := kernel.QuoteHash(base())
+	if h == "" || h != kernel.QuoteHash(base()) {
+		t.Fatalf("quote hash must be non-empty and stable, got %q", h)
+	}
+	for name, mutate := range map[string]func(*kernel.Action){
+		"price":       func(a *kernel.Action) { a.Price = 101 },
+		"effect":      func(a *kernel.Action) { a.Effect = "transfer" },
+		"description": func(a *kernel.Action) { a.Description = "d2" },
+		"input":       func(a *kernel.Action) { a.InputSchema = map[string]any{"type": "string"} },
+		"output":      func(a *kernel.Action) { a.OutputSchema = map[string]any{"type": "string"} },
+		"identity":    func(a *kernel.Action) { a.ID = "other-id" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := base()
+			mutate(a)
+			if kernel.QuoteHash(a) == h {
+				t.Errorf("changing %s must move the quote hash", name)
+			}
+		})
+	}
+	// Not quoted, so it must not move the hash: the pin binds terms, never implementation.
+	impl := base()
+	impl.Source, impl.ArtifactHash, impl.Kind = "http://elsewhere", "deadbeef", kernel.KindHTTP
+	if kernel.QuoteHash(impl) != h {
+		t.Error("the pin binds the quote, not the implementation; source/artifact must not move it")
+	}
+	// A proxy keys on its REMOTE id, so a catalog hit and the row it resolves to agree even though
+	// the local cache UUID differs (§13). This is what lets a hash read from lookup bind a first call.
+	p1 := base()
+	p1.ID, p1.RemoteActionID, p1.Kind = "local-uuid-1", "remote-id", kernel.KindRemoteProxy
+	p2 := base()
+	p2.ID, p2.RemoteActionID, p2.Kind = "local-uuid-2", "remote-id", kernel.KindRemoteProxy
+	if kernel.QuoteHash(p1) != kernel.QuoteHash(p2) {
+		t.Error("a proxy's quote must key on its remote id, not its local cache UUID")
+	}
+}
+
+// TestRunQuotePinRefusesBeforeFunding: a stale pin is refused with ErrInvalidState carrying the
+// current hash and price, and — the point of the whole mechanism — nothing is charged and no
+// process exists, because the refusal precedes BeginRun. A matching pin runs normally, and an
+// omitted pin leaves behaviour unchanged.
+func TestRunQuotePinRefusesBeforeFunding(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "alice-quote", 5000)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "svc",
+		Kind: kernel.KindWasm, Source: "x", Active: true, Price: 100,
+		Visibility: kernel.VisibilityPublic, Description: "d",
+		CreatedAt:  time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+	stale := kernel.QuoteHash(a)
+
+	// The owner raises the price; the buyer still holds the old quote.
+	a.Price = 500
+	if err := st.UpdateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := k.Run(ctx, alice.ID, "alice-quote/svc", map[string]any{}, stale)
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("stale pin: got %v, want ErrInvalidState", err)
+	}
+	var ke *kernel.KernelError
+	if !errors.As(err, &ke) || ke.Meta["quote_hash"] != kernel.QuoteHash(a) || ke.Meta["price"] != "500" {
+		t.Errorf("refusal must carry the current hash and price, got meta %v", ke.Meta)
+	}
+	u, _ := st.ReadUser(ctx, alice.ID)
+	if u.Available != 5000 || u.Locked != 0 {
+		t.Errorf("a refused pin must charge and lock nothing; got available=%d locked=%d", u.Available, u.Locked)
+	}
+	if ps, _ := st.ListProcesses(ctx, alice.ID, 10, 0); len(ps) != 0 {
+		t.Errorf("a refused pin must create no process, got %d", len(ps))
+	}
+
+	// The buyer re-reads and accepts the new terms; and an unpinned run is unaffected.
+	if _, err := k.Run(ctx, alice.ID, "alice-quote/svc", map[string]any{}, kernel.QuoteHash(a)); err != nil {
+		t.Errorf("a matching pin must run normally: %v", err)
+	}
+	if _, err := k.Run(ctx, alice.ID, "alice-quote/svc", map[string]any{}, ""); err != nil {
+		t.Errorf("an omitted pin must leave behaviour unchanged: %v", err)
+	}
+}
+
+// TestQuotePinOrderedAfterVisibility: the pin is compared after the visibility check, so a stranger
+// probing a private action gets ErrUnauthorized and never learns its terms; and before input
+// validation, so terms that changed enough to invalidate the args still report as changed terms
+// rather than a schema violation, which is the case the mechanism exists for.
+func TestQuotePinOrderedAfterVisibility(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "alice-order", 500)
+	bob := setupUser(t, st, "bob-order", 500)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "secret",
+		Kind: kernel.KindWasm, Source: "x", Active: true, Price: 10,
+		Visibility: kernel.VisibilityPrivate, Description: "d",
+		InputSchema: map[string]any{"type": "object"},
+		CreatedAt:   time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, a)
+
+	_, err := k.Run(ctx, bob.ID, "alice-order/secret", map[string]any{}, "any-guess")
+	if !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("a private action must refuse on visibility, never disclose terms: got %v", err)
+	}
+	var ke *kernel.KernelError
+	if errors.As(err, &ke) && ke.Meta["quote_hash"] != "" {
+		t.Error("a visibility refusal must not carry the action's quote hash")
+	}
+
+	// Owner-visible now: the schema tightens so the previously valid args no longer validate.
+	stale := kernel.QuoteHash(a)
+	a.InputSchema = map[string]any{"type": "object", "properties": map[string]any{
+		"need": map[string]any{"type": "string"}}, "required": []any{"need"}}
+	if err := st.UpdateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	_, err = k.Run(ctx, alice.ID, "alice-order/secret", map[string]any{}, stale)
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("a schema change under a stale pin must report changed terms, got %v", err)
 	}
 }

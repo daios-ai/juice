@@ -243,6 +243,7 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 								"score":         map[string]any{"type": "number", "description": "Relevance score between 0 and 1"},
 								"input_schema":  map[string]any{"type": "object", "description": "JSON Schema for the action's input"},
 								"output_schema": map[string]any{"type": "object", "description": "JSON Schema for the action's output"},
+								"quote_hash":    map[string]any{"type": "string", "description": "Fingerprint of the quoted terms; pin it on a run to be refused if they changed"},
 							},
 						},
 					},

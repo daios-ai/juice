@@ -1541,7 +1541,7 @@ func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	if err := st.CreateAction(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	_, err := k.Run(ctx, owner.ID, "no-receipt-owner/no-receipt", map[string]any{})
+	_, err := k.Run(ctx, owner.ID, "no-receipt-owner/no-receipt", map[string]any{}, "")
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState, got %v", err)
 	}
@@ -1761,7 +1761,7 @@ func TestListAllTransactionViewsAttachesRating(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	reply, err := k.Run(ctx, alice.ID, "alice/svc", map[string]any{})
+	reply, err := k.Run(ctx, alice.ID, "alice/svc", map[string]any{}, "")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -2382,7 +2382,7 @@ func TestRunInputSchemaRejectionLeavesNoProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, alice.ID, "alice-run-schema/schema-guarded", map[string]any{"wrong_field": "x"})
+	_, err := k.Run(ctx, alice.ID, "alice-run-schema/schema-guarded", map[string]any{"wrong_field": "x"}, "")
 	if err == nil {
 		t.Fatal("expected schema validation error")
 	}
@@ -2415,7 +2415,7 @@ func TestRunNoSigningKeyLeavesNoProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, bob.ID, "bob-run-nokey/no-key", map[string]any{})
+	_, err := k.Run(ctx, bob.ID, "bob-run-nokey/no-key", map[string]any{}, "")
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState, got %v", err)
 	}
@@ -2447,7 +2447,7 @@ func TestRunDoesNotCreateProcessForInactiveAction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, alice.ID, "alice-run-inactive/inactive-act", map[string]any{})
+	_, err := k.Run(ctx, alice.ID, "alice-run-inactive/inactive-act", map[string]any{}, "")
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState for inactive action, got %v", err)
 	}
@@ -2792,7 +2792,7 @@ func TestGrantRequiredRejectsBeforeLock(t *testing.T) {
 
 	a := createDelegatedAction(t, k, owner.ID, "inbox", 100)
 
-	_, err := k.Run(ctx, owner.ID, owner.Handle+"/"+a.Name, map[string]any{})
+	_, err := k.Run(ctx, owner.ID, owner.Handle+"/"+a.Name, map[string]any{}, "")
 	if !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}
@@ -3031,7 +3031,7 @@ func TestBearerGrantRequiredBeforeLock(t *testing.T) {
 	owner := setupUser(t, st, "br-owner", 1000)
 	a := createBearerAction(t, k, owner.ID, "inbox", 100)
 
-	_, err := k.Run(ctx, owner.ID, owner.Handle+"/"+a.Name, map[string]any{})
+	_, err := k.Run(ctx, owner.ID, owner.Handle+"/"+a.Name, map[string]any{}, "")
 	if !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}

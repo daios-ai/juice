@@ -1103,6 +1103,7 @@ func init() {
 }
 
 func runCmd() *cobra.Command {
+	var quoteHash string
 	cmd := &cobra.Command{
 		Use:   "run <action> [json]",
 		Short: "Run an action",
@@ -1117,6 +1118,9 @@ func runCmd() *cobra.Command {
 				return kernel.ErrInvalidInput.Wrapf("invalid args: %v", err)
 			}
 			reqBody := map[string]any{"action": cmdArgs[0], "args": args}
+			if quoteHash != "" {
+				reqBody["quote_hash"] = quoteHash
+			}
 			var raw json.RawMessage
 			err = apiCall(context.Background(), "POST", "/v1/run", reqBody, &raw)
 			// A delegated-OAuth action needs a one-time consent (§8). At an interactive terminal,
@@ -1146,6 +1150,13 @@ func runCmd() *cobra.Command {
 				if errors.Is(err, kernel.ErrPeerUnfunded) {
 					fmt.Fprintf(os.Stderr, "\nYour balance is fine; this kernel's credit with peer %s is exhausted.\nOperator remedy: pay the peer out of band and have its operator run `admin deposit`.\n", peerMetaHandle(err))
 				}
+				// A pinned run refused for changed terms: nothing was charged, and the current
+				// number is what the caller must re-consent to (§4 precondition 7).
+				if quoteHash != "" {
+					if ke := (*kernel.KernelError)(nil); errors.As(err, &ke) && ke.Meta["quote_hash"] != "" {
+						fmt.Fprintf(os.Stderr, "\nNothing was charged. It now costs %s; re-read the action and pin %s to accept.\n", ke.Meta["price"], ke.Meta["quote_hash"])
+					}
+				}
 				return err
 			}
 			if flagQuiet {
@@ -1159,5 +1170,6 @@ func runCmd() *cobra.Command {
 			return emitRaw(raw)
 		},
 	}
+	cmd.Flags().StringVar(&quoteHash, "quote-hash", "", "refuse before charging if the action's terms no longer match this quote")
 	return cmd
 }

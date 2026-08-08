@@ -1751,6 +1751,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 			Name:            m.Name,
 			InputSchema:     m.InputSchema,
 			OutputSchema:    m.OutputSchema,
+			Effect:          m.Effect,
 			ServingPrice:    sp,
 			ObservedAt:      now,
 		}

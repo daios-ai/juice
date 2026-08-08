@@ -49,7 +49,7 @@ run_flows \
     flow_bootstrap flow_signup_errors flow_local_auth flow_recovery flow_suspension flow_deposits flow_transfers \
     flow_action_lifecycle flow_action_owner_visibility \
     flow_process_lifecycle flow_acl_public flow_successful_paid_call flow_http_verbs \
-    flow_failed_call_refund flow_input_schema_failure flow_output_schema_failure \
+    flow_failed_call_refund flow_terms_changed_refused flow_input_schema_failure flow_output_schema_failure \
     flow_wasm_execution flow_contractor_subcall flow_contractor_failure \
     flow_step_success flow_step_failure flow_step_restart flow_locked_funds_recovery \
     flow_rating \

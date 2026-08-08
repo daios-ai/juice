@@ -148,6 +148,39 @@ flow_failed_call_refund() {
         "$(strfield "$(jj "$db" "$hb" tx show "$dtx")" reason)"
 }
 
+# The quote pin (§4 precondition 7). A buyer is shown a price, the owner raises it, and the buyer
+# clicks the number they were shown: the run is refused and — the assertion that proves the whole
+# mechanism — the balance has not moved, so the refusal preceded BeginRun.
+flow_terms_changed_refused() {
+    echo "=== FLOW terms_changed_refused ==="
+    local dir db hs ha hb bport
+    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    bport=$(backend_port); start_backend "$bport" 200 '{"result":"ok"}'
+    make_admin "$db" "$hs" || { fail "terms.boot" "server did not start"; return; }
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
+    deposit "$db" "$hs" bob 1000
+
+    local aid; aid=$(publish "$db" "$ha" svc --kind http --source "http://127.0.0.1:${bport}/x" --price 100 --description "quoted")
+    local quoted; quoted=$(strfield "$(jj "$db" "$hb" action show alice/svc)" quote_hash)
+    assert_nonempty "terms.hash_exposed" "$quoted"
+
+    # A pinned run at the quoted terms behaves exactly like an unpinned one.
+    assert_nonempty "terms.pinned_run_ok" "$(strfield "$(jj "$db" "$hb" run alice/svc '{}' --quote-hash "$quoted")" tx_id)"
+    local bal; bal=$(numfield "$(jj "$db" "$hb" user me)" available)
+
+    # The owner raises the price. The stale pin is refused, and nothing moves.
+    j "$db" "$ha" action update "$aid" --price 500 >/dev/null 2>&1
+    j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
+    assert_fails "terms.stale_pin_refused" "" -- j "$db" "$hb" run alice/svc '{}' --quote-hash "$quoted"
+    assert_jnum "terms.no_charge" "$(jj "$db" "$hb" user me)" available "$bal"
+
+    # Re-read and accept the new terms; an unpinned run was never affected.
+    local fresh; fresh=$(strfield "$(jj "$db" "$hb" action show alice/svc)" quote_hash)
+    assert_ne "terms.hash_moved" "$quoted" "$fresh"
+    assert_nonempty "terms.retry_after_reread" "$(strfield "$(jj "$db" "$hb" run alice/svc '{}' --quote-hash "$fresh")" tx_id)"
+}
+
 flow_input_schema_failure() {
     echo "=== FLOW input_schema_failure ==="
     local dir db hs ha hb; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)

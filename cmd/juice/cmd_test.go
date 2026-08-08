@@ -1379,7 +1379,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	a, _ := env.k.ReadActionByOwnerName(ctx, owner.ID, "expensive")
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 
-	_, err = env.k.Run(ctx, owner.ID, "poorowner/expensive", map[string]any{})
+	_, err = env.k.Run(ctx, owner.ID, "poorowner/expensive", map[string]any{}, "")
 	if err == nil {
 		t.Error("expected insufficient funds error")
 	}
@@ -1608,7 +1608,7 @@ func TestCLIActionRatings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reply, err := env.k.Run(ctx, caller.ID, "rate-owner/svc", map[string]any{})
+	reply, err := env.k.Run(ctx, caller.ID, "rate-owner/svc", map[string]any{}, "")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}

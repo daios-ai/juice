@@ -73,6 +73,7 @@ type actionResp struct {
 	HTTP          *httpView `json:"http,omitempty"`
 	AuthScheme    string    `json:"auth_scheme,omitempty"` // upstream auth scheme name (§8); present only when the action has auth; never config/secrets (R9)
 	RequiresGrant bool      `json:"requires_grant"`        // true iff a caller must connect a per-caller grant first (delegated schemes)
+	QuoteHash     string    `json:"quote_hash"`            // the terms a caller may pin on a run (§4 precondition 7)
 }
 
 // httpView is the read-side decomposition of an action's HTTPSource. It carries
@@ -223,7 +224,7 @@ func actionRef(a *kernel.Action, uc *accountCache) string {
 
 func enrichAction(k *kernel.Kernel, a *kernel.Action, uc *accountCache) actionResp {
 	scheme, requiresGrant := k.ActionAuthInfo(a)
-	return actionResp{Action: a, ActionRef: actionRef(a, uc), HTTP: httpViewOf(a), AuthScheme: scheme, RequiresGrant: requiresGrant}
+	return actionResp{Action: a, ActionRef: actionRef(a, uc), HTTP: httpViewOf(a), AuthScheme: scheme, RequiresGrant: requiresGrant, QuoteHash: kernel.QuoteHash(a)}
 }
 
 // httpViewOf decomposes a kind=http action's stored HTTPSource into a uniform
@@ -866,8 +867,8 @@ func verifyReceipt(k *kernel.Kernel, ctx context.Context, callerID, id string) (
 
 // ---- Run ----
 
-func run(k *kernel.Kernel, ctx context.Context, callerID, actionRef string, args map[string]any) (*kernel.CallReply, error) {
-	return k.Run(ctx, callerID, actionRef, args)
+func run(k *kernel.Kernel, ctx context.Context, callerID, actionRef string, args map[string]any, quoteHash string) (*kernel.CallReply, error) {
+	return k.Run(ctx, callerID, actionRef, args, quoteHash)
 }
 
 // ---- Federation ----

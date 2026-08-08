@@ -3,6 +3,7 @@ package kernel
 import (
 	"errors"
 	"fmt"
+	"strconv"
 )
 
 // KernelError is a typed error with a stable code and default HTTP status.
@@ -148,6 +149,14 @@ func GrantRequiredError(ref string) error {
 // both the message and Meta["peer"], mirroring GrantRequiredError.
 func PeerUnreachableError(handle string) *KernelError {
 	return ErrPeerUnreachable.Wrapf("peer %s is unreachable; the call was not sent and has been refunded", handle).WithMeta("peer", handle)
+}
+
+// TermsChangedError refuses a run whose quote pin no longer matches (§4 precondition 7), before any
+// funds are locked. Meta carries the current hash AND price: the hash alone would let a client
+// blindly re-arm and retry, defeating the pin, while the price is what a human re-consents to.
+func TermsChangedError(currentHash string, currentPrice int64) error {
+	return ErrInvalidState.Wrapf("the action's terms changed; it now costs %d", currentPrice).
+		WithMeta("quote_hash", currentHash).WithMeta("price", strconv.FormatInt(currentPrice, 10))
 }
 
 // PeerUnfundedError attributes a 402 signed rejection to this kernel's exhausted credit on the

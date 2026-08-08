@@ -781,6 +781,10 @@ type DiscoveryDoc struct {
 	Name            string         `json:"name,omitempty"`
 	InputSchema     map[string]any `json:"input_schema,omitempty"`
 	OutputSchema    map[string]any `json:"output_schema,omitempty"`
+	// Effect mirrors the manifest's privileged-execution-effect field ("transfer", §13). Carried so
+	// a catalog hit and the proxy it resolves to yield the same quote_hash (§4 precondition 7):
+	// effect alone decides whether a call engages the value channel.
+	Effect string `json:"effect,omitempty"`
 	// ServingPrice is the manifest's price plus the peer's signed serving markup,
 	// mp + ceil(mp·remote_bps/10000) (§13). The local all-in price adds import_bps at read time,
 	// so a policy change reprices the catalog with no re-pull. Untagged: admin inspect serializes

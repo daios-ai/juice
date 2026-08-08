@@ -3130,10 +3130,10 @@ func (s *DB) ReplaceDiscoveryDocs(ctx context.Context, kernelPublicKey string, d
 				embed = string(b)
 			}
 			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO discovery_docs (kernel_public_key,kind,user_id,handle,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,observed_at)
-				 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+				`INSERT INTO discovery_docs (kernel_public_key,kind,user_id,handle,description,action_id,name,input_schema,output_schema,serving_price,effect,embed_vec,observed_at)
+				 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				d.KernelPublicKey, d.Kind, d.UserID, d.Handle, d.Description, d.ActionID, d.Name,
-				string(inJSON), string(outJSON), d.ServingPrice, embed, timeToStr(d.ObservedAt)); err != nil {
+				string(inJSON), string(outJSON), d.ServingPrice, d.Effect, embed, timeToStr(d.ObservedAt)); err != nil {
 				return dbErr(err, "insert discovery_doc")
 			}
 			text := d.Handle + " " + d.Name + " " + d.Description
@@ -3148,7 +3148,7 @@ func (s *DB) ReplaceDiscoveryDocs(ctx context.Context, kernelPublicKey string, d
 
 func (s *DB) ListDiscoveryDocs(ctx context.Context) ([]*kernel.DiscoveryDoc, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT kernel_public_key,kind,user_id,handle,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,observed_at
+		`SELECT kernel_public_key,kind,user_id,handle,description,action_id,name,input_schema,output_schema,serving_price,effect,embed_vec,observed_at
 		 FROM discovery_docs`)
 	if err != nil {
 		return nil, dbErr(err, "list discovery docs")
@@ -3158,7 +3158,7 @@ func (s *DB) ListDiscoveryDocs(ctx context.Context) ([]*kernel.DiscoveryDoc, err
 		var inJSON, outJSON, observedAt string
 		var embed sql.NullString
 		if err := scan(&d.KernelPublicKey, &d.Kind, &d.UserID, &d.Handle, &d.Description, &d.ActionID, &d.Name,
-			&inJSON, &outJSON, &d.ServingPrice, &embed, &observedAt); err != nil {
+			&inJSON, &outJSON, &d.ServingPrice, &d.Effect, &embed, &observedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(inJSON), &d.InputSchema)
