@@ -177,7 +177,7 @@ type sysNativeSpec struct {
 	outputSchema map[string]any
 }
 
-// ensureSysNative idempotently registers, activates, and grants public call access to a
+// ensureSysNative idempotently registers, activates, and grants local call access to a
 // @sys native action. If the action already exists, its description and schemas are always
 // reconciled to the spec so that schema drift is corrected on every boot.
 func ensureSysNative(ctx context.Context, k *kernel.Kernel, superuserHandle string, spec sysNativeSpec) error {

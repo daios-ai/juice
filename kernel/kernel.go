@@ -1798,7 +1798,7 @@ func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionReque
 		Name:         req.Name,
 		Kind:         KindNative,
 		Active:       false,
-		Visibility:   VisibilityPrivate, // promoted to public by ActivateNativeAction
+		Visibility:   VisibilityPrivate, // promoted to local by ActivateNativeAction
 		Price:        req.Price,
 		Effect:       req.Effect,
 		Description:  req.Description,
@@ -1836,6 +1836,11 @@ func (k *Kernel) validateAndInitActivation(ctx context.Context, a *Action) error
 
 // ActivateNativeAction reconciles spec fields and activates a native action for bootstrap use. It
 // overwrites price, effect, description, inputSchema, and outputSchema so drift is corrected on every boot.
+// Natives are the platform stdlib, present identically on every kernel, so they are local and never
+// public (§9): serving them across federation would give away scarce local resources — model, bandwidth,
+// compiler, a write into a local user's step list — at a price a peer's exposure cap cannot bound (a
+// price-0 call adds no exposure, §13), and would put a duplicate of every native in every peer's
+// discovery cache. Local visibility keeps the whole stdlib callable by this kernel's own users (§4).
 func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description string, inputSchema, outputSchema map[string]any, price int64, effect string) error {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
@@ -1849,7 +1854,7 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 	a.Description = description
 	a.InputSchema = inputSchema
 	a.OutputSchema = outputSchema
-	a.Visibility = VisibilityPublic
+	a.Visibility = VisibilityLocal
 	if err := k.validateAndInitActivation(ctx, a); err != nil {
 		return err
 	}

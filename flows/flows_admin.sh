@@ -109,7 +109,7 @@ flow_time() {
     make_admin "$db" "$hs" || { fail "time.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
-    # sys/time is registered active + public + free after bootstrap.
+    # sys/time is registered active + local + free after bootstrap, so a local user may call it.
     local acts; acts=$(jj "$db" "$hs" action list)
     assert_eq "time.registered" yes "$(has_action "$acts" time)"
 
@@ -164,7 +164,7 @@ owner = c.execute("SELECT id FROM accounts WHERE handle='sys' LIMIT 1").fetchone
 aid = str(uuid.uuid4())
 c.execute("""INSERT INTO actions
   (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,auth_json,created_at,updated_at)
-  VALUES (?,?,?,'native',1,'public',0,'obsolete',?,?,'','','','','',datetime('now'),datetime('now'))""",
+  VALUES (?,?,?,'native',1,'local',0,'obsolete',?,?,'','','','','',datetime('now'),datetime('now'))""",
   [aid, owner, 'obsolete-native', '{"type":"object"}', '{"type":"object"}'])
 c.commit(); print(aid)
 PYEOF

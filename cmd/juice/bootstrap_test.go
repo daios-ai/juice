@@ -131,8 +131,8 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Visibility != kernel.VisibilityPublic {
-		t.Error("lookup should be public after idempotent ensureSysNative")
+	if a.Visibility != kernel.VisibilityLocal {
+		t.Error("lookup should be local after idempotent ensureSysNative")
 	}
 }
 
@@ -169,8 +169,8 @@ func TestEnsureSysLLMChatIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Visibility != kernel.VisibilityPublic {
-		t.Error("llm/chat should be public after idempotent ensureSysNative")
+	if a.Visibility != kernel.VisibilityLocal {
+		t.Error("llm/chat should be local after idempotent ensureSysNative")
 	}
 }
 
@@ -347,14 +347,58 @@ func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sys/tinygo/compile not registered after bootstrap: %v", err)
 	}
-	if !a.Active || a.Visibility != kernel.VisibilityPublic {
-		t.Errorf("sys/tinygo/compile should be active and public, got active=%v visibility=%v", a.Active, a.Visibility)
+	if !a.Active || a.Visibility != kernel.VisibilityLocal {
+		t.Errorf("sys/tinygo/compile should be active and local, got active=%v visibility=%v", a.Active, a.Visibility)
 	}
 	if a.Kind != kernel.KindNative {
 		t.Errorf("sys/tinygo/compile kind = %q, want native", a.Kind)
 	}
 	if a.Price != 5 {
 		t.Errorf("sys/tinygo/compile price = %d, want 5", a.Price)
+	}
+}
+
+// The platform stdlib is local, so a stock kernel exposes none of it across federation: every native
+// is registered local (§9) and a fresh kernel — which owns nothing but natives — therefore gossips an
+// empty action catalog while still advertising sys as a first-party user (§13).
+func TestBootstrapNativesAreLocalAndNotGossiped(t *testing.T) {
+	ctx := context.Background()
+	k := newTestKernel(t)
+
+	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
+		t.Fatalf("FirstBoot: %v", err)
+	}
+	if err := bootstrap(k, DefaultServerConfig().Native); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	all, err := k.ListAllActions(ctx, 200, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	natives := 0
+	for _, a := range all {
+		if a.Kind != kernel.KindNative {
+			continue
+		}
+		natives++
+		if a.Visibility != kernel.VisibilityLocal {
+			t.Errorf("native sys/%s visibility = %q, want local", a.Name, a.Visibility)
+		}
+	}
+	if natives == 0 {
+		t.Fatal("bootstrap registered no native actions")
+	}
+
+	g, err := k.GetGossip(ctx, "", "")
+	if err != nil {
+		t.Fatalf("GetGossip: %v", err)
+	}
+	if len(g.ActionManifests) != 0 {
+		t.Errorf("gossip served %d manifests, want 0 (natives are local)", len(g.ActionManifests))
+	}
+	if len(g.Users) != 1 || g.Users[0].Handle != "sys" {
+		t.Errorf("gossip users = %+v, want sys alone", g.Users)
 	}
 }
 

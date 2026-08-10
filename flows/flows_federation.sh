@@ -675,45 +675,38 @@ flow_transfer() {
     FED_HL="$dir/lsys"; FED_HR="$dir/rsys"
     mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
 
-    # R extends global exposure so it will front alice's transfer to bob before settlement.
     start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r exposure_max=1000 settlement_trigger=500 || { fail "transfer.setup_r" "boot"; return; }
     local boot; boot=$(kernel_fed_addr "$FED_DBR"); [ -n "$boot" ] || { fail "transfer.boot" "no addr"; return; }
     start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$boot" || { fail "transfer.setup_l" "boot"; return; }
     j "$FED_DBR" "$FED_HR" auth login sys --password sys-pass >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" auth login sys --password sys-pass >/dev/null 2>&1
     local rkey; rkey=$(kernel_key "$FED_DBR" "$FED_HR"); [ -n "$rkey" ] || { fail "transfer.rkey" "empty"; return; }
-    local lkey; lkey=$(kernel_key "$FED_DBL" "$FED_HL"); [ -n "$lkey" ] || { fail "transfer.lkey" "empty"; return; }
 
-    # bob is a local user on R; alice is a funded local user on L. L cold-resolves R's sys/transfer by
-    # key and binds the kernel-r alias.
-    j "$FED_DBR" "$FED_HR" user create bob --password userpass >/dev/null 2>&1
+    # alice and bob are both local users on L; R exists to prove its stdlib is not served abroad.
+    j "$FED_DBL" "$FED_HL" user create bob --password userpass >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" user create alice --password userpass >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit alice 1000 >/dev/null 2>&1
-    # Cold-resolve a price-0 greet to provision R's proxy and bind kernel-r; sys/transfer then resolves
-    # on alice's own first call below.
-    local gid; gid=$(publish "$FED_DBR" "$FED_HR" greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)
-    j "$FED_DBL" "$FED_HL" run "sys@$rkey/greet" '{}' >/dev/null 2>&1  # resolve caches R's proxy even though greet's dead backend fails execution
-    j "$FED_DBL" "$FED_HL" admin rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "transfer.resolve" "resolve/rename failed"; return; }
     local ahome; ahome=$(home "$dir" alice); j "$FED_DBL" "$ahome" auth login alice --password userpass >/dev/null 2>&1
 
-    # alice sends 100 to bob on R. mp=0, rbps=500, ibps=500, value=100 ⇒ sr=105, alice locks q=111;
-    # settlement: paid=charge0+value100+premium5=105 → L owes R; importFee=6 → L sys; refund 0.
-    local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$ahome" run sys@kernel-r/transfer '{"target":"bob","amount":100}')" tx_id)
+    # alice sends 100 to bob on her own kernel: the execution price (0) rides the trace and is taxed,
+    # while the value moves untaxed from alice's own balance to the beneficiary — two channels (§13).
+    local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$ahome" run sys/transfer '{"target":"bob","amount":100}')" tx_id)
     assert_nonempty "transfer.call_succeeded" "$tx_id"
     assert_json "transfer.tx_success" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status success
 
-    # alice paid amount + fees (100 + premium 5 + import fee 6 = 111); bob received exactly 100.
-    assert_eq "transfer.alice_charged" 889 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
-    assert_eq "transfer.bob_credited" 100 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show bob)" available)"
-    # Bilateral rows: L owes R the value + serving premium (105) on both ledgers.
-    assert_eq "transfer.l_owes_r" 105 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)"
-    assert_eq "transfer.r_owed_by_l" -105 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$lkey")" available)"
-    # Receipt audit passes with the value/premium checks.
-    assert_json "transfer.receipt_valid" "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")" valid True
+    # The beneficiary receives exactly the amount and the sender pays exactly it (price 0, no markup).
+    assert_eq "transfer.alice_charged" 900 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
+    assert_eq "transfer.bob_credited" 100 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show bob)" available)"
 
     # A transfer alice cannot afford is rejected with no balance change.
-    j "$FED_DBL" "$ahome" run sys@kernel-r/transfer '{"target":"bob","amount":100000}' >/dev/null 2>&1 || true
-    assert_eq "transfer.underfunded_no_charge" 889 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
+    j "$FED_DBL" "$ahome" run sys/transfer '{"target":"bob","amount":100000}' >/dev/null 2>&1 || true
+    assert_eq "transfer.underfunded_no_charge" 900 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
+
+    # The stdlib is local (§9), so R serves no manifest for sys/transfer: the kernel-qualified form
+    # does not resolve, and the refusal costs the caller nothing.
+    assert_fails "transfer.remote_native_not_served" "not found\|not available\|error" -- \
+        j "$FED_DBL" "$ahome" run "sys@$rkey/transfer" '{"target":"bob","amount":10}'
+    assert_eq "transfer.remote_refusal_no_charge" 900 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
 
     # The admin transfers surface is wired end-to-end (route + superuser gate + CLI): no buyer-side
     # payment steps here, so the unresolved list is empty (§13).
