@@ -3705,8 +3705,6 @@ func TestCreateLedgerEntry(t *testing.T) {
 	}
 }
 
-// Step gates back the @sys/step/join native (§9). They are native-owned state — not part of the
-// kernel.Store interface — so they are exercised directly here.
 // ListStepsAwaitingCaller must be scoped in SQL and oldest-first: the federation step list (§13)
 // relies on it, and filtering ListSteps' disjunction in Go after its row cap discarded exactly the
 // steps a peer could complete.

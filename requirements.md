@@ -1285,11 +1285,8 @@ a park-invariant violation from BeginStepCall is NOT reported as a lost claim (o
 a settled failure returns its committed transaction to the caller even when post-settlement bookkeeping fails (the caller was charged); a WASM timeout completion is reported as settled, not as a parked dispatch
 a crashed federated call to a LOCAL action completes its inbound idempotency record on recovery, not only a remote-proxy one
 a settled-failure replay carries the receipt and the settled transaction ids, and a success whose result contains an "error" field still replays as success (the receipt decides, not the body)
-a join gate row is dropped once its onward step is terminally resolved, so a late contribution cannot leak a row that nothing removes
 the peer step list carries partial_args and allowed_input and withholds owner_handle, created_by, the target action ref, and every local trace/action id (§5 boundary)
 a replayed idempotency record returns the status its stored outcome implies: a settled failure never replays as 200, and the duplicate-in-flight reply carries an error code
-a gate reports fired:true when it resumed a step whose onward action then failed (the continuation ran; its transaction records the failure), fired:false only when another contributor claimed it, and propagates anything else — classified from CompleteStep's outcome, never from the step's status
-a join whose fire fails keeps its gate row at have >= need so a later contribution re-attempts the barrier
 CompleteStep reports its outcome: a claim failure carries ErrStepNotClaimed while still presenting code invalid_state and HTTP 409; a rejection before anything settles does not; a failure after a committed transaction returns that transaction alongside the error
 ```
 

@@ -43,13 +43,7 @@ func newLookupTestKernel(t *testing.T) (*kernel.Kernel, kernel.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return newTestKernelOn(t, db), db
-}
 
-// newTestKernelOn builds a kernel over an already-open store, for tests that need the concrete
-// *store.DB as well (e.g. the gate natives, which take it as their injected GateStore).
-func newTestKernelOn(t *testing.T, db *store.DB) *kernel.Kernel {
-	t.Helper()
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	issuerID := uuid.New().String()
 	hash, _ := kernel.HashPassword("pw")
@@ -62,7 +56,7 @@ func newTestKernelOn(t *testing.T, db *store.DB) *kernel.Kernel {
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = issuerID
 	cfg.SigningKey = priv
-	return kernel.New(db, nil, nil, &fakeEmbedder{}, cfg, nil)
+	return kernel.New(db, nil, nil, &fakeEmbedder{}, cfg, nil), db
 }
 
 func seedOwner(t *testing.T, st kernel.Store, handle string) *kernel.Account {

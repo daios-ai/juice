@@ -2213,12 +2213,6 @@ func (s *DB) ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID s
 	})
 }
 
-// DeleteStepGate drops a fired or abandoned barrier's row.
-func (s *DB) DeleteStepGate(ctx context.Context, stepID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM step_gates WHERE step_id=?`, stepID)
-	return dbErr(err, "delete step gate")
-}
-
 // nullStr converts an empty string to nil for nullable TEXT columns.
 func nullStr(s string) *string {
 	if s == "" {
