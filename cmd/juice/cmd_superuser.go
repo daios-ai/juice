@@ -117,8 +117,7 @@ func transferListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status; default lists the unresolved ones (pending, quarantined)")
-	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
-	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
 
@@ -218,8 +217,7 @@ func adminUsersCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
-	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
 
@@ -342,20 +340,8 @@ func peerInspectCmd() *cobra.Command {
 					Description string `json:"description"`
 					Price       int64  `json:"price"`
 				} `json:"actions"`
-				Evidence []struct {
-					IssuerPublicKey   string   `json:"issuer_public_key"`
-					SubjectActionID   string   `json:"subject_action_id"`
-					Uses              int64    `json:"uses"`
-					Successes         int64    `json:"successes"`
-					Failures          int64    `json:"failures"`
-					CorroboratedUses  int64    `json:"corroborated_uses"`
-					AvgLatencyMs      float64  `json:"avg_latency_ms"`
-					RatingCount       int64    `json:"rating_count"`
-					RatingMean        float64  `json:"rating_mean"`
-					UnverifiedRatings int64    `json:"unverified_ratings"`
-					Notes             []string `json:"notes"`
-				} `json:"evidence"`
-				Account *struct {
+				Evidence []kernel.SubjectEvidenceRow `json:"evidence"`
+				Account  *struct {
 					Available int64 `json:"available"`
 					Locked    int64 `json:"locked"`
 					Suspended bool  `json:"suspended"`
@@ -558,8 +544,7 @@ func peerListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&showAll, "all", false, "Include suspended counterparties")
-	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
-	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
 

@@ -63,7 +63,7 @@ func TestTransferLocal(t *testing.T) {
 	alice := seedUserWithBalance(t, db, "alice", 1000)
 	bob := seedUserWithBalance(t, db, "bob", 0)
 
-	reply, err := k.Run(ctx, alice.ID, "sys/transfer", map[string]any{"target": "bob", "amount": float64(100)}, "")
+	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "sys/transfer", Args: map[string]any{"target": "bob", "amount": float64(100)}})
 	if err != nil {
 		t.Fatalf("run sys/transfer: %v", err)
 	}
@@ -79,11 +79,11 @@ func TestTransferLocal(t *testing.T) {
 
 	// A kernel-qualified target on the local action is rejected — cross-kernel transfers are addressed
 	// as sys@<kernel>/transfer, not sys/transfer with a remote target.
-	if _, err := k.Run(ctx, alice.ID, "sys/transfer", map[string]any{"target": "bob@other", "amount": float64(10)}, ""); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "sys/transfer", Args: map[string]any{"target": "bob@other", "amount": float64(10)}}); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("kernel-qualified target: got %v, want ErrInvalidInput", err)
 	}
 	// Insufficient balance is rejected atomically (bob has 100, tries to send 200).
-	if _, err := k.Run(ctx, bob.ID, "sys/transfer", map[string]any{"target": "alice", "amount": float64(200)}, ""); err == nil {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: bob.ID, ActionRef: "sys/transfer", Args: map[string]any{"target": "alice", "amount": float64(200)}}); err == nil {
 		t.Error("expected insufficient-funds rejection")
 	}
 	if a, _ := db.ReadUser(ctx, alice.ID); a.Available != 900 {

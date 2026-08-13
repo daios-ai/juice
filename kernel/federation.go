@@ -277,6 +277,26 @@ func marshalDispatch(args map[string]any, stepID string, mp, value, gross int64,
 	return &s
 }
 
+// dispatchedRates returns the rates a call was funded under, frozen on its dispatch record (§13
+// price-snapshot): settlement and audit never read live config, so a rate change between dispatch
+// and settlement cannot move this call's arithmetic. A nil field is a pre-041 row: use the default.
+func (k *Kernel) dispatchedRates(dispatchJSON *string, defRemoteBPS, defImportBPS int64) (remoteBPS, importBPS int64, d dispatchPayload) {
+	remoteBPS, importBPS = defRemoteBPS, defImportBPS
+	if dispatchJSON == nil {
+		return
+	}
+	if json.Unmarshal([]byte(*dispatchJSON), &d) != nil {
+		return
+	}
+	if d.RemoteBPS != nil {
+		remoteBPS = *d.RemoteBPS
+	}
+	if d.ImportBPS != nil {
+		importBPS = *d.ImportBPS
+	}
+	return
+}
+
 // PaymentDescriptor is what a serving kernel A advertises about a payment Step to the buyer B (§13): the
 // bilateral obligation A can compute, and nothing more. `remote_max = amount + value_premium` is what B
 // owes A; B computes its own `value_import`/`max_total` locally (its import policy is not A's business).
@@ -606,20 +626,13 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	// action row's markup and local config both move, so auditing against them would fail a
 	// historically-correct settlement after any rate change. Pre-041 traces fall back to the old
 	// sources.
-	rbps, importBPS := int64(0), k.cfg.ImportBPS
+	rbps := int64(0)
 	if act, aerr := k.store.ReadAction(ctx, tx.ActionID); aerr == nil && act.RemoteBPS != nil {
 		rbps = *act.RemoteBPS
 	}
-	if tr, terr := k.store.ReadTrace(ctx, tx.TraceID); terr == nil && tr != nil && tr.DispatchJSON != nil {
-		var d dispatchPayload
-		if json.Unmarshal([]byte(*tr.DispatchJSON), &d) == nil {
-			if d.RemoteBPS != nil {
-				rbps = *d.RemoteBPS
-			}
-			if d.ImportBPS != nil {
-				importBPS = *d.ImportBPS
-			}
-		}
+	importBPS := k.cfg.ImportBPS
+	if tr, terr := k.store.ReadTrace(ctx, tx.TraceID); terr == nil && tr != nil {
+		rbps, importBPS, _ = k.dispatchedRates(tr.DispatchJSON, rbps, importBPS)
 	}
 	checks.Premium = r.Premium == ceilDiv(r.Charge*rbps, 10000)
 	checks.ValuePremium = r.ValuePremium == ceilDiv(r.Value*rbps, 10000)
@@ -770,22 +783,8 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// The rates come from the same record: the funding boundary froze them, so a fee change between
 	// dispatch and settlement cannot move this call's arithmetic (§13). Nil = pre-041 dispatch, which
 	// falls back to the row and live config exactly as before.
-	var sentValue int64
-	var dispatchedHash string
-	rbps, importBPS := actionRemoteBPS(action), k.cfg.ImportBPS
-	if trace.DispatchJSON != nil {
-		var d dispatchPayload
-		if json.Unmarshal([]byte(*trace.DispatchJSON), &d) == nil {
-			sentValue = d.Value
-			dispatchedHash = d.ContractHash
-			if d.RemoteBPS != nil {
-				rbps = *d.RemoteBPS
-			}
-			if d.ImportBPS != nil {
-				importBPS = *d.ImportBPS
-			}
-		}
-	}
+	rbps, importBPS, d := k.dispatchedRates(trace.DispatchJSON, actionRemoteBPS(action), k.cfg.ImportBPS)
+	sentValue, dispatchedHash := d.Value, d.ContractHash
 	// A missing, unparseable, unsigned, or mismatched receipt keeps the trace open for retry.
 	// action_id and args_hash are enforced here so settlement is valid by construction.
 	expectedArgsHash, _ := jcsHashStr(string(ktx.ArgsJSON))
@@ -1423,7 +1422,8 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*G
 	handle, _ := k.store.GetConfig(ctx, "kernel_handle")
 	// The kernel's self-description is @sys's user description (§13): one primitive, not a config key.
 	var about string
-	if sys, err := k.store.ReadUserByHandle(ctx, "sys"); err == nil && sys != nil {
+	sys, _ := k.store.ReadUserByHandle(ctx, "sys")
+	if sys != nil {
 		about = sys.Description
 	}
 
@@ -1432,32 +1432,35 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*G
 		return nil, err
 	}
 	var manifests []*ActionManifest
-	ownerSeen := map[string]bool{}
 	var users []GossipUser
+	ownerSeen := map[string]bool{}
+	owners := map[string]*Account{} // one read per owner, shared by the manifest and the user summary
 	for _, a := range actions {
-		if !a.Active || a.Visibility != VisibilityPublic {
+		if k.exportable(a) != nil {
 			continue
 		}
-		if k.isDelegatedAuth(a) {
-			continue // delegated-auth actions are never advertised to peers (§8/§13)
+		ow, cached := owners[a.OwnerUserID]
+		if !cached {
+			ow, _ = k.store.ReadUser(ctx, a.OwnerUserID)
+			owners[a.OwnerUserID] = ow
 		}
-		if a.Kind == KindRemoteProxy {
-			continue // imports are not our own actions; peers reach them by resolving the owner directly (§13)
+		if ow == nil {
+			continue
 		}
-		m, merr := k.GetActionManifest(ctx, a.ID)
+		m, merr := k.buildManifest(ctx, a, ow)
 		if merr != nil || m == nil {
 			continue
 		}
 		manifests = append(manifests, m)
-		if !ownerSeen[a.OwnerUserID] {
-			ownerSeen[a.OwnerUserID] = true
-			if ow, oerr := k.store.ReadUser(ctx, a.OwnerUserID); oerr == nil && ow != nil && ow.KernelPublicKey == "" {
+		if !ownerSeen[ow.ID] {
+			ownerSeen[ow.ID] = true
+			if ow.KernelPublicKey == "" {
 				users = append(users, GossipUser{UserID: ow.ID, Handle: ow.Handle, Description: ow.Description})
 			}
 		}
 	}
 	// Always advertise @sys so a discovering kernel can index the operator identity.
-	if sys, err := k.store.ReadUserByHandle(ctx, "sys"); err == nil && sys != nil && !ownerSeen[sys.ID] {
+	if sys != nil && !ownerSeen[sys.ID] {
 		users = append(users, GossipUser{UserID: sys.ID, Handle: sys.Handle, Description: sys.Description})
 	}
 
@@ -2015,26 +2018,16 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 			a.BasePrice = &basePrice
 			a.Effect = m.Effect // signed effect contract: the proxy is value-bearing iff the peer signed it
 		},
+		// Identity and lifecycle only; reconcileImport calls apply for the contract fields.
 		new: func() *Action {
 			now := time.Now().UTC()
 			return &Action{
 				ID:             uuid.New().String(),
 				OwnerUserID:    remoteUserID,
-				Name:           name,
 				Kind:           KindRemoteProxy,
 				Active:         false,
 				Visibility:     VisibilityPrivate, // promoted to local on successful resolve (§8, below)
-				Price:          proxyPrice,
-				Description:    m.Description,
-				InputSchema:    m.InputSchema,
-				OutputSchema:   m.OutputSchema,
-				Source:         source,
-				ArtifactHash:   contentHash,
 				RemoteActionID: m.ActionID,
-				RemoteOwnerID:  m.OwnerID,
-				RemoteBPS:      &rbps,
-				BasePrice:      &basePrice,
-				Effect:         m.Effect,
 				CreatedAt:      now,
 				UpdatedAt:      now,
 			}
@@ -2058,29 +2051,44 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 
 // GetActionManifest returns a signed manifest for a public active action.
 // Manifests are only available for actions that are both active and public.
-func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*ActionManifest, error) {
-	a, err := k.store.ReadAction(ctx, actionID)
-	if err != nil {
-		return nil, err
-	}
+// exportable reports whether an action may be served abroad: the one export predicate, shared by
+// the manifest path and the gossip catalog (§13) so the two cannot drift apart.
+func (k *Kernel) exportable(a *Action) error {
 	if !a.Active || a.Visibility != VisibilityPublic {
-		return nil, ErrUnauthorized.Wrap("manifest only available for public active actions")
+		return ErrUnauthorized.Wrap("manifest only available for public active actions")
 	}
 	// Delegated-OAuth actions are never advertised: a remote peer's proxy user cannot complete a
 	// browser consent, so importing one could only ever produce grant-required failures (§8/§13).
 	if k.isDelegatedAuth(a) {
-		return nil, ErrUnauthorized.Wrap("delegated-OAuth actions are not served as manifests")
+		return ErrUnauthorized.Wrap("delegated-OAuth actions are not served as manifests")
 	}
 	// Imported (remote_proxy) actions are never re-exported: a kernel serves manifests only for its
 	// own actions, so friendship stays non-transitive — reaching a peer's imported action requires
 	// friending its true owner directly (§13).
 	if a.Kind == KindRemoteProxy {
-		return nil, ErrUnauthorized.Wrap("imported (remote-proxy) actions are not re-exported to peers")
+		return ErrUnauthorized.Wrap("imported (remote-proxy) actions are not re-exported to peers")
+	}
+	return nil
+}
+
+func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*ActionManifest, error) {
+	a, err := k.store.ReadAction(ctx, actionID)
+	if err != nil {
+		return nil, err
+	}
+	if err := k.exportable(a); err != nil {
+		return nil, err
 	}
 	owner, err := k.store.ReadUser(ctx, a.OwnerUserID)
 	if err != nil {
 		return nil, err
 	}
+	return k.buildManifest(ctx, a, owner)
+}
+
+// buildManifest projects an already-exportable action and its owner into a signed manifest, so
+// gossip can reuse one owner read across every manifest it serves.
+func (k *Kernel) buildManifest(ctx context.Context, a *Action, owner *Account) (*ActionManifest, error) {
 	stats, _ := k.store.ReadStats(ctx, a.ID)
 	if stats == nil {
 		stats = &Stats{ActionID: a.ID}

@@ -578,22 +578,18 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 				a.OutputSchema = raw.outputSchema
 				a.Source = sourceJSON
 			},
+			// Identity and lifecycle only; reconcileImport calls apply for the contract fields.
 			new: func() *Action {
 				now := time.Now().UTC()
 				return &Action{
-					ID:           uuid.New().String(),
-					OwnerUserID:  ownerID,
-					Name:         name,
-					Kind:         KindHTTP,
-					Active:       false,
-					Visibility:   VisibilityPrivate,
-					Description:  raw.description,
-					Price:        raw.price,
-					InputSchema:  raw.inputSchema,
-					OutputSchema: raw.outputSchema,
-					Source:       sourceJSON,
-					CreatedAt:    now,
-					UpdatedAt:    now,
+					ID:          uuid.New().String(),
+					OwnerUserID: ownerID,
+					Name:        name,
+					Kind:        KindHTTP,
+					Active:      false,
+					Visibility:  VisibilityPrivate,
+					CreatedAt:   now,
+					UpdatedAt:   now,
 				}
 			},
 		})

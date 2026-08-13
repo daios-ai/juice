@@ -19,6 +19,35 @@ import (
 // "context deadline exceeded (Client.Timeout exceeded while awaiting headers)".
 var ollamaClient = &http.Client{Timeout: 300 * time.Second}
 
+// ollamaPost performs one Ollama JSON round trip: marshal, POST, status check, decode. Each stage
+// failure names its stage, so an unreachable server, a rejection, and a bad reply stay tellable
+// apart. The four entry points then differ only in payload and result shape.
+func ollamaPost(ctx context.Context, url string, payload, out any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return kernel.ErrInternal.Wrapf("encode request: %v", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return kernel.ErrInternal.Wrapf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := ollamaClient.Do(req)
+	if err != nil {
+		return kernel.ErrInternal.Wrapf("HTTP: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return kernel.ErrInternal.Wrapf("ollama returned status %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return kernel.ErrInternal.Wrapf("decode response: %v", err)
+	}
+	return nil
+}
+
 // OllamaEmbedder calls the Ollama /api/embeddings endpoint.
 type OllamaEmbedder struct {
 	URL   string // e.g. "http://localhost:11434"
@@ -26,33 +55,31 @@ type OllamaEmbedder struct {
 }
 
 func (o *OllamaEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	body, _ := json.Marshal(map[string]string{"model": o.Model, "prompt": text})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.URL+"/api/embeddings", bytes.NewReader(body))
-	if err != nil {
-		return nil, kernel.ErrInternal.Wrapf("embed request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := ollamaClient.Do(req)
-	if err != nil {
-		return nil, kernel.ErrInternal.Wrapf("embed HTTP: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, kernel.ErrInternal.Wrapf("ollama returned status %d", resp.StatusCode)
-	}
-
 	var result struct {
 		Embedding []float32 `json:"embedding"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, kernel.ErrInternal.Wrapf("decode embed response: %v", err)
+	if err := ollamaPost(ctx, o.URL+"/api/embeddings", map[string]string{"model": o.Model, "prompt": text}, &result); err != nil {
+		return nil, err
 	}
 	if len(result.Embedding) == 0 {
 		return nil, kernel.ErrInternal.Wrap("empty embedding returned")
 	}
 	return result.Embedding, nil
+}
+
+// ollamaMsg is the wire shape of one chat message; ollamaMessages projects the kernel's
+// messages onto it for the two plain /api/chat entry points.
+type ollamaMsg struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+func ollamaMessages(messages []kernel.ChatMessage) []ollamaMsg {
+	var out []ollamaMsg // nil for no messages, so the request body is unchanged
+	for _, m := range messages {
+		out = append(out, ollamaMsg{Role: m.Role, Content: m.Content})
+	}
+	return out
 }
 
 // OllamaChatter calls the Ollama /api/chat endpoint.
@@ -62,39 +89,15 @@ type OllamaChatter struct {
 }
 
 func (o *OllamaChatter) Chat(ctx context.Context, messages []kernel.ChatMessage) (kernel.ChatMessage, error) {
-	type msg struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-	var msgs []msg
-	for _, m := range messages {
-		msgs = append(msgs, msg{Role: m.Role, Content: m.Content})
-	}
-	body, _ := json.Marshal(map[string]any{"model": o.Model, "messages": msgs, "stream": false})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.URL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return kernel.ChatMessage{}, kernel.ErrInternal.Wrapf("chat request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := ollamaClient.Do(req)
-	if err != nil {
-		return kernel.ChatMessage{}, kernel.ErrInternal.Wrapf("chat HTTP: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return kernel.ChatMessage{}, kernel.ErrInternal.Wrapf("ollama chat returned status %d", resp.StatusCode)
-	}
-
+	msgs := ollamaMessages(messages)
 	var result struct {
 		Message struct {
 			Role    string `json:"role"`
 			Content string `json:"content"`
 		} `json:"message"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return kernel.ChatMessage{}, kernel.ErrInternal.Wrapf("decode chat response: %v", err)
+	if err := ollamaPost(ctx, o.URL+"/api/chat", map[string]any{"model": o.Model, "messages": msgs, "stream": false}, &result); err != nil {
+		return kernel.ChatMessage{}, err
 	}
 	return kernel.ChatMessage{Role: result.Message.Role, Content: result.Message.Content}, nil
 }
@@ -102,38 +105,14 @@ func (o *OllamaChatter) Chat(ctx context.Context, messages []kernel.ChatMessage)
 // ChatJSON calls /api/chat with a JSON schema format constraint.
 // It returns the raw parsed JSON value; schema validation is the caller's responsibility.
 func (o *OllamaChatter) ChatJSON(ctx context.Context, messages []kernel.ChatMessage, schema map[string]any) (any, error) {
-	type msg struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-	var msgs []msg
-	for _, m := range messages {
-		msgs = append(msgs, msg{Role: m.Role, Content: m.Content})
-	}
-	body, _ := json.Marshal(map[string]any{"model": o.Model, "messages": msgs, "stream": false, "format": schema})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.URL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return nil, kernel.ErrInternal.Wrapf("chat json request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := ollamaClient.Do(req)
-	if err != nil {
-		return nil, kernel.ErrInternal.Wrapf("chat json HTTP: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, kernel.ErrInternal.Wrapf("ollama chat json returned status %d", resp.StatusCode)
-	}
-
+	msgs := ollamaMessages(messages)
 	var result struct {
 		Message struct {
 			Content string `json:"content"`
 		} `json:"message"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, kernel.ErrInternal.Wrapf("decode chat json response: %v", err)
+	if err := ollamaPost(ctx, o.URL+"/api/chat", map[string]any{"model": o.Model, "messages": msgs, "stream": false, "format": schema}, &result); err != nil {
+		return nil, err
 	}
 	content := extractFirstJSON(stripCodeFence(result.Message.Content))
 	var value any
@@ -264,28 +243,6 @@ func (o *OllamaChatter) ChatDecide(ctx context.Context, messages []kernel.Decide
 		})
 	}
 
-	body, _ := json.Marshal(map[string]any{
-		"model":    o.Model,
-		"messages": msgs,
-		"tools":    ollamaTools,
-		"stream":   false,
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.URL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return nil, nil, kernel.ErrInternal.Wrapf("chat decide request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := ollamaClient.Do(req)
-	if err != nil {
-		return nil, nil, kernel.ErrInternal.Wrapf("chat decide HTTP: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, nil, kernel.ErrInternal.Wrapf("ollama chat decide returned status %d", resp.StatusCode)
-	}
-
 	var result struct {
 		Message struct {
 			Role      string `json:"role"`
@@ -298,8 +255,9 @@ func (o *OllamaChatter) ChatDecide(ctx context.Context, messages []kernel.Decide
 			} `json:"tool_calls"`
 		} `json:"message"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, nil, kernel.ErrInternal.Wrapf("decode chat decide response: %v", err)
+	payload := map[string]any{"model": o.Model, "messages": msgs, "tools": ollamaTools, "stream": false}
+	if err := ollamaPost(ctx, o.URL+"/api/chat", payload, &result); err != nil {
+		return nil, nil, err
 	}
 
 	if len(result.Message.ToolCalls) > 0 {

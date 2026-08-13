@@ -349,7 +349,7 @@ func TestSuspendedSubjectRejectedBySupervisionOps(t *testing.T) {
 	}
 
 	// Run: requireActiveUser rejects suspended subject.
-	_, err = k.Run(ctx, u.ID, "any/nonexistent", nil, "")
+	_, err = k.Run(ctx, kernel.RunRequest{CallerID: u.ID, ActionRef: "any/nonexistent", Args: nil})
 	if !errors.Is(err, kernel.ErrUnauthenticated) {
 		t.Errorf("Run: got %v, want ErrUnauthenticated", err)
 	}

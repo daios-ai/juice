@@ -1541,7 +1541,7 @@ func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	if err := st.CreateAction(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	_, err := k.Run(ctx, owner.ID, "no-receipt-owner/no-receipt", map[string]any{}, "")
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: "no-receipt-owner/no-receipt", Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState, got %v", err)
 	}
@@ -1744,9 +1744,9 @@ func TestTransactionViewEmbeddedRating(t *testing.T) {
 	}
 }
 
-// TestListAllTransactionViewsAttachesRating proves the admin-listing helper returns the
-// canonical TransactionView shape: nil rating before, embedded rating after (§14).
-func TestListAllTransactionViewsAttachesRating(t *testing.T) {
+// TestTransactionViewAttachesRating proves transaction listings return the canonical
+// TransactionView shape: nil rating before, embedded rating after (§14).
+func TestTransactionViewAttachesRating(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -1761,14 +1761,14 @@ func TestListAllTransactionViewsAttachesRating(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	reply, err := k.Run(ctx, alice.ID, "alice/svc", map[string]any{}, "")
+	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/svc", Args: map[string]any{}})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	views, err := k.ListAllTransactionViews(ctx, 50, 0)
+	views, err := k.ListTransactions(ctx, alice.ID, kernel.TxFilter{Limit: 50})
 	if err != nil {
-		t.Fatalf("ListAllTransactionViews: %v", err)
+		t.Fatalf("ListTransactions: %v", err)
 	}
 	if len(views) != 1 {
 		t.Fatalf("want 1 view, got %d", len(views))
@@ -1780,9 +1780,9 @@ func TestListAllTransactionViewsAttachesRating(t *testing.T) {
 	if _, err := k.RateTransaction(ctx, alice.ID, reply.TxID, 1, nil); err != nil {
 		t.Fatalf("RateTransaction: %v", err)
 	}
-	views, err = k.ListAllTransactionViews(ctx, 50, 0)
+	views, err = k.ListTransactions(ctx, alice.ID, kernel.TxFilter{Limit: 50})
 	if err != nil {
-		t.Fatalf("ListAllTransactionViews after rating: %v", err)
+		t.Fatalf("ListTransactions after rating: %v", err)
 	}
 	if views[0].Rating == nil || views[0].Rating.Value != 1 {
 		t.Errorf("rated tx view should carry rating value 1, got %+v", views[0].Rating)
@@ -2210,19 +2210,6 @@ func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, actionID, _
 	return kernel.FederationResult{Result: result, ReceiptJSON: f.receiptJSON, HTTPStatus: status}, nil
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
-}
-
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
 // jcsHashForTest computes SHA-256(JCS(jsonStr)) using the exported CanonicalJSON.
 func jcsHashForTest(t *testing.T, jsonStr string) string {
 	t.Helper()
@@ -2382,7 +2369,7 @@ func TestRunInputSchemaRejectionLeavesNoProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, alice.ID, "alice-run-schema/schema-guarded", map[string]any{"wrong_field": "x"}, "")
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-run-schema/schema-guarded", Args: map[string]any{"wrong_field": "x"}})
 	if err == nil {
 		t.Fatal("expected schema validation error")
 	}
@@ -2415,7 +2402,7 @@ func TestRunNoSigningKeyLeavesNoProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, bob.ID, "bob-run-nokey/no-key", map[string]any{}, "")
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: bob.ID, ActionRef: "bob-run-nokey/no-key", Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState, got %v", err)
 	}
@@ -2447,7 +2434,7 @@ func TestRunDoesNotCreateProcessForInactiveAction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, alice.ID, "alice-run-inactive/inactive-act", map[string]any{}, "")
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-run-inactive/inactive-act", Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState for inactive action, got %v", err)
 	}
@@ -2792,7 +2779,7 @@ func TestGrantRequiredRejectsBeforeLock(t *testing.T) {
 
 	a := createDelegatedAction(t, k, owner.ID, "inbox", 100)
 
-	_, err := k.Run(ctx, owner.ID, owner.Handle+"/"+a.Name, map[string]any{}, "")
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: owner.Handle + "/" + a.Name, Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}
@@ -3031,7 +3018,7 @@ func TestBearerGrantRequiredBeforeLock(t *testing.T) {
 	owner := setupUser(t, st, "br-owner", 1000)
 	a := createBearerAction(t, k, owner.ID, "inbox", 100)
 
-	_, err := k.Run(ctx, owner.ID, owner.Handle+"/"+a.Name, map[string]any{}, "")
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: owner.Handle + "/" + a.Name, Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}

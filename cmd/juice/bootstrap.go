@@ -213,20 +213,26 @@ var msgItemSchema = map[string]any{
 	"required": []string{"role", "content"},
 }
 
+// searchQuerySchema is the {query, limit} input both lookup natives take. A fresh map per call:
+// the specs are handed to the kernel, which may retain them, so they must not share state.
+func searchQuerySchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query": map[string]any{"type": "string", "description": "Semantic search query"},
+			"limit": map[string]any{"type": "integer", "description": "Maximum number of results"},
+		},
+		"required": []string{"query"},
+	}
+}
+
 func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 	return []sysNativeSpec{
 		{
 			name:        "lookup",
 			price:       cfg.Lookup.Price,
 			description: "Semantic search over active actions",
-			inputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"query": map[string]any{"type": "string", "description": "Semantic search query"},
-					"limit": map[string]any{"type": "integer", "description": "Maximum number of results"},
-				},
-				"required": []string{"query"},
-			},
+			inputSchema: searchQuerySchema(),
 			outputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -254,14 +260,7 @@ func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
 			name:        "user-lookup",
 			price:       cfg.UserLookup.Price,
 			description: "Semantic search over local and discovered users",
-			inputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"query": map[string]any{"type": "string", "description": "Semantic search query"},
-					"limit": map[string]any{"type": "integer", "description": "Maximum number of results"},
-				},
-				"required": []string{"query"},
-			},
+			inputSchema: searchQuerySchema(),
 			outputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

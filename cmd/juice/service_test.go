@@ -25,7 +25,7 @@ func TestResolveHandle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := resolveHandle(k, ctx, "svc-bob")
+	got, err := k.ResolveUser(ctx, "svc-bob")
 	if err != nil {
 		t.Fatalf("resolveHandle(@svc-bob): %v", err)
 	}
@@ -34,7 +34,7 @@ func TestResolveHandle(t *testing.T) {
 	}
 
 	// Without @ prefix is also accepted.
-	got2, err := resolveHandle(k, ctx, "svc-bob")
+	got2, err := k.ResolveUser(ctx, "svc-bob")
 	if err != nil {
 		t.Fatalf("resolveHandle(svc-bob): %v", err)
 	}
@@ -42,7 +42,7 @@ func TestResolveHandle(t *testing.T) {
 		t.Errorf("without @: got ID %q, want %q", got2.ID, u.ID)
 	}
 
-	_, err = resolveHandle(k, ctx, "nobody-svc")
+	_, err = k.ResolveUser(ctx, "nobody-svc")
 	if err == nil {
 		t.Error("expected error for missing handle")
 	}
@@ -54,7 +54,7 @@ func TestResolveHandle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	byKey, err := resolveHandle(k, ctx, keyB64)
+	byKey, err := k.ResolveUser(ctx, keyB64)
 	if err != nil || byKey.ID != peer.ID {
 		t.Errorf("resolveHandle(key): got %v (err %v), want peer %q", byKey, err, peer.ID)
 	}
@@ -70,7 +70,7 @@ func TestResolveActionRef(t *testing.T) {
 	actID, _ := createStepAction(t, srv, backend.URL, ownerTok, "svc-alice", "svc-greet")
 
 	// Resolve by @owner/name.
-	got, err := resolveActionRef(k, ctx, "svc-alice/svc-greet")
+	got, err := k.ResolveAction(ctx, "svc-alice/svc-greet")
 	if err != nil {
 		t.Fatalf("resolveActionRef(@svc-alice/svc-greet): %v", err)
 	}
@@ -79,7 +79,7 @@ func TestResolveActionRef(t *testing.T) {
 	}
 
 	// Resolve by owner/name without the leading "@".
-	got1b, err := resolveActionRef(k, ctx, "svc-alice/svc-greet")
+	got1b, err := k.ResolveAction(ctx, "svc-alice/svc-greet")
 	if err != nil {
 		t.Fatalf("resolveActionRef(svc-alice/svc-greet): %v", err)
 	}
@@ -88,7 +88,7 @@ func TestResolveActionRef(t *testing.T) {
 	}
 
 	// Resolve by raw action ID.
-	got2, err := resolveActionRef(k, ctx, actID)
+	got2, err := k.ResolveAction(ctx, actID)
 	if err != nil {
 		t.Fatalf("resolveActionRef(id): %v", err)
 	}
@@ -97,7 +97,7 @@ func TestResolveActionRef(t *testing.T) {
 	}
 
 	// Bad @owner/name returns error.
-	_, err = resolveActionRef(k, ctx, "nobody-svc/nope")
+	_, err = k.ResolveAction(ctx, "nobody-svc/nope")
 	if err == nil {
 		t.Error("expected error for missing owner")
 	}
@@ -408,7 +408,7 @@ func TestListPublicActions_FilterAndStrip(t *testing.T) {
 		t.Fatalf("createAction: %v", err)
 	}
 	// Enable and make public.
-	if err := enableAction(k, ctx, ownerID, a.ID); err != nil {
+	if err := k.SetActive(ctx, ownerID, a.ID, true); err != nil {
 		t.Fatalf("enableAction: %v", err)
 	}
 	if _, err := updateAction(k, ctx, ownerID, kernel.UpdateActionRequest{ID: a.ID, Visibility: visPtr(kernel.VisibilityPublic)}); err != nil {
@@ -454,8 +454,6 @@ func TestListPublicActions_FilterAndStrip(t *testing.T) {
 		t.Error("no results filtering by name svc-pub")
 	}
 }
-
-func boolPtr(b bool) *bool { return &b }
 
 func visPtr(v kernel.ActionVisibility) *kernel.ActionVisibility { return &v }
 

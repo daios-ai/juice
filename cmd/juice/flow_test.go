@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
-	"github.com/daios-ai/juice/llm"
 	"github.com/daios-ai/juice/log"
 	"github.com/daios-ai/juice/native"
 	"github.com/daios-ai/juice/store"
@@ -133,12 +132,6 @@ func createEnabledPublicAction(t *testing.T, srv *httptest.Server, ownerTok, nam
 func createPublicAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, name string, price int64) string {
 	t.Helper()
 	return createEnabledPublicAction(t, srv, ownerTok, name, "http", backendURL, "flow test action", price)
-}
-
-// createWasmAction creates a WASM action using the flowScriptExec (kind=wasm, source=handlerName).
-func createWasmAction(t *testing.T, srv *httptest.Server, ownerTok, name string, price int64) string {
-	t.Helper()
-	return createEnabledPublicAction(t, srv, ownerTok, name, "wasm", name, "flow wasm action", price)
 }
 
 // getTxList returns transaction list for the caller.
@@ -724,9 +717,13 @@ func TestFlow_RestartRecovery(t *testing.T) {
 	decodeResponse(t, stepResp, &step)
 	stepID := step["id"].(string)
 
-	// Simulate restart: call ResetRunningSteps (resets any mid-flight running steps to waiting).
+	// Simulate restart: the phase-B transition startup recovery performs (§5), which re-parks
+	// mid-flight running steps and leaves waiting ones alone. The full Kernel.Recover is not
+	// used here because this fixture's parent trace is built directly in the store and so is
+	// orphaned (no transaction); recovery would rightly fail it and cancel the step beneath.
+	// Kernel.Recover itself is covered by the kernel recovery suite.
 	ctx := context.Background()
-	if err := k.ResetRunningSteps(ctx); err != nil {
+	if err := db.ResetRunningSteps(ctx); err != nil {
 		t.Fatalf("ResetRunningSteps: %v", err)
 	}
 
@@ -1437,32 +1434,6 @@ func TestFlow_UpstreamAuthSecrecy(t *testing.T) {
 // — Missing §15 user-story flows —
 // ============================================================
 
-// newFlowKernelFull is like newFlowKernel but accepts an embedder for tests that exercise
-// semantic lookup.
-func newFlowKernelFull(t *testing.T, exec kernel.ScriptExecutor, embedder kernel.Embedder) (*httptest.Server, *kernel.Kernel, *store.DB) {
-	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "flow-full.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "flow-full-test-secret"
-	cfg.AllowLocalSources = true
-	logger := log.Discard()
-	k := kernel.New(db, exec, &httpActionExecutor{timeout: cfg.ScriptTimeout}, embedder, cfg, logger)
-
-	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
-		t.Fatal(err)
-	}
-	bootstrapSigning(t, k)
-
-	srv := &server{kernel: k, log: logger}
-	return httptest.NewServer(mountFullRouter(srv)), k, db
-}
-
 // bootstrapSysNative registers and activates a @sys native action by spec name.
 // Uses price=0 for all test specs; spec schemas come from buildSysNativeSpecs.
 func bootstrapSysNative(t *testing.T, k *kernel.Kernel, names ...string) {
@@ -1494,7 +1465,9 @@ func TestFlow_LookupAndRun(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	srv, k, _ := newFlowKernelFull(t, nil, &llm.FakeEmbedder{Dims: 8})
+	// No embedder: lookup degrades to its lexical (BM25) leg, which resolves an exact
+	// description query (§9). Semantic ranking is covered by kernel/lookup_test.go.
+	srv, k, _ := newFlowKernel(t, nil)
 	defer srv.Close()
 
 	ctx := context.Background()

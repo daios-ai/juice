@@ -268,12 +268,6 @@ func userView(u *kernel.Account) map[string]any {
 
 // ---- Resolution helpers ----
 
-// resolveHandle resolves an account by its @handle (kernel-local name) or public key (global name):
-// an @-prefixed string is a handle, a bare string is tried as a key first, then a handle.
-func resolveHandle(k *kernel.Kernel, ctx context.Context, ident string) (*kernel.Account, error) {
-	return k.ResolveUser(ctx, ident)
-}
-
 // resolveMixed resolves a target that may name either namespace — the only commands that need it are
 // show, rename, suspend/unsuspend, and deposit/withdraw (§14). It returns an account for a local
 // user and a public key for a kernel; the shapes are self-identifying, so only a bare name can be
@@ -310,11 +304,6 @@ func resolveMixed(k *kernel.Kernel, ctx context.Context, ident string) (*kernel.
 		return acct, acct.KernelPublicKey, nil
 	}
 	return nil, "", kernel.ErrNotFound.Wrapf("%s not found", ident)
-}
-
-// resolveActionRef resolves "@owner/name" (with or without a leading "@") or a raw action ID.
-func resolveActionRef(k *kernel.Kernel, ctx context.Context, ref string) (*kernel.Action, error) {
-	return k.ResolveAction(ctx, ref)
 }
 
 // ---- User operations ----
@@ -408,11 +397,6 @@ func getMe(k *kernel.Kernel, ctx context.Context, callerID string) (map[string]a
 	// The full account inventory, so a connection with zero grants still surfaces as unused (§8/§14).
 	view["connections"] = conns
 	return view, nil
-}
-
-// planGrants expands a selector into the consent plan user connect walks (§8).
-func planGrants(k *kernel.Kernel, ctx context.Context, callerID, selector string) (*kernel.ConsentPlan, error) {
-	return k.ConsentPlan(ctx, callerID, selector)
 }
 
 // grantGroup finds the plan group for a provider_key; when provider is empty it must resolve to a
@@ -700,22 +684,6 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 	return resps, nil
 }
 
-func enableAction(k *kernel.Kernel, ctx context.Context, callerID, id string) error {
-	return k.SetActive(ctx, callerID, id, true)
-}
-
-func disableAction(k *kernel.Kernel, ctx context.Context, callerID, id string) error {
-	return k.SetActive(ctx, callerID, id, false)
-}
-
-func deleteAction(k *kernel.Kernel, ctx context.Context, callerID, id string) error {
-	return k.DeleteAction(ctx, callerID, id)
-}
-
-func actionStats(k *kernel.Kernel, ctx context.Context, id string) (*kernel.Stats, error) {
-	return k.ReadStats(ctx, id)
-}
-
 // ---- Process operations ----
 
 func listProcesses(k *kernel.Kernel, ctx context.Context, callerID string, limit, offset int) ([]*processView, error) {
@@ -751,10 +719,6 @@ func getProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) (*pr
 	return enrichProcess(p, since, newAccountCache(k, ctx)), nil
 }
 
-func endProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) error {
-	return k.EndProcess(ctx, callerID, id)
-}
-
 // ---- Step operations ----
 
 type createStepParams struct {
@@ -772,7 +736,7 @@ type createStepParams struct {
 // calls kernel.CreateStep, and returns an enriched *stepWithAction.
 // Used by both HTTP and CLI surfaces.
 func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p createStepParams) (*stepWithAction, error) {
-	action, err := resolveActionRef(k, ctx, p.ActionRef)
+	action, err := k.ResolveAction(ctx, p.ActionRef)
 	if err != nil {
 		return nil, err
 	}
@@ -819,10 +783,6 @@ func getStep(k *kernel.Kernel, ctx context.Context, callerID, id string) (*stepW
 	return enrichStep(k, ctx, step, action, newAccountCache(k, ctx)), nil
 }
 
-func completeStep(k *kernel.Kernel, ctx context.Context, callerID, id string, args json.RawMessage) (*kernel.StepReply, error) {
-	return k.CompleteStep(ctx, callerID, id, args)
-}
-
 // ---- Transaction operations ----
 
 func listTransactions(k *kernel.Kernel, ctx context.Context, callerID string, f kernel.TxFilter) ([]*txView, error) {
@@ -861,14 +821,10 @@ func rateTransaction(k *kernel.Kernel, ctx context.Context, callerID, id string,
 	return k.RateTransaction(ctx, callerID, id, rating, note)
 }
 
-func verifyReceipt(k *kernel.Kernel, ctx context.Context, callerID, id string) (*kernel.ReceiptVerification, error) {
-	return k.VerifyRemoteReceipt(ctx, callerID, id)
-}
-
 // ---- Run ----
 
 func run(k *kernel.Kernel, ctx context.Context, callerID, actionRef string, args map[string]any, quoteHash string) (*kernel.CallReply, error) {
-	return k.Run(ctx, callerID, actionRef, args, quoteHash)
+	return k.Run(ctx, kernel.RunRequest{CallerID: callerID, ActionRef: actionRef, Args: args, QuoteHash: quoteHash})
 }
 
 // ---- Federation ----

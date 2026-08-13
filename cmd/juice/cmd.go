@@ -22,6 +22,12 @@ import (
 
 // grantActionRef returns the action a grant_required error names (from its structured Meta),
 // falling back to fallback when absent.
+// addPagingFlags registers the --limit/--offset pair every list command shares.
+func addPagingFlags(cmd *cobra.Command, limit, offset *int) {
+	cmd.Flags().IntVar(limit, "limit", 50, "Maximum results")
+	cmd.Flags().IntVar(offset, "offset", 0, "Pagination offset")
+}
+
 func grantActionRef(err error, fallback string) string {
 	var ke *kernel.KernelError
 	if errors.As(err, &ke) && ke.Meta["action"] != "" {
@@ -211,15 +217,6 @@ func renderValue(raw json.RawMessage) string {
 	return string(r)
 }
 
-// emit prints a single resource object: canonical JSON with --json, else the complete
-// text view. Both render the same object, guaranteeing CLI/HTTP parity.
-func emit(v any) error {
-	if flagJSON {
-		return printJSON(v)
-	}
-	return printText(v)
-}
-
 // ---- user ----
 
 func init() {
@@ -366,8 +363,7 @@ func userLedgerCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
-	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
 
@@ -552,6 +548,19 @@ func actionDisableCmd() *cobra.Command {
 	return actionActiveCmd("disable <action>", "Disable an action", "disable", "disabled", false)
 }
 
+// actionRunE adapts a command body that needs the resolved action id: every action subcommand
+// takes one positional ref and resolves it the same way, so the preamble lives here once.
+func actionRunE(fn func(ctx context.Context, id, ref string) error) func(*cobra.Command, []string) error {
+	return func(_ *cobra.Command, args []string) error {
+		ctx := context.Background()
+		id, err := resolveActionID(ctx, args[0])
+		if err != nil {
+			return err
+		}
+		return fn(ctx, id, args[0])
+	}
+}
+
 // actionActiveCmd builds the enable/disable action command; the two differ only in wording
 // and the endpoint suffix.
 func actionActiveCmd(use, short, suffix, pastTense string, active bool) *cobra.Command {
@@ -559,21 +568,16 @@ func actionActiveCmd(use, short, suffix, pastTense string, active bool) *cobra.C
 		Use:   use,
 		Short: short,
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			ctx := context.Background()
-			id, err := resolveActionID(ctx, args[0])
-			if err != nil {
-				return err
-			}
+		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
 			if err := apiCall(ctx, "POST", "/v1/actions/"+id+"/"+suffix, nil, nil); err != nil {
 				return err
 			}
 			if flagJSON {
 				return printJSON(map[string]bool{"active": active})
 			}
-			fmt.Printf("Action %s %s.\n", args[0], pastTense)
+			fmt.Printf("Action %s %s.\n", ref, pastTense)
 			return nil
-		},
+		}),
 	}
 }
 
@@ -629,8 +633,7 @@ func actionListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Include your inactive/private actions")
-	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
-	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
 
@@ -639,14 +642,9 @@ func actionShowCmd() *cobra.Command {
 		Use:   "show <action>",
 		Short: "Show action details",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			ctx := context.Background()
-			id, err := resolveActionID(ctx, args[0])
-			if err != nil {
-				return err
-			}
+		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
 			return apiEmit("GET", "/v1/actions/"+id, nil)
-		},
+		}),
 	}
 }
 
@@ -655,18 +653,13 @@ func actionDeleteCmd() *cobra.Command {
 		Use:   "delete <action>",
 		Short: "Delete an action, preserving history",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			ctx := context.Background()
-			id, err := resolveActionID(ctx, args[0])
-			if err != nil {
-				return err
-			}
+		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
 			if err := apiCall(ctx, "DELETE", "/v1/actions/"+id, nil, nil); err != nil {
 				return err
 			}
-			fmt.Printf("Action %s deleted.\n", args[0])
+			fmt.Printf("Action %s deleted.\n", ref)
 			return nil
-		},
+		}),
 	}
 }
 
@@ -729,12 +722,7 @@ func actionStatsCmd() *cobra.Command {
 		Use:   "stats <action>",
 		Short: "Show an action's statistics",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			ctx := context.Background()
-			id, err := resolveActionID(ctx, args[0])
-			if err != nil {
-				return err
-			}
+		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
 			var raw json.RawMessage
 			if err := apiCall(ctx, "GET", "/v1/stats/"+id, nil, &raw); err != nil {
 				return err
@@ -747,7 +735,7 @@ func actionStatsCmd() *cobra.Command {
 				return nil
 			}
 			return emitRaw(raw)
-		},
+		}),
 	}
 }
 
@@ -757,12 +745,7 @@ func actionRatingsCmd() *cobra.Command {
 		Use:   "ratings <action>",
 		Short: "Show an action's public ratings",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			ctx := context.Background()
-			id, err := resolveActionID(ctx, args[0])
-			if err != nil {
-				return err
-			}
+		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
 			path := "/v1/actions/" + id + "/ratings"
@@ -792,10 +775,9 @@ func actionRatingsCmd() *cobra.Command {
 				fmt.Printf("%d  %s%s\n", rt.Value, rt.Created, note)
 			}
 			return nil
-		},
+		}),
 	}
-	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
-	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
 
@@ -834,8 +816,7 @@ func processListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
-	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
 
@@ -954,8 +935,7 @@ func stepListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (waiting, running, done)")
-	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
-	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
 
@@ -1046,8 +1026,7 @@ func txListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
-	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results")
-	cmd.Flags().IntVar(&offset, "offset", 0, "Pagination offset")
+	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
 

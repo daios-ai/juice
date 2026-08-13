@@ -906,3 +906,53 @@ func TestPricedStorePropagatesOverflow(t *testing.T) {
 		t.Error("priceMany must propagate the overflow")
 	}
 }
+
+// TestRemoteManifestHashFixture pins the manifest-hash wire format. This digest is the
+// cross-kernel contract identity (§8 If-Match, cached in Action.ArtifactHash): a change
+// invalidates every peer's cached proxy. Never regenerate these values to make a test pass.
+func TestRemoteManifestHashFixture(t *testing.T) {
+	for _, tc := range manifestFixtures() {
+		if got := remoteManifestHash(tc.m); got != tc.want {
+			t.Errorf("%s: manifest hash changed\n got  %s\n want %s", tc.name, got, tc.want)
+		}
+	}
+}
+
+func manifestFixtures() []struct {
+	name string
+	m    ActionManifest
+	want string
+} {
+	nested := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"outer": map[string]any{"type": "object", "properties": map[string]any{"inner": map[string]any{"type": "number"}}},
+		},
+	}
+	base := ActionManifest{
+		ActionID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OwnerID: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+		OwnerHandle: "alice", Name: "greet", Description: "greets a caller", Price: 100, Kind: KindWasm,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "deadbeef",
+	}
+	withBPS := base
+	withBPS.RemoteBPS = 500
+	withNested := base
+	withNested.InputSchema, withNested.OutputSchema = nested, nested
+	withEffect := base
+	withEffect.Effect = "transfer"
+	renamed := base
+	renamed.OwnerHandle = "alice-renamed" // display metadata: must NOT change the hash
+	return []struct {
+		name string
+		m    ActionManifest
+		want string
+	}{
+		{"zero-bps", base, "b909e43f663733f19c202805bda8be0b3ce5fb2f4285de1d5135eb0198c0012b"},
+		{"remote-bps-500", withBPS, "ebed5d1fc13f043ece714a5e341c69d37255eddca9f2ca8d79f35761ef6f4252"},
+		{"nested-schemas", withNested, "ec8e5e5f130550f733f4e45e56ce552dc87b35a1517b01537f4bf1edc4e0793e"},
+		{"transfer-effect", withEffect, "9fb2028b5cc595f099d3329f4e07235457c22e768e2d97aa1ed2b7bc7919aba0"},
+		// A display-only handle rename must hash identically to the base fixture.
+		{"owner-handle-renamed", renamed, "b909e43f663733f19c202805bda8be0b3ce5fb2f4285de1d5135eb0198c0012b"},
+	}
+}

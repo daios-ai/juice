@@ -49,6 +49,16 @@ type CallRequest struct {
 	IdempotencyRecordID string
 }
 
+// RunRequest is input to Run, the ordinary root-call entry point (§4): a struct so a new optional
+// term is a field, not a signature break at every call site. Federation ingress keeps its own entry
+// point (RunFederated), so its authority is not expressible here.
+type RunRequest struct {
+	CallerID  string
+	ActionRef string // owner/name, owner@kernel/name, or a raw action id
+	Args      map[string]any
+	QuoteHash string // optional §4-precondition-7 pin; empty means the caller pinned nothing
+}
+
 // CallReply is the response from a successful Call().
 type CallReply struct {
 	Result    map[string]any `json:"result"`
@@ -130,15 +140,31 @@ type quoteTerms struct {
 // and the local proxy it resolves to hash identically and a hash read from lookup binds a first
 // cross-kernel call. Effect is included because it alone decides whether a call locks a value
 // reserve (§13): a peer promoting effect under unchanged terms would otherwise pass.
-func QuoteHash(a *Action) string {
+func QuoteHash(a *Action) string { return quoteHashOf(quoteTermsOfAction(a)) }
+
+// quoteTermsOfAction projects a stored action onto its quote, under the STABLE id.
+func quoteTermsOfAction(a *Action) quoteTerms {
 	id := a.RemoteActionID
 	if id == "" {
 		id = a.ID
 	}
-	payload, _ := CanonicalJSON(quoteTerms{
+	return quoteTerms{
 		ActionID: id, Effect: a.Effect, Description: a.Description,
 		InputSchema: a.InputSchema, OutputSchema: a.OutputSchema, Price: a.Price,
-	})
+	}
+}
+
+// quoteTermsOfDoc projects a gossiped discovery doc onto the same quote at the all-in price shown,
+// so a discovered hit and the proxy it resolves to hash identically (§15).
+func quoteTermsOfDoc(d *DiscoveryDoc, price int64) quoteTerms {
+	return quoteTerms{
+		ActionID: d.ActionID, Effect: d.Effect, Description: d.Description,
+		InputSchema: d.InputSchema, OutputSchema: d.OutputSchema, Price: price,
+	}
+}
+
+func quoteHashOf(t quoteTerms) string {
+	payload, _ := CanonicalJSON(t)
 	return sha256Hex(string(payload))
 }
 
@@ -354,12 +380,9 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	}
 
 	// 2. Process must exist and be open.
-	process, err := k.store.ReadProcess(ctx, processID)
+	process, err := k.readOpenProcess(ctx, processID)
 	if err != nil {
-		return nil, ErrNotFound.Wrap("process not found")
-	}
-	if process.Status != ProcessOpen {
-		return nil, ErrInvalidState.Wrap("process is closed")
+		return nil, err
 	}
 
 	// 3. Process-use authority (§4 precondition 4), enforced here for subcalls. Root calls have

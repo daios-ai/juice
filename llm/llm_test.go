@@ -2,9 +2,13 @@ package llm
 
 import (
 	"context"
-	"math"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/daios-ai/juice/kernel"
 )
 
 // TestOllamaClientTimeoutGenerous guards the HTTP timeout used for all Ollama calls:
@@ -16,66 +20,97 @@ func TestOllamaClientTimeoutGenerous(t *testing.T) {
 	}
 }
 
-func TestFakeEmbedder(t *testing.T) {
-	f := &FakeEmbedder{Dims: 4}
-	ctx := context.Background()
+// ollamaStub serves one canned reply for every request and records the last body it received.
+func ollamaStub(t *testing.T, status int, reply string) (*httptest.Server, *map[string]any) {
+	t.Helper()
+	got := &map[string]any{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(got)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(reply))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, got
+}
 
-	vec, err := f.Embed(ctx, "hello")
+// TestOllamaEmbedRoundTrip covers the success path of the shared transport: the model and prompt
+// reach the server and the decoded vector is returned.
+func TestOllamaEmbedRoundTrip(t *testing.T) {
+	srv, got := ollamaStub(t, http.StatusOK, `{"embedding":[0.25,0.5,0.75]}`)
+	e := &OllamaEmbedder{URL: srv.URL, Model: "nomic-embed-text"}
+
+	vec, err := e.Embed(context.Background(), "hello")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Embed: %v", err)
 	}
-	if len(vec) != 4 {
-		t.Errorf("expected 4-dim vector, got %d", len(vec))
+	if len(vec) != 3 || vec[0] != 0.25 {
+		t.Errorf("decoded vector = %v, want [0.25 0.5 0.75]", vec)
 	}
-
-	// Vector should be unit-length (L2-normalized).
-	var norm float32
-	for _, v := range vec {
-		norm += v * v
-	}
-	if math.Abs(float64(norm)-1.0) > 0.01 {
-		t.Errorf("vector not approximately unit-length: norm=%f", norm)
+	if (*got)["model"] != "nomic-embed-text" || (*got)["prompt"] != "hello" {
+		t.Errorf("request body did not carry model and prompt: %v", *got)
 	}
 }
 
-func TestFakeEmbedderSimilarity(t *testing.T) {
-	f := &FakeEmbedder{Dims: 8}
-	ctx := context.Background()
+// TestOllamaChatRoundTrip covers the chat success path and message projection.
+func TestOllamaChatRoundTrip(t *testing.T) {
+	srv, got := ollamaStub(t, http.StatusOK, `{"message":{"role":"assistant","content":"pong"}}`)
+	c := &OllamaChatter{URL: srv.URL, Model: "gemma4:26b"}
 
-	// Same text should produce identical vectors.
-	v1, _ := f.Embed(ctx, "abc")
-	v2, _ := f.Embed(ctx, "abc")
-
-	var dot float32
-	for i := range v1 {
-		dot += v1[i] * v2[i]
+	msg, err := c.Chat(context.Background(), []kernel.ChatMessage{{Role: "user", Content: "ping"}})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
 	}
-	if math.Abs(float64(dot)-1.0) > 1e-4 {
-		t.Errorf("identical texts should produce dot product 1.0, got %f", dot)
+	if msg.Role != "assistant" || msg.Content != "pong" {
+		t.Errorf("Chat = %+v, want assistant/pong", msg)
 	}
-
-	// Different texts should produce different vectors.
-	v3, _ := f.Embed(ctx, "xyz")
-	var same bool
-	for i := range v1 {
-		if v1[i] != v3[i] {
-			same = false
-			break
-		}
-		same = true
-	}
-	if same {
-		t.Error("different texts produced identical vectors")
+	if (*got)["stream"] != false {
+		t.Errorf("chat must request a non-streaming reply, got %v", (*got)["stream"])
 	}
 }
 
-func TestFakeEmbedderDefaultDims(t *testing.T) {
-	f := &FakeEmbedder{} // dims=0 → defaults to 8
-	vec, err := f.Embed(context.Background(), "test")
-	if err != nil {
-		t.Fatal(err)
+// TestOllamaTransportFailures proves every stage of ollamaPost propagates rather than yielding a
+// zero value: an upstream error status and a malformed body must both surface as errors, on every
+// entry point. A silently-swallowed decode is how an empty embedding or reply reaches a caller.
+func TestOllamaTransportFailures(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		reply  string
+	}{
+		{"non-200", http.StatusInternalServerError, `{"error":"model not found"}`},
+		{"malformed json", http.StatusOK, `{"embedding": [0.1`},
 	}
-	if len(vec) != 8 {
-		t.Errorf("expected 8 dims by default, got %d", len(vec))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := ollamaStub(t, tc.status, tc.reply)
+			ctx := context.Background()
+
+			if _, err := (&OllamaEmbedder{URL: srv.URL, Model: "m"}).Embed(ctx, "x"); err == nil {
+				t.Error("Embed: got nil error, want failure")
+			}
+			c := &OllamaChatter{URL: srv.URL, Model: "m"}
+			if _, err := c.Chat(ctx, []kernel.ChatMessage{{Role: "user", Content: "x"}}); err == nil {
+				t.Error("Chat: got nil error, want failure")
+			}
+			if _, err := c.ChatJSON(ctx, []kernel.ChatMessage{{Role: "user", Content: "x"}}, map[string]any{"type": "object"}); err == nil {
+				t.Error("ChatJSON: got nil error, want failure")
+			}
+			if _, _, err := c.ChatDecide(ctx, []kernel.DecideMessage{{Role: "user", Content: "x"}}, nil); err == nil {
+				t.Error("ChatDecide: got nil error, want failure")
+			}
+		})
+	}
+}
+
+// TestOllamaUnreachableServer covers the transport leg: a closed server is an error, never a
+// zero-valued success.
+func TestOllamaUnreachableServer(t *testing.T) {
+	srv, _ := ollamaStub(t, http.StatusOK, `{}`)
+	url := srv.URL
+	srv.Close()
+
+	if _, err := (&OllamaEmbedder{URL: url, Model: "m"}).Embed(context.Background(), "x"); err == nil {
+		t.Error("Embed against a closed server: got nil error, want failure")
 	}
 }

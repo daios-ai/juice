@@ -1347,6 +1347,22 @@ func (k *Kernel) ValidateFeeRecipient(ctx context.Context) error {
 	return nil
 }
 
+// newLedgerEntry builds the immutable audit record shared by the three direct balance movements
+// (§3): a deposit credits (from nil), a withdrawal debits (to nil), a transfer moves between two
+// local users. The store enforces the debit's sufficient-funds rule atomically.
+func newLedgerEntry(operatorID, fromUserID, toUserID string, amount int64, reason, externalKey string) *LedgerEntry {
+	return &LedgerEntry{
+		ID:             uuid.New().String(),
+		OperatorUserID: operatorID,
+		FromUserID:     fromUserID,
+		ToUserID:       toUserID,
+		Amount:         amount,
+		Reason:         reason,
+		ExternalKey:    externalKey,
+		CreatedAt:      time.Now().UTC(),
+	}
+}
+
 func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, amount int64, reason, externalKey string) (*LedgerEntry, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
@@ -1361,15 +1377,7 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 	if err := k.requireLiveAccount(ctx, targetUserID); err != nil {
 		return nil, err
 	}
-	e := &LedgerEntry{
-		ID:             uuid.New().String(),
-		OperatorUserID: operatorID,
-		ToUserID:       targetUserID,
-		Amount:         amount,
-		Reason:         reason,
-		ExternalKey:    externalKey,
-		CreatedAt:      time.Now().UTC(),
-	}
+	e := newLedgerEntry(operatorID, "", targetUserID, amount, reason, externalKey)
 	if err := k.store.CreateLedgerEntry(ctx, e); err != nil {
 		logger.Warn("deposit.failed", "target_user_id", targetUserID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, err
@@ -1389,15 +1397,7 @@ func (k *Kernel) Withdraw(ctx context.Context, operatorID, targetUserID string, 
 	if err := k.requireLiveAccount(ctx, targetUserID); err != nil {
 		return nil, err
 	}
-	e := &LedgerEntry{
-		ID:             uuid.New().String(),
-		OperatorUserID: operatorID,
-		FromUserID:     targetUserID,
-		Amount:         amount,
-		Reason:         reason,
-		ExternalKey:    externalKey,
-		CreatedAt:      time.Now().UTC(),
-	}
+	e := newLedgerEntry(operatorID, targetUserID, "", amount, reason, externalKey)
 	if err := k.store.CreateLedgerEntry(ctx, e); err != nil {
 		return nil, err
 	}
@@ -1437,16 +1437,7 @@ func (k *Kernel) Transfer(ctx context.Context, callerID, recipientID string, amo
 	if recipient.SuspendedAt != nil {
 		return nil, ErrInvalidInput.Wrap("recipient is suspended")
 	}
-	e := &LedgerEntry{
-		ID:             uuid.New().String(),
-		OperatorUserID: caller.ID,
-		FromUserID:     caller.ID,
-		ToUserID:       recipient.ID,
-		Amount:         amount,
-		Reason:         reason,
-		ExternalKey:    externalKey,
-		CreatedAt:      time.Now().UTC(),
-	}
+	e := newLedgerEntry(caller.ID, caller.ID, recipient.ID, amount, reason, externalKey)
 	if err := k.store.CreateLedgerEntry(ctx, e); err != nil {
 		logger.Warn("transfer.failed", "recipient_user_id", recipientID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, err
@@ -1962,20 +1953,6 @@ func (k *Kernel) ListAllTransactions(ctx context.Context, limit, offset int) ([]
 	return k.store.ListAllTransactions(ctx, limit, offset)
 }
 
-// ListAllTransactionViews returns all transactions as TransactionViews (with embedded
-// rating), so admin listings expose the same canonical shape as ListTransactions (§14).
-func (k *Kernel) ListAllTransactionViews(ctx context.Context, limit, offset int) ([]*TransactionView, error) {
-	txs, err := k.store.ListAllTransactions(ctx, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	views := make([]*TransactionView, len(txs))
-	for i, tx := range txs {
-		views[i] = k.toTransactionView(ctx, tx)
-	}
-	return views, nil
-}
-
 // GetConfig returns a persistent config value by key.
 func (k *Kernel) GetConfig(ctx context.Context, key string) (string, error) {
 	return k.store.GetConfig(ctx, key)
@@ -2295,11 +2272,7 @@ func (k *Kernel) DeleteAction(ctx context.Context, callerID, actionID string) er
 
 // beginRun consolidates all preconditions for a new process, atomically creates the process
 // and root trace via BeginRun, then executes the root call. Shared by Run and RunFederated.
-func (k *Kernel) beginRun(ctx context.Context, caller *Account, targetUserID, actionName string, args map[string]any, idempotencyRecordID, quoteHash string) (*CallReply, error) {
-	action, err := k.store.ReadActionByOwnerName(ctx, targetUserID, actionName)
-	if err != nil || action == nil {
-		return nil, ErrNotFound.Wrapf("action %s/%s not found", targetUserID, actionName)
-	}
+func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, args map[string]any, idempotencyRecordID, quoteHash string) (*CallReply, error) {
 	// Pre-funding validity gate: Call re-runs checkCallPreconditions authoritatively, but a
 	// rejection must not leave a funded process behind (a rejected call creates no transaction,
 	// §6), so the same check runs here before BeginRun parks funds.
@@ -2410,26 +2383,31 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, targetUserID, ac
 }
 
 // Run atomically creates a process funded with action.Price, then executes the root call.
-func (k *Kernel) Run(ctx context.Context, callerID, actionRef string, args map[string]any, quoteHash string) (*CallReply, error) {
-	caller, err := k.requireActiveUser(ctx, callerID)
+func (k *Kernel) Run(ctx context.Context, req RunRequest) (*CallReply, error) {
+	caller, err := k.requireActiveUser(ctx, req.CallerID)
 	if err != nil {
 		return nil, err
 	}
-	action, err := k.ResolveAction(ctx, actionRef)
+	action, err := k.ResolveAction(ctx, req.ActionRef)
 	if err != nil {
 		return nil, err
 	}
-	return k.beginRun(ctx, caller, action.OwnerUserID, action.Name, args, "", quoteHash)
+	return k.beginRun(ctx, caller, action, req.Args, "", req.QuoteHash)
 }
 
 // RunFederated is like Run but accepts an idempotencyRecordID for federation calls.
-// Used by the federation handler to atomically settle the idempotency record.
+// Used by the federation handler to atomically settle the idempotency record. It stays a
+// separate entry point so federation-only authority is not representable in RunRequest.
 func (k *Kernel) RunFederated(ctx context.Context, callerID, targetUserID, actionName string, args map[string]any, idempotencyRecordID string) (*CallReply, error) {
 	caller, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
 	}
-	return k.beginRun(ctx, caller, targetUserID, actionName, args, idempotencyRecordID, "") // a peer pins the manifest via expected_contract_hash (§8), not a local quote
+	action, err := k.store.ReadActionByOwnerName(ctx, targetUserID, actionName)
+	if err != nil || action == nil {
+		return nil, ErrNotFound.Wrapf("action %s/%s not found", targetUserID, actionName)
+	}
+	return k.beginRun(ctx, caller, action, args, idempotencyRecordID, "") // a peer pins the manifest via expected_contract_hash (§8), not a local quote
 }
 
 // EndProcess closes a process and returns all remaining funds to the owner.
@@ -2688,11 +2666,6 @@ func (k *Kernel) ReadStats(ctx context.Context, actionID string) (*Stats, error)
 	return k.store.ReadStats(ctx, actionID)
 }
 
-// ResetActionStats resets the statistics row for an action to zero counters.
-func (k *Kernel) ResetActionStats(ctx context.Context, actionID string) error {
-	return k.store.UpsertStats(ctx, &Stats{ActionID: actionID})
-}
-
 // ---- Lookup ----
 
 // LookupRequest is a natural-language query for actions.
@@ -2712,10 +2685,47 @@ type LookupResult struct {
 	Discovered  *DiscoveryDoc
 	Price       int64
 	Score       float32
+	// QuoteHash is the §4-precondition-7 pin over the terms actually shown (Price included),
+	// computed here for both kinds of hit so no caller rebuilds the tuple and drifts.
+	QuoteHash string
 }
 
 // rrfK is the reciprocal-rank-fusion constant (standard default): score = Σ 1/(rrfK + rank).
 const rrfK = 60
+
+// rankDense ranks keyed vectors by cosine against qvec and reports the top `oversample` in
+// descending similarity, calling hit(key, rank). One dense retrieval leg, shared by the action,
+// discovery-action, and discovery-user legs (§9). A vector whose dimension differs from the
+// query's is skipped, so a changed embed model can never panic cosine or score across spaces.
+// docEmbeddings projects discovery docs onto the key→vector map rankDense consumes.
+func docEmbeddings(byKey map[string]*DiscoveryDoc) map[string][]float32 {
+	vecs := make(map[string][]float32, len(byKey))
+	for key, d := range byKey {
+		vecs[key] = d.Embedding
+	}
+	return vecs
+}
+
+func rankDense(qvec []float32, vecs map[string][]float32, oversample int, hit func(key string, rank int)) {
+	type sc struct {
+		key string
+		s   float32
+	}
+	cand := make([]sc, 0, len(vecs))
+	for key, vec := range vecs {
+		if len(vec) != len(qvec) {
+			continue
+		}
+		cand = append(cand, sc{key, cosine(qvec, vec)})
+	}
+	sort.Slice(cand, func(i, j int) bool { return cand[i].s > cand[j].s })
+	for i, c := range cand {
+		if i >= oversample {
+			break
+		}
+		hit(c.key, i)
+	}
+}
 
 // Lookup ranks active actions the caller may call by a hybrid of lexical (BM25) and semantic
 // (cosine) relevance, fused by reciprocal-rank fusion and weighted by observed quality (§9). The
@@ -2740,24 +2750,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		} else if embeddings, err := k.store.ListEmbeddings(ctx); err != nil {
 			return nil, err
 		} else {
-			type sc struct {
-				id string
-				s  float32
-			}
-			cand := make([]sc, 0, len(embeddings))
-			for id, vec := range embeddings {
-				if len(vec) != len(qvec) {
-					continue
-				}
-				cand = append(cand, sc{id, cosine(qvec, vec)})
-			}
-			sort.Slice(cand, func(i, j int) bool { return cand[i].s > cand[j].s })
-			for i, c := range cand {
-				if i >= oversample {
-					break
-				}
-				denseRank[c.id] = i
-			}
+			rankDense(qvec, embeddings, oversample, func(id string, rank int) { denseRank[id] = rank })
 		}
 	}
 
@@ -2832,7 +2825,8 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 			if perr != nil {
 				continue
 			}
-			out = append(out, &LookupResult{Discovered: doc, Price: price, Score: float32(r.score)})
+			out = append(out, &LookupResult{Discovered: doc, Price: price, Score: float32(r.score),
+				QuoteHash: quoteHashOf(quoteTermsOfDoc(doc, price))})
 			continue
 		}
 		a, err := k.store.ReadAction(ctx, r.id)
@@ -2845,7 +2839,8 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 			ownerHandles[a.OwnerUserID] = k.displayOwner(ctx, a.OwnerUserID)
 		}
 		a.OwnerHandle = ownerHandles[a.OwnerUserID] // the mount alias FormatActionRef renders from
-		out = append(out, &LookupResult{Action: a, OwnerHandle: a.OwnerHandle, Price: a.Price, Score: float32(r.score)})
+		out = append(out, &LookupResult{Action: a, OwnerHandle: a.OwnerHandle, Price: a.Price, Score: float32(r.score),
+			QuoteHash: QuoteHash(a)})
 	}
 	return out, nil
 }
@@ -2867,25 +2862,10 @@ func (k *Kernel) mergeDiscoveryActionLegs(ctx context.Context, query string, ove
 	// Dense leg over discovery embeddings.
 	if k.llm != nil {
 		if qvec, err := k.llm.Embed(ctx, query); err == nil {
-			type sc struct {
-				key string
-				s   float32
-			}
-			var cand []sc
-			for key, d := range byKey {
-				if len(d.Embedding) != len(qvec) {
-					continue
-				}
-				cand = append(cand, sc{key, cosine(qvec, d.Embedding)})
-			}
-			sort.Slice(cand, func(i, j int) bool { return cand[i].s > cand[j].s })
-			for i, c := range cand {
-				if i >= oversample {
-					break
-				}
-				fused["disc:"+c.key] += 1.0 / float64(rrfK+i)
-				hits["disc:"+c.key] = byKey[c.key]
-			}
+			rankDense(qvec, docEmbeddings(byKey), oversample, func(key string, rank int) {
+				fused["disc:"+key] += 1.0 / float64(rrfK+rank)
+				hits["disc:"+key] = byKey[key]
+			})
 		}
 	}
 	// Lexical leg over discovery FTS.
@@ -3029,24 +3009,7 @@ func (k *Kernel) mergeDiscoveryUserLegs(ctx context.Context, query string, overs
 	}
 	if k.llm != nil {
 		if qvec, err := k.llm.Embed(ctx, query); err == nil {
-			type sc struct {
-				key string
-				s   float32
-			}
-			var cand []sc
-			for key, d := range byKey {
-				if len(d.Embedding) != len(qvec) {
-					continue
-				}
-				cand = append(cand, sc{key, cosine(qvec, d.Embedding)})
-			}
-			sort.Slice(cand, func(i, j int) bool { return cand[i].s > cand[j].s })
-			for i, c := range cand {
-				if i >= oversample {
-					break
-				}
-				add(c.key, i)
-			}
+			rankDense(qvec, docEmbeddings(byKey), oversample, add)
 		}
 	}
 	if keys, err := k.store.SearchDiscoveryLexical(ctx, query, oversample); err == nil {
@@ -3419,7 +3382,10 @@ func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*
 				result.Updated = append(result.Updated, ex)
 			}
 		} else {
+			// new() supplies identity and lifecycle; apply() is the single writer of every contract
+			// field, on create exactly as on update, so the two paths cannot diverge.
 			a := op.new()
+			op.apply(a)
 			if err := k.store.CreateAction(ctx, a); err != nil {
 				return nil, err
 			}

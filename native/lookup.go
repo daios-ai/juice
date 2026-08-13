@@ -28,37 +28,24 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 	}
 	items := make([]any, len(results))
 	for i, r := range results {
-		if r.Discovered != nil {
-			// A not-yet-resolved remote action (§13): render with its STABLE identity — the remote
-			// action id and the kernel-qualified reference (raw key; a gossiped label never resolves).
-			// Selecting it invokes it by reference, which resolves and verifies from the home kernel.
-			d := r.Discovered
-			items[i] = map[string]any{
-				"action_id":     d.ActionID,
-				"action":        d.Handle + "@" + d.KernelPublicKey + "/" + d.Name,
-				"description":   d.Description,
-				"price":         r.Price,
-				"score":         float64(r.Score),
-				"input_schema":  d.InputSchema,
-				"output_schema": d.OutputSchema,
-				// Keyed on the remote action id, so this equals the quote_hash of the local proxy
-				// this hit resolves to: a hash read here binds a first cross-kernel call (§13).
-				"quote_hash": kernel.QuoteHash(&kernel.Action{
-					RemoteActionID: d.ActionID, Effect: d.Effect, Description: d.Description,
-					InputSchema: d.InputSchema, OutputSchema: d.OutputSchema, Price: r.Price,
-				}),
-			}
-			continue
+		// A discovered hit (§13) renders its STABLE identity — remote action id, kernel-qualified
+		// reference by raw key — so selecting it resolves from the home kernel; a local hit its own row.
+		var actionID, ref, description string
+		var in, out map[string]any
+		if d := r.Discovered; d != nil {
+			actionID, ref, description, in, out = d.ActionID, d.Handle+"@"+d.KernelPublicKey+"/"+d.Name, d.Description, d.InputSchema, d.OutputSchema
+		} else {
+			actionID, ref, description, in, out = r.Action.ID, kernel.FormatActionRef(r.Action), r.Action.Description, r.Action.InputSchema, r.Action.OutputSchema
 		}
 		items[i] = map[string]any{
-			"action_id":     r.Action.ID,
-			"action":        kernel.FormatActionRef(r.Action),
-			"description":   r.Action.Description,
+			"action_id":     actionID,
+			"action":        ref,
+			"description":   description,
 			"price":         r.Price,
 			"score":         float64(r.Score),
-			"input_schema":  r.Action.InputSchema,
-			"output_schema": r.Action.OutputSchema,
-			"quote_hash":    kernel.QuoteHash(r.Action),
+			"input_schema":  in,
+			"output_schema": out,
+			"quote_hash":    r.QuoteHash,
 		}
 	}
 	return map[string]any{"results": items}, nil

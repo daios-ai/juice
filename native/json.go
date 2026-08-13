@@ -18,29 +18,9 @@ func executeJSON(ctx context.Context, args map[string]any, chatter kernel.JSONCh
 		return nil, kernel.ErrInvalidState.Wrap("json chat service not configured")
 	}
 
-	rawMsgs, ok := args["messages"]
-	if !ok {
-		return nil, kernel.ErrInvalidInput.Wrap("llm/json requires messages argument")
-	}
-	msgList, ok := rawMsgs.([]any)
-	if !ok {
-		return nil, kernel.ErrInvalidInput.Wrap("messages must be an array")
-	}
-	var messages []kernel.ChatMessage
-	if sys, ok := args["system"].(string); ok && sys != "" {
-		messages = append(messages, kernel.ChatMessage{Role: "system", Content: sys})
-	}
-	for _, item := range msgList {
-		m, ok := item.(map[string]any)
-		if !ok {
-			return nil, kernel.ErrInvalidInput.Wrap("each message must be an object")
-		}
-		role, _ := m["role"].(string)
-		content, _ := m["content"].(string)
-		if role == "" || content == "" {
-			return nil, kernel.ErrInvalidInput.Wrap("each message must have role and content")
-		}
-		messages = append(messages, kernel.ChatMessage{Role: role, Content: content})
+	messages, err := chatMessages(args, "llm/json")
+	if err != nil {
+		return nil, err
 	}
 
 	rawSchema, ok := args["output_schema"]

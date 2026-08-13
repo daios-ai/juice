@@ -10,13 +10,21 @@ import (
 	"github.com/google/uuid"
 )
 
-// ResetRunningSteps resets running steps (status=running, tx_id=null) back to waiting. Called at startup.
-func (k *Kernel) ResetRunningSteps(ctx context.Context) error {
-	return k.store.ResetRunningSteps(ctx)
-}
-
 // Recover settles interrupted calls and re-parks crashed step completions.
 // Must be called after SetSigningKey (buildReceipt requires the platform signing key).
+// readOpenProcess reads a process and rejects a closed one — §4 precondition 2, the gate every
+// spend path shares (a closed process can neither call nor park work).
+func (k *Kernel) readOpenProcess(ctx context.Context, processID string) (*Process, error) {
+	process, err := k.store.ReadProcess(ctx, processID)
+	if err != nil {
+		return nil, ErrNotFound.Wrap("process not found")
+	}
+	if process.Status != ProcessOpen {
+		return nil, ErrInvalidState.Wrap("process is closed")
+	}
+	return process, nil
+}
+
 func (k *Kernel) Recover(ctx context.Context) error {
 	logger := k.log.With(ctx)
 
@@ -133,12 +141,8 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 	if err != nil {
 		return nil, ErrNotFound.Wrap("parent trace not found")
 	}
-	process, err := k.store.ReadProcess(ctx, parent.ProcessID)
-	if err != nil {
-		return nil, ErrNotFound.Wrap("process not found")
-	}
-	if process.Status != ProcessOpen {
-		return nil, ErrInvalidState.Wrap("process is closed")
+	if _, err := k.readOpenProcess(ctx, parent.ProcessID); err != nil {
+		return nil, err
 	}
 	action, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
@@ -303,12 +307,8 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 	if err != nil {
 		return nil, ErrNotFound.Wrap("parent trace not found")
 	}
-	process, err := k.store.ReadProcess(ctx, parentTrace.ProcessID)
-	if err != nil {
-		return nil, ErrNotFound.Wrap("process not found")
-	}
-	if process.Status != ProcessOpen {
-		return nil, ErrInvalidState.Wrap("process is closed")
+	if _, err := k.readOpenProcess(ctx, parentTrace.ProcessID); err != nil {
+		return nil, err
 	}
 	if callerID != step.RequiredCallerUserID {
 		return nil, ErrUnauthorized.Wrap("only required_caller_user_id may complete this step")

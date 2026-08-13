@@ -479,13 +479,17 @@ func TestBootstrapResetsRunningStepsToWaiting(t *testing.T) {
 		t.Fatalf("expected running after BeginStepCall, got %s", got.Status)
 	}
 
-	// ResetRunningSteps restores to waiting
-	if err := k.ResetRunningSteps(ctx); err != nil {
+	// The store transition startup recovery drives in phase B (§5) restores it to waiting.
+	// Recovery through Kernel.Recover is covered end-to-end by
+	// TestRecoverReparkEmptyStepCompletionTrace, which supplies a settled parent trace;
+	// this fixture's parent is deliberately orphaned, so Recover would fail it and cancel
+	// the step instead — the very behaviour TestRecoverWithOrphanParentAndPendingChild pins.
+	if err := st.ResetRunningSteps(ctx); err != nil {
 		t.Fatalf("ResetRunningSteps: %v", err)
 	}
 	got, _ = st.ReadStep(ctx, step.ID)
 	if got.Status != kernel.StepWaiting {
-		t.Errorf("expected waiting after ResetRunningSteps, got %s", got.Status)
+		t.Errorf("expected waiting after recovery, got %s", got.Status)
 	}
 }
 
@@ -1723,7 +1727,7 @@ func TestCallReturnsTheCommittedReplyWhenPostExecutionReadFails(t *testing.T) {
 	caller := setupUser(t, st, "fail-caller", 500)
 	action := setupWasmAction(t, st, owner.ID, "fail-action", "", 10)
 
-	reply, err := k.Run(ctx, caller.ID, "fail-owner/fail-action", map[string]any{}, "")
+	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "fail-owner/fail-action", Args: map[string]any{}})
 	if err == nil {
 		t.Fatal("expected the injected read failure to surface")
 	}

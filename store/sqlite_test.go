@@ -3766,41 +3766,6 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 
 }
 
-// seedWaitingStep creates owner+assignee, an action, a funded process and root trace, and returns
-// a maker for waiting steps on that trace. Four paging/gate tests built this by hand.
-func seedWaitingStep(t *testing.T, db *DB, prefix string) (assigneeID string, mk func() string) {
-	t.Helper()
-	ctx := context.Background()
-	owner := newUser("@"+prefix+"-owner", 1000)
-	assignee := newUser("@"+prefix+"-assignee", 0)
-	for _, u := range []*kernel.Account{owner, assignee} {
-		if err := db.CreateUser(ctx, u); err != nil {
-			t.Fatal(err)
-		}
-	}
-	act := newAction(owner.ID, prefix+"-act", 0, true)
-	if err := db.CreateAction(ctx, act); err != nil {
-		t.Fatal(err)
-	}
-	return assignee.ID, func() string {
-		t.Helper()
-		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: owner.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
-		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-		if err := db.BeginRun(ctx, p, root, owner.ID, 0, 0, 0); err != nil {
-			t.Fatal(err)
-		}
-		ptID := root.ID
-		st := &kernel.Step{
-			ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: assignee.ID,
-			ActionID: act.ID, Price: 0, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
-		}
-		if err := db.CreateStep(ctx, st); err != nil {
-			t.Fatal(err)
-		}
-		return st.ID
-	}
-}
-
 // Scenario (design review): CommitRemoteSettlement completes the idempotency record with
 // ktx.ReplyJSON, which settleRemoteCall sets only on SUCCESS. A remote FAILURE therefore stores
 // result_json "null", so a replaying peer reads no "error" key and gets HTTP 200 — a settled

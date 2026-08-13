@@ -20,15 +20,34 @@ func executeChat(ctx context.Context, args map[string]any, chatter kernel.Chatte
 		return nil, kernel.ErrInvalidState.Wrap("chat service not configured")
 	}
 
+	messages, err := chatMessages(args, "chat")
+	if err != nil {
+		return nil, err
+	}
+
+	reply, err := chatter.Chat(ctx, messages)
+	if err != nil {
+		return nil, kernel.ErrExecutionFailed.Wrapf("chat failed: %v", err)
+	}
+	return map[string]any{
+		"message": map[string]any{
+			"role":    reply.Role,
+			"content": reply.Content,
+		},
+	}, nil
+}
+
+// chatMessages extracts the {role, content} list both plain LLM natives take, prepending the
+// optional system message. One parser, so llm/chat and llm/json cannot diverge on what they accept.
+func chatMessages(args map[string]any, who string) ([]kernel.ChatMessage, error) {
 	rawMsgs, ok := args["messages"]
 	if !ok {
-		return nil, kernel.ErrInvalidInput.Wrap("chat requires messages argument")
+		return nil, kernel.ErrInvalidInput.Wrapf("%s requires messages argument", who)
 	}
 	msgList, ok := rawMsgs.([]any)
 	if !ok {
 		return nil, kernel.ErrInvalidInput.Wrap("messages must be an array")
 	}
-
 	var messages []kernel.ChatMessage
 	if sys, ok := args["system"].(string); ok && sys != "" {
 		messages = append(messages, kernel.ChatMessage{Role: "system", Content: sys})
@@ -45,15 +64,5 @@ func executeChat(ctx context.Context, args map[string]any, chatter kernel.Chatte
 		}
 		messages = append(messages, kernel.ChatMessage{Role: role, Content: content})
 	}
-
-	reply, err := chatter.Chat(ctx, messages)
-	if err != nil {
-		return nil, kernel.ErrExecutionFailed.Wrapf("chat failed: %v", err)
-	}
-	return map[string]any{
-		"message": map[string]any{
-			"role":    reply.Role,
-			"content": reply.Content,
-		},
-	}, nil
+	return messages, nil
 }

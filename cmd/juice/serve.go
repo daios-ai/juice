@@ -180,13 +180,9 @@ func runServer(addr string) error {
 	}
 }
 
-// startRemoteRetryLoop is the "server ticker" §13 relies on to settle parked remote calls without a
-// restart. Every interval it lists the pending remote traces and retries only those a backoffScheduler
-// says are due, so a long-offline peer is backed off rather than hammered every tick, and a call still
-// mid-inline-round-trip isn't duplicate-dispatched. Runs are sequential (a tick never overlaps the
-// previous one); the retry is idempotent (same key → the remote replays). Stops when ctx is cancelled.
-func startRemoteRetryLoop(ctx context.Context, list func(context.Context) ([]*kernel.Trace, error), retry func(context.Context, *kernel.Trace) error, interval time.Duration) {
-	sched := newBackoffScheduler(interval)
+// everyTick runs work on interval until ctx is cancelled, sequentially (a tick never overlaps the
+// previous run). The one loop body behind every background sweeper below.
+func everyTick(ctx context.Context, interval time.Duration, work func(context.Context)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -194,15 +190,27 @@ func startRemoteRetryLoop(ctx context.Context, list func(context.Context) ([]*ke
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			traces, err := list(ctx)
-			if err != nil {
-				continue
-			}
-			for _, tr := range sched.due(traces, time.Now()) {
-				_ = retry(ctx, tr)
-			}
+			work(ctx)
 		}
 	}
+}
+
+// startRemoteRetryLoop is the "server ticker" §13 relies on to settle parked remote calls without a
+// restart. Every interval it lists the pending remote traces and retries only those a backoffScheduler
+// says are due, so a long-offline peer is backed off rather than hammered every tick, and a call still
+// mid-inline-round-trip isn't duplicate-dispatched. Runs are sequential (a tick never overlaps the
+// previous one); the retry is idempotent (same key → the remote replays). Stops when ctx is cancelled.
+func startRemoteRetryLoop(ctx context.Context, list func(context.Context) ([]*kernel.Trace, error), retry func(context.Context, *kernel.Trace) error, interval time.Duration) {
+	sched := newBackoffScheduler(interval)
+	everyTick(ctx, interval, func(ctx context.Context) {
+		traces, err := list(ctx)
+		if err != nil {
+			return
+		}
+		for _, tr := range sched.due(traces, time.Now()) {
+			_ = retry(ctx, tr)
+		}
+	})
 }
 
 // peerRetentionSweepInterval is how often the running server reaps idle peers (§13 Retention).
@@ -215,16 +223,7 @@ const peerRetentionSweepInterval = time.Hour
 // safe to start unconditionally; runs are sequential. Mirrors startRemoteRetryLoop.
 func startPeerRetentionSweep(ctx context.Context, purge func(context.Context) (int, error), interval time.Duration) {
 	_, _ = purge(ctx) // one pass at startup
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			_, _ = purge(ctx)
-		}
-	}
+	everyTick(ctx, interval, func(ctx context.Context) { _, _ = purge(ctx) })
 }
 
 // discoveryPullTimeout bounds a single gossip pull and discoveryPassTimeout the whole pass, so one
@@ -344,16 +343,7 @@ func discoverOnce(ctx context.Context, d fedDiscoverer,
 // without libp2p. Runs are sequential (a tick never overlaps the previous pass).
 func startDiscoveryLoop(ctx context.Context, interval time.Duration, pass func(context.Context)) {
 	pass(ctx) // one pass at startup
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			pass(ctx)
-		}
-	}
+	everyTick(ctx, interval, pass)
 }
 
 // backoffScheduler decides which pending remote traces are due for a retry, spacing each trace's
@@ -1024,9 +1014,9 @@ func (s *server) setActionActive(active bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		if active {
-			err = enableAction(s.kernel, r.Context(), callerFrom(r), pathID(r))
+			err = s.kernel.SetActive(r.Context(), callerFrom(r), pathID(r), true)
 		} else {
-			err = disableAction(s.kernel, r.Context(), callerFrom(r), pathID(r))
+			err = s.kernel.SetActive(r.Context(), callerFrom(r), pathID(r), false)
 		}
 		if err != nil {
 			writeErr(w, err)
@@ -1037,7 +1027,7 @@ func (s *server) setActionActive(active bool) http.HandlerFunc {
 }
 
 func (s *server) deleteAction(w http.ResponseWriter, r *http.Request) {
-	if err := deleteAction(s.kernel, r.Context(), callerFrom(r), pathID(r)); err != nil {
+	if err := s.kernel.DeleteAction(r.Context(), callerFrom(r), pathID(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -1067,7 +1057,7 @@ func (s *server) getProcess(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) endProcess(w http.ResponseWriter, r *http.Request) {
-	if err := endProcess(s.kernel, r.Context(), callerFrom(r), pathID(r)); err != nil {
+	if err := s.kernel.EndProcess(r.Context(), callerFrom(r), pathID(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -1128,7 +1118,7 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) {
-	v, err := verifyReceipt(s.kernel, r.Context(), callerFrom(r), pathID(r))
+	v, err := s.kernel.VerifyRemoteReceipt(r.Context(), callerFrom(r), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1137,7 +1127,7 @@ func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *server) getStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := actionStats(s.kernel, r.Context(), pathID(r))
+	stats, err := s.kernel.ReadStats(r.Context(), pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1335,24 +1325,9 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 		if _, owner, ok := capFromContext(r); ok {
 			callerID = owner
 		}
-		reply, err := completeStep(s.kernel, r.Context(), callerID, pathID(r), *req.Args)
+		reply, err := s.kernel.CompleteStep(r.Context(), callerID, pathID(r), *req.Args)
 		return reply, http.StatusOK, err
 	})(w, r)
-}
-
-func withSettlementMeta(err error, reply *kernel.StepReply) error {
-	if err == nil || reply == nil {
-		return err
-	}
-	ke, ok := err.(*kernel.KernelError)
-	if !ok {
-		ke = kernel.ErrExecutionFailed.Wrap(err.Error())
-	}
-	ke = ke.WithMeta("step_id", reply.StepID).WithMeta("tx_id", reply.TxID).WithMeta("trace_id", reply.TraceID)
-	if reply.ReceiptID != "" {
-		ke = ke.WithMeta("receipt_id", reply.ReceiptID)
-	}
-	return ke
 }
 
 // postCall is the capability-only HTTP twin of juice.call (§9): a subcall on the capability's
@@ -1412,7 +1387,7 @@ func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
 		Reason      string `json:"reason"`
 		ExternalKey string `json:"external_key"`
 	}) (any, int, error) {
-		recipient, err := resolveHandle(s.kernel, r.Context(), body.Recipient)
+		recipient, err := s.kernel.ResolveUser(r.Context(), body.Recipient)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -1449,7 +1424,7 @@ func (s *server) getGrantPlan(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("selector query parameter is required"))
 		return
 	}
-	res, err := planGrants(s.kernel, r.Context(), callerFrom(r), selector)
+	res, err := s.kernel.ConsentPlan(r.Context(), callerFrom(r), selector)
 	if err != nil {
 		writeErr(w, err)
 		return

@@ -21,13 +21,6 @@ import (
 // on loopback. The route registrations live in registerRoutes (serve.go); this file holds the
 // superuser handlers and the federation-import helpers they call.
 
-// allowLocalPeers reports whether outbound federation-import HTTP fetches may reach
-// local/private addresses. Federation transport itself is libp2p (§13); this remains
-// only for the action-import fetch paths, gated by the action-source dev escape hatch.
-func allowLocalPeers() bool {
-	return globalCfg.AllowLocalSources
-}
-
 // requireSuperuserMW rejects any caller whose handle is not the configured superuser. It runs
 // after authMiddleware, so the caller is already authenticated and unsuspended.
 func (s *server) requireSuperuserMW(next http.Handler) http.Handler {
@@ -346,7 +339,7 @@ func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, erro
 	if key, _, err := s.kernel.ResolveKernelKey(ctx, ident); err == nil {
 		return key, nil
 	}
-	if u, err := resolveHandle(s.kernel, ctx, ident); err == nil {
+	if u, err := s.kernel.ResolveUser(ctx, ident); err == nil {
 		if u.KernelPublicKey == "" {
 			return "", kernel.ErrInvalidInput.Wrapf("%q is a local user, not a federation peer", ident)
 		}

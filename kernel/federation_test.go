@@ -853,7 +853,7 @@ func TestRemoteDispatchUsesStableActionID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (pending), got %v", err)
 	}
 	if fake.sentAction != "stable-action" {
@@ -901,7 +901,7 @@ func TestRetryExpiredRemoteTraceSettlesAsFailure(t *testing.T) {
 
 	// Real root run: the empty receipt makes the proxy call time out; the process stays open and
 	// the trace persists in the DB with its idempotency key (beginRun records the dispatch).
-	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -958,7 +958,7 @@ func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
 	premium := (mp*bps + 9999) / 10000
 
 	// Call while the peer is offline → pending, no settled transaction, funds locked.
-	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (pending), got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -1017,7 +1017,7 @@ func TestAwaitingReceiptSince(t *testing.T) {
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "await-action", 1000)
 
 	// Offline call → parked, awaiting a receipt.
-	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	pend, _ := st.ListPendingRemoteTraces(ctx)
@@ -1065,7 +1065,7 @@ func TestPendingRemoteTracesAndRetryWrappers(t *testing.T) {
 	mp := *a.BasePrice
 	premium := (mp*bps + 9999) / 10000
 
-	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	pending, err := k.PendingRemoteTraces(ctx)
@@ -2268,7 +2268,7 @@ func TestRemoteCallNotDispatchedFailsFast(t *testing.T) {
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "nd-action", 1000)
 	before, _ := st.ReadUser(ctx, caller.ID)
 
-	_, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, "")
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrPeerUnreachable) {
 		t.Fatalf("Run: expected ErrPeerUnreachable, got %v", err)
 	}
@@ -2311,7 +2311,7 @@ func TestRetryNeverFailsFastOnNotDispatched(t *testing.T) {
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "retry-nd-action", 1000)
 	mp := a.Price * 10000 / (10000 + bps)
 
-	if _, err := k.Run(ctx, caller.ID, "settle-peer@settle-peer/settleact", map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (parked), got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -3287,7 +3287,7 @@ func TestSettlementUsesDispatchedRate(t *testing.T) {
 	}
 	before, _ := st.ReadUser(ctx, caller.ID)
 
-	if _, err := k.Run(ctx, caller.ID, a.ID, map[string]any{}, ""); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: a.ID, Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (parked), got %v", err)
 	}
 	pend, _ := st.ListPendingRemoteTraces(ctx)
@@ -3481,13 +3481,84 @@ func TestQuotePinCatchesEffectPromotion(t *testing.T) {
 	}
 
 	buyer := setupUser(t, st, "buyer-effect", 5000)
-	_, err = k.Run(ctx, buyer.ID, "seller@seller/pay",
-		map[string]any{"amount": 100, "target": "someone"}, quoted)
+	_, err = k.Run(ctx, kernel.RunRequest{CallerID: buyer.ID, ActionRef: "seller@seller/pay", Args: map[string]any{"amount": 100, "target": "someone"}, QuoteHash: quoted})
 	if !errors.Is(err, kernel.ErrTermsChanged) {
 		t.Fatalf("a stale quote over a promoted effect must be refused, got %v", err)
 	}
 	u, _ := st.ReadUser(ctx, buyer.ID)
 	if u.Available != 5000 || u.Locked != 0 {
 		t.Errorf("the refusal must lock no value reserve; got available=%d locked=%d", u.Available, u.Locked)
+	}
+}
+
+// TestDiscoveredQuoteHashMatchesProxy proves the §15 invariant that a discovered catalog hit
+// and the proxy it resolves to carry the SAME quote hash: a buyer who pins a hash read from
+// sys/lookup must be able to run the action without the pin being refused as changed terms.
+// The two hashes are produced by different code paths (gossip ingest → discovery doc → indicative
+// pricing, versus signed manifest → import → stored proxy row), so nothing but this test keeps
+// them equal. Exercised through public behaviour only.
+func TestDiscoveredQuoteHashMatchesProxy(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithEmbedder(st, &fakeEmbedder{})
+	ctx := context.Background()
+	setupSys(t, k, st)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+
+	m := kernel.ActionManifest{
+		ActionID: "quote-parity-action", OwnerID: "remote-owner-id", OwnerHandle: "carol",
+		Name: "forecast", Description: "distinctive barometric forecasting service",
+		Kind: kernel.KindHTTP, Price: 100, RemoteBPS: 500,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "sha256-parity", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+	}
+	sig, err := kernel.SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+
+	// Leg 1: learn it from gossip, then read the hash lookup would show a local caller.
+	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{
+		PublicKey: peerKey, Handle: "carolkernel", ActionManifests: []*kernel.ActionManifest{&m},
+	}, ""); err != nil {
+		t.Fatalf("AccumulateGossip: %v", err)
+	}
+	buyer, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "quote-buyer", Password: "password123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "distinctive barometric forecasting service", Limit: 10, CallerID: buyer.ID})
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	var discovered *kernel.LookupResult
+	for _, r := range results {
+		if r.Discovered != nil && r.Discovered.ActionID == m.ActionID {
+			discovered = r
+			break
+		}
+	}
+	if discovered == nil {
+		t.Fatal("gossiped action did not surface as a discovered lookup hit")
+	}
+	if discovered.QuoteHash == "" {
+		t.Fatal("a discovered hit must carry a quote hash a buyer can pin")
+	}
+
+	// Leg 2: resolve the same manifest into a local proxy row.
+	remoteUser, err := k.EnsureKernelAccount(ctx, peerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
+	if err != nil {
+		t.Fatalf("ImportPeerAction: %v", err)
+	}
+
+	if got, want := kernel.QuoteHash(proxy), discovered.QuoteHash; got != want {
+		t.Errorf("quote hash differs between catalog and resolved proxy\n proxy      %s\n discovered %s\nprices: proxy=%d discovered=%d", got, want, proxy.Price, discovered.Price)
 	}
 }

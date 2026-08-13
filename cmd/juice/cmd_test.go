@@ -1379,22 +1379,13 @@ func TestCallInsufficientFunds(t *testing.T) {
 	a, _ := env.k.ReadActionByOwnerName(ctx, owner.ID, "expensive")
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 
-	_, err = env.k.Run(ctx, owner.ID, "poorowner/expensive", map[string]any{}, "")
+	_, err = env.k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: "poorowner/expensive", Args: map[string]any{}})
 	if err == nil {
 		t.Error("expected insufficient funds error")
 	}
 }
 
 // ---- remote ----
-
-func remoteTestPublicKey(t *testing.T) string {
-	t.Helper()
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return base64.RawURLEncoding.EncodeToString(pub)
-}
 
 func newRemoteTestKernel(t *testing.T) (*kernel.Kernel, *store.DB) {
 	t.Helper()
@@ -1608,7 +1599,7 @@ func TestCLIActionRatings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reply, err := env.k.Run(ctx, caller.ID, "rate-owner/svc", map[string]any{}, "")
+	reply, err := env.k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "rate-owner/svc", Args: map[string]any{}})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
