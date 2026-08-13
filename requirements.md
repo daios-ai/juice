@@ -167,7 +167,7 @@ Reads / supervision (no monetary mutation):
   CreateAction ReadAction ReadActionByOwnerName UpdateAction UpdateActionAndResetStats DeleteAction ListAllActions
   ReadProcess ListProcesses ListAllProcesses
   ReadTrace ReadRootTrace ListTraces
-  ReadTransaction ListTransactions ListAllTransactions
+  ReadTransaction ListTransactions
   ReadStats UpsertStats
   ReadStep ListSteps ResetStepAndRepark ResetRunningSteps
   ReadReceipt ReadReceiptByTxID

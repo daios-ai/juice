@@ -100,7 +100,6 @@ func loginPKCE(handle, password, server string) error {
 	}
 
 	tokenBody, _ := json.Marshal(map[string]string{
-		"grant_type":    "authorization_code",
 		"code":          code,
 		"code_verifier": verifier,
 		"redirect_uri":  redirectURI,

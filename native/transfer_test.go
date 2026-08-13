@@ -56,7 +56,7 @@ func seedNativeAction(t *testing.T, st kernel.Store, ownerID, name string, price
 // debited, the beneficiary credited, and a ledger entry recorded — no fee, no value machinery.
 func TestTransferLocal(t *testing.T) {
 	k, db := newLookupTestKernel(t)
-	RegisterTransferHandler(k)
+	Register(k, []Spec{Transfer()})
 	ctx := context.Background()
 	sys := seedOwner(t, db, "sys")
 	seedNativeAction(t, db, sys.ID, "transfer", 0, "transfer")

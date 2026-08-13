@@ -752,7 +752,7 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	caller := setupUser(t, st, "proxy-caller", 0)
 	p, tr := beginTestRun(t, st, caller.ID, a)
 
-	reply, err := k.Call(ctx, kernel.CallRequest{
+	reply, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        caller.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    remoteUser.ID,
@@ -845,7 +845,7 @@ func TestRemoteDispatchUsesStableActionID(t *testing.T) {
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "stable-action", 1000)
 	a.Source = "@settle-peer/settleact" // the legacy sigil form a v0.12.4+ peer rejects
@@ -894,7 +894,7 @@ func TestRetryExpiredRemoteTraceSettlesAsFailure(t *testing.T) {
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
 	cfg.RemotePendingMaxAge = time.Nanosecond // any pending trace is immediately past the bound
-	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
 
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "exp-action", 1000)
 	before, _ := st.ReadUser(ctx, caller.ID)
@@ -951,7 +951,7 @@ func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
 	// Default RemotePendingMaxAge (24h): the trace stays pending, not force-expired.
-	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "ret-action", 1000)
 	mp := *a.BasePrice
@@ -1012,7 +1012,7 @@ func TestAwaitingReceiptSince(t *testing.T) {
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
 
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "await-action", 1000)
 
@@ -1059,7 +1059,7 @@ func TestPendingRemoteTracesAndRetryWrappers(t *testing.T) {
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "wrap-action", 1000)
 	mp := *a.BasePrice
@@ -1113,7 +1113,7 @@ func TestSettleRemoteCallRejectsWrongActionID(t *testing.T) {
 	b, _ := json.Marshal(r)
 	fake.receiptJSON = string(b)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 	})
@@ -1162,7 +1162,7 @@ func TestGossipEvidenceExcludesNonExecutions(t *testing.T) {
 		if err := st.BeginRun(ctx, p, tr, caller.ID, a.Price, 0, 0); err != nil {
 			t.Fatalf("BeginRun: %v", err)
 		}
-		_, _ = k.Call(ctx, kernel.CallRequest{
+		_, _ = k.TestCall(ctx, kernel.TestCallRequest{
 			CallerID: caller.ID, ExistingTraceID: tr.ID,
 			ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 		})
@@ -1216,7 +1216,7 @@ func TestSettleRemoteCallRejectsWrongArgsHash(t *testing.T) {
 	b, _ := json.Marshal(r)
 	fake.receiptJSON = string(b)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 	})
@@ -1274,7 +1274,7 @@ func TestSettleRemoteCallQuarantinesInvalidReceipt(t *testing.T) {
 			b, _ := json.Marshal(r)
 			fake.receiptJSON = string(b)
 
-			_, err := k.Call(ctx, kernel.CallRequest{
+			_, err := k.TestCall(ctx, kernel.TestCallRequest{
 				CallerID: caller.ID, ExistingTraceID: tr.ID,
 				ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 			})
@@ -1327,7 +1327,7 @@ func TestSettleRemoteCallValidChargeNotClamped(t *testing.T) {
 	b, _ := json.Marshal(r)
 	fake.receiptJSON = string(b)
 
-	if _, err := k.Call(ctx, kernel.CallRequest{
+	if _, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 	}); err != nil {
@@ -1381,7 +1381,7 @@ func TestSettleRemoteCallRejectsRefreshProxyOnSuccess(t *testing.T) {
 	b, _ := json.Marshal(r)
 	fake.receiptJSON = string(b)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 	})
@@ -1845,7 +1845,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	receiptBytes, _ := json.Marshal(remoteReceipt)
 	fake.receiptJSON = string(receiptBytes)
 
-	reply, err := k.Call(ctx, kernel.CallRequest{
+	reply, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: remoteUser.ID, ActionName: "verify-peer/vact", Args: map[string]any{},
 	})
@@ -1902,7 +1902,7 @@ func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
 	}
 
 	p, tr := beginTestRun(t, st, caller.ID, a)
-	reply, err := k.Call(ctx, kernel.CallRequest{
+	reply, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: sys.ID, ActionName: "vrr-local", Args: map[string]any{},
 	})
@@ -1960,7 +1960,7 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	caller := setupUser(t, st, "tamper-caller", 0)
 	p, tr := beginTestRun(t, st, caller.ID, a)
 	// A receipt signed with the wrong key must be rejected: no settlement, trace stays open.
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: remoteUser.ID, ActionName: "tamper-peer/tact", Args: map[string]any{},
 	})
@@ -2021,7 +2021,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	receiptBytes, _ := json.Marshal(remoteReceipt)
 	fake.receiptJSON = string(receiptBytes)
 
-	reply, err := k.Call(ctx, kernel.CallRequest{
+	reply, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: remoteUser.ID, ActionName: "del-peer/dact", Args: map[string]any{},
 	})
@@ -2112,7 +2112,7 @@ func TestPurgeIdlePeers(t *testing.T) {
 		return cfg
 	}
 
-	kDisabled := kernel.New(st, nil, nil, nil, baseCfg(), log.Default())
+	kDisabled := kernel.New(kernel.Dependencies{Store: st, Config: baseCfg(), Logger: log.Default()})
 	setupSys(t, kDisabled, st)
 
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -2151,7 +2151,7 @@ func TestPurgeIdlePeers(t *testing.T) {
 	// Enabled with a tiny retention so the just-created peer is immediately idle.
 	cfg := baseCfg()
 	cfg.PeerRetention = time.Nanosecond
-	kEnabled := kernel.New(st, nil, nil, nil, cfg, log.Default())
+	kEnabled := kernel.New(kernel.Dependencies{Store: st, Config: cfg, Logger: log.Default()})
 	n, err := kEnabled.PurgeIdlePeers(ctx)
 	if err != nil {
 		t.Fatalf("PurgeIdlePeers: %v", err)
@@ -2263,7 +2263,7 @@ func TestRemoteCallNotDispatchedFailsFast(t *testing.T) {
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
 
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "nd-action", 1000)
 	before, _ := st.ReadUser(ctx, caller.ID)
@@ -2306,7 +2306,7 @@ func TestRetryNeverFailsFastOnNotDispatched(t *testing.T) {
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "retry-nd-action", 1000)
 	mp := a.Price * 10000 / (10000 + bps)
@@ -2377,7 +2377,7 @@ func TestSettleRemoteCallPeerUnfunded(t *testing.T) {
 			b, _ := json.Marshal(r)
 			fake.receiptJSON = string(b)
 
-			_, err := k.Call(ctx, kernel.CallRequest{
+			_, err := k.TestCall(ctx, kernel.TestCallRequest{
 				CallerID: caller.ID, ExistingTraceID: tr.ID,
 				ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 			})
@@ -2509,7 +2509,7 @@ func TestParkedDispatchCompletesInboundIdempotencyRecordOnRetry(t *testing.T) {
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "inbound-rec", 1000)
 	mp := a.Price * 10000 / (10000 + bps)
@@ -2575,7 +2575,7 @@ func TestEndProcessCompletesInboundIdempotencyRecordOfAParkedDispatch(t *testing
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, nil, fake, nil, cfg, log.Default())
+	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "close-rec", 1000)
 	rec := &kernel.IdempotencyRecord{
@@ -2619,7 +2619,7 @@ func TestCrashRecoveryCompletesInboundRecordForALocalAction(t *testing.T) {
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, nil, &fakeSuccessHTTP{}, nil, cfg, log.Default())
+	k := kernel.New(kernel.Dependencies{Store: st, HTTP: &fakeSuccessHTTP{}, Config: cfg, Logger: log.Default()})
 
 	owner := setupUser(t, st, "local-owner", 0)
 	peer := setupUser(t, st, "local-peer", 500)
@@ -2671,7 +2671,7 @@ func pexKernel(st kernel.Store, interval time.Duration) (*kernel.Kernel, string)
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = priv
 	cfg.DiscoveryInterval = interval
-	k := kernel.New(st, nil, nil, nil, cfg, log.Default())
+	k := kernel.New(kernel.Dependencies{Store: st, Config: cfg, Logger: log.Default()})
 	return k, base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 }
 
@@ -3180,7 +3180,7 @@ func TestProxyRepricesOnImportBPSChange(t *testing.T) {
 		cfg.FeeRecipientID = testIssuerUserID
 		cfg.SigningKey = testSigningKey()
 		cfg.ImportBPS = importBPS
-		return kernel.New(st, nil, &fakeFederationHTTP{resolveManifest: &m}, nil, cfg, log.Default())
+		return kernel.New(kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{resolveManifest: &m}, Federation: &fakeFederationHTTP{resolveManifest: &m}, Config: cfg, Logger: log.Default()})
 	}
 	ctx := context.Background()
 
@@ -3313,7 +3313,7 @@ func TestSettlementUsesDispatchedRate(t *testing.T) {
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret, cfg.IssuerUserID, cfg.FeeRecipientID = "test-secret", testIssuerUserID, testIssuerUserID
 	cfg.SigningKey, cfg.ImportBPS = testSigningKey(), 2000
-	repriced := kernel.New(st, nil, fake, nil, cfg, log.Default())
+	repriced := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
 	if got, _ := repriced.ReadAction(ctx, a.ID); got.Price != 1260 { // 1050 + ceil(1050*2000/10000)
 		t.Fatalf("catalog price after the change = %d, want 1260", got.Price)
 	}
@@ -3359,7 +3359,7 @@ func TestEveryReadPathReprices(t *testing.T) {
 		cfg := kernel.DefaultConfig()
 		cfg.TokenSecret, cfg.IssuerUserID, cfg.FeeRecipientID = "test-secret", testIssuerUserID, testIssuerUserID
 		cfg.SigningKey, cfg.ImportBPS = testSigningKey(), importBPS
-		return kernel.New(st, nil, &fakeFederationHTTP{resolveManifest: &m}, &fakeEmbedder{}, cfg, log.Default())
+		return kernel.New(kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{resolveManifest: &m}, Federation: &fakeFederationHTTP{resolveManifest: &m}, Embedder: &fakeEmbedder{}, Config: cfg, Logger: log.Default()})
 	}
 	a, err := at(500).ResolveAction(ctx, "bob@"+pubB64+"/greet")
 	if err != nil {

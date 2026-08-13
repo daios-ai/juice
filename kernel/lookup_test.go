@@ -36,7 +36,7 @@ func newTestKernelWithEmbedder(st kernel.Store, emb kernel.Embedder) *kernel.Ker
 	cfg.TokenSecret = "test-secret"
 	cfg.FeeBPS = 2000
 	cfg.IssuerUserID = testIssuerUserID
-	return kernel.New(st, nil, nil, emb, cfg, nil)
+	return kernel.New(kernel.Dependencies{Store: st, Embedder: emb, Config: cfg})
 }
 
 func TestLookupRanking(t *testing.T) {
@@ -403,7 +403,7 @@ func newTestKernelWithImportBPS(st kernel.Store, importBPS int64) *kernel.Kernel
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.ImportBPS = importBPS
-	return kernel.New(st, nil, nil, &fakeEmbedder{}, cfg, nil)
+	return kernel.New(kernel.Dependencies{Store: st, Embedder: &fakeEmbedder{}, Config: cfg})
 }
 
 // TestLookupDiscoveredActionPrice: a discovered-but-unresolved remote action is priced from its

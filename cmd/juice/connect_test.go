@@ -57,8 +57,12 @@ func TestUserDisconnectCLI(t *testing.T) {
 	ctx := context.Background()
 	uid, tok := makeUser(t, env.k, "grant-cli")
 	aid := createDelegatedCLIAction(t, env.k, uid, "inbox")
-	if _, err := env.k.CreateGrant(ctx, uid, aid, "refresh-tok"); err != nil {
-		t.Fatalf("CreateGrant: %v", err)
+	plan, err := env.k.ConsentPlan(ctx, uid, "grant-cli/inbox")
+	if err != nil || len(plan.Groups) != 1 {
+		t.Fatalf("consent plan: %v groups=%d", err, len(plan.Groups))
+	}
+	if _, err := env.k.CreateGrants(ctx, uid, plan.Groups[0].ProviderKey, []string{aid}, "refresh-tok", ""); err != nil {
+		t.Fatalf("grant: %v", err)
 	}
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)

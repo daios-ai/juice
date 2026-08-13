@@ -8,11 +8,27 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// RegisterChatHandler registers the @sys/llm/chat native action handler on k.
-func RegisterChatHandler(k *kernel.Kernel, chatter kernel.Chatter) {
-	k.RegisterNativeHandler("llm/chat", func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
-		return executeChat(ctx, args, chatter)
-	})
+// Chat declares @sys/llm/chat (§9).
+func Chat(chatter kernel.Chatter) Spec {
+	return Spec{
+		Name:        "llm/chat",
+		Description: "Chat completion via the configured language model",
+		InputSchema: obj(map[string]any{
+			"messages": arrayOf(messageSchema(), "Conversation history"),
+			"system":   str("Optional system prompt"),
+		}, "messages"),
+		OutputSchema: obj(map[string]any{
+			"message": objd("Generated reply message", map[string]any{
+				"role":    str("Role of the message sender (assistant)"),
+				"content": str("Text content of the reply"),
+			}),
+		}),
+		Handler: func(*kernel.Kernel) kernel.NativeFunc {
+			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+				return executeChat(ctx, args, chatter)
+			}
+		},
+	}
 }
 
 func executeChat(ctx context.Context, args map[string]any, chatter kernel.Chatter) (map[string]any, error) {

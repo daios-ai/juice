@@ -42,13 +42,13 @@ func init() {
 }
 
 func runServer(addr string) error {
-	k, db, logger, httpExec, err := openKernel()
+	k, db, logger, httpExec, fedAdapter, specs, err := openKernel()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	if err := bootstrap(k, globalCfg.Native); err != nil {
+	if err := bootstrap(k, globalCfg.Native, specs); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 	// Prune natives the build no longer ships (e.g. after a native action is removed): a
@@ -76,7 +76,7 @@ func runServer(addr string) error {
 
 	// Auth — rate limited: 5 requests/minute per IP, burst of 10.
 	authLimiter := ipRateLimiter(5.0/60, 10)
-	r.With(authLimiter).Post("/v1/auth/token", srv.postTokenMulti)
+	r.With(authLimiter).Post("/v1/auth/token", srv.postToken)
 	r.With(authLimiter).Post("/v1/auth/authorize", srv.postAuthorize)
 	r.With(authLimiter).Post("/v1/auth/refresh", srv.postRefresh)
 	r.With(authLimiter).Post("/v1/auth/logout", srv.postLogout)
@@ -109,8 +109,9 @@ func runServer(addr string) error {
 		logger.Error("fed.start_failed", "error", ferr)
 	} else {
 		srv.fed = fedTransport
-		httpExec.fedTransport = fedTransport
-		httpExec.localPubKey, _ = k.GetConfig(context.Background(), configKeySigningPublic)
+		fedAdapter.SetTransport(fedTransport)
+		pub, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+		fedAdapter.SetLocalPubKey(pub)
 		defer fedTransport.Close()
 
 		// Drive pending remote-proxy calls on a timer so a peer coming back online settles parked
@@ -1193,36 +1194,21 @@ func (s *server) postLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// postTokenMulti handles POST /v1/auth/token (JSON only).
-// grant_type "authorization_code" exchanges a PKCE code for tokens;
-// all other values (or omitted) are treated as password grant.
-func (s *server) postTokenMulti(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		GrantType    string `json:"grant_type"`
-		Handle       string `json:"handle"`
-		Password     string `json:"password"`
+// postToken handles POST /v1/auth/token (JSON only): the authorization-code + PKCE exchange,
+// the sole token-issuing form §14 defines. A password never reaches this route — credentials go
+// to /v1/auth/authorize, which mints the code this exchanges (§12).
+func (s *server) postToken(w http.ResponseWriter, r *http.Request) {
+	handle(func(r *http.Request, req struct {
 		Code         string `json:"code"`
 		CodeVerifier string `json:"code_verifier"`
 		RedirectURI  string `json:"redirect_uri"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	if req.GrantType == "authorization_code" {
+	}) (any, int, error) {
 		access, refresh, err := s.kernel.ExchangeAuthCode(r.Context(), req.Code, req.CodeVerifier, req.RedirectURI)
 		if err != nil {
-			writeErr(w, err)
-			return
+			return nil, 0, err
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"access_token": access, "refresh_token": refresh})
-		return
-	}
-	tok, err := s.kernel.Login(r.Context(), req.Handle, req.Password)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": tok})
+		return map[string]string{"access_token": access, "refresh_token": refresh}, http.StatusOK, nil
+	})(w, r)
 }
 
 // ---- Step handlers ----
@@ -1347,7 +1333,7 @@ func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return nil, 0, kernel.ErrUnauthenticated.Wrap("capability required")
 		}
-		reply, err := s.kernel.Call(r.Context(), kernel.CallRequest{
+		reply, err := s.kernel.Subcall(r.Context(), kernel.SubcallRequest{
 			CallerID:      owner,
 			ParentTraceID: trace,
 			ActionRef:     req.Action,
@@ -1607,194 +1593,4 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 		return nil, err
 	}
 	return tr, nil
-}
-
-// fedHandlers answers inbound federation protocol streams.
-type fedHandlers struct {
-	kernel      *kernel.Kernel
-	log         *log.Logger
-	callLimiter *keyLimiter // per-peer inbound call rate limit (§13; known-peer-bounded)
-}
-
-// keyLimiter is a per-key token-bucket rate limiter. Keyed by peer public key on the federation
-// call path — inbound calls are permissionless, so any signed key can call (§13); the distinct-key
-// set is therefore bounded by the transport's Sybil caps (per-source/per-peer/global, §13), not by
-// peering. Complements those transport frame/deadline caps and the economic (prepaid-balance)
-// backstop with a per-key call-rate ceiling.
-type keyLimiter struct {
-	mu      sync.Mutex
-	entries map[string]*rate.Limiter
-	rate    rate.Limit
-	burst   int
-}
-
-func newKeyLimiter(ratePerSec float64, burst int) *keyLimiter {
-	return &keyLimiter{entries: map[string]*rate.Limiter{}, rate: rate.Limit(ratePerSec), burst: burst}
-}
-
-func (kl *keyLimiter) allow(key string) bool {
-	kl.mu.Lock()
-	defer kl.mu.Unlock()
-	l, ok := kl.entries[key]
-	if !ok {
-		l = rate.NewLimiter(kl.rate, kl.burst)
-		kl.entries[key] = l
-	}
-	return l.Allow()
-}
-
-// OnCall verifies and executes an inbound federation call, returning the settlement envelope.
-func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRequest) fed.CallResponse {
-	// Defense in depth (§13): the payload signature already authenticates the counterparty, but the
-	// Noise-authenticated connection key must also match, so a validly-signed request cannot be
-	// relayed or replayed over a connection authenticated as a different peer. Fail open only when
-	// the transport supplied no key (the signature remains the authority).
-	if peerKey != "" && peerKey != req.Counterparty {
-		code := kernel.KernelErrorCode(kernel.ErrUnauthenticated)
-		b, _ := json.Marshal(map[string]string{"error": "counterparty does not match the authenticated connection", "code": code})
-		return fed.CallResponse{Status: kernel.HTTPStatusFromCode(code), Body: b}
-	}
-	limitKey := peerKey
-	if limitKey == "" {
-		limitKey = req.Counterparty
-	}
-	if h.callLimiter != nil && !h.callLimiter.allow(limitKey) {
-		b, _ := json.Marshal(map[string]string{"error": "rate limit exceeded"})
-		return fed.CallResponse{Status: http.StatusTooManyRequests, Body: b}
-	}
-	status, body, err := handleFederationCall(h.kernel, ctx, req.Counterparty, req.ExpectedContractHash,
-		req.Timestamp, req.IdempotencyKey, req.Action, req.Signature, []byte(req.Args))
-	if err != nil {
-		// No receipt to settle on → the caller treats this as pending (retry), exactly as the
-		// HTTP path did when it returned an error status with no receipt body.
-		b, _ := json.Marshal(map[string]string{"error": err.Error(), "code": kernel.KernelErrorCode(err)})
-		return fed.CallResponse{Status: kernel.HTTPStatusFromCode(kernel.KernelErrorCode(err)), Body: b}
-	}
-	b, _ := json.Marshal(body)
-	return fed.CallResponse{Status: status, Body: b}
-}
-
-// OnStep lists or completes the waiting steps this peer is the required caller of (§10, §13).
-// The connection-key check and rate limit mirror OnCall: a step completion runs a funded call here.
-func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRequest) fed.StepResponse {
-	stepErr := func(err error) fed.StepResponse {
-		code := kernel.KernelErrorCode(err)
-		b, _ := json.Marshal(map[string]string{"error": err.Error(), "code": code})
-		return fed.StepResponse{Status: kernel.HTTPStatusFromCode(code), Body: b}
-	}
-	// Parity with OnCall, including its fail-open when the transport supplied no key. What makes
-	// that safe here is that the step payloads bind their `recipient` (§13): a request signed for
-	// another kernel does not verify against ours, so a captured request cannot be replayed across
-	// kernels even when the connection key is unavailable.
-	if peerKey != "" && peerKey != req.Counterparty {
-		return stepErr(kernel.ErrUnauthenticated.Wrap("counterparty does not match the authenticated connection"))
-	}
-	limitKey := peerKey
-	if limitKey == "" {
-		limitKey = req.Counterparty
-	}
-	if h.callLimiter != nil && !h.callLimiter.allow(limitKey) {
-		b, _ := json.Marshal(map[string]string{"error": "rate limit exceeded"})
-		return fed.StepResponse{Status: http.StatusTooManyRequests, Body: b}
-	}
-
-	var status int
-	var body map[string]any
-	var err error
-	switch req.Kind {
-	case "list":
-		status, body, err = handleFederationStepList(h.kernel, ctx, req.Counterparty, req.Timestamp, req.Signature)
-	case "complete":
-		input := []byte(req.Input)
-		if len(input) == 0 {
-			input = []byte("{}")
-		}
-		status, body, err = handleFederationStepComplete(h.kernel, ctx, req.Counterparty, req.Timestamp,
-			req.IdempotencyKey, req.StepID, req.Signature, input, req.ForUserID, req.UserAttestation, req.UserTimestamp)
-	default:
-		return stepErr(kernel.ErrInvalidInput.Wrap("unknown step request kind"))
-	}
-	if err != nil {
-		return stepErr(err)
-	}
-	b, _ := json.Marshal(body)
-	return fed.StepResponse{Status: status, Body: b}
-}
-
-// OnSettle answers the /juice/fed/settle/1 residual-settlement exchange (§13): the creditor side of
-// the two-party commit/reveal. The connection-key check and freshness window mirror OnCall/OnStep;
-// the kernel verifies the debtor's scoped signature and applies the three-way legs idempotently.
-func (h *fedHandlers) OnSettle(ctx context.Context, peerKey string, req fed.SettleRequest) fed.SettleResponse {
-	settleErr := func(err error) fed.SettleResponse {
-		code := kernel.KernelErrorCode(err)
-		b, _ := json.Marshal(map[string]string{"error": err.Error(), "code": code})
-		return fed.SettleResponse{Status: kernel.HTTPStatusFromCode(code), Body: b}
-	}
-	if peerKey != "" && peerKey != req.Counterparty {
-		return settleErr(kernel.ErrUnauthenticated.Wrap("counterparty does not match the authenticated connection"))
-	}
-	if err := checkFederationTimestamp(req.Timestamp); err != nil {
-		return settleErr(err)
-	}
-	status, body, err := h.kernel.HandleSettle(ctx, req.Counterparty, req.Kind, req.Timestamp, req.Signature,
-		req.SettlementID, req.Amount, req.Nonce, []byte(req.Record))
-	if err != nil {
-		return settleErr(err)
-	}
-	return fed.SettleResponse{Status: status, Body: body}
-}
-
-// OnResolve answers the open /juice/fed/resolve/1 protocol (§13): resolve one action to its signed
-// manifest, or one user reference to its stable id+handle — the primitive that lets a caller reach a
-// remote action without prior subscription.
-func (h *fedHandlers) OnResolve(ctx context.Context, _ string, req fed.ResolveRequest) fed.ResolveResponse {
-	// Mirror the HTTP error shape ({error, code}) so an offline-verifiable rejection carries a
-	// typed code like every other reply (§14). Status derives from the code.
-	errResp := func(err error) fed.ResolveResponse {
-		code := kernel.KernelErrorCode(err)
-		b, _ := json.Marshal(map[string]string{"error": err.Error(), "code": code})
-		return fed.ResolveResponse{Status: kernel.HTTPStatusFromCode(code), Body: b}
-	}
-	switch req.Kind {
-	case "action":
-		a, err := h.kernel.ResolveAction(ctx, req.Owner+"/"+req.Name)
-		if err != nil || a == nil {
-			return errResp(kernel.ErrNotFound.Wrap("action not found"))
-		}
-		m, err := h.kernel.GetActionManifest(ctx, a.ID)
-		if err != nil {
-			return errResp(err)
-		}
-		b, _ := json.Marshal(m)
-		return fed.ResolveResponse{Status: 200, Body: b}
-	case "user":
-		id, handle, err := h.kernel.ResolvePrincipal(ctx, req.User)
-		if err != nil {
-			return errResp(kernel.ErrNotFound.Wrap("user not found"))
-		}
-		b, _ := json.Marshal(map[string]string{"user_id": id, "handle": handle})
-		return fed.ResolveResponse{Status: 200, Body: b}
-	default:
-		return errResp(kernel.ErrInvalidInput.Wrap("unknown resolve kind"))
-	}
-}
-
-// OnGossip returns one page of the gossip document (§13). peerKey is the connection's authenticated
-// public key; GetGossip uses it to report the requesting peer its credit here (counterparty_balance,
-// §13 peer sync). req.Cursor resumes the evidence stream.
-func (h *fedHandlers) OnGossip(ctx context.Context, peerKey string, req fed.GossipRequest) (json.RawMessage, error) {
-	g, err := h.kernel.GetGossip(ctx, peerKey, req.Cursor)
-	if err != nil {
-		return nil, err
-	}
-	b, err := json.Marshal(g)
-	if err != nil {
-		return nil, err
-	}
-	// Served-response telemetry (§13 diagnostics): size + payload counts, to correlate a
-	// puller's read-side failure against a heavy gossip frame near the relayed allowance.
-	h.log.With(ctx).Debug("gossip.served",
-		"requester", peerKey, "bytes", len(b),
-		"manifests", len(g.ActionManifests), "evidence", len(g.Evidence))
-	return b, nil
 }

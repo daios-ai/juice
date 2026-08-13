@@ -6,11 +6,33 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
 )
+
+// loginToken returns just the access token from the canonical PKCE flow.
+func loginToken(k *kernel.Kernel, ctx context.Context, handle, password string) (string, error) {
+	access, _, err := loginTokens(k, ctx, handle, password)
+	return access, err
+}
+
+// loginTokens is the canonical password→tokens path (§12): authorize with PKCE, then exchange the
+// code — the only token-issuing flow §14 defines. Credential errors surface from StartAuthCode.
+func loginTokens(k *kernel.Kernel, ctx context.Context, handle, password string) (access, refresh string, err error) {
+	verifier, err := kernel.GenerateCodeVerifier()
+	if err != nil {
+		return "", "", err
+	}
+	redirect, err := k.StartAuthCode(ctx, handle, password, kernel.CodeChallenge(verifier), "")
+	if err != nil {
+		return "", "", err
+	}
+	code := strings.TrimPrefix(redirect, "?code=")
+	return k.ExchangeAuthCode(ctx, code, verifier, "")
+}
 
 func TestHashPassword(t *testing.T) {
 	hash, err := kernel.HashPassword("secret")
@@ -254,12 +276,12 @@ func TestRefreshAccessToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	access1, refresh1, err := k.LoginWithRefresh(ctx, "eve", "pass")
+	access1, refresh1, err := loginTokens(k, ctx, "eve", "pass")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if access1 == "" || refresh1 == "" {
-		t.Fatal("expected access and refresh tokens from LoginWithRefresh")
+		t.Fatal("expected access and refresh tokens from the PKCE exchange")
 	}
 
 	access2, refresh2, err := k.RefreshAccessToken(ctx, refresh1)
@@ -302,7 +324,7 @@ func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, refresh, err := k.LoginWithRefresh(ctx, u.Handle, "pass")
+	_, refresh, err := loginTokens(k, ctx, u.Handle, "pass")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,8 +341,8 @@ func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
 	if _, _, err := k.RefreshAccessToken(ctx, refresh); !errors.Is(err, kernel.ErrUnauthenticated) {
 		t.Fatalf("RefreshAccessToken: got %v, want ErrUnauthenticated", err)
 	}
-	if _, _, err := k.LoginWithRefresh(ctx, u.Handle, "pass"); !errors.Is(err, kernel.ErrUnauthenticated) {
-		t.Fatalf("LoginWithRefresh: got %v, want ErrUnauthenticated", err)
+	if _, _, err := loginTokens(k, ctx, u.Handle, "pass"); !errors.Is(err, kernel.ErrUnauthenticated) {
+		t.Fatalf("login: got %v, want ErrUnauthenticated", err)
 	}
 }
 
@@ -519,10 +541,10 @@ func TestSeedPhraseRecovery(t *testing.T) {
 	if err := k.CompleteRecovery(ctx, "rec", nonce, sign(priv, nonce), "newpass1"); err != nil {
 		t.Fatalf("CompleteRecovery: %v", err)
 	}
-	if _, _, err := k.LoginWithRefresh(ctx, "rec", "origpass"); err == nil {
+	if _, _, err := loginTokens(k, ctx, "rec", "origpass"); err == nil {
 		t.Error("old password should be rejected after recovery")
 	}
-	if _, _, err := k.LoginWithRefresh(ctx, "rec", "newpass1"); err != nil {
+	if _, _, err := loginTokens(k, ctx, "rec", "newpass1"); err != nil {
 		t.Errorf("new password should work: %v", err)
 	}
 

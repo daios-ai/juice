@@ -90,9 +90,8 @@ Federation has no HTTP surface: peer identity, gossip, manifests, and inbound ca
 
 | Operation | HTTP | CLI |
 |-----------|------|-----|
-| Password login | `POST /v1/auth/token` `{handle, password}` → `{token}` | `juice auth login <user> [--password]` |
-| PKCE authorize | `POST /v1/auth/authorize` `{handle, password, code_challenge, [redirect_uri]}` → `302` if `redirect_uri` provided, else `200 {"redirect":"?code=CODE"}` | `juice auth login <user> --pkce --server <url>` |
-| PKCE token exchange | `POST /v1/auth/token` `{grant_type:"authorization_code", code, code_verifier, [redirect_uri]}` → `{access_token, refresh_token}` | (handled internally by `--pkce` login) |
+| Authorize (PKCE) | `POST /v1/auth/authorize` `{handle, password, code_challenge, [redirect_uri]}` → `302` if `redirect_uri` provided, else `200 {"redirect":"?code=CODE"}` | `juice auth login <user> [--password]` |
+| Token exchange | `POST /v1/auth/token` `{code, code_verifier, [redirect_uri]}` → `{access_token, refresh_token}` | (driven internally by `auth login`) |
 | Refresh token | `POST /v1/auth/refresh` `{refresh_token}` → `{access_token, refresh_token}` | (automatic on any command's 401) |
 | Logout | `POST /v1/auth/logout` `{refresh_token}` → 204 | `juice auth logout` |
 | Recover (start) | `POST /v1/auth/recover/start` `{handle}` → `{nonce, expires_in_seconds}` | (part of `juice auth recover`) |

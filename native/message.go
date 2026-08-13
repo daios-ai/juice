@@ -7,10 +7,22 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-func RegisterMessageHandler(k *kernel.Kernel) {
-	k.RegisterNativeHandler("message", func(ctx context.Context, args map[string]any, _, callerID, _, _, parentTraceID string) (map[string]any, error) {
-		return executeMessage(ctx, args, callerID, parentTraceID, k)
-	})
+// Message declares @sys/message (§9): delivery by parking a Step the recipient must acknowledge.
+func Message() Spec {
+	return Spec{
+		Name:        "message",
+		Description: "Sends a message to another platform user and creates a Step they must acknowledge",
+		InputSchema: obj(map[string]any{
+			"to":      str("Recipient handle"),
+			"message": str("Message body"),
+		}, "to", "message"),
+		OutputSchema: obj(map[string]any{"step_id": str("ID of the created step")}),
+		Handler: func(k *kernel.Kernel) kernel.NativeFunc {
+			return func(ctx context.Context, args map[string]any, _, callerID, _, _, parentTraceID string) (map[string]any, error) {
+				return executeMessage(ctx, args, callerID, parentTraceID, k)
+			}
+		},
+	}
 }
 
 func executeMessage(ctx context.Context, args map[string]any, callerID, parentTraceID string, k *kernel.Kernel) (map[string]any, error) {

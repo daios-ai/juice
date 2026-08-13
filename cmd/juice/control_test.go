@@ -27,7 +27,7 @@ func bootSuperuser(t *testing.T, env *testEnv) string {
 	if err := env.k.SetConfig(ctx, configKeySuperuser, "sys"); err != nil {
 		t.Fatal(err)
 	}
-	tok, err := env.k.Login(ctx, "sys", "sys-pass")
+	tok, err := loginTokenFor(env.k, ctx, "sys", "sys-pass")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestAdminSuperuserGate(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	regTok, err := env.k.Login(ctx, "regular", "pw")
+	regTok, err := loginTokenFor(env.k, ctx, "regular", "pw")
 	if err != nil {
 		t.Fatal(err)
 	}

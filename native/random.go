@@ -9,11 +9,19 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// RegisterRandomHandler registers the @sys/random native action handler on k.
-func RegisterRandomHandler(k *kernel.Kernel) {
-	k.RegisterNativeHandler("random", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
-		return executeRandom()
-	})
+// Random declares @sys/random (§9): the randomness source WASM scripts have no ambient access to.
+func Random() Spec {
+	return Spec{
+		Name:         "random",
+		Description:  "Returns a cryptographically secure random float in [0, 1)",
+		InputSchema:  obj(map[string]any{}),
+		OutputSchema: obj(map[string]any{"value": num("Random float in [0, 1)")}),
+		Handler: func(*kernel.Kernel) kernel.NativeFunc {
+			return func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+				return executeRandom()
+			}
+		},
+	}
 }
 
 func executeRandom() (map[string]any, error) {

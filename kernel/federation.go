@@ -777,7 +777,7 @@ func remoteReceiptInvalid(r Receipt, mp, rbps, sentValue int64, replyJSON []byte
 // settleRemoteCall settles a remote-proxy call after ExecuteFederation returns.
 // If the receipt is absent or has an invalid signature, the trace stays open for retry (ErrTimeout).
 // Otherwise it commits CommitRemoteSettlement with the correct charge/duty/refund split.
-func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, action *Action, ktx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req CallRequest, target *Account, mp int64, fr FederationResult, latency float64) (*CallReply, error) {
+func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, action *Action, ktx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req callRequest, target *Account, mp int64, fr FederationResult, latency float64) (*CallReply, error) {
 	// The value we dispatched (for a value transfer) and the contract hash we dispatched with ride on
 	// the trace, so both the direct and the retry settle paths read them from one source (§13).
 	// The rates come from the same record: the funding boundary froze them, so a fee change between
@@ -962,8 +962,8 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	if err != nil {
 		return ErrNotFound.Wrap("process not found for retry")
 	}
-	fe, ok := k.http.(FederationExecutor)
-	if !ok {
+	fe := k.fedClient
+	if fe == nil {
 		return ErrInvalidState.Wrap("federation executor not configured")
 	}
 	mp := dispatch.RemotePrice
@@ -993,7 +993,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	argsJSON, _ := json.Marshal(dispatch.Args)
 	ktx.ArgsJSON = json.RawMessage(argsJSON)
 
-	req := CallRequest{StepID: dispatch.StepID}
+	req := callRequest{StepID: dispatch.StepID}
 	// The inbound record rides on the trace, so it survives for every action kind and is found
 	// here whether this retry settles on a receipt or hits the max-age bound below.
 	if trace.IdempotencyRecordID != nil {
@@ -1099,8 +1099,8 @@ func (k *Kernel) ResolveRequiredCaller(ctx context.Context, ref string) (callerI
 	if kerr != nil {
 		return "", "", kerr
 	}
-	resolver, ok := k.http.(RemoteResolver)
-	if !ok {
+	resolver := k.fedClient
+	if resolver == nil {
 		return "", "", ErrNotFound.Wrap("remote resolution unavailable")
 	}
 	remoteUserID, _, rerr := resolver.ResolveRemoteUser(ctx, peerKey, owner)
@@ -2161,25 +2161,62 @@ func VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
 // JCS({action, args_hash, counterparty, expected_contract_hash, idempotency_key, recipient, timestamp}).
 // recipient (the serving kernel's key) binds the request to one kernel (§13 replay defense);
 // expected_contract_hash is the caller's cached contract hash (§8 If-Match).
-func fedCallPayload(action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash string) map[string]string {
-	return map[string]string{
-		"action":                 action,
-		"args_hash":              argsHash,
-		"counterparty":           counterparty,
-		"expected_contract_hash": expectedContractHash,
-		"idempotency_key":        idempotencyKey,
-		"recipient":              recipient,
-		"timestamp":              timestamp,
-	}
+// Signed request payloads (§13). Each type IS one protocol's contract shape: its JSON tags fix the
+// key-set, and its signature domain (§12) keeps it from verifying as any other payload. JCS orders
+// keys canonically, so these produce byte-identical bytes to the maps they replaced — pinned by the
+// golden fixtures in sigfixture_test.go. Adding a payload is one struct plus one domain constant.
+type fedCallPayload struct {
+	Action               string `json:"action"`
+	ArgsHash             string `json:"args_hash"`
+	Counterparty         string `json:"counterparty"`
+	ExpectedContractHash string `json:"expected_contract_hash"`
+	IdempotencyKey       string `json:"idempotency_key"`
+	Recipient            string `json:"recipient"`
+	Timestamp            string `json:"timestamp"`
 }
 
-// VerifyFederationSignature verifies an Ed25519 signature over the canonical federation call payload.
-func VerifyFederationSignature(pubKeyB64, action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash, sigB64 string) error {
+type stepCompletePayload struct {
+	Counterparty   string `json:"counterparty"`
+	IdempotencyKey string `json:"idempotency_key"`
+	InputHash      string `json:"input_hash"`
+	Recipient      string `json:"recipient"`
+	StepID         string `json:"step_id"`
+	Timestamp      string `json:"timestamp"`
+}
+
+// stepAuthPayload is the home kernel's attestation that its authenticated local user authorized
+// completing a step (§13). No "scope" key: the sigDomainStepAuth prefix provides the separation.
+type stepAuthPayload struct {
+	Counterparty string `json:"counterparty"`
+	Recipient    string `json:"recipient"`
+	StepID       string `json:"step_id"`
+	Timestamp    string `json:"timestamp"`
+	UserID       string `json:"user_id"`
+}
+
+type stepListPayload struct {
+	Counterparty string `json:"counterparty"`
+	Recipient    string `json:"recipient"`
+	Timestamp    string `json:"timestamp"`
+}
+
+// verifyPeerSignature verifies a peer's base64url Ed25519 signature over a payload in its own
+// domain. It owns the cryptographic mechanics only; each exported verifier below translates a
+// failure into its own typed, protocol-specific error.
+func verifyPeerSignature(pubKeyB64, domain string, payload any, sigB64 string) error {
 	pub, err := decodeRemotePublicKey(pubKeyB64)
 	if err != nil {
 		return ErrUnauthenticated.Wrap("invalid counterparty public key")
 	}
-	if err := verifyJCS(pub, sigDomainFedCall, fedCallPayload(action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash), sigB64); err != nil {
+	return verifyJCS(pub, domain, payload, sigB64)
+}
+
+// VerifyFederationSignature verifies an Ed25519 signature over the canonical federation call payload.
+func VerifyFederationSignature(pubKeyB64, action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash, sigB64 string) error {
+	p := fedCallPayload{Action: action, ArgsHash: argsHash, Counterparty: counterparty,
+		ExpectedContractHash: expectedContractHash, IdempotencyKey: idempotencyKey,
+		Recipient: recipient, Timestamp: timestamp}
+	if err := verifyPeerSignature(pubKeyB64, sigDomainFedCall, p, sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("federation signature is invalid")
 	}
 	return nil
@@ -2187,69 +2224,46 @@ func VerifyFederationSignature(pubKeyB64, action, counterparty, recipient, expec
 
 // SignFederationPayload creates a base64url Ed25519 signature over the canonical federation payload.
 func SignFederationPayload(key ed25519.PrivateKey, action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash string) (string, error) {
-	return signJCS(key, sigDomainFedCall, fedCallPayload(action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash))
+	return signJCS(key, sigDomainFedCall, fedCallPayload{Action: action, ArgsHash: argsHash,
+		Counterparty: counterparty, ExpectedContractHash: expectedContractHash,
+		IdempotencyKey: idempotencyKey, Recipient: recipient, Timestamp: timestamp})
 }
 
 // SignStepPayload creates a base64url Ed25519 signature over the canonical step-completion payload
-// JCS({counterparty, idempotency_key, input_hash, recipient, step_id, timestamp}) — a key-set
-// disjoint from every other signed Juice payload (§12, §13).
+// — a key-set disjoint from every other signed Juice payload (§12, §13).
 func SignStepPayload(key ed25519.PrivateKey, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash string) (string, error) {
-	return signJCS(key, sigDomainStepComplete, stepPayload(stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash))
+	return signJCS(key, sigDomainStepComplete, stepCompletePayload{Counterparty: counterparty,
+		IdempotencyKey: idempotencyKey, InputHash: inputHash, Recipient: recipient,
+		StepID: stepID, Timestamp: timestamp})
 }
 
 // VerifyStepSignature verifies an Ed25519 signature over the canonical step-completion payload.
 // recipient must be the verifying kernel's own public key.
 func VerifyStepSignature(pubKeyB64, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash, sigB64 string) error {
-	pub, err := decodeRemotePublicKey(pubKeyB64)
-	if err != nil {
-		return ErrUnauthenticated.Wrap("invalid counterparty public key")
-	}
-	if err := verifyJCS(pub, sigDomainStepComplete, stepPayload(stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash), sigB64); err != nil {
+	p := stepCompletePayload{Counterparty: counterparty, IdempotencyKey: idempotencyKey,
+		InputHash: inputHash, Recipient: recipient, StepID: stepID, Timestamp: timestamp}
+	if err := verifyPeerSignature(pubKeyB64, sigDomainStepComplete, p, sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("step signature is invalid")
 	}
 	return nil
 }
 
-func stepPayload(stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash string) map[string]string {
-	return map[string]string{
-		"counterparty":    counterparty,
-		"idempotency_key": idempotencyKey,
-		"input_hash":      inputHash,
-		"recipient":       recipient,
-		"step_id":         stepID,
-		"timestamp":       timestamp,
-	}
-}
-
 // SignStepAuthPayload signs the home-kernel attestation that its authenticated local user (userID)
-// authorized completing step stepID (§13). The fixed scope "step_auth" plus the user_id key keep
-// this key-set disjoint from the step-complete and step-list payloads; recipient binds it to the
-// serving kernel, closing cross-kernel replay.
+// authorized completing step stepID (§13). recipient binds it to the serving kernel, closing
+// cross-kernel replay.
 func SignStepAuthPayload(key ed25519.PrivateKey, counterparty, recipient, userID, stepID, timestamp string) (string, error) {
-	return signJCS(key, sigDomainStepAuth, stepAuthPayload(counterparty, recipient, userID, stepID, timestamp))
+	return signJCS(key, sigDomainStepAuth, stepAuthPayload{Counterparty: counterparty,
+		Recipient: recipient, StepID: stepID, Timestamp: timestamp, UserID: userID})
 }
 
 // VerifyStepAuthSignature verifies the attestation. recipient must be the verifying kernel's own key.
 func VerifyStepAuthSignature(pubKeyB64, counterparty, recipient, userID, stepID, timestamp, sigB64 string) error {
-	pub, err := decodeRemotePublicKey(pubKeyB64)
-	if err != nil {
-		return ErrUnauthenticated.Wrap("invalid counterparty public key")
-	}
-	if err := verifyJCS(pub, sigDomainStepAuth, stepAuthPayload(counterparty, recipient, userID, stepID, timestamp), sigB64); err != nil {
+	p := stepAuthPayload{Counterparty: counterparty, Recipient: recipient, StepID: stepID,
+		Timestamp: timestamp, UserID: userID}
+	if err := verifyPeerSignature(pubKeyB64, sigDomainStepAuth, p, sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("step attestation is invalid")
 	}
 	return nil
-}
-
-func stepAuthPayload(counterparty, recipient, userID, stepID, timestamp string) map[string]string {
-	// No "scope" key: the sigDomainStepAuth prefix now provides domain separation (§12).
-	return map[string]string{
-		"counterparty": counterparty,
-		"recipient":    recipient,
-		"step_id":      stepID,
-		"timestamp":    timestamp,
-		"user_id":      userID,
-	}
 }
 
 // SignStepAuth stamps the current time and signs the step_auth attestation with this kernel's
@@ -2260,33 +2274,21 @@ func (k *Kernel) SignStepAuth(counterparty, recipient, userID, stepID string) (s
 	return
 }
 
-// SignStepListPayload creates a base64url Ed25519 signature over
-// JCS({counterparty, recipient, scope, timestamp}). The fixed scope value keeps this key-set
-// disjoint from every other signed payload (§12, §13).
+// SignStepListPayload creates a base64url Ed25519 signature over the canonical step-list payload.
+// The sigDomainStepList prefix keeps this key-set disjoint from every other signed payload (§12).
 func SignStepListPayload(key ed25519.PrivateKey, counterparty, recipient, timestamp string) (string, error) {
-	return signJCS(key, sigDomainStepList, stepListPayload(counterparty, recipient, timestamp))
+	return signJCS(key, sigDomainStepList, stepListPayload{Counterparty: counterparty,
+		Recipient: recipient, Timestamp: timestamp})
 }
 
 // VerifyStepListSignature verifies an Ed25519 signature over the canonical step-list payload.
 // recipient must be the verifying kernel's own public key.
 func VerifyStepListSignature(pubKeyB64, counterparty, recipient, timestamp, sigB64 string) error {
-	pub, err := decodeRemotePublicKey(pubKeyB64)
-	if err != nil {
-		return ErrUnauthenticated.Wrap("invalid counterparty public key")
-	}
-	if err := verifyJCS(pub, sigDomainStepList, stepListPayload(counterparty, recipient, timestamp), sigB64); err != nil {
+	p := stepListPayload{Counterparty: counterparty, Recipient: recipient, Timestamp: timestamp}
+	if err := verifyPeerSignature(pubKeyB64, sigDomainStepList, p, sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("step signature is invalid")
 	}
 	return nil
-}
-
-func stepListPayload(counterparty, recipient, timestamp string) map[string]string {
-	// No "scope" key: the sigDomainStepList prefix now provides domain separation (§12).
-	return map[string]string{
-		"counterparty": counterparty,
-		"recipient":    recipient,
-		"timestamp":    timestamp,
-	}
 }
 
 // ---- Residual settlement (§13) ----
@@ -2347,16 +2349,44 @@ func verifySettlementRecord(r *SettlementRecord, creditorB64 string) error {
 // The three settle request payloads are disjoint from each other and from every other signed payload
 // (§12): each is signed under its own domain (sigDomainSettleOpen/Finish/Reconcile). recipient binds a
 // request to the intended creditor, closing cross-kernel replay.
-func settleOpenPayload(counterparty, recipient, settlementID string, amount int64, timestamp string) map[string]string {
-	return map[string]string{"amount": strconv.FormatInt(amount, 10), "counterparty": counterparty, "recipient": recipient, "settlement_id": settlementID, "timestamp": timestamp}
+// The three settle rounds (§13). Amount is a decimal string, as the signed key-set has always had
+// it — a typed struct fixes the shape without moving a byte (sigfixture_test.go).
+type settleOpenReq struct {
+	Amount       string `json:"amount"`
+	Counterparty string `json:"counterparty"`
+	Recipient    string `json:"recipient"`
+	SettlementID string `json:"settlement_id"`
+	Timestamp    string `json:"timestamp"`
 }
 
-func settleFinishPayload(counterparty, recipient, settlementID, nonce, timestamp string) map[string]string {
-	return map[string]string{"counterparty": counterparty, "nonce": nonce, "recipient": recipient, "settlement_id": settlementID, "timestamp": timestamp}
+type settleFinishReq struct {
+	Counterparty string `json:"counterparty"`
+	Nonce        string `json:"nonce"`
+	Recipient    string `json:"recipient"`
+	SettlementID string `json:"settlement_id"`
+	Timestamp    string `json:"timestamp"`
 }
 
-func settleReconcilePayload(counterparty, recipient, settlementID, timestamp string) map[string]string {
-	return map[string]string{"counterparty": counterparty, "recipient": recipient, "settlement_id": settlementID, "timestamp": timestamp}
+type settleReconcileReq struct {
+	Counterparty string `json:"counterparty"`
+	Recipient    string `json:"recipient"`
+	SettlementID string `json:"settlement_id"`
+	Timestamp    string `json:"timestamp"`
+}
+
+func settleOpenPayload(counterparty, recipient, settlementID string, amount int64, timestamp string) settleOpenReq {
+	return settleOpenReq{Amount: strconv.FormatInt(amount, 10), Counterparty: counterparty,
+		Recipient: recipient, SettlementID: settlementID, Timestamp: timestamp}
+}
+
+func settleFinishPayload(counterparty, recipient, settlementID, nonce, timestamp string) settleFinishReq {
+	return settleFinishReq{Counterparty: counterparty, Nonce: nonce, Recipient: recipient,
+		SettlementID: settlementID, Timestamp: timestamp}
+}
+
+func settleReconcilePayload(counterparty, recipient, settlementID, timestamp string) settleReconcileReq {
+	return settleReconcileReq{Counterparty: counterparty, Recipient: recipient,
+		SettlementID: settlementID, Timestamp: timestamp}
 }
 
 // GrossReceivables returns this kernel's total unsecured receivables across all peers (§13).
@@ -2543,8 +2573,8 @@ func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (ma
 			"message": fmt.Sprintf("pay %d on the rail, then run `admin withdraw %s %d --external-key %s`", d, name, d, settlementID)}, nil
 	}
 
-	settler, ok := k.http.(FederationSettler)
-	if !ok {
+	settler := k.fedClient
+	if settler == nil {
 		return nil, ErrInvalidState.Wrap("federation transport does not support settlement")
 	}
 	our := k.ourKeyB64()

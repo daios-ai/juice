@@ -20,7 +20,7 @@ func newAdminTestKernel(t *testing.T) *kernel.Kernel {
 	t.Cleanup(func() { db.Close() })
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "admin-test-secret"
-	return kernel.New(db, nil, nil, nil, cfg, log.Discard())
+	return kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: log.Discard()})
 }
 
 func TestAdminListUsers(t *testing.T) {
@@ -70,7 +70,7 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 	}
 
 	// Login should fail.
-	if _, err := k.Login(ctx, "target", "pass"); err == nil {
+	if _, err := loginTokenFor(k, ctx, "target", "pass"); err == nil {
 		t.Error("expected login to fail for suspended user")
 	}
 
@@ -80,7 +80,7 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 	}
 
 	// Login should succeed.
-	if _, err := k.Login(ctx, "target", "pass"); err != nil {
+	if _, err := loginTokenFor(k, ctx, "target", "pass"); err != nil {
 		t.Errorf("expected login to succeed after unsuspend, got: %v", err)
 	}
 }

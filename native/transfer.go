@@ -6,22 +6,33 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// RegisterTransferHandler wires sys/transfer: a value-bearing native declaring the "transfer" effect
-// (§13). The runtime handler only VALIDATES and acknowledges — it moves no balances. The value channel
-// is a deferred TransferEffect staged at admission (the reserve locked from the immediate caller C) and
-// committed atomically by the kernel at settlement, for both local and cross-kernel transfers alike, so
-// no non-atomic ledger write happens in-handler. RegisterValueAction binds the effect id → args
-// extractor without the kernel ever naming the action, keeping the effect encapsulated (native actions
-// are never hardwired into the kernel).
-func RegisterTransferHandler(k *kernel.Kernel) {
-	k.RegisterValueAction("transfer", transferValue)
-	k.RegisterNativeHandler("transfer", func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
-		amount, _, err := transferValue(args)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"amount": amount}, nil
-	})
+// Transfer declares @sys/transfer: a value-bearing native carrying the "transfer" effect (§13). The
+// runtime handler only VALIDATES and acknowledges — it moves no balances. The value channel is a
+// deferred TransferEffect staged at admission (the reserve locked from the immediate caller C) and
+// committed atomically by the kernel at settlement, for local and cross-kernel transfers alike, so no
+// non-atomic ledger write happens in-handler. Value binds the effect id → args extractor without the
+// kernel ever naming the action, keeping the effect encapsulated (natives are never hardwired in).
+func Transfer() Spec {
+	return Spec{
+		Name:        "transfer",
+		Effect:      "transfer",
+		Description: "Transfers credits from the caller to another user. The target may be local (a handle) or a remote transfer action (sys@<kernel>/transfer with a local target on that kernel); a cross-kernel transfer settles through the federation receipt/exposure system (§13). The value is funded from the immediate caller's own balance and delivered by a deferred, receipt-backed transfer effect.",
+		InputSchema: obj(map[string]any{
+			"target": str("Recipient: a local handle, or (when calling sys@<kernel>/transfer) a bare handle on that kernel"),
+			"amount": integer("Amount of credits to transfer (positive integer)"),
+		}, "target", "amount"),
+		OutputSchema: obj(map[string]any{"amount": integer("Amount transferred")}, "amount"),
+		Value:        transferValue,
+		Handler: func(*kernel.Kernel) kernel.NativeFunc {
+			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+				amount, _, err := transferValue(args)
+				if err != nil {
+					return nil, err
+				}
+				return map[string]any{"amount": amount}, nil
+			}
+		},
+	}
 }
 
 // transferValue extracts (amount, target) from sys/transfer args. The amount must be a positive

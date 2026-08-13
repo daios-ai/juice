@@ -293,16 +293,7 @@ ORDER BY u.id`, timeToStr(cutoff))
 	if err != nil {
 		return nil, dbErr(err, "list purgeable peers")
 	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, dbErr(err, "scan purgeable peer")
-		}
-		ids = append(ids, id)
-	}
-	return ids, dbErr(rows.Err(), "purgeable peers rows")
+	return queryList(rows, "list purgeable peers", scanID)
 }
 
 // PurgePeerCascade deletes a purged peer's derived data and anonymizes the user row (§13 Retention).
@@ -699,13 +690,15 @@ func finishAction(a *kernel.Action, kind, visibility string, active int, inJSON,
 // with available=0/locked=price, and creates the root trace with available=price.
 // lockReserveTx atomically debits `amount` from userID.available into userID.locked, guarded by the
 // §13 admission rule (factored so both the execution reserve and the value-transfer reserve use it):
-//   ordinary user (kernel_public_key IS NULL): must be prepaid (available ≥ amount); the exposure clause is
-//     short-circuited true.
-//   peer (kernel_public_key set): admitted when the draw does not increase this peer's own debt
-//     (max(0,amount−available) ≤ max(0,−available)), or when the projected global gross receivables
-//     (Σ over OTHER peer rows of max(0,−available) + this peer's post-debit debt) stay ≤ exposureMax.
-//     Own row's current debt is excluded and replaced by its projected value — the cap is on the whole
-//     book (Sybil-proof); SQLite serializes writers, so G ≤ X holds as an invariant.
+//
+//	ordinary user (kernel_public_key IS NULL): must be prepaid (available ≥ amount); the exposure clause is
+//	  short-circuited true.
+//	peer (kernel_public_key set): admitted when the draw does not increase this peer's own debt
+//	  (max(0,amount−available) ≤ max(0,−available)), or when the projected global gross receivables
+//	  (Σ over OTHER peer rows of max(0,−available) + this peer's post-debit debt) stay ≤ exposureMax.
+//	  Own row's current debt is excluded and replaced by its projected value — the cap is on the whole
+//	  book (Sybil-proof); SQLite serializes writers, so G ≤ X holds as an invariant.
+//
 // A zero amount is a no-op. Returns ErrInsufficientFunds when the guard rejects (0 rows).
 func lockReserveTx(ctx context.Context, tx *sql.Tx, userID string, amount, exposureMax int64) error {
 	if amount == 0 {
@@ -1113,6 +1106,7 @@ func applyPremiumLegs(ctx context.Context, tx *sql.Tx, traceID, ownerID, sysID s
 //     value+value_premium — what C owes the far kernel);
 //   - sysID receives `sysCredit`  (value_premium for a local/inbound settle, value_import for outbound);
 //   - the unspent remainder refunds to C.available.
+//
 // Every credit leg is guarded (RowsAffected==1), so a missing recipient fails closed rather than
 // destroying funds. A zero reserve is a no-op (non-transfer call). A pure refund passes credit=sysCredit=0.
 func settleTransferReserve(ctx context.Context, tx *sql.Tx, callerC string, reserve int64, creditID string, credit int64, sysID string, sysCredit int64) error {
@@ -1199,11 +1193,12 @@ func refundTransferEffect(ctx context.Context, tx *sql.Tx, traceID string) error
 
 const pendingTransferCols = `id,buyer_id,peer_key,step_id,input_hash,input,idempotency_key,beneficiary,amount,remote_max,reserve,status,COALESCE(last_error,''),created_at,updated_at`
 
-// scanPendingTransfer reads one row selected with pendingTransferCols.
-func scanPendingTransfer(row interface{ Scan(...any) error }) (*kernel.PendingTransfer, error) {
+// scanPendingTransferFn reads one row selected with pendingTransferCols; it is both the row-scanner
+// and the queryList adapter (§5 one shape per read).
+func scanPendingTransferFn(scan func(...any) error) (*kernel.PendingTransfer, error) {
 	var pt kernel.PendingTransfer
 	var input, createdAt, updatedAt string
-	if err := row.Scan(&pt.ID, &pt.BuyerID, &pt.PeerKey, &pt.StepID, &pt.InputHash, &input,
+	if err := scan(&pt.ID, &pt.BuyerID, &pt.PeerKey, &pt.StepID, &pt.InputHash, &input,
 		&pt.IdempotencyKey, &pt.Beneficiary, &pt.Amount, &pt.RemoteMax, &pt.Reserve, &pt.Status,
 		&pt.LastError, &createdAt, &updatedAt); err != nil {
 		return nil, err
@@ -1238,8 +1233,8 @@ func (s *DB) InsertPendingTransfer(ctx context.Context, pt *kernel.PendingTransf
 
 // ReadPendingTransferByKey returns the pending_transfers row for an idempotency key, or ErrNotFound.
 func (s *DB) ReadPendingTransferByKey(ctx context.Context, idempotencyKey string) (*kernel.PendingTransfer, error) {
-	pt, err := scanPendingTransfer(s.db.QueryRowContext(ctx,
-		`SELECT `+pendingTransferCols+` FROM pending_transfers WHERE idempotency_key=?`, idempotencyKey))
+	pt, err := scanPendingTransferFn(rowScan(s.db.QueryRowContext(ctx,
+		`SELECT `+pendingTransferCols+` FROM pending_transfers WHERE idempotency_key=?`, idempotencyKey)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("pending transfer not found")
 	}
@@ -1251,8 +1246,8 @@ func (s *DB) ReadPendingTransferByKey(ctx context.Context, idempotencyKey string
 
 // ReadPendingTransfer returns the pending_transfers row by its id, or ErrNotFound.
 func (s *DB) ReadPendingTransfer(ctx context.Context, id string) (*kernel.PendingTransfer, error) {
-	pt, err := scanPendingTransfer(s.db.QueryRowContext(ctx,
-		`SELECT `+pendingTransferCols+` FROM pending_transfers WHERE id=?`, id))
+	pt, err := scanPendingTransferFn(rowScan(s.db.QueryRowContext(ctx,
+		`SELECT `+pendingTransferCols+` FROM pending_transfers WHERE id=?`, id)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("pending transfer not found")
 	}
@@ -1278,16 +1273,7 @@ func (s *DB) ListPendingTransfers(ctx context.Context, status string, limit, off
 	if err != nil {
 		return nil, dbErr(err, "list pending transfers")
 	}
-	defer rows.Close()
-	var out []*kernel.PendingTransfer
-	for rows.Next() {
-		pt, serr := scanPendingTransfer(rows)
-		if serr != nil {
-			return nil, dbErr(serr, "list pending transfers: scan")
-		}
-		out = append(out, pt)
-	}
-	return out, rows.Err()
+	return queryList(rows, "list pending transfers", scanPendingTransferFn)
 }
 
 // CommitPendingTransfer settles a buyer-side payment reserve on the serving kernel's valid success
@@ -1595,21 +1581,18 @@ func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction
 	})
 }
 
-func scanProcessRows(rows *sql.Rows) ([]*kernel.Process, error) {
-	var out []*kernel.Process
-	for rows.Next() {
-		var p kernel.Process
-		var status, createdAt string
-		var endedAt *string
-		if err := rows.Scan(&p.ID, &p.OwnerUserID, &p.Available, &p.Locked, &status, &createdAt, &endedAt); err != nil {
-			return nil, dbErr(err, "scan process")
-		}
-		p.Status = kernel.ProcessStatus(status)
-		p.CreatedAt = strToTime(createdAt)
-		p.EndedAt = strToNullTime(endedAt)
-		out = append(out, &p)
+// scanProcessFn is the queryList adapter for process lists.
+func scanProcessFn(scan func(...any) error) (*kernel.Process, error) {
+	var p kernel.Process
+	var status, createdAt string
+	var endedAt *string
+	if err := scan(&p.ID, &p.OwnerUserID, &p.Available, &p.Locked, &status, &createdAt, &endedAt); err != nil {
+		return nil, err
 	}
-	return out, rows.Err()
+	p.Status = kernel.ProcessStatus(status)
+	p.CreatedAt = strToTime(createdAt)
+	p.EndedAt = strToNullTime(endedAt)
+	return &p, nil
 }
 
 func (s *DB) ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Process, error) {
@@ -1624,7 +1607,7 @@ func (s *DB) ListProcesses(ctx context.Context, ownerID string, limit, offset in
 		return nil, dbErr(err, "list processes")
 	}
 	defer rows.Close()
-	return scanProcessRows(rows)
+	return queryList(rows, "list processes", scanProcessFn)
 }
 
 func (s *DB) ListAllProcesses(ctx context.Context, limit, offset int) ([]*kernel.Process, error) {
@@ -1638,7 +1621,7 @@ func (s *DB) ListAllProcesses(ctx context.Context, limit, offset int) ([]*kernel
 		return nil, dbErr(err, "list all processes")
 	}
 	defer rows.Close()
-	return scanProcessRows(rows)
+	return queryList(rows, "list processes", scanProcessFn)
 }
 
 func (s *DB) EndProcess(ctx context.Context, processID string) error {
@@ -1894,19 +1877,6 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 		return nil, dbErr(err, "list transactions")
 	}
 	return queryList(rows, "list transactions", scanTxPtr)
-}
-
-func (s *DB) ListAllTransactions(ctx context.Context, limit, offset int) ([]*kernel.Transaction, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+txColumns+` FROM transactions ORDER BY started_at DESC LIMIT ? OFFSET ?`,
-		limit, offset)
-	if err != nil {
-		return nil, dbErr(err, "list all transactions")
-	}
-	return queryList(rows, "list all transactions", scanTxPtr)
 }
 
 // ---- Stats ----
@@ -2718,18 +2688,15 @@ func (s *DB) ListLedgerByUser(ctx context.Context, userID string, limit, offset 
 	if err != nil {
 		return nil, dbErr(err, "list ledger by user")
 	}
-	defer rows.Close()
-	var out []*kernel.LedgerEntry
-	for rows.Next() {
+	return queryList(rows, "list ledger by user", func(scan func(...any) error) (*kernel.LedgerEntry, error) {
 		var e kernel.LedgerEntry
 		var createdAt string
-		if err := rows.Scan(&e.ID, &e.OperatorUserID, &e.FromUserID, &e.ToUserID, &e.Amount, &e.Reason, &e.ExternalKey, &createdAt); err != nil {
-			return nil, dbErr(err, "scan ledger entry")
+		if err := scan(&e.ID, &e.OperatorUserID, &e.FromUserID, &e.ToUserID, &e.Amount, &e.Reason, &e.ExternalKey, &createdAt); err != nil {
+			return nil, err
 		}
 		e.CreatedAt = strToTime(createdAt)
-		out = append(out, &e)
-	}
-	return out, dbErr(rows.Err(), "iterate ledger")
+		return &e, nil
+	})
 }
 
 func readLedgerByExternalKey(ctx context.Context, tx *sql.Tx, externalKey string) (*kernel.LedgerEntry, error) {
@@ -2897,16 +2864,7 @@ func (s *DB) SearchActionsLexical(ctx context.Context, query string, limit int) 
 	if err != nil {
 		return nil, dbErr(err, "lexical search")
 	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, dbErr(err, "lexical search: scan")
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
+	return queryList(rows, "lexical search", scanID)
 }
 
 // ftsMatchQuery turns free text into a safe FTS5 MATCH expression: each unicode word token is
@@ -3035,22 +2993,19 @@ func (s *DB) ListKernels(ctx context.Context, selfKey string, includeSuspended b
 	if err != nil {
 		return nil, dbErr(err, "list kernels")
 	}
-	defer rows.Close()
-	var out []*kernel.RemoteKernelView
-	for rows.Next() {
+	return queryList(rows, "list kernels", func(scan func(...any) error) (*kernel.RemoteKernelView, error) {
 		var v kernel.RemoteKernelView
 		var hasAccount int
 		var suspendedAt, lastSeen *string
-		if err := rows.Scan(&v.PublicKey, &v.Petname, &v.Nickname, &v.About, &hasAccount,
+		if err := scan(&v.PublicKey, &v.Petname, &v.Nickname, &v.About, &hasAccount,
 			&v.Available, &v.Locked, &suspendedAt, &v.PeerCredit, &lastSeen, &v.Actions); err != nil {
-			return nil, dbErr(err, "scan kernel view")
+			return nil, err
 		}
 		v.HasAccount = hasAccount == 1
 		v.SuspendedAt = strToNullTime(suspendedAt)
 		v.LastSeen = strToNullTime(lastSeen)
-		out = append(out, &v)
-	}
-	return out, dbErr(rows.Err(), "list kernels")
+		return &v, nil
+	})
 }
 
 func (s *DB) ReadKernel(ctx context.Context, publicKey string) (*kernel.RemoteKernel, error) {
@@ -3175,16 +3130,7 @@ func (s *DB) SearchDiscoveryLexical(ctx context.Context, query string, limit int
 	if err != nil {
 		return nil, dbErr(err, "discovery lexical search")
 	}
-	defer rows.Close()
-	var keys []string
-	for rows.Next() {
-		var k string
-		if err := rows.Scan(&k); err != nil {
-			return nil, dbErr(err, "discovery lexical search: scan")
-		}
-		keys = append(keys, k)
-	}
-	return keys, rows.Err()
+	return queryList(rows, "discovery lexical search", scanID)
 }
 
 // ---- Evidence cache ----
@@ -3412,6 +3358,16 @@ func dbErr(err error, op string) error {
 		}
 	}
 	return kernel.ErrInternal.Wrapf("%s: %v", op, err)
+}
+
+// rowScan adapts a single-row query to the scan-function shape the scanners take.
+func rowScan(row *sql.Row) func(...any) error { return row.Scan }
+
+// scanID is the queryList adapter for a single-column id/key list.
+func scanID(scan func(...any) error) (string, error) {
+	var id string
+	err := scan(&id)
+	return id, err
 }
 
 // queryList collects rows into a slice using the provided scan function.

@@ -74,7 +74,7 @@ func newFlowKernel(t *testing.T, exec kernel.ScriptExecutor) (*httptest.Server, 
 		t.Fatal(err)
 	}
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout)}
-	k := kernel.New(db, exec, httpExec, nil, cfg, logger)
+	k := kernel.New(kernel.Dependencies{Store: db, Scripts: exec, HTTP: httpExec, Fetcher: httpExec, Config: cfg, Logger: logger})
 	k.SetSecretBox(box)
 
 	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
@@ -463,7 +463,7 @@ func TestFlow_ApprovalStep(t *testing.T) {
 	// Owner creates a step (approval gate) addressed to the human.
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action":       stepActionID,
+		"action":          stepActionID,
 		"required_caller": "appr-human",
 		"partial_args":    map[string]any{"preset": "value"},
 	}, ownerTok)
@@ -551,7 +551,7 @@ func TestFlow_WebhookCompleteStep(t *testing.T) {
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action":       actionID,
+		"action":          actionID,
 		"required_caller": "wh-webhook-sys",
 		"partial_args":    map[string]any{"purchase_id": "abc123"},
 	}, ownerTok)
@@ -624,7 +624,7 @@ func TestFlow_ForceEndWithSteps(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 			"trace_id":        traceID,
-			"action":       actionID,
+			"action":          actionID,
 			"required_caller": "fend-caller",
 			"partial_args":    map[string]any{},
 		}, ownerTok)
@@ -705,7 +705,7 @@ func TestFlow_RestartRecovery(t *testing.T) {
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action":       actionID,
+		"action":          actionID,
 		"required_caller": "rst-caller",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
@@ -1308,15 +1308,14 @@ func newFedKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store.DB, ed
 	logger := log.Discard()
 
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
-	k := kernel.New(db, nil, httpExec, nil, cfg, logger)
+	k := kernel.New(kernel.Dependencies{Store: db, HTTP: httpExec, Fetcher: httpExec, Config: cfg, Logger: logger})
+	// The outbound federation adapter signs as this kernel, so signed calls to peer kernels work.
+	k.SetFederation(newFedAdapter("", k.SignFederation))
 
 	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
 	}
 	priv := bootstrapSigning(t, k)
-
-	// Wire the outbound federation signer so signed calls to peer kernels work.
-	httpExec.signerFn = k.SignFederation
 
 	srv := &server{kernel: k, log: logger}
 	return httptest.NewServer(mountFullRouter(srv)), k, db, priv
@@ -1434,22 +1433,21 @@ func TestFlow_UpstreamAuthSecrecy(t *testing.T) {
 // — Missing §15 user-story flows —
 // ============================================================
 
-// bootstrapSysNative registers and activates a @sys native action by spec name.
-// Uses price=0 for all test specs; spec schemas come from buildSysNativeSpecs.
+// bootstrapSysNative registers and activates @sys natives by name at price 0. Contracts come from
+// each native's own Spec (§9), the same source production bootstrap reads.
 func bootstrapSysNative(t *testing.T, k *kernel.Kernel, names ...string) {
 	t.Helper()
 	ctx := context.Background()
-	specs := buildSysNativeSpecs(NativeConfig{})
-	specMap := make(map[string]sysNativeSpec, len(specs))
-	for _, s := range specs {
-		specMap[s.name] = s
+	specs := map[string]native.Spec{}
+	for _, s := range native.All(native.Deps{}) {
+		specs[s.Name] = s
 	}
 	for _, name := range names {
-		spec, ok := specMap[name]
+		spec, ok := specs[name]
 		if !ok {
 			t.Fatalf("bootstrapSysNative: unknown spec %q", name)
 		}
-		if err := ensureSysNative(ctx, k, "sys", spec); err != nil {
+		if err := ensureSysNative(ctx, k, "sys", spec, 0); err != nil {
 			t.Fatalf("bootstrapSysNative %q: %v", name, err)
 		}
 	}
@@ -1473,7 +1471,7 @@ func TestFlow_LookupAndRun(t *testing.T) {
 	ctx := context.Background()
 
 	bootstrapSysNative(t, k, "lookup")
-	native.RegisterLookupHandler(k)
+	native.Register(k, []native.Spec{native.Lookup()})
 
 	// Provider creates a public action with a distinctive description.
 	providerID, providerTok := makeUser(t, k, "lk-provider")
@@ -1530,8 +1528,7 @@ func TestFlow_Message(t *testing.T) {
 	defer srv.Close()
 
 	bootstrapSysNative(t, k, "sink", "message")
-	native.RegisterSinkHandler(k)
-	native.RegisterMessageHandler(k)
+	native.Register(k, []native.Spec{native.Sink(), native.Message()})
 
 	userAID, userATok := makeUser(t, k, "msg-a")
 	_, userBTok := makeUser(t, k, "msg-b")
@@ -1628,7 +1625,7 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 	}
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action":       aAction.ID,
+		"action":          aAction.ID,
 		"required_caller": "3p-caller",
 		"partial_args":    map[string]any{},
 	}, pTok)
@@ -1738,18 +1735,12 @@ func TestFlow_AuthTokenLifecycle(t *testing.T) {
 	// Create user; Login is already tested via makeUser; here we test via HTTP.
 	_, _ = makeUser(t, k, "auth-life")
 
-	loginResp := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"handle": "auth-life", "password": "pass",
-	}, "")
-	if loginResp.StatusCode != http.StatusOK {
-		loginResp.Body.Close()
-		t.Fatalf("login: expected 200, got %d", loginResp.StatusCode)
+	status, tok := httpLogin(t, srv, "auth-life", "pass")
+	if status != http.StatusOK {
+		t.Fatalf("login: expected 200, got %d", status)
 	}
-	var loginBody map[string]any
-	decodeResponse(t, loginResp, &loginBody)
-	tok, _ := loginBody["token"].(string)
 	if tok == "" {
-		t.Fatal("login: expected token in response")
+		t.Fatal("login: expected an access token")
 	}
 
 	// Token is valid.
@@ -1769,26 +1760,17 @@ func TestFlow_AuthTokenLifecycle(t *testing.T) {
 	}
 
 	// Old password is rejected.
-	oldLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"handle": "auth-life", "password": "pass",
-	}, "")
-	oldLogin.Body.Close()
-	if oldLogin.StatusCode == http.StatusOK {
+	if status, _ := httpLogin(t, srv, "auth-life", "pass"); status == http.StatusOK {
 		t.Error("old password should be rejected after change")
 	}
 
 	// New password works.
-	newLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"handle": "auth-life", "password": "newpass",
-	}, "")
-	if newLogin.StatusCode != http.StatusOK {
-		newLogin.Body.Close()
-		t.Fatalf("new password login: expected 200, got %d", newLogin.StatusCode)
+	status, newTok := httpLogin(t, srv, "auth-life", "newpass")
+	if status != http.StatusOK {
+		t.Fatalf("new password login: expected 200, got %d", status)
 	}
-	var newBody map[string]any
-	decodeResponse(t, newLogin, &newBody)
-	if newBody["token"] == "" {
-		t.Error("new password login: expected token")
+	if newTok == "" {
+		t.Error("new password login: expected an access token")
 	}
 }
 
@@ -1874,21 +1856,13 @@ func TestFlow_AccountSelfService(t *testing.T) {
 	}
 
 	// Old password rejected.
-	oldLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"handle": "self-user", "password": "pass",
-	}, "")
-	oldLogin.Body.Close()
-	if oldLogin.StatusCode == http.StatusOK {
+	if status, _ := httpLogin(t, srv, "self-user", "pass"); status == http.StatusOK {
 		t.Error("old password should be rejected")
 	}
 
 	// New password accepted.
-	newLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"handle": "self-user", "password": "changed123",
-	}, "")
-	newLogin.Body.Close()
-	if newLogin.StatusCode != http.StatusOK {
-		t.Errorf("new password login: expected 200, got %d", newLogin.StatusCode)
+	if status, _ := httpLogin(t, srv, "self-user", "changed123"); status != http.StatusOK {
+		t.Errorf("new password login: expected 200, got %d", status)
 	}
 }
 
@@ -2270,7 +2244,7 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 		cfg.RemoteBPS = importBPS
 		logger := log.Discard()
 		httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
-		kB := kernel.New(db, nil, httpExec, nil, cfg, logger)
+		kB := kernel.New(kernel.Dependencies{Store: db, HTTP: httpExec, Fetcher: httpExec, Config: cfg, Logger: logger})
 
 		if err := kB.FirstBoot(ctx, "sys-pass", ""); err != nil {
 			t.Fatal(err)
@@ -2280,7 +2254,7 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 		privBBytes, _ := base64.RawURLEncoding.DecodeString(privB64)
 		privB := ed25519.PrivateKey(privBBytes)
 		kB.SetSigningKey(privB, sysB.ID)
-		httpExec.signerFn = kB.SignFederation
+		kB.SetFederation(newFedAdapter("", kB.SignFederation))
 
 		peerAOnB, err := kB.EnsureKernelAccount(ctx, pubAB64)
 		if err != nil {
@@ -2443,7 +2417,7 @@ func newOAuthFlowServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	}
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
 	httpExec.auth = newAuthenticator(box, db, true, cfg.ScriptTimeout)
-	k := kernel.New(db, &flowScriptExec{}, httpExec, nil, cfg, logger)
+	k := kernel.New(kernel.Dependencies{Store: db, Scripts: &flowScriptExec{}, HTTP: httpExec, Fetcher: httpExec, Config: cfg, Logger: logger})
 	k.SetSecretBox(box)
 	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatal(err)

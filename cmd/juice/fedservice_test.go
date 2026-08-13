@@ -143,7 +143,7 @@ func fedStepComplete(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, st
 func TestFedStep_PaymentStepSettlesValue(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
-	native.RegisterTransferHandler(k) // registers effect "transfer" + handler
+	native.Register(k, []native.Spec{native.Transfer()}) // effect "transfer" + handler
 	ctx := context.Background()
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 

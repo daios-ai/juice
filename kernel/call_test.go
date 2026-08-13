@@ -38,7 +38,7 @@ func TestCallValidatesRootActionSnapshot(t *testing.T) {
 		t.Fatalf("UpdateAction: %v", err)
 	}
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "act", Args: map[string]any{},
 	})
@@ -61,7 +61,7 @@ func TestWasmTimeoutReturnsErrTimeout(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 	_, tr := beginTestRun(t, st, alice.ID, a)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "slow", Args: map[string]any{},
 	})
@@ -118,11 +118,11 @@ func TestSubCostNotIncrementedOnFailedSubCall(t *testing.T) {
 	cfg.FeeBPS = 2000
 	cfg.FeeRecipientID = feeUser.ID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, exec, nil, nil, cfg, nil)
+	k := kernel.New(kernel.Dependencies{Store: st, Scripts: exec, Config: cfg})
 
 	_, tr := beginTestRun(t, st, carol.ID, outer)
 
-	reply, err := k.Call(ctx, kernel.CallRequest{
+	reply, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: carol.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
@@ -158,7 +158,7 @@ func TestCallClosedProcessFails(t *testing.T) {
 	p, tr := beginTestRun(t, st, owner.ID, a)
 	_ = k.EndProcess(ctx, owner.ID, p.ID)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        owner.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    target.ID,
@@ -196,7 +196,7 @@ func TestCallInactiveActionDeniedForNonOwner(t *testing.T) {
 
 	_, tr := beginTestRun(t, st, alice.ID, a)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        alice.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    bob.ID,
@@ -253,7 +253,7 @@ func TestCallPublicActionAnyOwner(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 
 	_, tr := beginTestRun(t, st, alice.ID, a)
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        alice.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    bob.ID,
@@ -287,7 +287,7 @@ func TestCallPrivateActionOwnerOnly(t *testing.T) {
 
 	// Bob (the owner) can call his own private action.
 	_, trBob := beginTestRun(t, st, bob.ID, a)
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        bob.ID,
 		ExistingTraceID: trBob.ID,
 		TargetUserID:    bob.ID,
@@ -399,7 +399,7 @@ func TestCallGrossEqualsNetPlusFee(t *testing.T) {
 
 	_, tr := beginTestRun(t, st, alice.ID, a)
 
-	reply, err := k.Call(ctx, kernel.CallRequest{
+	reply, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        alice.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    alice.ID,
@@ -444,7 +444,7 @@ func TestCallCreatesExactlyOneTransaction(t *testing.T) {
 	beforeTxs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID})
 	before := len(beforeTxs)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID,
 		ActionName:   "svc",
@@ -474,7 +474,7 @@ func TestCallCreatesChildTrace(t *testing.T) {
 
 	_, tr := beginTestRun(t, st, alice.ID, a)
 
-	reply, err := k.Call(ctx, kernel.CallRequest{
+	reply, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        alice.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    alice.ID,
@@ -512,7 +512,7 @@ func TestCallFailureRefundsFunds(t *testing.T) {
 
 	_, tr := beginTestRun(t, st, alice.ID, a)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        alice.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    alice.ID,
@@ -551,7 +551,7 @@ func TestWasmHandleErrorSentinelMapsToExecutionFailed(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 	_, tr := beginTestRun(t, st, alice.ID, a)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "handle-err", Args: map[string]any{},
 	})
@@ -604,7 +604,7 @@ func TestFailureSettlesUnderCancelledContext(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 	_, tr := beginTestRun(t, st, alice.ID, a)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "cancels", Args: map[string]any{},
 	})
@@ -638,7 +638,7 @@ func TestWasmPanicRefundsFunds(t *testing.T) {
 
 	_, tr := beginTestRun(t, st, alice.ID, a)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        alice.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    alice.ID,
@@ -769,7 +769,7 @@ func TestCallOutputSchemaRejection(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 	_, tr := beginTestRun(t, st, alice.ID, a)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "typed", Args: map[string]any{},
 	})
@@ -808,7 +808,7 @@ func TestFailedExecutionUpdatesTraceLatencyNotCost(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 	p, tr := beginTestRun(t, st, alice.ID, a)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "fails", Args: map[string]any{},
 	})
@@ -881,7 +881,7 @@ func TestWasmHostCallPrivateActionDenied(t *testing.T) {
 	k := newTestKernelWithScripts(st, exec)
 	_, tr := beginTestRun(t, st, alice.ID, outerAction)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
@@ -918,7 +918,7 @@ func TestSubcallProviderPrivateHelper(t *testing.T) {
 	k := newTestKernelWithScripts(st, exec)
 	_, tr := beginTestRun(t, st, bob.ID, composite)
 
-	if _, err := k.Call(ctx, kernel.CallRequest{
+	if _, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: bob.ID, ExistingTraceID: tr.ID, Action: composite, Args: map[string]any{},
 	}); err != nil {
 		t.Errorf("provider's public composite should reach its own private helper: %v", err)
@@ -953,7 +953,7 @@ func TestSubcallConfusedDeputyDenied(t *testing.T) {
 	k := newTestKernelWithScripts(st, exec)
 	_, tr := beginTestRun(t, st, bob.ID, composite)
 
-	if _, err := k.Call(ctx, kernel.CallRequest{
+	if _, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: bob.ID, ExistingTraceID: tr.ID, Action: composite, Args: map[string]any{},
 	}); err == nil {
 		t.Error("foreign composite must not reach the process owner's private action (confused deputy)")
@@ -1030,11 +1030,11 @@ func TestProcessFundedSubCallSpendsSameProcess(t *testing.T) {
 	cfg.FeeBPS = 2000
 	cfg.FeeRecipientID = feeUser.ID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, exec, nil, nil, cfg, nil)
+	k := kernel.New(kernel.Dependencies{Store: st, Scripts: exec, Config: cfg})
 
 	p, tr := beginTestRun(t, st, alice.ID, outer)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
@@ -1078,7 +1078,7 @@ func TestProcessFundedSubCallInsufficientFundsFails(t *testing.T) {
 	// Fund only enough for outer, not inner.
 	_, tr := beginTestRun(t, st, alice.ID, outer)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
@@ -1120,7 +1120,7 @@ func TestProcessFundedSubCallTraceHasSameProcess(t *testing.T) {
 	k := newTestKernelWithScripts(st, exec)
 
 	p, tr := beginTestRun(t, st, alice.ID, outer)
-	outerReply, err := k.Call(ctx, kernel.CallRequest{
+	outerReply, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
 	})
@@ -1166,7 +1166,7 @@ func TestRootTraceHasNilParent(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 	_, tr := beginTestRun(t, st, alice.ID, a)
 
-	reply, err := k.Call(ctx, kernel.CallRequest{
+	reply, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "noop", Args: map[string]any{},
 	})
@@ -1250,7 +1250,7 @@ func TestCommitCallAtomicOnFailure(t *testing.T) {
 
 	p, tr := beginTestRun(t, base, caller.ID, a)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: caller.ID, ExistingTraceID: tr.ID,
 		TargetUserID: actionOwner.ID, ActionName: "echo", Args: map[string]any{},
 	})
@@ -1290,7 +1290,7 @@ func TestCallInvalidParentTraceDoesNotLockFunds(t *testing.T) {
 
 	p := setupProcess(t, st, alice.ID, 500)
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ParentTraceID: "nonexistent-trace-id",
 		TargetUserID: alice.ID,
 		ActionName:   "svc",
@@ -1332,7 +1332,7 @@ func TestCallCrossProcessParentTraceRejectedForOwner(t *testing.T) {
 		t.Fatalf("setup call in otherP: %v", err)
 	}
 
-	_, err = k.Call(ctx, kernel.CallRequest{
+	_, err = k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:      alice.ID,
 		ParentTraceID: otherReply.TraceID, // trace from closed process — must be rejected
 		TargetUserID:  alice.ID,
@@ -1372,7 +1372,7 @@ func TestCallCrossProcessParentTraceRejectedForNonOwner(t *testing.T) {
 	_, p2Orphan := beginTestRun(t, st, procOwner.ID, callerAction)
 
 	// Create a trace in p1 owned by actionOwner (by calling callerAction in p1).
-	reply1, err := k.Call(ctx, kernel.CallRequest{
+	reply1, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        procOwner.ID,
 		ExistingTraceID: p1tr.ID,
 		TargetUserID:    actionOwner.ID,
@@ -1385,7 +1385,7 @@ func TestCallCrossProcessParentTraceRejectedForNonOwner(t *testing.T) {
 	p1TraceID := reply1.TraceID
 
 	// actionOwner tries to use a trace from the now-closed p1 process — must fail.
-	_, err = k.Call(ctx, kernel.CallRequest{
+	_, err = k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:      actionOwner.ID,
 		ParentTraceID: p1TraceID, // trace from closed process
 		TargetUserID:  procOwner.ID,
@@ -1397,7 +1397,7 @@ func TestCallCrossProcessParentTraceRejectedForNonOwner(t *testing.T) {
 	}
 
 	// Using the p2 root trace (action_owner_id=actionOwner.ID via callerAction) should succeed.
-	_, err = k.Call(ctx, kernel.CallRequest{
+	_, err = k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:      actionOwner.ID,
 		ParentTraceID: p2Orphan.ID, // open process trace → allowed
 		TargetUserID:  procOwner.ID,
@@ -1436,7 +1436,7 @@ func TestCommitFailedCallSettlementError(t *testing.T) {
 	_ = base.CreateAction(ctx, a)
 
 	_, tr := beginTestRun(t, base, alice.ID, a)
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "risky", Args: map[string]any{},
 	})
@@ -1464,7 +1464,7 @@ func TestFailedCallReceiptChargeMatchesCommittedCharge(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, tr := beginTestRun(t, st, alice.ID, a)
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "fail-act", Args: map[string]any{},
 	})
@@ -1508,8 +1508,8 @@ func newTestKernelWithChatter(st kernel.Store, c kernel.Chatter) *kernel.Kernel 
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	k := kernel.New(st, nil, nil, nil, cfg, nil)
-	native.RegisterChatHandler(k, c)
+	k := kernel.New(kernel.Dependencies{Store: st, Config: cfg})
+	native.Register(k, []native.Spec{native.Chat(c)})
 	return k
 }
 
@@ -1535,7 +1535,7 @@ func TestCallLLMChat(t *testing.T) {
 	_ = st.CreateAction(ctx, chatAction)
 
 	_, tr := beginTestRun(t, st, owner.ID, chatAction)
-	reply, err := k.Call(ctx, kernel.CallRequest{
+	reply, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        owner.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    owner.ID,
@@ -1562,7 +1562,7 @@ func TestCallLLMChatNoChatter(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
 	k := newTestKernel(st)
-	native.RegisterChatHandler(k, nil)
+	native.Register(k, []native.Spec{native.Chat(nil)})
 
 	owner := setupUser(t, st, "sys", 1000)
 	chatAction := &kernel.Action{
@@ -1580,7 +1580,7 @@ func TestCallLLMChatNoChatter(t *testing.T) {
 	_ = st.CreateAction(ctx, chatAction)
 
 	_, tr := beginTestRun(t, st, owner.ID, chatAction)
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        owner.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    owner.ID,
@@ -1607,7 +1607,7 @@ func TestCallSuspendedSubjectRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Call(ctx, kernel.CallRequest{
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        owner.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    target.ID,
@@ -1634,7 +1634,7 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 		st := newTestStore(t)
 		cfg := kernel.DefaultConfig()
 		cfg.FeeBPS = 2000 // 20% fee — no FeeRecipientID set
-		k := kernel.New(st, nil, nil, nil, cfg, nil)
+		k := kernel.New(kernel.Dependencies{Store: st, Config: cfg})
 		if err := k.ValidateFeeRecipient(ctx); !errors.Is(err, kernel.ErrInvalidState) {
 			t.Errorf("expected ErrInvalidState for fee_bps>0 with empty recipient, got %v", err)
 		}
@@ -1645,7 +1645,7 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 		cfg := kernel.DefaultConfig()
 		cfg.FeeBPS = 2000
 		cfg.FeeRecipientID = "no-such-user"
-		k := kernel.New(st, nil, nil, nil, cfg, nil)
+		k := kernel.New(kernel.Dependencies{Store: st, Config: cfg})
 		if err := k.ValidateFeeRecipient(ctx); !errors.Is(err, kernel.ErrInvalidState) {
 			t.Errorf("expected ErrInvalidState for unknown fee recipient, got %v", err)
 		}
@@ -1655,7 +1655,7 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 		st := newTestStore(t)
 		cfg := kernel.DefaultConfig()
 		cfg.FeeBPS = 0
-		k := kernel.New(st, nil, nil, nil, cfg, nil)
+		k := kernel.New(kernel.Dependencies{Store: st, Config: cfg})
 		if err := k.ValidateFeeRecipient(ctx); err != nil {
 			t.Errorf("expected no error when fee_bps=0, got %v", err)
 		}
@@ -1693,7 +1693,7 @@ func TestZeroPriceCallOnClosedProcessReturnsErrInvalidState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, callErr := k.Call(ctx, kernel.CallRequest{
+	_, callErr := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        owner.ID,
 		ExistingTraceID: tr.ID,
 		TargetUserID:    owner.ID,
@@ -1736,9 +1736,9 @@ func TestCallRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 	}
 
 	// Exactly one failure transaction was committed, with a receipt.
-	txs, err := st.ListAllTransactions(ctx, 100, 0)
+	txs, err := st.ListTransactions(ctx, kernel.TxFilter{Limit: 100})
 	if err != nil {
-		t.Fatalf("ListAllTransactions: %v", err)
+		t.Fatalf("ListTransactions: %v", err)
 	}
 	if len(txs) != 1 {
 		t.Fatalf("expected exactly one transaction, got %d", len(txs))
@@ -1768,17 +1768,17 @@ func TestParseActionRef(t *testing.T) {
 		wantName   string
 		wantErr    bool
 	}{
-		{"alice/greet", "alice", "", "greet", false},            // bare local
+		{"alice/greet", "alice", "", "greet", false},                 // bare local
 		{"alice/greet/subname", "alice", "", "greet/subname", false}, // names may contain /
-		{"sys/llm/chat", "sys", "", "llm/chat", false},          // multi-segment native
-		{"bob@acme/foo", "bob", "acme", "foo", false},           // kernel-qualified
-		{"@alice/greet", "", "", "", true},                      // sigil-prefixed owner rejected (§14)
-		{"acme/alice/foo", "acme", "", "alice/foo", false},     // owner with a slashed action name
-		{"bob@/foo", "", "", "", true},                          // empty kernel
-		{"bob/", "", "", "", true},                             // empty name
-		{"alice", "", "", "", true},                             // missing /
-		{"/greet", "", "", "", true},                            // empty owner
-		{"", "", "", "", true},                                  // empty string
+		{"sys/llm/chat", "sys", "", "llm/chat", false},               // multi-segment native
+		{"bob@acme/foo", "bob", "acme", "foo", false},                // kernel-qualified
+		{"@alice/greet", "", "", "", true},                           // sigil-prefixed owner rejected (§14)
+		{"acme/alice/foo", "acme", "", "alice/foo", false},           // owner with a slashed action name
+		{"bob@/foo", "", "", "", true},                               // empty kernel
+		{"bob/", "", "", "", true},                                   // empty name
+		{"alice", "", "", "", true},                                  // missing /
+		{"/greet", "", "", "", true},                                 // empty owner
+		{"", "", "", "", true},                                       // empty string
 	}
 	for _, c := range cases {
 		r, err := kernel.ParseActionRef(c.input)
@@ -1995,7 +1995,7 @@ func TestHostStepCreateResolvesNames(t *testing.T) {
 	k := newTestKernelWithScripts(st, exec)
 
 	_, tr := beginTestRun(t, st, alice.ID, orch)
-	if _, err := k.Call(ctx, kernel.CallRequest{
+	if _, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: alice.ID, ExistingTraceID: tr.ID,
 		TargetUserID: alice.ID, ActionName: "orchestrate", Args: map[string]any{},
 	}); err != nil {
@@ -2131,7 +2131,7 @@ func TestRunQuotePinRefusesBeforeFunding(t *testing.T) {
 		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "svc",
 		Kind: kernel.KindWasm, Source: "x", Active: true, Price: 100,
 		Visibility: kernel.VisibilityPublic, Description: "d",
-		CreatedAt:  time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	_ = st.CreateAction(ctx, a)
 	stale := kernel.QuoteHash(a)

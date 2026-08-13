@@ -120,7 +120,7 @@ func newMinimalKernel() *Kernel {
 	cfg := DefaultConfig()
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = "test-issuer-id"
-	return New(nil, nil, nil, nil, cfg, nil)
+	return New(Dependencies{Config: cfg})
 }
 
 func TestValidateHTTPSourceSSRF(t *testing.T) {

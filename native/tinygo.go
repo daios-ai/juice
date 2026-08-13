@@ -26,19 +26,34 @@ type CompileDeps struct {
 // status="failure" with diagnostics — a charged success transaction, not a kernel
 // error — so an author compile error is charged, while a platform misconfiguration is not.
 type CompileResult struct {
-	Status       string   `json:"status"` // "success" | "failure"
+	Status       string   `json:"status"`                  // "success" | "failure"
 	Artifact     string   `json:"artifact,omitempty"`      // base64 WASM on success
 	ArtifactHash string   `json:"artifact_hash,omitempty"` // SHA-256 hex of the artifact
 	Diagnostics  []string `json:"diagnostics"`
 }
 
-// RegisterTinyGoCompileHandler registers the @sys/tinygo/compile native action on k.
-// sdk is the TinyGo SDK source (script.TinyGoSDK) prepended to the author's body, so
-// authors submit only a `func Handle(in map[string]any) (map[string]any, error)`.
-func RegisterTinyGoCompileHandler(k *kernel.Kernel, deps CompileDeps, sdk string) {
-	k.RegisterNativeHandler("tinygo/compile", func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
-		return executeTinyGoCompile(ctx, args, deps, sdk)
-	})
+// TinyGo declares @sys/tinygo/compile (§9). sdk is the TinyGo SDK source (script.TinyGoSDK)
+// prepended to the author's body, so authors submit only a
+// `func Handle(in map[string]any) (map[string]any, error)`.
+func TinyGo(deps CompileDeps, sdk string) Spec {
+	return Spec{
+		Name:        "tinygo/compile",
+		Description: "Compiles TinyGo source (a Handle function written against the Juice SDK) to a WASM artifact, ready to register with action create --kind wasm --artifact",
+		InputSchema: obj(map[string]any{
+			"source": str("TinyGo source: a func Handle(in map[string]any) (map[string]any, error) plus any private helpers; the SDK (package, imports, alloc, run, main) is prepended automatically"),
+		}, "source"),
+		OutputSchema: obj(map[string]any{
+			"status":        str("success or failure"),
+			"artifact":      str("Base64-encoded WASM artifact, present on success"),
+			"artifact_hash": str("SHA-256 hex of the artifact, present on success"),
+			"diagnostics":   arrayOf(map[string]any{"type": "string"}, "Compile/validation diagnostics"),
+		}, "status", "diagnostics"),
+		Handler: func(*kernel.Kernel) kernel.NativeFunc {
+			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+				return executeTinyGoCompile(ctx, args, deps, sdk)
+			}
+		},
+	}
 }
 
 func executeTinyGoCompile(ctx context.Context, args map[string]any, deps CompileDeps, sdk string) (map[string]any, error) {

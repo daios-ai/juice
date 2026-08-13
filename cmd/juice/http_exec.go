@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 )
 
@@ -213,130 +211,6 @@ func doHTTP(ctx context.Context, method, rawURL string, headers map[string]strin
 	return respBody, resp.StatusCode, nil
 }
 
-// signerFunc signs a federation request with the platform key, returning (signature, timestamp).
-type signerFunc = func(action, counterparty, recipient, expectedContractHash, idempotencyKey, argsHash string) (sig, ts string, err error)
-
-// ExecuteFederation sends a cross-kernel call over the libp2p federation transport (§13),
-// addressing the peer by its Ed25519 public key. The routing (peer key, action id) that used
-// to live in a URL is now explicit arguments. A missing transport, or a transport error,
-// returns a zero FederationResult so the kernel keeps the call pending for retry.
-func (e *httpActionExecutor) ExecuteFederation(ctx context.Context, peerPublicKey, actionID, expectedContractHash, idempotencyKey string, args map[string]any) (kernel.FederationResult, error) {
-	if e.fedTransport == nil {
-		// No transport at all: the request provably cannot have been sent (§13 never-dispatched).
-		return kernel.FederationResult{NotDispatched: true}, nil
-	}
-	return executeFederationOverTransport(ctx, e.fedTransport, e.signerFn, e.localPubKey,
-		peerPublicKey, actionID, expectedContractHash, idempotencyKey, args)
-}
-
-// federationTransport is the outbound half of the libp2p transport this executor needs; *fed.Transport
-// satisfies it. Keeping it an interface lets the fake in tests stand in without a real network.
-type federationTransport interface {
-	Call(ctx context.Context, peerKey string, req fed.CallRequest) (fed.CallResponse, error)
-	Resolve(ctx context.Context, peerKey string, req fed.ResolveRequest) (fed.ResolveResponse, error)
-	Settle(ctx context.Context, peerKey string, req fed.SettleRequest) (fed.SettleResponse, error)
-}
-
-// Settle implements kernel.FederationSettler over /juice/fed/settle/1 (§13): the debtor forwards one
-// signed round to the peer and returns its raw response body (a signed SettlementRecord) and status.
-func (e *httpActionExecutor) Settle(ctx context.Context, peerPublicKey, kind, timestamp, signature, settlementID string, amount int64, nonce string, record []byte) (int, []byte, error) {
-	if e.fedTransport == nil {
-		return 0, nil, kernel.ErrPeerUnreachable.Wrap("federation transport not running")
-	}
-	resp, err := e.fedTransport.Settle(ctx, peerPublicKey, fed.SettleRequest{
-		Kind: kind, Counterparty: e.localPubKey, Timestamp: timestamp, Signature: signature,
-		SettlementID: settlementID, Amount: amount, Nonce: nonce, Record: record,
-	})
-	if err != nil {
-		return 0, nil, kernel.ErrPeerUnreachable.Wrap("peer unreachable")
-	}
-	return resp.Status, resp.Body, nil
-}
-
-// ResolveRemoteAction / ResolveRemoteUser implement kernel.RemoteResolver over the transport's
-// /juice/fed/resolve/1 protocol (§13 subscription-free calls): fetch one signed manifest, or map a
-// user reference to its stable id+handle on the peer. A missing transport is ErrPeerUnreachable so
-// the kernel never treats "no network" as "action absent".
-func (e *httpActionExecutor) ResolveRemoteAction(ctx context.Context, peerPublicKey, owner, name string) (*kernel.ActionManifest, error) {
-	if e.fedTransport == nil {
-		return nil, kernel.ErrPeerUnreachable.Wrap("federation transport not running")
-	}
-	resp, err := e.fedTransport.Resolve(ctx, peerPublicKey, fed.ResolveRequest{Kind: "action", Owner: owner, Name: name})
-	if err != nil {
-		return nil, kernel.ErrPeerUnreachable.Wrap("peer unreachable")
-	}
-	if resp.Status != 200 {
-		return nil, kernel.ErrNotFound.Wrap("remote action not found")
-	}
-	var m kernel.ActionManifest
-	if err := json.Unmarshal(resp.Body, &m); err != nil {
-		return nil, kernel.ErrInvalidInput.Wrap("invalid remote manifest")
-	}
-	return &m, nil
-}
-
-func (e *httpActionExecutor) ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (string, string, error) {
-	if e.fedTransport == nil {
-		return "", "", kernel.ErrPeerUnreachable.Wrap("federation transport not running")
-	}
-	resp, err := e.fedTransport.Resolve(ctx, peerPublicKey, fed.ResolveRequest{Kind: "user", User: ref})
-	if err != nil {
-		return "", "", kernel.ErrPeerUnreachable.Wrap("peer unreachable")
-	}
-	if resp.Status != 200 {
-		return "", "", kernel.ErrNotFound.Wrap("remote user not found")
-	}
-	var body struct {
-		UserID string `json:"user_id"`
-		Handle string `json:"handle"`
-	}
-	if err := json.Unmarshal(resp.Body, &body); err != nil {
-		return "", "", kernel.ErrInvalidInput.Wrap("invalid resolve response")
-	}
-	return body.UserID, body.Handle, nil
-}
-
-// executeFederationOverTransport is the transport-backed kernel.FederationExecutor. It signs the
-// request as this kernel and sends the exact args bytes so the receiver's args_hash matches.
-func executeFederationOverTransport(ctx context.Context, tr federationTransport, signerFn signerFunc,
-	localPubKey, peerPublicKey, actionID, expectedContractHash, idempotencyKey string, args map[string]any) (kernel.FederationResult, error) {
-
-	body, err := json.Marshal(args)
-	if err != nil {
-		return kernel.FederationResult{}, kernel.ErrInvalidInput.Wrap("could not serialize args")
-	}
-	argsHash := sha256HexBytes(body)
-	req := fed.CallRequest{
-		Action:               actionID,
-		Counterparty:         localPubKey,
-		ExpectedContractHash: expectedContractHash,
-		IdempotencyKey:       idempotencyKey,
-		Args:                 json.RawMessage(body),
-	}
-	if signerFn != nil {
-		if sig, ts, serr := signerFn(actionID, localPubKey, peerPublicKey, expectedContractHash, idempotencyKey, argsHash); serr == nil {
-			req.Signature = sig
-			req.Timestamp = ts
-		}
-	}
-	resp, err := tr.Call(ctx, peerPublicKey, req)
-	if err != nil {
-		// Provably-never-sent (resolve/connect failed) → NotDispatched, so a first dispatch may
-		// fail fast (§13). Any other transport error stays pending: the request may have executed
-		// remotely, so only a signed receipt (or the max-age bound) may settle it.
-		return kernel.FederationResult{NotDispatched: errors.Is(err, fed.ErrNotDispatched)}, nil
-	}
-	var envelope struct {
-		Result  map[string]any  `json:"result"`
-		Receipt json.RawMessage `json:"receipt"`
-	}
-	var receiptJSON string
-	if json.Unmarshal(resp.Body, &envelope) == nil && len(envelope.Receipt) > 0 && string(envelope.Receipt) != "null" {
-		receiptJSON = string(envelope.Receipt)
-	}
-	return kernel.FederationResult{Result: envelope.Result, ReceiptJSON: receiptJSON, HTTPStatus: resp.Status}, nil
-}
-
 // Trace-scoped composition capability headers (§9): the token and the base URL the endpoint
 // calls back on. Distinct from the user Authorization header so routes disambiguate the credential.
 const (
@@ -344,14 +218,13 @@ const (
 	callbackHeader   = "X-Juice-Callback"
 )
 
+// httpActionExecutor dispatches kind=http actions and fetches URLs — one cohesive HTTP concern
+// (kernel.HTTPExecutor + kernel.URLFetcher). Federation lives in fedClient, not here.
 type httpActionExecutor struct {
-	timeout      time.Duration
-	allowLocal   bool
-	callbackURL  string              // §9 base URL advertised to dispatched endpoints for callbacks; "" disables composition
-	auth         *authenticator      // §9 upstream-auth adapter; nil when no credentials box
-	signerFn     signerFunc          // wired after bootstrap
-	fedTransport federationTransport // libp2p federation carrier; nil off the serving path
-	localPubKey  string              // this kernel's base64url Ed25519 public key
+	timeout     time.Duration
+	allowLocal  bool
+	callbackURL string         // §9 base URL advertised to dispatched endpoints for callbacks; "" disables composition
+	auth        *authenticator // §9 upstream-auth adapter; nil when no credentials box
 }
 
 // FetchURL retrieves the body of a URL. Implements kernel.URLFetcher for ownership proof checks.

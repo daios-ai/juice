@@ -16,11 +16,26 @@ type WebDeps struct {
 	Fetch func(ctx context.Context, url string) (status int, body []byte, contentType, finalURL string, err error)
 }
 
-// RegisterWebHandler registers the @sys/web native action handler on k.
-func RegisterWebHandler(k *kernel.Kernel, deps WebDeps) {
-	k.RegisterNativeHandler("web", func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
-		return executeWeb(ctx, args, deps)
-	})
+// Web declares @sys/web (§9): the mediated, SSRF-restricted path by which scripts read the network.
+func Web(deps WebDeps) Spec {
+	return Spec{
+		Name:        "web",
+		Description: "Fetch a public web page (read-only HTTP GET); returns status, body, content type, and final URL",
+		InputSchema: obj(map[string]any{
+			"url": str("Public URL to fetch; a scheme-less URL defaults to https"),
+		}, "url"),
+		OutputSchema: obj(map[string]any{
+			"status":       integer("HTTP response status code"),
+			"body":         str("Response body"),
+			"content_type": str("Response Content-Type header"),
+			"final_url":    str("Final URL fetched, after scheme defaulting and redirects"),
+		}),
+		Handler: func(*kernel.Kernel) kernel.NativeFunc {
+			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+				return executeWeb(ctx, args, deps)
+			}
+		},
+	}
 }
 
 func executeWeb(ctx context.Context, args map[string]any, deps WebDeps) (map[string]any, error) {

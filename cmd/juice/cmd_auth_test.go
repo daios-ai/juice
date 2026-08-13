@@ -4,10 +4,30 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
 )
+
+// loginTokenFor returns just the access token from the canonical PKCE flow.
+func loginTokenFor(k *kernel.Kernel, ctx context.Context, handle, password string) (string, error) {
+	access, _, err := loginTokensFor(k, ctx, handle, password)
+	return access, err
+}
+
+// loginTokensFor drives the canonical PKCE flow (§12): authorize, then exchange the code.
+func loginTokensFor(k *kernel.Kernel, ctx context.Context, handle, password string) (access, refresh string, err error) {
+	verifier, err := kernel.GenerateCodeVerifier()
+	if err != nil {
+		return "", "", err
+	}
+	redirect, err := k.StartAuthCode(ctx, handle, password, kernel.CodeChallenge(verifier), "")
+	if err != nil {
+		return "", "", err
+	}
+	return k.ExchangeAuthCode(ctx, strings.TrimPrefix(redirect, "?code="), verifier, "")
+}
 
 // TestRecoveryKeyDerivation pins that the CLI's seed-phrase derivation is deterministic and that a
 // challenge it signs verifies against the enrolled public key under the kernel's exact payload —
@@ -54,7 +74,7 @@ func TestAuthLoginLogout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tok, _, err := env.k.LoginWithRefresh(ctx, "clitest", "clipass")
+	tok, _, err := loginTokensFor(env.k, ctx, "clitest", "clipass")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +109,7 @@ func TestAuthWrongPassword(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := env.k.Login(ctx, "wrongpass", "wrong"); err == nil {
+	if _, err := loginTokenFor(env.k, ctx, "wrongpass", "wrong"); err == nil {
 		t.Error("expected error for wrong password")
 	}
 }
@@ -105,7 +125,7 @@ func TestRevokeRefreshToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, rt, err := env.k.LoginWithRefresh(ctx, "revoke-user", "pass")
+	_, rt, err := loginTokensFor(env.k, ctx, "revoke-user", "pass")
 	if err != nil {
 		t.Fatal(err)
 	}

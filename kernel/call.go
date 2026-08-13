@@ -12,11 +12,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// CallRequest is input to the central Call() operation. The dispatch mode is selected by which
+// callRequest is input to the central Call() operation. The dispatch mode is selected by which
 // trace reference is set: ParentTraceID for a subcall (funded here by BeginSubcall), or
 // ExistingTraceID for a pre-created, pre-funded trace — a root call (BeginRun) or a step
 // completion (BeginStepCall). StepID is an orthogonal flag, not a third trace mode.
-type CallRequest struct {
+type callRequest struct {
 	// CallerID is the authenticated user making the call.
 	CallerID string
 	// ParentTraceID is the parent trace of a subcall; the call's funds are moved from it by
@@ -282,8 +282,8 @@ func (k *Kernel) ensureBasePrice(ctx context.Context, a *Action) (*Action, error
 // run, /v1/call, and WASM subcalls all reach unimported remote actions uniformly. Trust derives from
 // the manifest signature, not an operator act; a nil resolver (no transport) yields ErrNotFound.
 func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *Account, r ActionRef) (*Action, error) {
-	resolver, ok := k.http.(RemoteResolver)
-	if !ok {
+	resolver := k.fedClient
+	if resolver == nil {
 		return nil, ErrNotFound.Wrapf("action %s not found", r.String())
 	}
 	m, err := resolver.ResolveRemoteAction(ctx, peerKey, r.Owner, r.Name)
@@ -341,7 +341,30 @@ func (k *Kernel) ResolveUser(ctx context.Context, ident string) (*Account, error
 // For root calls (req.ExistingTraceID), the process and trace must already have been created by Run().
 // For subcalls, the parent trace must have sufficient available funds.
 // For step-completion calls, BeginStepCall must have been called before invoking Call.
-func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) {
+// SubcallRequest is the only publicly constructible call: a subcall on an existing trace (§6), the
+// HTTP twin of juice.call used by a capability callback (§9). It cannot express an orchestration
+// mode — a pre-funded trace, a step completion, or an inbound idempotency record — so no client can
+// assemble a combination the kernel does not itself create.
+type SubcallRequest struct {
+	CallerID      string // the executing action's owner, per the subcall law (§6)
+	ParentTraceID string // the trace the subcall spends from
+	ActionRef     string // owner/name, owner@kernel/name, or a raw action id
+	Args          map[string]any
+}
+
+// Subcall executes a subcall on an existing trace. Root calls go through Run, step completions
+// through CompleteStep, inbound federation through RunFederated — each supplying its own
+// orchestration mode internally.
+func (k *Kernel) Subcall(ctx context.Context, req SubcallRequest) (*CallReply, error) {
+	return k.call(ctx, callRequest{
+		CallerID:      req.CallerID,
+		ParentTraceID: req.ParentTraceID,
+		ActionRef:     req.ActionRef,
+		Args:          req.Args,
+	})
+}
+
+func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) {
 	logger := k.log.With(ctx)
 
 	// 1. Subject must be authenticated. The caller User is retained for the §4 precondition-6
@@ -563,26 +586,39 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	argsJSON, _ := json.Marshal(req.Args)
 	ktx.ArgsJSON = json.RawMessage(argsJSON)
 
+	// fail is the single settled-failure exit (§5): stamp the failure, commit the transaction +
+	// receipt + refund through settleFailedCall, and report the committed transaction alongside the
+	// cause — the caller was charged, so it must be able to find it. Every failure path below goes
+	// through here, so the invariant has one implementation; only the cause and latency vary.
+	// A settlement that itself fails returns its own error, since then nothing was committed.
+	fail := func(cause error, latency float64) (*CallReply, error) {
+		ktx.Status = TxFailure
+		if ktx.EndedAt.IsZero() {
+			ktx.EndedAt = time.Now().UTC()
+		}
+		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, cause)
+		if sErr != nil || receipt == nil {
+			if sErr == nil {
+				sErr = cause
+			}
+			return nil, sErr
+		}
+		return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID}, cause
+	}
+
 	// 9. Execute. Remote proxy calls use ExecuteFederation directly with the stored idempotency key,
 	// dispatching the peer's stable action id — never the cached display name (§13).
 	started := time.Now()
 
 	if action.Kind == KindRemoteProxy {
-		fe, ok := k.http.(FederationExecutor)
-		if !ok {
+		fe := k.fedClient
+		if fe == nil {
 			// The trace is already funded (BeginSubcall / BeginRun). Returning here without
 			// settling would commit no transaction and strand the locked allocation. Route the
 			// misconfiguration through the normal failure path so a failure tx + receipt commits
 			// and the funds refund — the "no settlement" rule is only for a network timeout
 			// awaiting a remote receipt, not a local adapter being absent.
-			cfgErr := ErrInvalidState.Wrap("federation executor not configured")
-			ktx.Status = TxFailure
-			ktx.EndedAt = time.Now().UTC()
-			receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, 0, cfgErr)
-			if sErr != nil {
-				return nil, sErr
-			}
-			return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID}, cfgErr
+			return fail(ErrInvalidState.Wrap("federation executor not configured"), 0)
 		}
 		ikey := ""
 		if trace.IdempotencyKey != nil {
@@ -598,14 +634,8 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 			// never fail-fasts, since a parked request may already have executed. Mirrors the
 			// executor-not-configured settlement above (a funded trace must never be stranded).
 			pn := k.KernelName(ctx, target.KernelPublicKey)
-			unreach := ErrPeerUnreachable.Wrapf("peer %s is unreachable; the call was not sent and has been refunded", pn).WithMeta("peer", pn)
-			ktx.Status = TxFailure
-			receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, unreach)
-			if sErr != nil {
-				return nil, sErr
-			}
 			logger.Warn("remote.unreachable", "action", action.Name, "peer", target.Handle)
-			return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID}, unreach
+			return fail(ErrPeerUnreachable.Wrapf("peer %s is unreachable; the call was not sent and has been refunded", pn).WithMeta("peer", pn), latency)
 		}
 		return k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, latency)
 	}
@@ -615,23 +645,13 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	ktx.EndedAt = time.Now().UTC()
 
 	if execErr != nil {
-		ktx.Status = TxFailure
-		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, execErr)
-		if sErr != nil {
-			return nil, sErr
-		}
 		logger.Warn("call.failed", "action", action.Name, "error", execErr)
-		return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID}, execErr
+		return fail(execErr, latency)
 	}
 
 	// 10. Validate output schema.
 	if schemaErr := ValidateInput(action.OutputSchema, any(reply)); schemaErr != nil {
-		ktx.Status = TxFailure
-		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, schemaErr)
-		if sErr != nil {
-			return nil, sErr
-		}
-		return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID}, schemaErr
+		return fail(schemaErr, latency)
 	}
 
 	// 11. Read trace.available post-execution — this is the taxable amount.
@@ -644,16 +664,12 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	postTrace, readErr := k.store.ReadTrace(ctx, trace.ID)
 	if readErr != nil {
 		mu.Unlock()
-		// If we can't read the trace, settle as failure to avoid fund loss. The settlement commits
-		// a transaction and charges for it, so its receipt must be returned like every other
-		// settled-failure path below: a nil reply here would tell callers nothing happened while
-		// the caller has in fact been charged, and the idempotency record already completed.
-		ktx.Status = TxFailure
-		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, readErr)
-		if sErr != nil || receipt == nil {
-			return nil, ErrInternal.Wrap("could not read trace")
-		}
-		return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID}, ErrInternal.Wrap("could not read trace")
+		// If we can't read the trace, settle as failure to avoid fund loss. The settlement commits a
+		// transaction and charges for it, so its receipt is reported like every other settled failure:
+		// a nil reply would tell the caller nothing happened while it has in fact been charged, and
+		// the idempotency record already completed.
+		reply, _ := fail(ErrInternal.Wrap("could not read trace"), latency)
+		return reply, ErrInternal.Wrap("could not read trace")
 	}
 	taxable := postTrace.Available
 	net, fee := ComputeFee(taxable, k.cfg.FeeBPS)
@@ -678,14 +694,10 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium, trace.Value, valuePremium, trace.ValueTo) // success: charge = gross, value delivered
 	if receiptErr != nil {
 		mu.Unlock()
-		ktx.Status = TxFailure
-		// Same as the post-execution read failure above: the settlement committed, so its receipt
-		// is returned rather than discarded.
-		failReceipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, receiptErr)
-		if sErr != nil || failReceipt == nil {
-			return nil, ErrInternal.Wrap("could not build receipt")
-		}
-		return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: failReceipt.ID}, ErrInternal.Wrap("could not build receipt")
+		// Same as the post-execution read failure above: the settlement committed, so its receipt is
+		// reported rather than discarded.
+		reply, _ := fail(ErrInternal.Wrap("could not build receipt"), latency)
+		return reply, ErrInternal.Wrap("could not build receipt")
 	}
 	// Detach settlement from execution-scoped cancellation so the success commit
 	// (payout + lock release + audit record) is never aborted mid-flight (§5).
@@ -709,7 +721,7 @@ func (k *Kernel) Call(ctx context.Context, req CallRequest) (*CallReply, error) 
 
 // callerWallet returns the callerWalletID and callerWalletKind for CommitCall/CommitFailedCall.
 // Root calls (ExistingTraceID) have no parent trace, so they resolve to CallerProcess.
-func (k *Kernel) callerWallet(req CallRequest, process *Process, parentTrace *Trace) (id, kind string) {
+func (k *Kernel) callerWallet(req callRequest, process *Process, parentTrace *Trace) (id, kind string) {
 	var parentTraceID *string
 	if parentTrace != nil {
 		parentTraceID = &parentTrace.ID
@@ -935,7 +947,7 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
 		return nil, ErrInvalidInput.Wrap("args must be a JSON object")
 	}
-	reply, err := h.kernel.Call(ctx, CallRequest{
+	reply, err := h.kernel.call(ctx, callRequest{
 		CallerID:      h.targetID,
 		ParentTraceID: h.traceID,
 		ActionRef:     actionName,
@@ -1007,7 +1019,7 @@ func (k *Kernel) computeStats(_ context.Context, actionID string, tx *Transactio
 // It returns the committed receipt so callers can surface the real charge (e.g. an inbound
 // federation call that failed after settling descendants must return that receipt, not a
 // zero-charge rejection).
-func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req CallRequest, action *Action, latency float64, callErr error) (*Receipt, error) {
+func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req callRequest, action *Action, latency float64, callErr error) (*Receipt, error) {
 	traceID := trace.ID
 	// Settlement is a money transition + its audit record (§5); it must commit even
 	// if the call timed out or the client disconnected. Detach from execution-scoped

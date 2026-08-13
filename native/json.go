@@ -6,11 +6,23 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// RegisterJSONHandler registers the @sys/llm/json native action handler on k.
-func RegisterJSONHandler(k *kernel.Kernel, chatter kernel.JSONChatter) {
-	k.RegisterNativeHandler("llm/json", func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
-		return executeJSON(ctx, args, chatter)
-	})
+// JSON declares @sys/llm/json (§9): structured output validated locally against the caller's schema.
+func JSON(chatter kernel.JSONChatter) Spec {
+	return Spec{
+		Name:        "llm/json",
+		Description: "Structured JSON output from the configured language model, locally validated against a schema",
+		InputSchema: obj(map[string]any{
+			"messages":      arrayOf(messageSchema(), "Conversation history"),
+			"system":        str("Optional system prompt"),
+			"output_schema": object("JSON Schema the model output must satisfy"),
+		}, "messages", "output_schema"),
+		OutputSchema: obj(map[string]any{"value": object("JSON value conforming to output_schema")}),
+		Handler: func(*kernel.Kernel) kernel.NativeFunc {
+			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+				return executeJSON(ctx, args, chatter)
+			}
+		},
+	}
 }
 
 func executeJSON(ctx context.Context, args map[string]any, chatter kernel.JSONChatter) (map[string]any, error) {

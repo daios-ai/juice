@@ -7,11 +7,22 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// RegisterTimeHandler registers the @sys/time native action handler on k.
-func RegisterTimeHandler(k *kernel.Kernel) {
-	k.RegisterNativeHandler("time", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
-		return executeTime()
-	})
+// Time declares @sys/time (§9).
+func Time() Spec {
+	return Spec{
+		Name:        "time",
+		Description: "Returns the current UTC time",
+		InputSchema: obj(map[string]any{}),
+		OutputSchema: obj(map[string]any{
+			"unix": integer("Seconds since UTC epoch"),
+			"iso":  str("RFC 3339 timestamp"),
+		}),
+		Handler: func(*kernel.Kernel) kernel.NativeFunc {
+			return func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+				return executeTime()
+			}
+		},
+	}
 }
 
 func executeTime() (map[string]any, error) {

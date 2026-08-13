@@ -54,7 +54,7 @@ type GrantStore interface {
 }
 
 // URLFetcher retrieves the body of a URL. Used for OpenAPI ownership proof (well-known challenge).
-// HTTPExecutor implementations may optionally implement this interface; kernel checks via type assertion.
+// Injected explicitly (Dependencies.Fetcher); a nil fetcher disables well-known proof.
 type URLFetcher interface {
 	FetchURL(ctx context.Context, rawURL string) ([]byte, error)
 }
@@ -63,29 +63,36 @@ type URLFetcher interface {
 // transport (§13), addressing the peer by its Ed25519 public key. actionID is the action's stable
 // id on that peer; expectedContractHash is the cached contract hash the call
 // binds as the §8 If-Match precondition. The transport signs the request as this kernel and
-// resolves peerPublicKey to a live path (direct / hole-punched / relayed). HTTPExecutor
-// implementations may optionally implement this interface; kernel checks via type assertion.
+// resolves peerPublicKey to a live path (direct / hole-punched / relayed).
 type FederationExecutor interface {
 	ExecuteFederation(ctx context.Context, peerPublicKey, actionID, expectedContractHash, idempotencyKey string, args map[string]any) (FederationResult, error)
 }
 
 // FederationSettler runs one round of the /juice/fed/settle/1 residual-settlement exchange against a
-// peer (§13), addressing it by Ed25519 public key. Like FederationExecutor it is an optional
-// capability of the injected HTTPExecutor; the kernel checks via type assertion and never imports fed.
-// It returns the peer's raw response body (a signed SettlementRecord) and status.
+// peer (§13), addressing it by Ed25519 public key. It returns the peer's raw response body (a signed
+// SettlementRecord) and status. The kernel never imports fed.
 type FederationSettler interface {
 	Settle(ctx context.Context, peerPublicKey, kind, timestamp, signature, settlementID string, amount int64, nonce string, record []byte) (status int, body []byte, err error)
 }
 
 // RemoteResolver resolves a single remote action or user on demand over /juice/fed/resolve/1
-// (§13 subscription-free calls). Like FederationExecutor it is an optional capability the injected
-// HTTPExecutor may implement; the kernel checks via type assertion and never imports fed.
-// ResolveRemoteAction returns the peer's signed manifest for one action; ResolveRemoteUser maps a
-// user reference to its stable id and handle on the peer. A nil/absent resolver disables lazy
-// resolution (a cold cross-kernel ref is then a plain ErrNotFound).
+// (§13 subscription-free calls). ResolveRemoteAction returns the peer's signed manifest for one
+// action; ResolveRemoteUser maps a user reference to its stable id and handle on the peer. A nil
+// federation client disables lazy resolution (a cold cross-kernel ref is then a plain ErrNotFound).
 type RemoteResolver interface {
 	ResolveRemoteAction(ctx context.Context, peerPublicKey, owner, name string) (*ActionManifest, error)
 	ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (userID, handle string, err error)
+}
+
+// FederationClient is the outbound federation adapter: everything the kernel needs to reach a peer
+// (§13) — dispatch a call, settle a residual debt, resolve one action or principal. cmd/juice supplies
+// one object implementing all three; the kernel holds it as a single named dependency rather than
+// type-asserting capabilities out of the HTTP executor, so a federation change never touches the
+// HTTP adapter. A nil client means federation is unconfigured, reported per call site.
+type FederationClient interface {
+	FederationExecutor
+	FederationSettler
+	RemoteResolver
 }
 
 // HostFunctions are the callbacks available to a running script.
@@ -286,7 +293,6 @@ type Store interface {
 
 	ReadTransaction(ctx context.Context, id string) (*Transaction, error)
 	ListTransactions(ctx context.Context, filter TxFilter) ([]*Transaction, error)
-	ListAllTransactions(ctx context.Context, limit, offset int) ([]*Transaction, error)
 
 	// ---- Receipts ----
 

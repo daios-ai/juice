@@ -66,7 +66,7 @@ func mountFullRouter(srv *server) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(requestIDMiddleware)
-	r.Post("/v1/auth/token", srv.postTokenMulti)
+	r.Post("/v1/auth/token", srv.postToken)
 	r.Post("/v1/auth/authorize", srv.postAuthorize)
 	r.Post("/v1/auth/refresh", srv.postRefresh)
 	r.Post("/v1/auth/logout", srv.postLogout)
@@ -124,7 +124,7 @@ func makeUser(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, err := k.Login(context.Background(), handle, "pass")
+	tok, err := loginTokenFor(k, context.Background(), handle, "pass")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,6 +297,35 @@ func TestServeCreateUser(t *testing.T) {
 	}
 }
 
+// httpLogin drives the canonical authorize→exchange flow over HTTP (§12, §14) and returns the
+// status a caller should assert plus the access token. Credential rejection surfaces at the
+// authorize leg, so a bad password yields that leg's status and an empty token.
+func httpLogin(t *testing.T, srv *httptest.Server, handle, password string) (int, string) {
+	t.Helper()
+	verifier := strings.Repeat("v", 43)
+	h := sha256.Sum256([]byte(verifier))
+	authResp := httpDo(t, srv, "POST", "/v1/auth/authorize", map[string]any{
+		"handle": handle, "password": password,
+		"code_challenge": base64.RawURLEncoding.EncodeToString(h[:]),
+	}, "")
+	if authResp.StatusCode != http.StatusOK {
+		defer authResp.Body.Close()
+		return authResp.StatusCode, ""
+	}
+	var auth map[string]string
+	decodeResponse(t, authResp, &auth)
+	tokResp := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
+		"code": strings.TrimPrefix(auth["redirect"], "?code="), "code_verifier": verifier,
+	}, "")
+	if tokResp.StatusCode != http.StatusOK {
+		defer tokResp.Body.Close()
+		return tokResp.StatusCode, ""
+	}
+	var tokens map[string]string
+	decodeResponse(t, tokResp, &tokens)
+	return http.StatusOK, tokens["access_token"]
+}
+
 func TestServeAuthToken(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
@@ -308,17 +337,12 @@ func TestServeAuthToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"handle": "http-bob", "password": "pass",
-	}, "")
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	status, tok := httpLogin(t, srv, "http-bob", "pass")
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", status)
 	}
-	var result map[string]string
-	decodeResponse(t, resp, &result)
-	if result["token"] == "" {
-		t.Error("expected non-empty token")
+	if tok == "" {
+		t.Error("expected non-empty access token")
 	}
 }
 
@@ -1070,7 +1094,7 @@ func TestServeRateTransactionNotFound(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	tok, err := k.Login(context.Background(), "sys", "sys-pass")
+	tok, err := loginTokenFor(k, context.Background(), "sys", "sys-pass")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1250,7 +1274,7 @@ func TestRateLimitLogin(t *testing.T) {
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "rl-test-secret"
 	logger := log.Discard()
-	k := kernel.New(db, nil, nil, nil, cfg, logger)
+	k := kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: logger})
 	if _, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
 		Handle: "rlu", Password: "pass",
 	}); err != nil {
@@ -1261,7 +1285,7 @@ func TestRateLimitLogin(t *testing.T) {
 	r := chi.NewRouter()
 	r.Use(requestIDMiddleware)
 	// Burst of 3 with zero refill rate so tokens don't recover during the test.
-	r.With(ipRateLimiter(0, 3)).Post("/v1/auth/token", srv.postTokenMulti)
+	r.With(ipRateLimiter(0, 3)).Post("/v1/auth/token", srv.postToken)
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
@@ -1380,21 +1404,12 @@ func TestPutMe(t *testing.T) {
 	resp3.Body.Close()
 
 	// Old password login must fail; new password must succeed.
-	oldLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"grant_type": "password", "handle": "putmetest", "password": "pass",
-	}, "")
-	if oldLogin.StatusCode != http.StatusUnauthorized {
-		t.Errorf("old password: want 401, got %d", oldLogin.StatusCode)
+	if status, _ := httpLogin(t, srv, "putmetest", "pass"); status != http.StatusUnauthorized {
+		t.Errorf("old password: want 401, got %d", status)
 	}
-	oldLogin.Body.Close()
-
-	newLogin := httpDo(t, srv, "POST", "/v1/auth/token", map[string]any{
-		"grant_type": "password", "handle": "putmetest", "password": "newpass",
-	}, "")
-	if newLogin.StatusCode != http.StatusOK {
-		t.Errorf("new password: want 200, got %d", newLogin.StatusCode)
+	if status, _ := httpLogin(t, srv, "putmetest", "newpass"); status != http.StatusOK {
+		t.Errorf("new password: want 200, got %d", status)
 	}
-	newLogin.Body.Close()
 
 	// Wrong current password returns 401.
 	resp4 := httpDo(t, srv, "PUT", "/v1/me", map[string]any{
@@ -2521,7 +2536,7 @@ func TestSuperuserScopeOverTCP(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 
-	sysTok, err := k.Login(ctx, "sys", "sys-pass")
+	sysTok, err := loginTokenFor(k, ctx, "sys", "sys-pass")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2605,8 +2620,10 @@ func (f *fakeDiscoverer) Advertise(context.Context) (time.Duration, error) {
 	f.advertised++
 	return time.Minute, nil
 }
-func (f *fakeDiscoverer) DiscoverProviders(context.Context) ([]string, error) { return f.providers, nil }
-func (f *fakeDiscoverer) BootstrapKeys() []string                             { return f.bootstrap }
+func (f *fakeDiscoverer) DiscoverProviders(context.Context) ([]string, error) {
+	return f.providers, nil
+}
+func (f *fakeDiscoverer) BootstrapKeys() []string { return f.bootstrap }
 func (f *fakeDiscoverer) Gossip(_ context.Context, key string, _ string) (json.RawMessage, error) {
 	f.gossiped = append(f.gossiped, key)
 	if raw, ok := f.gossip[key]; ok {
@@ -2713,8 +2730,8 @@ func TestDiscoverPullFailureLog(t *testing.T) {
 		bootstrap: []string{"OFF", "DEC", "MIS", "ACC"}, // configured seeds, all pulled this pass
 		gossip: map[string]json.RawMessage{
 			"DEC": json.RawMessage("{not json"), // decode: malformed reply
-			"MIS": mkGossip("OTHER"),             // mismatch: claims OTHER ≠ MIS
-			"ACC": mkGossip("ACC"),               // verifies, but accumulate rejects
+			"MIS": mkGossip("OTHER"),            // mismatch: claims OTHER ≠ MIS
+			"ACC": mkGossip("ACC"),              // verifies, but accumulate rejects
 			// "OFF" absent from the map → fakeDiscoverer returns an error → transport stage
 		},
 	}

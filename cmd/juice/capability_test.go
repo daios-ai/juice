@@ -33,7 +33,7 @@ func newCapabilityKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store
 		t.Fatal(err)
 	}
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout)}
-	k := kernel.New(db, nil, httpExec, nil, cfg, logger)
+	k := kernel.New(kernel.Dependencies{Store: db, HTTP: httpExec, Fetcher: httpExec, Config: cfg, Logger: logger})
 	k.SetSecretBox(box)
 	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
@@ -116,7 +116,7 @@ func TestCapabilityComposition(t *testing.T) {
 
 	// Role law of the subcall: caller = the composing action's owner (§6/§9), target = sub owner,
 	// owner = the process owner (the run caller).
-	txs, err := db.ListAllTransactions(ctx, 100, 0)
+	txs, err := db.ListTransactions(ctx, kernel.TxFilter{Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -241,10 +241,13 @@ http_body() {
 # assert_status label want method url [json] [token] — assert an exact HTTP status. Without this
 # an error contract is unassertable, which is why the suite never had one.
 assert_status() { local l="$1" w="$2"; shift 2; assert_eq "$l" "$w" "$(http_code "$@")"; }
-# token base handle password — a bearer token via the password grant, for raw-HTTP checks.
+# token base handle password — an access token via authorize→exchange (§12, the only token-issuing
+# form; there is no password grant), for raw-HTTP checks.
 token() {
+    local v ch code; v=$(pkce_verifier); ch=$(pkce_challenge "$v"); code=$(pkce_code "$1" "$2" "$3" "$ch")
+    [ -n "$code" ] || return 0
     strfield "$(curl -sf -X POST "$1/v1/auth/token" -H 'Content-Type: application/json' \
-        -d "{\"handle\":\"$2\",\"password\":\"$3\"}" 2>/dev/null)" token
+        -d "{\"code\":\"$code\",\"code_verifier\":\"$v\"}" 2>/dev/null)" access_token
 }
 
 # juice_token_dir home db — mirrors tokenDir() in cmd/juice/main.go:

@@ -241,7 +241,7 @@ func TestStepCompleteResetsToWaitingOnPreTransactionReject(t *testing.T) {
 	_, tr := beginTestRun(t, st, owner.ID, action)
 
 	// Create a root trace so the step has a parent (required for step.price > 0 parking).
-	rootReply, err := k.Call(ctx, kernel.CallRequest{
+	rootReply, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID: owner.ID, ExistingTraceID: tr.ID,
 		TargetUserID: owner.ID, ActionName: action.Name, Args: map[string]any{},
 	})
@@ -778,7 +778,7 @@ func TestCreateStepTraceAuthorityWrongProcess(t *testing.T) {
 	_, tr1 := beginTestRun(t, st, procOwner.ID, action)
 
 	// Call completes; p1 auto-closes after Run finishes.
-	reply, err := k.Call(ctx, kernel.CallRequest{
+	reply, err := k.TestCall(ctx, kernel.TestCallRequest{
 		CallerID:        procOwner.ID,
 		ExistingTraceID: tr1.ID,
 		TargetUserID:    actionOwner.ID,

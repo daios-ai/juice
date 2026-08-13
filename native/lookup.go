@@ -6,11 +6,30 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// RegisterLookupHandler registers the @sys/lookup native action handler on k.
-func RegisterLookupHandler(k *kernel.Kernel) {
-	k.RegisterNativeHandler("lookup", func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
-		return executeLookup(ctx, args, callerID, k)
-	})
+// Lookup declares @sys/lookup (§9): ranked search over callable actions, local and discovered.
+func Lookup() Spec {
+	return Spec{
+		Name:        "lookup",
+		Description: "Semantic search over active actions",
+		InputSchema: searchQuerySchema(),
+		OutputSchema: obj(map[string]any{
+			"results": arrayOf(obj(map[string]any{
+				"action_id":     str("Unique action identifier"),
+				"action":        str("Action reference as owner/name"),
+				"description":   str("Human-readable description of the action"),
+				"price":         integer("All-in price the caller pays; indicative for a not-yet-resolved remote action"),
+				"score":         num("Relevance score between 0 and 1"),
+				"input_schema":  object("JSON Schema for the action's input"),
+				"output_schema": object("JSON Schema for the action's output"),
+				"quote_hash":    str("Fingerprint of the quoted terms; pin it on a run to be refused if they changed"),
+			}), "Ranked list of matching actions"),
+		}),
+		Handler: func(k *kernel.Kernel) kernel.NativeFunc {
+			return func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
+				return executeLookup(ctx, args, callerID, k)
+			}
+		},
+	}
 }
 
 func executeLookup(ctx context.Context, args map[string]any, subjectID string, k *kernel.Kernel) (map[string]any, error) {

@@ -56,7 +56,7 @@ func newLookupTestKernel(t *testing.T) (*kernel.Kernel, kernel.Store) {
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = issuerID
 	cfg.SigningKey = priv
-	return kernel.New(db, nil, nil, &fakeEmbedder{}, cfg, nil), db
+	return kernel.New(kernel.Dependencies{Store: db, Embedder: &fakeEmbedder{}, Config: cfg}), db
 }
 
 func seedOwner(t *testing.T, st kernel.Store, handle string) *kernel.Account {

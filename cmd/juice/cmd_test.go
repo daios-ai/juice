@@ -67,7 +67,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	box, _ := newAESGCMBox(make([]byte, 32))
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout), allowLocal: true}
 	exec := script.New(script.Config{TimeoutMS: cfg.ScriptTimeout.Milliseconds(), MemoryBytes: cfg.ScriptMemory})
-	k := kernel.New(db, exec, httpExec, nil, cfg, log.Discard())
+	k := kernel.New(kernel.Dependencies{Store: db, Scripts: exec, HTTP: httpExec, Fetcher: httpExec, Config: cfg, Logger: log.Discard()})
 	k.SetSecretBox(box)
 	t.Setenv("JUICE_SECRET_KEY", "cli-test-secret")
 
@@ -96,7 +96,7 @@ func mountTestServer(t *testing.T, k *kernel.Kernel) *httptest.Server {
 	t.Helper()
 	srv := &server{kernel: k, log: log.Discard()}
 	r := chi.NewRouter()
-	r.Post("/v1/auth/token", srv.postTokenMulti)
+	r.Post("/v1/auth/token", srv.postToken)
 	r.Post("/v1/auth/authorize", srv.postAuthorize)
 	r.Post("/v1/auth/refresh", srv.postRefresh)
 	r.Post("/v1/auth/logout", srv.postLogout)
@@ -255,10 +255,10 @@ func TestUserUpdatePassword(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := env.k.LoginWithRefresh(ctx, "updpass", "oldpass"); err == nil {
+	if _, _, err := loginTokensFor(env.k, ctx, "updpass", "oldpass"); err == nil {
 		t.Error("old password should be rejected after change")
 	}
-	if _, _, err := env.k.LoginWithRefresh(ctx, "updpass", "newpass"); err != nil {
+	if _, _, err := loginTokensFor(env.k, ctx, "updpass", "newpass"); err != nil {
 		t.Errorf("new password should work: %v", err)
 	}
 }
@@ -311,7 +311,7 @@ func TestUserUpdateProxyUser(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := &kernel.Account{
-		ID:        "proxy-id-1",
+		ID:              "proxy-id-1",
 		KernelPublicKey: "dGVzdGtleQ==",
 		CreatedAt:       time.Now().UTC(),
 		UpdatedAt:       time.Now().UTC(),
@@ -460,7 +460,7 @@ func TestActionShowPrivate(t *testing.T) {
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
 
-	ownerTok, _ := env.k.Login(ctx, "show-owner", "pass")
+	ownerTok, _ := loginTokenFor(env.k, ctx, "show-owner", "pass")
 	if err := saveToken(ownerTok); err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +468,7 @@ func TestActionShowPrivate(t *testing.T) {
 		t.Errorf("owner: unexpected error: %v", err)
 	}
 
-	strangerTok, _ := env.k.Login(ctx, "show-stranger", "pass")
+	strangerTok, _ := loginTokenFor(env.k, ctx, "show-stranger", "pass")
 	if err := saveToken(strangerTok); err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +489,7 @@ func TestActionCreateSchemasAndAuthFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(ctx, "authowner", "pass")
+	tok, _ := loginTokenFor(env.k, ctx, "authowner", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +541,7 @@ func TestActionCreateFromArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(ctx, "wasmowner", "pass")
+	tok, _ := loginTokenFor(env.k, ctx, "wasmowner", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +579,7 @@ func TestActionCreateHTTPMethodParam(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(ctx, "httpowner", "pass")
+	tok, _ := loginTokenFor(env.k, ctx, "httpowner", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -615,7 +615,7 @@ func TestActionImportOpenAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(context.Background(), "cli-import-owner", "pass")
+	tok, _ := loginTokenFor(env.k, context.Background(), "cli-import-owner", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -656,7 +656,7 @@ func TestActionUnimportOpenAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(context.Background(), "cli-unimport-owner", "pass")
+	tok, _ := loginTokenFor(env.k, context.Background(), "cli-unimport-owner", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -956,7 +956,7 @@ func TestServeCreateStep(t *testing.T) {
 
 	resp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action":       actionID,
+		"action":          actionID,
 		"required_caller": "cs-create-caller",
 		"partial_args":    map[string]any{"preset": "val"},
 	}, ownerTok)
@@ -995,7 +995,7 @@ func TestServeListSteps(t *testing.T) {
 	for range 2 {
 		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 			"trace_id":        traceID,
-			"action":       actionID,
+			"action":          actionID,
 			"required_caller": "sl-steps-caller",
 			"partial_args":    map[string]any{},
 		}, ownerTok)
@@ -1068,7 +1068,7 @@ func TestCLIListPaginationFlags(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(ctx, "page-cli", "pass")
+	tok, _ := loginTokenFor(env.k, ctx, "page-cli", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -1101,7 +1101,7 @@ func TestServeGetStep(t *testing.T) {
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action":       actionID,
+		"action":          actionID,
 		"required_caller": "gs-steps-caller",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
@@ -1160,7 +1160,7 @@ func TestServeCompleteStepMissingArgs(t *testing.T) {
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action":       actionID,
+		"action":          actionID,
 		"required_caller": "csmiss-caller",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
@@ -1197,7 +1197,7 @@ func TestServeCompleteStep(t *testing.T) {
 
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
-		"action":       actionID,
+		"action":          actionID,
 		"required_caller": "cs2-caller",
 		"partial_args":    map[string]any{"from_partial": "A"},
 	}, ownerTok)
@@ -1245,7 +1245,7 @@ func TestStepCompleteFileArg(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := env.k.Login(ctx, "sc-caller", "pass")
+	tok, _ := loginTokenFor(env.k, ctx, "sc-caller", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -1349,12 +1349,11 @@ func TestCallClosedProcess(t *testing.T) {
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
 
-	_, err := env.k.Call(ctx, kernel.CallRequest{
-		CallerID:        owner.ID,
-		ExistingTraceID: tr.ID,
-		TargetUserID:    owner.ID,
-		ActionName:      "echo",
-		Args:            map[string]any{},
+	_, err := env.k.Subcall(ctx, kernel.SubcallRequest{
+		CallerID:      owner.ID,
+		ParentTraceID: tr.ID,
+		ActionRef:     owner.Handle + "/echo",
+		Args:          map[string]any{},
 	})
 	if err == nil {
 		t.Error("expected error calling on closed process")
@@ -1401,7 +1400,7 @@ func newRemoteTestKernel(t *testing.T) (*kernel.Kernel, *store.DB) {
 
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "remote-test-secret"
-	k := kernel.New(db, nil, nil, nil, cfg, log.Discard())
+	k := kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: log.Discard()})
 
 	if err := k.FirstBoot(t.Context(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
@@ -1549,7 +1548,7 @@ func TestDirectorySelector(t *testing.T) {
 		"alice/mail/send": "alice/mail",
 		"alice/send":      "alice/send",
 		"a/x/y/z":         "a/x/y",
-		"noslash":          "noslash",
+		"noslash":         "noslash",
 	}
 	for in, want := range cases {
 		if got := directorySelector(in); got != want {
@@ -1608,7 +1607,7 @@ func TestCLIActionRatings(t *testing.T) {
 		t.Fatalf("rate: %v", err)
 	}
 
-	tok, _ := env.k.Login(ctx, "rate-owner", "pass")
+	tok, _ := loginTokenFor(env.k, ctx, "rate-owner", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}

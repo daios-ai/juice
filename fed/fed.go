@@ -54,21 +54,27 @@ type ResolveRequest struct {
 	User  string `json:"user,omitempty"`  // user reference: handle or id (kind=user)
 }
 
-// ResolveResponse mirrors CallResponse: a status plus an opaque JSON body. For kind "action" the
-// body is a signed ActionManifest; for kind "user" it is {"user_id","handle"}; on miss, an error.
-type ResolveResponse struct {
+// Response is the shape every protocol reply takes: a status plus an opaque JSON body. Status
+// mirrors the HTTP status codes the pre-migration federation used (200 success, 402/403/409/422
+// failures), so settlement branching above the seam is unchanged; the transport applies no Juice
+// semantics to either field. The per-protocol aliases below name what each body carries.
+type Response struct {
 	Status int             `json:"status"`
 	Body   json.RawMessage `json:"body"`
 }
 
+// ResolveResponse carries a signed ActionManifest (kind "action") or {"user_id","handle"}
+// (kind "user"); on miss, an error.
+type ResolveResponse = Response
+
 // CallRequest is the wire form of an inbound federation call (§13). Args carries the exact
 // bytes the caller hashed and signed, so the receiver's args_hash matches byte-for-byte.
 type CallRequest struct {
-	Action               string          `json:"action"`                 // the action's stable id on the serving kernel
-	Counterparty         string          `json:"counterparty"`           // caller's base64url Ed25519 public key
-	ExpectedContractHash string          `json:"expected_contract_hash"` // contract hash the caller cached (§8 If-Match)
-	IdempotencyKey       string          `json:"idempotency_key"`        //
-	Timestamp            string          `json:"timestamp"`              // RFC3339
+	Action               string `json:"action"`                 // the action's stable id on the serving kernel
+	Counterparty         string `json:"counterparty"`           // caller's base64url Ed25519 public key
+	ExpectedContractHash string `json:"expected_contract_hash"` // contract hash the caller cached (§8 If-Match)
+	IdempotencyKey       string `json:"idempotency_key"`        //
+	Timestamp            string `json:"timestamp"`              // RFC3339
 	// Signature is Ed25519 over JCS({action,args_hash,counterparty,expected_contract_hash,idempotency_key,recipient,timestamp}).
 	// recipient (the serving kernel's key) is bound into the signature but not carried on the wire: the signer
 	// signs the key it dialed, the receiver verifies with its own key, so a captured request cannot be replayed
@@ -77,37 +83,30 @@ type CallRequest struct {
 	Args      json.RawMessage `json:"args"` // exact request bytes
 }
 
-// CallResponse carries the settlement envelope back to the caller. Status mirrors the HTTP
-// status codes the pre-migration federation used (200 success, 402/403/409/422 failures),
-// so settlement branching above the seam is unchanged. Body is {result,receipt} or {error,receipt}.
-type CallResponse struct {
-	Status int             `json:"status"`
-	Body   json.RawMessage `json:"body"`
-}
+// CallResponse carries the settlement envelope back to the caller: {result,receipt} or
+// {error,receipt}.
+type CallResponse = Response
 
 // StepRequest is the wire form of a /juice/fed/step/1 request (§13). Kind selects the operation:
 // "list" enumerates the waiting steps this peer is the required caller of, "complete" resumes one.
 // Input carries the exact bytes the caller hashed and signed, so input_hash matches byte-for-byte.
 type StepRequest struct {
-	Kind           string          `json:"kind"`                      // "list" | "complete"
-	Counterparty   string          `json:"counterparty"`              // caller's base64url Ed25519 public key
-	Timestamp      string          `json:"timestamp"`                 // RFC3339
-	Signature      string          `json:"signature"`                 // Ed25519 over the kind's canonical payload
-	StepID         string          `json:"step_id,omitempty"`          // complete only
-	IdempotencyKey string          `json:"idempotency_key,omitempty"`  // complete only
-	Input          json.RawMessage `json:"input,omitempty"`            // complete only; exact request bytes
-	ForUserID      string          `json:"for_user_id,omitempty"`      // complete: the completing user's stable id on the requesting kernel (§13)
-	UserAttestation string         `json:"user_attestation,omitempty"` // complete: home-kernel step_auth signature over that id
-	UserTimestamp  string          `json:"user_timestamp,omitempty"`   // complete: attestation timestamp (own freshness window)
+	Kind            string          `json:"kind"`                       // "list" | "complete"
+	Counterparty    string          `json:"counterparty"`               // caller's base64url Ed25519 public key
+	Timestamp       string          `json:"timestamp"`                  // RFC3339
+	Signature       string          `json:"signature"`                  // Ed25519 over the kind's canonical payload
+	StepID          string          `json:"step_id,omitempty"`          // complete only
+	IdempotencyKey  string          `json:"idempotency_key,omitempty"`  // complete only
+	Input           json.RawMessage `json:"input,omitempty"`            // complete only; exact request bytes
+	ForUserID       string          `json:"for_user_id,omitempty"`      // complete: the completing user's stable id on the requesting kernel (§13)
+	UserAttestation string          `json:"user_attestation,omitempty"` // complete: home-kernel step_auth signature over that id
+	UserTimestamp   string          `json:"user_timestamp,omitempty"`   // complete: attestation timestamp (own freshness window)
 }
 
-// StepResponse mirrors CallResponse: a status plus an opaque JSON body. Unlike a call, a step
-// completion parks nothing on the requester, so failures are plain typed errors — there is no
-// local trace awaiting a signed rejection receipt (§13).
-type StepResponse struct {
-	Status int             `json:"status"`
-	Body   json.RawMessage `json:"body"`
-}
+// StepResponse carries a step list or completion result. Unlike a call, a step completion parks
+// nothing on the requester, so failures are plain typed errors — there is no local trace awaiting a
+// signed rejection receipt (§13).
+type StepResponse = Response
 
 // SettleRequest is the wire form of a /juice/fed/settle/1 request (§13): the debtor-driven two-party
 // commit/reveal that settles a sub-quantum residual debt probabilistically. Kind selects the round:
@@ -116,22 +115,19 @@ type StepResponse struct {
 // applies the three-way settlement; "reconcile" re-presents an expired open record so the creditor
 // applies the binding clear-for-zero (FIX 2). Signatures are over disjoint scoped payloads (§12).
 type SettleRequest struct {
-	Kind         string          `json:"kind"`                    // "open" | "finish" | "reconcile"
-	Counterparty string          `json:"counterparty"`            // debtor's base64url Ed25519 public key
-	Timestamp    string          `json:"timestamp"`               // RFC3339
-	Signature    string          `json:"signature"`               // Ed25519 over the kind's scoped canonical payload
-	SettlementID string          `json:"settlement_id"`           // debtor-chosen unique id, binds the whole exchange
-	Amount       int64           `json:"amount,omitempty"`        // open: the debt d the debtor owes (creditor checks == its receivable)
-	Nonce        string          `json:"nonce,omitempty"`         // finish: the debtor's committed nonce
-	Record       json.RawMessage `json:"record,omitempty"`        // finish/reconcile: the creditor-signed open record carried back
+	Kind         string          `json:"kind"`             // "open" | "finish" | "reconcile"
+	Counterparty string          `json:"counterparty"`     // debtor's base64url Ed25519 public key
+	Timestamp    string          `json:"timestamp"`        // RFC3339
+	Signature    string          `json:"signature"`        // Ed25519 over the kind's scoped canonical payload
+	SettlementID string          `json:"settlement_id"`    // debtor-chosen unique id, binds the whole exchange
+	Amount       int64           `json:"amount,omitempty"` // open: the debt d the debtor owes (creditor checks == its receivable)
+	Nonce        string          `json:"nonce,omitempty"`  // finish: the debtor's committed nonce
+	Record       json.RawMessage `json:"record,omitempty"` // finish/reconcile: the creditor-signed open record carried back
 }
 
-// SettleResponse mirrors CallResponse: a status plus an opaque JSON body. The body is a signed
-// SettlementRecord (open → commitment; finish/reconcile → final record with outcome), or an error.
-type SettleResponse struct {
-	Status int             `json:"status"`
-	Body   json.RawMessage `json:"body"`
-}
+// SettleResponse carries a signed SettlementRecord (open → commitment; finish/reconcile → final
+// record with outcome), or an error.
+type SettleResponse = Response
 
 // Handlers is implemented by cmd/juice to answer inbound protocol streams. Each method
 // receives the peer's verified public key (from the authenticated libp2p connection) plus

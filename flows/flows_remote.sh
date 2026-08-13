@@ -12,17 +12,17 @@ flow_pkce_auth() {
     v=$(pkce_verifier); ch=$(pkce_challenge "$v"); code=$(pkce_code "$base" alice userpass "$ch")
     # authorization_code + correct verifier → access_token.
     local tok; tok=$(strfield "$(curl -sf -X POST "$base/v1/auth/token" -H 'Content-Type: application/json' \
-        -d "{\"grant_type\":\"authorization_code\",\"code\":\"$code\",\"code_verifier\":\"$v\"}" 2>/dev/null)" access_token)
+        -d "{\"code\":\"$code\",\"code_verifier\":\"$v\"}" 2>/dev/null)" access_token)
     assert_nonempty "pkce_auth.token_obtained" "$tok"
 
     # Reusing the (now-consumed) code → rejected (non-2xx).
     assert_ne "pkce_auth.code_reuse_rejected" 200 \
-        "$(http_code POST "$base/v1/auth/token" "{\"grant_type\":\"authorization_code\",\"code\":\"$code\",\"code_verifier\":\"$v\"}")"
+        "$(http_code POST "$base/v1/auth/token" "{\"code\":\"$code\",\"code_verifier\":\"$v\"}")"
 
     # A fresh code with the wrong verifier → rejected.
     local code2; code2=$(pkce_code "$base" alice userpass "$ch")
     assert_ne "pkce_auth.wrong_verifier_rejected" 200 \
-        "$(http_code POST "$base/v1/auth/token" "{\"grant_type\":\"authorization_code\",\"code\":\"$code2\",\"code_verifier\":\"wrong\"}")"
+        "$(http_code POST "$base/v1/auth/token" "{\"code\":\"$code2\",\"code_verifier\":\"wrong\"}")"
 }
 
 flow_refresh_rotation() {

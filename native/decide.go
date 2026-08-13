@@ -6,11 +6,35 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// RegisterDecideHandler registers the @sys/llm/decide native action handler on k.
-func RegisterDecideHandler(k *kernel.Kernel, chatter kernel.DecideChatter) {
-	k.RegisterNativeHandler("llm/decide", func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
-		return executeDecide(ctx, args, chatter, k.ReadCallableAction, k.ResolveAction, callerID)
-	})
+// Decide declares @sys/llm/decide (§9): the model selects one candidate action and proposes args;
+// it never executes the call.
+func Decide(chatter kernel.DecideChatter) Spec {
+	return Spec{
+		Name:        "llm/decide",
+		Description: "LLM-driven action selection; returns chosen action and args without executing",
+		InputSchema: obj(map[string]any{
+			"messages": arrayOf(obj(map[string]any{
+				"role":    str("Message role: system, user, assistant, or tool"),
+				"content": str("Text content of the message"),
+				"tool": objd("Tool action and result; present on assistant proposal and tool result turns", map[string]any{
+					"action": str("Juice action reference (owner/name)"),
+					"args":   object("Arguments for the action"),
+					"result": object("Result from the action execution"),
+				}),
+			}, "role"), "Conversation turns (system/user/assistant/tool)"),
+			"actions": arrayOf(map[string]any{"type": "string"}, "Candidate actions as owner/name strings"),
+		}, "messages", "actions"),
+		OutputSchema: obj(map[string]any{
+			"action":  str("Selected owner/name"),
+			"args":    object("Arguments for the selected action"),
+			"message": object("Optional text message from the model"),
+		}, "action", "args"),
+		Handler: func(k *kernel.Kernel) kernel.NativeFunc {
+			return func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
+				return executeDecide(ctx, args, chatter, k.ReadCallableAction, k.ResolveAction, callerID)
+			}
+		},
+	}
 }
 
 func executeDecide(

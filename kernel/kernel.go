@@ -85,6 +85,8 @@ type Kernel struct {
 	store          Store
 	scripts        ScriptExecutor
 	http           HTTPExecutor
+	fedClient      FederationClient
+	fetcher        URLFetcher
 	llm            Embedder
 	cfg            Config
 	log            *log.Logger
@@ -177,18 +179,36 @@ func (k *Kernel) displayOwner(ctx context.Context, ownerID string) string {
 // CreateAction/UpdateAction calls that include an Auth payload.
 func (k *Kernel) SetSecretBox(box SecretBox) { k.secretBox = box }
 
-// New constructs a Kernel. scripts, http, and llm may be nil if those features are unused.
-func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, cfg Config, logger *log.Logger) *Kernel {
+// Dependencies are the adapters a Kernel runs on, each named for the one concern it owns (§2). All
+// but Store are optional: a nil adapter disables its feature and is reported at the call site that
+// needs it, never discovered by type assertion.
+type Dependencies struct {
+	Store      Store
+	Scripts    ScriptExecutor   // WASM execution
+	HTTP       HTTPExecutor     // kind=http action dispatch
+	Fetcher    URLFetcher       // OpenAPI well-known ownership proof (§8)
+	Federation FederationClient // outbound federation: call, settle, resolve (§13)
+	Embedder   Embedder         // semantic leg of lookup (§9)
+	Config     Config
+	Logger     *log.Logger
+}
+
+// New constructs a Kernel from its explicit dependencies.
+func New(deps Dependencies) *Kernel {
+	logger := deps.Logger
 	if logger == nil {
 		logger = log.Default()
 	}
 	// Every action the kernel reads carries its derived local price, because the derivation lives on
 	// the store handle rather than at each of the ~40 read sites (see pricing.go).
+	cfg := deps.Config
 	return &Kernel{
-		store:          &pricedStore{Store: store, importBPS: cfg.ImportBPS},
-		scripts:        scripts,
-		http:           http,
-		llm:            llm,
+		store:          &pricedStore{Store: deps.Store, importBPS: cfg.ImportBPS},
+		scripts:        deps.Scripts,
+		http:           deps.HTTP,
+		fedClient:      deps.Federation,
+		fetcher:        deps.Fetcher,
+		llm:            deps.Embedder,
 		cfg:            cfg,
 		log:            logger,
 		nativeHandlers: make(map[string]NativeFunc),
@@ -196,6 +216,11 @@ func New(store Store, scripts ScriptExecutor, http HTTPExecutor, llm Embedder, c
 		lookupHost:     net.DefaultResolver.LookupHost,
 	}
 }
+
+// SetFederation attaches the outbound federation adapter (§13). Separate from New because the
+// adapter is built around the kernel's own signer, so the kernel must exist first; the private key
+// never leaves the kernel.
+func (k *Kernel) SetFederation(fc FederationClient) { k.fedClient = fc }
 
 // SetLookupHost overrides the DNS resolver used by validateHTTPSource. For tests only.
 func (k *Kernel) SetLookupHost(fn func(context.Context, string) ([]string, error)) {
@@ -397,44 +422,6 @@ func (k *Kernel) readDelegatedAction(ctx context.Context, actionID string) (*Act
 	return a, auth, nil
 }
 
-// AttachBearerGrant stores a caller-supplied static token for one delegated_bearer action (§8): the
-// direct, non-OAuth consent path. It requires the action to use delegated_bearer (an oauth_delegated
-// action must use the browser flow), then routes through CreateGrant, which homes the token on the
-// action's Connection and mints the per-action consent. The raw token never appears in any read path.
-func (k *Kernel) AttachBearerGrant(ctx context.Context, callerID, actionID, token string) (*Grant, error) {
-	_, auth, err := k.readDelegatedAction(ctx, actionID)
-	if err != nil {
-		return nil, err
-	}
-	if auth.Scheme != AuthSchemeDelegatedBearer {
-		return nil, ErrInvalidInput.Wrap("action does not use delegated_bearer; connect via the consent flow instead")
-	}
-	return k.CreateGrant(ctx, callerID, actionID, token)
-}
-
-// CreateGrant records a user's delegated consent for one action (§8): the token — an OAuth refresh
-// token (oauth_delegated) or a static bearer/API-key token (delegated_bearer) — is homed on the
-// action's Connection (shared per upstream account) and the grant points at it. Single-action twin
-// of CreateGrants.
-func (k *Kernel) CreateGrant(ctx context.Context, callerID, actionID, token string) (*Grant, error) {
-	if token == "" {
-		return nil, ErrInvalidInput.Wrap("token is required")
-	}
-	a, auth, err := k.readDelegatedAction(ctx, actionID)
-	if err != nil {
-		return nil, err
-	}
-	pk, err := connectionKey(a, auth)
-	if err != nil {
-		return nil, err
-	}
-	grants, err := k.CreateGrants(ctx, callerID, pk, []string{actionID}, token, actionScopesJSON(auth))
-	if err != nil {
-		return nil, err
-	}
-	return grants[0], nil
-}
-
 // ListGrantViews returns the caller's grants as token-free views for GET /v1/me, resolving each
 // action to @owner/name and surfacing the scopes its auth config requests.
 func (k *Kernel) ListGrantViews(ctx context.Context, callerID string) ([]*GrantView, error) {
@@ -485,19 +472,6 @@ func (k *Kernel) DelegatedAuthConfig(ctx context.Context, callerID, actionID str
 		return nil, ErrUnauthorized.Wrap("cannot grant for an action you may not call")
 	}
 	return auth, nil
-}
-
-// RevokeGrant deletes the caller's grant for an action (self-service; §8). The Connection it
-// pointed at survives — a shared upstream account outlives any one action's consent.
-func (k *Kernel) RevokeGrant(ctx context.Context, callerID, actionID string) error {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
-		return err
-	}
-	if err := k.store.DeleteGrant(ctx, callerID, actionID); err != nil {
-		return err
-	}
-	k.log.With(ctx).Info("grant.revoked", "action_id", actionID, "grantor", callerID, "status", "success")
-	return nil
 }
 
 // ---- Connections, selectors, and consent plans (§8) ----
@@ -1214,20 +1188,6 @@ func (k *Kernel) ReadUserByHandle(ctx context.Context, handle string) (*Account,
 // ReadAccountByKernelKey returns the user with the given base64url Ed25519 public key.
 func (k *Kernel) ReadAccountByKernelKey(ctx context.Context, publicKey string) (*Account, error) {
 	return k.store.ReadAccountByKernelKey(ctx, publicKey)
-}
-
-// Login authenticates handle+password and returns a signed JWT.
-func (k *Kernel) Login(ctx context.Context, handle, password string) (string, error) {
-	u, err := k.authenticateLocal(ctx, handle, password)
-	if err != nil {
-		return "", err
-	}
-	tok, err := IssueToken(u.ID, k.cfg.TokenSecret, k.cfg.AuthIssuer, k.cfg.AuthAudience, k.cfg.TokenTTL)
-	if err != nil {
-		return "", err
-	}
-	k.log.With(ctx).Info("user.login", "user_id", u.ID)
-	return tok, nil
 }
 
 func rejectSuspended(u *Account) error {
@@ -1948,11 +1908,6 @@ func (k *Kernel) ListProcesses(ctx context.Context, callerID string, limit, offs
 	return k.store.ListProcesses(ctx, callerID, limit, offset)
 }
 
-// ListAllTransactions returns all transactions ordered by started_at.
-func (k *Kernel) ListAllTransactions(ctx context.Context, limit, offset int) ([]*Transaction, error) {
-	return k.store.ListAllTransactions(ctx, limit, offset)
-}
-
 // GetConfig returns a persistent config value by key.
 func (k *Kernel) GetConfig(ctx context.Context, key string) (string, error) {
 	return k.store.GetConfig(ctx, key)
@@ -2373,7 +2328,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	// Pass the validated Action snapshot and the funded root trace into Call: binds execution to
 	// the row just funded (no TOCTOU window). Call re-validates the snapshot. The serving-markup rate
 	// rides on the trace (loaded by Call), so no request field is needed.
-	return k.Call(ctx, CallRequest{
+	return k.call(ctx, callRequest{
 		CallerID:            caller.ID,
 		Action:              action,
 		Args:                args,

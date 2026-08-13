@@ -6,13 +6,30 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// RegisterUserLookupHandler registers the @sys/user-lookup native action handler on k (§13). It is
-// the user-facing twin of @sys/lookup: it searches local principals (sys + owners of active public
-// actions) and discovered users, returning each hit's stable PrincipalID plus a display reference.
-func RegisterUserLookupHandler(k *kernel.Kernel) {
-	k.RegisterNativeHandler("user-lookup", func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
-		return executeUserLookup(ctx, args, callerID, k)
-	})
+// UserLookup declares @sys/user-lookup (§13): the user-facing twin of @sys/lookup. It searches
+// local principals (sys + owners of active public actions) and discovered users, returning each
+// hit's stable PrincipalID plus a display reference.
+func UserLookup() Spec {
+	return Spec{
+		Name:        "user-lookup",
+		Description: "Semantic search over local and discovered users",
+		InputSchema: searchQuerySchema(),
+		OutputSchema: obj(map[string]any{
+			"results": arrayOf(obj(map[string]any{
+				"principal_id":      object("Stable identity: kernel_public_key + user_id"),
+				"reference":         str("Display/use form: handle@<kernel-key> or a local handle"),
+				"handle":            str("The user's handle on its home kernel"),
+				"description":       str("The user's self-description"),
+				"kernel_public_key": str("The home kernel's public key (empty for a local user)"),
+				"score":             num("Relevance score"),
+			}), "Ranked list of matching users"),
+		}),
+		Handler: func(k *kernel.Kernel) kernel.NativeFunc {
+			return func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
+				return executeUserLookup(ctx, args, callerID, k)
+			}
+		},
+	}
 }
 
 func executeUserLookup(ctx context.Context, args map[string]any, subjectID string, k *kernel.Kernel) (map[string]any, error) {

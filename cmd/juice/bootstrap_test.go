@@ -8,6 +8,7 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/native"
 	"github.com/daios-ai/juice/store"
 )
 
@@ -19,14 +20,14 @@ func TestFirstBootRequiresKernelName(t *testing.T) {
 	t.Setenv("JUICE_BOOTSTRAP_PASSWORD", "pw")
 
 	globalCfg.KernelHandle = ""
-	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native); err == nil ||
+	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native, native.All(native.Deps{})); err == nil ||
 		!strings.Contains(err.Error(), "kernel name is required") {
 		t.Fatalf("headless boot with no name: want required-name error, got %v", err)
 	}
 
 	t.Setenv("JUICE_BOOTSTRAP_KERNEL_HANDLE", "acme")
 	globalCfg.KernelHandle = ""
-	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native); err != nil {
+	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native, native.All(native.Deps{})); err != nil {
 		t.Fatalf("boot with name via env: %v", err)
 	}
 	if globalCfg.KernelHandle != "acme" {
@@ -82,16 +83,17 @@ func newTestKernel(t *testing.T) *kernel.Kernel {
 	t.Cleanup(func() { db.Close() })
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "bootstrap-test-secret"
-	return kernel.New(db, nil, nil, nil, cfg, log.Discard())
+	return kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: log.Discard()})
 }
 
-func sysSpec(name string) sysNativeSpec {
-	for _, s := range buildSysNativeSpecs(DefaultServerConfig().Native) {
-		if s.name == name {
-			return s
+// sysSpec returns the shipped native.Spec for name, with the configured default price (§9/§14).
+func sysSpec(name string) (native.Spec, int64) {
+	for _, s := range native.All(native.Deps{}) {
+		if s.Name == name {
+			return s, DefaultServerConfig().Native.PriceOf(name)
 		}
 	}
-	panic("sysNativeSpec not found: " + name)
+	panic("native spec not found: " + name)
 }
 
 func TestEnsureSysLookupIdempotent(t *testing.T) {
@@ -109,10 +111,10 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	spec := sysSpec("lookup")
+	spec, price := sysSpec("lookup")
 
 	// First call: creates the action.
-	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+	if err := ensureSysNative(ctx, k, u.Handle, spec, price); err != nil {
 		t.Fatalf("first ensureSysNative(lookup): %v", err)
 	}
 	a, err := k.ReadActionByOwnerName(ctx, u.ID, "lookup")
@@ -124,7 +126,7 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 	}
 
 	// Second call: idempotent — must also enforce grant-all.
-	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+	if err := ensureSysNative(ctx, k, u.Handle, spec, price); err != nil {
 		t.Fatalf("second ensureSysNative(lookup): %v", err)
 	}
 	a, err = k.ReadActionByOwnerName(ctx, u.ID, "lookup")
@@ -147,10 +149,10 @@ func TestEnsureSysLLMChatIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	spec := sysSpec("llm/chat")
+	spec, price := sysSpec("llm/chat")
 
 	// First call: creates the action.
-	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+	if err := ensureSysNative(ctx, k, u.Handle, spec, price); err != nil {
 		t.Fatalf("first ensureSysNative(llm/chat): %v", err)
 	}
 	a, err := k.ReadActionByOwnerName(ctx, u.ID, "llm/chat")
@@ -162,7 +164,7 @@ func TestEnsureSysLLMChatIdempotent(t *testing.T) {
 	}
 
 	// Second call: idempotent — must also enforce grant-all.
-	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+	if err := ensureSysNative(ctx, k, u.Handle, spec, price); err != nil {
 		t.Fatalf("second ensureSysNative(llm/chat): %v", err)
 	}
 	a, err = k.ReadActionByOwnerName(ctx, u.ID, "llm/chat")
@@ -190,7 +192,7 @@ func TestBootstrapRejectsKeyMismatch(t *testing.T) {
 	}
 
 	// bootstrap must reject the mismatch.
-	if err := bootstrap(k, DefaultServerConfig().Native); err == nil {
+	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{})); err == nil {
 		t.Error("expected error for mismatched signing keys, got nil")
 	}
 }
@@ -233,8 +235,8 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 	}
 
 	// ensureSysNative must correct drift for all specs.
-	spec := sysSpec("lookup")
-	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+	spec, price := sysSpec("lookup")
+	if err := ensureSysNative(ctx, k, u.Handle, spec, price); err != nil {
 		t.Fatalf("ensureSysNative: %v", err)
 	}
 
@@ -242,8 +244,8 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Description != spec.description {
-		t.Errorf("description = %q, want %q", got.Description, spec.description)
+	if got.Description != spec.Description {
+		t.Errorf("description = %q, want %q", got.Description, spec.Description)
 	}
 	props, _ := got.InputSchema["properties"].(map[string]any)
 	if props == nil || props["query"] == nil {
@@ -266,7 +268,7 @@ func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "bootstrap-test-secret"
 	newBuild := func(withWidget bool) *kernel.Kernel {
-		k := kernel.New(db, nil, nil, nil, cfg, log.Discard())
+		k := kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: log.Discard()})
 		if withWidget {
 			k.RegisterNativeHandler("widget", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
 				return map[string]any{}, nil
@@ -275,7 +277,9 @@ func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 		return k
 	}
 	schema := map[string]any{"type": "object"}
-	spec := sysNativeSpec{name: "widget", price: 7, description: "a widget native", inputSchema: schema, outputSchema: schema}
+	spec := native.Spec{Name: "widget", Description: "a widget native", InputSchema: schema, OutputSchema: schema,
+		Handler: func(*kernel.Kernel) kernel.NativeFunc { return nil }}
+	const widgetPrice int64 = 7
 
 	// Build 1 ships "widget".
 	k := newBuild(true)
@@ -286,7 +290,7 @@ func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureSysNative(ctx, k, "sys", spec); err != nil {
+	if err := ensureSysNative(ctx, k, "sys", spec, widgetPrice); err != nil {
 		t.Fatalf("ensureSysNative (build 1): %v", err)
 	}
 	first, err := k.ReadActionByOwnerName(ctx, su.ID, "widget")
@@ -309,7 +313,7 @@ func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 
 	// Build 3 RE-INTRODUCES "widget": handler back, ensure again → re-registers under the same name.
 	kBack := newBuild(true)
-	if err := ensureSysNative(ctx, kBack, "sys", spec); err != nil {
+	if err := ensureSysNative(ctx, kBack, "sys", spec, widgetPrice); err != nil {
 		t.Fatalf("ensureSysNative (reintroduce): %v", err)
 	}
 	again, err := kBack.ReadActionByOwnerName(ctx, su.ID, "widget")
@@ -335,7 +339,7 @@ func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
 	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
-	if err := bootstrap(k, DefaultServerConfig().Native); err != nil {
+	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{})); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
@@ -368,7 +372,7 @@ func TestBootstrapNativesAreLocalAndNotGossiped(t *testing.T) {
 	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
-	if err := bootstrap(k, DefaultServerConfig().Native); err != nil {
+	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{})); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
@@ -415,15 +419,15 @@ func TestEnsureSysNativeReconcilesPrice(t *testing.T) {
 	}
 
 	// Create the action with price 0.
-	spec := sysSpec("lookup")
-	spec.price = 0
-	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+	spec, price := sysSpec("lookup")
+	price = 0
+	if err := ensureSysNative(ctx, k, u.Handle, spec, price); err != nil {
 		t.Fatalf("initial ensureSysNative: %v", err)
 	}
 
 	// Re-run with price 7 — must reconcile.
-	spec.price = 7
-	if err := ensureSysNative(ctx, k, u.Handle, spec); err != nil {
+	price = 7
+	if err := ensureSysNative(ctx, k, u.Handle, spec, price); err != nil {
 		t.Fatalf("reconcile ensureSysNative: %v", err)
 	}
 

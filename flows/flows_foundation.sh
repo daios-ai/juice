@@ -25,10 +25,9 @@ flow_bootstrap() {
     ok "bootstrap.idempotent"
     assert_json "bootstrap.state_preserved" "$(jj "$db" "$hs" user me)" handle sys
 
-    # HTTP-only: the password-grant token endpoint (CLI login uses PKCE, not this path).
-    local tok; tok=$(strfield "$(curl -sf -X POST "$(url "$db")/v1/auth/token" \
-        -H 'Content-Type: application/json' -d '{"handle":"sys","password":"sys-pass"}' 2>/dev/null)" token)
-    assert_nonempty "bootstrap.http_password_grant" "$tok"
+    # HTTP-only: the authorize→exchange token path (§12), driven raw rather than through the CLI.
+    local tok; tok=$(token "$(url "$db")" sys sys-pass)
+    assert_nonempty "bootstrap.http_token_exchange" "$tok"
 }
 
 # The error contract on the wire. Until assert_status existed, no flow could assert a status at
@@ -217,8 +216,7 @@ flow_action_owner_visibility() {
     local base; base=$(url "$db")
     assert_eq "action_owner_visibility.unauthenticated_zero" 0 \
         "$(list_len "$(curl -sf "$base/v1/actions?owner=alice" 2>/dev/null)")"
-    local tok; tok=$(strfield "$(curl -sf -X POST "$base/v1/auth/token" -H 'Content-Type: application/json' \
-        -d '{"handle":"alice","password":"userpass"}' 2>/dev/null)" token)
+    local tok; tok=$(token "$base" alice userpass)
     local n; n=$(list_len "$(curl -sf -H "Authorization: Bearer $tok" "$base/v1/actions?owner=alice" 2>/dev/null)")
     assert_eq "action_owner_visibility.owner_sees_private" yes "$([ "${n:-0}" -ge 1 ] && echo yes || echo no)"
 }

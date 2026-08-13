@@ -117,7 +117,7 @@ func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Tr
 	ktx.ReplyJSON = json.RawMessage("null")
 
 	recoverErr := ErrInternal.Wrap(reason)
-	req := CallRequest{StepID: stepID}
+	req := callRequest{StepID: stepID}
 	// Force-failing a trace here (EndProcess, or crash recovery) is the final settlement for any
 	// inbound cross-kernel record it serves, so thread the id through: otherwise the peer that
 	// requested the work is answered "duplicate in flight" until the record expires and never
@@ -420,7 +420,7 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		return nil, err
 	}
 
-	reply, callErr := k.Call(ctx, CallRequest{
+	reply, callErr := k.call(ctx, callRequest{
 		CallerID:            callerID,
 		ExistingTraceID:     stepTrace.ID, // BeginStepCall pre-created and funded this completion trace
 		Action:              action,

@@ -494,7 +494,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 	// Proof 2: x-juice-owner field in the spec document (embedded challenge, less strong).
 	ownershipVerified := false
 	if baseURL != "" {
-		if uf, ok := k.http.(URLFetcher); ok {
+		if uf := k.fetcher; uf != nil {
 			wkURL := strings.TrimRight(baseURL, "/") + "/.well-known/juice-owner.txt"
 			if body, fetchErr := uf.FetchURL(ctx, wkURL); fetchErr == nil {
 				ownershipVerified = strings.TrimSpace(string(body)) == owner.Handle

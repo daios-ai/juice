@@ -252,27 +252,9 @@ func (k *Kernel) issueRefreshToken(ctx context.Context, userID string) (*Refresh
 	return rt, nil
 }
 
-// LoginWithRefresh authenticates handle+password and returns both access and refresh tokens.
 // RevokeRefreshToken revokes a refresh token, preventing further use.
 func (k *Kernel) RevokeRefreshToken(ctx context.Context, token string) error {
 	return k.store.RevokeRefreshToken(ctx, token)
-}
-
-func (k *Kernel) LoginWithRefresh(ctx context.Context, handle, password string) (accessToken, refreshToken string, err error) {
-	u, err := k.authenticateLocal(ctx, handle, password)
-	if err != nil {
-		return "", "", err
-	}
-	accessToken, err = IssueToken(u.ID, k.cfg.TokenSecret, k.cfg.AuthIssuer, k.cfg.AuthAudience, k.cfg.TokenTTL)
-	if err != nil {
-		return "", "", err
-	}
-	rt, err := k.issueRefreshToken(ctx, u.ID)
-	if err != nil {
-		return "", "", err
-	}
-	k.log.With(ctx).Info("user.login", "user_id", u.ID)
-	return accessToken, rt.Token, nil
 }
 
 // ---- Seed-phrase password recovery (§12) ----

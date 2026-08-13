@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/llm"
@@ -221,7 +220,17 @@ func exitCodeFor(err error) int {
 
 // openKernel opens the SQLite store and constructs a Kernel from globalCfg.
 // The caller is responsible for closing the store when done.
-func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, error) {
+// kernelSecret resolves the JWT secret: the env override (runtime only, §14) else the stored value.
+// It never comes from config.json, which is why KernelConfig takes it as an argument.
+func kernelSecret(db *store.DB) string {
+	if secret := os.Getenv("JUICE_SECRET_KEY"); secret != "" {
+		return secret
+	}
+	stored, _ := db.GetConfig(context.Background(), "jwt_secret")
+	return stored
+}
+
+func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, *fedAdapter, []native.Spec, error) {
 	if dir := filepath.Dir(flagDB); dir != "" {
 		_ = os.MkdirAll(dir, 0o700)
 	}
@@ -229,63 +238,14 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	_ = os.MkdirAll(cacheDir(), 0o700)
 	db, err := store.Open(flagDB)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("open db: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("open db: %w", err)
 	}
 
-	cfg := kernel.DefaultConfig()
-
-	// JWT secret: env var only (never stored in config file).
-	if secret := os.Getenv("JUICE_SECRET_KEY"); secret != "" {
-		cfg.TokenSecret = secret
-	} else if stored, _ := db.GetConfig(context.Background(), "jwt_secret"); stored != "" {
-		cfg.TokenSecret = stored
-	}
-
-	cfg.FeeBPS = globalCfg.FeeBPS
-	if globalCfg.FeeBPS < 0 || globalCfg.FeeBPS > 10000 {
-		db.Close()
-		return nil, nil, nil, nil, fmt.Errorf("fee_bps must be 0–10000")
-	}
-
-	cfg.RemoteBPS = globalCfg.RemoteBPS
-	if globalCfg.RemoteBPS < 0 || globalCfg.RemoteBPS > 10000 {
-		db.Close()
-		return nil, nil, nil, nil, fmt.Errorf("remote_bps must be 0–10000")
-	}
-
-	cfg.ImportBPS = globalCfg.ImportBPS
-	if globalCfg.ImportBPS < 0 || globalCfg.ImportBPS > 10000 {
-		db.Close()
-		return nil, nil, nil, nil, fmt.Errorf("import_bps must be 0–10000")
-	}
-
-	// Global exposure policy (§13): X ≥ 0; when X > 0 the settlement trigger must sit strictly inside
-	// it (0 < Y < X) so a flagged peer is still below the hard cap; Q ≥ 0 (0 disables the residual path).
-	cfg.ExposureMax = globalCfg.ExposureMax
-	cfg.SettlementTrigger = globalCfg.SettlementTrigger
-	cfg.SettlementQuantum = globalCfg.SettlementQuantum
-	if globalCfg.ExposureMax < 0 || globalCfg.SettlementQuantum < 0 {
-		db.Close()
-		return nil, nil, nil, nil, fmt.Errorf("exposure_max and settlement_quantum must be non-negative")
-	}
-	if globalCfg.ExposureMax > 0 && !(globalCfg.SettlementTrigger > 0 && globalCfg.SettlementTrigger < globalCfg.ExposureMax) {
-		db.Close()
-		return nil, nil, nil, nil, fmt.Errorf("settlement_trigger must satisfy 0 < settlement_trigger < exposure_max when exposure_max > 0")
-	}
-
-	tokenTTL, err := time.ParseDuration(globalCfg.TokenTTL)
+	cfg, err := globalCfg.KernelConfig(kernelSecret(db))
 	if err != nil {
 		db.Close()
-		return nil, nil, nil, nil, fmt.Errorf("token_ttl invalid: %w", err)
+		return nil, nil, nil, nil, nil, nil, err
 	}
-	cfg.TokenTTL = tokenTTL
-	cfg.ScriptTimeout = time.Duration(globalCfg.ScriptTimeoutMS) * time.Millisecond
-	cfg.ScriptMemory = globalCfg.ScriptMemoryBytes
-	cfg.AllowLocalSources = globalCfg.AllowLocalSources
-	cfg.AuthIssuer = globalCfg.AuthIssuer
-	cfg.AuthAudience = globalCfg.AuthAudience
-	cfg.PeerRetention = globalCfg.peerRetention()
-	cfg.DiscoveryInterval = globalCfg.discoveryInterval()
 
 	logger, _ := log.New(log.Config{
 		Level:    globalCfg.LogLevel,
@@ -309,7 +269,20 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	chatter := kernel.Chatter(ollamaChatter)
 
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
-	k := kernel.New(db, exec, httpExec, embedder, cfg, logger)
+	k := kernel.New(kernel.Dependencies{
+		Store:    db,
+		Scripts:  exec,
+		HTTP:     httpExec,
+		Fetcher:  httpExec, // one cohesive HTTP concern: dispatch + ordinary fetching
+		Embedder: embedder,
+		Config:   cfg,
+		Logger:   logger,
+	})
+	// Federation is a separate adapter, constructed around the kernel's own signer and attached
+	// after (§13): it holds neither the kernel nor the private key, and its transport arrives at
+	// serve time via SetTransport. Signing goes live when bootstrap calls SetSigningKey.
+	fedAdapter := newFedAdapter("", k.SignFederation)
+	k.SetFederation(fedAdapter)
 
 	// Wire credential encryption. Generate a key on first use and persist it. Fail loudly if the
 	// key cannot be persisted: an in-memory-only key would silently render every credential sealed
@@ -317,11 +290,11 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	if globalCfg.CredentialsKey == "" {
 		raw := make([]byte, 32)
 		if _, err := rand.Read(raw); err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("generate credentials key: %w", err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("generate credentials key: %w", err)
 		}
 		globalCfg.CredentialsKey = base64.RawURLEncoding.EncodeToString(raw)
 		if err := writeConfig(resolvedConfigPath, globalCfg); err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("persist generated credentials key to %s: %w", resolvedConfigPath, err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("persist generated credentials key to %s: %w", resolvedConfigPath, err)
 		}
 	}
 	if globalCfg.CredentialsKey != "" {
@@ -336,26 +309,23 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 		}
 	}
 
-	// Register native action plugins. Must happen on every kernel open, not just bootstrap.
-	compiler := script.NewTinyGoCompiler(script.CompileConfig{})
-	native.RegisterLookupHandler(k)
-	native.RegisterUserLookupHandler(k)
-	native.RegisterChatHandler(k, chatter)
-	native.RegisterEmbedHandler(k, embedder)
-	native.RegisterJSONHandler(k, ollamaChatter)
-	native.RegisterDecideHandler(k, ollamaChatter)
-	native.RegisterTimeHandler(k)
-	native.RegisterSinkHandler(k)
-	native.RegisterMessageHandler(k)
-	native.RegisterRandomHandler(k)
-	native.RegisterTransferHandler(k)
+	// Register the platform stdlib. Each native declares its own contract (native.Spec), so this
+	// wiring names adapters only — never a schema or description. Must happen on every kernel open,
+	// not just bootstrap.
 	webUA := globalCfg.Native.Web.UserAgent
-	native.RegisterWebHandler(k, native.WebDeps{
-		Fetch: func(ctx context.Context, url string) (int, []byte, string, string, error) {
+	nativeDeps := native.Deps{
+		Chatter:  chatter,
+		Embedder: embedder,
+		JSON:     ollamaChatter,
+		Decide:   ollamaChatter,
+		Web: native.WebDeps{Fetch: func(ctx context.Context, url string) (int, []byte, string, string, error) {
 			return httpExec.fetchWeb(ctx, url, webUA)
-		},
-	})
-	native.RegisterTinyGoCompileHandler(k, native.CompileDeps{Compiler: compiler, Scripts: exec}, script.TinyGoSDK)
+		}},
+		Compile:    native.CompileDeps{Compiler: script.NewTinyGoCompiler(script.CompileConfig{}), Scripts: exec},
+		CompileSDK: script.TinyGoSDK,
+	}
+	specs := native.All(nativeDeps)
+	native.Register(k, specs)
 
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).
 	if privB64, _ := db.GetConfig(context.Background(), configKeySigningPrivate); privB64 != "" {
@@ -366,10 +336,12 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 		}
 	}
 
-	// Wire signing callback into the HTTP executor; private key stays inside kernel.
-	httpExec.signerFn = k.SignFederation
+	// The adapter learns this kernel's own public key once bootstrap has loaded the signing key.
+	if pub, _ := db.GetConfig(context.Background(), configKeySigningPublic); pub != "" {
+		fedAdapter.SetLocalPubKey(pub)
+	}
 
-	return k, db, logger, httpExec, nil
+	return k, db, logger, httpExec, fedAdapter, specs, nil
 }
 
 // tokenDir returns a directory namespaced by the canonical DB path so that tokens for

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/native"
 	"golang.org/x/term"
 )
 
@@ -32,7 +33,7 @@ func requireBareHandle(h string) error {
 }
 
 // On first boot (no superuser configured), it prompts for credentials interactively.
-func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
+func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec) error {
 	ctx := context.Background()
 
 	handle, err := k.GetConfig(ctx, configKeySuperuser)
@@ -120,8 +121,8 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig) error {
 	// Retry any remote proxy calls that were pending at last shutdown.
 	k.RetryPendingRemoteDispatches(ctx)
 
-	for _, spec := range buildSysNativeSpecs(nativeCfg) {
-		if err := ensureSysNative(ctx, k, handle, spec); err != nil {
+	for _, spec := range specs {
+		if err := ensureSysNative(ctx, k, handle, spec, nativeCfg.PriceOf(spec.Name)); err != nil {
 			return err
 		}
 	}
@@ -167,327 +168,29 @@ func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 	return superuserHandle, nil
 }
 
-// sysNativeSpec describes one @sys native action to register during bootstrap.
-type sysNativeSpec struct {
-	name         string
-	price        int64
-	effect       string // privileged execution effect ("transfer"); empty for an ordinary native (§13)
-	description  string
-	inputSchema  map[string]any
-	outputSchema map[string]any
-}
-
-// ensureSysNative idempotently registers, activates, and grants local call access to a
-// @sys native action. If the action already exists, its description and schemas are always
-// reconciled to the spec so that schema drift is corrected on every boot.
-func ensureSysNative(ctx context.Context, k *kernel.Kernel, superuserHandle string, spec sysNativeSpec) error {
+// ensureSysNative idempotently registers, activates, and grants local call access to a @sys native
+// action. The contract comes from the native's own Spec (§9, one owner per native) and the price
+// from configuration (§14), so drift in either is corrected on every boot.
+func ensureSysNative(ctx context.Context, k *kernel.Kernel, superuserHandle string, spec native.Spec, price int64) error {
 	su, err := k.ReadUserByHandle(ctx, superuserHandle)
 	if err != nil {
 		return fmt.Errorf("read superuser: %w", err)
 	}
-	a, err := k.ReadActionByOwnerName(ctx, su.ID, spec.name)
+	a, err := k.ReadActionByOwnerName(ctx, su.ID, spec.Name)
 	if err != nil || a == nil {
 		a, err = k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 			OwnerUserID: su.ID,
-			Name:        spec.name,
+			Name:        spec.Name,
 			Kind:        kernel.KindNative,
-			Price:       spec.price,
-			Effect:      spec.effect,
+			Price:       price,
+			Effect:      spec.Effect,
 		})
 		if err != nil {
-			return fmt.Errorf("create @sys/%s: %w", spec.name, err)
+			return fmt.Errorf("create @sys/%s: %w", spec.Name, err)
 		}
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID, spec.description, spec.inputSchema, spec.outputSchema, spec.price, spec.effect); err != nil {
-		return fmt.Errorf("activate @sys/%s: %w", spec.name, err)
+	if err := k.ActivateNativeAction(ctx, a.ID, spec.Description, spec.InputSchema, spec.OutputSchema, price, spec.Effect); err != nil {
+		return fmt.Errorf("activate @sys/%s: %w", spec.Name, err)
 	}
 	return nil
-}
-
-var msgItemSchema = map[string]any{
-	"type": "object",
-	"properties": map[string]any{
-		"role":    map[string]any{"type": "string", "description": "Role of the message sender (user or assistant)"},
-		"content": map[string]any{"type": "string", "description": "Text content of the message"},
-	},
-	"required": []string{"role", "content"},
-}
-
-// searchQuerySchema is the {query, limit} input both lookup natives take. A fresh map per call:
-// the specs are handed to the kernel, which may retain them, so they must not share state.
-func searchQuerySchema() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"query": map[string]any{"type": "string", "description": "Semantic search query"},
-			"limit": map[string]any{"type": "integer", "description": "Maximum number of results"},
-		},
-		"required": []string{"query"},
-	}
-}
-
-func buildSysNativeSpecs(cfg NativeConfig) []sysNativeSpec {
-	return []sysNativeSpec{
-		{
-			name:        "lookup",
-			price:       cfg.Lookup.Price,
-			description: "Semantic search over active actions",
-			inputSchema: searchQuerySchema(),
-			outputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"results": map[string]any{
-						"type":        "array",
-						"description": "Ranked list of matching actions",
-						"items": map[string]any{
-							"type": "object",
-							"properties": map[string]any{
-								"action_id":     map[string]any{"type": "string", "description": "Unique action identifier"},
-								"action":        map[string]any{"type": "string", "description": "Action reference as owner/name"},
-								"description":   map[string]any{"type": "string", "description": "Human-readable description of the action"},
-								"price":         map[string]any{"type": "integer", "description": "All-in price the caller pays; indicative for a not-yet-resolved remote action"},
-								"score":         map[string]any{"type": "number", "description": "Relevance score between 0 and 1"},
-								"input_schema":  map[string]any{"type": "object", "description": "JSON Schema for the action's input"},
-								"output_schema": map[string]any{"type": "object", "description": "JSON Schema for the action's output"},
-								"quote_hash":    map[string]any{"type": "string", "description": "Fingerprint of the quoted terms; pin it on a run to be refused if they changed"},
-							},
-						},
-					},
-				},
-			},
-		},
-		{
-			name:        "user-lookup",
-			price:       cfg.UserLookup.Price,
-			description: "Semantic search over local and discovered users",
-			inputSchema: searchQuerySchema(),
-			outputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"results": map[string]any{
-						"type":        "array",
-						"description": "Ranked list of matching users",
-						"items": map[string]any{
-							"type": "object",
-							"properties": map[string]any{
-								"principal_id":      map[string]any{"type": "object", "description": "Stable identity: kernel_public_key + user_id"},
-								"reference":         map[string]any{"type": "string", "description": "Display/use form: handle@<kernel-key> or a local handle"},
-								"handle":            map[string]any{"type": "string", "description": "The user's handle on its home kernel"},
-								"description":       map[string]any{"type": "string", "description": "The user's self-description"},
-								"kernel_public_key": map[string]any{"type": "string", "description": "The home kernel's public key (empty for a local user)"},
-								"score":             map[string]any{"type": "number", "description": "Relevance score"},
-							},
-						},
-					},
-				},
-			},
-		},
-		{
-			name:        "llm/chat",
-			price:       cfg.LLM.Price,
-			description: "Chat completion via the configured language model",
-			inputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"messages": map[string]any{"type": "array", "items": msgItemSchema, "description": "Conversation history"},
-					"system":   map[string]any{"type": "string", "description": "Optional system prompt"},
-				},
-				"required": []string{"messages"},
-			},
-			outputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"message": map[string]any{
-						"type":        "object",
-						"description": "Generated reply message",
-						"properties": map[string]any{
-							"role":    map[string]any{"type": "string", "description": "Role of the message sender (assistant)"},
-							"content": map[string]any{"type": "string", "description": "Text content of the reply"},
-						},
-					},
-				},
-			},
-		},
-		{
-			name:        "llm/json",
-			price:       cfg.LLM.Price,
-			description: "Structured JSON output from the configured language model, locally validated against a schema",
-			inputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"messages":      map[string]any{"type": "array", "items": msgItemSchema, "description": "Conversation history"},
-					"system":        map[string]any{"type": "string", "description": "Optional system prompt"},
-					"output_schema": map[string]any{"type": "object", "description": "JSON Schema the model output must satisfy"},
-				},
-				"required": []string{"messages", "output_schema"},
-			},
-			outputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"value": map[string]any{"type": "object", "description": "JSON value conforming to output_schema"},
-				},
-			},
-		},
-		{
-			name:        "llm/decide",
-			price:       cfg.LLM.Price,
-			description: "LLM-driven action selection; returns chosen action and args without executing",
-			inputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"messages": map[string]any{"type": "array", "description": "Conversation turns (system/user/assistant/tool)", "items": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"role":    map[string]any{"type": "string", "description": "Message role: system, user, assistant, or tool"},
-							"content": map[string]any{"type": "string", "description": "Text content of the message"},
-							"tool": map[string]any{
-								"type":        "object",
-								"description": "Tool action and result; present on assistant proposal and tool result turns",
-								"properties": map[string]any{
-									"action": map[string]any{"type": "string", "description": "Juice action reference (owner/name)"},
-									"args":   map[string]any{"type": "object", "description": "Arguments for the action"},
-									"result": map[string]any{"type": "object", "description": "Result from the action execution"},
-								},
-							},
-						},
-						"required": []string{"role"},
-					}},
-					"actions": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Candidate actions as owner/name strings"},
-				},
-				"required": []string{"messages", "actions"},
-			},
-			outputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"action":  map[string]any{"type": "string", "description": "Selected owner/name"},
-					"args":    map[string]any{"type": "object", "description": "Arguments for the selected action"},
-					"message": map[string]any{"type": "object", "description": "Optional text message from the model"},
-				},
-				"required": []string{"action", "args"},
-			},
-		},
-		{
-			name:        "time",
-			price:       cfg.Time.Price,
-			description: "Returns the current UTC time",
-			inputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
-			outputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"unix": map[string]any{"type": "integer", "description": "Seconds since UTC epoch"},
-					"iso":  map[string]any{"type": "string", "description": "RFC 3339 timestamp"},
-				},
-			},
-		},
-		{
-			name:         "sink",
-			price:        cfg.Sink.Price,
-			description:  "Universal no-op sink; accepts any input and returns {}",
-			inputSchema:  map[string]any{"type": "object"},
-			outputSchema: map[string]any{"type": "object"},
-		},
-		{
-			name:        "llm/embed",
-			price:       cfg.LLM.Price,
-			description: "Returns a text embedding vector from the configured embedding model",
-			inputSchema: map[string]any{"type": "object", "properties": map[string]any{
-				"text": map[string]any{"type": "string", "description": "Text to embed"},
-			}, "required": []string{"text"}},
-			outputSchema: map[string]any{"type": "object", "properties": map[string]any{
-				"embedding": map[string]any{"type": "array", "description": "Embedding vector", "items": map[string]any{"type": "number"}},
-			}},
-		},
-		{
-			name:        "random",
-			price:       cfg.Random.Price,
-			description: "Returns a cryptographically secure random float in [0, 1)",
-			inputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
-			outputSchema: map[string]any{"type": "object", "properties": map[string]any{
-				"value": map[string]any{"type": "number", "description": "Random float in [0, 1)"},
-			}},
-		},
-		{
-			name:        "web",
-			price:       cfg.Web.Price,
-			description: "Fetch a public web page (read-only HTTP GET); returns status, body, content type, and final URL",
-			inputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"url": map[string]any{"type": "string", "description": "Public URL to fetch; a scheme-less URL defaults to https"},
-				},
-				"required": []string{"url"},
-			},
-			outputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"status":       map[string]any{"type": "integer", "description": "HTTP response status code"},
-					"body":         map[string]any{"type": "string", "description": "Response body"},
-					"content_type": map[string]any{"type": "string", "description": "Response Content-Type header"},
-					"final_url":    map[string]any{"type": "string", "description": "Final URL fetched, after scheme defaulting and redirects"},
-				},
-			},
-		},
-		{
-			name:        "message",
-			price:       cfg.Message.Price,
-			description: "Sends a message to another platform user and creates a Step they must acknowledge",
-			inputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"to":      map[string]any{"type": "string", "description": "Recipient handle"},
-					"message": map[string]any{"type": "string", "description": "Message body"},
-				},
-				"required": []string{"to", "message"},
-			},
-			outputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"step_id": map[string]any{"type": "string", "description": "ID of the created step"},
-				},
-			},
-		},
-		{
-			name:        "transfer",
-			price:       cfg.Transfer.Price,
-			effect:      "transfer",
-			description: "Transfers credits from the caller to another user. The target may be local (a handle) or a remote transfer action (sys@<kernel>/transfer with a local target on that kernel); a cross-kernel transfer settles through the federation receipt/exposure system (§13). The value is funded from the immediate caller's own balance and delivered by a deferred, receipt-backed transfer effect.",
-			inputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"target": map[string]any{"type": "string", "description": "Recipient: a local handle, or (when calling sys@<kernel>/transfer) a bare handle on that kernel"},
-					"amount": map[string]any{"type": "integer", "description": "Amount of credits to transfer (positive integer)"},
-				},
-				"required": []string{"target", "amount"},
-			},
-			outputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"amount": map[string]any{"type": "integer", "description": "Amount transferred"},
-				},
-				"required": []string{"amount"},
-			},
-		},
-		{
-			name:        "tinygo/compile",
-			price:       cfg.TinyGo.Price,
-			description: "Compiles TinyGo source (a Handle function written against the Juice SDK) to a WASM artifact, ready to register with action create --kind wasm --artifact",
-			inputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"source": map[string]any{"type": "string", "description": "TinyGo source: a func Handle(in map[string]any) (map[string]any, error) plus any private helpers; the SDK (package, imports, alloc, run, main) is prepended automatically"},
-				},
-				"required": []string{"source"},
-			},
-			outputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"status":        map[string]any{"type": "string", "description": "success or failure"},
-					"artifact":      map[string]any{"type": "string", "description": "Base64-encoded WASM artifact, present on success"},
-					"artifact_hash": map[string]any{"type": "string", "description": "SHA-256 hex of the artifact, present on success"},
-					"diagnostics":   map[string]any{"type": "array", "description": "Compile/validation diagnostics", "items": map[string]any{"type": "string"}},
-				},
-				"required": []string{"status", "diagnostics"},
-			},
-		},
-	}
 }

@@ -3,12 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/daios-ai/juice/kernel"
 	"os"
 	"strings"
 	"time"
 )
 
-// NativeLLMConfig holds configuration for the @sys/llm/chat native action.
+// NativeLLMConfig holds configuration for the @sys/llm/* native actions.
 type NativeLLMConfig struct {
 	URL        string `json:"url"`
 	ChatModel  string `json:"chat_model"`
@@ -22,59 +23,59 @@ type NativeLookupConfig struct {
 	Price        int64 `json:"price"`
 }
 
-// NativeUserLookupConfig holds configuration for the @sys/user-lookup native action.
-type NativeUserLookupConfig struct {
-	Price int64 `json:"price"`
-}
-
-// NativeTimeConfig holds configuration for the @sys/time native action.
-type NativeTimeConfig struct {
-	Price int64 `json:"price"`
-}
-
-// NativeSinkConfig holds configuration for the @sys/sink native action.
-type NativeSinkConfig struct {
-	Price int64 `json:"price"`
-}
-
-// NativeMessageConfig holds configuration for the @sys/message native action.
-type NativeMessageConfig struct {
-	Price int64 `json:"price"`
-}
-
-// NativeRandomConfig holds configuration for the @sys/random native action.
-type NativeRandomConfig struct {
-	Price int64 `json:"price"`
-}
-
-// NativeTinyGoConfig holds configuration for the @sys/tinygo/compile native action.
-type NativeTinyGoConfig struct {
-	Price int64 `json:"price"`
-}
-
 // NativeWebConfig holds configuration for the @sys/web native action.
 type NativeWebConfig struct {
 	Price     int64  `json:"price"`
 	UserAgent string `json:"user_agent"`
 }
 
-// NativeTransferConfig holds configuration for the @sys/transfer native action.
-type NativeTransferConfig struct {
+// NativePriceConfig is the whole configuration of a native whose only setting is its price —
+// most of the stdlib. One type instead of one struct per action; the JSON shape is unchanged (§14).
+type NativePriceConfig struct {
 	Price int64 `json:"price"`
 }
 
-// NativeConfig holds per-action configuration for all native actions.
+// NativeConfig holds per-action configuration for all native actions (§14 `native.<action>`).
+// Configuration owns prices and their defaults; each native's contract lives with its handler (§9).
 type NativeConfig struct {
-	LLM        NativeLLMConfig        `json:"llm"`
-	Lookup     NativeLookupConfig     `json:"lookup"`
-	UserLookup NativeUserLookupConfig `json:"user-lookup"`
-	Time       NativeTimeConfig       `json:"time"`
-	Sink     NativeSinkConfig     `json:"sink"`
-	Message  NativeMessageConfig  `json:"message"`
-	Random   NativeRandomConfig   `json:"random"`
-	Web      NativeWebConfig      `json:"web"`
-	TinyGo   NativeTinyGoConfig   `json:"tinygo"`
-	Transfer NativeTransferConfig `json:"transfer"`
+	LLM        NativeLLMConfig    `json:"llm"`
+	Lookup     NativeLookupConfig `json:"lookup"`
+	UserLookup NativePriceConfig  `json:"user-lookup"`
+	Time       NativePriceConfig  `json:"time"`
+	Sink       NativePriceConfig  `json:"sink"`
+	Message    NativePriceConfig  `json:"message"`
+	Random     NativePriceConfig  `json:"random"`
+	Web        NativeWebConfig    `json:"web"`
+	TinyGo     NativePriceConfig  `json:"tinygo"`
+	Transfer   NativePriceConfig  `json:"transfer"`
+}
+
+// PriceOf returns the configured price for a native action name (§9 names, §14 config keys). It is
+// the single place the two vocabularies meet, so bootstrap never restates either.
+func (c NativeConfig) PriceOf(name string) int64 {
+	switch name {
+	case "lookup":
+		return c.Lookup.Price
+	case "user-lookup":
+		return c.UserLookup.Price
+	case "llm/chat", "llm/embed", "llm/json", "llm/decide":
+		return c.LLM.Price
+	case "time":
+		return c.Time.Price
+	case "sink":
+		return c.Sink.Price
+	case "message":
+		return c.Message.Price
+	case "random":
+		return c.Random.Price
+	case "transfer":
+		return c.Transfer.Price
+	case "web":
+		return c.Web.Price
+	case "tinygo/compile":
+		return c.TinyGo.Price
+	}
+	return 0
 }
 
 // ServerConfig holds all non-secret runtime configuration.
@@ -142,22 +143,16 @@ func (c ServerConfig) peerRetention() time.Duration {
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
 		Native: NativeConfig{
-			LLM:        NativeLLMConfig{URL: "http://localhost:11434", ChatModel: "gemma4:26b", EmbedModel: "nomic-embed-text", Price: 0},
-			Lookup:     NativeLookupConfig{DefaultLimit: 10, Price: 0},
-			UserLookup: NativeUserLookupConfig{Price: 0},
-			Time:       NativeTimeConfig{Price: 0},
-			Sink:    NativeSinkConfig{Price: 0},
-			Message: NativeMessageConfig{Price: 0},
-			Random:  NativeRandomConfig{Price: 0},
-			Web:      NativeWebConfig{Price: 0, UserAgent: "juice-kernel/0.4 (+https://github.com/daios-ai/juice)"},
-			TinyGo:   NativeTinyGoConfig{Price: 5},
-			Transfer: NativeTransferConfig{Price: 0},
+			LLM:    NativeLLMConfig{URL: "http://localhost:11434", ChatModel: "gemma4:26b", EmbedModel: "nomic-embed-text", Price: 0},
+			Lookup: NativeLookupConfig{DefaultLimit: 10, Price: 0},
+			Web:    NativeWebConfig{Price: 0, UserAgent: "juice-kernel/0.4 (+https://github.com/daios-ai/juice)"},
+			TinyGo: NativePriceConfig{Price: 5},
 		},
 		ScriptTimeoutMS:   10000,
 		ScriptMemoryBytes: 64 * 1024 * 1024,
-		FeeBPS:    2000,
-		RemoteBPS: 500,
-		ImportBPS: 500,
+		FeeBPS:            2000,
+		RemoteBPS:         500,
+		ImportBPS:         500,
 		// A fresh kernel serves remote paid calls out of the box (§13): X=1000 caps the total
 		// unsecured credit it extends across all peers (a bounded, Sybil-proof maximum loss),
 		// flagged for settlement at Y=500. Set exposure_max=0 to opt into prepaid-only. Q stays 0
@@ -239,4 +234,57 @@ func writeConfig(path string, cfg ServerConfig) error {
 		return err
 	}
 	return os.WriteFile(path, append(b, '\n'), 0o644)
+}
+
+// KernelConfig translates the JSON (wire) configuration into the kernel's runtime Config and
+// validates it — the single owner of both, so defaults and bounds cannot drift between the file
+// format and the running kernel (§14). The two types stay distinct because their representations
+// genuinely differ: durations are strings on the wire and time.Duration at runtime, and the token
+// secret is never stored in the file at all (it is passed in).
+func (c ServerConfig) KernelConfig(tokenSecret string) (kernel.Config, error) {
+	cfg := kernel.DefaultConfig()
+	if tokenSecret != "" {
+		cfg.TokenSecret = tokenSecret
+	}
+
+	for _, bps := range []struct {
+		name  string
+		value int64
+		dst   *int64
+	}{
+		{"fee_bps", c.FeeBPS, &cfg.FeeBPS},
+		{"remote_bps", c.RemoteBPS, &cfg.RemoteBPS},
+		{"import_bps", c.ImportBPS, &cfg.ImportBPS},
+	} {
+		if bps.value < 0 || bps.value > 10000 {
+			return kernel.Config{}, fmt.Errorf("%s must be 0–10000", bps.name)
+		}
+		*bps.dst = bps.value
+	}
+
+	// Global exposure policy (§13): X ≥ 0; when X > 0 the settlement trigger must sit strictly inside
+	// it (0 < Y < X) so a flagged peer is still below the hard cap; Q ≥ 0 (0 disables the residual path).
+	if c.ExposureMax < 0 || c.SettlementQuantum < 0 {
+		return kernel.Config{}, fmt.Errorf("exposure_max and settlement_quantum must be non-negative")
+	}
+	if c.ExposureMax > 0 && !(c.SettlementTrigger > 0 && c.SettlementTrigger < c.ExposureMax) {
+		return kernel.Config{}, fmt.Errorf("settlement_trigger must satisfy 0 < settlement_trigger < exposure_max when exposure_max > 0")
+	}
+	cfg.ExposureMax = c.ExposureMax
+	cfg.SettlementTrigger = c.SettlementTrigger
+	cfg.SettlementQuantum = c.SettlementQuantum
+
+	tokenTTL, err := time.ParseDuration(c.TokenTTL)
+	if err != nil {
+		return kernel.Config{}, fmt.Errorf("token_ttl invalid: %w", err)
+	}
+	cfg.TokenTTL = tokenTTL
+	cfg.ScriptTimeout = time.Duration(c.ScriptTimeoutMS) * time.Millisecond
+	cfg.ScriptMemory = c.ScriptMemoryBytes
+	cfg.AllowLocalSources = c.AllowLocalSources
+	cfg.AuthIssuer = c.AuthIssuer
+	cfg.AuthAudience = c.AuthAudience
+	cfg.PeerRetention = c.peerRetention()
+	cfg.DiscoveryInterval = c.discoveryInterval()
+	return cfg, nil
 }
