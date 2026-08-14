@@ -247,8 +247,8 @@ func userCreateCmd() *cobra.Command {
 				return err
 			}
 			var view json.RawMessage
-			if err := apiCall(context.Background(), "POST", "/v1/users", map[string]any{
-				"handle": user, "password": password, "recovery_public_key": recoveryPub,
+			if err := apiCall(context.Background(), "POST", "/v1/users", kernel.CreateUserRequest{
+				Handle: user, Password: password, RecoveryPublicKey: recoveryPub,
 			}, &view); err != nil {
 				return err
 			}
@@ -295,15 +295,14 @@ func userUpdateCmd() *cobra.Command {
 					return err
 				}
 			}
-			body := map[string]any{}
+			var req kernel.UpdateUserRequest
 			if setDescription {
-				body["description"] = description // may be "" to clear
+				req.Description = &description // may point at "" to clear
 			}
 			if changePassword {
-				body["current_password"] = currentPassword
-				body["password"] = newPassword
+				req.CurrentPassword, req.NewPassword = currentPassword, newPassword
 			}
-			return apiEmit("PUT", "/v1/me", body)
+			return apiEmit("PUT", "/v1/me", req)
 		},
 	}
 	cmd.Flags().StringVar(&description, "description", "", "New profile description (about); pass empty to clear")
@@ -425,21 +424,12 @@ func actionCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			body := map[string]any{
-				"name": name, "kind": kind, "price": price, "description": description,
-				"input_schema": inputSchema, "output_schema": outputSchema,
-				"source": srcData, "wasm_artifact": artData,
-			}
-			if method != "" {
-				body["method"] = method
-			}
-			if len(httpParams) > 0 {
-				body["params"] = httpParams
-			}
-			if auth != nil {
-				body["auth"] = auth
-			}
-			return apiEmit("POST", "/v1/actions", body)
+			return apiEmit("POST", "/v1/actions", kernel.CreateActionRequest{
+				Name: name, Kind: kernel.ActionKind(kind), Price: price, Description: description,
+				InputSchema: inputSchema, OutputSchema: outputSchema,
+				Source: srcData, WasmArtifact: artData,
+				Method: method, Params: httpParams, Auth: auth,
+			})
 		},
 	}
 	cmd.Flags().StringVar(&kind, "kind", "http", "Action kind: http, wasm, native")
@@ -471,9 +461,11 @@ func actionUpdateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			req := map[string]any{}
+			// Pointer fields carry the absent/set distinction the contract defines (§14): a flag the
+			// user did not pass stays nil, so the server leaves that term alone.
+			var req kernel.UpdateActionRequest
 			if c.Flags().Changed("description") {
-				req["description"] = description
+				req.Description = &description
 			}
 			if c.Flags().Changed("source") || c.Flags().Changed("artifact") {
 				srcData, artData, err := prepareSourceArtifact(source, artifact)
@@ -481,48 +473,42 @@ func actionUpdateCmd() *cobra.Command {
 					return err
 				}
 				if srcData != "" {
-					req["source"] = srcData
+					req.Source = &srcData
 				}
-				if artData != "" {
-					req["wasm_artifact"] = artData
-				}
+				req.WasmArtifact = artData
 			}
 			if c.Flags().Changed("method") {
-				req["method"] = method
+				req.Method = &method
 			}
 			if c.Flags().Changed("param") {
 				httpParams, err := parseParams(params)
 				if err != nil {
 					return err
 				}
-				req["params"] = httpParams
+				req.Params = &httpParams
 			}
 			if c.Flags().Changed("price") {
-				req["price"] = price
+				req.Price = &price
 			}
 			if c.Flags().Changed("visibility") {
-				req["visibility"] = visibility
+				v := kernel.ActionVisibility(visibility)
+				req.Visibility = &v
 			}
 			if inputSchemaStr != "" {
-				m := map[string]any{}
-				if err := unmarshalJSONArg(inputSchemaStr, &m); err != nil {
+				if err := unmarshalJSONArg(inputSchemaStr, &req.InputSchema); err != nil {
 					return kernel.ErrInvalidInput.Wrapf("invalid --input-schema: %v", err)
 				}
-				req["input_schema"] = m
 			}
 			if outputSchemaStr != "" {
-				m := map[string]any{}
-				if err := unmarshalJSONArg(outputSchemaStr, &m); err != nil {
+				if err := unmarshalJSONArg(outputSchemaStr, &req.OutputSchema); err != nil {
 					return kernel.ErrInvalidInput.Wrapf("invalid --output-schema: %v", err)
 				}
-				req["output_schema"] = m
 			}
 			if c.Flags().Changed("auth") {
-				auth := &kernel.AuthInput{}
-				if err := unmarshalJSONArg(authStr, auth); err != nil {
+				req.Auth = &kernel.AuthInput{}
+				if err := unmarshalJSONArg(authStr, req.Auth); err != nil {
 					return kernel.ErrInvalidInput.Wrapf("invalid --auth: %v", err)
 				}
-				req["auth"] = auth
 			}
 			return apiEmit("PUT", "/v1/actions/"+id, req)
 		},
@@ -869,11 +855,11 @@ func stepCreateCmd() *cobra.Command {
 					return kernel.ErrInvalidInput.Wrapf("invalid --partial-args: %v", err)
 				}
 			}
-			body := map[string]any{
-				"trace_id":        traceID,
-				"action":          args[0], // @owner/name or id; the server resolves it
-				"required_caller": requiredCaller,
-				"partial_args":    pa,
+			body := createStepParams{
+				TraceID:        traceID,
+				ActionRef:      args[0], // owner/name or id; the server resolves it
+				RequiredCaller: requiredCaller,
+				PartialArgs:    pa,
 			}
 			if flagQuiet {
 				var view struct {
@@ -1096,10 +1082,7 @@ func runCmd() *cobra.Command {
 			if err != nil {
 				return kernel.ErrInvalidInput.Wrapf("invalid args: %v", err)
 			}
-			reqBody := map[string]any{"action": cmdArgs[0], "args": args}
-			if quoteHash != "" {
-				reqBody["quote_hash"] = quoteHash
-			}
+			reqBody := kernel.RunRequest{ActionRef: cmdArgs[0], Args: args, QuoteHash: quoteHash}
 			var raw json.RawMessage
 			err = apiCall(context.Background(), "POST", "/v1/run", reqBody, &raw)
 			// A delegated-OAuth action needs a one-time consent (§8). At an interactive terminal,

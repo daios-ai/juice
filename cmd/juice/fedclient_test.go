@@ -21,8 +21,10 @@ type fakeFedCaller struct {
 	resolveResp fed.ResolveResponse
 	settleResp  fed.SettleResponse
 	resp        fed.CallResponse
+	stepResp    fed.StepResponse
 	err         error
 	lastReq     fed.CallRequest
+	lastStep    fed.StepRequest
 }
 
 func (f *fakeFedCaller) Call(_ context.Context, _ string, req fed.CallRequest) (fed.CallResponse, error) {
@@ -36,6 +38,11 @@ func (f *fakeFedCaller) Resolve(_ context.Context, _ string, _ fed.ResolveReques
 
 func (f *fakeFedCaller) Settle(_ context.Context, _ string, _ fed.SettleRequest) (fed.SettleResponse, error) {
 	return f.settleResp, f.err
+}
+
+func (f *fakeFedCaller) Step(_ context.Context, _ string, req fed.StepRequest) (fed.StepResponse, error) {
+	f.lastStep = req
+	return f.stepResp, f.err
 }
 
 func TestExecuteFederationSuccess(t *testing.T) {

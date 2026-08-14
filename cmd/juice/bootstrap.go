@@ -107,12 +107,6 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec) er
 	// Persist the kernel handle so GetGossip serves it from the DB.
 	_ = k.SetConfig(ctx, "kernel_handle", globalCfg.KernelHandle)
 
-	// One-time migration to the Connection model (§8): re-home any legacy per-grant tokens onto
-	// their derived connections. Idempotent — a fully-migrated store finds nothing to do.
-	if err := k.BackfillGrantConnections(ctx); err != nil {
-		return fmt.Errorf("backfill grant connections: %w", err)
-	}
-
 	// Recover interrupted calls and re-park crashed step completions (after signing key is set).
 	if err := k.Recover(ctx); err != nil {
 		return fmt.Errorf("recover: %w", err)

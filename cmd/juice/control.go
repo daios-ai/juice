@@ -3,13 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 	"github.com/go-chi/chi/v5"
 )
@@ -301,7 +299,7 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 			}
 			resp["about"], resp["users"], resp["actions"] = g.About, g.Users, g.ActionManifests
 			resp["source"] = "live"
-			if steps, ok := s.peerStepsAwaitingUs(octx, peerKey); ok {
+			if steps, serr := s.kernel.PeerStepsAwaitingUs(octx, peerKey); serr == nil && steps != nil {
 				resp["steps"] = steps
 			}
 			_ = s.kernel.RecordPeerSync(ctx, g.PublicKey, g.CounterpartyBalance)
@@ -352,222 +350,6 @@ func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, erro
 		return ident, nil
 	}
 	return "", kernel.ErrNotFound.Wrapf("no peer %q", ident)
-}
-
-// stepRoundTrip signs, dispatches, and unwraps one outbound /juice/fed/step/1 request.
-func (s *server) stepRoundTrip(ctx context.Context, peerKey string, req fed.StepRequest, timeout time.Duration) (map[string]any, error) {
-	if s.fed == nil {
-		return nil, kernel.ErrInvalidState.Wrap("federation transport not running")
-	}
-	octx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	resp, err := s.fed.Step(octx, peerKey, req)
-	if err != nil {
-		// Preserve the §13 dispatch distinction, as the call path does. Only a provably-never-sent
-		// request is "unreachable"; anything else (a timeout while the peer runs the resumed call,
-		// a mid-stream failure) may already have executed and settled there, so it must not be
-		// reported as if nothing happened. Retrying is safe and is how the real result is recovered:
-		// the idempotency key is derived from the request, so a repeat returns the stored outcome.
-		if errors.Is(err, fed.ErrNotDispatched) {
-			return nil, kernel.ErrPeerUnreachable.Wrapf("cannot reach %s (offline?)", peerKey).WithMeta("peer", peerKey)
-		}
-		return nil, kernel.ErrTimeout.Wrapf(
-			"no reply from %s; the request may have executed there — retry to recover its result", peerKey).WithMeta("peer", peerKey)
-	}
-	var body map[string]any
-	if json.Unmarshal(resp.Body, &body) != nil {
-		return nil, kernel.ErrExecutionFailed.Wrap("malformed peer response")
-	}
-	if resp.Status >= 300 {
-		msg, _ := body["error"].(string)
-		if msg == "" {
-			msg = "peer rejected the step request"
-		}
-		code, _ := body["code"].(string)
-		return nil, kernel.ErrorFromCode(code).Wrap(msg)
-	}
-	return body, nil
-}
-
-// completePeerStep resumes a step a peer parked for this kernel, over /juice/fed/step/1 (§13).
-// Reached from POST /v1/steps/{id}/complete when the request names a peer — the same command that
-// completes a local step, since a step is a step.
-// completePeerStep drives an outbound step completion to the serving peer (§13). forUserID, when
-// non-empty, is the completing user's own stable id on THIS kernel: it attaches a step_auth
-// attestation so a remote-user-addressed step is completed as that specific user (an empty forUserID
-// is a kernel-level completion, superuser scope, for a kernel-addressed step).
-func (s *server) completePeerStep(ctx context.Context, peerRef, stepID string, rawInput json.RawMessage, forUserID, paymentHash string) (map[string]any, error) {
-	peerKey, err := s.resolvePeerKey(ctx, strings.TrimSpace(peerRef))
-	if err != nil {
-		return nil, err
-	}
-	// Normalize the input to exactly the bytes the transport will send before hashing it:
-	// marshaling the outer StepRequest compacts and HTML-escapes an embedded RawMessage, so
-	// hashing the caller's raw body would sign bytes the peer never sees. Marshaling a RawMessage
-	// is idempotent, so this is a fixed point — hash and send the same slice.
-	input := []byte(rawInput)
-	if len(input) == 0 {
-		input = []byte("{}")
-	}
-	if input, err = json.Marshal(json.RawMessage(input)); err != nil {
-		return nil, kernel.ErrInvalidInput.Wrap("input must be valid JSON")
-	}
-	inputHash := sha256HexBytes(input)
-
-	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	// Derive the idempotency key rather than minting a UUID per attempt: a retry must present the
-	// SAME key, or the peer cannot recognize it as a duplicate and the tx/receipt of an
-	// already-executed completion is lost. Same peer + step + input ⇒ same key, nothing persisted.
-	// The key binds the payment descriptor hash (§13): a payment step folds its hash here so the serving
-	// kernel, recomputing its own, rejects a mismatch. A non-payment step uses paymentHash="".
-	idempotencyKey := sha256HexBytes([]byte("juice/fed/step/1|" + peerKey + "|" + stepID + "|" + inputHash + "|" + paymentHash))
-	sig, ts, err := s.kernel.SignStep(stepID, pub, peerKey, idempotencyKey, inputHash)
-	if err != nil {
-		return nil, err
-	}
-	req := fed.StepRequest{
-		Kind: "complete", Counterparty: pub, Timestamp: ts, Signature: sig,
-		StepID: stepID, IdempotencyKey: idempotencyKey, Input: json.RawMessage(input),
-	}
-	if forUserID != "" {
-		asig, ats, aerr := s.kernel.SignStepAuth(pub, peerKey, forUserID, stepID)
-		if aerr != nil {
-			return nil, aerr
-		}
-		req.ForUserID, req.UserAttestation, req.UserTimestamp = forUserID, asig, ats
-	}
-	return s.stepRoundTrip(ctx, peerKey, req, fedStepTimeout)
-}
-
-// completePeerStepMaybePaid completes a peer-held step, funding the value channel when the step is a
-// payment step (§13). It first reads the peer's step listing for a payment descriptor: absent ⇒ an
-// ordinary completion (paymentHash ""). Present ⇒ the buyer locks its own max_total reserve-first in a
-// pending_transfers record (idempotent on the payment-bound key), completes, and settles on the serving
-// kernel's signed receipt — value+value_premium to A's proxy row, value_import to buyer sys, refund on a
-// signed failure, left pending on an uncertain outcome for retry with the same key.
-func (s *server) completePeerStepMaybePaid(ctx context.Context, peerRef, stepID string, rawInput json.RawMessage, forUserID, buyerID string) (map[string]any, error) {
-	peerKey, err := s.resolvePeerKey(ctx, strings.TrimSpace(peerRef))
-	if err != nil {
-		return nil, err
-	}
-	desc := s.findPeerStepPayment(ctx, peerKey, stepID)
-	if desc == nil {
-		return s.completePeerStep(ctx, peerRef, stepID, rawInput, forUserID, "") // ordinary (non-payment) step
-	}
-	if buyerID == "" {
-		return nil, kernel.ErrInvalidInput.Wrap("a payment step must be completed by a specific user")
-	}
-	if kernel.PaymentDescriptorHash(*desc) != desc.Hash {
-		return nil, kernel.ErrInvalidState.Wrap("payment descriptor hash mismatch")
-	}
-	// Hash the input exactly as completePeerStep will (marshaling a RawMessage is a fixed point).
-	input := []byte(rawInput)
-	if len(input) == 0 {
-		input = []byte("{}")
-	}
-	if input, err = json.Marshal(json.RawMessage(input)); err != nil {
-		return nil, kernel.ErrInvalidInput.Wrap("input must be valid JSON")
-	}
-	inputHash := sha256HexBytes(input)
-	idempotencyKey := sha256HexBytes([]byte("juice/fed/step/1|" + peerKey + "|" + stepID + "|" + inputHash + "|" + desc.Hash))
-
-	// Reuse an existing reserve (retry) or admit a new one (lock max_total). Reserve-first: fund before
-	// the network completion so a crash never leaves the buyer having paid without a record.
-	pending, err := s.kernel.ReadPendingTransferByKey(ctx, idempotencyKey)
-	if err != nil {
-		if pending, err = s.kernel.AdmitRemotePaidStep(ctx, buyerID, peerKey, stepID, input, idempotencyKey, *desc); err != nil {
-			return nil, err
-		}
-	}
-	body, cerr := s.completePeerStep(ctx, peerRef, stepID, rawInput, forUserID, desc.Hash)
-	var receiptJSON []byte
-	if body != nil {
-		if rj, ok := body["receipt"]; ok && rj != nil {
-			receiptJSON, _ = json.Marshal(rj)
-		}
-	}
-	if serr := s.kernel.SettleRemotePaidStep(ctx, pending, *desc, receiptJSON); serr != nil {
-		return body, serr
-	}
-	return body, cerr
-}
-
-// findPeerStepPayment fetches the peer's step listing and returns the payment descriptor for stepID, or
-// nil when the step is not a payment step (or the listing cannot be read).
-func (s *server) findPeerStepPayment(ctx context.Context, peerKey, stepID string) *kernel.PaymentDescriptor {
-	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	sig, ts, err := s.kernel.SignStepList(pub, peerKey)
-	if err != nil {
-		return nil
-	}
-	body, err := s.stepRoundTrip(ctx, peerKey, fed.StepRequest{
-		Kind: "list", Counterparty: pub, Timestamp: ts, Signature: sig,
-	}, fedOpTimeout)
-	if err != nil {
-		return nil
-	}
-	raw, ok := body["steps"]
-	if !ok {
-		return nil
-	}
-	b, _ := json.Marshal(raw)
-	var views []struct {
-		ID      string                    `json:"id"`
-		Payment *kernel.PaymentDescriptor `json:"payment"`
-	}
-	if json.Unmarshal(b, &views) != nil {
-		return nil
-	}
-	for _, v := range views {
-		if v.ID == stepID {
-			return v.Payment
-		}
-	}
-	return nil
-}
-
-// retryPendingTransfer re-presents the SAME signed completion for a still-pending payment reserve and
-// settles on the result (§13 operator surface / future sweeper — one shared path). It re-derives nothing:
-// the stored idempotency key and raw input rebuild the identical request, so the serving kernel replays an
-// already-executed completion (returning its stored receipt) rather than re-running it. Disposition is
-// exactly the completion path's: a valid success settles, a valid failure refunds, an invalid receipt
-// quarantines, and no receipt / an unreachable peer leaves the record pending — a retry has no
-// never-dispatched proof (§13), since the first attempt may already have paid the beneficiary. Only a
-// pending record is actionable; settled/refunded are terminal and a quarantined receipt can never heal.
-func (s *server) retryPendingTransfer(ctx context.Context, pt *kernel.PendingTransfer) (*kernel.PendingTransfer, error) {
-	if pt.Status != "pending" {
-		return nil, kernel.ErrInvalidState.Wrapf("transfer is %s, not pending", pt.Status)
-	}
-	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	sig, ts, err := s.kernel.SignStep(pt.StepID, pub, pt.PeerKey, pt.IdempotencyKey, pt.InputHash)
-	if err != nil {
-		return nil, err
-	}
-	req := fed.StepRequest{
-		Kind: "complete", Counterparty: pub, Timestamp: ts, Signature: sig,
-		StepID: pt.StepID, IdempotencyKey: pt.IdempotencyKey, Input: pt.Input,
-	}
-	// A payment step is always user-addressed; re-attest as the buyer.
-	asig, ats, aerr := s.kernel.SignStepAuth(pub, pt.PeerKey, pt.BuyerID, pt.StepID)
-	if aerr != nil {
-		return nil, aerr
-	}
-	req.ForUserID, req.UserAttestation, req.UserTimestamp = pt.BuyerID, asig, ats
-
-	// A transport failure (unreachable / no settleable receipt) is not an error here: the record simply
-	// stays pending for a later retry. Only a signed receipt moves it.
-	body, _ := s.stepRoundTrip(ctx, pt.PeerKey, req, fedStepTimeout)
-	var receiptJSON []byte
-	if body != nil {
-		if rj, ok := body["receipt"]; ok && rj != nil {
-			receiptJSON, _ = json.Marshal(rj)
-		}
-	}
-	d := kernel.PaymentDescriptor{Beneficiary: pt.Beneficiary, Amount: pt.Amount, RemoteMax: pt.RemoteMax}
-	if serr := s.kernel.SettleRemotePaidStep(ctx, pt, d, receiptJSON); serr != nil {
-		return nil, serr
-	}
-	return s.kernel.ReadPendingTransfer(ctx, pt.ID)
 }
 
 // pendingTransferView is the operator-facing shape of a pending_transfers record (§13): operational
@@ -635,30 +417,12 @@ func (s *server) ctlRetryTransfer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	updated, err := s.retryPendingTransfer(r.Context(), pt)
+	updated, err := s.kernel.RetryPendingTransfer(r.Context(), pt)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.transferView(r.Context(), updated))
-}
-
-// peerStepsAwaitingUs lists the steps a peer holds for this kernel, for admin inspect (§13).
-// One bounded fetch: the queue is a handful of pending cross-kernel approvals, not a corpus.
-func (s *server) peerStepsAwaitingUs(ctx context.Context, peerKey string) (any, bool) {
-	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	sig, ts, err := s.kernel.SignStepList(pub, peerKey)
-	if err != nil {
-		return nil, false
-	}
-	body, err := s.stepRoundTrip(ctx, peerKey, fed.StepRequest{
-		Kind: "list", Counterparty: pub, Timestamp: ts, Signature: sig,
-	}, fedOpTimeout)
-	if err != nil {
-		return nil, false
-	}
-	steps, ok := body["steps"]
-	return steps, ok
 }
 
 // ctlIdentity reports this kernel's federation identity: public key, handle, and libp2p listen

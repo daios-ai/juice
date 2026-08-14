@@ -1,1 +1,0 @@
-ALTER TABLE actions ADD COLUMN wasm_artifact TEXT NOT NULL DEFAULT '';

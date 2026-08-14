@@ -148,14 +148,11 @@ type AuthInput struct {
 
 // Grant is a user's per-action delegated consent (§8): a pointer binding one action to the
 // Connection (ConnectionID) whose credential it may wield. It holds no token of its own.
-// RefreshToken is populated only on legacy rows awaiting the backfill (§8) and is otherwise
-// empty; it is AES-256-GCM sealed and write-only, never serialized by any read path.
 type Grant struct {
 	ID            string    `json:"id"`
 	GrantorUserID string    `json:"grantor_user_id"`
 	ActionID      string    `json:"action_id"`
 	ConnectionID  string    `json:"-"` // FK to Connection (empty on unbackfilled legacy rows)
-	RefreshToken  string    `json:"-"` // legacy sealed token, backfill-only; cleared once linked
 	CreatedAt     time.Time `json:"created_at"`
 }
 

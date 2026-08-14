@@ -517,12 +517,8 @@ func revokeConnection(k *kernel.Kernel, ctx context.Context, callerID, providerK
 	return map[string]any{"revoked": revoked, "connection": kernel.ProviderLabel(providerKey)}, nil
 }
 
-func updateMe(k *kernel.Kernel, ctx context.Context, callerID string, description *string, currentPwd, newPwd string) (map[string]any, error) {
-	u, err := k.UpdateUser(ctx, callerID, kernel.UpdateUserRequest{
-		Description:     description,
-		CurrentPassword: currentPwd,
-		NewPassword:     newPwd,
-	})
+func updateMe(k *kernel.Kernel, ctx context.Context, callerID string, req kernel.UpdateUserRequest) (map[string]any, error) {
+	u, err := k.UpdateUser(ctx, callerID, req)
 	if err != nil {
 		return nil, err
 	}
@@ -718,15 +714,17 @@ func getProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) (*pr
 
 // ---- Step operations ----
 
+// createStepParams is both the POST /v1/steps body and the shared HTTP/CLI input (§14): one shape
+// for the contract. ViaCapability is authority the middleware establishes, never wire input.
 type createStepParams struct {
-	TraceID        string
-	ActionRef      string
-	RequiredCaller string
-	PartialArgs    json.RawMessage
+	TraceID        string          `json:"trace_id"`
+	ActionRef      string          `json:"action"`
+	RequiredCaller string          `json:"required_caller"`
+	PartialArgs    json.RawMessage `json:"partial_args"`
 	// ViaCapability skips the precondition-4 trace-use check: a capability's trace authority is
 	// the executing action owning that trace (§9), matching the WASM juice.step_create path, which
 	// calls CreateStep directly without an external authorization check.
-	ViaCapability bool
+	ViaCapability bool `json:"-"`
 }
 
 // createStep resolves ActionRef and RequiredCaller, enforces precondition-4 for the trace,
@@ -801,25 +799,4 @@ func getTransaction(k *kernel.Kernel, ctx context.Context, callerID, id string) 
 		return nil, err
 	}
 	return enrichTx(tv, newAccountCache(k, ctx)), nil
-}
-
-// validateRating returns ErrInvalidInput if v is not 0 or 1.
-func validateRating(v float64) error {
-	if v != 0 && v != 1 {
-		return kernel.ErrInvalidInput.Wrap("rating must be 0 or 1")
-	}
-	return nil
-}
-
-func rateTransaction(k *kernel.Kernel, ctx context.Context, callerID, id string, rating float64, note *string) (*kernel.Rating, error) {
-	if err := validateRating(rating); err != nil {
-		return nil, err
-	}
-	return k.RateTransaction(ctx, callerID, id, rating, note)
-}
-
-// ---- Run ----
-
-func run(k *kernel.Kernel, ctx context.Context, callerID, actionRef string, args map[string]any, quoteHash string) (*kernel.CallReply, error) {
-	return k.Run(ctx, kernel.RunRequest{CallerID: callerID, ActionRef: actionRef, Args: args, QuoteHash: quoteHash})
 }

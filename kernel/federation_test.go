@@ -573,6 +573,46 @@ func TestSettleRemotePaidStep(t *testing.T) {
 		}
 	})
 
+	// A retry is the ONLY mutation an operator has on a stuck transfer, and it must never invent an
+	// outcome: a transport failure leaves the reserve exactly as it was, pending, with no error
+	// surfaced — a retry carries no never-dispatched proof, so the first attempt may already have
+	// paid the beneficiary and only receipt evidence may move money (§13). This is deliberately the
+	// OPPOSITE disposition to a direct completion, which reports the typed transport error.
+	t.Run("retry suppresses a transport failure and stays pending", func(t *testing.T) {
+		k, st, buyer, proxyA, pt := admit(t)
+		k.SetFederation(&fakeFederationHTTP{}) // every step call fails at the transport
+		before, _ := st.ReadUser(ctx, buyer.ID)
+
+		updated, err := k.RetryPendingTransfer(ctx, pt)
+		if err != nil {
+			t.Fatalf("a transport failure must not surface as an error: %v", err)
+		}
+		if updated.Status != "pending" {
+			t.Errorf("status = %q, want pending", updated.Status)
+		}
+		after, _ := st.ReadUser(ctx, buyer.ID)
+		if after.Available != before.Available || after.Locked != before.Locked {
+			t.Errorf("reserve moved on a transport failure: %d/%d → %d/%d",
+				before.Available, before.Locked, after.Available, after.Locked)
+		}
+		if p, _ := st.ReadUser(ctx, proxyA.ID); p.Available != 0 {
+			t.Errorf("no receipt must mean no credit: proxy row = %d", p.Available)
+		}
+	})
+
+	// A settled or quarantined record is terminal: retry refuses it rather than re-presenting a
+	// completion whose money has already moved (or whose evidence can never heal).
+	t.Run("retry refuses a terminal record", func(t *testing.T) {
+		k, st, _, _, pt := admit(t)
+		if err := st.SetPendingTransferStatus(ctx, pt.ID, "quarantined", "test"); err != nil {
+			t.Fatal(err)
+		}
+		done, _ := k.ReadPendingTransfer(ctx, pt.ID)
+		if _, err := k.RetryPendingTransfer(ctx, done); !errors.Is(err, kernel.ErrInvalidState) {
+			t.Errorf("retry on a quarantined record: got %v, want ErrInvalidState", err)
+		}
+	})
+
 	t.Run("wrong beneficiary quarantines", func(t *testing.T) {
 		k, st, buyer, _, pt := admit(t)
 		if err := k.SettleRemotePaidStep(ctx, pt, desc, signedReceipt(t, kernel.TxSuccess, 100, 5, "someone-else")); err != nil {

@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
-	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,6 +24,185 @@ func openTestDB(t *testing.T) *DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+// The schema history is one baseline (store/migrations/001_baseline.sql). These five cases pin
+// the whole contract of that cut: what a fresh database gets, what a database at the end of the
+// old chain gets, and the three states the runner must refuse rather than guess at.
+
+// legacyChainDB builds a database that looks exactly like one left by the previous release: the
+// full 42-row migration ledger and a grants table still carrying the legacy refresh_token column.
+// It is built RAW — never through Open — because Open is the thing under test: the fixture must
+// reach the runner in the pre-baseline state, not one the runner has already reconciled.
+func legacyChainDB(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	raw := rawDB(t, path)
+	if _, err := raw.Exec(createSchemaMigrations); err != nil {
+		t.Fatal(err)
+	}
+	body, err := migrationFS.ReadFile("migrations/001_baseline.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range splitSQLStatements(string(body)) {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("seed baseline: %v", err)
+		}
+	}
+	if _, err := raw.Exec(`ALTER TABLE grants ADD COLUMN refresh_token TEXT`); err != nil {
+		t.Fatal(err)
+	}
+	names := []string{"042_discovery_effect"}
+	for i := 1; i <= 41; i++ {
+		names = append(names, fmt.Sprintf("%03d_step", i))
+	}
+	for _, v := range names {
+		if _, err := raw.Exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
+			v, timeToStr(time.Now().UTC())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw.Close()
+	return path
+}
+
+// rawDB opens a connection that bypasses the migration runner entirely.
+func rawDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	raw, err := sql.Open(driverName, path+"?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func openAt(t *testing.T, path string) *DB {
+	t.Helper()
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(%s): %v", path, err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func schemaOf(t *testing.T, db *DB) string {
+	t.Helper()
+	rows, err := db.db.Query(`SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, s)
+	}
+	return strings.Join(out, "\n")
+}
+
+// A fresh database is created directly from the baseline and records it.
+func TestBaselineCreatesFreshSchema(t *testing.T) {
+	db := openTestDB(t)
+	applied, err := db.migrationApplied(baselineVersion)
+	if err != nil || !applied {
+		t.Fatalf("fresh database must record %s: applied=%v err=%v", baselineVersion, applied, err)
+	}
+	if _, err := db.db.Exec(`SELECT refresh_token FROM grants`); err == nil {
+		t.Error("a fresh grants table must not carry the legacy refresh_token column")
+	}
+}
+
+// A database at the end of the old chain is normalized and stamped, and its schema then matches a
+// fresh one exactly — an upgraded kernel and a new one run on the same bytes.
+func TestBaselineUpgradesLegacyChainToAnIdenticalSchema(t *testing.T) {
+	path := legacyChainDB(t)
+	upgraded := openAt(t, path)
+	applied, err := db2applied(upgraded)
+	if err != nil || !applied {
+		t.Fatalf("legacy database must be stamped: applied=%v err=%v", applied, err)
+	}
+	if _, err := upgraded.db.Exec(`SELECT refresh_token FROM grants`); err == nil {
+		t.Error("normalization must drop the legacy refresh_token column")
+	}
+	if got, want := schemaOf(t, upgraded), schemaOf(t, openTestDB(t)); got != want {
+		t.Errorf("upgraded schema differs from a fresh one:\n--- upgraded ---\n%s\n--- fresh ---\n%s", got, want)
+	}
+	rows, err := upgraded.db.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Error("PRAGMA foreign_key_check reported violations after the upgrade")
+	}
+	// Idempotent: a second boot is state 1 and changes nothing.
+	upgraded.Close()
+	again := openAt(t, path)
+	if got, want := schemaOf(t, again), schemaOf(t, openTestDB(t)); got != want {
+		t.Error("a second boot must be a no-op")
+	}
+}
+
+func db2applied(db *DB) (bool, error) { return db.migrationApplied(baselineVersion) }
+
+// A grant still holding a legacy token means the previous release's backfill never completed.
+// Refuse rather than drop the column — that would destroy a recoverable credential.
+func TestBaselineRefusesUnbackfilledLegacyToken(t *testing.T) {
+	path := legacyChainDB(t)
+	raw := rawDB(t, path)
+	u, a := uuid.New().String(), uuid.New().String()
+	now := timeToStr(time.Now().UTC())
+	if _, err := raw.Exec(`INSERT INTO accounts (id,handle,description,password_hash,available,locked,created_at,updated_at) VALUES (?,?,'','',0,0,?,?)`,
+		u, "legacy-holder", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO actions (id,owner_user_id,name,kind,active,visibility,price,description,created_at,updated_at) VALUES (?,?,?,'http',1,'private',0,'',?,?)`,
+		a, u, "svc", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO grants (id,grantor_user_id,action_id,connection_id,refresh_token,created_at) VALUES (?,?,?,NULL,?,?)`,
+		uuid.New().String(), u, a, "sealed", now); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "legacy token") {
+		t.Fatalf("expected a refusal naming the legacy token, got %v", err)
+	}
+}
+
+// A ledger that is neither empty nor exactly the old chain is an unknown state: refuse, rather
+// than stamp a baseline over a schema we cannot vouch for.
+func TestBaselineRefusesPartialHistory(t *testing.T) {
+	path := legacyChainDB(t)
+	raw := rawDB(t, path)
+	if _, err := raw.Exec(`DELETE FROM schema_migrations WHERE version=?`, "042_discovery_effect"); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "unsupported migration state") {
+		t.Fatalf("expected an unsupported-state refusal, got %v", err)
+	}
+}
+
+// An empty ledger over existing tables is a damaged or foreign database; creating the baseline
+// over it would fail half-way through.
+func TestBaselineRefusesTablesWithoutHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "damaged.db")
+	db := openAt(t, path)
+	if _, err := db.db.Exec(`DELETE FROM schema_migrations`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "unknown schema") {
+		t.Fatalf("expected a refusal to baseline over an unknown schema, got %v", err)
+	}
 }
 
 func TestMigrationsAreFileBackedAndRecorded(t *testing.T) {
@@ -360,101 +539,6 @@ func TestStrToTimeAcceptsLegacyLayout(t *testing.T) {
 	// The primary RFC3339Nano path still parses.
 	if strToTime("2026-07-13T12:34:56.5Z").IsZero() {
 		t.Error("RFC3339Nano timestamp should parse on the primary path")
-	}
-}
-
-// TestMigration021DropsEmailPreservesRows exercises the real upgrade path: it applies every
-// migration strictly before 021, seeds a user (with the then-required email column, via raw SQL)
-// plus a child action under the old schema, then applies 021 and asserts the pre-existing rows
-// survive the users-table rebuild with their FK graph intact — the one thing a fresh-DB test cannot
-// cover — while email is dropped and description defaults to "".
-func TestMigration021DropsEmailPreservesRows(t *testing.T) {
-	dsn := filepath.Join(t.TempDir(), "up.db") +
-		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
-	raw, err := sql.Open(driverName, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw.SetMaxOpenConns(1) // mirror Open(): the FK-off pragma and the rebuild tx share one conn
-	defer raw.Close()
-	s := &DB{db: raw}
-	if _, err := raw.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
-		t.Fatal(err)
-	}
-
-	files, err := migrationFileNames()
-	if err != nil {
-		t.Fatal(err)
-	}
-	apply := func(file string) {
-		version := strings.TrimSuffix(path.Base(file), ".sql")
-		b, err := migrationFS.ReadFile(file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := s.applyMigration(version, string(b)); err != nil {
-			t.Fatalf("apply %s: %v", version, err)
-		}
-	}
-	var held []string // 021 and everything after it: applied after seeding under the old schema
-	for _, f := range files {
-		if path.Base(f) >= "021_" {
-			held = append(held, f)
-			continue
-		}
-		apply(f)
-	}
-	if len(held) == 0 || !strings.HasPrefix(path.Base(held[0]), "021_") {
-		t.Fatal("migration 021 not found")
-	}
-
-	// Seed under the pre-021 schema, which still has the email column (NOT NULL). CreateUser no
-	// longer writes email, so seed via raw SQL to match the old column set.
-	ctx := context.Background()
-	uid := uuid.New().String()
-	now := timeToStr(time.Now().UTC())
-	if _, err := raw.ExecContext(ctx,
-		`INSERT INTO users (id,handle,email,password_hash,available,locked,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?)`,
-		uid, "old", "old@example.com", "hash", int64(42), int64(0), now, now); err != nil {
-		t.Fatalf("seed user: %v", err)
-	}
-	// Seed the child action via raw SQL under the pre-021 column set: CreateAction now writes
-	// v0.12 columns (remote_owner_id/remote_bps) that only exist after migration 027.
-	if _, err := raw.ExecContext(ctx,
-		`INSERT INTO actions (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		uuid.New().String(), uid, "act", "wasm", 1, "public", int64(0), "d", "{}", "{}", "", "", "", now, now); err != nil {
-		t.Fatalf("seed action: %v", err)
-	}
-
-	// Apply 021 (rebuild dropping email, adding description + recovery_public_key) and everything
-	// after it (022 drops denied_at), in order.
-	for _, f := range held {
-		apply(f)
-	}
-
-	// The pre-existing user survived the rebuild with its data; description defaults to "".
-	// Migration 026 (v0.12) strips the stored `@` sigil, so `@old` reads back bare as `old`.
-	got, err := s.ReadUser(ctx, uid)
-	if err != nil || got.Handle != "old" || got.Available != 42 {
-		t.Fatalf("user lost or altered by rebuild: err=%v got=%+v", err, got)
-	}
-	if got.Description != "" || got.RecoveryPublicKey != "" {
-		t.Errorf("new columns should default empty, got description=%q recovery=%q", got.Description, got.RecoveryPublicKey)
-	}
-	// The child action's FK still resolves — no dangling references after DROP/RENAME.
-	fkRows, err := raw.QueryContext(ctx, `PRAGMA foreign_key_check`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fkRows.Close()
-	if fkRows.Next() {
-		t.Error("foreign_key_check reported a violation after the upgrade")
-	}
-	// The email column is gone: selecting it must error.
-	if _, err := raw.QueryContext(ctx, `SELECT email FROM users`); err == nil {
-		t.Error("email column should not exist after migration 021")
 	}
 }
 
@@ -3153,55 +3237,6 @@ func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {
 	}
 }
 
-// TestMigration011RewritesBareURLSources verifies the http-source unification
-// migration converts legacy bare-URL kind=http sources into structured HTTPSource
-// JSON while leaving already-structured (OpenAPI) sources untouched.
-func TestMigration011RewritesBareURLSources(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	owner := newUser("mig-owner", 0)
-	if err := db.CreateUser(ctx, owner); err != nil {
-		t.Fatal(err)
-	}
-
-	// Legacy manual action: bare URL string.
-	bare := newAction(owner.ID, "/legacy", 0, false)
-	bare.Source = "https://api.example.com/hook"
-	if err := db.CreateAction(ctx, bare); err != nil {
-		t.Fatal(err)
-	}
-	// OpenAPI action: already-structured JSON.
-	oapi := newAction(owner.ID, "/imported", 0, false)
-	oapi.Source = `{"type":"openapi","base_url":"https://api.example.com","method":"GET","path":"/items"}`
-	if err := db.CreateAction(ctx, oapi); err != nil {
-		t.Fatal(err)
-	}
-
-	// Re-apply migration 011 (idempotent over already-structured rows).
-	sqlBytes, err := migrationFS.ReadFile("migrations/011_http_source_structured.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := db.db.ExecContext(ctx, string(sqlBytes)); err != nil {
-		t.Fatalf("apply migration: %v", err)
-	}
-
-	gotBare, _ := db.ReadAction(ctx, bare.ID)
-	var s kernel.HTTPSource
-	if err := json.Unmarshal([]byte(gotBare.Source), &s); err != nil {
-		t.Fatalf("legacy source not rewritten to JSON: %v (%s)", err, gotBare.Source)
-	}
-	if s.Type != "http" || s.Method != "POST" || s.BaseURL != "https://api.example.com/hook" {
-		t.Errorf("rewritten source unexpected: %+v", s)
-	}
-
-	gotOapi, _ := db.ReadAction(ctx, oapi.ID)
-	if gotOapi.Source != oapi.Source {
-		t.Errorf("openapi source must be untouched: got %s", gotOapi.Source)
-	}
-}
-
 // ---- Peer retention purge (§13) ----
 
 func TestPurgePeerCascade(t *testing.T) {
@@ -3424,7 +3459,7 @@ func TestGrantCRUDAndUpsert(t *testing.T) {
 	a := newAction(user.ID, "/oauth-svc", 0, true)
 	_ = db.CreateAction(ctx, a)
 
-	g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: user.ID, ActionID: a.ID, RefreshToken: "sealed-1", CreatedAt: time.Now().UTC()}
+	g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: user.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()}
 	if err := db.CreateOrReplaceGrant(ctx, g); err != nil {
 		t.Fatalf("CreateOrReplaceGrant: %v", err)
 	}
@@ -3432,12 +3467,13 @@ func TestGrantCRUDAndUpsert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadGrant: %v", err)
 	}
-	if got.RefreshToken != "sealed-1" {
-		t.Errorf("refresh token = %q, want sealed-1", got.RefreshToken)
+	if got.ID != g.ID {
+		t.Errorf("read back id = %q, want %q", got.ID, g.ID)
 	}
 
-	// Re-consent overwrites in place: still one row, new token, new id.
-	g2 := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: user.ID, ActionID: a.ID, RefreshToken: "sealed-2", CreatedAt: time.Now().UTC()}
+	// Re-consent overwrites in place: still one row, new id. A grant holds no secret of its own —
+	// the credential lives on the Connection it points at (§8).
+	g2 := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: user.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()}
 	if err := db.CreateOrReplaceGrant(ctx, g2); err != nil {
 		t.Fatalf("re-consent: %v", err)
 	}
@@ -3445,8 +3481,8 @@ func TestGrantCRUDAndUpsert(t *testing.T) {
 	if len(list) != 1 {
 		t.Fatalf("grant count = %d, want 1 (upsert)", len(list))
 	}
-	if list[0].RefreshToken != "sealed-2" {
-		t.Errorf("after upsert token = %q, want sealed-2", list[0].RefreshToken)
+	if list[0].ID != g2.ID {
+		t.Errorf("after upsert id = %q, want %q", list[0].ID, g2.ID)
 	}
 
 	if err := db.DeleteGrant(ctx, user.ID, a.ID); err != nil {
@@ -3472,7 +3508,7 @@ func TestDeleteGrantsForAction(t *testing.T) {
 	_ = db.CreateAction(ctx, a)
 
 	for _, u := range []*kernel.Account{u1, u2} {
-		_ = db.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: u.ID, ActionID: a.ID, RefreshToken: "s", CreatedAt: time.Now().UTC()})
+		_ = db.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: u.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()})
 	}
 	if err := db.DeleteGrantsForAction(ctx, a.ID); err != nil {
 		t.Fatalf("DeleteGrantsForAction: %v", err)
@@ -3554,44 +3590,6 @@ func TestConnectionCRUDAndCascade(t *testing.T) {
 	}
 	if err := db.DeleteConnectionCascade(ctx, got.ID); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("cascade absent connection: got %v, want ErrNotFound", err)
-	}
-}
-
-func TestLegacyTokenBackfillHelpers(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	u := newUser("legacy", 0)
-	_ = db.CreateUser(ctx, u)
-	a := newAction(u.ID, "svc", 0, true)
-	_ = db.CreateAction(ctx, a)
-
-	// A legacy grant carries a sealed token and no connection.
-	g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: u.ID, ActionID: a.ID, RefreshToken: "legacy-sealed", CreatedAt: time.Now().UTC()}
-	_ = db.CreateOrReplaceGrant(ctx, g)
-
-	legacy, err := db.ListLegacyTokenGrants(ctx)
-	if err != nil {
-		t.Fatalf("ListLegacyTokenGrants: %v", err)
-	}
-	if len(legacy) != 1 || legacy[0].RefreshToken != "legacy-sealed" || legacy[0].ConnectionID != "" {
-		t.Fatalf("legacy grants = %+v, want one unlinked token", legacy)
-	}
-
-	c := &kernel.Connection{ID: uuid.New().String(), UserID: u.ID, ProviderKey: "oauth:t|c", SealedSecret: "resealed", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	_ = db.CreateOrUpdateConnection(ctx, c)
-	if err := db.LinkGrantConnection(ctx, g.ID, c.ID); err != nil {
-		t.Fatalf("LinkGrantConnection: %v", err)
-	}
-
-	// After linking, the grant points at the connection and holds no token; the backfill
-	// predicate is now empty (idempotent: a second pass finds nothing).
-	got, _ := db.ReadGrant(ctx, u.ID, a.ID)
-	if got.ConnectionID != c.ID || got.RefreshToken != "" {
-		t.Errorf("after link: connection=%q token=%q, want linked and empty", got.ConnectionID, got.RefreshToken)
-	}
-	if again, _ := db.ListLegacyTokenGrants(ctx); len(again) != 0 {
-		t.Errorf("legacy predicate not cleared after link: %d rows", len(again))
 	}
 }
 
@@ -4075,7 +4073,7 @@ func TestUpsertKernelPreservesNarrowPaths(t *testing.T) {
 // captured transaction party still resolves), no child table still points at the dropped `users`
 // table, and the schema is referentially clean. SQLite writes the rewritten name quoted, so the
 // sqlite_master check must look for both forms.
-func TestMigration037Integrity(t *testing.T) {
+func TestSchemaAccountIntegrity(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -4124,263 +4122,6 @@ func TestMigration037Integrity(t *testing.T) {
 	defer rows.Close()
 	if rows.Next() {
 		t.Error("PRAGMA foreign_key_check reported violations")
-	}
-}
-
-// TestMigration037SplitsAccountsAndKernelsPreservingRows exercises the real upgrade path for the
-// account/kernel split (§3, §13): it applies every migration strictly before 037, seeds a v0.12
-// database — a local user, a peer account, a discovered kernel, a discovery-only kernel, and child
-// rows referencing the peer — then applies 037 and asserts what the migration promises. A fresh-DB
-// test cannot cover any of this: ids must survive so every captured transaction party still
-// resolves, and the two naming sources must land in the right columns.
-func TestMigration037SplitsAccountsAndKernelsPreservingRows(t *testing.T) {
-	dsn := filepath.Join(t.TempDir(), "up37.db") +
-		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
-	raw, err := sql.Open(driverName, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw.SetMaxOpenConns(1) // mirror Open(): the FK-off pragma and the rebuild tx share one conn
-	defer raw.Close()
-	s := &DB{db: raw}
-	if _, err := raw.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
-		t.Fatal(err)
-	}
-	files, err := migrationFileNames()
-	if err != nil {
-		t.Fatal(err)
-	}
-	apply := func(file string) {
-		version := strings.TrimSuffix(path.Base(file), ".sql")
-		b, err := migrationFS.ReadFile(file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := s.applyMigration(version, string(b)); err != nil {
-			t.Fatalf("apply %s: %v", version, err)
-		}
-	}
-	var held []string
-	for _, f := range files {
-		if path.Base(f) >= "037_" {
-			held = append(held, f)
-			continue
-		}
-		apply(f)
-	}
-	if len(held) == 0 || !strings.HasPrefix(path.Base(held[0]), "037_") {
-		t.Fatal("migration 037 not found")
-	}
-
-	ctx := context.Background()
-	const peerKey, otherKey = "PEERKEY", "OTHERKEY"
-	aliceID, peerID := uuid.New().String(), uuid.New().String()
-	early := timeToStr(time.Now().UTC().Add(-72 * time.Hour))
-	mid := timeToStr(time.Now().UTC().Add(-48 * time.Hour))
-	late := timeToStr(time.Now().UTC().Add(-1 * time.Hour))
-
-	// Seed under the pre-037 schema: one local user and one peer account (public_key set, negative
-	// balance — allowed for a peer by the old CHECK), plus the peer's sync cache.
-	if _, err := raw.ExecContext(ctx,
-		`INSERT INTO users (id,handle,description,password_hash,available,locked,public_key,peer_last_seen,peer_credit,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?), (?,?,?,?,?,?,?,?,?,?,?)`,
-		aliceID, "alice", "a local", "hash", int64(42), int64(0), nil, nil, nil, mid, mid,
-		peerID, "minibox", "", "", int64(-50), int64(0), peerKey, late, int64(7), mid, mid); err != nil {
-		t.Fatalf("seed users: %v", err)
-	}
-	// The discovery cache: one row backing the peer (its advertised label differs from the local
-	// name the operator bound) and one discovery-only kernel.
-	if _, err := raw.ExecContext(ctx,
-		`INSERT INTO discovered_kernels (public_key,handle,about,gossip_cursor,first_seen,updated_at)
-		 VALUES (?,?,?,?,?,?), (?,?,?,?,?,?)`,
-		peerKey, "minibox-advertised", "a box", "cur1", early, late,
-		otherKey, "stranger", "", "cur3", mid, mid); err != nil {
-		t.Fatalf("seed discovered_kernels: %v", err)
-	}
-	// Child rows referencing the peer account: a proxy action, a process, and a transaction whose
-	// captured party ids must still resolve after the rebuild.
-	proxyID := uuid.New().String()
-	if _, err := raw.ExecContext(ctx,
-		`INSERT INTO actions (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,remote_action_id,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		proxyID, peerID, "sys/greet", "remote_proxy", 1, "local", int64(5), "d", "{}", "{}", "", "h", "ra-1", mid, mid); err != nil {
-		t.Fatalf("seed proxy action: %v", err)
-	}
-	if _, err := raw.ExecContext(ctx,
-		`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at) VALUES (?,?,?,?,?,?)`,
-		uuid.New().String(), peerID, int64(0), int64(0), "closed", mid); err != nil {
-		t.Fatalf("seed process: %v", err)
-	}
-	txID := uuid.New().String()
-	if _, err := raw.ExecContext(ctx,
-		`INSERT INTO transactions (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,action_id,status,gross,net,fee,started_at,ended_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		txID, "p1", "t1", "", aliceID, aliceID, peerID, proxyID, "success", int64(5), int64(4), int64(1), mid, mid); err != nil {
-		t.Fatalf("seed transaction: %v", err)
-	}
-
-	for _, f := range held {
-		apply(f)
-	}
-
-	// Ids survive, so the transaction's captured parties still resolve.
-	alice, err := s.ReadUser(ctx, aliceID)
-	if err != nil || alice.Handle != "alice" || alice.Available != 42 || alice.KernelPublicKey != "" {
-		t.Fatalf("local user lost or altered: err=%v got=%+v", err, alice)
-	}
-	peer, err := s.ReadUser(ctx, peerID)
-	if err != nil || peer.Available != -50 || peer.KernelPublicKey != peerKey {
-		t.Fatalf("peer account lost or altered: err=%v got=%+v", err, peer)
-	}
-	if peer.Handle != "" || peer.PasswordHash != "" {
-		t.Errorf("a kernel account must hold no session credential, got handle=%q hash=%q", peer.Handle, peer.PasswordHash)
-	}
-	var owner, target string
-	if err := raw.QueryRowContext(ctx, `SELECT owner_user_id, target_user_id FROM transactions WHERE id=?`, txID).
-		Scan(&owner, &target); err != nil {
-		t.Fatal(err)
-	}
-	if owner != aliceID || target != peerID {
-		t.Errorf("transaction parties rewritten: owner=%s target=%s", owner, target)
-	}
-
-	// Naming precedence: the operator's bound name becomes the petname, the remote's advertised
-	// label becomes the nickname, and the two stay distinct.
-	rk, err := s.ReadKernel(ctx, peerKey)
-	if err != nil || rk == nil {
-		t.Fatalf("peer kernel row missing: %v", err)
-	}
-	if rk.Petname != "minibox" || rk.Nickname != "minibox-advertised" {
-		t.Errorf("naming precedence: petname=%q nickname=%q, want minibox / minibox-advertised", rk.Petname, rk.Nickname)
-	}
-	if rk.About != "a box" || rk.GossipCursor != "cur1" {
-		t.Errorf("discovery metadata lost: about=%q cursor=%q", rk.About, rk.GossipCursor)
-	}
-	if rk.PeerCredit == nil || *rk.PeerCredit != 7 || rk.LastSeen == nil {
-		t.Errorf("sync cache not carried onto the kernel row: credit=%v last_seen=%v", rk.PeerCredit, rk.LastSeen)
-	}
-	if got := timeToStr(rk.FirstSeen); got != early {
-		t.Errorf("first_seen = %s, want the earliest of the two sources (%s)", got, early)
-	}
-	// A discovery-only kernel arrives with a nickname and no petname: nothing bound it.
-	other, err := s.ReadKernel(ctx, otherKey)
-	if err != nil || other == nil {
-		t.Fatalf("discovery-only kernel missing: %v", err)
-	}
-	if other.Petname != "" || other.Nickname != "stranger" {
-		t.Errorf("discovery-only kernel: petname=%q nickname=%q, want unbound / stranger", other.Petname, other.Nickname)
-	}
-
-	// The FK graph survived the DROP/RENAME, and nothing still points at the dropped table.
-	fkRows, err := raw.QueryContext(ctx, `PRAGMA foreign_key_check`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fkRows.Close()
-	if fkRows.Next() {
-		t.Error("foreign_key_check reported a violation after the upgrade")
-	}
-	var dangling int
-	if err := raw.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%REFERENCES users%' OR sql LIKE '%REFERENCES "users"%'`).
-		Scan(&dangling); err != nil {
-		t.Fatal(err)
-	}
-	if dangling != 0 {
-		t.Errorf("%d schema objects still reference the dropped users table", dangling)
-	}
-}
-
-// TestMigration038NormalizesProxyVisibility: a proxy row is kernel-managed and always local (§8),
-// but rows cached before that was enforced are public, so they surface in anonymous action
-// listings. The migration corrects the data without touching ids, stats, or history; a row that
-// was created and never promoted stays private.
-func TestMigration038NormalizesProxyVisibility(t *testing.T) {
-	dsn := filepath.Join(t.TempDir(), "up38.db") +
-		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
-	raw, err := sql.Open(driverName, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw.SetMaxOpenConns(1)
-	defer raw.Close()
-	s := &DB{db: raw}
-	if _, err := raw.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
-		t.Fatal(err)
-	}
-	files, err := migrationFileNames()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var held []string
-	for _, f := range files {
-		version := strings.TrimSuffix(path.Base(f), ".sql")
-		if path.Base(f) >= "038_" {
-			held = append(held, f)
-			continue
-		}
-		b, _ := migrationFS.ReadFile(f)
-		if err := s.applyMigration(version, string(b)); err != nil {
-			t.Fatalf("apply %s: %v", version, err)
-		}
-	}
-	if len(held) == 0 || !strings.HasPrefix(path.Base(held[0]), "038_") {
-		t.Fatal("migration 038 not found")
-	}
-
-	ctx := context.Background()
-	now := time.Now().UTC()
-	if err := s.UpsertKernel(ctx, "peerkey038", "peer", "", now); err != nil {
-		t.Fatal(err)
-	}
-	peer := newUser("", 0)
-	peer.PasswordHash, peer.KernelPublicKey = "", "peerkey038"
-	if err := s.CreateUser(ctx, peer); err != nil {
-		t.Fatal(err)
-	}
-	// Seed with raw SQL, not CreateAction: this DB is deliberately held at the pre-038 schema, and
-	// the current store code writes columns later migrations add. A migration test must construct
-	// the historical world it claims to migrate.
-	seedRaw := func(name string, kind kernel.ActionKind, vis kernel.ActionVisibility) *kernel.Action {
-		t.Helper()
-		a := newAction(peer.ID, name, 5, true)
-		a.Kind = kind
-		a.Visibility = vis
-		a.RemoteActionID = "ra-" + name
-		if _, err := s.db.ExecContext(ctx,
-			`INSERT INTO actions (id,owner_user_id,name,kind,active,visibility,price,description,
-			                      input_schema,output_schema,source,artifact_hash,wasm_artifact,
-			                      remote_action_id,created_at,updated_at)
-			 VALUES (?,?,?,?,1,?,5,'d','{}','{}','','','',?,?,?)`,
-			a.ID, peer.ID, name, string(kind), string(vis), a.RemoteActionID,
-			timeToStr(now), timeToStr(now)); err != nil {
-			t.Fatal(err)
-		}
-		return a
-	}
-	legacy := seedRaw("far/one", kernel.KindRemoteProxy, kernel.VisibilityPublic)
-	unpromoted := seedRaw("far/two", kernel.KindRemoteProxy, kernel.VisibilityPrivate)
-	local := seedRaw("own/http", kernel.KindHTTP, kernel.VisibilityPublic)
-
-	for _, f := range held {
-		b, _ := migrationFS.ReadFile(f)
-		if err := s.applyMigration(strings.TrimSuffix(path.Base(f), ".sql"), string(b)); err != nil {
-			t.Fatalf("apply 038: %v", err)
-		}
-	}
-
-	got, err := s.ReadAction(ctx, legacy.ID)
-	if err != nil || got.Visibility != kernel.VisibilityLocal {
-		t.Fatalf("legacy public proxy: err=%v visibility=%q, want local", err, got.Visibility)
-	}
-	if got.ID != legacy.ID || got.Price != 5 || !got.Active || got.RemoteActionID != "ra-far/one" {
-		t.Errorf("migration altered more than visibility: %+v", got)
-	}
-	if u, _ := s.ReadAction(ctx, unpromoted.ID); u.Visibility != kernel.VisibilityPrivate {
-		t.Errorf("unpromoted proxy visibility = %q, want private (untouched)", u.Visibility)
-	}
-	if l, _ := s.ReadAction(ctx, local.ID); l.Visibility != kernel.VisibilityPublic {
-		t.Errorf("non-proxy action visibility = %q, want public (untouched)", l.Visibility)
 	}
 }
 
@@ -4457,69 +4198,6 @@ func TestDiscoveryDocServingPrice(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("a negative serving_price must be rejected by the CHECK constraint")
-	}
-}
-
-// TestMigration040ReindexesProxies: migration 040 backfills the lexical index for proxies created
-// by the resolve path before it indexed them, without duplicating an already-indexed row and
-// without touching inactive or deleted ones. The rows stay active — repair is of the derived
-// index, not of domain state (a raw-id call does not re-resolve). The migration's own SQL is
-// replayed from the embedded FS, so the test cannot drift from the shipped statement.
-func TestMigration040ReindexesProxies(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	owner := newUser("owner040", 0)
-	if err := db.CreateUser(ctx, owner); err != nil {
-		t.Fatal(err)
-	}
-
-	mk := func(name string, active bool) string {
-		t.Helper()
-		a := newAction(owner.ID, name, 0, active)
-		a.Kind = kernel.KindRemoteProxy
-		a.Description = "a remote thing"
-		if err := db.CreateAction(ctx, a); err != nil {
-			t.Fatal(err)
-		}
-		return a.ID
-	}
-	unindexed := mk("bob/greet", true)
-	indexed := mk("bob/wave", true)
-	inactive := mk("bob/idle", false)
-	if err := db.UpsertLookupText(ctx, indexed, "bob/wave a remote thing"); err != nil {
-		t.Fatal(err)
-	}
-
-	sqlBytes, err := migrationFS.ReadFile("migrations/040_reindex_proxies.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.db.ExecContext(ctx, string(sqlBytes)); err != nil {
-		t.Fatalf("replay 040: %v", err)
-	}
-
-	count := func(id string) int {
-		var n int
-		if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM actions_fts WHERE action_id=?`, id).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		return n
-	}
-	if got := count(unindexed); got != 1 {
-		t.Errorf("unindexed active proxy: %d fts rows, want 1", got)
-	}
-	if got := count(indexed); got != 1 {
-		t.Errorf("already-indexed proxy: %d fts rows, want 1 (no duplicate)", got)
-	}
-	if got := count(inactive); got != 0 {
-		t.Errorf("inactive proxy: %d fts rows, want 0", got)
-	}
-	var active int
-	if err := db.db.QueryRowContext(ctx, `SELECT active FROM actions WHERE id=?`, unindexed).Scan(&active); err != nil {
-		t.Fatal(err)
-	}
-	if active != 1 {
-		t.Error("repair must not deactivate the row")
 	}
 }
 

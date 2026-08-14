@@ -423,11 +423,6 @@ type fedClient interface {
 // peer fails promptly (§13) rather than stalling on the DHT resolve/dial up to the client timeout.
 const fedOpTimeout = 8 * time.Second
 
-// fedStepTimeout bounds an outbound step completion. It is longer than fedOpTimeout because the
-// peer runs the resumed call synchronously before replying — this waits on execution, not just
-// on reachability.
-const fedStepTimeout = 60 * time.Second
-
 // registerRoutes mounts all application routes onto r for the given server.
 // Rate-limited routes (auth, user creation) are registered by the caller before this call.
 func registerRoutes(r chi.Router, srv *server) {
@@ -787,24 +782,10 @@ func (s *server) optionalAuth(r *http.Request) string {
 // ---- handlers ----
 
 func (s *server) postUser(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Handle            string `json:"handle"`
-		Password          string `json:"password"`
-		RecoveryPublicKey string `json:"recovery_public_key"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	view, err := createUser(s.kernel, r.Context(), kernel.CreateUserRequest{
-		Handle:            req.Handle,
-		Password:          req.Password,
-		RecoveryPublicKey: req.RecoveryPublicKey,
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, view)
+	handle(func(r *http.Request, req kernel.CreateUserRequest) (any, int, error) {
+		view, err := createUser(s.kernel, r.Context(), req)
+		return view, http.StatusCreated, err
+	})(w, r)
 }
 
 func (s *server) postRecoverStart(w http.ResponseWriter, r *http.Request) {
@@ -815,11 +796,7 @@ func (s *server) postRecoverStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view, err := startRecovery(s.kernel, r.Context(), req.Handle)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
+	writeOr(w, view, err)
 }
 
 func (s *server) postRecoverComplete(w http.ResponseWriter, r *http.Request) {
@@ -833,11 +810,7 @@ func (s *server) postRecoverComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view, err := completeRecovery(s.kernel, r.Context(), req.Handle, req.Nonce, req.Signature, req.Password)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
+	writeOr(w, view, err)
 }
 
 func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
@@ -845,11 +818,7 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 	limit, offset := listBounds(r)
 	resps, err := listPublicActions(s.kernel, r.Context(), s.optionalAuth(r),
 		r.URL.Query().Get("owner"), r.URL.Query().Get("name"), all, limit, offset)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, resps)
+	writeOr(w, resps, err)
 }
 
 func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
@@ -869,11 +838,7 @@ func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.kernel.ImportOpenAPI(r.Context(), callerFrom(r), callerFrom(r), req.SpecURL, specBytes)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
+	writeOr(w, result, err)
 }
 
 func (s *server) unimportOpenAPI(w http.ResponseWriter, r *http.Request) {
@@ -900,52 +865,20 @@ func (s *server) unimportOpenAPI(w http.ResponseWriter, r *http.Request) {
 		ownerID = owner.ID
 	}
 	actions, err := s.kernel.UnimportOpenAPI(r.Context(), sub, ownerID, req.SpecURL, req.Name)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, actions)
+	writeOr(w, actions, err)
 }
 
 func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
-	handle(func(r *http.Request, req struct {
-		Name         string             `json:"name"`
-		Kind         string             `json:"kind"`
-		Price        int64              `json:"price"`
-		Description  string             `json:"description"`
-		InputSchema  map[string]any     `json:"input_schema"`
-		OutputSchema map[string]any     `json:"output_schema"`
-		Source       string             `json:"source"`
-		Method       string             `json:"method"`
-		Params       []kernel.HTTPParam `json:"params"`
-		WasmArtifact string             `json:"wasm_artifact"`
-		Auth         *kernel.AuthInput  `json:"auth"`
-	}) (any, int, error) {
-		a, err := createAction(s.kernel, r.Context(), callerFrom(r), kernel.CreateActionRequest{
-			OwnerUserID:  callerFrom(r),
-			Name:         req.Name,
-			Kind:         kernel.ActionKind(req.Kind),
-			Price:        req.Price,
-			Description:  req.Description,
-			InputSchema:  req.InputSchema,
-			OutputSchema: req.OutputSchema,
-			Source:       req.Source,
-			Method:       req.Method,
-			Params:       req.Params,
-			WasmArtifact: req.WasmArtifact,
-			Auth:         req.Auth,
-		})
+	handle(func(r *http.Request, req kernel.CreateActionRequest) (any, int, error) {
+		req.OwnerUserID = callerFrom(r) // authority, never the wire (§14)
+		a, err := createAction(s.kernel, r.Context(), callerFrom(r), req)
 		return a, http.StatusCreated, err
 	})(w, r)
 }
 
 func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 	a, err := getAction(s.kernel, r.Context(), callerFrom(r), pathID(r))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, a)
+	writeOr(w, a, err)
 }
 
 // ratingView is the public reputation projection of a Rating (§13, §16): the market signal only,
@@ -977,36 +910,9 @@ func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
-	handle(func(r *http.Request, body struct {
-		Price        *int64              `json:"price"`
-		Description  *string             `json:"description"`
-		Source       *string             `json:"source"`
-		WasmArtifact string              `json:"wasm_artifact"`
-		Method       *string             `json:"method"`
-		Params       *[]kernel.HTTPParam `json:"params"`
-		InputSchema  map[string]any      `json:"input_schema"`
-		OutputSchema map[string]any      `json:"output_schema"`
-		Visibility   *string             `json:"visibility"`
-		Auth         *kernel.AuthInput   `json:"auth"`
-	}) (any, int, error) {
-		var vis *kernel.ActionVisibility
-		if body.Visibility != nil {
-			v := kernel.ActionVisibility(*body.Visibility)
-			vis = &v
-		}
-		a, err := updateAction(s.kernel, r.Context(), callerFrom(r), kernel.UpdateActionRequest{
-			ID:           pathID(r),
-			Price:        body.Price,
-			Description:  body.Description,
-			Source:       body.Source,
-			WasmArtifact: body.WasmArtifact,
-			Method:       body.Method,
-			Params:       body.Params,
-			InputSchema:  body.InputSchema,
-			OutputSchema: body.OutputSchema,
-			Visibility:   vis,
-			Auth:         body.Auth,
-		})
+	handle(func(r *http.Request, req kernel.UpdateActionRequest) (any, int, error) {
+		req.ID = pathID(r) // path-derived, never the wire
+		a, err := updateAction(s.kernel, r.Context(), callerFrom(r), req)
 		return a, http.StatusOK, err
 	})(w, r)
 }
@@ -1038,23 +944,12 @@ func (s *server) deleteAction(w http.ResponseWriter, r *http.Request) {
 func (s *server) listProcesses(w http.ResponseWriter, r *http.Request) {
 	limit, offset := listBounds(r)
 	processes, err := listProcesses(s.kernel, r.Context(), callerFrom(r), limit, offset)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if processes == nil {
-		processes = []*processView{}
-	}
-	writeJSON(w, http.StatusOK, processes)
+	writeOr(w, processes, err)
 }
 
 func (s *server) getProcess(w http.ResponseWriter, r *http.Request) {
 	p, err := getProcess(s.kernel, r.Context(), callerFrom(r), pathID(r))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, p)
+	writeOr(w, p, err)
 }
 
 func (s *server) endProcess(w http.ResponseWriter, r *http.Request) {
@@ -1066,18 +961,15 @@ func (s *server) endProcess(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) postRun(w http.ResponseWriter, r *http.Request) {
-	handle(func(r *http.Request, req struct {
-		Action    string          `json:"action"`
-		Args      *map[string]any `json:"args"`
-		QuoteHash string          `json:"quote_hash"` // optional pin (§4 precondition 7)
-	}) (any, int, error) {
-		if req.Action == "" {
+	handle(func(r *http.Request, req kernel.RunRequest) (any, int, error) {
+		if req.ActionRef == "" {
 			return nil, 0, kernel.ErrInvalidInput.Wrap("action is required")
 		}
-		if req.Args == nil {
+		if req.Args == nil { // absent or null; {} decodes to a non-nil empty map (§14)
 			return nil, 0, kernel.ErrInvalidInput.Wrap("args is required")
 		}
-		reply, err := run(s.kernel, r.Context(), callerFrom(r), req.Action, *req.Args, req.QuoteHash)
+		req.CallerID = callerFrom(r)
+		reply, err := s.kernel.Run(r.Context(), req)
 		return reply, http.StatusOK, err
 	})(w, r)
 }
@@ -1089,23 +981,12 @@ func (s *server) listTransactions(w http.ResponseWriter, r *http.Request) {
 		Limit:     limit,
 		Offset:    offset,
 	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if txs == nil {
-		txs = []*txView{}
-	}
-	writeJSON(w, http.StatusOK, txs)
+	writeOr(w, txs, err)
 }
 
 func (s *server) getTransaction(w http.ResponseWriter, r *http.Request) {
 	tx, err := getTransaction(s.kernel, r.Context(), callerFrom(r), pathID(r))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, tx)
+	writeOr(w, tx, err)
 }
 
 func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
@@ -1113,27 +994,19 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 		Rating float64 `json:"rating"`
 		Note   *string `json:"note"`
 	}) (any, int, error) {
-		rating, err := rateTransaction(s.kernel, r.Context(), callerFrom(r), pathID(r), req.Rating, req.Note)
+		rating, err := s.kernel.RateTransaction(r.Context(), callerFrom(r), pathID(r), req.Rating, req.Note)
 		return rating, http.StatusOK, err
 	})(w, r)
 }
 
 func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) {
 	v, err := s.kernel.VerifyRemoteReceipt(r.Context(), callerFrom(r), pathID(r))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, v)
+	writeOr(w, v, err)
 }
 
 func (s *server) getStats(w http.ResponseWriter, r *http.Request) {
 	stats, err := s.kernel.ReadStats(r.Context(), pathID(r))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, stats)
+	writeOr(w, stats, err)
 }
 
 // ---- PKCE / auth handlers ----
@@ -1217,70 +1090,40 @@ func (s *server) listSteps(w http.ResponseWriter, r *http.Request) {
 	limit, offset := listBounds(r)
 	views, err := listSteps(s.kernel, r.Context(), callerFrom(r),
 		r.URL.Query().Get("process_id"), r.URL.Query().Get("status"), limit, offset)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, views)
+	writeOr(w, views, err)
 }
 
 func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		TraceID        string          `json:"trace_id"`
-		Action         string          `json:"action"`
-		PartialArgs    json.RawMessage `json:"partial_args"`
-		RequiredCaller string          `json:"required_caller"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	// A capability supplies the trace (the cap IS the trace, §9); a JWT caller supplies trace_id.
-	capTrace, capOwner, isCap := capFromContext(r)
-	traceID, callerID := req.TraceID, callerFrom(r)
-	if isCap {
-		if req.TraceID != "" {
-			writeErr(w, kernel.ErrInvalidInput.Wrap("trace_id must not be sent with a capability"))
-			return
+	handle(func(r *http.Request, req createStepParams) (any, int, error) {
+		// A capability supplies the trace (the cap IS the trace, §9); a JWT caller supplies trace_id.
+		capTrace, capOwner, isCap := capFromContext(r)
+		callerID := callerFrom(r)
+		switch {
+		case isCap && req.TraceID != "":
+			return nil, 0, kernel.ErrInvalidInput.Wrap("trace_id must not be sent with a capability")
+		case isCap:
+			req.TraceID, callerID, req.ViaCapability = capTrace, capOwner, true
+		case req.TraceID == "":
+			return nil, 0, kernel.ErrInvalidInput.Wrap("trace_id is required")
 		}
-		traceID, callerID = capTrace, capOwner
-	} else if req.TraceID == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("trace_id is required"))
-		return
-	}
-	if req.Action == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("action is required"))
-		return
-	}
-	if req.RequiredCaller == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("required_caller is required"))
-		return
-	}
-	if req.PartialArgs == nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("partial_args is required"))
-		return
-	}
-	req.RequiredCaller = kernel.NormalizeHandle(req.RequiredCaller)
-	view, err := createStep(s.kernel, r.Context(), callerID, createStepParams{
-		TraceID:        traceID,
-		ActionRef:      req.Action,
-		RequiredCaller: req.RequiredCaller,
-		PartialArgs:    req.PartialArgs,
-		ViaCapability:  isCap,
-	})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, view)
+		if req.ActionRef == "" {
+			return nil, 0, kernel.ErrInvalidInput.Wrap("action is required")
+		}
+		if req.RequiredCaller == "" {
+			return nil, 0, kernel.ErrInvalidInput.Wrap("required_caller is required")
+		}
+		if req.PartialArgs == nil {
+			return nil, 0, kernel.ErrInvalidInput.Wrap("partial_args is required")
+		}
+		req.RequiredCaller = kernel.NormalizeHandle(req.RequiredCaller)
+		view, err := createStep(s.kernel, r.Context(), callerID, req)
+		return view, http.StatusCreated, err
+	})(w, r)
 }
 
 func (s *server) getStep(w http.ResponseWriter, r *http.Request) {
 	step, err := getStep(s.kernel, r.Context(), callerFrom(r), pathID(r))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, step)
+	writeOr(w, step, err)
 }
 
 func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
@@ -1302,7 +1145,11 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 			if s.kernel.IsSuperuser(r.Context(), callerID) {
 				forUserID = "" // kernel-level completion (no per-user attestation)
 			}
-			body, err := s.completePeerStepMaybePaid(r.Context(), req.Peer, pathID(r), *req.Args, forUserID, forUserID)
+			peerKey, err := s.resolvePeerKey(r.Context(), strings.TrimSpace(req.Peer))
+			if err != nil {
+				return nil, 0, err
+			}
+			body, err := s.kernel.CompletePeerStep(r.Context(), peerKey, pathID(r), *req.Args, forUserID, forUserID)
 			return body, http.StatusOK, err
 		}
 		// Under a capability the caller is the executing action's owner (§9); CompleteStep still
@@ -1319,11 +1166,8 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 // postCall is the capability-only HTTP twin of juice.call (§9): a subcall on the capability's
 // trace. There is no wallet/BeginRun path here, making C3's wallet-exclusion structural.
 func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
-	handle(func(r *http.Request, req struct {
-		Action string          `json:"action"`
-		Args   *map[string]any `json:"args"`
-	}) (any, int, error) {
-		if req.Action == "" {
+	handle(func(r *http.Request, req kernel.SubcallRequest) (any, int, error) {
+		if req.ActionRef == "" {
 			return nil, 0, kernel.ErrInvalidInput.Wrap("action is required")
 		}
 		if req.Args == nil {
@@ -1333,12 +1177,8 @@ func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return nil, 0, kernel.ErrUnauthenticated.Wrap("capability required")
 		}
-		reply, err := s.kernel.Subcall(r.Context(), kernel.SubcallRequest{
-			CallerID:      owner,
-			ParentTraceID: trace,
-			ActionRef:     req.Action,
-			Args:          *req.Args,
-		})
+		req.CallerID, req.ParentTraceID = owner, trace
+		reply, err := s.kernel.Subcall(r.Context(), req)
 		return reply, http.StatusOK, err
 	})(w, r)
 }
@@ -1347,20 +1187,12 @@ func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getMe(w http.ResponseWriter, r *http.Request) {
 	view, err := getMe(s.kernel, r.Context(), callerFrom(r))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
+	writeOr(w, view, err)
 }
 
 func (s *server) putMe(w http.ResponseWriter, r *http.Request) {
-	handle(func(r *http.Request, body struct {
-		Description     *string `json:"description"`
-		CurrentPassword string  `json:"current_password"`
-		Password        string  `json:"password"`
-	}) (any, int, error) {
-		view, err := updateMe(s.kernel, r.Context(), callerFrom(r), body.Description, body.CurrentPassword, body.Password)
+	handle(func(r *http.Request, req kernel.UpdateUserRequest) (any, int, error) {
+		view, err := updateMe(s.kernel, r.Context(), callerFrom(r), req)
 		return view, http.StatusOK, err
 	})(w, r)
 }
@@ -1411,11 +1243,7 @@ func (s *server) getGrantPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.kernel.ConsentPlan(r.Context(), callerFrom(r), selector)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, res)
+	writeOr(w, res, err)
 }
 
 func (s *server) postGrantStart(w http.ResponseWriter, r *http.Request) {
@@ -1475,11 +1303,7 @@ func (s *server) deleteGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := revokeGrantsBySelector(s.kernel, r.Context(), callerFrom(r), selector)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, res)
+	writeOr(w, res, err)
 }
 
 // ---- health command ----

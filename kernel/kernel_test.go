@@ -984,6 +984,22 @@ func TestRateTransactionUpdatesActionStats(t *testing.T) {
 	}
 }
 
+// The rating domain is {0,1} (§11) and the kernel is its only owner: a non-binary value is
+// refused before any authorization or lookup, so no caller can record one.
+func TestRateTransactionRejectsNonBinaryValue(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	for _, v := range []float64{-1, 0.5, 2} {
+		_, err := k.RateTransaction(ctx, "any-caller", "any-tx", v, nil)
+		ke, ok := err.(*kernel.KernelError)
+		if !ok || ke.Code != "invalid_input" {
+			t.Errorf("RateTransaction(%v): expected invalid_input, got %v", v, err)
+		}
+	}
+}
+
 func TestRateTransactionAlreadyRatedRejected(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
@@ -2170,6 +2186,13 @@ type fakeFederationHTTP struct {
 	// peer's stable action id, under the key parked with the dispatch).
 	sentAction         string
 	sentIdempotencyKey string
+	// Outbound step protocol (§13): the canned list/complete replies, and what the kernel sent.
+	stepListBody      string
+	stepBody          string
+	stepStatus        int
+	stepNotDispatched bool
+	stepInput         string
+	stepForUserID     string
 }
 
 func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, _, _ string) (*kernel.ActionManifest, error) {
@@ -2189,6 +2212,31 @@ func (f *fakeFederationHTTP) ResolveRemoteUser(_ context.Context, _, _ string) (
 // Settle completes kernel.FederationClient; residual settlement has its own dedicated fakes.
 func (f *fakeFederationHTTP) Settle(_ context.Context, _, _, _, _, _ string, _ int64, _ string, _ []byte) (int, []byte, error) {
 	return 0, nil, kernel.ErrPeerUnreachable.Wrap("settle not used in these tests")
+}
+
+// stepStatus/stepBody/stepNotDispatched drive the outbound step protocol (§13); zero values make
+// every unrelated test see an unreachable peer, which no call path consults.
+func (f *fakeFederationHTTP) CompletePeerStep(_ context.Context, _, _, _, _, _ string, input []byte, forUserID, _, _ string) (int, []byte, bool, error) {
+	f.stepInput, f.stepForUserID = string(input), forUserID
+	return f.stepReply()
+}
+
+func (f *fakeFederationHTTP) ListPeerSteps(_ context.Context, _, _, _ string) (int, []byte, bool, error) {
+	if f.stepListBody == "" {
+		return 0, nil, true, nil // no listing configured: peer unreachable, so no payment descriptor
+	}
+	return 200, []byte(f.stepListBody), false, nil
+}
+
+func (f *fakeFederationHTTP) stepReply() (int, []byte, bool, error) {
+	if f.stepBody == "" {
+		return 0, nil, f.stepNotDispatched, kernel.ErrPeerUnreachable.Wrap("step transport failure")
+	}
+	status := f.stepStatus
+	if status == 0 {
+		status = 200
+	}
+	return status, []byte(f.stepBody), false, nil
 }
 
 func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _, _ string) (map[string]any, error) {
@@ -3421,68 +3469,5 @@ func TestRevokeSelectorAndAccount(t *testing.T) {
 	}
 	if _, err := k.RevokeConnection(ctx, owner.ID, "bearer:mail.example"); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("re-revoking absent connection: got %v, want ErrNotFound", err)
-	}
-}
-
-// TestBackfillGrantConnections: the one-time migration re-homes a legacy per-grant token onto its
-// derived connection (reseal + link), is idempotent, deletes an unrecoverable token, and no-ops
-// with no credential box (§8).
-func TestBackfillGrantConnections(t *testing.T) {
-	st := newTestStore(t)
-	ctx := context.Background()
-	k := newTestKernel(st)
-	box := b64Box{}
-	k.SetSecretBox(box)
-	owner := setupUser(t, st, "legacyco", 0)
-	a := createBearerAction(t, k, owner.ID, "svc", 0)
-
-	// Seed a legacy grant directly: sealed token under the old AAD grantor|action, no connection.
-	sealed, _ := box.Seal(owner.ID+"|"+a.ID, "legacy-secret")
-	if err := st.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: owner.ID, ActionID: a.ID, RefreshToken: sealed, CreatedAt: time.Now().UTC()}); err != nil {
-		t.Fatalf("seed legacy grant: %v", err)
-	}
-	if err := k.BackfillGrantConnections(ctx); err != nil {
-		t.Fatalf("BackfillGrantConnections: %v", err)
-	}
-	g, _ := st.ReadGrant(ctx, owner.ID, a.ID)
-	if g.ConnectionID == "" || g.RefreshToken != "" {
-		t.Fatalf("grant not re-homed: %+v", g)
-	}
-	conn, err := st.ReadConnectionByUserProvider(ctx, owner.ID, "bearer:provider.example")
-	if err != nil {
-		t.Fatalf("connection not created: %v", err)
-	}
-	if plain, _ := box.Open(owner.ID+"|"+conn.ID, conn.SealedSecret); plain != "legacy-secret" {
-		t.Errorf("resealed secret = %q, want legacy-secret", plain)
-	}
-
-	// Idempotent: the predicate is now empty, a second run changes nothing.
-	if err := k.BackfillGrantConnections(ctx); err != nil {
-		t.Fatalf("second backfill: %v", err)
-	}
-	if legacy, _ := st.ListLegacyTokenGrants(ctx); len(legacy) != 0 {
-		t.Errorf("legacy rows remain after backfill: %d", len(legacy))
-	}
-
-	// An unrecoverable token deletes its grant.
-	b := createBearerAction(t, k, owner.ID, "svc2", 0)
-	_ = st.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: owner.ID, ActionID: b.ID, RefreshToken: "!!!not-base64!!!", CreatedAt: time.Now().UTC()})
-	if err := k.BackfillGrantConnections(ctx); err != nil {
-		t.Fatalf("backfill (bad token): %v", err)
-	}
-	if _, err := st.ReadGrant(ctx, owner.ID, b.ID); !errors.Is(err, kernel.ErrNotFound) {
-		t.Errorf("grant with unrecoverable token should be deleted, got %v", err)
-	}
-
-	// No credential box: backfill no-ops, leaving a legacy row for a later boot.
-	c := createBearerAction(t, k, owner.ID, "svc3", 0)
-	sealed3, _ := box.Seal(owner.ID+"|"+c.ID, "keep")
-	_ = st.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: owner.ID, ActionID: c.ID, RefreshToken: sealed3, CreatedAt: time.Now().UTC()})
-	kNoBox := newTestKernel(st)
-	if err := kNoBox.BackfillGrantConnections(ctx); err != nil {
-		t.Fatalf("no-box backfill: %v", err)
-	}
-	if gc, _ := st.ReadGrant(ctx, owner.ID, c.ID); gc.ConnectionID != "" || gc.RefreshToken == "" {
-		t.Errorf("no-box backfill should leave the legacy row untouched: %+v", gc)
 	}
 }

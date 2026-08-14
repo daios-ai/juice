@@ -1,1 +1,0 @@
-ALTER TABLE transactions ADD COLUMN refund INTEGER NOT NULL DEFAULT 0 CHECK (refund >= 0);

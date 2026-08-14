@@ -967,72 +967,6 @@ func (k *Kernel) ListConnectionViews(ctx context.Context, callerID string) ([]*C
 	return out, nil
 }
 
-// BackfillGrantConnections is the one-time migration to the Connection model (§8): it re-homes each
-// legacy per-grant token onto its derived Connection and reseals it under the new AAD. Idempotent —
-// linking clears the legacy token, so a second pass finds nothing. Processing oldest-first means the
-// latest grant wins the connection's secret on a provider collision. A grant whose action is gone,
-// non-delegated, or whose token cannot be recovered is deleted. With no credential box configured it
-// no-ops, leaving legacy rows for a later boot rather than destroying recoverable tokens.
-func (k *Kernel) BackfillGrantConnections(ctx context.Context) error {
-	if k.secretBox == nil {
-		return nil
-	}
-	legacy, err := k.store.ListLegacyTokenGrants(ctx)
-	if err != nil {
-		return err
-	}
-	for _, g := range legacy {
-		// A legacy grant we cannot re-home (action gone, no longer delegated, token unrecoverable,
-		// or no derivable provider) is dropped — consent binds to a contract that no longer holds.
-		drop := func(reason string) {
-			_ = k.store.DeleteGrant(ctx, g.GrantorUserID, g.ActionID)
-			k.log.With(ctx).Warn("grant.backfill.dropped", "grant_id", g.ID, "reason", reason)
-		}
-		a, aerr := k.store.ReadAction(ctx, g.ActionID)
-		if aerr != nil || a == nil {
-			drop("action_missing")
-			continue
-		}
-		auth, autherr := k.openAuthInput(a)
-		if autherr != nil || auth == nil || !isDelegatedScheme(auth.Scheme) {
-			drop("not_delegated")
-			continue
-		}
-		plain, oerr := k.secretBox.Open(g.GrantorUserID+"|"+g.ActionID, g.RefreshToken)
-		if oerr != nil {
-			drop("token_unrecoverable")
-			continue
-		}
-		pk, perr := connectionKey(a, auth)
-		if perr != nil {
-			drop("no_provider_key")
-			continue
-		}
-		connID, createdAt, existingScopes := uuid.New().String(), g.CreatedAt, ""
-		if existing, cerr := k.store.ReadConnectionByUserProvider(ctx, g.GrantorUserID, pk); cerr == nil {
-			connID, createdAt, existingScopes = existing.ID, existing.CreatedAt, existing.ScopesJSON
-		}
-		sealed, serr := k.secretBox.Seal(g.GrantorUserID+"|"+connID, plain)
-		if serr != nil {
-			return ErrInternal.Wrapf("reseal backfilled token: %v", serr)
-		}
-		unionJSON, _ := unionScopes(existingScopes, splitScopes(authField(auth.Config, "scopes")))
-		if err := k.store.CreateOrUpdateConnection(ctx, &Connection{
-			ID: connID, UserID: g.GrantorUserID, ProviderKey: pk,
-			SealedSecret: sealed, ScopesJSON: unionJSON, CreatedAt: createdAt, UpdatedAt: time.Now().UTC(),
-		}); err != nil {
-			return err
-		}
-		if err := k.store.LinkGrantConnection(ctx, g.ID, connID); err != nil {
-			return err
-		}
-	}
-	if len(legacy) > 0 {
-		k.log.With(ctx).Info("grant.backfill.done", "processed", len(legacy))
-	}
-	return nil
-}
-
 // SetSigningKey stores the Ed25519 signing key and issuer user ID after bootstrap completes.
 func (k *Kernel) SetSigningKey(priv ed25519.PrivateKey, issuerUserID string) {
 	k.cfg.SigningKey = priv
@@ -1051,9 +985,9 @@ func (k *Kernel) SetTokenSecret(secret string) {
 // own base64url Ed25519 recovery key, derived client-side from a seed phrase (§12); optional so a
 // programmatic/webhook registrant may omit it, but the CLI always supplies it.
 type CreateUserRequest struct {
-	Handle            string
-	Password          string
-	RecoveryPublicKey string
+	Handle            string `json:"handle"`
+	Password          string `json:"password"`
+	RecoveryPublicKey string `json:"recovery_public_key"`
 }
 
 // NormalizeHandle canonicalizes a user handle by trimming surrounding whitespace only —
@@ -1129,9 +1063,9 @@ func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*Accoun
 // UpdateUserRequest holds validated input for user self-service update. Description is a pointer so
 // a nil value means "don't change" while a non-nil "" clears it.
 type UpdateUserRequest struct {
-	Description     *string // nil = don't change
-	CurrentPassword string  // required when NewPassword is set
-	NewPassword     string  // empty = don't change
+	Description     *string `json:"description"`      // nil = don't change
+	CurrentPassword string  `json:"current_password"` // required when NewPassword is set
+	NewPassword     string  `json:"password"`         // empty = don't change
 }
 
 // UpdateUser lets an authenticated password account update its own description and/or password.
@@ -1423,21 +1357,26 @@ func (k *Kernel) VerifyToken(token string) (string, error) {
 
 // ---- Action operations ----
 
-// CreateActionRequest holds validated input for action creation.
+// CreateActionRequest holds validated input for action creation. It is also the HTTP request body
+// (§14), so it owns that contract outright — one shape, no per-handler restatement. Fields the
+// kernel fills from authority rather than the wire carry `json:"-"`: OwnerUserID is the
+// authenticated caller, and Effect is the privileged value-bearing declaration a bootstrap
+// registration supplies (§13) — accepting either from a client would let it name its own owner or
+// mint a transfer action.
 type CreateActionRequest struct {
-	OwnerUserID  string
-	Name         string
-	Kind         ActionKind
-	Price        int64
-	Effect       string // privileged execution effect ("transfer"); empty for an ordinary action (§13)
-	Description  string
-	InputSchema  map[string]any
-	OutputSchema map[string]any
-	Source       string      // for http: the upstream URL; assembled into canonical HTTPSource JSON
-	Method       string      // http only: verb (default POST); GET/POST/PUT/PATCH/DELETE
-	Params       []HTTPParam // http only: explicit field bindings; empty = implicit routing
-	WasmArtifact string      // base64-encoded pre-compiled WASM; if set, stored as-is and used for the hash
-	Auth         *AuthInput  // upstream credentials; sealed into auth_json at rest; write-only
+	OwnerUserID  string         `json:"-"`
+	Name         string         `json:"name"`
+	Kind         ActionKind     `json:"kind"`
+	Price        int64          `json:"price"`
+	Effect       string         `json:"-"` // privileged execution effect ("transfer"); empty for an ordinary action (§13)
+	Description  string         `json:"description"`
+	InputSchema  map[string]any `json:"input_schema"`
+	OutputSchema map[string]any `json:"output_schema"`
+	Source       string         `json:"source"`        // for http: the upstream URL; assembled into canonical HTTPSource JSON
+	Method       string         `json:"method"`        // http only: verb (default POST); GET/POST/PUT/PATCH/DELETE
+	Params       []HTTPParam    `json:"params"`        // http only: explicit field bindings; empty = implicit routing
+	WasmArtifact string         `json:"wasm_artifact"` // base64-encoded pre-compiled WASM; if set, stored as-is and used for the hash
+	Auth         *AuthInput     `json:"auth"`          // upstream credentials; sealed into auth_json at rest; write-only
 }
 
 // cgnatRange is RFC 6598 shared address space (100.64.0.0/10) — routable-looking but not covered by
@@ -1992,19 +1931,21 @@ func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey stri
 	return nil
 }
 
-// UpdateActionRequest holds validated input for action updates.
+// UpdateActionRequest holds validated input for action updates, and is the HTTP request body
+// (§14). Pointer fields distinguish absent (nil, leave alone) from set — including an explicit
+// null or empty object, which JSON decoding preserves. ID is path-derived, never wire-settable.
 type UpdateActionRequest struct {
-	ID           string
-	Price        *int64
-	Description  *string
-	InputSchema  map[string]any
-	OutputSchema map[string]any
-	Source       *string           // http: new upstream URL (merged into existing HTTPSource); wasm: new TinyGo source
-	WasmArtifact string            // wasm: new pre-compiled base64 artifact (symmetric with CreateActionRequest)
-	Method       *string           // http: new verb (merged into existing HTTPSource)
-	Params       *[]HTTPParam      // http: new explicit bindings (merged into existing HTTPSource)
-	Visibility   *ActionVisibility // private | local | public (§4)
-	Auth         *AuthInput        // upstream credentials; sealed into auth_json at rest; write-only
+	ID           string            `json:"-"`
+	Price        *int64            `json:"price"`
+	Description  *string           `json:"description"`
+	InputSchema  map[string]any    `json:"input_schema"`
+	OutputSchema map[string]any    `json:"output_schema"`
+	Source       *string           `json:"source"`        // http: new upstream URL (merged into existing HTTPSource); wasm: new TinyGo source
+	WasmArtifact string            `json:"wasm_artifact"` // wasm: new pre-compiled base64 artifact (symmetric with CreateActionRequest)
+	Method       *string           `json:"method"`        // http: new verb (merged into existing HTTPSource)
+	Params       *[]HTTPParam      `json:"params"`        // http: new explicit bindings (merged into existing HTTPSource)
+	Visibility   *ActionVisibility `json:"visibility"`    // private | local | public (§4)
+	Auth         *AuthInput        `json:"auth"`          // upstream credentials; sealed into auth_json at rest; write-only
 }
 
 // errProxyKernelManaged rejects any manual mutation of a remote_proxy: its active bit and
@@ -2661,6 +2602,42 @@ func docEmbeddings(byKey map[string]*DiscoveryDoc) map[string][]float32 {
 	return vecs
 }
 
+// rrfRanker fuses ranking legs by reciprocal-rank fusion: scale-free (no normalization between
+// cosine and BM25) and positive by construction. Both lookup surfaces (§9) accumulate their legs
+// here and read one ordering out, so the fusion formula, its limit ceiling, and the ordering rule
+// have a single owner; only candidate construction and hydration differ between them.
+type rrfRanker struct {
+	limit      int
+	oversample int
+	fused      map[string]float64
+}
+
+// newRRFRanker normalizes the requested limit (§9: default 10, ceiling 50) and derives the
+// per-leg oversample from it.
+func newRRFRanker(limit int) *rrfRanker {
+	if limit <= 0 || limit > 50 {
+		limit = 10
+	}
+	return &rrfRanker{limit: limit, oversample: limit * 10, fused: map[string]float64{}}
+}
+
+func (r *rrfRanker) add(id string, rank int) { r.fused[id] += 1.0 / float64(rrfK+rank) }
+
+// scoredID is one fused candidate; ranked returns them best-first.
+type scoredID struct {
+	id    string
+	score float64
+}
+
+func (r *rrfRanker) ranked() []scoredID {
+	out := make([]scoredID, 0, len(r.fused))
+	for id, s := range r.fused {
+		out = append(out, scoredID{id, s})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].score > out[j].score })
+	return out
+}
+
 func rankDense(qvec []float32, vecs map[string][]float32, oversample int, hit func(key string, rank int)) {
 	type sc struct {
 		key string
@@ -2688,41 +2665,29 @@ func rankDense(qvec []float32, vecs map[string][]float32, oversample int, hit fu
 // leg alone, so lookup still works on a kernel with no LLM. The formula is a tested baseline over
 // replaceable storage (§9/§16); brute-force cosine is acceptable at this scale.
 func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult, error) {
-	limit := req.Limit
-	if limit <= 0 || limit > 50 {
-		limit = 10
-	}
-	oversample := limit * 10
+	rr := newRRFRanker(req.Limit)
 
 	// Semantic leg: cosine over stored vectors, best first, capped at oversample. Skipped when no
 	// embedder is configured; on embed failure, log and degrade rather than fail the query. A vector
 	// whose dimension differs from the query's is skipped — a changed embed model can never panic
 	// cosine or score across incompatible spaces.
-	denseRank := map[string]int{}
 	if k.llm != nil {
 		if qvec, err := k.llm.Embed(ctx, req.Query); err != nil {
 			k.log.With(ctx).Warn("lookup.embed_failed", "error", err.Error())
 		} else if embeddings, err := k.store.ListEmbeddings(ctx); err != nil {
 			return nil, err
 		} else {
-			rankDense(qvec, embeddings, oversample, func(id string, rank int) { denseRank[id] = rank })
+			rankDense(qvec, embeddings, rr.oversample, rr.add)
 		}
 	}
 
 	// Lexical leg: BM25-ranked action IDs (already active/non-deleted and capped at oversample).
-	lexIDs, err := k.store.SearchActionsLexical(ctx, req.Query, oversample)
+	lexIDs, err := k.store.SearchActionsLexical(ctx, req.Query, rr.oversample)
 	if err != nil {
 		return nil, err
 	}
-
-	// Reciprocal-rank fusion: scale-free (no normalization between cosine and BM25) and positive by
-	// construction.
-	fused := map[string]float64{}
-	for id, rank := range denseRank {
-		fused[id] += 1.0 / float64(rrfK+rank)
-	}
 	for rank, id := range lexIDs {
-		fused[id] += 1.0 / float64(rrfK+rank)
+		rr.add(id, rank)
 	}
 
 	// Discovery leg (§13): fold in cross-kernel discovery docs as a third RRF rank list. Gated to
@@ -2733,7 +2698,10 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	discHits := map[string]*DiscoveryDoc{}
 	if req.CallerID != "" {
 		if u, _ := k.store.ReadUser(ctx, req.CallerID); u != nil && u.KernelPublicKey == "" {
-			k.mergeDiscoveryActionLegs(ctx, req.Query, oversample, fused, discHits)
+			k.forEachDiscoveryHit(ctx, "action", req.Query, rr.oversample, func(key string, d *DiscoveryDoc, rank int) {
+				rr.add("disc:"+key, rank)
+				discHits["disc:"+key] = d
+			})
 		}
 	}
 
@@ -2741,15 +2709,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	// action's fused relevance by a Laplace-smoothed success ratio (1+successes)/(2+uses), which is
 	// unbounded below, so a persistently-failing action could sink far beneath weakly-relevant
 	// matches. Until the redesign lands (see ranking.md) the score is relevance alone.
-	type scored struct {
-		id    string
-		score float64
-	}
-	ranked := make([]scored, 0, len(fused))
-	for id, rel := range fused {
-		ranked = append(ranked, scored{id, rel})
-	}
-	sort.Slice(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
+	ranked := rr.ranked()
 
 	// Hydrate and filter by CanCall BEFORE truncating, so a run of others' private actions cannot
 	// starve the caller of results it may actually call. Visibility is caller-scoped (§4), so load
@@ -2758,10 +2718,10 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	if req.CallerID != "" {
 		caller, _ = k.store.ReadUser(ctx, req.CallerID)
 	}
-	out := make([]*LookupResult, 0, limit)
+	out := make([]*LookupResult, 0, rr.limit)
 	ownerHandles := map[string]string{}
 	for _, r := range ranked {
-		if len(out) >= limit {
+		if len(out) >= rr.limit {
 			break
 		}
 		// Discovered (not-yet-resolved) remote action.
@@ -2800,38 +2760,34 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	return out, nil
 }
 
-// mergeDiscoveryActionLegs folds cross-kernel discovery "action" docs into fused as a third RRF rank
-// list (lexical + dense), recording each hit's doc under the synthetic id "disc:<doc_key>" (§13).
-func (k *Kernel) mergeDiscoveryActionLegs(ctx context.Context, query string, oversample int, fused map[string]float64, hits map[string]*DiscoveryDoc) {
+// forEachDiscoveryHit runs the two discovery ranking legs for one doc kind (§13) — dense over the
+// stored embeddings, lexical over the FTS mirror — calling add for every hit with its rank. Both
+// lookup surfaces fold discovery in this way; only what they build from a hit differs.
+func (k *Kernel) forEachDiscoveryHit(ctx context.Context, kind, query string, oversample int, add func(key string, d *DiscoveryDoc, rank int)) {
 	docs, err := k.store.ListDiscoveryDocs(ctx)
 	if err != nil {
 		return
 	}
 	byKey := map[string]*DiscoveryDoc{}
 	for _, d := range docs {
-		if d.Kind != "action" {
-			continue
+		if d.Kind == kind {
+			byKey[discoveryDocKey(d.KernelPublicKey, d.Kind, d.UserID, d.ActionID)] = d
 		}
-		byKey[discoveryDocKey(d.KernelPublicKey, d.Kind, d.UserID, d.ActionID)] = d
 	}
-	// Dense leg over discovery embeddings.
 	if k.llm != nil {
 		if qvec, err := k.llm.Embed(ctx, query); err == nil {
 			rankDense(qvec, docEmbeddings(byKey), oversample, func(key string, rank int) {
-				fused["disc:"+key] += 1.0 / float64(rrfK+rank)
-				hits["disc:"+key] = byKey[key]
+				add(key, byKey[key], rank)
 			})
 		}
 	}
-	// Lexical leg over discovery FTS.
 	keys, err := k.store.SearchDiscoveryLexical(ctx, query, oversample)
 	if err != nil {
 		return
 	}
 	for rank, key := range keys {
 		if d := byKey[key]; d != nil {
-			fused["disc:"+key] += 1.0 / float64(rrfK+rank)
-			hits["disc:"+key] = d
+			add(key, d, rank)
 		}
 	}
 }
@@ -2857,12 +2813,7 @@ type UserLookupResult struct {
 // docs) — by the same lexical+dense RRF as Lookup (§13). It returns the stable PrincipalID plus a
 // display reference. Discovered users are shown only to authenticated local callers.
 func (k *Kernel) LookupUsers(ctx context.Context, req LookupRequest) ([]*UserLookupResult, error) {
-	limit := req.Limit
-	if limit <= 0 || limit > 50 {
-		limit = 10
-	}
-	oversample := limit * 10
-	fused := map[string]float64{}
+	rr := newRRFRanker(req.Limit)
 	// Candidates keyed by synthetic id → result skeleton.
 	cands := map[string]*UserLookupResult{}
 
@@ -2901,77 +2852,38 @@ func (k *Kernel) LookupUsers(ctx context.Context, req LookupRequest) ([]*UserLoo
 	})
 	for rank, u := range localRanked {
 		id := "local:" + u.ID
-		fused[id] += 1.0 / float64(rrfK+rank)
+		rr.add(id, rank)
 		cands[id] = &UserLookupResult{UserID: u.ID, Reference: u.Handle, Handle: u.Handle, Description: u.Description}
 	}
 
 	// Discovery candidates, gated to authenticated local callers.
 	if req.CallerID != "" {
 		if cu, _ := k.store.ReadUser(ctx, req.CallerID); cu != nil && cu.KernelPublicKey == "" {
-			k.mergeDiscoveryUserLegs(ctx, req.Query, oversample, fused, cands)
+			k.forEachDiscoveryHit(ctx, "user", req.Query, rr.oversample, func(key string, d *DiscoveryDoc, rank int) {
+				id := "disc:" + key
+				rr.add(id, rank)
+				cands[id] = &UserLookupResult{
+					KernelPublicKey: d.KernelPublicKey,
+					UserID:          d.UserID,
+					Reference:       d.Handle + "@" + d.KernelPublicKey,
+					Handle:          d.Handle,
+					Description:     d.Description,
+				}
+			})
 		}
 	}
 
-	type scored struct {
-		id string
-		s  float64
-	}
-	ranked := make([]scored, 0, len(fused))
-	for id, s := range fused {
-		ranked = append(ranked, scored{id, s})
-	}
-	sort.Slice(ranked, func(i, j int) bool { return ranked[i].s > ranked[j].s })
-	out := make([]*UserLookupResult, 0, limit)
-	for _, r := range ranked {
-		if len(out) >= limit {
+	out := make([]*UserLookupResult, 0, rr.limit)
+	for _, r := range rr.ranked() {
+		if len(out) >= rr.limit {
 			break
 		}
 		if c := cands[r.id]; c != nil {
-			c.Score = float32(r.s)
+			c.Score = float32(r.score)
 			out = append(out, c)
 		}
 	}
 	return out, nil
-}
-
-// mergeDiscoveryUserLegs folds discovery "user" docs into fused as an RRF rank list (§13).
-func (k *Kernel) mergeDiscoveryUserLegs(ctx context.Context, query string, oversample int, fused map[string]float64, cands map[string]*UserLookupResult) {
-	docs, err := k.store.ListDiscoveryDocs(ctx)
-	if err != nil {
-		return
-	}
-	byKey := map[string]*DiscoveryDoc{}
-	for _, d := range docs {
-		if d.Kind != "user" {
-			continue
-		}
-		byKey[discoveryDocKey(d.KernelPublicKey, d.Kind, d.UserID, d.ActionID)] = d
-	}
-	add := func(key string, rank int) {
-		d := byKey[key]
-		if d == nil {
-			return
-		}
-		id := "disc:" + key
-		fused[id] += 1.0 / float64(rrfK+rank)
-		cands[id] = &UserLookupResult{
-			KernelPublicKey: d.KernelPublicKey,
-			UserID:          d.UserID,
-			Reference:       d.Handle + "@" + d.KernelPublicKey,
-			Handle:          d.Handle,
-			Description:     d.Description,
-		}
-	}
-	if k.llm != nil {
-		if qvec, err := k.llm.Embed(ctx, query); err == nil {
-			rankDense(qvec, docEmbeddings(byKey), oversample, add)
-		}
-	}
-	if keys, err := k.store.SearchDiscoveryLexical(ctx, query, oversample); err == nil {
-		for rank, key := range keys {
-			add(key, rank)
-		}
-	}
 }
 
 // indexForLookup keeps an action's lookup entries current: the lexical FTS text (always — it needs

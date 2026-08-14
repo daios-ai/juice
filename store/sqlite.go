@@ -63,14 +63,31 @@ func (s *DB) Close() error {
 }
 
 // migrate applies file-backed SQL migrations in order.
+// The schema history was folded into one baseline once every live database had reached
+// legacySentinel, the last incremental migration. Three states are supported, and nothing else:
+// a database that already records the baseline, an empty one, and one sitting exactly at the end
+// of the old chain — which is normalized and stamped, in one transaction, on its next boot.
+// createSchemaMigrations is the runner's own ledger table — the one schema object the baseline
+// file does not carry, because it must exist before any migration can be recorded.
+const createSchemaMigrations = `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version    TEXT PRIMARY KEY,
+		applied_at TEXT NOT NULL
+	)`
+
+const (
+	baselineVersion = "001_baseline"
+	legacySentinel  = "042_discovery_effect"
+	legacyChainLen  = 42
+)
+
 func (s *DB) migrate() error {
 	if _, err := s.db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
-		version    TEXT PRIMARY KEY,
-		applied_at TEXT NOT NULL
-	)`); err != nil {
+	if _, err := s.db.Exec(createSchemaMigrations); err != nil {
+		return err
+	}
+	if err := s.reconcileBaseline(); err != nil {
 		return err
 	}
 	files, err := migrationFileNames()
@@ -95,6 +112,68 @@ func (s *DB) migrate() error {
 		}
 	}
 	return nil
+}
+
+// reconcileBaseline decides which of the three supported states this database is in, and rejects
+// every other one rather than guessing. A database at the end of the legacy chain is brought to
+// the baseline atomically: the audit proving no legacy grant token survives, the column drop that
+// makes an upgraded schema identical to a fresh one, and the stamp all commit together or not at
+// all. The audit — not the recorded version — is what proves the completed backfill, because the
+// backfill ran at startup AFTER the last migration was recorded.
+func (s *DB) reconcileBaseline() error {
+	var stamped int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=?`, baselineVersion).Scan(&stamped); err != nil {
+		return err
+	}
+	if stamped > 0 {
+		return nil // already on the baseline; later migrations apply normally
+	}
+	var recorded int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&recorded); err != nil {
+		return err
+	}
+	if recorded == 0 {
+		// Fresh only when there is no application schema: an empty ledger over existing tables is a
+		// damaged or foreign database, and creating the baseline over it would fail mid-way.
+		var tables int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != 'schema_migrations'`).Scan(&tables); err != nil {
+			return err
+		}
+		if tables > 0 {
+			return fmt.Errorf("store: database has tables but no migration history; refusing to baseline over an unknown schema")
+		}
+		return nil // the runner creates the baseline below
+	}
+	var sentinel int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=?`, legacySentinel).Scan(&sentinel); err != nil {
+		return err
+	}
+	if sentinel == 0 || recorded != legacyChainLen {
+		return fmt.Errorf("store: unsupported migration state (%d recorded, %s %s); upgrade through the previous release first",
+			recorded, legacySentinel, map[bool]string{true: "present", false: "absent"}[sentinel > 0])
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var legacyTokens int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM grants WHERE refresh_token IS NOT NULL`).Scan(&legacyTokens); err != nil {
+		return fmt.Errorf("store: legacy grant audit failed: %w", err)
+	}
+	if legacyTokens > 0 {
+		return fmt.Errorf("store: %d grant(s) still hold a legacy token; run the previous release once to complete the connection backfill", legacyTokens)
+	}
+	if _, err := tx.Exec(`ALTER TABLE grants DROP COLUMN refresh_token`); err != nil {
+		return fmt.Errorf("store: normalizing grants: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
+		baselineVersion, timeToStr(time.Now().UTC())); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func migrationFileNames() ([]string, error) {
@@ -2404,28 +2483,26 @@ func (s *DB) RevokeRefreshToken(ctx context.Context, token string) error {
 
 // CreateOrReplaceGrant upserts on (grantor_user_id, action_id): a re-consent overwrites the
 // row's id, connection_id, and created_at, so a user holds at most one grant per action. A
-// live grant carries connection_id (NULL only on an unbackfilled legacy row); refresh_token is
-// written NULL by all live paths and set only by the migration seed.
+// grant holds no secret of its own: it points at the Connection whose credential it consents to.
 func (s *DB) CreateOrReplaceGrant(ctx context.Context, g *kernel.Grant) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO grants (id,grantor_user_id,action_id,connection_id,refresh_token,created_at)
-		 VALUES (?,?,?,?,?,?)
+		`INSERT INTO grants (id,grantor_user_id,action_id,connection_id,created_at)
+		 VALUES (?,?,?,?,?)
 		 ON CONFLICT(grantor_user_id,action_id) DO UPDATE SET
-		   id=excluded.id, connection_id=excluded.connection_id, refresh_token=excluded.refresh_token, created_at=excluded.created_at`,
-		g.ID, g.GrantorUserID, g.ActionID, nullStr(g.ConnectionID), nullStr(g.RefreshToken), timeToStr(g.CreatedAt),
+		   id=excluded.id, connection_id=excluded.connection_id, created_at=excluded.created_at`,
+		g.ID, g.GrantorUserID, g.ActionID, nullStr(g.ConnectionID), timeToStr(g.CreatedAt),
 	)
 	return dbErr(err, "create grant")
 }
 
 func scanGrant(scan func(...any) error) (*kernel.Grant, error) {
 	var g kernel.Grant
-	var connID, refresh sql.NullString
+	var connID sql.NullString
 	var createdAt string
-	if err := scan(&g.ID, &g.GrantorUserID, &g.ActionID, &connID, &refresh, &createdAt); err != nil {
+	if err := scan(&g.ID, &g.GrantorUserID, &g.ActionID, &connID, &createdAt); err != nil {
 		return nil, err
 	}
 	g.ConnectionID = connID.String
-	g.RefreshToken = refresh.String
 	g.CreatedAt = strToTime(createdAt)
 	return &g, nil
 }
@@ -2433,7 +2510,7 @@ func scanGrant(scan func(...any) error) (*kernel.Grant, error) {
 func (s *DB) ReadGrant(ctx context.Context, grantorUserID, actionID string) (*kernel.Grant, error) {
 	g, err := scanGrant(func(dest ...any) error {
 		return s.db.QueryRowContext(ctx,
-			`SELECT id,grantor_user_id,action_id,connection_id,refresh_token,created_at
+			`SELECT id,grantor_user_id,action_id,connection_id,created_at
 			 FROM grants WHERE grantor_user_id=? AND action_id=?`, grantorUserID, actionID).Scan(dest...)
 	})
 	if errors.Is(err, sql.ErrNoRows) {
@@ -2447,7 +2524,7 @@ func (s *DB) ReadGrant(ctx context.Context, grantorUserID, actionID string) (*ke
 
 func (s *DB) ListGrantsByUser(ctx context.Context, grantorUserID string) ([]*kernel.Grant, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,grantor_user_id,action_id,connection_id,refresh_token,created_at
+		`SELECT id,grantor_user_id,action_id,connection_id,created_at
 		 FROM grants WHERE grantor_user_id=? ORDER BY created_at DESC`, grantorUserID)
 	if err != nil {
 		return nil, dbErr(err, "list grants")
@@ -2569,28 +2646,6 @@ func (s *DB) DeleteConnectionCascade(ctx context.Context, id string) error {
 	}
 	return dbErr(tx.Commit(), "delete connection")
 }
-
-// ListLegacyTokenGrants returns grants still holding a legacy sealed token (refresh_token not
-// null), oldest first, for the one-time backfill (§8). Retired with the legacy column.
-func (s *DB) ListLegacyTokenGrants(ctx context.Context) ([]*kernel.Grant, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,grantor_user_id,action_id,connection_id,refresh_token,created_at
-		 FROM grants WHERE refresh_token IS NOT NULL ORDER BY created_at ASC`)
-	if err != nil {
-		return nil, dbErr(err, "list legacy grants")
-	}
-	defer rows.Close()
-	return queryList(rows, "list legacy grants", scanGrant)
-}
-
-// LinkGrantConnection points a grant at a connection and clears its legacy token (backfill).
-func (s *DB) LinkGrantConnection(ctx context.Context, grantID, connectionID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE grants SET connection_id=?, refresh_token=NULL WHERE id=?`, connectionID, grantID)
-	return dbErr(err, "link grant connection")
-}
-
-// ---- Config ----
 
 func (s *DB) GetConfig(ctx context.Context, key string) (string, error) {
 	var value string

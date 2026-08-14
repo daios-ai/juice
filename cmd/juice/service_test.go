@@ -261,19 +261,6 @@ func TestEnrichAction(t *testing.T) {
 	}
 }
 
-func TestValidateRating(t *testing.T) {
-	for _, v := range []float64{0, 1} {
-		if err := validateRating(v); err != nil {
-			t.Errorf("validateRating(%v): unexpected error: %v", v, err)
-		}
-	}
-	for _, v := range []float64{-1, 0.5, 2} {
-		if err := validateRating(v); err == nil {
-			t.Errorf("validateRating(%v): expected error, got nil", v)
-		}
-	}
-}
-
 func TestGetMe(t *testing.T) {
 	_, k, _ := newTestHTTPServerFull(t)
 	ctx := context.Background()
@@ -537,22 +524,6 @@ func TestGetStep_Enriched(t *testing.T) {
 	}
 	if asHook.OwnerHandle != "svc-gs" {
 		t.Errorf("getStep(required caller) owner_handle = %q, want @svc-gs", asHook.OwnerHandle)
-	}
-}
-
-func TestRateTransaction_Validation(t *testing.T) {
-	_, k, _ := newTestHTTPServerFull(t)
-	ctx := context.Background()
-
-	// Invalid rating — must fail before touching kernel.
-	_, err := rateTransaction(k, ctx, "any", "any", 0.5, nil)
-	if err == nil {
-		t.Error("rateTransaction(0.5): expected validation error, got nil")
-	}
-
-	_, err = rateTransaction(k, ctx, "any", "any", 2, nil)
-	if err == nil {
-		t.Error("rateTransaction(2): expected validation error, got nil")
 	}
 }
 

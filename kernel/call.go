@@ -52,11 +52,14 @@ type callRequest struct {
 // RunRequest is input to Run, the ordinary root-call entry point (§4): a struct so a new optional
 // term is a field, not a signature break at every call site. Federation ingress keeps its own entry
 // point (RunFederated), so its authority is not expressible here.
+// It is also the HTTP request body (§14): CallerID is the authenticated caller and never wire-
+// settable, while a nil Args (absent) stays distinguishable from an empty one ({}), which §14
+// requires — absent is ErrInvalidInput, {} is a valid empty call.
 type RunRequest struct {
-	CallerID  string
-	ActionRef string // owner/name, owner@kernel/name, or a raw action id
-	Args      map[string]any
-	QuoteHash string // optional §4-precondition-7 pin; empty means the caller pinned nothing
+	CallerID  string         `json:"-"`
+	ActionRef string         `json:"action"` // owner/name, owner@kernel/name, or a raw action id
+	Args      map[string]any `json:"args"`
+	QuoteHash string         `json:"quote_hash"` // optional §4-precondition-7 pin; empty means the caller pinned nothing
 }
 
 // CallReply is the response from a successful Call().
@@ -345,11 +348,13 @@ func (k *Kernel) ResolveUser(ctx context.Context, ident string) (*Account, error
 // HTTP twin of juice.call used by a capability callback (§9). It cannot express an orchestration
 // mode — a pre-funded trace, a step completion, or an inbound idempotency record — so no client can
 // assemble a combination the kernel does not itself create.
+// It is also the POST /v1/call body (§9): both authority fields come from the capability, never
+// from the wire, so a caller can neither name another caller nor reach another trace.
 type SubcallRequest struct {
-	CallerID      string // the executing action's owner, per the subcall law (§6)
-	ParentTraceID string // the trace the subcall spends from
-	ActionRef     string // owner/name, owner@kernel/name, or a raw action id
-	Args          map[string]any
+	CallerID      string         `json:"-"`      // the executing action's owner, per the subcall law (§6)
+	ParentTraceID string         `json:"-"`      // the trace the subcall spends from
+	ActionRef     string         `json:"action"` // owner/name, owner@kernel/name, or a raw action id
+	Args          map[string]any `json:"args"`
 }
 
 // Subcall executes a subcall on an existing trace. Root calls go through Run, step completions

@@ -27,6 +27,7 @@ type fakeFed struct {
 	inspectDoc    json.RawMessage // non-nil → Inspect/Gossip succeed with this; nil → they fail (offline)
 	reachPath     string          // "direct" | "relayed" | "unreachable" (default unreachable)
 	stepBody      json.RawMessage // non-nil → Step succeeds with this; nil → offline
+	stepListBody  json.RawMessage // non-nil → a "list" Step answers with this instead of stepBody
 	stepStatus    int             // status Step returns alongside stepBody
 	stepMidStream bool            // Step fails after dispatch (may have executed remotely)
 	lastStep      fed.StepRequest // the last outbound step request, for assertions
@@ -38,6 +39,15 @@ func (f *fakeFed) Gossip(_ context.Context, _ string, _ string) (json.RawMessage
 	}
 	return f.inspectDoc, nil
 }
+func (f *fakeFed) Call(_ context.Context, _ string, _ fed.CallRequest) (fed.CallResponse, error) {
+	return fed.CallResponse{}, errors.New("fed: call not used in these tests")
+}
+func (f *fakeFed) Resolve(_ context.Context, _ string, _ fed.ResolveRequest) (fed.ResolveResponse, error) {
+	return fed.ResolveResponse{}, errors.New("fed: resolve not used in these tests")
+}
+func (f *fakeFed) Settle(_ context.Context, _ string, _ fed.SettleRequest) (fed.SettleResponse, error) {
+	return fed.SettleResponse{}, errors.New("fed: settle not used in these tests")
+}
 func (f *fakeFed) Step(_ context.Context, _ string, req fed.StepRequest) (fed.StepResponse, error) {
 	f.lastStep = req
 	// stepMidStream models a failure AFTER bytes may have reached the peer (a stream error, or a
@@ -45,6 +55,9 @@ func (f *fakeFed) Step(_ context.Context, _ string, req fed.StepRequest) (fed.St
 	// never sent anything. Only the latter is ErrNotDispatched (§13).
 	if f.stepMidStream {
 		return fed.StepResponse{}, errors.New("fed: stream closed mid-request")
+	}
+	if req.Kind == "list" && f.stepListBody != nil {
+		return fed.StepResponse{Status: 200, Body: f.stepListBody}, nil
 	}
 	if f.stepBody == nil {
 		return fed.StepResponse{}, fmt.Errorf("%w: cannot resolve peer (offline)", fed.ErrNotDispatched)
@@ -277,8 +290,14 @@ func TestInspectPersistsPeerSync(t *testing.T) {
 func peerStepServer(t *testing.T, f *fakeFed) (*server, string) {
 	t.Helper()
 	k, _ := newRemoteTestKernel(t)
-	handle, _ := seedPeer(t, k, "peer-steps")
-	return &server{kernel: k, log: log.Discard(), fed: f}, handle
+	_, key := seedPeer(t, k, "peer-steps")
+	// The outbound step protocol runs kernel-side over kernel.StepCaller (§13), so the fake backs a
+	// real fedAdapter: these tests exercise the whole path, not a stub of it.
+	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+	adapter := newFedAdapter(self, nil)
+	adapter.SetTransport(f)
+	k.SetFederation(adapter)
+	return &server{kernel: k, log: log.Discard(), fed: f}, key
 }
 
 // A retry after a lost reply must present the SAME idempotency key, or the peer cannot recognise
@@ -286,29 +305,29 @@ func peerStepServer(t *testing.T, f *fakeFed) (*server, string) {
 // unreachable. The key is derived from the request, so identical requests derive identical keys.
 func TestCompletePeerStep_DerivesTheIdempotencyKey(t *testing.T) {
 	f := &fakeFed{stepBody: json.RawMessage(`{"tx_id":"tx-9"}`), stepStatus: 200}
-	srv, handle := peerStepServer(t, f)
+	srv, peerKey := peerStepServer(t, f)
 	ctx := context.Background()
 
-	key := func(stepID string, input string) string {
+	sentKey := func(stepID string, input string) string {
 		t.Helper()
-		if _, err := srv.completePeerStep(ctx, handle, stepID, json.RawMessage(input), "", ""); err != nil {
-			t.Fatalf("completePeerStep: %v", err)
+		if _, err := srv.kernel.CompletePeerStep(ctx, peerKey, stepID, json.RawMessage(input), "", ""); err != nil {
+			t.Fatalf("CompletePeerStep: %v", err)
 		}
 		return f.lastStep.IdempotencyKey
 	}
 
-	first := key("s1", `{"ok":true}`)
+	first := sentKey("s1", `{"ok":true}`)
 	if first == "" {
 		t.Fatal("no idempotency key was sent")
 	}
-	if retry := key("s1", `{"ok":true}`); retry != first {
+	if retry := sentKey("s1", `{"ok":true}`); retry != first {
 		t.Errorf("a retry must reuse the key: %s vs %s", first, retry)
 	}
 	// Genuinely different requests must not collide with the stored result of the first.
-	if other := key("s1", `{"ok":false}`); other == first {
+	if other := sentKey("s1", `{"ok":false}`); other == first {
 		t.Error("different input must derive a different key")
 	}
-	if other := key("s2", `{"ok":true}`); other == first {
+	if other := sentKey("s2", `{"ok":true}`); other == first {
 		t.Error("a different step must derive a different key")
 	}
 }
@@ -319,11 +338,11 @@ func TestCompletePeerStep_DerivesTheIdempotencyKey(t *testing.T) {
 // non-CLI client would fail verification. Driven with a pretty-printed body containing < and &.
 func TestCompletePeerStep_SignsTheBytesItSends(t *testing.T) {
 	f := &fakeFed{stepBody: json.RawMessage(`{"tx_id":"tx-9"}`), stepStatus: 200}
-	srv, handle := peerStepServer(t, f)
+	srv, key := peerStepServer(t, f)
 
 	pretty := json.RawMessage("{\n  \"city\": \"Rio\",\n  \"note\": \"a<b&c\"\n}")
-	if _, err := srv.completePeerStep(context.Background(), handle, "s1", pretty, "", ""); err != nil {
-		t.Fatalf("completePeerStep: %v", err)
+	if _, err := srv.kernel.CompletePeerStep(context.Background(), key, "s1", pretty, "", ""); err != nil {
+		t.Fatalf("CompletePeerStep: %v", err)
 	}
 
 	// Round-trip the request as the transport does, then verify against what came out the far side.
@@ -339,11 +358,37 @@ func TestCompletePeerStep_SignsTheBytesItSends(t *testing.T) {
 		t.Fatalf("input is not a marshal fixed point:\n sent:     %s\n received: %s",
 			f.lastStep.Input, received.Input)
 	}
-	peerKey, _ := srv.resolvePeerKey(context.Background(), handle)
 	if err := kernel.VerifyStepSignature(received.Counterparty, received.StepID, received.Counterparty,
-		peerKey, received.IdempotencyKey, received.Timestamp,
+		key, received.IdempotencyKey, received.Timestamp,
 		sha256HexBytes(received.Input), received.Signature); err != nil {
 		t.Errorf("signature must verify over the bytes the peer receives: %v", err)
+	}
+}
+
+// A peer's step list is untrusted input on the path every payment step takes: the completion asks
+// for it to find its payment descriptor. A reply carrying a null entry — or an outright malformed
+// one — must degrade to "no payment advertised" and complete ordinarily, never take down the
+// caller mid-completion.
+func TestCompletePeerStep_SurvivesAMalformedStepList(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		list string
+	}{
+		{"null entry", `{"steps":[null]}`},
+		{"entry of the wrong type", `{"steps":["not-an-object"]}`},
+		{"steps is not a list", `{"steps":{"id":"s1"}}`},
+		{"no steps key", `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeFed{stepBody: json.RawMessage(`{"tx_id":"tx-9"}`), stepStatus: 200,
+				stepListBody: json.RawMessage(tc.list)}
+			srv, peerKey := peerStepServer(t, f)
+			// Must not panic, and must still complete: an unreadable list means no payment binding.
+			if _, err := srv.kernel.CompletePeerStep(context.Background(), peerKey, "s1",
+				json.RawMessage(`{}`), "", ""); err != nil {
+				t.Fatalf("CompletePeerStep: %v", err)
+			}
+		})
 	}
 }
 
@@ -361,8 +406,8 @@ func TestCompletePeerStep_DistinguishesNeverSentFromMayHaveRun(t *testing.T) {
 		{"failed after dispatch", &fakeFed{stepMidStream: true}, kernel.ErrTimeout, "offline"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, handle := peerStepServer(t, tc.fed)
-			_, err := srv.completePeerStep(context.Background(), handle, "s1", json.RawMessage(`{}`), "", "")
+			srv, key := peerStepServer(t, tc.fed)
+			_, err := srv.kernel.CompletePeerStep(context.Background(), key, "s1", json.RawMessage(`{}`), "", "")
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("got %v, want %v", err, tc.want)
 			}

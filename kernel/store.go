@@ -84,15 +84,28 @@ type RemoteResolver interface {
 	ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (userID, handle string, err error)
 }
 
+// StepCaller carries one /juice/fed/step/1 request to a peer (§13): listing the steps parked for
+// this kernel, or completing one. Like FederationSettler, it takes the signed scalars the kernel
+// produced and returns the peer's raw status/body — the kernel owns the protocol (key derivation,
+// signing, settlement disposition), the adapter owns the wire shape and its transport deadline.
+// notDispatched reports the §13 never-dispatched proof: the request provably never left this host.
+type StepCaller interface {
+	CompletePeerStep(ctx context.Context, peerKey, timestamp, signature, stepID, idempotencyKey string,
+		input []byte, forUserID, userAttestation, userTimestamp string) (status int, body []byte, notDispatched bool, err error)
+	ListPeerSteps(ctx context.Context, peerKey, timestamp, signature string) (status int, body []byte, notDispatched bool, err error)
+}
+
 // FederationClient is the outbound federation adapter: everything the kernel needs to reach a peer
-// (§13) — dispatch a call, settle a residual debt, resolve one action or principal. cmd/juice supplies
-// one object implementing all three; the kernel holds it as a single named dependency rather than
-// type-asserting capabilities out of the HTTP executor, so a federation change never touches the
-// HTTP adapter. A nil client means federation is unconfigured, reported per call site.
+// (§13) — dispatch a call, settle a residual debt, resolve one action or principal, carry a step.
+// cmd/juice supplies one object implementing all of them; the kernel holds it as a single named
+// dependency rather than type-asserting capabilities out of the HTTP executor, so a federation
+// change never touches the HTTP adapter. A nil client means federation is unconfigured, reported
+// per call site.
 type FederationClient interface {
 	FederationExecutor
 	FederationSettler
 	RemoteResolver
+	StepCaller
 }
 
 // HostFunctions are the callbacks available to a running script.
@@ -441,10 +454,6 @@ type Store interface {
 	UpdateConnectionSecret(ctx context.Context, id, sealedSecret string) error
 	// DeleteConnectionCascade removes a connection and all its grants atomically.
 	DeleteConnectionCascade(ctx context.Context, id string) error
-	// ListLegacyTokenGrants returns grants still holding a legacy token, oldest first (backfill).
-	ListLegacyTokenGrants(ctx context.Context) ([]*Grant, error)
-	// LinkGrantConnection points a grant at a connection and clears its legacy token (backfill).
-	LinkGrantConnection(ctx context.Context, grantID, connectionID string) error
 
 	// ---- Config ----
 

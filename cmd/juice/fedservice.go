@@ -212,39 +212,6 @@ func checkFederationTimestamp(tsStr string) error {
 	return nil
 }
 
-// peerStepView is what a remote peer may see of a step parked for it: the request, not the
-// requester. Deliberately NOT stepWithAction — that is the local operator's view, and reusing it
-// shipped a peer the creating action's name, the process owner's @handle, and raw local ids.
-// A user identity crossing a kernel boundary is precisely what §5's encapsulation forbids, so the
-// peer-facing shape is a separate type whose fields must each be justified rather than inherited.
-//
-// Kept, because each is bound FOR the completer: partial_args is the payload channel (§14 has
-// @sys/message put its body there so the recipient can read it), and allowed_input is §14's
-// explicit substitute for reading a target action that may be private. Everything else — the
-// action ref (it names a local owner), created_by, owner_handle, and every trace/action/tx id —
-// is local composition detail the completer does not need in order to complete.
-type peerStepView struct {
-	ID           string                    `json:"id"`
-	PartialArgs  json.RawMessage           `json:"partial_args,omitempty"`
-	AllowedInput map[string]any            `json:"allowed_input,omitempty"`
-	Price        int64                     `json:"price"`
-	Payment      *kernel.PaymentDescriptor `json:"payment,omitempty"` // present iff this is a payment step (§13)
-	CreatedAt    time.Time                 `json:"created_at"`
-}
-
-func newPeerStepView(ctx context.Context, k *kernel.Kernel, s *kernel.Step, action *kernel.Action) *peerStepView {
-	v := &peerStepView{ID: s.ID, PartialArgs: s.PartialArgs, Price: s.Price, CreatedAt: s.CreatedAt}
-	if action != nil {
-		v.AllowedInput = kernel.DeriveAllowedSchema(action.InputSchema, s.PartialArgs)
-		// A payment step (effect-bearing action) carries the payment descriptor so the buyer can fund the
-		// value channel and bind it into the completion (§13). Silently absent otherwise.
-		if d, err := k.BuildPaymentDescriptor(ctx, action, s.PartialArgs); err == nil && d != nil {
-			v.Payment = d
-		}
-	}
-	return v
-}
-
 // maxPeerStepPage bounds one step-list reply. Reaching it sets `truncated` rather than silently
 // dropping the tail: an operator must never read a capped page as "nothing is parked for you".
 const maxPeerStepPage = 200
@@ -307,10 +274,10 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	if err != nil {
 		return 0, nil, err
 	}
-	views := make([]*peerStepView, len(steps))
+	views := make([]*kernel.PeerStepView, len(steps))
 	for i, s := range steps {
 		action, _ := k.ReadAction(ctx, s.ActionID)
-		views[i] = newPeerStepView(ctx, k, s, action)
+		views[i] = k.NewPeerStepView(ctx, s, action)
 	}
 	body := map[string]any{"steps": views}
 	// A full page means more may be waiting. One honest flag, no continuation: this queue holds
@@ -370,7 +337,7 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 	// whole completion. A non-payment step has paymentHash="" — identical to the base key (back-compat
 	// within the federation line).
 	paymentHash := k.StepPaymentHash(ctx, stepID)
-	expectedKey := sha256HexBytes([]byte("juice/fed/step/1|" + self + "|" + stepID + "|" + sha256HexBytes(rawInput) + "|" + paymentHash))
+	expectedKey := kernel.StepIdempotencyKey(self, stepID, sha256HexBytes(rawInput), paymentHash)
 	if idempotencyKey != expectedKey {
 		return 0, nil, kernel.ErrUnauthorized.Wrap("idempotency key does not match the step's payment binding")
 	}

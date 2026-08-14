@@ -227,7 +227,7 @@ func TestFedStep_ListShowsOnlyOwnWaitingSteps(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d", status)
 	}
-	steps, _ := body["steps"].([]*peerStepView)
+	steps, _ := body["steps"].([]*kernel.PeerStepView)
 	if len(steps) != 1 || steps[0].ID != stepID {
 		t.Fatalf("expected exactly the parked step, got %+v", steps)
 	}
@@ -240,7 +240,7 @@ func TestFedStep_ListShowsOnlyOwnWaitingSteps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list for peer B: %v", err)
 	}
-	if stepsB, _ := bodyB["steps"].([]*peerStepView); len(stepsB) != 0 {
+	if stepsB, _ := bodyB["steps"].([]*kernel.PeerStepView); len(stepsB) != 0 {
 		t.Errorf("peer B must not see peer A's step, got %+v", stepsB)
 	}
 }
@@ -259,7 +259,7 @@ func TestFedStep_ListUnknownKeyIsEmptyAndProvisionsNothing(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d", status)
 	}
-	if steps, _ := body["steps"].([]*peerStepView); len(steps) != 0 {
+	if steps, _ := body["steps"].([]*kernel.PeerStepView); len(steps) != 0 {
 		t.Errorf("expected no steps for a stranger, got %+v", steps)
 	}
 	if u, _ := k.ReadAccountByKernelKey(context.Background(), cp); u != nil {
@@ -473,7 +473,7 @@ func TestFedStep_ListNotCrowdedOutByOwnProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	steps, _ := body["steps"].([]*peerStepView)
+	steps, _ := body["steps"].([]*kernel.PeerStepView)
 	if len(steps) != 1 || steps[0].ID != stepID {
 		ids := make([]string, len(steps))
 		for i, s := range steps {

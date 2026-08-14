@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
@@ -58,6 +59,47 @@ type federationTransport interface {
 	Call(ctx context.Context, peerKey string, req fed.CallRequest) (fed.CallResponse, error)
 	Resolve(ctx context.Context, peerKey string, req fed.ResolveRequest) (fed.ResolveResponse, error)
 	Settle(ctx context.Context, peerKey string, req fed.SettleRequest) (fed.SettleResponse, error)
+	Step(ctx context.Context, peerKey string, req fed.StepRequest) (fed.StepResponse, error)
+}
+
+// Transport deadlines live here, with the carrier: the kernel owns step protocol semantics but has
+// no business naming a wall-clock bound per operation. A list only measures reachability, while a
+// completion waits on the peer running the resumed call synchronously — hence the wider bound. Both
+// derive from the caller's context, so cancellation upstream still cuts them short.
+const (
+	fedStepListTimeout     = 8 * time.Second
+	fedStepCompleteTimeout = 60 * time.Second
+)
+
+// CompletePeerStep and ListPeerSteps implement kernel.StepCaller over /juice/fed/step/1 (§13). The
+// kernel hands over signed scalars; this builds the wire request, dispatches it, and reports the
+// raw status/body plus the never-dispatched proof — no Juice semantics are applied here.
+func (c *fedAdapter) CompletePeerStep(ctx context.Context, peerKey, timestamp, signature, stepID, idempotencyKey string,
+	input []byte, forUserID, userAttestation, userTimestamp string) (int, []byte, bool, error) {
+	return c.step(ctx, peerKey, fedStepCompleteTimeout, fed.StepRequest{
+		Kind: "complete", Counterparty: c.localPubKey, Timestamp: timestamp, Signature: signature,
+		StepID: stepID, IdempotencyKey: idempotencyKey, Input: json.RawMessage(input),
+		ForUserID: forUserID, UserAttestation: userAttestation, UserTimestamp: userTimestamp,
+	})
+}
+
+func (c *fedAdapter) ListPeerSteps(ctx context.Context, peerKey, timestamp, signature string) (int, []byte, bool, error) {
+	return c.step(ctx, peerKey, fedStepListTimeout, fed.StepRequest{
+		Kind: "list", Counterparty: c.localPubKey, Timestamp: timestamp, Signature: signature,
+	})
+}
+
+func (c *fedAdapter) step(ctx context.Context, peerKey string, timeout time.Duration, req fed.StepRequest) (int, []byte, bool, error) {
+	if c.transport == nil {
+		return 0, nil, true, nil // no carrier: the request provably cannot have been sent (§13)
+	}
+	octx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	resp, err := c.transport.Step(octx, peerKey, req)
+	if err != nil {
+		return 0, nil, errors.Is(err, fed.ErrNotDispatched), err
+	}
+	return resp.Status, resp.Body, false, nil
 }
 
 // Settle implements kernel.FederationSettler over /juice/fed/settle/1 (§13): the debtor forwards one
