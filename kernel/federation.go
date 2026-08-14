@@ -87,32 +87,35 @@ func actionBasePrice(a *Action) int64 {
 	return a.Price
 }
 
-// TransferEffect is the staged value channel of an effect-bearing action (§13): the delivered Amount,
-// the resolved local-beneficiary Dest (empty for an outbound/remote destination), and the total Reserve
-// to lock from the immediate caller C's own balance at admission. It is produced only for an action
-// whose signed contract declares an effect, and settled deferredly by the kernel at commit; the two
-// money channels (execution price, funded by the trace, and this value, funded by C) never mix.
+// TransferEffect is the staged value channel of an effect-bearing action (§13): the delivered Amount
+// and the resolved beneficiary Dest. It is produced only for an action whose contract declares an
+// effect, and settled deferredly by the kernel at commit; the two money channels — the execution price,
+// funded by the trace, and this value, funded from the immediate caller C's own balance — never mix.
 type TransferEffect struct {
-	Amount  int64
-	Dest    string
-	Reserve int64
+	Amount int64
+	Dest   string
 }
 
 // prepareTransferEffect stages the value channel for a call at funding time (§13), or returns nil when
-// the action declares no transfer effect. Effect identity comes from the action's signed contract
-// (actionValue keys on a.Effect), never its name. The reserve, locked from the immediate caller C's own
-// balance, covers the delivered value plus the value-channel fees owed at settlement, by destination:
-//   - local action, local target (local caller):  reserve = value                         (Dest = id)
-//   - local action, local target (peer caller):   reserve = value + value_premium         (Dest = id)
-//   - remote_proxy action (outbound, local caller): reserve = value + value_premium + value_import (Dest = "")
+// the action declares no transfer effect. Effect identity comes from the action's contract (actionValue
+// keys on a.Effect), never its name.
 //
-// It rejects, before any funds move, a non-positive amount, a peer caller relaying a cross-kernel
-// transfer (non-transitive), an @-qualified target on a local action, and an unresolvable / peer /
-// suspended local beneficiary.
+// The value channel is local to one kernel: caller, action, and beneficiary are all accounts here, the
+// amount locked from C is exactly the amount delivered, and no fee is levied on it. Value between
+// kernels settles on the external rail, not through a call. callerIsPeer is therefore a rejection
+// rather than a pricing input: a peer completing a parked step is the one path by which a kernel
+// account could otherwise reach an effect-bearing action, since completion re-checks liveness but not
+// visibility (§4 binding rule).
+//
+// It rejects, before any funds move, a peer caller, a non-positive amount, a kernel-qualified target,
+// and an unresolvable / peer / suspended beneficiary.
 func (k *Kernel) prepareTransferEffect(ctx context.Context, callerIsPeer bool, a *Action, args map[string]any) (*TransferEffect, error) {
 	fn := k.actionValue(a)
 	if fn == nil {
 		return nil, nil
+	}
+	if callerIsPeer {
+		return nil, ErrInvalidInput.Wrap("value transfer is local to a kernel; a peer cannot fund one")
 	}
 	amount, ref, err := fn(args)
 	if err != nil {
@@ -121,16 +124,8 @@ func (k *Kernel) prepareTransferEffect(ctx context.Context, callerIsPeer bool, a
 	if amount < 1 {
 		return nil, ErrInvalidInput.Wrap("transfer amount must be a positive integer")
 	}
-	if a.Kind == KindRemoteProxy {
-		if callerIsPeer {
-			return nil, ErrInvalidInput.Wrap("a peer caller cannot relay a cross-kernel transfer (non-transitive)")
-		}
-		vp := ceilDiv(amount*k.cfg.RemoteBPS, 10000)
-		vi := ceilDiv((amount+vp)*k.cfg.ImportBPS, 10000)
-		return &TransferEffect{Amount: amount, Dest: "", Reserve: amount + vp + vi}, nil
-	}
 	if strings.Contains(ref, "@") {
-		return nil, ErrInvalidInput.Wrap("address a cross-kernel transfer as sys@<kernel>/transfer with a bare target")
+		return nil, ErrInvalidInput.Wrap("value transfer is local to a kernel; the target must be a bare local handle")
 	}
 	benef, err := k.ResolveUser(ctx, ref)
 	if err != nil || benef == nil {
@@ -142,11 +137,7 @@ func (k *Kernel) prepareTransferEffect(ctx context.Context, callerIsPeer bool, a
 	if benef.SuspendedAt != nil {
 		return nil, ErrInvalidInput.Wrap("transfer beneficiary is suspended")
 	}
-	reserve := amount
-	if callerIsPeer {
-		reserve += ceilDiv(amount*k.cfg.RemoteBPS, 10000) // inbound serving markup owed to sys at settlement
-	}
-	return &TransferEffect{Amount: amount, Dest: benef.ID, Reserve: reserve}, nil
+	return &TransferEffect{Amount: amount, Dest: benef.ID}, nil
 }
 
 // dispatchPayload is the persisted remote-proxy dispatch record, stored on Trace.DispatchJSON
@@ -155,10 +146,9 @@ type dispatchPayload struct {
 	Args        map[string]any `json:"args"`
 	StepID      string         `json:"step_id"`
 	RemotePrice int64          `json:"remote_price"`
-	// Value is the delivered amount for a value transfer (§13); Gross is the funded local price (the
-	// two-step markup on mp+value), used to reconstruct the locked amount on retry after restart —
-	// action.Price alone is 0 for a transfer. Both 0 for a plain remote call.
-	Value int64 `json:"value,omitempty"`
+	// Gross is the funded local price this dispatch locked. Retry after restart reconstructs the
+	// locked amount from it rather than from action.Price, which is derived live from the current
+	// import fee and so would move under a policy change (§16 price snapshot).
 	Gross int64 `json:"gross,omitempty"`
 	// ContractHash is the expected_contract_hash this dispatch bound (§8 If-Match). Read back at
 	// settlement to key the hash-conditional proxy deactivation, so a stale dispatch settling after a
@@ -268,9 +258,9 @@ func (s *pricedStore) ListAllActions(ctx context.Context, limit, offset int) ([]
 }
 
 // marshalDispatch serializes a dispatchPayload and returns a pointer suitable for Trace.DispatchJSON.
-func marshalDispatch(args map[string]any, stepID string, mp, value, gross int64, contractHash string, remoteBPS, importBPS int64) *string {
+func marshalDispatch(args map[string]any, stepID string, mp, gross int64, contractHash string, remoteBPS, importBPS int64) *string {
 	b, _ := json.Marshal(dispatchPayload{
-		Args: args, StepID: stepID, RemotePrice: mp, Value: value, Gross: gross, ContractHash: contractHash,
+		Args: args, StepID: stepID, RemotePrice: mp, Gross: gross, ContractHash: contractHash,
 		RemoteBPS: &remoteBPS, ImportBPS: &importBPS,
 	})
 	s := string(b)
@@ -297,193 +287,28 @@ func (k *Kernel) dispatchedRates(dispatchJSON *string, defRemoteBPS, defImportBP
 	return
 }
 
-// PaymentDescriptor is what a serving kernel A advertises about a payment Step to the buyer B (§13): the
-// bilateral obligation A can compute, and nothing more. `remote_max = amount + value_premium` is what B
-// owes A; B computes its own `value_import`/`max_total` locally (its import policy is not A's business).
-// Hash binds the descriptor into the completion idempotency key so the step cannot be completed for a
-// different payment.
-type PaymentDescriptor struct {
-	Beneficiary string `json:"beneficiary"` // resolved local beneficiary user_id on the serving kernel
-	Amount      int64  `json:"amount"`
-	RemoteBPS   int64  `json:"remote_bps"`
-	RemoteMax   int64  `json:"remote_max"`
-	Hash        string `json:"hash,omitempty"`
-}
-
-// PaymentDescriptorHash is the SHA-256 over the JCS-canonical descriptor (excluding hash), shared by the
-// serving kernel (which advertises it) and the buyer (which binds it into the idempotency key). Both
-// sides compute it identically, so a mismatch means a tampered payment.
-func PaymentDescriptorHash(d PaymentDescriptor) string {
-	d.Hash = ""
-	payload, _ := CanonicalJSON(d)
-	return sha256Hex(string(payload))
-}
-
 // PeerStepView is what a remote peer may see of a step parked for it: the request, not the
 // requester. Deliberately NOT the local step view — that one carries the creating action's name,
 // the process owner's handle, and raw local ids, and a user identity crossing a kernel boundary is
 // precisely what §13's encapsulation forbids. Each field is here because the completer needs it:
-// partial_args is the payload channel (§14 has sys/message put its body there), allowed_input is
-// §14's substitute for reading a target action that may be private, and payment carries the value
-// obligation (§13). One type serves both ends of the protocol — the serving kernel builds it,
-// the buying kernel decodes it — so neither side can drift from the other.
+// partial_args is the payload channel (§14 has sys/message put its body there) and allowed_input is
+// §14's substitute for reading a target action that may be private. One type serves both ends of the
+// protocol — the serving kernel builds it, the buying kernel decodes it — so neither side can drift.
 type PeerStepView struct {
-	ID           string             `json:"id"`
-	PartialArgs  json.RawMessage    `json:"partial_args,omitempty"`
-	AllowedInput map[string]any     `json:"allowed_input,omitempty"`
-	Price        int64              `json:"price"`
-	Payment      *PaymentDescriptor `json:"payment,omitempty"` // present iff this is a payment step (§13)
-	CreatedAt    time.Time          `json:"created_at"`
+	ID           string          `json:"id"`
+	PartialArgs  json.RawMessage `json:"partial_args,omitempty"`
+	AllowedInput map[string]any  `json:"allowed_input,omitempty"`
+	Price        int64           `json:"price"`
+	CreatedAt    time.Time       `json:"created_at"`
 }
 
 // NewPeerStepView projects one waiting step into the peer-facing shape (§13).
-func (k *Kernel) NewPeerStepView(ctx context.Context, s *Step, action *Action) *PeerStepView {
+func (k *Kernel) NewPeerStepView(s *Step, action *Action) *PeerStepView {
 	v := &PeerStepView{ID: s.ID, PartialArgs: s.PartialArgs, Price: s.Price, CreatedAt: s.CreatedAt}
 	if action != nil {
 		v.AllowedInput = DeriveAllowedSchema(action.InputSchema, s.PartialArgs)
-		// A payment step (effect-bearing action) carries the payment descriptor so the buyer can fund
-		// the value channel and bind it into the completion (§13). Silently absent otherwise.
-		if d, err := k.BuildPaymentDescriptor(ctx, action, s.PartialArgs); err == nil && d != nil {
-			v.Payment = d
-		}
 	}
 	return v
-}
-
-// BuildPaymentDescriptor computes the payment descriptor for an effect-bearing step from its partial
-// args (§13), resolving the local beneficiary and pricing the serving markup. Returns nil for a
-// non-transfer action or when the step's args do not name a resolvable local beneficiary.
-func (k *Kernel) BuildPaymentDescriptor(ctx context.Context, action *Action, partialArgs []byte) (*PaymentDescriptor, error) {
-	fn := k.actionValue(action)
-	if fn == nil {
-		return nil, nil // not a payment step
-	}
-	var args map[string]any
-	if err := json.Unmarshal(partialArgs, &args); err != nil {
-		return nil, nil
-	}
-	amount, ref, err := fn(args)
-	if err != nil || amount < 1 || strings.Contains(ref, "@") {
-		return nil, nil
-	}
-	benef, err := k.ResolveUser(ctx, ref)
-	if err != nil || benef == nil || benef.IsPeer() || benef.SuspendedAt != nil {
-		return nil, nil
-	}
-	valuePremium := ceilDiv(amount*k.cfg.RemoteBPS, 10000)
-	d := PaymentDescriptor{
-		Beneficiary: benef.ID,
-		Amount:      amount,
-		RemoteBPS:   k.cfg.RemoteBPS,
-		RemoteMax:   amount + valuePremium,
-	}
-	d.Hash = PaymentDescriptorHash(d)
-	return &d, nil
-}
-
-// StepPaymentHash returns the payment-descriptor hash for a step, or "" when it is not a payment step
-// (§13). The serving side folds it into the expected completion idempotency key to bind the payment.
-func (k *Kernel) StepPaymentHash(ctx context.Context, stepID string) string {
-	step, err := k.store.ReadStep(ctx, stepID)
-	if err != nil {
-		return ""
-	}
-	action, err := k.store.ReadAction(ctx, step.ActionID)
-	if err != nil {
-		return ""
-	}
-	d, err := k.BuildPaymentDescriptor(ctx, action, step.PartialArgs)
-	if err != nil || d == nil {
-		return ""
-	}
-	return d.Hash
-}
-
-// ReadPendingTransferByKey returns the buyer-side pending payment record for an idempotency key (§13),
-// or ErrNotFound. Used by the completion orchestration to make funding idempotent across retries.
-func (k *Kernel) ReadPendingTransferByKey(ctx context.Context, idempotencyKey string) (*PendingTransfer, error) {
-	return k.store.ReadPendingTransferByKey(ctx, idempotencyKey)
-}
-
-// ReadPendingTransfer returns a pending payment record by id (§13 operator surface), or ErrNotFound.
-func (k *Kernel) ReadPendingTransfer(ctx context.Context, id string) (*PendingTransfer, error) {
-	return k.store.ReadPendingTransfer(ctx, id)
-}
-
-// ListPendingTransfers backs the admin transfers resource (§13): an empty status returns only the
-// unresolved records (pending + quarantined); an explicit status filters to exactly that one.
-func (k *Kernel) ListPendingTransfers(ctx context.Context, status string, limit, offset int) ([]*PendingTransfer, error) {
-	return k.store.ListPendingTransfers(ctx, status, limit, offset)
-}
-
-// AdmitRemotePaidStep locks the buyer's reserve (max_total = remote_max + its own import fee) from its
-// own balance and records a pending_transfers row, reserve-first and atomic (§13). It stores the RAW
-// completion input (not just its hash) so a later retry rebuilds the same signed request, and the
-// descriptor's remote_max so settlement re-validates without the live descriptor. The idempotency key is
-// payment-bound (control layer). Returns the pending record; a duplicate key (retry) returns ErrConflict.
-func (k *Kernel) AdmitRemotePaidStep(ctx context.Context, buyerID, peerKey, stepID string, input []byte, idempotencyKey string, d PaymentDescriptor) (*PendingTransfer, error) {
-	valueImport := ceilDiv(d.RemoteMax*k.cfg.ImportBPS, 10000)
-	pt := &PendingTransfer{
-		ID:             uuid.New().String(),
-		BuyerID:        buyerID,
-		PeerKey:        peerKey,
-		StepID:         stepID,
-		InputHash:      sha256Hex(string(input)),
-		Input:          json.RawMessage(input),
-		IdempotencyKey: idempotencyKey,
-		Beneficiary:    d.Beneficiary,
-		Amount:         d.Amount,
-		RemoteMax:      d.RemoteMax,
-		Reserve:        d.RemoteMax + valueImport, // max_total: value + value_premium + value_import
-		Status:         "pending",
-		CreatedAt:      time.Now().UTC(),
-	}
-	if err := k.store.InsertPendingTransfer(ctx, pt); err != nil {
-		return nil, err
-	}
-	return pt, nil
-}
-
-// SettleRemotePaidStep disposes of a buyer-side payment reserve on the serving kernel's completion
-// receipt (§13), the same rule as the outbound-call value channel:
-//   - valid SUCCESS binding the payment (signature over A's key; value == amount; value_to ==
-//     beneficiary; value_premium == remote_max − amount) ⇒ settle: value+value_premium to A's proxy row
-//     (buyer owes A), value_import to buyer sys, remainder refunded;
-//   - valid FAILURE/rejection ⇒ refund the whole reserve;
-//   - an inconsistent/mis-bound receipt after a possibly-executed completion ⇒ QUARANTINE (reserve stays
-//     locked; A may have paid the beneficiary).
-//
-// receiptJSON is nil/empty when no receipt arrived (uncertain): the record is left pending for retry.
-func (k *Kernel) SettleRemotePaidStep(ctx context.Context, pending *PendingTransfer, d PaymentDescriptor, receiptJSON []byte) error {
-	if len(receiptJSON) == 0 {
-		return nil // uncertain: leave pending, retry with the same key
-	}
-	var r Receipt
-	if err := json.Unmarshal(receiptJSON, &r); err != nil {
-		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "receipt unparseable")
-	}
-	if verifyRemoteReceiptSignature(&r, pending.PeerKey) != nil {
-		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "invalid receipt signature")
-	}
-	if r.Status != TxSuccess {
-		return k.store.RefundPendingTransfer(ctx, pending.ID) // valid signed failure
-	}
-	valuePremium := d.RemoteMax - d.Amount
-	switch {
-	case r.Value != d.Amount:
-		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "receipt value != amount")
-	case r.ValueTo != d.Beneficiary:
-		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "receipt beneficiary mismatch")
-	case r.ValuePremium != valuePremium:
-		return k.store.SetPendingTransferStatus(ctx, pending.ID, "quarantined", "receipt value_premium mismatch")
-	}
-	proxy, err := k.store.ReadAccountByKernelKey(ctx, pending.PeerKey)
-	if err != nil || proxy == nil {
-		return ErrNotFound.Wrap("serving-kernel proxy row not found for settlement")
-	}
-	credit := r.Value + r.ValuePremium // buyer owes A value + serving markup
-	valueImport := pending.Reserve - credit
-	return k.store.CommitPendingTransfer(ctx, pending.ID, proxy.ID, credit, k.cfg.FeeRecipientID, valueImport)
 }
 
 // callerWalletFor returns the (walletID, walletKind) that funds a call:
@@ -764,20 +589,23 @@ func parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedActionID, expec
 // §13 settlement invariants (success ⇒ charge = mp and reply_hash matches; failure ⇒ 0 ≤ charge ≤ mp),
 // so settlement can quarantine it (charge 0, full refund, no retry) instead of clamp-committing a
 // record that would fail VerifyRemoteReceipt. An empty string means the receipt is settleable.
-func remoteReceiptInvalid(r Receipt, mp, rbps, sentValue int64, replyJSON []byte) string {
+func remoteReceiptInvalid(r Receipt, mp, rbps int64, replyJSON []byte) string {
 	// refresh_proxy is only ever a valid zero-charge pre-execution rejection (§13 rule C). A receipt
-	// setting it on a success or any charged/value-bearing failure is malformed and quarantines,
-	// so a hostile peer cannot pair a paid receipt with a cache-invalidation signal.
-	if r.RefreshProxy && !(r.Status == TxFailure && r.Charge == 0 && r.Premium == 0 && r.Value == 0 && r.ValuePremium == 0) {
+	// setting it on a success or any charged failure is malformed and quarantines, so a hostile peer
+	// cannot pair a paid receipt with a cache-invalidation signal.
+	if r.RefreshProxy && !(r.Status == TxFailure && r.Charge == 0 && r.Premium == 0) {
 		return "refresh_proxy on a non-rejection receipt"
+	}
+	// The value channel is local to a kernel (§13): no call this kernel dispatches carries value, so a
+	// remote receipt claiming any is inconsistent with what was sent and quarantines rather than
+	// settling — the reserve it would move does not exist here.
+	if r.Value != 0 || r.ValuePremium != 0 {
+		return "remote receipt carries value"
 	}
 	switch r.Status {
 	case TxSuccess:
 		if r.Charge != mp {
 			return "success charge != mp"
-		}
-		if r.Value != sentValue {
-			return "success value != sent"
 		}
 		if h, err := jcsHashStr(string(replyJSON)); err != nil || r.ReplyHash != h {
 			return "reply_hash mismatch"
@@ -786,21 +614,12 @@ func remoteReceiptInvalid(r Receipt, mp, rbps, sentValue int64, replyJSON []byte
 		if r.Charge < 0 || r.Charge > mp {
 			return "failure charge out of range"
 		}
-		// Value delivery is all-or-nothing (§13): a failed transfer delivers nothing.
-		if r.Value != 0 {
-			return "failure delivered value"
-		}
 	default:
 		return "unknown status"
 	}
-	// The two channels are audited separately (§13, the un-folded model): the execution premium must be
-	// the manifest-snapshot rate on the charge, and the value premium the same rate on the delivered
-	// value — never ceil((charge+value)·rbps), whose rounding merge is the bug. Either mismatch quarantines.
+	// The execution premium must be the manifest-snapshot rate on the actual charge (§13).
 	if r.Premium != ceilDiv(r.Charge*rbps, 10000) {
 		return "premium != ceil(charge*rbps)"
-	}
-	if r.ValuePremium != ceilDiv(r.Value*rbps, 10000) {
-		return "value_premium != ceil(value*rbps)"
 	}
 	return ""
 }
@@ -815,7 +634,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// dispatch and settlement cannot move this call's arithmetic (§13). Nil = pre-041 dispatch, which
 	// falls back to the row and live config exactly as before.
 	rbps, importBPS, d := k.dispatchedRates(trace.DispatchJSON, actionRemoteBPS(action), k.cfg.ImportBPS)
-	sentValue, dispatchedHash := d.Value, d.ContractHash
+	dispatchedHash := d.ContractHash
 	// A missing, unparseable, unsigned, or mismatched receipt keeps the trace open for retry.
 	// action_id and args_hash are enforced here so settlement is valid by construction.
 	expectedArgsHash, _ := jcsHashStr(string(ktx.ArgsJSON))
@@ -836,35 +655,20 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 		replyJSON, _ = json.Marshal(fr.Result)
 	}
 	charge := r.Charge
-	// The two channels settle independently (§13): the EXECUTION channel (charge/premium/import) is the
-	// normal proxy settlement on the trace-funded gross q; the VALUE channel is the TransferEffect reserve
-	// locked on the caller C, disposed of via `vs` — settled to the peer proxy row on success, refunded on
-	// a valid failure, or kept LOCKED (quarantined) on an invalid receipt after a possibly-executed dispatch.
 	var premium, importFee int64
-	var valueForReceipt, valuePremForReceipt int64
-	var valueToForReceipt string
-	vs := ValueSettlement{Reserve: trace.ValueReserve}
-	if invalid := remoteReceiptInvalid(r, mp, rbps, sentValue, replyJSON); invalid != "" {
+	quarantined := false
+	if invalid := remoteReceiptInvalid(r, mp, rbps, replyJSON); invalid != "" {
 		logger.Warn("remote.receipt_invalid", "action", action.Name, "reason", invalid)
 		charge = 0
 		ktx.Status = TxFailure
 		ktx.Reason = reasonRemoteReceiptInvalidPrefix + invalid
-		vs.Quarantine = true
+		quarantined = true
 	} else {
 		premium = r.Premium // execution serving markup
 		ktx.Status = r.Status
 		if r.Status == TxSuccess {
 			importFee = ceilDiv((charge+premium)*importBPS, 10000) // execution import at the DISPATCHED rate (§13)
 			ktx.ReplyJSON = json.RawMessage(replyJSON)
-			// Value channel: C owes the peer value+value_premium (credited to the proxy row), and origin
-			// sys retains value_import; the remainder of the reserve refunds to C inside the commit.
-			vs.Credit = r.Value + r.ValuePremium
-			vs.SysCredit = ceilDiv((r.Value+r.ValuePremium)*importBPS, 10000)
-			valueForReceipt = r.Value
-			valuePremForReceipt = trace.ValueReserve - r.Value // caller's value overhead: value_premium + value_import
-			valueToForReceipt = r.ValueTo
-		} else {
-			vs.Refund = true // valid failure/rejection: return the whole value reserve to C
 		}
 	}
 	paid := charge + premium // execution bilateral payable to the peer
@@ -887,7 +691,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 		// so a client never renders it as the caller's own insufficient_funds. Gated on the receipt
 		// having validated — a quarantined receipt also forces charge 0, and vs.Quarantine is the
 		// explicit flag for that (never infer it from the reason string).
-		if fr.HTTPStatus == 402 && charge == 0 && !vs.Quarantine {
+		if fr.HTTPStatus == 402 && charge == 0 && !quarantined {
 			failErr = PeerUnfundedError(k.KernelName(ctx, target.KernelPublicKey))
 		}
 		// The peer authored r.Reason; never adopt it into a record we sign (§6). Its verbatim text
@@ -896,7 +700,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 			ktx.Reason = KernelErrorCode(failErr)
 		}
 	}
-	localReceipt, receiptErr := k.buildReceipt(ktx, paid+importFee, 0, valueForReceipt, valuePremForReceipt, valueToForReceipt)
+	localReceipt, receiptErr := k.buildReceipt(ktx, paid+importFee, 0, 0, 0, "")
 	if receiptErr != nil {
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
@@ -905,7 +709,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// (charge/duty/refund + audit record) always commits once the signed receipt is in.
 	sctx, cancel := settlementContext(ctx)
 	defer cancel()
-	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, paid, importFee, vs, stats, req.IdempotencyRecordID, req.StepID, KernelErrorCode(failErr)); err != nil {
+	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, paid, importFee, stats, req.IdempotencyRecordID, req.StepID, KernelErrorCode(failErr)); err != nil {
 		return nil, ErrInternal.Wrap("could not commit remote settlement")
 	}
 
@@ -914,7 +718,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// outside the monetary write set (a failure here never rolls back settlement), and hash-conditional
 	// so a stale dispatch settling after a re-resolve spares the refreshed row. A funding (402) rejection
 	// carries no refresh_proxy, so it never reaches here.
-	if r.RefreshProxy || vs.Quarantine {
+	if r.RefreshProxy || quarantined {
 		// The dispatch snapshots the hash it bound; absent it (a trace not dispatched through the normal
 		// path), guard against the row's current hash so the deactivation still targets this row.
 		guardHash := dispatchedHash
@@ -1088,12 +892,13 @@ func (k *Kernel) SignStepList(counterparty, recipient string) (sig, ts string, e
 
 // StepIdempotencyKey derives the cross-kernel key for one step completion. It is DERIVED, never
 // minted per attempt: a retry after a network failure presents the same key and recovers the stored
-// outcome, since a step completion has no local trace to persist one on (unlike a remote-proxy
-// call). recipient is the serving kernel's key; paymentHash binds a payment step's descriptor (§13)
-// and is empty otherwise, so the serving kernel — recomputing its own — rejects a key naming a
-// different payment. Exported because the serving side recomputes it to verify the buyer's key.
-func StepIdempotencyKey(recipient, stepID, inputHash, paymentHash string) string {
-	return sha256Hex("juice/fed/step/1|" + recipient + "|" + stepID + "|" + inputHash + "|" + paymentHash)
+// outcome, since a step completion has no local trace to persist one on (unlike a remote-proxy call).
+// recipient is the serving kernel's key. Exported because the serving side recomputes it to verify
+// the requester's key. The trailing empty component is a reserved slot in the derivation: keeping it
+// makes every key byte-identical to those already in flight, so a completion retried across an
+// upgrade recovers its stored outcome instead of re-executing under a fresh key.
+func StepIdempotencyKey(recipient, stepID, inputHash string) string {
+	return sha256Hex("juice/fed/step/1|" + recipient + "|" + stepID + "|" + inputHash + "|")
 }
 
 // normalizeStepInput renders completion input as exactly the bytes the transport will send, and
@@ -1177,27 +982,11 @@ func (k *Kernel) PeerStepsAwaitingUs(ctx context.Context, peerKey string) ([]Pee
 	return views, nil
 }
 
-// peerStepPayment returns the payment descriptor a peer advertises for stepID, or nil when the step
-// is not a payment step (or the listing cannot be read — an ordinary completion then follows).
-func (k *Kernel) peerStepPayment(ctx context.Context, peerKey, stepID string) *PaymentDescriptor {
-	views, err := k.PeerStepsAwaitingUs(ctx, peerKey)
-	if err != nil {
-		return nil
-	}
-	for _, v := range views {
-		if v.ID == stepID {
-			return v.Payment
-		}
-	}
-	return nil
-}
-
 // completePeerStepRaw signs and dispatches one completion under an ALREADY-DERIVED idempotency key:
-// a retry must present the key its first attempt used (a payment key binds the descriptor hash), so
-// the key is an argument, never re-derived here. forUserID, when non-empty, attaches the
-// home-kernel step_auth attestation naming that stable local id, so a remote-user-addressed step is
-// completed as that specific user (§13); empty is a kernel-level completion for a kernel-addressed
-// step.
+// a retry must present the key its first attempt used, so the key is an argument, never re-derived
+// here. forUserID, when non-empty, attaches the home-kernel step_auth attestation naming that stable
+// local id, so a remote-user-addressed step is completed as that specific user (§13); empty is a
+// kernel-level completion for a kernel-addressed step.
 func (k *Kernel) completePeerStepRaw(ctx context.Context, peerKey, stepID string, input []byte, inputHash, idempotencyKey, forUserID string) (map[string]any, error) {
 	if k.fedClient == nil {
 		return nil, ErrInvalidState.Wrap("federation transport not running")
@@ -1218,80 +1007,17 @@ func (k *Kernel) completePeerStepRaw(ctx context.Context, peerKey, stepID string
 	return stepReply(status, body, notDispatched, err, peerKey)
 }
 
-// receiptFromReply extracts the signed receipt a completion carried, if any.
-func receiptFromReply(reply map[string]any) []byte {
-	if reply == nil {
-		return nil
-	}
-	rj, ok := reply["receipt"]
-	if !ok || rj == nil {
-		return nil
-	}
-	b, _ := json.Marshal(rj)
-	return b
-}
-
-// CompletePeerStep resumes a step a peer parked for this kernel over /juice/fed/step/1 (§13),
-// funding the value channel when the step is a payment step. Ordinary step: sign, dispatch, done —
-// no money moves here, because the step's price was parked on the serving kernel at creation and
-// completion never checks funds (§10). Payment step: the buyer locks max_total reserve-first in a
-// pending_transfers record (idempotent on the payment-bound key) BEFORE the network completion, so
-// a crash never leaves it having paid without a record, then settles strictly on the serving
-// kernel's signed receipt — success credits, failure refunds, an uncertain outcome stays pending
-// for retry under the same key.
-func (k *Kernel) CompletePeerStep(ctx context.Context, peerKey, stepID string, rawInput json.RawMessage, forUserID, buyerID string) (map[string]any, error) {
+// CompletePeerStep resumes a step a peer parked for this kernel over /juice/fed/step/1 (§13). No money
+// moves here: the step's price was parked on the serving kernel at creation and completion never checks
+// funds (§10), so the requester creates no local trace or transaction and a timeout pins nothing. The
+// completion settles wholly on the serving kernel under §6.
+func (k *Kernel) CompletePeerStep(ctx context.Context, peerKey, stepID string, rawInput json.RawMessage, forUserID string) (map[string]any, error) {
 	input, inputHash, err := normalizeStepInput(rawInput)
 	if err != nil {
 		return nil, err
 	}
-	desc := k.peerStepPayment(ctx, peerKey, stepID)
-	if desc == nil {
-		return k.completePeerStepRaw(ctx, peerKey, stepID, input, inputHash,
-			StepIdempotencyKey(peerKey, stepID, inputHash, ""), forUserID)
-	}
-	if buyerID == "" {
-		return nil, ErrInvalidInput.Wrap("a payment step must be completed by a specific user")
-	}
-	if PaymentDescriptorHash(*desc) != desc.Hash {
-		return nil, ErrInvalidState.Wrap("payment descriptor hash mismatch")
-	}
-	idempotencyKey := StepIdempotencyKey(peerKey, stepID, inputHash, desc.Hash)
-	// Reuse an existing reserve (a retry) or admit a new one.
-	pending, err := k.ReadPendingTransferByKey(ctx, idempotencyKey)
-	if err != nil {
-		if pending, err = k.AdmitRemotePaidStep(ctx, buyerID, peerKey, stepID, input, idempotencyKey, *desc); err != nil {
-			return nil, err
-		}
-	}
-	reply, cerr := k.completePeerStepRaw(ctx, peerKey, stepID, input, inputHash, idempotencyKey, forUserID)
-	if serr := k.SettleRemotePaidStep(ctx, pending, *desc, receiptFromReply(reply)); serr != nil {
-		return reply, serr
-	}
-	return reply, cerr
-}
-
-// RetryPendingTransfer re-presents the SAME signed completion for a still-pending payment reserve
-// and settles on the result (§13 operator surface). It re-derives nothing: the stored key and raw
-// input rebuild the identical request, so the serving kernel replays an already-executed completion
-// rather than re-running it. Disposition is the completion path's — a valid success settles, a
-// valid failure refunds, an invalid receipt quarantines — with one deliberate difference: a
-// TRANSPORT failure is suppressed rather than surfaced, leaving the record pending. A retry has no
-// never-dispatched proof (the first attempt may already have paid the beneficiary), so only receipt
-// evidence may move money. Only a pending record is actionable; settled/refunded are terminal and a
-// quarantined receipt can never heal.
-func (k *Kernel) RetryPendingTransfer(ctx context.Context, pt *PendingTransfer) (*PendingTransfer, error) {
-	if pt.Status != "pending" {
-		return nil, ErrInvalidState.Wrapf("transfer is %s, not pending", pt.Status)
-	}
-	// The STORED key, never a fresh derivation: it binds this transfer's payment descriptor, and a
-	// different key would make the peer re-execute instead of replaying. A payment step is always
-	// user-addressed, so re-attest as the buyer.
-	reply, _ := k.completePeerStepRaw(ctx, pt.PeerKey, pt.StepID, pt.Input, pt.InputHash, pt.IdempotencyKey, pt.BuyerID)
-	d := PaymentDescriptor{Beneficiary: pt.Beneficiary, Amount: pt.Amount, RemoteMax: pt.RemoteMax}
-	if err := k.SettleRemotePaidStep(ctx, pt, d, receiptFromReply(reply)); err != nil {
-		return nil, err
-	}
-	return k.ReadPendingTransfer(ctx, pt.ID)
+	return k.completePeerStepRaw(ctx, peerKey, stepID, input, inputHash,
+		StepIdempotencyKey(peerKey, stepID, inputHash), forUserID)
 }
 
 // ---- Peer operations ----
@@ -1995,7 +1721,6 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 			Name:            m.Name,
 			InputSchema:     m.InputSchema,
 			OutputSchema:    m.OutputSchema,
-			Effect:          m.Effect,
 			ServingPrice:    sp,
 			ObservedAt:      now,
 		}
@@ -2120,7 +1845,10 @@ func remoteManifestHash(m ActionManifest) string {
 		"action_id":     m.ActionID,
 		"artifact_hash": m.ArtifactHash,
 		"description":   m.Description,
-		"effect":        m.Effect,
+		// Reserved: the value channel is local to a kernel, so no manifest declares an effect. The key
+		// stays in the payload at its empty value so every hash already cached by a peer keeps matching
+		// and no proxy is re-keyed by this removal.
+		"effect":        "",
 		"input_schema":  string(inputJSON),
 		"kind":          string(m.Kind),
 		"name":          m.Name,
@@ -2257,7 +1985,6 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 			a.RemoteOwnerID = m.OwnerID
 			a.RemoteBPS = &rbps
 			a.BasePrice = &basePrice
-			a.Effect = m.Effect // signed effect contract: the proxy is value-bearing iff the peer signed it
 		},
 		// Identity and lifecycle only; reconcileImport calls apply for the contract fields.
 		new: func() *Action {
@@ -2345,7 +2072,6 @@ func (k *Kernel) buildManifest(ctx context.Context, a *Action, owner *Account) (
 		OutputSchema: a.OutputSchema,
 		Price:        a.Price,
 		Kind:         a.Kind,
-		Effect:       a.Effect, // signed so a peer decides value-bearing from the contract, not the name (§13)
 		ArtifactHash: a.ArtifactHash,
 		UpdatedAt:    a.UpdatedAt,
 		Stats:        stats,

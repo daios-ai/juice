@@ -277,7 +277,7 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	views := make([]*kernel.PeerStepView, len(steps))
 	for i, s := range steps {
 		action, _ := k.ReadAction(ctx, s.ActionID)
-		views[i] = k.NewPeerStepView(ctx, s, action)
+		views[i] = k.NewPeerStepView(s, action)
 	}
 	body := map[string]any{"steps": views}
 	// A full page means more may be waiting. One honest flag, no continuation: this queue holds
@@ -331,15 +331,12 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 		}
 	}
 
-	// Payment binding (§13): fold the step's OWN payment-descriptor hash into the expected idempotency
-	// key and require the presented key to match, so a payment step cannot be completed for a different
-	// (or no) payment — the key is already inside the signed step payload, so binding it here binds the
-	// whole completion. A non-payment step has paymentHash="" — identical to the base key (back-compat
-	// within the federation line).
-	paymentHash := k.StepPaymentHash(ctx, stepID)
-	expectedKey := kernel.StepIdempotencyKey(self, stepID, sha256HexBytes(rawInput), paymentHash)
+	// The key is derived, not chosen (§13): recompute what this completion must present and reject a
+	// mismatch. The key is already inside the signed step payload, so binding it here binds the whole
+	// completion to this step and these exact input bytes.
+	expectedKey := kernel.StepIdempotencyKey(self, stepID, sha256HexBytes(rawInput))
 	if idempotencyKey != expectedKey {
-		return 0, nil, kernel.ErrUnauthorized.Wrap("idempotency key does not match the step's payment binding")
+		return 0, nil, kernel.ErrUnauthorized.Wrap("idempotency key does not match the step and input")
 	}
 
 	rec, existing, err := beginIdempotency(k, ctx, idempotencyKey, peer.ID)

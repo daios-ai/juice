@@ -64,7 +64,7 @@ final and atomic with its transaction and receipt.
 - **OpenAPI import** — register representable HTTP operations as actions.
 - **WASM via wazero** — sandboxed scripts with host functions `juice.call`, `juice.step_create`,
   `juice.step_complete`, and `juice.log`; no ambient filesystem, network, or token access.
-- **Semantic lookup** — cosine search over action embeddings, re-ranked by stats.
+- **Hybrid lookup** — lexical (BM25) and semantic (cosine) search over actions, fused by reciprocal-rank fusion.
 - **SQLite** — single file, WAL mode, pure Go (no CGO); structured logging.
 
 ## Installation

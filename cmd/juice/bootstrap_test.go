@@ -332,9 +332,19 @@ func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 	}
 }
 
+// namedKernel gives bootstrap the network name it requires before writing anything (§12), and
+// restores the package-global config afterwards.
+func namedKernel(t *testing.T, name string) {
+	t.Helper()
+	saved := globalCfg.KernelHandle
+	globalCfg.KernelHandle = name
+	t.Cleanup(func() { globalCfg.KernelHandle = saved })
+}
+
 func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)
+	namedKernel(t, "test-kernel")
 
 	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
@@ -368,6 +378,7 @@ func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
 func TestBootstrapNativesAreLocalAndNotGossiped(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)
+	namedKernel(t, "test-kernel")
 
 	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
 		t.Fatalf("FirstBoot: %v", err)

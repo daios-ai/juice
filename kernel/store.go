@@ -245,7 +245,7 @@ type Store interface {
 	// BeginRun atomically debits W = price + premiumReserve from owner.available→locked, creates
 	// the process with available=0/locked=price, and creates the root trace with available=price;
 	// the extra premiumReserve stays parked in owner.locked for the serving markup, released at
-	// settlement (§13). Admission (§13): an ordinary owner (no public_key) must have available ≥ W;
+	// settlement (§13). Admission (§13): an ordinary owner (no kernel_public_key) must have available ≥ W;
 	// a peer owner is bounded not per-row but globally — the projected global gross receivables
 	// G = Σ_peers max(0,−available), with this peer's debt replaced by its post-debit value, must
 	// stay ≤ exposureMax (Sybil-proof: one cap across all peer identities). exposureMax is ignored
@@ -394,24 +394,7 @@ type Store interface {
 	// decrements owner.locked by taxable (paid+importFee), records the transaction+receipt, updates
 	// stats, marks step done (if stepID non-empty), completes the idempotency record (if non-empty),
 	// and closes the process if quiescent.
-	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, proxyUserID, feeRecipientID string, paid, importFee int64, vs ValueSettlement, stats *Stats, idempotencyRecordID, stepID, errorCode string) error
-
-	// Remote payment-step reserve (buyer side, §13): the buyer funds a TransferEffect attached to a
-	// Step hosted on another kernel via a dedicated pending_transfers record, not a fabricated trace.
-	// InsertPendingTransfer locks max_total from the buyer reserve-first and records the row atomically.
-	// CommitPendingTransfer settles it on the serving kernel's valid success receipt (value+value_premium
-	// → peer proxy row, value_import → buyer sys, remainder refunded). RefundPendingTransfer returns the
-	// whole reserve (valid failure/never-dispatched). SetPendingTransferStatus quarantines WITHOUT
-	// touching balances (invalid receipt: reserve stays locked), recording a reason. ReadPendingTransferByKey
-	// is the idempotency/retry lookup; ReadPendingTransfer/ListPendingTransfers back the operator surface
-	// (an empty status lists only unresolved records — pending + quarantined).
-	InsertPendingTransfer(ctx context.Context, pt *PendingTransfer) error
-	ReadPendingTransferByKey(ctx context.Context, idempotencyKey string) (*PendingTransfer, error)
-	ReadPendingTransfer(ctx context.Context, id string) (*PendingTransfer, error)
-	ListPendingTransfers(ctx context.Context, status string, limit, offset int) ([]*PendingTransfer, error)
-	CommitPendingTransfer(ctx context.Context, id, proxyRowID string, credit int64, sysID string, sysCredit int64) error
-	RefundPendingTransfer(ctx context.Context, id string) error
-	SetPendingTransferStatus(ctx context.Context, id, status, reason string) error
+	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, proxyUserID, feeRecipientID string, paid, importFee int64, stats *Stats, idempotencyRecordID, stepID, errorCode string) error
 
 	// ---- Traces (by process) ----
 
@@ -575,14 +558,14 @@ type Store interface {
 
 	// ---- Peer lifecycle ----
 
-	// ListPurgeablePeers returns the IDs of peer users (public_key set) that are idle past
+	// ListPurgeablePeers returns the IDs of peer users (kernel_public_key set) that are idle past
 	// cutoff at zero balance (§13 Retention): available=0, locked=0, last activity (max of
 	// created_at, latest transaction naming them, latest deposit/withdrawal, latest gossip
 	// mention) before cutoff, and no waiting/running step addressed to them or to their actions.
 	ListPurgeablePeers(ctx context.Context, cutoff time.Time) ([]string, error)
 	// PurgePeerCascade atomically deletes a purged peer's derived data — its proxy actions,
 	// their stats, its steps, its discovered_kernels row, its discovery_docs, and its evidence
-	// rows (as issuer and as subject) — and forgets the peer identity by clearing public_key on the
+	// rows (as issuer and as subject) — and forgets the peer identity by clearing kernel_public_key on the
 	// user row. The immutable transaction/receipt ledger is preserved (party ids carry no FK),
 	// keeping local counterparties' credits reconstructible (§11); the anonymized user row stays as
 	// a ledger anchor so old history remains legible.

@@ -312,7 +312,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	// Register the platform stdlib. Each native declares its own contract (native.Spec), so this
 	// wiring names adapters only — never a schema or description. Must happen on every kernel open,
 	// not just bootstrap.
-	webUA := globalCfg.Native.Web.UserAgent
+	webUA := "juice-kernel/" + version + " (+https://github.com/daios-ai/juice)"
 	nativeDeps := native.Deps{
 		Chatter:  chatter,
 		Embedder: embedder,

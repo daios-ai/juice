@@ -618,34 +618,26 @@ func TestSettleOutcomeAndPayloads(t *testing.T) {
 	}
 }
 
-// TestRemoteReceiptInvalidValue: the origin quarantines a transfer receipt that short-changes the
-// beneficiary, misprices the premium, or delivers value on a failure (§13 value transfer).
+// TestRemoteReceiptInvalidValue: the value channel is local to a kernel (§13), so no dispatched call
+// carries value and a remote receipt claiming any is quarantined rather than settled — the reserve it
+// would move does not exist here. The execution channel settles normally alongside.
 func TestRemoteReceiptInvalidValue(t *testing.T) {
 	replyHash, _ := jcsHashStr("null")
-	const rbps, mp, sent = int64(500), int64(0), int64(100)
-	// Valid success transfer (the un-folded two-channel model): charge 0 ⇒ execution premium 0; value
-	// 100 ⇒ value_premium ceil(100*500/1e4)=5, computed separately.
-	if got := remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: 0, Value: 100, Premium: 0, ValuePremium: 5, ReplyHash: replyHash}, mp, rbps, sent, []byte("null")); got != "" {
-		t.Errorf("valid transfer receipt rejected: %s", got)
+	const rbps, mp = int64(500), int64(100)
+	if got := remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, ReplyHash: replyHash}, mp, rbps, []byte("null")); got != "" {
+		t.Errorf("valid value-free receipt rejected: %s", got)
 	}
-	// Delivered value != sent (short-changed beneficiary).
-	if remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: 0, Value: 50, Premium: 0, ValuePremium: 3, ReplyHash: replyHash}, mp, rbps, sent, []byte("null")) == "" {
-		t.Error("value != sent must be quarantined")
+	if remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, Value: 100, ReplyHash: replyHash}, mp, rbps, []byte("null")) == "" {
+		t.Error("a success delivering value must be quarantined")
 	}
-	// Value premium not levied on the delivered value.
-	if remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: 0, Value: 100, Premium: 0, ValuePremium: 0, ReplyHash: replyHash}, mp, rbps, sent, []byte("null")) == "" {
-		t.Error("wrong value_premium must be quarantined")
+	if remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, ValuePremium: 5, ReplyHash: replyHash}, mp, rbps, []byte("null")) == "" {
+		t.Error("a success levying a value premium must be quarantined")
 	}
-	// Execution premium not levied on the charge (charge 0 ⇒ premium must be 0).
-	if remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: 0, Value: 100, Premium: 5, ValuePremium: 5, ReplyHash: replyHash}, mp, rbps, sent, []byte("null")) == "" {
-		t.Error("wrong execution premium must be quarantined")
+	if remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0, Value: 100}, mp, rbps, nil) == "" {
+		t.Error("a failure delivering value must be quarantined")
 	}
-	// A failed transfer must deliver nothing.
-	if remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0, Value: 100}, mp, rbps, sent, nil) == "" {
-		t.Error("failure with delivered value must be quarantined")
-	}
-	if remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0, Value: 0}, mp, rbps, sent, nil) != "" {
-		t.Error("failure with no value must settle")
+	if remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0}, mp, rbps, nil) != "" {
+		t.Error("a value-free failure must settle")
 	}
 }
 
@@ -939,8 +931,6 @@ func manifestFixtures() []struct {
 	withBPS.RemoteBPS = 500
 	withNested := base
 	withNested.InputSchema, withNested.OutputSchema = nested, nested
-	withEffect := base
-	withEffect.Effect = "transfer"
 	renamed := base
 	renamed.OwnerHandle = "alice-renamed" // display metadata: must NOT change the hash
 	return []struct {
@@ -951,7 +941,6 @@ func manifestFixtures() []struct {
 		{"zero-bps", base, "b909e43f663733f19c202805bda8be0b3ce5fb2f4285de1d5135eb0198c0012b"},
 		{"remote-bps-500", withBPS, "ebed5d1fc13f043ece714a5e341c69d37255eddca9f2ca8d79f35761ef6f4252"},
 		{"nested-schemas", withNested, "ec8e5e5f130550f733f4e45e56ce552dc87b35a1517b01537f4bf1edc4e0793e"},
-		{"transfer-effect", withEffect, "9fb2028b5cc595f099d3329f4e07235457c22e768e2d97aa1ed2b7bc7919aba0"},
 		// A display-only handle rename must hash identically to the base fixture.
 		{"owner-handle-renamed", renamed, "b909e43f663733f19c202805bda8be0b3ce5fb2f4285de1d5135eb0198c0012b"},
 	}

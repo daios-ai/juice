@@ -32,34 +32,46 @@ func requireBareHandle(h string) error {
 	return nil
 }
 
+// requireKernelName resolves the handle this kernel presents to the network (§12, §13): the
+// configured value, else JUICE_BOOTSTRAP_KERNEL_HANDLE, else a prompt that repeats until a name is
+// given. There is no derived fallback — an unnamed kernel is a configuration error, not a default.
+func requireKernelName() (string, error) {
+	name := globalCfg.KernelHandle
+	if name == "" {
+		name = strings.TrimSpace(os.Getenv("JUICE_BOOTSTRAP_KERNEL_HANDLE"))
+	}
+	for name == "" && term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprint(os.Stderr, "Kernel name — the handle this kernel presents to the network (required): ")
+		var line string
+		fmt.Fscanln(os.Stdin, &line)
+		name = strings.TrimSpace(line)
+	}
+	if name == "" {
+		return "", fmt.Errorf("kernel name is required: run interactively or set JUICE_BOOTSTRAP_KERNEL_HANDLE")
+	}
+	return name, requireBareHandle(name)
+}
+
 // On first boot (no superuser configured), it prompts for credentials interactively.
 func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec) error {
 	ctx := context.Background()
 
+	// The name is resolved BEFORE anything is written, so a boot that cannot be named leaves no
+	// half-created kernel behind: the next boot would find a superuser configured, skip first boot
+	// entirely, and have nowhere left to demand a name.
+	kernelName, err := requireKernelName()
+	if err != nil {
+		return err
+	}
+	if kernelName != globalCfg.KernelHandle {
+		globalCfg.KernelHandle = kernelName
+		_ = writeConfig(resolvedConfigPath, globalCfg)
+	}
+
 	handle, err := k.GetConfig(ctx, configKeySuperuser)
 	if err != nil || handle == "" {
-		handle, err = firstBoot(ctx, k)
-		if err != nil {
+		if handle, err = firstBoot(ctx, k); err != nil {
 			return err
-		}
-		// The kernel's network name is required at first boot — it's how the kernel presents itself
-		// to peers. From JUICE_BOOTSTRAP_KERNEL_HANDLE, else prompt until a non-empty name is given.
-		if globalCfg.KernelHandle == "" {
-			ph := os.Getenv("JUICE_BOOTSTRAP_KERNEL_HANDLE")
-			for ph == "" && term.IsTerminal(int(os.Stdin.Fd())) {
-				fmt.Fprint(os.Stderr, "Kernel name — the handle this kernel presents to the network (required): ")
-				var line string
-				fmt.Fscanln(os.Stdin, &line)
-				ph = strings.TrimSpace(line)
-			}
-			if ph == "" {
-				return fmt.Errorf("kernel name is required at first boot: run interactively or set JUICE_BOOTSTRAP_KERNEL_HANDLE")
-			}
-			if err := requireBareHandle(ph); err != nil {
-				return err
-			}
-			globalCfg.KernelHandle = ph
-			_ = writeConfig(resolvedConfigPath, globalCfg)
 		}
 	}
 
@@ -83,18 +95,6 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec) er
 	derivedPub := ed25519.PrivateKey(privKeyBytes).Public().(ed25519.PublicKey)
 	if !derivedPub.Equal(ed25519.PublicKey(pubKeyBytes)) {
 		return fmt.Errorf("signing_public_key does not match signing_private_key")
-	}
-
-	// Fallback for a pre-existing DB that predates the required-name boot and still has no handle:
-	// a distinct key-derived name, never the shared "sys". Fresh boots always set a name above.
-	if globalCfg.KernelHandle == "" {
-		globalCfg.KernelHandle = "k-" + pubKeyB64[:8]
-		_ = writeConfig(resolvedConfigPath, globalCfg)
-	}
-	// Catch-all: a handle set from config.json bypasses the prompt-path check above, so reject a
-	// non-bare configured value before it is persisted to the DB and served in gossip (§3, §14).
-	if err := requireBareHandle(globalCfg.KernelHandle); err != nil {
-		return err
 	}
 
 	// Load the signing key and issuer user ID into the kernel.

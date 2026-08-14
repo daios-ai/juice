@@ -665,9 +665,10 @@ flow_settlement() {
     assert_json "settlement.idempotent" "$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r)" status settled
 }
 
-# flow_transfer exercises federated value transfer (§13): alice@L sends credits to bob@R by calling
-# R's sys/transfer proxy. The amount rides the call through L's funding, R's exposure admission, the
-# signed receipt, and settlement — alice is debited amount+fees, bob is credited exactly the amount.
+# flow_transfer exercises the value channel across a federated pair (§13). Value is LOCAL to a kernel:
+# alice pays bob on their own kernel, the amount leaving her balance untaxed and arriving in full,
+# while the peer R is present to prove the channel stops at the boundary — its stdlib is never served
+# abroad, so no kernel-qualified transfer resolves and no local funds move on the attempt.
 flow_transfer() {
     echo "=== FLOW transfer ==="
     local dir; dir=$(new_dir)
@@ -702,13 +703,14 @@ flow_transfer() {
     j "$FED_DBL" "$ahome" run sys/transfer '{"target":"bob","amount":100000}' >/dev/null 2>&1 || true
     assert_eq "transfer.underfunded_no_charge" 900 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
 
-    # The stdlib is local (§9), so R serves no manifest for sys/transfer: the kernel-qualified form
-    # does not resolve, and the refusal costs the caller nothing.
+    # Value does not cross a kernel boundary (§13). The stdlib is local (§9), so R serves no manifest
+    # for sys/transfer: the kernel-qualified form does not resolve, and the refusal costs nothing.
     assert_fails "transfer.remote_native_not_served" "not found\|not available\|error" -- \
         j "$FED_DBL" "$ahome" run "sys@$rkey/transfer" '{"target":"bob","amount":10}'
     assert_eq "transfer.remote_refusal_no_charge" 900 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
 
-    # The admin transfers surface is wired end-to-end (route + superuser gate + CLI): no buyer-side
-    # payment steps here, so the unresolved list is empty (§13).
-    assert_eq "transfer.admin_list_empty" "[]" "$(jj "$FED_DBL" "$FED_HL" admin transfer list)"
+    # Nor by naming a beneficiary on another kernel: the target is a bare local handle, always.
+    assert_fails "transfer.qualified_target_rejected" "invalid\|not found\|error" -- \
+        j "$FED_DBL" "$ahome" run sys/transfer "{\"target\":\"bob@$rkey\",\"amount\":10}"
+    assert_eq "transfer.qualified_target_no_charge" 900 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
 }

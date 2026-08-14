@@ -363,11 +363,11 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		return nil, ErrInvalidInput.Wrap("merged args are not a valid JSON object")
 	}
 
-	// Value transfer (§13): a payment step is a Step whose action bears the transfer effect, completed
-	// by the required caller. Stage the inbound TransferEffect over the merged args so BeginStepCall
-	// locks the value reserve from the completer's own balance (a peer completer's proxy row, against
-	// exposure) atomic with claiming the step, and settlement credits the beneficiary — the buyer funds
-	// the value, the step's execution price stays creator-parked. Nil for a non-transfer step.
+	// Value transfer (§13): a Step whose action bears the transfer effect delivers value on completion.
+	// Stage it over the merged args so BeginStepCall locks the value from the completer's own balance
+	// atomic with claiming the step, and settlement credits the beneficiary — the completer funds the
+	// value, the step's execution price stays creator-parked. A peer completer is refused (value is
+	// local to a kernel), and a non-transfer step stages nothing.
 	eff, err := k.prepareTransferEffect(ctx, caller.IsPeer(), action, args)
 	if err != nil {
 		return nil, err
@@ -384,10 +384,9 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		CreatedAt:     time.Now().UTC(),
 	}
 	if eff != nil {
-		// The value premium (for a peer completer) is baked into eff.Reserve; the receipt derives it as
-		// value_reserve−value, so no PremiumBPS snapshot is needed and the completer pays no EXECUTION
-		// premium (the step's price was creator-parked, not funded across the wire).
-		stepTrace.Value, stepTrace.ValueTo, stepTrace.ValueReserve = eff.Amount, eff.Dest, eff.Reserve
+		// No PremiumBPS snapshot: the completer pays no execution premium either, since the step's price
+		// was creator-parked rather than funded across the wire.
+		stepTrace.Value, stepTrace.ValueTo = eff.Amount, eff.Dest
 	}
 	// Same as a root call (kernel.go): the inbound record rides on the trace so any settlement
 	// completes it, for every action kind rather than only remote proxies.
@@ -410,7 +409,7 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		if step.ImportBPS != nil {
 			ibps = *step.ImportBPS
 		}
-		stepTrace.DispatchJSON = marshalDispatch(args, stepID, actionBasePrice(action), 0, step.Price, action.ArtifactHash, actionRemoteBPS(action), ibps)
+		stepTrace.DispatchJSON = marshalDispatch(args, stepID, actionBasePrice(action), step.Price, action.ArtifactHash, actionRemoteBPS(action), ibps)
 	}
 	// A lost waiting→running CAS already carries ErrStepNotClaimed from the store, which marks
 	// only the two genuine claim races. Deliberately NOT relabelled here: BeginStepCall also

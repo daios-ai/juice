@@ -67,6 +67,135 @@ func legacyChainDB(t *testing.T) string {
 	return path
 }
 
+// preValueMigrationDB builds a database at exactly the state before 043 — the baseline applied and
+// stamped, nothing after — so the value-channel migration reaches the runner with real rows to guard.
+// Built RAW, never through Open, because Open is what is under test. seed runs against that state.
+func preValueMigrationDB(t *testing.T, seed func(*sql.DB)) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "pre043.db")
+	raw := rawDB(t, path)
+	if _, err := raw.Exec(createSchemaMigrations); err != nil {
+		t.Fatal(err)
+	}
+	body, err := migrationFS.ReadFile("migrations/001_baseline.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range splitSQLStatements(string(body)) {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("seed baseline: %v", err)
+		}
+	}
+	if _, err := raw.Exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
+		baselineVersion, timeToStr(time.Now().UTC())); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO "accounts" (id,handle,available,locked,created_at,updated_at)
+		VALUES ('u1','alice',0,500,?,?)`, timeToStr(time.Now().UTC()), timeToStr(time.Now().UTC())); err != nil {
+		t.Fatal(err)
+	}
+	seed(raw)
+	raw.Close()
+	return path
+}
+
+// TestValueMigrationRefusesToStrandFunds: the value channel became local, and 043 drops the records
+// the cross-kernel legs used. Locked funds must never go with them, so the migration aborts — the
+// kernel refuses to start — while an unresolved payment reserve or a cross-kernel value lock exists,
+// leaving the operator to drain it first. A database with neither upgrades.
+func TestValueMigrationRefusesToStrandFunds(t *testing.T) {
+	now := timeToStr(time.Now().UTC())
+	for _, tc := range []struct {
+		name    string
+		seed    func(*sql.DB)
+		wantErr bool
+	}{
+		{"unresolved payment reserve", func(raw *sql.DB) {
+			if _, err := raw.Exec(`INSERT INTO pending_transfers
+				(id,buyer_id,peer_key,step_id,input_hash,input,idempotency_key,beneficiary,amount,remote_max,reserve,status,created_at,updated_at)
+				VALUES ('pt1','u1','peerkey','s1','h','{}','idem','benef',100,105,110,'pending',?,?)`, now, now); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"quarantined payment reserve", func(raw *sql.DB) {
+			if _, err := raw.Exec(`INSERT INTO pending_transfers
+				(id,buyer_id,peer_key,step_id,input_hash,input,idempotency_key,beneficiary,amount,remote_max,reserve,status,created_at,updated_at)
+				VALUES ('pt2','u1','peerkey','s2','h','{}','idem2','benef',100,105,110,'quarantined',?,?)`, now, now); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"unsettled cross-kernel value lock", func(raw *sql.DB) {
+			if _, err := raw.Exec(`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at)
+				VALUES ('p1','u1',0,0,'open',?)`, now); err != nil {
+				t.Fatal(err)
+			}
+			// reserve > value: the difference was cross-kernel value fees, and no transaction settled it.
+			if _, err := raw.Exec(`INSERT INTO "traces" (id,process_id,caller_user_id,available,locked,value,value_reserve,created_at)
+				VALUES ('t1','p1','u1',0,0,100,110,?)`, now); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"fee-free outbound value lock", func(raw *sql.DB) {
+			// remote_bps and import_bps may both be 0, so an outbound reserve equals the value exactly:
+			// the amounts are indistinguishable from a local transfer and only the shape gives it away
+			// (no local beneficiary). Post-migration nothing would deliver it, so it must be drained.
+			if _, err := raw.Exec(`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at)
+				VALUES ('p3','u1',0,0,'open',?)`, now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(`INSERT INTO "traces" (id,process_id,caller_user_id,available,locked,value,value_reserve,value_to,created_at)
+				VALUES ('t3','p3','u1',0,0,100,100,'',?)`, now); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"peer-funded value lock", func(raw *sql.DB) {
+			// An inbound transfer funded from a peer's row, again with zero fees. A peer funds no
+			// transfer now, so this lock has no settlement path.
+			if _, err := raw.Exec(`INSERT INTO kernels (public_key,first_seen,updated_at) VALUES ('peerkey',?,?)`,
+				now, now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(`INSERT INTO "accounts" (id,kernel_public_key,available,locked,created_at,updated_at)
+				VALUES ('peer1','peerkey',0,100,?,?)`, now, now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at)
+				VALUES ('p4','peer1',0,0,'open',?)`, now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(`INSERT INTO "traces" (id,process_id,caller_user_id,available,locked,value,value_reserve,value_to,created_at)
+				VALUES ('t4','p4','peer1',0,0,100,100,'u1',?)`, now); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"settled local value", func(raw *sql.DB) {
+			if _, err := raw.Exec(`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at)
+				VALUES ('p2','u1',0,0,'open',?)`, now); err != nil {
+				t.Fatal(err)
+			}
+			// A local lock is exactly the delivered value, so it releases identically without the column.
+			if _, err := raw.Exec(`INSERT INTO "traces" (id,process_id,caller_user_id,available,locked,value,value_reserve,value_to,created_at)
+				VALUES ('t2','p2','u1',0,0,100,100,'u1',?)`, now); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := preValueMigrationDB(t, tc.seed)
+			db, err := Open(path)
+			if db != nil {
+				defer db.Close()
+			}
+			if tc.wantErr && err == nil {
+				t.Fatal("migration applied while funds were still locked: money would be stranded")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("migration refused a drainable database: %v", err)
+			}
+		})
+	}
+}
+
 // rawDB opens a connection that bypasses the migration runner entirely.
 func rawDB(t *testing.T, path string) *sql.DB {
 	t.Helper()
@@ -1004,7 +1133,7 @@ func TestTransferEffectFundsFromCaller(t *testing.T) {
 	// 0 (funded from the parent trace); the value reserve 100 is locked from C's own balance.
 	sub := &kernel.Trace{
 		ID: uuid.New().String(), ProcessID: p.ID, CallerUserID: C.ID,
-		Value: 100, ValueTo: B.ID, ValueReserve: 100, CreatedAt: time.Now().UTC(),
+		Value: 100, ValueTo: B.ID, CreatedAt: time.Now().UTC(),
 	}
 	if err := db.BeginSubcall(ctx, parent.ID, sub, 0); err != nil {
 		t.Fatal(err)
@@ -1067,7 +1196,7 @@ func TestTransferEffectRefundedOnFailure(t *testing.T) {
 	}
 	sub := &kernel.Trace{
 		ID: uuid.New().String(), ProcessID: p.ID, CallerUserID: C.ID,
-		Value: 100, ValueTo: B.ID, ValueReserve: 100, CreatedAt: time.Now().UTC(),
+		Value: 100, ValueTo: B.ID, CreatedAt: time.Now().UTC(),
 	}
 	if err := db.BeginSubcall(ctx, parent.ID, sub, 0); err != nil {
 		t.Fatal(err)
@@ -1094,155 +1223,6 @@ func TestTransferEffectRefundedOnFailure(t *testing.T) {
 	}
 }
 
-// TestPendingTransferSettlement is the buyer-side payment-step reserve (§13): InsertPendingTransfer
-// locks max_total from the buyer; CommitPendingTransfer settles value+value_premium to the peer proxy
-// row and value_import to sys, refunding the remainder; RefundPendingTransfer returns the whole reserve;
-// SetPendingTransferStatus('quarantined') leaves it LOCKED.
-func TestPendingTransferSettlement(t *testing.T) {
-	ctx := context.Background()
-	// amount 100, rbps/ibps 500: value_premium 5, remote_max 105, value_import 6, max_total 111.
-	mk := func(t *testing.T) (*DB, *kernel.Account, *kernel.Account, *kernel.Account, *kernel.PendingTransfer) {
-		db := openTestDB(t)
-		buyer := newUser("buyer", 1000)
-		proxyA := newUser("proxy-a", 0)
-		sys := newUser("sys", 0)
-		for _, u := range []*kernel.Account{buyer, proxyA, sys} {
-			if err := db.CreateUser(ctx, u); err != nil {
-				t.Fatal(err)
-			}
-		}
-		pt := &kernel.PendingTransfer{
-			ID: uuid.New().String(), BuyerID: buyer.ID, PeerKey: "keyA", StepID: "s1",
-			InputHash: "ih", Input: json.RawMessage(`{}`), IdempotencyKey: uuid.New().String(), Beneficiary: "benef",
-			Amount: 100, RemoteMax: 105, Reserve: 111, CreatedAt: time.Now().UTC(),
-		}
-		if err := db.InsertPendingTransfer(ctx, pt); err != nil {
-			t.Fatal(err)
-		}
-		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 889 || b.Locked != 111 {
-			t.Fatalf("after admit buyer: got available=%d locked=%d, want 889/111", b.Available, b.Locked)
-		}
-		return db, buyer, proxyA, sys, pt
-	}
-
-	t.Run("settle", func(t *testing.T) {
-		db, buyer, proxyA, sys, pt := mk(t)
-		if err := db.CommitPendingTransfer(ctx, pt.ID, proxyA.ID, 105, sys.ID, 6); err != nil {
-			t.Fatal(err)
-		}
-		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 889 || b.Locked != 0 {
-			t.Errorf("settled buyer: got available=%d locked=%d, want 889/0", b.Available, b.Locked)
-		}
-		if p, _ := db.ReadUser(ctx, proxyA.ID); p.Available != 105 {
-			t.Errorf("proxy row (buyer owes A): got %d, want 105", p.Available)
-		}
-		if su, _ := db.ReadUser(ctx, sys.ID); su.Available != 6 {
-			t.Errorf("sys value_import: got %d, want 6", su.Available)
-		}
-	})
-
-	t.Run("refund", func(t *testing.T) {
-		db, buyer, _, _, pt := mk(t)
-		if err := db.RefundPendingTransfer(ctx, pt.ID); err != nil {
-			t.Fatal(err)
-		}
-		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 1000 || b.Locked != 0 {
-			t.Errorf("refunded buyer: got available=%d locked=%d, want 1000/0", b.Available, b.Locked)
-		}
-	})
-
-	t.Run("quarantine keeps reserve locked", func(t *testing.T) {
-		db, buyer, _, _, pt := mk(t)
-		if err := db.SetPendingTransferStatus(ctx, pt.ID, "quarantined", "receipt value != amount"); err != nil {
-			t.Fatal(err)
-		}
-		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 889 || b.Locked != 111 {
-			t.Errorf("quarantined buyer must stay locked: got available=%d locked=%d, want 889/111", b.Available, b.Locked)
-		}
-		// A later commit/refund on a non-pending record is a no-op (idempotent disposition).
-		if err := db.RefundPendingTransfer(ctx, pt.ID); err != nil {
-			t.Fatal(err)
-		}
-		if b, _ := db.ReadUser(ctx, buyer.ID); b.Available != 889 {
-			t.Errorf("refund after quarantine must be a no-op: got %d, want 889", b.Available)
-		}
-	})
-}
-
-// TestPendingTransferListing covers the operator surface (§13): the default list returns only the
-// UNRESOLVED records (pending + quarantined), a status filter selects one status, read-by-id works,
-// quarantine records a last_error, and updated_at advances on a status transition.
-func TestPendingTransferListing(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	buyer := newUser("buyer", 1000)
-	if err := db.CreateUser(ctx, buyer); err != nil {
-		t.Fatal(err)
-	}
-	seed := func(t *testing.T) *kernel.PendingTransfer {
-		t.Helper()
-		pt := &kernel.PendingTransfer{
-			ID: uuid.New().String(), BuyerID: buyer.ID, PeerKey: "keyA", StepID: "s1",
-			InputHash: "ih", Input: json.RawMessage(`{}`), IdempotencyKey: uuid.New().String(),
-			Beneficiary: "benef", Amount: 10, RemoteMax: 11, Reserve: 12, CreatedAt: time.Now().UTC(),
-		}
-		if err := db.InsertPendingTransfer(ctx, pt); err != nil {
-			t.Fatal(err)
-		}
-		return pt
-	}
-	pending := seed(t)
-	quarantined := seed(t)
-	refunded := seed(t)
-	if err := db.SetPendingTransferStatus(ctx, quarantined.ID, "quarantined", "receipt value != amount"); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.RefundPendingTransfer(ctx, refunded.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	// Default (empty status) = unresolved only: pending + quarantined, never the refunded (terminal) one.
-	got, err := db.ListPendingTransfers(ctx, "", 50, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ids := map[string]string{}
-	for _, pt := range got {
-		ids[pt.ID] = pt.Status
-	}
-	if len(got) != 2 || ids[pending.ID] != "pending" || ids[quarantined.ID] != "quarantined" {
-		t.Fatalf("default list must be unresolved only, got %v", ids)
-	}
-	if _, ok := ids[refunded.ID]; ok {
-		t.Error("default list must not include a refunded (terminal) record")
-	}
-
-	// A status filter selects exactly that status.
-	ref, _ := db.ListPendingTransfers(ctx, "refunded", 50, 0)
-	if len(ref) != 1 || ref[0].ID != refunded.ID {
-		t.Errorf("status=refunded filter: got %v", ref)
-	}
-
-	// Read-by-id + quarantine metadata.
-	q, err := db.ReadPendingTransfer(ctx, quarantined.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if q.LastError != "receipt value != amount" {
-		t.Errorf("quarantine last_error: got %q", q.LastError)
-	}
-	if !q.UpdatedAt.After(q.CreatedAt) && !q.UpdatedAt.Equal(q.CreatedAt) {
-		t.Errorf("updated_at must be >= created_at, got created=%v updated=%v", q.CreatedAt, q.UpdatedAt)
-	}
-	if _, err := db.ReadPendingTransfer(ctx, "no-such-id"); !errors.Is(err, kernel.ErrNotFound) {
-		t.Errorf("read unknown id: want ErrNotFound, got %v", err)
-	}
-}
-
-// TestPremiumReserveReleasedFromTrace is the F1 regression: the serving-markup reserve parked at
-// admission must be released from the trace's premium_parked snapshot at settlement — WITHOUT any
-// in-memory request — so crash-recovery / forced-closure failure paths (which rebuild the request
-// with no rate) never leak it in owner.locked. Here a peer-owner root call parks a reserve, then
 // CommitFailedCall (the recovery settle op) fully restores the balance.
 func TestPremiumReserveReleasedFromTrace(t *testing.T) {
 	db := openTestDB(t)
@@ -3811,7 +3791,7 @@ func TestCommitRemoteSettlementStoresFailureResult(t *testing.T) {
 		Status: "failure", Gross: 10, StartedAt: now, CreatedAt: now,
 	}
 	if err := db.CommitRemoteSettlement(ctx, ktx, receipt, root.ID, p.ID, kernel.CallerProcess,
-		proxy.ID, sys.ID, 0, 0, kernel.ValueSettlement{}, &kernel.Stats{ActionID: act.ID}, rec.ID, "", kernel.ErrExecutionFailed.Code); err != nil {
+		proxy.ID, sys.ID, 0, 0, &kernel.Stats{ActionID: act.ID}, rec.ID, "", kernel.ErrExecutionFailed.Code); err != nil {
 		t.Fatalf("CommitRemoteSettlement: %v", err)
 	}
 

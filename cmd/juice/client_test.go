@@ -29,21 +29,14 @@ func stubServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
 }
 
 func TestServerBaseURL(t *testing.T) {
-	oldServer, oldCfg := flagServer, globalCfg.ServerURL
-	t.Cleanup(func() { flagServer = oldServer; globalCfg.ServerURL = oldCfg })
+	oldServer := flagServer
+	t.Cleanup(func() { flagServer = oldServer })
 
-	flagServer, globalCfg.ServerURL = "", ""
-	t.Setenv("JUICE_SERVER", "")
+	// --server is the only override: no env var, no config key (§14).
+	flagServer = ""
+	t.Setenv("JUICE_SERVER", "http://env:2")
 	if got := serverBaseURL(); got != "http://localhost:4040" {
 		t.Fatalf("default: got %q", got)
-	}
-	globalCfg.ServerURL = "http://cfg:1/"
-	if got := serverBaseURL(); got != "http://cfg:1" {
-		t.Fatalf("config: got %q", got)
-	}
-	t.Setenv("JUICE_SERVER", "http://env:2")
-	if got := serverBaseURL(); got != "http://env:2" {
-		t.Fatalf("env: got %q", got)
 	}
 	flagServer = "http://flag:3/"
 	if got := serverBaseURL(); got != "http://flag:3" {

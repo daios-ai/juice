@@ -518,9 +518,6 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Get("/control/peers", srv.ctlListPeers)
 		r.Get("/control/peers/inspect", srv.ctlInspectPeer)
 		r.Get("/control/identity", srv.ctlIdentity)
-		r.Get("/control/transfers", srv.ctlListTransfers)
-		r.Get("/control/transfers/{id}", srv.ctlShowTransfer)
-		r.Post("/control/transfers/{id}/retry", srv.ctlRetryTransfer)
 	})
 }
 
@@ -1149,7 +1146,7 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return nil, 0, err
 			}
-			body, err := s.kernel.CompletePeerStep(r.Context(), peerKey, pathID(r), *req.Args, forUserID, forUserID)
+			body, err := s.kernel.CompletePeerStep(r.Context(), peerKey, pathID(r), *req.Args, forUserID)
 			return body, http.StatusOK, err
 		}
 		// Under a capability the caller is the executing action's owner (§9); CompleteStep still
@@ -1313,8 +1310,8 @@ func healthCmd() *cobra.Command {
 		Use:   "health",
 		Short: "Check server health",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			// Resolve the target through the single client resolver (§14: --server / JUICE_SERVER /
-			// server_url), like every other command — no bespoke URL that could hit another kernel.
+			// Resolve the target through the single client resolver (§14: --server), like every
+			// other command — no bespoke URL that could hit another kernel.
 			base := serverBaseURL()
 			resp, err := http.Get(base + "/health") //nolint:noctx
 			if err != nil {

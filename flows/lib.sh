@@ -61,9 +61,9 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-# write_config db [key=value ...]  — config.json next to db. server_url is intentionally
-# empty (CLI dials the real bound address). log_format is json so `server.ready` is
-# machine-readable. bootstrap_peers seeds the federation transport (§13); empty = no discovery.
+# write_config db [key=value ...]  — config.json next to db. The CLI dials the real bound address
+# via --server (see the wrappers below). log_format is json so `server.ready` is machine-readable.
+# bootstrap_peers seeds the federation transport (§13); empty = no discovery.
 # Keys: fee_bps import_bps script_timeout_ms kernel_handle bootstrap_peers.
 write_config() {
     local db="$1"; shift
@@ -97,7 +97,6 @@ write_config() {
   "log_level": "info",
   "log_format": "json",
   "allow_local_sources": true,
-  "server_url": "",
   "kernel_handle": "$kernel_handle",
   "bootstrap_peers": $bp_json,
   "remote_retry_interval_seconds": $remote_retry_interval_seconds,
@@ -161,12 +160,13 @@ stop_server() {
 }
 
 # ---------------------------------------------------------------------------
-# CLI wrappers — always the built binary, targeting the db's server.
-# admin/peer commands are TCP clients too now: they use JUICE_SERVER (set below) and hit
-# superuser-gated routes on the same public API as user commands.
+# CLI wrappers — always the built binary, targeting the db's server via --server.
+# admin/peer commands are TCP clients too: they hit superuser-gated routes on the same public API
+# as user commands.
 # ---------------------------------------------------------------------------
-j()  { local db="$1" home="$2"; shift 2; HOME="$home" JUICE_SERVER="${SERVER_URL[$db]:-}" "$JUICE" --db "$db" "$@" 2>&1; }
-jj() { local db="$1" home="$2"; shift 2; HOME="$home" JUICE_SERVER="${SERVER_URL[$db]:-}" "$JUICE" --db "$db" --json "$@" 2>/dev/null; }
+_srv() { local db="$1"; [ -n "${SERVER_URL[$db]:-}" ] && printf -- '--server\n%s\n' "${SERVER_URL[$db]}"; }
+j()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" --db "$db" "${a[@]}" "$@" 2>&1; }
+jj() { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" --db "$db" "${a[@]}" --json "$@" 2>/dev/null; }
 
 # url db — the base URL of db's server (for curl-based HTTP-only assertions).
 url() { echo "${SERVER_URL[$1]:-}"; }

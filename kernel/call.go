@@ -160,8 +160,10 @@ func quoteTermsOfAction(a *Action) quoteTerms {
 // quoteTermsOfDoc projects a gossiped discovery doc onto the same quote at the all-in price shown,
 // so a discovered hit and the proxy it resolves to hash identically (§15).
 func quoteTermsOfDoc(d *DiscoveryDoc, price int64) quoteTerms {
+	// Effect stays at its zero value: the value channel is local to a kernel, so no manifest declares
+	// one and a discovered action is never effect-bearing (§13).
 	return quoteTerms{
-		ActionID: d.ActionID, Effect: d.Effect, Description: d.Description,
+		ActionID: d.ActionID, Description: d.Description,
 		InputSchema: d.InputSchema, OutputSchema: d.OutputSchema, Price: price,
 	}
 }
@@ -516,21 +518,15 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		return nil, verr
 	}
 	if eff != nil {
-		trace.Value = eff.Amount
-		trace.ValueTo = eff.Dest
-		trace.ValueReserve = eff.Reserve
+		trace.Value, trace.ValueTo = eff.Amount, eff.Dest
 	}
 	if action.Kind == KindRemoteProxy {
 		// The seller's own price, kept on the row since it was resolved — never reverse-calculated
 		// from the rounded local total, which cannot recover it exactly (§16).
 		mp = actionBasePrice(action)
-		var value int64
-		if eff != nil {
-			value = eff.Amount
-		}
 		key := uuid.New().String()
 		trace.IdempotencyKey = &key
-		trace.DispatchJSON = marshalDispatch(req.Args, req.StepID, mp, value, lockPrice, action.ArtifactHash, actionRemoteBPS(action), k.cfg.ImportBPS)
+		trace.DispatchJSON = marshalDispatch(req.Args, req.StepID, mp, lockPrice, action.ArtifactHash, actionRemoteBPS(action), k.cfg.ImportBPS)
 	}
 
 	callerWalletID, callerWalletKind := k.callerWallet(req, process, parentTrace)
@@ -686,17 +682,10 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	ktx.Fee = fee
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
 	// Two independent channels (§13). The EXECUTION premium is levied on the charge (= gross) at the
-	// rate snapshotted on the trace, and released from premium_parked at settlement. The VALUE premium
-	// is the serving markup baked into the value reserve at admission — value_reserve − value — so the
-	// receipt's value_premium is exactly what commitTraceTransferEffect settles to sys, for every
-	// caller (a local caller reserves exactly value ⇒ 0; a peer/step completer reserves value+markup).
-	// Both computed separately; never on charge+value (the rounding-merge is the bug).
+	// rate snapshotted on the trace, and released from premium_parked at settlement. The VALUE channel
+	// is local and untaxed, so it carries no premium: the receipt records exactly what was delivered.
 	premium := ceilDiv(ktx.Gross*trace.PremiumBPS, 10000)
-	var valuePremium int64
-	if trace.ValueTo != "" && trace.ValueReserve > trace.Value {
-		valuePremium = trace.ValueReserve - trace.Value
-	}
-	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium, trace.Value, valuePremium, trace.ValueTo) // success: charge = gross, value delivered
+	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium, trace.Value, 0, trace.ValueTo) // success: charge = gross, value delivered
 	if receiptErr != nil {
 		mu.Unlock()
 		// Same as the post-execution read failure above: the settlement committed, so its receipt is
@@ -745,13 +734,12 @@ func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
 	trace.IdempotencyKey = dbTrace.IdempotencyKey
 	trace.DispatchJSON = dbTrace.DispatchJSON
 	// The serving-markup and value-transfer snapshots (§13) ride on the funded root trace; carry them
-	// into the adopted trace so the receipt levies the correct premium/value and the reserve is
-	// released to the beneficiary and sys at settlement.
+	// into the adopted trace so the receipt levies the correct premium and the value is released to its
+	// beneficiary at settlement.
 	trace.PremiumBPS = dbTrace.PremiumBPS
 	trace.PremiumParked = dbTrace.PremiumParked
 	trace.Value = dbTrace.Value
 	trace.ValueTo = dbTrace.ValueTo
-	trace.ValueReserve = dbTrace.ValueReserve
 	return dbTrace.Available
 }
 

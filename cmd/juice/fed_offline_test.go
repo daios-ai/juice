@@ -310,7 +310,7 @@ func TestCompletePeerStep_DerivesTheIdempotencyKey(t *testing.T) {
 
 	sentKey := func(stepID string, input string) string {
 		t.Helper()
-		if _, err := srv.kernel.CompletePeerStep(ctx, peerKey, stepID, json.RawMessage(input), "", ""); err != nil {
+		if _, err := srv.kernel.CompletePeerStep(ctx, peerKey, stepID, json.RawMessage(input), ""); err != nil {
 			t.Fatalf("CompletePeerStep: %v", err)
 		}
 		return f.lastStep.IdempotencyKey
@@ -341,7 +341,7 @@ func TestCompletePeerStep_SignsTheBytesItSends(t *testing.T) {
 	srv, key := peerStepServer(t, f)
 
 	pretty := json.RawMessage("{\n  \"city\": \"Rio\",\n  \"note\": \"a<b&c\"\n}")
-	if _, err := srv.kernel.CompletePeerStep(context.Background(), key, "s1", pretty, "", ""); err != nil {
+	if _, err := srv.kernel.CompletePeerStep(context.Background(), key, "s1", pretty, ""); err != nil {
 		t.Fatalf("CompletePeerStep: %v", err)
 	}
 
@@ -383,9 +383,9 @@ func TestCompletePeerStep_SurvivesAMalformedStepList(t *testing.T) {
 			f := &fakeFed{stepBody: json.RawMessage(`{"tx_id":"tx-9"}`), stepStatus: 200,
 				stepListBody: json.RawMessage(tc.list)}
 			srv, peerKey := peerStepServer(t, f)
-			// Must not panic, and must still complete: an unreadable list means no payment binding.
+			// Must not panic, and must still complete: the key is derived from the request alone.
 			if _, err := srv.kernel.CompletePeerStep(context.Background(), peerKey, "s1",
-				json.RawMessage(`{}`), "", ""); err != nil {
+				json.RawMessage(`{}`), ""); err != nil {
 				t.Fatalf("CompletePeerStep: %v", err)
 			}
 		})
@@ -407,7 +407,7 @@ func TestCompletePeerStep_DistinguishesNeverSentFromMayHaveRun(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, key := peerStepServer(t, tc.fed)
-			_, err := srv.kernel.CompletePeerStep(context.Background(), key, "s1", json.RawMessage(`{}`), "", "")
+			_, err := srv.kernel.CompletePeerStep(context.Background(), key, "s1", json.RawMessage(`{}`), "")
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("got %v, want %v", err, tc.want)
 			}

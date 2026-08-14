@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/go-chi/chi/v5"
@@ -238,7 +237,7 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Flag debtor counterparties when global gross receivables have reached Y (display only, FIX 3).
-	if globalCfg.SettlementTrigger > 0 {
+	if settlementDueConfigured() {
 		if gross, err := s.kernel.GrossReceivables(r.Context()); err == nil && gross >= globalCfg.SettlementTrigger {
 			for _, v := range views {
 				if v.HasAccount && v.Available < 0 {
@@ -352,77 +351,11 @@ func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, erro
 	return "", kernel.ErrNotFound.Wrapf("no peer %q", ident)
 }
 
-// pendingTransferView is the operator-facing shape of a pending_transfers record (§13): operational
-// fields only — never the idempotency key, raw input bytes, buyer user-id, or receipt internals.
-type pendingTransferView struct {
-	ID            string    `json:"id"`
-	Status        string    `json:"status"`
-	BuyerHandle   string    `json:"buyer_handle"`
-	PeerHandle    string    `json:"peer_handle"`
-	PeerPublicKey string    `json:"peer_public_key"`
-	Beneficiary   string    `json:"beneficiary"`
-	Amount        int64     `json:"amount"`
-	Reserve       int64     `json:"reserve"`
-	StepID        string    `json:"step_id"`
-	LastError     string    `json:"last_error,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
-}
-
-// transferView enriches a record with display handles (buyer, peer) resolved locally. `beneficiary` is
-// the serving kernel's stable user id as stored — identity, not a locally-resolvable display handle.
-func (s *server) transferView(ctx context.Context, pt *kernel.PendingTransfer) pendingTransferView {
-	v := pendingTransferView{
-		ID: pt.ID, Status: pt.Status, PeerPublicKey: pt.PeerKey, Beneficiary: pt.Beneficiary,
-		Amount: pt.Amount, Reserve: pt.Reserve, StepID: pt.StepID, LastError: pt.LastError,
-		CreatedAt: pt.CreatedAt, UpdatedAt: pt.UpdatedAt,
-	}
-	if buyer, err := s.kernel.ResolveUser(ctx, pt.BuyerID); err == nil && buyer != nil {
-		v.BuyerHandle = buyer.Handle
-	}
-	v.PeerHandle = s.kernel.KernelName(ctx, pt.PeerKey)
-	return v
-}
-
-// ctlListTransfers lists pending value-transfer records (§13 admin surface): an empty status returns the
-// unresolved records (pending + quarantined); an explicit status filters to that one.
-func (s *server) ctlListTransfers(w http.ResponseWriter, r *http.Request) {
-	limit, offset := listBounds(r)
-	pts, err := s.kernel.ListPendingTransfers(r.Context(), r.URL.Query().Get("status"), limit, offset)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	views := make([]pendingTransferView, 0, len(pts))
-	for _, pt := range pts {
-		views = append(views, s.transferView(r.Context(), pt))
-	}
-	writeJSON(w, http.StatusOK, views)
-}
-
-func (s *server) ctlShowTransfer(w http.ResponseWriter, r *http.Request) {
-	pt, err := s.kernel.ReadPendingTransfer(r.Context(), pathID(r))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.transferView(r.Context(), pt))
-}
-
-// ctlRetryTransfer re-presents the stored completion and returns the updated resource (§13). It is the
-// only mutation on the resource — quarantine means "evidence insufficient", not "operator may choose".
-func (s *server) ctlRetryTransfer(w http.ResponseWriter, r *http.Request) {
-	pt, err := s.kernel.ReadPendingTransfer(r.Context(), pathID(r))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	updated, err := s.kernel.RetryPendingTransfer(r.Context(), pt)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.transferView(r.Context(), updated))
+// settlementDueConfigured reports whether the settlement trigger Y can flag anything: only a kernel
+// that extends credit accrues receivables to settle, so at exposure_max 0 (prepaid-only) Y is inert
+// however it is configured (§13).
+func settlementDueConfigured() bool {
+	return globalCfg.ExposureMax > 0 && globalCfg.SettlementTrigger > 0
 }
 
 // ctlIdentity reports this kernel's federation identity: public key, handle, and libp2p listen
@@ -444,7 +377,7 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"handle": handle, "public_key": pub, "about": about, "addrs": addrs,
 		"exposure_max": globalCfg.ExposureMax, "settlement_trigger": globalCfg.SettlementTrigger,
 		"settlement_quantum": globalCfg.SettlementQuantum, "gross_receivables": gross,
-		"settlement_due": globalCfg.SettlementTrigger > 0 && gross >= globalCfg.SettlementTrigger})
+		"settlement_due": settlementDueConfigured() && gross >= globalCfg.SettlementTrigger})
 }
 
 // writeOr writes v as JSON on success, or the error otherwise.

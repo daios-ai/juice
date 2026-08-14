@@ -2183,22 +2183,23 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	// Value transfer (§13): sys/transfer is an ordinary priced action with one deferred, receipt-backed
 	// transfer effect. The execution channel (price) is the normal Call lifecycle, funded by the process;
 	// the value channel is an additive TransferEffect funded from the immediate caller C's OWN balance
-	// (here C == P, a root call) and settled to the beneficiary/peer, never taxed by ComputeFee.
+	// (here C == P, a root call) and delivered to the beneficiary untaxed.
 	eff, err := k.prepareTransferEffect(ctx, caller.IsPeer(), action, args)
 	if err != nil {
 		return nil, err
 	}
-	var value, valueReserve int64
+	var value int64
 	var valueTo string
 	if eff != nil {
-		value, valueReserve, valueTo = eff.Amount, eff.Reserve, eff.Dest
+		value, valueTo = eff.Amount, eff.Dest
 	}
 	// Global-exposure admission (§13). `lockPrice` funds the process (spendable, taxed at settlement) and
 	// is action.Price for every kind (already the two-step gross for a remote proxy). `premiumReserve` is
-	// the EXECUTION serving markup only, parked beyond it and released at settlement. The value reserve is
+	// the EXECUTION serving markup only, parked beyond it and released at settlement. The transfer value is
 	// funded separately from C's own row inside store.BeginRun (an atomic second lock on t.CallerUserID),
-	// so value never flows through the execution economics. A peer caller (C == P inbound) reserves
-	// W = price + premiumReserve + valueReserve against the exposure cap X; an ordinary caller prepays it.
+	// so value never flows through the execution economics — and never through exposure either, since a
+	// peer can fund no transfer (§13). A peer caller (C == P inbound) reserves W = price + premiumReserve
+	// against the exposure cap X; an ordinary caller prepays it plus the value.
 	lockPrice := action.Price
 	var premiumReserve, premiumBPS int64
 	if caller.IsPeer() {
@@ -2207,7 +2208,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 		// A peer with a paid probabilistic outcome still awaiting its rail record must finalize it
 		// before drawing new credit (§13). Fully-prepaid calls (available ≥ W) add no obligation and
 		// are unaffected; only credit-drawing calls are gated.
-		if w := lockPrice + premiumReserve + valueReserve; w > caller.Available {
+		if w := lockPrice + premiumReserve; w > caller.Available {
 			if pending, err := k.store.HasPendingSettlement(ctx, caller.ID); err != nil {
 				return nil, err
 			} else if pending {
@@ -2215,8 +2216,8 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 			}
 		}
 	} else {
-		if caller.Available < lockPrice+valueReserve {
-			return nil, ErrInsufficientFunds.Wrapf("user has %d credits, call costs %d", caller.Available, lockPrice+valueReserve)
+		if caller.Available < lockPrice+value {
+			return nil, ErrInsufficientFunds.Wrapf("user has %d credits, call costs %d", caller.Available, lockPrice+value)
 		}
 	}
 	now := time.Now().UTC()
@@ -2239,14 +2240,11 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 		PremiumParked: premiumReserve,
 		CreatedAt:     now,
 	}
-	// Snapshot the TransferEffect on the trace so every settlement path releases the value reserve
-	// config-independently (§13): the delivered amount, the resolved local beneficiary (empty for an
-	// outbound destination — settled against the remote receipt), and the reserve locked from C. All 0
-	// on a non-transfer call.
+	// Snapshot the TransferEffect on the trace so every settlement path releases the locked value
+	// config-independently (§13): the amount locked from C and the beneficiary it is delivered to.
+	// Both zero on a non-transfer call.
 	if eff != nil {
-		t.Value = value
-		t.ValueTo = valueTo
-		t.ValueReserve = valueReserve
+		t.Value, t.ValueTo = value, valueTo
 	}
 	// Persist the inbound cross-kernel record on the trace, for every action kind: whichever
 	// settlement resolves this call — commit, retry, max-age, forced closure, crash recovery —
@@ -2257,7 +2255,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	if action.Kind == KindRemoteProxy {
 		key := uuid.New().String()
 		t.IdempotencyKey = &key
-		t.DispatchJSON = marshalDispatch(args, "", actionBasePrice(action), value, lockPrice, action.ArtifactHash, actionRemoteBPS(action), k.cfg.ImportBPS)
+		t.DispatchJSON = marshalDispatch(args, "", actionBasePrice(action), lockPrice, action.ArtifactHash, actionRemoteBPS(action), k.cfg.ImportBPS)
 	}
 	if err := k.store.BeginRun(ctx, p, t, caller.ID, lockPrice, premiumReserve, k.cfg.ExposureMax); err != nil {
 		if caller.IsPeer() && errors.Is(err, ErrInsufficientFunds) {
@@ -2660,7 +2658,8 @@ func rankDense(qvec []float32, vecs map[string][]float32, oversample int, hit fu
 }
 
 // Lookup ranks active actions the caller may call by a hybrid of lexical (BM25) and semantic
-// (cosine) relevance, fused by reciprocal-rank fusion and weighted by observed quality (§9). The
+// (cosine) relevance, fused by reciprocal-rank fusion (§9). Ranking is by fused relevance alone:
+// stats-based quality weighting is under revision and temporarily removed (see the note below). The
 // embedder is optional: with none configured (or on embed failure) ranking degrades to the lexical
 // leg alone, so lookup still works on a kernel with no LLM. The formula is a tested baseline over
 // replaceable storage (§9/§16); brute-force cosine is acceptable at this scale.

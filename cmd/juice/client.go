@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/url"
-	"os"
 	"strings"
 
 	"github.com/daios-ai/juice/kernel"
@@ -26,13 +25,12 @@ func isTimeoutErr(err error) bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
-// serverBaseURL resolves the Juice server base URL for user-facing (client) commands:
-// --server, then JUICE_SERVER, then server_url in config, else http://localhost:4040.
+// serverBaseURL resolves the Juice server base URL for user-facing (client) commands: --server,
+// else the local kernel on http://localhost:4040. One override, because the CLI drives a kernel it
+// is co-located with — a second address is a federation identity, which is a key, not a URL (§13).
 func serverBaseURL() string {
-	for _, v := range []string{flagServer, os.Getenv("JUICE_SERVER"), globalCfg.ServerURL} {
-		if v != "" {
-			return strings.TrimRight(v, "/")
-		}
+	if flagServer != "" {
+		return strings.TrimRight(flagServer, "/")
 	}
 	return "http://localhost:4040"
 }

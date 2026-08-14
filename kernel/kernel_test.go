@@ -1303,7 +1303,7 @@ func TestTransfer(t *testing.T) {
 		t.Errorf("self-transfer: got %v, want ErrInvalidInput", err)
 	}
 
-	// Peer/proxy recipient (public_key set) rejected.
+	// Peer/proxy recipient (kernel_public_key set) rejected.
 	if err := st.UpsertKernel(ctx, "cGVlci1rZXk", "peer", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
@@ -2553,7 +2553,7 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 	ctx := context.Background()
 
 	target := setupUser(t, st, "target-local-fed", 0)
-	// A peer proxy user: a set public_key makes it a key account (a peer), funded so the denial is
+	// A peer proxy user: a set kernel_public_key makes it a key account (a peer), funded so the denial is
 	// on visibility, not balance.
 	if err := st.UpsertKernel(ctx, "cGVlci1sb2NhbC1mZWQ", "peer-local-fed", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)

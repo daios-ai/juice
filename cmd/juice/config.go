@@ -23,10 +23,11 @@ type NativeLookupConfig struct {
 	Price        int64 `json:"price"`
 }
 
-// NativeWebConfig holds configuration for the @sys/web native action.
+// NativeWebConfig holds configuration for the @sys/web native action. The User-Agent it sends is
+// derived from the binary's own version, not configured: it identifies the software making the
+// request, which is a fact about the build rather than an operator preference.
 type NativeWebConfig struct {
-	Price     int64  `json:"price"`
-	UserAgent string `json:"user_agent"`
+	Price int64 `json:"price"`
 }
 
 // NativePriceConfig is the whole configuration of a native whose only setting is its price —
@@ -98,7 +99,6 @@ type ServerConfig struct {
 	LogFile                    string       `json:"log_file"`
 	LogFormat                  string       `json:"log_format"`
 	AllowLocalSources          bool         `json:"allow_local_sources"`
-	ServerURL                  string       `json:"server_url"`                    // local base URL the CLI dials; never a federation identity (§14)
 	HTTPCallbackURL            string       `json:"http_callback_url"`             // base URL advertised to dispatched kind=http endpoints for capability callbacks (§9); "" ⇒ derive from listen address
 	KernelHandle               string       `json:"kernel_handle"`                 // handle this kernel presents in gossip (§13)
 	BootstrapPeers             []string     `json:"bootstrap_peers"`               // seed multiaddrs; sole seed source; empty = no announce/discovery (§13)
@@ -145,7 +145,7 @@ func DefaultServerConfig() ServerConfig {
 		Native: NativeConfig{
 			LLM:    NativeLLMConfig{URL: "http://localhost:11434", ChatModel: "gemma4:26b", EmbedModel: "nomic-embed-text", Price: 0},
 			Lookup: NativeLookupConfig{DefaultLimit: 10, Price: 0},
-			Web:    NativeWebConfig{Price: 0, UserAgent: "juice-kernel/0.4 (+https://github.com/daios-ai/juice)"},
+			Web:    NativeWebConfig{Price: 0},
 			TinyGo: NativePriceConfig{Price: 5},
 		},
 		ScriptTimeoutMS:   10000,
@@ -167,7 +167,6 @@ func DefaultServerConfig() ServerConfig {
 		LogFile:           "",
 		LogFormat:         "text",
 		AllowLocalSources: false,
-		ServerURL:         "",
 		// The public daios.ai node is the default meeting point, so a fresh `juice serve` joins
 		// the network out of the box (it listens on the standard port 31313, §13). Override or
 		// extend for a private network; clear it to run standalone.

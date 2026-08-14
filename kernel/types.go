@@ -278,52 +278,15 @@ type Trace struct {
 	// and pins the rate against a mid-call config change. 0 on local calls and subcalls.
 	PremiumBPS    int64 `json:"premium_bps,omitempty"`
 	PremiumParked int64 `json:"premium_parked,omitempty"`
-	// Value, ValueTo, ValueReserve snapshot a TransferEffect on a call whose caller C funds a transfer
-	// (§13): the delivered amount, the resolved local-beneficiary user id (empty for a remote/outbound
-	// destination), and the total reserve locked from C.available at admission (value + value fees).
-	// Released to the beneficiary/peer + sys + refund at settlement, or refunded on failure — sourced
-	// from C, not the trace budget. All 0/"" on every non-transfer call.
-	Value        int64     `json:"value,omitempty"`
-	ValueTo      string    `json:"value_to,omitempty"`
-	ValueReserve int64     `json:"value_reserve,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-}
-
-// ValueSettlement describes how an outbound remote settlement disposes of the value-transfer reserve
-// locked on the caller C (§13). It is computed by settleRemoteCall from the peer's signed receipt and
-// applied atomically inside CommitRemoteSettlement. A zero Reserve means the call carried no transfer.
-// Exactly one disposition applies: Quarantine leaves the reserve LOCKED (an invalid/inconsistent
-// receipt after a possibly-executed dispatch — never auto-refund); Refund returns the whole reserve to
-// C (a valid failure/rejection); otherwise the reserve settles — Credit (value+value_premium) to the
-// peer proxy row, SysCredit (value_import) to origin sys, remainder refunded to C.
-type ValueSettlement struct {
-	Reserve    int64
-	Quarantine bool
-	Refund     bool
-	Credit     int64
-	SysCredit  int64
-}
-
-// PendingTransfer is the buyer-side reserve holder for a remote payment Step (§13): the buyer funds a
-// TransferEffect attached to a Step hosted on another kernel, so the reserve lives here rather than on a
-// fabricated local trace. Status ∈ {pending, settled, refunded, quarantined}. IdempotencyKey is unique
-// and payment-bound, so a retry presents the same key and never double-funds.
-type PendingTransfer struct {
-	ID             string
-	BuyerID        string
-	PeerKey        string
-	StepID         string
-	InputHash      string
-	Input          json.RawMessage // raw completion input bytes, so a retry rebuilds the SAME signed request
-	IdempotencyKey string
-	Beneficiary    string // the beneficiary user_id the serving kernel binds in its receipt
-	Amount         int64
-	RemoteMax      int64 // descriptor obligation (amount + value_premium); settlement re-validates against it
-	Reserve        int64 // buyer's max_total: amount + value_premium + value_import
-	Status         string
-	LastError      string // disposition reason (e.g. why quarantined), for the operator
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// Value and ValueTo snapshot a TransferEffect on a call whose caller C funds a transfer (§13): the
+	// amount locked from C.available at admission and the beneficiary it is delivered to at settlement
+	// (refunded to C on failure). Sourced from C, not the trace budget, and untaxed, so locked and
+	// delivered are one number. Both 0/"" on every non-transfer call. Riding on the trace is what lets
+	// every settlement path — commit, failure, recovery, forced closure — release the lock without the
+	// in-memory request.
+	Value     int64     `json:"value,omitempty"`
+	ValueTo   string    `json:"value_to,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Transaction records one attempted call. Immutable after creation.
@@ -462,12 +425,13 @@ type Receipt struct {
 	// it out of the JCS signature for all local and pre-v0.12 receipts (Premium=0), so those verify
 	// unchanged; nonzero only on a receipt the serving kernel issues for an inbound federated call.
 	Premium int64 `json:"premium,omitempty"`
-	// Value / ValuePremium / ValueTo are the transfer channel, kept distinct from the execution channel
-	// (Charge/Premium) so the two never mix (§13). Value is the delivered amount — all-or-nothing (0 or
-	// the requested amount, so a partial-charge failure never dilutes delivery); ValuePremium is the
-	// serving markup on the value (= ceil(value·remote_bps), NOT folded into execution Premium); ValueTo
-	// is the resolved beneficiary the origin binds. omitempty keeps all three out of the JCS signature
-	// for every non-transfer receipt (0/""), so those verify unchanged.
+	// Value and ValueTo are the transfer channel, kept distinct from the execution channel
+	// (Charge/Premium) so the two never mix (§13): the delivered amount — all-or-nothing, so a
+	// partial-charge failure never dilutes delivery — and the beneficiary. ValuePremium is always 0:
+	// the value channel is local to a kernel and untaxed. It remains a field because receipts are
+	// immutable signed records and older ones carry it; dropping it would make those unverifiable.
+	// omitempty keeps all three out of the JCS signature when unset, so non-transfer receipts (and
+	// every receipt predating the channel) verify unchanged.
 	Value        int64  `json:"value,omitempty"`
 	ValuePremium int64  `json:"value_premium,omitempty"`
 	ValueTo      string `json:"value_to,omitempty"`
@@ -579,7 +543,6 @@ type ActionManifest struct {
 	OutputSchema map[string]any `json:"output_schema"`
 	Price        int64          `json:"price"`
 	Kind         ActionKind     `json:"kind"`
-	Effect       string         `json:"effect,omitempty"` // privileged execution effect ("transfer"); signed so the origin decides value-bearing from the contract, not a name (§13)
 	ArtifactHash string         `json:"artifact_hash"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 	Stats        *Stats         `json:"stats"`
@@ -778,10 +741,6 @@ type DiscoveryDoc struct {
 	Name            string         `json:"name,omitempty"`
 	InputSchema     map[string]any `json:"input_schema,omitempty"`
 	OutputSchema    map[string]any `json:"output_schema,omitempty"`
-	// Effect mirrors the manifest's privileged-execution-effect field ("transfer", §13). Carried so
-	// a catalog hit and the proxy it resolves to yield the same quote_hash (§4 precondition 7):
-	// effect alone decides whether a call engages the value channel.
-	Effect string `json:"effect,omitempty"`
 	// ServingPrice is the manifest's price plus the peer's signed serving markup,
 	// mp + ceil(mp·remote_bps/10000) (§13). The local all-in price adds import_bps at read time,
 	// so a policy change reprices the catalog with no re-pull. Untagged: admin inspect serializes
