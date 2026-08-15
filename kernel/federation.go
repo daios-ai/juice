@@ -491,7 +491,6 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 		rbps, importBPS, _ = k.dispatchedRates(tr.DispatchJSON, rbps, importBPS)
 	}
 	checks.Premium = r.Premium == ceilDiv(r.Charge*rbps, 10000)
-	checks.ValuePremium = r.ValuePremium == ceilDiv(r.Value*rbps, 10000)
 
 	// 7. Settlement arithmetic: the origin import fee on the actual obligation (tx.net = paid).
 	if tx.Status == TxSuccess {
@@ -522,7 +521,7 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	}
 
 	valid := checks.ReceiptHash && checks.Signature && checks.ActionID &&
-		checks.Status && checks.Charge && checks.Premium && checks.ValuePremium && checks.SettlementArith &&
+		checks.Status && checks.Charge && checks.Premium && checks.SettlementArith &&
 		checks.ChargeCeiling && checks.RefundConservation && checks.ArgsHash && checks.ReplyHash
 
 	return &ReceiptVerification{
@@ -599,7 +598,7 @@ func remoteReceiptInvalid(r Receipt, mp, rbps int64, replyJSON []byte) string {
 	// The value channel is local to a kernel (§13): no call this kernel dispatches carries value, so a
 	// remote receipt claiming any is inconsistent with what was sent and quarantines rather than
 	// settling — the reserve it would move does not exist here.
-	if r.Value != 0 || r.ValuePremium != 0 {
+	if r.Value != 0 {
 		return "remote receipt carries value"
 	}
 	switch r.Status {
@@ -700,7 +699,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 			ktx.Reason = KernelErrorCode(failErr)
 		}
 	}
-	localReceipt, receiptErr := k.buildReceipt(ktx, paid+importFee, 0, 0, 0, "")
+	localReceipt, receiptErr := k.buildReceipt(ktx, paid+importFee, 0, 0, "")
 	if receiptErr != nil {
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}

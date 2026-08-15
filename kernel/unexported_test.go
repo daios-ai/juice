@@ -222,7 +222,7 @@ func TestReceiptSigningRequiresConfiguredKey(t *testing.T) {
 		ReplyJSON: json.RawMessage(`{}`),
 		Status:    TxSuccess,
 		EndedAt:   time.Now().UTC(),
-	}, 0, 0, 0, 0, "")
+	}, 0, 0, 0, "")
 	if !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
 	}
@@ -629,9 +629,6 @@ func TestRemoteReceiptInvalidValue(t *testing.T) {
 	}
 	if remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, Value: 100, ReplyHash: replyHash}, mp, rbps, []byte("null")) == "" {
 		t.Error("a success delivering value must be quarantined")
-	}
-	if remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, ValuePremium: 5, ReplyHash: replyHash}, mp, rbps, []byte("null")) == "" {
-		t.Error("a success levying a value premium must be quarantined")
 	}
 	if remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0, Value: 100}, mp, rbps, nil) == "" {
 		t.Error("a failure delivering value must be quarantined")

@@ -427,14 +427,11 @@ type Receipt struct {
 	Premium int64 `json:"premium,omitempty"`
 	// Value and ValueTo are the transfer channel, kept distinct from the execution channel
 	// (Charge/Premium) so the two never mix (§13): the delivered amount — all-or-nothing, so a
-	// partial-charge failure never dilutes delivery — and the beneficiary. ValuePremium is always 0:
-	// the value channel is local to a kernel and untaxed. It remains a field because receipts are
-	// immutable signed records and older ones carry it; dropping it would make those unverifiable.
-	// omitempty keeps all three out of the JCS signature when unset, so non-transfer receipts (and
-	// every receipt predating the channel) verify unchanged.
-	Value        int64  `json:"value,omitempty"`
-	ValuePremium int64  `json:"value_premium,omitempty"`
-	ValueTo      string `json:"value_to,omitempty"`
+	// partial-charge failure never dilutes delivery — and the beneficiary. The channel is local to a
+	// kernel and untaxed, so no premium rides it. omitempty keeps both out of the JCS signature when
+	// unset, so non-transfer receipts (and every receipt predating the channel) verify unchanged.
+	Value   int64  `json:"value,omitempty"`
+	ValueTo string `json:"value_to,omitempty"`
 	// RefreshProxy signals the origin to invalidate its cached proxy for this action (§8/§13): set only
 	// on a zero-charge pre-execution rejection whose fault is the cache's (contract-hash mismatch, a
 	// non-executable action). omitempty keeps it out of the JCS signature for every other receipt, so
@@ -570,7 +567,6 @@ type ReceiptChecks struct {
 	Status             bool `json:"status"`
 	Charge             bool `json:"charge"`              // execution obligation (tx.net) == receipt.charge + receipt.premium
 	Premium            bool `json:"premium"`             // receipt.premium == ceil(receipt.charge * remote_bps / 10000)
-	ValuePremium       bool `json:"value_premium"`       // receipt.value_premium == ceil(receipt.value * remote_bps / 10000) (§13)
 	SettlementArith    bool `json:"settlement_arith"`    // tx.fee == ceil(tx.net * import_bps / 10000) on success, 0 on failure
 	ChargeCeiling      bool `json:"charge_ceiling"`      // receipt.charge + receipt.premium <= tx.gross, the authenticated ceiling (§13)
 	RefundConservation bool `json:"refund_conservation"` // tx.Refund == tx.Gross - tx.Net - tx.Fee (exact equality)

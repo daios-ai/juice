@@ -3115,7 +3115,7 @@ func (k *Kernel) CompleteIdempotencyRecordIfPending(ctx context.Context, id, res
 // ≤ gross on failure, 0 on rejection). It must be pre-computed by the caller so that
 // it is included in the JCS signature before the receipt is persisted.
 // Returns ErrInvalidState if the kernel has not been bootstrapped (no issuer configured).
-func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value, valuePremium int64, valueTo string) (*Receipt, error) {
+func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value int64, valueTo string) (*Receipt, error) {
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
@@ -3144,7 +3144,6 @@ func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value, valuePrem
 		Charge:       charge,
 		Premium:      premium,
 		Value:        value,
-		ValuePremium: valuePremium,
 		ValueTo:      valueTo,
 		Reason:       tx.Reason,
 		StartedAt:    tx.StartedAt,

@@ -685,7 +685,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	// rate snapshotted on the trace, and released from premium_parked at settlement. The VALUE channel
 	// is local and untaxed, so it carries no premium: the receipt records exactly what was delivered.
 	premium := ceilDiv(ktx.Gross*trace.PremiumBPS, 10000)
-	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium, trace.Value, 0, trace.ValueTo) // success: charge = gross, value delivered
+	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium, trace.Value, trace.ValueTo) // success: charge = gross, value delivered
 	if receiptErr != nil {
 		mu.Unlock()
 		// Same as the post-execution read failure above: the settlement committed, so its receipt is
@@ -1049,9 +1049,9 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 	var committed *Receipt
 	buildFn := func(refund int64) (*Receipt, error) {
 		charge := tx.Gross - refund
-		// value delivery is all-or-nothing (§13): a failed transfer delivers nothing, so value/value_premium
-		// are 0 and refundTransferEffect returns the whole value reserve to the caller C.
-		r, err := k.buildReceipt(tx, charge, ceilDiv(charge*trace.PremiumBPS, 10000), 0, 0, "")
+		// value delivery is all-or-nothing (§13): a failed transfer delivers nothing, so value is 0
+		// and refundTransferEffect returns the whole value reserve to the caller C.
+		r, err := k.buildReceipt(tx, charge, ceilDiv(charge*trace.PremiumBPS, 10000), 0, "")
 		committed = r
 		return r, err
 	}
