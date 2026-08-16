@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
@@ -80,6 +81,44 @@ func TestAPICallErrorMapsCode(t *testing.T) {
 	}
 	if !errors.Is(err, kernel.ErrNotFound) {
 		t.Fatal("errors.Is(ErrNotFound) should hold")
+	}
+}
+
+// TestExitCodesAreStableAndDistinct: every error class a script branches on has its own code (§14),
+// so a caller can act on the outcome without parsing prose. terms_changed in particular must not
+// share the catch-all 1 with an internal error: it means re-quote and retry.
+func TestExitCodesAreStableAndDistinct(t *testing.T) {
+	want := map[string]int{
+		"unauthenticated": 2, "unauthorized": 3, "not_found": 4, "invalid_input": 5,
+		"schema_violation": 5, "insufficient_funds": 6, "timeout": 7, "grant_required": 8,
+		"peer_unreachable": 9, "peer_unfunded": 10, "terms_changed": 11,
+	}
+	for code, exit := range want {
+		err := (&kernel.KernelError{Code: code, Message: code}).Wrap("x")
+		if got := exitCodeFor(err); got != exit {
+			t.Errorf("%s: exit code %d, want %d", code, got, exit)
+		}
+	}
+	if got := exitCodeFor(kernel.ErrInternal.Wrap("boom")); got != 1 {
+		t.Errorf("internal error exit code %d, want the catch-all 1", got)
+	}
+}
+
+// TestUnauthenticatedWithNoTokenSuggestsLogin: the server can only say "missing bearer token",
+// which tells the user nothing to do. With no token stored, the CLI answers with the actionable
+// local hint instead (§14).
+func TestUnauthenticatedWithNoTokenSuggestsLogin(t *testing.T) {
+	stubServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing bearer token", "code": "unauthenticated"})
+	})
+	t.Setenv("HOME", t.TempDir()) // no token file
+	err := apiCall(context.Background(), "GET", "/v1/me", nil, nil)
+	if err == nil || !errors.Is(err, kernel.ErrUnauthenticated) {
+		t.Fatalf("expected ErrUnauthenticated, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "juice auth login") {
+		t.Errorf("the hint must name the command to run, got %q", err.Error())
 	}
 }
 
@@ -184,6 +223,57 @@ func TestActionCreateBinaryWasmRoutesToArtifact(t *testing.T) {
 	}
 	if gotArtifact != base64.StdEncoding.EncodeToString(binary) {
 		t.Fatalf("wasm_artifact = %q, want base64 of the binary module", gotArtifact)
+	}
+}
+
+// TestArtifactFileIsEncoded: --artifact accepts a path, and a path names bytes — the same rule
+// --source follows — so the file is always encoded. The routing must NOT depend on whether the
+// bytes happen to parse as UTF-8: a minimal WASM module is entirely below 0x80 (`\0asm\1\0\0\0`),
+// so a content-sniffing rule sends one module encoded and the next one raw. Literal base64 is the
+// non-file case.
+func TestArtifactFileIsEncoded(t *testing.T) {
+	dir := t.TempDir()
+	send := func(t *testing.T, artifact string) string {
+		t.Helper()
+		var got string
+		stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				WasmArtifact string `json:"wasm_artifact"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			got = req.WasmArtifact
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "x", "action": "a/m"})
+		})
+		if _, err := execTestCmd(t, actionCreateCmd(), "m",
+			"--kind", "wasm", "--artifact", artifact, "--price", "0", "--description", "d"); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	write := func(name string, b []byte) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// The case a UTF-8 check gets wrong: a valid module whose every byte is ASCII-range.
+	asciiModule := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	if got, want := send(t, write("ascii.wasm", asciiModule)), base64.StdEncoding.EncodeToString(asciiModule); got != want {
+		t.Errorf("an all-ASCII wasm module must still be encoded: got %q, want %q", got, want)
+	}
+	// And the case it gets right, so both go down one path.
+	highModule := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x80, 0xff}
+	if got, want := send(t, write("high.wasm", highModule)), base64.StdEncoding.EncodeToString(highModule); got != want {
+		t.Errorf("a non-UTF-8 wasm module must be encoded: got %q, want %q", got, want)
+	}
+	// A literal base64 value is not a path, so it passes through untouched.
+	lit := base64.StdEncoding.EncodeToString(asciiModule)
+	if got := send(t, lit); got != lit {
+		t.Errorf("a literal base64 value must pass through: got %q, want %q", got, lit)
 	}
 }
 

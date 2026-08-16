@@ -61,7 +61,11 @@ func apiDo(ctx context.Context, method, path string, body, out any, retry bool) 
 		rdr = bytes.NewReader(b)
 	}
 	headers := map[string]string{"Content-Type": "application/json"}
-	if tok, err := loadToken(); err == nil {
+	// Remember whether we had a token at all: the server can only answer "missing bearer token",
+	// which tells the user nothing about what to do. With no token file the actionable answer is
+	// local — run juice auth login — so it replaces the 401 below rather than being discarded here.
+	tok, tokErr := loadToken()
+	if tokErr == nil {
 		headers["Authorization"] = "Bearer " + tok
 	}
 	base := serverBaseURL()
@@ -79,6 +83,9 @@ func apiDo(ctx context.Context, method, path string, body, out any, retry bool) 
 	}
 	if status == 401 && retry && refreshToken(ctx) {
 		return apiDo(ctx, method, path, body, out, false)
+	}
+	if status == 401 && tokErr != nil {
+		return tokErr // never logged in here: say so, instead of "missing bearer token"
 	}
 	if status < 200 || status >= 300 {
 		return errorFromResponse(status, respBody)

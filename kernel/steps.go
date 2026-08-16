@@ -169,7 +169,7 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 	// The required caller must resolve to a real account so the step is completable (§10).
 	rc, err := k.store.ReadUser(ctx, requiredCallerID)
 	if err != nil {
-		return nil, ErrNotFound.Wrap("required_caller_user_id not found")
+		return nil, ErrNotFound.Wrap("required caller not found")
 	}
 	// A remote required caller (§13) names a peer's proxy user as the accounting/routing account and
 	// the completer's stable user_id on that peer kernel; completion then demands a home-kernel
@@ -266,7 +266,19 @@ func (k *Kernel) ListStepsAwaitingCaller(ctx context.Context, callerID string, l
 //	                                      the step stays running for RetryPendingRemoteDispatches
 //	otherwise (reply == nil)              rejected before anything settled; the step is waiting again
 func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, input json.RawMessage) (*StepReply, error) {
-	return k.completeStep(ctx, callerID, stepID, input, "")
+	return k.completeStep(ctx, callerID, stepID, input, "", "")
+}
+
+// CompleteStepInTrace resumes a step from inside a running execution — a WASM juice.step_complete or
+// the HTTP capability twin. Authority there is the executing trace, not a session: the caller may only
+// complete a step its own trace parked, so an endpoint holding a capability cannot reach steps living
+// in another process (§9 "no other trace"). Session and federated completion are unaffected: their
+// authority is the account itself, which is exactly what required_caller names.
+func (k *Kernel) CompleteStepInTrace(ctx context.Context, callerID, traceID, stepID string, input json.RawMessage) (*StepReply, error) {
+	if traceID == "" {
+		return nil, ErrUnauthorized.Wrap("in-execution completion requires an authorizing trace")
+	}
+	return k.completeStep(ctx, callerID, stepID, input, "", traceID)
 }
 
 // CompleteStepFederated resumes a step on behalf of a peer, threading the inbound cross-kernel
@@ -274,7 +286,7 @@ func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, inpu
 // including a settlement that only happens later, via the remote-dispatch retry loop. Mirrors
 // RunFederated, which does the same for an inbound call.
 func (k *Kernel) CompleteStepFederated(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID string) (*StepReply, error) {
-	return k.completeStep(ctx, callerID, stepID, input, idempotencyRecordID)
+	return k.completeStep(ctx, callerID, stepID, input, idempotencyRecordID, "")
 }
 
 // StepRemoteRequiredCaller returns a step's required remote-caller id (nil = a local/kernel-level
@@ -287,7 +299,7 @@ func (k *Kernel) StepRemoteRequiredCaller(ctx context.Context, stepID string) (*
 	return step.RequiredCallerRemoteID, nil
 }
 
-func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID string) (*StepReply, error) {
+func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID, authorizingTraceID string) (*StepReply, error) {
 	caller, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
@@ -311,7 +323,14 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		return nil, err
 	}
 	if callerID != step.RequiredCallerUserID {
-		return nil, ErrUnauthorized.Wrap("only required_caller_user_id may complete this step")
+		return nil, ErrUnauthorized.Wrap("only the step's required caller may complete it")
+	}
+	// In-execution completion is confined to the trace that authorized it (§10): a capability or WASM
+	// host may resume only a step its own trace parked. Without this, holding one trace's capability
+	// would reach every step addressed to that action's owner anywhere in the kernel — spending a
+	// third party's parked funds. Session and federated callers pass "" and are unaffected.
+	if authorizingTraceID != "" && *step.ParentTraceID != authorizingTraceID {
+		return nil, ErrUnauthorized.Wrap("step belongs to another trace")
 	}
 
 	// Look up action early — needed for derived allowed schema validation.

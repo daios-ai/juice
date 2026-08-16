@@ -296,12 +296,14 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 			if resp["petname"] == g.PublicKey {
 				resp["petname"] = "" // unbound: KernelName falls back to the key
 			}
-			resp["about"], resp["users"], resp["actions"] = g.About, g.Users, g.ActionManifests
+			resp["about"], resp["users"] = g.About, g.Users
+			resp["actions"] = s.kernel.PeerCatalog(g.ActionManifests)
 			resp["source"] = "live"
 			if steps, serr := s.kernel.PeerStepsAwaitingUs(octx, peerKey); serr == nil && steps != nil {
 				resp["steps"] = steps
 			}
-			_ = s.kernel.RecordPeerSync(ctx, g.PublicKey, g.CounterpartyBalance)
+			// Inspect writes nothing (§14): the discovery loop owns cache refresh, so a diagnostic
+			// read never makes retention or display state depend on being observed.
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
@@ -319,8 +321,10 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resp["petname"], resp["nickname"], resp["public_key"], resp["source"] = "", "", peerKey, "none"
 	}
-	if docs, derr := s.kernel.DiscoveryDocsForKernel(ctx, peerKey); derr == nil {
-		resp["actions"] = docs
+	// Same projection as the live branch, so the offline answer differs only in freshness — never in
+	// shape, and never in what the price means.
+	if acts, aerr := s.kernel.PeerCatalogCached(ctx, peerKey); aerr == nil {
+		resp["actions"] = acts
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

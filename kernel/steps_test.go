@@ -167,6 +167,44 @@ func TestStepCompleteWrongCallerReturnsErrUnauthorized(t *testing.T) {
 	}
 }
 
+// TestCompleteStepInTraceIsTraceConfined: in-execution completion (the HTTP capability and the WASM
+// host) is confined to the trace that authorized it (§9 "no other trace"). Being the required caller
+// is not enough — otherwise a capability minted for one process would fire steps parked in another
+// user's process, spending funds that user committed. The same caller completing through its own
+// trace still succeeds, and the session path (CompleteStep) is untouched.
+func TestCompleteStepInTraceIsTraceConfined(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	victim := setupUser(t, st, "confine-victim", 500)
+	mallory := setupUser(t, st, "confine-mallory", 500)
+	action := setupWasmAction(t, st, victim.ID, "confine-action", "", 0)
+
+	// A step in VICTIM's process, addressed to mallory.
+	_, victimTrace := setupOrphanTrace(t, st, victim.ID, victim.ID, victim.ID)
+	step, err := k.CreateStep(ctx, victimTrace.ID, action.ID, nil, mallory.ID, "")
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+	// A trace of mallory's own, standing in for the one a capability would name.
+	_, mallorysTrace := setupOrphanTrace(t, st, mallory.ID, mallory.ID, mallory.ID)
+
+	if _, err := k.CompleteStepInTrace(ctx, mallory.ID, mallorysTrace.ID, step.ID, json.RawMessage(`{}`)); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("a foreign trace must not complete the step, got %v", err)
+	}
+	if s, _ := st.ReadStep(ctx, step.ID); s.Status != kernel.StepWaiting {
+		t.Errorf("a refused completion must leave the step waiting, got %s", s.Status)
+	}
+	if _, err := k.CompleteStepInTrace(ctx, mallory.ID, "", step.ID, json.RawMessage(`{}`)); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("an empty authorizing trace must be refused, got %v", err)
+	}
+	// The authorizing trace IS the step's parent: ordinary in-execution completion still works.
+	if _, err := k.CompleteStepInTrace(ctx, mallory.ID, victimTrace.ID, step.ID, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("completion from the parking trace must succeed, got %v", err)
+	}
+}
+
 func TestStepCompleteRunningOrDoneReturnsErrInvalidState(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})

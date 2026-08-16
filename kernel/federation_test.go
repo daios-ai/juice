@@ -1007,6 +1007,72 @@ func TestSettleRemoteCallRejectsWrongActionID(t *testing.T) {
 	}
 }
 
+// TestGossipEvidenceExcludesDelegatedAuth: a delegated-auth action is never described abroad (§6 P6,
+// §8 D10), so evidence must not name it either — otherwise a peer learns the existence, identity, and
+// usage volume of a capability it can never call or even see. An ordinary public action's execution
+// stays gossip-eligible, so the exclusion is the scheme, not the leg.
+func TestGossipEvidenceExcludesDelegatedAuth(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithHTTP(st, &fakeSuccessHTTP{})
+	k.SetSecretBox(b64Box{})
+	ctx := context.Background()
+	setupSys(t, k, st)
+	owner := setupUser(t, st, "evid-owner", 1000)
+
+	plain := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "plain",
+		Kind: kernel.KindHTTP, Source: "https://provider.example/api", Active: true,
+		Visibility: kernel.VisibilityPublic, Description: "d",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:   time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, plain); err != nil {
+		t.Fatal(err)
+	}
+	// A real delegated action: public, active, with the caller's own token attached, so it executes
+	// and settles exactly as in production and leaves an ordinary leg-(a) receipt behind.
+	delegated := createBearerAction(t, k, owner.ID, "delegated", 0)
+	pub := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: delegated.ID, Visibility: &pub}); err != nil {
+		t.Fatalf("make delegated public: %v", err)
+	}
+	if err := k.SetActive(ctx, owner.ID, delegated.ID, true); err != nil {
+		t.Fatalf("reactivate delegated: %v", err)
+	}
+	if _, err := k.AttachBearerGrants(ctx, owner.ID, owner.Handle+"/"+delegated.Name, "", "tok"); err != nil {
+		t.Fatalf("AttachBearerGrants: %v", err)
+	}
+
+	for _, a := range []*kernel.Action{plain, delegated} {
+		_, tr := beginTestRun(t, st, owner.ID, a)
+		if _, err := k.TestCall(ctx, kernel.TestCallRequest{
+			CallerID: owner.ID, ExistingTraceID: tr.ID, TargetUserID: owner.ID,
+			ActionName: a.Name, Args: map[string]any{},
+		}); err != nil {
+			t.Fatalf("run %s: %v", a.Name, err)
+		}
+	}
+
+	resp, err := k.GetGossip(ctx, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range resp.Evidence {
+		if b.EvidenceReceipt != nil && b.EvidenceReceipt.SubjectActionID == delegated.ID {
+			t.Error("evidence must not name a delegated-auth action the manifests exclude")
+		}
+	}
+	found := false
+	for _, b := range resp.Evidence {
+		if b.EvidenceReceipt != nil && b.EvidenceReceipt.SubjectActionID == plain.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("an ordinary public action's execution must still be gossip-eligible")
+	}
+}
+
 // TestGossipEvidenceExcludesNonExecutions proves the §13/§15 leg-(b) exclusions end-to-end through
 // ACTUAL settlements (not fabricated rows): only a receipt-backed admitted execution is gossip-
 // eligible. Three real proxy calls settle on one price-0 proxy — an admitted success, a
@@ -2225,17 +2291,24 @@ func TestRetryNeverFailsFastOnNotDispatched(t *testing.T) {
 	}
 }
 
-// TestSettleRemoteCallPeerUnfunded: a signed zero-charge rejection carried on transport status 402
-// (the remote's ErrInsufficientFunds: our credit there is exhausted) settles as ErrPeerUnfunded with
-// the peer handle in meta; a rejection on 422 stays a plain ErrExecutionFailed.
-func TestSettleRemoteCallPeerUnfunded(t *testing.T) {
+// TestSettleRemoteFailureClassification freezes the §13 outcome classification, which is gated on the
+// rejection marker (receipt tx_id == our dispatched idempotency_key, §6 P4) and never on charge or
+// transport status alone: a rejection on 402 is our exhausted credit there (ErrPeerUnfunded), any
+// other rejection is the peer refusing us (ErrUnauthorized + peer meta), and an EXECUTED failure stays
+// ErrExecutionFailed even at charge 0 on transport 402 — the case a charge-based test would misread,
+// since the serving kernel returns the execution error's status alongside the real receipt.
+func TestSettleRemoteFailureClassification(t *testing.T) {
 	cases := []struct {
-		name     string
-		status   int
-		unfunded bool
+		name      string
+		status    int
+		rejection bool // true → a real signed rejection (tx_id = idempotency_key)
+		want      error
 	}{
-		{"402_is_peer_unfunded", 402, true},
-		{"422_is_execution_failed", 422, false},
+		{"rejection_402_is_peer_unfunded", 402, true, kernel.ErrPeerUnfunded},
+		{"rejection_403_is_peer_refused", 403, true, kernel.ErrUnauthorized},
+		{"rejection_422_is_peer_refused", 422, true, kernel.ErrUnauthorized},
+		{"executed_zero_charge_402_is_execution_failed", 402, false, kernel.ErrExecutionFailed},
+		{"executed_zero_charge_422_is_execution_failed", 422, false, kernel.ErrExecutionFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2246,41 +2319,44 @@ func TestSettleRemoteCallPeerUnfunded(t *testing.T) {
 			k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "unfunded-action", 1000)
 			_, tr := beginTestRun(t, st, caller.ID, a)
 
-			// A validly-signed zero-charge rejection (status=failure), the remote's refusal.
-			now := time.Now().UTC()
-			r := &kernel.Receipt{
-				ID: uuid.New().String(), TxID: "rtx", ActionID: "unfunded-action",
-				ArgsHash: jcsHashForTest(t, `{}`), Status: kernel.TxFailure, Charge: 0,
-				Reason: "insufficient balance", StartedAt: now, CreatedAt: now,
+			if tc.rejection {
+				// The fake signs a rejection exactly as a serving kernel does: tx_id = our key.
+				fake.rejectSignKey, fake.rejectActionID = priv, "unfunded-action"
+				fake.rejectArgsHash = jcsHashForTest(t, `{}`)
+			} else {
+				// An ordinary executed failure that consumed nothing: charge 0, but its OWN tx_id.
+				now := time.Now().UTC()
+				r := &kernel.Receipt{
+					ID: uuid.New().String(), TxID: uuid.New().String(), ActionID: "unfunded-action",
+					ArgsHash: jcsHashForTest(t, `{}`), Status: kernel.TxFailure, Charge: 0,
+					Reason: "execution_failed", StartedAt: now, CreatedAt: now,
+				}
+				r.Signature = signReceiptForTest(t, priv, r)
+				b, _ := json.Marshal(r)
+				fake.receiptJSON = string(b)
 			}
-			r.Signature = signReceiptForTest(t, priv, r)
-			b, _ := json.Marshal(r)
-			fake.receiptJSON = string(b)
 
 			_, err := k.TestCall(ctx, kernel.TestCallRequest{
 				CallerID: caller.ID, ExistingTraceID: tr.ID,
 				ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
 			})
-			if tc.unfunded {
-				if !errors.Is(err, kernel.ErrPeerUnfunded) {
-					t.Fatalf("expected ErrPeerUnfunded on 402, got %v", err)
-				}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("expected %v, got %v", tc.want, err)
+			}
+			// The two peer-attributed classes name the peer so a client can act on it; the execution
+			// class must never be attributed to the peer's funding or its refusal.
+			if tc.want != kernel.ErrExecutionFailed {
 				var ke *kernel.KernelError
 				if !errors.As(err, &ke) || ke.Meta["peer"] != "settle-peer" {
 					t.Errorf("expected Meta[peer]=settle-peer, got %+v", err)
 				}
-			} else {
-				if !errors.Is(err, kernel.ErrExecutionFailed) {
-					t.Fatalf("expected ErrExecutionFailed on 422, got %v", err)
-				}
-				if errors.Is(err, kernel.ErrPeerUnfunded) {
-					t.Error("422 rejection must not be attributed to peer_unfunded")
-				}
+			} else if errors.Is(err, kernel.ErrPeerUnfunded) || errors.Is(err, kernel.ErrUnauthorized) {
+				t.Error("an executed failure must not be reported as a funding or refusal condition")
 			}
-			// Rule C (§13): neither a funding (402) nor a plain execution rejection is a cache fault,
-			// so the proxy stays active (only refresh_proxy / quarantine deactivate).
+			// Rule C (§13): none of these is a cache fault, so the proxy stays active (only
+			// refresh_proxy / quarantine deactivate).
 			if ra, _ := st.ReadAction(ctx, a.ID); !ra.Active {
-				t.Error("a funding/execution rejection must leave the proxy active")
+				t.Error("a funding/refusal/execution failure must leave the proxy active")
 			}
 		})
 	}

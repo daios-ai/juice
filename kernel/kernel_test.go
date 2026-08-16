@@ -202,6 +202,12 @@ func beginTestRun(t *testing.T, st kernel.Store, callerID string, action *kernel
 		CallerUserID:  callerID,
 		CreatedAt:     time.Now().UTC(),
 	}
+	// Mirror beginRun: a remote-proxy root trace carries its dispatch key, which the settlement path
+	// compares against a receipt's tx_id to tell a signed rejection from an execution (§6 P4).
+	if action.Kind == kernel.KindRemoteProxy {
+		key := uuid.New().String()
+		tr.IdempotencyKey = &key
+	}
 	if err := st.BeginRun(ctx, p, tr, callerID, action.Price, 0, 0); err != nil {
 		t.Fatalf("beginTestRun: %v", err)
 	}
@@ -1677,8 +1683,14 @@ func TestRatingDuplicateRejected(t *testing.T) {
 	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 1.0, nil); err != nil {
 		t.Fatalf("first RateTransaction: %v", err)
 	}
-	if _, err := k.RateTransaction(ctx, buyer.ID, reply.TxID, 0.0, nil); !errors.Is(err, kernel.ErrInvalidInput) {
+	_, err = k.RateTransaction(ctx, buyer.ID, reply.TxID, 0.0, nil)
+	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for duplicate rating, got %v", err)
+	}
+	// The rule is "one rating per transaction" (§11); the message says that, not the store
+	// operation whose unique index caught it — internals never reach a user-facing error (§14).
+	if msg := err.Error(); !strings.Contains(msg, "already rated") || strings.Contains(msg, "insert rating") {
+		t.Errorf("duplicate-rating message = %q, want the rule, not the store operation", msg)
 	}
 }
 
@@ -2258,7 +2270,11 @@ func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, actionID, _
 		payload, _ := kernel.ReceiptSigningBytes(r)
 		r.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(f.rejectSignKey, payload))
 		b, _ := json.Marshal(r)
-		return kernel.FederationResult{ReceiptJSON: string(b), HTTPStatus: 403}, nil
+		status := f.httpStatus // 403 by default: a refusal, not a funding condition
+		if status == 0 {
+			status = 403
+		}
+		return kernel.FederationResult{ReceiptJSON: string(b), HTTPStatus: status}, nil
 	}
 	result := f.result
 	if result == nil {

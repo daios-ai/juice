@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/log"
 )
 
 // createDelegatedCLIAction creates and activates an oauth_delegated http action owned by ownerID.
@@ -73,6 +76,45 @@ func TestUserDisconnectCLI(t *testing.T) {
 	}
 	if views, _ := env.k.ListGrantViews(ctx, uid); len(views) != 0 {
 		t.Errorf("grant survived CLI revoke: %d", len(views))
+	}
+}
+
+// TestDeleteGrantsHasOneSpelling: revocation names a selector or an account, and nothing else. The
+// full owner/name is the degenerate single-action selector, so a second ?action= spelling was pure
+// duplication (§12 rule 6) — it is gone, and a request carrying only it is an ordinary bad request
+// rather than a silent second path.
+func TestDeleteGrantsHasOneSpelling(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	uid, tok := makeUser(t, env.k, "grant-alias")
+	aid := createDelegatedCLIAction(t, env.k, uid, "inbox")
+	plan, err := env.k.ConsentPlan(ctx, uid, "grant-alias/inbox")
+	if err != nil || len(plan.Groups) != 1 {
+		t.Fatalf("consent plan: %v groups=%d", err, len(plan.Groups))
+	}
+	if _, err := env.k.CreateGrants(ctx, uid, plan.Groups[0].ProviderKey, []string{aid}, "refresh-tok", ""); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+
+	srv := httptest.NewServer(mountFullRouter(&server{kernel: env.k, log: log.Discard()}))
+	t.Cleanup(srv.Close)
+
+	resp := httpDo(t, srv, "DELETE", "/v1/grants?action=grant-alias/inbox", nil, tok)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("the legacy ?action= alias must not revoke: status = %d, want 422 (invalid_input)", resp.StatusCode)
+	}
+	if views, _ := env.k.ListGrantViews(ctx, uid); len(views) != 1 {
+		t.Fatalf("the grant must survive a request naming no selector: %d", len(views))
+	}
+	// The canonical spelling still works.
+	ok := httpDo(t, srv, "DELETE", "/v1/grants?selector=grant-alias/inbox", nil, tok)
+	defer ok.Body.Close()
+	if ok.StatusCode != http.StatusOK {
+		t.Fatalf("selector revoke: status = %d, want 200", ok.StatusCode)
+	}
+	if views, _ := env.k.ListGrantViews(ctx, uid); len(views) != 0 {
+		t.Errorf("grant survived the canonical revoke: %d", len(views))
 	}
 }
 

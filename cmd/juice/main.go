@@ -213,6 +213,8 @@ func exitCodeFor(err error) int {
 		return 9
 	case "peer_unfunded":
 		return 10
+	case "terms_changed":
+		return 11
 	default:
 		return 1
 	}

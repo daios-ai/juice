@@ -169,3 +169,11 @@ func TermsChangedError(currentHash string, currentPrice int64) error {
 func PeerUnfundedError(handle string) *KernelError {
 	return ErrPeerUnfunded.Wrapf("this kernel's credit with peer %s is exhausted; the operator must top up", handle).WithMeta("peer", handle)
 }
+
+// PeerRefusedError attributes a signed rejection that is neither a funding condition nor a contract
+// mismatch to the peer's own refusal — a suspended caller, or an action it will not serve (§13). The
+// three federation outcomes are operationally distinct: unreachable means retry, unfunded means the
+// operator tops up, refused means stop calling until a human resolves it.
+func PeerRefusedError(handle string) *KernelError {
+	return ErrUnauthorized.Wrapf("peer %s refused this call", handle).WithMeta("peer", handle)
+}

@@ -684,14 +684,31 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	var failErr error
 	if ktx.Status != TxSuccess {
 		failErr = ErrExecutionFailed.Wrap("remote call failed")
-		// A signed zero-charge rejection carried on transport status 402 is the remote's structured
-		// ErrInsufficientFunds (the inbound handler's 402 mapping): OUR prepaid credit there is
-		// exhausted, not the caller's balance. Surface it as the operator-actionable ErrPeerUnfunded
-		// so a client never renders it as the caller's own insufficient_funds. Gated on the receipt
-		// having validated — a quarantined receipt also forces charge 0, and vs.Quarantine is the
-		// explicit flag for that (never infer it from the reason string).
-		if fr.HTTPStatus == 402 && charge == 0 && !quarantined {
-			failErr = PeerUnfundedError(k.KernelName(ctx, target.KernelPublicKey))
+		// Classify on the rejection marker alone, never on charge or transport status: an executed
+		// failure that consumed nothing also charges 0, and the inbound handler returns the execution
+		// error's HTTP status alongside the real receipt — so a propagated ErrInsufficientFunds
+		// arrives as 402 as well. tx_id == our dispatched key is the one marker that separates a
+		// non-execution from an execution at any price (§6 P4). A quarantined receipt is never
+		// classified: it also forces charge 0, and the explicit flag is the signal.
+		var dispatchedKey string
+		if trace.IdempotencyKey != nil {
+			dispatchedKey = *trace.IdempotencyKey
+		}
+		if !quarantined && isRejectionReceipt(r.TxID, dispatchedKey) {
+			switch {
+			case fr.HTTPStatus == 402:
+				// The remote's structured ErrInsufficientFunds: OUR prepaid credit there is exhausted,
+				// not the caller's balance. Operator-actionable, so a client never renders it as the
+				// caller's own insufficient_funds.
+				failErr = PeerUnfundedError(k.KernelName(ctx, target.KernelPublicKey))
+			case r.RefreshProxy:
+				// A contract mismatch is not an authorization refusal: the proxy deactivates below and
+				// the next call re-resolves, so this stays an ordinary failure.
+			default:
+				// The peer will not serve us — suspended caller, or an action it refuses. Distinct
+				// from unreachable (retry) and unfunded (top up): a human must resolve it.
+				failErr = PeerRefusedError(k.KernelName(ctx, target.KernelPublicKey))
+			}
 		}
 		// The peer authored r.Reason; never adopt it into a record we sign (§6). Its verbatim text
 		// stays verifiable in ktx.RemoteReceiptJSON. The quarantine marker above wins.
@@ -1504,6 +1521,15 @@ func (k *Kernel) buildEvidenceReceipt(ourKey string, row *GossipReceiptRow) (*Ev
 // rejection — the serving kernel sets a rejection receipt's tx_id to the caller's idempotency_key, so
 // tx_id == our dispatched key distinguishes any rejection from a genuine execution at any price, 0
 // included.
+// isRejectionReceipt reports whether a remote receipt records a refusal rather than an execution.
+// The serving kernel sets a rejection receipt's tx_id to the caller's idempotency_key (§6 P4), and
+// that is the only marker that holds at any price: an executed failure consuming nothing charges 0
+// too, and may even carry transport status 402. One definition, used by gossip eligibility and by
+// settlement classification alike.
+func isRejectionReceipt(receiptTxID, dispatchedIdempotencyKey string) bool {
+	return dispatchedIdempotencyKey != "" && receiptTxID == dispatchedIdempotencyKey
+}
+
 func gossipRowIsExecuted(row *GossipReceiptRow) bool {
 	if row.RemoteReceiptJSON == "" {
 		return true // leg (a): own execution
@@ -1513,9 +1539,7 @@ func gossipRowIsExecuted(row *GossipReceiptRow) bool {
 		Status TxStatus `json:"status"`
 	}
 	_ = json.Unmarshal([]byte(row.RemoteReceiptJSON), &rr)
-	// Signed rejection: the serving kernel sets a rejection receipt's tx_id to the caller's
-	// idempotency_key, distinguishing it from a genuine execution at any price (0 included).
-	if row.IdempotencyKey != "" && rr.TxID == row.IdempotencyKey {
+	if isRejectionReceipt(rr.TxID, row.IdempotencyKey) {
 		return false
 	}
 	// Quarantined invalid receipt (§13): we settled it as a failure while keeping the reserve locked.
@@ -1548,6 +1572,15 @@ func (k *Kernel) gossipEvidencePage(ctx context.Context, ourKey, cursor string) 
 		next = row.Cursor
 		if !gossipRowIsExecuted(row) {
 			continue
+		}
+		// A delegated-auth action is never described abroad (§6 P6, §8 D10), so evidence must not
+		// name it either: the exclusion is one rule, and gossiping usage of a capability no peer can
+		// call or even see would disclose its existence and volume for no consumer. Own-execution
+		// rows only — a leg-(b) subject is the peer's action, governed by that peer.
+		if row.RemoteReceiptJSON == "" && row.SubjectActionID != "" {
+			if a, aerr := k.store.ReadAction(ctx, row.SubjectActionID); aerr == nil && k.isDelegatedAuth(a) {
+				continue
+			}
 		}
 		er, berr := k.buildEvidenceReceipt(ourKey, row)
 		if berr != nil {
@@ -1595,7 +1628,7 @@ func (k *Kernel) ReadKernelByPetname(ctx context.Context, petname string) (*Remo
 }
 
 // DiscoveryDocsForKernel returns the locally-cached "action" discovery docs for one source kernel
-// (§13), for the offline-inspect fallback. Regenerable — empty until the next gossip pull.
+// (§13). Regenerable — empty until the next gossip pull.
 func (k *Kernel) DiscoveryDocsForKernel(ctx context.Context, publicKey string) ([]*DiscoveryDoc, error) {
 	all, err := k.store.ListDiscoveryDocs(ctx)
 	if err != nil {
@@ -1606,6 +1639,68 @@ func (k *Kernel) DiscoveryDocsForKernel(ctx context.Context, publicKey string) (
 		if d.KernelPublicKey == publicKey && d.Kind == "action" {
 			out = append(out, d)
 		}
+	}
+	return out, nil
+}
+
+// PeerAction is one action a peer offers, as `admin inspect` reports it. Price is the indicative
+// local all-in — the peer's serving price plus this kernel's import fee — the same number and the
+// same definition sys/lookup shows, so two surfaces never quote one action differently; a resolve
+// re-quotes authoritatively before money moves (§13).
+type PeerAction struct {
+	ActionID     string         `json:"action_id"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description"`
+	InputSchema  map[string]any `json:"input_schema,omitempty"`
+	OutputSchema map[string]any `json:"output_schema,omitempty"`
+	Price        int64          `json:"price"`
+	Indicative   bool           `json:"indicative"`
+}
+
+// indicativePrice adds this kernel's import fee to a peer's serving price, the one definition of the
+// number both catalog sources and sys/lookup quote (§13). False when the arithmetic is out of range.
+func (k *Kernel) indicativePrice(serving int64) (int64, bool) {
+	p, err := markedUpPrice(serving, k.cfg.ImportBPS)
+	return p, err == nil
+}
+
+// PeerCatalog projects the signed manifests of a live gossip pull. Separate from PeerCatalogCached
+// rather than one call switching on a nil slice: a live peer that exports nothing legitimately sends
+// no manifests, and an emptiness test would silently answer that with stale cache under source
+// "live". The source is the caller's knowledge, so the caller names it.
+func (k *Kernel) PeerCatalog(manifests []*ActionManifest) []*PeerAction {
+	out := make([]*PeerAction, 0, len(manifests))
+	for _, m := range manifests {
+		serving, err := markedUpPrice(m.Price, m.RemoteBPS)
+		if err != nil {
+			continue // a manifest priced out of range is skipped at ingest too (§6 P6)
+		}
+		price, ok := k.indicativePrice(serving)
+		if !ok {
+			continue
+		}
+		out = append(out, &PeerAction{ActionID: m.ActionID, Name: m.Name, Description: m.Description,
+			InputSchema: m.InputSchema, OutputSchema: m.OutputSchema, Price: price, Indicative: true})
+	}
+	return out
+}
+
+// PeerCatalogCached projects the discovery cache into the same shape, for an unreachable peer. A
+// cached price is still a real price — rendering the untagged ServingPrice would report every action
+// free — and it is the same quantity the live projection carries, so the two differ only in freshness.
+func (k *Kernel) PeerCatalogCached(ctx context.Context, publicKey string) ([]*PeerAction, error) {
+	docs, err := k.DiscoveryDocsForKernel(ctx, publicKey)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*PeerAction, 0, len(docs))
+	for _, d := range docs {
+		price, ok := k.indicativePrice(d.ServingPrice)
+		if !ok {
+			continue
+		}
+		out = append(out, &PeerAction{ActionID: d.ActionID, Name: d.Name, Description: d.Description,
+			InputSchema: d.InputSchema, OutputSchema: d.OutputSchema, Price: price, Indicative: true})
 	}
 	return out, nil
 }

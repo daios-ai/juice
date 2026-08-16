@@ -59,7 +59,11 @@ func prepareSourceArtifact(source, artifact string) (srcData, artData string, er
 			if readErr != nil {
 				return "", "", kernel.ErrInvalidInput.Wrapf("reading artifact file: %v", readErr)
 			}
-			artData = strings.TrimSpace(string(data))
+			// A path names bytes, as it does for --source, so encode them. Never branch on whether
+			// the bytes parse as UTF-8: a small WASM module is entirely below 0x80 (the header
+			// alone is `\0asm\1\0\0\0`), so that test routes one module by its content and the next
+			// one differently. Literal base64 is the non-file case below.
+			artData = base64.StdEncoding.EncodeToString(data)
 		}
 	}
 	if srcData != "" && !utf8.ValidString(srcData) {
@@ -139,6 +143,19 @@ func printJSONBytes(b []byte) error {
 func emitRaw(b []byte) error {
 	if flagJSON {
 		return printJSONBytes(b)
+	}
+	// --quiet is one rule on every command, reads included (§14 C8): print the resource's id and
+	// nothing else, so output pipes into the next command; a response naming no resource prints
+	// nothing at all, rather than falling back to the full view the flag exists to suppress.
+	if flagQuiet {
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(b, &obj) == nil {
+			var id string
+			if raw, ok := obj["id"]; ok && json.Unmarshal(raw, &id) == nil && id != "" {
+				fmt.Println(id)
+			}
+			return nil
+		}
 	}
 	return printTextBytes(b)
 }
@@ -347,6 +364,12 @@ func userLedgerCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(entries)
 			}
+			if flagQuiet {
+				for _, e := range entries {
+					fmt.Println(e.ID)
+				}
+				return nil
+			}
 			for _, e := range entries {
 				from, to := e.FromHandle, e.ToHandle
 				if from == "" {
@@ -432,7 +455,7 @@ func actionCreateCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&kind, "kind", "http", "Action kind: http, wasm, native")
+	cmd.Flags().StringVar(&kind, "kind", "http", "Action kind: http or wasm")
 	cmd.Flags().StringVar(&source, "source", "", "URL (http) or file path (wasm)")
 	cmd.Flags().StringVar(&method, "method", "", "HTTP verb (default POST)")
 	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (path|query|body); repeatable")
@@ -601,18 +624,23 @@ func actionListCmd() *cobra.Command {
 				return printJSON(actions)
 			}
 			for _, a := range actions {
+				if flagQuiet {
+					fmt.Println(a.ID) // ids only, one per line: pipeable (§14 C8)
+					continue
+				}
 				grant := ""
 				if a.RequiresGrant {
 					grant = " [grant]" // caller must connect their own credential first (§8)
 				}
+				// The ref already contains the name; one padded reference column in both branches.
 				if all {
 					active := " "
 					if a.Active {
 						active = "*"
 					}
-					fmt.Printf("[%s] %s  %-30s  %d credits%s\n", active, a.ActionRef, a.Name, a.Price, grant)
+					fmt.Printf("[%s] %-30s  %d credits%s\n", active, a.ActionRef, a.Price, grant)
 				} else {
-					fmt.Printf("  %-24s  %d credits%s\n", a.ActionRef, a.Price, grant)
+					fmt.Printf("  %-30s  %d credits%s\n", a.ActionRef, a.Price, grant)
 				}
 			}
 			return nil
@@ -791,6 +819,12 @@ func processListCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(processes)
 			}
+			if flagQuiet {
+				for _, p := range processes {
+					fmt.Println(p.ID)
+				}
+				return nil
+			}
 			for _, p := range processes {
 				awaiting := ""
 				if p.AwaitingReceipt && p.AwaitingReceiptSince != nil {
@@ -905,6 +939,12 @@ func stepListCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(steps)
 			}
+			if flagQuiet {
+				for _, s := range steps {
+					fmt.Println(s.ID)
+				}
+				return nil
+			}
 			for _, s := range steps {
 				marker := ""
 				if s.WaitingOnPeer {
@@ -920,7 +960,7 @@ func stepListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
-	cmd.Flags().StringVar(&status, "status", "", "Filter by status (waiting, running, done)")
+	cmd.Flags().StringVar(&status, "status", "", "Filter by status (waiting, running, done, cancelled)")
 	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
@@ -1002,6 +1042,12 @@ func txListCmd() *cobra.Command {
 			}
 			if flagJSON {
 				return printJSON(txs)
+			}
+			if flagQuiet {
+				for _, tx := range txs {
+					fmt.Println(tx.ID)
+				}
+				return nil
 			}
 			for _, tx := range txs {
 				fmt.Printf("[%s] %s  status:%s  gross:%d\n",

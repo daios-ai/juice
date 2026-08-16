@@ -2020,6 +2020,64 @@ func TestHostStepCreateResolvesNames(t *testing.T) {
 	}
 }
 
+// stepCompleteHostExec drives the WASM host's juice.step_complete against a step the executing
+// trace did not park, recording what the host returned.
+type stepCompleteHostExec struct {
+	stepID string
+	err    error
+}
+
+func (e *stepCompleteHostExec) Compile(_ context.Context, src []byte) ([]byte, string, error) {
+	return src, "fakehash", nil
+}
+
+func (e *stepCompleteHostExec) Execute(ctx context.Context, _ []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
+	if _, e.err = host.StepComplete(ctx, e.stepID, []byte(`{}`)); e.err != nil {
+		return nil, e.err
+	}
+	return []byte(`{"ok":true}`), nil
+}
+
+// TestHostStepCompleteIsTraceConfined: a script resumes only a step its own trace parked (§10). The
+// script runs as its action's owner, so being the required caller would otherwise let any execution
+// of that action fire a step living in an unrelated process — the WASM half of the capability rule.
+func TestHostStepCompleteIsTraceConfined(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	victim := setupUser(t, st, "hsc-victim", 1000)
+	mallory := setupUser(t, st, "hsc-mallory", 1000)
+
+	// The step's target and the script are both mallory's, so the script's owner IS the required
+	// caller: only the trace check can refuse this.
+	target := setupWasmAction(t, st, mallory.ID, "hsc-target", "", 0)
+	script := setupWasmAction(t, st, mallory.ID, "hsc-script", "", 0)
+
+	_, victimTrace := setupOrphanTrace(t, st, victim.ID, victim.ID, victim.ID)
+	exec := &stepCompleteHostExec{}
+	k := newTestKernelWithScripts(st, exec)
+	step, err := k.CreateStep(ctx, victimTrace.ID, target.ID, nil, mallory.ID, "")
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+	exec.stepID = step.ID
+
+	_, tr := beginTestRun(t, st, mallory.ID, script)
+	_, callErr := k.TestCall(ctx, kernel.TestCallRequest{
+		CallerID: mallory.ID, ExistingTraceID: tr.ID,
+		TargetUserID: mallory.ID, ActionName: "hsc-script", Args: map[string]any{},
+	})
+	if callErr == nil {
+		t.Fatal("the call must fail: the host completion is refused")
+	}
+	if !errors.Is(exec.err, kernel.ErrUnauthorized) {
+		t.Fatalf("host StepComplete across traces must be ErrUnauthorized, got %v", exec.err)
+	}
+	if s, _ := st.ReadStep(ctx, step.ID); s.Status != kernel.StepWaiting {
+		t.Errorf("the step must stay waiting, got %s", s.Status)
+	}
+}
+
 // ---- Symmetric wasm-artifact update (item 2) ----
 
 func TestUpdateActionAcceptsWasmArtifact(t *testing.T) {

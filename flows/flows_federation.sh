@@ -463,50 +463,50 @@ flow_fed_peer_sync() {
     assert_nonempty "fed_peer_sync.last_seen_cached" "$seen"
 }
 
-# flow_fed_inspect_sync — `admin inspect` refreshes the peer-sync cache ON DEMAND, not only on the
-# discovery timer (§13 peer sync). inspect already does the live gossip pull (OnInspect == OnGossip),
-# so it persists last_seen + our credit there the moment an operator looks. Proven with the timer
-# parked at 3600s: the cache can only be refreshed by the inspect, never by a background pass.
-flow_fed_inspect_sync() {
-    echo "=== FLOW fed_inspect_sync ==="
+# flow_fed_inspect_read_only — `admin inspect` writes nothing (§14). Its reply is live — it does do
+# the gossip pull — but it must not persist what it saw: the discovery loop owns the peer-sync cache,
+# so retention and display state never depend on an operator having looked. Proven with the timer
+# parked at 3600s, so the only thing that could refresh the cache is the inspect itself.
+flow_fed_inspect_read_only() {
+    echo "=== FLOW fed_inspect_read_only ==="
     local dir; dir=$(new_dir)
     local dbr="$dir/r/juice.db" hr="$dir/rsys" dbl="$dir/l/juice.db" hl="$dir/lsys"
     mkdir -p "$dir/r" "$dir/l" "$hr/.juice" "$hl/.juice"
 
     start_server "$dbr" "$hr" kernel_handle=kernel-r discovery_interval_seconds=3600 \
-        || { fail "fed_inspect_sync.setup" "R did not start"; return; }
+        || { fail "fed_inspect_read_only.setup" "R did not start"; return; }
     local boot; boot=$(kernel_fed_addr "$dbr")
-    [ -n "$boot" ] || { fail "fed_inspect_sync.boot" "no R fed addr"; return; }
+    [ -n "$boot" ] || { fail "fed_inspect_read_only.boot" "no R fed addr"; return; }
     start_server "$dbl" "$hl" kernel_handle=kernel-l bootstrap_peers="$boot" discovery_interval_seconds=3600 \
-        || { fail "fed_inspect_sync.l" "L did not start"; return; }
+        || { fail "fed_inspect_read_only.l" "L did not start"; return; }
     j "$dbr" "$hr" auth login sys --password sys-pass >/dev/null 2>&1
     j "$dbl" "$hl" auth login sys --password sys-pass >/dev/null 2>&1
     local rkey; rkey=$(kernel_key "$dbr" "$hr")
     local lkey; lkey=$(kernel_key "$dbl" "$hl")
-    [ -n "$rkey" ] && [ -n "$lkey" ] || { fail "fed_inspect_sync.rkey" "no R/L key"; return; }
+    [ -n "$rkey" ] && [ -n "$lkey" ] || { fail "fed_inspect_read_only.rkey" "no R/L key"; return; }
 
     # R exposes a public action; L cold-resolves it by key to provision R's proxy locally and bind the
     # kernel-r alias. R funds L's proxy by key so R reports our credit.
     local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)
     j "$dbl" "$hl" run "sys@$rkey/greet" '{}' >/dev/null 2>&1  # resolve caches the proxy even if greet's dead backend fails execution
-    j "$dbl" "$hl" admin rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "fed_inspect_sync.resolve" "resolve/rename failed"; return; }
+    j "$dbl" "$hl" admin rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "fed_inspect_read_only.resolve" "resolve/rename failed"; return; }
     j "$dbr" "$hr" admin deposit -- "$lkey" 250 >/dev/null 2>&1
 
     local pc='import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get("petname")=="kernel-r"),{});print(p.get("peer_credit") if p.get("peer_credit") is not None else "")'
     # Baseline: with the sync pass parked at 3600s and no inspect yet, L has NOT cached R's report.
-    assert_eq "fed_inspect_sync.baseline_uncached" "" \
+    assert_eq "fed_inspect_read_only.baseline_uncached" "" \
         "$(python3 -c "$pc" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)"
 
-    # A single live inspect must persist last_seen + peer_credit (the on-demand refresh).
+    # The inspect itself is live: it reaches R and reports what R says right now.
     local doc; doc=$(jj "$dbl" "$hl" admin inspect kernel-r)
-    assert_json "fed_inspect_sync.inspect_live"   "$doc" source live
-    assert_json "fed_inspect_sync.inspect_online" "$doc" online True
+    assert_json "fed_inspect_read_only.inspect_live"   "$doc" source live
+    assert_json "fed_inspect_read_only.inspect_online" "$doc" online True
 
-    # The cache is now fresh — set by inspect alone, no timer pass involved.
-    assert_eq "fed_inspect_sync.credit_after_inspect" 250 \
+    # ...and it left nothing behind: the cache is exactly as uncached as before.
+    assert_eq "fed_inspect_read_only.credit_still_uncached" "" \
         "$(python3 -c "$pc" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)"
     local seen; seen=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get('petname')=='kernel-r'),{});print(p.get('last_seen') or '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
-    assert_nonempty "fed_inspect_sync.last_seen_after_inspect" "$seen"
+    assert_eq "fed_inspect_read_only.last_seen_still_unset" "" "$seen"
 }
 
 # flow_fed_offline — every federation command has defined behavior when the peer is DOWN (§13):

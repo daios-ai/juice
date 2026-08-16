@@ -57,8 +57,9 @@ final and atomic with its transaction and receipt.
   `juice user connect --token`, applied into a configurable header). Reads expose only the
   non-secret `auth_scheme` name and a `requires_grant` flag, never config or secrets. See
   **[docs/oauth.md](docs/oauth.md)**.
-- **Native `sys` actions** (the platform stdlib): `lookup`, `llm/chat`, `llm/embed`, `llm/json`,
-  `llm/decide`, `tinygo/compile`, `time`, `sink`, `message`, `random`, `web`.
+- **Native `sys` actions** (the platform stdlib, all `local` — callable here, never served
+  abroad): `lookup`, `user-lookup`, `llm/chat`, `llm/embed`, `llm/json`, `llm/decide`,
+  `tinygo/compile`, `time`, `sink`, `message`, `random`, `web`, `transfer`.
 - **Federation** — call peer kernels by public key (actions resolve and cache on first use), proxy users, prepaid credits, signed
   manifests, and gossip-based discovery; `juice tx verify` checks a remote receipt locally.
 - **OpenAPI import** — register representable HTTP operations as actions.
@@ -128,7 +129,7 @@ transactions are ids.
 ```text
 juice serve | health
 juice user create <user> | me | update | connect <action> | disconnect <action>
-juice auth login <user> | logout | refresh | recover <user>
+juice auth login <user> | logout | recover <user>
 juice action create <name> | update <action> | enable/disable <action> | list | show <action>
 juice action delete <action> | import <spec-url> | unimport <spec-url> | stats <action>
 juice run <action> [json]
@@ -169,7 +170,7 @@ Key groups:
 | `token_ttl` | Access-token lifetime (e.g. `15m`) |
 | `log_level` / `log_file` / `log_format` | Structured logging |
 | `kernel_handle` / `bootstrap_peers` | Federation identity and the peers dialed to join the discovery network |
-| `allow_local_sources` | Permit loopback/private URLs for action sources and OAuth endpoints (off by default) |
+| `allow_local_sources` | Permit private, link-local, and CGNAT URLs for action sources and OAuth endpoints (off by default). Loopback is always permitted: a co-located service shares the kernel's trust domain, which is a deployment assumption to make deliberately on a shared host |
 | `credentials_key` | Auto-generated AES-256 key sealing action upstream credentials and delegated-OAuth grant refresh tokens |
 
 Environment variables are bootstrap and overrides only (everything else is configured
@@ -187,7 +188,7 @@ kernel/      Core types, interfaces, auth, call/settlement semantics, federation
 store/       SQLite implementation of kernel.Store (migrations, WAL)
 script/      WebAssembly execution via wazero
 llm/         Language and embedding adapter (Ollama) for lookup, chat, json, decide
-native/      Native sys action handlers (lookup, llm/*, time, sink, message, random, web, tinygo)
+native/      Native sys action handlers (lookup, user-lookup, llm/*, time, sink, message, random, web, transfer, tinygo)
 log/         Structured logger (slog + tint, text + JSON)
 ```
 

@@ -1496,6 +1496,54 @@ func captureStdout(t *testing.T, fn func() error) string {
 	return buf.String()
 }
 
+// TestQuietPrintsIdentifiersOnly: --quiet means one thing on every command, reads included (§14 C8)
+// — the resource id and nothing else, one per line, so output pipes into the next command. It was
+// previously honoured on three creation commands and silently ignored on every read, which makes
+// the flag unusable in a script.
+func TestQuietPrintsIdentifiersOnly(t *testing.T) {
+	old := flagQuiet
+	flagQuiet = true
+	t.Cleanup(func() { flagQuiet = old })
+
+	t.Run("detail view prints the id", func(t *testing.T) {
+		out := captureStdout(t, func() error {
+			return emitRaw([]byte(`{"id":"act-1","action":"bob/echo","price":10,"description":"d"}`))
+		})
+		if out != "act-1\n" {
+			t.Errorf("emitRaw --quiet = %q, want %q", out, "act-1\n")
+		}
+	})
+
+	t.Run("a response naming no resource prints nothing", func(t *testing.T) {
+		out := captureStdout(t, func() error { return emitRaw([]byte(`{"status":"ok"}`)) })
+		if out != "" {
+			t.Errorf("--quiet must suppress a response with no resource id, got %q", out)
+		}
+	})
+
+	t.Run("list prints one id per line", func(t *testing.T) {
+		var ids []string
+		stubServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": "act-1", "action": "bob/echo", "price": 1},
+				{"id": "act-2", "action": "bob/other", "price": 2},
+			})
+		})
+		out := captureStdout(t, func() error {
+			_, err := execTestCmd(t, actionListCmd())
+			return err
+		})
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			if line != "" {
+				ids = append(ids, line)
+			}
+		}
+		if len(ids) != 2 || ids[0] != "act-1" || ids[1] != "act-2" {
+			t.Errorf("action list --quiet = %v, want [act-1 act-2]", ids)
+		}
+	})
+}
+
 // TestPrintTextParity asserts that printText surfaces every field the canonical JSON
 // (what the HTTP API returns) carries — the CLI/HTTP parity invariant (§14). It also
 // checks that structured values are rendered as indented JSON.

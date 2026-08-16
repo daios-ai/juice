@@ -68,6 +68,10 @@ type CallReply struct {
 	TxID      string         `json:"tx_id"`
 	TraceID   string         `json:"trace_id"`
 	ReceiptID string         `json:"receipt_id"`
+	// ProcessID is set only by run, which creates the process: it is the handle the caller needs for
+	// `process show`/`end` when work parks (§14). Subcalls and step completions run inside a process
+	// the caller already addressed, so they omit it.
+	ProcessID string `json:"process_id,omitempty"`
 }
 
 // ActionRef is a parsed user[@kernel]/action reference (§13). Kernel is "" for a local action.
@@ -972,8 +976,10 @@ func (h *kernelHostFunctions) StepCreate(ctx context.Context, partialArgs []byte
 	return step.ID, nil
 }
 
+// StepComplete carries the executing trace, not just the owner: a script resumes only a step its own
+// trace parked (§10), the same confinement the HTTP capability twin enforces.
 func (h *kernelHostFunctions) StepComplete(ctx context.Context, stepID string, input []byte) ([]byte, error) {
-	reply, err := h.kernel.CompleteStep(ctx, h.targetID, stepID, json.RawMessage(input))
+	reply, err := h.kernel.CompleteStepInTrace(ctx, h.targetID, h.traceID, stepID, json.RawMessage(input))
 	if err != nil {
 		return nil, err
 	}

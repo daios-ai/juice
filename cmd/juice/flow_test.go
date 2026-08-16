@@ -206,6 +206,17 @@ func TestFlow_SignupDepositRun(t *testing.T) {
 	if reply.TxID == "" {
 		t.Fatal("expected tx_id in reply")
 	}
+	// run creates the process, so its reply carries the handle the caller needs next — process
+	// show/end when work parks. Without it the caller has to go hunting through process list (§14).
+	if reply.ProcessID == "" {
+		t.Fatal("expected process_id in the run reply")
+	}
+	if resp := httpDo(t, srv, "GET", "/v1/processes/"+reply.ProcessID, nil, callerTok); resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("the returned process_id must address the process: GET status %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
 	if reply.Result["answer"] != float64(42) {
 		t.Errorf("result: got %v, want answer=42", reply.Result)
 	}

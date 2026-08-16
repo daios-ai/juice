@@ -1263,6 +1263,129 @@ func TestPremiumReserveReleasedFromTrace(t *testing.T) {
 	}
 }
 
+// TestCommitFailedCallRecordsRefund: a failed local call records what actually came back on the
+// transaction the payer audits (§3 D4). The local law is not the remote identity gross−net−fee — a
+// failure charges no fee or net, yet settled descendants stay paid — so the field carries the
+// unspent allocation, which is the whole gross when nothing settled beneath it.
+func TestCommitFailedCallRecordsRefund(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("refund-alice", 1000)
+	_ = db.CreateUser(ctx, user)
+	p := newProcess(user.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, user.ID, 70, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	failTx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID,
+		OwnerUserID: user.ID, CallerUserID: user.ID, TargetUserID: user.ID,
+		ActionID: "dummy", Status: kernel.TxFailure, Gross: 70, Reason: "execution_failed",
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	buildReceipt := func(refund int64) (*kernel.Receipt, error) {
+		return &kernel.Receipt{
+			ID: uuid.New().String(), IssuerUserID: user.ID, TxID: failTx.ID, TraceID: root.ID,
+			ActionID: "dummy", Status: kernel.TxFailure, Gross: 70, Charge: 70 - refund,
+			CreatedAt: time.Now().UTC(),
+		}, nil
+	}
+	if err := db.CommitFailedCall(ctx, failTx, buildReceipt, root.ID, p.ID, kernel.CallerProcess, "", 70, nil, "", "execution_failed", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read it back: the audit record, not the in-memory struct, is what the payer sees.
+	stored, err := db.ReadTransaction(ctx, failTx.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Refund != 70 {
+		t.Errorf("failed call refund = %d, want 70 (the whole allocation came back)", stored.Refund)
+	}
+	if stored.Net != 0 || stored.Fee != 0 {
+		t.Errorf("a failure pays nothing: net=%d fee=%d", stored.Net, stored.Fee)
+	}
+	// The reported refund must agree with the money that actually moved.
+	u, _ := db.ReadUser(ctx, user.ID)
+	if u.Available != 1000 {
+		t.Errorf("owner available = %d, want the full 1000 back", u.Available)
+	}
+}
+
+// TestCommitFailedCallRefundExcludesSettledDescendants: the local law is NOT gross−net−fee. A parent
+// that fails after a child already settled keeps that child paid (U13), and the parent's own net and
+// fee stay zero — so the remote identity would report the whole gross as returned. `refund` must be
+// what the caller actually got back: the allocation still unspent when the rollup ran.
+func TestCommitFailedCallRefundExcludesSettledDescendants(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	sys := newUser("refund-sys", 0)
+	_ = db.CreateUser(ctx, sys)
+	owner := newUser("refund-owner", 1000)
+	_ = db.CreateUser(ctx, owner)
+	provider := newUser("refund-provider", 0)
+	_ = db.CreateUser(ctx, provider)
+
+	// A root funded with 70 spends 30 on a child that settles successfully, then fails.
+	p := newProcess(owner.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, owner.ID, 70, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	child := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: provider.ID,
+		CallerUserID: owner.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginSubcall(ctx, root.ID, child, 30); err != nil {
+		t.Fatal(err)
+	}
+	okTx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: child.ID, ParentTraceID: root.ID,
+		OwnerUserID: owner.ID, CallerUserID: owner.ID, TargetUserID: provider.ID, ActionID: "child",
+		Status: kernel.TxSuccess, Gross: 30, Net: 24, Fee: 6,
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	okReceipt := &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: sys.ID, TxID: okTx.ID,
+		TraceID: child.ID, ActionID: "child", Status: kernel.TxSuccess, CreatedAt: time.Now().UTC()}
+	if err := db.CommitCall(ctx, okTx, okReceipt, child.ID, root.ID, kernel.CallerTrace,
+		provider.ID, sys.ID, 24, 6, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	failTx := &kernel.Transaction{
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID,
+		OwnerUserID: owner.ID, CallerUserID: owner.ID, TargetUserID: owner.ID, ActionID: "root",
+		Status: kernel.TxFailure, Gross: 70, Reason: "execution_failed",
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+	}
+	buildReceipt := func(refund int64) (*kernel.Receipt, error) {
+		return &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: sys.ID, TxID: failTx.ID,
+			TraceID: root.ID, ActionID: "root", Status: kernel.TxFailure, Gross: 70,
+			Charge: 70 - refund, CreatedAt: time.Now().UTC()}, nil
+	}
+	if err := db.CommitFailedCall(ctx, failTx, buildReceipt, root.ID, p.ID, kernel.CallerProcess,
+		sys.ID, 70, nil, "", "execution_failed", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	stored, err := db.ReadTransaction(ctx, failTx.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Refund != 40 {
+		t.Errorf("refund = %d, want 40 (gross 70 − the settled child's 30)", stored.Refund)
+	}
+	if stored.Gross-stored.Net-stored.Fee == stored.Refund {
+		t.Error("refund must not equal gross−net−fee here; that identity is the remote one (P7)")
+	}
+	// The child stays paid and the owner is out exactly what the child cost.
+	if pu, _ := db.ReadUser(ctx, provider.ID); pu.Available != 24 {
+		t.Errorf("settled descendant must stay paid: provider has %d, want 24", pu.Available)
+	}
+	if u, _ := db.ReadUser(ctx, owner.ID); u.Available != 970 {
+		t.Errorf("owner available = %d, want 970 (1000 − the settled 30)", u.Available)
+	}
+}
+
 func TestEndProcess(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

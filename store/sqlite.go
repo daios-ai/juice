@@ -1326,6 +1326,11 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 			return err
 		}
 		refund := traceAvailable + stepPrices
+		// Record what actually came back, on the same row the payer audits (§3 D4). The local law is
+		// not the remote identity gross−net−fee: a failed call charges no fee or net, yet already
+		// settled descendants stay paid, so the returned amount is the unspent allocation plus the
+		// parked prices of the steps this rollup cancels.
+		ktx.Refund = refund
 		// Build and sign the receipt inside the transaction so that charge (gross − refund)
 		// is guaranteed to match what is committed — no TOCTOU window.
 		receipt, err := buildReceipt(refund)

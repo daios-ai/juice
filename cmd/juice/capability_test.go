@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"github.com/google/uuid"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -230,6 +232,116 @@ func readAvailable(t *testing.T, db *store.DB, userID string) int64 {
 		t.Fatal(err)
 	}
 	return u.Available
+}
+
+// TestCapabilityStepCompleteIsTraceConfined proves the capability cannot complete a step outside
+// its own trace (§9 "no other trace"). The endpoint runs in ITS OWN process while a step addressed
+// to the same owner waits in a victim's process: without confinement, holding the capability would
+// fire that step — spending funds the victim committed, at a time the attacker chooses. The step
+// stays waiting and the victim's balance is untouched.
+func TestCapabilityStepCompleteIsTraceConfined(t *testing.T) {
+	srv, k, db := newCapabilityKernel(t)
+	ctx := context.Background()
+
+	provID, provTok := makeUser(t, k, "prov")
+	victimID, victimTok := makeUser(t, k, "victim")
+	giveCredits(t, k, provID, 1000)
+	giveCredits(t, k, victimID, 1000)
+
+	// A leaf the parked step will target, owned by the victim so its price is the victim's to spend.
+	leaf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	t.Cleanup(leaf.Close)
+	createEnabledPublicAction(t, srv, victimTok, "leaf", "http", leaf.URL, "victim leaf", 10)
+
+	// The victim's own composing action parks a step addressed to @prov, inside the VICTIM's process.
+	var victimStepID string
+	victimCompose := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, body := capCallback(r.Header.Get(callbackHeader), r.Header.Get(capabilityHeader), "/v1/steps",
+			map[string]any{"action": "victim/leaf", "required_caller": "prov", "partial_args": map[string]any{}})
+		var sv map[string]any
+		_ = json.Unmarshal(body, &sv)
+		victimStepID, _ = sv["id"].(string)
+		_ = json.NewEncoder(w).Encode(map[string]any{"parked": true})
+	}))
+	t.Cleanup(victimCompose.Close)
+	createEnabledPublicAction(t, srv, victimTok, "park", "http", victimCompose.URL, "victim parker", 100)
+	runAction(t, srv, victimTok, "victim/park", map[string]any{})
+	if victimStepID == "" {
+		t.Fatal("setup: the victim's process did not park a step")
+	}
+
+	// @prov's own action, running in @prov's process, tries to complete that step with its capability.
+	var completeStatus int
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		completeStatus, _ = capCallback(r.Header.Get(callbackHeader), r.Header.Get(capabilityHeader),
+			"/v1/steps/"+victimStepID+"/complete", map[string]any{"args": map[string]any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"done": true})
+	}))
+	t.Cleanup(attacker.Close)
+	createEnabledPublicAction(t, srv, provTok, "hook", "http", attacker.URL, "attacker hook", 50)
+
+	before := readAvailable(t, db, victimID)
+	runAction(t, srv, provTok, "prov/hook", map[string]any{})
+
+	if completeStatus != http.StatusForbidden {
+		t.Errorf("cross-trace capability completion: status = %d, want 403 (unauthorized)", completeStatus)
+	}
+	step, err := db.ReadStep(ctx, victimStepID)
+	if err != nil {
+		t.Fatalf("ReadStep: %v", err)
+	}
+	if step.Status != kernel.StepWaiting {
+		t.Errorf("the victim's step must stay waiting, got %s", step.Status)
+	}
+	if after := readAvailable(t, db, victimID); after != before {
+		t.Errorf("the victim's balance moved: %d → %d", before, after)
+	}
+}
+
+// TestCapabilityCannotDriveFederation: a capability is local to its trace and carries no supervision
+// authority (§9), so it must never reach the `--peer` completion path — that request is signed by the
+// whole kernel. The trap is that a capability request has no session caller, so an empty caller reads
+// as "kernel-level completion", the superuser form. An untrusted endpoint holding any valid
+// capability would then complete a kernel-addressed step on a peer with operator authority.
+// The assertion is that NOTHING is dispatched, not merely that the call errors.
+func TestCapabilityCannotDriveFederation(t *testing.T) {
+	srv, k, _ := newCapabilityKernel(t)
+
+	// A recording transport behind a real adapter: any federation dispatch shows up in lastStep.
+	f := &fakeFed{stepBody: json.RawMessage(`{"tx_id":"tx-peer"}`), stepStatus: 200}
+	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+	adapter := newFedAdapter(self, nil)
+	adapter.SetTransport(f)
+	k.SetFederation(adapter)
+
+	_, provTok := makeUser(t, k, "prov")
+	callerID, callerTok := makeUser(t, k, "caller")
+	giveCredits(t, k, callerID, 1000)
+
+	// A stranger peer key: unresolvable locally, which is exactly the cold-dispatch case.
+	strangerKey := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+
+	var status int
+	var body []byte
+	compose := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		status, body = capCallback(r.Header.Get(callbackHeader), r.Header.Get(capabilityHeader),
+			"/v1/steps/"+uuid.New().String()+"/complete",
+			map[string]any{"peer": strangerKey, "args": map[string]any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"done": true})
+	}))
+	t.Cleanup(compose.Close)
+	createEnabledPublicAction(t, srv, provTok, "hook", "http", compose.URL, "hook", 50)
+
+	runAction(t, srv, callerTok, "prov/hook", map[string]any{})
+
+	if status != http.StatusForbidden {
+		t.Errorf("capability + --peer: status = %d, want 403; body=%s", status, body)
+	}
+	if f.lastStep.Kind != "" {
+		t.Errorf("a capability must not reach federation at all; dispatched %+v", f.lastStep)
+	}
 }
 
 // TestCapabilityRejectedOnRun proves /v1/run never accepts a capability: the route is JWT-only,

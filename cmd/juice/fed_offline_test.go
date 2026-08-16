@@ -183,6 +183,89 @@ func TestInspectOfflineFriendedShowsLocalData(t *testing.T) {
 	}
 }
 
+// TestInspectCatalogIsOneShapeAndPrice: inspect answers from a live gossip pull or, when the peer is
+// down, from the discovery cache — and an operator must not have to know which. Both branches carry
+// the same fields and the same price, the indicative local all-in (serving price + import fee) that
+// sys/lookup shows. Two failures this pins: the cached ServingPrice is untagged, so serializing docs
+// directly reported every action free; and the live branch's raw manifest price is the seller's
+// base, which is a different number from the cached one under the same key.
+func TestInspectCatalogIsOneShapeAndPrice(t *testing.T) {
+	k, db := newRemoteTestKernel(t)
+	ctx := context.Background()
+	handle, key := seedPeer(t, k, "peer-priced")
+
+	// mp=20 at the default 500 bps serving markup → serving 21; +500 bps import → 23 all-in.
+	const mp, wantAllIn = int64(20), float64(23)
+	rbps := kernel.DefaultConfig().RemoteBPS
+	m := kernel.ActionManifest{
+		ActionID: "act-1", OwnerHandle: handle, Name: "greet", Description: "greet",
+		Kind: kernel.KindHTTP, Price: mp, RemoteBPS: rbps,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+	}
+	doc, _ := json.Marshal(kernel.GossipResponse{
+		Handle: handle, PublicKey: key, ActionManifests: []*kernel.ActionManifest{&m},
+	})
+	if err := db.ReplaceDiscoveryDocs(ctx, key, []*kernel.DiscoveryDoc{{
+		KernelPublicKey: key, Kind: "action", ActionID: "act-1", Name: "greet",
+		Description: "greet", ServingPrice: 21, ObservedAt: time.Now().UTC(),
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	read := func(t *testing.T, f *fakeFed, wantSource string) map[string]any {
+		t.Helper()
+		out := inspectResp(t, &server{kernel: k, log: log.Discard(), fed: f}, handle)
+		if out["source"] != wantSource {
+			t.Fatalf("source = %v, want %v", out["source"], wantSource)
+		}
+		acts, ok := out["actions"].([]any)
+		if !ok || len(acts) != 1 {
+			t.Fatalf("%s: actions = %v, want exactly one", wantSource, out["actions"])
+		}
+		a, _ := acts[0].(map[string]any)
+		return a
+	}
+
+	live := read(t, &fakeFed{inspectDoc: doc, reachPath: "direct"}, "live")
+	cached := read(t, &fakeFed{reachPath: "unreachable"}, "local")
+
+	for _, c := range []struct {
+		name string
+		a    map[string]any
+	}{{"live", live}, {"cached", cached}} {
+		if c.a["price"] != wantAllIn {
+			t.Errorf("%s price = %v, want the indicative all-in %v", c.name, c.a["price"], wantAllIn)
+		}
+		if c.a["indicative"] != true {
+			t.Errorf("%s price must be marked indicative, got %v", c.name, c.a["indicative"])
+		}
+		if c.a["action_id"] != "act-1" || c.a["name"] != "greet" {
+			t.Errorf("%s projection lost its identity fields: %v", c.name, c.a)
+		}
+	}
+	// One schema, not merely one price: the same key set from both branches.
+	if len(live) != len(cached) {
+		t.Errorf("live and cached projections differ in shape: %v vs %v", live, cached)
+	}
+
+	// A peer that answers and offers nothing is not a peer we could not reach. The gossip producer
+	// leaves an empty manifest slice nil and the field is omitempty, so treating emptiness as "no
+	// live data" would answer a retired catalog with whatever the cache still holds, labelled live.
+	t.Run("live peer with no actions does not fall back to cache", func(t *testing.T) {
+		empty, _ := json.Marshal(kernel.GossipResponse{Handle: handle, PublicKey: key})
+		out := inspectResp(t, &server{kernel: k, log: log.Discard(),
+			fed: &fakeFed{inspectDoc: empty, reachPath: "direct"}}, handle)
+		if out["source"] != "live" {
+			t.Fatalf("source = %v, want live", out["source"])
+		}
+		if acts, _ := out["actions"].([]any); len(acts) != 0 {
+			t.Errorf("a live peer offering nothing must report no actions, got %v", acts)
+		}
+	})
+}
+
 // TestInspectLocalUserRejected: a handle that names a LOCAL account (no public key) is not a
 // federation peer — inspect must reject it, not probe the handle as if it were a key. Regression:
 // `admin inspect @chat` used to report a local user as an offline unknown peer.
@@ -248,11 +331,11 @@ func TestInspectOnlineLive(t *testing.T) {
 	}
 }
 
-// TestInspectPersistsPeerSync: a live inspect of a friended peer persists the freshness it just
-// fetched — last_seen and our credit there — so `admin peers`/`admin show` refresh on demand rather
-// than only on the 5-minute discovery timer (§13 peer sync). The stranger-live case is covered by
-// TestInspectOnlineLive, whose inspectDoc key has no user: RecordPeerSync no-ops without erroring.
-func TestInspectPersistsPeerSync(t *testing.T) {
+// TestInspectWritesNothing: inspect is a diagnostic read and writes nothing (§14), so even a live
+// pull that observes the peer's freshness leaves the sync cache alone — the discovery loop owns it.
+// Otherwise retention and display state would depend on being looked at, and a GET would carry
+// durable side effects.
+func TestInspectWritesNothing(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
 	handle, key := seedPeer(t, k, "peer-sync")
@@ -267,16 +350,20 @@ func TestInspectPersistsPeerSync(t *testing.T) {
 	doc, _ := json.Marshal(kernel.GossipResponse{Handle: handle, PublicKey: key, CounterpartyBalance: &bal})
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{inspectDoc: doc, reachPath: "direct"}}
 
+	// The response itself is live: what must not happen is persistence of what it saw.
 	if out := inspectResp(t, srv, key); out["source"] != "live" {
 		t.Fatalf("source = %v, want live", out["source"])
 	}
 
 	after, _ := k.ReadKernel(ctx, key)
-	if after == nil || after.LastSeen == nil {
-		t.Fatal("inspect must persist last_seen for a known peer")
+	if after == nil {
+		t.Fatal("the peer row must survive an inspect")
 	}
-	if after.PeerCredit == nil || *after.PeerCredit != bal {
-		t.Fatalf("inspect must persist peer_credit; got %v, want %d", after.PeerCredit, bal)
+	if after.LastSeen != nil {
+		t.Errorf("inspect must not persist last_seen, got %v", after.LastSeen)
+	}
+	if after.PeerCredit != nil {
+		t.Errorf("inspect must not persist peer_credit, got %v", *after.PeerCredit)
 	}
 }
 

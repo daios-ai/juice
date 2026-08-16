@@ -1207,6 +1207,9 @@ func (k *Kernel) RenameUser(ctx context.Context, operatorID, targetID, newHandle
 		return nil, err
 	}
 	target.Handle = newHandle
+	// The id→handle cache backs displayOwner, so a stale entry would keep rendering the vacated
+	// handle in references callers run against.
+	k.userHandles.Delete(targetID)
 	k.log.With(ctx).Info("user.renamed", "user_id", targetID, "handle", newHandle)
 	return target, nil
 }
@@ -2267,13 +2270,17 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	// Pass the validated Action snapshot and the funded root trace into Call: binds execution to
 	// the row just funded (no TOCTOU window). Call re-validates the snapshot. The serving-markup rate
 	// rides on the trace (loaded by Call), so no request field is needed.
-	return k.call(ctx, callRequest{
+	reply, err := k.call(ctx, callRequest{
 		CallerID:            caller.ID,
 		Action:              action,
 		Args:                args,
 		ExistingTraceID:     t.ID,
 		IdempotencyRecordID: idempotencyRecordID,
 	})
+	if reply != nil {
+		reply.ProcessID = p.ID // the handle for process show/end when work parks (§14)
+	}
+	return reply, err
 }
 
 // Run atomically creates a process funded with action.Price, then executes the root call.
@@ -2543,6 +2550,11 @@ func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rat
 	}
 	r.Signature = sig
 	if err := k.store.CreateRatingAndUpdateStats(ctx, r, tx.ActionID, rating); err != nil {
+		// One rating per transaction (§11): report that, not the store operation whose unique index
+		// caught it. Other failures keep their own error.
+		if errors.Is(err, ErrInvalidInput) {
+			return nil, ErrInvalidInput.Wrap("this transaction is already rated")
+		}
 		return nil, err
 	}
 	return r, nil
@@ -2747,12 +2759,16 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		if err != nil || !canCall(caller, a) {
 			continue
 		}
-		if _, cached := ownerHandles[a.OwnerUserID]; !cached {
-			// displayOwner, not the bare handle: a resolved proxy is owned by a kernel account,
-			// which holds none, and would otherwise render with an empty owner (§14 R8).
-			ownerHandles[a.OwnerUserID] = k.displayOwner(ctx, a.OwnerUserID)
+		// The store's join already carries the current handle; only fill the case it cannot — a
+		// resolved proxy owned by a kernel account, which holds no handle and would otherwise render
+		// empty (§14 R8). Overwriting unconditionally would serve displayOwner's log-oriented cache
+		// as a reference callers must be able to run.
+		if a.OwnerHandle == "" {
+			if _, cached := ownerHandles[a.OwnerUserID]; !cached {
+				ownerHandles[a.OwnerUserID] = k.displayOwner(ctx, a.OwnerUserID)
+			}
+			a.OwnerHandle = ownerHandles[a.OwnerUserID]
 		}
-		a.OwnerHandle = ownerHandles[a.OwnerUserID] // the mount alias FormatActionRef renders from
 		out = append(out, &LookupResult{Action: a, OwnerHandle: a.OwnerHandle, Price: a.Price, Score: float32(r.score),
 			QuoteHash: QuoteHash(a)})
 	}

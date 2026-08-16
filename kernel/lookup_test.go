@@ -364,6 +364,55 @@ func TestLookupEmbeddingStoredOnActivate(t *testing.T) {
 // TestLookupMatchesOwnerHandle: an action's real name is @owner/name, so a query naming the owner
 // must find it via the lexical leg even though the handle appears nowhere in its description. No
 // embedder, so the only possible match is the owner handle folded into the lexical index text.
+// TestLookupRendersCurrentHandleAfterRename: a lookup result must be runnable. The owner handle is
+// part of the reference a caller (or sys/llm/decide) feeds straight back into run, so a rename has
+// to show up immediately — not at the next restart, which is what an unbounded id→handle cache on
+// the display path produced (§14 R8, §13 D15).
+func TestLookupRendersCurrentHandleAfterRename(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+	owner := setupUser(t, st, "rename-before", 0)
+
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "echo",
+		Kind: kernel.KindHTTP, Active: false, Visibility: kernel.VisibilityPublic,
+		Description:  "echo text back to the caller",
+		Source:       "https://example.com/api",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+	// Warm the display cache the way ordinary traffic does, before the rename.
+	if _, err := k.Lookup(ctx, kernel.LookupRequest{Query: "echo text", Limit: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.RenameUser(ctx, sys.ID, owner.ID, "rename-after"); err != nil {
+		t.Fatalf("RenameUser: %v", err)
+	}
+
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "echo text", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range results {
+		if r.Action != nil && r.Action.ID == a.ID {
+			if r.OwnerHandle != "rename-after" {
+				t.Fatalf("lookup rendered the stale handle %q; the reference would not resolve", r.OwnerHandle)
+			}
+			return
+		}
+	}
+	t.Fatal("the action should still be found after its owner was renamed")
+}
+
 func TestLookupMatchesOwnerHandle(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)

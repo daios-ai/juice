@@ -1131,6 +1131,14 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 		if req.Args == nil {
 			return nil, 0, kernel.ErrInvalidInput.Wrap("args is required")
 		}
+		capTrace, capOwner, isCap := capFromContext(r)
+		// The --peer request is signed by the whole kernel, so it is a session-caller path only. A
+		// capability is local to its trace and carries no supervision or federation authority (§9) —
+		// and it presents no session caller, which downstream reads as the kernel-level form. Checked
+		// before the branch, or an untrusted endpoint would dispatch abroad as the operator.
+		if isCap && req.Peer != "" {
+			return nil, 0, kernel.ErrUnauthorized.Wrap("a capability cannot complete a step on a peer")
+		}
 		// A peer-held step is completed over /juice/fed/step/1 (§13) — the same command, since a step
 		// is a step. An ordinary authenticated user may complete a remote step addressed to THEM: the
 		// home kernel attaches a step_auth attestation naming their stable id, and the serving kernel
@@ -1149,13 +1157,14 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 			body, err := s.kernel.CompletePeerStep(r.Context(), peerKey, pathID(r), *req.Args, forUserID)
 			return body, http.StatusOK, err
 		}
-		// Under a capability the caller is the executing action's owner (§9); CompleteStep still
-		// enforces caller == step.required_caller (§10), so the cap only completes its own steps.
-		callerID := callerFrom(r)
-		if _, owner, ok := capFromContext(r); ok {
-			callerID = owner
+		// Under a capability the caller is the executing action's owner AND the authority is the
+		// capability's own trace (§9): CompleteStepInTrace enforces both, so the cap completes only
+		// steps its own trace parked, never one living in another user's process.
+		if isCap {
+			reply, err := s.kernel.CompleteStepInTrace(r.Context(), capOwner, capTrace, pathID(r), *req.Args)
+			return reply, http.StatusOK, err
 		}
-		reply, err := s.kernel.CompleteStep(r.Context(), callerID, pathID(r), *req.Args)
+		reply, err := s.kernel.CompleteStep(r.Context(), callerFrom(r), pathID(r), *req.Args)
 		return reply, http.StatusOK, err
 	})(w, r)
 }
@@ -1278,8 +1287,8 @@ func (s *server) postGrant(w http.ResponseWriter, r *http.Request) {
 	})(w, r)
 }
 
-// deleteGrant revokes by selector (grants only) or by account (connection + cascade), §8. A legacy
-// ?action= is accepted as the degenerate single-action selector.
+// deleteGrant revokes by selector (grants only) or by account (connection + cascade), §8. A full
+// owner/name is the degenerate single-action selector, so there is one spelling per intent.
 func (s *server) deleteGrant(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if account := q.Get("account"); account != "" {
@@ -1292,9 +1301,6 @@ func (s *server) deleteGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selector := q.Get("selector")
-	if selector == "" {
-		selector = q.Get("action") // legacy alias: the degenerate single-action selector
-	}
 	if selector == "" {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("selector or account query parameter is required"))
 		return
