@@ -10,6 +10,7 @@ INSTRUCTIONS FOR EDITING THIS FILE:
 - §10 is a lag ledger: a decision folds into the body as current contract, and §10 records only what still diverges in the source contract or the code, each line deleted as its lag closes. An empty ledger means document, contract, and system agree.
 - Be terse, measured in **characters** — except the user stories, which are complete, precise English sentences: they are the standard.
 - Timeless present tense; no changelog framing; measure the character delta after every edit.
+- Always attempt to **delete** or **change** the phrasing. Only **add** as a last resort.
 
 ## 1. Taxonomy
 
