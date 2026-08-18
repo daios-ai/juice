@@ -164,6 +164,18 @@ func TermsChangedError(currentHash string, currentPrice int64) error {
 		WithMeta("quote_hash", currentHash).WithMeta("price", strconv.FormatInt(currentPrice, 10))
 }
 
+// QuoteRequiredError refuses a root run that carries no quote pin (§4 precondition 7), before any
+// funds are locked. Every root run is a purchase, so the buyer must have seen what they are buying:
+// the quote binds effect, schemas, and description as well as price, so a free action can still
+// move value or change shape. Meta carries the token to re-run with, mirroring GrantRequiredError:
+// the refusal names exactly what to supply.
+func QuoteRequiredError(currentHash string, currentPrice int64) error {
+	return ErrInvalidInput.Wrapf("this run needs a quote pin; the action costs %d — re-run with quote_hash to confirm", currentPrice).
+		WithMeta("required", "quote_hash").
+		WithMeta("quote_hash", currentHash).
+		WithMeta("price", strconv.FormatInt(currentPrice, 10))
+}
+
 // PeerUnfundedError attributes a 402 signed rejection to this kernel's exhausted credit on the
 // peer (§13): handle in the message and Meta["peer"]. An operator condition, not the caller's.
 func PeerUnfundedError(handle string) *KernelError {

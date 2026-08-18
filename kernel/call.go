@@ -59,7 +59,7 @@ type RunRequest struct {
 	CallerID  string         `json:"-"`
 	ActionRef string         `json:"action"` // owner/name, owner@kernel/name, or a raw action id
 	Args      map[string]any `json:"args"`
-	QuoteHash string         `json:"quote_hash"` // optional §4-precondition-7 pin; empty means the caller pinned nothing
+	QuoteHash string         `json:"quote_hash"` // §4-precondition-7 consent pin; required on a root run, refused with the current quote when absent
 }
 
 // CallReply is the response from a successful Call().
@@ -475,7 +475,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	// checked here too with no extra DB read and no TOCTOU window — Call is the single validity
 	// function; no entry path bypasses it (beginRun runs the same check before funding). A step
 	// completion (req.StepID != "") bound visibility at creation (§10), so it skips that check.
-	if err := k.checkCallPreconditions(ctx, caller, process.OwnerUserID, action, req.Args, req.StepID == "", ""); err != nil {
+	if err := k.checkCallPreconditions(ctx, caller, process.OwnerUserID, action, req.Args, req.StepID == "", noPin); err != nil {
 		return nil, err
 	}
 
@@ -768,6 +768,23 @@ func canCall(caller *Account, action *Action) bool {
 	}
 }
 
+// quotePin is a caller's consent to one call's terms (§4 precondition 7). A root run requires one:
+// it is a purchase, and the buyer must have seen the quote — which binds effect, schemas, and
+// description as well as price, so even a free action is consented to, never assumed. Every other
+// entry path carries noPin and says why: a subcall spends inside the root's consent (§6 subtree
+// price), a step completion consented when the step was created against its price snapshot (§10),
+// and a peer pins the manifest contract hash on the wire instead (§8).
+type quotePin struct {
+	hash     string
+	required bool
+}
+
+// noPin is the consent model of every non-root entry path.
+var noPin = quotePin{}
+
+// requiredPin is the consent model of a root run: the hash the caller supplied, empty if none.
+func requiredPin(hash string) quotePin { return quotePin{hash: hash, required: true} }
+
 // checkCallPreconditions enforces the §4 semantic call-validity rules (steps 6 to 8) for a
 // resolved action: liveness, visibility by the immediate caller, the optional quote pin, and input
 // against the action's schema. It is the single validity function — Call runs it unconditionally
@@ -775,8 +792,8 @@ func canCall(caller *Account, action *Action) bool {
 // creates a funded process (§6). checkVisibility is false only for a step completion, which bound
 // visibility at creation (§10): a liveness failure still resets it to waiting, a later visibility
 // change does not. The grant check stays keyed on the process owner: delegated consent binds to the
-// paying human (§8). quoteHash is empty on every path but a pinned root run.
-func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *Account, processOwnerID string, action *Action, args map[string]any, checkVisibility bool, quoteHash string) error {
+// paying human (§8). pin is the caller's consent model (see quotePin).
+func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *Account, processOwnerID string, action *Action, args map[string]any, checkVisibility bool, pin quotePin) error {
 	if !action.Active {
 		return ErrInvalidState.Wrap("action is inactive")
 	}
@@ -786,13 +803,15 @@ func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *Account, pr
 	if checkVisibility && !canCall(caller, action) {
 		return ErrUnauthorized.Wrap("call permission denied")
 	}
-	// After visibility, so a mismatch never discloses a private action's terms; before input
+	// After visibility, so neither refusal discloses a private action's terms; before input
 	// validation, so terms that changed enough to invalidate the args still report as changed terms
-	// rather than a schema violation (§4 precondition 7). Guarded rather than computed in the `if`
-	// initializer: this runs on every call, subcall and step completion, and hashing two schemas
-	// for a pin nobody supplied is pure waste.
-	if quoteHash != "" {
-		if cur := QuoteHash(action); quoteHash != cur {
+	// rather than a schema violation (§4 precondition 7). The hash is computed only where a pin is
+	// at stake: hashing two schemas for a path that carries no pin is pure waste.
+	if pin.required && pin.hash == "" {
+		return QuoteRequiredError(QuoteHash(action), action.Price)
+	}
+	if pin.hash != "" {
+		if cur := QuoteHash(action); pin.hash != cur {
 			return TermsChangedError(cur, action.Price)
 		}
 	}

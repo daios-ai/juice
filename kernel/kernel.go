@@ -2171,13 +2171,13 @@ func (k *Kernel) DeleteAction(ctx context.Context, callerID, actionID string) er
 
 // beginRun consolidates all preconditions for a new process, atomically creates the process
 // and root trace via BeginRun, then executes the root call. Shared by Run and RunFederated.
-func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, args map[string]any, idempotencyRecordID, quoteHash string) (*CallReply, error) {
+func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, args map[string]any, idempotencyRecordID string, pin quotePin) (*CallReply, error) {
 	// Pre-funding validity gate: Call re-runs checkCallPreconditions authoritatively, but a
 	// rejection must not leave a funded process behind (a rejected call creates no transaction,
 	// §6), so the same check runs here before BeginRun parks funds.
 	// Root/federated runs have C = P (the caller owns the process), so one identity feeds both the
 	// caller-scoped visibility check and the process-owner-scoped grant check.
-	if err := k.checkCallPreconditions(ctx, caller, caller.ID, action, args, true, quoteHash); err != nil {
+	if err := k.checkCallPreconditions(ctx, caller, caller.ID, action, args, true, pin); err != nil {
 		return nil, err
 	}
 	if err := k.requireReceiptSigningReady(); err != nil {
@@ -2293,7 +2293,7 @@ func (k *Kernel) Run(ctx context.Context, req RunRequest) (*CallReply, error) {
 	if err != nil {
 		return nil, err
 	}
-	return k.beginRun(ctx, caller, action, req.Args, "", req.QuoteHash)
+	return k.beginRun(ctx, caller, action, req.Args, "", requiredPin(req.QuoteHash))
 }
 
 // RunFederated is like Run but accepts an idempotencyRecordID for federation calls.
@@ -2308,7 +2308,7 @@ func (k *Kernel) RunFederated(ctx context.Context, callerID, targetUserID, actio
 	if err != nil || action == nil {
 		return nil, ErrNotFound.Wrapf("action %s/%s not found", targetUserID, actionName)
 	}
-	return k.beginRun(ctx, caller, action, args, idempotencyRecordID, "") // a peer pins the manifest via expected_contract_hash (§8), not a local quote
+	return k.beginRun(ctx, caller, action, args, idempotencyRecordID, noPin) // a peer pins the manifest via expected_contract_hash (§8), not a local quote
 }
 
 // EndProcess closes a process and returns all remaining funds to the owner.

@@ -11,7 +11,7 @@ flow_process_lifecycle() {
 
     # sys/message (price 0) creates a process + a waiting step addressed to alice.
     local msg tx_id step_id proc
-    msg=$(jj "$db" "$ha" run sys/message '{"to":"alice","message":"lifecycle"}')
+    msg=$(jjrun "$db" "$ha" sys/message '{"to":"alice","message":"lifecycle"}')
     tx_id=$(strfield "$msg" tx_id)
     step_id=$(pathf "$msg" result.step_id)
     proc=$(strfield "$(jj "$db" "$ha" tx show "$tx_id")" process_id)
@@ -47,20 +47,20 @@ flow_acl_public() {
     # before any process/backend work.
     aid=$(enabled "$db" "$ha" target --kind http --source "http://127.0.0.1:1/target" --price 0 --description "acl")
 
-    assert_fails "acl_public.private_denied" "unauthorized\|permission\|error" -- j "$db" "$hb" run alice/target '{}'
+    assert_fails "acl_public.private_denied" "unauthorized\|permission\|error" -- jrun "$db" "$hb" alice/target '{}'
     assert_fails "acl_public.update_owner_only" "unauthorized\|error" -- j "$db" "$hb" action update "$aid" --visibility public
 
     # Local: bob (a local user) passes the permission check (then fails at the unreachable backend, NOT on permission).
     j "$db" "$ha" action update "$aid" --visibility local >/dev/null 2>&1
-    assert_not_contains "acl_public.local_passes_for_local_user" "permission" "$(j "$db" "$hb" run alice/target '{}')"
+    assert_not_contains "acl_public.local_passes_for_local_user" "permission" "$(jrun "$db" "$hb" alice/target '{}')"
 
     # Public: bob passes too.
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
-    assert_not_contains "acl_public.public_passes" "permission" "$(j "$db" "$hb" run alice/target '{}')"
+    assert_not_contains "acl_public.public_passes" "permission" "$(jrun "$db" "$hb" alice/target '{}')"
 
     # Private again: permission enforced.
     j "$db" "$ha" action update "$aid" --visibility private >/dev/null 2>&1
-    assert_fails "acl_public.private_enforced" "unauthorized\|permission\|error" -- j "$db" "$hb" run alice/target '{}'
+    assert_fails "acl_public.private_enforced" "unauthorized\|permission\|error" -- jrun "$db" "$hb" alice/target '{}'
 }
 
 flow_successful_paid_call() {
@@ -76,7 +76,7 @@ flow_successful_paid_call() {
     local sys_start; sys_start=$(numfield "$(jj "$db" "$hs" admin show sys)" available)
 
     # fee_bps=2000 → on gross=100: fee=20, net=80.
-    local tx_id; tx_id=$(strfield "$(jj "$db" "$hb" run alice/pay '{}')" tx_id)
+    local tx_id; tx_id=$(strfield "$(jjrun "$db" "$hb" alice/pay '{}')" tx_id)
     assert_nonempty "successful_paid_call.call_succeeded" "$tx_id"
     local tx; tx=$(jj "$db" "$hb" tx show "$tx_id")
     assert_jnum "successful_paid_call.tx_gross" "$tx" gross 100
@@ -101,7 +101,7 @@ flow_http_verbs() {
     for verb in GET PUT PATCH DELETE; do
         lname=$(printf '%s' "$verb" | tr 'A-Z' 'a-z')
         aid=$(enabled "$db" "$ha" "v-$lname" --kind http --method "$verb" --source "http://127.0.0.1:${bport}/echo" --price 0 --description "verb $verb")
-        out=$(jj "$db" "$ha" run "alice/v-$lname" '{"v":"x"}')
+        out=$(jjrun "$db" "$ha" "alice/v-$lname" '{"v":"x"}')
         local m v
         m=$(pathf "$out" result.method)
         v=$(pathf "$out" result.v)
@@ -124,7 +124,7 @@ flow_failed_call_refund() {
     local aid; aid=$(publish "$db" "$ha" fail --kind http --source "http://127.0.0.1:${bport}/fail" --price 100 --description "failing")
 
     # Backend 500 → execution failure; full refund, alice credited nothing, failure tx recorded.
-    j "$db" "$hb" run alice/fail '{}' >/dev/null 2>&1 || true
+    jrun "$db" "$hb" alice/fail '{}' >/dev/null 2>&1 || true
     assert_jnum "failed_call_refund.process_unchanged"    "$(jj "$db" "$hb" user me)" available 500
     assert_jnum "failed_call_refund.target_not_credited"  "$(jj "$db" "$ha" user me)" available 0
     local txs; txs=$(jj "$db" "$hb" tx list)
@@ -142,7 +142,7 @@ flow_failed_call_refund() {
 
     # A dial failure (closed port) must not name the host either — a different code path.
     local did; did=$(publish "$db" "$ha" dead --kind http --source "http://127.0.0.1:1/x" --price 10 --description "dead")
-    j "$db" "$hb" run alice/dead '{}' >/dev/null 2>&1 || true
+    jrun "$db" "$hb" alice/dead '{}' >/dev/null 2>&1 || true
     local dtx; dtx=$(find_id "$(jj "$db" "$hb" tx list)" action_name dead)
     assert_not_contains "failed_call_refund.dial_reason_hides_host" "127.0.0.1:1" \
         "$(strfield "$(jj "$db" "$hb" tx show "$dtx")" reason)"
@@ -195,7 +195,7 @@ flow_input_schema_failure() {
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
     # Missing required "x" → schema error BEFORE any trace/charge.
-    assert_fails "input_schema_failure.error_returned" "schema\|invalid\|required\|error" -- j "$db" "$hb" run alice/schema-in '{}'
+    assert_fails "input_schema_failure.error_returned" "schema\|invalid\|required\|error" -- jrun "$db" "$hb" alice/schema-in '{}'
     assert_jnum "input_schema_failure.balance_unchanged" "$(jj "$db" "$hb" user me)" available 300
     assert_eq   "input_schema_failure.no_tx_created" 0 "$(list_len "$(jj "$db" "$hb" tx list)")"
 }
@@ -215,7 +215,7 @@ flow_output_schema_failure() {
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
     # Execution succeeds but output fails validation → CommitFailedCall: refund + failure tx.
-    assert_fails "output_schema_failure.error_returned" "schema\|invalid\|error" -- j "$db" "$hb" run alice/schema-out '{}'
+    assert_fails "output_schema_failure.error_returned" "schema\|invalid\|error" -- jrun "$db" "$hb" alice/schema-out '{}'
     assert_jnum "output_schema_failure.process_refunded"   "$(jj "$db" "$hb" user me)" available 300
     assert_jnum "output_schema_failure.target_not_credited" "$(jj "$db" "$ha" user me)" available 0
     local txs; txs=$(jj "$db" "$hb" tx list)
@@ -242,7 +242,7 @@ flow_grant() {
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
 
     # Running without a grant is rejected before any charge, with the consent hint surfaced.
-    assert_fails "grant.reject_before_consent" "grant" -- j "$db" "$ha" run alice/inbox '{}'
+    assert_fails "grant.reject_before_consent" "grant" -- jrun "$db" "$ha" alice/inbox '{}'
     assert_jnum "grant.no_charge" "$(jj "$db" "$ha" user me)" available 1000
 
     # No connection exists yet, so disconnect reports not-found.
@@ -270,20 +270,20 @@ flow_grant_bearer() {
     j "$db" "$ha" action enable "$a2" >/dev/null 2>&1
 
     # No grant yet: both rejected before consent.
-    assert_fails "grant_bearer.reject_send" "grant" -- j "$db" "$ha" run alice/inbox/send '{}'
-    assert_fails "grant_bearer.reject_read" "grant" -- j "$db" "$ha" run alice/inbox/read '{}'
+    assert_fails "grant_bearer.reject_send" "grant" -- jrun "$db" "$ha" alice/inbox/send '{}'
+    assert_fails "grant_bearer.reject_read" "grant" -- jrun "$db" "$ha" alice/inbox/read '{}'
 
     # One command connects the whole directory; both actions then see the token upstream.
     j "$db" "$ha" user connect alice/inbox --token ghp_secret >/dev/null 2>&1
-    assert_eq "grant_bearer.send_saw_token" "ghp_secret" "$(resultf "$(jj "$db" "$ha" run alice/inbox/send '{}')" seen)"
-    assert_eq "grant_bearer.read_saw_token" "ghp_secret" "$(resultf "$(jj "$db" "$ha" run alice/inbox/read '{}')" seen)"
+    assert_eq "grant_bearer.send_saw_token" "ghp_secret" "$(resultf "$(jjrun "$db" "$ha" alice/inbox/send '{}')" seen)"
+    assert_eq "grant_bearer.read_saw_token" "ghp_secret" "$(resultf "$(jjrun "$db" "$ha" alice/inbox/read '{}')" seen)"
     assert_contains "grant_bearer.listed_send" "alice/inbox/send" "$(j "$db" "$ha" user me)"
     assert_contains "grant_bearer.listed_read" "alice/inbox/read" "$(j "$db" "$ha" user me)"
     assert_not_contains "grant_bearer.no_leak" "ghp_secret" "$(j "$db" "$ha" user me)"
 
     # Disconnect the whole upstream account (--account) → connection + both grants cascade away.
     j "$db" "$ha" user disconnect --account "bearer:127.0.0.1:${bport}" >/dev/null 2>&1
-    assert_fails "grant_bearer.reject_send_after" "grant" -- j "$db" "$ha" run alice/inbox/send '{}'
-    assert_fails "grant_bearer.reject_read_after" "grant" -- j "$db" "$ha" run alice/inbox/read '{}'
+    assert_fails "grant_bearer.reject_send_after" "grant" -- jrun "$db" "$ha" alice/inbox/send '{}'
+    assert_fails "grant_bearer.reject_read_after" "grant" -- jrun "$db" "$ha" alice/inbox/read '{}'
 }
 

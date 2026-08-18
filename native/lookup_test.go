@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -34,6 +35,17 @@ func (f *fakeEmbedder) Embed(_ context.Context, text string) ([]float32, error) 
 		}
 	}
 	return vec, nil
+}
+
+// pinFor is the quote a root run consents to (§4 precondition 7) — the hash a buyer reads off
+// lookup before running. Native tests drive real runs, so they carry it as a client does.
+func pinFor(t *testing.T, k *kernel.Kernel, ref string) string {
+	t.Helper()
+	a, err := k.ResolveAction(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("resolve %s for its quote: %v", ref, err)
+	}
+	return kernel.QuoteHash(a)
 }
 
 func newLookupTestKernel(t *testing.T) (*kernel.Kernel, kernel.Store) {
@@ -182,5 +194,73 @@ func TestExecuteLookup_CustomLimit(t *testing.T) {
 	items, _ := result["results"].([]any)
 	if len(items) > 3 {
 		t.Errorf("expected at most 3 results with limit=3, got %d", len(items))
+	}
+}
+
+// TestExecuteLookupRemoteHitNamingAndFreshness freezes what a buyer reads off a hit they cannot
+// verify themselves (§13). Two things ride on a remote hit and neither on a local one:
+//
+//   - observed_at: when this kernel last verified the authority's own description of the action.
+//     A local action has none — this kernel IS its authority, so its row is not an observation.
+//   - the kernel qualifier goes through the one naming rule: a bound petname once we have met the
+//     peer, its self-certifying key before that. Both resolve, so either is runnable as printed.
+func TestExecuteLookupRemoteHitNamingAndFreshness(t *testing.T) {
+	k, st := newLookupTestKernel(t)
+	ctx := context.Background()
+
+	// A local action, for contrast.
+	owner := seedOwner(t, st, "alice")
+	seedAction(t, st, owner.ID, "weather", "forecast the weather for a city")
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	observed := time.Now().UTC().Add(-90 * time.Minute).Truncate(time.Second)
+	doc := &kernel.DiscoveryDoc{
+		KernelPublicKey: peerKey, Kind: "action",
+		UserID: "u-remote", Handle: "prov", ActionID: "act-remote", Name: "weather",
+		Description: "forecast the weather for a city", ServingPrice: 10, ObservedAt: observed,
+	}
+	if err := st.ReplaceDiscoveryDocs(ctx, peerKey, []*kernel.DiscoveryDoc{doc}); err != nil {
+		t.Fatalf("ReplaceDiscoveryDocs: %v", err)
+	}
+	caller := seedUserWithBalance(t, st, "buyer", 0)
+
+	hits := func() (local, remote map[string]any) {
+		t.Helper()
+		res, err := executeLookup(ctx, map[string]any{"query": "forecast the weather"}, caller.ID, k)
+		if err != nil {
+			t.Fatalf("executeLookup: %v", err)
+		}
+		for _, it := range res["results"].([]any) {
+			m := it.(map[string]any)
+			if m["action_id"] == "act-remote" {
+				remote = m
+			} else {
+				local = m
+			}
+		}
+		if remote == nil || local == nil {
+			t.Fatalf("expected both a local and a discovered hit, got %v", res["results"])
+		}
+		return local, remote
+	}
+
+	local, remote := hits()
+	if _, ok := local["observed_at"]; ok {
+		t.Error("a local action is authoritative here; it must carry no observation date")
+	}
+	if remote["observed_at"] != observed.Format(time.RFC3339) {
+		t.Errorf("observed_at: got %v, want %v", remote["observed_at"], observed.Format(time.RFC3339))
+	}
+	// Before we have met the peer, the key is the only name that resolves.
+	if want := "prov@" + peerKey + "/weather"; remote["action"] != want {
+		t.Errorf("unmet peer must render by key: got %v, want %v", remote["action"], want)
+	}
+	// Once it has a local name, that is what a buyer sees — and it resolves in kernel position.
+	if _, err := k.BindPetname(ctx, peerKey, "weatherco", true); err != nil {
+		t.Fatalf("BindPetname: %v", err)
+	}
+	if _, remote = hits(); remote["action"] != "prov@weatherco/weather" {
+		t.Errorf("a named peer must render by petname: got %v", remote["action"])
 	}
 }

@@ -176,7 +176,7 @@ func TestRunGrantRequiredNonTTY(t *testing.T) {
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
-	_, err := execTestCmd(t, runCmd(), "run-grant/inbox", "{}")
+	_, err := execTestCmd(t, runCmd(), "run-grant/inbox", "{}", "--quote-hash", pinFor(t, env.k, "run-grant/inbox"))
 	if !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}

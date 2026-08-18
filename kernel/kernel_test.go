@@ -84,6 +84,18 @@ func testSigningKey() ed25519.PrivateKey {
 	return priv
 }
 
+// pinFor is the quote a root run consents to (§4 precondition 7): the same hash a buyer reads off
+// `sys/lookup` or `action show` before running. Tests that exercise the pin itself build the
+// request directly; every other run carries this, exactly as a real client does.
+func pinFor(t *testing.T, k *kernel.Kernel, ref string) string {
+	t.Helper()
+	a, err := k.ResolveAction(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("resolve %s for its quote: %v", ref, err)
+	}
+	return kernel.QuoteHash(a)
+}
+
 func setupUser(t *testing.T, st kernel.Store, handle string, balance int64) *kernel.Account {
 	t.Helper()
 	hash, err := kernel.HashPassword("password")
@@ -1563,7 +1575,7 @@ func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	if err := st.CreateAction(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: "no-receipt-owner/no-receipt", Args: map[string]any{}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: "no-receipt-owner/no-receipt", Args: map[string]any{}, QuoteHash: pinFor(t, k, "no-receipt-owner/no-receipt")})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState, got %v", err)
 	}
@@ -1789,7 +1801,7 @@ func TestTransactionViewAttachesRating(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/svc", Args: map[string]any{}})
+	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/svc", Args: map[string]any{}, QuoteHash: pinFor(t, k, "alice/svc")})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -2194,6 +2206,9 @@ type fakeFederationHTTP struct {
 	rejectSignKey  ed25519.PrivateKey
 	rejectActionID string
 	rejectArgsHash string
+	// rejectRefreshProxy makes that rejection the contract-mismatch kind (§8 If-Match): the peer's
+	// terms moved under our cached row, so it tells us to re-resolve rather than refusing outright.
+	rejectRefreshProxy bool
 	// sentAction / sentIdempotencyKey record what the kernel actually put on the wire (§13: the
 	// peer's stable action id, under the key parked with the dispatch).
 	sentAction         string
@@ -2265,7 +2280,7 @@ func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, actionID, _
 		r := &kernel.Receipt{
 			ID: uuid.New().String(), TxID: idempotencyKey, ActionID: f.rejectActionID,
 			ArgsHash: f.rejectArgsHash, Status: kernel.TxFailure, Reason: "counterparty denied",
-			StartedAt: now, CreatedAt: now,
+			RefreshProxy: f.rejectRefreshProxy, StartedAt: now, CreatedAt: now,
 		}
 		payload, _ := kernel.ReceiptSigningBytes(r)
 		r.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(f.rejectSignKey, payload))
@@ -2446,9 +2461,10 @@ func TestRunInputSchemaRejectionLeavesNoProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-run-schema/schema-guarded", Args: map[string]any{"wrong_field": "x"}})
-	if err == nil {
-		t.Fatal("expected schema validation error")
+	// Pinned, so the args are what is under test: validation follows the quote check (§4 order).
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-run-schema/schema-guarded", Args: map[string]any{"wrong_field": "x"}, QuoteHash: pinFor(t, k, "alice-run-schema/schema-guarded")})
+	if !errors.Is(err, kernel.ErrSchemaViolation) {
+		t.Fatalf("bad args: got %v, want ErrSchemaViolation", err)
 	}
 
 	got, _ := st.ReadUser(ctx, alice.ID)
@@ -2479,7 +2495,7 @@ func TestRunNoSigningKeyLeavesNoProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: bob.ID, ActionRef: "bob-run-nokey/no-key", Args: map[string]any{}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: bob.ID, ActionRef: "bob-run-nokey/no-key", Args: map[string]any{}, QuoteHash: pinFor(t, k, "bob-run-nokey/no-key")})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState, got %v", err)
 	}
@@ -2856,7 +2872,7 @@ func TestGrantRequiredRejectsBeforeLock(t *testing.T) {
 
 	a := createDelegatedAction(t, k, owner.ID, "inbox", 100)
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: owner.Handle + "/" + a.Name, Args: map[string]any{}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: owner.Handle + "/" + a.Name, Args: map[string]any{}, QuoteHash: pinFor(t, k, owner.Handle+"/"+a.Name)})
 	if !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}
@@ -3126,7 +3142,7 @@ func TestBearerGrantRequiredBeforeLock(t *testing.T) {
 	owner := setupUser(t, st, "br-owner", 1000)
 	a := createBearerAction(t, k, owner.ID, "inbox", 100)
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: owner.Handle + "/" + a.Name, Args: map[string]any{}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: owner.Handle + "/" + a.Name, Args: map[string]any{}, QuoteHash: pinFor(t, k, owner.Handle+"/"+a.Name)})
 	if !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}

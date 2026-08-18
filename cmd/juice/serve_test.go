@@ -838,8 +838,9 @@ func TestServeCall(t *testing.T) {
 
 	// Make the call via /v1/run (new API — price=0, caller needs no credits).
 	callResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "call-owner/answer",
-		"args":   map[string]any{},
+		"action":     "call-owner/answer",
+		"args":       map[string]any{},
+		"quote_hash": quoteFor(t, srv, callerTok, "call-owner/answer", map[string]any{}),
 	}, callerTok)
 	if callResp.StatusCode != http.StatusOK {
 		callResp.Body.Close()
@@ -911,6 +912,7 @@ func TestServeListAndGetTransaction(t *testing.T) {
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "tx-owner/tx-action", "args": map[string]any{},
+		"quote_hash": quoteFor(t, srv, callerTok, "tx-owner/tx-action", map[string]any{}),
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -968,6 +970,7 @@ func TestServeRateTransaction(t *testing.T) {
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "rate-owner/rate-action", "args": map[string]any{},
+		"quote_hash": quoteFor(t, srv, callerTok, "rate-owner/rate-action", map[string]any{}),
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -1022,6 +1025,7 @@ func TestServeListActionRatings(t *testing.T) {
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "list-ratings-owner/list-ratings-action", "args": map[string]any{},
+		"quote_hash": quoteFor(t, srv, callerTok, "list-ratings-owner/list-ratings-action", map[string]any{}),
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -1132,6 +1136,7 @@ func TestServeGetStats(t *testing.T) {
 	// Make one call to generate stats.
 	httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "stats-owner/stats-action", "args": map[string]any{},
+		"quote_hash": quoteFor(t, srv, callerTok, "stats-owner/stats-action", map[string]any{}),
 	}, callerTok).Body.Close()
 
 	get := httpDo(t, srv, "GET", "/v1/stats/"+action.ID, nil, ownerTok)
@@ -1749,7 +1754,7 @@ func TestWaitingOnPeer(t *testing.T) {
 	}
 }
 
-// TestStartRemoteRetryLoop: the serve retry loop lists pending traces, retries the due ones, and
+// TestStartRemoteRetryLoop: the serve retry worker lists pending traces, retries the due ones, and
 // stops promptly when its context is cancelled (§13 — this is what settles parked remote calls
 // without a restart). The retry's own settlement behavior is covered in kernel/federation_test.go.
 func TestStartRemoteRetryLoop(t *testing.T) {
@@ -1768,7 +1773,7 @@ func TestStartRemoteRetryLoop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		startRemoteRetryLoop(ctx, list, retry, time.Millisecond)
+		startRemoteRetryLoop(ctx, nil, list, retry, time.Millisecond)
 		close(done)
 	}()
 
@@ -1787,6 +1792,37 @@ func TestStartRemoteRetryLoop(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("loop did not stop on ctx cancel")
+	}
+}
+
+// TestStartRemoteRetryLoopDrainsFirst: work that was already parked when the transport came up is
+// retried immediately, not one interval later (§13). The interval here is far longer than the test
+// would ever wait, so only the startup drain can produce the call — a restart mid-call resumes as
+// soon as there is a carrier. A trace too young for the backoff schedule is still drained: the
+// snapshot is the pre-existing work, not what the scheduler considers due.
+func TestStartRemoteRetryLoopDrainsFirst(t *testing.T) {
+	parked := &kernel.Trace{ID: "parked", ProcessID: "p1", CreatedAt: time.Now()}
+	list := func(context.Context) ([]*kernel.Trace, error) { return nil, nil }
+	calls := make(chan string, 4)
+	retry := func(_ context.Context, tr *kernel.Trace) error {
+		select {
+		case calls <- tr.ID:
+		default:
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go startRemoteRetryLoop(ctx, []*kernel.Trace{parked}, list, retry, time.Hour)
+
+	select {
+	case id := <-calls:
+		if id != "parked" {
+			t.Fatalf("drained wrong trace: %q", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pre-existing parked work was not drained at startup")
 	}
 }
 
@@ -2439,6 +2475,7 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 
 	callResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "sys/vrr-http", "args": map[string]any{},
+		"quote_hash": quoteFor(t, srv, tok, "sys/vrr-http", map[string]any{}),
 	}, tok)
 	if callResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(callResp.Body)

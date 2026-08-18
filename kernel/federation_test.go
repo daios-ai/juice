@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -733,7 +734,7 @@ func TestRemoteDispatchUsesStableActionID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (pending), got %v", err)
 	}
 	if fake.sentAction != "stable-action" {
@@ -781,7 +782,7 @@ func TestRetryExpiredRemoteTraceSettlesAsFailure(t *testing.T) {
 
 	// Real root run: the empty receipt makes the proxy call time out; the process stays open and
 	// the trace persists in the DB with its idempotency key (beginRun records the dispatch).
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -838,7 +839,7 @@ func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
 	premium := (mp*bps + 9999) / 10000
 
 	// Call while the peer is offline → pending, no settled transaction, funds locked.
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (pending), got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -897,7 +898,7 @@ func TestAwaitingReceiptSince(t *testing.T) {
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "await-action", 1000)
 
 	// Offline call → parked, awaiting a receipt.
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	pend, _ := st.ListPendingRemoteTraces(ctx)
@@ -945,7 +946,7 @@ func TestPendingRemoteTracesAndRetryWrappers(t *testing.T) {
 	mp := *a.BasePrice
 	premium := (mp*bps + 9999) / 10000
 
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	pending, err := k.PendingRemoteTraces(ctx)
@@ -1024,7 +1025,7 @@ func TestGossipEvidenceExcludesDelegatedAuth(t *testing.T) {
 		Kind: kernel.KindHTTP, Source: "https://provider.example/api", Active: true,
 		Visibility: kernel.VisibilityPublic, Description: "d",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
-		CreatedAt:   time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(ctx, plain); err != nil {
 		t.Fatal(err)
@@ -1335,6 +1336,94 @@ func TestSettleRemoteCallRejectsRefreshProxyOnSuccess(t *testing.T) {
 		t.Fatalf("expected quarantine (ErrExecutionFailed), got %v", err)
 	}
 	assertUserBalance(t, st, caller.ID, a.Price, 0) // fully refunded, nothing paid
+}
+
+// TestRefreshProxyRejectionInvalidatesAndExplains: when the peer's contract has moved under our
+// cached row it refuses with a signed refresh_proxy rejection (§8 If-Match). Three things must
+// follow, and the third is the one a buyer feels: nothing is charged, the stale row is invalidated
+// so the next call re-resolves, and the failure SAYS the provider updated the action instead of
+// reading as a generic remote error. It is deliberately NOT reported as changed terms: the contract
+// hash also covers the artifact and kind (§6 P6), so this fires on a re-implementation at an
+// unchanged price, and consent is the quote pin's job at the funding boundary (§4 precondition 7).
+func TestRefreshProxyRejectionInvalidatesAndExplains(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	fake := &fakeFederationHTTP{httpStatus: 409}
+	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "rp-action", 1000)
+	_, tr := beginTestRun(t, st, caller.ID, a)
+	fake.rejectSignKey, fake.rejectActionID = priv, "rp-action"
+	fake.rejectArgsHash = jcsHashForTest(t, `{}`)
+	fake.rejectRefreshProxy = true
+
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
+		CallerID: caller.ID, ExistingTraceID: tr.ID,
+		ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{},
+	})
+	if !errors.Is(err, kernel.ErrExecutionFailed) {
+		t.Fatalf("a contract mismatch is an ordinary failure, got %v", err)
+	}
+	if errors.Is(err, kernel.ErrTermsChanged) {
+		t.Error("a contract mismatch must not claim the buyer's terms changed: the hash covers the implementation too")
+	}
+	var ke *kernel.KernelError
+	if !errors.As(err, &ke) || ke.Meta["retry"] != "refresh" {
+		t.Errorf("the failure must say it is refreshable, got meta %v", ke.Meta)
+	}
+	if !strings.Contains(err.Error(), "updated this action") || !strings.Contains(err.Error(), "nothing was charged") {
+		t.Errorf("the message must name the cause and the cost, got %q", err.Error())
+	}
+	assertUserBalance(t, st, caller.ID, a.Price, 0) // full refund
+	if ra, _ := st.ReadAction(ctx, a.ID); ra.Active {
+		t.Error("a contract mismatch must invalidate the cached row so the next call re-resolves")
+	}
+}
+
+// TestParkedRemoteCallHandsBackItsProcess: a dispatched call with no signed outcome yet is parked,
+// not lost — the allocation stays locked and the process open until a receipt arrives or the
+// pending bound expires (§13). The caller must be able to follow that money, so the refusal carries
+// the durable handle: which process holds it, since when, and when a refund falls due.
+func TestParkedRemoteCallHandsBackItsProcess(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	fake := &fakeFederationHTTP{} // no receipt → parked
+	k, _, caller := setupSettleProxy(t, st, fake, priv, pub, "park-action", 1000)
+
+	ref := "settle-peer@settle-peer/settleact"
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: ref, Args: map[string]any{}, QuoteHash: pinFor(t, k, ref)})
+	if !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("expected a parked call, got %v", err)
+	}
+	var ke *kernel.KernelError
+	if !errors.As(err, &ke) {
+		t.Fatalf("expected a structured error, got %v", err)
+	}
+	pend, _ := st.ListPendingRemoteTraces(ctx)
+	if len(pend) != 1 {
+		t.Fatalf("expected 1 parked trace, got %d", len(pend))
+	}
+	if ke.Meta["process_id"] != pend[0].ProcessID {
+		t.Errorf("process handle: got %q, want %q", ke.Meta["process_id"], pend[0].ProcessID)
+	}
+	since, perr := time.Parse(time.RFC3339, ke.Meta["pending_since"])
+	if perr != nil {
+		t.Errorf("pending_since must be RFC 3339, got %q", ke.Meta["pending_since"])
+	}
+	refundAt, rerr := time.Parse(time.RFC3339, ke.Meta["refund_eligible_at"])
+	if rerr != nil {
+		t.Fatalf("refund_eligible_at must be RFC 3339, got %q", ke.Meta["refund_eligible_at"])
+	}
+	// The eligibility time is the pending bound the retry loop actually enforces (§13), not a
+	// number invented for the message.
+	if want := since.Add(24 * time.Hour); !refundAt.Equal(want) {
+		t.Errorf("refund_eligible_at = %v, want %v (pending_since + the max pending age)", refundAt, want)
+	}
+	// A parked call is not a settled one: the money is still reserved, not spent.
+	u, _ := st.ReadUser(ctx, caller.ID)
+	if u.Locked == 0 {
+		t.Error("a parked call must keep its allocation locked")
+	}
 }
 
 // Rule D (§8): a remote_proxy is kernel-managed; manual enable/disable, update, and delete are all
@@ -2214,7 +2303,7 @@ func TestRemoteCallNotDispatchedFailsFast(t *testing.T) {
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "nd-action", 1000)
 	before, _ := st.ReadUser(ctx, caller.ID)
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")})
 	if !errors.Is(err, kernel.ErrPeerUnreachable) {
 		t.Fatalf("Run: expected ErrPeerUnreachable, got %v", err)
 	}
@@ -2257,7 +2346,7 @@ func TestRetryNeverFailsFastOnNotDispatched(t *testing.T) {
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "retry-nd-action", 1000)
 	mp := a.Price * 10000 / (10000 + bps)
 
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (parked), got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -2297,18 +2386,24 @@ func TestRetryNeverFailsFastOnNotDispatched(t *testing.T) {
 // other rejection is the peer refusing us (ErrUnauthorized + peer meta), and an EXECUTED failure stays
 // ErrExecutionFailed even at charge 0 on transport 402 — the case a charge-based test would misread,
 // since the serving kernel returns the execution error's status alongside the real receipt.
+//
+// The same marker decides the cache (§13 Rule C): a peer that refuses to serve an action at all has
+// told us our cached row is wrong, whatever its reason field says, so the row is invalidated and the
+// next call re-resolves. Two exemptions: a 402 rejection (our credit is exhausted, the action is
+// fine) and an executed failure (the action ran — the cache was right).
 func TestSettleRemoteFailureClassification(t *testing.T) {
 	cases := []struct {
-		name      string
-		status    int
-		rejection bool // true → a real signed rejection (tx_id = idempotency_key)
-		want      error
+		name        string
+		status      int
+		rejection   bool // true → a real signed rejection (tx_id = idempotency_key)
+		want        error
+		stillCached bool // proxy survives the outcome
 	}{
-		{"rejection_402_is_peer_unfunded", 402, true, kernel.ErrPeerUnfunded},
-		{"rejection_403_is_peer_refused", 403, true, kernel.ErrUnauthorized},
-		{"rejection_422_is_peer_refused", 422, true, kernel.ErrUnauthorized},
-		{"executed_zero_charge_402_is_execution_failed", 402, false, kernel.ErrExecutionFailed},
-		{"executed_zero_charge_422_is_execution_failed", 422, false, kernel.ErrExecutionFailed},
+		{"rejection_402_is_peer_unfunded", 402, true, kernel.ErrPeerUnfunded, true},
+		{"rejection_403_is_peer_refused", 403, true, kernel.ErrUnauthorized, false},
+		{"rejection_422_is_peer_refused", 422, true, kernel.ErrUnauthorized, false},
+		{"executed_zero_charge_402_is_execution_failed", 402, false, kernel.ErrExecutionFailed, true},
+		{"executed_zero_charge_422_is_execution_failed", 422, false, kernel.ErrExecutionFailed, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2353,10 +2448,10 @@ func TestSettleRemoteFailureClassification(t *testing.T) {
 			} else if errors.Is(err, kernel.ErrPeerUnfunded) || errors.Is(err, kernel.ErrUnauthorized) {
 				t.Error("an executed failure must not be reported as a funding or refusal condition")
 			}
-			// Rule C (§13): none of these is a cache fault, so the proxy stays active (only
-			// refresh_proxy / quarantine deactivate).
-			if ra, _ := st.ReadAction(ctx, a.ID); !ra.Active {
-				t.Error("a funding/refusal/execution failure must leave the proxy active")
+			// Rule C (§13): a refusal to serve invalidates the cached row; a funding condition and
+			// an executed failure leave it alone.
+			if ra, _ := st.ReadAction(ctx, a.ID); ra.Active != tc.stillCached {
+				t.Errorf("proxy active = %v, want %v", ra.Active, tc.stillCached)
 			}
 		})
 	}
@@ -3243,7 +3338,7 @@ func TestSettlementUsesDispatchedRate(t *testing.T) {
 	}
 	before, _ := st.ReadUser(ctx, caller.ID)
 
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: a.ID, Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: a.ID, Args: map[string]any{}, QuoteHash: pinFor(t, k, a.ID)}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (parked), got %v", err)
 	}
 	pend, _ := st.ListPendingRemoteTraces(ctx)

@@ -623,6 +623,16 @@ func remoteReceiptInvalid(r Receipt, mp, rbps int64, replyJSON []byte) string {
 	return ""
 }
 
+// remotePendingMaxAge is how long a dispatched call may stay unsettled before it settles locally as
+// a failure with a full refund (§13). One definition: the settle path quotes it to the caller as the
+// refund-eligibility time, and the retry loop enforces it.
+func (k *Kernel) remotePendingMaxAge() time.Duration {
+	if k.cfg.RemotePendingMaxAge == 0 {
+		return 24 * time.Hour
+	}
+	return k.cfg.RemotePendingMaxAge
+}
+
 // settleRemoteCall settles a remote-proxy call after ExecuteFederation returns.
 // If the receipt is absent or has an invalid signature, the trace stays open for retry (ErrTimeout).
 // Otherwise it commits CommitRemoteSettlement with the correct charge/duty/refund split.
@@ -639,6 +649,18 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	expectedArgsHash, _ := jcsHashStr(string(ktx.ArgsJSON))
 	rp, err := parseAndVerifyRemoteReceipt(fr.ReceiptJSON, target.KernelPublicKey, action.RemoteActionID, expectedArgsHash)
 	if err != nil {
+		// The call is parked, not lost: no receipt has settled it, so the allocation stays locked and
+		// the process open until one arrives or the pending bound expires (§13). Hand back the durable
+		// handle for it — the process to watch and when a refund becomes due — so the caller is not
+		// left with money reserved and no way to follow it. The original cause stays the message's
+		// head: absent, unparseable, badly signed, and mismatched receipts are different diagnoses.
+		if errors.Is(err, ErrTimeout) {
+			eligible := trace.CreatedAt.Add(k.remotePendingMaxAge()).UTC().Format(time.RFC3339)
+			return nil, ErrTimeout.Wrapf("%v; result confirmation is pending — funds remain reserved on process %s and the call retries automatically", err, trace.ProcessID).
+				WithMeta("process_id", trace.ProcessID).
+				WithMeta("pending_since", trace.CreatedAt.UTC().Format(time.RFC3339)).
+				WithMeta("refund_eligible_at", eligible)
+		}
 		return nil, err
 	}
 	r := *rp
@@ -677,24 +699,26 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	ktx.RemoteReceiptJSON = fr.ReceiptJSON
 
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
+	// A rejection is the peer's refusal to execute, at any price: an executed failure that consumed
+	// nothing also charges 0, and the inbound handler returns the execution error's HTTP status
+	// alongside the real receipt, so a propagated ErrInsufficientFunds arrives as 402 too. tx_id ==
+	// our dispatched key is the one marker that separates the two (§6 P4). A quarantined receipt is
+	// never a rejection: it also forces charge 0, and the explicit flag is its signal. Computed once
+	// here because two decisions read it: how the failure is classified, and whether the cached row
+	// survives it.
+	var dispatchedKey string
+	if trace.IdempotencyKey != nil {
+		dispatchedKey = *trace.IdempotencyKey
+	}
+	rejection := !quarantined && ktx.Status != TxSuccess && isRejectionReceipt(r.TxID, dispatchedKey)
+
 	// Classify a failure BEFORE building the receipt: the commit stores the error body a replaying
 	// peer will be served, so it needs this call's code, and buildReceipt copies ktx.Reason — so the
-	// reason must be final here or the signed receipt and the transaction would disagree. This also
-	// keeps one definition of the 402/unfunded predicate, reused for the returned error below.
+	// reason must be final here or the signed receipt and the transaction would disagree.
 	var failErr error
 	if ktx.Status != TxSuccess {
 		failErr = ErrExecutionFailed.Wrap("remote call failed")
-		// Classify on the rejection marker alone, never on charge or transport status: an executed
-		// failure that consumed nothing also charges 0, and the inbound handler returns the execution
-		// error's HTTP status alongside the real receipt — so a propagated ErrInsufficientFunds
-		// arrives as 402 as well. tx_id == our dispatched key is the one marker that separates a
-		// non-execution from an execution at any price (§6 P4). A quarantined receipt is never
-		// classified: it also forces charge 0, and the explicit flag is the signal.
-		var dispatchedKey string
-		if trace.IdempotencyKey != nil {
-			dispatchedKey = *trace.IdempotencyKey
-		}
-		if !quarantined && isRejectionReceipt(r.TxID, dispatchedKey) {
+		if rejection {
 			switch {
 			case fr.HTTPStatus == 402:
 				// The remote's structured ErrInsufficientFunds: OUR prepaid credit there is exhausted,
@@ -702,8 +726,13 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 				// caller's own insufficient_funds.
 				failErr = PeerUnfundedError(k.KernelName(ctx, target.KernelPublicKey))
 			case r.RefreshProxy:
-				// A contract mismatch is not an authorization refusal: the proxy deactivates below and
-				// the next call re-resolves, so this stays an ordinary failure.
+				// The peer's contract moved under our cached copy. NOT a terms change in the buyer's
+				// sense: the contract hash also covers the artifact, kind, and owner id (§6 P6), so a
+				// re-implementation at an unchanged price trips this while the quote stays identical.
+				// Consent is the pin's job at the funding boundary (§4 precondition 7), which the next
+				// call reaches with a freshly resolved row; here we only say what happened.
+				failErr = ErrExecutionFailed.Wrap("the provider updated this action; nothing was charged — re-run to refresh").
+					WithMeta("retry", "refresh")
 			default:
 				// The peer will not serve us — suspended caller, or an action it refuses. Distinct
 				// from unreachable (retry) and unfunded (top up): a human must resolve it.
@@ -729,12 +758,14 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 		return nil, ErrInternal.Wrap("could not commit remote settlement")
 	}
 
-	// Rule C (§8/§13): a settlement outcome proving the cache wrong — a signed refresh_proxy rejection
-	// or a quarantined receipt — deactivates the proxy so the next call re-resolves. Supervision-side,
-	// outside the monetary write set (a failure here never rolls back settlement), and hash-conditional
-	// so a stale dispatch settling after a re-resolve spares the refreshed row. A funding (402) rejection
-	// carries no refresh_proxy, so it never reaches here.
-	if r.RefreshProxy || quarantined {
+	// Rule C (§8/§13): a settlement outcome proving the cached row wrong invalidates it, so the next
+	// call re-resolves. Three such outcomes: a signed refresh_proxy rejection (the contract moved), a
+	// quarantined receipt, and any other non-funding rejection — the peer refused to serve this action
+	// at all (retired, made private, owner suspended), so the entry is stale whether or not it says so.
+	// A funding (402) rejection is exempt: our credit is exhausted, the action is fine.
+	// Supervision-side, outside the monetary write set (a failure here never rolls back settlement),
+	// and hash-conditional so a stale dispatch settling after a re-resolve spares the refreshed row.
+	if r.RefreshProxy || quarantined || (rejection && fr.HTTPStatus != 402) {
 		// The dispatch snapshots the hash it bound; absent it (a trace not dispatched through the normal
 		// path), guard against the row's current hash so the deactivation still targets this row.
 		guardHash := dispatchedHash
@@ -866,11 +897,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 
 	// No settleable receipt yet. Past the bound the §13 idempotency key may be gone on the remote,
 	// so settle as a failure with full refund rather than retry forever; otherwise keep retrying.
-	maxAge := k.cfg.RemotePendingMaxAge
-	if maxAge == 0 {
-		maxAge = 24 * time.Hour
-	}
-	if now.Sub(trace.CreatedAt) > maxAge {
+	if now.Sub(trace.CreatedAt) > k.remotePendingMaxAge() {
 		ktx.Status = TxFailure
 		logger.Warn("remote.retry.expired", "trace_id", trace.ID, "age_seconds", now.Sub(trace.CreatedAt).Seconds())
 		_, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, 0, ErrTimeout.Wrap("remote call unsettled past max pending age"))

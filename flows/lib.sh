@@ -168,6 +168,34 @@ _srv() { local db="$1"; [ -n "${SERVER_URL[$db]:-}" ] && printf -- '--server\n%s
 j()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" --db "$db" "${a[@]}" "$@" 2>&1; }
 jj() { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" --db "$db" "${a[@]}" --json "$@" 2>/dev/null; }
 
+# quote db home ref [args] — the quote a run must consent to (§4 precondition 7). A run carrying no
+# pin is refused before funding with the current quote attached, and the CLI prints the pinned
+# command to re-run; this reads the pin back out of that offer, which is exactly the affordance a
+# non-interactive client has. A pure read: nothing executes and nothing is charged. Empty when the
+# run is refused for an earlier reason (visibility, liveness), where terms are never disclosed.
+quote() {
+    local db="$1" home="$2" ref="$3" args="${4:-{\}}"
+    j "$db" "$home" run "$ref" "$args" 2>&1 | sed -n 's/.*--quote-hash \([A-Za-z0-9]\{1,\}\).*/\1/p' | head -1
+}
+
+# jrun / jjrun db home ref [args] [extra...] — run an action the way a client does: read the offered
+# quote, then run carrying it. A run refused before the quote check yields no pin and is dispatched
+# unpinned, so it still fails for its own reason. Callers that pass their own --quote-hash use j/jj
+# directly, since they are testing the pin itself.
+jrun() {
+    local db="$1" home="$2" ref="$3" args="${4:-{\}}"; shift 4 2>/dev/null || shift 3
+    local q; q=$(quote "$db" "$home" "$ref" "$args")
+    if [ -n "$q" ]; then j "$db" "$home" run "$ref" "$args" --quote-hash "$q" "$@"
+    else j "$db" "$home" run "$ref" "$args" "$@"; fi
+}
+
+jjrun() {
+    local db="$1" home="$2" ref="$3" args="${4:-{\}}"; shift 4 2>/dev/null || shift 3
+    local q; q=$(quote "$db" "$home" "$ref" "$args")
+    if [ -n "$q" ]; then jj "$db" "$home" run "$ref" "$args" --quote-hash "$q" "$@"
+    else jj "$db" "$home" run "$ref" "$args" "$@"; fi
+}
+
 # url db — the base URL of db's server (for curl-based HTTP-only assertions).
 url() { echo "${SERVER_URL[$1]:-}"; }
 

@@ -114,13 +114,20 @@ func runServer(addr string) error {
 		fedAdapter.SetLocalPubKey(pub)
 		defer fedTransport.Close()
 
-		// Drive pending remote-proxy calls on a timer so a peer coming back online settles parked
-		// calls without a restart, and the RemotePendingMaxAge refund fires from the running server
-		// (§13). bootstrap already ran one pass for calls pending at the last shutdown; this keeps
-		// them moving. The loop stops when runServer returns.
+		// Drive pending remote-proxy calls (§13). The worker drains the work that survived the last
+		// shutdown first, then settles into the ordinary timer so a peer coming back online settles
+		// parked calls without a restart and the RemotePendingMaxAge refund fires from the running
+		// server. bootstrap's own pass runs before this transport exists, so it can only settle
+		// max-age expiries — this drain is the first attempt that can actually reach a peer.
+		// The snapshot is taken HERE, synchronously, before any HTTP request can create a new
+		// trace, so the drain is exactly the pre-existing work and never a moving target.
 		retryCtx, retryCancel := context.WithCancel(context.Background())
 		defer retryCancel()
-		go startRemoteRetryLoop(retryCtx, k.PendingRemoteTraces, k.RetryRemoteTrace, globalCfg.remoteRetryInterval())
+		pending, perr := k.PendingRemoteTraces(retryCtx)
+		if perr != nil {
+			logger.Warn("remote.retry.snapshot_failed", "error", perr.Error())
+		}
+		go startRemoteRetryLoop(retryCtx, pending, k.PendingRemoteTraces, k.RetryRemoteTrace, globalCfg.remoteRetryInterval())
 
 		// Grow and refresh the known network (§13). One loop: each pass advertises this kernel to the
 		// routing-discovery namespace, then pulls gossip from the union of the namespace's providers,
@@ -196,12 +203,23 @@ func everyTick(ctx context.Context, interval time.Duration, work func(context.Co
 	}
 }
 
-// startRemoteRetryLoop is the "server ticker" §13 relies on to settle parked remote calls without a
-// restart. Every interval it lists the pending remote traces and retries only those a backoffScheduler
-// says are due, so a long-offline peer is backed off rather than hammered every tick, and a call still
-// mid-inline-round-trip isn't duplicate-dispatched. Runs are sequential (a tick never overlaps the
-// previous one); the retry is idempotent (same key → the remote replays). Stops when ctx is cancelled.
-func startRemoteRetryLoop(ctx context.Context, list func(context.Context) ([]*kernel.Trace, error), retry func(context.Context, *kernel.Trace) error, interval time.Duration) {
+// startRemoteRetryLoop is the durable worker §13 relies on to settle parked remote calls without a
+// restart. It runs the two phases every such worker runs, in order and in one goroutine: first it
+// drains `drain` — the work that was already pending when the transport came up — retrying each once
+// so a call parked across a restart moves as soon as there is a carrier, not one interval later.
+// Then it enters the ordinary schedule: every interval it lists the pending traces and retries only
+// those a backoffScheduler says are due, so a long-offline peer is backed off rather than hammered
+// and a call still mid-inline-round-trip isn't duplicate-dispatched. Runs are sequential (a tick
+// never overlaps the previous one); every retry is idempotent (same key → the remote replays), so
+// the drain and the first tick overlapping on one trace costs a replay, never a second execution.
+// Stops when ctx is cancelled.
+func startRemoteRetryLoop(ctx context.Context, drain []*kernel.Trace, list func(context.Context) ([]*kernel.Trace, error), retry func(context.Context, *kernel.Trace) error, interval time.Duration) {
+	for _, tr := range drain {
+		if ctx.Err() != nil {
+			return
+		}
+		_ = retry(ctx, tr)
+	}
 	sched := newBackoffScheduler(interval)
 	everyTick(ctx, interval, func(ctx context.Context) {
 		traces, err := list(ctx)
