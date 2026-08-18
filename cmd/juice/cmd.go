@@ -100,17 +100,6 @@ func peerMetaHandle(err error) string {
 	return "peer"
 }
 
-// quoteRefusal reports the quote a run was refused for want of a pin (§4 precondition 7),
-// returning the hash to re-run with and the price to confirm. Keyed on the structured marker the
-// kernel sets, never on the message.
-func quoteRefusal(err error) (hash, price string, ok bool) {
-	var ke *kernel.KernelError
-	if errors.As(err, &ke) && ke.Meta["required"] == "quote_hash" && ke.Meta["quote_hash"] != "" {
-		return ke.Meta["quote_hash"], ke.Meta["price"], true
-	}
-	return "", "", false
-}
-
 // interactiveTTY reports whether a human is driving: stdin readable and stderr a terminal.
 // Prompts and progress go to stderr so stdout stays payload-only (§14).
 func interactiveTTY() bool {
@@ -1142,21 +1131,6 @@ func runCmd() *cobra.Command {
 			reqBody := kernel.RunRequest{ActionRef: cmdArgs[0], Args: args, QuoteHash: quoteHash}
 			var raw json.RawMessage
 			err = apiCall(context.Background(), "POST", "/v1/run", reqBody, &raw)
-			// Every root run is a purchase, so it carries the caller's consent to the quoted terms
-			// (§4 precondition 7) — the quote binds effect and schemas too, so a free action is
-			// consented to just as a priced one is. An unpinned run is refused with the current
-			// quote attached: at an interactive terminal, show the price, take the answer, and
-			// re-run once with that pin, so consent costs the user one `juice run`. Non-TTY callers
-			// (scripts, agents) get the structured error and the exact pinned command instead.
-			if pin, price, refused := quoteRefusal(err); refused {
-				if interactiveTTY() && promptYesNo(fmt.Sprintf("%s costs %s. Run it?", cmdArgs[0], price)) {
-					reqBody.QuoteHash = pin
-					err = apiCall(context.Background(), "POST", "/v1/run", reqBody, &raw)
-				} else {
-					fmt.Fprintf(os.Stderr, "\nRun it with:\n  juice run %s '%s' --quote-hash %s\n", cmdArgs[0], argsStr, pin)
-					return err
-				}
-			}
 			// A delegated-OAuth action needs a one-time consent (§8). At an interactive terminal,
 			// offer it inline and re-run once, so the user issues a single `juice run`. Non-TTY
 			// callers (scripts, agents) get the structured error + hint instead — no browser.
@@ -1190,9 +1164,9 @@ func runCmd() *cobra.Command {
 				if errors.Is(err, kernel.ErrPeerUnfunded) {
 					fmt.Fprintf(os.Stderr, "\nYour balance is fine; this kernel's credit with peer %s is exhausted.\nOperator remedy: pay the peer out of band and have its operator run `admin deposit`.\n", peerMetaHandle(err))
 				}
-				// A run refused because the terms moved under its pin: nothing was charged, and the
-				// current number is what the caller must re-consent to (§4 precondition 7).
-				if errors.Is(err, kernel.ErrTermsChanged) {
+				// A pinned run refused for changed terms: nothing was charged, and the current
+				// number is what the caller must re-consent to (§4 precondition 7).
+				if quoteHash != "" {
 					if ke := (*kernel.KernelError)(nil); errors.As(err, &ke) && ke.Meta["quote_hash"] != "" {
 						fmt.Fprintf(os.Stderr, "\nNothing was charged. It now costs %s; re-read the action and pin %s to accept.\n", ke.Meta["price"], ke.Meta["quote_hash"])
 					}
@@ -1210,6 +1184,6 @@ func runCmd() *cobra.Command {
 			return emitRaw(raw)
 		},
 	}
-	cmd.Flags().StringVar(&quoteHash, "quote-hash", "", "the quote being consented to; a run without one is refused with the current quote to confirm")
+	cmd.Flags().StringVar(&quoteHash, "quote-hash", "", "refuse before charging if the action's terms no longer match this quote")
 	return cmd
 }

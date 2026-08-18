@@ -340,7 +340,7 @@ func TestCallSuspendedOwnerActionBlocked(t *testing.T) {
 	})
 
 	// Callable before suspension.
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob/svc", Args: map[string]any{}, QuoteHash: pinFor(t, k, "bob/svc")}); err != nil {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob/svc", Args: map[string]any{}}); err != nil {
 		t.Fatalf("action should be callable before owner suspension: %v", err)
 	}
 
@@ -348,7 +348,7 @@ func TestCallSuspendedOwnerActionBlocked(t *testing.T) {
 	if err := st.SuspendUser(ctx, bob.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob/svc", Args: map[string]any{}, QuoteHash: pinFor(t, k, "bob/svc")}); !errors.Is(err, kernel.ErrInvalidState) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob/svc", Args: map[string]any{}}); !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("suspended owner's action should fail with ErrInvalidState, got %v", err)
 	}
 
@@ -356,7 +356,7 @@ func TestCallSuspendedOwnerActionBlocked(t *testing.T) {
 	if err := st.UnsuspendUser(ctx, bob.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob/svc", Args: map[string]any{}, QuoteHash: pinFor(t, k, "bob/svc")}); err != nil {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob/svc", Args: map[string]any{}}); err != nil {
 		t.Fatalf("unsuspend should restore callability: %v", err)
 	}
 }
@@ -369,7 +369,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	alice := setupUser(t, st, "alice", 50)
 	_ = setupAction(t, st, alice.ID, "expensive", 200)
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/expensive", Args: map[string]any{}, QuoteHash: pinFor(t, k, "alice/expensive")})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/expensive", Args: map[string]any{}})
 	if err == nil {
 		t.Error("expected insufficient funds error")
 	}
@@ -736,9 +736,8 @@ func TestCallInputSchemaRejection(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	// Use Run, which enforces input schema validation in beginRun. Pinned, so the args are what is
-	// under test: validation follows the quote check (§4 precondition order).
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/strict", Args: map[string]any{"wrong_field": "value"}, QuoteHash: pinFor(t, k, "alice/strict")})
+	// Use Run, which enforces input schema validation in beginRun.
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/strict", Args: map[string]any{"wrong_field": "value"}})
 	if !errors.Is(err, kernel.ErrSchemaViolation) {
 		t.Errorf("missing required field: got %v, want ErrSchemaViolation", err)
 	}
@@ -1328,7 +1327,7 @@ func TestCallCrossProcessParentTraceRejectedForOwner(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 
 	// Run a call to get a trace from a completed (auto-closed) process.
-	otherReply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/svc", Args: map[string]any{}, QuoteHash: pinFor(t, k, "alice/svc")})
+	otherReply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/svc", Args: map[string]any{}})
 	if err != nil {
 		t.Fatalf("setup call in otherP: %v", err)
 	}
@@ -1731,7 +1730,7 @@ func TestCallRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 
 	// A proxy is addressable by its action id (never a bare owner/name, §8); the missing
 	// FederationExecutor then settles the call as a failure.
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: remoteAct.ID, Args: map[string]any{}, QuoteHash: pinFor(t, k, remoteAct.ID)})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: remoteAct.ID, Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState for missing federation executor, got %v", err)
 	}
@@ -2222,68 +2221,12 @@ func TestRunQuotePinRefusesBeforeFunding(t *testing.T) {
 		t.Errorf("a refused pin must create no process, got %d", len(ps))
 	}
 
-	// An omitted pin is refused the same way, before funding, and names the quote to re-run with:
-	// a root run is a purchase, so it always carries the buyer's consent (§4 precondition 7).
-	_, err = k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-quote/svc", Args: map[string]any{}})
-	if !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Fatalf("an unpinned run: got %v, want ErrInvalidInput", err)
-	}
-	if !errors.As(err, &ke) || ke.Meta["required"] != "quote_hash" || ke.Meta["quote_hash"] != kernel.QuoteHash(a) || ke.Meta["price"] != "500" {
-		t.Errorf("the refusal must name the token and carry the current quote, got meta %v", ke.Meta)
-	}
-	u, _ = st.ReadUser(ctx, alice.ID)
-	if u.Available != 5000 || u.Locked != 0 {
-		t.Errorf("an unpinned run must charge and lock nothing; got available=%d locked=%d", u.Available, u.Locked)
-	}
-	if ps, _ := st.ListProcesses(ctx, alice.ID, 10, 0); len(ps) != 0 {
-		t.Errorf("an unpinned run must create no process, got %d", len(ps))
-	}
-
-	// The buyer re-reads and accepts the new terms.
+	// The buyer re-reads and accepts the new terms; and an unpinned run is unaffected.
 	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-quote/svc", Args: map[string]any{}, QuoteHash: kernel.QuoteHash(a)}); err != nil {
 		t.Errorf("a matching pin must run normally: %v", err)
 	}
-}
-
-// TestQuoteRequiredEvenWhenFree: price is not what makes a run consequential. The quote binds the
-// action's effect and both schemas as well as its price (§4 quote terms), and a price-0 action can
-// still move the caller's money through the value channel (§13 sys/transfer). So consent is
-// required uniformly, and two actions differing only in effect quote differently.
-func TestQuoteRequiredEvenWhenFree(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
-	ctx := context.Background()
-
-	alice := setupUser(t, st, "alice-free", 100)
-	free := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "gratis",
-		Kind: kernel.KindWasm, Source: "x", Active: true, Price: 0,
-		Visibility: kernel.VisibilityPublic, Description: "d",
-		InputSchema: map[string]any{"type": "object"},
-		CreatedAt:   time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	if err := st.CreateAction(ctx, free); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-free/gratis", Args: map[string]any{}})
-	if !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Fatalf("a free run still needs consent: got %v, want ErrInvalidInput", err)
-	}
-	var ke *kernel.KernelError
-	if !errors.As(err, &ke) || ke.Meta["required"] != "quote_hash" || ke.Meta["price"] != "0" {
-		t.Errorf("the refusal must name the token and quote 0, got meta %v", ke.Meta)
-	}
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-free/gratis", Args: map[string]any{}, QuoteHash: kernel.QuoteHash(free)}); err != nil {
-		t.Fatalf("a pinned free run must execute: %v", err)
-	}
-
-	// The effect is why a free action is worth consenting to: it alone decides whether the call
-	// engages the value channel, so it moves the quote.
-	valued := *free
-	valued.Effect = "transfer"
-	if kernel.QuoteHash(&valued) == kernel.QuoteHash(free) {
-		t.Error("the quote must bind the effect: a value-bearing action cannot share a free one's quote")
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-quote/svc", Args: map[string]any{}}); err != nil {
+		t.Errorf("an omitted pin must leave behaviour unchanged: %v", err)
 	}
 }
 

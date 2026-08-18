@@ -1765,7 +1765,7 @@ func TestCallReturnsTheCommittedReplyWhenPostExecutionReadFails(t *testing.T) {
 	caller := setupUser(t, st, "fail-caller", 500)
 	action := setupWasmAction(t, st, owner.ID, "fail-action", "", 10)
 
-	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "fail-owner/fail-action", Args: map[string]any{}, QuoteHash: pinFor(t, k, "fail-owner/fail-action")})
+	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "fail-owner/fail-action", Args: map[string]any{}})
 	if err == nil {
 		t.Fatal("expected the injected read failure to surface")
 	}

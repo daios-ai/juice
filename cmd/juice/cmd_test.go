@@ -1383,8 +1383,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Pinned, so the balance is what is under test: funding follows the quote check (§4 order).
-	_, err = env.k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: "poorowner/expensive", Args: map[string]any{}, QuoteHash: pinFor(t, env.k, "poorowner/expensive")})
+	_, err = env.k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: "poorowner/expensive", Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrInsufficientFunds) {
 		t.Errorf("a caller who cannot afford the price: got %v, want ErrInsufficientFunds", err)
 	}
@@ -1613,67 +1612,6 @@ func TestDirectorySelector(t *testing.T) {
 
 // TestCLIActionRatings drives `juice action ratings <owner/name>` end to end: a caller runs a
 // public action and rates it, and the owner reads the projection through the CLI. Exercises the
-// TestRunUnpinnedNonInteractiveOffersTheQuote: a root run carries the buyer's consent to the quoted
-// terms (§4 precondition 7). A script or agent — no terminal to prompt at — must not be left
-// guessing: the refusal is structured, nothing is charged, and the CLI prints the exact command
-// that accepts the quote, so the retry is a copy-paste rather than a reading of the spec.
-func TestRunUnpinnedNonInteractiveOffersTheQuote(t *testing.T) {
-	env := newTestEnv(t)
-	ctx := context.Background()
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{}`))
-	}))
-	t.Cleanup(backend.Close)
-
-	uid, tok := makeUser(t, env.k, "unpinned")
-	a, err := env.k.CreateAction(ctx, uid, kernel.CreateActionRequest{
-		OwnerUserID: uid, Name: "svc", Kind: kernel.KindHTTP, Source: backend.URL,
-		Description: "priced service", InputSchema: minSchema, OutputSchema: minSchema, Price: 0,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := env.k.SetActive(ctx, uid, a.ID, true); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveToken(tok); err != nil {
-		t.Fatal(err)
-	}
-	a, _ = env.k.ReadAction(ctx, a.ID)
-
-	out := captureStderr(t, func() {
-		_, err = execTestCmd(t, runCmd(), "unpinned/svc", `{}`)
-	})
-	if !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Fatalf("an unpinned run: got %v, want the structured refusal", err)
-	}
-	pin := kernel.QuoteHash(a)
-	if !strings.Contains(out, "--quote-hash "+pin) {
-		t.Errorf("the refusal must print the pinned command to re-run; got %q", out)
-	}
-	// Nothing ran: the refusal precedes funding, so there is no transaction to show for it.
-	txs, _ := env.k.ListTransactions(ctx, uid, kernel.TxFilter{})
-	if len(txs) != 0 {
-		t.Errorf("an unpinned run must execute nothing, got %d transactions", len(txs))
-	}
-	// Carrying the offered quote runs it.
-	if _, err := execTestCmd(t, runCmd(), "unpinned/svc", `{}`, "--quote-hash", pin); err != nil {
-		t.Fatalf("the offered quote must be accepted: %v", err)
-	}
-}
-
-// pinFor is the quote a root run consents to (§4 precondition 7) — what a client reads off a
-// listing before running. CLI tests carry it exactly as a real invocation does.
-func pinFor(t *testing.T, k *kernel.Kernel, ref string) string {
-	t.Helper()
-	a, err := k.ResolveAction(context.Background(), ref)
-	if err != nil {
-		t.Fatalf("resolve %s for its quote: %v", ref, err)
-	}
-	return kernel.QuoteHash(a)
-}
-
 // every-command rule (§14) and confirms the human view surfaces the value and note.
 func TestCLIActionRatings(t *testing.T) {
 	env := newTestEnv(t)
@@ -1713,7 +1651,7 @@ func TestCLIActionRatings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reply, err := env.k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "rate-owner/svc", Args: map[string]any{}, QuoteHash: pinFor(t, env.k, "rate-owner/svc")})
+	reply, err := env.k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "rate-owner/svc", Args: map[string]any{}})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}

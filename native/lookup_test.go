@@ -37,17 +37,6 @@ func (f *fakeEmbedder) Embed(_ context.Context, text string) ([]float32, error) 
 	return vec, nil
 }
 
-// pinFor is the quote a root run consents to (§4 precondition 7) — the hash a buyer reads off
-// lookup before running. Native tests drive real runs, so they carry it as a client does.
-func pinFor(t *testing.T, k *kernel.Kernel, ref string) string {
-	t.Helper()
-	a, err := k.ResolveAction(context.Background(), ref)
-	if err != nil {
-		t.Fatalf("resolve %s for its quote: %v", ref, err)
-	}
-	return kernel.QuoteHash(a)
-}
-
 func newLookupTestKernel(t *testing.T) (*kernel.Kernel, kernel.Store) {
 	t.Helper()
 	db, err := store.Open(t.TempDir() + "/test.db")

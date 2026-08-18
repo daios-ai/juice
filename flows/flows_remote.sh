@@ -66,7 +66,7 @@ flow_successful_receipt() {
 
     local aid; aid=$(publish "$db" "$ha" receipt-action --kind http --source "http://127.0.0.1:${bport}/act" --price 10 --description "receipt")
 
-    local out; out=$(jjrun "$db" "$hb" alice/receipt-action '{}')
+    local out; out=$(jj "$db" "$hb" run alice/receipt-action '{}')
     assert_nonempty "successful_receipt.call_succeeded" "$(strfield "$out" tx_id)"
     assert_nonempty "successful_receipt.receipt_id_returned" "$(strfield "$out" receipt_id)"
 }
@@ -82,7 +82,7 @@ flow_failed_receipt() {
 
     local aid; aid=$(publish "$db" "$ha" fail-action --kind http --source "http://127.0.0.1:${bport}/fail" --price 10 --description "fail")
 
-    jrun "$db" "$hb" alice/fail-action '{}' >/dev/null 2>&1 || true
+    j "$db" "$hb" run alice/fail-action '{}' >/dev/null 2>&1 || true
     local txs; txs=$(jj "$db" "$hb" tx list)
     local tx_id; tx_id=$(python3 -c "import sys,json;print(json.loads(sys.argv[1])[0]['id'])" "$txs" 2>/dev/null)
     assert_eq   "failed_receipt.failure_tx_recorded" failure "$(python3 -c "import sys,json;print(json.loads(sys.argv[1])[0]['status'])" "$txs" 2>/dev/null)"
@@ -95,7 +95,7 @@ flow_lookup() {
     make_admin "$db" "$hs" || { fail "lookup.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     # sys/lookup requires "query"; missing it → schema violation.
-    assert_fails "lookup.missing_query_rejected" "query\|required\|schema" -- jrun "$db" "$ha" sys/lookup '{}'
+    assert_fails "lookup.missing_query_rejected" "query\|required\|schema" -- j "$db" "$ha" run sys/lookup '{}'
 
     # Hybrid lookup degrades to the lexical (BM25) leg with no Ollama, so a distinctively-named
     # action is discoverable by keyword — the offline happy path, untestable before.
@@ -103,7 +103,7 @@ flow_lookup() {
     aid=$(strfield "$(jj "$db" "$ha" action create zqxwvprobe --kind http --source "https://api.example/x" --price 0 --description "zqxwvprobe lexical lookup probe")" id)
     assert_nonempty "lookup.action_created" "$aid"
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
-    assert_contains "lookup.lexical_hit" "alice/zqxwvprobe" "$(jjrun "$db" "$ha" sys/lookup '{"query":"zqxwvprobe"}')"
+    assert_contains "lookup.lexical_hit" "alice/zqxwvprobe" "$(jj "$db" "$ha" run sys/lookup '{"query":"zqxwvprobe"}')"
 }
 
 flow_chat() {
@@ -112,10 +112,10 @@ flow_chat() {
     make_admin "$db" "$hs" || { fail "chat.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     # No chatter configured → ErrInvalidState (or a reply if one is); either is acceptable.
-    local out; out=$(jrun "$db" "$ha" sys/llm/chat '{"messages":[{"role":"user","content":"hello"}]}' 2>&1)
+    local out; out=$(j "$db" "$ha" run sys/llm/chat '{"messages":[{"role":"user","content":"hello"}]}' 2>&1)
     case "$out" in *invalid?state*|*invalid_state*|*content*|*assistant*|*message*) ok "chat.no_chatter_or_reply";; *) fail "chat.no_chatter_or_reply" "got: $out";; esac
     # Missing "messages" → schema violation.
-    assert_fails "chat.missing_messages_rejected" "messages\|required\|schema" -- jrun "$db" "$ha" sys/llm/chat '{}'
+    assert_fails "chat.missing_messages_rejected" "messages\|required\|schema" -- j "$db" "$ha" run sys/llm/chat '{}'
 }
 
 # --- OpenAPI ---
@@ -151,7 +151,7 @@ flow_openapi_import_execute() {
 
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
-    assert_nonempty "openapi_import.call_succeeds" "$(strfield "$(jjrun "$db" "$hb" "alice/$name" '{}')" tx_id)"
+    assert_nonempty "openapi_import.call_succeeds" "$(strfield "$(jj "$db" "$hb" run "alice/$name" '{}')" tx_id)"
 }
 
 flow_openapi_changed_reimport() {

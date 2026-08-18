@@ -88,31 +88,12 @@ func newFlowKernel(t *testing.T, exec kernel.ScriptExecutor) (*httptest.Server, 
 
 // ---- helpers used across flow tests ----
 
-// quoteFor reads the quote a run consents to (§4 precondition 7) exactly as a client with no prior
-// listing does: an unpinned run is refused before funding with the current quote attached, so this
-// is a pure read — nothing executes and nothing is charged. Tests that assert the refusal itself,
-// or that a run is refused for another reason first, post directly instead.
-func quoteFor(t *testing.T, srv *httptest.Server, tok, actionRef string, args map[string]any) string {
-	t.Helper()
-	resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{"action": actionRef, "args": args}, tok)
-	defer resp.Body.Close()
-	var body struct {
-		Meta map[string]string `json:"meta"`
-	}
-	json.NewDecoder(resp.Body).Decode(&body)
-	if body.Meta["quote_hash"] == "" {
-		t.Fatalf("no quote offered for %s (status %d)", actionRef, resp.StatusCode)
-	}
-	return body.Meta["quote_hash"]
-}
-
 // runAction calls POST /v1/run and decodes the reply. Fatals on non-200.
 func runAction(t *testing.T, srv *httptest.Server, tok, actionRef string, args map[string]any) kernel.CallReply {
 	t.Helper()
 	resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action":     actionRef,
-		"args":       args,
-		"quote_hash": quoteFor(t, srv, tok, actionRef, args),
+		"action": actionRef,
+		"args":   args,
 	}, tok)
 	if resp.StatusCode != http.StatusOK {
 		var body map[string]any
@@ -437,9 +418,8 @@ func TestFlow_FailMidTree(t *testing.T) {
 
 	// Run — expect failure.
 	resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action":     "flow-fail-mainprov/fail-after-sub",
-		"args":       map[string]any{},
-		"quote_hash": quoteFor(t, srv, callerTok, "flow-fail-mainprov/fail-after-sub", map[string]any{}),
+		"action": "flow-fail-mainprov/fail-after-sub",
+		"args":   map[string]any{},
 	}, callerTok)
 	// Should be an error response.
 	resp.Body.Close()
@@ -910,9 +890,8 @@ func TestFlow_OpenAPIImportActivateRun(t *testing.T) {
 	giveCredits(t, k, callerID, 100)
 
 	runResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action":     ownerHandle + "/fetchData",
-		"args":       map[string]any{},
-		"quote_hash": quoteFor(t, srv, callerTok, ownerHandle+"/fetchData", map[string]any{}),
+		"action": ownerHandle + "/fetchData",
+		"args":   map[string]any{},
 	}, callerTok)
 	if runResp.StatusCode != http.StatusOK {
 		var body map[string]any
@@ -1429,9 +1408,8 @@ func TestFlow_UpstreamAuthSecrecy(t *testing.T) {
 
 	// Run the action — backend should receive the Authorization header.
 	runResult := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action":     "auth-owner/secured-action",
-		"args":       map[string]any{},
-		"quote_hash": quoteFor(t, srv, callerTok, "auth-owner/secured-action", map[string]any{}),
+		"action": "auth-owner/secured-action",
+		"args":   map[string]any{},
 	}, callerTok)
 	if runResult.StatusCode != http.StatusOK {
 		var body map[string]any
@@ -1749,8 +1727,7 @@ func TestFlow_PrivateAction(t *testing.T) {
 		t.Error("owner run: expected tx_id")
 	}
 
-	// Another user is rejected — on visibility, which precedes the quote check, so a stranger is
-	// refused without ever being told the action's terms (§4 precondition order).
+	// Another user is rejected.
 	resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "priv-owner/private-action", "args": map[string]any{},
 	}, otherTok)
@@ -2054,8 +2031,7 @@ func TestFlow_ActionUpdateLive(t *testing.T) {
 		t.Fatalf("update price: expected 200, got %d", putResp.StatusCode)
 	}
 
-	// Caller is rejected (action inactive) — liveness precedes the quote check, so the refusal is
-	// the same whether or not the caller carries a pin (§4 precondition order).
+	// Caller is rejected (action inactive).
 	failResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "upd-provider/upd-action", "args": map[string]any{},
 	}, callerTok)
@@ -2224,7 +2200,6 @@ func TestFlow_OpenAPIOwnershipProof(t *testing.T) {
 	// Caller can run the action.
 	runResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": ownerHandle + "/proofCall", "args": map[string]any{},
-		"quote_hash": quoteFor(t, srv, callerTok, ownerHandle+"/proofCall", map[string]any{}),
 	}, callerTok)
 	if runResp.StatusCode != http.StatusOK {
 		var body map[string]any
@@ -2532,7 +2507,7 @@ func TestFlow_OAuthDelegated(t *testing.T) {
 	const readRef, sendRef, selector = "oauth-owner/mail/read", "oauth-owner/mail/send", "oauth-owner/mail"
 
 	rejectRun := func(ref string) {
-		resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{"action": ref, "args": map[string]any{}, "quote_hash": quoteFor(t, srv, ownerTok, ref, map[string]any{})}, ownerTok)
+		resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{"action": ref, "args": map[string]any{}}, ownerTok)
 		defer resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
 			t.Fatalf("run %s without grant unexpectedly succeeded", ref)
@@ -2644,7 +2619,7 @@ func TestFlow_DelegatedBearer(t *testing.T) {
 	providerKey := "bearer:" + strings.TrimPrefix(upstream.URL, "http://")
 
 	rejectRun := func(ref string) {
-		resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{"action": ref, "args": map[string]any{}, "quote_hash": quoteFor(t, srv, ownerTok, ref, map[string]any{})}, ownerTok)
+		resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{"action": ref, "args": map[string]any{}}, ownerTok)
 		defer resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
 			t.Fatalf("run %s without grant unexpectedly succeeded", ref)

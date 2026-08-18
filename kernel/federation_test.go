@@ -734,7 +734,7 @@ func TestRemoteDispatchUsesStableActionID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (pending), got %v", err)
 	}
 	if fake.sentAction != "stable-action" {
@@ -782,7 +782,7 @@ func TestRetryExpiredRemoteTraceSettlesAsFailure(t *testing.T) {
 
 	// Real root run: the empty receipt makes the proxy call time out; the process stays open and
 	// the trace persists in the DB with its idempotency key (beginRun records the dispatch).
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -839,7 +839,7 @@ func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
 	premium := (mp*bps + 9999) / 10000
 
 	// Call while the peer is offline → pending, no settled transaction, funds locked.
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (pending), got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -898,7 +898,7 @@ func TestAwaitingReceiptSince(t *testing.T) {
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "await-action", 1000)
 
 	// Offline call → parked, awaiting a receipt.
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	pend, _ := st.ListPendingRemoteTraces(ctx)
@@ -946,7 +946,7 @@ func TestPendingRemoteTracesAndRetryWrappers(t *testing.T) {
 	mp := *a.BasePrice
 	premium := (mp*bps + 9999) / 10000
 
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout, got %v", err)
 	}
 	pending, err := k.PendingRemoteTraces(ctx)
@@ -1391,7 +1391,7 @@ func TestParkedRemoteCallHandsBackItsProcess(t *testing.T) {
 	k, _, caller := setupSettleProxy(t, st, fake, priv, pub, "park-action", 1000)
 
 	ref := "settle-peer@settle-peer/settleact"
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: ref, Args: map[string]any{}, QuoteHash: pinFor(t, k, ref)})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: ref, Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("expected a parked call, got %v", err)
 	}
@@ -2303,7 +2303,7 @@ func TestRemoteCallNotDispatchedFailsFast(t *testing.T) {
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "nd-action", 1000)
 	before, _ := st.ReadUser(ctx, caller.ID)
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrPeerUnreachable) {
 		t.Fatalf("Run: expected ErrPeerUnreachable, got %v", err)
 	}
@@ -2346,7 +2346,7 @@ func TestRetryNeverFailsFastOnNotDispatched(t *testing.T) {
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "retry-nd-action", 1000)
 	mp := a.Price * 10000 / (10000 + bps)
 
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}, QuoteHash: pinFor(t, k, "settle-peer@settle-peer/settleact")}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (parked), got %v", err)
 	}
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 1 {
@@ -3338,7 +3338,7 @@ func TestSettlementUsesDispatchedRate(t *testing.T) {
 	}
 	before, _ := st.ReadUser(ctx, caller.ID)
 
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: a.ID, Args: map[string]any{}, QuoteHash: pinFor(t, k, a.ID)}); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: a.ID, Args: map[string]any{}}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("Run: expected ErrTimeout (parked), got %v", err)
 	}
 	pend, _ := st.ListPendingRemoteTraces(ctx)

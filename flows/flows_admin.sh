@@ -27,7 +27,7 @@ flow_transaction_access() {
 
     # bob (buyer) calls it 3 times.
     local i last_tx
-    for i in 1 2 3; do last_tx=$(strfield "$(jjrun "$db" "$hb" alice/pvd-action '{}')" tx_id); done
+    for i in 1 2 3; do last_tx=$(strfield "$(jj "$db" "$hb" run alice/pvd-action '{}')" tx_id); done
 
     # Seller sees all 3; buyer sees all 3; the sum of nets equals the seller's balance.
     local alice_txs
@@ -92,7 +92,7 @@ flow_admin_supervision() {
 
     deposit "$db" "$hs" alice 100
     local tx_id proc_id
-    tx_id=$(strfield "$(jjrun "$db" "$ha" alice/test '{}')" tx_id)
+    tx_id=$(strfield "$(jj "$db" "$ha" run alice/test '{}')" tx_id)
     proc_id=$(strfield "$(jj "$db" "$ha" tx show "$tx_id")" process_id)
     # sys `process list` / `tx list` span all users.
     assert_contains "admin.process_list_scope" "$proc_id" "$(jj "$db" "$hs" process list)"
@@ -114,7 +114,7 @@ flow_time() {
     assert_eq "time.registered" yes "$(has_action "$acts" time)"
 
     # Call it (price=0): result carries a positive unix ts and an RFC-3339 iso ts.
-    local out; out=$(jjrun "$db" "$ha" sys/time '{}')
+    local out; out=$(jj "$db" "$ha" run sys/time '{}')
     local unix_val; unix_val=$(resultf "$out" unix)
     assert_eq "time.returns_unix" yes "$([ -n "$unix_val" ] && [ "$unix_val" -gt 0 ] 2>/dev/null && echo yes || echo no)"
     assert_eq "time.returns_iso" ok "$(python3 -c "
@@ -132,7 +132,7 @@ flow_message() {
 
     # alice sends sys/message to bob (price=0) → a waiting step addressed to bob.
     local step_id
-    step_id=$(resultf "$(jjrun "$db" "$ha" sys/message '{"to":"bob","message":"Please review doc"}')" step_id)
+    step_id=$(resultf "$(jj "$db" "$ha" run sys/message '{"to":"bob","message":"Please review doc"}')" step_id)
     assert_nonempty "message.step_created" "$step_id"
 
     # bob sees the step and completes it.
@@ -142,8 +142,8 @@ flow_message() {
     assert_json "message.step_done" "$(jj "$db" "$ha" step show "$step_id")" status done
 
     # Missing 'to' and unknown recipient are both rejected.
-    assert_fails "message.missing_to_rejected" "to\|required\|invalid" -- jrun "$db" "$ha" sys/message '{"message":"hi"}'
-    assert_fails "message.unknown_recipient_rejected" "not found\|invalid\|unknown" -- jrun "$db" "$ha" sys/message '{"to":"nobody","message":"hi"}'
+    assert_fails "message.missing_to_rejected" "to\|required\|invalid" -- j "$db" "$ha" run sys/message '{"message":"hi"}'
+    assert_fails "message.unknown_recipient_rejected" "not found\|invalid\|unknown" -- j "$db" "$ha" run sys/message '{"to":"nobody","message":"hi"}'
 }
 
 flow_native_orphan_purge() {

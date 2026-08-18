@@ -116,10 +116,6 @@ subdirectory holds regenerable data and is safe to delete.
 ./juice run sys/time
 ```
 
-Running an action confirms its terms first: at a terminal `run` shows the price and asks, then
-proceeds; a script gets the quote back in the error and re-runs with `--quote-hash`. Either way
-nothing is charged until the terms shown are the terms accepted.
-
 JSON arguments accept the `@file.json` convention (a leading `@` reads the value from a file), and
 omitted args default to `{}`. Add `--json` for canonical machine-readable output (the HTTP shape)
 or `--quiet` to print only a created resource's id.
@@ -136,7 +132,7 @@ juice user create <user> | me | update | connect <action> | disconnect <action>
 juice auth login <user> | logout | recover <user>
 juice action create <name> | update <action> | enable/disable <action> | list | show <action>
 juice action delete <action> | import <spec-url> | unimport <spec-url> | stats <action>
-juice run <action> [json] [--quote-hash H]
+juice run <action> [json]
 juice process list | show <id> | end <id>
 juice step create <action> | list | show <id> | complete <id> [json]
 juice tx list | show <id> | rate <id> <0|1> | verify <id>

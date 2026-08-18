@@ -68,7 +68,7 @@ func TestCapabilityRejectedAfterSettlement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: sys.ID, ActionRef: "sys/echo", Args: map[string]any{}, QuoteHash: pinFor(t, k, "sys/echo")})
+	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: sys.ID, ActionRef: "sys/echo", Args: map[string]any{}})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

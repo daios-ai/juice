@@ -197,7 +197,7 @@ flow_action_lifecycle() {
     bport=$(backend_port); start_backend "$bport" 200 '{"answer":42}'
     local tid tx_id
     tid=$(publish "$db" "$ha" callable --kind http --source "http://127.0.0.1:${bport}/call" --description "tx test" --price 0)
-    tx_id=$(strfield "$(jjrun "$db" "$hb" alice/callable '{}')" tx_id)
+    tx_id=$(strfield "$(jj "$db" "$hb" run alice/callable '{}')" tx_id)
     j "$db" "$ha" action delete "$tid" >/dev/null 2>&1
     assert_json "action_lifecycle.action_name_in_tx_after_delete" "$(jj "$db" "$hb" tx show "$tx_id")" action_name callable
 }
